@@ -379,6 +379,30 @@ impl MovedPath {
     }
 }
 
+/// One link a link operation created, and what its inverse needs.
+///
+/// The same three fields [`OpRecord::Link`] carries, factored out so that
+/// [`OpRecord::Links`] can hold a whole gesture's worth of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedLink {
+    pub link: PathBuf,
+    /// The link text, for a symlink. `None` for a hard link.
+    pub target: Option<PathBuf>,
+    pub fingerprint: Fingerprint,
+}
+
+impl CreatedLink {
+    /// Fingerprint a link that has just been made. `target` is the text
+    /// [`super::link::symlink`] returned, or `None` for a hard link.
+    pub fn record(link: &Path, target: Option<&Path>) -> Result<CreatedLink> {
+        Ok(CreatedLink {
+            link: normalize(link),
+            target: target.map(PathBuf::from),
+            fingerprint: Fingerprint::of(link)?,
+        })
+    }
+}
+
 /// A completed operation, and everything its inverse needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpRecord {
@@ -402,13 +426,28 @@ pub enum OpRecord {
         /// file, deepest first, and only while they are still empty.
         created_parents: Vec<PathBuf>,
     },
-    /// `-` / `_` / `Ctrl+-`. Inverse: unlink.
+    /// `-` / `_` / `Ctrl+-` over a single file. Inverse: unlink.
     Link {
         link: PathBuf,
         /// The link text, for a symlink. `None` for a hard link.
         target: Option<PathBuf>,
         fingerprint: Fingerprint,
     },
+    /// `-` / `_` / `Ctrl+-` over a yank of several files. Inverse: unlink every
+    /// one of them.
+    ///
+    /// A separate variant rather than a `Vec` inside [`OpRecord::Link`]: the
+    /// single-link shape is what a caller with one path in hand already builds,
+    /// and widening it would churn every one of those call sites to say
+    /// `vec![…]`. What earns the variant is the *undo*: linking eight yanked
+    /// files is one gesture, so it has to be one `u` — eight records would mean
+    /// eight presses to take back one keystroke, and seven intermediate states
+    /// in which the directory holds some of the links and not the others.
+    ///
+    /// Every link is verified before any of them is removed, like
+    /// [`OpRecord::Copy`], and a failure part way rewrites the record to cover
+    /// only what is left so a second `u` finishes the job.
+    Links { links: Vec<CreatedLink> },
 }
 
 impl OpRecord {
@@ -442,6 +481,13 @@ impl OpRecord {
                 "linked {}",
                 link.file_name().unwrap_or_default().to_string_lossy()
             ),
+            OpRecord::Links { links } => match links.as_slice() {
+                [one] => format!(
+                    "linked {}",
+                    one.link.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                many => format!("linked {}", plural(many.len(), "item", "items")),
+            },
         }
     }
 }
@@ -591,6 +637,7 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
             target,
             fingerprint,
         } => whole(undo_link(link, target.as_deref(), fingerprint)),
+        OpRecord::Links { links } => undo_links(links, ctx),
     }
 }
 
@@ -804,6 +851,81 @@ fn undo_link(link: &Path, target: Option<&Path>, fingerprint: &Fingerprint) -> R
         ),
         touched: vec![link.to_path_buf()],
     })
+}
+
+/// Unlink every link one gesture made, all-or-nothing on the check.
+///
+/// Verified in full before anything is removed, for the same reason
+/// [`undo_moves`] is: a `-` over eight yanked files that can only take six of
+/// them back should take none, rather than leaving a directory with two links
+/// in it that the user now has to reason about. If a removal fails *after* some
+/// have gone, the remainder is handed back so a second `u` finishes rather than
+/// tripping over the half that already went.
+fn undo_links(links: &[CreatedLink], ctx: &TaskCtx) -> UndoAttempt {
+    let refuse = |e: DfError| UndoAttempt {
+        result: Err(e),
+        remaining: None,
+    };
+    if links.is_empty() {
+        return refuse(DfError::Op("nothing to undo".to_string()));
+    }
+    for l in links {
+        if let Err(e) = l.fingerprint.verify(&l.link) {
+            return refuse(e);
+        }
+        if let Some(target) = &l.target {
+            match std::fs::read_link(&l.link) {
+                Ok(now) if &now != target => {
+                    return refuse(DfError::Op(format!(
+                        "cannot undo: {} points somewhere else now",
+                        l.link.display()
+                    )))
+                }
+                Ok(_) => {}
+                Err(e) => return refuse(DfError::io(&l.link, e)),
+            }
+        }
+    }
+
+    let mut touched = Vec::new();
+    for (i, l) in links.iter().enumerate() {
+        if let Err(e) = ctx.checkpoint() {
+            return UndoAttempt {
+                result: Err(e),
+                remaining: (i > 0).then(|| OpRecord::Links {
+                    links: links[i..].to_vec(),
+                }),
+            };
+        }
+        if let Err(e) = std::fs::remove_file(&l.link) {
+            return UndoAttempt {
+                result: Err(DfError::io(&l.link, e)),
+                remaining: (i > 0).then(|| OpRecord::Links {
+                    links: links[i..].to_vec(),
+                }),
+            };
+        }
+        ctx.advance(0, 1);
+        touched.push(l.link.clone());
+    }
+    UndoAttempt {
+        result: Ok(UndoReport {
+            description: if links.len() == 1 {
+                format!(
+                    "Removed the link {}",
+                    links[0]
+                        .link
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )
+            } else {
+                format!("Removed {} links", links.len())
+            },
+            touched,
+        }),
+        remaining: None,
+    }
 }
 
 #[cfg(test)]
@@ -1310,6 +1432,85 @@ mod tests {
         j.undo(&ctx()).unwrap();
         assert!(!super::exists(&l));
         assert_eq!(std::fs::read(&target).unwrap(), b"x");
+    }
+
+    /// Linking a yank of several files is one gesture, so it is one `u`.
+    #[test]
+    fn undo_of_a_batch_of_links_takes_them_all_back_at_once() {
+        let t = TempTree::new("j-links");
+        let mut links = Vec::new();
+        for name in ["a.txt", "ünïcödé — 日本語 🎬.txt", "with spaces.txt"] {
+            let target = t.file(name, b"x");
+            let l = t.join(format!("link-{name}"));
+            let text = link::symlink(&target, &l, LinkKind::Absolute).unwrap();
+            links.push(CreatedLink::record(&l, Some(&text)).unwrap());
+        }
+        // One hard link in the same gesture: `target: None` is the other shape.
+        let hard_target = t.file("hard-target", b"x");
+        let hard = t.join("hard-link");
+        link::hardlink(&hard_target, &hard).unwrap();
+        links.push(CreatedLink::record(&hard, None).unwrap());
+
+        let record = OpRecord::Links {
+            links: links.clone(),
+        };
+        assert_eq!(record.describe(), "linked 4 items");
+
+        let mut j = Journal::default();
+        j.record(record);
+        assert_eq!(j.len(), 1, "one record, not four");
+        let report = j.undo(&ctx()).unwrap();
+        assert_eq!(report.touched.len(), 4);
+        for l in &links {
+            assert!(!super::exists(&l.link), "{}", l.link.display());
+        }
+        assert!(j.is_empty(), "one `u` emptied it");
+        assert!(hard_target.is_file(), "the targets are untouched");
+    }
+
+    /// All-or-nothing on the check: one link pointing somewhere else now
+    /// refuses the whole batch, and nothing is removed.
+    #[test]
+    fn undo_of_a_batch_refuses_whole_when_one_link_changed() {
+        let t = TempTree::new("j-links-changed");
+        let target = t.file("target.txt", b"x");
+        let mut links = Vec::new();
+        for name in ["one", "two"] {
+            let l = t.join(name);
+            let text = link::symlink(&target, &l, LinkKind::Absolute).unwrap();
+            links.push(CreatedLink::record(&l, Some(&text)).unwrap());
+        }
+        let mut j = Journal::default();
+        j.record(OpRecord::Links {
+            links: links.clone(),
+        });
+
+        std::fs::remove_file(t.join("two")).unwrap();
+        std::os::unix::fs::symlink("/somewhere/else", t.join("two")).unwrap();
+
+        let err = j.undo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("points somewhere else"), "{err}");
+        assert!(
+            super::exists(&links[0].link),
+            "the untouched link is still there: nothing was removed"
+        );
+        assert_eq!(j.len(), 1, "the entry stays so it can be retried");
+    }
+
+    /// A single-item batch reads like the single-link record it replaces.
+    #[test]
+    fn a_batch_of_one_describes_itself_by_name() {
+        let t = TempTree::new("j-links-one");
+        let target = t.file("target.txt", b"x");
+        let l = t.join("just-one");
+        let text = link::symlink(&target, &l, LinkKind::Absolute).unwrap();
+        let record = OpRecord::Links {
+            links: vec![CreatedLink::record(&l, Some(&text)).unwrap()],
+        };
+        assert_eq!(record.describe(), "linked just-one");
+        let report = undo_record(&record, &ctx()).unwrap();
+        assert_eq!(report.description, "Removed the link just-one");
+        assert!(!super::exists(&l));
     }
 
     #[test]

@@ -39,6 +39,13 @@
 //! macro_workers = 10
 //! bizarre_retry = 3
 //!
+//! [preview]
+//! tab_size = 2
+//! max_text_bytes = 1048576   # 1 MiB
+//! max_hex_bytes = 65536      # 64 KiB
+//! image_quality = 80         # 0–100, for the shared thumbnail cache
+//! wrap = false
+//!
 //! # Bookmarks for the `g` chord. Writing this table replaces the shipped one
 //! # outright — otherwise a bookmark could never be removed.
 //! [goto]
@@ -106,6 +113,23 @@ pub const DEFAULT_MACRO_WORKERS: usize = 10;
 /// and the usual one: enough for a stall, short enough that a genuine failure
 /// still surfaces while the user is still looking at the screen.
 pub const DEFAULT_BIZARRE_RETRY: u32 = 3;
+
+/// How wide a tab renders in the preview pane.
+///
+/// Two, not eight: the pane is a *glance*, sharing a third of the window with
+/// the list, and eight-column indentation spends half of that on whitespace
+/// before the first deeply-nested line has said anything. It is df-app's
+/// `TAB_SIZE` and the number Brian's editors are set to.
+pub const DEFAULT_TAB_SIZE: usize = 2;
+
+/// JPEG quality, 0–100, for the thumbnail delightfile writes back to the shared
+/// yazi-compatible cache (PLAN §6).
+///
+/// 80 is dv-media's own `ThumbnailOpts::default`, which is what delightviewer
+/// writes with. One cache should not have two programs writing it at two
+/// qualities, so the default is theirs and the key exists for the person who
+/// wants smaller files.
+pub const DEFAULT_IMAGE_QUALITY: u8 = 80;
 
 /// The `g` chord's bookmarks, in which-key order: key, path, description.
 /// `~` is expanded at use time so `$HOME` can move.
@@ -440,6 +464,43 @@ impl Default for TasksConfig {
     }
 }
 
+/// PLAN §6's preview pane, as far as it is a matter of taste or of a cap.
+///
+/// The caps were named constants in [`crate::preview::job`] and the tab width a
+/// constant in df-app; they are here as well because they are the four numbers
+/// a person actually wants to move. Somebody reading minified JSON wants a
+/// bigger `max_text_bytes`; somebody on a slow sshfs wants a smaller one. The
+/// defaults are the constants, so a config that says nothing changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewConfig {
+    /// Spaces a `\t` renders as in the text previewer.
+    pub tab_size: usize,
+    /// The most of a text file that is read and highlighted.
+    pub max_text_bytes: usize,
+    /// The most of a binary file that is turned into a hexdump. Smaller than
+    /// the text cap because a hexdump is four screen columns per byte.
+    pub max_hex_bytes: usize,
+    /// JPEG quality, 0–100, for the thumbnail written back to the shared cache.
+    pub image_quality: u8,
+    /// Soft-wrap long lines in the text previewer instead of letting them run
+    /// off the edge. Off, because a wrapped line of minified JS is a wall and
+    /// the pane is a glance: the horizontal cut tells you the line is long,
+    /// which is information the wrap destroys.
+    pub wrap: bool,
+}
+
+impl Default for PreviewConfig {
+    fn default() -> PreviewConfig {
+        PreviewConfig {
+            tab_size: DEFAULT_TAB_SIZE,
+            max_text_bytes: crate::preview::TEXT_BYTES,
+            max_hex_bytes: crate::preview::HEX_BYTES,
+            image_quality: DEFAULT_IMAGE_QUALITY,
+            wrap: false,
+        }
+    }
+}
+
 /// One `g <key>` destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bookmark {
@@ -521,6 +582,7 @@ pub struct OpenRule {
 pub struct Config {
     pub mgr: MgrConfig,
     pub tasks: TasksConfig,
+    pub preview: PreviewConfig,
     pub goto: Vec<Bookmark>,
     pub openers: Vec<Opener>,
     pub rules: Vec<OpenRule>,
@@ -531,6 +593,7 @@ impl Default for Config {
         Config {
             mgr: MgrConfig::default(),
             tasks: TasksConfig::default(),
+            preview: PreviewConfig::default(),
             goto: default_bookmarks(),
             openers: DEFAULT_OPENERS
                 .iter()
@@ -626,6 +689,23 @@ impl Config {
                         r
                     }
                     _ => Err(format!("unknown key `{}` in [tasks]", entry.key)),
+                };
+                if let Err(message) = ok {
+                    warnings.push(ConfigWarning::new(file, entry.line, message));
+                }
+            }
+        }
+
+        if let Some(preview) = doc.table("preview") {
+            for entry in &preview.entries {
+                let value = &entry.value;
+                let ok = match entry.key.as_str() {
+                    "tab_size" => read_usize(value, &mut config.preview.tab_size),
+                    "max_text_bytes" => read_usize(value, &mut config.preview.max_text_bytes),
+                    "max_hex_bytes" => read_usize(value, &mut config.preview.max_hex_bytes),
+                    "image_quality" => read_quality(value, &mut config.preview.image_quality),
+                    "wrap" => read_bool(value, &mut config.preview.wrap),
+                    _ => Err(format!("unknown key `{}` in [preview]", entry.key)),
                 };
                 if let Err(message) = ok {
                     warnings.push(ConfigWarning::new(file, entry.line, message));
@@ -989,6 +1069,23 @@ fn read_usize(value: &Value, dst: &mut usize) -> Result<(), String> {
     }
 }
 
+/// A 0–100 quality. Out of range is a warning and the default stands, rather
+/// than a silent clamp: `image_quality = 300` is a typo, and a config that
+/// quietly reinterprets a typo is one you cannot debug.
+fn read_quality(value: &Value, dst: &mut u8) -> Result<(), String> {
+    match value.as_int() {
+        Some(n) if (0..=100).contains(&n) => {
+            *dst = n as u8;
+            Ok(())
+        }
+        Some(n) => Err(format!("{n} must be between 0 and 100")),
+        None => Err(format!(
+            "expected a whole number, found {}",
+            value.type_name()
+        )),
+    }
+}
+
 fn read_enum<T: Copy>(
     value: &Value,
     from_name: fn(&str) -> Option<T>,
@@ -1275,6 +1372,75 @@ mod tests {
         assert_eq!(warnings.len(), 2, "{warnings:?}");
         assert_eq!(c.mgr.scrolloff, 5);
         assert_eq!(c.mgr.sort_by, SortBy::Alphabetical);
+    }
+
+    /// The `[preview]` defaults are the constants the code already used, so a
+    /// config that says nothing about the pane changes nothing about it.
+    #[test]
+    fn preview_defaults_are_the_shipped_constants() {
+        let p = Config::default().preview;
+        assert_eq!(p.tab_size, 2);
+        assert_eq!(p.max_text_bytes, 1024 * 1024);
+        assert_eq!(p.max_hex_bytes, 64 * 1024);
+        assert_eq!(p.image_quality, 80);
+        assert!(!p.wrap);
+        // …and they are literally those constants, not a second copy that can
+        // drift from them.
+        assert_eq!(p.max_text_bytes, crate::preview::TEXT_BYTES);
+        assert_eq!(p.max_hex_bytes, crate::preview::HEX_BYTES);
+    }
+
+    #[test]
+    fn a_preview_table_overrides_every_key() {
+        let (c, warnings) = parse(
+            r#"
+            [preview]
+            tab_size = 4
+            max_text_bytes = 2048
+            max_hex_bytes = 512
+            image_quality = 100
+            wrap = true
+            "#,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(c.preview.tab_size, 4);
+        assert_eq!(c.preview.max_text_bytes, 2048);
+        assert_eq!(c.preview.max_hex_bytes, 512);
+        assert_eq!(c.preview.image_quality, 100);
+        assert!(c.preview.wrap);
+    }
+
+    /// PLAN §3's rule at the `[preview]` table: a bad line warns with its own
+    /// line number and the good ones around it still apply.
+    #[test]
+    fn bad_preview_lines_warn_and_keep_their_defaults() {
+        let (c, warnings) = parse(
+            r#"
+            [preview]
+            tab_size = 8
+            image_quality = 300
+            max_hex_bytes = "big"
+            wrap = "yes"
+            nonsense = 1
+            "#,
+        );
+        assert_eq!(c.preview.tab_size, 8, "the good line applied");
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        assert!(
+            warnings[0].message.contains("between 0 and 100"),
+            "{:?}",
+            warnings[0]
+        );
+        assert!(
+            warnings[3].message.contains("unknown key"),
+            "{:?}",
+            warnings[3]
+        );
+        // Every value that failed to parse kept the shipped one.
+        let d = PreviewConfig::default();
+        assert_eq!(c.preview.image_quality, d.image_quality);
+        assert_eq!(c.preview.max_hex_bytes, d.max_hex_bytes);
+        assert_eq!(c.preview.wrap, d.wrap);
     }
 
     #[test]

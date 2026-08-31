@@ -49,8 +49,8 @@ pub use create::{create, rename, Created};
 pub use delete::{check_deletable, check_deletable_here, delete_permanent, remove_tree};
 pub use jobs::{DeleteJob, OpOutcome, Outcome, PasteJob, TrashJob};
 pub use journal::{
-    undo_attempt, undo_record, CopyManifest, FileKind, Fingerprint, Journal, MovedPath, OpRecord,
-    UndoAttempt, UndoReport, JOURNAL_DEPTH, MAX_MANIFEST_ENTRIES,
+    undo_attempt, undo_record, CopyManifest, CreatedLink, FileKind, Fingerprint, Journal,
+    MovedPath, OpRecord, UndoAttempt, UndoReport, JOURNAL_DEPTH, MAX_MANIFEST_ENTRIES,
 };
 pub use link::{hardlink, relative_to, symlink, LinkKind};
 pub use paste::{
@@ -207,97 +207,13 @@ pub fn exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// The fixture tree the operation tests run against (PLAN §9): gnarly names,
-/// created and torn down per test with nothing but `std::fs`.
+/// The operation fixtures, re-exported under the name the tests grew up with.
+///
+/// The fixture itself moved to [`crate::test_support`] so df-app's tests can
+/// build against the same `TempTree` instead of growing a second one that
+/// drifts (PLAN §9 wants *one* set of gnarly names, exercised everywhere).
 #[cfg(test)]
-pub(crate) mod fixture {
-    use std::path::{Path, PathBuf};
-
-    /// A directory under `$TMPDIR` that deletes itself on drop.
-    pub struct TempTree {
-        path: PathBuf,
-    }
-
-    impl TempTree {
-        pub fn new(label: &str) -> TempTree {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-            let unique = format!(
-                "delightfile-test-{}-{}-{}-{n}",
-                label,
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
-            );
-            let path = std::env::temp_dir().join(unique);
-            std::fs::create_dir_all(&path).expect("temp dir");
-            TempTree { path }
-        }
-
-        pub fn path(&self) -> &Path {
-            &self.path
-        }
-
-        pub fn join(&self, rel: impl AsRef<Path>) -> PathBuf {
-            self.path.join(rel)
-        }
-
-        /// Write a file, creating parents.
-        pub fn file(&self, rel: impl AsRef<Path>, contents: &[u8]) -> PathBuf {
-            let p = self.join(rel);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).expect("parents");
-            }
-            std::fs::write(&p, contents).expect("write");
-            p
-        }
-
-        pub fn dir(&self, rel: impl AsRef<Path>) -> PathBuf {
-            let p = self.join(rel);
-            std::fs::create_dir_all(&p).expect("mkdir");
-            p
-        }
-
-        pub fn symlink(&self, target: impl AsRef<Path>, rel: impl AsRef<Path>) -> PathBuf {
-            let p = self.join(rel);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).expect("parents");
-            }
-            std::os::unix::fs::symlink(target.as_ref(), &p).expect("symlink");
-            p
-        }
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            // Best effort: a leaked temp dir is a nuisance, a panic in a
-            // destructor is a lost test failure.
-            let _ignored = std::fs::remove_dir_all(&self.path);
-        }
-    }
-
-    /// The gnarly names of PLAN §9, in one place so every operation test
-    /// exercises the same set.
-    pub fn gnarly_names() -> Vec<String> {
-        vec![
-            "plain.txt".to_string(),
-            "with spaces.txt".to_string(),
-            "ünïcödé — 日本語 🎬.txt".to_string(),
-            "new\nline.txt".to_string(),
-            "'quoted' and \"double\".txt".to_string(),
-            "tab\there.txt".to_string(),
-            "back\\slash.txt".to_string(),
-            "-leading-dash.txt".to_string(),
-            // 255 bytes is the ext4/btrfs limit for one name component; the
-            // point is that nothing in here appends to a name without room.
-            "x".repeat(255),
-            "%20already-encoded.txt".to_string(),
-        ]
-    }
-}
+pub(crate) use crate::test_support as fixture;
 
 #[cfg(test)]
 mod tests {

@@ -21,6 +21,11 @@ pub mod ops;
 pub mod preview;
 pub mod state;
 pub mod tasks;
+/// The shared test fixtures (PLAN §9). `#[cfg(test)]` here, and a real `pub`
+/// module for anyone who turns on the `test-support` feature — which is how
+/// df-app's tests get the same `TempTree` instead of a second copy of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod toml;
 pub mod zoxide;
 

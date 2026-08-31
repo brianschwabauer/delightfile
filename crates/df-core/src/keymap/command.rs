@@ -246,6 +246,15 @@ commands! {
     OverlayNext => "overlay-next",
     TaskInspect => "task-inspect",
     TaskCancel => "task-cancel",
+    TaskPauseResume => "task-pause-resume",
+    // The four answers to a name collision (PLAN §5). They are commands rather
+    // than keys the dialog reads for itself so that they appear in the help
+    // sheet and the which-key card like everything else — a dialog whose keys
+    // are invisible to the registry is a dialog whose keys are undiscoverable.
+    ConflictOverwrite => "conflict-overwrite",
+    ConflictSkip => "conflict-skip",
+    ConflictRename => "conflict-rename",
+    ConflictApplyAll => "conflict-apply-all",
     SpotSwipePrev => "spot-swipe-prev",
     SpotSwipeNext => "spot-swipe-next",
     SpotCopyCell => "spot-copy-cell",

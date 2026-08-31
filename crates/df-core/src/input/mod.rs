@@ -324,6 +324,75 @@ impl InputBuffer {
         self.command(chord)
     }
 
+    /// Feed already-composed text at the caret: an IME commit, the result of a
+    /// dead-key sequence on a non-US layout, or a paste.
+    ///
+    /// [`InputBuffer::feed`] cannot serve these. It takes a [`Chord`], and a
+    /// chord is one key: `´` then `e` on a French layout is two keystrokes and
+    /// one character, `私` is a whole conversion the compositor hands over in
+    /// one string, and a paste is a hundred characters with no keystroke at
+    /// all. Every one of them arrives on the window system's *text* channel
+    /// (winit's `Ime::Commit`, the clipboard), not its key channel, so the
+    /// buffer needs a door on that side too.
+    ///
+    /// Semantics follow the mode, and match typing the characters one at a
+    /// time:
+    ///
+    /// * **Insert** — inserted at the caret, which ends after them.
+    /// * **Replace** — overwrites forward, one character of the buffer per
+    ///   character committed, stopping at the end of the line rather than
+    ///   extending it (Replace never changes the line's length, which is what
+    ///   makes `r` at the end of an empty line a no-op); then back to Normal
+    ///   with the caret on the last character written, as `r` leaves it.
+    /// * **Normal** — ignored. Text only reaches a program while something is
+    ///   *composing*, and in Normal mode keys are commands, so there is nothing
+    ///   composing and this call is a mode error somewhere upstream. Swallowing
+    ///   it is the conservative half of the choice: the alternative — treating
+    ///   the commit as text — would let an IME that fires one frame late type
+    ///   `d` into a line the user thought they were deleting from.
+    ///
+    /// Undo-coalesced like consecutive insert keys: a commit lands inside the
+    /// Insert run it arrives in, so `u` takes back the whole word rather than
+    /// splitting it around the composition.
+    ///
+    /// The text is taken verbatim, newlines and all — this buffer is a string,
+    /// not a filename validator, and a caller that does not want the trailing
+    /// `\n` off a clipboard should trim it before it gets here.
+    pub fn insert_text(&mut self, text: &str) -> InputEvent {
+        if text.is_empty() {
+            return InputEvent::Consumed;
+        }
+        match self.mode {
+            Mode::Normal => InputEvent::Consumed,
+            Mode::Insert => {
+                self.tag_once();
+                let at = self.cursor;
+                self.splice(at, at, text);
+                self.cursor = at + text.chars().count();
+                InputEvent::Consumed
+            }
+            Mode::Replace => {
+                let at = self.cursor;
+                // Replace never changes the length of the line — that is the
+                // invariant `r` has, and "replace one character at the end of
+                // an empty line does nothing" is the same rule read at the
+                // boundary. A commit longer than what is left of the line
+                // overwrites what it can and drops the overflow rather than
+                // growing the line behind an `r`.
+                let room = self.len().saturating_sub(at);
+                let n = text.chars().count().min(room);
+                if n > 0 {
+                    self.tag();
+                    let written: String = text.chars().take(n).collect();
+                    self.splice(at, at + n, &written);
+                }
+                self.mode = Mode::Normal;
+                self.cursor = (at + n.saturating_sub(1)).min(self.limit());
+                InputEvent::Consumed
+            }
+        }
+    }
+
     /// The `[input]` keymap, transcribed.
     fn command(&mut self, chord: Chord) -> InputEvent {
         let m = chord.mods;

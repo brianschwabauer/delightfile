@@ -305,6 +305,16 @@ pub(super) fn build() -> Registry {
         (Confirm, "y",      C::OverlaySubmit, "Yes",           Always),
         (Confirm, "up",     C::OverlayPrev,   "Previous line", Always),
         (Confirm, "down",   C::OverlayNext,   "Next line",     Always),
+        // The conflict dialog's four answers (PLAN §5: "overwrite / skip /
+        // rename / apply-to-all"). The dialog matched these keys literally
+        // before they were rows, which worked and was invisible: a key with no
+        // registry row is absent from the help sheet and from which-key, so the
+        // only way to learn it was to be told. They are inert outside the
+        // dialog because nothing else runs a conflict command.
+        (Confirm, "o",      C::ConflictOverwrite, "Overwrite",    Always),
+        (Confirm, "s",      C::ConflictSkip,      "Skip",         Always),
+        (Confirm, "r",      C::ConflictRename,    "Rename",       Always),
+        (Confirm, "a",      C::ConflictApplyAll,  "Apply to all", Always),
 
         // ── Pick (the `O` opener chooser) ───────────────────────────────────
         (Pick, "esc",    C::OverlayClose,  "Cancel",          Always),
@@ -320,6 +330,9 @@ pub(super) fn build() -> Registry {
         (Tasks, "up",     C::OverlayPrev,  "Previous task",          Always),
         (Tasks, "down",   C::OverlayNext,  "Next task",              Always),
         (Tasks, "enter",  C::TaskInspect,  "Inspect the task",       Always),
+        // PLAN §5's task engine is "pause/resume, cancel"; `p` is the half that
+        // had no row, so it did not appear in the help sheet next to `x`.
+        (Tasks, "p",      C::TaskPauseResume, "Pause / resume the task", Always),
         (Tasks, "x",      C::TaskCancel,   "Cancel the task",        Always),
 
         // ── Spot (`Tab`) ────────────────────────────────────────────────────

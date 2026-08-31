@@ -561,6 +561,116 @@ fn backspace_removes_a_whole_multibyte_character() {
     assert_eq!(buf.text(), "ab");
 }
 
+// ── Composed text: IME, dead keys, paste ────────────────────────────────────
+
+#[test]
+fn insert_text_lands_at_the_caret_in_insert_mode() {
+    let mut buf = InputBuffer::new("ab", 1);
+    assert_eq!(buf.insert_text("XY"), InputEvent::Consumed);
+    assert_eq!(buf.text(), "aXYb");
+    assert_eq!(buf.cursor(), 3, "the caret ends after what was committed");
+    assert_eq!(buf.mode(), InputMode::Insert);
+}
+
+/// The case `feed` cannot express: one commit, several characters, several
+/// bytes each. The caret is a *char* index throughout.
+#[test]
+fn insert_text_handles_multibyte_commits() {
+    let mut buf = InputBuffer::new("aé", 2);
+    buf.insert_text("日本語");
+    assert_eq!(buf.text(), "aé日本語");
+    assert_eq!(buf.cursor(), 5);
+    assert_eq!(buf.cursor_byte(), buf.text().len());
+
+    // …and in the middle of a multibyte run, which is where a byte index
+    // would slice a character in half.
+    let mut buf = InputBuffer::new("日本語", 1);
+    buf.insert_text("ñ̃");
+    assert_eq!(buf.text(), "日ñ̃本語");
+}
+
+#[test]
+fn insert_text_of_nothing_is_a_no_op() {
+    let mut buf = InputBuffer::new("abc", 1);
+    buf.insert_text("");
+    assert_eq!(buf.text(), "abc");
+    assert_eq!(buf.cursor(), 1);
+}
+
+/// One IME commit inside a run of typing is one undo step with it — the whole
+/// word comes back on `u`, not the half either side of the composition.
+#[test]
+fn insert_text_coalesces_with_the_insert_run_around_it() {
+    let mut buf = normal("start", 0);
+    run(&mut buf, "A");
+    buf.insert_text("日本");
+    run(&mut buf, "more");
+    assert_eq!(buf.text(), "start日本more");
+    run(&mut buf, "<esc>u");
+    assert_eq!(buf.text(), "start", "one step, not three");
+}
+
+/// A commit that arrives *before* any key of the run still opens the step, so
+/// the typing after it joins the same one.
+#[test]
+fn insert_text_opens_an_undo_step_of_its_own() {
+    let mut buf = InputBuffer::new("start", 5);
+    buf.insert_text("é");
+    run(&mut buf, "xyz");
+    assert_eq!(buf.text(), "startéxyz");
+    run(&mut buf, "<esc>u");
+    assert_eq!(buf.text(), "start");
+}
+
+#[test]
+fn insert_text_in_replace_mode_overwrites_forward_and_leaves_replace() {
+    let mut buf = normal("abcdef", 1);
+    run(&mut buf, "r");
+    assert_eq!(buf.mode(), InputMode::Replace);
+    buf.insert_text("XYZ");
+    assert_eq!(buf.text(), "aXYZef");
+    assert_eq!(
+        buf.cursor(),
+        3,
+        "on the last character written, as `r` leaves it"
+    );
+    assert_eq!(buf.mode(), InputMode::Normal);
+    // Undone as one step, like the `r` it stands in for.
+    run(&mut buf, "u");
+    assert_eq!(buf.text(), "abcdef");
+}
+
+/// Replace never lengthens the line: the commit overwrites what is left and
+/// the overflow is dropped, which is the same rule as `r` on an empty line.
+#[test]
+fn insert_text_in_replace_mode_stops_at_the_end_of_the_line() {
+    let mut buf = normal("ab", 1);
+    run(&mut buf, "r");
+    buf.insert_text("日本語");
+    assert_eq!(buf.text(), "a日");
+    assert_eq!(buf.cursor(), 1);
+    assert_eq!(buf.mode(), InputMode::Normal);
+
+    let mut buf = normal("", 0);
+    run(&mut buf, "r");
+    buf.insert_text("x");
+    assert_eq!(buf.text(), "");
+    assert_eq!(buf.mode(), InputMode::Normal);
+}
+
+/// Normal mode is a mode error, and the error is swallowed: text only arrives
+/// while something is composing, and nothing composes over a command mode.
+#[test]
+fn insert_text_is_ignored_in_normal_mode() {
+    let mut buf = normal("abc", 1);
+    assert_eq!(buf.insert_text("XY"), InputEvent::Consumed);
+    assert_eq!(buf.text(), "abc");
+    assert_eq!(buf.cursor(), 1);
+    assert_eq!(buf.mode(), InputMode::Normal);
+    // Nothing was recorded either, so `u` has not gained a no-op step.
+    assert!(buf.undo.is_empty());
+}
+
 // ── Undo and redo ───────────────────────────────────────────────────────────
 
 #[test]

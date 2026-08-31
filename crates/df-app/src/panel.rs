@@ -420,6 +420,7 @@ mod tests {
             name: "Copy 3 items → /home/brian/Work".to_string(),
             lane: Lane::Macro,
             state,
+            terminal: false,
         }
     }
 

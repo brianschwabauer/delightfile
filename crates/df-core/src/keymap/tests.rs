@@ -460,6 +460,77 @@ fn the_help_browser_only_lists_what_is_reachable() {
     assert_eq!(bindings[0].context, Context::Tasks);
 }
 
+/// PLAN §5's conflict dialog answers — overwrite / skip / rename /
+/// apply-to-all — dispatch from the Confirm context, so the help sheet and
+/// which-key can offer them instead of the user having to be told.
+#[test]
+fn the_conflict_dialog_answers_are_registry_rows() {
+    let km = Registry::defaults();
+    let mut stack = files();
+    stack.push(Context::Confirm);
+    for (keys, expected, label) in [
+        ("o", Command::ConflictOverwrite, "Overwrite"),
+        ("s", Command::ConflictSkip, "Skip"),
+        ("r", Command::ConflictRename, "Rename"),
+        ("a", Command::ConflictApplyAll, "Apply to all"),
+    ] {
+        assert_eq!(
+            press(&km, &stack, WhenFlags::LIST, keys),
+            Dispatch::Match(expected),
+            "{keys}"
+        );
+        assert_eq!(km.binding_label(expected).as_deref(), Some(keys));
+        let listed = km.active_bindings(&stack, WhenFlags::LIST);
+        let row = listed
+            .iter()
+            .find(|b| b.command == expected)
+            .unwrap_or_else(|| panic!("{keys} is not in the help sheet"));
+        assert_eq!(row.description, label);
+        assert_eq!(row.context, Context::Confirm);
+    }
+    // The dialog's keys stay the dialog's: `s` is still search in the browser.
+    assert_eq!(
+        press(&km, &files(), WhenFlags::LIST, "s"),
+        Dispatch::Match(Command::SearchName)
+    );
+}
+
+/// The `w` panel's two verbs (PLAN §5: "pause/resume, cancel").
+#[test]
+fn the_task_panel_binds_pause_resume_and_cancel() {
+    let km = Registry::defaults();
+    let mut stack = files();
+    stack.push(Context::Tasks);
+    assert_eq!(
+        press(&km, &stack, WhenFlags::LIST, "p"),
+        Dispatch::Match(Command::TaskPauseResume)
+    );
+    assert_eq!(
+        press(&km, &stack, WhenFlags::LIST, "x"),
+        Dispatch::Match(Command::TaskCancel)
+    );
+    assert_eq!(
+        km.binding_label(Command::TaskPauseResume).as_deref(),
+        Some("p")
+    );
+}
+
+/// The ids are the vocabulary of `keymap.toml`, so they are pinned here as
+/// well as round-tripped: renaming one silently breaks a user's config.
+#[test]
+fn the_new_dialog_command_ids_are_stable() {
+    for (command, id) in [
+        (Command::ConflictOverwrite, "conflict-overwrite"),
+        (Command::ConflictSkip, "conflict-skip"),
+        (Command::ConflictRename, "conflict-rename"),
+        (Command::ConflictApplyAll, "conflict-apply-all"),
+        (Command::TaskPauseResume, "task-pause-resume"),
+    ] {
+        assert_eq!(command.id(), id);
+        assert_eq!(Command::from_id(id), Some(command));
+    }
+}
+
 // ── Reserved transport keys ─────────────────────────────────────────────────
 
 /// PLAN §4.3's hard rule: `j k l [ ]` belong to transport everywhere, so

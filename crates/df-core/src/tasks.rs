@@ -162,6 +162,18 @@ pub struct TaskSnapshot {
     pub name: String,
     pub lane: Lane,
     pub state: TaskState,
+    /// The worker has let go of this task for good — it will not run again.
+    ///
+    /// Exposed because [`TaskState`] alone cannot answer it: `Failed` is not
+    /// necessarily the end. A transient failure publishes
+    /// `Failed { retries }` — which is what the panel should show while the
+    /// task backs off — and then the task runs again. A UI that keys "this
+    /// finished" on the state has to guess at that, and guesses wrong for
+    /// exactly the `bizarre_retry` window (PLAN §5) the retry exists to cover.
+    /// So the engine's own flag is published instead: a toast, a rescan or a
+    /// dialog that should fire once fires on `terminal`, and the state says
+    /// *how* it ended.
+    pub terminal: bool,
 }
 
 /// A state transition, for a UI that would rather react than diff snapshots.
@@ -786,6 +798,7 @@ impl TaskEngine {
                 name: rec.name.clone(),
                 lane: rec.lane,
                 state: rec.state.clone(),
+                terminal: rec.terminal,
             })
             .collect()
     }
@@ -797,6 +810,7 @@ impl TaskEngine {
             name: rec.name.clone(),
             lane: rec.lane,
             state: rec.state.clone(),
+            terminal: rec.terminal,
         })
     }
 
@@ -1086,6 +1100,64 @@ mod tests {
         assert_eq!(snap[0].lane, Lane::Macro);
         drop(tx);
         engine.join(id, T);
+    }
+
+    /// The snapshot says whether the engine has let go, so a UI does not have
+    /// to infer "finished" from the state — which `Failed` cannot answer on its
+    /// own, because a transient failure publishes `Failed` and then runs again.
+    #[test]
+    fn the_snapshot_carries_terminality() {
+        let engine = TaskEngine::new(&config(0));
+        let (tx, rx) = crossbeam_channel::bounded::<()>(0);
+        let id = engine.spawn(FnJob::new("held", Lane::Macro, move |_| {
+            let _ = rx.recv();
+            Ok(())
+        }));
+        wait_for(&engine, id, |s| matches!(s, TaskState::Running(_)));
+        assert!(!engine.task(id).expect("task").terminal, "still running");
+        assert!(!engine.snapshot()[0].terminal);
+
+        drop(tx);
+        assert_eq!(engine.join(id, T), Some(TaskState::Done));
+        let done = engine.task(id).expect("task");
+        assert!(done.terminal, "the worker has let go");
+        assert!(engine.snapshot()[0].terminal);
+    }
+
+    /// The reason the flag is published at all: a retried failure is `Failed`
+    /// and *not* terminal, and the two are only distinguishable here.
+    #[test]
+    fn a_retried_failure_is_not_terminal_until_it_gives_up() {
+        let engine = TaskEngine::new(&config(3));
+        let id = engine.spawn(FnJob::new("doomed", Lane::Micro, |_| {
+            Err(DfError::io(
+                "/tmp/x",
+                std::io::Error::from(std::io::ErrorKind::Interrupted),
+            ))
+        }));
+        // Almost the whole life of this task is spent backing off between
+        // retries, showing `Failed` with the engine still holding it.
+        let deadline = Instant::now() + T;
+        let mut saw_retry_era_failure = false;
+        let end = loop {
+            let snap = engine.task(id).expect("task");
+            if snap.terminal {
+                break snap.state;
+            }
+            if matches!(snap.state, TaskState::Failed { .. }) {
+                saw_retry_era_failure = true;
+            }
+            assert!(Instant::now() < deadline, "never became terminal");
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        assert!(
+            saw_retry_era_failure,
+            "a `Failed` with `terminal == false` is the state under test"
+        );
+        match end {
+            TaskState::Failed { retries, .. } => assert_eq!(retries, 3),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[test]

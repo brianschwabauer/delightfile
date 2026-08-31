@@ -6,6 +6,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Publish `df_core::test_support` (the `TempTree` fixture and PLAN §9's gnarly
+# names) to other crates' tests. Off by default and named as a feature rather
+# than a `dev-dependency` trick because that is the only way a *sibling* crate
+# can reach a `#[cfg(test)]` module: df-app adds
+# `df-core = { workspace = true, features = ["test-support"] }` under
+# `[dev-dependencies]` and gets the same fixture the ops tests use.
+test-support = []
+
 # Deliberately no winit/egui/wgpu (PLAN §1): everything in here has to be
 # unit-testable without a display, and the compile-time proof of that is the
 # dependency list staying this short.
