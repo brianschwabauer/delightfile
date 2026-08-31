@@ -8,6 +8,9 @@
 
 mod app;
 mod graphics;
+mod hover;
+mod motion;
+mod ripple;
 
 use winit::event_loop::EventLoop;
 

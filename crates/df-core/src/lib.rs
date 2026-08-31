@@ -15,6 +15,7 @@ pub mod fs;
 pub mod keymap;
 pub mod ops;
 pub mod tasks;
+pub mod toml;
 
 /// Everything this crate can fail at.
 ///

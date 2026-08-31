@@ -18,6 +18,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::graphics::{Gfx, GfxError};
+use crate::hover::{pressed_rect, Hovers};
+use crate::ripple::Ripples;
 
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
 /// columns (PLAN §2) to each be usable at once — the middle column is the one
@@ -85,6 +87,22 @@ pub struct App {
     repaint_at: Option<Instant>,
     /// Set once, so the cold-start line is logged for the first frame only.
     logged_first_frame: bool,
+    /// Hover/press amounts for every control on screen (PLAN §8). One instance
+    /// for the whole window rather than one per pane: the pointer is only ever
+    /// over one thing, and a single list is also a single `animating()` to ask.
+    hovers: Hovers<Control>,
+    /// Click ripples in flight.
+    ripples: Ripples<Control>,
+}
+
+/// Everything the pointer can be over. One flat enum for the window, the way
+/// delightviewer keys its hover map off a single `Hit` — Phase 1 grows it into
+/// rows, tabs and breadcrumb segments, and nothing about the hover or ripple
+/// machinery changes when it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Control {
+    /// The Phase 0 placeholder card. Deleted with the placeholder.
+    Card,
 }
 
 impl App {
@@ -94,6 +112,8 @@ impl App {
             waker,
             repaint_at: None,
             logged_first_frame: false,
+            hovers: Hovers::new(),
+            ripples: Ripples::new(),
         }
     }
 
@@ -144,16 +164,71 @@ impl App {
     /// visual language (PLAN §8) is hand-drawn — rows, ripples, scrims — and
     /// mixing in a widget theme would only be a second set of rules to fight.
     fn frame(&mut self, ui: &mut egui::Ui) {
+        let now = Instant::now();
         let area = ui.max_rect();
         let painter = ui.painter().clone();
         painter.rect_filled(area, 0, crate::graphics::BG);
+
+        // The Phase 0 placeholder, promoted to a card so the motion vocabulary
+        // (PLAN §8) has something to be verified on before there are rows to
+        // put it on: hover fades in instantly and out over `hover::FADE`, the
+        // card sinks under a press, and a click leaves a ripple.
+        let card = egui::Rect::from_center_size(area.center(), CARD_SIZE);
+        let (pointer, down, just_pressed) = ui.input(|i| {
+            (
+                i.pointer.interact_pos(),
+                i.pointer.primary_down(),
+                i.pointer.primary_pressed(),
+            )
+        });
+        // Hit-testing against the *unpressed* rect: a control that shrinks out
+        // from under the pointer it is reacting to would flicker its own hover
+        // off at the moment of the click.
+        let over = pointer.is_some_and(|p| card.contains(p));
+        self.hovers.tick(
+            over.then_some(Control::Card),
+            (over && down).then_some(Control::Card),
+            now,
+        );
+        if let Some(p) = pointer.filter(|_| over && just_pressed) {
+            // On mouse-down, not on click: the ripple acknowledges the press,
+            // and waiting for the release would put it after whatever the click
+            // did.
+            self.ripples.spawn(Control::Card, p, card, now);
+        }
+        self.ripples.tick(now);
+
+        let hover = self.hovers.hover(Control::Card);
+        let press = self.hovers.press(Control::Card);
+        let rect = pressed_rect(card, press);
+        painter.rect_filled(rect, CARD_RADIUS, mix(CARD_FILL, CARD_FILL_HOT, hover));
+        // Ripples are clipped to the card, so an expanding circle stops at the
+        // surface it belongs to. The clip is rectangular — egui has no rounded
+        // clip — which costs a few pixels in the corners at exactly the moment
+        // the ripple is faintest.
+        let inside = painter.with_clip_rect(rect);
+        for s in self.ripples.splashes(Control::Card, now) {
+            inside.circle_filled(
+                s.center,
+                s.radius,
+                egui::Color32::from_white_alpha((s.alpha * 255.0).round() as u8),
+            );
+        }
         painter.text(
-            area.center(),
+            rect.center(),
             egui::Align2::CENTER_CENTER,
             "delightfile",
             egui::FontId::proportional(PLACEHOLDER_SIZE),
             PLACEHOLDER_COLOR,
         );
+
+        // The repaint discipline, in one place (PLAN §1): a frame is asked for
+        // only while something is actually moving. A pointer parked on the card
+        // holds a 1.0 that will be 1.0 again next frame, and `animating()`
+        // says so — idle costs zero frames, hover included.
+        if self.hovers.animating() || self.ripples.animating(now) {
+            ui.ctx().request_repaint();
+        }
     }
 
     fn redraw(&mut self) {
@@ -283,3 +358,32 @@ const PLACEHOLDER_SIZE: f32 = 15.0;
 /// placeholder is already the right color against `base` rather than a stand-in
 /// that has to be re-picked.
 const PLACEHOLDER_COLOR: egui::Color32 = egui::Color32::from_rgb(0xcd, 0xd6, 0xf4);
+
+/// The placeholder card, in logical points. Wide enough that the ripple has
+/// somewhere to travel and the fixed-pixel press squeeze reads as a squeeze;
+/// nothing else depends on it.
+const CARD_SIZE: egui::Vec2 = egui::vec2(240.0, 72.0);
+
+/// Card corner radius, in logical points. PLAN §8's nested-rounding rule makes
+/// this a number the contents will be derived *from* later (container radius =
+/// element radius + gap), so it is picked as a container: round enough to read
+/// as a card, not so round it reads as a pill.
+const CARD_RADIUS: u8 = 12;
+
+/// catppuccin-mocha `surface0` (#313244) — the first surface above `base`,
+/// which is what a card sitting on the background is.
+const CARD_FILL: egui::Color32 = egui::Color32::from_rgb(0x31, 0x32, 0x44);
+
+/// catppuccin-mocha `surface1` (#45475a) — one step further up the same ramp.
+/// Hovering moves a surface up its own ramp rather than tinting it, so the
+/// hover state is the palette's own next value and not an invented colour.
+const CARD_FILL_HOT: egui::Color32 = egui::Color32::from_rgb(0x45, 0x47, 0x5a);
+
+/// Blend two opaque colours. Straight per-channel interpolation in sRGB: both
+/// ends are neighbouring values on one palette ramp, so there is no hue to be
+/// lost between them and a gamma-correct mix would land in the same place.
+fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    egui::Color32::from_rgb(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()))
+}
