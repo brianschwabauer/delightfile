@@ -16,15 +16,21 @@
 //! silently did *nearly* the right thing would be worse than one that has not
 //! landed yet.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use df_core::config::{Config, LineMode, MgrConfig, SortBy, Theme};
 use df_core::fs::{random_seed, FindDirection, Scanner, SortOptions, WatchEvent, Watcher};
+use df_core::input::{InputBuffer, InputEvent};
 use df_core::keymap::{
-    Chord, Command, Context, ContextStack, Dispatch, KeymapState, Registry, WhenFlags,
+    Chord, Command, Context, ContextStack, Dispatch, Key, KeymapState, Registry, WhenFlags,
 };
+use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord};
+use df_core::ops::paste::{plan_paste, Clipboard, PasteMode};
+use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
+use df_core::tasks::{FnJob, Lane, TaskCtx, TaskEngine, TaskEvent, TaskId, TaskState};
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -33,17 +39,21 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use crate::chrome;
+use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
 use crate::graphics::{Gfx, GfxError};
 use crate::help::{self, Help};
 use crate::hover::Hovers;
 use crate::input::{Prompt, PromptKind};
+use crate::open::{self, Picker};
+use crate::panel::{self, TaskPanel, TaskRow};
 use crate::preview::Pane as PreviewPane;
 use crate::ripple::Ripples;
+use crate::toast::Toasts;
 use crate::select::{self, Visual};
 use crate::tab::Tab;
 use crate::tabs::Tabs;
 use crate::theme::Palette;
-use crate::ui::{self, Column, Control, CursorGlow, ListView};
+use crate::ui::{self, ClipMark, Column, Control, CursorGlow, ListView};
 use crate::whichkey::WhichKey;
 
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
@@ -124,6 +134,81 @@ struct Press {
     text: Option<String>,
 }
 
+/// A job that has been spawned and whose result the UI still owes somebody a
+/// toast for.
+///
+/// The engine's event stream says a task is *over*; the outcome slot says what
+/// it did. Both are needed: the record for the journal and the message for the
+/// toast are in the slot, and the moment to read them is the event.
+struct PendingOp {
+    id: TaskId,
+    slot: Outcome,
+    /// Directories to re-read once it lands. inotify usually beats us to it,
+    /// which is why `rescan` is idempotent — a second read of a directory that
+    /// is already right costs one scan and changes nothing.
+    dirs: Vec<PathBuf>,
+}
+
+/// The modal card that is up, if one is.
+enum Dialog {
+    /// `d` / `D`.
+    Confirm(Confirm),
+    /// A paste that hit a name that is taken. Boxed: it carries a whole
+    /// [`PastePlan`](df_core::ops::paste::PastePlan) and the enum is otherwise
+    /// a few words wide.
+    Conflict(Box<ConflictDialog>),
+}
+
+/// One frame's worth of "where the open surface's pieces are".
+enum OverlayGeom {
+    Confirm(dialog::Geometry),
+    Conflict(dialog::Geometry),
+    Picker(egui::Rect, Vec<egui::Rect>),
+    Panel(egui::Rect, Vec<egui::Rect>, Vec<TaskRow>),
+}
+
+impl OverlayGeom {
+    /// What the pointer is over. `None` inside the card but not on anything is
+    /// still "inside the card" as far as the caller is concerned — the modal
+    /// swallows the pointer either way (see the hit test in `frame`).
+    fn hit(&self, pos: egui::Pos2) -> Option<Control> {
+        match self {
+            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g
+                .action_at(pos)
+                .map(Control::Action)
+                .or_else(|| {
+                    g.apply_all
+                        .filter(|r| r.contains(pos))
+                        // The toggle sits one past the answers, so one index
+                        // space covers every button on the card.
+                        .map(|_| Control::Action(dialog::ConflictAction::ALL.len()))
+                })
+                .or_else(|| g.row_at(pos).map(Control::PanelRow)),
+            OverlayGeom::Picker(_, rows) | OverlayGeom::Panel(_, rows, _) => rows
+                .iter()
+                .position(|r| r.contains(pos))
+                .map(Control::PanelRow),
+        }
+    }
+
+    /// Where a control was drawn, for the ripple to start from.
+    fn rect_of(&self, control: Control) -> Option<egui::Rect> {
+        match (self, control) {
+            (OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g), Control::Action(i)) => {
+                g.actions.get(i).copied().or(g.apply_all)
+            }
+            (OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g), Control::PanelRow(i)) => {
+                g.rows.get(i).copied()
+            }
+            (
+                OverlayGeom::Picker(_, rows) | OverlayGeom::Panel(_, rows, _),
+                Control::PanelRow(i),
+            ) => rows.get(i).copied(),
+            _ => None,
+        }
+    }
+}
+
 /// How a session ended, and therefore whether the cwd-file is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Quit {
@@ -190,6 +275,31 @@ pub struct App {
     /// so that submitting the filter can close the bar without also throwing
     /// away what was typed into it.
     help_query: String,
+    // ── Operations (PLAN §5) ────────────────────────────────────────────────
+    /// The worker pool. Started before the window, like every other worker.
+    engine: TaskEngine,
+    /// The engine's transition stream, taken **once** at startup: `events()`
+    /// replaces the channel every time it is called, so a second call would
+    /// silently orphan the first receiver.
+    task_events: crossbeam_channel::Receiver<TaskEvent>,
+    ops: Vec<PendingOp>,
+    /// The undo stack (PLAN §5).
+    journal: Journal,
+    /// What `y` / `x` filled and `p` will paste.
+    clipboard: Clipboard,
+    /// The one-at-a-time toast.
+    toasts: Toasts,
+    /// The modal card, when one is up. While it is, keys are matched against
+    /// its context *alone* — see [`App::overlay_key`].
+    dialog: Option<Dialog>,
+    /// `O`'s opener chooser.
+    picker: Option<Picker>,
+    /// `w`'s task panel.
+    panel: Option<TaskPanel>,
+    /// Where the cursor row was last drawn: what a rename popup and the opener
+    /// picker anchor themselves to (PLAN §4.2, §6).
+    cursor_rect: egui::Rect,
+
     /// The which-key card's timing (PLAN §4).
     which: WhichKey,
     /// What the card lists: `(keys, description)` in df-core's declaration
@@ -240,6 +350,15 @@ impl App {
         // "decode workers started **before** the window").
         let mut preview = PreviewPane::start(notifier);
 
+        // Before the window as well (PLAN §6's cold-start ordering), and wired
+        // to the same bell every other worker rings.
+        let engine = TaskEngine::new(&config.tasks);
+        {
+            let waker = waker.clone();
+            engine.set_notifier(Box::new(move || waker.wake()));
+        }
+        let task_events = engine.events();
+
         let mgr = config.mgr.clone();
         let seed = 0;
         let sort = sort_options(&mgr, seed);
@@ -274,6 +393,16 @@ impl App {
             tabs: Tabs::new(tab),
             cwd_file: args.cwd_file,
             quit: None,
+            engine,
+            task_events,
+            ops: Vec::new(),
+            journal: Journal::default(),
+            clipboard: Clipboard::default(),
+            toasts: Toasts::new(),
+            dialog: None,
+            picker: None,
+            panel: None,
+            cursor_rect: egui::Rect::ZERO,
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
             prompt: None,
@@ -365,6 +494,15 @@ impl App {
             }
         }
 
+        // The task engine. Every event is a repaint — a progress tick moves the
+        // `w` panel's bar, and a terminal one owes somebody a toast. Collected
+        // first because handling one takes `&mut self`.
+        let events: Vec<TaskEvent> = self.task_events.try_iter().collect();
+        for event in events {
+            changed = true;
+            self.task_event(event, now);
+        }
+
         for event in self.watcher.drain() {
             changed = true;
             match event {
@@ -425,6 +563,368 @@ impl App {
         self.watcher.watch(self.tabs.active().watched());
     }
 
+    // ── Operations (PLAN §5) ────────────────────────────────────────────────
+
+    /// What an operation acts on: the selection, or — when there is none — the
+    /// row under the cursor. yazi's rule, and the one every file manager has.
+    fn targets(&self) -> Vec<PathBuf> {
+        let dir = &self.tab().cwd.dir;
+        let selected = dir.selected_paths();
+        if !selected.is_empty() {
+            return selected;
+        }
+        dir.cursor_entry()
+            .map(|entry| vec![entry.path.clone()])
+            .unwrap_or_default()
+    }
+
+    fn cwd(&self) -> PathBuf {
+        self.tab().cwd.path().to_path_buf()
+    }
+
+    /// The directories an operation over `paths` could change: where they are
+    /// now, and where they are going.
+    fn affected(paths: &[PathBuf], dest: Option<&Path>) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = paths
+            .iter()
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .collect();
+        if let Some(dest) = dest {
+            dirs.push(dest.to_path_buf());
+        }
+        dirs.sort();
+        dirs.dedup();
+        dirs
+    }
+
+    /// One task transition. The stream is for *reacting*; the panel renders
+    /// from [`TaskEngine::snapshot`], never from this.
+    fn task_event(&mut self, event: TaskEvent, now: Instant) {
+        match event.state {
+            TaskState::Done | TaskState::Cancelled => self.finish_op(event.id, now),
+            // A failure is not always the end — a transient one is republished
+            // as `Failed { retries }` and then runs again — so the op stays
+            // pending and only the message goes out now.
+            TaskState::Failed { ref error, .. } if self.ops.iter().any(|op| op.id == event.id) => {
+                self.toasts.error(format!("{}: {error}", event.name), now);
+            }
+            _ => {}
+        }
+    }
+
+    /// A job is over: journal what it did, say so, and re-read what it touched.
+    fn finish_op(&mut self, id: TaskId, now: Instant) {
+        let Some(index) = self.ops.iter().position(|op| op.id == id) else {
+            return;
+        };
+        let op = self.ops.remove(index);
+        let outcome = match op.slot.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        if let Some(mut outcome) = outcome {
+            for (path, error) in &outcome.errors {
+                log::warn!("{}: {error}", path.display());
+            }
+            let (message, kind) = op_toast(&outcome);
+            if let Some(record) = outcome.record.take() {
+                self.journal.record(record);
+            }
+            self.toasts.show(message, kind, now);
+        }
+        for dir in &op.dirs {
+            self.rescan(dir, now);
+        }
+    }
+
+    /// Queue a job and remember where to look for its result.
+    fn track(&mut self, id: TaskId, slot: Outcome, dirs: Vec<PathBuf>) {
+        self.ops.push(PendingOp { id, slot, dirs });
+    }
+
+    /// `y` / `x`.
+    fn set_clipboard(&mut self, cut: bool, now: Instant) {
+        let paths = self.targets();
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        self.clipboard = if cut {
+            Clipboard::cut(paths)
+        } else {
+            Clipboard::yank(paths)
+        };
+        let verb = if cut { "Cut" } else { "Yanked" };
+        self.toasts
+            .notice(format!("{verb} {}", plural(n, "item", "items")), now);
+    }
+
+    /// `X`: the yank is off. The marks come off the rows with it.
+    fn unyank(&mut self, now: Instant) {
+        if self.clipboard.is_empty() {
+            return;
+        }
+        self.clipboard.clear();
+        self.toasts.notice("Clipboard cleared", now);
+    }
+
+    /// `p` / `P`. Conflicts open the dialog; a settled plan goes straight to
+    /// the pool.
+    fn paste(&mut self, force: bool, now: Instant) {
+        if self.clipboard.is_empty() {
+            self.toasts.notice("Nothing yanked — y copies, x cuts", now);
+            return;
+        }
+        let dest = self.cwd();
+        let plan = match plan_paste(&self.clipboard, &dest, force) {
+            Ok(plan) => plan,
+            Err(e) => {
+                self.toasts.error(e.to_string(), now);
+                return;
+            }
+        };
+        if !plan.is_settled() {
+            self.dialog = Some(Dialog::Conflict(Box::new(ConflictDialog::new(plan))));
+            self.sync_context();
+            return;
+        }
+        self.spawn_paste(plan, now);
+    }
+
+    fn spawn_paste(&mut self, plan: df_core::ops::paste::PastePlan, now: Instant) {
+        if plan.ready.is_empty() {
+            self.toasts.notice("Nothing left to paste", now);
+            return;
+        }
+        let dirs = Self::affected(
+            &plan.ready.iter().map(|i| i.src.clone()).collect::<Vec<_>>(),
+            Some(&plan.dest_dir),
+        );
+        let cut = plan.mode == PasteMode::Cut;
+        let job = PasteJob::new(plan);
+        let slot = job.outcome();
+        let id = self.engine.spawn(job);
+        self.track(id, slot, dirs);
+        // A cut is spent by its paste: pasting it a second time would move
+        // files that are no longer where the clipboard says they are.
+        if cut {
+            self.clipboard.clear();
+        }
+    }
+
+    /// `d` and `D`, both of which ask first.
+    fn open_confirm(&mut self, kind: ConfirmKind, now: Instant) {
+        let paths = self.targets();
+        if paths.is_empty() {
+            self.toasts.notice("Nothing selected", now);
+            return;
+        }
+        self.dialog = Some(Dialog::Confirm(Confirm::new(kind, paths)));
+        self.sync_context();
+    }
+
+    /// The confirm was answered yes.
+    fn run_confirm(&mut self, confirm: Confirm, _now: Instant) {
+        let dirs = Self::affected(&confirm.paths, None);
+        let (id, slot) = match confirm.kind {
+            ConfirmKind::Trash => {
+                let job = TrashJob::new(confirm.paths);
+                let slot = job.outcome();
+                (self.engine.spawn(job), slot)
+            }
+            ConfirmKind::Delete => {
+                let job = DeleteJob::new(confirm.paths);
+                let slot = job.outcome();
+                (self.engine.spawn(job), slot)
+            }
+        };
+        self.track(id, slot, dirs);
+    }
+
+    /// `-`, `_`, `Ctrl+-`: link the yanked files into this directory.
+    ///
+    /// The clipboard is the source, as in yazi — `y` then `-` is the gesture,
+    /// and linking "the selection" would mean linking files to themselves.
+    fn link(&mut self, kind: Option<LinkKind>, now: Instant) {
+        if self.clipboard.is_empty() {
+            self.toasts.notice("Nothing yanked to link", now);
+            return;
+        }
+        let cwd = self.cwd();
+        let paths = self.clipboard.paths.clone();
+        let mut made = 0;
+        let mut failure = None;
+        for target in &paths {
+            let Some(name) = target.file_name() else { continue };
+            let link = cwd.join(name);
+            let result = match kind {
+                Some(kind) => df_core::ops::symlink(target, &link, kind).map(|_| ()),
+                None => df_core::ops::hardlink(target, &link),
+            };
+            match result {
+                Ok(()) => {
+                    made += 1;
+                    // One record per link: `OpRecord::Link` describes a single
+                    // one, so `u` takes them back one at a time.
+                    if let Ok(fingerprint) = Fingerprint::of(&link) {
+                        self.journal.record(OpRecord::Link {
+                            link,
+                            target: kind.map(|_| target.clone()),
+                            fingerprint,
+                        });
+                    }
+                }
+                Err(e) => failure = Some(e.to_string()),
+            }
+        }
+        match (made, failure) {
+            (0, Some(error)) => self.toasts.error(error, now),
+            (n, _) => {
+                self.toasts
+                    .undo(format!("Linked {}", plural(n, "item", "items")), now);
+                self.rescan(&cwd.clone(), now);
+            }
+        }
+    }
+
+    /// `u` / `Ctrl+Shift+z`.
+    ///
+    /// Synchronous: an undo is usually a rename back, and the one case that is
+    /// not — deleting what a big copy created — is the price of the journal
+    /// staying a plain `&mut` stack rather than something a worker can hold.
+    /// (Noted as a deferral; moving it to the pool needs a shareable journal.)
+    fn undo(&mut self, now: Instant) {
+        if self.journal.is_empty() {
+            self.toasts.notice("Nothing to undo", now);
+            return;
+        }
+        match self.journal.undo(&TaskCtx::detached()) {
+            Ok(report) => {
+                // The refusal *and* the success are the user's words: df-core
+                // writes these to be read, so they are shown verbatim.
+                self.toasts.notice(report.description.clone(), now);
+                for dir in Self::affected(&report.touched, None) {
+                    self.rescan(&dir, now);
+                }
+                self.refresh_all(now);
+            }
+            Err(e) => self.toasts.error(e.to_string(), now),
+        }
+    }
+
+    // ── Opening (PLAN §6) ───────────────────────────────────────────────────
+
+    /// `o` / `Enter`: the first opener rule that matches.
+    fn open_hovered(&mut self, now: Instant) {
+        let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
+            return;
+        };
+        // A directory is *entered*, not launched: `Enter` on a folder has meant
+        // "go in" since before file managers had opener rules. The launchers a
+        // directory does have (a Zed workspace, a terminal here) are on `O`.
+        if entry.is_dir() {
+            let path = entry.path.clone();
+            self.navigate(path, now);
+            return;
+        }
+        let choices = open::choices_for(&self.config, &entry);
+        let Some(choice) = choices.first().cloned() else {
+            self.toasts
+                .notice(format!("No opener rule matches {}", entry.name), now);
+            return;
+        };
+        self.launch(&choice, self.targets(), now);
+    }
+
+    /// `O` / `Shift+Enter`: the picker, anchored to the row it is about.
+    fn open_picker(&mut self, now: Instant) {
+        let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
+            return;
+        };
+        let choices = open::choices_for(&self.config, &entry);
+        if choices.is_empty() {
+            self.toasts
+                .notice(format!("No opener rule matches {}", entry.name), now);
+            return;
+        }
+        let paths = self.targets();
+        self.picker = Some(Picker::new(choices, paths, self.cursor_rect));
+        self.sync_context();
+    }
+
+    /// Run one opener over `paths`.
+    fn launch(&mut self, choice: &open::Choice, paths: Vec<PathBuf>, now: Instant) {
+        if let Some(builtin) = choice.builtin() {
+            // The one built-in the shipped rules name. Archive walking is
+            // Phase 5; saying so is better than a rule that silently does
+            // nothing (PLAN §6's "fix the yazi gap").
+            log::info!("builtin opener `{builtin}` is not implemented yet");
+            self.toasts
+                .notice("Extraction lands with archives", now);
+            return;
+        }
+        if choice.block {
+            self.run_shell(&choice.command.clone(), paths, true, now);
+            return;
+        }
+        let cwd = self.cwd();
+        if let Err(e) = open::spawn_detached(&choice.command, &paths, &cwd) {
+            self.toasts.error(format!("{}: {e}", choice.name), now);
+        }
+    }
+
+    /// `;` and `:`, and the blocking openers.
+    ///
+    /// A blocking command runs **on the pool**, not here: `:` means "wait for
+    /// it", and waiting on the UI thread would freeze the window until it
+    /// exited. Streaming its output into a panel is deferred; the exit status
+    /// comes back as a toast.
+    fn run_shell(&mut self, snippet: &str, paths: Vec<PathBuf>, block: bool, now: Instant) {
+        let cwd = self.cwd();
+        if !block {
+            match open::spawn_detached(snippet, &paths, &cwd) {
+                Ok(()) => self
+                    .toasts
+                    .notice(format!("{} — started", open::short(snippet)), now),
+                Err(e) => self.toasts.error(format!("{e}"), now),
+            }
+            return;
+        }
+        let slot: Outcome = Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&slot);
+        let snippet = snippet.to_string();
+        let label = open::short(&snippet);
+        let dirs = vec![cwd.clone()];
+        let job = FnJob::new(
+            format!("Shell: {label}"),
+            Lane::Micro,
+            move |_ctx: &TaskCtx| {
+                let result = open::run_blocking(&snippet, &paths, &cwd);
+                let outcome = match result {
+                    // A non-zero exit is *reported*, not treated as a failed
+                    // task: the command ran, and "exit 1" is its answer. Only a
+                    // command that could not be started at all is an error.
+                    Ok(code) => df_core::ops::OpOutcome {
+                        message: open::exit_text(&snippet, code),
+                        ..Default::default()
+                    },
+                    Err(e) => df_core::ops::OpOutcome {
+                        message: format!("{}: {e}", open::short(&snippet)),
+                        errors: vec![(cwd.clone(), e.to_string())],
+                        ..Default::default()
+                    },
+                };
+                match sink.lock() {
+                    Ok(mut guard) => *guard = Some(outcome),
+                    Err(poisoned) => *poisoned.into_inner() = Some(outcome),
+                }
+                Ok(())
+            },
+        );
+        let id = self.engine.spawn(job);
+        self.track(id, slot, dirs);
+    }
+
     // ── Commands ────────────────────────────────────────────────────────────
 
     /// Turn queued keystrokes into commands and run them.
@@ -438,23 +938,32 @@ impl App {
         // until there is a media pipeline to say so.
         let flags = WhenFlags::LIST;
         for press in std::mem::take(&mut self.pending_keys) {
-            // A prompt takes the printable keys before the keymap sees them.
-            // This is what "insert mode" means with the vi editor still to come
-            // (PLAN §4.2): everything with a glyph is text, and everything else
-            // — `Esc`, `Enter`, the Ctrl and Alt chords — is a binding, which is
-            // exactly the set the `[input]` context binds.
+            // The chord is the binding; the text is the fallback for a key the
+            // chord table cannot name — a composed character, a layout's own
+            // letter — which still has to be typeable into a prompt.
+            let chord = press.chord.or_else(|| {
+                press
+                    .text
+                    .as_deref()
+                    .and_then(|text| text.chars().next())
+                    .and_then(Chord::from_char)
+            });
+            let Some(chord) = chord else { continue };
+            // A prompt swallows every key: df-core's editor decides what each
+            // one means, including which ones are text (PLAN §4.2).
             if self.prompt.is_some() {
-                if let Some(text) = press.text.as_deref() {
-                    let modified = press
-                        .chord
-                        .is_some_and(|c| c.mods.ctrl || c.mods.alt || c.mods.super_key);
-                    if !modified {
-                        self.type_text(text);
-                        continue;
-                    }
-                }
+                self.prompt_key(chord, now);
+                continue;
             }
-            let Some(chord) = press.chord else { continue };
+            // A modal surface is matched against its own context **alone**.
+            // Merely pushing `Confirm` onto the browser's stack would leave
+            // `Files` reachable underneath it, and a `d` typed into a delete
+            // confirmation would queue a second trash. A dialog that is asking
+            // "are you sure" must not also be a file manager.
+            if self.overlay_open() {
+                self.overlay_key(chord, now);
+                continue;
+            }
             match self
                 .keymap
                 .dispatch(&mut self.keys, &self.context, flags, chord, now)
@@ -474,20 +983,240 @@ impl App {
         }
     }
 
-    // ── The bottom bar ──────────────────────────────────────────────────────
+    // ── The modal surfaces: dialog, picker, task panel ──────────────────────
 
-    /// Type into the open prompt, and let whatever it drives keep up.
-    fn type_text(&mut self, text: &str) {
-        let Some(prompt) = &mut self.prompt else { return };
-        prompt.line.insert(text);
-        self.prompt_changed();
+    fn overlay_open(&self) -> bool {
+        self.dialog.is_some() || self.picker.is_some() || self.panel.is_some()
     }
 
-    /// Open the bar. `origin` is where the cursor is, which is what `Esc` puts
+    /// The context an open surface is matched in. Never stacked on `Files`:
+    /// see [`App::route_keys`].
+    fn overlay_stack(&self) -> ContextStack {
+        let context = if self.dialog.is_some() {
+            Context::Confirm
+        } else if self.picker.is_some() {
+            Context::Pick
+        } else {
+            Context::Tasks
+        };
+        ContextStack::with(&[context])
+    }
+
+    fn overlay_key(&mut self, chord: Chord, now: Instant) {
+        if self.overlay_literal(chord, now) {
+            return;
+        }
+        let stack = self.overlay_stack();
+        let dispatch = self
+            .keymap
+            .dispatch(&mut self.keys, &stack, WhenFlags::LIST, chord, now);
+        let Dispatch::Match(command) = dispatch else {
+            return;
+        };
+        use Command as C;
+        match command {
+            // Only the overlay vocabulary is honoured. `Global` is still under
+            // the stack — that is where `Esc` lives — but a `Ctrl+p` palette or
+            // a `~` help sheet opening *behind* a modal card would be a second
+            // surface nobody asked for.
+            C::Escape | C::OverlayClose => self.close_overlay(now),
+            C::OverlaySubmit => self.submit_overlay(now),
+            C::OverlayPrev => self.overlay_move(-1),
+            C::OverlayNext => self.overlay_move(1),
+            C::TaskInspect => {
+                if let Some(panel) = &mut self.panel {
+                    panel.inspect = !panel.inspect;
+                }
+            }
+            C::TaskCancel => self.cancel_selected_task(now),
+            other => log::trace!("`{}` is not an overlay key", other.id()),
+        }
+    }
+
+    /// The keys a surface handles itself, because df-core's keymap has no row
+    /// for them.
+    ///
+    /// Two of these are gaps in the shipped `[confirm]`/`[tasks]` tables rather
+    /// than deliberate omissions: the conflict resolver's three answers, and
+    /// pausing a task. They are matched literally here and are noted so the
+    /// keymap can grow rows for them without this code changing shape.
+    fn overlay_literal(&mut self, chord: Chord, now: Instant) -> bool {
+        let plain = chord.mods.is_none() || chord.mods == df_core::keymap::Mods::SHIFT;
+        if let Some(Dialog::Conflict(dialog)) = &mut self.dialog {
+            match chord.key {
+                Key::Char(c) if plain => {
+                    if let Some(action) = ConflictDialog::action_for_key(c) {
+                        dialog.set_action(action);
+                        return true;
+                    }
+                    if c == 'a' {
+                        dialog.toggle_apply_all();
+                        return true;
+                    }
+                }
+                // `←`/`→` walk the three answers, which is what they mean on a
+                // row of buttons everywhere else.
+                Key::ArrowLeft if plain => {
+                    dialog.cycle_action(-1);
+                    return true;
+                }
+                Key::ArrowRight if plain => {
+                    dialog.cycle_action(1);
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if self.panel.is_some() && plain && chord.key == Key::Char('p') {
+            self.pause_selected_task(now);
+            return true;
+        }
+        false
+    }
+
+    fn overlay_move(&mut self, delta: isize) {
+        match &mut self.dialog {
+            Some(Dialog::Confirm(confirm)) => {
+                confirm.scroll_by(delta);
+                return;
+            }
+            Some(Dialog::Conflict(dialog)) => {
+                dialog.move_cursor(delta);
+                return;
+            }
+            None => {}
+        }
+        if let Some(picker) = &mut self.picker {
+            picker.move_cursor(delta);
+            return;
+        }
+        let rows = self.task_rows();
+        if let Some(panel) = &mut self.panel {
+            panel.move_cursor(delta, rows.len());
+        }
+    }
+
+    /// `Enter` on whatever is up.
+    fn submit_overlay(&mut self, now: Instant) {
+        if let Some(Dialog::Confirm(_)) = &self.dialog {
+            let Some(Dialog::Confirm(confirm)) = self.dialog.take() else {
+                return;
+            };
+            self.sync_context();
+            self.run_confirm(confirm, now);
+            return;
+        }
+        if let Some(Dialog::Conflict(dialog)) = &mut self.dialog {
+            match dialog.apply() {
+                Step::Continue => {}
+                Step::NeedName(suggested) => {
+                    let buffer = InputBuffer::for_rename_stem(&suggested);
+                    self.open_prompt_with(PromptKind::ConflictRename, buffer);
+                }
+                Step::Settled => {
+                    let plan = match self.dialog.take() {
+                        Some(Dialog::Conflict(dialog)) => Some(dialog.plan),
+                        other => {
+                            self.dialog = other;
+                            None
+                        }
+                    };
+                    self.sync_context();
+                    if let Some(plan) = plan {
+                        self.spawn_paste(plan, now);
+                    }
+                }
+            }
+            return;
+        }
+        if let Some(picker) = self.picker.take() {
+            self.sync_context();
+            if let Some(choice) = picker.chosen().cloned() {
+                self.launch(&choice, picker.paths.clone(), now);
+            }
+        }
+    }
+
+    /// `Esc`, and every other way of saying "not this".
+    fn close_overlay(&mut self, now: Instant) {
+        // A prompt the dialog opened is *inside* it, so the dialog's own Esc
+        // takes that down first and the card stays up. This is the §4.1 ladder's
+        // "dialog before prompt" read the only way it can happen.
+        if self.prompt.is_some() && self.dialog.is_some() {
+            self.prompt = None;
+            self.sync_context();
+            return;
+        }
+        match self.dialog.take() {
+            Some(Dialog::Conflict(_)) => {
+                // Cancelling a conflict cancels the whole paste (PLAN §5): the
+                // clipboard is untouched, so `p` starts it again.
+                self.toasts.notice("Paste cancelled", now);
+            }
+            Some(Dialog::Confirm(_)) | None => {}
+        }
+        self.picker = None;
+        self.panel = None;
+        self.sync_context();
+    }
+
+    /// `w`: the task panel, which the same key closes again.
+    fn toggle_panel(&mut self) {
+        self.panel = match self.panel.take() {
+            Some(_) => None,
+            None => Some(TaskPanel::new()),
+        };
+        self.sync_context();
+    }
+
+    /// The `w` panel's rows, from the engine's snapshot — the render source its
+    /// documentation insists on.
+    fn task_rows(&self) -> Vec<TaskRow> {
+        let mut snapshot = self.engine.snapshot();
+        // Newest first: the thing you pressed `w` to look at is the thing that
+        // just started.
+        snapshot.sort_by_key(|task| std::cmp::Reverse(task.id));
+        snapshot.iter().map(panel::row_for).collect()
+    }
+
+    fn cancel_selected_task(&mut self, now: Instant) {
+        let rows = self.task_rows();
+        let Some(id) = self.panel.as_ref().and_then(|p| p.selected(&rows)) else {
+            return;
+        };
+        self.engine.cancel(id);
+        self.toasts.notice("Cancelling…", now);
+    }
+
+    /// `p` in the panel. Pause and resume are one key, because a paused task's
+    /// row already says which of the two pressing it will do.
+    fn pause_selected_task(&mut self, now: Instant) {
+        let rows = self.task_rows();
+        let Some(row) = self
+            .panel
+            .as_ref()
+            .and_then(|p| rows.get(p.cursor))
+            .cloned()
+        else {
+            return;
+        };
+        if row.tone == panel::Tone::Paused {
+            self.engine.resume(row.id);
+            // The sticky toast the pause put up described a state that has now
+            // ended, so it comes down with it (PLAN §5).
+            self.toasts.clear_sticky(now);
+        } else {
+            self.engine.pause(row.id);
+            self.toasts
+                .sticky(format!("{} — paused, p resumes", row.name), now);
+        }
+    }
+
+    // ── Prompts (PLAN §4.2) ─────────────────────────────────────────────────
+
+    /// Open a prompt. `origin` is where the cursor is, which is what `Esc` puts
     /// back and what every keystroke of a live find searches from.
     fn open_prompt(&mut self, kind: PromptKind) {
-        let origin = self.tab().cwd.dir.cursor();
-        let mut prompt = Prompt::new(kind, origin);
         // Re-opening a filter edits the query that is applied rather than
         // starting from nothing — `f`, look, `f` again, refine. (Not the finds:
         // `/` is a new search, and the old one is on `n`.)
@@ -496,14 +1225,55 @@ impl App {
             PromptKind::HelpFilter => self.help_query.clone(),
             _ => String::new(),
         };
-        prompt.line.insert(&existing);
-        self.prompt = Some(prompt);
+        let cursor = existing.chars().count();
+        self.open_prompt_with(kind, InputBuffer::new(existing, cursor));
+    }
+
+    fn open_prompt_with(&mut self, kind: PromptKind, buffer: InputBuffer) {
+        let origin = self.tab().cwd.dir.cursor();
+        self.prompt = Some(Prompt::with(kind, origin, buffer));
         self.sync_context();
         self.prompt_changed();
     }
 
-    /// Everything that has to happen when the query changes: filter-as-you-type,
-    /// find-as-you-type, and the help sheet narrowing under the cursor.
+    /// `r` and `R`: the two rename presets, both anchored to the cursor's row.
+    fn open_rename(&mut self, empty_stem: bool) {
+        let Some(entry) = self.tab().cwd.dir.cursor_entry() else {
+            return;
+        };
+        let name = entry.name.clone();
+        let (kind, buffer) = if empty_stem {
+            (
+                PromptKind::RenameEmptyStem,
+                InputBuffer::for_rename_empty(&name),
+            )
+        } else {
+            (PromptKind::Rename, InputBuffer::for_rename_stem(&name))
+        };
+        self.open_prompt_with(kind, buffer);
+    }
+
+    /// One keystroke into the open prompt.
+    ///
+    /// The buffer takes **every** key — that is what df-core's editor is for,
+    /// and it is why a stray `q` in a rename types a `q` instead of quitting.
+    fn prompt_key(&mut self, chord: Chord, now: Instant) {
+        let Some(prompt) = &mut self.prompt else { return };
+        let live = prompt.kind.is_live();
+        match prompt.feed(chord) {
+            InputEvent::Consumed => {
+                if live {
+                    self.prompt_changed();
+                }
+            }
+            InputEvent::Submit(text) => self.submit_prompt(text, now),
+            InputEvent::Cancel => self.cancel_prompt(),
+        }
+    }
+
+    /// Everything that has to happen when a live query changes:
+    /// filter-as-you-type, find-as-you-type, and the help sheet narrowing under
+    /// the cursor.
     fn prompt_changed(&mut self) {
         let Some(prompt) = &self.prompt else { return };
         let (kind, query, origin) = (prompt.kind, prompt.query().to_string(), prompt.origin);
@@ -531,43 +1301,55 @@ impl App {
                     self.help = Some(help);
                 }
             }
+            _ => {}
         }
         self.apply_visual();
     }
 
-    /// One editing command against the open prompt's buffer.
-    fn edit_prompt(&mut self, command: Command) {
-        use Command as C;
-        let Some(prompt) = &mut self.prompt else { return };
-        let line = &mut prompt.line;
-        match command {
-            C::InputBackspace => line.backspace(),
-            C::InputDeleteUnder => line.delete_under(),
-            C::InputMoveLeft => line.move_left(),
-            C::InputMoveRight => line.move_right(),
-            C::InputMoveBol => line.move_bol(),
-            C::InputMoveEol => line.move_eol(),
-            C::InputKillBol => line.kill_bol(),
-            C::InputKillEol => line.kill_eol(),
-            C::InputKillWordBackward => line.kill_word_back(),
-            other => {
-                log::debug!("`{}` needs the vi editor, which is Phase 2", other.id());
-                return;
-            }
-        }
-        self.prompt_changed();
-    }
-
-    /// `Enter`: keep what was typed, put the keyboard back in the browser.
-    fn submit_prompt(&mut self) {
-        let Some(prompt) = self.prompt.take() else {
+    /// `Enter`. A prompt whose work *failed* stays open with the reason beside
+    /// it (PLAN §5: "errors as inline bar text, not toasts"), because the fix is
+    /// almost always one more keystroke in the field you are already in.
+    fn submit_prompt(&mut self, text: String, now: Instant) {
+        let Some(kind) = self.prompt.as_ref().map(|p| p.kind) else {
             return;
         };
-        if matches!(prompt.kind, PromptKind::FindNext | PromptKind::FindPrev) {
-            // What `n` and `N` repeat.
-            self.last_find = Some((prompt.query().to_string(), find_direction(prompt.kind)));
+        let error = match kind {
+            PromptKind::Filter | PromptKind::HelpFilter => None,
+            PromptKind::FindNext | PromptKind::FindPrev => {
+                // What `n` and `N` repeat.
+                self.last_find = Some((text.clone(), find_direction(kind)));
+                None
+            }
+            PromptKind::Create => self.create(&text, now).err(),
+            PromptKind::Rename | PromptKind::RenameEmptyStem => self.rename(&text, now).err(),
+            PromptKind::Shell => {
+                let paths = self.targets();
+                self.run_shell(&text, paths, false, now);
+                None
+            }
+            PromptKind::ShellBlock => {
+                let paths = self.targets();
+                self.run_shell(&text, paths, true, now);
+                None
+            }
+            PromptKind::ConflictRename => {
+                self.conflict_rename(&text, now);
+                // The dialog owns the outcome: it either takes the name or puts
+                // its own message on the prompt it re-opened.
+                return;
+            }
+        };
+        match error {
+            Some(message) => {
+                if let Some(prompt) = &mut self.prompt {
+                    prompt.error = Some(message);
+                }
+            }
+            None => {
+                self.prompt = None;
+                self.sync_context();
+            }
         }
-        self.sync_context();
     }
 
     /// `Esc`: undo what the prompt did and close it.
@@ -582,8 +1364,115 @@ impl App {
                 self.dir().set_cursor(origin);
             }
             PromptKind::HelpFilter => self.help_query.clear(),
+            // A cancelled conflict rename goes back to the dialog, which is
+            // still holding the unanswered conflict.
+            _ => {}
         }
         self.sync_context();
+    }
+
+    /// `a`. A trailing `/` means a directory, and missing parents are made
+    /// (df-core's `create`, which records what it had to make so `u` can peel
+    /// them off again).
+    fn create(&mut self, text: &str, now: Instant) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("no name given".to_string());
+        }
+        let path = self.cwd().join(text);
+        let created = df_core::ops::create(&path).map_err(|e| e.to_string())?;
+        let name = created
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Ok(fingerprint) = Fingerprint::of(&created.path) {
+            self.journal.record(OpRecord::Create {
+                path: created.path.clone(),
+                is_dir: created.is_dir,
+                fingerprint,
+                created_parents: created.created_parents,
+            });
+        }
+        self.toasts.undo(
+            format!(
+                "Created {} {name}",
+                if created.is_dir { "folder" } else { "file" }
+            ),
+            now,
+        );
+        let cwd = self.cwd();
+        self.rescan(&cwd, now);
+        self.dir().cursor_to_name(&name);
+        Ok(())
+    }
+
+    /// `r` / `R`.
+    fn rename(&mut self, text: &str, now: Instant) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("no name given".to_string());
+        }
+        let Some(from) = self
+            .tab()
+            .cwd
+            .dir
+            .cursor_entry()
+            .map(|entry| entry.path.clone())
+        else {
+            return Err("nothing under the cursor".to_string());
+        };
+        let to = self.cwd().join(text);
+        df_core::ops::rename(&from, &to, false).map_err(|e| e.to_string())?;
+        if let Ok(moved) = MovedPath::record(&from, &to) {
+            self.journal.record(OpRecord::Rename { moved });
+        }
+        let name = to
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.toasts.undo(format!("Renamed to {name}"), now);
+        let cwd = self.cwd();
+        self.rescan(&cwd, now);
+        self.dir().cursor_to_name(&name);
+        Ok(())
+    }
+
+    /// The conflict dialog's rename came back from the prompt.
+    fn conflict_rename(&mut self, text: &str, now: Instant) {
+        let Some(Dialog::Conflict(dialog)) = &mut self.dialog else {
+            self.prompt = None;
+            self.sync_context();
+            return;
+        };
+        match dialog.rename(text.trim()) {
+            Step::NeedName(name) => {
+                // Refused: put the message on the prompt and leave it open, with
+                // what was typed still in it.
+                if let Some(prompt) = &mut self.prompt {
+                    prompt.error = dialog.error.clone();
+                    let _ = name;
+                }
+            }
+            Step::Continue => {
+                self.prompt = None;
+                self.sync_context();
+            }
+            Step::Settled => {
+                let plan = match self.dialog.take() {
+                    Some(Dialog::Conflict(dialog)) => Some(dialog.plan),
+                    other => {
+                        self.dialog = other;
+                        None
+                    }
+                };
+                self.prompt = None;
+                if let Some(plan) = plan {
+                    self.spawn_paste(plan, now);
+                }
+                self.sync_context();
+            }
+        }
     }
 
     /// `n` / `N` — repeat the last find, wrapping (PLAN §4.1).
@@ -698,6 +1587,17 @@ impl App {
     /// the browser's own keys stay reachable underneath. That is also what makes
     /// the sheet honest, because it lists exactly what this stack can dispatch.
     fn sync_context(&mut self) {
+        // A modal surface is not *stacked* on the browser — see
+        // [`App::route_keys`] — but the stack still has to say what is up, so
+        // the hint bar and the help sheet describe the keyboard as it actually
+        // is.
+        if self.overlay_open() {
+            self.context = self.overlay_stack();
+            if self.prompt.is_some() {
+                self.context.push(Context::Input);
+            }
+            return;
+        }
         let mut stack = self.help_stack();
         if self.prompt.is_some() {
             stack.push(Context::Input);
@@ -725,6 +1625,14 @@ impl App {
     /// would mean a stray press throws away a selection built up over a dozen
     /// keystrokes, and there is no undo for a selection.
     fn escape(&mut self) {
+        // A modal card is the nearest thing to the user, and its own `Esc`
+        // knows whether it is holding a prompt of its own (PLAN §4.1's extended
+        // ladder: dialog → prompt → …). Reached from `Global`'s `Esc` when no
+        // overlay is open, and from [`App::overlay_key`] when one is.
+        if self.overlay_open() {
+            self.close_overlay(Instant::now());
+            return;
+        }
         if self.keys.is_pending() {
             self.keys.cancel();
             return;
@@ -903,28 +1811,9 @@ impl App {
                 }
             }
             C::HelpFilter => self.open_prompt(PromptKind::HelpFilter),
-            C::OverlayClose => {
-                if self.prompt.is_some() {
-                    self.cancel_prompt();
-                } else {
-                    self.close_help();
-                }
-            }
-            C::OverlaySubmit => self.submit_prompt(),
+            C::OverlayClose => self.close_help(),
+            C::OverlaySubmit => {}
 
-            // ── The line editor (PLAN §4.2) ─────────────────────────────────
-            // The motions and the kills, which are what the bar needs to be
-            // usable; the modes (`i`, `a`, `v`, `r`) and the operators arrive
-            // with the full vi editor in Phase 2, on top of this same buffer.
-            C::InputBackspace
-            | C::InputDeleteUnder
-            | C::InputMoveLeft
-            | C::InputMoveRight
-            | C::InputMoveBol
-            | C::InputMoveEol
-            | C::InputKillBol
-            | C::InputKillEol
-            | C::InputKillWordBackward => self.edit_prompt(command),
             C::OverlayPrev | C::OverlayNext => {
                 // The help browser is the only overlay with a list in it so
                 // far; the others arrive with their phases.
@@ -967,6 +1856,29 @@ impl App {
                 self.seed = random_seed();
                 self.sort_by(SortBy::Random, false, None);
             }
+
+            // ── The clipboard and the file operations (PLAN §5) ─────────────
+            C::Yank => self.set_clipboard(false, now),
+            C::YankCut => self.set_clipboard(true, now),
+            C::Unyank => self.unyank(now),
+            C::Paste => self.paste(false, now),
+            C::PasteForce => self.paste(true, now),
+            C::Trash => self.open_confirm(ConfirmKind::Trash, now),
+            C::DeletePermanently => self.open_confirm(ConfirmKind::Delete, now),
+            C::SymlinkAbsolute => self.link(Some(LinkKind::Absolute), now),
+            C::SymlinkRelative => self.link(Some(LinkKind::Relative), now),
+            C::Hardlink => self.link(None, now),
+            C::Create => self.open_prompt(PromptKind::Create),
+            C::Rename => self.open_rename(false),
+            C::RenameEmptyStem => self.open_rename(true),
+            C::Shell => self.open_prompt(PromptKind::Shell),
+            C::ShellBlock => self.open_prompt(PromptKind::ShellBlock),
+            C::Undo => self.undo(now),
+            C::TasksShow => self.toggle_panel(),
+
+            // ── Opening (PLAN §6) ───────────────────────────────────────────
+            C::Open => self.open_hovered(now),
+            C::OpenInteractive => self.open_picker(now),
 
             // ── Leaving ─────────────────────────────────────────────────────
             C::Quit => self.quit = Some(Quit::WriteCwd),
@@ -1038,6 +1950,78 @@ impl App {
         self.navigate(PathBuf::from(path), now);
     }
 
+    /// Where the open surface's pieces are this frame. Built before the
+    /// pointer is looked at, so a click lands on the card rather than on the row
+    /// behind it, and reused by the paint so the two cannot disagree.
+    fn overlay_geometry(&self, area: egui::Rect, bar_top: f32) -> Option<OverlayGeom> {
+        match &self.dialog {
+            Some(Dialog::Confirm(confirm)) => {
+                return Some(OverlayGeom::Confirm(dialog::confirm_geometry(area, confirm)))
+            }
+            Some(Dialog::Conflict(conflict)) => {
+                return Some(OverlayGeom::Conflict(dialog::conflict_geometry(
+                    area, conflict,
+                )))
+            }
+            None => {}
+        }
+        if let Some(picker) = &self.picker {
+            let (card, rows) = open::picker_geometry(area, picker.anchor, picker.choices.len());
+            return Some(OverlayGeom::Picker(card, rows));
+        }
+        if self.panel.is_some() {
+            let rows = self.task_rows();
+            let (card, rects) = panel::geometry(area, bar_top, rows.len());
+            return Some(OverlayGeom::Panel(card, rects, rows));
+        }
+        None
+    }
+
+    /// A click on a surface. Pressing a button *is* choosing it — the pointer
+    /// does not get a two-step "select, then confirm" the keyboard does not
+    /// have.
+    fn overlay_click(&mut self, control: Control, now: Instant) {
+        match control {
+            Control::Action(index) => match &mut self.dialog {
+                Some(Dialog::Confirm(_)) => {
+                    if index == 0 {
+                        self.close_overlay(now);
+                    } else {
+                        self.submit_overlay(now);
+                    }
+                }
+                Some(Dialog::Conflict(conflict)) => {
+                    match dialog::ConflictAction::ALL.get(index) {
+                        Some(action) => {
+                            conflict.set_action(*action);
+                            self.submit_overlay(now);
+                        }
+                        // Past the three answers is the apply-to-all toggle.
+                        None => conflict.toggle_apply_all(),
+                    }
+                }
+                None => {}
+            },
+            Control::PanelRow(index) => {
+                if let Some(Dialog::Conflict(conflict)) = &mut self.dialog {
+                    let delta = index as isize - conflict.cursor as isize;
+                    conflict.move_cursor(delta);
+                    return;
+                }
+                if let Some(picker) = &mut self.picker {
+                    picker.cursor = index.min(picker.choices.len().saturating_sub(1));
+                    self.submit_overlay(now);
+                    return;
+                }
+                let rows = self.task_rows();
+                if let Some(panel) = &mut self.panel {
+                    panel.select(index, rows.len());
+                }
+            }
+            Control::Row(..) | Control::Tab(_) => {}
+        }
+    }
+
     // ── The frame ───────────────────────────────────────────────────────────
 
     /// Everything this frame draws. One `&mut Ui` covering the window; painting
@@ -1079,7 +2063,14 @@ impl App {
         let scroll_rows = self.tab().cwd.scroll_rows(now);
         let slide = self.tabs.offset(now);
         let tab_count = self.tabs.len();
+        let overlay = self.overlay_geometry(area, layout.bar.top());
         let over = pointer.and_then(|p| {
+            // A modal surface takes the pointer with the keyboard: nothing
+            // behind the scrim is hoverable, so a stray click cannot move the
+            // cursor under a question about the row it was on.
+            if let Some(overlay) = &overlay {
+                return overlay.hit(p).map(|control| (control, p));
+            }
             let control = layout
                 .strip
                 .and_then(|strip| chrome::tab_at(strip, tab_count, p))
@@ -1110,6 +2101,14 @@ impl App {
                         .and_then(|rects| rects.get(index).copied())
                         .unwrap_or(egui::Rect::ZERO)
                 }
+                Control::Action(_) | Control::PanelRow(_) => {
+                    let rect = overlay
+                        .as_ref()
+                        .and_then(|o| o.rect_of(control))
+                        .unwrap_or(egui::Rect::ZERO);
+                    self.overlay_click(control, now);
+                    rect
+                }
             };
             self.ripples.spawn(control, position, rect, now);
         }
@@ -1139,6 +2138,9 @@ impl App {
         tab.cwd.set_first(list_first, now);
         let cursor = tab.cwd.dir.cursor();
         self.cursor_glow.tick(Some(cursor), None, now);
+        // Where a rename popup and the opener picker anchor themselves — the
+        // row the cursor is on, as it was actually drawn this frame.
+        self.cursor_rect = ui::row_rect(list_content, scroll_rows, cursor);
 
         if let Some(parent) = &mut self.tabs.active_mut().parent {
             let first = crate::viewport::first_visible(
@@ -1193,6 +2195,22 @@ impl App {
             None => None,
         };
 
+        // ── The clock-driven bits, ticked once, before anything is drawn ────
+        self.toasts.tick(now);
+        // The rows the `w` panel is about, and the bars' targets. Built here
+        // because the panel is painted from the same list the pointer was hit
+        // tested against.
+        let task_rows = match &overlay {
+            Some(OverlayGeom::Panel(_, _, rows)) => rows.clone(),
+            _ => Vec::new(),
+        };
+        if let Some(panel) = &mut self.panel {
+            panel.tick(&task_rows, now);
+        }
+        // What the clipboard is holding, as a set the row painter can ask in
+        // constant time.
+        let clip_paths: HashSet<PathBuf> = self.clipboard.paths.iter().cloned().collect();
+
         // ── Paint ───────────────────────────────────────────────────────────
         let paint = ui::Painting {
             painter: &painter,
@@ -1226,6 +2244,10 @@ impl App {
                 slow_load: now.duration_since(parent.scan_started) >= LOADING_DELAY,
                 offset_x: slide,
                 show_selection: false,
+                // The clipboard's marks belong to the directory the yank was
+                // made in, which is the list — the parent shows where you are,
+                // not what you are carrying.
+                clip: None,
             });
         }
         paint.listing(ListView {
@@ -1243,6 +2265,10 @@ impl App {
             slow_load: now.duration_since(self.tab().cwd.scan_started) >= LOADING_DELAY,
             offset_x: slide,
             show_selection: true,
+            clip: (!clip_paths.is_empty()).then(|| ClipMark {
+                paths: &clip_paths,
+                cut: self.clipboard.mode == PasteMode::Cut,
+            }),
         });
         crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now);
 
@@ -1266,8 +2292,33 @@ impl App {
             chrome::help_overlay(&paint, area, *rect, lines, help, *total);
         }
 
+        // An anchored prompt (`r`, `R`, the conflict rename) floats over the row
+        // it is about, so the bar keeps saying where you are underneath it.
+        let anchored = self
+            .prompt
+            .as_ref()
+            .filter(|prompt| prompt.kind.anchored());
         match &self.prompt {
+            Some(prompt) if prompt.kind.anchored() => {
+                let dir = &self.tab().cwd.dir;
+                chrome::status_bar(
+                    &paint,
+                    layout.bar,
+                    chrome::Status {
+                        selected: dir.selected_count(),
+                        position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
+                        rows: dir.len(),
+                        filter: dir.filter(),
+                        visual: self.visual.as_ref().map(|v| v.selecting),
+                    },
+                );
+            }
             Some(prompt) => chrome::input_bar(&paint, layout.bar, prompt),
+            None if self.overlay_open() => chrome::hint_bar(
+                &paint,
+                layout.bar,
+                &overlay_hints(&self.dialog, self.picker.is_some()),
+            ),
             None if self.help.is_some() => chrome::hint_bar(
                 &paint,
                 layout.bar,
@@ -1293,6 +2344,60 @@ impl App {
             }
         }
 
+        // ── The modal surfaces, over the panes and the bar ──────────────────
+        match (&overlay, &self.dialog) {
+            (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
+                dialog::paint_confirm(
+                    &paint,
+                    area,
+                    confirm,
+                    geometry,
+                    &self.hovers,
+                    &self.ripples,
+                );
+            }
+            (Some(OverlayGeom::Conflict(geometry)), Some(Dialog::Conflict(conflict))) => {
+                dialog::paint_conflict(
+                    &paint,
+                    area,
+                    conflict,
+                    geometry,
+                    &self.hovers,
+                    &self.ripples,
+                );
+            }
+            _ => {}
+        }
+        if let (Some(OverlayGeom::Picker(card, rows)), Some(picker)) = (&overlay, &self.picker) {
+            open::paint_picker(&paint, *card, rows, picker, &self.hovers, &self.ripples);
+        }
+        if let (Some(OverlayGeom::Panel(card, rects, _)), Some(panel)) = (&overlay, &self.panel) {
+            panel::paint(
+                &paint,
+                *card,
+                rects,
+                &task_rows,
+                panel,
+                &self.hovers,
+                &self.ripples,
+                now,
+            );
+        }
+        // The floating prompt goes over the card that opened it — the conflict
+        // resolver's rename is a field *in* that dialog.
+        if let Some(prompt) = anchored {
+            let anchor = match &overlay {
+                Some(OverlayGeom::Conflict(geometry)) => geometry.card,
+                _ => self.cursor_rect,
+            };
+            chrome::prompt_popup(&paint, area, anchor, prompt);
+        }
+
+        // The toast sits above the bar and under the which-key card: a message
+        // about what just happened must not cover the answer to the key being
+        // held down now.
+        self.toasts.paint(&paint, area, layout.bar.top(), now);
+
         // Last, and over everything: the card is an answer to a key that is
         // being held down right now, so nothing may cover it.
         if self.which.visible(now) {
@@ -1317,6 +2422,11 @@ impl App {
             ("tabs", self.tabs.animating(now)),
             ("preview", self.preview.animating(now)),
             ("which", self.which.fading()),
+            ("toast", self.toasts.animating(now)),
+            (
+                "tasks",
+                self.panel.as_ref().is_some_and(|p| p.animating(now)),
+            ),
         ];
         // DF_FRAME_LOG=1 names whoever is holding the frame rate up — the
         // instrument for the Phase 6 "zero repaints at rest" audit, because a
@@ -1343,9 +2453,15 @@ impl App {
             .which
             .deadline(self.keys.which_key_due())
             .map(|at| at.saturating_duration_since(now));
-        // Three waiters now: a slow directory read, a held chord, and the
-        // preview (its own "reading…" label and its scrollbar's linger).
-        [self.loading_deadline(now), card, self.preview.next_deadline(now)]
+        // Four waiters now: a slow directory read, a held chord, the preview
+        // (its own "reading…" label and its scrollbar's linger), and the toast
+        // — which asks for exactly one wake-up, the instant its fade begins.
+        [
+            self.loading_deadline(now),
+            card,
+            self.preview.next_deadline(now),
+            self.toasts.deadline(now),
+        ]
             .into_iter()
             .flatten()
             .min()
@@ -1427,6 +2543,78 @@ impl App {
             crate::cli::write_cwd_file(path, self.tab().cwd.path());
         }
         event_loop.exit();
+    }
+}
+
+/// How a finished operation reads, and for how long.
+///
+/// One function so the wording is decided in one place and can be read without
+/// a running worker pool: an operation with an inverse gets the 8 s undo toast
+/// (PLAN §5) — the "u — undo" hint is the toast's own, so the message says only
+/// what happened — and everything else says what it did or what went wrong.
+fn op_toast(outcome: &df_core::ops::OpOutcome) -> (String, crate::toast::ToastKind) {
+    use crate::toast::ToastKind;
+    let failed = outcome.errors.len();
+    let message = if failed > 0 {
+        format!("{} · {} failed", outcome.message, failed)
+    } else {
+        outcome.message.clone()
+    };
+    if outcome.record.is_some() {
+        // Undoable even when part of it failed: what *did* land is real, and
+        // the journal is holding its inverse.
+        return (message, ToastKind::Undo);
+    }
+    if outcome.cancelled {
+        return (format!("{message} — cancelled"), ToastKind::Notice);
+    }
+    if failed > 0 {
+        let (path, error) = &outcome.errors[0];
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        return (
+            if failed == 1 {
+                format!("{name}: {error}")
+            } else {
+                format!("{name}: {error} · {} more failed", failed - 1)
+            },
+            ToastKind::Error,
+        );
+    }
+    (message, ToastKind::Notice)
+}
+
+/// What the bar says while a modal surface owns the keyboard.
+fn overlay_hints(dialog: &Option<Dialog>, picker: bool) -> Vec<(&'static str, &'static str)> {
+    match dialog {
+        Some(Dialog::Confirm(_)) => vec![("Enter / y", "confirm"), ("Esc / n", "cancel"), ("↑↓", "scroll")],
+        Some(Dialog::Conflict(_)) => vec![
+            ("↑↓", "choose"),
+            ("o s r", "overwrite / skip / rename"),
+            ("a", "apply to all"),
+            ("Enter", "apply"),
+            ("Esc", "cancel the paste"),
+        ],
+        None if picker => vec![("↑↓", "choose"), ("Enter", "open"), ("Esc", "close")],
+        None => vec![
+            ("↑↓", "select"),
+            ("p", "pause"),
+            ("x", "cancel"),
+            ("Enter", "inspect"),
+            ("w / Esc", "close"),
+        ],
+    }
+}
+
+/// "1 item" / "3 items". The same wording df-core's jobs use, so a toast about
+/// a paste and a toast about a link count the same way.
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
     }
 }
 
@@ -1600,6 +2788,17 @@ impl ApplicationHandler<crate::Wake> for App {
         // dropped channel is harmless, but joining them here keeps the shutdown
         // order the same every time.
         self.scanner.cancel_all();
+        // The task engine joins its workers when it is dropped, so anything
+        // still running has to be told to stop *first* — otherwise closing the
+        // window during a 40 GB copy leaves a dead window on screen until the
+        // copy finishes. Cancelling is safe: a cancelled copy removes its own
+        // partial destination (`ops::copy`), and what already landed is real
+        // and journalled.
+        let running = self.engine.active_count();
+        if running > 0 {
+            log::warn!("quitting with {running} task(s) still running; cancelling them");
+        }
+        self.engine.cancel_all();
         self.gfx = None;
     }
 }
@@ -1631,6 +2830,98 @@ mod tests {
         let (dir, focus) = start_directory(Some(Path::new("/nonexistent/delightfile-test")));
         assert_eq!(Some(dir), std::env::current_dir().ok());
         assert_eq!(focus, None);
+    }
+
+    /// PLAN §5: an operation with an inverse lands with the undo toast; the
+    /// "u — undo" hint is the toast's, so the message is only what happened.
+    #[test]
+    fn an_undoable_operation_gets_the_undo_toast() {
+        use crate::toast::ToastKind;
+        use df_core::ops::OpOutcome;
+
+        let copied = OpOutcome {
+            record: Some(OpRecord::Copy { created: Vec::new() }),
+            message: "Copied 3 items".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            op_toast(&copied),
+            ("Copied 3 items".to_string(), ToastKind::Undo)
+        );
+        assert_eq!(ToastKind::Undo.lifetime(), crate::toast::UNDO_LIFETIME);
+
+        // A partial success is still undoable, and still says how much failed.
+        let partial = OpOutcome {
+            record: Some(OpRecord::Trash { items: Vec::new() }),
+            message: "Trashed 2 items".to_string(),
+            errors: vec![(PathBuf::from("/srv/x"), "permission denied".to_string())],
+            ..Default::default()
+        };
+        assert_eq!(
+            op_toast(&partial),
+            ("Trashed 2 items · 1 failed".to_string(), ToastKind::Undo)
+        );
+
+        // A permanent delete has no inverse, so it gets a plain notice.
+        let deleted = OpOutcome {
+            message: "Deleted 1 item".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            op_toast(&deleted),
+            ("Deleted 1 item".to_string(), ToastKind::Notice)
+        );
+
+        // A total failure names the file and says what went wrong, in df-core's
+        // own words.
+        let failed = OpOutcome {
+            message: "Deleted 0 items".to_string(),
+            errors: vec![
+                (PathBuf::from("/"), "refusing to delete /".to_string()),
+                (PathBuf::from("/etc"), "permission denied".to_string()),
+            ],
+            ..Default::default()
+        };
+        let (message, kind) = op_toast(&failed);
+        assert_eq!(kind, ToastKind::Error);
+        assert!(message.starts_with("/: refusing to delete /"), "{message}");
+        assert!(message.ends_with("· 1 more failed"), "{message}");
+
+        let cancelled = OpOutcome {
+            message: "Copied 1 item".to_string(),
+            cancelled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            op_toast(&cancelled),
+            ("Copied 1 item — cancelled".to_string(), ToastKind::Notice)
+        );
+    }
+
+    /// Every modal surface says what its keys do, and never claims a key the
+    /// surface does not have.
+    #[test]
+    fn each_overlay_teaches_its_own_keys() {
+        let confirm = overlay_hints(
+            &Some(Dialog::Confirm(Confirm::new(
+                ConfirmKind::Delete,
+                vec![PathBuf::from("/tmp/a")],
+            ))),
+            false,
+        );
+        assert!(confirm.iter().any(|(k, _)| k.contains("Enter")));
+        assert!(confirm.iter().any(|(k, _)| k.contains("Esc")));
+        let panel = overlay_hints(&None, false);
+        assert!(panel.iter().any(|(k, what)| *k == "x" && *what == "cancel"));
+        let picker = overlay_hints(&None, true);
+        assert!(picker.iter().any(|(_, what)| *what == "open"));
+    }
+
+    #[test]
+    fn counting_reads_like_a_person_wrote_it() {
+        assert_eq!(plural(1, "item", "items"), "1 item");
+        assert_eq!(plural(0, "item", "items"), "0 items");
+        assert_eq!(plural(3, "item", "items"), "3 items");
     }
 
     /// Deleting the directory you are standing in must land somewhere real.

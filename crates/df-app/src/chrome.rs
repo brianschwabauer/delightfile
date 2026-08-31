@@ -36,7 +36,7 @@ pub const CARD_PAD: f32 = 10.0;
 
 /// A row inside a card rounds like a row inside a pane: they are the same kind
 /// of thing at the same size, and two radii for one shape would be two.
-const CARD_ROW_RADIUS: u8 = ROW_RADIUS;
+pub const CARD_ROW_RADIUS: u8 = ROW_RADIUS;
 
 /// The floating card's corner radius: **its row's plus the padding**, so the
 /// gap around a highlighted row stays a constant width as it turns the card's
@@ -45,7 +45,7 @@ pub const CARD_RADIUS: u8 = CARD_ROW_RADIUS + CARD_PAD as u8;
 
 /// How far a floating card keeps off the window's edge, and off the chrome it
 /// sits above.
-const CARD_MARGIN: f32 = 16.0;
+pub const CARD_MARGIN: f32 = 16.0;
 
 /// How opaque a card's plate is, 0–255.
 ///
@@ -57,13 +57,13 @@ const CARD_ALPHA: u8 = 242;
 
 /// Body text on the chrome, in logical points. A shade under the pane's row
 /// text: this is the frame, not the content.
-const FONT: f32 = 12.5;
+pub const FONT: f32 = 12.5;
 
 /// A line of a card's list.
-const CARD_ROW: f32 = 20.0;
+pub const CARD_ROW: f32 = 20.0;
 
 /// Horizontal padding inside a bar or a chip.
-const PAD_X: f32 = 8.0;
+pub const PAD_X: f32 = 8.0;
 
 // ── Tab strip (PLAN §2) ─────────────────────────────────────────────────────
 
@@ -282,7 +282,7 @@ fn chip(
     rect.right() + GAP
 }
 
-/// The bar while something is being typed into it: `f`, `/`, `?`, or the help
+/// The bar while something is being typed into it: `f`, `/`, `?`, and the help
 /// browser's own filter.
 pub fn input_bar(paint: &Painting<'_>, rect: egui::Rect, prompt: &Prompt) {
     let palette = paint.palette;
@@ -297,77 +297,214 @@ pub fn input_bar(paint: &Painting<'_>, rect: egui::Rect, prompt: &Prompt) {
         1,
         palette.blue,
     );
+    prompt_field(paint, inner, prompt);
+}
 
-    let title = prompt.kind.title();
+/// How wide a floating rename prompt is, and how far it may hang past its row.
+///
+/// Anchored prompts sit over the row they rename (PLAN §4.2's yazi geometry),
+/// so the width is the row's — a popup narrower than its own file name would be
+/// the one field in the program you cannot see the end of.
+const PROMPT_MIN_WIDTH: f32 = 260.0;
+
+/// The floating prompt: `r`, `R`, and the conflict dialog's rename.
+///
+/// Drawn over `anchor` — the cursor's row — because that is the thing being
+/// renamed, and the eye is already there.
+pub fn prompt_popup(paint: &Painting<'_>, area: egui::Rect, anchor: egui::Rect, prompt: &Prompt) {
+    let rect = prompt_rect(area, anchor);
+    card(paint, rect, 1.0);
+    prompt_field(paint, rect.shrink2(egui::vec2(CARD_PAD, 0.0)), prompt);
+}
+
+/// Where a floating prompt goes. Shared with the hit test so a click lands
+/// inside the field it looks like it landed in.
+pub fn prompt_rect(area: egui::Rect, anchor: egui::Rect) -> egui::Rect {
+    let width = anchor
+        .width()
+        .max(PROMPT_MIN_WIDTH)
+        .min(area.width() - CARD_MARGIN * 2.0);
+    let height = CHROME_HEIGHT + CARD_PAD;
+    let left = anchor
+        .left()
+        .min(area.right() - CARD_MARGIN - width)
+        .max(area.left() + CARD_MARGIN);
+    // Centred on the row, so the name being edited does not appear to jump to
+    // another line as the popup opens (`delightful-ui` §8).
+    let top = (anchor.center().y - height / 2.0).clamp(
+        area.top() + CARD_MARGIN,
+        (area.bottom() - CARD_MARGIN - height).max(area.top() + CARD_MARGIN),
+    );
+    egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width.max(0.0), height))
+}
+
+/// The prompt itself, in whatever box it has been given: title, mode chip, the
+/// text with its selection, the caret, and the inline error.
+fn prompt_field(paint: &Painting<'_>, inner: egui::Rect, prompt: &Prompt) {
+    let palette = paint.palette;
+    let painter = paint.painter;
+    let font = egui::FontId::proportional(FONT);
+
     let title_galley =
-        paint
-            .painter
-            .layout_no_wrap(title.to_string(), egui::FontId::proportional(FONT), palette.blue);
-    paint.painter.galley(
+        painter.layout_no_wrap(prompt.kind.title().to_string(), font.clone(), palette.blue);
+    painter.galley(
         egui::pos2(inner.left(), inner.center().y - title_galley.size().y / 2.0),
         title_galley.clone(),
         palette.blue,
     );
 
-    // The smart-case indicator: lit when the query has a capital in it and is
-    // therefore case-*sensitive* (df-core's rule, PLAN §7.2). Dim the rest of
-    // the time — it reports a mode nobody chose, so it must not shout.
-    let (case_color, case_text) = if is_case_sensitive(prompt.query()) {
-        (palette.yellow, "Aa")
-    } else {
-        (palette.overlay0, "aa")
+    // ── The right-hand furniture, measured first so the text knows its room ──
+    // The mode chip is the outermost thing on the line: it is the answer to
+    // "why did that letter not type", and it must be findable in the same place
+    // every time (`delightful-ui` §8).
+    let mode = prompt.mode_label();
+    let mode_color = match mode {
+        "INSERT" => palette.green,
+        "VISUAL" => palette.mauve,
+        "REPLACE" => palette.peach,
+        _ => palette.blue,
     };
-    let case_galley = paint.painter.layout_no_wrap(
-        case_text.to_string(),
-        key_font(FONT - 0.5),
-        case_color,
-    );
-    let case_width = case_galley.size().x;
-    paint.painter.galley(
+    let mode_galley =
+        painter.layout_no_wrap(mode.to_string(), key_font(FONT - 1.5), mode_color);
+    let chip_width = mode_galley.size().x + 10.0;
+    let chip_rect = egui::Rect::from_min_size(
         egui::pos2(
-            inner.right() - case_width,
-            inner.center().y - case_galley.size().y / 2.0,
+            inner.right() - chip_width,
+            inner.center().y - (mode_galley.size().y + 4.0) / 2.0,
         ),
-        case_galley,
-        case_color,
+        egui::vec2(chip_width, mode_galley.size().y + 4.0),
+    );
+    painter.rect_filled(chip_rect, 4, mix(paint.palette.crust, mode_color, 0.18));
+    painter.galley(
+        egui::pos2(chip_rect.left() + 5.0, chip_rect.top() + 2.0),
+        mode_galley,
+        mode_color,
     );
 
+    let mut right = chip_rect.left() - PAD_X;
+    if let Some(error) = &prompt.error {
+        // The error takes the place the case indicator would have had: it is
+        // the more urgent thing to say about what has been typed.
+        let galley = painter.layout_no_wrap(error.clone(), font.clone(), palette.red);
+        let width = galley.size().x.min((right - inner.left()).max(0.0));
+        painter.galley(
+            egui::pos2(right - width, inner.center().y - galley.size().y / 2.0),
+            galley,
+            palette.red,
+        );
+        right -= width + PAD_X;
+    } else if prompt.kind.is_live() {
+        // The smart-case indicator: lit when the query has a capital in it and
+        // is therefore case-*sensitive* (df-core's rule, PLAN §7.2). Dim the
+        // rest of the time — it reports a mode nobody chose, so it must not
+        // shout.
+        let (color, text) = if is_case_sensitive(prompt.query()) {
+            (palette.yellow, "Aa")
+        } else {
+            (palette.overlay0, "aa")
+        };
+        let galley = painter.layout_no_wrap(text.to_string(), key_font(FONT - 0.5), color);
+        let width = galley.size().x;
+        painter.galley(
+            egui::pos2(right - width, inner.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+        right -= width + PAD_X;
+    }
+
+    // ── The line ────────────────────────────────────────────────────────────
     let text_left = inner.left() + title_galley.size().x + PAD_X;
-    let room = (inner.right() - case_width - PAD_X - text_left).max(0.0);
-    let painter = paint.painter.with_clip_rect(egui::Rect::from_min_max(
+    let room = (right - text_left).max(0.0);
+    let painter = painter.with_clip_rect(egui::Rect::from_min_max(
         egui::pos2(text_left, inner.top()),
         egui::pos2(text_left + room, inner.bottom()),
     ));
     let query = prompt.query();
+    let width_of = |upto: usize| -> f32 {
+        let upto = upto.min(query.len());
+        painter
+            .layout_no_wrap(query[..upto].to_string(), font.clone(), palette.text)
+            .size()
+            .x
+    };
+
+    if let Some(range) = prompt.selection() {
+        // A visual run is a *region*, so it is drawn as one rather than as
+        // differently coloured letters.
+        let (from, to) = (text_left + width_of(range.start), text_left + width_of(range.end));
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(from, inner.top() + 4.0),
+                egui::pos2(to.max(from + 2.0), inner.bottom() - 4.0),
+            ),
+            2,
+            mix(paint.palette.crust, palette.mauve, 0.35),
+        );
+    }
+
     painter.text(
         egui::pos2(text_left, inner.center().y),
         egui::Align2::LEFT_CENTER,
         query,
-        egui::FontId::proportional(FONT),
+        font.clone(),
         palette.text,
     );
 
-    // The caret. A solid bar and **not a blinking one** — PLAN §4.2 says no
-    // cursor blink, and a blink is an animation that never stops asking for
-    // frames (PLAN §1).
-    let before = painter
-        .layout_no_wrap(
-            query[..prompt.line.caret().min(query.len())].to_string(),
-            egui::FontId::proportional(FONT),
-            palette.text,
-        )
-        .size()
-        .x;
-    let caret_x = text_left + before;
+    // The caret. **Never blinking** — PLAN §4.2 says no blink, and a blink is
+    // an animation that never stops asking for frames (PLAN §1). A block in
+    // Normal, where the caret sits *on* a character; a bar in Insert, where it
+    // sits between two.
+    let caret = prompt.caret();
+    let caret_x = text_left + width_of(caret);
+    let caret_width = if prompt.block_caret() {
+        let next = query[caret.min(query.len())..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0);
+        if next == 0 {
+            CARET_WIDTH * 4.0
+        } else {
+            (width_of(caret + next) - width_of(caret)).max(CARET_WIDTH)
+        }
+    } else {
+        CARET_WIDTH
+    };
     painter.rect_filled(
         egui::Rect::from_min_max(
             egui::pos2(caret_x, inner.top() + 5.0),
-            egui::pos2(caret_x + 1.5, inner.bottom() - 5.0),
+            egui::pos2(caret_x + caret_width, inner.bottom() - 5.0),
         ),
         0,
-        palette.blue,
+        // A block caret is drawn *behind* nothing — egui has no blend mode for
+        // "invert" — so it is the accent at a weight that leaves the glyph
+        // readable through it.
+        if prompt.block_caret() {
+            mix(paint.palette.crust, palette.blue, 0.55)
+        } else {
+            palette.blue
+        },
     );
+    if prompt.block_caret() {
+        // …and the character is redrawn over the block, so the caret never eats
+        // the letter it is standing on.
+        let under: String = query[caret.min(query.len())..].chars().take(1).collect();
+        if !under.is_empty() {
+            painter.text(
+                egui::pos2(caret_x, inner.center().y),
+                egui::Align2::LEFT_CENTER,
+                under,
+                font,
+                palette.crust,
+            );
+        }
+    }
 }
+
+/// The insert caret's width, in points. One-and-a-half rather than one: a
+/// hairline caret disappears against a busy line at fractional scaling.
+const CARET_WIDTH: f32 = 1.5;
 
 /// The bar while an overlay owns the keyboard: what the keys do now.
 pub fn hint_bar(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
@@ -507,7 +644,7 @@ const HELP_MAX_WIDTH: f32 = 860.0;
 /// is no fade-to-transparent to ease (`delightful-ui` §14 applies to the ones
 /// that *do* fade). Enough to push the panes back, little enough that you can
 /// still see where you were.
-const HELP_SCRIM: u8 = 150;
+pub const HELP_SCRIM: u8 = 150;
 
 /// Where the help card goes: most of the window, above the bar.
 pub fn help_rect(area: egui::Rect, bar: egui::Rect) -> egui::Rect {
@@ -644,7 +781,7 @@ pub fn help_overlay(
 // ── Shared bits ─────────────────────────────────────────────────────────────
 
 /// A card plate and its hairline edge, at `alpha`.
-fn card(paint: &Painting<'_>, rect: egui::Rect, alpha: f32) {
+pub fn card(paint: &Painting<'_>, rect: egui::Rect, alpha: f32) {
     let plate = paint.palette.crust;
     let a = (alpha.clamp(0.0, 1.0) * CARD_ALPHA as f32).round() as u8;
     paint.painter.rect_filled(
@@ -661,18 +798,18 @@ fn card(paint: &Painting<'_>, rect: egui::Rect, alpha: f32) {
 }
 
 /// The same colour, at `alpha`.
-fn fade(color: egui::Color32, alpha: f32) -> egui::Color32 {
+pub fn fade(color: egui::Color32, alpha: f32) -> egui::Color32 {
     let a = (alpha.clamp(0.0, 1.0) * color.a() as f32).round() as u8;
     egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
 }
 
 /// The font every keyboard shortcut on the chrome is drawn in — monospace, so
 /// a column of chords lines up and `l` and `1` are not the same shape.
-fn key_font(size: f32) -> egui::FontId {
+pub fn key_font(size: f32) -> egui::FontId {
     egui::FontId::monospace(size)
 }
 
-fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
+pub fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
     painter
         .layout_no_wrap(text.to_string(), font, egui::Color32::WHITE)
         .size()
@@ -680,7 +817,7 @@ fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
 }
 
 /// Left-aligned, vertically centred, ellipsised at `max_width`.
-fn truncated(
+pub fn truncated(
     painter: &egui::Painter,
     pos: egui::Pos2,
     text: &str,
@@ -808,10 +945,25 @@ mod tests {
                     visual: Some(true),
                 },
             );
-            let mut prompt = Prompt::new(PromptKind::Filter, 0);
-            prompt.line.insert("READ");
-            prompt.line.move_left();
+            let mut prompt = Prompt::with(
+                PromptKind::Filter,
+                0,
+                df_core::input::InputBuffer::new("READ", 2),
+            );
             input_bar(&paint, bar, &prompt);
+            // …and every mode of it, since each one draws a different caret.
+            prompt.feed(df_core::keymap::Chord::plain(df_core::keymap::Key::Escape));
+            input_bar(&paint, bar, &prompt);
+            prompt.feed(df_core::keymap::Chord::from_char('v').expect("v"));
+            input_bar(&paint, bar, &prompt);
+            let mut rename = Prompt::with(
+                PromptKind::Rename,
+                0,
+                df_core::input::InputBuffer::for_rename_stem("photo.jpg"),
+            );
+            rename.error = Some("photo.jpg already exists".to_string());
+            let row = egui::Rect::from_min_size(egui::pos2(300.0, 400.0), egui::vec2(400.0, 22.0));
+            prompt_popup(&paint, area, row, &rename);
             hint_bar(&paint, bar, &[("Esc", "close"), ("f", "filter")]);
 
             let rows: Vec<(String, String)> = (0..14)

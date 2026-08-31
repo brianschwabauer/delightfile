@@ -403,13 +403,13 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Which-key card (175 ms), `?` help browser
 
 ### Phase 2 — operate
-- [ ] Task engine: workers, progress, pause/cancel, `w` panel
-- [ ] yank/cut/paste (+force), reflink-first copy, symlink/hardlink
-- [ ] Trash (freedesktop) + permanent delete + confirm dialogs
-- [ ] Create `a`, rename `r`/`R` with vi input editor
-- [ ] Op journal + `u` undo + toast system (one-at-a-time, kind lifetimes)
-- [ ] Conflict dialog with side-by-side previews
-- [ ] Shell `;`/`:`, open `o`/`O` with opener rules + picker
+- [x] Task engine: workers, progress, pause/cancel, `w` panel
+- [x] yank/cut/paste (+force), reflink-first copy, symlink/hardlink
+- [x] Trash (freedesktop) + permanent delete + confirm dialogs
+- [x] Create `a`, rename `r`/`R` with vi input editor
+- [x] Op journal + `u` undo + toast system (one-at-a-time, kind lifetimes)
+- [x] Conflict dialog with side-by-side previews
+- [x] Shell `;`/`:`, open `o`/`O` with opener rules + picker
 
 ### Phase 3 — preview
 - [x] Preview workers + yazi-compatible thumbnail cache; 80 ms crossfade-in

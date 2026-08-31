@@ -1,144 +1,19 @@
-//! The one-line text buffer behind the bottom input bar — `f` filter, `/` and
-//! `?` find, and the help browser's own filter field.
+//! The prompt behind the bottom bar — and now behind the rename popup, the
+//! create prompt and the shell line as well.
 //!
-//! PLAN §4.2 wants **one** input implementation shared by rename, filter,
-//! create, cd, search and shell, with the full vi line editor on top of it. That
-//! editor is a Phase 2 checkbox; what is here is the buffer it will be built
-//! *on* — a byte-offset cursor over a `String` with the edit primitives the
-//! `[input]` bindings already name ([`Command::InputKillBol`] and friends), so
-//! Phase 2 adds modes and motions to this file rather than replacing it.
+//! PLAN §4.2 asks for **one** input implementation shared by rename, filter,
+//! create, cd, search and shell, with the full vi line editor on it. That editor
+//! is [`df_core::input::InputBuffer`], and this file is the thin app-side shell
+//! around it: which prompt is open, what its title says, where it is drawn, and
+//! the inline error it shows when what was typed cannot be used.
 //!
-//! Everything is a pure operation on `(&mut Line)` with no clock and no egui, so
-//! the awkward half — cursor arithmetic that has to land on character
-//! boundaries, in a program whose whole test corpus is gnarly unicode filenames
-//! (PLAN §9) — is unit-tested without a window.
-//!
-//! [`Command::InputKillBol`]: df_core::keymap::Command::InputKillBol
+//! Phase 1 had a byte-offset `Line` here with backspace and the kill keys on it.
+//! It is gone rather than kept alongside: two line editors in one program is
+//! two sets of Unicode edge cases, and the one in df-core is the one with the
+//! modes, the operators and the tests.
 
-/// A single line of text and where the caret is in it.
-///
-/// The caret is a **byte** offset, always on a character boundary. Byte rather
-/// than char because every consumer — `str` slicing, egui's `LayoutJob`
-/// sections, df-core's [`Span`](df_core::fs::Span) match ranges — speaks bytes,
-/// and converting at each of them is three chances to be off by one on a name
-/// with an emoji in it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Line {
-    text: String,
-    caret: usize,
-}
-
-impl Line {
-    pub fn new() -> Line {
-        Line::default()
-    }
-
-    pub fn text(&self) -> &str {
-        &self.text
-    }
-
-    pub fn caret(&self) -> usize {
-        self.caret
-    }
-
-    /// Type something. Winit hands over a whole string rather than a character
-    /// because one keystroke can produce several (a composed key), and pasting
-    /// later arrives the same way.
-    pub fn insert(&mut self, text: &str) {
-        self.text.insert_str(self.caret, text);
-        self.caret += text.len();
-    }
-
-    /// `Backspace` — delete the character *before* the caret.
-    pub fn backspace(&mut self) {
-        let Some(prev) = self.prev_boundary() else {
-            return;
-        };
-        self.text.replace_range(prev..self.caret, "");
-        self.caret = prev;
-    }
-
-    /// `Delete` — the character *under* the caret.
-    pub fn delete_under(&mut self) {
-        let Some(next) = self.next_boundary() else {
-            return;
-        };
-        self.text.replace_range(self.caret..next, "");
-    }
-
-    pub fn move_left(&mut self) {
-        if let Some(prev) = self.prev_boundary() {
-            self.caret = prev;
-        }
-    }
-
-    pub fn move_right(&mut self) {
-        if let Some(next) = self.next_boundary() {
-            self.caret = next;
-        }
-    }
-
-    pub fn move_bol(&mut self) {
-        self.caret = 0;
-    }
-
-    pub fn move_eol(&mut self) {
-        self.caret = self.text.len();
-    }
-
-    /// `Ctrl+u`.
-    pub fn kill_bol(&mut self) {
-        self.text.replace_range(0..self.caret, "");
-        self.caret = 0;
-    }
-
-    /// `Ctrl+k`.
-    pub fn kill_eol(&mut self) {
-        self.text.truncate(self.caret);
-    }
-
-    /// `Ctrl+w`: the whitespace before the caret and then the word before that.
-    /// Killing the whitespace first is what makes a second `Ctrl+w` eat a whole
-    /// word rather than the gap it just made.
-    pub fn kill_word_back(&mut self) {
-        let start = word_start(&self.text, self.caret);
-        self.text.replace_range(start..self.caret, "");
-        self.caret = start;
-    }
-
-    fn prev_boundary(&self) -> Option<usize> {
-        if self.caret == 0 {
-            return None;
-        }
-        (0..self.caret)
-            .rev()
-            .find(|i| self.text.is_char_boundary(*i))
-    }
-
-    fn next_boundary(&self) -> Option<usize> {
-        if self.caret >= self.text.len() {
-            return None;
-        }
-        (self.caret + 1..=self.text.len()).find(|i| self.text.is_char_boundary(*i))
-    }
-}
-
-/// Where `Ctrl+w` should cut back to from `caret`.
-fn word_start(text: &str, caret: usize) -> usize {
-    let head = &text[..caret];
-    let trimmed = head.trim_end();
-    // Everything before the caret is blank: take it all, rather than leaving a
-    // line of spaces that looks empty and is not.
-    if trimmed.is_empty() {
-        return 0;
-    }
-    match trimmed.rfind(char::is_whitespace) {
-        // `rfind` gives the byte the separator starts at; the word begins after
-        // it, which for a multi-byte separator is not that byte plus one.
-        Some(at) => at + trimmed[at..].chars().next().map(char::len_utf8).unwrap_or(1),
-        None => 0,
-    }
-}
+use df_core::input::{InputBuffer, InputEvent};
+use df_core::keymap::{Chord, InputMode};
 
 /// What the bar is being typed into, which is also what its title says.
 ///
@@ -155,6 +30,18 @@ pub enum PromptKind {
     FindPrev,
     /// `f` inside the help browser.
     HelpFilter,
+    /// `a` — a name, with a trailing `/` for a directory.
+    Create,
+    /// `r` — the whole name, caret before the extension.
+    Rename,
+    /// `R` — the extension only, caret at the start.
+    RenameEmptyStem,
+    /// `;` — a shell line, detached.
+    Shell,
+    /// `:` — a shell line delightfile waits for.
+    ShellBlock,
+    /// The conflict dialog's "keep both, under this name".
+    ConflictRename,
 }
 
 impl PromptKind {
@@ -164,6 +51,11 @@ impl PromptKind {
             PromptKind::FindNext => "Find next:",
             PromptKind::FindPrev => "Find previous:",
             PromptKind::HelpFilter => "Filter help:",
+            PromptKind::Create => "Create:",
+            PromptKind::Rename | PromptKind::RenameEmptyStem => "Rename:",
+            PromptKind::Shell => "Shell:",
+            PromptKind::ShellBlock => "Shell (block):",
+            PromptKind::ConflictRename => "New name:",
         }
     }
 
@@ -171,13 +63,36 @@ impl PromptKind {
     pub fn is_help(self) -> bool {
         matches!(self, PromptKind::HelpFilter)
     }
+
+    /// Whether every keystroke changes something behind the prompt. The live
+    /// ones re-run their query as you type; the rest do nothing until `Enter`,
+    /// which is what makes a half-typed `rm` command harmless.
+    pub fn is_live(self) -> bool {
+        matches!(
+            self,
+            PromptKind::Filter
+                | PromptKind::FindNext
+                | PromptKind::FindPrev
+                | PromptKind::HelpFilter
+        )
+    }
+
+    /// Whether the prompt floats over the row it is about instead of sitting in
+    /// the bar — yazi's rename geometry (PLAN §4.2), where the name you are
+    /// editing is under your eyes and not at the other end of the window.
+    pub fn anchored(self) -> bool {
+        matches!(
+            self,
+            PromptKind::Rename | PromptKind::RenameEmptyStem | PromptKind::ConflictRename
+        )
+    }
 }
 
-/// One open input bar.
+/// One open prompt.
 #[derive(Debug, Clone)]
 pub struct Prompt {
     pub kind: PromptKind,
-    pub line: Line,
+    pub buffer: InputBuffer,
     /// Where the cursor was when the prompt opened.
     ///
     /// `/` and `?` search *live*, and every keystroke re-searches from here
@@ -186,107 +101,73 @@ pub struct Prompt {
     /// no longer exists, and the search would walk forward through the
     /// directory as you typed. It is also where `Esc` puts the cursor back.
     pub origin: usize,
+    /// Why the last `Enter` was refused: "exists", "not a usable name". Drawn
+    /// beside the field rather than raised as a toast, because it is about the
+    /// text under the caret and belongs where that text is (PLAN §5).
+    pub error: Option<String>,
 }
 
 impl Prompt {
-    pub fn new(kind: PromptKind, origin: usize) -> Prompt {
+    /// A prompt over a buffer somebody else prepared — the rename presets, or a
+    /// filter re-opened on the query that is already applied.
+    pub fn with(kind: PromptKind, origin: usize, buffer: InputBuffer) -> Prompt {
         Prompt {
             kind,
-            line: Line::new(),
+            buffer,
             origin,
+            error: None,
         }
     }
 
     pub fn query(&self) -> &str {
-        self.line.text()
+        self.buffer.text()
+    }
+
+    /// The caret as a byte offset, which is what the painter measures with.
+    pub fn caret(&self) -> usize {
+        self.buffer.cursor_byte()
+    }
+
+    /// One keystroke. Typing clears a stale error: the message was about the
+    /// text as it stood, and it does not stand any more.
+    pub fn feed(&mut self, chord: Chord) -> InputEvent {
+        let event = self.buffer.feed(chord);
+        if matches!(event, InputEvent::Consumed) {
+            self.error = None;
+        }
+        event
+    }
+
+    /// The mode chip's text. Shown for every prompt, because the whole point of
+    /// a modal editor is that you can tell which mode you are in.
+    pub fn mode_label(&self) -> &'static str {
+        match self.buffer.mode() {
+            InputMode::Insert => "INSERT",
+            InputMode::Normal => "NORMAL",
+            InputMode::Visual => "VISUAL",
+            InputMode::Replace => "REPLACE",
+        }
+    }
+
+    /// Whether the caret is a block (Normal, Visual, Replace — it sits *on* a
+    /// character) or a bar (Insert — it sits *between* two).
+    pub fn block_caret(&self) -> bool {
+        !matches!(self.buffer.mode(), InputMode::Insert)
+    }
+
+    /// The visual selection, in bytes.
+    pub fn selection(&self) -> Option<std::ops::Range<usize>> {
+        self.buffer.selection_bytes()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use df_core::keymap::{Key, Mods};
 
-    fn line(text: &str) -> Line {
-        let mut l = Line::new();
-        l.insert(text);
-        l
-    }
-
-    #[test]
-    fn typing_lands_at_the_caret() {
-        let mut l = line("abc");
-        assert_eq!((l.text(), l.caret()), ("abc", 3));
-        l.move_left();
-        l.insert("X");
-        assert_eq!((l.text(), l.caret()), ("abXc", 3));
-    }
-
-    /// The caret must step over a whole character, not a byte of one — the
-    /// difference between working and panicking on any name with an accent.
-    #[test]
-    fn the_caret_moves_by_characters_not_bytes() {
-        let mut l = line("aé☃");
-        assert_eq!(l.caret(), l.text().len());
-        l.move_left();
-        assert_eq!(l.caret(), 3); // before the snowman (3 bytes)
-        l.move_left();
-        assert_eq!(l.caret(), 1); // before the é (2 bytes)
-        l.move_left();
-        assert_eq!(l.caret(), 0);
-        l.move_left();
-        assert_eq!(l.caret(), 0, "at the start it stays");
-        l.move_right();
-        assert_eq!(l.caret(), 1);
-    }
-
-    #[test]
-    fn backspace_and_delete_take_one_character_each() {
-        let mut l = line("aé☃");
-        l.backspace();
-        assert_eq!(l.text(), "aé");
-        l.move_bol();
-        l.delete_under();
-        assert_eq!((l.text(), l.caret()), ("é", 0));
-        l.backspace();
-        assert_eq!(l.text(), "é", "backspace at the start does nothing");
-        l.move_eol();
-        l.delete_under();
-        assert_eq!(l.text(), "é", "delete at the end does nothing");
-    }
-
-    #[test]
-    fn the_kill_keys_cut_from_the_caret() {
-        let mut l = line("one two");
-        l.move_left();
-        l.kill_eol();
-        assert_eq!(l.text(), "one tw");
-        l.kill_bol();
-        assert_eq!((l.text(), l.caret()), ("", 0));
-    }
-
-    /// `Ctrl+w` eats the gap and then the word, so pressing it twice removes
-    /// two words rather than a word and a space.
-    #[test]
-    fn kill_word_back_takes_the_gap_with_the_word() {
-        let mut l = line("one two three   ");
-        l.kill_word_back();
-        assert_eq!(l.text(), "one two ");
-        l.kill_word_back();
-        assert_eq!(l.text(), "one ");
-        l.kill_word_back();
-        assert_eq!(l.text(), "");
-        l.kill_word_back();
-        assert_eq!(l.text(), "", "on an empty line it does nothing");
-    }
-
-    /// A separator that is not one byte wide must not leave half of itself
-    /// behind.
-    #[test]
-    fn kill_word_back_handles_a_wide_separator() {
-        // U+3000 IDEOGRAPHIC SPACE is whitespace and three bytes long.
-        let mut l = line("one\u{3000}two");
-        l.kill_word_back();
-        assert_eq!(l.text(), "one\u{3000}");
+    fn chord(c: char) -> Chord {
+        Chord::from_char(c).expect("a printable key")
     }
 
     #[test]
@@ -296,10 +177,86 @@ mod tests {
             PromptKind::FindNext,
             PromptKind::FindPrev,
             PromptKind::HelpFilter,
+            PromptKind::Create,
+            PromptKind::Rename,
+            PromptKind::RenameEmptyStem,
+            PromptKind::Shell,
+            PromptKind::ShellBlock,
+            PromptKind::ConflictRename,
         ] {
             assert!(kind.title().ends_with(':'), "{kind:?}");
         }
         assert!(PromptKind::HelpFilter.is_help());
         assert!(!PromptKind::Filter.is_help());
+        assert!(PromptKind::Filter.is_live());
+        assert!(!PromptKind::Shell.is_live(), "a shell line runs on Enter only");
+        assert!(PromptKind::Rename.anchored());
+        assert!(!PromptKind::Create.anchored());
+    }
+
+    /// The prompt is the df-core editor: modes, motions and all, with the app
+    /// only holding the frame around it.
+    #[test]
+    fn the_prompt_is_the_vi_editor() {
+        let mut prompt = Prompt::with(
+            PromptKind::Rename,
+            0,
+            InputBuffer::for_rename_stem("photo.jpg"),
+        );
+        assert_eq!(prompt.query(), "photo.jpg");
+        assert_eq!(prompt.caret(), "photo".len(), "the caret is before the extension");
+        assert_eq!(prompt.mode_label(), "INSERT");
+        assert!(!prompt.block_caret());
+
+        // Escape to Normal, `0` to the start, `D` to kill the line's tail.
+        assert_eq!(
+            prompt.feed(Chord::plain(Key::Escape)),
+            InputEvent::Consumed
+        );
+        assert_eq!(prompt.mode_label(), "NORMAL");
+        assert!(prompt.block_caret(), "a normal-mode caret sits on a character");
+        prompt.feed(chord('0'));
+        prompt.feed(Chord::new(Mods::SHIFT, Key::Char('d')));
+        assert_eq!(prompt.query(), "");
+
+        // …and typing goes back through insert.
+        prompt.feed(chord('i'));
+        for c in "cat.png".chars() {
+            prompt.feed(chord(c));
+        }
+        assert_eq!(prompt.query(), "cat.png");
+        assert_eq!(
+            prompt.feed(Chord::plain(Key::Enter)),
+            InputEvent::Submit("cat.png".to_string())
+        );
+    }
+
+    /// `R` opens on the extension alone, caret at the front (PLAN §4.1).
+    #[test]
+    fn rename_with_an_empty_stem_keeps_the_extension() {
+        let prompt = Prompt::with(
+            PromptKind::RenameEmptyStem,
+            0,
+            InputBuffer::for_rename_empty("photo.jpg"),
+        );
+        assert_eq!(prompt.query(), ".jpg");
+        assert_eq!(prompt.caret(), 0);
+    }
+
+    /// An error is about the text as it stands, so editing the text takes it
+    /// down — but a keystroke that submits or cancels leaves it alone.
+    #[test]
+    fn typing_clears_the_inline_error() {
+        let mut prompt = Prompt::with(PromptKind::Create, 0, InputBuffer::new("", 0));
+        prompt.error = Some("notes.txt already exists".to_string());
+        prompt.feed(chord('x'));
+        assert!(prompt.error.is_none());
+
+        prompt.error = Some("still true".to_string());
+        assert!(matches!(
+            prompt.feed(Chord::plain(Key::Enter)),
+            InputEvent::Submit(_)
+        ));
+        assert!(prompt.error.is_some(), "submitting does not clear it");
     }
 }

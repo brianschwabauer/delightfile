@@ -22,6 +22,7 @@
 //! The preview pane is drawn as an honest empty state rather than a mock of
 //! what will fill it.
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use df_core::config::{LineMode, Theme};
@@ -133,6 +134,11 @@ const SELECT_BAR_WIDTH: f32 = 2.5;
 /// adjacent selected rows must still look like two rows.
 const SELECT_BAR_INSET: f32 = 3.5;
 
+/// The clipboard mark's width, on the row's trailing edge. A shade narrower
+/// than the selection bar: a yank is a thing you did to a row a moment ago,
+/// not a thing you are about to act on, so it says its piece more quietly.
+const CLIP_BAR_WIDTH: f32 = 2.0;
+
 /// Height of the tab strip and of the bottom bar, in logical points.
 ///
 /// One number for both: they are the same kind of thing — a single line of
@@ -155,6 +161,12 @@ pub enum Control {
     Row(Column, usize),
     /// A chip in the tab strip, by tab index.
     Tab(usize),
+    /// A button on a floating surface — a dialog's answers, the conflict
+    /// resolver's apply-to-all — by its index in that surface's own list.
+    Action(usize),
+    /// A row inside a floating surface: the task panel's tasks, the opener
+    /// picker's choices, the conflict resolver's names.
+    PanelRow(usize),
 }
 
 /// Where the panes and the chrome go.
@@ -287,6 +299,21 @@ impl CursorGlow<'_> {
     }
 }
 
+/// Which rows are on the clipboard, and how they got there (PLAN §4.1's `y`
+/// and `x`).
+///
+/// Two channels, because they say different things. A **yank** is a copy that
+/// has not happened yet, so its rows are marked and otherwise untouched. A
+/// **cut** is a row that is on its way out of this directory, so it is dimmed
+/// as well — the same treatment the parent column gets for "this is not what
+/// you are acting on now".
+#[derive(Clone, Copy)]
+pub struct ClipMark<'a> {
+    pub paths: &'a std::collections::HashSet<PathBuf>,
+    /// `x` rather than `y`.
+    pub cut: bool,
+}
+
 /// One call's worth of "draw this listing here".
 ///
 /// A struct rather than ten positional arguments: half of them are colours and
@@ -325,6 +352,8 @@ pub struct ListView<'a> {
     /// the parent's rows would claim you had selected directories you have not
     /// been inside.
     pub show_selection: bool,
+    /// The clipboard's marks, when this pane's directory has any in it.
+    pub clip: Option<ClipMark<'a>>,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -393,6 +422,7 @@ impl Painting<'_> {
             slow_load,
             offset_x,
             show_selection,
+            clip,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
@@ -419,6 +449,9 @@ impl Painting<'_> {
             let press = hovers.press(key);
             let on_cursor = index == dir.cursor();
             let selected = show_selection && dir.is_selected(&entry.name);
+            // On the clipboard: marked either way, and dimmed when it is a cut.
+            let marked = clip.is_some_and(|c| c.paths.contains(&entry.path));
+            let cut = marked && clip.is_some_and(|c| c.cut);
 
             // The row's ground, in one expression: the pane, tinted for a
             // selection, lifted to `surface1` for the cursor row and towards
@@ -457,6 +490,27 @@ impl Painting<'_> {
                 );
                 painter.rect_filled(bar, 1, self.palette.yellow);
             }
+            if marked {
+                // The mirror of the selection bar, on the other edge and in
+                // another colour: a row can be both selected and yanked, and
+                // the two facts must not fight over one strip of pixels.
+                let chip = egui::Rect::from_min_max(
+                    egui::pos2(
+                        rect.right() - CLIP_BAR_WIDTH,
+                        rect.top() + SELECT_BAR_INSET,
+                    ),
+                    egui::pos2(rect.right(), rect.bottom() - SELECT_BAR_INSET),
+                );
+                painter.rect_filled(
+                    chip,
+                    1,
+                    if cut {
+                        self.palette.peach
+                    } else {
+                        self.palette.teal
+                    },
+                );
+            }
 
             // Ripples live inside the row they acknowledge. The clip is
             // rectangular — egui has no rounded clip — which costs a few pixels
@@ -477,7 +531,7 @@ impl Painting<'_> {
                 dir.row_spans(index),
                 ground,
                 linemode,
-                dim,
+                dim || cut,
             );
         }
     }
