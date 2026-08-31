@@ -1309,14 +1309,23 @@ impl App {
         // A frame is asked for only while something is actually moving. A
         // pointer parked on a row holds a 1.0 that will be 1.0 again next
         // frame, and `animating()` says so — idle costs zero frames.
-        if self.hovers.animating()
-            || self.cursor_glow.animating()
-            || self.ripples.animating(now)
-            || self.tab().animating(now)
-            || self.tabs.animating(now)
-            || self.preview.animating(now)
-            || self.which.fading()
-        {
+        let animating = [
+            ("hovers", self.hovers.animating()),
+            ("cursor_glow", self.cursor_glow.animating()),
+            ("ripples", self.ripples.animating(now)),
+            ("tab", self.tab().animating(now)),
+            ("tabs", self.tabs.animating(now)),
+            ("preview", self.preview.animating(now)),
+            ("which", self.which.fading()),
+        ];
+        // DF_FRAME_LOG=1 names whoever is holding the frame rate up — the
+        // instrument for the Phase 6 "zero repaints at rest" audit, because a
+        // stuck `animating()` source is invisible from outside.
+        if frame_log_enabled() {
+            let hot: Vec<&str> = animating.iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect();
+            log::info!("frame: animating={hot:?}");
+        }
+        if animating.iter().any(|(_, on)| *on) {
             ui.ctx().request_repaint();
         } else if let Some(due) = self.next_deadline(now) {
             // The *scheduled* wake-ups, and there are exactly two kinds: the
@@ -1379,6 +1388,9 @@ impl App {
             .map(|vp| vp.repaint_delay);
 
         if !gfx.present(full_output) {
+            if frame_log_enabled() {
+                log::info!("present-fail");
+            }
             gfx.window.request_redraw();
             return;
         }
@@ -1396,7 +1408,12 @@ impl App {
         // is the "never" sentinel and is dropped so the loop can actually
         // sleep.
         match repaint_delay {
-            Some(delay) if delay.is_zero() => gfx.window.request_redraw(),
+            Some(delay) if delay.is_zero() => {
+                if frame_log_enabled() {
+                    log::info!("egui-zero-delay");
+                }
+                gfx.window.request_redraw();
+            }
             Some(delay) if delay < REPAINT_HORIZON => {
                 self.repaint_at = Some(Instant::now() + delay);
             }
@@ -1411,6 +1428,12 @@ impl App {
         }
         event_loop.exit();
     }
+}
+
+/// Gate for the per-frame `DF_FRAME_LOG` diagnostic, read once.
+fn frame_log_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("DF_FRAME_LOG").is_some_and(|v| v == "1"))
 }
 
 /// Which way a prompt searches.
@@ -1487,7 +1510,16 @@ impl ApplicationHandler<crate::Wake> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(gfx) = &mut self.gfx else { return };
         let response = gfx.egui_state.on_window_event(&gfx.window, &event);
-        if response.repaint {
+        // egui-winit answers `repaint: true` to `RedrawRequested` itself, so
+        // honouring it unconditionally is a vsync-paced self-loop — the app
+        // repaints forever at 60 fps while idle (measured with DF_FRAME_LOG).
+        // After a redraw, the *next* frame is decided by `redraw()`'s own
+        // policy (animating / deadline / egui's repaint_delay), never by the
+        // event that delivered this one.
+        if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
+            if frame_log_enabled() {
+                log::info!("event-repaint: {event:?}");
+            }
             gfx.window.request_redraw();
         }
         match event {
@@ -1530,6 +1562,9 @@ impl ApplicationHandler<crate::Wake> for App {
     /// is warranted, so second-guessing it here would drop egui's own requests
     /// on the floor. It stays event-driven — no `Wake`, no frame.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: crate::Wake) {
+        if frame_log_enabled() {
+            log::info!("wake");
+        }
         self.poll_workers();
         if let Some(gfx) = &self.gfx {
             gfx.window.request_redraw();
@@ -1541,6 +1576,9 @@ impl ApplicationHandler<crate::Wake> for App {
         match self.repaint_at {
             Some(at) if at <= now => {
                 self.repaint_at = None;
+                if frame_log_enabled() {
+                    log::info!("deadline-fire");
+                }
                 if let Some(gfx) = &self.gfx {
                     gfx.window.request_redraw();
                 }
