@@ -398,9 +398,9 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Directory model: async read, watch (inotify), sort modes, dir-first, hidden toggle
 - [x] Three-pane miller render `[1,4,3]`, cursor, scrolloff, linemodes, icons + theme colors
 - [x] Navigation: arrow keys, gg/G, paging, Alt+←/→ history, `g` goto table, `--cwd-file`
-- [ ] Selection: Space, visual mode, Ctrl+a/r; filter `f`, find `/ ? n N`
-- [ ] Tabs: t, 1–9, [/], {/}, tab strip
-- [ ] Which-key card (175 ms), `?` help browser
+- [x] Selection: Space, visual mode, Ctrl+a/r; filter `f`, find `/ ? n N`
+- [x] Tabs: t, 1–9, [/], {/}, tab strip
+- [x] Which-key card (175 ms), `?` help browser
 
 ### Phase 2 — operate
 - [ ] Task engine: workers, progress, pause/cancel, `w` panel

@@ -16,14 +16,16 @@
 //!
 //! ## What is *not* drawn here
 //!
-//! No preview (Phase 3), no tab strip (a later Phase 1 checkbox), no which-key
-//! card (likewise). The preview pane is drawn as an honest empty state rather
-//! than a mock of what will fill it.
+//! No preview (Phase 3). The chrome that frames the panes — the tab strip, the
+//! bottom bar, the which-key card, the help overlay — is [`crate::chrome`]'s;
+//! this file lays out the space it goes in and draws what is inside the panes.
+//! The preview pane is drawn as an honest empty state rather than a mock of
+//! what will fill it.
 
 use std::time::Instant;
 
 use df_core::config::{LineMode, Theme};
-use df_core::fs::{DirState, LoadState};
+use df_core::fs::{DirState, LoadState, Span};
 
 use crate::format::linemode_text;
 use crate::hover::{pressed_rect, Hovers};
@@ -108,6 +110,37 @@ const CURSOR_HOVER_LIFT: f32 = 0.35;
 /// strength it competes with the list for attention.
 const PARENT_DIM: f32 = 0.45;
 
+/// How far a *selected* row's ground is tinted towards the selection accent.
+///
+/// Twice the focus tint, because it means something twice as consequential: the
+/// focus tint says where the keyboard is, and this says which files `d` is about
+/// to trash. Still a tint and not a fill — at much above this the file names
+/// start fighting the ground they are on, and a selection of forty rows would
+/// turn the column into a yellow block.
+const SELECT_TINT: f32 = 0.10;
+
+/// The selected row's accent bar, in logical points.
+///
+/// A tint alone is not enough (`delightful-ui`: selection has to be
+/// unmistakable at a glance) — on a dark palette a 10% wash is exactly the sort
+/// of difference that vanishes on a dim panel or under a colour-blind eye. The
+/// bar is the second, redundant channel: a hard edge at a fixed x, which reads
+/// as a *list* of marks down the column even at a glance from across the room.
+const SELECT_BAR_WIDTH: f32 = 2.5;
+
+/// How far the accent bar is inset from the row's top and bottom, so it reads
+/// as a mark on the row rather than as a continuous rule down the pane — two
+/// adjacent selected rows must still look like two rows.
+const SELECT_BAR_INSET: f32 = 3.5;
+
+/// Height of the tab strip and of the bottom bar, in logical points.
+///
+/// One number for both: they are the same kind of thing — a single line of
+/// chrome bracketing the panes — and giving them different heights would put a
+/// wobble in the window's vertical rhythm for no reason. 26 is [`ROW_HEIGHT`]
+/// plus the four points that keep a chip's text off its own edge.
+pub const CHROME_HEIGHT: f32 = 26.0;
+
 /// Which pane a row belongs to. The hover map's key has to distinguish them —
 /// row 3 of the parent column is not row 3 of the list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,23 +153,62 @@ pub enum Column {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Control {
     Row(Column, usize),
+    /// A chip in the tab strip, by tab index.
+    Tab(usize),
 }
 
-/// Where the three panes go.
+/// Where the panes and the chrome go.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
+    /// The tab strip, when there is more than one tab (PLAN §2).
+    pub strip: Option<egui::Rect>,
     pub parent: egui::Rect,
     pub list: egui::Rect,
     pub preview: egui::Rect,
+    /// The bottom line: the status, or the input prompt, or the help hint.
+    pub bar: egui::Rect,
 }
 
-/// Split the window into miller columns at `ratio` (PLAN §2).
+/// Split the window into miller columns at `ratio` (PLAN §2), with the tab
+/// strip above and the bar below.
 ///
 /// The gaps come out of the total *before* the ratio is applied, so `[1, 4, 3]`
 /// describes the panes themselves rather than the panes plus the spaces between
 /// them — otherwise the middle column would quietly shrink as the gap grew.
-pub fn layout(area: egui::Rect, ratio: [u16; 3]) -> Layout {
-    let inner = area.shrink(GAP);
+///
+/// The bar is **always** reserved, whether it is showing a status line or a
+/// prompt. `f` must not resize the pane it is filtering: rows reflowing under
+/// the pointer as a prompt opens is `delightful-ui` §8's spatial stability, and
+/// the one place a file manager can least afford to break it is the moment the
+/// user is about to act on a row.
+pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
+    let outer = area.shrink(GAP);
+    // A window narrower or shorter than two gaps shrinks to an *inverted* rect,
+    // and every rect derived from it inherits the inversion. Collapsing it to
+    // zero instead keeps the geometry degenerate-but-sane while a compositor is
+    // mid-resize.
+    let outer = egui::Rect::from_min_max(
+        outer.min,
+        egui::pos2(outer.max.x.max(outer.min.x), outer.max.y.max(outer.min.y)),
+    );
+    let strip = tab_strip.then(|| {
+        egui::Rect::from_min_size(
+            outer.min,
+            egui::vec2(outer.width(), CHROME_HEIGHT.min(outer.height())),
+        )
+    });
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(outer.left(), (outer.bottom() - CHROME_HEIGHT).max(outer.top())),
+        outer.max,
+    );
+    let top = match strip {
+        Some(strip) => strip.bottom() + GAP,
+        None => outer.top(),
+    };
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(outer.left(), top),
+        egui::pos2(outer.right(), (bar.top() - GAP).max(top)),
+    );
     let total: f32 = ratio.iter().map(|r| *r as f32).sum();
     // `read_ratio` in df-core rejects an all-zero ratio, so this cannot divide
     // by zero; the guard is here because this function is also reachable from a
@@ -152,9 +224,11 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3]) -> Layout {
         rect
     };
     Layout {
+        strip,
         parent: next(width(ratio[0])),
         list: next(width(ratio[1])),
         preview: next(width(ratio[2])),
+        bar,
     }
 }
 
@@ -242,6 +316,15 @@ pub struct ListView<'a> {
     pub dim: bool,
     /// The scan has been running long enough to say so out loud.
     pub slow_load: bool,
+    /// How far the rows are displaced horizontally, in points: the tab switch's
+    /// slide (see [`crate::tabs`]). The *clip* stays on the pane, so the
+    /// content slides inside its column rather than the column moving.
+    pub offset_x: f32,
+    /// Whether selection marks are drawn in this pane. Off for the parent
+    /// column: a selection belongs to the directory it was made in, and marking
+    /// the parent's rows would claim you had selected directories you have not
+    /// been inside.
+    pub show_selection: bool,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -308,6 +391,8 @@ impl Painting<'_> {
             linemode,
             dim,
             slow_load,
+            offset_x,
+            show_selection,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
@@ -325,7 +410,7 @@ impl Painting<'_> {
 
         for index in first..=last {
             let Some(entry) = dir.row(index) else { continue };
-            let rect = row_rect(content, scroll_rows, index);
+            let rect = row_rect(content, scroll_rows, index).translate(egui::vec2(offset_x, 0.0));
             if !rect.intersects(content) {
                 continue;
             }
@@ -333,12 +418,21 @@ impl Painting<'_> {
             let hover = hovers.hover(key);
             let press = hovers.press(key);
             let on_cursor = index == dir.cursor();
+            let selected = show_selection && dir.is_selected(&entry.name);
 
-            // The row's ground, in one expression: the pane, lifted to
-            // `surface1` for the cursor row and towards `surface0` for a hover,
-            // both of them steps up the palette's own ramp.
+            // The row's ground, in one expression: the pane, tinted for a
+            // selection, lifted to `surface1` for the cursor row and towards
+            // `surface0` for a hover — the last two steps up the palette's own
+            // ramp. The selection tint goes on *first* so the cursor still
+            // reads as the brightest thing in the column when it is standing on
+            // a selected row.
+            let ground_here = if selected {
+                mix(ground, self.palette.yellow, SELECT_TINT)
+            } else {
+                ground
+            };
             let glow = cursor_glow.at(index, on_cursor);
-            let base = mix(ground, cursor_color, glow);
+            let base = mix(ground_here, cursor_color, glow);
             let lift = if glow > 0.5 {
                 CURSOR_HOVER_LIFT
             } else {
@@ -350,6 +444,18 @@ impl Painting<'_> {
             // it sits on — the common case, and one fewer quad per row.
             if fill != ground {
                 painter.rect_filled(rect, ROW_RADIUS, fill);
+            }
+            if selected {
+                // The redundant channel: a hard mark at a fixed x, so a
+                // selection is legible as a shape and not only as a colour.
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.top() + SELECT_BAR_INSET),
+                    egui::pos2(
+                        rect.left() + SELECT_BAR_WIDTH,
+                        rect.bottom() - SELECT_BAR_INSET,
+                    ),
+                );
+                painter.rect_filled(bar, 1, self.palette.yellow);
             }
 
             // Ripples live inside the row they acknowledge. The clip is
@@ -364,7 +470,15 @@ impl Painting<'_> {
                 );
             }
 
-            self.row(&painter, rect, entry, ground, linemode, dim);
+            self.row(
+                &painter,
+                rect,
+                entry,
+                dir.row_spans(index),
+                ground,
+                linemode,
+                dim,
+            );
         }
     }
 
@@ -375,6 +489,7 @@ impl Painting<'_> {
         painter: &egui::Painter,
         rect: egui::Rect,
         entry: &df_core::fs::Entry,
+        spans: &[Span],
         ground: egui::Color32,
         linemode: LineMode,
         dim: bool,
@@ -421,11 +536,16 @@ impl Painting<'_> {
 
         let name_left = rect.left() + ROW_PAD_X + ICON_COLUMN;
         let name_room = (rect.right() - ROW_PAD_X - mode_width - name_left).max(0.0);
-        let name_end = self.text_truncated(
+        let name_end = self.text_spans(
             painter,
             egui::pos2(name_left, rect.center().y),
             &entry.name,
             fade(name_color(entry, self.palette)),
+            // The part `f` or `/` matched, in the one colour on the palette
+            // that is neither a file type nor the selection: the highlight has
+            // to be readable as "this is why the row is here" and nothing else.
+            fade(self.palette.sky),
+            spans,
             name_room,
         );
 
@@ -459,15 +579,54 @@ impl Painting<'_> {
         color: egui::Color32,
         max_width: f32,
     ) -> f32 {
+        self.text_spans(painter, pos, text, color, color, &[], max_width)
+    }
+
+    /// The same, with the filter's matched runs in `highlight`.
+    ///
+    /// The spans are byte ranges into `text` produced by df-core's matcher
+    /// (PLAN §7.2), so they are already non-overlapping and in order; they are
+    /// still bounds-checked against character boundaries, because they were
+    /// computed against the name as it was when the query was applied and this
+    /// row could in principle have been rescanned since.
+    #[allow(clippy::too_many_arguments)]
+    fn text_spans(
+        &self,
+        painter: &egui::Painter,
+        pos: egui::Pos2,
+        text: &str,
+        color: egui::Color32,
+        highlight: egui::Color32,
+        spans: &[Span],
+        max_width: f32,
+    ) -> f32 {
         use egui::text::{LayoutJob, TextFormat, TextWrapping};
-        let mut job = LayoutJob::single_section(
-            text.to_string(),
-            TextFormat {
-                font_id: egui::FontId::proportional(FONT_SIZE),
-                color,
-                ..Default::default()
-            },
-        );
+        let format = |color: egui::Color32| TextFormat {
+            font_id: egui::FontId::proportional(FONT_SIZE),
+            color,
+            ..Default::default()
+        };
+        let mut job = LayoutJob::default();
+        let push = |job: &mut LayoutJob, run: &str, color| {
+            // An empty section is a section egui still lays out; skipping them
+            // keeps a name with no matches to exactly one.
+            if !run.is_empty() {
+                job.append(run, 0.0, format(color));
+            }
+        };
+        let mut at = 0usize;
+        for &(start, end) in spans {
+            if start < at || end > text.len() || start >= end {
+                continue;
+            }
+            if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                continue;
+            }
+            push(&mut job, &text[at..start], color);
+            push(&mut job, &text[start..end], highlight);
+            at = end;
+        }
+        push(&mut job, &text[at..], color);
         job.wrap = TextWrapping {
             max_width,
             max_rows: 1,
@@ -566,7 +725,7 @@ mod tests {
     /// The ratio describes the panes, not the panes plus the gaps.
     #[test]
     fn the_panes_split_at_the_configured_ratio() {
-        let l = layout(area(), [1, 4, 3]);
+        let l = layout(area(), [1, 4, 3], false);
         let usable = 1408.0 - GAP * 2.0 - GAP * 2.0;
         assert!((l.parent.width() - usable / 8.0).abs() < 1e-3);
         assert!((l.list.width() - usable * 4.0 / 8.0).abs() < 1e-3);
@@ -585,21 +744,48 @@ mod tests {
         assert_eq!(PANE_RADIUS as f32, ROW_RADIUS as f32 + ROW_INSET);
     }
 
-    /// A window too narrow for three panes must not produce negative widths.
+    /// A window too narrow for three panes must not produce negative widths —
+    /// nor a negative *height* once the strip and the bar have taken theirs.
     #[test]
     fn a_tiny_window_does_not_produce_negative_panes() {
-        let l = layout(
-            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
-            [1, 4, 3],
-        );
-        for rect in [l.parent, l.list, l.preview] {
-            assert!(rect.width() >= 0.0, "{rect:?}");
+        for strip in [false, true] {
+            let l = layout(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
+                [1, 4, 3],
+                strip,
+            );
+            for rect in [l.parent, l.list, l.preview, l.bar] {
+                assert!(rect.width() >= 0.0 && rect.height() >= 0.0, "{rect:?}");
+            }
         }
+    }
+
+    /// The bar is always reserved, and the strip only takes space when it is
+    /// asked for (PLAN §2: the strip appears at two tabs).
+    #[test]
+    fn the_chrome_brackets_the_panes() {
+        let bare = layout(area(), [1, 4, 3], false);
+        assert_eq!(bare.strip, None);
+        assert!((bare.bar.height() - CHROME_HEIGHT).abs() < 1e-3);
+        assert!((bare.list.bottom() - (bare.bar.top() - GAP)).abs() < 1e-3);
+        assert!((bare.list.top() - GAP).abs() < 1e-3);
+
+        let with_strip = layout(area(), [1, 4, 3], true);
+        let strip = with_strip.strip.expect("a strip was asked for");
+        assert!((strip.height() - CHROME_HEIGHT).abs() < 1e-3);
+        assert!((with_strip.list.top() - (strip.bottom() + GAP)).abs() < 1e-3);
+        // The strip costs the panes exactly its own height plus one gap, and
+        // nothing else moves.
+        assert!(
+            (bare.list.height() - with_strip.list.height() - CHROME_HEIGHT - GAP).abs() < 1e-3
+        );
+        assert_eq!(bare.bar, with_strip.bar);
+        assert!((bare.list.width() - with_strip.list.width()).abs() < 1e-3);
     }
 
     #[test]
     fn rows_stack_downwards_from_the_scroll_position() {
-        let content = content_rect(layout(area(), [1, 4, 3]).list);
+        let content = content_rect(layout(area(), [1, 4, 3], false).list);
         let top = row_rect(content, 0.0, 0);
         assert!((top.top() - content.top()).abs() < 1e-3);
         assert!((top.height() - ROW_HEIGHT).abs() < 1e-3);
@@ -613,7 +799,7 @@ mod tests {
 
     #[test]
     fn hit_testing_finds_the_row_under_the_pointer() {
-        let content = content_rect(layout(area(), [1, 4, 3]).list);
+        let content = content_rect(layout(area(), [1, 4, 3], false).list);
         let inside = |index: usize| row_rect(content, 0.0, index).center();
         assert_eq!(row_at(content, 0.0, 40, inside(0)), Some(0));
         assert_eq!(row_at(content, 0.0, 40, inside(7)), Some(7));

@@ -241,6 +241,29 @@ impl Tab {
         };
     }
 
+    /// What the tab strip calls this tab: the directory's own name, or `/` at
+    /// the root, which genuinely has none.
+    pub fn title(&self) -> String {
+        match self.cwd.path().file_name() {
+            Some(name) => name.to_string_lossy().into_owned(),
+            None => self.cwd.path().to_string_lossy().into_owned(),
+        }
+    }
+
+    /// Re-read both panes without rebuilding them.
+    ///
+    /// The difference from [`Tab::rescan_all`] is the parent listing: this keeps
+    /// it, and with it the scroll position and the cursor. It is what a tab gets
+    /// when it comes back on screen — a tab that is not active is not watched
+    /// (PLAN §2 watches the active tab's directories), so what it is showing may
+    /// be minutes old, but it is showing the right *place* and should not jump.
+    pub fn rescan(&mut self, scanner: &Scanner, now: Instant) {
+        self.cwd.begin_scan(scanner, now);
+        if let Some(parent) = &mut self.parent {
+            parent.begin_scan(scanner, now);
+        }
+    }
+
     /// The directories this tab wants watched (PLAN §2: the list and its
     /// parent).
     pub fn watched(&self) -> Vec<PathBuf> {

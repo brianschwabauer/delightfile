@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use df_core::config::{Config, LineMode, MgrConfig, SortBy, Theme};
-use df_core::fs::{random_seed, Scanner, SortOptions, WatchEvent, Watcher};
+use df_core::fs::{random_seed, FindDirection, Scanner, SortOptions, WatchEvent, Watcher};
 use df_core::keymap::{
-    Chord, Command, ContextStack, Dispatch, KeymapState, Registry, WhenFlags,
+    Chord, Command, Context, ContextStack, Dispatch, KeymapState, Registry, WhenFlags,
 };
 
 use winit::application::ApplicationHandler;
@@ -32,12 +32,18 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+use crate::chrome;
 use crate::graphics::{Gfx, GfxError};
+use crate::help::{self, Help};
 use crate::hover::Hovers;
+use crate::input::{Prompt, PromptKind};
 use crate::ripple::Ripples;
+use crate::select::{self, Visual};
 use crate::tab::Tab;
+use crate::tabs::Tabs;
 use crate::theme::Palette;
 use crate::ui::{self, Column, Control, CursorGlow, ListView};
+use crate::whichkey::WhichKey;
 
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
 /// columns (PLAN §2) to each be usable at once — the middle column is the one
@@ -99,6 +105,24 @@ impl std::fmt::Debug for Waker {
     }
 }
 
+/// One keystroke, as both of the things a keystroke can be.
+///
+/// A key that is bound is a [`Chord`]; a key that is *typed into something* is
+/// text. They are not alternatives — `f` is a command in the browser and the
+/// letter `f` in a filter box, and which one it is depends on state the key
+/// handler does not have. So both readings are carried through to the router,
+/// which is the one place that knows whether anything is open to type into.
+///
+/// `text` is `None` for anything that is not printable — control characters
+/// arrive on winit's `text` field too, and `Esc` inserting `\u{1b}` into a
+/// filter is the kind of bug that is invisible until somebody's query stops
+/// matching for no reason.
+#[derive(Debug, Clone)]
+struct Press {
+    chord: Option<Chord>,
+    text: Option<String>,
+}
+
 /// How a session ended, and therefore whether the cwd-file is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Quit {
@@ -137,7 +161,7 @@ pub struct App {
     context: ContextStack,
     scanner: Scanner,
     watcher: Watcher,
-    tab: Tab,
+    tabs: Tabs,
     /// `--cwd-file`, written on a `q` quit (PLAN §3).
     cwd_file: Option<PathBuf>,
     quit: Option<Quit>,
@@ -146,8 +170,28 @@ pub struct App {
     /// Keystrokes that arrived since the last frame. Queued rather than acted
     /// on in `window_event` because a command needs the pane geometry — a page
     /// is however many rows are on screen — and that is only known mid-frame.
-    pending_keys: Vec<Chord>,
+    pending_keys: Vec<Press>,
     modifiers: ModifiersState,
+    /// The bottom bar, when something is being typed into it.
+    prompt: Option<Prompt>,
+    /// Visual mode (`v` / `V`), while it is on.
+    visual: Option<Visual>,
+    /// The last `/` or `?`, so `n` and `N` have something to repeat.
+    last_find: Option<(String, FindDirection)>,
+
+    // ── Overlays ────────────────────────────────────────────────────────────
+    /// The `~` / `F1` help browser's view state, while it is open.
+    help: Option<Help>,
+    /// The help browser's own `f` filter. Held here rather than in the prompt
+    /// so that submitting the filter can close the bar without also throwing
+    /// away what was typed into it.
+    help_query: String,
+    /// The which-key card's timing (PLAN §4).
+    which: WhichKey,
+    /// What the card lists: `(keys, description)` in df-core's declaration
+    /// order. Kept after the chord resolves so the card has something to draw
+    /// while it fades.
+    which_rows: Vec<(String, String)>,
 
     // ── Painting ────────────────────────────────────────────────────────────
     /// Hover/press amounts for every row on screen (PLAN §8).
@@ -217,11 +261,18 @@ impl App {
             context: ContextStack::browser(),
             scanner,
             watcher,
-            tab,
+            tabs: Tabs::new(tab),
             cwd_file: args.cwd_file,
             quit: None,
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
+            prompt: None,
+            visual: None,
+            last_find: None,
+            help: None,
+            help_query: String::new(),
+            which: WhichKey::new(),
+            which_rows: Vec::new(),
             hovers: Hovers::new(),
             cursor_glow: Hovers::new(),
             ripples: Ripples::new(),
@@ -231,6 +282,18 @@ impl App {
 
     fn sort(&self) -> SortOptions {
         sort_options(&self.mgr, self.seed)
+    }
+
+    /// The tab on screen. Every command in this file acts on this one — a tab
+    /// you are not looking at is a directory nobody asked about.
+    fn tab(&self) -> &Tab {
+        self.tabs.active()
+    }
+
+    /// The listing the cursor is in, which is what most commands mean by "the
+    /// directory".
+    fn dir(&mut self) -> &mut df_core::fs::DirState {
+        &mut self.tabs.active_mut().cwd.dir
     }
 
     fn init_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<(), GfxError> {
@@ -274,14 +337,18 @@ impl App {
         let now = Instant::now();
         let mut changed = false;
         for update in self.scanner.drain() {
-            if self.tab.apply(&update) {
+            // Every tab, not only the active one: a tab opened a moment ago is
+            // still loading behind the strip.
+            if self.tabs.apply(&update) {
                 changed = true;
             }
         }
         if changed {
             // The parent's marker follows the path, and the row it belongs on
             // may only just have arrived in a batch.
-            self.tab.sync_parent_cursor();
+            for tab in self.tabs.iter_mut() {
+                tab.sync_parent_cursor();
+            }
         }
 
         for event in self.watcher.drain() {
@@ -292,7 +359,7 @@ impl App {
                 // nearest ancestor that still does is what a person would do
                 // by hand, and leaving the pane showing a listing of a deleted
                 // directory is the alternative.
-                WatchEvent::Gone(dir) if dir == self.tab.cwd.path() => {
+                WatchEvent::Gone(dir) if dir == self.tab().cwd.path() => {
                     let up = nearest_existing(&dir);
                     log::info!("{} is gone; moving to {}", dir.display(), up.display());
                     self.navigate(up, now);
@@ -306,26 +373,42 @@ impl App {
     }
 
     fn rescan(&mut self, dir: &Path, now: Instant) {
-        if dir == self.tab.cwd.path() {
-            self.tab.cwd.begin_scan(&self.scanner, now);
+        let scanner = &self.scanner;
+        let tab = self.tabs.active_mut();
+        if dir == tab.cwd.path() {
+            tab.cwd.begin_scan(scanner, now);
         }
-        if let Some(parent) = &mut self.tab.parent {
+        if let Some(parent) = &mut tab.parent {
             if dir == parent.path() {
-                parent.begin_scan(&self.scanner, now);
+                parent.begin_scan(scanner, now);
             }
         }
     }
 
     fn refresh_all(&mut self, now: Instant) {
         let (mgr, sort) = (self.mgr.clone(), self.sort());
-        self.tab.rescan_all(&mgr, sort, &self.scanner, now);
-        self.watcher.watch(self.tab.watched());
+        self.tabs
+            .active_mut()
+            .rescan_all(&mgr, sort, &self.scanner, now);
+        self.rewatch();
     }
 
     fn navigate(&mut self, path: PathBuf, now: Instant) {
         let (mgr, sort) = (self.mgr.clone(), self.sort());
-        self.tab.navigate(path, &mgr, sort, &self.scanner, now);
-        self.watcher.watch(self.tab.watched());
+        self.tabs
+            .active_mut()
+            .navigate(path, &mgr, sort, &self.scanner, now);
+        // Moving is leaving: a visual run is anchored to a row in the directory
+        // that is no longer on screen.
+        self.visual = None;
+        self.rewatch();
+    }
+
+    /// Point the watcher at the active tab's directories (PLAN §2: the list and
+    /// its parent). Called after anything that changes which those are —
+    /// including a tab switch, which is the whole reason this is a function.
+    fn rewatch(&mut self) {
+        self.watcher.watch(self.tabs.active().watched());
     }
 
     // ── Commands ────────────────────────────────────────────────────────────
@@ -340,18 +423,331 @@ impl App {
         // with the preview in Phase 3), and nothing playable can be hovered
         // until there is a media pipeline to say so.
         let flags = WhenFlags::LIST;
-        for chord in std::mem::take(&mut self.pending_keys) {
+        for press in std::mem::take(&mut self.pending_keys) {
+            // A prompt takes the printable keys before the keymap sees them.
+            // This is what "insert mode" means with the vi editor still to come
+            // (PLAN §4.2): everything with a glyph is text, and everything else
+            // — `Esc`, `Enter`, the Ctrl and Alt chords — is a binding, which is
+            // exactly the set the `[input]` context binds.
+            if self.prompt.is_some() {
+                if let Some(text) = press.text.as_deref() {
+                    let modified = press
+                        .chord
+                        .is_some_and(|c| c.mods.ctrl || c.mods.alt || c.mods.super_key);
+                    if !modified {
+                        self.type_text(text);
+                        continue;
+                    }
+                }
+            }
+            let Some(chord) = press.chord else { continue };
             match self
                 .keymap
                 .dispatch(&mut self.keys, &self.context, flags, chord, now)
             {
                 Dispatch::Match(command) => self.run(command, page, now),
-                // The chord is held. The which-key card that shows what could
-                // finish it is a later checkbox; the state it reads is live.
-                Dispatch::Pending { .. } => {}
+                // The chord is held: remember what could finish it, in df-core's
+                // declaration order (PLAN §4), for the card to draw once it is
+                // due. Nothing is shown yet — that is [`WhichKey`]'s decision.
+                Dispatch::Pending { continuations, .. } => {
+                    self.which_rows = continuations
+                        .iter()
+                        .map(|c| (c.label(), c.description.clone()))
+                        .collect();
+                }
                 Dispatch::NoMatch => log::trace!("unbound: {}", chord.label()),
             }
         }
+    }
+
+    // ── The bottom bar ──────────────────────────────────────────────────────
+
+    /// Type into the open prompt, and let whatever it drives keep up.
+    fn type_text(&mut self, text: &str) {
+        let Some(prompt) = &mut self.prompt else { return };
+        prompt.line.insert(text);
+        self.prompt_changed();
+    }
+
+    /// Open the bar. `origin` is where the cursor is, which is what `Esc` puts
+    /// back and what every keystroke of a live find searches from.
+    fn open_prompt(&mut self, kind: PromptKind) {
+        let origin = self.tab().cwd.dir.cursor();
+        let mut prompt = Prompt::new(kind, origin);
+        // Re-opening a filter edits the query that is applied rather than
+        // starting from nothing — `f`, look, `f` again, refine. (Not the finds:
+        // `/` is a new search, and the old one is on `n`.)
+        let existing = match kind {
+            PromptKind::Filter => self.tab().cwd.dir.filter().to_string(),
+            PromptKind::HelpFilter => self.help_query.clone(),
+            _ => String::new(),
+        };
+        prompt.line.insert(&existing);
+        self.prompt = Some(prompt);
+        self.sync_context();
+        self.prompt_changed();
+    }
+
+    /// Everything that has to happen when the query changes: filter-as-you-type,
+    /// find-as-you-type, and the help sheet narrowing under the cursor.
+    fn prompt_changed(&mut self) {
+        let Some(prompt) = &self.prompt else { return };
+        let (kind, query, origin) = (prompt.kind, prompt.query().to_string(), prompt.origin);
+        match kind {
+            PromptKind::Filter => self.dir().set_filter(query),
+            PromptKind::FindNext | PromptKind::FindPrev => {
+                let direction = find_direction(kind);
+                let dir = self.dir();
+                // From the origin every time, not from the last match: typing a
+                // second letter must narrow the search, never walk it forward
+                // through the directory.
+                dir.set_cursor(origin);
+                if !query.is_empty() {
+                    dir.find(&query, direction);
+                }
+            }
+            PromptKind::HelpFilter => {
+                self.help_query = query;
+                // The line the cursor was on may not be in the sheet any more,
+                // so it goes back to the first binding — which is also the one
+                // the narrowed list is *about*.
+                if let Some(mut help) = self.help {
+                    let lines = self.help_lines();
+                    help.reset(&lines);
+                    self.help = Some(help);
+                }
+            }
+        }
+        self.apply_visual();
+    }
+
+    /// One editing command against the open prompt's buffer.
+    fn edit_prompt(&mut self, command: Command) {
+        use Command as C;
+        let Some(prompt) = &mut self.prompt else { return };
+        let line = &mut prompt.line;
+        match command {
+            C::InputBackspace => line.backspace(),
+            C::InputDeleteUnder => line.delete_under(),
+            C::InputMoveLeft => line.move_left(),
+            C::InputMoveRight => line.move_right(),
+            C::InputMoveBol => line.move_bol(),
+            C::InputMoveEol => line.move_eol(),
+            C::InputKillBol => line.kill_bol(),
+            C::InputKillEol => line.kill_eol(),
+            C::InputKillWordBackward => line.kill_word_back(),
+            other => {
+                log::debug!("`{}` needs the vi editor, which is Phase 2", other.id());
+                return;
+            }
+        }
+        self.prompt_changed();
+    }
+
+    /// `Enter`: keep what was typed, put the keyboard back in the browser.
+    fn submit_prompt(&mut self) {
+        let Some(prompt) = self.prompt.take() else {
+            return;
+        };
+        if matches!(prompt.kind, PromptKind::FindNext | PromptKind::FindPrev) {
+            // What `n` and `N` repeat.
+            self.last_find = Some((prompt.query().to_string(), find_direction(prompt.kind)));
+        }
+        self.sync_context();
+    }
+
+    /// `Esc`: undo what the prompt did and close it.
+    fn cancel_prompt(&mut self) {
+        let Some(prompt) = self.prompt.take() else {
+            return;
+        };
+        match prompt.kind {
+            PromptKind::Filter => self.dir().clear_filter(),
+            PromptKind::FindNext | PromptKind::FindPrev => {
+                let origin = prompt.origin;
+                self.dir().set_cursor(origin);
+            }
+            PromptKind::HelpFilter => self.help_query.clear(),
+        }
+        self.sync_context();
+    }
+
+    /// `n` / `N` — repeat the last find, wrapping (PLAN §4.1).
+    fn repeat_find(&mut self, reverse: bool) {
+        let Some((query, direction)) = self.last_find.clone() else {
+            log::debug!("nothing to repeat: no find has been made yet");
+            return;
+        };
+        let direction = if reverse {
+            flip(direction)
+        } else {
+            direction
+        };
+        if !self.dir().find(&query, direction) {
+            log::debug!("`{query}` matches nothing here");
+        }
+        self.apply_visual();
+    }
+
+    // ── Selection (PLAN §4.1) ───────────────────────────────────────────────
+
+    /// `Space`: toggle the row under the cursor, then advance — the advance is
+    /// the binding's decision, not the model's, which is why it is here.
+    fn toggle_select(&mut self) {
+        let dir = self.dir();
+        let at = dir.cursor();
+        dir.toggle_selected(at);
+        dir.move_cursor(1);
+    }
+
+    /// `v` and `V`. Pressing the same key again leaves the mode, keeping
+    /// whatever the run selected — visual mode applies as it goes, so there is
+    /// nothing left to commit.
+    fn begin_visual(&mut self, selecting: bool) {
+        if self.visual.is_some() {
+            self.visual = None;
+            return;
+        }
+        let anchor = self.tab().cwd.dir.cursor();
+        self.visual = Some(Visual::new(selecting, anchor));
+        // The anchor row is in the run from the moment the mode opens: `v` then
+        // `Esc` with nothing selected would be a mode that did nothing.
+        self.apply_visual();
+    }
+
+    /// Bring the selection in line with where the cursor has got to.
+    ///
+    /// Called after *every* command, because any of them can move the cursor
+    /// and none of them should have to remember that visual mode is on. It is a
+    /// no-op when it is not.
+    fn apply_visual(&mut self) {
+        let Some(visual) = self.visual.as_mut() else {
+            return;
+        };
+        let dir = &mut self.tabs.active_mut().cwd.dir;
+        if dir.is_empty() {
+            return;
+        }
+        let last = dir.len() - 1;
+        let wanted = select::range(visual.anchor.min(last), dir.cursor().min(last));
+        let (leaving, entering) = select::range_delta(visual.applied, wanted);
+        for position in leaving {
+            let Some(name) = dir.row(position).map(|e| e.name.clone()) else {
+                continue;
+            };
+            // Back to what the row was before visual mode reached it — which
+            // for a row selected earlier with `Space` is *selected*.
+            let was = visual.was_selected(&name).unwrap_or(false);
+            dir.select_range(position, position, was);
+        }
+        for position in entering {
+            let Some(name) = dir.row(position).map(|e| e.name.clone()) else {
+                continue;
+            };
+            visual.remember(&name, dir.is_selected(&name));
+            dir.select_range(position, position, visual.selecting);
+        }
+        visual.applied = Some(wanted);
+    }
+
+    // ── Overlays ────────────────────────────────────────────────────────────
+
+    fn open_help(&mut self) {
+        if self.help.is_some() {
+            return;
+        }
+        self.help = Some(Help::default());
+        self.help_query.clear();
+        self.sync_context();
+        // On the first binding rather than on the "Help" heading above it: the
+        // cursor must always be on something you could act on.
+        let lines = self.help_lines();
+        if let Some(help) = &mut self.help {
+            help.reset(&lines);
+        }
+    }
+
+    fn close_help(&mut self) {
+        self.help = None;
+        self.help_query.clear();
+        if self.prompt.as_ref().is_some_and(|p| p.kind.is_help()) {
+            self.prompt = None;
+        }
+        self.sync_context();
+    }
+
+    /// The context stack, rebuilt from what is open (PLAN §4).
+    ///
+    /// The overlays *stack* rather than replace, which is the model df-core's
+    /// registry is built on: Help sits on Files, and where both bind a key the
+    /// more specific one wins — `f` filters the help sheet, `↑` walks it — while
+    /// the browser's own keys stay reachable underneath. That is also what makes
+    /// the sheet honest, because it lists exactly what this stack can dispatch.
+    fn sync_context(&mut self) {
+        let mut stack = self.help_stack();
+        if self.prompt.is_some() {
+            stack.push(Context::Input);
+        }
+        self.context = stack;
+    }
+
+    /// The stack the help sheet documents: the browser, plus the help overlay
+    /// when it is open. Deliberately *without* the Input context that an open
+    /// prompt adds — a filter box that rewrote the list it was filtering into a
+    /// list of its own bindings would be no use to anybody.
+    fn help_stack(&self) -> ContextStack {
+        let mut stack = ContextStack::browser();
+        if self.help.is_some() {
+            stack.push(Context::Help);
+        }
+        stack
+    }
+
+    /// The `Esc` ladder (PLAN §4.1), one rung per press: cancel the chord →
+    /// close the prompt → close the overlay → leave visual mode → clear the
+    /// selection → clear the filter.
+    ///
+    /// One rung at a time is the whole point. `Esc` that cleared everything
+    /// would mean a stray press throws away a selection built up over a dozen
+    /// keystrokes, and there is no undo for a selection.
+    fn escape(&mut self) {
+        if self.keys.is_pending() {
+            self.keys.cancel();
+            return;
+        }
+        if self.prompt.is_some() {
+            self.cancel_prompt();
+            return;
+        }
+        if self.help.is_some() {
+            self.close_help();
+            return;
+        }
+        if self.visual.take().is_some() {
+            return;
+        }
+        let dir = self.dir();
+        if dir.selected_count() > 0 {
+            dir.clear_selection();
+            return;
+        }
+        if !dir.filter().is_empty() {
+            dir.clear_filter();
+        }
+        // The last rung is `focus = List`, which is where focus already is
+        // until the preview pane lands in Phase 3.
+    }
+
+    // ── Tabs (PLAN §2) ──────────────────────────────────────────────────────
+
+    /// Anything that changes which tab is on screen: the watcher follows, a
+    /// visual run anchored in the other tab ends, and the newly shown
+    /// directories are re-read — they were not being watched while they were
+    /// out of sight.
+    fn tab_changed(&mut self, now: Instant) {
+        self.visual = None;
+        self.tabs.active_mut().rescan(&self.scanner, now);
+        self.rewatch();
     }
 
     fn run(&mut self, command: Command, page: usize, now: Instant) {
@@ -363,25 +759,25 @@ impl App {
 
         match command {
             // ── The cursor ──────────────────────────────────────────────────
-            C::CursorUp => self.tab.cwd.dir.move_cursor(-1),
-            C::CursorDown => self.tab.cwd.dir.move_cursor(1),
-            C::HalfPageUp => self.tab.cwd.dir.move_cursor(-half),
-            C::HalfPageDown => self.tab.cwd.dir.move_cursor(half),
-            C::PageUp => self.tab.cwd.dir.move_cursor(-full),
-            C::PageDown => self.tab.cwd.dir.move_cursor(full),
-            C::CursorTop => self.tab.cwd.dir.set_cursor(0),
-            C::CursorBottom => self.tab.cwd.dir.set_cursor(usize::MAX),
+            C::CursorUp => self.dir().move_cursor(-1),
+            C::CursorDown => self.dir().move_cursor(1),
+            C::HalfPageUp => self.dir().move_cursor(-half),
+            C::HalfPageDown => self.dir().move_cursor(half),
+            C::PageUp => self.dir().move_cursor(-full),
+            C::PageDown => self.dir().move_cursor(full),
+            C::CursorTop => self.dir().set_cursor(0),
+            C::CursorBottom => self.dir().set_cursor(usize::MAX),
 
             // ── Moving between directories ──────────────────────────────────
             C::Leave => {
-                if let Some(parent) = self.tab.cwd.path().parent().map(Path::to_path_buf) {
+                if let Some(parent) = self.tab().cwd.path().parent().map(Path::to_path_buf) {
                     self.navigate(parent, now);
                 }
             }
             C::EnterOrPreview => {
                 // Directories only, for now: `→` on a *file* focuses the
                 // preview pane (PLAN §2.1), and there is no preview yet.
-                match self.tab.cwd.dir.cursor_entry() {
+                match self.tab().cwd.dir.cursor_entry() {
                     Some(entry) if entry.is_dir() => {
                         let path = entry.path.clone();
                         self.navigate(path, now);
@@ -392,27 +788,138 @@ impl App {
             }
             C::HistoryBack => {
                 let (mgr, sort) = (self.mgr.clone(), self.sort());
-                if self.tab.back(&mgr, sort, &self.scanner, now) {
-                    self.watcher.watch(self.tab.watched());
+                if self.tabs.active_mut().back(&mgr, sort, &self.scanner, now) {
+                    self.visual = None;
+                    self.rewatch();
                 }
             }
             C::HistoryForward => {
                 let (mgr, sort) = (self.mgr.clone(), self.sort());
-                if self.tab.forward(&mgr, sort, &self.scanner, now) {
-                    self.watcher.watch(self.tab.watched());
+                if self.tabs.active_mut().forward(&mgr, sort, &self.scanner, now) {
+                    self.visual = None;
+                    self.rewatch();
                 }
             }
             C::Goto(slot) => self.goto(slot, now),
+
+            // ── Selection ───────────────────────────────────────────────────
+            C::ToggleSelect => self.toggle_select(),
+            C::SelectAll => self.dir().select_all(),
+            C::InvertSelection => self.dir().invert_selection(),
+            C::VisualMode => self.begin_visual(true),
+            C::VisualUnset => self.begin_visual(false),
+
+            // ── Filter and find ─────────────────────────────────────────────
+            C::Filter => self.open_prompt(PromptKind::Filter),
+            C::FindNext => self.open_prompt(PromptKind::FindNext),
+            C::FindPrev => self.open_prompt(PromptKind::FindPrev),
+            C::FindArrowNext => self.repeat_find(false),
+            C::FindArrowPrev => self.repeat_find(true),
+            C::CancelSearch => {
+                self.dir().clear_filter();
+                self.last_find = None;
+            }
+
+            // ── Tabs ────────────────────────────────────────────────────────
+            C::TabCreate => {
+                let path = self.tab().cwd.path().to_path_buf();
+                let (mgr, sort) = (self.mgr.clone(), self.sort());
+                if self.tabs.create(path, &mgr, sort, &self.scanner, now) {
+                    // No re-read: the tab was built a line ago and its scan is
+                    // already in flight. Only the watcher has to follow.
+                    self.visual = None;
+                    self.rewatch();
+                } else {
+                    log::info!(
+                        "{} tabs is the maximum — `1`–`9` is the switch row",
+                        crate::tabs::MAX_TABS
+                    );
+                }
+            }
+            C::TabSwitch(n) => {
+                if self.tabs.switch_to(n as usize, now) {
+                    self.tab_changed(now);
+                }
+            }
+            C::TabPrev => {
+                if self.tabs.cycle(-1, now) {
+                    self.tab_changed(now);
+                }
+            }
+            C::TabNext => {
+                if self.tabs.cycle(1, now) {
+                    self.tab_changed(now);
+                }
+            }
+            // Swapping does not change *which* tab you are looking at, so
+            // nothing is re-read and nothing is re-watched: only the strip
+            // moves.
+            C::TabSwapPrev => {
+                self.tabs.swap(-1);
+            }
+            C::TabSwapNext => {
+                self.tabs.swap(1);
+            }
+            C::CloseTab => {
+                if self.tabs.close_active() {
+                    self.tab_changed(now);
+                } else {
+                    // The last tab: `Ctrl+c` is a quit, and a quit writes the
+                    // cwd-file (PLAN §4.1).
+                    self.quit = Some(Quit::WriteCwd);
+                }
+            }
+
+            // ── Overlays ────────────────────────────────────────────────────
+            // `~` and `F1` toggle: the key that opened the sheet is the one a
+            // hand reaches for to get rid of it again.
+            C::Help => {
+                if self.help.is_some() {
+                    self.close_help();
+                } else {
+                    self.open_help();
+                }
+            }
+            C::HelpFilter => self.open_prompt(PromptKind::HelpFilter),
+            C::OverlayClose => {
+                if self.prompt.is_some() {
+                    self.cancel_prompt();
+                } else {
+                    self.close_help();
+                }
+            }
+            C::OverlaySubmit => self.submit_prompt(),
+
+            // ── The line editor (PLAN §4.2) ─────────────────────────────────
+            // The motions and the kills, which are what the bar needs to be
+            // usable; the modes (`i`, `a`, `v`, `r`) and the operators arrive
+            // with the full vi editor in Phase 2, on top of this same buffer.
+            C::InputBackspace
+            | C::InputDeleteUnder
+            | C::InputMoveLeft
+            | C::InputMoveRight
+            | C::InputMoveBol
+            | C::InputMoveEol
+            | C::InputKillBol
+            | C::InputKillEol
+            | C::InputKillWordBackward => self.edit_prompt(command),
+            C::OverlayPrev | C::OverlayNext => {
+                // The help browser is the only overlay with a list in it so
+                // far; the others arrive with their phases.
+                let delta = if command == C::OverlayPrev { -1 } else { 1 };
+                self.move_help_cursor(delta);
+            }
 
             // ── What is shown ───────────────────────────────────────────────
             C::ToggleHidden => {
                 self.mgr.show_hidden = !self.mgr.show_hidden;
                 let show = self.mgr.show_hidden;
-                self.tab.cwd.dir.set_show_hidden(show);
-                if let Some(parent) = &mut self.tab.parent {
+                let tab = self.tabs.active_mut();
+                tab.cwd.dir.set_show_hidden(show);
+                if let Some(parent) = &mut tab.parent {
                     parent.dir.set_show_hidden(show);
                 }
-                self.tab.sync_parent_cursor();
+                tab.sync_parent_cursor();
             }
             C::LinemodeSize => self.mgr.linemode = LineMode::Size,
             C::LinemodePermissions => self.mgr.linemode = LineMode::Permissions,
@@ -442,13 +949,33 @@ impl App {
             // ── Leaving ─────────────────────────────────────────────────────
             C::Quit => self.quit = Some(Quit::WriteCwd),
             C::QuitNoCwdFile => self.quit = Some(Quit::Silent),
-            // The Esc ladder (PLAN §4.1) is mostly about state Phase 1 does not
-            // have yet. The rung that exists is abandoning a half-typed chord —
-            // and dispatch has already done that by the time this runs.
-            C::Escape => self.keys.cancel(),
+            C::Escape => self.escape(),
 
             other => log::debug!("`{}` is not implemented yet", other.id()),
         }
+        // Any of the above can move the cursor, and none of them should have to
+        // remember that visual mode is on.
+        self.apply_visual();
+    }
+
+    /// Move the help browser's cursor, if it is open.
+    ///
+    /// The lines are rebuilt here rather than cached because they are cheap and
+    /// because the alternative is a cache that has to be invalidated by the
+    /// filter, the context stack and every `keymap.toml` reload — three chances
+    /// for the help sheet to disagree with the keymap, which is the one thing it
+    /// exists not to do.
+    fn move_help_cursor(&mut self, delta: isize) {
+        let Some(mut help) = self.help else { return };
+        let lines = self.help_lines();
+        help.move_cursor(&lines, delta);
+        self.help = Some(help);
+    }
+
+    /// The help sheet as it stands: every live binding, narrowed by `f`.
+    fn help_lines(&self) -> Vec<crate::help::HelpLine> {
+        let rows = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::LIST);
+        help::lines(&rows, &self.help_query)
     }
 
     /// The `,` chord. PLAN §4.1: the time and size sorts **also switch the
@@ -461,11 +988,12 @@ impl App {
             self.mgr.linemode = mode;
         }
         let sort = self.sort();
-        self.tab.cwd.dir.set_sort(sort);
-        if let Some(parent) = &mut self.tab.parent {
+        let tab = self.tabs.active_mut();
+        tab.cwd.dir.set_sort(sort);
+        if let Some(parent) = &mut tab.parent {
             parent.dir.set_sort(sort);
         }
-        self.tab.sync_parent_cursor();
+        tab.sync_parent_cursor();
     }
 
     /// The `g` chord's bookmarks (PLAN §3's `[goto]` table).
@@ -498,11 +1026,22 @@ impl App {
         painter.rect_filled(area, 0, self.palette.crust);
 
         // Layout first: a page is however many rows fit, so the keys cannot be
-        // routed until the panes have been measured.
-        let layout = ui::layout(area, self.mgr.ratio);
+        // routed until the panes have been measured. It is measured *again*
+        // afterwards, because `t` and `Ctrl+c` change whether there is a tab
+        // strip and therefore how tall the panes are — painting this frame with
+        // the pre-keystroke geometry would leave the strip a frame behind the
+        // key that asked for it, on a frame nothing would follow.
+        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1);
+        let page = crate::viewport::visible_rows(
+            ui::content_rect(layout.list).height(),
+            ui::ROW_HEIGHT,
+        );
+        self.route_keys(page, now);
+        self.which.update(self.keys.which_key_due(), now);
+
+        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1);
         let list_content = ui::content_rect(layout.list);
         let page = crate::viewport::visible_rows(list_content.height(), ui::ROW_HEIGHT);
-        self.route_keys(page, now);
 
         // ── Pointer ─────────────────────────────────────────────────────────
         let (pointer, down, just_pressed) = ui.input(|i| {
@@ -512,18 +1051,41 @@ impl App {
                 i.pointer.primary_pressed(),
             )
         });
-        let scroll_rows = self.tab.cwd.scroll_rows(now);
+        let scroll_rows = self.tab().cwd.scroll_rows(now);
+        let slide = self.tabs.offset(now);
+        let tab_count = self.tabs.len();
         let over = pointer.and_then(|p| {
-            ui::row_at(list_content, scroll_rows, self.tab.cwd.dir.len(), p)
-                .map(|index| (Control::Row(Column::List, index), p))
+            let control = layout
+                .strip
+                .and_then(|strip| chrome::tab_at(strip, tab_count, p))
+                .map(Control::Tab)
+                .or_else(|| {
+                    ui::row_at(list_content, scroll_rows, self.tab().cwd.dir.len(), p)
+                        .map(|index| Control::Row(Column::List, index))
+                })?;
+            Some((control, p))
         });
         if let Some((control, position)) = over.filter(|_| just_pressed) {
-            let Control::Row(_, index) = control;
-            // The cursor moves on mouse-*down*, with the ripple: waiting for
+            // Everything happens on mouse-*down*, with the ripple: waiting for
             // the release would put the acknowledgement after the thing it is
             // acknowledging.
-            self.tab.cwd.dir.set_cursor(index);
-            let rect = ui::row_rect(list_content, scroll_rows, index);
+            let rect = match control {
+                Control::Row(_, index) => {
+                    self.dir().set_cursor(index);
+                    self.apply_visual();
+                    ui::row_rect(list_content, scroll_rows, index)
+                }
+                Control::Tab(index) => {
+                    if self.tabs.switch_to(index, now) {
+                        self.tab_changed(now);
+                    }
+                    layout
+                        .strip
+                        .map(|strip| chrome::tab_rects(strip, tab_count))
+                        .and_then(|rects| rects.get(index).copied())
+                        .unwrap_or(egui::Rect::ZERO)
+                }
+            };
             self.ripples.spawn(control, position, rect, now);
         }
         self.hovers.tick(
@@ -536,31 +1098,57 @@ impl App {
         // ── Scroll ──────────────────────────────────────────────────────────
         // The scrolloff rule is applied to the *target* row, not to where the
         // rows have animated to, so the maths never chases its own animation.
-        let list_first = crate::viewport::first_visible(
-            self.tab.cwd.first(),
-            self.tab.cwd.dir.cursor(),
-            self.tab.cwd.dir.len(),
-            page,
-            self.mgr.scrolloff,
-        );
-        self.tab.cwd.set_first(list_first, now);
-        self.cursor_glow
-            .tick(Some(self.tab.cwd.dir.cursor()), None, now);
-
+        let scrolloff = self.mgr.scrolloff;
         let parent_page = crate::viewport::visible_rows(
             ui::content_rect(layout.parent).height(),
             ui::ROW_HEIGHT,
         );
-        if let Some(parent) = &mut self.tab.parent {
+        let tab = self.tabs.active_mut();
+        let list_first = crate::viewport::first_visible(
+            tab.cwd.first(),
+            tab.cwd.dir.cursor(),
+            tab.cwd.dir.len(),
+            page,
+            scrolloff,
+        );
+        tab.cwd.set_first(list_first, now);
+        let cursor = tab.cwd.dir.cursor();
+        self.cursor_glow.tick(Some(cursor), None, now);
+
+        if let Some(parent) = &mut self.tabs.active_mut().parent {
             let first = crate::viewport::first_visible(
                 parent.first(),
                 parent.dir.cursor(),
                 parent.dir.len(),
                 parent_page,
-                self.mgr.scrolloff,
+                scrolloff,
             );
             parent.set_first(first, now);
         }
+
+        // ── The help sheet, and where it has scrolled to ─────────────────────
+        // Built before the painter exists, because building it needs `&mut
+        // self` and the painter holds the palette.
+        let help_view = match self.help {
+            Some(mut help) => {
+                let rect = chrome::help_rect(area, layout.bar);
+                let lines = self.help_lines();
+                let total =
+                    help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::LIST).len();
+                // The same scrolloff rule the panes use, on the same numbers:
+                // one list-scrolling behaviour in the program, not two.
+                help.first = crate::viewport::first_visible(
+                    help.first,
+                    help.cursor,
+                    lines.len(),
+                    chrome::help_page(rect),
+                    scrolloff,
+                );
+                self.help = Some(help);
+                Some((rect, lines, total, help))
+            }
+            None => None,
+        };
 
         // ── Paint ───────────────────────────────────────────────────────────
         let paint = ui::Painting {
@@ -579,7 +1167,7 @@ impl App {
         paint.pane(layout.list, self.palette.base, true);
         paint.pane(layout.preview, self.palette.mantle, false);
 
-        if let Some(parent) = &self.tab.parent {
+        if let Some(parent) = &self.tab().parent {
             paint.listing(ListView {
                 pane: layout.parent,
                 ground: self.palette.mantle,
@@ -593,12 +1181,14 @@ impl App {
                 linemode: LineMode::None,
                 dim: true,
                 slow_load: now.duration_since(parent.scan_started) >= LOADING_DELAY,
+                offset_x: slide,
+                show_selection: false,
             });
         }
         paint.listing(ListView {
             pane: layout.list,
             ground: list_ground,
-            dir: &self.tab.cwd.dir,
+            dir: &self.tab().cwd.dir,
             scroll_rows,
             column: Column::List,
             hovers: &self.hovers,
@@ -607,9 +1197,70 @@ impl App {
             cursor_glow: CursorGlow::Fading(&self.cursor_glow),
             linemode: self.mgr.linemode,
             dim: false,
-            slow_load: now.duration_since(self.tab.cwd.scan_started) >= LOADING_DELAY,
+            slow_load: now.duration_since(self.tab().cwd.scan_started) >= LOADING_DELAY,
+            offset_x: slide,
+            show_selection: true,
         });
         paint.preview_placeholder(layout.preview);
+
+        // ── The chrome ──────────────────────────────────────────────────────
+        if let Some(strip) = layout.strip {
+            let titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
+            chrome::tab_strip(
+                &paint,
+                strip,
+                &titles,
+                self.tabs.active_index(),
+                &self.hovers,
+                &self.ripples,
+            );
+        }
+
+        // The help sheet is drawn over the panes but *under* the bar, because
+        // the bar is where its filter is typed — an overlay that covered its own
+        // input would be asking a question it hid the answer box for.
+        if let Some((rect, lines, total, help)) = &help_view {
+            chrome::help_overlay(&paint, area, *rect, lines, help, *total);
+        }
+
+        match &self.prompt {
+            Some(prompt) => chrome::input_bar(&paint, layout.bar, prompt),
+            None if self.help.is_some() => chrome::hint_bar(
+                &paint,
+                layout.bar,
+                &[
+                    ("↑↓", "move"),
+                    ("f", "filter"),
+                    ("Esc", "close"),
+                ],
+            ),
+            None => {
+                let dir = &self.tab().cwd.dir;
+                chrome::status_bar(
+                    &paint,
+                    layout.bar,
+                    chrome::Status {
+                        selected: dir.selected_count(),
+                        position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
+                        rows: dir.len(),
+                        filter: dir.filter(),
+                        visual: self.visual.as_ref().map(|v| v.selecting),
+                    },
+                );
+            }
+        }
+
+        // Last, and over everything: the card is an answer to a key that is
+        // being held down right now, so nothing may cover it.
+        if self.which.visible(now) {
+            chrome::which_key(
+                &paint,
+                area,
+                layout.bar.top(),
+                &self.which_rows,
+                self.which.alpha(now),
+            );
+        }
 
         // ── The repaint discipline, in one place (PLAN §1) ──────────────────
         // A frame is asked for only while something is actually moving. A
@@ -618,21 +1269,37 @@ impl App {
         if self.hovers.animating()
             || self.cursor_glow.animating()
             || self.ripples.animating(now)
-            || self.tab.animating(now)
+            || self.tab().animating(now)
+            || self.tabs.animating(now)
+            || self.which.fading()
         {
             ui.ctx().request_repaint();
-        } else if let Some(due) = self.loading_deadline(now) {
-            // The one *scheduled* wake-up: the moment a slow read earns its
-            // label. Without it a directory that never sends a batch would stay
-            // blank forever, and with a poll it would cost frames for the
-            // 99.9% of reads that land immediately.
+        } else if let Some(due) = self.next_deadline(now) {
+            // The *scheduled* wake-ups, and there are exactly two kinds: the
+            // moment a slow read earns its label, and the moment a held chord
+            // earns its which-key card. Both are a single instant known in
+            // advance, so both are a `WaitUntil` and neither is a poll.
             ui.ctx().request_repaint_after(due);
+        }
+    }
+
+    /// When the next frame is owed by something that is *waiting* rather than
+    /// moving. `None` is the resting state: no deadline, no frame.
+    fn next_deadline(&self, now: Instant) -> Option<Duration> {
+        let card = self
+            .which
+            .deadline(self.keys.which_key_due())
+            .map(|at| at.saturating_duration_since(now));
+        match (self.loading_deadline(now), card) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
     /// How long until a pane has to admit it is loading, if one is about to.
     fn loading_deadline(&self, now: Instant) -> Option<Duration> {
-        let panes = std::iter::once(&self.tab.cwd).chain(self.tab.parent.iter());
+        let tab = self.tab();
+        let panes = std::iter::once(&tab.cwd).chain(tab.parent.iter());
         panes
             .filter(|p| p.dir.is_empty() && p.dir.state() == df_core::fs::LoadState::Loading)
             .map(|p| (p.scan_started + LOADING_DELAY).saturating_duration_since(now))
@@ -694,9 +1361,25 @@ impl App {
     /// Write the cwd-file if this quit calls for one, and say goodbye.
     fn finish(&mut self, event_loop: &ActiveEventLoop) {
         if let (Some(Quit::WriteCwd), Some(path)) = (self.quit, self.cwd_file.as_deref()) {
-            crate::cli::write_cwd_file(path, self.tab.cwd.path());
+            crate::cli::write_cwd_file(path, self.tab().cwd.path());
         }
         event_loop.exit();
+    }
+}
+
+/// Which way a prompt searches.
+fn find_direction(kind: PromptKind) -> FindDirection {
+    match kind {
+        PromptKind::FindPrev => FindDirection::Backward,
+        _ => FindDirection::Forward,
+    }
+}
+
+/// `N` is `n` the other way round.
+fn flip(direction: FindDirection) -> FindDirection {
+    match direction {
+        FindDirection::Forward => FindDirection::Backward,
+        FindDirection::Backward => FindDirection::Forward,
     }
 }
 
@@ -776,8 +1459,10 @@ impl ApplicationHandler<crate::Wake> for App {
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
                 // Key repeat is kept: holding `↓` has to scroll, and the keymap
                 // treats a repeat exactly as a press.
-                if let Some(chord) = crate::keys::chord(&event, self.modifiers) {
-                    self.pending_keys.push(chord);
+                let chord = crate::keys::chord(&event, self.modifiers);
+                let text = crate::keys::text(&event);
+                if chord.is_some() || text.is_some() {
+                    self.pending_keys.push(Press { chord, text });
                     gfx.window.request_redraw();
                 }
             }

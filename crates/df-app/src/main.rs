@@ -8,18 +8,24 @@
 //! and workers being startable before the window exists.
 
 mod app;
+mod chrome;
 mod cli;
 mod format;
 mod graphics;
+mod help;
 mod hover;
 mod icons;
+mod input;
 mod keys;
 mod motion;
 mod ripple;
+mod select;
 mod tab;
+mod tabs;
 mod theme;
 mod ui;
 mod viewport;
+mod whichkey;
 
 use winit::event_loop::EventLoop;
 

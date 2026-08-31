@@ -31,6 +31,22 @@ pub fn chord(event: &KeyEvent, mods: ModifiersState) -> Option<Chord> {
     chord_from(&event.key_without_modifiers(), mods).or_else(|| chord_from(&event.logical_key, mods))
 }
 
+/// What this keystroke *types*, if it types anything.
+///
+/// The same press is both a chord and — when something is open to type into —
+/// a character (see `app::Press`). winit reports the text a key produces
+/// including the control characters: `Esc` is `\u{1b}`, `Enter` is `\r`, `Tab`
+/// is `\t`. Those are keystrokes, not text, and a filter query with an escape
+/// character in it is a query that quietly stops matching, so anything with a
+/// control character in it is not text at all.
+pub fn text(event: &KeyEvent) -> Option<String> {
+    let text = event.text.as_deref()?;
+    if text.is_empty() || text.chars().any(char::is_control) {
+        return None;
+    }
+    Some(text.to_string())
+}
+
 /// The pure half, so the mapping can be tested without a window.
 pub fn chord_from(key: &WinitKey, mods: ModifiersState) -> Option<Chord> {
     let (key, implied_shift) = translate(key)?;
