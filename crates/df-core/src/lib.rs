@@ -14,6 +14,7 @@ pub mod config;
 pub mod fs;
 pub mod keymap;
 pub mod ops;
+pub mod preview;
 pub mod tasks;
 pub mod toml;
 
