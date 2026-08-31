@@ -28,6 +28,7 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 crossbeam-channel = "0.5"
+libc = "0.2"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 # `anyhow` and `serde_json` are here only because the vendored `dv-*` crates

@@ -7,3 +7,275 @@
 //! it is the only one that gets a confirm dialog. Copies are reflink-first
 //! (`FICLONE`) with a read/write fallback, so duplicating a 40 GB file on btrfs
 //! is instant and on ext4 is merely a copy.
+//!
+//! ## The shape of an operation
+//!
+//! Every operation in here is a plain function taking a [`TaskCtx`](crate::tasks::TaskCtx).
+//! That is the whole cancellation and progress story: the function calls
+//! `ctx.checkpoint()?` between chunks and directory entries, and `ctx.advance()`
+//! as bytes and files land. Run it on the pool and it is a task with a bar in
+//! the `w` panel; run it with `TaskCtx::detached()` and it is a synchronous
+//! call in a test. No operation knows which it is.
+//!
+//! ## What is deliberately not here (v1)
+//!
+//! - **Hardlink preservation across a copy.** Copying a tree in which two files
+//!   are the same inode produces two independent files. Preserving the link
+//!   means carrying an inode map for the whole tree and is only correct if the
+//!   copy is one atomic operation; `cp -a` does it, and so will v2. Nothing is
+//!   lost by not doing it, only disk.
+//! - **Extended attributes, ACLs and ownership.** `chown` needs privileges we
+//!   do not have; xattrs need per-filesystem support. Mode and mtime are
+//!   preserved, which is what a file manager's user sees.
+//! - **Redo.** Undo is a stack that only pops (PLAN §5).
+//! - **Queue reordering** in the task engine — that is the `w` panel's half of
+//!   the phase.
+
+pub mod copy;
+pub mod create;
+pub mod delete;
+pub mod jobs;
+pub mod journal;
+pub mod link;
+pub mod paste;
+pub mod trash;
+
+use std::path::{Component, Path, PathBuf};
+
+use crate::{DfError, Result};
+
+pub use copy::{copy_tree, measure, move_cross_device, move_path, CopyStats, COPY_CHUNK};
+pub use create::{create, rename, Created};
+pub use delete::{check_deletable, check_deletable_here, delete_permanent, remove_tree};
+pub use jobs::{DeleteJob, OpOutcome, Outcome, PasteJob, TrashJob};
+pub use journal::{
+    undo_record, FileKind, Fingerprint, Journal, MovedPath, OpRecord, UndoReport, JOURNAL_DEPTH,
+};
+pub use link::{hardlink, relative_to, symlink, LinkKind};
+pub use paste::{
+    execute as paste, plan_paste, unique_name, Clipboard, Conflict, PasteItem, PasteMode,
+    PastePlan, PasteReport, Resolution,
+};
+pub use trash::{Trash, TrashedItem};
+
+/// Make a path absolute and lexically clean, without touching the disk.
+///
+/// Lexical on purpose: `canonicalize` resolves symlinks, and a file manager
+/// that silently rewrote `~/Downloads/link-to-huge` into the huge thing's real
+/// path would copy, move and delete the wrong object. `..` is popped
+/// lexically, which is wrong in the presence of symlinked parents — so it is
+/// only ever used for *comparisons and display*, never as the path an
+/// operation actually acts on. Operations use the path the caller gave them.
+pub fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    for comp in absolute.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push("/");
+    }
+    out
+}
+
+/// Is `ancestor` at or above `path` in the tree? Lexical, over normalized
+/// paths, so `/a/b` is an ancestor of `/a/b/c` but not of `/a/bc`.
+pub fn is_ancestor(ancestor: &Path, path: &Path) -> bool {
+    let a = normalize(ancestor);
+    let p = normalize(path);
+    p.starts_with(&a)
+}
+
+/// Strictly below: an ancestor that is not the path itself.
+pub fn is_strict_ancestor(ancestor: &Path, path: &Path) -> bool {
+    let a = normalize(ancestor);
+    let p = normalize(path);
+    p != a && p.starts_with(&a)
+}
+
+/// Are these two paths the same file *on disk* (same device and inode)?
+///
+/// The lexical comparison is not enough: `~/x` and `/home/brian/x` are the same
+/// file through a symlinked `~`, and the "do not overwrite the source with its
+/// own copy" rail has to catch that. `false` when either side cannot be
+/// stat'ed, since a path that does not exist is not the same file as anything.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
+        _ => false,
+    }
+}
+
+/// The file name of a path, or an error naming the path that has none
+/// (`/`, or something ending in `..`).
+pub fn file_name(path: &Path) -> Result<&std::ffi::OsStr> {
+    path.file_name()
+        .ok_or_else(|| DfError::Op(format!("{} has no file name", path.display())))
+}
+
+/// Does this path exist, counting a broken symlink as existing?
+///
+/// `Path::exists` follows the link and answers "no" for a broken one, which
+/// would have us happily clobber it.
+pub fn exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// The fixture tree the operation tests run against (PLAN §9): gnarly names,
+/// created and torn down per test with nothing but `std::fs`.
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::path::{Path, PathBuf};
+
+    /// A directory under `$TMPDIR` that deletes itself on drop.
+    pub struct TempTree {
+        path: PathBuf,
+    }
+
+    impl TempTree {
+        pub fn new(label: &str) -> TempTree {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let unique = format!(
+                "delightfile-test-{}-{}-{}-{n}",
+                label,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).expect("temp dir");
+            TempTree { path }
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.path
+        }
+
+        pub fn join(&self, rel: impl AsRef<Path>) -> PathBuf {
+            self.path.join(rel)
+        }
+
+        /// Write a file, creating parents.
+        pub fn file(&self, rel: impl AsRef<Path>, contents: &[u8]) -> PathBuf {
+            let p = self.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).expect("parents");
+            }
+            std::fs::write(&p, contents).expect("write");
+            p
+        }
+
+        pub fn dir(&self, rel: impl AsRef<Path>) -> PathBuf {
+            let p = self.join(rel);
+            std::fs::create_dir_all(&p).expect("mkdir");
+            p
+        }
+
+        pub fn symlink(&self, target: impl AsRef<Path>, rel: impl AsRef<Path>) -> PathBuf {
+            let p = self.join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).expect("parents");
+            }
+            std::os::unix::fs::symlink(target.as_ref(), &p).expect("symlink");
+            p
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            // Best effort: a leaked temp dir is a nuisance, a panic in a
+            // destructor is a lost test failure.
+            let _ignored = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
+    /// The gnarly names of PLAN §9, in one place so every operation test
+    /// exercises the same set.
+    pub fn gnarly_names() -> Vec<String> {
+        vec![
+            "plain.txt".to_string(),
+            "with spaces.txt".to_string(),
+            "ünïcödé — 日本語 🎬.txt".to_string(),
+            "new\nline.txt".to_string(),
+            "'quoted' and \"double\".txt".to_string(),
+            "tab\there.txt".to_string(),
+            "back\\slash.txt".to_string(),
+            "-leading-dash.txt".to_string(),
+            // 255 bytes is the ext4/btrfs limit for one name component; the
+            // point is that nothing in here appends to a name without room.
+            "x".repeat(255),
+            "%20already-encoded.txt".to_string(),
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
+
+    use super::*;
+
+    #[test]
+    fn normalize_cleans_lexically() {
+        assert_eq!(normalize(Path::new("/a/./b/../c")), Path::new("/a/c"));
+        assert_eq!(normalize(Path::new("/a/b/../..")), Path::new("/"));
+        assert_eq!(normalize(Path::new("/")), Path::new("/"));
+        assert_eq!(normalize(Path::new("/a//b")), Path::new("/a/b"));
+    }
+
+    #[test]
+    fn normalize_makes_relative_absolute() {
+        let n = normalize(Path::new("relative/thing"));
+        assert!(n.is_absolute(), "{}", n.display());
+        assert!(n.ends_with("relative/thing"));
+    }
+
+    #[test]
+    fn ancestry_is_component_wise() {
+        assert!(is_ancestor(Path::new("/a/b"), Path::new("/a/b/c")));
+        assert!(is_ancestor(Path::new("/a/b"), Path::new("/a/b")));
+        assert!(!is_strict_ancestor(Path::new("/a/b"), Path::new("/a/b")));
+        assert!(
+            !is_ancestor(Path::new("/a/b"), Path::new("/a/bc")),
+            "a prefix of the *name* is not an ancestor"
+        );
+    }
+
+    #[test]
+    fn same_file_sees_through_a_symlinked_route() {
+        let t = fixture::TempTree::new("samefile");
+        let real = t.file("dir/file.txt", b"hi");
+        t.symlink(t.join("dir"), "link");
+        let through_link = t.join("link/file.txt");
+        assert!(same_file(&real, &through_link));
+        assert!(!same_file(&real, &t.join("dir/other")));
+    }
+
+    #[test]
+    fn exists_counts_a_broken_symlink() {
+        let t = fixture::TempTree::new("broken");
+        let link = t.symlink(t.join("nowhere"), "broken");
+        assert!(!link.exists(), "std follows the link");
+        assert!(exists(&link), "but the link itself is there");
+    }
+}

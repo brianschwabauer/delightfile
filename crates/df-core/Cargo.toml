@@ -12,6 +12,18 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 log.workspace = true
+# Worker threads publish scan results and watch events on channels and ring the
+# app's `Wake` bell (PLAN §1). `crossbeam-channel` is already in the tree and is
+# the one std::sync::mpsc cannot replace: multi-consumer, so a pool of scan
+# workers can share one request queue.
+crossbeam-channel.workspace = true
+# inotify has no std binding and is four syscalls (PLAN §1's bar for a new
+# dependency is "rewriting is impractical"; a watch crate does not clear it).
+# The FFI is confined to `fs::inotify`, the crate's only unsafe.
+# Also the two syscalls std does not expose elsewhere: the `FICLONE` ioctl
+# behind reflink copies (PLAN §5) and `getuid` for the freedesktop trash
+# `.Trash-$uid` directory.
+libc.workspace = true
 
 [lints]
 workspace = true

@@ -395,7 +395,7 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Hover/press system + easing module ported from delightviewer, with tests
 
 ### Phase 1 — browse
-- [ ] Directory model: async read, watch (inotify), sort modes, dir-first, hidden toggle
+- [x] Directory model: async read, watch (inotify), sort modes, dir-first, hidden toggle
 - [ ] Three-pane miller render `[1,4,3]`, cursor, scrolloff, linemodes, icons + theme colors
 - [ ] Navigation: arrow keys, gg/G, paging, Alt+←/→ history, `g` goto table, `--cwd-file`
 - [ ] Selection: Space, visual mode, Ctrl+a/r; filter `f`, find `/ ? n N`
