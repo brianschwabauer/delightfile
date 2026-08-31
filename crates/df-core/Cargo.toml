@@ -1,0 +1,17 @@
+[package]
+name = "df-core"
+description = "delightfile's headless half: fs model, sort/filter, op journal + undo, task engine, keymap engine, config. No window, no GPU."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately no winit/egui/wgpu (PLAN §1): everything in here has to be
+# unit-testable without a display, and the compile-time proof of that is the
+# dependency list staying this short.
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

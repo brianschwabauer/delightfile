@@ -1,0 +1,47 @@
+# Vendored from the delightvideo project (GPL-3.0-or-later, same author)
+# so delightviewer builds standalone.
+[package]
+name = "dv-media"
+description = "ffmpeg wrappers: probe, demux, decode, keyframe index, proxy/thumb/waveform generation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# ffmpeg-next 9.0 pairs with system ffmpeg 9 / libavcodec 63 (§2 pins the
+# crate × system-ffmpeg major; verified building against this machine's 9.0.1).
+# Default features give us codec/format/software-scaling/software-resampling —
+# exactly the demux/decode/swscale/swresample surface M1 needs.
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+dv-core = { path = "../dv-core" }
+ffmpeg-next = "9.0"
+# Only the still-image codecs we accept (§9) + JPEG for thumbnail encode (§4.3).
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+] }
+# Local speech-to-text (§18), behind the opt-in `transcribe` feature.
+# Default features only: CPU whisper.cpp built from source by whisper-rs-sys —
+# no "cuda"/"vulkan"/"openblas" (no GPU dependency creeps into the media
+# crate).
+whisper-rs = { version = "0.16", default-features = false, features = [
+    "log_backend",
+], optional = true }
+
+# `transcribe` is on by default upstream in delightvideo; in this vendored copy
+# it is off, because the viewer never transcribes and a workspace-wide
+# `cargo build`/`cargo test` would otherwise build whisper.cpp from source.
+# The code is kept intact — build with `--features transcribe` to get it back.
+[features]
+default = []
+transcribe = ["dep:whisper-rs"]
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

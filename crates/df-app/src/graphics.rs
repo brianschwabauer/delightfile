@@ -1,0 +1,197 @@
+//! wgpu surface + egui plumbing, kept apart from the event loop in `app.rs`
+//! (the shape delightviewer's `dlv-app/src/{app,graphics}.rs` settled on, which
+//! it in turn inherited from delightvideo).
+//!
+//! Deliberately not eframe (PLAN §1): delightfile owns its render loop so that
+//! video frames can be drawn as wgpu textures under egui in the preview pane
+//! (Phase 3), and so the cold-start path can decide exactly what the first
+//! frame contains — the directory listing has to be on screen before the
+//! preview workers have finished anything.
+//!
+//! wgpu is reached only through `egui_wgpu::wgpu`. That re-export is what
+//! guarantees there is exactly one wgpu in the build, shared with `dv-playback`
+//! when the preview pane arrives.
+
+use std::sync::Arc;
+
+use egui_wgpu::wgpu;
+use winit::window::Window;
+
+/// Everything that must exist before a pixel can be drawn.
+pub struct Gfx {
+    pub window: Arc<Window>,
+    pub surface: wgpu::Surface<'static>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub surface_config: wgpu::SurfaceConfiguration,
+    pub renderer: egui_wgpu::Renderer,
+    pub egui_ctx: egui::Context,
+    pub egui_state: egui_winit::State,
+}
+
+/// The window background: catppuccin-mocha `base` (#1e1e2e), the same ground
+/// the yazi config this replaces sits on (PLAN §3, §8). It is the clear color
+/// as well as the pane background, so a resize never flashes a different
+/// surface behind the panes before egui has repainted them.
+pub const BG: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x1e, 0x2e);
+
+impl Gfx {
+    pub fn new(window: Arc<Window>) -> Result<Gfx, GfxError> {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|e| GfxError(format!("create surface: {e}")))?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))
+        .map_err(|e| GfxError(format!("no suitable adapter: {e}")))?;
+        log::debug!("adapter: {:?}", adapter.get_info().name);
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .map_err(|e| GfxError(format!("request device: {e}")))?;
+
+        let size = window.inner_size();
+        let mut surface_config = surface
+            // `.max(1)`: a compositor can hand us a zero-sized window before
+            // the first configure, and a zero-sized surface is a validation
+            // error rather than an empty picture.
+            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+            .ok_or_else(|| GfxError("surface not supported by adapter".into()))?;
+        // AutoVsync: a file manager is idle most of its life and must never
+        // spin the GPU. Tearing buys nothing here — there is no game loop to
+        // shave a frame off.
+        surface_config.present_mode = wgpu::PresentMode::AutoVsync;
+        // egui outputs sRGB-encoded colors; give it a non-sRGB view format so
+        // the hardware does not encode them a second time and wash the theme
+        // out.
+        let caps = surface.get_capabilities(&adapter);
+        if let Some(&fmt) = caps.formats.iter().find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+            )
+        }) {
+            surface_config.format = fmt;
+        }
+        surface.configure(&device, &surface_config);
+
+        let egui_ctx = egui::Context::default();
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            Some(device.limits().max_texture_dimension_2d as usize),
+        );
+        let renderer = egui_wgpu::Renderer::new(
+            &device,
+            surface_config.format,
+            egui_wgpu::RendererOptions::default(),
+        );
+
+        Ok(Gfx {
+            window,
+            surface,
+            device,
+            queue,
+            surface_config,
+            renderer,
+            egui_ctx,
+            egui_state,
+        })
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.surface.configure(&self.device, &self.surface_config);
+    }
+
+    /// Tessellate and present one egui frame. Returns false when the surface
+    /// was unavailable and the caller should just ask for another redraw.
+    pub fn present(&mut self, full_output: egui::FullOutput) -> bool {
+        use wgpu::CurrentSurfaceTexture as Cst;
+        let frame = match self.surface.get_current_texture() {
+            Cst::Success(f) | Cst::Suboptimal(f) => f,
+            Cst::Lost | Cst::Outdated => {
+                self.surface.configure(&self.device, &self.surface_config);
+                return false;
+            }
+            Cst::Timeout | Cst::Occluded | Cst::Validation => {
+                log::debug!("surface frame unavailable; skipping");
+                return false;
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let pixels_per_point = full_output.pixels_per_point;
+        let primitives = self
+            .egui_ctx
+            .tessellate(full_output.shapes, pixels_per_point);
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.surface_config.width, self.surface_config.height],
+            pixels_per_point,
+        };
+
+        for (id, delta) in &full_output.textures_delta.set {
+            self.renderer
+                .update_texture(&self.device, &self.queue, *id, delta);
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("egui"),
+            });
+        let user_buffers = self.renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &primitives,
+            &screen,
+        );
+        {
+            let rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: BG.r() as f64 / 255.0,
+                            g: BG.g() as f64 / 255.0,
+                            b: BG.b() as f64 / 255.0,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            let mut rpass = rpass.forget_lifetime();
+            self.renderer.render(&mut rpass, &primitives, &screen);
+        }
+        for id in &full_output.textures_delta.free {
+            self.renderer.free_texture(id);
+        }
+        self.queue
+            .submit(user_buffers.into_iter().chain([encoder.finish()]));
+        frame.present();
+        true
+    }
+}
+
+/// Graphics init failed — fatal, and there is nothing useful to do but say so.
+#[derive(Debug, thiserror::Error)]
+#[error("graphics: {0}")]
+pub struct GfxError(pub String);

@@ -1,0 +1,25 @@
+[package]
+name = "df-app"
+description = "delightfile — a native, GPU-rendered keyboard-first file manager for Wayland."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "delightfile"
+path = "src/main.rs"
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+df-core.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+egui-winit.workspace = true
+winit.workspace = true
+pollster.workspace = true
+
+[lints]
+workspace = true

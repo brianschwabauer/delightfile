@@ -388,8 +388,8 @@ is delightviewer's painter-side port of delightstack — reuse its code and cons
 Work top to bottom; tick boxes in the same commit as the work.
 
 ### Phase 0 — skeleton
-- [ ] Workspace scaffold: df-core, df-app, vendor dv-core/dv-media/dv-playback; lints, profiles
-- [ ] winit ApplicationHandler + egui + egui-wgpu window, repaint-on-event, Wake event
+- [x] Workspace scaffold: df-core, df-app, vendor dv-core/dv-media/dv-playback; lints, profiles
+- [x] winit ApplicationHandler + egui + egui-wgpu window, repaint-on-event, Wake event
 - [ ] Hand-rolled TOML config loading (`delightfile.toml`, `keymap.toml`, `theme.toml`)
 - [ ] Keymap engine: registry, context stack, chords, `when` predicates, reserved keys
 - [ ] Hover/press system + easing module ported from delightviewer, with tests

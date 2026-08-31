@@ -1,0 +1,29 @@
+# Vendored from the delightvideo project (GPL-3.0-or-later, same author)
+# so delightviewer builds standalone.
+[package]
+name = "dv-playback"
+description = "Playback controller, clocks, frame queue, audio render thread, DSP, cpal output."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+log.workspace = true
+dv-core = { path = "../dv-core" }
+# `default-features = false` drops whisper.cpp: playback never transcribes,
+# and a consumer that only wants playback (delightviewer) should not build it.
+# In this workspace nothing enables `transcribe`, so whisper never builds.
+dv-media = { path = "../dv-media", default-features = false }
+# Same major as egui-wgpu 0.35's re-export (cargo unifies to one wgpu 29.x;
+# dv-app keeps using `egui_wgpu::wgpu` per the M0 rule).
+wgpu = "29"
+cpal = "0.16"
+nnnoiseless = { version = "0.5", default-features = false }
+ebur128 = "0.1"
+
+[lints]
+workspace = true

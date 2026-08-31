@@ -1,0 +1,22 @@
+# Vendored from the delightvideo project (GPL-3.0-or-later, same author)
+# so delightviewer builds standalone.
+[package]
+name = "dv-core"
+description = "Project model, commands/undo, timeline math, persistence. Pure logic — no ffmpeg, no GPU."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+log.workspace = true
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+zstd = "0.13.3"
+blake3 = "1.8.5"
+
+[lints]
+workspace = true

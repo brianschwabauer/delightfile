@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dv-core",
+    "crates/dv-media",
+    "crates/dv-playback",
+    "crates/df-core",
+    "crates/df-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# GPL because the vendored `dv-*` crates are: they arrived from delightvideo
+# through delightviewer under GPL-3.0-or-later and stay under it here.
+license = "GPL-3.0-or-later"
+repository = "https://github.com/brianschwabauer/delightfile"
+
+[workspace.lints.rust]
+unsafe_code = "warn" # dv-media overrides: ffmpeg FFI lives there
+
+[workspace.lints.clippy]
+all = "warn"
+unwrap_used = "warn"
+
+[workspace.dependencies]
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+# `anyhow` and `serde_json` are here only because the vendored `dv-*` crates
+# name them; nothing in `df-*` uses either (errors are `thiserror` enums, and
+# config parsing is hand-rolled per PLAN §3).
+anyhow = "1"
+serde_json = "1"
+
+# The headless half: fs model, sort/filter, op journal, task engine, keymap,
+# config. No winit/egui/wgpu, so it is testable without a window (PLAN §1).
+df-core = { path = "crates/df-core" }
+
+# Vendored from delightviewer (which vendored them from delightvideo), copied
+# unchanged so this repo builds standalone. `default-features = false` on
+# dv-media drops whisper.cpp — a file manager never transcribes.
+dv-media = { path = "crates/dv-media", default-features = false }
+dv-playback = { path = "crates/dv-playback" }
+dv-core = { path = "crates/dv-core" }
+
+# Version lockstep with delightviewer, so the two programs can share vendored
+# code and a thumbnail cache without a second wgpu in the tree. wgpu is reached
+# only through `egui_wgpu::wgpu`, never as a direct dependency (PLAN §1).
+egui = "0.35.0"
+egui-wgpu = "0.35.0"
+egui-winit = "0.35.0"
+winit = "0.30.13"
+pollster = "1.0.1"
+image = { version = "0.25", default-features = false, features = [
+    "jpeg",
+    "png",
+    "webp",
+    "gif",
+] }
+
+[profile.dev]
+opt-level = 1 # egui/wgpu are unusable at opt-level 0
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
