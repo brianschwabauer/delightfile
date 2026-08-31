@@ -29,12 +29,12 @@
 //! overwrite therefore does nothing rather than finishing off the file the
 //! overwrite damaged.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
-use super::journal::{Fingerprint, MovedPath, OpRecord};
+use super::journal::{CopyManifest, MovedPath, OpRecord};
 use super::trash::{suffixed, MAX_TRASH_COLLISIONS};
 use super::{exists, file_name, is_ancestor_resolved, is_real_dir, normalize, same_file};
 
@@ -110,8 +110,27 @@ pub struct Conflict {
 pub enum Resolution {
     Overwrite,
     Skip,
-    /// Keep both, under this name.
+    /// Keep both, under this name — a **plain file name**, never a path.
+    ///
+    /// The dialog's text field holds a name, and a name is what lands in the
+    /// destination directory. Anything with a `/` in it, `.`, `..`, an empty
+    /// string or an absolute path is refused by [`PastePlan::resolve`]: a
+    /// relative multi-component answer used to be joined against the *process
+    /// working directory*, so a paste could quietly write somewhere the user
+    /// was not even looking at.
     Rename(PathBuf),
+}
+
+/// The name a rename answer must be: one ordinary path component.
+fn rename_name(name: &Path) -> Result<&std::ffi::OsStr> {
+    let mut components = name.components();
+    let (Some(Component::Normal(first)), None) = (components.next(), components.next()) else {
+        return Err(DfError::Op(format!(
+            "\"{}\" is not a usable name: type a file name, not a path",
+            name.display()
+        )));
+    };
+    Ok(first)
 }
 
 /// What a paste would do, before it does any of it.
@@ -135,26 +154,42 @@ impl PastePlan {
     /// Answer one conflict, by source path. Unknown sources are ignored, since
     /// a dialog answering a conflict that has already been resolved is a race,
     /// not an error.
-    pub fn resolve(&mut self, src: &Path, answer: &Resolution) {
+    ///
+    /// Errors only on a [`Resolution::Rename`] carrying something that is not a
+    /// plain file name; the conflict is then left unanswered, so the dialog can
+    /// show the message and ask again.
+    pub fn resolve(&mut self, src: &Path, answer: &Resolution) -> Result<()> {
+        if let Resolution::Rename(name) = answer {
+            rename_name(name)?;
+        }
         let Some(index) = self.conflicts.iter().position(|c| c.src == src) else {
-            return;
+            return Ok(());
         };
         let conflict = self.conflicts.remove(index);
         self.apply_one(conflict, answer);
+        Ok(())
     }
 
     /// The dialog's "apply to all" — the same answer for every remaining
     /// conflict.
+    ///
+    /// A single explicit rename cannot be applied to many files without
+    /// colliding, so "rename all" means "keep both, auto-named": every
+    /// conflict's own suggested name is used and the name in the answer is
+    /// ignored, which is why this one cannot fail.
     pub fn resolve_all(&mut self, answer: &Resolution) {
         for conflict in std::mem::take(&mut self.conflicts) {
-            // A single explicit rename cannot be applied to many files without
-            // colliding, so "rename all" means "keep both, auto-named" — which
-            // is the suggested name each conflict already carries.
-            let answer = match answer {
-                Resolution::Rename(_) => Resolution::Rename(conflict.suggested.clone()),
-                other => other.clone(),
-            };
-            self.apply_one(conflict, &answer);
+            match answer {
+                Resolution::Rename(_) => {
+                    let dst = conflict.suggested.clone();
+                    self.ready.push(PasteItem {
+                        src: conflict.src,
+                        dst,
+                        overwrite: false,
+                    });
+                }
+                other => self.apply_one(conflict, other),
+            }
         }
     }
 
@@ -167,16 +202,12 @@ impl PastePlan {
                 overwrite: true,
             }),
             Resolution::Rename(name) => {
-                // A bare name is taken as a name in the destination; a path is
-                // taken as given, so the dialog can offer either.
-                let dst = if name.parent() == Some(Path::new("")) {
-                    self.dest_dir.join(name)
-                } else {
-                    name.clone()
-                };
+                // Always a name in the destination directory. `resolve` has
+                // already refused anything that is not one.
+                let Ok(name) = rename_name(name) else { return };
                 self.ready.push(PasteItem {
                     src: conflict.src,
-                    dst,
+                    dst: self.dest_dir.join(name),
                     overwrite: false,
                 });
             }
@@ -381,7 +412,7 @@ pub fn execute(plan: &PastePlan, ctx: &TaskCtx) -> Result<PasteReport> {
     }
     ctx.set_total(bytes_total, files_total);
 
-    let mut created: Vec<(PathBuf, Fingerprint)> = Vec::new();
+    let mut created: Vec<CopyManifest> = Vec::new();
     let mut moves: Vec<MovedPath> = Vec::new();
 
     for item in &plan.ready {
@@ -404,16 +435,24 @@ pub fn execute(plan: &PastePlan, ctx: &TaskCtx) -> Result<PasteReport> {
         match outcome {
             Ok(()) => match plan.mode {
                 PasteMode::Copy => {
-                    match Fingerprint::of(&item.dst) {
-                        Ok(fp) if fresh => created.push((item.dst.clone(), fp)),
-                        Ok(_) => log::info!(
+                    if fresh {
+                        // Recorded now, item by item: what is at `item.dst` is
+                        // exactly what this copy just made there, so a paste
+                        // cancelled after this item manifests this item whole
+                        // and the ones it never started not at all.
+                        match CopyManifest::of_tree(&item.dst) {
+                            Ok(manifest) => created.push(manifest),
+                            // The copy landed but cannot be manifested — too
+                            // big to record, or unreadable. Leaving it out of
+                            // the journal is the safe half: undo never deletes
+                            // what it could not describe first.
+                            Err(e) => log::warn!("no undo record for {}: {e}", item.dst.display()),
+                        }
+                    } else {
+                        log::info!(
                             "no undo record for {}: it was already there",
                             item.dst.display()
-                        ),
-                        // The copy landed but cannot be fingerprinted; leaving
-                        // it out of the journal is the safe half — undo will
-                        // not delete something it cannot verify.
-                        Err(e) => log::warn!("no undo record for {}: {e}", item.dst.display()),
+                        );
                     }
                     report.copied.push(item.dst.clone());
                 }
@@ -621,7 +660,7 @@ mod tests {
         std::fs::write(dest.join("notes.txt"), b"old").unwrap();
 
         let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
-        plan.resolve(&normalize(&src), &Resolution::Overwrite);
+        plan.resolve(&normalize(&src), &Resolution::Overwrite).unwrap();
         assert!(plan.is_settled());
         execute(&plan, &ctx()).unwrap();
         assert_eq!(std::fs::read(dest.join("notes.txt")).unwrap(), b"new");
@@ -635,17 +674,52 @@ mod tests {
         std::fs::write(dest.join("notes.txt"), b"old").unwrap();
 
         let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
-        plan.resolve(&normalize(&src), &Resolution::Skip);
+        plan.resolve(&normalize(&src), &Resolution::Skip).unwrap();
         assert!(plan.ready.is_empty());
         execute(&plan, &ctx()).unwrap();
         assert_eq!(std::fs::read(dest.join("notes.txt")).unwrap(), b"old");
 
         let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
         let suggested = plan.conflicts[0].suggested.clone();
-        plan.resolve(&normalize(&src), &Resolution::Rename(suggested.clone()));
+        let name = PathBuf::from(suggested.file_name().unwrap());
+        plan.resolve(&normalize(&src), &Resolution::Rename(name)).unwrap();
         execute(&plan, &ctx()).unwrap();
         assert_eq!(std::fs::read(&suggested).unwrap(), b"new");
         assert_eq!(std::fs::read(dest.join("notes.txt")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn a_rename_answer_must_be_a_plain_file_name() {
+        // BUG: a multi-component or absolute rename answer was used as the
+        // destination path verbatim. A relative one — "notes/copy.txt", or a
+        // stray "../notes.txt" — was therefore resolved against the *process
+        // working directory*, so answering the dialog wrote somewhere the user
+        // was not looking at, and outside the directory they were pasting into.
+        let t = TempTree::new("paste-rename-path");
+        let src = t.file("src/notes.txt", b"new");
+        let dest = t.dir("dst");
+        std::fs::write(dest.join("notes.txt"), b"old").unwrap();
+
+        for bad in ["sub/notes.txt", "../notes.txt", "/tmp/notes.txt", ".", "..", ""] {
+            let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
+            let err = plan
+                .resolve(&normalize(&src), &Resolution::Rename(PathBuf::from(bad)))
+                .unwrap_err();
+            assert!(err.to_string().contains("not a usable name"), "{bad:?}: {err}");
+            assert_eq!(plan.conflicts.len(), 1, "{bad:?} left the conflict standing");
+            assert!(plan.ready.is_empty(), "{bad:?}");
+        }
+
+        // The plain name it should have been all along.
+        let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
+        plan.resolve(
+            &normalize(&src),
+            &Resolution::Rename(PathBuf::from("kept.txt")),
+        )
+        .unwrap();
+        assert_eq!(plan.ready[0].dst, dest.join("kept.txt"));
+        execute(&plan, &ctx()).unwrap();
+        assert_eq!(std::fs::read(dest.join("kept.txt")).unwrap(), b"new");
     }
 
     #[test]
@@ -864,6 +938,57 @@ mod tests {
         assert!(report.cancelled);
         assert!(report.copied.is_empty());
         assert!(report.record.is_none());
+    }
+
+    #[test]
+    fn a_cancelled_paste_manifests_exactly_what_it_created() {
+        use crate::tasks::{ProgressSink, TaskFlags};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        /// Cancel the moment the first *file* has landed whole, so the paste
+        /// stops between items rather than at a guessed instant.
+        struct CancelAfterFirst {
+            flags: Arc<TaskFlags>,
+            seen: AtomicU64,
+        }
+        impl ProgressSink for CancelAfterFirst {
+            fn set_total(&self, _bytes: u64, _files: u64) {}
+            fn advance(&self, _bytes: u64, files: u64) {
+                if self.seen.fetch_add(files, Ordering::SeqCst) + files > 0 {
+                    self.flags.cancel();
+                }
+            }
+        }
+
+        let t = TempTree::new("paste-cancel-manifest");
+        let a = t.file("src/a.txt", b"aaaa");
+        let b = t.file("src/b.txt", b"bbbb");
+        let dest = t.dir("dst");
+        let plan = plan_paste(&Clipboard::yank([a, b]), &dest, false).unwrap();
+
+        let flags = Arc::new(TaskFlags::new());
+        let ctx = TaskCtx::with_sink(
+            Arc::clone(&flags),
+            Arc::new(CancelAfterFirst {
+                flags: Arc::clone(&flags),
+                seen: AtomicU64::new(0),
+            }),
+        );
+        let report = execute(&plan, &ctx).unwrap();
+        assert!(report.cancelled);
+        assert_eq!(report.copied.len(), 1, "only the first item landed");
+
+        // The record covers that one item and nothing else, and undoing it
+        // takes back exactly what the cancelled paste managed to create.
+        let Some(OpRecord::Copy { created }) = report.record.clone() else {
+            panic!("a cancelled paste still journals what it did: {report:?}");
+        };
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].root, dest.join("a.txt"));
+        super::super::journal::undo_record(&report.record.unwrap(), &TaskCtx::detached())
+            .unwrap();
+        assert!(!exists(&dest.join("a.txt")));
     }
 
     #[test]

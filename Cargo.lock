@@ -710,6 +710,7 @@ dependencies = [
  "egui-wgpu",
  "egui-winit",
  "env_logger",
+ "libc",
  "log",
  "pollster",
  "thiserror 2.0.20",

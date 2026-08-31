@@ -20,6 +20,9 @@ egui-wgpu.workspace = true
 egui-winit.workspace = true
 winit.workspace = true
 pollster.workspace = true
+# Only for `localtime_r`: the mtime/btime linemodes have to be in the machine's
+# timezone, and the zoneinfo rules that decide the offset live behind libc.
+libc.workspace = true
 
 [lints]
 workspace = true

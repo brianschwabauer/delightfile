@@ -49,7 +49,8 @@ pub use create::{create, rename, Created};
 pub use delete::{check_deletable, check_deletable_here, delete_permanent, remove_tree};
 pub use jobs::{DeleteJob, OpOutcome, Outcome, PasteJob, TrashJob};
 pub use journal::{
-    undo_record, FileKind, Fingerprint, Journal, MovedPath, OpRecord, UndoReport, JOURNAL_DEPTH,
+    undo_attempt, undo_record, CopyManifest, FileKind, Fingerprint, Journal, MovedPath, OpRecord,
+    UndoAttempt, UndoReport, JOURNAL_DEPTH, MAX_MANIFEST_ENTRIES,
 };
 pub use link::{hardlink, relative_to, symlink, LinkKind};
 pub use paste::{

@@ -7,6 +7,14 @@
 //! created, every inverse checks it *before touching anything*, and a mismatch
 //! is an error the user reads rather than a deletion they discover.
 //!
+//! A copy carries a whole [`CopyManifest`] instead of one fingerprint, because
+//! it is the one inverse that *deletes*: a fingerprint describes a single path,
+//! and a directory's does not move when a file is added two levels below it.
+//! The manifest names every path the copy created, the undo verifies all of
+//! them — and that no recorded directory holds anything else — before removing
+//! any, and then removes exactly those paths, children first. There is no
+//! recursive delete anywhere in an undo.
+//!
 //! Two things are deliberately absent:
 //!
 //! - **Permanent delete is not journalled.** There is nothing to record: the
@@ -14,7 +22,8 @@
 //!   the one with a confirm dialog (PLAN §5).
 //! - **Redo.** Not required for v1 (PLAN §5). The stack only pops.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -136,6 +145,225 @@ impl Fingerprint {
     }
 }
 
+/// How many paths one copy may record before it stops being undoable.
+///
+/// A manifest costs roughly the length of each relative path plus ~40 bytes of
+/// fingerprint, so 50 000 entries is a few megabytes — and the journal holds up
+/// to [`JOURNAL_DEPTH`] of them. Past this the copy is simply not journalled:
+/// `u` says there is nothing to undo rather than quietly holding a hundred
+/// megabytes of paths, or — far worse — deleting a 200 000-file tree on the
+/// strength of a fingerprint that could not describe it. Undoing a copy that
+/// big is a recursive delete the user should ask for explicitly.
+pub const MAX_MANIFEST_ENTRIES: usize = 50_000;
+
+/// Every path one copy created, and the state each was in when it finished.
+///
+/// The reason this exists rather than a single [`Fingerprint`] on the top-level
+/// destination: a fingerprint describes *one* path. For a copied tree the top
+/// directory's child count does not move when work is added two levels down, so
+/// an undo that checked only the top would walk in and `remove_tree` the lot —
+/// "press u, lose today's work". A manifest makes the undo check every path it
+/// is about to delete, and delete nothing else.
+///
+/// ## Memory
+///
+/// Paths are stored *relative to [`root`](CopyManifest::root)*, which is the one
+/// absolute path in here. A 40 000-file tree under `~/Work/very/long/prefix`
+/// costs the relative names once instead of the prefix 40 000 times. The
+/// remaining cost is real and bounded on purpose by [`MAX_MANIFEST_ENTRIES`]:
+/// the alternative — recording nothing and trusting one fingerprint — is the
+/// bug this type replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyManifest {
+    /// The destination the copy created.
+    pub root: PathBuf,
+    /// Every created path relative to `root`, depth-first, parents before
+    /// children. The root itself is the first entry, with an empty relative
+    /// path.
+    entries: Vec<(PathBuf, Fingerprint)>,
+}
+
+impl CopyManifest {
+    /// Record everything that now lives at `root`.
+    ///
+    /// Called immediately after a copy, on a destination the copy *created* —
+    /// so what is on disk is exactly what it made. That is also what makes a
+    /// partial copy honest: [`super::copy::copy_tree`] removes a destination it
+    /// created but could not finish, and a paste that is cancelled between
+    /// items never reaches this call for the item it did not start, so each
+    /// manifest describes one item that actually landed, whole.
+    ///
+    /// Errors if the tree is larger than [`MAX_MANIFEST_ENTRIES`], which the
+    /// caller turns into "this copy is not undoable" rather than into a failure
+    /// of the copy.
+    pub fn of_tree(root: &Path) -> Result<CopyManifest> {
+        CopyManifest::of_tree_capped(root, MAX_MANIFEST_ENTRIES)
+    }
+
+    /// [`of_tree`](CopyManifest::of_tree) with the bound spelled out, so the
+    /// refusal is testable without making fifty thousand files.
+    pub(crate) fn of_tree_capped(root: &Path, cap: usize) -> Result<CopyManifest> {
+        let root = normalize(root);
+        let mut entries = Vec::new();
+        walk(&root, PathBuf::new(), &mut entries, cap)?;
+        Ok(CopyManifest { root, entries })
+    }
+
+    /// How many paths the copy created.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Every path this manifest covers, absolute.
+    pub fn paths(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.entries.iter().map(|(rel, _)| self.path_of(rel))
+    }
+
+    fn path_of(&self, rel: &Path) -> PathBuf {
+        if rel.as_os_str().is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(rel)
+        }
+    }
+
+    /// Is the world still exactly as the copy left it?
+    ///
+    /// Two questions, both of which have to be "yes" before anything is
+    /// deleted:
+    ///
+    /// 1. every recorded path is still there, still the same kind, still the
+    ///    same size and mtime;
+    /// 2. no directory the copy created holds anything the manifest does not
+    ///    account for — which is the nested case a single fingerprint misses.
+    ///
+    /// The error names the path that changed, because "cannot undo" without a
+    /// reason is a dead end.
+    pub fn verify(&self) -> Result<()> {
+        // The names each recorded directory is allowed to contain.
+        let mut expected: HashMap<&Path, HashSet<&OsStr>> = HashMap::new();
+        for (rel, _) in &self.entries {
+            if let (Some(parent), Some(name)) = (rel.parent(), rel.file_name()) {
+                expected.entry(parent).or_default().insert(name);
+            }
+        }
+        let none: HashSet<&OsStr> = HashSet::new();
+
+        for (rel, fp) in &self.entries {
+            let path = self.path_of(rel);
+            fp.verify(&path)?;
+            if fp.kind != FileKind::Dir {
+                continue;
+            }
+            let known = expected.get(rel.as_path()).unwrap_or(&none);
+            for entry in std::fs::read_dir(&path).map_err(|e| DfError::io(&path, e))? {
+                let entry = entry.map_err(|e| DfError::io(&path, e))?;
+                if !known.contains(entry.file_name().as_os_str()) {
+                    return Err(DfError::Op(format!(
+                        "cannot undo: {} was added after the copy",
+                        entry.path().display()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Delete exactly the manifested paths, children before parents.
+    ///
+    /// Never a blanket `remove_tree`: `remove_dir` on a directory that is not
+    /// empty fails, which is one last rail under [`CopyManifest::verify`] —
+    /// anything that appeared between the check and the delete keeps its
+    /// directory, and the error names it.
+    pub fn remove(&self, ctx: &TaskCtx) -> Result<()> {
+        // The entries are parents-before-children, so reversed is every child
+        // ahead of the directory holding it.
+        for (rel, fp) in self.entries.iter().rev() {
+            ctx.checkpoint()?;
+            let path = self.path_of(rel);
+            let outcome = if fp.kind == FileKind::Dir {
+                std::fs::remove_dir(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match outcome {
+                Ok(()) => ctx.advance(
+                    if fp.kind == FileKind::File { fp.len } else { 0 },
+                    1,
+                ),
+                // Already gone is the state this call wanted.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(DfError::io(&path, e)),
+            }
+        }
+        Ok(())
+    }
+
+    /// What is left of this manifest after a [`remove`](CopyManifest::remove)
+    /// that stopped part way, so a second `u` can finish the job.
+    ///
+    /// Only the paths still on disk survive, and each surviving directory's
+    /// recorded child count is recomputed *from the manifest* rather than from
+    /// the disk — so the retry still refuses if somebody has put something new
+    /// in the half-deleted tree. `None` when nothing is left to delete.
+    pub fn remaining(&self) -> Option<CopyManifest> {
+        let mut entries: Vec<(PathBuf, Fingerprint)> = self
+            .entries
+            .iter()
+            .filter(|(rel, _)| exists(&self.path_of(rel)))
+            .cloned()
+            .collect();
+        if entries.is_empty() {
+            return None;
+        }
+        let mut children: HashMap<PathBuf, u64> = HashMap::new();
+        for (rel, _) in &entries {
+            if let Some(parent) = rel.parent() {
+                *children.entry(parent.to_path_buf()).or_insert(0) += 1;
+            }
+        }
+        for (rel, fp) in entries.iter_mut() {
+            if fp.kind == FileKind::Dir {
+                fp.entries = Some(children.get(rel).copied().unwrap_or(0));
+            }
+        }
+        Some(CopyManifest {
+            root: self.root.clone(),
+            entries,
+        })
+    }
+}
+
+/// Depth-first, parents first, one entry per created path.
+fn walk(
+    path: &Path,
+    rel: PathBuf,
+    out: &mut Vec<(PathBuf, Fingerprint)>,
+    cap: usize,
+) -> Result<()> {
+    if out.len() >= cap {
+        return Err(DfError::Op(format!(
+            "{}: more than {cap} files, too large to record an undo for",
+            path.display()
+        )));
+    }
+    let fp = Fingerprint::of(path)?;
+    let is_dir = fp.kind == FileKind::Dir;
+    out.push((rel.clone(), fp));
+    if !is_dir {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(path).map_err(|e| DfError::io(path, e))? {
+        let entry = entry.map_err(|e| DfError::io(path, e))?;
+        walk(&entry.path(), rel.join(entry.file_name()), out, cap)?;
+    }
+    Ok(())
+}
+
 /// One leg of a move, with the fingerprint of where it landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MovedPath {
@@ -162,8 +390,10 @@ pub enum OpRecord {
     /// `r` / `R`. Inverse: rename back. Kept apart from `Move` only so the
     /// toast can say "renamed" — which is what the user did.
     Rename { moved: MovedPath },
-    /// A yank-and-paste. Inverse: delete what was created, and nothing else.
-    Copy { created: Vec<(PathBuf, Fingerprint)> },
+    /// A yank-and-paste. Inverse: delete what was created, and nothing else —
+    /// one [`CopyManifest`] per item that landed, every path in it verified
+    /// before any of it is removed.
+    Copy { created: Vec<CopyManifest> },
     /// `d`. Inverse: restore each item from the trash it went into.
     Trash { items: Vec<TrashedItem> },
     /// `a`. Inverse: remove it, if it is still the empty thing that was made.
@@ -290,38 +520,84 @@ impl Journal {
     ///
     /// The entry stays on the stack if the undo fails, so the user can fix
     /// whatever is in the way (close the file, move the newer copy aside) and
-    /// press `u` again.
+    /// press `u` again. If the undo failed *part way through* a multi-item
+    /// entry, the entry is rewritten to cover only what has not been taken back
+    /// yet — otherwise the second `u` would trip over its own first half ("that
+    /// file exists again") and the rest could never be undone at all.
     pub fn undo(&mut self, ctx: &TaskCtx) -> Result<UndoReport> {
         let Some(entry) = self.entries.back().cloned() else {
             return Err(DfError::Op("nothing to undo".to_string()));
         };
-        let report = undo_record(&entry, ctx)?;
-        self.entries.pop_back();
-        Ok(report)
+        let attempt = undo_attempt(&entry, ctx);
+        match attempt.result {
+            Ok(report) => {
+                self.entries.pop_back();
+                Ok(report)
+            }
+            Err(e) => {
+                if let Some(remaining) = attempt.remaining {
+                    if let Some(back) = self.entries.back_mut() {
+                        *back = remaining;
+                    }
+                }
+                Err(e)
+            }
+        }
     }
+}
+
+/// The result of one inverse, plus what is left of it if it stopped part way.
+#[derive(Debug)]
+pub struct UndoAttempt {
+    pub result: Result<UndoReport>,
+    /// A record covering only the items still to be undone. `Some` only when
+    /// `result` is an error *and* some of the work was already taken back, so
+    /// the entry the caller is holding no longer describes the world.
+    pub remaining: Option<OpRecord>,
 }
 
 /// Run one inverse. Public so a caller can undo a record it is holding without
 /// a journal — the conflict dialog's "put that back" path.
+///
+/// A caller that keeps the record around should use [`undo_attempt`] instead,
+/// so a partial failure can rewrite it; this shorthand throws the remainder
+/// away.
 pub fn undo_record(record: &OpRecord, ctx: &TaskCtx) -> Result<UndoReport> {
-    match record {
-        OpRecord::Move { moves } => undo_moves(moves, ctx, "Moved"),
-        OpRecord::Rename { moved } => {
-            undo_moves(std::slice::from_ref(moved), ctx, "Renamed")
+    undo_attempt(record, ctx).result
+}
+
+/// [`undo_record`], keeping what is left over when it fails half way.
+pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
+    fn whole(result: Result<UndoReport>) -> UndoAttempt {
+        UndoAttempt {
+            result,
+            remaining: None,
         }
+    }
+    match record {
+        OpRecord::Move { moves } => undo_moves(moves, ctx, "Moved", |rest| OpRecord::Move {
+            moves: rest,
+        }),
+        OpRecord::Rename { moved } => undo_moves(
+            std::slice::from_ref(moved),
+            ctx,
+            "Renamed",
+            // A rename is one leg; there is no "part way" for it to stop at.
+            |rest| OpRecord::Move { moves: rest },
+        ),
         OpRecord::Copy { created } => undo_copy(created, ctx),
-        OpRecord::Trash { items } => undo_trash(items, ctx),
+        OpRecord::Trash { items } => whole(undo_trash(items, ctx)),
         OpRecord::Create {
             path,
             is_dir,
             fingerprint,
             created_parents,
-        } => undo_create(path, *is_dir, fingerprint, created_parents),
+        } => whole(undo_create(path, *is_dir, fingerprint, created_parents)),
         OpRecord::Link {
             link,
             target,
             fingerprint,
-        } => undo_link(link, target.as_deref(), fingerprint),
+        } => whole(undo_link(link, target.as_deref(), fingerprint)),
     }
 }
 
@@ -330,20 +606,31 @@ pub fn undo_record(record: &OpRecord, ctx: &TaskCtx) -> Result<UndoReport> {
 /// Checked in full first: a five-file paste that can only put three back should
 /// put none back, rather than leaving the user with a half-undone state they
 /// now have to reason about.
-fn undo_moves(moves: &[MovedPath], ctx: &TaskCtx, verb: &str) -> Result<UndoReport> {
+fn undo_moves(
+    moves: &[MovedPath],
+    ctx: &TaskCtx,
+    verb: &str,
+    rebuild: impl Fn(Vec<MovedPath>) -> OpRecord,
+) -> UndoAttempt {
+    let refuse = |e: DfError| UndoAttempt {
+        result: Err(e),
+        remaining: None,
+    };
     for m in moves {
-        m.fingerprint.verify(&m.to)?;
+        if let Err(e) = m.fingerprint.verify(&m.to) {
+            return refuse(e);
+        }
         if exists(&m.from) {
-            return Err(DfError::Op(format!(
+            return refuse(DfError::Op(format!(
                 "cannot undo: {} exists again",
                 m.from.display()
             )));
         }
         let Some(parent) = m.from.parent() else {
-            return Err(DfError::Op(format!("{} has no parent", m.from.display())));
+            return refuse(DfError::Op(format!("{} has no parent", m.from.display())));
         };
         if !exists(parent) {
-            return Err(DfError::Op(format!(
+            return refuse(DfError::Op(format!(
                 "cannot undo: {} no longer exists",
                 parent.display()
             )));
@@ -351,8 +638,15 @@ fn undo_moves(moves: &[MovedPath], ctx: &TaskCtx, verb: &str) -> Result<UndoRepo
     }
 
     let mut touched = Vec::new();
-    for m in moves {
-        super::copy::move_path(&m.to, &m.from, ctx, false)?;
+    for (i, m) in moves.iter().enumerate() {
+        if let Err(e) = super::copy::move_path(&m.to, &m.from, ctx, false) {
+            // Everything before `i` is already back where it came from, so the
+            // entry as it stands would refuse for ever. Keep the remainder.
+            return UndoAttempt {
+                result: Err(e),
+                remaining: (i > 0).then(|| rebuild(moves[i..].to_vec())),
+            };
+        }
         touched.push(m.from.clone());
     }
     let what = if moves.len() == 1 {
@@ -360,33 +654,64 @@ fn undo_moves(moves: &[MovedPath], ctx: &TaskCtx, verb: &str) -> Result<UndoRepo
     } else {
         format!("{} items", moves.len())
     };
-    Ok(UndoReport {
-        description: format!("{verb} {what} back"),
-        touched,
-    })
+    UndoAttempt {
+        result: Ok(UndoReport {
+            description: format!("{verb} {what} back"),
+            touched,
+        }),
+        remaining: None,
+    }
 }
 
-/// Delete exactly what the copy created, and only if it is untouched.
-fn undo_copy(created: &[(PathBuf, Fingerprint)], ctx: &TaskCtx) -> Result<UndoReport> {
-    for (path, fp) in created {
-        fp.verify(path)?;
+/// Delete exactly what the copy created, and only if every bit of it is
+/// untouched.
+///
+/// The whole manifest of every item is verified before a single path is
+/// removed: a paste of four folders that can only take three of them back
+/// should take none, rather than leaving the user half-way between two states.
+fn undo_copy(created: &[CopyManifest], ctx: &TaskCtx) -> UndoAttempt {
+    for manifest in created {
+        if let Err(e) = manifest.verify() {
+            return UndoAttempt {
+                result: Err(e),
+                remaining: None,
+            };
+        }
     }
     let mut touched = Vec::new();
-    for (path, _fp) in created {
-        super::delete::remove_tree(path, ctx)?;
-        touched.push(path.clone());
+    for (i, manifest) in created.iter().enumerate() {
+        if let Err(e) = manifest.remove(ctx) {
+            // This item is part-deleted and the ones after it are untouched.
+            // Re-record both so a second `u` finishes the job instead of
+            // refusing over the half that already went.
+            let mut rest: Vec<CopyManifest> = manifest.remaining().into_iter().collect();
+            rest.extend(created[i + 1..].iter().cloned());
+            let remaining = (!rest.is_empty()).then_some(OpRecord::Copy { created: rest });
+            return UndoAttempt {
+                result: Err(e),
+                remaining,
+            };
+        }
+        touched.push(manifest.root.clone());
     }
-    Ok(UndoReport {
-        description: if created.len() == 1 {
-            format!(
-                "Removed the copy {}",
-                created[0].0.file_name().unwrap_or_default().to_string_lossy()
-            )
-        } else {
-            format!("Removed {} copies", created.len())
-        },
-        touched,
-    })
+    UndoAttempt {
+        result: Ok(UndoReport {
+            description: if created.len() == 1 {
+                format!(
+                    "Removed the copy {}",
+                    created[0]
+                        .root
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )
+            } else {
+                format!("Removed {} copies", created.len())
+            },
+            touched,
+        }),
+        remaining: None,
+    }
 }
 
 fn undo_trash(items: &[TrashedItem], ctx: &TaskCtx) -> Result<UndoReport> {
@@ -566,6 +891,13 @@ mod tests {
         assert!(!super::exists(&to));
     }
 
+    /// The journal entry a real paste of `dst` would produce.
+    fn copied(dst: &Path) -> OpRecord {
+        OpRecord::Copy {
+            created: vec![CopyManifest::of_tree(dst).unwrap()],
+        }
+    }
+
     #[test]
     fn undo_of_a_copy_deletes_the_copies_only() {
         let t = TempTree::new("j-copy");
@@ -574,9 +906,7 @@ mod tests {
         copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
 
         let mut j = Journal::default();
-        j.record(OpRecord::Copy {
-            created: vec![(dst.clone(), Fingerprint::of(&dst).unwrap())],
-        });
+        j.record(copied(&dst));
         j.undo(&ctx()).unwrap();
         assert!(!super::exists(&dst));
         assert_eq!(std::fs::read(&src).unwrap(), b"data", "the original stays");
@@ -590,9 +920,7 @@ mod tests {
         copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
 
         let mut j = Journal::default();
-        j.record(OpRecord::Copy {
-            created: vec![(dst.clone(), Fingerprint::of(&dst).unwrap())],
-        });
+        j.record(copied(&dst));
         std::fs::write(&dst, b"the user edited this").unwrap();
 
         let err = j.undo(&ctx()).unwrap_err();
@@ -609,29 +937,22 @@ mod tests {
         copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
 
         let mut j = Journal::default();
-        j.record(OpRecord::Copy {
-            created: vec![(dst.clone(), Fingerprint::of(&dst).unwrap())],
-        });
+        j.record(copied(&dst));
         std::fs::write(dst.join("new-work"), b"mine").unwrap();
         let err = j.undo(&ctx()).unwrap_err();
-        assert!(err.to_string().contains("different contents"), "{err}");
+        assert!(err.to_string().contains("cannot undo"), "{err}");
         assert!(dst.join("new-work").is_file());
     }
 
     #[test]
-    #[ignore = "BUG: needs a manifest of the copied tree, which is a design change"]
     fn undo_of_a_copied_directory_refuses_new_contents_nested_below_it() {
-        // BUG (deferred): `Fingerprint` describes one path. For a copied
-        // *tree* only the top directory is fingerprinted, and its child count
-        // is unchanged by work added two levels down — so `u` walks in and
-        // deletes it. `undo_copy` calls `remove_tree` on the whole tree after
-        // checking one entry count.
-        //
-        // Catching this needs the copy to record a manifest of every path it
-        // created (path, kind, size, mtime) and `undo_copy` to verify the whole
-        // manifest before removing anything. That is a change to `OpRecord`,
-        // to what `paste::execute` collects and to `undo_copy`, so it is left
-        // for the phase that also gives the journal a persisted form.
+        // BUG: `Fingerprint` describes one path. For a copied *tree* only the
+        // top directory was fingerprinted, and its child count does not move
+        // when work is added two levels down — so `u` walked in and
+        // `remove_tree`d the lot: press u, lose today's work. The copy now
+        // records a manifest of every path it created and the undo verifies the
+        // whole of it, including that no directory holds anything the copy did
+        // not put there.
         let t = TempTree::new("j-copy-dir-nested");
         let src = t.dir("src/sub");
         std::fs::write(src.join("a"), b"a").unwrap();
@@ -639,15 +960,208 @@ mod tests {
         copy::copy_tree(&t.join("src"), &dst, &ctx(), false).unwrap();
 
         let mut j = Journal::default();
-        j.record(OpRecord::Copy {
-            created: vec![(dst.clone(), Fingerprint::of(&dst).unwrap())],
-        });
+        j.record(copied(&dst));
         // New work, nested — the top directory still has exactly one child.
         std::fs::write(dst.join("sub/mine"), b"hours of work").unwrap();
 
         let err = j.undo(&ctx()).unwrap_err();
         assert!(err.to_string().contains("cannot undo"), "{err}");
         assert!(dst.join("sub/mine").is_file(), "newer work is never destroyed");
+        assert!(dst.join("sub/a").is_file(), "and neither is the copy itself");
+        assert_eq!(j.len(), 1, "the entry survives a refused undo");
+    }
+
+    #[test]
+    fn undo_of_a_deep_copy_refuses_a_file_edited_deep_inside_it() {
+        // The other half of the nested case: nothing was added or removed, so
+        // every child count matches — one file three levels down was edited.
+        let t = TempTree::new("j-copy-deep-edit");
+        let src = t.dir("src/a/b/c");
+        std::fs::write(src.join("notes.txt"), b"original").unwrap();
+        let dst = t.join("dst");
+        copy::copy_tree(&t.join("src"), &dst, &ctx(), false).unwrap();
+
+        let mut j = Journal::default();
+        j.record(copied(&dst));
+        std::fs::write(dst.join("a/b/c/notes.txt"), b"a whole afternoon of work").unwrap();
+
+        let err = j.undo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("cannot undo"), "{err}");
+        assert_eq!(
+            std::fs::read(dst.join("a/b/c/notes.txt")).unwrap(),
+            b"a whole afternoon of work"
+        );
+    }
+
+    #[test]
+    fn undo_of_a_copied_tree_removes_every_path_it_made() {
+        let t = TempTree::new("j-copy-tree");
+        let src = t.dir("src/sub/deeper");
+        std::fs::write(src.join("f"), b"f").unwrap();
+        std::fs::write(t.join("src/top"), b"top").unwrap();
+        std::os::unix::fs::symlink("top", t.join("src/link")).unwrap();
+        let dst = t.join("dst");
+        copy::copy_tree(&t.join("src"), &dst, &ctx(), false).unwrap();
+
+        let record = copied(&dst);
+        let OpRecord::Copy { created } = &record else {
+            panic!("{record:?}")
+        };
+        assert_eq!(
+            created[0].len(),
+            6,
+            "dst, sub, deeper, f, top, link: {:?}",
+            created[0].paths().collect::<Vec<_>>()
+        );
+
+        let mut j = Journal::default();
+        j.record(record);
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&dst), "children went before their parents");
+        assert!(t.join("src/sub/deeper/f").is_file(), "the source is untouched");
+    }
+
+    #[test]
+    fn undo_of_a_copy_refuses_a_new_directory_nested_inside_it() {
+        let t = TempTree::new("j-copy-new-dir");
+        let src = t.dir("src/sub");
+        std::fs::write(src.join("a"), b"a").unwrap();
+        let dst = t.join("dst");
+        copy::copy_tree(&t.join("src"), &dst, &ctx(), false).unwrap();
+
+        let mut j = Journal::default();
+        j.record(copied(&dst));
+        std::fs::create_dir(dst.join("sub/mine")).unwrap();
+        let err = j.undo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("cannot undo"), "{err}");
+        assert!(dst.join("sub/mine").is_dir());
+    }
+
+    #[test]
+    fn a_partly_undone_copy_leaves_only_the_remainder_to_retry() {
+        // A multi-item paste whose second item cannot be deleted: the first is
+        // gone, so re-running the *original* entry would refuse for ever ("the
+        // first copy is no longer there"). The entry is rewritten to the part
+        // that is still outstanding.
+        let t = TempTree::new("j-copy-partial");
+        let src_file = t.file("src/a.txt", b"a");
+        let src_dir = t.dir("src/folder");
+        std::fs::write(src_dir.join("inner"), b"inner").unwrap();
+        let dest = t.dir("dst");
+        let copied_file = dest.join("a.txt");
+        let copied_dir = dest.join("folder");
+        copy::copy_tree(&src_file, &copied_file, &ctx(), false).unwrap();
+        copy::copy_tree(&src_dir, &copied_dir, &ctx(), false).unwrap();
+
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![
+                CopyManifest::of_tree(&copied_file).unwrap(),
+                CopyManifest::of_tree(&copied_dir).unwrap(),
+            ],
+        });
+
+        // Nothing may be unlinked from a directory with no write bit, so
+        // removing `folder/inner` fails while `a.txt` has already gone.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&copied_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let err = j.undo(&ctx()).unwrap_err();
+        std::fs::set_permissions(&copied_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!err.to_string().is_empty(), "{err}");
+        assert!(!super::exists(&copied_file), "the first item did go");
+        assert!(copied_dir.join("inner").is_file(), "the second one did not");
+        assert_eq!(j.len(), 1);
+        match j.peek() {
+            Some(OpRecord::Copy { created }) => {
+                assert_eq!(created.len(), 1, "only the remainder is left to undo");
+                assert_eq!(created[0].root, super::normalize(&copied_dir));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // A second `u` finishes the job rather than refusing over the half
+        // that already went.
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&copied_dir));
+        assert!(j.is_empty());
+        assert_eq!(std::fs::read(src_dir.join("inner")).unwrap(), b"inner");
+    }
+
+    #[test]
+    fn a_partly_undone_move_leaves_only_the_remainder_to_retry() {
+        // BUG: an undo that failed part way through left an entry describing
+        // moves that had already been undone, so every later `u` refused with
+        // "exists again" and the rest could never be put back at all.
+        let t = TempTree::new("j-move-partial");
+        let a = t.file("one/a.txt", b"a");
+        let b = t.file("two/b.txt", b"b");
+        let dest = t.dir("dst");
+        let a2 = dest.join("a.txt");
+        let b2 = dest.join("b.txt");
+        copy::move_path(&a, &a2, &ctx(), false).unwrap();
+        copy::move_path(&b, &b2, &ctx(), false).unwrap();
+
+        let mut j = Journal::default();
+        j.record(OpRecord::Move {
+            moves: vec![
+                MovedPath::record(&a, &a2).unwrap(),
+                MovedPath::record(&b, &b2).unwrap(),
+            ],
+        });
+
+        // `two/` cannot be written to, so `b.txt` cannot be moved back into it
+        // — but `a.txt` already has been.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(t.join("two"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(j.undo(&ctx()).is_err());
+        std::fs::set_permissions(t.join("two"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(std::fs::read(&a).unwrap(), b"a", "the first leg went back");
+        assert!(super::exists(&b2), "the second one did not");
+        assert_eq!(j.len(), 1);
+        match j.peek() {
+            Some(OpRecord::Move { moves }) => {
+                assert_eq!(moves.len(), 1, "only the leg still outstanding");
+                assert_eq!(moves[0].to, super::normalize(&b2));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        j.undo(&ctx()).unwrap();
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        assert!(j.is_empty());
+    }
+
+    #[test]
+    fn a_tree_too_big_to_record_is_simply_not_undoable() {
+        // The memory bound: past the cap the copy is not journalled at all,
+        // rather than the journal holding a hundred megabytes of paths — or,
+        // far worse, `u` deleting a 200 000-file tree on the strength of a
+        // record that could not describe it.
+        let t = TempTree::new("j-manifest-cap");
+        let dst = t.dir("dst");
+        for i in 0..5 {
+            std::fs::write(dst.join(format!("f{i}")), b"x").unwrap();
+        }
+        let err = CopyManifest::of_tree_capped(&dst, 3).unwrap_err();
+        assert!(err.to_string().contains("too large to record"), "{err}");
+        // Under the cap it records the lot.
+        assert_eq!(CopyManifest::of_tree_capped(&dst, 64).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn a_manifest_is_stored_relative_to_its_root() {
+        // The memory story: one absolute path, then names.
+        let t = TempTree::new("j-manifest-rel");
+        let dir = t.dir("a/very/long/prefix/dst/sub");
+        std::fs::write(dir.join("f"), b"f").unwrap();
+        let root = t.join("a/very/long/prefix/dst");
+        let m = CopyManifest::of_tree(&root).unwrap();
+        assert_eq!(m.root, super::normalize(&root));
+        assert_eq!(
+            m.paths().collect::<Vec<_>>(),
+            vec![root.clone(), root.join("sub"), root.join("sub/f")]
+        );
     }
 
     #[test]
@@ -838,7 +1352,7 @@ mod tests {
         let fp = Fingerprint::of(&p).unwrap();
         assert_eq!(
             OpRecord::Copy {
-                created: vec![(p.clone(), fp.clone())]
+                created: vec![CopyManifest::of_tree(&p).unwrap()]
             }
             .describe(),
             "copied 1 item"

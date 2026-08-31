@@ -59,6 +59,20 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(50);
 /// and below the rate at which it costs anything.
 const PROGRESS_NOTIFY_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How many *successfully finished* tasks the registry keeps.
+///
+/// The `w` panel is a history as well as a queue, and a session that copies a
+/// few thousand files one keystroke at a time would otherwise grow the registry
+/// — and every snapshot of it — without bound. 128 is more finished rows than
+/// anyone scrolls back through, and several screens' worth at any font size.
+///
+/// Only `Done` is evicted. `Pending`, `Running` and `Paused` are still
+/// happening; `Failed` and `Cancelled` are the rows the user has not necessarily
+/// seen yet, and a task panel that quietly loses the one failure in a run of two
+/// hundred successes is worse than one that grows. Those are cleared when the
+/// user asks, through [`TaskEngine::clear_finished`].
+pub const MAX_FINISHED_TASKS: usize = 128;
+
 /// Identifier for a queued or running task. Monotonic, never reused, so a stale
 /// UI reference resolves to "gone" rather than to somebody else's task.
 pub type TaskId = u64;
@@ -392,7 +406,20 @@ struct Shared {
     idle: Condvar,
     next_id: AtomicU64,
     notifier: Mutex<Option<Notifier>>,
-    events: Sender<TaskEvent>,
+    /// The event stream's sending half, and only while somebody is listening.
+    ///
+    /// The engine deliberately holds **no receiver**. It used to keep one so
+    /// that `events()` could hand out clones, which meant the unbounded channel
+    /// had a live consumer that never consumed: an app that only ever reads
+    /// [`TaskEngine::snapshot`] grew one `TaskEvent` per transition for the
+    /// lifetime of the process. With no engine-side receiver, `send` on a
+    /// stream nobody has taken (or one whose receiver has been dropped) simply
+    /// reports "disconnected", and the sender is dropped in response — so the
+    /// unread case costs nothing at all. Coalescing into a bounded channel was
+    /// the alternative and was rejected: `TaskEvent` is a *transition*, and a
+    /// UI that misses `Failed` because the channel was full is worse than one
+    /// that has to ask for the stream before it can read it.
+    events: Mutex<Option<Sender<TaskEvent>>>,
     retries: u32,
 }
 
@@ -404,6 +431,20 @@ impl Shared {
             // cannot have left it half-updated in a way that matters, and
             // losing the whole task panel over one poisoned lock is worse.
             Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Publish one transition, if anybody is listening. A disconnected stream
+    /// drops the sender, so the next send does not even allocate.
+    fn send_event(&self, event: TaskEvent) {
+        let mut guard = match self.events.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(tx) = guard.as_ref() {
+            if tx.send(event).is_err() {
+                *guard = None;
+            }
         }
     }
 
@@ -443,16 +484,34 @@ impl Shared {
                     state,
                 });
             }
+            if terminal {
+                evict_finished(&mut tasks);
+            }
         }
         if let Some(event) = event {
-            // Full channel is impossible (unbounded) and a disconnected one
-            // just means nobody is listening — neither is worth failing a task.
-            let _dropped = self.events.send(event);
+            self.send_event(event);
             if terminal {
                 self.idle.notify_all();
             }
             self.notify();
         }
+    }
+}
+
+/// Drop the oldest `Done` rows once there are more than [`MAX_FINISHED_TASKS`]
+/// of them. Ids are monotonic and the map is ordered, so "first in the map" is
+/// "oldest".
+fn evict_finished(tasks: &mut BTreeMap<TaskId, TaskRecord>) {
+    let done: Vec<TaskId> = tasks
+        .iter()
+        .filter(|(_, rec)| rec.terminal && rec.state == TaskState::Done)
+        .map(|(id, _)| *id)
+        .collect();
+    let Some(excess) = done.len().checked_sub(MAX_FINISHED_TASKS) else {
+        return;
+    };
+    for id in &done[..excess] {
+        tasks.remove(id);
     }
 }
 
@@ -522,7 +581,6 @@ pub struct TaskEngine {
     shared: Arc<Shared>,
     senders: Option<(Sender<Queued>, Sender<Queued>)>,
     workers: Vec<std::thread::JoinHandle<()>>,
-    events_rx: Receiver<TaskEvent>,
 }
 
 type Queued = (TaskId, Box<dyn Job>);
@@ -532,13 +590,12 @@ impl TaskEngine {
     /// §5); a configured 0 is clamped to 1 so a typo cannot wedge every
     /// operation in the program forever.
     pub fn new(config: &TasksConfig) -> TaskEngine {
-        let (events_tx, events_rx) = crossbeam_channel::unbounded();
         let shared = Arc::new(Shared {
             tasks: Mutex::new(BTreeMap::new()),
             idle: Condvar::new(),
             next_id: AtomicU64::new(1),
             notifier: Mutex::new(None),
-            events: events_tx,
+            events: Mutex::new(None),
             retries: config.bizarre_retry,
         });
         let (micro_tx, micro_rx) = crossbeam_channel::unbounded::<Queued>();
@@ -567,7 +624,6 @@ impl TaskEngine {
             shared,
             senders: Some((micro_tx, macro_tx)),
             workers,
-            events_rx,
         }
     }
 
@@ -580,10 +636,23 @@ impl TaskEngine {
         *guard = Some(notifier);
     }
 
-    /// The transition stream. The receiver is cloneable and multi-consumer;
-    /// nothing is lost if it is never read.
+    /// Take the transition stream.
+    ///
+    /// Single-owner on purpose (see [`Shared::events`]): the engine keeps no
+    /// receiver, so events are only ever queued while this receiver — or a
+    /// clone of it — is alive, and everything published before this call, or
+    /// after the last clone is dropped, is discarded rather than piling up.
+    /// [`TaskEngine::snapshot`] is the source of truth for what a task *is*;
+    /// this stream is only for reacting to changes. Calling it again replaces
+    /// the stream, and the previous receiver stops seeing new events.
     pub fn events(&self) -> Receiver<TaskEvent> {
-        self.events_rx.clone()
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let mut guard = match self.shared.events.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = Some(tx);
+        rx
     }
 
     /// Queue a job. Returns immediately with the id the UI will refer to it by.
@@ -608,7 +677,7 @@ impl TaskEngine {
                 },
             );
         }
-        let _dropped = self.shared.events.send(TaskEvent {
+        self.shared.send_event(TaskEvent {
             id,
             name,
             state: TaskState::Pending,
@@ -628,6 +697,17 @@ impl TaskEngine {
         id
     }
 
+    /// Whether an event stream is currently armed — i.e. whether a publish
+    /// would queue anything at all.
+    #[cfg(test)]
+    fn has_event_listener(&self) -> bool {
+        let guard = match self.shared.events.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.is_some()
+    }
+
     fn flags(&self, id: TaskId) -> Option<Arc<TaskFlags>> {
         let tasks = self.shared.lock_tasks();
         tasks.get(&id).map(|r| Arc::clone(&r.flags))
@@ -644,7 +724,7 @@ impl TaskEngine {
         if let Some(rec) = tasks.get_mut(&id) {
             if let TaskState::Running(p) = rec.state {
                 rec.state = TaskState::Paused(p);
-                let _dropped = self.shared.events.send(TaskEvent {
+                self.shared.send_event(TaskEvent {
                     id,
                     name: rec.name.clone(),
                     state: TaskState::Paused(p),
@@ -663,7 +743,7 @@ impl TaskEngine {
         if let Some(rec) = tasks.get_mut(&id) {
             if let TaskState::Paused(p) = rec.state {
                 rec.state = TaskState::Running(p);
-                let _dropped = self.shared.events.send(TaskEvent {
+                self.shared.send_event(TaskEvent {
                     id,
                     name: rec.name.clone(),
                     state: TaskState::Running(p),
@@ -1241,6 +1321,73 @@ mod tests {
         for id in big {
             engine.join(id, T);
         }
+    }
+
+    #[test]
+    fn finished_tasks_do_not_pile_up_for_ever() {
+        // BUG: the registry kept every task that had ever run, so a session
+        // spent copying files one keystroke at a time grew it — and every
+        // `snapshot()` clone of it — without bound.
+        let engine = TaskEngine::new(&config(0));
+        for _ in 0..MAX_FINISHED_TASKS + 20 {
+            let id = engine.spawn(FnJob::new("t", Lane::Micro, |_| Ok(())));
+            engine.join(id, T);
+        }
+        assert!(engine.wait_idle(T));
+        assert_eq!(engine.snapshot().len(), MAX_FINISHED_TASKS);
+    }
+
+    #[test]
+    fn eviction_never_takes_a_failure_with_it() {
+        let engine = TaskEngine::new(&config(0));
+        let doomed = engine.spawn(FnJob::new("doomed", Lane::Micro, |_| {
+            Err(DfError::Op("no".to_string()))
+        }));
+        let stopped = engine.spawn(FnJob::new("stopped", Lane::Micro, |ctx| {
+            ctx.flags().cancel();
+            ctx.checkpoint()
+        }));
+        assert!(matches!(
+            engine.join(doomed, T),
+            Some(TaskState::Failed { .. })
+        ));
+        assert_eq!(engine.join(stopped, T), Some(TaskState::Cancelled));
+
+        // Bury them under far more than the cap of successes.
+        for _ in 0..MAX_FINISHED_TASKS + 20 {
+            let id = engine.spawn(FnJob::new("t", Lane::Micro, |_| Ok(())));
+            engine.join(id, T);
+        }
+        assert!(
+            engine.task(doomed).is_some(),
+            "a failure the user may not have seen is never evicted"
+        );
+        assert!(engine.task(stopped).is_some());
+        assert_eq!(engine.snapshot().len(), MAX_FINISHED_TASKS + 2);
+    }
+
+    #[test]
+    fn events_are_not_queued_when_nobody_is_listening() {
+        // BUG: the engine held its own receiver, so the unbounded event channel
+        // had a consumer that never consumed — one `TaskEvent` per transition,
+        // for the life of the process, in an app that only reads `snapshot()`.
+        let engine = TaskEngine::new(&config(0));
+        let id = engine.spawn(FnJob::new("t", Lane::Micro, |_| Ok(())));
+        engine.join(id, T);
+        assert!(
+            !engine.has_event_listener(),
+            "no stream was ever taken, so nothing was queued"
+        );
+
+        // Taking one arms it; dropping it disarms it again at the next send.
+        let rx = engine.events();
+        let id = engine.spawn(FnJob::new("t", Lane::Micro, |_| Ok(())));
+        engine.join(id, T);
+        assert!(rx.try_recv().is_ok());
+        drop(rx);
+        let id = engine.spawn(FnJob::new("t", Lane::Micro, |_| Ok(())));
+        engine.join(id, T);
+        assert!(!engine.has_event_listener());
     }
 
     #[test]
