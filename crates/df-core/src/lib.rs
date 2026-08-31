@@ -12,12 +12,14 @@
 
 pub mod archive;
 pub mod config;
+pub mod du;
 pub mod fs;
 pub mod git;
 pub mod input;
 pub mod keymap;
 pub mod ops;
 pub mod preview;
+pub mod state;
 pub mod tasks;
 pub mod toml;
 pub mod zoxide;
