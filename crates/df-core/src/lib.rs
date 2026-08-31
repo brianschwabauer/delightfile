@@ -10,8 +10,10 @@
 //! The modules below are placeholders for Phase 0; each one names the seam it
 //! will fill so later work has an obvious home rather than a new file.
 
+pub mod archive;
 pub mod config;
 pub mod fs;
+pub mod git;
 pub mod input;
 pub mod keymap;
 pub mod ops;

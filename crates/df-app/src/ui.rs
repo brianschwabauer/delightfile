@@ -483,8 +483,13 @@ impl Painting<'_> {
     }
 
     /// One row's contents: icon, name, and the linemode column.
+    ///
+    /// Visible to the crate because the preview pane's directory body draws
+    /// with it (PLAN §6, "replaces piper/eza"): a folder previewed and a folder
+    /// entered must be the same rows, from one icon table and one set of name
+    /// colours, or the two panes quietly disagree about what a file is.
     #[allow(clippy::too_many_arguments)]
-    fn row(
+    pub(crate) fn row(
         &self,
         painter: &egui::Painter,
         rect: egui::Rect,
@@ -503,11 +508,20 @@ impl Painting<'_> {
         };
 
         let icon = icon_for(entry, self.theme, self.palette, self.nerd);
+        // The icon family only exists when a patched font was found: egui
+        // panics on a `FontFamily::Name` nothing is bound to, so the fallback
+        // glyphs (`/`, `@`) are drawn in the monospace face, which is where an
+        // `ls -F` classifier belongs anyway.
+        let icon_family = if self.nerd {
+            egui::FontFamily::Name(ICON_FAMILY.into())
+        } else {
+            egui::FontFamily::Monospace
+        };
         painter.text(
             egui::pos2(rect.left() + ROW_PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
             icon.glyph,
-            egui::FontId::new(ICON_SIZE, egui::FontFamily::Name(ICON_FAMILY.into())),
+            egui::FontId::new(ICON_SIZE, icon_family),
             fade(icon.color),
         );
 
@@ -691,14 +705,6 @@ impl Painting<'_> {
         );
     }
 
-    /// The preview pane, which Phase 3 fills in.
-    ///
-    /// Drawn as an honest empty state rather than a mock of what will be here:
-    /// a placeholder that looked like a preview would be the one thing worse
-    /// than an empty pane.
-    pub fn preview_placeholder(&self, pane: egui::Rect) {
-        self.quiet_label(content_rect(pane), "no preview yet");
-    }
 }
 
 /// Turn a `DfError` string into something a person can act on.

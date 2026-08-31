@@ -18,6 +18,7 @@ mod icons;
 mod input;
 mod keys;
 mod motion;
+mod preview;
 mod ripple;
 mod select;
 mod tab;

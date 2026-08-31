@@ -37,6 +37,7 @@ use crate::graphics::{Gfx, GfxError};
 use crate::help::{self, Help};
 use crate::hover::Hovers;
 use crate::input::{Prompt, PromptKind};
+use crate::preview::Pane as PreviewPane;
 use crate::ripple::Ripples;
 use crate::select::{self, Visual};
 use crate::tab::Tab;
@@ -161,6 +162,9 @@ pub struct App {
     context: ContextStack,
     scanner: Scanner,
     watcher: Watcher,
+    /// The preview pane's whole state: its workers, what it is showing, and
+    /// how far that has been scrolled (PLAN §6).
+    preview: PreviewPane,
     tabs: Tabs,
     /// `--cwd-file`, written on a `q` quit (PLAN §3).
     cwd_file: Option<PathBuf>,
@@ -231,11 +235,16 @@ impl App {
             Arc::new(move || waker.wake())
         };
         let scanner = Scanner::start(Arc::clone(&notifier));
-        let watcher = Watcher::start(notifier);
+        let watcher = Watcher::start(Arc::clone(&notifier));
+        // Before the window, with the scanner (PLAN §6's cold-start ordering:
+        // "decode workers started **before** the window").
+        let mut preview = PreviewPane::start(notifier);
 
         let mgr = config.mgr.clone();
         let seed = 0;
         let sort = sort_options(&mgr, seed);
+        // A directory *peek* is listed the way entering it would list it.
+        preview.set_sort(sort);
         let now = Instant::now();
         let (start, focus) = start_directory(args.start.as_deref());
         let mut tab = Tab::open(start, &mgr, sort, &scanner, now);
@@ -261,6 +270,7 @@ impl App {
             context: ContextStack::browser(),
             scanner,
             watcher,
+            preview,
             tabs: Tabs::new(tab),
             cwd_file: args.cwd_file,
             quit: None,
@@ -335,7 +345,11 @@ impl App {
     /// and a frame is owed.
     fn poll_workers(&mut self) -> bool {
         let now = Instant::now();
-        let mut changed = false;
+        // The preview's own two workers. The context is where decoded pixels
+        // become a texture, which is the one part of the preview that has to
+        // happen on the thread egui lives on.
+        let ctx = self.gfx.as_ref().map(|g| g.egui_ctx.clone());
+        let mut changed = self.preview.poll(ctx.as_ref(), now);
         for update in self.scanner.drain() {
             // Every tab, not only the active one: a tab opened a moment ago is
             // still loading behind the strip.
@@ -746,6 +760,10 @@ impl App {
     /// out of sight.
     fn tab_changed(&mut self, now: Instant) {
         self.visual = None;
+        // The other tab's cursor is on a different file, so whatever the
+        // preview is decoding is work for a pane nobody is looking at. The
+        // next frame's `sync` asks for the new tab's file.
+        self.preview.cancel();
         self.tabs.active_mut().rescan(&self.scanner, now);
         self.rewatch();
     }
@@ -801,6 +819,10 @@ impl App {
                 }
             }
             C::Goto(slot) => self.goto(slot, now),
+
+            // ── The preview, from the list (PLAN §4.1's yazi parity) ────────
+            C::SeekPreviewUp => self.preview.seek(false, now),
+            C::SeekPreviewDown => self.preview.seek(true, now),
 
             // ── Selection ───────────────────────────────────────────────────
             C::ToggleSelect => self.toggle_select(),
@@ -988,6 +1010,9 @@ impl App {
             self.mgr.linemode = mode;
         }
         let sort = self.sort();
+        // A directory peek is listed the way entering it would list it, so the
+        // preview follows `,` too.
+        self.preview.set_sort(sort);
         let tab = self.tabs.active_mut();
         tab.cwd.dir.set_sort(sort);
         if let Some(parent) = &mut tab.parent {
@@ -1126,6 +1151,24 @@ impl App {
             parent.set_first(first, now);
         }
 
+        // ── The preview (PLAN §6) ───────────────────────────────────────────
+        // Asked for here, *after* the keys have been routed: the request is for
+        // where the cursor ended up, not for each row it passed through. The
+        // debounce in df-core does the rest.
+        let ppp = ui.ctx().pixels_per_point();
+        let preview_content = ui::content_rect(layout.preview);
+        let target = (
+            (preview_content.width() * ppp).max(0.0) as u32,
+            (preview_content.height() * ppp).max(0.0) as u32,
+        );
+        let hovered = self
+            .tab()
+            .cwd
+            .dir
+            .cursor_entry()
+            .map(|entry| entry.path.clone());
+        self.preview.sync(hovered.as_deref(), target, now);
+
         // ── The help sheet, and where it has scrolled to ─────────────────────
         // Built before the painter exists, because building it needs `&mut
         // self` and the painter holds the palette.
@@ -1201,7 +1244,7 @@ impl App {
             offset_x: slide,
             show_selection: true,
         });
-        paint.preview_placeholder(layout.preview);
+        crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now);
 
         // ── The chrome ──────────────────────────────────────────────────────
         if let Some(strip) = layout.strip {
@@ -1271,6 +1314,7 @@ impl App {
             || self.ripples.animating(now)
             || self.tab().animating(now)
             || self.tabs.animating(now)
+            || self.preview.animating(now)
             || self.which.fading()
         {
             ui.ctx().request_repaint();
@@ -1290,10 +1334,12 @@ impl App {
             .which
             .deadline(self.keys.which_key_due())
             .map(|at| at.saturating_duration_since(now));
-        match (self.loading_deadline(now), card) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        // Three waiters now: a slow directory read, a held chord, and the
+        // preview (its own "reading…" label and its scrollbar's linger).
+        [self.loading_deadline(now), card, self.preview.next_deadline(now)]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// How long until a pane has to admit it is loading, if one is about to.

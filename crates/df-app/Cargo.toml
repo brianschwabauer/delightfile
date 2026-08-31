@@ -15,6 +15,16 @@ thiserror.workspace = true
 log.workspace = true
 env_logger.workspace = true
 df-core.workspace = true
+crossbeam-channel.workspace = true
+# The decode half of PLAN §6's seam. dv-media is already a workspace member and
+# already builds; what df-app takes from it is its `ffmpeg` re-export, which is
+# how AVIF/HEIF still images decode without a libavif or libheif of our own
+# (dv-media itself has no still-image API — see `preview::decode`).
+dv-media.workspace = true
+# PNG/JPEG/WebP/GIF decoding, the downscale, and the JPEG *encoder* that writes
+# a thumbnail back into the shared yazi cache. Already in the workspace and
+# already compiled for dv-media; no new dependency enters the tree for it.
+image.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true

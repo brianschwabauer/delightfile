@@ -37,12 +37,26 @@ pub struct Palette {
     pub overlay1: egui::Color32,
     pub overlay2: egui::Color32,
     pub subtext0: egui::Color32,
+    pub subtext1: egui::Color32,
     pub text: egui::Color32,
     /// The focus accent, and the colour of a directory's name.
     pub blue: egui::Color32,
     pub sky: egui::Color32,
     pub red: egui::Color32,
     pub yellow: egui::Color32,
+    // The rest of the accent ramp. Added for the preview pane's syntax
+    // highlighting (PLAN §6), which needs a colour per token kind and takes
+    // each of them from the flavour's own names — the mapping is catppuccin's
+    // published one (keywords mauve, strings green, numbers peach, types
+    // yellow, functions blue), so a `[palette]` override in `theme.toml`
+    // re-tints the code the same way it re-tints everything else.
+    pub mauve: egui::Color32,
+    pub green: egui::Color32,
+    pub peach: egui::Color32,
+    pub teal: egui::Color32,
+    pub lavender: egui::Color32,
+    pub maroon: egui::Color32,
+    pub pink: egui::Color32,
 }
 
 impl Palette {
@@ -70,11 +84,19 @@ impl Palette {
             overlay1: pick("overlay1"),
             overlay2: pick("overlay2"),
             subtext0: pick("subtext0"),
+            subtext1: pick("subtext1"),
             text: pick("text"),
             blue: pick("blue"),
             sky: pick("sky"),
             red: pick("red"),
             yellow: pick("yellow"),
+            mauve: pick("mauve"),
+            green: pick("green"),
+            peach: pick("peach"),
+            teal: pick("teal"),
+            lavender: pick("lavender"),
+            maroon: pick("maroon"),
+            pink: pick("pink"),
         }
     }
 }

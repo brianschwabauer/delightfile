@@ -412,8 +412,8 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [ ] Shell `;`/`:`, open `o`/`O` with opener rules + picker
 
 ### Phase 3 — preview
-- [ ] Preview workers + yazi-compatible thumbnail cache; 80 ms crossfade-in
-- [ ] Text/syntax, rendered markdown, directory tree, image (incl. AVIF/HEIF)
+- [x] Preview workers + yazi-compatible thumbnail cache; 80 ms crossfade-in
+- [x] Text/syntax, rendered markdown, directory tree, image (incl. AVIF/HEIF)
 - [ ] Video/audio playback in pane (dv-playback); `K`/`J` seek ±5 from list
 - [ ] Pane focus model: `→`-on-file → Preview, visuals (accent rule, tint, ghost cursor)
 - [ ] Global transport: j/k/l shuttle ladder, L [ ] < >, volume; preview-focus extras (, . m)
