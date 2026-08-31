@@ -12,11 +12,13 @@
 
 pub mod config;
 pub mod fs;
+pub mod input;
 pub mod keymap;
 pub mod ops;
 pub mod preview;
 pub mod tasks;
 pub mod toml;
+pub mod zoxide;
 
 /// Everything this crate can fail at.
 ///
