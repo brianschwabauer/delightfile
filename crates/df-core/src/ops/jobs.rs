@@ -215,9 +215,22 @@ impl Job for DeleteJob {
     }
 
     fn run(&mut self, ctx: &TaskCtx) -> Result<()> {
+        let mut errors = Vec::new();
+        // The rails come first, before the measuring: measuring walks the whole
+        // tree, and a `D` on `/` should be refused in a millisecond rather than
+        // after scanning every file on the disk to size up a delete that is
+        // never going to happen.
+        let mut doomed = Vec::new();
+        for path in &self.paths {
+            match super::delete::check_deletable_here(path) {
+                Ok(()) => doomed.push(path.clone()),
+                Err(e) => errors.push((path.clone(), e.to_string())),
+            }
+        }
+
         let mut bytes = 0;
         let mut files = 0;
-        for path in &self.paths {
+        for path in &doomed {
             if let Ok((b, f)) = super::copy::measure(path) {
                 bytes += b;
                 files += f;
@@ -226,9 +239,8 @@ impl Job for DeleteJob {
         ctx.set_total(bytes, files);
 
         let mut deleted = 0;
-        let mut errors = Vec::new();
         let mut cancelled = false;
-        for path in &self.paths {
+        for path in &doomed {
             match super::delete::delete_permanent(path, ctx) {
                 Ok(()) => deleted += 1,
                 Err(DfError::Cancelled) => {

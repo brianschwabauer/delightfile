@@ -12,7 +12,9 @@
 //! Three ways a paste could destroy the thing it was copying, each refused:
 //!
 //! 1. **A directory into itself, or into its own descendant.** `cp -r a a/b`
-//!    recurses until the disk is full. Refused before anything is written.
+//!    recurses until the disk is full. Refused before anything is written, and
+//!    refused on the *resolved* paths: a destination spelled through a symlink
+//!    is still inside the source.
 //! 2. **Overwriting the source with its own copy.** Both the literal case
 //!    (`src == dst`) and the sideways one, where the destination *contains* the
 //!    source, so overwriting it would take the source with it. Device and inode
@@ -20,6 +22,12 @@
 //! 3. **A name collision in the source's own directory** is not a conflict at
 //!    all — it is a duplicate, and yazi's answer is the right one: `notes.txt`
 //!    becomes `notes_1.txt`, no dialog.
+//!
+//! And one way the *undo* of a paste could: undoing a copy deletes what the
+//! copy created, so a destination that was already there — overwritten, or a
+//! directory merged into — is deliberately left out of the record. `u` after an
+//! overwrite therefore does nothing rather than finishing off the file the
+//! overwrite damaged.
 
 use std::path::{Path, PathBuf};
 
@@ -28,7 +36,7 @@ use crate::{DfError, Result};
 
 use super::journal::{Fingerprint, MovedPath, OpRecord};
 use super::trash::{suffixed, MAX_TRASH_COLLISIONS};
-use super::{exists, file_name, is_ancestor, normalize, same_file};
+use super::{exists, file_name, is_ancestor_resolved, is_real_dir, normalize, same_file};
 
 /// What `p` will do with the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -216,7 +224,9 @@ pub fn plan_paste(clip: &Clipboard, dest_dir: &Path, force: bool) -> Result<Past
             ));
         }
         // Rail 1: a directory may not be pasted into itself or below itself.
-        if src.is_dir() && is_ancestor(&src, &dest_dir) {
+        // Resolved, not lexical: a destination spelled through a symlink is
+        // still inside the source, and the copy would recurse forever.
+        if is_real_dir(&src) && is_ancestor_resolved(&src, &dest_dir) {
             return Err(DfError::Op(format!(
                 "cannot paste {} into {}: that is inside itself",
                 src.display(),
@@ -270,7 +280,7 @@ pub fn plan_paste(clip: &Clipboard, dest_dir: &Path, force: bool) -> Result<Past
 
         // Rail 2: never overwrite the source with its own copy — either
         // directly, or by clobbering a directory the source lives in.
-        let devours_source = same_file(&dst, &src) || is_ancestor(&dst, &src);
+        let devours_source = same_file(&dst, &src) || is_ancestor_resolved(&dst, &src);
         if force && !devours_source {
             claimed.push(dst.clone());
             plan.ready.push(PasteItem {
@@ -379,6 +389,13 @@ pub fn execute(plan: &PastePlan, ctx: &TaskCtx) -> Result<PasteReport> {
             report.cancelled = true;
             break;
         }
+        // Whether this destination is the copy's to take back, decided *before*
+        // the copy runs. Undo of a copy deletes what the copy created; a
+        // destination that was already there is not that. Overwriting a file
+        // destroyed the old one, and merging into a directory left the old
+        // contents in place — deleting either on `u` would be the undo
+        // finishing the job rather than reversing it.
+        let fresh = !exists(&item.dst);
         let outcome = match plan.mode {
             PasteMode::Copy => super::copy::copy_tree(&item.src, &item.dst, ctx, item.overwrite)
                 .map(|_stats| ()),
@@ -388,7 +405,11 @@ pub fn execute(plan: &PastePlan, ctx: &TaskCtx) -> Result<PasteReport> {
             Ok(()) => match plan.mode {
                 PasteMode::Copy => {
                     match Fingerprint::of(&item.dst) {
-                        Ok(fp) => created.push((item.dst.clone(), fp)),
+                        Ok(fp) if fresh => created.push((item.dst.clone(), fp)),
+                        Ok(_) => log::info!(
+                            "no undo record for {}: it was already there",
+                            item.dst.display()
+                        ),
                         // The copy landed but cannot be fingerprinted; leaving
                         // it out of the journal is the safe half — undo will
                         // not delete something it cannot verify.
@@ -489,6 +510,33 @@ mod tests {
     }
 
     #[test]
+    fn a_symlinked_destination_is_still_inside_the_source() {
+        // BUG: rail 1 compared paths lexically, so a destination spelled
+        // through a symlink read as "somewhere else" — and the copy recursed
+        // into its own output until the disk filled.
+        let t = TempTree::new("paste-symlink-self");
+        let dir = t.dir("project");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        // `link` is another spelling of `project`, so pasting `project` into
+        // `link` is pasting a directory into itself by a different name.
+        let link = t.symlink(&dir, "link");
+        let err = plan_paste(&Clipboard::yank([dir.clone()]), &link, false).unwrap_err();
+        assert!(err.to_string().contains("inside itself"), "{err}");
+    }
+
+    #[test]
+    fn a_symlinked_destination_below_the_source_is_refused() {
+        // BUG: as above, one level down.
+        let t = TempTree::new("paste-symlink-descendant");
+        let dir = t.dir("project");
+        let deep = t.dir("project/a/b");
+        std::fs::write(dir.join("a.txt"), b"x").unwrap();
+        let link = t.symlink(&deep, "link");
+        let err = plan_paste(&Clipboard::yank([dir.clone()]), &link, false).unwrap_err();
+        assert!(err.to_string().contains("inside itself"), "{err}");
+    }
+
+    #[test]
     fn a_file_may_be_pasted_into_a_directory_that_holds_it() {
         // The rail is about directories eating themselves; a *file* going into
         // its own directory is the duplicate case, not an error.
@@ -513,6 +561,23 @@ mod tests {
             execute(&plan, &ctx()).unwrap();
             assert_eq!(std::fs::read(dir.join(expected)).unwrap(), b"body");
         }
+    }
+
+    #[test]
+    fn a_cut_onto_a_hardlink_of_the_source_reports_itself_skipped() {
+        let t = TempTree::new("paste-hardlink");
+        let src = t.file("src/notes.txt", b"body");
+        let dest = t.dir("dst");
+        // The same inode under two names, in two directories.
+        std::fs::hard_link(&src, dest.join("notes.txt")).unwrap();
+
+        let plan = plan_paste(&Clipboard::cut([src.clone()]), &dest, false).unwrap();
+        let report = execute(&plan, &ctx()).unwrap();
+        assert!(
+            !exists(&src) || !report.skipped.is_empty(),
+            "a cut that did nothing must say so rather than claim to have moved: \
+             plan {plan:?} report {report:?}"
+        );
     }
 
     #[test]
@@ -664,6 +729,53 @@ mod tests {
         let err = plan_paste(&clip, &parent, true).unwrap_err();
         assert!(err.to_string().contains("destroy the source"), "{err}");
         assert!(inner.is_dir(), "nothing was touched");
+    }
+
+    #[test]
+    fn undo_of_an_overwriting_copy_does_not_delete_the_old_destination() {
+        // BUG: an overwriting paste journalled the destination as something the
+        // copy "created", so `u` deleted it outright — the file the user chose
+        // to overwrite was not put back, it was finished off. For a directory,
+        // which an overwrite *merges* into, `u` took the whole pre-existing
+        // tree with it.
+        let t = TempTree::new("paste-undo-overwrite");
+        let src = t.dir("src/photos");
+        std::fs::write(src.join("new.jpg"), b"new").unwrap();
+        let dest = t.dir("dst");
+        let victim = t.dir("dst/photos");
+        std::fs::write(victim.join("wedding.jpg"), b"irreplaceable").unwrap();
+
+        let plan = plan_paste(&Clipboard::yank([src]), &dest, true).unwrap();
+        assert!(plan.ready[0].overwrite);
+        let report = execute(&plan, &ctx()).unwrap();
+        assert!(victim.join("new.jpg").is_file(), "the paste landed");
+
+        if let Some(record) = report.record {
+            super::super::journal::undo_record(&record, &ctx()).unwrap();
+        }
+        assert_eq!(
+            std::fs::read(victim.join("wedding.jpg")).unwrap(),
+            b"irreplaceable",
+            "undo may only remove what the copy created"
+        );
+    }
+
+    #[test]
+    fn undo_of_an_overwriting_file_copy_leaves_the_file_there() {
+        let t = TempTree::new("paste-undo-overwrite-file");
+        let src = t.file("src/notes.txt", b"new");
+        let dest = t.dir("dst");
+        let victim = t.file("dst/notes.txt", b"the old contents");
+
+        let plan = plan_paste(&Clipboard::yank([src]), &dest, true).unwrap();
+        let report = execute(&plan, &ctx()).unwrap();
+        if let Some(record) = report.record {
+            super::super::journal::undo_record(&record, &ctx()).unwrap();
+        }
+        assert!(
+            exists(&victim),
+            "undo of an overwrite must not leave the user with nothing at all"
+        );
     }
 
     #[test]

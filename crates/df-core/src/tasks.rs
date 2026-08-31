@@ -801,6 +801,21 @@ fn worker_loop(shared: Arc<Shared>, rx: Receiver<Queued>) {
     }
 }
 
+/// The text a panic payload carries, for the `w` panel's error line.
+///
+/// `panic!` with a literal gives a `&str` and with formatting a `String`;
+/// anything else was thrown by a library doing something exotic, and there is
+/// nothing to say about it beyond that it happened.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "no message".to_string()
+}
+
 /// Run one job to a terminal state, retrying transient failures.
 fn run_one(shared: &Arc<Shared>, id: TaskId, job: &mut dyn Job) {
     let Some(flags) = ({
@@ -832,7 +847,27 @@ fn run_one(shared: &Arc<Shared>, id: TaskId, job: &mut dyn Job) {
         };
         shared.set_state(id, start_state);
 
-        match job.run(&ctx) {
+        // A panic in one job must not take the worker with it. Unwinding out of
+        // `worker_loop` would end the thread for good: its lane would lose a
+        // slot — ten panics and nothing in that lane ever runs again — and the
+        // task would sit `Running` in the `w` panel for ever, with nothing left
+        // alive to publish a terminal state or wake `join`.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(&ctx)));
+        let outcome = match outcome {
+            Ok(result) => result,
+            Err(payload) => {
+                shared.finish(
+                    id,
+                    TaskState::Failed {
+                        error: format!("the task panicked: {}", panic_message(payload.as_ref())),
+                        retries: attempt,
+                    },
+                );
+                return;
+            }
+        };
+
+        match outcome {
             Ok(()) => {
                 shared.finish(id, TaskState::Done);
                 return;
@@ -1065,6 +1100,38 @@ mod tests {
         engine.join(blocker, T);
         assert_eq!(engine.join(victim, T), Some(TaskState::Cancelled));
         assert_eq!(ran.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_panicking_job_fails_without_taking_its_worker_with_it() {
+        // BUG: a panic unwound out of the worker loop, so the thread died. Its
+        // lane lost a slot for the rest of the session and the panicking task
+        // stayed `Running` in the `w` panel for ever, because nothing was left
+        // to publish a terminal state — `join` and `wait_idle` hung on it.
+        let engine = TaskEngine::new(&TasksConfig {
+            micro_workers: 1,
+            macro_workers: 1,
+            bizarre_retry: 3,
+        });
+        // The default hook would print a backtrace for a panic the test is
+        // deliberately causing; put it back afterwards.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let boom = engine.spawn(FnJob::new("boom", Lane::Micro, |_| {
+            panic!("a job went wrong");
+        }));
+        match engine.join(boom, T) {
+            Some(TaskState::Failed { error, .. }) => {
+                assert!(error.contains("a job went wrong"), "{error}")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        std::panic::set_hook(previous);
+
+        // The lane still has its worker.
+        let after = engine.spawn(FnJob::new("after", Lane::Micro, |_| Ok(())));
+        assert_eq!(engine.join(after, T), Some(TaskState::Done));
+        assert!(engine.wait_idle(T));
     }
 
     #[test]

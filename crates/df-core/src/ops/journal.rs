@@ -619,6 +619,38 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "BUG: needs a manifest of the copied tree, which is a design change"]
+    fn undo_of_a_copied_directory_refuses_new_contents_nested_below_it() {
+        // BUG (deferred): `Fingerprint` describes one path. For a copied
+        // *tree* only the top directory is fingerprinted, and its child count
+        // is unchanged by work added two levels down — so `u` walks in and
+        // deletes it. `undo_copy` calls `remove_tree` on the whole tree after
+        // checking one entry count.
+        //
+        // Catching this needs the copy to record a manifest of every path it
+        // created (path, kind, size, mtime) and `undo_copy` to verify the whole
+        // manifest before removing anything. That is a change to `OpRecord`,
+        // to what `paste::execute` collects and to `undo_copy`, so it is left
+        // for the phase that also gives the journal a persisted form.
+        let t = TempTree::new("j-copy-dir-nested");
+        let src = t.dir("src/sub");
+        std::fs::write(src.join("a"), b"a").unwrap();
+        let dst = t.join("dst");
+        copy::copy_tree(&t.join("src"), &dst, &ctx(), false).unwrap();
+
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![(dst.clone(), Fingerprint::of(&dst).unwrap())],
+        });
+        // New work, nested — the top directory still has exactly one child.
+        std::fs::write(dst.join("sub/mine"), b"hours of work").unwrap();
+
+        let err = j.undo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("cannot undo"), "{err}");
+        assert!(dst.join("sub/mine").is_file(), "newer work is never destroyed");
+    }
+
+    #[test]
     fn undo_of_a_trash_restores_it() {
         let t = TempTree::new("j-trash");
         let bin = trash::Trash::at(t.join("Trash"));

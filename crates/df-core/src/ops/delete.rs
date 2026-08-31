@@ -26,7 +26,7 @@ use std::path::Path;
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
-use super::{is_ancestor, normalize};
+use super::{is_ancestor, normalize, trim_trailing_slash};
 
 /// Would deleting `path` be reckless? Errors say which rail was hit.
 pub fn check_deletable(path: &Path, cwd: &Path, home: Option<&Path>) -> Result<()> {
@@ -83,6 +83,9 @@ pub fn delete_permanent(path: &Path, ctx: &TaskCtx) -> Result<()> {
 /// path the user asked to *move*.
 pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
     ctx.checkpoint()?;
+    // `lstat("link/")` answers about the *target*, so a walk that kept the
+    // slash would descend a symlink and empty what it points at.
+    let path = &trim_trailing_slash(path);
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         // Already gone is the state we wanted.
@@ -113,6 +116,7 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
 /// Only for cleaning up something *this program just created* — a partial copy,
 /// a destination the user chose to overwrite. Never reachable from a keystroke.
 pub(crate) fn remove_tree_unchecked(path: &Path) -> Result<()> {
+    let path = &trim_trailing_slash(path);
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -131,6 +135,7 @@ mod tests {
 
     use super::*;
     use crate::ops::exists;
+    use std::path::PathBuf;
     use crate::ops::fixture::{gnarly_names, TempTree};
 
     fn ctx() -> TaskCtx {
@@ -161,6 +166,23 @@ mod tests {
         remove_tree(&victim, &ctx()).unwrap();
         assert!(!exists(&victim));
         assert!(real.join("precious").is_file(), "the target survives");
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_turn_a_link_into_its_target() {
+        // BUG: POSIX makes a trailing slash mean "and this is a directory", so
+        // `lstat("link/")` follows the final symlink. The walk below therefore
+        // saw a directory rather than a link, descended into it, and emptied
+        // the thing the link pointed at — `~/link/` deleting `~/Pictures`.
+        let t = TempTree::new("delete-trailing-slash");
+        let real = t.dir("real");
+        std::fs::write(real.join("precious"), b"keep").unwrap();
+        let link = t.symlink(&real, "link");
+
+        let with_slash = PathBuf::from(format!("{}/", link.display()));
+        remove_tree(&with_slash, &ctx()).unwrap();
+        assert!(real.join("precious").is_file(), "the target survives");
+        assert!(!exists(&link), "the link itself is gone");
     }
 
     #[test]

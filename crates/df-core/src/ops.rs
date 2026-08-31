@@ -108,6 +108,75 @@ pub fn is_strict_ancestor(ancestor: &Path, path: &Path) -> bool {
     p != a && p.starts_with(&a)
 }
 
+/// A path with every symlink in it resolved — including a path that is not
+/// there yet, whose parent is resolved and whose name is put back.
+///
+/// `None` when even the parent cannot be resolved, which leaves the caller with
+/// nothing better than the lexical answer.
+fn resolved(path: &Path) -> Option<PathBuf> {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return Some(p);
+    }
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    Some(std::fs::canonicalize(parent).ok()?.join(name))
+}
+
+/// [`is_ancestor`], asking the filesystem instead of the text.
+///
+/// The lexical answer is the right one for display and for `..`, and the wrong
+/// one for the "into itself" rails: `~/link` and `~/project` are one directory
+/// when `link` points at it, and copying `project` into `link` recurses until
+/// the disk is full. Falls back to the lexical answer when either side cannot
+/// be resolved, so this never says "safe" where [`is_ancestor`] said "unsafe".
+pub fn is_ancestor_resolved(ancestor: &Path, path: &Path) -> bool {
+    if is_ancestor(ancestor, path) {
+        return true;
+    }
+    matches!(
+        (resolved(ancestor), resolved(path)),
+        (Some(a), Some(p)) if p.starts_with(&a)
+    )
+}
+
+/// [`is_strict_ancestor`], resolved. See [`is_ancestor_resolved`].
+pub fn is_strict_ancestor_resolved(ancestor: &Path, path: &Path) -> bool {
+    if is_strict_ancestor(ancestor, path) {
+        return true;
+    }
+    matches!(
+        (resolved(ancestor), resolved(path)),
+        (Some(a), Some(p)) if p != a && p.starts_with(&a)
+    )
+}
+
+/// Is this a directory *itself*, rather than a symlink to one?
+///
+/// The recursion rails only apply to a real directory: copying a symlink that
+/// points at an ancestor recreates one link and recurses into nothing.
+pub fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
+}
+
+/// A path with any trailing `/` trimmed, for the calls that must act on the
+/// *link* rather than on what it points at.
+///
+/// POSIX makes a trailing slash mean "and this had better be a directory", so
+/// `lstat("link/")` follows the final symlink and answers about the target.
+/// A recursive delete handed `~/link/` would therefore descend into the target
+/// and empty it. Everything that unlinks trims first.
+pub fn trim_trailing_slash(path: &Path) -> PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    let raw = path.as_os_str().as_bytes();
+    let mut end = raw.len();
+    while end > 1 && raw[end - 1] == b'/' {
+        end -= 1;
+    }
+    PathBuf::from(std::ffi::OsStr::from_bytes(&raw[..end]))
+}
+
 /// Are these two paths the same file *on disk* (same device and inode)?
 ///
 /// The lexical comparison is not enough: `~/x` and `/home/brian/x` are the same

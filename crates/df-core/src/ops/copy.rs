@@ -20,7 +20,17 @@ use std::time::SystemTime;
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
-use super::{exists, file_name, is_strict_ancestor, same_file};
+use super::{exists, file_name, is_real_dir, is_strict_ancestor_resolved, same_file};
+
+/// Would putting `dst` inside `src` make the copy eat its own output?
+///
+/// Only a real directory can: a symlink is recreated in one syscall and
+/// recurses into nothing. Resolved rather than lexical, because `dst` may reach
+/// `src` through a symlinked parent — `cp -r a a/b` spelled so it does not look
+/// like it.
+fn copies_into_itself(src: &Path, dst: &Path) -> bool {
+    is_real_dir(src) && is_strict_ancestor_resolved(src, dst)
+}
 
 /// How much of a file to move between two cancellation checkpoints.
 ///
@@ -109,7 +119,7 @@ pub fn copy_tree(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
             dst.display()
         )));
     }
-    if is_strict_ancestor(src, dst) {
+    if copies_into_itself(src, dst) {
         return Err(DfError::Op(format!(
             "cannot copy {} into itself ({})",
             src.display(),
@@ -191,11 +201,14 @@ fn copy_dir(
     meta: &std::fs::Metadata,
 ) -> Result<CopyStats> {
     if exists(dst) {
+        if !overwrite {
+            // Including a destination directory: merging into one the caller
+            // did not know was there is a silent overwrite of every name that
+            // collides inside it.
+            return Err(already_exists(dst));
+        }
         let dst_meta = std::fs::symlink_metadata(dst).map_err(|e| DfError::io(dst, e))?;
         if !dst_meta.is_dir() {
-            if !overwrite {
-                return Err(already_exists(dst));
-            }
             super::delete::remove_tree_unchecked(dst)?;
             std::fs::create_dir(dst).map_err(|e| DfError::io(dst, e))?;
         }
@@ -495,28 +508,70 @@ pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
             dst.display()
         )));
     }
-    if is_strict_ancestor(src, dst) {
+    if copies_into_itself(src, dst) {
         return Err(DfError::Op(format!(
             "cannot move {} into itself ({})",
             src.display(),
             dst.display()
         )));
     }
-    if exists(dst) {
-        if !overwrite {
-            return Err(already_exists(dst));
-        }
-        // `rename` will not replace a directory with a file, or a non-empty
-        // directory with anything, so the old destination goes first. The
-        // conflict dialog has already been through; this is the user's answer.
-        super::delete::remove_tree_unchecked(dst)?;
+    // The other direction: replacing a directory that holds the source means
+    // clearing the destination out of the way would delete the source with it,
+    // leaving nothing at all behind. Refused here as well as in `plan_paste`,
+    // because this is the call that does the deleting.
+    if is_strict_ancestor_resolved(dst, src) {
+        return Err(DfError::Op(format!(
+            "cannot move {} onto {}: the destination contains it",
+            src.display(),
+            dst.display()
+        )));
+    }
+    let replacing = exists(dst);
+    if replacing && !overwrite {
+        return Err(already_exists(dst));
     }
 
+    // `rename(2)` replaces an existing file atomically, so the destination is
+    // never missing and never half-written — the rename is tried *first*, even
+    // when the user asked to overwrite. Only the shapes rename refuses (a
+    // directory in the way of a file, a non-empty directory in the way of
+    // anything) need the old destination removed, and then only once rename has
+    // said so. Removing it up front destroyed the user's file whenever the
+    // rename went on to fail for an unrelated reason — a read-only source
+    // directory, a vanished mount — and there was nothing left to put back.
+    match std::fs::rename(src, dst) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            // Across filesystems the copy overwrites in place, temp-file and
+            // all; an existing destination *directory* is merged into rather
+            // than replaced, which leaves too much rather than too little.
+            return move_cross_device(src, dst, ctx);
+        }
+        Err(e) if replacing && in_the_way(&e) => {}
+        Err(e) => return Err(DfError::io(src, e)),
+    }
+
+    // The conflict dialog has already been through; this is the user's answer.
+    super::delete::remove_tree_unchecked(dst)?;
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => move_cross_device(src, dst, ctx),
         Err(e) => Err(DfError::io(src, e)),
     }
+}
+
+/// Does this `rename(2)` failure mean "the old destination is in the way", as
+/// opposed to "this move cannot happen at all"?
+///
+/// Only asked when the destination is known to exist, which is what keeps
+/// `ENOTDIR` from being read as "a component of the path is not a directory".
+fn in_the_way(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        // ENOTEMPTY/EEXIST: a directory with something in it. EISDIR: a
+        // directory where the source is not one. ENOTDIR: the reverse.
+        Some(libc::ENOTEMPTY) | Some(libc::EEXIST) | Some(libc::EISDIR) | Some(libc::ENOTDIR)
+    )
 }
 
 /// The cross-filesystem move: copy everything, prove it arrived, then delete
@@ -802,6 +857,35 @@ mod tests {
     }
 
     #[test]
+    fn refuses_to_copy_a_directory_into_itself_through_a_symlink() {
+        // BUG: the rail was lexical, so a destination spelled through a symlink
+        // read as "somewhere else" and the copy recursed until the disk filled.
+        let t = TempTree::new("copy-into-self-link");
+        let src = t.dir("src");
+        std::fs::write(src.join("a"), b"x").unwrap();
+        let link = t.symlink(&src, "link");
+        let err = copy_tree(&src, &link.join("copy"), &ctx(), false).unwrap_err();
+        assert!(err.to_string().contains("into itself"), "{err}");
+
+        // And the same for a move.
+        let err = move_path(&src, &link.join("copy"), &ctx(), false).unwrap_err();
+        assert!(err.to_string().contains("into itself"), "{err}");
+    }
+
+    #[test]
+    fn a_symlink_may_be_copied_into_the_directory_it_points_at() {
+        // The rail is about a *directory* eating its own output; a link is one
+        // syscall and recurses into nothing.
+        let t = TempTree::new("copy-link-into-target");
+        let dir = t.dir("dir");
+        let link = t.symlink(&dir, "link");
+        copy_tree(&link, &dir.join("copied-link"), &ctx(), false).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("copied-link"))
+            .unwrap()
+            .is_symlink());
+    }
+
+    #[test]
     fn refuses_to_copy_a_file_over_itself() {
         let t = TempTree::new("copy-self");
         let src = t.file("a.txt", b"x");
@@ -871,6 +955,28 @@ mod tests {
     }
 
     #[test]
+    fn a_directory_is_not_silently_merged_into_without_overwrite() {
+        // BUG: an existing destination *directory* was merged into whatever the
+        // caller said, so a destination that appeared between the plan and the
+        // execute quietly overwrote every colliding name inside it — and the
+        // journal then recorded the whole merged directory as a fresh copy.
+        let t = TempTree::new("copy-merge");
+        let src = t.dir("src");
+        std::fs::write(src.join("a"), b"new").unwrap();
+        let dst = t.dir("dst");
+        std::fs::write(dst.join("a"), b"old").unwrap();
+
+        let err = copy_tree(&src, &dst, &ctx(), false).unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(std::fs::read(dst.join("a")).unwrap(), b"old");
+
+        // With overwrite it still merges, which is what the dialog's answer
+        // means for a folder.
+        copy_tree(&src, &dst, &ctx(), true).unwrap();
+        assert_eq!(std::fs::read(dst.join("a")).unwrap(), b"new");
+    }
+
+    #[test]
     fn measure_counts_bytes_and_entries() {
         let t = TempTree::new("measure");
         let src = t.dir("src");
@@ -891,6 +997,65 @@ mod tests {
         move_path(&src, &dst, &ctx(), false).unwrap();
         assert!(!exists(&src));
         assert_eq!(std::fs::read(&dst).unwrap(), b"data");
+    }
+
+    #[test]
+    fn refuses_to_move_something_onto_a_directory_that_contains_it() {
+        // BUG: the destination was removed to make room for the rename, and
+        // when the destination *contained* the source that removal took the
+        // source with it — both gone, and the rename then failed with ENOENT.
+        // `plan_paste` refuses this a layer up; the rail belongs here too,
+        // because `move_path` is the public call that does the damage.
+        let t = TempTree::new("move-onto-container");
+        let inner = t.dir("parent/inner");
+        let src = t.file("parent/inner/thing", b"the only copy");
+        std::fs::write(inner.join("neighbour"), b"also precious").unwrap();
+
+        let err = move_path(&src, &inner, &ctx(), true).unwrap_err();
+        assert!(err.to_string().contains("contains it"), "{err}");
+        assert_eq!(std::fs::read(&src).unwrap(), b"the only copy");
+        assert!(inner.join("neighbour").is_file());
+    }
+
+    #[test]
+    fn a_move_that_cannot_happen_leaves_the_destination_alone() {
+        // BUG: an overwriting move deleted the old destination *before* trying
+        // the rename, so a rename that then failed left the user with neither
+        // file — the source still in place and the destination annihilated.
+        let t = TempTree::new("move-overwrite-fail");
+        let src_dir = t.dir("src");
+        let src = t.file("src/a.txt", b"the source");
+        let dst = t.file("dst/a.txt", b"the precious destination");
+
+        // A source directory nothing may unlink from: `rename` needs write
+        // permission on it, so the move is impossible.
+        std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let err = move_path(&src, &dst, &ctx(), true).unwrap_err();
+        std::fs::set_permissions(&src_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(matches!(err, DfError::Io { .. }), "{err}");
+        assert_eq!(
+            std::fs::read(&dst).unwrap(),
+            b"the precious destination",
+            "a move that could not happen must not have destroyed the destination"
+        );
+        assert_eq!(std::fs::read(&src).unwrap(), b"the source");
+    }
+
+    #[test]
+    fn an_overwriting_move_still_replaces_a_directory() {
+        // The other half of the rail above: when the rename genuinely is
+        // blocked by the old destination, it still goes.
+        let t = TempTree::new("move-overwrite-dir");
+        let src = t.dir("src");
+        std::fs::write(src.join("new"), b"new").unwrap();
+        let dst = t.dir("dst");
+        std::fs::write(dst.join("old"), b"old").unwrap();
+
+        move_path(&src, &dst, &ctx(), true).unwrap();
+        assert!(!exists(&src));
+        assert!(dst.join("new").is_file());
+        assert!(!exists(&dst.join("old")), "the old destination was replaced");
     }
 
     #[test]
