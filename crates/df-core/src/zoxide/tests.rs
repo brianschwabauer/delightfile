@@ -219,8 +219,16 @@ fn an_empty_query_is_the_frecency_list() {
 fn matching_is_prefix_then_substring_then_keywords() {
     let cases: &[(&str, &str, MatchKind)] = &[
         ("del", "/home/brian/Work/delightstack", MatchKind::Prefix),
-        ("light", "/home/brian/Work/delightstack", MatchKind::Component),
-        ("work del", "/home/brian/Work/delightstack", MatchKind::Keywords),
+        (
+            "light",
+            "/home/brian/Work/delightstack",
+            MatchKind::Component,
+        ),
+        (
+            "work del",
+            "/home/brian/Work/delightstack",
+            MatchKind::Keywords,
+        ),
         // Case folds both ways.
         ("DEL", "/home/brian/Work/delightstack", MatchKind::Prefix),
         ("downloads", "/home/brian/Downloads", MatchKind::Prefix),
@@ -229,7 +237,9 @@ fn matching_is_prefix_then_substring_then_keywords() {
     ];
     for (q, path, kind) in cases {
         let got = query(&dirs(), q, LATER);
-        let top = got.first().unwrap_or_else(|| panic!("{q:?} matched nothing"));
+        let top = got
+            .first()
+            .unwrap_or_else(|| panic!("{q:?} matched nothing"));
         assert_eq!(top.dir.path, PathBuf::from(path), "{q:?}");
         assert_eq!(top.kind, *kind, "{q:?}");
     }
@@ -242,7 +252,10 @@ fn a_prefix_match_outranks_a_more_frecent_substring_match() {
     // other. Frecency breaks ties; it does not overrule the query.
     let got = query(&dirs(), "stack", LATER);
     assert_eq!(got.len(), 1);
-    assert_eq!(got[0].dir.path, PathBuf::from("/home/brian/Work/delightstack"));
+    assert_eq!(
+        got[0].dir.path,
+        PathBuf::from("/home/brian/Work/delightstack")
+    );
 }
 
 #[test]

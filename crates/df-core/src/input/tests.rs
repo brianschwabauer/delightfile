@@ -502,7 +502,13 @@ fn the_kill_family() {
         (6, "<ctrl+k>", "héllo ", "wörld.foo  日本語 bar", 5),
         (11, "<ctrl+w>", "héllo .foo  日本語 bar", "wörld", 6),
         (0, "<ctrl+u>", FIXTURE, "", 0),
-        (FIXTURE_LEN - 1, "<ctrl+k>", "héllo wörld.foo  日本語 ba", "r", 22),
+        (
+            FIXTURE_LEN - 1,
+            "<ctrl+k>",
+            "héllo wörld.foo  日本語 ba",
+            "r",
+            22,
+        ),
         // Alt+d kills forward through the end of the word, inclusive.
         (6, "<alt+d>", "héllo .foo  日本語 bar", "wörld", 6),
         (0, "<alt+d>", " wörld.foo  日本語 bar", "héllo", 0),
@@ -578,7 +584,11 @@ fn undo_and_redo_walk_the_stack_both_ways() {
     run(&mut buf, "u");
     assert_eq!(buf.text(), "alpha beta gamma");
     run(&mut buf, "u");
-    assert_eq!(buf.text(), "alpha beta gamma", "undo past the bottom is inert");
+    assert_eq!(
+        buf.text(),
+        "alpha beta gamma",
+        "undo past the bottom is inert"
+    );
     run(&mut buf, "<ctrl+r>");
     assert_eq!(buf.text(), "beta gamma");
     run(&mut buf, "<ctrl+r>");
@@ -664,7 +674,11 @@ fn the_escape_ladder() {
     let mut buf = InputBuffer::new("abc", 3);
     assert_eq!(buf.feed(esc()), InputEvent::Consumed);
     assert_eq!(buf.mode(), InputMode::Normal);
-    assert_eq!(buf.cursor(), 2, "leaving insert steps back onto a character");
+    assert_eq!(
+        buf.cursor(),
+        2,
+        "leaving insert steps back onto a character"
+    );
     run(&mut buf, "v");
     assert_eq!(buf.feed(esc()), InputEvent::Consumed);
     assert_eq!(buf.selection(), None);
@@ -674,7 +688,10 @@ fn the_escape_ladder() {
 #[test]
 fn ctrl_bracket_is_the_same_key_as_escape() {
     let mut buf = InputBuffer::new("abc", 3);
-    assert_eq!(buf.feed(parse_chord("ctrl+[").expect("ctrl+[")), InputEvent::Consumed);
+    assert_eq!(
+        buf.feed(parse_chord("ctrl+[").expect("ctrl+[")),
+        InputEvent::Consumed
+    );
     assert_eq!(buf.mode(), InputMode::Normal);
     assert_eq!(
         buf.feed(parse_chord("ctrl+[").expect("ctrl+[")),
@@ -756,5 +773,9 @@ fn cursor_byte_tracks_multibyte_text() {
     assert_eq!(buf.cursor(), 2);
     assert_eq!(buf.cursor_byte(), 6);
     run(&mut buf, "<right>");
-    assert_eq!(buf.cursor_byte(), 9, "past the end is the end of the string");
+    assert_eq!(
+        buf.cursor_byte(),
+        9,
+        "past the end is the end of the string"
+    );
 }

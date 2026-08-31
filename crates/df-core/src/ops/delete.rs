@@ -135,8 +135,8 @@ mod tests {
 
     use super::*;
     use crate::ops::exists;
-    use std::path::PathBuf;
     use crate::ops::fixture::{gnarly_names, TempTree};
+    use std::path::PathBuf;
 
     fn ctx() -> TaskCtx {
         TaskCtx::detached()
@@ -254,8 +254,7 @@ mod tests {
     fn rail_is_not_fooled_by_dots_or_a_name_prefix() {
         let home = Path::new("/home/someone");
         let cwd = Path::new("/home/someone/work");
-        let err =
-            check_deletable(Path::new("/home/someone/work/.."), cwd, Some(home)).unwrap_err();
+        let err = check_deletable(Path::new("/home/someone/work/.."), cwd, Some(home)).unwrap_err();
         assert!(err.to_string().contains("home directory"), "{err}");
         // `/home/someone/workshop` merely starts with the same letters.
         check_deletable(Path::new("/home/someone/workshop"), cwd, Some(home)).unwrap();

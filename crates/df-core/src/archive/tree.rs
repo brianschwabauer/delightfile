@@ -183,6 +183,12 @@ pub struct ArchiveEntry {
 
 impl ArchiveEntry {
     fn dir(path: String, name: String) -> ArchiveEntry {
+        // A synthesized directory inherits the safety of the prefix it stands
+        // for. `../../etc/passwd` synthesizes a `..` and a `../..`, and those are
+        // every bit as unsafe to join onto a destination as the leaf is — more
+        // so, since `dest.join("..")` is lexically still "under" the destination
+        // and would slip past a naive prefix check.
+        let unsafe_name = name_is_unsafe(&path);
         ArchiveEntry {
             name,
             path,
@@ -192,7 +198,7 @@ impl ArchiveEntry {
             is_dir: true,
             method: Method::Store,
             encrypted: false,
-            unsafe_name: false,
+            unsafe_name,
             synthesized: true,
             link_target: None,
         }

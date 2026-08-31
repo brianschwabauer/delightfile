@@ -77,11 +77,7 @@ impl Head {
 /// Bare repositories are deliberately not found — they have no work tree, so
 /// there are no rows to decorate.
 pub fn repo_root(path: &Path) -> Option<PathBuf> {
-    let start = if path.is_dir() {
-        path
-    } else {
-        path.parent()?
-    };
+    let start = if path.is_dir() { path } else { path.parent()? };
 
     let mut here = Some(start);
     for _ in 0..MAX_WALK_DEPTH {
@@ -178,9 +174,8 @@ pub fn parse_head(text: &[u8]) -> Option<Head> {
     // Detached: a bare object id. Accept both sha-1 (40) and sha-256 (64), and
     // require it to be hex so that a `HEAD` full of junk reads as "no branch"
     // instead of putting the junk in the breadcrumb.
-    let is_oid = text.len() >= SHORT_HASH
-        && text.len() <= 64
-        && text.bytes().all(|b| b.is_ascii_hexdigit());
+    let is_oid =
+        text.len() >= SHORT_HASH && text.len() <= 64 && text.bytes().all(|b| b.is_ascii_hexdigit());
     if !is_oid {
         return None;
     }

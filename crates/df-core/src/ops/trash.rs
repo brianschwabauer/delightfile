@@ -456,7 +456,9 @@ fn fit(name: &OsStr, suffix: Option<u32>, max: usize) -> OsString {
     let stem = as_path.file_stem().unwrap_or(name).as_bytes().to_vec();
     let ext = as_path.extension().map(|e| e.as_bytes().to_vec());
 
-    let suffix = suffix.map(|n| format!("_{n}").into_bytes()).unwrap_or_default();
+    let suffix = suffix
+        .map(|n| format!("_{n}").into_bytes())
+        .unwrap_or_default();
     let ext_len = ext.as_ref().map(|e| e.len() + 1).unwrap_or(0);
     if suffix.len() + ext_len > max {
         // Pathological: an extension longer than a whole name may be.
@@ -521,8 +523,7 @@ pub fn encode_path(path: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
     let mut out = String::new();
     for &b in path.as_os_str().as_bytes() {
-        let unreserved = b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/');
+        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/');
         if unreserved {
             out.push(b as char);
         } else {
@@ -659,7 +660,10 @@ mod tests {
             .unwrap()
             .is_symlink());
         restore(&item, &ctx()).unwrap();
-        assert_eq!(std::fs::read_link(&link).unwrap(), Path::new("/nowhere/at/all"));
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("/nowhere/at/all")
+        );
     }
 
     #[test]
@@ -826,10 +830,7 @@ mod tests {
 
     #[test]
     fn iso8601_is_utc_and_correct() {
-        assert_eq!(
-            iso8601_utc(SystemTime::UNIX_EPOCH),
-            "1970-01-01T00:00:00"
-        );
+        assert_eq!(iso8601_utc(SystemTime::UNIX_EPOCH), "1970-01-01T00:00:00");
         // 2026-08-31T13:45:07Z = 1_788_183_907.
         assert_eq!(
             iso8601_utc(SystemTime::UNIX_EPOCH + Duration::from_secs(1_788_183_907)),
@@ -918,7 +919,11 @@ mod tests {
         };
         let chosen = for_path(&home).unwrap();
         assert_eq!(chosen, Trash::home().unwrap());
-        assert!(chosen.root().ends_with("Trash"), "{}", chosen.root().display());
+        assert!(
+            chosen.root().ends_with("Trash"),
+            "{}",
+            chosen.root().display()
+        );
     }
 
     #[test]
@@ -930,7 +935,10 @@ mod tests {
 
     #[test]
     fn suffixing_keeps_the_extension_and_the_length_limit() {
-        assert_eq!(suffixed(OsStr::new("notes.txt"), 1), OsString::from("notes_1.txt"));
+        assert_eq!(
+            suffixed(OsStr::new("notes.txt"), 1),
+            OsString::from("notes_1.txt")
+        );
         assert_eq!(suffixed(OsStr::new("notes"), 2), OsString::from("notes_2"));
         assert_eq!(
             suffixed(OsStr::new("a.tar.gz"), 3),

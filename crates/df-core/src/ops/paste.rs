@@ -344,11 +344,7 @@ pub fn plan_paste(clip: &Clipboard, dest_dir: &Path, force: bool) -> Result<Past
 ///
 /// `claimed` holds names this same paste has already spoken for but not yet
 /// created.
-pub fn unique_name(
-    dir: &Path,
-    name: &std::ffi::OsStr,
-    claimed: &[PathBuf],
-) -> Result<PathBuf> {
+pub fn unique_name(dir: &Path, name: &std::ffi::OsStr, claimed: &[PathBuf]) -> Result<PathBuf> {
     let bare = dir.join(name);
     if !exists(&bare) && !claimed.contains(&bare) {
         return Ok(bare);
@@ -428,8 +424,9 @@ pub fn execute(plan: &PastePlan, ctx: &TaskCtx) -> Result<PasteReport> {
         // finishing the job rather than reversing it.
         let fresh = !exists(&item.dst);
         let outcome = match plan.mode {
-            PasteMode::Copy => super::copy::copy_tree(&item.src, &item.dst, ctx, item.overwrite)
-                .map(|_stats| ()),
+            PasteMode::Copy => {
+                super::copy::copy_tree(&item.src, &item.dst, ctx, item.overwrite).map(|_stats| ())
+            }
             PasteMode::Cut => super::copy::move_path(&item.src, &item.dst, ctx, item.overwrite),
         };
         match outcome {
@@ -660,7 +657,8 @@ mod tests {
         std::fs::write(dest.join("notes.txt"), b"old").unwrap();
 
         let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
-        plan.resolve(&normalize(&src), &Resolution::Overwrite).unwrap();
+        plan.resolve(&normalize(&src), &Resolution::Overwrite)
+            .unwrap();
         assert!(plan.is_settled());
         execute(&plan, &ctx()).unwrap();
         assert_eq!(std::fs::read(dest.join("notes.txt")).unwrap(), b"new");
@@ -682,7 +680,8 @@ mod tests {
         let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
         let suggested = plan.conflicts[0].suggested.clone();
         let name = PathBuf::from(suggested.file_name().unwrap());
-        plan.resolve(&normalize(&src), &Resolution::Rename(name)).unwrap();
+        plan.resolve(&normalize(&src), &Resolution::Rename(name))
+            .unwrap();
         execute(&plan, &ctx()).unwrap();
         assert_eq!(std::fs::read(&suggested).unwrap(), b"new");
         assert_eq!(std::fs::read(dest.join("notes.txt")).unwrap(), b"old");
@@ -700,13 +699,27 @@ mod tests {
         let dest = t.dir("dst");
         std::fs::write(dest.join("notes.txt"), b"old").unwrap();
 
-        for bad in ["sub/notes.txt", "../notes.txt", "/tmp/notes.txt", ".", "..", ""] {
+        for bad in [
+            "sub/notes.txt",
+            "../notes.txt",
+            "/tmp/notes.txt",
+            ".",
+            "..",
+            "",
+        ] {
             let mut plan = plan_paste(&Clipboard::yank([src.clone()]), &dest, false).unwrap();
             let err = plan
                 .resolve(&normalize(&src), &Resolution::Rename(PathBuf::from(bad)))
                 .unwrap_err();
-            assert!(err.to_string().contains("not a usable name"), "{bad:?}: {err}");
-            assert_eq!(plan.conflicts.len(), 1, "{bad:?} left the conflict standing");
+            assert!(
+                err.to_string().contains("not a usable name"),
+                "{bad:?}: {err}"
+            );
+            assert_eq!(
+                plan.conflicts.len(),
+                1,
+                "{bad:?} left the conflict standing"
+            );
             assert!(plan.ready.is_empty(), "{bad:?}");
         }
 
@@ -911,8 +924,12 @@ mod tests {
         let good = t.file("src/good.txt", b"g");
         let doomed = t.file("src/doomed.txt", b"d");
         let dest = t.dir("dst");
-        let mut plan = plan_paste(&Clipboard::yank([doomed.clone(), good.clone()]), &dest, false)
-            .unwrap();
+        let mut plan = plan_paste(
+            &Clipboard::yank([doomed.clone(), good.clone()]),
+            &dest,
+            false,
+        )
+        .unwrap();
         // Make the first item fail by deleting it after planning.
         std::fs::remove_file(&doomed).unwrap();
         plan.ready.sort_by_key(|i| i.src.clone());
@@ -986,8 +1003,7 @@ mod tests {
         };
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].root, dest.join("a.txt"));
-        super::super::journal::undo_record(&report.record.unwrap(), &TaskCtx::detached())
-            .unwrap();
+        super::super::journal::undo_record(&report.record.unwrap(), &TaskCtx::detached()).unwrap();
         assert!(!exists(&dest.join("a.txt")));
     }
 

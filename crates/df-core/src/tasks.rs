@@ -1018,7 +1018,10 @@ mod tests {
                     return t.state;
                 }
             }
-            assert!(Instant::now() < deadline, "state never arrived for task {id}");
+            assert!(
+                Instant::now() < deadline,
+                "state never arrived for task {id}"
+            );
             std::thread::sleep(Duration::from_millis(2));
         }
     }
@@ -1174,7 +1177,10 @@ mod tests {
             Ok(())
         }));
         wait_for(&engine, blocker, |s| matches!(s, TaskState::Running(_)));
-        assert_eq!(engine.task(victim).map(|t| t.state), Some(TaskState::Pending));
+        assert_eq!(
+            engine.task(victim).map(|t| t.state),
+            Some(TaskState::Pending)
+        );
         engine.cancel(victim);
         drop(tx);
         engine.join(blocker, T);
@@ -1266,10 +1272,7 @@ mod tests {
                 std::io::Error::from(std::io::ErrorKind::PermissionDenied),
             ))
         }));
-        assert!(matches!(
-            engine.join(id, T),
-            Some(TaskState::Failed { .. })
-        ));
+        assert!(matches!(engine.join(id, T), Some(TaskState::Failed { .. })));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 

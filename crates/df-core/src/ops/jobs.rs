@@ -388,7 +388,10 @@ mod tests {
         let plan = plan_paste(&Clipboard::cut([src.clone()]), &dest, false).unwrap();
         let job = PasteJob::new(plan);
         assert!(job.name().starts_with("Move 1 item → "), "{}", job.name());
-        assert_eq!(TrashJob::new(vec![src.clone(), src]).name(), "Trash 2 items");
+        assert_eq!(
+            TrashJob::new(vec![src.clone(), src]).name(),
+            "Trash 2 items"
+        );
         assert_eq!(DeleteJob::new(vec![]).name(), "Delete 0 items");
     }
 }

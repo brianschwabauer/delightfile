@@ -69,10 +69,7 @@ pub fn relative_to(from_dir: &Path, to: &Path) -> PathBuf {
 /// unlinking the link it made and not a newer one.
 pub fn symlink(target: &Path, link: &Path, kind: LinkKind) -> Result<PathBuf> {
     if exists(link) {
-        return Err(DfError::Op(format!(
-            "{} already exists",
-            link.display()
-        )));
+        return Err(DfError::Op(format!("{} already exists", link.display())));
     }
     let text = match kind {
         LinkKind::Absolute => normalize(target),
@@ -147,7 +144,10 @@ mod tests {
 
     #[test]
     fn relative_to_the_same_place_is_dot() {
-        assert_eq!(relative_to(Path::new("/a/b"), Path::new("/a/b")), Path::new("."));
+        assert_eq!(
+            relative_to(Path::new("/a/b"), Path::new("/a/b")),
+            Path::new(".")
+        );
     }
 
     #[test]

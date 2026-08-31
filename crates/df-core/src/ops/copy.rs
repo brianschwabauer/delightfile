@@ -719,7 +719,10 @@ mod tests {
         for name in gnarly_names() {
             assert!(dst.join(&name).is_file(), "missing {name:?}");
         }
-        assert_eq!(std::fs::read(dst.join("nested dir/deep.txt")).unwrap(), b"deep");
+        assert_eq!(
+            std::fs::read(dst.join("nested dir/deep.txt")).unwrap(),
+            b"deep"
+        );
         verify_copy(&src, &dst).unwrap();
     }
 
@@ -946,10 +949,7 @@ mod tests {
 
         let flags = Arc::new(TaskFlags::new());
         flags.cancel();
-        let ctx = TaskCtx::with_sink(
-            Arc::clone(&flags),
-            Arc::new(crate::tasks::NullSink),
-        );
+        let ctx = TaskCtx::with_sink(Arc::clone(&flags), Arc::new(crate::tasks::NullSink));
         assert!(copy_tree(&src, &dst, &ctx, true).is_err());
         assert_eq!(std::fs::read(dst.join("keep-me")).unwrap(), b"precious");
     }
@@ -1055,7 +1055,10 @@ mod tests {
         move_path(&src, &dst, &ctx(), true).unwrap();
         assert!(!exists(&src));
         assert!(dst.join("new").is_file());
-        assert!(!exists(&dst.join("old")), "the old destination was replaced");
+        assert!(
+            !exists(&dst.join("old")),
+            "the old destination was replaced"
+        );
     }
 
     #[test]
@@ -1072,7 +1075,10 @@ mod tests {
 
         assert!(!exists(&src), "the source is gone only after the copy");
         assert_eq!(std::fs::read(dst.join("d/b")).unwrap(), b"bbb");
-        assert_eq!(std::fs::read_link(dst.join("d/link")).unwrap(), Path::new("../a"));
+        assert_eq!(
+            std::fs::read_link(dst.join("d/link")).unwrap(),
+            Path::new("../a")
+        );
     }
 
     #[test]

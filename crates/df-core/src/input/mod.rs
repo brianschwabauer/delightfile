@@ -515,7 +515,11 @@ impl InputBuffer {
     fn delete(&mut self, cut: bool, insert: bool) {
         match self.op {
             Some(Op::Select { anchor }) => {
-                self.op = Some(Op::Delete { cut, insert, anchor });
+                self.op = Some(Op::Delete {
+                    cut,
+                    insert,
+                    anchor,
+                });
                 self.fire(self.cursor, true);
             }
             // `dd`: the operator is already armed, so the object is the line.
@@ -748,7 +752,11 @@ impl InputBuffer {
     fn fire(&mut self, to: usize, include: bool) {
         let Some(op) = self.op.take() else { return };
         let (cut, insert, anchor) = match op {
-            Op::Delete { cut, insert, anchor } => (cut, insert, anchor),
+            Op::Delete {
+                cut,
+                insert,
+                anchor,
+            } => (cut, insert, anchor),
             Op::Yank { anchor } => {
                 let (lo, hi) = span(anchor, to, include, self.len());
                 self.yank = self.slice(lo, hi);
@@ -867,7 +875,11 @@ impl InputBuffer {
 /// The span an operator covers, given its anchor, where the motion landed, and
 /// whether the far end is inclusive.
 fn span(anchor: usize, to: usize, include: bool, len: usize) -> (usize, usize) {
-    let (lo, hi) = if anchor <= to { (anchor, to) } else { (to, anchor) };
+    let (lo, hi) = if anchor <= to {
+        (anchor, to)
+    } else {
+        (to, anchor)
+    };
     let hi = if include { hi + 1 } else { hi };
     (lo.min(len), hi.min(len))
 }

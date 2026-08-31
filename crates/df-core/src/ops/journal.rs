@@ -291,10 +291,7 @@ impl CopyManifest {
                 std::fs::remove_file(&path)
             };
             match outcome {
-                Ok(()) => ctx.advance(
-                    if fp.kind == FileKind::File { fp.len } else { 0 },
-                    1,
-                ),
+                Ok(()) => ctx.advance(if fp.kind == FileKind::File { fp.len } else { 0 }, 1),
                 // Already gone is the state this call wanted.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(DfError::io(&path, e)),
@@ -428,11 +425,7 @@ impl OpRecord {
             OpRecord::Move { moves } => format!("moved {}", plural(moves.len(), "item", "items")),
             OpRecord::Rename { moved } => format!(
                 "renamed {}",
-                moved
-                    .to
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
+                moved.to.file_name().unwrap_or_default().to_string_lossy()
             ),
             OpRecord::Copy { created } => {
                 format!("copied {}", plural(created.len(), "item", "items"))
@@ -575,9 +568,9 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
         }
     }
     match record {
-        OpRecord::Move { moves } => undo_moves(moves, ctx, "Moved", |rest| OpRecord::Move {
-            moves: rest,
-        }),
+        OpRecord::Move { moves } => {
+            undo_moves(moves, ctx, "Moved", |rest| OpRecord::Move { moves: rest })
+        }
         OpRecord::Rename { moved } => undo_moves(
             std::slice::from_ref(moved),
             ctx,
@@ -650,7 +643,12 @@ fn undo_moves(
         touched.push(m.from.clone());
     }
     let what = if moves.len() == 1 {
-        moves[0].from.file_name().unwrap_or_default().to_string_lossy().to_string()
+        moves[0]
+            .from
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
     } else {
         format!("{} items", moves.len())
     };
@@ -739,7 +737,11 @@ fn undo_trash(items: &[TrashedItem], ctx: &TaskCtx) -> Result<UndoReport> {
         description: if items.len() == 1 {
             format!(
                 "Restored {}",
-                items[0].original.file_name().unwrap_or_default().to_string_lossy()
+                items[0]
+                    .original
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
             )
         } else {
             format!("Restored {} items from the trash", items.len())
@@ -966,8 +968,14 @@ mod tests {
 
         let err = j.undo(&ctx()).unwrap_err();
         assert!(err.to_string().contains("cannot undo"), "{err}");
-        assert!(dst.join("sub/mine").is_file(), "newer work is never destroyed");
-        assert!(dst.join("sub/a").is_file(), "and neither is the copy itself");
+        assert!(
+            dst.join("sub/mine").is_file(),
+            "newer work is never destroyed"
+        );
+        assert!(
+            dst.join("sub/a").is_file(),
+            "and neither is the copy itself"
+        );
         assert_eq!(j.len(), 1, "the entry survives a refused undo");
     }
 
@@ -1018,7 +1026,10 @@ mod tests {
         j.record(record);
         j.undo(&ctx()).unwrap();
         assert!(!super::exists(&dst), "children went before their parents");
-        assert!(t.join("src/sub/deeper/f").is_file(), "the source is untouched");
+        assert!(
+            t.join("src/sub/deeper/f").is_file(),
+            "the source is untouched"
+        );
     }
 
     #[test]

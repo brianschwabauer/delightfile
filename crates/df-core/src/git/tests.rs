@@ -124,9 +124,7 @@ fn a_copy_reads_as_a_rename() {
 
 #[test]
 fn unmerged_entries_are_conflicts() {
-    let bytes = framed(&[
-        b"u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.txt",
-    ]);
+    let bytes = framed(&[b"u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.txt"]);
     let data = parse_porcelain_v2(&bytes, &root());
     assert_eq!(
         data.status_for(Path::new("/repo/conflict.txt")),
@@ -312,7 +310,11 @@ fn headers_are_parsed_and_are_not_paths() {
     ]);
     let data = parse_porcelain_v2(&bytes, &root());
     assert_eq!(data.branch.as_deref(), Some("main"));
-    assert_eq!(data.ahead_behind, Some((3, 1)), "both are counts, not signs");
+    assert_eq!(
+        data.ahead_behind,
+        Some((3, 1)),
+        "both are counts, not signs"
+    );
     assert_eq!(data.files.len(), 1);
 }
 
