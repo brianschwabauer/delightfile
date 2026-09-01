@@ -90,7 +90,8 @@ pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
     // One row's worth of height for the empty state's sentence, so the card
     // does not collapse to a bare field when a query matches nothing.
     let body = (shown.max(1) as f32) * CARD_ROW;
-    let height = CARD_PAD * 2.0 + FIELD_ROW + GAP + body;
+    // …plus the strip its own hints go in (PLAN §4).
+    let height = CARD_PAD * 2.0 + FIELD_ROW + GAP + body + chrome::HINT_ROW;
     let height = height.min(area.height() - chrome::CARD_MARGIN * 2.0);
     let top = area.top() + (area.height() - height) * crate::chrome::OPTICAL_CENTRE;
     let card = Rect::from_min_size(
@@ -328,7 +329,12 @@ pub fn search_geometry(left: f32, right: f32, top: f32, bottom: f32, mode: Mode)
         Mode::Content => CONTENT_ROW,
     };
     let body_top = field.bottom() + GAP;
-    let count = crate::viewport::visible_rows(card.bottom() - CARD_PAD - body_top, row_height);
+    // The panel is as tall as the two panes it covers, so its hint strip comes
+    // out of the rows rather than adding to the card.
+    let count = crate::viewport::visible_rows(
+        card.bottom() - CARD_PAD - chrome::HINT_ROW - body_top,
+        row_height,
+    );
     let rows = (0..count)
         .map(|n| {
             Rect::from_min_size(

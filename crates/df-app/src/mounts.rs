@@ -479,7 +479,7 @@ impl Geometry {
 /// (`delightful-ui` §16).
 pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
     let visible = card.devices.len().saturating_sub(card.first).clamp(1, ROWS);
-    let height = PAD * 2.0 + TITLE * 2.0 + 6.0 + visible as f32 * ROW;
+    let height = PAD * 2.0 + TITLE * 2.0 + 6.0 + visible as f32 * ROW + crate::chrome::HINT_ROW;
     let width = (area.width() - 40.0).clamp(0.0, MAX_WIDTH);
     let height = height.min((area.height() - 40.0).max(0.0));
     let top = area.top() + (area.height() - height).max(0.0) * crate::chrome::OPTICAL_CENTRE;
@@ -490,7 +490,10 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
     let body_top = rect.top() + PAD + TITLE * 2.0 + 6.0;
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + PAD, body_top),
-        egui::pos2(rect.right() - PAD, rect.bottom() - PAD),
+        egui::pos2(
+            rect.right() - PAD,
+            rect.bottom() - PAD - crate::chrome::HINT_ROW,
+        ),
     );
     let rows = (0..card.devices.len().saturating_sub(card.first).min(ROWS))
         .map(|i| {

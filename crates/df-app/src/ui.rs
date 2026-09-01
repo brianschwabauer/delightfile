@@ -17,7 +17,7 @@
 //! ## What is *not* drawn here
 //!
 //! No preview (Phase 3). The chrome that frames the panes — the tab strip, the
-//! bottom bar, the which-key card, the help overlay — is [`crate::chrome`]'s;
+//! top row, the which-key card, the help overlay — is [`crate::chrome`]'s;
 //! this file lays out the space it goes in and draws what is inside the panes.
 //! The preview pane is drawn as an honest empty state rather than a mock of
 //! what will fill it.
@@ -204,13 +204,19 @@ const SELECT_BAR_INSET: f32 = 3.5;
 /// not a thing you are about to act on, so it says its piece more quietly.
 pub(crate) const CLIP_BAR_WIDTH: f32 = 2.0;
 
-/// Height of the tab strip and of the bottom bar, in logical points.
+/// Height of the tab strip and of the top row, in logical points.
 ///
 /// One number for both: they are the same kind of thing — a single line of
-/// chrome bracketing the panes — and giving them different heights would put a
+/// chrome above the panes — and giving them different heights would put a
 /// wobble in the window's vertical rhythm for no reason. 26 is [`ROW_HEIGHT`]
 /// plus the four points that keep a chip's text off its own edge.
 pub const CHROME_HEIGHT: f32 = 26.0;
+
+/// What a second line costs the top row, in logical points (see [`layout`]).
+///
+/// A line of the chrome's own face plus its leading — the row is not gaining
+/// another chip's worth of padding, only somewhere to put a sentence.
+pub const PROMPT_ERROR_LINE: f32 = 17.0;
 
 /// A drop target's ring, in logical points. Two: the same weight as the
 /// focused pane's accent rule ([`FOCUS_RULE`]), because it is the same kind of
@@ -330,6 +336,12 @@ pub enum Control {
     /// A segment of the breadcrumb path bar, from the root rightwards
     /// (PLAN §2).
     Crumb(usize),
+    /// The committed filter's trailing chip on the top row, which re-opens the
+    /// prompt that set it (PLAN §7.2).
+    FilterChip,
+    /// The clipboard chip on the top row, which clears it — the pointer's `X`
+    /// (PLAN §4.1).
+    YankChip,
     /// A row of the right-click menu, and a row of its opener submenu
     /// (PLAN §7.5).
     MenuItem(usize),
@@ -346,34 +358,35 @@ pub enum Control {
 pub struct Layout {
     /// The tab strip, when there is more than one tab (PLAN §2).
     pub strip: Option<egui::Rect>,
-    /// The breadcrumb path bar (PLAN §2), under the strip and over the panes.
+    /// The top row (PLAN §2): the breadcrumbs and the status cluster, or the
+    /// prompt that has taken their place.
     ///
     /// Under the strip because a tab *contains* a path: the strip says which
-    /// session you are in and the crumbs say where that session is, and the
-    /// outer fact goes above the inner one. Always reserved, for the same
-    /// reason the bottom bar always is — a pane that changed height when a
-    /// second tab opened would move rows under the pointer.
+    /// session you are in and the row says where that session is, and the
+    /// outer fact goes above the inner one. Always reserved — a pane that
+    /// changed height when a second tab opened would move rows under the
+    /// pointer.
     pub path: egui::Rect,
     pub parent: egui::Rect,
     pub list: egui::Rect,
     pub preview: egui::Rect,
-    /// The bottom line: the status, or the input prompt, or the help hint.
-    pub bar: egui::Rect,
 }
 
 /// Split the window into miller columns at `ratio` (PLAN §2), with the tab
-/// strip above and the bar below.
+/// strip and the top row above them.
 ///
 /// The gaps come out of the total *before* the ratio is applied, so `[1, 4, 3]`
 /// describes the panes themselves rather than the panes plus the spaces between
 /// them — otherwise the middle column would quietly shrink as the gap grew.
 ///
-/// The bar is **always** reserved, whether it is showing a status line or a
-/// prompt. `f` must not resize the pane it is filtering: rows reflowing under
-/// the pointer as a prompt opens is `delightful-ui` §8's spatial stability, and
-/// the one place a file manager can least afford to break it is the moment the
-/// user is about to act on a row.
-pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
+/// `path_lines` is how many lines the top row needs: one in browse mode and
+/// while most prompts are open, two only while a prompt is showing an error
+/// that will not fit beside its query (see [`crate::chrome::prompt_lines`]).
+/// The panes reflow under it, which is the one place they may: the alternative
+/// is an error message clipped to three characters, and a prompt that cannot
+/// say what is wrong with what you typed is worse than a list that moved a row
+/// while you were typing.
+pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool, path_lines: usize) -> Layout {
     let outer = area.shrink(GAP);
     // A window narrower or shorter than two gaps shrinks to an *inverted* rect,
     // and every rect derived from it inherits the inversion. Collapsing it to
@@ -389,28 +402,29 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
             egui::vec2(outer.width(), CHROME_HEIGHT.min(outer.height())),
         )
     });
-    let bar = egui::Rect::from_min_max(
-        egui::pos2(
-            outer.left(),
-            (outer.bottom() - CHROME_HEIGHT).max(outer.top()),
-        ),
-        outer.max,
-    );
     let top = match strip {
         Some(strip) => strip.bottom() + GAP,
         None => outer.top(),
     };
+    // The second line is a *line*, not a second row: it is the same plate
+    // carrying one more baseline, so it grows by the height of a line of text
+    // rather than by another CHROME_HEIGHT of padding.
+    let path_height = CHROME_HEIGHT + (path_lines.max(1) - 1) as f32 * PROMPT_ERROR_LINE;
     let path = egui::Rect::from_min_max(
         egui::pos2(outer.left(), top),
-        // Clamped against the bar *and* against its own top: a window too short
-        // for the chrome collapses the path bar to nothing rather than to an
-        // inverted rectangle every rect derived from it would inherit.
-        egui::pos2(outer.right(), (top + CHROME_HEIGHT).min(bar.top()).max(top)),
+        // Clamped against the window's bottom *and* against its own top: a
+        // window too short for the chrome collapses the top row to nothing
+        // rather than to an inverted rectangle every rect derived from it
+        // would inherit.
+        egui::pos2(
+            outer.right(),
+            (top + path_height).min(outer.bottom()).max(top),
+        ),
     );
-    let top = (path.bottom() + GAP).min(bar.top());
+    let top = (path.bottom() + GAP).min(outer.bottom());
     let inner = egui::Rect::from_min_max(
         egui::pos2(outer.left(), top),
-        egui::pos2(outer.right(), (bar.top() - GAP).max(top)),
+        egui::pos2(outer.right(), outer.bottom().max(top)),
     );
     let total: f32 = ratio.iter().map(|r| *r as f32).sum();
     // `read_ratio` in df-core rejects an all-zero ratio, so this cannot divide
@@ -433,7 +447,6 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
         parent: next(width(ratio[0])),
         list: next(width(ratio[1])),
         preview: next(width(ratio[2])),
-        bar,
     }
 }
 
@@ -1343,7 +1356,7 @@ mod tests {
     /// The ratio describes the panes, not the panes plus the gaps.
     #[test]
     fn the_panes_split_at_the_configured_ratio() {
-        let l = layout(area(), [1, 4, 3], false);
+        let l = layout(area(), [1, 4, 3], false, 1);
         let usable = 1408.0 - GAP * 2.0 - GAP * 2.0;
         assert!((l.parent.width() - usable / 8.0).abs() < 1e-3);
         assert!((l.list.width() - usable * 4.0 / 8.0).abs() < 1e-3);
@@ -1371,27 +1384,28 @@ mod tests {
                 egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
                 [1, 4, 3],
                 strip,
+                1,
             );
-            for rect in [l.parent, l.list, l.preview, l.bar, l.path] {
+            for rect in [l.parent, l.list, l.preview, l.path] {
                 assert!(rect.width() >= 0.0 && rect.height() >= 0.0, "{rect:?}");
             }
         }
     }
 
-    /// The bar is always reserved, and the strip only takes space when it is
-    /// asked for (PLAN §2: the strip appears at two tabs).
+    /// The top row is always reserved, the strip only takes space when it is
+    /// asked for (PLAN §2: the strip appears at two tabs), and the panes run to
+    /// the window's own bottom edge now that there is no bar under them.
     #[test]
-    fn the_chrome_brackets_the_panes() {
-        let bare = layout(area(), [1, 4, 3], false);
+    fn the_chrome_sits_above_the_panes() {
+        let bare = layout(area(), [1, 4, 3], false, 1);
         assert_eq!(bare.strip, None);
-        assert!((bare.bar.height() - CHROME_HEIGHT).abs() < 1e-3);
-        assert!((bare.list.bottom() - (bare.bar.top() - GAP)).abs() < 1e-3);
-        // The path bar is always there, and the panes start below it.
+        assert!((bare.list.bottom() - (area().bottom() - GAP)).abs() < 1e-3);
+        // The top row is always there, and the panes start below it.
         assert!((bare.path.top() - GAP).abs() < 1e-3);
         assert!((bare.path.height() - CHROME_HEIGHT).abs() < 1e-3);
         assert!((bare.list.top() - (bare.path.bottom() + GAP)).abs() < 1e-3);
 
-        let with_strip = layout(area(), [1, 4, 3], true);
+        let with_strip = layout(area(), [1, 4, 3], true, 1);
         let strip = with_strip.strip.expect("a strip was asked for");
         assert!((strip.height() - CHROME_HEIGHT).abs() < 1e-3);
         assert!((with_strip.path.top() - (strip.bottom() + GAP)).abs() < 1e-3);
@@ -1399,13 +1413,25 @@ mod tests {
         // The strip costs the panes exactly its own height plus one gap, and
         // nothing else moves.
         assert!((bare.list.height() - with_strip.list.height() - CHROME_HEIGHT - GAP).abs() < 1e-3);
-        assert_eq!(bare.bar, with_strip.bar);
         assert!((bare.list.width() - with_strip.list.width()).abs() < 1e-3);
+    }
+
+    /// A prompt that grew a second line takes it out of the panes, and gives it
+    /// back when it closes: the top row is the only chrome that moves them.
+    #[test]
+    fn a_two_line_prompt_reflows_the_panes() {
+        let one = layout(area(), [1, 4, 3], false, 1);
+        let two = layout(area(), [1, 4, 3], false, 2);
+        assert!((two.path.height() - one.path.height() - PROMPT_ERROR_LINE).abs() < 1e-3);
+        assert!((one.list.height() - two.list.height() - PROMPT_ERROR_LINE).abs() < 1e-3);
+        assert!((two.list.top() - (two.path.bottom() + GAP)).abs() < 1e-3);
+        // Zero lines is one line: the row is never absent.
+        assert_eq!(layout(area(), [1, 4, 3], false, 0).path, one.path);
     }
 
     #[test]
     fn rows_stack_downwards_from_the_scroll_position() {
-        let content = content_rect(layout(area(), [1, 4, 3], false).list);
+        let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
         let top = row_rect(content, 0.0, 0);
         assert!((top.top() - content.top()).abs() < 1e-3);
         assert!((top.height() - ROW_HEIGHT).abs() < 1e-3);
@@ -1419,7 +1445,7 @@ mod tests {
 
     #[test]
     fn hit_testing_finds_the_row_under_the_pointer() {
-        let content = content_rect(layout(area(), [1, 4, 3], false).list);
+        let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
         let inside = |index: usize| row_rect(content, 0.0, index).center();
         assert_eq!(row_at(content, 0.0, 40, inside(0)), Some(0));
         assert_eq!(row_at(content, 0.0, 40, inside(7)), Some(7));

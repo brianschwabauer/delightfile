@@ -91,7 +91,11 @@ Yazi's miller columns at Brian's ratio `[1, 4, 3]`: **parent | list | preview**.
   windows; and `--cwd-file` belongs to the process that was launched with it and is never
   inherited by a window spawned from it.
 - Breadcrumb path bar at top: clickable segments, shows git branch when inside a repo,
-  drop target per segment.
+  drop target per segment. **It is the only bar.** The row also carries, on its right,
+  the position counter and the status chips (selection, visual, clipboard); a committed
+  filter is a trailing crumb-like chip; and a non-anchored prompt takes the crumbs' place
+  in the same row rather than opening a line of its own. Modal surfaces carry their own
+  hints along the bottom edge of their card.
 
 ### 2.1 Pane focus (the DelightMail model)
 

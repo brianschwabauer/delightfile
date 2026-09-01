@@ -490,7 +490,8 @@ pub fn confirm_geometry(area: egui::Rect, confirm: &Confirm) -> Geometry {
         + 6.0
         + lines as f32 * ROW
         + 10.0
-        + BUTTON_HEIGHT;
+        + BUTTON_HEIGHT
+        + chrome::HINT_ROW; // the card's own hint strip
     let card = card_rect(area, height);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
@@ -511,7 +512,7 @@ pub fn confirm_geometry(area: egui::Rect, confirm: &Confirm) -> Geometry {
     // one is the furthest from where the pointer rests after opening the card.
     let actions = button_row(
         inner_right,
-        card.bottom() - CARD_PAD - BUTTON_HEIGHT,
+        card.bottom() - CARD_PAD - chrome::HINT_ROW - BUTTON_HEIGHT,
         &["Cancel", confirm_verb(confirm.kind)],
     );
     Geometry {
@@ -543,7 +544,8 @@ pub fn conflict_geometry(area: egui::Rect, dialog: &ConflictDialog) -> Geometry 
         + 10.0
         + FACTS_HEIGHT
         + 10.0
-        + BUTTON_HEIGHT;
+        + BUTTON_HEIGHT
+        + chrome::HINT_ROW; // the card's own hint strip
     let card = card_rect(area, height);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
@@ -560,7 +562,7 @@ pub fn conflict_geometry(area: egui::Rect, dialog: &ConflictDialog) -> Geometry 
         egui::pos2(inner_left, body_top),
         egui::pos2(inner_right, body_top + listed as f32 * ROW),
     );
-    let buttons_top = card.bottom() - CARD_PAD - BUTTON_HEIGHT;
+    let buttons_top = card.bottom() - CARD_PAD - chrome::HINT_ROW - BUTTON_HEIGHT;
     let labels: Vec<&str> = ConflictAction::ALL.iter().map(|a| a.label()).collect();
     let actions = button_row(inner_right, buttons_top, &labels);
     // The toggle sits on the left of the same line as the buttons: it modifies
@@ -702,7 +704,8 @@ pub fn bulk_geometry(area: egui::Rect, bulk: &crate::bulk::Bulk) -> Geometry {
         + 10.0
         + visible as f32 * BULK_ROW
         + 10.0
-        + BUTTON_HEIGHT;
+        + BUTTON_HEIGHT
+        + chrome::HINT_ROW; // the card's own hint strip
     let card = card_rect(area, height);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
@@ -728,7 +731,7 @@ pub fn bulk_geometry(area: egui::Rect, bulk: &crate::bulk::Bulk) -> Geometry {
         .collect();
     let actions = button_row(
         inner_right,
-        card.bottom() - CARD_PAD - BUTTON_HEIGHT,
+        card.bottom() - CARD_PAD - chrome::HINT_ROW - BUTTON_HEIGHT,
         &["Cancel", "Rename"],
     );
     Geometry {

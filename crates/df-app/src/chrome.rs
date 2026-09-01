@@ -1,5 +1,5 @@
-//! The chrome around the panes: the tab strip, the bottom bar, the which-key
-//! card and the help browser.
+//! The chrome around the panes: the tab strip, the top row (crumbs, prompt and
+//! status cluster), the which-key card and the help browser.
 //!
 //! All four are painted, like everything else in delightfile, straight onto an
 //! [`egui::Painter`] — see [`crate::ui`]'s header for why there are no widgets
@@ -65,6 +65,27 @@ pub const CARD_ROW: f32 = 20.0;
 /// Horizontal padding inside a bar or a chip.
 pub const PAD_X: f32 = 8.0;
 
+/// A chip's inset inside the top row, on **every** adjacent side
+/// (`delightful-ui` §15's even insets).
+///
+/// Three: the row is [`CHROME_HEIGHT`] tall and a chip has to keep enough of
+/// its own plate to read as a pill, so this is about as much as the row can
+/// give away and still have two distinguishable surfaces.
+pub const CHIP_INSET: f32 = 3.0;
+
+/// A chip's corner radius: **the row's less its inset**, so the gap between a
+/// chip and the row's own corner stays a constant width as it turns
+/// (`delightful-ui` §15). Derived, never picked.
+pub const CHIP_RADIUS: u8 = ROW_RADIUS - CHIP_INSET as u8;
+
+/// How far a chip's plate is tinted towards its accent at rest.
+///
+/// The number every count on the top row has always been drawn with, named
+/// now that the hover and the fade multiply it: a wash, not a fill — the text
+/// on the chip is what is being read, and a plate at much above this starts
+/// competing with it.
+const CHIP_TINT: f32 = 0.16;
+
 // ── Tab strip (PLAN §2) ─────────────────────────────────────────────────────
 
 /// The gap between two tab chips. Half the window's [`GAP`]: the chips are one
@@ -115,6 +136,13 @@ pub fn tab_at(strip: egui::Rect, count: usize, pos: egui::Pos2) -> Option<usize>
 }
 
 /// Draw the strip. Only called with two or more tabs (PLAN §2).
+///
+/// The chips sit on the window's own ground rather than inside a plate of
+/// their own, so `delightful-ui` §15's concentric rule has nothing to be
+/// concentric *with* here: a chip is [`ROW_RADIUS`], the same as a row in a
+/// pane, because it is the same kind of thing at the same size. The nested
+/// case is the top row, where the chips do sit inside a rounded container —
+/// see [`CHIP_RADIUS`].
 pub fn tab_strip(
     paint: &Painting<'_>,
     strip: egui::Rect,
@@ -303,8 +331,10 @@ pub fn crumb_rects(
             x += CRUMB_SEPARATOR_WIDTH;
         }
         rects[index] = egui::Rect::from_min_size(
-            egui::pos2(x, bar.top() + 2.0),
-            egui::vec2(*width, (bar.height() - 4.0).max(0.0)),
+            // Inset by the same amount on every adjacent side as every other
+            // chip on this row, so the row has one nesting rule and not two.
+            egui::pos2(x, bar.top() + CHIP_INSET),
+            egui::vec2(*width, (bar.height() - CHIP_INSET * 2.0).max(0.0)),
         );
         x += width;
     }
@@ -334,28 +364,395 @@ pub fn branch_label(branch: &str, counts: Option<df_core::git::DirtyCounts>) -> 
     }
 }
 
-/// How wide the git chip is, so the crumbs can be measured against what is
-/// left. Zero when there is no branch to show.
-pub fn branch_width(painter: &egui::Painter, branch: Option<&str>) -> f32 {
-    match branch {
-        None => 0.0,
-        Some(branch) => {
-            text_width(painter, branch, egui::FontId::proportional(FONT))
-                + PAD_X * 2.0
-                + GAP
-                // The `` glyph and its gap.
-                + FONT
-        }
+// ── The top row's right-hand cluster ────────────────────────────────────────
+
+/// What the top row says about the listing, on its right-hand end.
+///
+/// One row, read right to left: the position counter is the number that is
+/// *always* true and so is always in the same place at the far end; the git
+/// chip is next because it is about the directory rather than the cursor; and
+/// the status chips — the ones that are only there when they have something to
+/// say — grow leftwards from those two towards the crumbs.
+pub struct Cluster<'a> {
+    /// How many files are selected (PLAN §4.1's `Space`/`Ctrl+a`/`v`).
+    pub selected: usize,
+    /// Visual mode, and which kind — the one piece of modal state in the
+    /// browser, so it has to be visible somewhere that is not the row colours.
+    pub visual: Option<bool>,
+    /// What `y` / `x` is holding (PLAN §4.1), if anything.
+    pub yank: Option<Yank<'a>>,
+    /// The branch chip's text, when git has an answer (PLAN §7.3).
+    pub branch: Option<&'a str>,
+    /// Where the cursor is, 1-based, and how many rows there are.
+    pub position: usize,
+    pub rows: usize,
+}
+
+/// The clipboard, as the top row sees it.
+///
+/// The row marks in the current directory only answer "is *this* file yanked";
+/// a yank made two directories ago is invisible until you paste it somewhere
+/// you did not mean to. The chip is the other half of that fact, and it is on
+/// the one strip of chrome that is on screen wherever you have wandered to.
+pub struct Yank<'a> {
+    pub paths: &'a [std::path::PathBuf],
+    /// `x` rather than `y` — the same distinction the row marks draw.
+    pub cut: bool,
+    /// The chip's fade: 1 while there is a clipboard, and its eased way out
+    /// after `X` (PLAN §8's instant-in, eased-out).
+    pub alpha: f32,
+}
+
+/// The most names the yank chip's tooltip lists.
+///
+/// Six: enough that a yank of a handful is entirely readable, few enough that
+/// the card stays something the eye takes in rather than a file listing
+/// floating over the file listing. Past that it says how many more there are,
+/// which is the question a longer list would have been answering anyway.
+const YANK_TOOLTIP_NAMES: usize = 6;
+
+/// Where each piece of the cluster is, measured before the crumbs so they know
+/// how much of the row is left (and so a click lands on the chip it looks like
+/// it landed on).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClusterGeom {
+    /// What the crumbs must keep clear on the right, the separating gap
+    /// included.
+    pub width: f32,
+    pub counter: egui::Rect,
+    pub git: Option<egui::Rect>,
+    pub yank: Option<egui::Rect>,
+    pub selected: Option<egui::Rect>,
+    pub visual: Option<egui::Rect>,
+}
+
+/// `12 / 340`, or `0 / 0` for an empty directory.
+fn counter_text(cluster: &Cluster<'_>) -> String {
+    if cluster.rows == 0 {
+        "0 / 0".to_string()
+    } else {
+        format!("{} / {}", cluster.position, cluster.rows)
     }
 }
 
-/// Draw the path bar: the crumbs, and the branch chip when git has an answer.
+/// The yank chip's label: `3 yanked` / `3 cut`.
+pub fn yank_label(count: usize, cut: bool) -> String {
+    format!("{count} {}", if cut { "cut" } else { "yanked" })
+}
+
+/// The chip's own colour, matching the mark on the rows it is about.
+fn yank_color(palette: &crate::theme::Palette, cut: bool) -> egui::Color32 {
+    if cut {
+        palette.peach
+    } else {
+        palette.teal
+    }
+}
+
+/// Lay the cluster out, right to left.
+pub fn cluster_geometry(
+    painter: &egui::Painter,
+    row: egui::Rect,
+    cluster: &Cluster<'_>,
+) -> ClusterGeom {
+    let font = egui::FontId::proportional(FONT);
+    let inner = row.shrink2(egui::vec2(PAD_X, 0.0));
+    let counter_w = text_width(painter, &counter_text(cluster), font.clone());
+    let counter = egui::Rect::from_min_max(
+        egui::pos2(inner.right() - counter_w, inner.top()),
+        egui::pos2(inner.right(), inner.bottom()),
+    );
+    let mut right = counter.left();
+    // A chip is inset from the row on every adjacent side and rounded
+    // concentrically with it (`delightful-ui` §15) — see [`CHIP_INSET`].
+    let chip_at = |width: f32, right: &mut f32| {
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(*right - GAP - width, row.top() + CHIP_INSET),
+            egui::pos2(*right - GAP, row.bottom() - CHIP_INSET),
+        );
+        *right = rect.left();
+        rect
+    };
+    let git = cluster.branch.map(|branch| {
+        // The glyph's column plus its gap is the `FONT` the branch text is set
+        // in: one em is what a single-character ornament needs beside a word.
+        let width = text_width(painter, branch, font.clone()) + PAD_X * 2.0 + FONT;
+        chip_at(width, &mut right)
+    });
+    let yank = cluster
+        .yank
+        .as_ref()
+        .filter(|y| !y.paths.is_empty())
+        .map(|y| {
+            let label = yank_label(y.paths.len(), y.cut);
+            let width = text_width(painter, &label, font.clone()) + PAD_X * 2.0;
+            chip_at(width, &mut right)
+        });
+    let selected = (cluster.selected > 0).then(|| {
+        let label = format!("{} selected", cluster.selected);
+        let width = text_width(painter, &label, font.clone()) + PAD_X * 2.0;
+        chip_at(width, &mut right)
+    });
+    let visual = cluster.visual.map(|selecting| {
+        let width = text_width(painter, visual_label(selecting), font.clone()) + PAD_X * 2.0;
+        chip_at(width, &mut right)
+    });
+    ClusterGeom {
+        // The gap between the cluster and the crumbs is the window's own, so
+        // the two groups on one row are separated by the same distance as
+        // everything else on it.
+        width: (row.right() - right + GAP).max(0.0),
+        counter,
+        git,
+        yank,
+        selected,
+        visual,
+    }
+}
+
+fn visual_label(selecting: bool) -> &'static str {
+    if selecting {
+        "visual"
+    } else {
+        "visual unset"
+    }
+}
+
+/// Draw the cluster into the rectangles [`cluster_geometry`] measured.
+fn paint_cluster(
+    paint: &Painting<'_>,
+    cluster: &Cluster<'_>,
+    geom: &ClusterGeom,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let painter = paint.painter;
+    // `12 / 340`, right-aligned: the one number that is always true, in the one
+    // place it can be found without reading.
+    painter.text(
+        egui::pos2(geom.counter.right(), geom.counter.center().y),
+        egui::Align2::RIGHT_CENTER,
+        counter_text(cluster),
+        egui::FontId::proportional(FONT),
+        palette.overlay1,
+    );
+    if let (Some(rect), Some(branch)) = (geom.git, cluster.branch) {
+        // The branch, in the palette's own git colour, on a plate of it — the
+        // same chip treatment every count on this row gets.
+        plate(paint, rect, palette.mauve, 1.0);
+        painter.text(
+            egui::pos2(rect.left() + PAD_X, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            // A plain branch glyph, in the proportional face: the nerd-font
+            // icons need a patched font that may not be there, and the row must
+            // read the same either way.
+            "⑂",
+            egui::FontId::proportional(FONT),
+            palette.mauve,
+        );
+        painter.text(
+            egui::pos2(rect.left() + PAD_X + FONT, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            branch,
+            egui::FontId::proportional(FONT),
+            palette.mauve,
+        );
+    }
+    if let (Some(rect), Some(yank)) = (geom.yank, &cluster.yank) {
+        let accent = yank_color(palette, yank.cut);
+        let hover = hovers.hover(Control::YankChip);
+        let rect = pressed_rect(rect, hovers.press(Control::YankChip));
+        // Lifted a little under the pointer, because it is the one chip on the
+        // row that *does* something when clicked (it clears the clipboard, the
+        // same as `X`).
+        plate(paint, rect, accent, yank.alpha * (1.0 + hover * 0.6));
+        let inside = painter.with_clip_rect(rect);
+        for splash in ripples.splashes(Control::YankChip, paint.now) {
+            inside.circle_filled(
+                splash.center,
+                splash.radius,
+                egui::Color32::from_white_alpha((splash.alpha * yank.alpha * 255.0).round() as u8),
+            );
+        }
+        inside.text(
+            egui::pos2(rect.left() + PAD_X, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            yank_label(yank.paths.len(), yank.cut),
+            egui::FontId::proportional(FONT),
+            fade(accent, yank.alpha),
+        );
+    }
+    if let Some(rect) = geom.selected {
+        // The count is in the selection's own colour, on a plate of it: the
+        // badge and the yellow bars down the column are visibly the same fact,
+        // said twice, in the two places the eye looks.
+        chip(
+            paint,
+            rect,
+            &format!("{} selected", cluster.selected),
+            palette.yellow,
+        );
+    }
+    if let (Some(rect), Some(selecting)) = (geom.visual, cluster.visual) {
+        // Visual mode is the browser's one piece of modal state, and a mode you
+        // cannot see is a mode you get caught in.
+        chip(paint, rect, visual_label(selecting), palette.sky);
+    }
+}
+
+/// The yank chip's tooltip: what is actually on the clipboard.
+///
+/// Hung off the chip rather than shown in a toast, because it answers a
+/// question the user asked by pointing at it — and a yank the user has
+/// forgotten the contents of is exactly the yank that pastes the wrong files.
+fn yank_tooltip(
+    paint: &Painting<'_>,
+    area: egui::Rect,
+    rect: egui::Rect,
+    yank: &Yank<'_>,
+    warm: f32,
+) {
+    if warm <= 0.0 || yank.paths.is_empty() {
+        return;
+    }
+    let painter = paint.painter;
+    let palette = paint.palette;
+    let mut lines: Vec<String> = yank
+        .paths
+        .iter()
+        .take(YANK_TOOLTIP_NAMES)
+        .map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        })
+        .collect();
+    if yank.paths.len() > YANK_TOOLTIP_NAMES {
+        lines.push(format!(
+            "and {} more",
+            yank.paths.len() - YANK_TOOLTIP_NAMES
+        ));
+    }
+    let font = egui::FontId::proportional(FONT);
+    let width = lines.iter().fold(0.0f32, |m, line| {
+        m.max(text_width(painter, line, font.clone()))
+    }) + CARD_PAD * 2.0;
+    let height = lines.len() as f32 * CARD_ROW + CARD_PAD * 2.0;
+    // Under the chip and right-aligned with it: the row is at the top of the
+    // window, so there is no room above, and hanging the card off the chip's
+    // own edge keeps it pointing at what it is about.
+    let left = (rect.right() - width).max(area.left() + CARD_MARGIN);
+    let card_rect = egui::Rect::from_min_size(
+        egui::pos2(left, rect.bottom() + CHIP_INSET),
+        egui::vec2(width, height),
+    );
+    card(paint, card_rect, warm);
+    for (i, line) in lines.iter().enumerate() {
+        painter.text(
+            egui::pos2(
+                card_rect.left() + CARD_PAD,
+                card_rect.top() + CARD_PAD + i as f32 * CARD_ROW + CARD_ROW / 2.0,
+            ),
+            egui::Align2::LEFT_CENTER,
+            line,
+            font.clone(),
+            fade(
+                if i < YANK_TOOLTIP_NAMES {
+                    palette.subtext0
+                } else {
+                    palette.overlay0
+                },
+                warm,
+            ),
+        );
+    }
+}
+
+// ── The top row ─────────────────────────────────────────────────────────────
+
+/// Everything the top row's geometry has to agree about: where the crumbs go,
+/// where the committed filter's chip goes, and where the cluster's chips are.
+///
+/// Measured once a frame and handed to both the hit test and the paint, for the
+/// reason [`tab_rects`] is shared: two functions computing this separately is
+/// how a row grows a one-pixel lie at its edges.
+pub struct TopGeom {
+    pub crumbs: Vec<egui::Rect>,
+    /// The committed `f` filter's trailing chip, when there is one.
+    pub filter: Option<egui::Rect>,
+    pub cluster: ClusterGeom,
+}
+
+/// The glyph the filter chip wears: a search lens, in the proportional face for
+/// the reason the branch glyph is.
+const FILTER_GLYPH: &str = "⌕";
+
+/// How wide the filter chip is, so the crumbs can be measured against what is
+/// left. Zero when nothing is filtered.
+fn filter_width(painter: &egui::Painter, filter: &str) -> f32 {
+    if filter.is_empty() {
+        return 0.0;
+    }
+    text_width(painter, filter, egui::FontId::proportional(FONT))
+        + PAD_X * 2.0
+        + FONT
+        + CRUMB_SEPARATOR_WIDTH
+}
+
+/// Lay the whole top row out.
+pub fn top_geometry(
+    painter: &egui::Painter,
+    row: egui::Rect,
+    crumbs: &[Crumb],
+    filter: &str,
+    cluster: &Cluster<'_>,
+) -> TopGeom {
+    let cluster_geom = cluster_geometry(painter, row, cluster);
+    let filter_w = filter_width(painter, filter);
+    let rects = crumb_rects(painter, row, crumbs, cluster_geom.width + filter_w);
+    // After the last crumb that fitted, with a separator's worth of space
+    // before it: the committed filter reads as one more step down the path,
+    // because that is what it is — `Downloads › ⌕ invoice` is the directory
+    // and then the part of it you are looking at (PLAN §7.2).
+    let filter_rect = (filter_w > 0.0)
+        .then(|| rects.iter().rev().find(|r| **r != egui::Rect::NOTHING))
+        .flatten()
+        .map(|last| {
+            egui::Rect::from_min_max(
+                egui::pos2(last.right() + CRUMB_SEPARATOR_WIDTH, row.top() + CHIP_INSET),
+                egui::pos2(last.right() + filter_w, row.bottom() - CHIP_INSET),
+            )
+        });
+    TopGeom {
+        crumbs: rects,
+        filter: filter_rect,
+        cluster: cluster_geom,
+    }
+}
+
+/// The top row's ground: the window's own, so it reads as part of the frame
+/// rather than as a fourth pane.
+fn bar_ground(paint: &Painting<'_>, rect: egui::Rect) -> egui::Rect {
+    paint.painter.rect_filled(
+        rect,
+        ROW_RADIUS,
+        mix(paint.palette.crust, paint.palette.base, 0.5),
+    );
+    rect.shrink2(egui::vec2(PAD_X, 0.0))
+}
+
+/// Draw the top row in browse mode: the crumbs, the filter chip, and the
+/// cluster (PLAN §2, §7.2, §7.3).
+#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn path_bar(
     paint: &Painting<'_>,
+    area: egui::Rect,
     bar: egui::Rect,
     crumbs: &[Crumb],
-    rects: &[egui::Rect],
-    branch: Option<&str>,
+    filter: &str,
+    cluster: &Cluster<'_>,
+    geom: &TopGeom,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
 ) {
@@ -363,6 +760,7 @@ pub fn path_bar(
     let painter = paint.painter;
     bar_ground(paint, bar);
     let font = egui::FontId::proportional(FONT);
+    let rects = &geom.crumbs;
 
     // The leading ellipsis, when the path did not fit.
     let elided = rects.iter().position(|r| *r != egui::Rect::NOTHING);
@@ -387,16 +785,12 @@ pub fn path_bar(
         if crumb.accent {
             // The chip that says "this is not a folder on this machine" — the
             // same plate treatment the git branch wears at the other end of the
-            // bar, so the two read as one kind of ornament (PLAN §7.4, §7.6).
-            painter.rect_filled(
-                rect,
-                ROW_RADIUS,
-                mix(paint.palette.crust, palette.sky, 0.16 + 0.14 * hover),
-            );
+            // row, so the two read as one kind of ornament (PLAN §7.4, §7.6).
+            plate(paint, rect, palette.sky, 1.0 + hover * 0.9);
         } else if hover > 0.0 {
             painter.rect_filled(
                 rect,
-                ROW_RADIUS,
+                CHIP_RADIUS,
                 mix(paint.palette.crust, palette.surface1, hover),
             );
         }
@@ -425,7 +819,10 @@ pub fn path_bar(
             font.clone(),
             color,
         );
-        if index < last && rects[index + 1] != egui::Rect::NOTHING {
+        let has_next = rects
+            .get(index + 1)
+            .is_some_and(|next| *next != egui::Rect::NOTHING);
+        if (index < last && has_next) || (index == last && geom.filter.is_some()) {
             painter.text(
                 egui::pos2(rect.right() + CRUMB_SEPARATOR_WIDTH / 2.0, bar.center().y),
                 egui::Align2::CENTER_CENTER,
@@ -436,155 +833,166 @@ pub fn path_bar(
         }
     }
 
-    if let Some(branch) = branch {
-        // Right-aligned, in the palette's own git colour, on a plate of it —
-        // the same chip treatment the status bar's counts get.
-        let galley = painter.layout_no_wrap(branch.to_string(), font, palette.mauve);
-        let width = galley.size().x + PAD_X * 2.0 + FONT;
-        let chip = egui::Rect::from_min_size(
-            egui::pos2(bar.right() - PAD_X - width, bar.top() + 3.0),
-            egui::vec2(width, (bar.height() - 6.0).max(0.0)),
-        );
-        painter.rect_filled(
-            chip,
-            ROW_RADIUS,
-            mix(paint.palette.crust, palette.mauve, 0.16),
-        );
-        painter.text(
-            egui::pos2(chip.left() + PAD_X, chip.center().y),
+    // The committed filter, as the trailing crumb it behaves like: clicking it
+    // re-opens the prompt that set it, which is the only way the pointer has of
+    // editing a query the keyboard typed.
+    if let Some(rect) = geom.filter {
+        let key = Control::FilterChip;
+        let hover = hovers.hover(key);
+        let rect = pressed_rect(rect, hovers.press(key));
+        plate(paint, rect, palette.blue, 1.0 + hover * 0.9);
+        let inside = painter.with_clip_rect(rect);
+        for splash in ripples.splashes(key, paint.now) {
+            inside.circle_filled(
+                splash.center,
+                splash.radius,
+                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            );
+        }
+        inside.text(
+            egui::pos2(rect.left() + PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            // A plain branch glyph, in the proportional face: the nerd-font
-            // icons need a patched font that may not be there, and the bar must
-            // read the same either way.
-            "⑂",
-            egui::FontId::proportional(FONT),
-            palette.mauve,
+            FILTER_GLYPH,
+            font.clone(),
+            palette.blue,
         );
-        painter.galley(
-            egui::pos2(
-                chip.left() + PAD_X + FONT,
-                chip.center().y - galley.size().y / 2.0,
-            ),
-            galley,
-            palette.mauve,
+        inside.text(
+            egui::pos2(rect.left() + PAD_X + FONT, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            filter,
+            font.clone(),
+            palette.blue,
         );
     }
+
+    paint_cluster(paint, cluster, &geom.cluster, hovers, ripples);
+    if let (Some(rect), Some(yank)) = (geom.cluster.yank, &cluster.yank) {
+        // …and the card leaves with the chip it hangs off, rather than
+        // outliving the fact it is explaining.
+        yank_tooltip(
+            paint,
+            area,
+            rect,
+            yank,
+            hovers.hover(Control::YankChip) * yank.alpha,
+        );
+    }
 }
 
-// ── The bottom bar ──────────────────────────────────────────────────────────
-
-/// What the status line has to say when nothing is being typed.
-pub struct Status<'a> {
-    /// How many files are selected (PLAN §4.1's `Space`/`Ctrl+a`/`v`).
-    pub selected: usize,
-    /// Where the cursor is, 1-based, and how many rows there are.
-    pub position: usize,
-    pub rows: usize,
-    /// The live `f` query, if one is committed.
-    pub filter: &'a str,
-    /// Visual mode, and which kind — the one piece of modal state in the
-    /// browser, so it has to be visible somewhere that is not the row colours.
-    pub visual: Option<bool>,
-}
-
-/// The bar's ground: the window's own, so the bar reads as part of the frame
-/// rather than as a fourth pane.
-fn bar_ground(paint: &Painting<'_>, rect: egui::Rect) -> egui::Rect {
-    paint.painter.rect_filled(
-        rect,
-        ROW_RADIUS,
-        mix(paint.palette.crust, paint.palette.base, 0.5),
-    );
-    rect.shrink2(egui::vec2(PAD_X, 0.0))
-}
-
-/// The resting bottom line: the selection count, the mode, the filter, and
-/// where the cursor is.
-pub fn status_bar(paint: &Painting<'_>, rect: egui::Rect, status: Status<'_>) {
+/// The top row while something is being typed into it: `f`, `/`, `?`, `a`, `;`
+/// and the help browser's own filter (PLAN §4.2).
+///
+/// The prompt takes the crumbs' place rather than opening a line of its own:
+/// the keyboard is in one place at a time, and a row that grew under the panes
+/// every time a query was typed would move rows under the pointer
+/// (`delightful-ui` §8's spatial stability).
+pub fn prompt_row(paint: &Painting<'_>, row: egui::Rect, prompt: &Prompt, tail: Option<&str>) {
     let palette = paint.palette;
-    let inner = bar_ground(paint, rect);
-
-    let mut chips: Vec<(String, egui::Color32)> = Vec::new();
-    if status.selected > 0 {
-        // The count is in the selection's own colour, on a plate of it: the
-        // badge and the yellow bars down the column are visibly the same fact,
-        // said twice, in the two places the eye looks.
-        chips.push((format!("{} selected", status.selected), palette.yellow));
-    }
-    if let Some(selecting) = status.visual {
-        // Visual mode is the browser's one piece of modal state, and a mode you
-        // cannot see is a mode you get caught in.
-        let text = if selecting { "visual" } else { "visual unset" };
-        chips.push((text.to_string(), palette.sky));
-    }
-    if !status.filter.is_empty() {
-        chips.push((format!("filter: {}", status.filter), palette.blue));
-    }
-    let mut left = inner.left();
-    for (text, accent) in &chips {
-        left = chip(paint, inner, left, text, *accent);
-    }
-
-    // `12 / 340`, right-aligned: the one number that is always true, in the one
-    // place it can be found without reading.
-    let counter = if status.rows == 0 {
-        "0 / 0".to_string()
-    } else {
-        format!("{} / {}", status.position, status.rows)
-    };
-    paint.painter.text(
-        egui::pos2(inner.right(), inner.center().y),
-        egui::Align2::RIGHT_CENTER,
-        counter,
-        egui::FontId::proportional(FONT),
-        palette.overlay1,
-    );
-}
-
-/// One labelled pill on the bar. Returns where the next one starts.
-fn chip(
-    paint: &Painting<'_>,
-    inner: egui::Rect,
-    left: f32,
-    text: &str,
-    accent: egui::Color32,
-) -> f32 {
-    let galley =
-        paint
-            .painter
-            .layout_no_wrap(text.to_string(), egui::FontId::proportional(FONT), accent);
-    let width = galley.size().x + PAD_X * 2.0;
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(left, inner.top() + 3.0),
-        egui::vec2(width, inner.height() - 6.0),
-    );
-    paint
-        .painter
-        .rect_filled(rect, ROW_RADIUS, mix(paint.palette.crust, accent, 0.16));
-    paint.painter.galley(
-        egui::pos2(rect.left() + PAD_X, rect.center().y - galley.size().y / 2.0),
-        galley,
-        accent,
-    );
-    rect.right() + GAP
-}
-
-/// The bar while something is being typed into it: `f`, `/`, a rename, and the
-/// help browser's own filter.
-pub fn input_bar(paint: &Painting<'_>, rect: egui::Rect, prompt: &Prompt) {
-    let palette = paint.palette;
-    let inner = bar_ground(paint, rect);
+    let mut inner = bar_ground(paint, row);
     // The accent rule says the keyboard is *here* and not in the list — the
     // same 2 pt mark a focused pane wears, for the same reason (PLAN §2.1).
     paint.painter.rect_filled(
         egui::Rect::from_min_max(
-            egui::pos2(rect.left() + ROW_RADIUS as f32, rect.top()),
-            egui::pos2(rect.right() - ROW_RADIUS as f32, rect.top() + 2.0),
+            egui::pos2(row.left() + ROW_RADIUS as f32, row.top()),
+            egui::pos2(row.right() - ROW_RADIUS as f32, row.top() + 2.0),
         ),
         1,
         palette.blue,
     );
-    prompt_field(paint, inner, prompt);
+
+    // The row grew a second line for an error that would not fit beside the
+    // query: the field keeps the first line and the error gets the second.
+    let error_line = (row.height() > CHROME_HEIGHT + 1.0).then(|| {
+        let split = row.top() + CHROME_HEIGHT;
+        let line = egui::Rect::from_min_max(
+            egui::pos2(inner.left(), split),
+            egui::pos2(inner.right(), row.bottom()),
+        );
+        inner = egui::Rect::from_min_max(inner.min, egui::pos2(inner.right(), split));
+        line
+    });
+
+    // The directory the prompt is about, kept at the far left as context when
+    // there is room for it: a filter with no idea what it is filtering is a
+    // text field floating in a window.
+    if let Some(tail) = tail {
+        let font = egui::FontId::proportional(FONT);
+        let width = text_width(paint.painter, tail, font.clone()) + CRUMB_SEPARATOR_WIDTH;
+        if inner.width() - width >= PROMPT_MIN_WIDTH {
+            paint.painter.text(
+                egui::pos2(inner.left(), inner.center().y),
+                egui::Align2::LEFT_CENTER,
+                tail,
+                font.clone(),
+                palette.overlay0,
+            );
+            paint.painter.text(
+                egui::pos2(
+                    inner.left() + width - CRUMB_SEPARATOR_WIDTH / 2.0,
+                    inner.center().y,
+                ),
+                egui::Align2::CENTER_CENTER,
+                CRUMB_SEPARATOR,
+                font,
+                palette.overlay0,
+            );
+            inner =
+                egui::Rect::from_min_max(egui::pos2(inner.left() + width, inner.top()), inner.max);
+        }
+    }
+    prompt_field(paint, inner, prompt, error_line);
+}
+
+/// How many lines the top row needs while `prompt` is open.
+///
+/// Two only when there is an error and no room to say it beside the query:
+/// an inline error that has been squeezed to three characters is not an error
+/// message, and a row that is always two lines tall would cost the panes a
+/// line for a state they are usually not in.
+pub fn prompt_lines(painter: &egui::Painter, prompt: &Prompt, width: f32) -> usize {
+    let Some(error) = &prompt.error else {
+        return 1;
+    };
+    let font = egui::FontId::proportional(FONT);
+    let wanted = text_width(painter, prompt.kind.title(), font.clone())
+        + PAD_X
+        + text_width(painter, prompt.query(), font.clone())
+        + PAD_X
+        + text_width(painter, error, font)
+        + PAD_X
+        + text_width(painter, prompt.mode_label(), key_font(FONT - 1.5))
+        + 10.0;
+    if wanted > width - PAD_X * 2.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// One labelled pill, in the rectangle the geometry gave it.
+fn chip(paint: &Painting<'_>, rect: egui::Rect, text: &str, accent: egui::Color32) {
+    plate(paint, rect, accent, 1.0);
+    paint.painter.text(
+        egui::pos2(rect.left() + PAD_X, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        text,
+        egui::FontId::proportional(FONT),
+        accent,
+    );
+}
+
+/// A chip's plate: the window's darkest ground tinted towards the chip's own
+/// accent, at `strength` (1 at rest, more under a pointer, less on the way
+/// out).
+fn plate(paint: &Painting<'_>, rect: egui::Rect, accent: egui::Color32, strength: f32) {
+    let tint = mix(
+        paint.palette.crust,
+        accent,
+        CHIP_TINT * strength.clamp(0.0, 2.0),
+    );
+    paint
+        .painter
+        .rect_filled(rect, CHIP_RADIUS, fade(tint, strength.min(1.0)));
 }
 
 /// How wide a floating rename prompt is, and how far it may hang past its row.
@@ -601,7 +1009,7 @@ const PROMPT_MIN_WIDTH: f32 = 260.0;
 pub fn prompt_popup(paint: &Painting<'_>, area: egui::Rect, anchor: egui::Rect, prompt: &Prompt) {
     let rect = prompt_rect(area, anchor);
     card(paint, rect, 1.0);
-    prompt_field(paint, rect.shrink2(egui::vec2(CARD_PAD, 0.0)), prompt);
+    prompt_field(paint, rect.shrink2(egui::vec2(CARD_PAD, 0.0)), prompt, None);
 }
 
 /// Where a floating prompt goes. Shared with the hit test so a click lands
@@ -627,7 +1035,16 @@ pub fn prompt_rect(area: egui::Rect, anchor: egui::Rect) -> egui::Rect {
 
 /// The prompt itself, in whatever box it has been given: title, mode chip, the
 /// text with its selection, the caret, and the inline error.
-fn prompt_field(paint: &Painting<'_>, inner: egui::Rect, prompt: &Prompt) {
+///
+/// `error_line` is the second line the top row grew when the error would not
+/// fit beside the query; with `None` the error keeps its place on the line, as
+/// it does in an anchored popup.
+fn prompt_field(
+    paint: &Painting<'_>,
+    inner: egui::Rect,
+    prompt: &Prompt,
+    error_line: Option<egui::Rect>,
+) {
     let palette = paint.palette;
     let painter = paint.painter;
     let font = egui::FontId::proportional(FONT);
@@ -668,7 +1085,18 @@ fn prompt_field(paint: &Painting<'_>, inner: egui::Rect, prompt: &Prompt) {
     );
 
     let mut right = chip_rect.left() - PAD_X;
-    if let Some(error) = &prompt.error {
+    if let (Some(error), Some(line)) = (&prompt.error, error_line) {
+        // The row grew for this: the error gets a line of its own, under the
+        // query it is about, rather than being squeezed into three characters
+        // beside it.
+        painter.text(
+            egui::pos2(line.left(), line.center().y),
+            egui::Align2::LEFT_CENTER,
+            error,
+            font.clone(),
+            palette.red,
+        );
+    } else if let Some(error) = &prompt.error {
         // The error takes the place the case indicator would have had: it is
         // the more urgent thing to say about what has been typed.
         let galley = painter.layout_no_wrap(error.clone(), font.clone(), palette.red);
@@ -795,31 +1223,61 @@ fn prompt_field(paint: &Painting<'_>, inner: egui::Rect, prompt: &Prompt) {
 /// hairline caret disappears against a busy line at fractional scaling.
 pub const CARET_WIDTH: f32 = 1.5;
 
-/// The bar while an overlay owns the keyboard: what the keys do now.
-pub fn hint_bar(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
-    let inner = bar_ground(paint, rect);
-    let mut x = inner.left();
+// ── An overlay's hints (PLAN §4) ───────────────────────────────────────────
+
+/// The height of the hint strip along the bottom of an overlay card.
+///
+/// Sixteen: a line of [`HINT_FONT`] plus the air a line of text needs under a
+/// list of rows to read as a footnote rather than as one more row.
+pub const HINT_ROW: f32 = 16.0;
+
+/// The hints' text size. Under the card's own body text, because the hints are
+/// what you can do next and the card is what you are doing now — a footer that
+/// matched the body would be a second thing to read (`ui-anti-slop`: hierarchy
+/// by size, not by decoration).
+const HINT_FONT: f32 = FONT - 1.0;
+
+/// Where a card's hints go: the strip inside its bottom padding.
+///
+/// Every overlay reserves [`HINT_ROW`] for this in its own geometry, so the
+/// strip is *inside* the plate and the rows above it never run under it.
+pub fn hint_rect(card: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(card.left() + CARD_PAD, card.bottom() - CARD_PAD - HINT_ROW),
+        egui::pos2(card.right() - CARD_PAD, card.bottom() - CARD_PAD),
+    )
+}
+
+/// What the keys do now, along the bottom of the surface that owns them.
+///
+/// On the overlay rather than on a strip of window chrome: a hint is about the
+/// card it belongs to, and the eye that is reading the card should not have to
+/// travel to the other end of the window to find out what `Enter` does there.
+pub fn hints(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
+    let painter = paint.painter;
+    let painter = painter.with_clip_rect(rect);
+    let mut x = rect.left();
     for (keys, what) in hints {
-        let key_galley = paint.painter.layout_no_wrap(
+        let key_galley = painter.layout_no_wrap(
             keys.to_string(),
-            key_font(FONT - 0.5),
-            paint.palette.text,
+            key_font(HINT_FONT),
+            paint.palette.subtext0,
         );
-        paint.painter.galley(
-            egui::pos2(x, inner.center().y - key_galley.size().y / 2.0),
+        painter.galley(
+            egui::pos2(x, rect.center().y - key_galley.size().y / 2.0),
             key_galley.clone(),
-            paint.palette.text,
+            paint.palette.subtext0,
         );
         x += key_galley.size().x + 6.0;
-        let what_galley = paint.painter.layout_no_wrap(
+        let what_galley = painter.layout_no_wrap(
             what.to_string(),
-            egui::FontId::proportional(FONT),
-            paint.palette.overlay1,
+            egui::FontId::proportional(HINT_FONT),
+            paint.palette.overlay0,
         );
-        paint.painter.galley(
-            egui::pos2(x, inner.center().y - what_galley.size().y / 2.0),
+        painter.galley(
+            egui::pos2(x, rect.center().y - what_galley.size().y / 2.0),
             what_galley.clone(),
-            paint.palette.overlay1,
+            paint.palette.overlay0,
         );
         x += what_galley.size().x + GAP * 2.0;
     }
@@ -955,21 +1413,25 @@ pub const OPTICAL_CENTRE: f32 = 0.4;
 /// having drifted towards the top rather than as being centred well.
 pub const OPTICAL_BASELINE: f32 = 0.42;
 
-/// Where the help card goes: most of the window, above the bar.
-pub fn help_rect(area: egui::Rect, bar: egui::Rect) -> egui::Rect {
+/// Where the help card goes: most of the window, down to `bottom`.
+pub fn help_rect(area: egui::Rect, bottom: f32) -> egui::Rect {
     let width = (area.width() - CARD_MARGIN * 2.0).min(HELP_MAX_WIDTH);
     egui::Rect::from_min_max(
         egui::pos2(area.center().x - width / 2.0, area.top() + CARD_MARGIN),
         egui::pos2(
             area.center().x + width / 2.0,
-            (bar.top() - GAP).max(area.top() + CARD_MARGIN + CHROME_HEIGHT),
+            bottom.max(area.top() + CARD_MARGIN + CHROME_HEIGHT),
         ),
     )
 }
 
-/// How many help lines fit in the card.
+/// How many help lines fit in the card — its own heading row and its hint strip
+/// come out of the height first.
 pub fn help_page(rect: egui::Rect) -> usize {
-    crate::viewport::visible_rows(rect.height() - CARD_PAD * 2.0 - CARD_ROW, HELP_ROW)
+    crate::viewport::visible_rows(
+        rect.height() - CARD_PAD * 2.0 - CARD_ROW - HINT_ROW,
+        HELP_ROW,
+    )
 }
 
 /// Draw the help overlay: every live binding, grouped by context.
@@ -1017,7 +1479,7 @@ pub fn help_overlay(
 
     let content = egui::Rect::from_min_max(
         egui::pos2(rect.left() + CARD_PAD, rect.top() + CARD_PAD + CARD_ROW),
-        egui::pos2(rect.right() - CARD_PAD, rect.bottom() - CARD_PAD),
+        egui::pos2(rect.right() - CARD_PAD, rect.bottom() - CARD_PAD - HINT_ROW),
     );
     let painter = painter.with_clip_rect(content);
     let page = help_page(rect);
@@ -1288,25 +1750,100 @@ mod tests {
             // click landing on the crumb it looks like it landed on.
             assert!(!rects[0].contains(narrow.center()));
 
-            // The branch chip's room comes out of the crumbs' room.
-            let with_branch = crumb_rects(
-                ui.painter(),
-                bar,
-                &path,
-                branch_width(ui.painter(), Some("main")),
-            );
-            assert!(branch_width(ui.painter(), Some("main")) > 0.0);
-            assert_eq!(branch_width(ui.painter(), None), 0.0);
-            assert_eq!(with_branch.len(), path.len());
+            // The cluster's room comes out of the crumbs' room.
+            let with_cluster = crumb_rects(ui.painter(), bar, &path, 200.0);
+            assert_eq!(with_cluster.len(), path.len());
+            assert!(with_cluster
+                .iter()
+                .filter(|r| **r != egui::Rect::NOTHING)
+                .all(|r| r.right() <= bar.right() - 200.0 + 1e-3));
         });
     }
 
     /// `delightful-ui` §15: a row inside a card is inset by the padding and its
     /// radius is the card's less that inset, so the gap stays constant round the
-    /// corner.
+    /// corner. The same rule holds for a chip inside the top row.
     #[test]
     fn the_card_radii_are_concentric() {
         assert_eq!(CARD_ROW_RADIUS as f32 + CARD_PAD, CARD_RADIUS as f32);
+        assert_eq!(CHIP_RADIUS as f32 + CHIP_INSET, ROW_RADIUS as f32);
+    }
+
+    /// The right-hand cluster is laid out right to left, every chip is inside
+    /// the row it is on, and what it occupies is what the crumbs are told to
+    /// keep clear.
+    #[test]
+    fn the_cluster_reserves_what_it_occupies() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let row =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, CHROME_HEIGHT));
+            let yanked = [std::path::PathBuf::from("/tmp/a")];
+            let full = Cluster {
+                selected: 3,
+                visual: Some(false),
+                yank: Some(Yank {
+                    paths: &yanked,
+                    cut: true,
+                    alpha: 1.0,
+                }),
+                branch: Some("main ·3"),
+                position: 12,
+                rows: 340,
+            };
+            let geom = cluster_geometry(ui.painter(), row, &full);
+            let chips = [
+                geom.counter,
+                geom.git.expect("a branch was given"),
+                geom.yank.expect("a clipboard was given"),
+                geom.selected.expect("a selection was given"),
+                geom.visual.expect("visual mode was given"),
+            ];
+            // Right to left, in that order, none of them overlapping.
+            for pair in chips.windows(2) {
+                assert!(pair[1].right() <= pair[0].left() + 1e-3);
+            }
+            for chip in chips {
+                assert!(row.contains(chip.center()));
+                assert!(chip.top() >= row.top() - 1e-3 && chip.bottom() <= row.bottom() + 1e-3);
+            }
+            // What it reserves reaches from the leftmost chip to the row's end.
+            assert!((geom.width - (row.right() - chips[4].left() + GAP)).abs() < 1e-3);
+
+            // A directory with nothing to say about it reserves the counter
+            // alone, which is always there.
+            let bare = Cluster {
+                selected: 0,
+                visual: None,
+                yank: None,
+                branch: None,
+                position: 0,
+                rows: 0,
+            };
+            let quiet = cluster_geometry(ui.painter(), row, &bare);
+            assert!(quiet.git.is_none() && quiet.yank.is_none());
+            assert!(quiet.selected.is_none() && quiet.visual.is_none());
+            assert!(quiet.width < geom.width);
+
+            // The committed filter is a trailing crumb, after the last one.
+            let path = crumbs(std::path::Path::new("/home/brian/Downloads"));
+            let top = top_geometry(ui.painter(), row, &path, "invoice", &bare);
+            let filter = top.filter.expect("a filter was given");
+            let last = top.crumbs.last().copied().expect("a crumb was drawn");
+            assert!(filter.left() > last.right());
+            assert!(filter.right() <= row.right() - quiet.width + 1e-3);
+            // …and nothing is drawn for it when nothing is filtered.
+            assert!(top_geometry(ui.painter(), row, &path, "", &bare)
+                .filter
+                .is_none());
+        });
+    }
+
+    /// The chip says what it is holding and how it got there.
+    #[test]
+    fn the_clipboard_chip_names_its_verb() {
+        assert_eq!(yank_label(3, false), "3 yanked");
+        assert_eq!(yank_label(1, true), "1 cut");
     }
 
     /// The help card stays inside the window and above the bar, however small
@@ -1315,11 +1852,7 @@ mod tests {
     fn the_help_card_fits_the_window() {
         for size in [egui::vec2(1400.0, 900.0), egui::vec2(320.0, 200.0)] {
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size);
-            let bar = egui::Rect::from_min_max(
-                egui::pos2(GAP, area.bottom() - GAP - CHROME_HEIGHT),
-                egui::pos2(area.right() - GAP, area.bottom() - GAP),
-            );
-            let rect = help_rect(area, bar);
+            let rect = help_rect(area, area.bottom() - GAP);
             assert!(rect.width() > 0.0 && rect.width() <= HELP_MAX_WIDTH + 1e-3);
             assert!(rect.left() >= area.left() && rect.right() <= area.right() + 1e-3);
             assert!(rect.top() >= area.top());
@@ -1344,10 +1877,6 @@ mod tests {
                 now: std::time::Instant::now(),
             };
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
-            let bar = egui::Rect::from_min_size(
-                egui::pos2(8.0, 866.0),
-                egui::vec2(1384.0, CHROME_HEIGHT),
-            );
 
             tab_strip(
                 &paint,
@@ -1360,14 +1889,40 @@ mod tests {
             let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile"));
             let path_rect =
                 egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(1384.0, CHROME_HEIGHT));
-            for (branch, room) in [(None, 0.0), (Some("main"), 60.0)] {
-                let rects = crumb_rects(paint.painter, path_rect, &path, room);
+            let yanked = [
+                std::path::PathBuf::from("/tmp/one.txt"),
+                std::path::PathBuf::from("/tmp/two.txt"),
+            ];
+            // Every state the row can be in at once, and the bare one.
+            for (branch, filter, yank) in [
+                (None, "", None),
+                (
+                    Some("main ·3"),
+                    "invoice",
+                    Some(Yank {
+                        paths: &yanked,
+                        cut: false,
+                        alpha: 1.0,
+                    }),
+                ),
+            ] {
+                let cluster = Cluster {
+                    selected: 3,
+                    visual: Some(true),
+                    yank,
+                    branch,
+                    position: 12,
+                    rows: 340,
+                };
+                let geom = top_geometry(paint.painter, path_rect, &path, filter, &cluster);
                 path_bar(
                     &paint,
+                    area,
                     path_rect,
                     &path,
-                    &rects,
-                    branch,
+                    filter,
+                    &cluster,
+                    &geom,
                     &Hovers::new(),
                     &Ripples::new(),
                 );
@@ -1375,39 +1930,48 @@ mod tests {
             // …and the elided case, which draws its own leading ellipsis.
             let narrow =
                 egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(90.0, CHROME_HEIGHT));
-            let rects = crumb_rects(paint.painter, narrow, &path, 0.0);
+            let cluster = Cluster {
+                selected: 0,
+                visual: None,
+                yank: None,
+                branch: None,
+                position: 0,
+                rows: 0,
+            };
+            let geom = top_geometry(paint.painter, narrow, &path, "", &cluster);
             path_bar(
                 &paint,
+                area,
                 narrow,
                 &path,
-                &rects,
-                None,
+                "",
+                &cluster,
+                &geom,
                 &Hovers::new(),
                 &Ripples::new(),
             );
 
-            status_bar(
-                &paint,
-                bar,
-                Status {
-                    selected: 3,
-                    position: 12,
-                    rows: 340,
-                    filter: "rs",
-                    visual: Some(true),
-                },
-            );
             let mut prompt = Prompt::with(
                 PromptKind::Filter,
                 0,
                 df_core::input::InputBuffer::new("READ", 2),
             );
-            input_bar(&paint, bar, &prompt);
+            prompt_row(&paint, path_rect, &prompt, Some("delightfile"));
             // …and every mode of it, since each one draws a different caret.
             prompt.feed(df_core::keymap::Chord::plain(df_core::keymap::Key::Escape));
-            input_bar(&paint, bar, &prompt);
+            prompt_row(&paint, path_rect, &prompt, None);
             prompt.feed(df_core::keymap::Chord::from_char('v').expect("v"));
-            input_bar(&paint, bar, &prompt);
+            prompt_row(&paint, path_rect, &prompt, Some("delightfile"));
+            // …and the two-line form, which an error too long for the line
+            // asks the layout for.
+            prompt.error = Some("that name is already taken by a directory".to_string());
+            let tall = egui::Rect::from_min_size(
+                path_rect.min,
+                egui::vec2(220.0, CHROME_HEIGHT + crate::ui::PROMPT_ERROR_LINE),
+            );
+            assert_eq!(prompt_lines(paint.painter, &prompt, 220.0), 2);
+            prompt_row(&paint, tall, &prompt, Some("delightfile"));
+            prompt.error = None;
             let mut rename = Prompt::with(
                 PromptKind::Rename,
                 0,
@@ -1416,14 +1980,21 @@ mod tests {
             rename.error = Some("photo.jpg already exists".to_string());
             let row = egui::Rect::from_min_size(egui::pos2(300.0, 400.0), egui::vec2(400.0, 22.0));
             prompt_popup(&paint, area, row, &rename);
-            hint_bar(&paint, bar, &[("Esc", "close"), ("f", "filter")]);
+            hints(
+                &paint,
+                hint_rect(egui::Rect::from_min_size(
+                    egui::pos2(300.0, 500.0),
+                    egui::vec2(400.0, 120.0),
+                )),
+                &[("Esc", "close"), ("f", "filter")],
+            );
 
             let rows: Vec<(String, String)> = (0..14)
                 .map(|i| (format!("{i}"), format!("do the {i}th thing")))
                 .collect();
-            which_key(&paint, area, bar.top(), &rows, 1.0);
-            which_key(&paint, area, bar.top(), &rows, 0.4);
-            which_key(&paint, area, bar.top(), &[], 1.0);
+            which_key(&paint, area, area.bottom(), &rows, 1.0);
+            which_key(&paint, area, area.bottom(), &rows, 0.4);
+            which_key(&paint, area, area.bottom(), &[], 1.0);
 
             let registry = df_core::keymap::Registry::defaults();
             let stack = df_core::keymap::ContextStack::with(&[df_core::keymap::Context::Help]);
@@ -1431,7 +2002,7 @@ mod tests {
             let lines = crate::help::lines(&all, "");
             let mut help = Help::default();
             help.reset(&lines);
-            let rect = help_rect(area, bar);
+            let rect = help_rect(area, area.bottom() - GAP);
             help_overlay(&paint, area, rect, &lines, &help, all.len());
             help_overlay(&paint, area, rect, &[], &help, all.len());
         });
