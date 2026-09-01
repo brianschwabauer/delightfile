@@ -239,7 +239,7 @@ pub fn picker_geometry(
     /// Wide enough for "Open in Zed" plus its opener name.
     const WIDTH: f32 = 260.0;
     let rows = count.max(1);
-    let height = CARD_PAD * 2.0 + rows as f32 * chrome::CARD_ROW;
+    let height = CARD_PAD * 2.0 + rows as f32 * chrome::CARD_ROW + chrome::HINT_ROW;
     let width = WIDTH.min(area.width() - chrome::CARD_MARGIN * 2.0);
     // Below the row, unless there is no room below — then above it, so the card
     // never covers the file it is offering to open.

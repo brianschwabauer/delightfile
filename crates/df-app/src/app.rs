@@ -318,6 +318,38 @@ enum Dialog {
     Bulk(Box<crate::bulk::Bulk>),
 }
 
+/// How long the clipboard chip takes to leave the top row after `X`.
+///
+/// PLAN §8's state-fade duration. Instant in — a yank is *made* the moment the
+/// key is pressed and the chip has to be there to say so — and eased out,
+/// because a chip that vanished would leave the eye wondering whether it had
+/// been there at all.
+const YANK_FADE: Duration = Duration::from_millis(120);
+
+/// What the top row's clipboard chip is drawn from.
+///
+/// A copy of the names rather than a borrow of [`Clipboard`], because the chip
+/// outlives the clipboard by one fade: `X` empties the real thing and the chip
+/// spends the next 120 ms saying what it *was*.
+struct YankChip {
+    paths: Vec<PathBuf>,
+    /// `x` rather than `y` — the same distinction the row marks draw.
+    cut: bool,
+    /// `None` while the clipboard is live; the fade once it is not.
+    leaving: Option<crate::motion::Tween>,
+}
+
+impl YankChip {
+    /// The chip's opacity now, and whether it has anything left to draw.
+    fn alpha(&self, now: Instant) -> f32 {
+        self.leaving.map(|t| t.value(now)).unwrap_or(1.0)
+    }
+
+    fn spent(&self, now: Instant) -> bool {
+        self.leaving.is_some_and(|t| t.finished(now))
+    }
+}
+
 /// One frame's worth of "where the open surface's pieces are".
 enum OverlayGeom {
     Confirm(dialog::Geometry),
@@ -337,6 +369,19 @@ enum OverlayGeom {
 }
 
 impl OverlayGeom {
+    /// The card's own plate, which is what its hint strip is laid along
+    /// (PLAN §4: the hints belong to the surface that owns the keyboard).
+    fn card(&self) -> egui::Rect {
+        match self {
+            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g.card,
+            OverlayGeom::Picker(card, _) | OverlayGeom::Panel(card, _, _) => *card,
+            OverlayGeom::Spot(g) => g.card,
+            OverlayGeom::Finder(g) => g.card,
+            OverlayGeom::Mounts(g) => g.card,
+            OverlayGeom::Search(g) => g.card,
+        }
+    }
+
     /// What the pointer is over. `None` inside the card but not on anything is
     /// still "inside the card" as far as the caller is concerned — the modal
     /// swallows the pointer either way (see the hit test in `frame`).
@@ -462,6 +507,8 @@ struct Geom<'a> {
     parent_scroll: f32,
     crumbs: &'a [egui::Rect],
     overlay: &'a Option<OverlayGeom>,
+    /// The top row's crumbs, filter chip and cluster (PLAN §2).
+    top: &'a chrome::TopGeom,
     menu: &'a Option<menu::Geometry>,
     /// The selection basket's tray (PLAN §7.1).
     basket: &'a crate::basket::Geometry,
@@ -686,7 +733,7 @@ pub struct App {
     /// is however many rows are on screen — and that is only known mid-frame.
     pending_keys: Vec<Press>,
     modifiers: ModifiersState,
-    /// The bottom bar, when something is being typed into it.
+    /// The top row's prompt, when something is being typed into it.
     prompt: Option<Prompt>,
     /// Visual mode (`v` / `V`), while it is on.
     visual: Option<Visual>,
@@ -743,6 +790,8 @@ pub struct App {
     journal: Journal,
     /// What `y` / `x` filled and `p` will paste.
     clipboard: Clipboard,
+    /// What the top row's clipboard chip is drawn from (PLAN §4.1).
+    yank: Option<YankChip>,
     /// The one-at-a-time toast.
     toasts: Toasts,
     /// The modal card, when one is up. While it is, keys are matched against
@@ -1165,6 +1214,7 @@ impl App {
             basket_first: 0,
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
+            yank: None,
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
             prompt: None,
@@ -5310,8 +5360,8 @@ impl App {
     fn sync_context(&mut self) {
         // A modal surface is not *stacked* on the browser — see
         // [`App::route_keys`] — but the stack still has to say what is up, so
-        // the hint bar and the help sheet describe the keyboard as it actually
-        // is.
+        // the overlays' hints and the help sheet describe the keyboard as it
+        // actually is.
         if self.overlay_open() {
             self.context = self.overlay_stack();
             if self.prompt.is_some() {
@@ -6286,6 +6336,8 @@ impl App {
         &self,
         area: egui::Rect,
         layout: &ui::Layout,
+        // What the floating cards hang above: the bottom of the panes, which
+        // is the window's own bottom edge now that no bar sits under them.
         bar_top: f32,
     ) -> Option<OverlayGeom> {
         match &self.dialog {
@@ -6414,6 +6466,8 @@ impl App {
                 Control::Row(..)
                 | Control::Tab(_)
                 | Control::Crumb(_)
+                | Control::FilterChip
+                | Control::YankChip
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
                 | Control::BasketChip
@@ -6469,6 +6523,8 @@ impl App {
             Control::Row(..)
             | Control::Tab(_)
             | Control::Crumb(_)
+            | Control::FilterChip
+            | Control::YankChip
             | Control::MenuItem(_)
             | Control::SubmenuItem(_)
             | Control::BasketChip
@@ -6478,6 +6534,74 @@ impl App {
     }
 
     // ── The pointer (PLAN §7.5) ─────────────────────────────────────────────
+
+    /// Keep the top row's clipboard chip in step with the clipboard.
+    ///
+    /// Noticed here rather than at each of the several places that can empty
+    /// the clipboard — `X`, a paste of a cut, a tab closing under one — so the
+    /// chip has exactly one rule and cannot be left behind by a path that
+    /// forgot to tell it.
+    fn sync_yank(&mut self, now: Instant) {
+        let cut = self.clipboard.mode == PasteMode::Cut;
+        if !self.clipboard.is_empty() {
+            let stale = match &self.yank {
+                Some(chip) => {
+                    chip.leaving.is_some() || chip.cut != cut || chip.paths != self.clipboard.paths
+                }
+                None => true,
+            };
+            if stale {
+                self.yank = Some(YankChip {
+                    paths: self.clipboard.paths.clone(),
+                    cut,
+                    leaving: None,
+                });
+            }
+            return;
+        }
+        match &mut self.yank {
+            // Emptied: the chip leaves the way every other transient thing in
+            // the window does (PLAN §8).
+            Some(chip) if chip.leaving.is_none() => {
+                chip.leaving = Some(crate::motion::Tween::new(
+                    1.0,
+                    0.0,
+                    YANK_FADE,
+                    crate::motion::Easing::OutQuint,
+                    now,
+                ));
+            }
+            Some(chip) if chip.spent(now) => self.yank = None,
+            _ => {}
+        }
+    }
+
+    /// What the top row's right-hand cluster says this frame.
+    fn cluster(&self, now: Instant) -> chrome::Cluster<'_> {
+        let dir = &self.tab().cwd.dir;
+        chrome::Cluster {
+            selected: dir.selected_count(),
+            visual: self.visual.as_ref().map(|v| v.selecting),
+            yank: self.yank.as_ref().map(|chip| chrome::Yank {
+                paths: &chip.paths,
+                cut: chip.cut,
+                alpha: chip.alpha(now),
+            }),
+            branch: self.path_bar.2.as_deref(),
+            position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
+            rows: dir.len(),
+        }
+    }
+
+    /// How many lines the top row needs this frame — see [`ui::layout`].
+    fn path_lines(&self, painter: &egui::Painter, area: egui::Rect) -> usize {
+        match &self.prompt {
+            Some(prompt) if !prompt.kind.anchored() => {
+                chrome::prompt_lines(painter, prompt, area.width() - ui::GAP * 2.0)
+            }
+            _ => 1,
+        }
+    }
 
     /// Rebuild the breadcrumb when the directory has changed under it.
     ///
@@ -6692,6 +6816,21 @@ impl App {
                         self.navigate(path, now);
                     }
                 }
+                rect
+            }
+            // The committed filter's chip re-opens the prompt that set it,
+            // seeded with the query — the only way the pointer has of editing
+            // something the keyboard typed (PLAN §7.2).
+            Control::FilterChip => {
+                let rect = geom.top.filter.unwrap_or(egui::Rect::ZERO);
+                self.focus = Focus::List;
+                self.open_prompt(PromptKind::Filter);
+                rect
+            }
+            // The clipboard chip is the pointer's `X`, down to the toast.
+            Control::YankChip => {
+                let rect = geom.top.cluster.yank.unwrap_or(egui::Rect::ZERO);
+                self.unyank(now);
                 rect
             }
             Control::Tab(index) => {
@@ -8045,7 +8184,12 @@ impl App {
         // strip and therefore how tall the panes are — painting this frame with
         // the pre-keystroke geometry would leave the strip a frame behind the
         // key that asked for it, on a frame nothing would follow.
-        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1);
+        let layout = ui::layout(
+            area,
+            self.mgr.ratio,
+            self.tabs.len() > 1,
+            self.path_lines(&painter, area),
+        );
         // How the list pane is drawn, published to the two things that run
         // *before* the pane is measured: the cursor commands and the wheel.
         let first_metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
@@ -8069,8 +8213,14 @@ impl App {
             }
         }
         self.tick_state(now);
+        self.sync_yank(now);
 
-        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1);
+        let layout = ui::layout(
+            area,
+            self.mgr.ratio,
+            self.tabs.len() > 1,
+            self.path_lines(&painter, area),
+        );
         let list_content = ui::content_rect(layout.list);
         // Which geometry this directory is drawn in, decided once and threaded
         // everywhere through `grid::pane_*` (PLAN §2). `None` is the list.
@@ -8119,14 +8269,28 @@ impl App {
         let parent_len = self.tab().parent.as_ref().map(|p| p.dir.len()).unwrap_or(0);
         let slide = self.tabs.offset(now);
         let tab_count = self.tabs.len();
-        let overlay = self.overlay_geometry(area, &layout, layout.bar.top());
+        // The floating cards that used to sit above the bottom bar now sit
+        // above the window's own bottom edge, which is where the panes end.
+        let overlay = self.overlay_geometry(area, &layout, area.bottom() - ui::GAP);
 
         // The breadcrumb is measured once and used by both the hit test and the
         // paint, for the reason `tab_rects` is: two functions computing this
         // separately is how a bar grows a one-pixel lie at its edges.
         self.sync_path_bar();
-        let branch_room = chrome::branch_width(&painter, self.path_bar.2.as_deref());
-        let crumb_rects = chrome::crumb_rects(&painter, layout.path, &self.path_bar.1, branch_room);
+        // The cluster is measured first and the crumbs against what is left of
+        // the row: the counter and the chips are fixed facts, and the path is
+        // the part that can be elided (PLAN §2).
+        let top_geom = {
+            let cluster = self.cluster(now);
+            chrome::top_geometry(
+                &painter,
+                layout.path,
+                &self.path_bar.1,
+                self.tab().cwd.dir.filter(),
+                &cluster,
+            )
+        };
+        let crumb_rects = top_geom.crumbs.clone();
         let menu_geometry = self
             .menu
             .as_ref()
@@ -8179,6 +8343,38 @@ impl App {
                         .iter()
                         .position(|rect| rect.contains(p))
                         .map(Control::Crumb)
+                })
+                // The two chips on the top row that do something when clicked.
+                // Not hit-tested while a prompt has taken the row: the crumbs
+                // and the chips are not drawn then, and a click landing on a
+                // control nobody can see is the pointer acting on a memory.
+                .or_else(|| {
+                    let prompting = self
+                        .prompt
+                        .as_ref()
+                        .is_some_and(|prompt| !prompt.kind.anchored());
+                    if prompting {
+                        return None;
+                    }
+                    top_geom
+                        .filter
+                        .is_some_and(|rect| rect.contains(p))
+                        .then_some(Control::FilterChip)
+                        .or_else(|| {
+                            // …but not while the chip is fading out: it is
+                            // pixels then, not a control, and `X` on an empty
+                            // clipboard means something else entirely (it
+                            // empties the basket — see [`App::unyank`]).
+                            let live = self
+                                .yank
+                                .as_ref()
+                                .is_some_and(|chip| chip.leaving.is_none());
+                            top_geom
+                                .cluster
+                                .yank
+                                .filter(|rect| live && rect.contains(p))
+                                .map(|_| Control::YankChip)
+                        })
                 })
                 .or_else(|| {
                     grid::pane_at(
@@ -8279,6 +8475,7 @@ impl App {
             parent_scroll,
             crumbs: &crumb_rects,
             overlay: &overlay,
+            top: &top_geom,
             menu: &menu_geometry,
             basket: &basket_geometry,
             tabs: tab_count,
@@ -8443,6 +8640,8 @@ impl App {
                 // says so (`delightful-ui` §2), like the basket's chip.
                 Control::Tab(_) | Control::BasketChip => egui::CursorIcon::Grab,
                 Control::Crumb(_)
+                | Control::FilterChip
+                | Control::YankChip
                 | Control::Action(_)
                 | Control::PanelRow(_)
                 | Control::MenuItem(_)
@@ -8598,7 +8797,7 @@ impl App {
         // self` and the painter holds the palette.
         let help_view = match self.help {
             Some(mut help) => {
-                let rect = chrome::help_rect(area, layout.bar);
+                let rect = chrome::help_rect(area, area.bottom() - ui::GAP);
                 let lines = self.help_lines();
                 let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::LIST).len();
                 // The same scrolloff rule the panes use, on the same numbers:
@@ -8936,89 +9135,53 @@ impl App {
             &self.hovers,
             &self.ripples,
         );
-        chrome::path_bar(
-            &paint,
-            layout.path,
-            &self.path_bar.1,
-            &crumb_rects,
-            self.path_bar.2.as_deref(),
-            &self.hovers,
-            &self.ripples,
-        );
+        // ── The top row (PLAN §2) ───────────────────────────────────────────
+        // A non-anchored prompt takes the crumbs' place, in the same row: the
+        // keyboard is in one place at a time, and a prompt that opened a line
+        // of its own would move every row in the window to say so
+        // (`delightful-ui` §8).
+        match &self.prompt {
+            Some(prompt) if !prompt.kind.anchored() => {
+                // The directory the prompt is about, kept as context on the
+                // left when the field can spare the room.
+                let tail = self.path_bar.1.last().map(|crumb| crumb.label.as_str());
+                chrome::prompt_row(&paint, layout.path, prompt, tail);
+            }
+            _ => {
+                let cluster = self.cluster(now);
+                chrome::path_bar(
+                    &paint,
+                    area,
+                    layout.path,
+                    &self.path_bar.1,
+                    self.tab().cwd.dir.filter(),
+                    &cluster,
+                    &top_geom,
+                    &self.hovers,
+                    &self.ripples,
+                );
+            }
+        }
 
-        // The help sheet is drawn over the panes but *under* the bar, because
-        // the bar is where its filter is typed — an overlay that covered its own
-        // input would be asking a question it hid the answer box for.
+        // The help sheet is drawn over the panes but *under* the top row,
+        // because the row is where its filter is typed — an overlay that
+        // covered its own input would be asking a question it hid the answer
+        // box for.
         if let Some((rect, lines, total, help)) = &help_view {
             chrome::help_overlay(&paint, area, *rect, lines, help, *total);
-        }
-
-        // An anchored prompt (`r`, `R`, the conflict rename) floats over the row
-        // it is about, so the bar keeps saying where you are underneath it.
-        let anchored = self.prompt.as_ref().filter(|prompt| prompt.kind.anchored());
-        match &self.prompt {
-            Some(prompt) if prompt.kind.anchored() => {
-                let dir = &self.tab().cwd.dir;
-                chrome::status_bar(
-                    &paint,
-                    layout.bar,
-                    chrome::Status {
-                        selected: dir.selected_count(),
-                        position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
-                        rows: dir.len(),
-                        filter: dir.filter(),
-                        visual: self.visual.as_ref().map(|v| v.selecting),
-                    },
-                );
-            }
-            Some(prompt) => chrome::input_bar(&paint, layout.bar, prompt),
-            None if self.finder.is_some() => chrome::hint_bar(
+            chrome::hints(
                 &paint,
-                layout.bar,
-                &[("↑↓", "move"), ("Enter", "run"), ("Esc", "close")],
-            ),
-            None if self.search.is_some() => chrome::hint_bar(
-                &paint,
-                layout.bar,
-                &[
-                    ("↑↓", "move"),
-                    ("Enter", "go there"),
-                    ("Ctrl+s", "stop"),
-                    ("Esc", "close"),
-                ],
-            ),
-            None if self.overlay_open() => chrome::hint_bar(
-                &paint,
-                layout.bar,
-                &overlay_hints(
-                    &self.dialog,
-                    self.picker.is_some(),
-                    self.spot.is_some(),
-                    self.mounts.is_some(),
-                ),
-            ),
-            None if self.help.is_some() => chrome::hint_bar(
-                &paint,
-                layout.bar,
+                chrome::hint_rect(*rect),
                 &[("↑↓", "move"), ("f", "filter"), ("Esc", "close")],
-            ),
-            None => {
-                let dir = &self.tab().cwd.dir;
-                chrome::status_bar(
-                    &paint,
-                    layout.bar,
-                    chrome::Status {
-                        selected: dir.selected_count(),
-                        position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
-                        rows: dir.len(),
-                        filter: dir.filter(),
-                        visual: self.visual.as_ref().map(|v| v.selecting),
-                    },
-                );
-            }
+            );
         }
 
-        // ── The modal surfaces, over the panes and the bar ──────────────────
+        // An anchored prompt (`r`, `R`, the conflict rename) floats over the
+        // row it is about, so the top row keeps saying where you are
+        // underneath it.
+        let anchored = self.prompt.as_ref().filter(|prompt| prompt.kind.anchored());
+
+        // ── The modal surfaces, over the panes and the top row ─────────────
         match (&overlay, &self.dialog) {
             (Some(OverlayGeom::Mounts(geometry)), _) => {
                 if let Some(card) = &self.mounts {
@@ -9067,6 +9230,18 @@ impl App {
                 now,
             );
         }
+        // Each surface's own hints, along the bottom edge of its card: what
+        // the keys do now belongs to the thing that has taken them, and an eye
+        // reading a dialog should not have to travel to the other end of the
+        // window to find out what `Enter` does in it (PLAN §4).
+        if let Some(geometry) = &overlay {
+            chrome::hints(
+                &paint,
+                chrome::hint_rect(geometry.card()),
+                &overlay_hints(geometry, &self.dialog),
+            );
+        }
+
         // The floating prompt goes over the card that opened it — the conflict
         // resolver's rename is a field *in* that dialog.
         if let Some(prompt) = anchored {
@@ -9163,10 +9338,13 @@ impl App {
             );
         }
 
-        // The toast sits above the bar and under the which-key card: a message
-        // about what just happened must not cover the answer to the key being
-        // held down now.
-        self.toasts.paint(&paint, area, layout.bar.top(), now);
+        // The toast sits at the window's own bottom edge now that there is no
+        // bar to sit above, and under the which-key card: a message about what
+        // just happened must not cover the answer to the key being held down
+        // now. Centred rather than in the corner because the corner is the
+        // selection basket's (PLAN §7.1), and two transient surfaces stacking
+        // in one place is how a notice ends up under a tray.
+        self.toasts.paint(&paint, area, area.bottom(), now);
 
         // The menu is over everything below it — it is the most recent thing
         // the user asked for — and under the which-key card, which is an answer
@@ -9181,7 +9359,7 @@ impl App {
             chrome::which_key(
                 &paint,
                 area,
-                layout.bar.top(),
+                area.bottom(),
                 &self.which_rows,
                 self.which.alpha(now),
             );
@@ -9204,6 +9382,14 @@ impl App {
             ("focus", self.focus_fade.animating(now)),
             ("cursor_glow", self.cursor_glow.animating()),
             ("ripples", self.ripples.animating(now)),
+            // The clipboard chip's way off the top row. Instant in, so only
+            // the leaving half ever asks for a frame (PLAN §1, §8).
+            (
+                "yank",
+                self.yank
+                    .as_ref()
+                    .is_some_and(|chip| chip.leaving.is_some() && !chip.spent(now)),
+            ),
             ("tab", self.tab().animating(now)),
             ("tabs", self.tabs.animating(now)),
             ("preview", self.preview.animating(now)),
@@ -9494,65 +9680,74 @@ fn op_toast(outcome: &df_core::ops::OpOutcome) -> (String, crate::toast::ToastKi
     (message, ToastKind::Notice)
 }
 
-/// What the bar says while a modal surface owns the keyboard.
+/// What a modal surface's hint strip says while it owns the keyboard.
+///
+/// Keyed on the surface that is open rather than on a handful of booleans: the
+/// hints and the card are one thing, and a list that could describe a card that
+/// is not up is a list that will eventually describe the wrong one.
 fn overlay_hints(
+    overlay: &OverlayGeom,
     dialog: &Option<Dialog>,
-    picker: bool,
-    spot: bool,
-    mounts: bool,
 ) -> Vec<(&'static str, &'static str)> {
-    if mounts {
+    match overlay {
         // The disks card's own vocabulary, including the two `[pick]` has no
         // row for — which is exactly why they are listed here: a key that is
-        // not on the help sheet has to be on the hint bar or it may as well not
+        // not on the help sheet has to be on the card or it may as well not
         // exist.
-        return vec![
+        OverlayGeom::Mounts(_) => vec![
             ("↑↓", "choose"),
             ("Enter", "mount / open"),
             ("u", "unmount"),
             ("e", "eject"),
             ("Esc", "close"),
-        ];
-    }
-    if spot {
-        // Every key the card answers to, including the two df-core's `[spot]`
-        // table has no row for — which is exactly why they are listed here: a
-        // key that is not on the help sheet has to be on the hint bar or it
-        // may as well not exist.
-        return vec![
+        ],
+        // Every key the spot card answers to, including the two df-core's
+        // `[spot]` table has no row for, for the same reason.
+        OverlayGeom::Spot(_) => vec![
             ("↑↓", "row"),
             ("←→", "previous / next file"),
             ("⇧←→", "permission bit"),
             ("Space", "toggle / hash"),
             ("Tab / Esc", "close"),
-        ];
-    }
-    match dialog {
-        Some(Dialog::Confirm(_)) => vec![
-            ("Enter / y", "confirm"),
-            ("Esc / n", "cancel"),
-            ("↑↓", "scroll"),
         ],
-        Some(Dialog::Bulk(_)) => vec![
-            ("Tab / ↑↓", "next field"),
-            ("Enter", "rename"),
-            ("Esc", "cancel"),
+        OverlayGeom::Finder(_) => vec![("↑↓", "move"), ("Enter", "run"), ("Esc", "close")],
+        OverlayGeom::Search(_) => vec![
+            ("↑↓", "move"),
+            ("Enter", "go there"),
+            ("Ctrl+s", "stop"),
+            ("Esc", "close"),
         ],
-        Some(Dialog::Conflict(_)) => vec![
-            ("↑↓", "choose"),
-            ("o s r", "overwrite / skip / rename"),
-            ("a", "apply to all"),
-            ("Enter", "apply"),
-            ("Esc", "cancel the paste"),
-        ],
-        None if picker => vec![("↑↓", "choose"), ("Enter", "open"), ("Esc", "close")],
-        None => vec![
+        OverlayGeom::Picker(_, _) => vec![("↑↓", "choose"), ("Enter", "open"), ("Esc", "close")],
+        OverlayGeom::Panel(_, _, _) => vec![
             ("↑↓", "select"),
             ("p", "pause"),
             ("x", "cancel"),
             ("Enter", "inspect"),
             ("w / Esc", "close"),
         ],
+        OverlayGeom::Confirm(_) | OverlayGeom::Conflict(_) | OverlayGeom::Bulk(_) => match dialog {
+            Some(Dialog::Confirm(_)) => vec![
+                ("Enter / y", "confirm"),
+                ("Esc / n", "cancel"),
+                ("↑↓", "scroll"),
+            ],
+            Some(Dialog::Bulk(_)) => vec![
+                ("Tab / ↑↓", "next field"),
+                ("Enter", "rename"),
+                ("Esc", "cancel"),
+            ],
+            Some(Dialog::Conflict(_)) => vec![
+                ("↑↓", "choose"),
+                ("o s r", "overwrite / skip / rename"),
+                ("a", "apply to all"),
+                ("Enter", "apply"),
+                ("Esc", "cancel the paste"),
+            ],
+            // The geometry outliving its dialog by a frame is not a state the
+            // program can be in, but a card with no hints reads better than a
+            // card with somebody else's.
+            None => Vec::new(),
+        },
     }
 }
 
@@ -10344,29 +10539,54 @@ mod tests {
     /// surface does not have.
     #[test]
     fn each_overlay_teaches_its_own_keys() {
+        let nowhere = egui::Rect::ZERO;
+        let empty = dialog::Geometry {
+            card: nowhere,
+            body: nowhere,
+            rows: Vec::new(),
+            actions: Vec::new(),
+            apply_all: None,
+        };
         let confirm = overlay_hints(
+            &OverlayGeom::Confirm(empty.clone()),
             &Some(Dialog::Confirm(Confirm::new(
                 ConfirmKind::Delete,
                 vec![PathBuf::from("/tmp/a")],
             ))),
-            false,
-            false,
-            false,
         );
         assert!(confirm.iter().any(|(k, _)| k.contains("Enter")));
         assert!(confirm.iter().any(|(k, _)| k.contains("Esc")));
-        let panel = overlay_hints(&None, false, false, false);
+        // A card with no dialog behind it says nothing rather than somebody
+        // else's keys.
+        assert!(overlay_hints(&OverlayGeom::Confirm(empty), &None).is_empty());
+
+        let panel = overlay_hints(&OverlayGeom::Panel(nowhere, Vec::new(), Vec::new()), &None);
         assert!(panel.iter().any(|(k, what)| *k == "x" && *what == "cancel"));
-        let picker = overlay_hints(&None, true, false, false);
+        let picker = overlay_hints(&OverlayGeom::Picker(nowhere, Vec::new()), &None);
         assert!(picker.iter().any(|(_, what)| *what == "open"));
         // The spot's hints cover the two keys df-core's `[spot]` table has no
         // row for, which is the only place they are ever advertised.
-        let spot = overlay_hints(&None, false, true, false);
+        let spot = overlay_hints(
+            &OverlayGeom::Spot(spot::Geometry {
+                card: nowhere,
+                rows: Vec::new(),
+                bits: Vec::new(),
+                action: None,
+            }),
+            &None,
+        );
         assert!(spot.iter().any(|(k, _)| k.contains("Space")));
         assert!(spot.iter().any(|(k, _)| k.contains('⇧')));
         assert!(spot.iter().any(|(k, _)| k.contains("Tab")));
         // The disks card advertises the two verbs `[pick]` has no row for.
-        let mounts = overlay_hints(&None, false, false, true);
+        let mounts = overlay_hints(
+            &OverlayGeom::Mounts(crate::mounts::Geometry {
+                card: nowhere,
+                body: nowhere,
+                rows: Vec::new(),
+            }),
+            &None,
+        );
         assert!(mounts.iter().any(|(k, what)| *k == "e" && *what == "eject"));
         assert!(mounts
             .iter()

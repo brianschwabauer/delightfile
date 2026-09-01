@@ -234,7 +234,7 @@ impl TaskPanel {
 /// Where the panel's rows are. Shared by paint and hit test.
 pub fn geometry(area: egui::Rect, bar_top: f32, rows: usize) -> (egui::Rect, Vec<egui::Rect>) {
     let listed = rows.clamp(1, VISIBLE);
-    let height = CARD_PAD * 2.0 + chrome::CARD_ROW + listed as f32 * ROW;
+    let height = CARD_PAD * 2.0 + chrome::CARD_ROW + listed as f32 * ROW + chrome::HINT_ROW;
     let width = WIDTH.min(area.width() - chrome::CARD_MARGIN * 2.0);
     let card = egui::Rect::from_min_size(
         egui::pos2(

@@ -686,7 +686,7 @@ fn row_height(row: &Row, checksum: &Checksum) -> f32 {
     }
 }
 
-/// Lay the card out above the bottom bar, centred.
+/// Lay the card out above the panes' bottom edge, centred.
 pub fn geometry(area: egui::Rect, bar_top: f32, spot: &Spot) -> Geometry {
     let heights: Vec<f32> = spot
         .rows
@@ -694,7 +694,7 @@ pub fn geometry(area: egui::Rect, bar_top: f32, spot: &Spot) -> Geometry {
         .map(|row| row_height(row, &spot.checksum))
         .collect();
     let body: f32 = heights.iter().sum();
-    let height = CARD_PAD * 2.0 + chrome::CARD_ROW + body;
+    let height = CARD_PAD * 2.0 + chrome::CARD_ROW + body + chrome::HINT_ROW;
     let width = WIDTH
         .min(area.width() - chrome::CARD_MARGIN * 2.0)
         .max(MIN_WIDTH);

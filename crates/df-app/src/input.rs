@@ -1,4 +1,4 @@
-//! The prompt behind the bottom bar — and now behind the rename popup, the
+//! The prompt behind the top row — and now behind the rename popup, the
 //! create prompt and the shell line as well.
 //!
 //! PLAN §4.2 asks for **one** input implementation shared by rename, filter,
@@ -15,7 +15,7 @@
 use df_core::input::{InputBuffer, InputEvent};
 use df_core::keymap::{Chord, InputMode};
 
-/// What the bar is being typed into, which is also what its title says.
+/// What the prompt is being typed into, which is also what its title says.
 ///
 /// Titles are yazi's, verbatim (PLAN §3: the defaults *are* the yazi config) —
 /// they are the words the muscle memory expects to see at the bottom of the
