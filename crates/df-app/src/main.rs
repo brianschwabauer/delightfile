@@ -10,6 +10,7 @@
 mod app;
 mod chrome;
 mod cli;
+mod clipboard;
 mod dialog;
 mod focus;
 mod format;
@@ -19,7 +20,9 @@ mod hover;
 mod icons;
 mod input;
 mod keys;
+mod menu;
 mod motion;
+mod mouse;
 mod open;
 mod panel;
 mod playback;

@@ -421,11 +421,11 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Spot panel `Tab` with metadata, permissions editor, checksum
 
 ### Phase 4 — mouse & drag
-- [ ] Click/double/middle/right + context menu, band select, momentum scroll
-- [ ] Ripples, press effects on all controls
+- [x] Click/double/middle/right + context menu, band select, momentum scroll
+- [x] Ripples, press effects on all controls
 - [ ] Internal DnD with ghost stack, target highlight, spring-back cancel
 - [ ] Wayland data-device: drag out (uri-list), drop in from external apps
-- [ ] Clipboard native: `Y`, `c t`, paste files/images
+- [x] Clipboard native: `Y`, `c t`, paste files/images
 
 ### Phase 5 — power
 - [ ] Command palette `Ctrl+p` from the registry

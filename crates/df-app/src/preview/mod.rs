@@ -351,6 +351,13 @@ pub struct Pane {
     max_scroll: usize,
     /// When the scroll last moved, for the scrollbar's linger-then-leave.
     scrolled_at: Option<Instant>,
+    /// The wheel's momentum over the line position (PLAN §7.5, §8).
+    ///
+    /// A document's scroll is a plain line number, so unlike the listing panes
+    /// — whose position is already a tween — the coast has to be held
+    /// somewhere. `None` when the pane has never been wheeled, which is the
+    /// resting state: no fling, no frames.
+    fling: Option<crate::mouse::Fling>,
     /// Set by the app each frame: a playback controller is mounted on this
     /// file, so the kind badge stands down (see [`Pane::set_media_mounted`]).
     media_mounted: bool,
@@ -383,6 +390,7 @@ impl Pane {
             scroll: 0,
             max_scroll: 0,
             scrolled_at: None,
+            fling: None,
             media_mounted: false,
         }
     }
@@ -424,6 +432,8 @@ impl Pane {
             self.scroll = 0;
             self.max_scroll = 0;
             self.scrolled_at = None;
+            // A coast belongs to the document it was started in.
+            self.fling = None;
             self.decoder.cancel();
             self.docs.cancel();
         }
@@ -448,6 +458,7 @@ impl Pane {
         self.scroll = 0;
         self.max_scroll = 0;
         self.scrolled_at = None;
+        self.fling = None;
     }
 
     /// `K` / `J`: move the preview by [`SEEK_LINES`] without leaving the list.
@@ -464,6 +475,7 @@ impl Pane {
         if self.scroll != was {
             self.scrolled_at = Some(now);
         }
+        self.fling = None;
     }
 
     /// Scroll by `delta` lines — the preview-focus arrows, `Ctrl+u`/`Ctrl+d`
@@ -483,6 +495,9 @@ impl Pane {
         if self.scroll != was {
             self.scrolled_at = Some(now);
         }
+        // The keyboard wins over a coast the wheel started: two things moving
+        // one number is one of them losing, and it must not be the key.
+        self.fling = None;
     }
 
     /// `g g` / `G`: the top, or as far down as the content goes.
@@ -491,6 +506,51 @@ impl Pane {
         self.scroll = line.min(self.max_scroll);
         if self.scroll != was {
             self.scrolled_at = Some(now);
+        }
+        // A keyboard jump ends any coast: two things moving one number is one
+        // of them losing.
+        self.fling = None;
+    }
+
+    /// A wheel roll over this pane (PLAN §7.5), in lines.
+    ///
+    /// Rendered documents take the wheel as a page turn instead — `doc_scroll`
+    /// answers whether it did — because a page is what a PDF scrolls by, which
+    /// is the same split `↑`/`↓` make in preview focus (PLAN §4.3).
+    pub fn wheel(&mut self, delta_lines: f32, now: Instant) -> bool {
+        // One notch, one page — not one page per *line* the notch is worth. A
+        // page is a big unit and the wheel is a fast control; multiplying them
+        // together turns a flick of the finger into a document you have lost
+        // your place in.
+        let page = delta_lines.trunc() as isize;
+        if page != 0 && self.doc_scroll(page.signum(), now) {
+            self.fling = None;
+            return true;
+        }
+        // Every other way of moving this pane clears the fling, so a coast that
+        // exists here started from the current position and is still the only
+        // thing driving it.
+        let fling = self
+            .fling
+            .get_or_insert_with(|| crate::mouse::Fling::at(self.scroll as f32, now));
+        fling.kick(delta_lines, 0.0, self.max_scroll as f32, now)
+    }
+
+    /// Sample the coast and put the pane where it says. Called once a frame.
+    pub fn tick_fling(&mut self, now: Instant) {
+        let Some(fling) = &self.fling else { return };
+        let at = fling.value(now).round().max(0.0) as usize;
+        let done = fling.finished(now);
+        let was = self.scroll;
+        self.scroll = at.min(self.max_scroll);
+        if self.scroll != was {
+            self.scrolled_at = Some(now);
+        }
+        if done {
+            // A spent coast is dropped, not kept at its target: `animating`
+            // reads the option, and an option that is never `None` is a pane
+            // that never stops asking for frames (PLAN §1).
+            self.fling = None;
         }
     }
 
@@ -896,6 +956,12 @@ impl Pane {
     /// Is anything still moving? The `animating()` half of PLAN §1's idle-cost
     /// rule: a settled preview must stop asking for frames.
     pub fn animating(&self, now: Instant) -> bool {
+        // The wheel's coast, first: it moves the pane whether or not there is
+        // anything decoded to show yet, and it *ends* — `tick_fling` drops it
+        // the frame it arrives.
+        if self.fling.as_ref().is_some_and(|f| !f.finished(now)) {
+            return true;
+        }
         let Some(shown) = &self.shown else {
             return false;
         };

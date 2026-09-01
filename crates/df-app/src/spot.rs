@@ -516,6 +516,26 @@ impl Spot {
     }
 
     /// Which permission chip a pointer index refers to, if the card has one.
+    /// What `c c` copies: the focused row's *value*, not its label.
+    ///
+    /// The two rows whose value is not already a string answer with the string
+    /// a person would have read off the card — the octal for the permission
+    /// chips, the digest for the checksum — so "copy the cell" means the same
+    /// thing on every row. A checksum that has not been asked for has no value
+    /// to copy, and says so by returning nothing.
+    pub fn cell_text(&self) -> Option<(&'static str, String)> {
+        let row = self.rows.get(self.cursor)?;
+        let text = match &row.value {
+            Value::Text(text) => text.clone(),
+            Value::Permissions => octal(self.facts.mode),
+            Value::Checksum => match &self.checksum {
+                Checksum::Done(digest) => digest.clone(),
+                _ => return None,
+            },
+        };
+        Some((row.label, text))
+    }
+
     pub fn perm_row(&self) -> Option<usize> {
         self.rows
             .iter()

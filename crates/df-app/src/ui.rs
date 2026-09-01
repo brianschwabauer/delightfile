@@ -176,6 +176,13 @@ pub enum Control {
     /// A row inside a floating surface: the task panel's tasks, the opener
     /// picker's choices, the conflict resolver's names.
     PanelRow(usize),
+    /// A segment of the breadcrumb path bar, from the root rightwards
+    /// (PLAN §2).
+    Crumb(usize),
+    /// A row of the right-click menu, and a row of its opener submenu
+    /// (PLAN §7.5).
+    MenuItem(usize),
+    SubmenuItem(usize),
 }
 
 /// Where the panes and the chrome go.
@@ -183,6 +190,14 @@ pub enum Control {
 pub struct Layout {
     /// The tab strip, when there is more than one tab (PLAN §2).
     pub strip: Option<egui::Rect>,
+    /// The breadcrumb path bar (PLAN §2), under the strip and over the panes.
+    ///
+    /// Under the strip because a tab *contains* a path: the strip says which
+    /// session you are in and the crumbs say where that session is, and the
+    /// outer fact goes above the inner one. Always reserved, for the same
+    /// reason the bottom bar always is — a pane that changed height when a
+    /// second tab opened would move rows under the pointer.
+    pub path: egui::Rect,
     pub parent: egui::Rect,
     pub list: egui::Rect,
     pub preview: egui::Rect,
@@ -226,6 +241,14 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
         Some(strip) => strip.bottom() + GAP,
         None => outer.top(),
     };
+    let path = egui::Rect::from_min_max(
+        egui::pos2(outer.left(), top),
+        // Clamped against the bar *and* against its own top: a window too short
+        // for the chrome collapses the path bar to nothing rather than to an
+        // inverted rectangle every rect derived from it would inherit.
+        egui::pos2(outer.right(), (top + CHROME_HEIGHT).min(bar.top()).max(top)),
+    );
+    let top = (path.bottom() + GAP).min(bar.top());
     let inner = egui::Rect::from_min_max(
         egui::pos2(outer.left(), top),
         egui::pos2(outer.right(), (bar.top() - GAP).max(top)),
@@ -246,6 +269,7 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
     };
     Layout {
         strip,
+        path,
         parent: next(width(ratio[0])),
         list: next(width(ratio[1])),
         preview: next(width(ratio[2])),
@@ -827,7 +851,7 @@ mod tests {
                 [1, 4, 3],
                 strip,
             );
-            for rect in [l.parent, l.list, l.preview, l.bar] {
+            for rect in [l.parent, l.list, l.preview, l.bar, l.path] {
                 assert!(rect.width() >= 0.0 && rect.height() >= 0.0, "{rect:?}");
             }
         }
@@ -841,12 +865,16 @@ mod tests {
         assert_eq!(bare.strip, None);
         assert!((bare.bar.height() - CHROME_HEIGHT).abs() < 1e-3);
         assert!((bare.list.bottom() - (bare.bar.top() - GAP)).abs() < 1e-3);
-        assert!((bare.list.top() - GAP).abs() < 1e-3);
+        // The path bar is always there, and the panes start below it.
+        assert!((bare.path.top() - GAP).abs() < 1e-3);
+        assert!((bare.path.height() - CHROME_HEIGHT).abs() < 1e-3);
+        assert!((bare.list.top() - (bare.path.bottom() + GAP)).abs() < 1e-3);
 
         let with_strip = layout(area(), [1, 4, 3], true);
         let strip = with_strip.strip.expect("a strip was asked for");
         assert!((strip.height() - CHROME_HEIGHT).abs() < 1e-3);
-        assert!((with_strip.list.top() - (strip.bottom() + GAP)).abs() < 1e-3);
+        assert!((with_strip.path.top() - (strip.bottom() + GAP)).abs() < 1e-3);
+        assert!((with_strip.list.top() - (with_strip.path.bottom() + GAP)).abs() < 1e-3);
         // The strip costs the panes exactly its own height plus one gap, and
         // nothing else moves.
         assert!(

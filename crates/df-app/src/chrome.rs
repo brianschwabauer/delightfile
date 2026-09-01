@@ -185,6 +185,243 @@ pub fn tab_strip(
     }
 }
 
+// ── The breadcrumb path bar (PLAN §2) ───────────────────────────────────────
+
+/// The separator drawn between two crumbs.
+///
+/// A chevron rather than the platform's `/`: the slash is *in* the path, and a
+/// separator that looks like content makes a segment's own name ambiguous the
+/// moment a directory has a slash-like character in it.
+const CRUMB_SEPARATOR: &str = "›";
+
+/// The separator's column, in logical points. Symmetric padding either side of
+/// a one-character glyph.
+const CRUMB_SEPARATOR_WIDTH: f32 = 13.0;
+
+/// What is drawn when the path is too long for the bar.
+const CRUMB_ELLIPSIS: &str = "…";
+
+/// One clickable segment of the path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Crumb {
+    /// What is drawn: the directory's own name, or `/` for the root.
+    pub label: String,
+    /// Where clicking goes.
+    pub path: std::path::PathBuf,
+}
+
+/// The path, as segments from the root rightwards.
+///
+/// The last one is the directory you are in. It is still a crumb and still
+/// clickable — clicking it is a no-op navigation, which is exactly what a user
+/// who clicked it expects, and special-casing it would mean one segment of the
+/// bar behaves differently from all the others for no visible reason.
+pub fn crumbs(path: &std::path::Path) -> Vec<Crumb> {
+    use std::path::Component;
+    let mut out = Vec::new();
+    let mut here = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => {
+                here.push("/");
+                out.push(Crumb {
+                    label: "/".to_string(),
+                    path: here.clone(),
+                });
+            }
+            Component::Normal(name) => {
+                here.push(name);
+                out.push(Crumb {
+                    label: name.to_string_lossy().into_owned(),
+                    path: here.clone(),
+                });
+            }
+            // A relative path's `.`/`..`/prefix components cannot be clicked to
+            // anywhere meaningful, so they are pushed onto the accumulator and
+            // not offered as segments. In practice every path here is absolute.
+            other => here.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Where each crumb goes, sharing the measurement with the paint so a click
+/// lands on the segment it looks like it landed on.
+///
+/// A crumb that did not fit gets [`egui::Rect::NOTHING`], which contains no
+/// point — so an elided segment is simply not hit-testable, and the vector
+/// stays index-aligned with `crumbs`.
+pub fn crumb_rects(
+    painter: &egui::Painter,
+    bar: egui::Rect,
+    crumbs: &[Crumb],
+    reserved_right: f32,
+) -> Vec<egui::Rect> {
+    let font = egui::FontId::proportional(FONT);
+    let widths: Vec<f32> = crumbs
+        .iter()
+        .map(|crumb| text_width(painter, &crumb.label, font.clone()) + PAD_X * 2.0)
+        .collect();
+    let room = (bar.width() - PAD_X * 2.0 - reserved_right).max(0.0);
+    // Elide from the *left*: the segment you are in and the ones just above it
+    // are what a person is reading, and the root is the part they can guess.
+    let mut first = 0;
+    loop {
+        let shown = &widths[first..];
+        let separators = CRUMB_SEPARATOR_WIDTH * shown.len().saturating_sub(1) as f32;
+        let ellipsis = if first > 0 {
+            text_width(painter, CRUMB_ELLIPSIS, font.clone()) + CRUMB_SEPARATOR_WIDTH
+        } else {
+            0.0
+        };
+        if shown.iter().sum::<f32>() + separators + ellipsis <= room || first + 1 >= widths.len() {
+            break;
+        }
+        first += 1;
+    }
+
+    let mut rects = vec![egui::Rect::NOTHING; crumbs.len()];
+    let mut x = bar.left() + PAD_X;
+    if first > 0 {
+        x += text_width(painter, CRUMB_ELLIPSIS, font.clone()) + CRUMB_SEPARATOR_WIDTH;
+    }
+    for (index, width) in widths.iter().enumerate().skip(first) {
+        if index > first {
+            x += CRUMB_SEPARATOR_WIDTH;
+        }
+        rects[index] = egui::Rect::from_min_size(
+            egui::pos2(x, bar.top() + 2.0),
+            egui::vec2(*width, (bar.height() - 4.0).max(0.0)),
+        );
+        x += width;
+    }
+    rects
+}
+
+/// How wide the git chip is, so the crumbs can be measured against what is
+/// left. Zero when there is no branch to show.
+pub fn branch_width(painter: &egui::Painter, branch: Option<&str>) -> f32 {
+    match branch {
+        None => 0.0,
+        Some(branch) => {
+            text_width(painter, branch, egui::FontId::proportional(FONT))
+                + PAD_X * 2.0
+                + GAP
+                // The `` glyph and its gap.
+                + FONT
+        }
+    }
+}
+
+/// Draw the path bar: the crumbs, and the branch chip when git has an answer.
+pub fn path_bar(
+    paint: &Painting<'_>,
+    bar: egui::Rect,
+    crumbs: &[Crumb],
+    rects: &[egui::Rect],
+    branch: Option<&str>,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let painter = paint.painter;
+    bar_ground(paint, bar);
+    let font = egui::FontId::proportional(FONT);
+
+    // The leading ellipsis, when the path did not fit.
+    let elided = rects.iter().position(|r| *r != egui::Rect::NOTHING);
+    if elided.unwrap_or(0) > 0 {
+        painter.text(
+            egui::pos2(bar.left() + PAD_X, bar.center().y),
+            egui::Align2::LEFT_CENTER,
+            CRUMB_ELLIPSIS,
+            font.clone(),
+            palette.overlay0,
+        );
+    }
+
+    let last = crumbs.len().saturating_sub(1);
+    for (index, (crumb, rect)) in crumbs.iter().zip(rects).enumerate() {
+        if *rect == egui::Rect::NOTHING {
+            continue;
+        }
+        let key = Control::Crumb(index);
+        let hover = hovers.hover(key);
+        let rect = pressed_rect(*rect, hovers.press(key));
+        if hover > 0.0 {
+            painter.rect_filled(
+                rect,
+                ROW_RADIUS,
+                mix(paint.palette.crust, palette.surface1, hover),
+            );
+        }
+        let inside = painter.with_clip_rect(rect);
+        for splash in ripples.splashes(key, paint.now) {
+            inside.circle_filled(
+                splash.center,
+                splash.radius,
+                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            );
+        }
+        // The directory you are actually in is the bright one; the ancestors
+        // are the route you took to it.
+        let color = if index == last {
+            palette.text
+        } else {
+            mix(palette.overlay1, palette.text, hover)
+        };
+        inside.text(
+            egui::pos2(rect.left() + PAD_X, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &crumb.label,
+            font.clone(),
+            color,
+        );
+        if index < last && rects[index + 1] != egui::Rect::NOTHING {
+            painter.text(
+                egui::pos2(
+                    rect.right() + CRUMB_SEPARATOR_WIDTH / 2.0,
+                    bar.center().y,
+                ),
+                egui::Align2::CENTER_CENTER,
+                CRUMB_SEPARATOR,
+                font.clone(),
+                palette.overlay0,
+            );
+        }
+    }
+
+    if let Some(branch) = branch {
+        // Right-aligned, in the palette's own git colour, on a plate of it —
+        // the same chip treatment the status bar's counts get.
+        let galley = painter.layout_no_wrap(branch.to_string(), font, palette.mauve);
+        let width = galley.size().x + PAD_X * 2.0 + FONT;
+        let chip = egui::Rect::from_min_size(
+            egui::pos2(bar.right() - PAD_X - width, bar.top() + 3.0),
+            egui::vec2(width, (bar.height() - 6.0).max(0.0)),
+        );
+        painter.rect_filled(chip, ROW_RADIUS, mix(paint.palette.crust, palette.mauve, 0.16));
+        painter.text(
+            egui::pos2(chip.left() + PAD_X, chip.center().y),
+            egui::Align2::LEFT_CENTER,
+            // A plain branch glyph, in the proportional face: the nerd-font
+            // icons need a patched font that may not be there, and the bar must
+            // read the same either way.
+            "⑂",
+            egui::FontId::proportional(FONT),
+            palette.mauve,
+        );
+        painter.galley(
+            egui::pos2(
+                chip.left() + PAD_X + FONT,
+                chip.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            palette.mauve,
+        );
+    }
+}
+
 // ── The bottom bar ──────────────────────────────────────────────────────────
 
 /// What the status line has to say when nothing is being typed.
@@ -881,6 +1118,73 @@ mod tests {
         assert_eq!(tab_at(strip, 4, egui::pos2(-10.0, -10.0)), None);
     }
 
+    /// The path, as segments you can click: the root first, the directory you
+    /// are in last, and each one addressing where it points.
+    #[test]
+    fn the_breadcrumb_is_the_path_one_segment_at_a_time() {
+        let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile"));
+        let labels: Vec<&str> = path.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["/", "home", "brian", "Work", "delightfile"]);
+        assert_eq!(
+            path.last().map(|c| c.path.as_path()),
+            Some(std::path::Path::new("/home/brian/Work/delightfile"))
+        );
+        assert_eq!(
+            path[1].path.as_path(),
+            std::path::Path::new("/home"),
+            "a segment addresses where it points, not where you are"
+        );
+        // The root on its own is one crumb, not none.
+        assert_eq!(crumbs(std::path::Path::new("/")).len(), 1);
+    }
+
+    /// The crumbs tile the bar, the hit test finds what was drawn, and a path
+    /// too long for the window loses its *leading* segments rather than
+    /// overflowing.
+    #[test]
+    fn the_crumbs_are_laid_out_and_hit_tested_the_same_way() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let bar = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(700.0, CHROME_HEIGHT));
+            let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile/crates"));
+            let rects = crumb_rects(ui.painter(), bar, &path, 0.0);
+            assert_eq!(rects.len(), path.len());
+            for (index, rect) in rects.iter().enumerate() {
+                assert_ne!(*rect, egui::Rect::NOTHING, "{index} did not fit a wide bar");
+                assert!(bar.contains(rect.center()));
+            }
+            // Left to right, with a separator's worth of space between.
+            for pair in rects.windows(2) {
+                assert!(pair[1].left() > pair[0].right());
+            }
+
+            // A narrow bar elides from the left and keeps the tail.
+            let narrow =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(150.0, CHROME_HEIGHT));
+            let rects = crumb_rects(ui.painter(), narrow, &path, 0.0);
+            assert_eq!(rects[0], egui::Rect::NOTHING, "the root should be elided");
+            assert_ne!(
+                rects[path.len() - 1],
+                egui::Rect::NOTHING,
+                "the directory you are in is never elided"
+            );
+            // An elided segment is not hit-testable, which is what keeps a
+            // click landing on the crumb it looks like it landed on.
+            assert!(!rects[0].contains(narrow.center()));
+
+            // The branch chip's room comes out of the crumbs' room.
+            let with_branch = crumb_rects(
+                ui.painter(),
+                bar,
+                &path,
+                branch_width(ui.painter(), Some("main")),
+            );
+            assert!(branch_width(ui.painter(), Some("main")) > 0.0);
+            assert_eq!(branch_width(ui.painter(), None), 0.0);
+            assert_eq!(with_branch.len(), path.len());
+        });
+    }
+
     /// `delightful-ui` §15: a row inside a card is inset by the padding and its
     /// radius is the card's less that inset, so the gap stays constant round the
     /// corner.
@@ -934,6 +1238,27 @@ mod tests {
                 &Hovers::new(),
                 &Ripples::new(),
             );
+            let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile"));
+            let path_rect =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(1384.0, CHROME_HEIGHT));
+            for (branch, room) in [(None, 0.0), (Some("main"), 60.0)] {
+                let rects = crumb_rects(paint.painter, path_rect, &path, room);
+                path_bar(
+                    &paint,
+                    path_rect,
+                    &path,
+                    &rects,
+                    branch,
+                    &Hovers::new(),
+                    &Ripples::new(),
+                );
+            }
+            // …and the elided case, which draws its own leading ellipsis.
+            let narrow =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(90.0, CHROME_HEIGHT));
+            let rects = crumb_rects(paint.painter, narrow, &path, 0.0);
+            path_bar(&paint, narrow, &path, &rects, None, &Hovers::new(), &Ripples::new());
+
             status_bar(
                 &paint,
                 bar,

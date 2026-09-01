@@ -47,6 +47,12 @@ pub struct Listing {
     first: usize,
     /// Where the rows are *drawn*, in rows, on its way to `first`.
     scroll: Tween,
+    /// Wheel travel that has not earned a whole row yet.
+    ///
+    /// A trackpad reports a few points at a time; without a carry each of those
+    /// would round to zero rows and the list would not move at all. See
+    /// [`crate::mouse::Fling`], which does the same thing for the preview.
+    wheel_carry: f32,
     /// Nothing has been drawn yet, so the first scroll position is a *jump*.
     ///
     /// Entering a directory and landing mid-list — `←` back out of a folder,
@@ -68,6 +74,7 @@ impl Listing {
             dir,
             first: 0,
             scroll: Tween::new(0.0, 0.0, SCROLL_TWEEN, Easing::OutQuint, now),
+            wheel_carry: 0.0,
             fresh: true,
             scan_started: now,
         }
@@ -90,6 +97,17 @@ impl Listing {
     /// rather than restarting it from the old position — a second arrow press
     /// must not make the list jump backwards before going forwards.
     pub fn set_first(&mut self, first: usize, now: Instant) {
+        self.set_first_over(first, SCROLL_TWEEN, now);
+    }
+
+    /// The same, with the slide given a length of its own.
+    ///
+    /// The wheel is the reason: a keyboard step is a *correction* the eye
+    /// barely registers, and a wheel roll is travel it has to follow, so the
+    /// second one coasts over [`crate::mouse::WHEEL_GLIDE`]. It is still one
+    /// eased animation retargeted in flight (PLAN §8), not a second scrolling
+    /// mechanism — only the duration differs.
+    pub fn set_first_over(&mut self, first: usize, duration: Duration, now: Instant) {
         if self.fresh {
             self.first = first;
             self.scroll =
@@ -106,7 +124,54 @@ impl Listing {
         }
         let from = self.scroll.value(now);
         self.first = first;
-        self.scroll = Tween::new(from, first as f32, SCROLL_TWEEN, Easing::OutQuint, now);
+        self.scroll = Tween::new(from, first as f32, duration, Easing::OutQuint, now);
+    }
+
+    /// A wheel roll over this pane (PLAN §7.5's "scroll with momentum").
+    ///
+    /// The view is moved directly and the **cursor is dragged into it**, which
+    /// is the one subtlety here: [`crate::viewport::first_visible`] derives the
+    /// view from the cursor every frame, so a wheel that moved only the view
+    /// would be undone by the next frame's scrolloff. Dragging the cursor is
+    /// also what yazi does, and it means the row you scrolled to is the row the
+    /// keyboard is on when you stop.
+    ///
+    /// Returns whether anything moved.
+    pub fn wheel(
+        &mut self,
+        delta_rows: f32,
+        visible: usize,
+        scrolloff: usize,
+        now: Instant,
+    ) -> bool {
+        let rows = self.dir.len();
+        if visible == 0 || rows <= visible {
+            // Everything fits: there is nothing to scroll, and the cursor
+            // belongs to the keyboard.
+            self.wheel_carry = 0.0;
+            return false;
+        }
+        self.wheel_carry += delta_rows;
+        let whole = self.wheel_carry.trunc();
+        self.wheel_carry -= whole;
+        if whole == 0.0 {
+            return false;
+        }
+        let max_first = (rows - visible) as f32;
+        let target = (self.first as f32 + whole).clamp(0.0, max_first) as usize;
+        if target == self.first {
+            return false;
+        }
+        self.set_first_over(target, crate::mouse::WHEEL_GLIDE, now);
+        let cursor = crate::viewport::cursor_in_view(
+            target,
+            self.dir.cursor(),
+            rows,
+            visible,
+            scrolloff,
+        );
+        self.dir.set_cursor(cursor);
+        true
     }
 
     /// Is the view still moving? The `animating()` half of PLAN §1's idle-cost
@@ -367,6 +432,66 @@ mod tests {
         l.set_first(4, at);
         assert_eq!(l.scroll_rows(at), mid);
         assert!((l.scroll_rows(at + SCROLL_TWEEN) - 4.0).abs() < 1e-3);
+    }
+
+    /// The wheel moves the view and carries the cursor with it, over the
+    /// momentum glide rather than the keyboard's shorter step.
+    #[test]
+    fn the_wheel_scrolls_the_view_and_carries_the_cursor() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        let rows = l.dir.len();
+        // `/` has plenty of entries, but the pane in this test is deliberately
+        // shorter than the listing so there is something to scroll.
+        let visible = 5.min(rows.saturating_sub(1));
+        assert!(visible >= 2, "`/` should have more than a couple of entries");
+
+        assert!(l.wheel(3.0, visible, 1, t0));
+        assert_eq!(l.first(), 3);
+        // The commit is instant; only the drawing lags — and it lags over the
+        // wheel's own, longer glide.
+        assert_eq!(l.scroll_rows(t0), 0.0);
+        assert!(l.animating(t0));
+        assert!(!l.animating(t0 + crate::mouse::WHEEL_GLIDE));
+        // The cursor came along, and it is inside the window the view landed on.
+        let cursor = l.dir.cursor();
+        // The window is rows 3..3+visible, and the margin of one keeps the
+        // cursor off both of its edges.
+        let margin = 1;
+        assert!(
+            cursor >= 3 + margin && cursor <= 3 + visible - 1 - margin,
+            "got {cursor}"
+        );
+
+        // Sub-row travel accumulates rather than rounding to nothing.
+        let at = t0 + crate::mouse::WHEEL_GLIDE;
+        assert!(!l.wheel(0.4, visible, 1, at));
+        assert_eq!(l.first(), 3);
+        assert!(l.wheel(0.8, visible, 1, at));
+        assert_eq!(l.first(), 4);
+
+        // …and it never scrolls past either end.
+        for _ in 0..200 {
+            l.wheel(-5.0, visible, 1, at);
+        }
+        assert_eq!(l.first(), 0);
+        for _ in 0..400 {
+            l.wheel(5.0, visible, 1, at);
+        }
+        assert_eq!(l.first(), rows - visible);
+    }
+
+    /// A listing that fits has nothing to scroll, and the wheel must not move
+    /// its cursor as a consolation prize.
+    #[test]
+    fn the_wheel_does_nothing_to_a_listing_that_fits() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        l.dir.set_cursor(2);
+        let visible = l.dir.len() + 10;
+        assert!(!l.wheel(4.0, visible, 5, t0));
+        assert_eq!(l.first(), 0);
+        assert_eq!(l.dir.cursor(), 2);
     }
 
     /// A new directory's rows were never on screen, so the first position is a

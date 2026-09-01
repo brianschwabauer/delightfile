@@ -45,6 +45,7 @@ use crate::graphics::{Gfx, GfxError};
 use crate::help::{self, Help};
 use crate::hover::Hovers;
 use crate::input::{Prompt, PromptKind};
+use crate::menu::{self, Menu};
 use crate::open::{self, Picker};
 use crate::focus::{escape_rung, EscapeRung, EscapeState, Focus, Hovered, Rightward};
 use crate::panel::{self, TaskPanel, TaskRow};
@@ -92,6 +93,18 @@ const LOADING_DELAY: Duration = Duration::from_millis(150);
 /// Four: a `↓ ↑`, and a step back up out of a directory onto the clip you were
 /// just on. Past that, asking ffmpeg again is cheaper than the memory of it.
 const PROBE_MEMORY: usize = 4;
+
+/// How strongly the band-select rectangle tints what it is over.
+///
+/// Six per cent: enough that the rectangle reads as a *region* rather than as
+/// four lines, faint enough that the file names under it are still readable —
+/// which matters, because the whole point of dragging a band is watching which
+/// rows it takes.
+const BAND_FILL: f32 = 0.06;
+
+/// …and its edge. Much stronger than the fill, because the edge is the part
+/// that says where the rectangle *ends*, which is the thing being aimed.
+const BAND_EDGE: f32 = 0.55;
 
 /// Wakes the event loop from a worker thread.
 ///
@@ -227,6 +240,97 @@ impl OverlayGeom {
     }
 }
 
+/// Where the primary button went down, and on what.
+///
+/// Held for two reasons, and they pull in opposite directions: a drag that
+/// begins on **empty pane space** is a band select, and a drag that begins **on
+/// a row** is a file drag (the next phase's internal DnD). Which of the two a
+/// gesture is has to be decided at *press* time — by the time the pointer has
+/// moved [`crate::mouse::DRAG_THRESHOLD`] it is over some other row and the
+/// question can no longer be asked.
+#[derive(Debug, Clone, Copy)]
+struct PressStart {
+    at: egui::Pos2,
+    /// The press landed on a row of the list — reserved for DnD.
+    on_row: bool,
+    /// The press landed inside the list pane, which is the only pane a band
+    /// can be drawn in.
+    in_list: bool,
+    /// Whether the drag threshold has already been crossed, so the decision is
+    /// made once rather than re-made every frame.
+    dragging: bool,
+}
+
+/// One frame's worth of pointer state, read out of egui in a single pass.
+///
+/// Bundled because it is read once and used in six places, and because reading
+/// it piecemeal is how two of those places end up disagreeing about whether the
+/// button is down.
+struct Pointer {
+    at: Option<egui::Pos2>,
+    down: bool,
+    pressed: bool,
+    released: bool,
+    secondary: bool,
+    middle: bool,
+    /// The wheel this frame, in logical points.
+    wheel: f32,
+    shift: bool,
+    /// `Ctrl` (or the platform's command key): toggle one row's selection.
+    toggle: bool,
+}
+
+/// Where this frame drew the things a click can land on.
+///
+/// A borrow of the frame's own locals rather than of `self`, so a `&mut self`
+/// handler can still be given the geometry it needs.
+struct Geom<'a> {
+    layout: &'a ui::Layout,
+    /// The list pane's content box, and how far it has scrolled.
+    list: egui::Rect,
+    list_scroll: f32,
+    parent: egui::Rect,
+    parent_scroll: f32,
+    crumbs: &'a [egui::Rect],
+    overlay: &'a Option<OverlayGeom>,
+    menu: &'a Option<menu::Geometry>,
+    tabs: usize,
+}
+
+/// Which piece of a path `c c` / `c d` / `c f` / `c n` copy (PLAN §7.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Piece {
+    Path,
+    Dirname,
+    Filename,
+    Stem,
+}
+
+/// egui's wheel unit, in this program's spelling.
+fn wheel_unit(unit: egui::MouseWheelUnit) -> crate::mouse::WheelUnit {
+    match unit {
+        egui::MouseWheelUnit::Point => crate::mouse::WheelUnit::Point,
+        egui::MouseWheelUnit::Line => crate::mouse::WheelUnit::Line,
+        egui::MouseWheelUnit::Page => crate::mouse::WheelUnit::Page,
+    }
+}
+
+/// A path's last component, as a `String`.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// "file is" / "files are", for the one message that needs it.
+fn plural_verb(n: usize) -> &'static str {
+    if n == 1 {
+        "file is"
+    } else {
+        "files are"
+    }
+}
+
 /// How a session ended, and therefore whether the cwd-file is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Quit {
@@ -316,6 +420,13 @@ pub struct App {
     prompt: Option<Prompt>,
     /// Visual mode (`v` / `V`), while it is on.
     visual: Option<Visual>,
+    /// The pointer's own state (PLAN §7.5): what the last click was, where the
+    /// button went down, and the band it is dragging.
+    clicks: crate::mouse::Clicks<Control>,
+    press: Option<PressStart>,
+    band: Option<select::Band>,
+    /// The right-click menu, while it is up — or fading (see [`menu::Menu`]).
+    menu: Option<menu::Menu>,
     /// The last `/` or `?`, so `n` and `N` have something to repeat.
     last_find: Option<(String, FindDirection)>,
 
@@ -358,6 +469,13 @@ pub struct App {
     /// Where the cursor row was last drawn: what a rename popup and the opener
     /// picker anchor themselves to (PLAN §4.2, §6).
     cursor_rect: egui::Rect,
+    /// The breadcrumb (PLAN §2), cached for the directory it describes.
+    ///
+    /// Rebuilt on a directory change rather than per frame: the segments are a
+    /// handful of `String`s and the branch is two file reads
+    /// (`df_core::git::repo`, which never spawns anything), but both are pure
+    /// waste on the sixty frames a scroll costs.
+    path_bar: (PathBuf, Vec<chrome::Crumb>, Option<String>),
 
     /// The which-key card's timing (PLAN §4).
     which: WhichKey,
@@ -481,10 +599,15 @@ impl App {
             spot: None,
             git: None,
             cursor_rect: egui::Rect::ZERO,
+            path_bar: (PathBuf::new(), Vec::new(), None),
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
             prompt: None,
             visual: None,
+            clicks: crate::mouse::Clicks::new(),
+            press: None,
+            band: None,
+            menu: None,
             last_find: None,
             help: None,
             help_query: String::new(),
@@ -799,11 +922,19 @@ impl App {
     /// the pool.
     fn paste(&mut self, force: bool, now: Instant) {
         if self.clipboard.is_empty() {
-            self.toasts.notice("Nothing yanked — y copies, x cuts", now);
+            // …and *only* when it is empty: see [`App::paste_system`] for why
+            // the internal clipboard always wins.
+            self.paste_system(force, now);
             return;
         }
+        let clipboard = self.clipboard.clone();
+        self.paste_from(&clipboard, force, now);
+    }
+
+    /// Plan and run a paste of `clipboard` into the current directory.
+    fn paste_from(&mut self, clipboard: &Clipboard, force: bool, now: Instant) {
         let dest = self.cwd();
-        let plan = match plan_paste(&self.clipboard, &dest, force) {
+        let plan = match plan_paste(clipboard, &dest, force) {
             Ok(plan) => plan,
             Err(e) => {
                 self.toasts.error(e.to_string(), now);
@@ -1203,6 +1334,14 @@ impl App {
                     .and_then(Chord::from_char)
             });
             let Some(chord) = chord else { continue };
+            // The context menu is the nearest surface to the user and takes
+            // the keyboard whole, above even a modal card — it is the most
+            // recent thing they asked for. See [`App::menu_key`] for why its
+            // keys are matched literally.
+            if self.menu.as_ref().is_some_and(Menu::live) {
+                self.menu_key(chord, now);
+                continue;
+            }
             // A prompt swallows every key: df-core's editor decides what each
             // one means, including which ones are text (PLAN §4.2).
             if self.prompt.is_some() {
@@ -1293,6 +1432,9 @@ impl App {
             C::SpotSwipePrev | C::SpotSwipeNext => {
                 self.swipe_spot(if command == C::SpotSwipeNext { 1 } else { -1 })
             }
+            // The card's own `c c`: the focused row's value, not the file's
+            // path — the browser's `c c` is the one that copies that.
+            C::SpotCopyCell => self.copy_spot_cell(now),
             other => log::trace!("`{}` is not an overlay key", other.id()),
         }
     }
@@ -2094,6 +2236,15 @@ impl App {
     /// would mean a stray press throws away a selection built up over a dozen
     /// keystrokes, and there is no undo for a selection.
     fn escape(&mut self) {
+        // Two rungs above the ladder proper, both owned by the pointer, and
+        // both above everything else for the same reason: they are things the
+        // hand is doing *now*. The menu is handled in `menu_key` before a
+        // chord is ever dispatched; a band is not, because a drag does not
+        // take the keyboard.
+        if self.band.is_some() {
+            self.cancel_band();
+            return;
+        }
         // The rungs and their order are [`crate::focus::escape_rung`]'s, so the
         // ladder can be walked in a test with no window and no dialog; this is
         // only the doing of them.
@@ -2497,6 +2648,14 @@ impl App {
             C::Unyank => self.unyank(now),
             C::Paste => self.paste(false, now),
             C::PasteForce => self.paste(true, now),
+            // ── The *system* clipboard (PLAN §7.4) ──────────────────────────
+            C::CopyToClipboard => self.yank_to_system(now),
+            C::CopyFileText => self.copy_file_text(now),
+            C::CopyPath => self.copy_piece(Piece::Path, now),
+            C::CopyDirname => self.copy_piece(Piece::Dirname, now),
+            C::CopyFilename => self.copy_piece(Piece::Filename, now),
+            C::CopyStem => self.copy_piece(Piece::Stem, now),
+
             C::Trash => self.open_confirm(ConfirmKind::Trash, now),
             C::DeletePermanently => self.open_confirm(ConfirmKind::Delete, now),
             C::SymlinkAbsolute => self.link(Some(LinkKind::Absolute), now),
@@ -2653,7 +2812,14 @@ impl App {
                         spot.select(index);
                     }
                 }
-                Control::Row(..) | Control::Tab(_) => {}
+                // Nothing in the panes and nothing on the menu is reachable
+                // while a modal card is up — the hit test above never
+                // produces them.
+                Control::Row(..)
+                | Control::Tab(_)
+                | Control::Crumb(_)
+                | Control::MenuItem(_)
+                | Control::SubmenuItem(_) => {}
             }
             return;
         }
@@ -2694,8 +2860,782 @@ impl App {
                     panel.select(index, rows.len());
                 }
             }
-            Control::Row(..) | Control::Tab(_) => {}
+            Control::Row(..)
+            | Control::Tab(_)
+            | Control::Crumb(_)
+            | Control::MenuItem(_)
+            | Control::SubmenuItem(_) => {}
         }
+    }
+
+    // ── The pointer (PLAN §7.5) ─────────────────────────────────────────────
+
+    /// Rebuild the breadcrumb when the directory has changed under it.
+    ///
+    /// The branch comes from [`df_core::git::repo`] — a walk up for `.git` and
+    /// a 41-byte read of `HEAD` — and **not** from the status worker: the
+    /// breadcrumb wants the branch name, which is a file read, and starting a
+    /// `git status` process for every directory a session passes through would
+    /// be a thread and a subprocess bought for one word of text. The dots and
+    /// the dirty count that *do* need the worker are Phase 5's.
+    fn sync_path_bar(&mut self) {
+        let cwd = self.cwd();
+        if self.path_bar.0 == cwd && !self.path_bar.1.is_empty() {
+            return;
+        }
+        let crumbs = chrome::crumbs(&cwd);
+        let branch = df_core::git::repo_root(&cwd).and_then(|root| df_core::git::branch(&root));
+        self.path_bar = (cwd, crumbs, branch);
+    }
+
+    /// A wheel roll, routed to the pane it was pointed at.
+    fn wheel(
+        &mut self,
+        points: f32,
+        at: egui::Pos2,
+        layout: &ui::Layout,
+        page: usize,
+        parent_page: usize,
+        now: Instant,
+    ) {
+        let rows = crate::mouse::wheel_rows(points, ui::ROW_HEIGHT);
+        if rows == 0.0 {
+            return;
+        }
+        let scrolloff = self.mgr.scrolloff;
+        if layout.preview.contains(at) {
+            // A document scrolls by lines with the same coast; a *rendered*
+            // document turns pages instead (see `Pane::wheel`).
+            self.preview.wheel(rows, now);
+            return;
+        }
+        if layout.parent.contains(at) {
+            if let Some(parent) = &mut self.tabs.active_mut().parent {
+                parent.wheel(rows, parent_page, scrolloff, now);
+            }
+            return;
+        }
+        // Everywhere else is the list: it is the pane a wheel means when it is
+        // not pointed at one of the other two.
+        if self.tabs.active_mut().cwd.wheel(rows, page, scrolloff, now) {
+            // Scrolling carries the cursor, and a visual run follows the
+            // cursor wherever it goes.
+            self.apply_visual();
+        }
+    }
+
+    /// A primary click on something. Returns where it landed, for the ripple.
+    fn click(
+        &mut self,
+        control: Control,
+        double: bool,
+        pointer: &Pointer,
+        geom: &Geom<'_>,
+        now: Instant,
+    ) -> egui::Rect {
+        match control {
+            Control::Row(Column::List, index) => {
+                let rect = ui::row_rect(geom.list, geom.list_scroll, index);
+                if pointer.shift {
+                    // Shift-click: the run from the cursor to here, the way
+                    // every list in every program extends a selection.
+                    self.click_range(index);
+                } else if pointer.toggle {
+                    // Ctrl-click: this row alone, on or off, leaving the rest
+                    // of the selection exactly as it is.
+                    let dir = self.dir();
+                    dir.toggle_selected(index);
+                    dir.set_cursor(index);
+                } else {
+                    self.dir().set_cursor(index);
+                    self.apply_visual();
+                    if double {
+                        // The second click *opens*, and opening is the openers
+                        // path — the same one `Enter` takes, so a directory is
+                        // entered and a file is launched by its rule.
+                        self.open_hovered(now);
+                    }
+                }
+                rect
+            }
+            Control::Row(Column::Parent, index) => {
+                // A click on the parent column is "go there" (PLAN §7.5). One
+                // click, not two: the column is a path, and every segment of it
+                // is somewhere you have already been.
+                let rect = ui::row_rect(geom.parent, geom.parent_scroll, index);
+                let target = self
+                    .tab()
+                    .parent
+                    .as_ref()
+                    .and_then(|parent| parent.dir.row(index))
+                    .filter(|entry| entry.is_dir())
+                    .map(|entry| entry.path.clone());
+                if let Some(path) = target {
+                    self.focus = Focus::List;
+                    self.navigate(path, now);
+                }
+                rect
+            }
+            Control::Crumb(index) => {
+                let rect = geom.crumbs.get(index).copied().unwrap_or(egui::Rect::ZERO);
+                if let Some(crumb) = self.path_bar.1.get(index) {
+                    let path = crumb.path.clone();
+                    if path != self.cwd() {
+                        self.focus = Focus::List;
+                        self.navigate(path, now);
+                    }
+                }
+                rect
+            }
+            Control::Tab(index) => {
+                if self.tabs.switch_to(index, now) {
+                    self.tab_changed(now);
+                }
+                geom.layout
+                    .strip
+                    .map(|strip| chrome::tab_rects(strip, geom.tabs))
+                    .and_then(|rects| rects.get(index).copied())
+                    .unwrap_or(egui::Rect::ZERO)
+            }
+            Control::MenuItem(_) | Control::SubmenuItem(_) => {
+                let rect = geom
+                    .menu
+                    .as_ref()
+                    .and_then(|g| g.rect_of(control))
+                    .unwrap_or(egui::Rect::ZERO);
+                self.menu_click(control, now);
+                rect
+            }
+            Control::Action(_) | Control::PanelRow(_) => {
+                let rect = geom
+                    .overlay
+                    .as_ref()
+                    .and_then(|o| o.rect_of(control))
+                    .unwrap_or(egui::Rect::ZERO);
+                self.overlay_click(control, now);
+                rect
+            }
+        }
+    }
+
+    /// Shift-click: select the run between the cursor and `index`.
+    ///
+    /// The cursor moves to the clicked row afterwards, so a second shift-click
+    /// extends from where you just were rather than from where you started —
+    /// which is what makes shift-click-shift-click walk a selection down a list.
+    fn click_range(&mut self, index: usize) {
+        let dir = self.dir();
+        let (from, to) = select::range(dir.cursor(), index);
+        dir.select_range(from, to, true);
+        dir.set_cursor(index);
+    }
+
+    /// Middle click: the row's directory in a new tab (PLAN §7.5).
+    fn middle_click(&mut self, control: Control, now: Instant) {
+        let path = match control {
+            Control::Row(Column::List, index) => self
+                .tab()
+                .cwd
+                .dir
+                .row(index)
+                .map(|entry| (entry.path.clone(), entry.is_dir())),
+            Control::Row(Column::Parent, index) => self
+                .tab()
+                .parent
+                .as_ref()
+                .and_then(|parent| parent.dir.row(index))
+                .map(|entry| (entry.path.clone(), entry.is_dir())),
+            _ => None,
+        };
+        // A *file* opens a tab on the directory it is in, with the cursor on
+        // it: "open in a new tab" has to mean something for every row, and the
+        // only honest reading for a file is "take me there in a new tab".
+        let Some((path, is_dir)) = path else { return };
+        let (dir, name) = if is_dir {
+            (path, None)
+        } else {
+            match path.parent() {
+                Some(parent) => (
+                    parent.to_path_buf(),
+                    path.file_name().map(|n| n.to_string_lossy().into_owned()),
+                ),
+                None => return,
+            }
+        };
+        let (mgr, sort) = (self.mgr.clone(), self.sort());
+        if !self.tabs.create(dir, &mgr, sort, &self.scanner, now) {
+            self.toasts.notice(
+                format!("{} tabs is the maximum", crate::tabs::MAX_TABS),
+                now,
+            );
+            return;
+        }
+        if let Some(name) = name {
+            // The scan is in flight, so the cursor is placed the way `--cwd`
+            // places it: remembered and retried as each batch lands.
+            self.start_cursor = Some((self.cwd(), name.clone()));
+            self.dir().cursor_to_name(&name);
+        }
+        self.visual = None;
+        self.rewatch();
+    }
+
+    // ── The context menu (PLAN §7.5) ────────────────────────────────────────
+
+    /// Right click: the menu, about whatever row it landed on.
+    fn right_click(&mut self, at: egui::Pos2, over: Option<Control>, layout: &ui::Layout) {
+        // Only the list pane has a menu. The parent column's one verb is "go
+        // there" and the preview's belong to the file it is showing, and a menu
+        // that offered "Move to trash" from either would be a menu about a row
+        // the pointer is not on.
+        if !layout.list.contains(at) {
+            return;
+        }
+        if let Some(Control::Row(Column::List, index)) = over {
+            // The menu is about the row it opened on, so the row becomes the
+            // cursor first — otherwise "Rename" would rename something else.
+            self.dir().set_cursor(index);
+            self.apply_visual();
+        }
+        self.open_menu(at);
+    }
+
+    fn open_menu(&mut self, at: egui::Pos2) {
+        let entry = self.tab().cwd.dir.cursor_entry().cloned();
+        let openers = entry
+            .as_ref()
+            .map(|entry| open::choices_for(&self.config, entry))
+            .unwrap_or_default();
+        let facts = menu::Facts {
+            has_row: entry.is_some(),
+            is_dir: entry.as_ref().is_some_and(|entry| entry.is_dir()),
+            targets: self.targets().len(),
+            clipboard: !self.clipboard.is_empty(),
+            openers: openers.len(),
+        };
+        let names = openers.iter().map(|choice| choice.name.clone()).collect();
+        self.menu = Some(Menu::new(at, menu::items(facts), names));
+        // The click that opened the menu is not half of a double click on
+        // whatever is underneath it.
+        self.clicks.reset();
+    }
+
+    /// Dismiss it. The menu is *gone* now; only its pixels fade.
+    fn close_menu(&mut self, now: Instant) {
+        if let Some(menu) = &mut self.menu {
+            if menu.closing.is_none() {
+                menu.closing = Some(now);
+            }
+        }
+    }
+
+    /// A click on a menu row.
+    fn menu_click(&mut self, control: Control, now: Instant) {
+        let action = match control {
+            Control::MenuItem(index) => match self.menu.as_ref().and_then(|m| m.items.get(index)) {
+                Some(item) if !item.enabled => return,
+                Some(item) if item.submenu() => {
+                    // The chevron row does not *do* anything; it flies the
+                    // submenu out, and clicking it again puts it away.
+                    if let Some(menu) = &mut self.menu {
+                        if menu.submenu {
+                            menu.close_submenu();
+                        } else {
+                            menu.open_submenu();
+                        }
+                    }
+                    return;
+                }
+                Some(item) => item.action,
+                None => return,
+            },
+            Control::SubmenuItem(index) => menu::Action::OpenWith(index),
+            _ => return,
+        };
+        // Closed *before* the action runs: an action that opens a dialog must
+        // not open it behind the menu that asked for it.
+        self.close_menu(now);
+        self.menu_action(action, now);
+    }
+
+    /// The menu's own keys.
+    ///
+    /// **Matched literally, because df-core's keymap has no `[cmenu]`
+    /// context.** The shipped registry has tables for the browser, the input
+    /// line, the confirm dialog, the picker, the task panel, the spot card and
+    /// the help sheet; a menu that arrived in a UI phase has none, and inventing
+    /// one here would put a keymap change in the middle of a paint change. So
+    /// these five are handled the way the conflict dialog's answers are (see
+    /// [`App::overlay_literal`]) — and they are the five keys every menu
+    /// everywhere already has, so there is nothing to configure yet. When
+    /// `[cmenu]` lands, this is the one function that changes.
+    fn menu_key(&mut self, chord: Chord, now: Instant) {
+        let plain = chord.mods.is_none();
+        let action = {
+            let Some(menu) = &mut self.menu else { return };
+            match chord.key {
+                Key::ArrowUp if plain => {
+                    menu.move_cursor(-1);
+                    None
+                }
+                Key::ArrowDown if plain => {
+                    menu.move_cursor(1);
+                    None
+                }
+                Key::ArrowRight if plain => {
+                    menu.open_submenu();
+                    None
+                }
+                Key::ArrowLeft if plain => {
+                    if !menu.close_submenu() {
+                        self.close_menu(now);
+                    }
+                    None
+                }
+                Key::Enter if plain => match menu.activate() {
+                    // `Enter` on the chevron row opens the submenu rather than
+                    // doing nothing, which is what `→` does and what a hand
+                    // expects from the row it is sitting on.
+                    Some(menu::Action::OpenWithMenu) => {
+                        menu.open_submenu();
+                        None
+                    }
+                    other => other,
+                },
+                Key::Escape => {
+                    // One rung of its own: the submenu goes first, then the
+                    // menu — the same "one rung at a time" the `Esc` ladder is.
+                    if !menu.close_submenu() {
+                        self.close_menu(now);
+                    }
+                    None
+                }
+                _ => None,
+            }
+        };
+        if let Some(action) = action {
+            self.close_menu(now);
+            self.menu_action(action, now);
+        }
+    }
+
+    /// Do what a menu row says. Every arm is a key that already exists.
+    fn menu_action(&mut self, action: menu::Action, now: Instant) {
+        use menu::Action as A;
+        match action {
+            A::Open => self.open_hovered(now),
+            A::OpenWithMenu => {}
+            A::OpenWith(index) => {
+                let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
+                    return;
+                };
+                // Re-derived rather than carried: `choices_for` is a pure
+                // function of the config and the entry, and holding a copy in
+                // the menu would be a second place for it to be wrong.
+                let choices = open::choices_for(&self.config, &entry);
+                if let Some(choice) = choices.get(index).cloned() {
+                    self.launch(&choice, self.targets(), now);
+                }
+            }
+            A::Yank => self.set_clipboard(false, now),
+            A::Cut => self.set_clipboard(true, now),
+            A::Paste => self.paste(false, now),
+            A::Rename => self.open_rename(false),
+            A::Trash => self.open_confirm(ConfirmKind::Trash, now),
+            A::CopyPath => self.copy_piece(Piece::Path, now),
+            A::CopyName => self.copy_piece(Piece::Filename, now),
+            A::Properties => self.toggle_spot(),
+        }
+    }
+
+    // ── Band select (PLAN §7.5) ─────────────────────────────────────────────
+
+    /// The pointer has moved with the button down.
+    fn drag(&mut self, at: Option<egui::Pos2>, list: egui::Rect, scroll_rows: f32) {
+        let (Some(at), Some(press)) = (at, self.press) else {
+            return;
+        };
+        if !press.dragging {
+            if (at - press.at).length() < crate::mouse::DRAG_THRESHOLD {
+                return;
+            }
+            if let Some(press) = &mut self.press {
+                press.dragging = true;
+            }
+            if press.on_row {
+                // **The seam.** A drag that began on a row is a *file* drag —
+                // internal DnD, the next checkbox in Phase 4 — and until that
+                // lands it does nothing at all. What it must not do is band
+                // select: a drag from a row is how every file manager moves
+                // files, and teaching the hand otherwise for one release would
+                // be worse than the feature being absent.
+                log::trace!("row drag armed; internal DnD lands with the next checkbox");
+                return;
+            }
+            if !press.in_list {
+                return;
+            }
+            self.band = Some(select::Band::new(press.at));
+        }
+        let Some(origin) = self.band.as_ref().map(|band| band.origin) else {
+            return;
+        };
+        let rows = self.tab().cwd.dir.len();
+        let run = crate::mouse::band_rows(
+            list,
+            scroll_rows,
+            rows,
+            ui::ROW_HEIGHT,
+            crate::mouse::band(origin, at),
+        );
+        self.apply_band(run);
+    }
+
+    /// Bring the selection in line with the band, live.
+    ///
+    /// The same arithmetic visual mode uses ([`select::range_delta`]), and for
+    /// the same reason: a band that shrinks has to hand back a selection that
+    /// was there before the drag started, not clear it.
+    fn apply_band(&mut self, run: Option<(usize, usize)>) {
+        let Some(band) = self.band.as_mut() else { return };
+        let dir = &mut self.tabs.active_mut().cwd.dir;
+        match run {
+            Some(wanted) => {
+                let (leaving, entering) = select::range_delta(band.applied, wanted);
+                for position in leaving {
+                    let Some(name) = dir.row(position).map(|entry| entry.name.clone()) else {
+                        continue;
+                    };
+                    let was = band.was_selected(&name).unwrap_or(false);
+                    dir.select_range(position, position, was);
+                }
+                for position in entering {
+                    let Some(name) = dir.row(position).map(|entry| entry.name.clone()) else {
+                        continue;
+                    };
+                    band.remember(&name, dir.is_selected(&name));
+                    dir.select_range(position, position, true);
+                }
+                band.applied = Some(wanted);
+            }
+            // The band has left the listing entirely — dragged above the first
+            // row, or into a directory that has none.
+            None => {
+                if let Some((from, to)) = band.applied.take() {
+                    for position in from..=to {
+                        let Some(name) = dir.row(position).map(|entry| entry.name.clone()) else {
+                            continue;
+                        };
+                        let was = band.was_selected(&name).unwrap_or(false);
+                        dir.select_range(position, position, was);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `Esc` mid-drag: every row the band touched goes back to what it was.
+    fn cancel_band(&mut self) {
+        let Some(band) = self.band.take() else { return };
+        let dir = &mut self.tabs.active_mut().cwd.dir;
+        for (name, was) in &band.prior {
+            if let Some(position) = dir.position_of(name) {
+                dir.select_range(position, position, *was);
+            }
+        }
+        // The press is spent as well, or letting go would start it again.
+        self.press = None;
+    }
+
+    // ── The system clipboard (PLAN §7.4) ────────────────────────────────────
+
+    /// `Y`: the native port of `clipboard.sh`.
+    fn yank_to_system(&mut self, now: Instant) {
+        let paths = self.targets();
+        if paths.is_empty() {
+            self.toasts.notice("Nothing to copy", now);
+            return;
+        }
+        let single = paths.first().filter(|_| paths.len() == 1).cloned();
+        let (mime, size) = match &single {
+            Some(path) => self.type_of(path),
+            None => (df_core::fs::mime::UNKNOWN_MIME, 0),
+        };
+        match crate::clipboard::branch_for(paths.len(), mime, size) {
+            crate::clipboard::Branch::Image(mime) => {
+                let Some(path) = single else { return };
+                let Some(bytes) = self.read_for_clipboard(&path, now) else {
+                    return;
+                };
+                let label = crate::clipboard::image_label(mime);
+                self.offer(Some(mime), &bytes, format!("Copied image ({label})"), now);
+            }
+            crate::clipboard::Branch::Text => {
+                let Some(path) = single else { return };
+                let Some(bytes) = self.read_for_clipboard(&path, now) else {
+                    return;
+                };
+                let name = file_name(&path);
+                self.offer(None, &bytes, format!("Copied text: {name}"), now);
+            }
+            crate::clipboard::Branch::Uris => {
+                let list = crate::clipboard::uri_list(&paths);
+                let message = match &single {
+                    Some(path) => format!("Copied file reference: {}", file_name(path)),
+                    None => format!("Copied {} paths", paths.len()),
+                };
+                self.offer(Some("text/uri-list"), list.as_bytes(), message, now);
+            }
+        }
+    }
+
+    /// `c t`: the native port of `copy-text.sh`.
+    fn copy_file_text(&mut self, now: Instant) {
+        let paths = self.targets();
+        let single = paths.first().filter(|_| paths.len() == 1).cloned();
+        let Some(path) = single else {
+            // The script's own fallback: more than one file (or none) is a
+            // plain yank, because there is no such thing as the text of two
+            // files.
+            self.set_clipboard(false, now);
+            if !paths.is_empty() {
+                self.toasts
+                    .notice("Yanked — `c t` copies one file's text", now);
+            }
+            return;
+        };
+        let (mime, _) = self.type_of(&path);
+        if !crate::clipboard::is_text_like(mime) {
+            self.set_clipboard(false, now);
+            self.toasts
+                .notice(format!("Yanked (binary): {}", file_name(&path)), now);
+            return;
+        }
+        let Some(bytes) = self.read_for_clipboard(&path, now) else {
+            return;
+        };
+        let name = file_name(&path);
+        self.offer(None, &bytes, format!("Copied text contents: {name}"), now);
+    }
+
+    /// `c c` / `c d` / `c f` / `c n`.
+    fn copy_piece(&mut self, piece: Piece, now: Instant) {
+        let Some(path) = self
+            .tab()
+            .cwd
+            .dir
+            .cursor_entry()
+            .map(|entry| entry.path.clone())
+        else {
+            self.toasts.notice("Nothing under the cursor", now);
+            return;
+        };
+        let text = match piece {
+            Piece::Path => path.to_string_lossy().into_owned(),
+            Piece::Dirname => path
+                .parent()
+                .unwrap_or(Path::new("/"))
+                .to_string_lossy()
+                .into_owned(),
+            Piece::Filename => file_name(&path),
+            Piece::Stem => path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+        let what = match piece {
+            Piece::Path => "path",
+            Piece::Dirname => "directory",
+            Piece::Filename => "name",
+            Piece::Stem => "stem",
+        };
+        self.offer(None, text.as_bytes(), format!("Copied {what}"), now);
+    }
+
+    /// The spot panel's `c c`: the focused row's value.
+    fn copy_spot_cell(&mut self, now: Instant) {
+        let Some((label, text)) = self.spot.as_ref().and_then(Spot::cell_text) else {
+            self.toasts
+                .notice("Nothing to copy on this row", now);
+            return;
+        };
+        self.offer(
+            None,
+            text.as_bytes(),
+            format!("Copied {}", label.to_lowercase()),
+            now,
+        );
+    }
+
+    /// Hand bytes to the clipboard and say what happened, either way.
+    fn offer(&mut self, mime: Option<&str>, bytes: &[u8], message: String, now: Instant) {
+        match crate::clipboard::copy(mime, bytes) {
+            Ok(()) => self.toasts.notice(message, now),
+            Err(error) => self.clip_failed(error, now),
+        }
+    }
+
+    fn clip_failed(&mut self, error: crate::clipboard::ClipError, now: Instant) {
+        match error {
+            // `wl-clipboard` not being installed is not something the user did,
+            // so it is a plain notice rather than a red bar.
+            crate::clipboard::ClipError::Missing(_) => {
+                self.toasts.notice(error.to_string(), now)
+            }
+            crate::clipboard::ClipError::Failed(_) => self.toasts.error(error.to_string(), now),
+        }
+    }
+
+    /// What a path is, and how big — the two inputs to
+    /// [`crate::clipboard::branch_for`].
+    ///
+    /// The mime is sniffed from the file's own bytes rather than from its name,
+    /// which is what `file -b --mime-type` does in the script; the *hint* is the
+    /// listing's extension guess, which is what keeps a `.rs` reading as source
+    /// rather than as plain text.
+    fn type_of(&self, path: &Path) -> (&'static str, u64) {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if path.is_dir() {
+            // A directory has no contents to put on a clipboard, so it is
+            // always a reference.
+            return (df_core::fs::mime::UNKNOWN_MIME, size);
+        }
+        let hint = self
+            .tab()
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .find(|entry| entry.path == path)
+            .map(|entry| entry.mime)
+            .unwrap_or(df_core::fs::mime::UNKNOWN_MIME);
+        let mime = df_core::preview::sniff_file(path, hint).unwrap_or(hint);
+        (mime, size)
+    }
+
+    /// Read a file whose contents are going on the clipboard.
+    ///
+    /// Blocking, on the event loop, and bounded by
+    /// [`crate::clipboard::SIZE_CAP`] — the branch that got here has already
+    /// refused anything larger. Reading it on a worker would mean a clipboard
+    /// that is set some time after the key was pressed, which is a race with
+    /// whatever the user pastes into next.
+    fn read_for_clipboard(&mut self, path: &Path, now: Instant) -> Option<Vec<u8>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                self.toasts
+                    .error(format!("{}: {error}", path.display()), now);
+                None
+            }
+        }
+    }
+
+    /// `p` with nothing yanked: whatever the *system* clipboard is holding.
+    ///
+    /// **Precedence, stated once.** The internal clipboard always wins: `y`
+    /// then `p` must paste what `y` yanked, whatever some other application has
+    /// put on the system clipboard since. This is the fallback for the empty
+    /// case, which is also the case where the old behaviour was a notice saying
+    /// there was nothing to paste.
+    fn paste_system(&mut self, force: bool, now: Instant) {
+        let types = match crate::clipboard::offered_types() {
+            Ok(types) => types,
+            Err(error) => {
+                self.clip_failed(error, now);
+                return;
+            }
+        };
+        match crate::clipboard::choose_offer(&types) {
+            None => self
+                .toasts
+                .notice("Nothing yanked — y copies, x cuts", now),
+            Some(crate::clipboard::Offer::Files) => self.paste_clipboard_files(force, now),
+            Some(crate::clipboard::Offer::Image(mime)) => {
+                let extension = crate::clipboard::image_extension(&mime);
+                self.save_clipboard(&mime, extension, now);
+            }
+            Some(crate::clipboard::Offer::Text(mime)) => self.save_clipboard(&mime, "txt", now),
+        }
+    }
+
+    fn paste_clipboard_files(&mut self, force: bool, now: Instant) {
+        let bytes = match crate::clipboard::paste("text/uri-list") {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.clip_failed(error, now);
+                return;
+            }
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let offered = crate::clipboard::parse_uri_list(&text);
+        let count = offered.len();
+        // Cross-checked against the filesystem: a clipboard outlives the files
+        // in it, and a paste plan built over a path that is gone fails halfway
+        // through instead of before it starts.
+        let paths: Vec<PathBuf> = offered.into_iter().filter(|path| path.exists()).collect();
+        if paths.is_empty() {
+            self.toasts.notice(
+                if count == 0 {
+                    "The clipboard has no files on it".to_string()
+                } else {
+                    format!("{} clipboard {} no longer there", count, plural_verb(count))
+                },
+                now,
+            );
+            return;
+        }
+        if paths.len() < count {
+            self.toasts.notice(
+                format!("{} of {count} clipboard files are gone", count - paths.len()),
+                now,
+            );
+        }
+        let clipboard = Clipboard::yank(paths);
+        self.paste_from(&clipboard, force, now);
+    }
+
+    /// Save what the clipboard is holding as a file in this directory.
+    fn save_clipboard(&mut self, mime: &str, extension: &str, now: Instant) {
+        let bytes = match crate::clipboard::paste(mime) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.clip_failed(error, now);
+                return;
+            }
+        };
+        if bytes.is_empty() {
+            self.toasts.notice("The clipboard is empty", now);
+            return;
+        }
+        let name = format!(
+            "clipboard_{}.{extension}",
+            crate::format::file_stamp(std::time::SystemTime::now())
+        );
+        let path = self.cwd().join(&name);
+        if let Err(error) = std::fs::write(&path, &bytes) {
+            self.toasts
+                .error(format!("{}: {error}", path.display()), now);
+            return;
+        }
+        // Journalled as a create, so `u` takes it back — a paste that made a
+        // file and could not be undone would be the one mutation in the program
+        // without an inverse.
+        if let Ok(fingerprint) = Fingerprint::of(&path) {
+            self.journal.record(OpRecord::Create {
+                path: path.clone(),
+                is_dir: false,
+                fingerprint,
+                created_parents: Vec::new(),
+            });
+        }
+        self.toasts.undo(
+            format!("Pasted {} into {name}", crate::format::human_size(bytes.len() as u64)),
+            now,
+        );
+        let cwd = self.cwd();
+        self.rescan(&cwd, now);
+        self.dir().cursor_to_name(&name);
     }
 
     // ── The frame ───────────────────────────────────────────────────────────
@@ -2728,19 +3668,68 @@ impl App {
         let list_content = ui::content_rect(layout.list);
         let page = crate::viewport::visible_rows(list_content.height(), ui::ROW_HEIGHT);
 
-        // ── Pointer ─────────────────────────────────────────────────────────
-        let (pointer, down, just_pressed) = ui.input(|i| {
-            (
-                i.pointer.interact_pos(),
-                i.pointer.primary_down(),
-                i.pointer.primary_pressed(),
-            )
+        // ── Pointer (PLAN §7.5) ─────────────────────────────────────────────
+        let pointer = ui.input(|i| Pointer {
+            at: i.pointer.interact_pos(),
+            down: i.pointer.primary_down(),
+            pressed: i.pointer.primary_pressed(),
+            released: i.pointer.primary_released(),
+            secondary: i.pointer.secondary_pressed(),
+            middle: i.pointer.button_pressed(egui::PointerButton::Middle),
+            // The events themselves, not egui's smoothed delta: that one is
+            // meant for widgets egui is animating, and these panes run their
+            // own momentum (see [`crate::mouse::Fling`]).
+            wheel: i
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel { unit, delta, .. } => {
+                        Some(crate::mouse::wheel_points(wheel_unit(*unit), delta.y))
+                    }
+                    _ => None,
+                })
+                .sum::<f32>(),
+            shift: i.modifiers.shift,
+            toggle: i.modifiers.command || i.modifiers.ctrl,
         });
         let scroll_rows = self.tab().cwd.scroll_rows(now);
+        let parent_content = ui::content_rect(layout.parent);
+        let parent_page =
+            crate::viewport::visible_rows(parent_content.height(), ui::ROW_HEIGHT);
+        let parent_scroll = self
+            .tab()
+            .parent
+            .as_ref()
+            .map(|parent| parent.scroll_rows(now))
+            .unwrap_or(0.0);
+        let parent_len = self.tab().parent.as_ref().map(|p| p.dir.len()).unwrap_or(0);
         let slide = self.tabs.offset(now);
         let tab_count = self.tabs.len();
         let overlay = self.overlay_geometry(area, layout.bar.top());
-        let over = pointer.and_then(|p| {
+
+        // The breadcrumb is measured once and used by both the hit test and the
+        // paint, for the reason `tab_rects` is: two functions computing this
+        // separately is how a bar grows a one-pixel lie at its edges.
+        self.sync_path_bar();
+        let branch_room = chrome::branch_width(&painter, self.path_bar.2.as_deref());
+        let crumb_rects =
+            chrome::crumb_rects(&painter, layout.path, &self.path_bar.1, branch_room);
+        let menu_geometry = self
+            .menu
+            .as_ref()
+            .map(|menu| menu::geometry(area, menu, &painter));
+        // A menu that is fading is pixels, not a surface: it takes no pointer.
+        let menu_live = self.menu.as_ref().is_some_and(Menu::live);
+
+        let over = pointer.at.and_then(|p| {
+            // The menu is over everything, a modal card included: it is the
+            // most recent thing the user asked for.
+            if menu_live {
+                return menu_geometry
+                    .as_ref()
+                    .and_then(|g| g.hit(p))
+                    .map(|control| (control, p));
+            }
             // A modal surface takes the pointer with the keyboard: nothing
             // behind the scrim is hoverable, so a stray click cannot move the
             // cursor under a question about the row it was on.
@@ -2752,18 +3741,71 @@ impl App {
                 .and_then(|strip| chrome::tab_at(strip, tab_count, p))
                 .map(Control::Tab)
                 .or_else(|| {
+                    crumb_rects
+                        .iter()
+                        .position(|rect| rect.contains(p))
+                        .map(Control::Crumb)
+                })
+                .or_else(|| {
                     ui::row_at(list_content, scroll_rows, self.tab().cwd.dir.len(), p)
                         .map(|index| Control::Row(Column::List, index))
+                })
+                .or_else(|| {
+                    // The parent column is clickable too (PLAN §7.5): a click
+                    // on it is "go there", which is what the column is showing.
+                    ui::row_at(parent_content, parent_scroll, parent_len, p)
+                        .map(|index| Control::Row(Column::Parent, index))
                 })?;
             Some((control, p))
         });
+
+        // The menu follows the pointer: hovering a row makes it the keyboard's
+        // row too (one cursor, not two), and hovering the chevron flies the
+        // submenu out — which is what a menu does everywhere and the reason
+        // nobody has to be told a submenu is there.
+        if menu_live {
+            if let Some((Control::MenuItem(index), _)) = over {
+                let submenu = self
+                    .menu
+                    .as_ref()
+                    .and_then(|menu| menu.items.get(index))
+                    .filter(|item| item.enabled)
+                    .map(|item| item.submenu());
+                if let (Some(submenu), Some(menu)) = (submenu, &mut self.menu) {
+                    menu.cursor = Some(index);
+                    if submenu {
+                        menu.open_submenu();
+                    } else {
+                        // Moving off the parent row puts the submenu away. The
+                        // cards overlap by `SUBMENU_OVERLAP` so the diagonal
+                        // travel from the parent row into the submenu never
+                        // passes over another row on the way.
+                        menu.close_submenu();
+                    }
+                }
+            }
+        }
+
+        // ── The wheel, with momentum (PLAN §7.5, §8) ────────────────────────
+        // Routed by what the pointer is *over*, not by what has focus: a wheel
+        // is aimed with the hand, and scrolling the pane the keyboard happens
+        // to be in would be the one control in the program that ignores where
+        // it was pointed.
+        if pointer.wheel != 0.0 {
+            if let Some(at) = pointer.at {
+                self.wheel(pointer.wheel, at, &layout, page, parent_page, now);
+            }
+        }
+
+        // ── Press ───────────────────────────────────────────────────────────
         // **Mousedown-capture focuses a pane** (PLAN §2.1). Before the click
         // itself, and on the pane rather than on anything in it: clicking the
         // empty space under a listing is still a claim about where you want the
         // keyboard, and a click that focused only when it landed on a row would
         // be a rule nobody could see.
-        if let (Some(position), true) = (pointer, just_pressed) {
-            if overlay.is_none() {
+        let any_press = pointer.pressed || pointer.secondary || pointer.middle;
+        if let (Some(position), true) = (pointer.at, any_press) {
+            if overlay.is_none() && !menu_live {
                 if layout.list.contains(position) {
                     self.focus = Focus::List;
                 } else if layout.preview.contains(position) {
@@ -2773,52 +3815,101 @@ impl App {
                 }
             }
         }
-        if let Some((control, position)) = over.filter(|_| just_pressed) {
+
+        // A press anywhere but on the menu dismisses it, and the press is spent
+        // doing so: a click that closed a menu *and* moved the cursor under it
+        // would act on something the menu was covering.
+        let dismissing = menu_live
+            && any_press
+            && !pointer
+                .at
+                .zip(menu_geometry.as_ref())
+                .is_some_and(|(p, g)| g.contains(p));
+        if dismissing {
+            self.close_menu(now);
+        }
+
+        let geom = Geom {
+            layout: &layout,
+            list: list_content,
+            list_scroll: scroll_rows,
+            parent: parent_content,
+            parent_scroll,
+            crumbs: &crumb_rects,
+            overlay: &overlay,
+            menu: &menu_geometry,
+            tabs: tab_count,
+        };
+
+        if pointer.secondary && !dismissing && overlay.is_none() && !menu_live {
+            if let Some(position) = pointer.at {
+                self.right_click(position, over.map(|(control, _)| control), &layout);
+            }
+        }
+
+        if let Some((control, position)) = over.filter(|_| pointer.pressed && !dismissing) {
             // Everything happens on mouse-*down*, with the ripple: waiting for
             // the release would put the acknowledgement after the thing it is
             // acknowledging.
-            let rect = match control {
-                Control::Row(_, index) => {
-                    self.dir().set_cursor(index);
-                    self.apply_visual();
-                    ui::row_rect(list_content, scroll_rows, index)
-                }
-                Control::Tab(index) => {
-                    if self.tabs.switch_to(index, now) {
-                        self.tab_changed(now);
-                    }
-                    layout
-                        .strip
-                        .map(|strip| chrome::tab_rects(strip, tab_count))
-                        .and_then(|rects| rects.get(index).copied())
-                        .unwrap_or(egui::Rect::ZERO)
-                }
-                Control::Action(_) | Control::PanelRow(_) => {
-                    let rect = overlay
-                        .as_ref()
-                        .and_then(|o| o.rect_of(control))
-                        .unwrap_or(egui::Rect::ZERO);
-                    self.overlay_click(control, now);
-                    rect
-                }
-            };
+            let double = self.clicks.press(control, position, now);
+            let rect = self.click(control, double, &pointer, &geom, now);
             self.ripples.spawn(control, position, rect, now);
         }
+
+        // Middle click: a new tab on the row it landed on (PLAN §7.5).
+        if pointer.middle && !menu_live && overlay.is_none() {
+            if let Some((control, _)) = over {
+                self.middle_click(control, now);
+            }
+        }
+
+        // ── Drag: the band, and the seam the DnD phase takes ────────────────
+        // Not while the menu owns the pointer: a drag that began *on* a menu
+        // row is a slip of the hand, not a band select of the rows underneath.
+        if pointer.pressed && !dismissing && !menu_live {
+            self.press = pointer.at.map(|at| PressStart {
+                at,
+                on_row: matches!(over, Some((Control::Row(Column::List, _), _))),
+                in_list: layout.list.contains(at) && overlay.is_none(),
+                dragging: false,
+            });
+        }
+        if pointer.released {
+            self.press = None;
+            // The band commits as it goes, so releasing is only letting go.
+            self.band = None;
+        }
+        if pointer.down {
+            self.drag(pointer.at, list_content, scroll_rows);
+        }
+
         self.hovers.tick(
             over.map(|(control, _)| control),
-            over.map(|(control, _)| control).filter(|_| down),
+            over.map(|(control, _)| control).filter(|_| pointer.down),
             now,
         );
         self.ripples.tick(now);
+
+        // `delightful-ui` §2: the pointer says what is clickable. A file row
+        // keeps the arrow — it is a place, and a hand over every row of a
+        // thousand-row listing is noise — while everything that is a *button*
+        // says so.
+        if let Some((control, _)) = over {
+            ui.ctx().set_cursor_icon(match control {
+                Control::Row(..) => egui::CursorIcon::Default,
+                Control::Tab(_)
+                | Control::Crumb(_)
+                | Control::Action(_)
+                | Control::PanelRow(_)
+                | Control::MenuItem(_)
+                | Control::SubmenuItem(_) => egui::CursorIcon::PointingHand,
+            });
+        }
 
         // ── Scroll ──────────────────────────────────────────────────────────
         // The scrolloff rule is applied to the *target* row, not to where the
         // rows have animated to, so the maths never chases its own animation.
         let scrolloff = self.mgr.scrolloff;
-        let parent_page = crate::viewport::visible_rows(
-            ui::content_rect(layout.parent).height(),
-            ui::ROW_HEIGHT,
-        );
         let tab = self.tabs.active_mut();
         let list_first = crate::viewport::first_visible(
             tab.cwd.first(),
@@ -2870,6 +3961,8 @@ impl App {
             .set_ink(crate::preview::doc::Ink::from_palette(&self.palette));
         self.preview.set_focused(self.focus == Focus::Preview);
         self.preview.sync_doc(now);
+        // The wheel's coast over the document, sampled once a frame (PLAN §7.5).
+        self.preview.tick_fling(now);
         // The transport follows the same cursor, one line later and by the same
         // rule: after the keys, so a held `↓` mounts what it stopped on.
         self.sync_playback(now);
@@ -3025,6 +4118,25 @@ impl App {
                 cut: self.clipboard.mode == PasteMode::Cut,
             }),
         });
+        // The band, over the rows it is selecting (PLAN §7.5). A wash and a
+        // hairline: it has to be unmistakable without hiding the names it is
+        // being drawn across, so the fill is barely there and the *edge* is
+        // what makes it a rectangle.
+        if let (Some(band), Some(at)) = (&self.band, pointer.at) {
+            let rect = crate::mouse::band(band.origin, at).intersect(list_content);
+            let clipped = painter.with_clip_rect(list_content);
+            clipped.rect_filled(
+                rect,
+                ui::ROW_RADIUS,
+                chrome::fade(self.palette.blue, BAND_FILL),
+            );
+            clipped.rect_stroke(
+                rect,
+                ui::ROW_RADIUS,
+                egui::Stroke::new(1.0, chrome::fade(self.palette.blue, BAND_EDGE)),
+                egui::StrokeKind::Inside,
+            );
+        }
         crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now);
         // Over the pane's own body — the cached thumbnail is the poster the
         // first decoded frame lands on top of — and under everything else.
@@ -3067,6 +4179,15 @@ impl App {
                 &self.ripples,
             );
         }
+        chrome::path_bar(
+            &paint,
+            layout.path,
+            &self.path_bar.1,
+            &crumb_rects,
+            self.path_bar.2.as_deref(),
+            &self.hovers,
+            &self.ripples,
+        );
 
         // The help sheet is drawn over the panes but *under* the bar, because
         // the bar is where its filter is typed — an overlay that covered its own
@@ -3184,6 +4305,13 @@ impl App {
         // held down now.
         self.toasts.paint(&paint, area, layout.bar.top(), now);
 
+        // The menu is over everything below it — it is the most recent thing
+        // the user asked for — and under the which-key card, which is an answer
+        // to a key being held down right now.
+        if let (Some(menu), Some(geometry)) = (&self.menu, &menu_geometry) {
+            menu::paint(&paint, menu, geometry, &self.hovers, &self.ripples, now);
+        }
+
         // Last, and over everything: the card is an answer to a key that is
         // being held down right now, so nothing may cover it.
         if self.which.visible(now) {
@@ -3194,6 +4322,11 @@ impl App {
                 &self.which_rows,
                 self.which.alpha(now),
             );
+        }
+
+        // A menu whose fade is over is gone: see the `menu` row below.
+        if self.menu.as_ref().is_some_and(|menu| menu.spent(now)) {
+            self.menu = None;
         }
 
         // ── The repaint discipline, in one place (PLAN §1) ──────────────────
@@ -3217,6 +4350,13 @@ impl App {
                     .is_some_and(|p| p.is_playing() || p.awaiting_frame()),
             ),
             ("which", self.which.fading()),
+            // The menu's dismissal fade. It ends, and `Menu::spent` is what
+            // drops it — an option that is never `None` is a window that never
+            // stops asking for frames (PLAN §1).
+            (
+                "menu",
+                self.menu.as_ref().is_some_and(|menu| !menu.live()),
+            ),
             ("toast", self.toasts.animating(now)),
             (
                 "tasks",

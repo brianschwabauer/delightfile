@@ -42,6 +42,36 @@ pub fn first_visible(
     first.clamp(lowest, highest).min(rows - visible)
 }
 
+/// The cursor, dragged into the window a *view* move has settled on.
+///
+/// The inverse of [`first_visible`], and it exists for one caller: the mouse
+/// wheel (PLAN §7.5), which moves the view rather than the cursor. Because
+/// `first_visible` recomputes the view from the cursor on every frame, a wheel
+/// roll that left the cursor behind would be undone before it was drawn — so
+/// the cursor is pulled to the nearest row that satisfies the same margin the
+/// keyboard obeys. Scrolling therefore *carries* the cursor, which is also what
+/// yazi does, and means the row you stopped on is the row `Enter` opens.
+pub fn cursor_in_view(
+    first: usize,
+    cursor: usize,
+    rows: usize,
+    visible: usize,
+    scrolloff: usize,
+) -> usize {
+    if rows == 0 {
+        return 0;
+    }
+    if visible == 0 || rows <= visible {
+        // Nothing scrolls, so nothing may move the cursor.
+        return cursor.min(rows - 1);
+    }
+    let margin = scrolloff.min((visible - 1) / 2);
+    let last = rows - 1;
+    let low = (first + margin).min(last);
+    let high = (first + visible - 1).saturating_sub(margin).min(last);
+    cursor.clamp(low.min(high), high)
+}
+
 /// How many whole rows of `height` fit in `available` points.
 pub fn visible_rows(available: f32, height: f32) -> usize {
     if height <= 0.0 || available <= 0.0 {
@@ -125,6 +155,42 @@ mod tests {
     fn no_scrolloff_means_the_cursor_can_touch_the_edge() {
         assert_eq!(first_visible(0, 19, 100, 20, 0), 0);
         assert_eq!(first_visible(0, 20, 100, 20, 0), 1);
+    }
+
+    /// The wheel's half of the rule: a view move drags the cursor to the
+    /// nearest row that keeps the margin, and the pair agree — feeding the
+    /// result back through `first_visible` must leave the view where the wheel
+    /// put it, or scrolling would fight itself every frame.
+    #[test]
+    fn a_view_move_drags_the_cursor_into_its_window() {
+        let (rows, visible, off) = (100, 20, 5);
+        // The cursor is above the new window: pulled down to the top margin.
+        let cursor = cursor_in_view(40, 0, rows, visible, off);
+        assert_eq!(cursor, 45);
+        assert_eq!(first_visible(40, cursor, rows, visible, off), 40);
+        // …and below it: pulled up to the bottom margin.
+        let cursor = cursor_in_view(40, 99, rows, visible, off);
+        assert_eq!(cursor, 54);
+        assert_eq!(first_visible(40, cursor, rows, visible, off), 40);
+        // Already inside: left exactly where it was.
+        assert_eq!(cursor_in_view(40, 50, rows, visible, off), 50);
+
+        // Scrolled to the very bottom, the cursor rests on the last row the
+        // margin allows — the same place `↓` would stop it. The last *rows*
+        // are on screen; reaching them is the keyboard's job, not the wheel's.
+        let first = rows - visible;
+        let cursor = cursor_in_view(first, 99, rows, visible, off);
+        assert_eq!(cursor, 94);
+        assert_eq!(first_visible(first, cursor, rows, visible, off), first);
+    }
+
+    /// A listing that fits has nothing to scroll, so the wheel must not move
+    /// the cursor at all.
+    #[test]
+    fn a_short_listing_keeps_its_cursor() {
+        assert_eq!(cursor_in_view(0, 3, 5, 20, 5), 3);
+        assert_eq!(cursor_in_view(0, 0, 0, 20, 5), 0);
+        assert_eq!(cursor_in_view(0, 7, 100, 0, 5), 7);
     }
 
     #[test]

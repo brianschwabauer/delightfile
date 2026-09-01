@@ -734,7 +734,21 @@ pub fn paint_conflict(
     }
 
     if let Some(rect) = geometry.apply_all {
-        let hover = hovers.hover(Control::Action(ConflictAction::ALL.len()));
+        // The toggle is a control like any other, so it gets the whole
+        // treatment (`delightful-ui` §3/§4, PLAN §8): hover in, press down,
+        // ripple from the pointer. It was the one clickable thing on a Phase 2
+        // card that had only the hover.
+        let key = Control::Action(ConflictAction::ALL.len());
+        let hover = hovers.hover(key);
+        let rect = pressed_rect(rect, hovers.press(key));
+        let inside = painter.with_clip_rect(rect);
+        for splash in ripples.splashes(key, paint.now) {
+            inside.circle_filled(
+                splash.center,
+                splash.radius,
+                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            );
+        }
         let color = if dialog.apply_all {
             palette.yellow
         } else {

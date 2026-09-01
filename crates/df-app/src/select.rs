@@ -101,6 +101,53 @@ impl Visual {
     }
 }
 
+/// A band-select drag (PLAN §7.5), which is visual mode drawn with a pointer.
+///
+/// It is deliberately the *same* arithmetic: [`range_delta`] decides what is
+/// entering and leaving the run, and the prior state of every row it has
+/// touched is remembered for exactly the reason [`Visual`] remembers it — a
+/// band that shrinks has to hand back a selection built up before the drag
+/// started, not clear it.
+///
+/// What is different is only where the run comes from: a rectangle over the
+/// pane rather than an anchor row and a cursor.
+#[derive(Debug, Clone)]
+pub struct Band {
+    /// Where the drag began, in window points. The rectangle is this and
+    /// wherever the pointer is now.
+    pub origin: egui::Pos2,
+    /// The run currently applied, if any.
+    pub applied: Option<(usize, usize)>,
+    /// Per row the band has touched: its name, and whether it was selected
+    /// before the drag reached it.
+    pub prior: Vec<(String, bool)>,
+}
+
+impl Band {
+    pub fn new(origin: egui::Pos2) -> Band {
+        Band {
+            origin,
+            applied: None,
+            prior: Vec::new(),
+        }
+    }
+
+    /// The first answer wins — see [`Visual::remember`].
+    pub fn remember(&mut self, name: &str, selected: bool) {
+        if self.prior.iter().any(|(n, _)| n == name) {
+            return;
+        }
+        self.prior.push((name.to_string(), selected));
+    }
+
+    pub fn was_selected(&self, name: &str) -> Option<bool> {
+        self.prior
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, was)| *was)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

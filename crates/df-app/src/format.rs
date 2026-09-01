@@ -108,6 +108,34 @@ pub fn long_stamp(time: Option<SystemTime>) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
 }
 
+/// `20260831_142233` — a stamp that is safe in a **file name**.
+///
+/// The clipboard's own paste target (PLAN §7.4: an image on the clipboard is
+/// saved as `clipboard_<stamp>.png`). No colons, no spaces and no dashes to be
+/// mistaken for an option: this string ends up on a command line sooner or
+/// later. Local time, so the file sorts next to whatever else was made this
+/// afternoon, and seconds, because two pastes a minute apart is not a rare
+/// thing to do.
+pub fn file_stamp(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() % 60)
+        .unwrap_or(0);
+    match civil_local(time) {
+        Some((year, month, day, hour, minute)) => {
+            format!("{year:04}{month:02}{day:02}_{hour:02}{minute:02}{seconds:02}")
+        }
+        // A clock the C library cannot make sense of still has to produce a
+        // unique name; the epoch second is one.
+        None => format!(
+            "{}",
+            time.duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        ),
+    }
+}
+
 fn local_stamp(time: SystemTime) -> Option<String> {
     let (year, month, day, hour, minute) = civil_local(time)?;
     Some(stamp(year, month, day, hour, minute))
