@@ -28,7 +28,8 @@ pub fn chord(event: &KeyEvent, mods: ModifiersState) -> Option<Chord> {
     // Lock and Ctrl, so the layout question is answered once, by the compositor,
     // rather than by a shift table here. `logical_key` is the fallback for the
     // platforms that do not implement it.
-    chord_from(&event.key_without_modifiers(), mods).or_else(|| chord_from(&event.logical_key, mods))
+    chord_from(&event.key_without_modifiers(), mods)
+        .or_else(|| chord_from(&event.logical_key, mods))
 }
 
 /// What this keystroke *types*, if it types anything.
@@ -157,11 +158,8 @@ mod tests {
     fn modifiers_carry_through() {
         let ctrl_u = chord_from(&character("u"), ModifiersState::CONTROL).expect("Ctrl+u");
         assert_eq!(ctrl_u, Chord::ctrl(Key::Char('u')));
-        let alt_left = chord_from(
-            &WinitKey::Named(NamedKey::ArrowLeft),
-            ModifiersState::ALT,
-        )
-        .expect("Alt+←");
+        let alt_left =
+            chord_from(&WinitKey::Named(NamedKey::ArrowLeft), ModifiersState::ALT).expect("Alt+←");
         assert_eq!(alt_left, Chord::alt(Key::ArrowLeft));
         assert_eq!(alt_left.label(), "Alt+←");
     }

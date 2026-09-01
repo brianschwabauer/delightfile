@@ -1,7 +1,7 @@
 //! What an extraction *would* do — the half that can be tested without a
 //! decompressor.
 //!
-//! Planning and executing are separated the same way [`crate::ops::paste`]
+//! Planning and executing are separated the same way [`mod@crate::ops::paste`]
 //! separates them, and for the same reason: every decision worth getting right
 //! is in the plan, and the plan is a pure function. Which entries are selected,
 //! where each one lands, which are refused for an unsafe name, which would

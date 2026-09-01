@@ -1001,7 +1001,11 @@ use crate::tasks::TaskCtx;
 
 /// Extract everything in `archive` into a fresh directory and hand back the
 /// report and the directory.
-fn extract_all(t: &TempTree, archive: &Path, into: &str) -> (unpack::ExtractReport, std::path::PathBuf) {
+fn extract_all(
+    t: &TempTree,
+    archive: &Path,
+    into: &str,
+) -> (unpack::ExtractReport, std::path::PathBuf) {
     let dest = t.path().join(into);
     std::fs::create_dir_all(&dest).unwrap();
     let tree = list(archive).unwrap();
@@ -1222,7 +1226,11 @@ fn a_cancelled_extraction_leaves_no_half_written_file() {
     assert!(report.cancelled);
     assert_eq!(report.files, 0);
     assert!(!dest.join("big.bin").exists());
-    assert!(report.message().starts_with("Cancelled"), "{}", report.message());
+    assert!(
+        report.message().starts_with("Cancelled"),
+        "{}",
+        report.message()
+    );
 }
 
 /// The bomb guard: a member that keeps producing bytes past the length its own
@@ -1230,7 +1238,8 @@ fn a_cancelled_extraction_leaves_no_half_written_file() {
 #[test]
 fn a_member_that_outgrows_its_declared_length_is_refused() {
     let t = TempTree::new("archive-extract-bomb");
-    let mut member = ZipMember::file("lie.txt", b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").really_deflated();
+    let mut member =
+        ZipMember::file("lie.txt", b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").really_deflated();
     // Keep the real (large) payload on the wire and claim it is two bytes.
     member.data = b"aa".to_vec();
     let bytes = build_zip(&[member], b"");

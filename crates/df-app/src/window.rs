@@ -80,7 +80,7 @@
 //! # The cwd-file, with several processes
 //!
 //! **The process launched with `--cwd-file` owns it, and windows it spawns
-//! never inherit it** ([`spawn_args`] does not pass it on). The flag exists for
+//! never inherit it** ([`crate::window::spawn_args`] does not pass it on). The flag exists for
 //! one thing — Brian's Hyprland `Super+F` runs delightfile with it and `cd`s the
 //! shell to whatever came back (PLAN §3) — and that shell function waits on the
 //! *one* pid it started. If every window wrote the file, the shell would follow
@@ -244,7 +244,9 @@ mod tests {
     fn a_spawned_window_never_inherits_the_cwd_file() {
         let args = spawn_args(Path::new("/tmp"));
         assert!(
-            !args.iter().any(|a| a.to_string_lossy().contains("cwd-file")),
+            !args
+                .iter()
+                .any(|a| a.to_string_lossy().contains("cwd-file")),
             "{args:?}"
         );
     }
@@ -262,7 +264,11 @@ mod tests {
         assert!(armed(from, out, strip));
         assert_eq!(release(from, out, strip), Release::Detach);
         // Upward counts too.
-        assert!(armed(from, egui::pos2(100.0, 20.0 - DETACH_THRESHOLD), strip));
+        assert!(armed(
+            from,
+            egui::pos2(100.0, 20.0 - DETACH_THRESHOLD),
+            strip
+        ));
 
         // A point short of the threshold does not arm…
         let short = egui::pos2(100.0, 20.0 + DETACH_THRESHOLD - 0.5);
@@ -272,7 +278,10 @@ mod tests {
         let along = egui::pos2(500.0, 22.0);
         assert!(!armed(from, along, strip));
         // …nor a mostly-horizontal drag that happens to clear the threshold.
-        let diagonal = egui::pos2(100.0 + DETACH_THRESHOLD * 2.0, 20.0 + DETACH_THRESHOLD + 1.0);
+        let diagonal = egui::pos2(
+            100.0 + DETACH_THRESHOLD * 2.0,
+            20.0 + DETACH_THRESHOLD + 1.0,
+        );
         assert!(!armed(from, diagonal, strip));
         assert_eq!(release(from, diagonal, strip), Release::SpringBack);
         // …nor one that ends back inside the strip after a trip below it.

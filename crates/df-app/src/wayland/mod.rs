@@ -148,13 +148,21 @@ const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum Event {
     /// A drag — somebody else's, or ours come back — is over our window, at
     /// this surface-local point.
-    Enter { at: (f32, f32), ours: bool },
-    Motion { at: (f32, f32) },
+    Enter {
+        at: (f32, f32),
+        ours: bool,
+    },
+    Motion {
+        at: (f32, f32),
+    },
     /// It left without dropping.
     Leave,
     /// It was dropped, and here is what it was carrying. Empty when the offer
     /// held nothing this program can paste.
-    Drop { paths: Vec<PathBuf>, ours: bool },
+    Drop {
+        paths: Vec<PathBuf>,
+        ours: bool,
+    },
     /// **Our** outgoing drag is over, whatever became of it.
     DragEnded,
 }
@@ -228,7 +236,14 @@ impl DataDevice {
 
     /// Start a drag out of the window, offering `offers` and carrying an icon
     /// drawn for `count` files.
-    pub fn drag(&self, offers: Vec<(String, Vec<u8>)>, count: usize, card: Rgba, ink: Rgba, scale: i32) {
+    pub fn drag(
+        &self,
+        offers: Vec<(String, Vec<u8>)>,
+        count: usize,
+        card: Rgba,
+        ink: Rgba,
+        scale: i32,
+    ) {
         self.send(Command::Drag {
             offers,
             count,
@@ -787,7 +802,9 @@ impl Dispatch<WlDataDevice, ()> for State {
             // The window's edge should ring, the row or pane under the pointer
             // should light up as the pointer moves, and letting go should
             // paste — conflict dialog, undo toast and all.
-            wl_data_device::Event::Enter { serial, x, y, id, .. } => {
+            wl_data_device::Event::Enter {
+                serial, x, y, id, ..
+            } => {
                 let Some(offer) = id else { return };
                 let mimes = state.mimes(&offer);
                 // *This* window's own drag, come back through the compositor —

@@ -40,7 +40,6 @@
 
 use std::path::PathBuf;
 
-
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::dbus::{Bus, Interfaces, Value};
@@ -139,14 +138,12 @@ pub fn devices_from(objects: &[(String, Interfaces)]) -> Vec<Device> {
 
     let mut out: Vec<Device> = Vec::new();
     for (path, interfaces) in objects {
-        let (Some(block), Some(filesystem)) =
-            (interfaces.get(BLOCK), interfaces.get(FILESYSTEM))
+        let (Some(block), Some(filesystem)) = (interfaces.get(BLOCK), interfaces.get(FILESYSTEM))
         else {
             continue;
         };
-        let get = |props: &std::collections::HashMap<String, Value>, key: &str| {
-            props.get(key).cloned()
-        };
+        let get =
+            |props: &std::collections::HashMap<String, Value>, key: &str| props.get(key).cloned();
         if get(block, "HintIgnore")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
@@ -171,10 +168,7 @@ pub fn devices_from(objects: &[(String, Interfaces)]) -> Vec<Device> {
                 // No label: the device node's last component, which is what
                 // every other tool falls back to and what the user will
                 // recognise from `lsblk`.
-                node.rsplit('/')
-                    .next()
-                    .unwrap_or("disk")
-                    .to_string()
+                node.rsplit('/').next().unwrap_or("disk").to_string()
             });
         let mount = get(filesystem, "MountPoints")
             .and_then(|v| v.as_bytestrings())
@@ -455,7 +449,14 @@ impl Card {
 
 /// One device's row. Two lines: the name and where it is, then the hardware.
 const ROW: f32 = 34.0;
-const PAD: f32 = 14.0;
+/// The card's inner padding — `chrome::CARD_PAD`, not a number of its own.
+///
+/// The plate is [`crate::chrome::card`], whose radius is
+/// `CARD_ROW_RADIUS + CARD_PAD`; a row inset by anything else stops being
+/// concentric with it (`delightful-ui` §15). This was 14 against a 10-derived
+/// radius, so the gap *widened* by 4 px as it turned each corner — the same
+/// mistake the basket tray made in the other direction.
+const PAD: f32 = crate::chrome::CARD_PAD;
 const TITLE: f32 = 20.0;
 const MAX_WIDTH: f32 = 560.0;
 const FONT: f32 = 13.0;
@@ -481,7 +482,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
     let height = PAD * 2.0 + TITLE * 2.0 + 6.0 + visible as f32 * ROW;
     let width = (area.width() - 40.0).clamp(0.0, MAX_WIDTH);
     let height = height.min((area.height() - 40.0).max(0.0));
-    let top = area.top() + (area.height() - height).max(0.0) * 0.4;
+    let top = area.top() + (area.height() - height).max(0.0) * crate::chrome::OPTICAL_CENTRE;
     let rect = egui::Rect::from_min_size(
         egui::pos2(area.center().x - width / 2.0, top),
         egui::vec2(width, height),
@@ -499,7 +500,11 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
             )
         })
         .collect();
-    Geometry { card: rect, body, rows }
+    Geometry {
+        card: rect,
+        body,
+        rows,
+    }
 }
 
 /// Draw it.
@@ -509,10 +514,15 @@ pub fn paint(
     card: &Card,
     geometry: &Geometry,
     hovers: &crate::hover::Hovers<crate::ui::Control>,
+    ripples: &crate::ripple::Ripples<crate::ui::Control>,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    painter.rect_filled(area, 0, egui::Color32::from_black_alpha(crate::chrome::HELP_SCRIM));
+    painter.rect_filled(
+        area,
+        0,
+        egui::Color32::from_black_alpha(crate::chrome::HELP_SCRIM),
+    );
     crate::chrome::card(paint, geometry.card, 1.0);
 
     let left = geometry.card.left() + PAD;
@@ -526,7 +536,10 @@ pub fn paint(
     // The keys, on the card rather than in a help sheet: this surface has three
     // of them and they are not guessable from the rows.
     painter.text(
-        egui::pos2(geometry.card.right() - PAD, geometry.card.top() + PAD + TITLE / 2.0),
+        egui::pos2(
+            geometry.card.right() - PAD,
+            geometry.card.top() + PAD + TITLE / 2.0,
+        ),
         egui::Align2::RIGHT_CENTER,
         "Enter mount / open · e eject · Esc close",
         egui::FontId::proportional(FONT - 1.5),
@@ -551,16 +564,31 @@ pub fn paint(
             break;
         };
         let on_cursor = index == card.cursor;
-        let hover = hovers.hover(crate::ui::Control::PanelRow(i));
+        // The offset, not the absolute index: `Geometry::row_at` and
+        // `rect_of` both index `geometry.rows`, so the offset is what the
+        // hit test produces and the hover key has to match it.
+        let key = crate::ui::Control::PanelRow(i);
+        let hover = hovers.hover(key);
+        // Mounting a disk is one of the more consequential clicks in the
+        // program, and it was the one row in the crate that gave no feedback
+        // at all under the finger (`delightful-ui` §4).
+        let rect = &crate::hover::pressed_rect(*rect, hovers.press(key));
         if on_cursor || hover > 0.0 {
             clipped.rect_filled(
-                rect.shrink2(egui::vec2(0.0, 2.0)),
+                *rect,
                 crate::ui::ROW_RADIUS,
                 crate::theme::mix(
                     palette.crust,
                     palette.surface1,
                     if on_cursor { 1.0 } else { hover * 0.6 },
                 ),
+            );
+        }
+        for splash in ripples.splashes(key, paint.now) {
+            clipped.circle_filled(
+                splash.center,
+                splash.radius,
+                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
             );
         }
         // A mounted device is the palette's own "this is live" colour; an
@@ -617,6 +645,17 @@ pub fn paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Same rule as the basket tray, which this card got wrong in the other
+    /// direction — a 14 pt inset against a 10-derived radius, so the gap
+    /// *widened* around each corner (`delightful-ui` §15).
+    #[test]
+    fn the_card_radii_are_concentric() {
+        assert_eq!(
+            crate::ui::ROW_RADIUS as f32 + PAD,
+            crate::chrome::CARD_RADIUS as f32
+        );
+    }
     use std::collections::HashMap;
 
     fn props(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
@@ -812,9 +851,23 @@ mod tests {
             ] {
                 // Still loading, empty, populated, scrolled, and busy.
                 let mut card = Card::new();
-                paint(&painting, area, &card, &geometry(area, &card), &hovers);
+                paint(
+                    &painting,
+                    area,
+                    &card,
+                    &geometry(area, &card),
+                    &hovers,
+                    &crate::ripple::Ripples::new(),
+                );
                 card.update(Vec::new());
-                paint(&painting, area, &card, &geometry(area, &card), &hovers);
+                paint(
+                    &painting,
+                    area,
+                    &card,
+                    &geometry(area, &card),
+                    &hovers,
+                    &crate::ripple::Ripples::new(),
+                );
 
                 let many: Vec<Device> = (0..20)
                     .map(|i| Device {
@@ -831,10 +884,24 @@ mod tests {
                     })
                     .collect();
                 card.update(many);
-                paint(&painting, area, &card, &geometry(area, &card), &hovers);
+                paint(
+                    &painting,
+                    area,
+                    &card,
+                    &geometry(area, &card),
+                    &hovers,
+                    &crate::ripple::Ripples::new(),
+                );
                 card.first = 15;
                 card.busy = Some("/block/16".to_string());
-                paint(&painting, area, &card, &geometry(area, &card), &hovers);
+                paint(
+                    &painting,
+                    area,
+                    &card,
+                    &geometry(area, &card),
+                    &hovers,
+                    &crate::ripple::Ripples::new(),
+                );
             }
         });
     }
@@ -875,7 +942,10 @@ mod tests {
         assert_eq!(card.cursor, 0);
 
         card.move_cursor(1);
-        assert_eq!(card.selected().map(|d| d.node.as_str()), Some("/dev/nvme0n1p2"));
+        assert_eq!(
+            card.selected().map(|d| d.node.as_str()),
+            Some("/dev/nvme0n1p2")
+        );
         // Clamped, not wrapped: a list of disks has a bottom.
         card.move_cursor(5);
         assert_eq!(card.cursor, 1);

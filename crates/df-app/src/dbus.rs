@@ -224,9 +224,7 @@ pub fn readable_error(name: &str, text: &str) -> String {
         "DeviceBusy" => "the device is busy — something still has a file open on it".to_string(),
         "AlreadyMounted" => "already mounted".to_string(),
         "NotMounted" => "not mounted".to_string(),
-        "ServiceUnknown" | "NameHasNoOwner" => {
-            "udisks2 is not running on this machine".to_string()
-        }
+        "ServiceUnknown" | "NameHasNoOwner" => "udisks2 is not running on this machine".to_string(),
         _ if !text.is_empty() => text.to_string(),
         _ if !short.is_empty() => short.to_string(),
         _ => "the call failed".to_string(),
@@ -902,7 +900,12 @@ mod tests {
         let mut fields = Vec::new();
         push_field(&mut fields, F_PATH, 'o', "/org/freedesktop/UDisks2");
         push_field(&mut fields, F_DESTINATION, 's', "org.freedesktop.UDisks2");
-        push_field(&mut fields, F_INTERFACE, 's', "org.freedesktop.DBus.ObjectManager");
+        push_field(
+            &mut fields,
+            F_INTERFACE,
+            's',
+            "org.freedesktop.DBus.ObjectManager",
+        );
         push_field(&mut fields, F_MEMBER, 's', "GetManagedObjects");
         push_signature_field(&mut fields, "s");
 
@@ -955,7 +958,10 @@ mod tests {
             ("t", Value::U64(1 << 42)),
             ("d", Value::F64(1.5)),
             ("s", Value::Str("label".into())),
-            ("o", Value::Path("/org/freedesktop/UDisks2/block_devices/sda1".into())),
+            (
+                "o",
+                Value::Path("/org/freedesktop/UDisks2/block_devices/sda1".into()),
+            ),
         ];
         for (sig, value) in cases {
             let mut body = Vec::new();
@@ -1005,8 +1011,18 @@ mod tests {
         // a{o a{s a{s v}}}
         marshal_array(&mut body, 8, |out| {
             for (path, label, size, mounted) in [
-                ("/org/freedesktop/UDisks2/block_devices/sda1", "USB", 8_000_000_000u64, true),
-                ("/org/freedesktop/UDisks2/block_devices/sdb1", "Backup", 16u64, false),
+                (
+                    "/org/freedesktop/UDisks2/block_devices/sda1",
+                    "USB",
+                    8_000_000_000u64,
+                    true,
+                ),
+                (
+                    "/org/freedesktop/UDisks2/block_devices/sdb1",
+                    "Backup",
+                    16u64,
+                    false,
+                ),
             ] {
                 pad_to(out, 8);
                 marshal_string(out, path);
@@ -1048,7 +1064,10 @@ mod tests {
         let block = &interfaces["org.freedesktop.UDisks2.Block"];
         assert_eq!(block["IdLabel"].as_str(), Some("USB"));
         assert_eq!(block["Size"].as_u64(), Some(8_000_000_000));
-        assert_eq!(block["Device"].as_bytestring().as_deref(), Some("/dev/sda1"));
+        assert_eq!(
+            block["Device"].as_bytestring().as_deref(),
+            Some("/dev/sda1")
+        );
         let fs = &interfaces["org.freedesktop.UDisks2.Filesystem"];
         assert_eq!(
             fs["MountPoints"].as_bytestrings(),
@@ -1086,7 +1105,10 @@ mod tests {
         let mut body = Vec::new();
         marshal_no_options(&mut body);
         assert_eq!(body, vec![0; 8]);
-        assert_eq!(Reader::new(&body).value("a{sv}").unwrap(), Value::Dict(vec![]));
+        assert_eq!(
+            Reader::new(&body).value("a{sv}").unwrap(),
+            Value::Dict(vec![])
+        );
     }
 
     /// The SASL line is the uid's decimal digits, hex-encoded — a fiddly little
@@ -1118,8 +1140,10 @@ mod tests {
             readable_error("org.freedesktop.UDisks2.Error.NotAuthorizedCanObtain", "")
                 .contains("not allowed")
         );
-        assert!(readable_error("org.freedesktop.UDisks2.Error.DeviceBusy", "")
-            .contains("still has a file open"));
+        assert!(
+            readable_error("org.freedesktop.UDisks2.Error.DeviceBusy", "")
+                .contains("still has a file open")
+        );
         assert_eq!(
             readable_error("org.freedesktop.DBus.Error.ServiceUnknown", ""),
             "udisks2 is not running on this machine"

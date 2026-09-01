@@ -21,11 +21,11 @@
 //! ## The pieces
 //!
 //! - [`wire`] — the pure codec: bytes ↔ messages, every length checked, no I/O.
-//! - [`poll`] — timed waits on the child's pipes; the crate's second island of
+//! - `poll` — timed waits on the child's pipes; the crate's second island of
 //!   `unsafe`, after `fs::inotify`.
-//! - [`conn`] — one child process and one live session: handshake, pipelined
+//! - `conn` — one child process and one live session: handshake, pipelined
 //!   transfers, request-id matching, teardown.
-//! - [`config`] — `vfs.toml`, read from yazi's file first and delightfile's
+//! - `config` — `vfs.toml`, read from yazi's file first and delightfile's
 //!   second (per-service override), so the machines `g 1`/`g 2` already reach
 //!   in yazi work on day one.
 //! - [`Vfs`] (this file) — the manager: one worker thread per service, lazy

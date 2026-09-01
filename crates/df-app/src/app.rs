@@ -27,10 +27,10 @@ use df_core::input::{InputBuffer, InputEvent};
 use df_core::keymap::{
     Chord, Command, Context, ContextStack, Dispatch, Key, KeymapState, Registry, WhenFlags,
 };
-use df_core::preview::PreviewKind;
 use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord};
 use df_core::ops::paste::{plan_paste, Clipboard, PasteMode};
 use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
+use df_core::preview::PreviewKind;
 use df_core::state::{StateStore, View};
 use df_core::tasks::{FnJob, Lane, TaskCtx, TaskEngine, TaskEvent, TaskId, TaskState};
 
@@ -41,11 +41,12 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use crate::chrome;
-use crate::dnd;
 use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
-use crate::graphics::{Gfx, GfxError};
+use crate::dnd;
 use crate::finder::{self, Choice, Finder, Source};
 use crate::flip::{self, Flip, Snapshot};
+use crate::focus::{escape_rung, EscapeRung, EscapeState, Focus, Hovered, Rightward};
+use crate::graphics::{Gfx, GfxError};
 use crate::grid::{self, GridView, Thumbs};
 use crate::help::{self, Help};
 use crate::hover::Hovers;
@@ -53,18 +54,17 @@ use crate::input::{Prompt, PromptKind};
 use crate::menu::{self, Menu};
 use crate::open::{self, Picker};
 use crate::overlay::{self, FinderGeom, SearchGeom};
-use crate::focus::{escape_rung, EscapeRung, EscapeState, Focus, Hovered, Rightward};
 use crate::panel::{self, TaskPanel, TaskRow};
 use crate::playback::{Player, Prober, TemporalInfo};
 use crate::preview::Pane as PreviewPane;
 use crate::ripple::Ripples;
 use crate::search::{self, Search};
-use crate::toast::Toasts;
 use crate::select::{self, Visual};
 use crate::spot::{self, Spot};
 use crate::tab::Tab;
 use crate::tabs::Tabs;
 use crate::theme::Palette;
+use crate::toast::Toasts;
 use crate::ui::{self, ClipMark, Column, Control, CursorGlow, ListView};
 use crate::whichkey::WhichKey;
 
@@ -125,18 +125,48 @@ const BAND_EDGE: f32 = 0.55;
 /// dead proxy is an error this deliberately drops, because "the window is
 /// gone" is not something a worker can or should do anything about.
 #[derive(Clone)]
-pub struct Waker(Arc<dyn Fn() + Send + Sync>);
+pub struct Waker {
+    ring: Arc<dyn Fn() + Send + Sync>,
+    /// Which worker this handle belongs to, for `DF_FRAME_LOG` only.
+    ///
+    /// The bell is deliberately anonymous to the event loop — `Wake` carries no
+    /// payload, and `user_event` is one branch wide no matter how many workers
+    /// exist. But "which worker rang, and did it have a frame's worth of work?"
+    /// is precisely the question PLAN §6's idle-cost audit has to answer, and
+    /// an unlabelled bell makes a spuriously-ringing worker invisible: the log
+    /// says a wake happened and nothing about who caused it. So the *handle*
+    /// carries a name the *event* does not.
+    source: &'static str,
+}
 
 impl Waker {
     pub fn new(proxy: EventLoopProxy<crate::Wake>) -> Waker {
-        Waker(Arc::new(move || {
-            let _ = proxy.send_event(crate::Wake);
-        }))
+        Waker {
+            ring: Arc::new(move || {
+                let _ = proxy.send_event(crate::Wake);
+            }),
+            source: "root",
+        }
+    }
+
+    /// The same bell, labelled with the worker about to be handed it.
+    ///
+    /// Clone-and-rename rather than a parameter on [`wake`](Waker::wake): a
+    /// worker is given its handle once, at startup, and then rings it from a
+    /// thread that has no idea what it is called.
+    pub fn named(&self, source: &'static str) -> Waker {
+        Waker {
+            ring: Arc::clone(&self.ring),
+            source,
+        }
     }
 
     /// Ask the event loop for a pass through `user_event`.
     pub fn wake(&self) {
-        (self.0)()
+        if frame_log_enabled() {
+            log::info!("wake: {}", self.source);
+        }
+        (self.ring)()
     }
 }
 
@@ -196,7 +226,7 @@ struct PendingArchive {
 
 /// Why an archive is being listed.
 ///
-/// Extraction needs the tree as much as browsing does — [`plan_extract`] is a
+/// Extraction needs the tree as much as browsing does — [`df_core::archive::plan_extract`] is a
 /// function of it — so "extract this archive without opening it" is the same
 /// read with a different ending, and it is spelled as one here rather than as a
 /// second pipeline.
@@ -289,7 +319,13 @@ impl OverlayGeom {
     /// swallows the pointer either way (see the hit test in `frame`).
     fn hit(&self, pos: egui::Pos2) -> Option<Control> {
         match self {
-            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g
+            // The confirm card's rows are *not* in this list. They are the
+            // list of files the answer is about — nothing to click — and
+            // reporting them as a control gave them a pointing hand and a
+            // hover lift for an action that resolves to nothing
+            // (`delightful-ui` §2: a wrong cursor reads as broken).
+            OverlayGeom::Confirm(g) => g.action_at(pos).map(Control::Action),
+            OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g
                 .action_at(pos)
                 .map(Control::Action)
                 .or_else(|| {
@@ -548,6 +584,12 @@ pub struct App {
     /// something happens" — the resting state.
     repaint_at: Option<Instant>,
     logged_first_frame: bool,
+    /// One-shot marker for PLAN §6's cold-start measurement: the first frame
+    /// that actually had rows in it. Separate from `logged_first_frame`,
+    /// because the two numbers answer different questions — how long until
+    /// there is a window, and how long until there is a *directory* — and in a
+    /// cold cache they are not the same instant.
+    logged_first_listing: bool,
 
     // ── The model ───────────────────────────────────────────────────────────
     config: Config,
@@ -570,6 +612,10 @@ pub struct App {
     /// Which pane the keyboard is in (PLAN §2.1). One field, read by the
     /// `when` predicates and by the paint — see [`crate::focus`].
     focus: Focus,
+    /// Where the focus *treatment* is, which lags [`App::focus`] by
+    /// [`crate::focus::FOCUS_FADE`] (PLAN §2.1). Kept beside it rather than
+    /// inside it because focus is a decision and this is a picture of one.
+    focus_fade: crate::focus::FocusFade,
     /// The transport, built the first time a playable file is hovered and kept
     /// after that (PLAN §4.3). `None` is the resting state of a session that
     /// has only ever looked at photographs: no cpal device, no decode thread.
@@ -958,24 +1004,52 @@ impl App {
             }
         }
 
-        let notifier: df_core::fs::Notifier = {
-            let waker = waker.clone();
+        // One bell, four ropes: the handles differ only in the name they log
+        // under `DF_FRAME_LOG` (see [`Waker::named`]), because "who woke us at
+        // rest?" is the only question the idle-cost audit cannot answer from
+        // the outside.
+        let bell = |source: &'static str| -> df_core::fs::Notifier {
+            let waker = waker.named(source);
             Arc::new(move || waker.wake())
         };
-        let scanner = Scanner::start(Arc::clone(&notifier));
-        let watcher = Watcher::start(Arc::clone(&notifier));
+        let scanner = Scanner::start(bell("scanner"));
+        let watcher = Watcher::start(bell("watcher"));
         // Before the window, with the scanner (PLAN §6's cold-start ordering:
         // "decode workers started **before** the window").
-        let mut preview = PreviewPane::start(Arc::clone(&notifier));
+        let mut preview = PreviewPane::start(bell("preview"));
         // Before the window as well, and for the same reason: the first thing
         // a probe is asked about is whatever file the cursor opens on.
-        let prober = Prober::start(notifier);
+        let prober = Prober::start(bell("prober"));
+
+        // ── What that ordering actually buys, measured (PLAN §6) ────────────
+        // Debug build (`opt-level = 1`), warm page cache, five runs each,
+        // timing the two `log::info!` markers below against the process's own
+        // launch instant: "window mapped" in `redraw`, and "first listing"
+        // the first frame that has rows in it.
+        //
+        //   ~40 entries  (this repo)         window 224–241 ms, listing same frame
+        //   ~800 entries (a Work subtree)    window 230–238 ms, listing same frame
+        //   9975 entries (a flat thumb dir)  window 462–510 ms, listing same frame
+        //
+        // The number that matters is not either column — it is that they are
+        // the *same* column. The directory read finishes while wgpu is still
+        // negotiating an adapter, so the first frame the compositor ever shows
+        // already has the listing in it. There is no empty-pane flash to
+        // crossfade away from at any directory size tested, which is the whole
+        // reason these four `start` calls sit above `init_gfx` rather than in
+        // it. Move any of them after the window and that column splits.
+        //
+        // Everything else a session needs — git, du, thumbnails, udisks, the
+        // vfs, search — is started lazily on first use, deliberately: none of
+        // them has anything to say about frame one, and four threads that
+        // cannot contribute to the first frame are four threads competing with
+        // the ones that can.
 
         // Before the window as well (PLAN §6's cold-start ordering), and wired
         // to the same bell every other worker rings.
         let engine = TaskEngine::new(&config.tasks);
         {
-            let waker = waker.clone();
+            let waker = waker.named("tasks");
             engine.set_notifier(Box::new(move || waker.wake()));
         }
         let task_events = engine.events();
@@ -1007,6 +1081,7 @@ impl App {
             waker,
             repaint_at: None,
             logged_first_frame: false,
+            logged_first_listing: false,
             palette: Palette::from_theme(&theme),
             config,
             theme,
@@ -1019,6 +1094,7 @@ impl App {
             watcher,
             preview,
             focus: Focus::default(),
+            focus_fade: crate::focus::FocusFade::new(),
             player: None,
             prober,
             probes: Vec::new(),
@@ -1142,7 +1218,7 @@ impl App {
         // wakeup path (PLAN §1). Only immediate requests ring it: a *delayed*
         // one is already carried by `repaint_delay` in `redraw`, and waking now
         // for a frame wanted later is how a wait turns into a poll.
-        let waker = self.waker.clone();
+        let waker = self.waker.named("egui");
         gfx.egui_ctx.set_request_repaint_callback(move |info| {
             if info.delay.is_zero() {
                 waker.wake();
@@ -1154,7 +1230,8 @@ impl App {
         // ordering rule bends exactly this far and no further). A session
         // without one is a session with no cross-application drags and
         // everything else intact.
-        self.data_device = Self::start_data_device(event_loop, &gfx.window, self.waker.clone());
+        self.data_device =
+            Self::start_data_device(event_loop, &gfx.window, self.waker.named("wayland"));
         if self.data_device.is_none() {
             log::info!("no wayland data device — drag out and drop in are off");
         }
@@ -1520,7 +1597,11 @@ impl App {
             Arc::new(std::sync::Mutex::new(None));
         let job_slot = Arc::clone(&slot);
         let job_path = path.clone();
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         let job = FnJob::new(format!("Read {name}"), Lane::Micro, move |_ctx| {
             let result = df_core::archive::list(&job_path).map_err(|e| e.to_string());
             match job_slot.lock() {
@@ -1564,7 +1645,11 @@ impl App {
         match pending.intent {
             ArchiveIntent::Browse => self.enter_archive(pending.path, tree, now),
             ArchiveIntent::ExtractHere | ArchiveIntent::ExtractSubfolder => {
-                let into = pending.path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.cwd());
+                let into = pending
+                    .path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| self.cwd());
                 let dest = self.extract_dest(
                     &pending.path,
                     into,
@@ -1580,7 +1665,12 @@ impl App {
     }
 
     /// Put the tab inside the archive.
-    fn enter_archive(&mut self, path: PathBuf, tree: Arc<df_core::archive::ArchiveTree>, now: Instant) {
+    fn enter_archive(
+        &mut self,
+        path: PathBuf,
+        tree: Arc<df_core::archive::ArchiveTree>,
+        now: Instant,
+    ) {
         // Everything worth warning about, in one notice rather than three: the
         // listing is about to appear and a stack of toasts over it would be
         // read as an error (PLAN §5's one-at-a-time rule).
@@ -1696,7 +1786,8 @@ impl App {
             Ok(dest) => match std::fs::create_dir_all(&dest) {
                 Ok(()) => Some(dest),
                 Err(e) => {
-                    self.toasts.error(df_core::DfError::io(&dest, e).to_string(), now);
+                    self.toasts
+                        .error(df_core::DfError::io(&dest, e).to_string(), now);
                     None
                 }
             },
@@ -1791,7 +1882,7 @@ impl App {
     /// should not hold a worker thread for a service it will never reach.
     fn vfs(&mut self) -> Arc<df_core::vfs::Vfs> {
         if self.vfs.is_none() {
-            let waker = self.waker.clone();
+            let waker = self.waker.named("vfs");
             let notifier: df_core::fs::Notifier = Arc::new(move || waker.wake());
             let vfs = df_core::vfs::Vfs::start(notifier);
             for warning in vfs.warnings() {
@@ -1864,10 +1955,7 @@ impl App {
             _ => crate::remote::Session::new(at.clone(), origin),
         };
         let (mgr, sort) = (self.mgr.clone(), self.sort());
-        let wanted = self
-            .tabs
-            .active_mut()
-            .show_remote(session, &mgr, sort, now);
+        let wanted = self.tabs.active_mut().show_remote(session, &mgr, sort, now);
         // Leaving is leaving: a visual run is anchored to a row in a listing
         // that is no longer on screen.
         self.visual = None;
@@ -2181,13 +2269,17 @@ impl App {
         let Some(at) = at else { return true };
         // `Lane::Micro`: it is a small read the user is waiting on, and putting
         // it behind a queued 4 GB download would make the pane lie for minutes.
-        self.spawn_remote(format!("Preview {}", entry.name), Lane::Micro, move |vfs, ctx| {
-            let local = vfs.download_to_temp(&at, ctx).map_err(|e| e.to_string())?;
-            Ok(RemoteDone {
-                preview: Some((url, local)),
-                ..RemoteDone::default()
-            })
-        });
+        self.spawn_remote(
+            format!("Preview {}", entry.name),
+            Lane::Micro,
+            move |vfs, ctx| {
+                let local = vfs.download_to_temp(&at, ctx).map_err(|e| e.to_string())?;
+                Ok(RemoteDone {
+                    preview: Some((url, local)),
+                    ..RemoteDone::default()
+                })
+            },
+        );
         true
     }
 
@@ -2242,7 +2334,7 @@ impl App {
             .cursor_entry()
             .and_then(|entry| crate::remote::at_of(&entry.path))
         else {
-            return Err("nothing under the cursor".to_string());
+            return Err("Nothing under the cursor".to_string());
         };
         let to = at.join(name);
         let old_url = from.to_url();
@@ -2250,14 +2342,18 @@ impl App {
         // The temp file was a copy of the *old* name, and an opener that
         // sniffs extensions must not be handed it under the new one.
         self.temps.forget(&old_url);
-        self.spawn_remote(format!("Rename to {label}"), Lane::Micro, move |vfs, ctx| {
-            vfs.rename(&from, &to, ctx).map_err(|e| e.to_string())?;
-            Ok(RemoteDone {
-                message: format!("Renamed to {label}"),
-                invalidate: Some(at),
-                ..RemoteDone::default()
-            })
-        });
+        self.spawn_remote(
+            format!("Rename to {label}"),
+            Lane::Micro,
+            move |vfs, ctx| {
+                vfs.rename(&from, &to, ctx).map_err(|e| e.to_string())?;
+                Ok(RemoteDone {
+                    message: format!("Renamed to {label}"),
+                    invalidate: Some(at),
+                    ..RemoteDone::default()
+                })
+            },
+        );
         Ok(())
     }
 
@@ -2355,7 +2451,11 @@ impl App {
         let count = places.len();
         let into = dest.clone();
         self.spawn_remote(
-            format!("Download {} → {}", plural(count, "file", "files"), dest.display()),
+            format!(
+                "Download {} → {}",
+                plural(count, "file", "files"),
+                dest.display()
+            ),
             Lane::Macro,
             move |vfs, ctx| {
                 let mut done = 0;
@@ -2383,9 +2483,10 @@ impl App {
                     }
                 }
                 match failure {
-                    Some(message) if done > 0 => {
-                        Err(format!("Downloaded {} — {message}", plural(done, "file", "files")))
-                    }
+                    Some(message) if done > 0 => Err(format!(
+                        "Downloaded {} — {message}",
+                        plural(done, "file", "files")
+                    )),
                     Some(message) => Err(message),
                     None => Ok(RemoteDone {
                         message: format!("Downloaded {}", plural(done, "file", "files")),
@@ -2414,7 +2515,7 @@ impl App {
             // clipboard is the common case and the reason is not obvious.
             self.toasts.notice(
                 if folders > 0 {
-                    "Only files upload in v1 — folders are not walked yet"
+                    "Only files upload — folders are not walked"
                 } else {
                     "Nothing local to upload"
                 },
@@ -2424,20 +2525,29 @@ impl App {
         }
         if folders > 0 {
             self.toasts.notice(
-                format!("Skipping {}: only files upload in v1", plural(folders, "folder", "folders")),
+                format!(
+                    "Skipping {}: only files upload",
+                    plural(folders, "folder", "folders")
+                ),
                 now,
             );
         }
         let count = files.len();
         let here = dest.clone();
         self.spawn_remote(
-            format!("Upload {} → {}", plural(count, "file", "files"), dest.to_url()),
+            format!(
+                "Upload {} → {}",
+                plural(count, "file", "files"),
+                dest.to_url()
+            ),
             Lane::Macro,
             move |vfs, ctx| {
                 let mut done = 0;
                 let mut failure: Option<String> = None;
                 for local in &files {
-                    let Some(name) = local.file_name() else { continue };
+                    let Some(name) = local.file_name() else {
+                        continue;
+                    };
                     let remote = here.join(&name.to_string_lossy());
                     match vfs.upload(local, &remote, ctx) {
                         Ok(_) => done += 1,
@@ -2447,9 +2557,10 @@ impl App {
                     }
                 }
                 match failure {
-                    Some(message) if done > 0 => {
-                        Err(format!("Uploaded {} — {message}", plural(done, "file", "files")))
-                    }
+                    Some(message) if done > 0 => Err(format!(
+                        "Uploaded {} — {message}",
+                        plural(done, "file", "files")
+                    )),
                     Some(message) => Err(message),
                     None => Ok(RemoteDone {
                         message: format!("Uploaded {}", plural(done, "file", "files")),
@@ -2549,13 +2660,15 @@ impl App {
         }
         self.refresh_trash(now);
         match refusal {
-            Some(message) if restored > 0 => self
-                .toasts
-                .error(format!("Restored {} — {message}", plural(restored, "item", "items")), now),
+            Some(message) if restored > 0 => self.toasts.error(
+                format!("Restored {} — {message}", plural(restored, "item", "items")),
+                now,
+            ),
             Some(message) => self.toasts.error(message, now),
-            None => self
-                .toasts
-                .confirm(format!("Restored {}", plural(restored, "item", "items")), now),
+            None => self.toasts.confirm(
+                format!("Restored {}", plural(restored, "item", "items")),
+                now,
+            ),
         }
     }
 
@@ -2648,8 +2761,10 @@ impl App {
             let n = self.basket.len();
             self.basket.clear();
             self.clamp_basket();
-            self.toasts
-                .notice(format!("Basket emptied — {}", plural(n, "file", "files")), now);
+            self.toasts.notice(
+                format!("Basket emptied — {}", plural(n, "file", "files")),
+                now,
+            );
         }
     }
 
@@ -2699,7 +2814,9 @@ impl App {
                 return;
             }
             crate::remote::Transfer::Upload => {
-                let Some(at) = crate::remote::at_of(&dest) else { return };
+                let Some(at) = crate::remote::at_of(&dest) else {
+                    return;
+                };
                 self.remote_upload(clipboard.paths.clone(), at, now);
                 return;
             }
@@ -2715,8 +2832,10 @@ impl App {
                 return;
             }
             crate::remote::Transfer::Mixed => {
-                self.toasts
-                    .notice("Local and remote files in one paste — yank one or the other", now);
+                self.toasts.notice(
+                    "Local and remote files in one paste — yank one or the other",
+                    now,
+                );
                 return;
             }
         }
@@ -2849,7 +2968,9 @@ impl App {
         let mut made = 0;
         let mut failure = None;
         for target in &paths {
-            let Some(name) = target.file_name() else { continue };
+            let Some(name) = target.file_name() else {
+                continue;
+            };
             let link = cwd.join(name);
             let result = match kind {
                 Some(kind) => df_core::ops::symlink(target, &link, kind).map(|_| ()),
@@ -2960,8 +3081,10 @@ impl App {
             // Phase 5; saying so is better than a rule that silently does
             // nothing (PLAN §6's "fix the yazi gap").
             log::info!("builtin opener `{builtin}` is not implemented yet");
-            self.toasts
-                .notice("Extraction lands with archives", now);
+            self.toasts.notice(
+                "This opener cannot extract yet — press o to open the archive",
+                now,
+            );
             return;
         }
         if choice.block {
@@ -3619,7 +3742,12 @@ impl App {
         // "destroy everything I have deleted" is a key somebody presses by
         // accident, and this one asks first *and* has to be typed for.
         if self.tab().trash.is_some() {
-            let n = self.tab().trash.as_ref().map(|v| v.items.len()).unwrap_or(0);
+            let n = self
+                .tab()
+                .trash
+                .as_ref()
+                .map(|v| v.items.len())
+                .unwrap_or(0);
             rows.push(finder::Row {
                 label: "Empty trash".to_string(),
                 detail: plural(n, "item", "items"),
@@ -3746,7 +3874,7 @@ impl App {
 
     /// The udisks2 worker, started the first time the card is opened.
     fn udisks(&mut self) -> &crate::mounts::Mounts {
-        let waker = self.waker.clone();
+        let waker = self.waker.named("udisks");
         self.udisks
             .get_or_insert_with(|| crate::mounts::Mounts::start(Arc::new(move || waker.wake())))
     }
@@ -3803,7 +3931,8 @@ impl App {
             return;
         };
         if !device.is_mounted() {
-            self.toasts.notice(format!("{} is not mounted", device.label), now);
+            self.toasts
+                .notice(format!("{} is not mounted", device.label), now);
             return;
         }
         if let Some(card) = &mut self.mounts {
@@ -4008,7 +4137,7 @@ impl App {
     /// process starts 150 ms later.
     fn open_search(&mut self, mode: search::Mode) {
         let notify: df_core::fs::Notifier = {
-            let waker = self.waker.clone();
+            let waker = self.waker.named("search");
             Arc::new(move || waker.wake())
         };
         self.search = Some(Search::new(
@@ -4184,7 +4313,7 @@ impl App {
     /// The grid's thumbnail workers, started on first use.
     fn thumbs(&mut self) -> &mut Thumbs {
         if self.thumbs.is_none() {
-            let waker = self.waker.clone();
+            let waker = self.waker.named("thumbs");
             let notify: df_core::fs::Notifier = Arc::new(move || waker.wake());
             self.thumbs = Some(Thumbs::start(notify));
         }
@@ -4303,7 +4432,7 @@ impl App {
         match action {
             spot::Action::SetMode(mode) => self.set_mode(mode, now),
             spot::Action::StartChecksum => {
-                let waker = self.waker.clone();
+                let waker = self.waker.named("checksum");
                 if let Some(spot) = &mut self.spot {
                     spot.start_checksum(move || waker.wake());
                 }
@@ -4337,10 +4466,8 @@ impl App {
                 if let Some(spot) = &mut self.spot {
                     spot.facts.mode = mode;
                 }
-                self.toasts.notice(
-                    format!("Permissions are now {}", spot::octal(mode)),
-                    now,
-                );
+                self.toasts
+                    .notice(format!("Permissions are now {}", spot::octal(mode)), now);
                 // The list's permissions linemode is showing the old string
                 // until the directory is read again.
                 if let Some(dir) = path.parent().map(Path::to_path_buf) {
@@ -4526,9 +4653,7 @@ impl App {
                 match field {
                     // The two top fields rewrite every row that has not been
                     // hand-edited, live, as you type.
-                    crate::bulk::Field::Find | crate::bulk::Field::Replace => {
-                        bulk.apply_replace()
-                    }
+                    crate::bulk::Field::Find | crate::bulk::Field::Replace => bulk.apply_replace(),
                     // …and typing in a row is what exempts it from that.
                     crate::bulk::Field::Row(_) => bulk.touched(),
                 }
@@ -4617,10 +4742,9 @@ impl App {
         }
         match failed {
             Some(error) => self.toasts.error(error, now),
-            None => self.toasts.undo(
-                format!("Renamed {}", plural(count, "file", "files")),
-                now,
-            ),
+            None => self
+                .toasts
+                .undo(format!("Renamed {}", plural(count, "file", "files")), now),
         }
         self.rescan(&dir, now);
         if let Some(name) = cursor_on {
@@ -4636,7 +4760,9 @@ impl App {
     /// The buffer takes **every** key — that is what df-core's editor is for,
     /// and it is why a stray `q` in a rename types a `q` instead of quitting.
     fn prompt_key(&mut self, chord: Chord, now: Instant) {
-        let Some(prompt) = &mut self.prompt else { return };
+        let Some(prompt) = &mut self.prompt else {
+            return;
+        };
         let live = prompt.kind.is_live();
         match prompt.feed(chord) {
             InputEvent::Consumed => {
@@ -4804,7 +4930,7 @@ impl App {
             .cursor_entry()
             .map(|entry| entry.path.clone())
         else {
-            return Err("nothing under the cursor".to_string());
+            return Err("Nothing under the cursor".to_string());
         };
         let to = self.cwd().join(text);
         df_core::ops::rename(&from, &to, false).map_err(|e| e.to_string())?;
@@ -4865,11 +4991,7 @@ impl App {
             log::debug!("nothing to repeat: no find has been made yet");
             return;
         };
-        let direction = if reverse {
-            flip(direction)
-        } else {
-            direction
-        };
+        let direction = if reverse { flip(direction) } else { direction };
         if !self.dir().find(&query, direction) {
             log::debug!("`{query}` matches nothing here");
         }
@@ -5131,8 +5253,7 @@ impl App {
         // notice names, so the key is not simply dead.
         if self.tab().remote.is_some() && crate::remote::inert_remotely(command) {
             self.toasts.notice(
-                "Not over the link — press y then p in a local folder to bring it here"
-                    .to_string(),
+                "Not over the link — press y then p in a local folder to bring it here".to_string(),
                 now,
             );
             return;
@@ -5293,7 +5414,11 @@ impl App {
             }
             C::HistoryForward => {
                 let (mgr, sort) = (self.mgr.clone(), self.sort());
-                if self.tabs.active_mut().forward(&mgr, sort, &self.scanner, now) {
+                if self
+                    .tabs
+                    .active_mut()
+                    .forward(&mgr, sort, &self.scanner, now)
+                {
                     self.visual = None;
                     self.rewatch();
                 }
@@ -5382,7 +5507,11 @@ impl App {
                 }
             }
             C::ShuttleForward | C::ShuttleReverse => {
-                let dir = if command == C::ShuttleForward { 1.0 } else { -1.0 };
+                let dir = if command == C::ShuttleForward {
+                    1.0
+                } else {
+                    -1.0
+                };
                 let held = self.key_repeat;
                 if let Some(player) = self.transport() {
                     player.shuttle(dir, held, now);
@@ -5411,7 +5540,11 @@ impl App {
                 }
             }
             C::FrameStepBack | C::FrameStepForward => {
-                let frames = if command == C::FrameStepForward { 1 } else { -1 };
+                let frames = if command == C::FrameStepForward {
+                    1
+                } else {
+                    -1
+                };
                 if let Some(player) = self.transport() {
                     player.step(frames, now);
                 }
@@ -5751,7 +5884,7 @@ impl App {
 
     /// The recursive-size walker, started the first time it is asked for.
     fn du(&mut self) -> &df_core::du::DuScanner {
-        let waker = self.waker.clone();
+        let waker = self.waker.named("du");
         self.du
             .get_or_insert_with(|| df_core::du::DuScanner::start(Arc::new(move || waker.wake())))
     }
@@ -5922,7 +6055,9 @@ impl App {
     ) -> Option<OverlayGeom> {
         match &self.dialog {
             Some(Dialog::Confirm(confirm)) => {
-                return Some(OverlayGeom::Confirm(dialog::confirm_geometry(area, confirm)))
+                return Some(OverlayGeom::Confirm(dialog::confirm_geometry(
+                    area, confirm,
+                )))
             }
             Some(Dialog::Conflict(conflict)) => {
                 return Some(OverlayGeom::Conflict(dialog::conflict_geometry(
@@ -6165,7 +6300,7 @@ impl App {
     /// to ask about — see [`App::repo`] — except the spot panel, which asks
     /// about one path and can afford to.
     fn git(&mut self) -> &df_core::git::Git {
-        let waker = self.waker.clone();
+        let waker = self.waker.named("git");
         self.git
             .get_or_insert_with(|| df_core::git::Git::start(Arc::new(move || waker.wake())))
     }
@@ -6207,7 +6342,9 @@ impl App {
     /// queued or running, so a `cargo build` under the cursor costs one status,
     /// not one per event.
     fn git_touched(&mut self, dir: &Path) {
-        let Some(root) = self.repo.clone() else { return };
+        let Some(root) = self.repo.clone() else {
+            return;
+        };
         if !dir.starts_with(&root) {
             return;
         }
@@ -6270,8 +6407,7 @@ impl App {
     ) -> egui::Rect {
         match control {
             Control::Row(Column::List, index) => {
-                let rect =
-                    grid::pane_rect(geom.list, geom.grid.as_ref(), geom.list_scroll, index);
+                let rect = grid::pane_rect(geom.list, geom.grid.as_ref(), geom.list_scroll, index);
                 if pointer.shift {
                     // Shift-click: the run from the cursor to here, the way
                     // every list in every program extends a selection.
@@ -6361,13 +6497,23 @@ impl App {
                 geom.basket.chip
             }
             Control::BasketRemove(index) => {
-                let rect = geom.basket.removes.get(index).copied().unwrap_or(egui::Rect::ZERO);
+                let rect = geom
+                    .basket
+                    .removes
+                    .get(index)
+                    .copied()
+                    .unwrap_or(egui::Rect::ZERO);
                 self.basket.remove(self.basket_first + index);
                 self.clamp_basket();
                 rect
             }
             Control::BasketRow(index) => {
-                let rect = geom.basket.rows.get(index).copied().unwrap_or(egui::Rect::ZERO);
+                let rect = geom
+                    .basket
+                    .rows
+                    .get(index)
+                    .copied()
+                    .unwrap_or(egui::Rect::ZERO);
                 if let Some(path) = self.basket.paths().get(self.basket_first + index).cloned() {
                     self.reveal(&path, now);
                 }
@@ -6474,7 +6620,12 @@ impl App {
             // come out before it can be opened, so offering "Extract here" on
             // it would offer something that cannot be done.
             trash: self.tab().trash.is_some(),
-            trashed: self.tab().trash.as_ref().map(|v| v.items.len()).unwrap_or(0),
+            trashed: self
+                .tab()
+                .trash
+                .as_ref()
+                .map(|v| v.items.len())
+                .unwrap_or(0),
             archive: self.tab().virtual_kind().is_none()
                 && entry
                     .as_ref()
@@ -6694,7 +6845,9 @@ impl App {
     /// the same reason: a band that shrinks has to hand back a selection that
     /// was there before the drag started, not clear it.
     fn apply_band(&mut self, run: Option<(usize, usize)>) {
-        let Some(band) = self.band.as_mut() else { return };
+        let Some(band) = self.band.as_mut() else {
+            return;
+        };
         let dir = &mut self.tabs.active_mut().cwd.dir;
         match run {
             Some(wanted) => {
@@ -6857,7 +7010,8 @@ impl App {
             }
             Err(e) => {
                 log::warn!("could not open a window on {}: {e}", dir.display());
-                self.toasts.error("Could not open a new window", now);
+                self.toasts
+                    .error(format!("Could not open a new window: {e}"), now);
                 false
             }
         }
@@ -6891,7 +7045,13 @@ impl App {
     /// [`crate::window::DETACH_THRESHOLD`] — so the hand sees it has hold of
     /// something long before the gesture can do anything, which is what makes
     /// the big threshold feel like a decision rather than a dead zone.
-    fn begin_tab_drag(&mut self, index: usize, from: egui::Pos2, at: egui::Pos2, strip: egui::Rect) {
+    fn begin_tab_drag(
+        &mut self,
+        index: usize,
+        from: egui::Pos2,
+        at: egui::Pos2,
+        strip: egui::Rect,
+    ) {
         let Some(label) = self.tabs.iter().nth(index).map(Tab::title) else {
             return;
         };
@@ -6979,7 +7139,10 @@ impl App {
         }
         let verb = dnd::verb_for(pointer.toggle, pointer.alt);
         let at = pointer.at.unwrap_or(drag.at);
-        let dt = now.saturating_duration_since(drag.last).as_secs_f32().min(0.25);
+        let dt = now
+            .saturating_duration_since(drag.last)
+            .as_secs_f32()
+            .min(0.25);
         if let Some(drag) = self.drag.as_mut() {
             drag.at = at;
             drag.last = now;
@@ -7010,7 +7173,11 @@ impl App {
             })
         };
         let dest = target.and_then(|target| self.dest_of(target));
-        let paths = self.drag.as_ref().map(|d| d.paths.clone()).unwrap_or_default();
+        let paths = self
+            .drag
+            .as_ref()
+            .map(|d| d.paths.clone())
+            .unwrap_or_default();
         let valid = dest
             .as_deref()
             .is_some_and(|dest| dnd::valid_dest(dest, &paths, verb));
@@ -7071,9 +7238,7 @@ impl App {
                 .parent
                 .as_ref()
                 .map(|parent| parent.path().to_path_buf()),
-            dnd::Target::Crumb(index) => {
-                self.path_bar.1.get(index).map(|crumb| crumb.path.clone())
-            }
+            dnd::Target::Crumb(index) => self.path_bar.1.get(index).map(|crumb| crumb.path.clone()),
             dnd::Target::Tab(index) => self
                 .tabs
                 .iter()
@@ -7133,8 +7298,10 @@ impl App {
         // originals are still here.
         let verb = match (verb, crate::remote::at_of(dest)) {
             (dnd::Verb::Move, Some(_)) => {
-                self.toasts
-                    .notice("Uploaded as a copy — moving to a server is not in v1", now);
+                self.toasts.notice(
+                    "Uploaded as a copy — a move to a server is not supported",
+                    now,
+                );
                 dnd::Verb::Copy
             }
             (dnd::Verb::Link, Some(_)) => {
@@ -7154,9 +7321,12 @@ impl App {
             }
             // The same default `-` has: a symlink, because a hard link across
             // filesystems is not a thing and a drag crosses them freely.
-            dnd::Verb::Link => {
-                self.link_into(paths.to_vec(), dest.to_path_buf(), Some(LinkKind::Absolute), now)
-            }
+            dnd::Verb::Link => self.link_into(
+                paths.to_vec(),
+                dest.to_path_buf(),
+                Some(LinkKind::Absolute),
+                now,
+            ),
         }
     }
 
@@ -7177,7 +7347,9 @@ impl App {
     // motion with no gap — and dragging back *in* should light the targets
     // again through the data device rather than through egui.
     fn hand_off_drag(&mut self, now: Instant) {
-        let Some(drag) = self.drag.as_mut() else { return };
+        let Some(drag) = self.drag.as_mut() else {
+            return;
+        };
         drag.handed_off = true;
         let paths = drag.paths.clone();
         let count = paths.len();
@@ -7196,9 +7368,8 @@ impl App {
             .as_ref()
             .map(|gfx| gfx.egui_ctx.pixels_per_point().round() as i32)
             .unwrap_or(1);
-        let rgba = |color: egui::Color32| {
-            crate::wayland::Rgba(color.r(), color.g(), color.b(), color.a())
-        };
+        let rgba =
+            |color: egui::Color32| crate::wayland::Rgba(color.r(), color.g(), color.b(), color.a());
         device.drag(
             dnd::offer(&paths),
             count,
@@ -7210,7 +7381,9 @@ impl App {
 
     /// What [`crate::wayland`] has to say, once a frame.
     fn poll_data_device(&mut self, now: Instant) {
-        let Some(device) = &self.data_device else { return };
+        let Some(device) = &self.data_device else {
+            return;
+        };
         for event in device.poll() {
             match event {
                 crate::wayland::Event::Enter { at, ours } => {
@@ -7345,7 +7518,7 @@ impl App {
             self.set_clipboard(false, now);
             if !paths.is_empty() {
                 self.toasts
-                    .notice("Yanked — `c t` copies one file's text", now);
+                    .notice("Yanked — c t copies one file's text", now);
             }
             return;
         };
@@ -7400,8 +7573,7 @@ impl App {
     /// The spot panel's `c c`: the focused row's value.
     fn copy_spot_cell(&mut self, now: Instant) {
         let Some((label, text)) = self.spot.as_ref().and_then(Spot::cell_text) else {
-            self.toasts
-                .notice("Nothing to copy on this row", now);
+            self.toasts.notice("Nothing to copy on this row", now);
             return;
         };
         self.offer(
@@ -7424,9 +7596,7 @@ impl App {
         match error {
             // `wl-clipboard` not being installed is not something the user did,
             // so it is a plain notice rather than a red bar.
-            crate::clipboard::ClipError::Missing(_) => {
-                self.toasts.notice(error.to_string(), now)
-            }
+            crate::clipboard::ClipError::Missing(_) => self.toasts.notice(error.to_string(), now),
             crate::clipboard::ClipError::Failed(_) => self.toasts.error(error.to_string(), now),
         }
     }
@@ -7492,9 +7662,7 @@ impl App {
             }
         };
         match crate::clipboard::choose_offer(&types) {
-            None => self
-                .toasts
-                .notice("Nothing yanked — y copies, x cuts", now),
+            None => self.toasts.notice("Nothing yanked — y copies, x cuts", now),
             Some(crate::clipboard::Offer::Files) => self.paste_clipboard_files(force, now),
             Some(crate::clipboard::Offer::Image(mime)) => {
                 let extension = crate::clipboard::image_extension(&mime);
@@ -7532,7 +7700,10 @@ impl App {
         }
         if paths.len() < count {
             self.toasts.notice(
-                format!("{} of {count} clipboard files are gone", count - paths.len()),
+                format!(
+                    "{} of {count} clipboard files are gone",
+                    count - paths.len()
+                ),
                 now,
             );
         }
@@ -7575,7 +7746,10 @@ impl App {
             });
         }
         self.toasts.undo(
-            format!("Pasted {} into {name}", crate::format::human_size(bytes.len() as u64)),
+            format!(
+                "Pasted {} into {name}",
+                crate::format::human_size(bytes.len() as u64)
+            ),
             now,
         );
         let cwd = self.cwd();
@@ -7608,10 +7782,8 @@ impl App {
             .then(|| grid::metrics(ui::content_rect(layout.list).width()));
         self.columns = first_metrics.as_ref().map(|m| m.columns).unwrap_or(1);
         self.pane_step = grid::pane_step(first_metrics.as_ref());
-        let page = crate::viewport::visible_rows(
-            ui::content_rect(layout.list).height(),
-            self.pane_step,
-        );
+        let page =
+            crate::viewport::visible_rows(ui::content_rect(layout.list).height(), self.pane_step);
         self.route_keys(page, now);
         self.which.update(self.keys.which_key_due(), now);
         // The two write-behind timers, both of which are deadlines rather than
@@ -7637,10 +7809,8 @@ impl App {
         // A "page" is a *row* of the pane either way — for a grid that is a
         // whole row of tiles, so `Ctrl+d` moves the same distance down the
         // window in both views.
-        let page = crate::viewport::visible_rows(
-            list_content.height(),
-            grid::pane_step(metrics.as_ref()),
-        );
+        let page =
+            crate::viewport::visible_rows(list_content.height(), grid::pane_step(metrics.as_ref()));
 
         // ── Pointer (PLAN §7.5) ─────────────────────────────────────────────
         let pointer = ui.input(|i| Pointer {
@@ -7669,8 +7839,7 @@ impl App {
         });
         let scroll_rows = self.tab().cwd.scroll_rows(now);
         let parent_content = ui::content_rect(layout.parent);
-        let parent_page =
-            crate::viewport::visible_rows(parent_content.height(), ui::ROW_HEIGHT);
+        let parent_page = crate::viewport::visible_rows(parent_content.height(), ui::ROW_HEIGHT);
         let parent_scroll = self
             .tab()
             .parent
@@ -7687,8 +7856,7 @@ impl App {
         // separately is how a bar grows a one-pixel lie at its edges.
         self.sync_path_bar();
         let branch_room = chrome::branch_width(&painter, self.path_bar.2.as_deref());
-        let crumb_rects =
-            chrome::crumb_rects(&painter, layout.path, &self.path_bar.1, branch_room);
+        let crumb_rects = chrome::crumb_rects(&painter, layout.path, &self.path_bar.1, branch_room);
         let menu_geometry = self
             .menu
             .as_ref()
@@ -7724,7 +7892,12 @@ impl App {
                     .remove_at(p)
                     .map(Control::BasketRemove)
                     .or_else(|| basket_geometry.row_at(p).map(Control::BasketRow))
-                    .or_else(|| basket_geometry.chip.contains(p).then_some(Control::BasketChip))?;
+                    .or_else(|| {
+                        basket_geometry
+                            .chip
+                            .contains(p)
+                            .then_some(Control::BasketChip)
+                    })?;
                 return Some((control, p));
             }
             let control = layout
@@ -7901,7 +8074,14 @@ impl App {
             self.band = None;
         }
         if pointer.down {
-            self.drag(pointer.at, list_content, layout.strip, scroll_rows, metrics, now);
+            self.drag(
+                pointer.at,
+                list_content,
+                layout.strip,
+                scroll_rows,
+                metrics,
+                now,
+            );
         }
 
         // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────
@@ -7927,17 +8107,21 @@ impl App {
         // The external drag's own highlight follows the pointer exactly as the
         // internal one's does — `wl_data_device` reports surface-local motion,
         // so a drop from another application is aimed, not guessed.
-        let incoming_target = self.incoming.as_ref().map(|incoming| incoming.at).and_then(|at| {
-            let tab = self.tab();
-            dnd::target_at(&zones, at, |column, index| match column {
-                Column::List => tab.cwd.dir.row(index).is_some_and(|e| e.is_dir()),
-                Column::Parent => tab
-                    .parent
-                    .as_ref()
-                    .and_then(|p| p.dir.row(index))
-                    .is_some_and(|e| e.is_dir()),
-            })
-        });
+        let incoming_target = self
+            .incoming
+            .as_ref()
+            .map(|incoming| incoming.at)
+            .and_then(|at| {
+                let tab = self.tab();
+                dnd::target_at(&zones, at, |column, index| match column {
+                    Column::List => tab.cwd.dir.row(index).is_some_and(|e| e.is_dir()),
+                    Column::Parent => tab
+                        .parent
+                        .as_ref()
+                        .and_then(|p| p.dir.row(index))
+                        .is_some_and(|e| e.is_dir()),
+                })
+            });
         self.targets.tick(
             dragging
                 .as_ref()
@@ -8021,10 +8205,11 @@ impl App {
         tab.cwd.set_first(list_first, now);
         let cursor = tab.cwd.dir.cursor();
         self.cursor_glow.tick(Some(cursor), None, now);
+        // Focus commits instantly; its picture catches up (PLAN §2.1).
+        self.focus_fade.tick(self.focus, now);
         // Where a rename popup and the opener picker anchor themselves — the
         // row the cursor is on, as it was actually drawn this frame.
-        self.cursor_rect =
-            grid::pane_rect(list_content, metrics.as_ref(), scroll_rows, cursor);
+        self.cursor_rect = grid::pane_rect(list_content, metrics.as_ref(), scroll_rows, cursor);
 
         if let Some(parent) = &mut self.tabs.active_mut().parent {
             let first = crate::viewport::first_visible(
@@ -8145,8 +8330,7 @@ impl App {
             Some(mut help) => {
                 let rect = chrome::help_rect(area, layout.bar);
                 let lines = self.help_lines();
-                let total =
-                    help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::LIST).len();
+                let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::LIST).len();
                 // The same scrolloff rule the panes use, on the same numbers:
                 // one list-scrolling behaviour in the program, not two.
                 help.first = crate::viewport::first_visible(
@@ -8237,11 +8421,16 @@ impl App {
 
         // PLAN §2.1's focus visuals: the pane with the keyboard wears the 2 px
         // accent rule and the 4% tint, and exactly one pane ever does.
-        let list_focused = self.focus == Focus::List;
-        let list_ground = paint.pane_fill(self.palette.base, list_focused);
-        paint.pane(layout.parent, self.palette.mantle, self.focus == Focus::Parent);
-        paint.pane(layout.list, self.palette.base, list_focused);
-        paint.pane(layout.preview, self.palette.mantle, self.focus == Focus::Preview);
+        // …as an *amount*, so the treatment eases across instead of popping
+        // (PLAN §2.1's 120 ms). The amounts always sum to 1: one pane is
+        // arriving at exactly the rate the other is leaving.
+        let parent_focus = self.focus_fade.amount(Focus::Parent, now);
+        let list_focus = self.focus_fade.amount(Focus::List, now);
+        let preview_focus = self.focus_fade.amount(Focus::Preview, now);
+        let list_ground = paint.pane_fill(self.palette.base, list_focus);
+        paint.pane(layout.parent, self.palette.mantle, parent_focus);
+        paint.pane(layout.list, self.palette.base, list_focus);
+        paint.pane(layout.preview, self.palette.mantle, preview_focus);
 
         if let Some(parent) = &self.tab().parent {
             paint.listing(ListView {
@@ -8257,11 +8446,7 @@ impl App {
                 // The parent's marker is normally a fact about the path rather
                 // than a cursor, so it stays quiet — until the keyboard is
                 // actually in that pane and it *is* the cursor.
-                cursor_alpha: if self.focus == Focus::Parent {
-                    1.0
-                } else {
-                    crate::ui::GHOST_CURSOR
-                },
+                cursor_alpha: crate::ui::ghost_cursor(parent_focus),
                 linemode: LineMode::None,
                 dim: true,
                 slow_load: now.duration_since(parent.scan_started) >= LOADING_DELAY,
@@ -8304,7 +8489,7 @@ impl App {
             // somewhere else the cursor row dims to a ghost bar, so "where am
             // I" and "where do my keys go" are two questions with two answers
             // and both are always on screen.
-            cursor_alpha: if list_focused { 1.0 } else { crate::ui::GHOST_CURSOR },
+            cursor_alpha: crate::ui::ghost_cursor(list_focus),
             linemode: self.mgr.linemode,
             dim: false,
             slow_load: now.duration_since(self.tab().cwd.scan_started) >= LOADING_DELAY,
@@ -8320,11 +8505,7 @@ impl App {
             usage: self.usage.as_ref().filter(|u| u.is_about(&cwd_now)),
             // PLAN §7.4: in the trash the column is where each row came from,
             // which is the fact the view is read for.
-            notes: self
-                .tab()
-                .trash
-                .is_some()
-                .then_some(&self.trash_notes),
+            notes: self.tab().trash.is_some().then_some(&self.trash_notes),
         };
         match (&metrics, &self.thumbs) {
             // PLAN §2's grid. Same directory, same cursor, same selection and
@@ -8402,10 +8583,7 @@ impl App {
                     }
                     // An empty archive, or a filter that matched nothing: the
                     // same quiet label an empty directory's preview gets.
-                    None => paint.quiet_label(
-                        ui::content_rect(layout.preview),
-                        "nothing to show",
-                    ),
+                    None => paint.quiet_label(ui::content_rect(layout.preview), "nothing to show"),
                 }
             }
             // On a remote service the hovered path is a URL, so the pane is the
@@ -8433,15 +8611,10 @@ impl App {
                             state.is_some_and(|p| p.loading),
                         );
                     }
-                    None => paint.quiet_label(
-                        ui::content_rect(layout.preview),
-                        "nothing to show",
-                    ),
+                    None => paint.quiet_label(ui::content_rect(layout.preview), "nothing to show"),
                 }
             }
-            None => {
-                crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now)
-            }
+            None => crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now),
         }
         // Over the pane's own body — the cached thumbnail is the poster the
         // first decoded frame lands on top of — and under everything else.
@@ -8512,10 +8685,7 @@ impl App {
 
         // An anchored prompt (`r`, `R`, the conflict rename) floats over the row
         // it is about, so the bar keeps saying where you are underneath it.
-        let anchored = self
-            .prompt
-            .as_ref()
-            .filter(|prompt| prompt.kind.anchored());
+        let anchored = self.prompt.as_ref().filter(|prompt| prompt.kind.anchored());
         match &self.prompt {
             Some(prompt) if prompt.kind.anchored() => {
                 let dir = &self.tab().cwd.dir;
@@ -8560,11 +8730,7 @@ impl App {
             None if self.help.is_some() => chrome::hint_bar(
                 &paint,
                 layout.bar,
-                &[
-                    ("↑↓", "move"),
-                    ("f", "filter"),
-                    ("Esc", "close"),
-                ],
+                &[("↑↓", "move"), ("f", "filter"), ("Esc", "close")],
             ),
             None => {
                 let dir = &self.tab().cwd.dir;
@@ -8586,28 +8752,14 @@ impl App {
         match (&overlay, &self.dialog) {
             (Some(OverlayGeom::Mounts(geometry)), _) => {
                 if let Some(card) = &self.mounts {
-                    crate::mounts::paint(&paint, area, card, geometry, &self.hovers);
+                    crate::mounts::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
                 }
             }
             (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) => {
-                dialog::paint_bulk(
-                    &paint,
-                    area,
-                    bulk,
-                    geometry,
-                    &self.hovers,
-                    &self.ripples,
-                );
+                dialog::paint_bulk(&paint, area, bulk, geometry, &self.hovers, &self.ripples);
             }
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
-                dialog::paint_confirm(
-                    &paint,
-                    area,
-                    confirm,
-                    geometry,
-                    &self.hovers,
-                    &self.ripples,
-                );
+                dialog::paint_confirm(&paint, area, confirm, geometry, &self.hovers, &self.ripples);
             }
             (Some(OverlayGeom::Conflict(geometry)), Some(Dialog::Conflict(conflict))) => {
                 dialog::paint_conflict(
@@ -8663,7 +8815,11 @@ impl App {
         // Not for our *own* drag come back through the compositor: the window
         // does not need telling that it is about to be handed something it is
         // holding.
-        if self.incoming.as_ref().is_some_and(|incoming| !incoming.ours) {
+        if self
+            .incoming
+            .as_ref()
+            .is_some_and(|incoming| !incoming.ours)
+        {
             paint.drop_window(area);
         }
         if let Some(zones) = &self.zones {
@@ -8772,6 +8928,10 @@ impl App {
         // frame, and `animating()` says so — idle costs zero frames.
         let animating = [
             ("hovers", self.hovers.animating()),
+            // The focus treatment crossing between panes. It retires itself
+            // once it has arrived (see `FocusFade::tick`), so a settled
+            // keyboard costs nothing.
+            ("focus", self.focus_fade.animating(now)),
             ("cursor_glow", self.cursor_glow.animating()),
             ("ripples", self.ripples.animating(now)),
             ("tab", self.tab().animating(now)),
@@ -8798,10 +8958,7 @@ impl App {
             // The menu's dismissal fade. It ends, and `Menu::spent` is what
             // drops it — an option that is never `None` is a window that never
             // stops asking for frames (PLAN §1).
-            (
-                "menu",
-                self.menu.as_ref().is_some_and(|menu| !menu.live()),
-            ),
+            ("menu", self.menu.as_ref().is_some_and(|menu| !menu.live())),
             ("toast", self.toasts.animating(now)),
             // The FLIP's travel and the fades either side of it. It is dropped
             // the moment it arrives (see the frame), so this can never be
@@ -8822,7 +8979,11 @@ impl App {
         // instrument for the Phase 6 "zero repaints at rest" audit, because a
         // stuck `animating()` source is invisible from outside.
         if frame_log_enabled() {
-            let hot: Vec<&str> = animating.iter().filter(|(_, on)| *on).map(|(n, _)| *n).collect();
+            let hot: Vec<&str> = animating
+                .iter()
+                .filter(|(_, on)| *on)
+                .map(|(n, _)| *n)
+                .collect();
             log::info!("frame: animating={hot:?}");
         }
         if animating.iter().any(|(_, on)| *on) {
@@ -8888,9 +9049,9 @@ impl App {
             search,
             state,
         ]
-            .into_iter()
-            .flatten()
-            .min()
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// How long until a pane has to admit it is loading, if one is about to.
@@ -8943,6 +9104,13 @@ impl App {
                 gfx.surface_config.width,
                 gfx.surface_config.height
             );
+        }
+        if !self.logged_first_listing {
+            let rows = self.tabs.active().cwd.dir.len();
+            if rows > 0 {
+                self.logged_first_listing = true;
+                log::info!("first listing {rows} rows");
+            }
         }
 
         // Repaint policy: egui says when it next needs a frame. Zero means
@@ -9068,7 +9236,11 @@ fn overlay_hints(
         ];
     }
     match dialog {
-        Some(Dialog::Confirm(_)) => vec![("Enter / y", "confirm"), ("Esc / n", "cancel"), ("↑↓", "scroll")],
+        Some(Dialog::Confirm(_)) => vec![
+            ("Enter / y", "confirm"),
+            ("Esc / n", "cancel"),
+            ("↑↓", "scroll"),
+        ],
         Some(Dialog::Bulk(_)) => vec![
             ("Tab / ↑↓", "next field"),
             ("Enter", "rename"),
@@ -9233,7 +9405,9 @@ fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>) {
         Ok(_) => {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
             (
-                path.parent().map(Path::to_path_buf).unwrap_or_else(fallback),
+                path.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(fallback),
                 name,
             )
         }
@@ -9710,7 +9884,9 @@ mod tests {
         use df_core::ops::OpOutcome;
 
         let copied = OpOutcome {
-            record: Some(OpRecord::Copy { created: Vec::new() }),
+            record: Some(OpRecord::Copy {
+                created: Vec::new(),
+            }),
             message: "Copied 3 items".to_string(),
             ..Default::default()
         };
@@ -9839,7 +10015,9 @@ mod tests {
         // The disks card advertises the two verbs `[pick]` has no row for.
         let mounts = overlay_hints(&None, false, false, true);
         assert!(mounts.iter().any(|(k, what)| *k == "e" && *what == "eject"));
-        assert!(mounts.iter().any(|(k, what)| *k == "u" && *what == "unmount"));
+        assert!(mounts
+            .iter()
+            .any(|(k, what)| *k == "u" && *what == "unmount"));
     }
 
     /// **Only video and audio grow a transport** (PLAN §4.3). A PDF has pages
@@ -9888,7 +10066,10 @@ mod tests {
     /// Deleting the directory you are standing in must land somewhere real.
     #[test]
     fn the_nearest_existing_ancestor_is_found() {
-        assert_eq!(nearest_existing(Path::new("/nonexistent/a/b/c")), PathBuf::from("/"));
+        assert_eq!(
+            nearest_existing(Path::new("/nonexistent/a/b/c")),
+            PathBuf::from("/")
+        );
         let exe = std::env::current_exe().expect("test binary path");
         let parent = exe.parent().expect("a parent").to_path_buf();
         assert_eq!(nearest_existing(&exe.join("gone")), parent);

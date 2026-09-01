@@ -107,7 +107,7 @@ pub fn measure(path: &Path) -> Result<(u64, u64)> {
 /// a whole tree.
 ///
 /// `overwrite` decides what happens when `dst` already exists — the conflict
-/// itself is resolved a layer up, in [`super::paste`], because only the UI can
+/// itself is resolved a layer up, in [`mod@super::paste`], because only the UI can
 /// ask the user. On cancellation or failure, anything this call created is
 /// removed again: a half-copied file is worse than no file, since it looks
 /// complete in a listing.

@@ -48,13 +48,6 @@ const CARD_WIDTH: f32 = 640.0;
 /// *typed into* and it has to look like a field rather than the first result.
 const FIELD_ROW: f32 = 28.0;
 
-/// How much of the space around a centred card goes above it.
-///
-/// `delightful-ui` §16: content centred in a large region reads as sitting low
-/// at the true 50/50 mark, and the fix is to bias it up towards a 60/40 split.
-/// 0.4 is that split — four tenths of the slack above, six below.
-const OPTICAL_CENTRE: f32 = 0.4;
-
 /// A search result row's height, per mode.
 ///
 /// A name is one line and a content hit is two — the file and line on top, the
@@ -99,7 +92,7 @@ pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
     let body = (shown.max(1) as f32) * CARD_ROW;
     let height = CARD_PAD * 2.0 + FIELD_ROW + GAP + body;
     let height = height.min(area.height() - chrome::CARD_MARGIN * 2.0);
-    let top = area.top() + (area.height() - height) * OPTICAL_CENTRE;
+    let top = area.top() + (area.height() - height) * crate::chrome::OPTICAL_CENTRE;
     let card = Rect::from_min_size(
         egui::pos2(area.center().x - width / 2.0, top),
         egui::vec2(width, height),
@@ -111,7 +104,10 @@ pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
     let rows = (0..shown)
         .map(|n| {
             Rect::from_min_size(
-                egui::pos2(card.left() + CARD_PAD, field.bottom() + GAP + n as f32 * CARD_ROW),
+                egui::pos2(
+                    card.left() + CARD_PAD,
+                    field.bottom() + GAP + n as f32 * CARD_ROW,
+                ),
                 egui::vec2(width - CARD_PAD * 2.0, CARD_ROW),
             )
         })
@@ -144,11 +140,8 @@ pub fn paint_finder(
         FontId::proportional(FONT),
         palette.overlay0,
     );
-    let title_width = chrome::text_width(
-        painter,
-        finder.source.title(),
-        FontId::proportional(FONT),
-    );
+    let title_width =
+        chrome::text_width(painter, finder.source.title(), FontId::proportional(FONT));
     let query_left = text_left + title_width + GAP;
     let query = finder.query();
     if query.is_empty() {
@@ -179,7 +172,7 @@ pub fn paint_finder(
     painter.rect_filled(
         Rect::from_min_size(
             egui::pos2(caret_x, field.top() + 6.0),
-            egui::vec2(1.5, field.height() - 12.0),
+            egui::vec2(crate::chrome::CARET_WIDTH, field.height() - 12.0),
         ),
         0,
         palette.text,
@@ -370,8 +363,7 @@ pub fn paint_search(
         FontId::proportional(FONT),
         palette.overlay0,
     );
-    let title_width =
-        chrome::text_width(painter, search.mode.title(), FontId::proportional(FONT));
+    let title_width = chrome::text_width(painter, search.mode.title(), FontId::proportional(FONT));
     let query_left = text_left + title_width + GAP;
     let query = search.query();
     painter.text(
@@ -399,7 +391,7 @@ pub fn paint_search(
         painter.rect_filled(
             Rect::from_min_size(
                 egui::pos2(caret_x, field.top() + 6.0),
-                egui::vec2(1.5, field.height() - 12.0),
+                egui::vec2(crate::chrome::CARET_WIDTH, field.height() - 12.0),
             ),
             0,
             palette.text,
@@ -678,7 +670,10 @@ mod tests {
         );
         let above = geometry.card.top() - area().top();
         let below = area().bottom() - geometry.card.bottom();
-        assert!(below > above, "more space below than above: {above} / {below}");
+        assert!(
+            below > above,
+            "more space below than above: {above} / {below}"
+        );
     }
 
     /// Every row is inside the card, none of them overlap, and they are in
@@ -688,7 +683,10 @@ mod tests {
         let geometry = finder_geometry(area(), 12);
         assert_eq!(geometry.rows.len(), 12);
         for (n, rect) in geometry.rows.iter().enumerate() {
-            assert!(geometry.card.contains_rect(*rect), "row {n} escaped the card");
+            assert!(
+                geometry.card.contains_rect(*rect),
+                "row {n} escaped the card"
+            );
             assert_eq!(geometry.row_at(rect.center()), Some(n));
             if n > 0 {
                 assert!(rect.top() >= geometry.rows[n - 1].bottom() - 0.01);

@@ -1,12 +1,12 @@
-//! Carrying out an [`ExtractPlan`] — the half [`super::extract`] deliberately
+//! Carrying out an [`ExtractPlan`] — the half [`mod@super::extract`] deliberately
 //! left for later, written now (PLAN §7.3: "extract selection with progress").
 //!
 //! ## The one rule
 //!
 //! **An entry's name never becomes a path.** The plan already decided where
 //! every entry lands, checking the name for traversal twice and the joined
-//! destination once more (see [`super::extract`]). What the walkers below do
-//! with a name is *look it up*: [`Sink::open`] takes the bytes an archive spells
+//! destination once more (see [`mod@super::extract`]). What the walkers below do
+//! with a name is *look it up*: `Sink::open` takes the bytes an archive spells
 //! its member with, normalizes them the same way the listing did, and asks the
 //! plan's map whether there is a destination for that key. A name that is not in
 //! the map — because it was unsafe, or encrypted, or simply not selected — gets
@@ -16,12 +16,12 @@
 //!
 //! ## Why the walkers live in the parsers
 //!
-//! [`super::zip::extract_into`] and [`super::tar::extract_into`] are next to the
+//! `super::zip::extract_into` and `super::tar::extract_into` are next to the
 //! listing code for their formats, because they are the same parse: a zip's
 //! local file headers and a tar's 512-byte blocks. What is *here* is everything
 //! that is not format-specific — the destination map, the collision suffixes,
 //! the progress ticks, the partial file that a cancel has to remove — expressed
-//! once, as a [`Sink`] the walkers can only push bytes at.
+//! once, as a `Sink` the walkers can only push bytes at.
 //!
 //! ## Decompression
 //!
@@ -497,11 +497,7 @@ pub fn extract(plan: &ExtractPlan, ctx: &TaskCtx) -> Result<ExtractReport> {
 /// The same spawn the listing uses ([`super::list`]), for the same reason: the
 /// child reads the file directly, so there is no second thread and no way for
 /// the parent to deadlock writing a pipe.
-fn extract_compressed_tar(
-    path: &Path,
-    format: ArchiveFormat,
-    sink: &mut Sink<'_>,
-) -> Result<()> {
+fn extract_compressed_tar(path: &Path, format: ArchiveFormat, sink: &mut Sink<'_>) -> Result<()> {
     let Some(binary) = format.decompressor() else {
         return Err(DfError::Op(format!(
             "{} archives are not supported",

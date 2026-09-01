@@ -143,6 +143,17 @@ const FOCUS_TINT: f32 = 0.04;
 /// the reason people lose their place in a three-column layout.
 pub const GHOST_CURSOR: f32 = 0.35;
 
+/// The cursor-row brightness for a pane that is `focused` far through the
+/// focus fade: [`GHOST_CURSOR`] when the keyboard is elsewhere, 1 when it is
+/// here, and eased between the two while it is moving (PLAN §2.1).
+///
+/// The ghost bar is part of the same statement as the tint and the rule, so it
+/// travels at the same speed. Left as a hard `if`, it was the one piece of the
+/// treatment that still popped.
+pub fn ghost_cursor(focused: f32) -> f32 {
+    GHOST_CURSOR + (1.0 - GHOST_CURSOR) * focused.clamp(0.0, 1.0)
+}
+
 /// How far a *hovered* row is lifted from the pane towards `surface0`.
 /// The full step, because hover is the palette's own next surface — moving up
 /// the ramp rather than inventing a colour (see [`crate::theme`]).
@@ -252,7 +263,7 @@ pub struct GhostFace<'a> {
 /// most of the way back into the pane's own grey: git does not know about it
 /// yet, so it should read as "nearly nothing" beside a real modification.
 ///
-/// [`FileStatus::Ignored`] gets no dot at all. It is said with
+/// [`df_core::git::FileStatus::Ignored`] gets no dot at all. It is said with
 /// [`IGNORED_DIM`] instead — a dot would be a mark drawing the eye to the one
 /// row in the pane that is asking for less of it.
 /// The git decoration for one row.
@@ -268,7 +279,10 @@ pub(crate) struct GitMark {
     pub status: Option<df_core::git::FileStatus>,
 }
 
-pub(crate) fn git_dot(status: df_core::git::FileStatus, palette: &Palette) -> Option<egui::Color32> {
+pub(crate) fn git_dot(
+    status: df_core::git::FileStatus,
+    palette: &Palette,
+) -> Option<egui::Color32> {
     use df_core::git::FileStatus as S;
     Some(match status {
         S::Ignored => return None,
@@ -376,7 +390,10 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
         )
     });
     let bar = egui::Rect::from_min_max(
-        egui::pos2(outer.left(), (outer.bottom() - CHROME_HEIGHT).max(outer.top())),
+        egui::pos2(
+            outer.left(),
+            (outer.bottom() - CHROME_HEIGHT).max(outer.top()),
+        ),
         outer.max,
     );
     let top = match strip {
@@ -405,7 +422,8 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool) -> Layout {
 
     let mut x = inner.left();
     let mut next = |w: f32| {
-        let rect = egui::Rect::from_min_size(egui::pos2(x, inner.top()), egui::vec2(w, inner.height()));
+        let rect =
+            egui::Rect::from_min_size(egui::pos2(x, inner.top()), egui::vec2(w, inner.height()));
         x += w + GAP;
         rect
     };
@@ -582,29 +600,40 @@ impl Painting<'_> {
     /// Public because the rows are drawn *from* it — every row colour is a step
     /// away from its pane's ground, so the two must be the same number and not
     /// two constants that happen to agree.
-    pub fn pane_fill(&self, fill: egui::Color32, focused: bool) -> egui::Color32 {
-        if focused {
-            mix(fill, self.palette.blue, FOCUS_TINT)
-        } else {
-            fill
-        }
+    /// `focused` is an *amount*, not a flag: 0 for a pane the keyboard has
+    /// left, 1 for the one it is in, and the eased values in between while
+    /// [`crate::focus::FocusFade`] carries the treatment across (PLAN §2.1's
+    /// 120 ms). Both the tint and the rule ride it, so the two halves of the
+    /// treatment always agree about where the keyboard is.
+    pub fn pane_fill(&self, fill: egui::Color32, focused: f32) -> egui::Color32 {
+        mix(
+            fill,
+            self.palette.blue,
+            FOCUS_TINT * focused.clamp(0.0, 1.0),
+        )
     }
 
     /// A pane's background, and the focus treatment if it has focus
     /// (PLAN §2.1).
-    pub fn pane(&self, rect: egui::Rect, fill: egui::Color32, focused: bool) {
+    pub fn pane(&self, rect: egui::Rect, fill: egui::Color32, focused: f32) {
+        let focused = focused.clamp(0.0, 1.0);
         let fill = self.pane_fill(fill, focused);
         self.painter.rect_filled(rect, PANE_RADIUS, fill);
-        if !focused {
+        if focused <= 0.0 {
             return;
         }
         // Inset to the pane's corner radius so the rule stops where the corner
         // starts turning, rather than being clipped square against it.
+        //
+        // The rule fades rather than growing out from the middle: it is a
+        // statement about the whole pane, and a 2 px bar unrolling across the
+        // top would draw the eye to the *motion* instead of to the column.
         let rule = egui::Rect::from_min_max(
             egui::pos2(rect.left() + PANE_RADIUS as f32, rect.top()),
             egui::pos2(rect.right() - PANE_RADIUS as f32, rect.top() + FOCUS_RULE),
         );
-        self.painter.rect_filled(rule, 1, self.palette.blue);
+        self.painter
+            .rect_filled(rule, 1, crate::chrome::fade(self.palette.blue, focused));
     }
 
     /// A directory listing's rows.
@@ -652,7 +681,9 @@ impl Painting<'_> {
         let last = (first + visible + 1).min(dir.len().saturating_sub(1));
 
         for index in first..=last {
-            let Some(entry) = dir.row(index) else { continue };
+            let Some(entry) = dir.row(index) else {
+                continue;
+            };
             let rect = row_rect(content, scroll_rows, index).translate(egui::vec2(offset_x, 0.0));
             if !rect.intersects(content) {
                 continue;
@@ -719,10 +750,7 @@ impl Painting<'_> {
                 // another colour: a row can be both selected and yanked, and
                 // the two facts must not fight over one strip of pixels.
                 let chip = egui::Rect::from_min_max(
-                    egui::pos2(
-                        rect.right() - CLIP_BAR_WIDTH,
-                        rect.top() + SELECT_BAR_INSET,
-                    ),
+                    egui::pos2(rect.right() - CLIP_BAR_WIDTH, rect.top() + SELECT_BAR_INSET),
                     egui::pos2(rect.right(), rect.bottom() - SELECT_BAR_INSET),
                 );
                 painter.rect_filled(
@@ -787,7 +815,9 @@ impl Painting<'_> {
                         growth: usage.growth(index.saturating_sub(first), self.now),
                     }
                 }),
-                notes.and_then(|notes| notes.get(&entry.name)).map(String::as_str),
+                notes
+                    .and_then(|notes| notes.get(&entry.name))
+                    .map(String::as_str),
             );
         }
         self.flip_ghosts(&painter, flip, content, ROW_RADIUS);
@@ -1101,10 +1131,7 @@ impl Painting<'_> {
         }
         // The badge sits inside the target's trailing edge, where a linemode
         // column has already given up its space to the ring.
-        let centre = egui::pos2(
-            rect.right() - DROP_BADGE - DROP_RING * 2.0,
-            rect.center().y,
-        );
+        let centre = egui::pos2(rect.right() - DROP_BADGE - DROP_RING * 2.0, rect.center().y);
         self.painter
             .circle_filled(centre, DROP_BADGE, fade(self.palette.crust, 0.85 * amount));
         self.painter.add(egui::Shape::line(
@@ -1184,7 +1211,10 @@ impl Painting<'_> {
                 .x;
             (count.to_string(), font, width + DROP_BADGE)
         });
-        let reserved = badge.as_ref().map(|(_, _, w)| *w + ROW_PAD_X).unwrap_or(0.0);
+        let reserved = badge
+            .as_ref()
+            .map(|(_, _, w)| *w + ROW_PAD_X)
+            .unwrap_or(0.0);
         let left = rect.left() + ROW_PAD_X + ICON_COLUMN;
         let inside = self.painter.with_clip_rect(rect);
         self.text_truncated(
@@ -1291,14 +1321,16 @@ impl Painting<'_> {
 
     pub fn quiet_label(&self, content: egui::Rect, text: &str) {
         self.painter.text(
-            egui::pos2(content.center().x, content.top() + content.height() * 0.42),
+            egui::pos2(
+                content.center().x,
+                content.top() + content.height() * crate::chrome::OPTICAL_BASELINE,
+            ),
             egui::Align2::CENTER_CENTER,
             text,
             egui::FontId::proportional(FONT_SIZE),
             self.palette.overlay0,
         );
     }
-
 }
 
 /// Turn a `DfError` string into something a person can act on.
@@ -1380,9 +1412,7 @@ mod tests {
         assert!((with_strip.list.top() - (with_strip.path.bottom() + GAP)).abs() < 1e-3);
         // The strip costs the panes exactly its own height plus one gap, and
         // nothing else moves.
-        assert!(
-            (bare.list.height() - with_strip.list.height() - CHROME_HEIGHT - GAP).abs() < 1e-3
-        );
+        assert!((bare.list.height() - with_strip.list.height() - CHROME_HEIGHT - GAP).abs() < 1e-3);
         assert_eq!(bare.bar, with_strip.bar);
         assert!((bare.list.width() - with_strip.list.width()).abs() < 1e-3);
     }
@@ -1481,8 +1511,26 @@ mod tests {
                 0.5,
             );
             // …and one that has finished fading draws nothing at all.
-            paint.ghost(&cards, &GhostFace { icon, name: "", count: None, verb: "" }, 0.0);
-            paint.ghost(&[], &GhostFace { icon, name: "x", count: None, verb: "Copy" }, 1.0);
+            paint.ghost(
+                &cards,
+                &GhostFace {
+                    icon,
+                    name: "",
+                    count: None,
+                    verb: "",
+                },
+                0.0,
+            );
+            paint.ghost(
+                &[],
+                &GhostFace {
+                    icon,
+                    name: "x",
+                    count: None,
+                    verb: "Copy",
+                },
+                1.0,
+            );
         });
     }
 
@@ -1520,7 +1568,11 @@ mod tests {
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {
-                assert_ne!(git_dot(*a, &palette), git_dot(*b, &palette), "{a:?} vs {b:?}");
+                assert_ne!(
+                    git_dot(*a, &palette),
+                    git_dot(*b, &palette),
+                    "{a:?} vs {b:?}"
+                );
             }
         }
     }

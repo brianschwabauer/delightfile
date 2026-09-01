@@ -52,7 +52,10 @@ pub struct Span {
 /// One block-level element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
-    Heading { level: u8, spans: Vec<Span> },
+    Heading {
+        level: u8,
+        spans: Vec<Span>,
+    },
     Paragraph(Vec<Span>),
     /// A list item. `marker` is what to draw in the gutter — a bullet, or the
     /// number the document wrote, so `3.` stays `3.` rather than being
@@ -89,7 +92,9 @@ pub const MAX_DEPTH: usize = 6;
 /// Parse a whole document.
 pub fn parse(source: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
-    let mut lines = source.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
+    let mut lines = source
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l));
     let mut pending: Vec<&str> = Vec::new();
     // `split` cannot be peeked and re-consumed cleanly across the fence case,
     // so the loop collects into a vector first — a preview is already capped at
@@ -117,7 +122,11 @@ pub fn parse(source: &str) -> Vec<Block> {
             i += 1;
             while i < all.len() {
                 let candidate = all[i].trim_start();
-                if candidate.starts_with(fence) && candidate.trim_end().chars().all(|c| c == fence.as_bytes()[0] as char)
+                if candidate.starts_with(fence)
+                    && candidate
+                        .trim_end()
+                        .chars()
+                        .all(|c| c == fence.as_bytes()[0] as char)
                 {
                     i += 1;
                     break;
@@ -267,7 +276,10 @@ fn list_item(trimmed: &str) -> Option<(String, &str)> {
             }
         }
     }
-    let digits = trimmed.len() - trimmed.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let digits = trimmed.len()
+        - trimmed
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
     if digits == 0 || digits > 9 {
         return None;
     }
@@ -396,7 +408,10 @@ pub fn inline(text: &str) -> Vec<Span> {
                 push(&mut buf, &mut spans, style);
                 spans.push(Span {
                     text: rest[ticks..ticks + end].to_string(),
-                    style: Style { code: true, ..style },
+                    style: Style {
+                        code: true,
+                        ..style
+                    },
                 });
                 i += ticks + end + ticks;
                 continue;
@@ -436,7 +451,10 @@ pub fn inline(text: &str) -> Vec<Span> {
                     // show it (see the module note on images).
                     spans.push(Span {
                         text: format!("🖼 {label}"),
-                        style: Style { code: true, ..style },
+                        style: Style {
+                            code: true,
+                            ..style
+                        },
                     });
                 } else {
                     for span in inline(label) {
@@ -462,7 +480,10 @@ pub fn inline(text: &str) -> Vec<Span> {
                 push(&mut buf, &mut spans, style);
                 spans.push(Span {
                     text: rest[1..end].to_string(),
-                    style: Style { link: true, ..style },
+                    style: Style {
+                        link: true,
+                        ..style
+                    },
                 });
                 i += end + 1;
                 continue;

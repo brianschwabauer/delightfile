@@ -180,7 +180,14 @@ impl Precedence {
 const CHIP_HEIGHT: f32 = 26.0;
 const TRAY_ROW: f32 = 22.0;
 /// The tray's inner padding.
-const TRAY_PAD: f32 = 8.0;
+///
+/// `chrome::CARD_PAD`, not a number of its own. The tray's plate is
+/// [`crate::chrome::card`], whose radius is `CARD_ROW_RADIUS + CARD_PAD`, so
+/// the padding that sets the gap between a row and that plate has to be the
+/// same `CARD_PAD` the radius was derived from or the corners stop being
+/// concentric (`delightful-ui` §15). It was 8 against a 10-derived radius,
+/// which pinched the gap by 2 px at every corner of the card.
+const TRAY_PAD: f32 = crate::chrome::CARD_PAD;
 /// The gap between the tray and the window's edges.
 const TRAY_MARGIN: f32 = 10.0;
 const TRAY_WIDTH: f32 = 260.0;
@@ -272,7 +279,11 @@ pub fn geometry(area: egui::Rect, basket: &Basket, open: bool, first: usize) -> 
         .iter()
         .map(|row| {
             egui::Rect::from_center_size(
-                egui::pos2(row.right() - REMOVE / 2.0 + 4.0, row.center().y),
+                // Flush with the row's right edge, not 4 px past it: the
+                // target's own inset from the card has to match the row's, or
+                // the × sits closer to the plate than the name it removes
+                // (`delightful-ui` §15's even insets).
+                egui::pos2(row.right() - REMOVE / 2.0, row.center().y),
                 egui::vec2(REMOVE, REMOVE.min(row.height() + 6.0)),
             )
         })
@@ -309,14 +320,20 @@ pub fn paint(
     if let Some(card) = geometry.card {
         crate::chrome::card(paint, card, 1.0);
         painter.text(
-            egui::pos2(card.left() + TRAY_PAD, card.top() + TRAY_PAD + TRAY_ROW / 2.0),
+            egui::pos2(
+                card.left() + TRAY_PAD,
+                card.top() + TRAY_PAD + TRAY_ROW / 2.0,
+            ),
             egui::Align2::LEFT_CENTER,
             "Basket",
             egui::FontId::proportional(TRAY_FONT + 1.0),
             palette.text,
         );
         painter.text(
-            egui::pos2(card.right() - TRAY_PAD, card.top() + TRAY_PAD + TRAY_ROW / 2.0),
+            egui::pos2(
+                card.right() - TRAY_PAD,
+                card.top() + TRAY_PAD + TRAY_ROW / 2.0,
+            ),
             egui::Align2::RIGHT_CENTER,
             "p pastes · B closes",
             egui::FontId::proportional(TRAY_FONT - 1.0),
@@ -328,11 +345,22 @@ pub fn paint(
             };
             let key = Control::BasketRow(i);
             let hover = hovers.hover(key);
+            // The row depresses and splashes like every other clickable row in
+            // the window (`delightful-ui` §4). It was the only list in the
+            // crate that lit on hover and then did nothing under the finger.
+            let rect = &pressed_rect(*rect, hovers.press(key));
             if hover > 0.0 {
                 painter.rect_filled(
                     *rect,
                     crate::ui::ROW_RADIUS,
                     crate::theme::mix(palette.crust, palette.surface1, hover),
+                );
+            }
+            for splash in ripples.splashes(key, paint.now) {
+                painter.circle_filled(
+                    splash.center,
+                    splash.radius,
+                    egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
                 );
             }
             let name = path
@@ -348,9 +376,17 @@ pub fn paint(
             );
             // The remove button: a small glyph in a target twice its size.
             let remove = geometry.removes[i];
-            let lit = hovers.hover(Control::BasketRemove(i));
+            let remove_key = Control::BasketRemove(i);
+            let lit = hovers.hover(remove_key);
+            for splash in ripples.splashes(remove_key, paint.now) {
+                painter.circle_filled(
+                    splash.center,
+                    splash.radius,
+                    egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                );
+            }
             painter.text(
-                pressed_rect(remove, hovers.press(Control::BasketRemove(i))).center(),
+                pressed_rect(remove, hovers.press(remove_key)).center(),
                 egui::Align2::CENTER_CENTER,
                 "×",
                 egui::FontId::proportional(TRAY_FONT + 3.0),
@@ -398,6 +434,18 @@ pub fn paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tray's rows sit inside a `chrome::card` plate, so the padding that
+    /// sets their gap and the padding its radius was derived from have to be
+    /// the same number (`delightful-ui` §15). They were 8 and 10, which pinched
+    /// the gap by 2 px at every corner.
+    #[test]
+    fn the_tray_radii_are_concentric() {
+        assert_eq!(
+            crate::ui::ROW_RADIUS as f32 + TRAY_PAD,
+            crate::chrome::CARD_RADIUS as f32
+        );
+    }
 
     fn paths(names: &[&str]) -> Vec<PathBuf> {
         names.iter().map(PathBuf::from).collect()

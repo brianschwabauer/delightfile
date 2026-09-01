@@ -3,7 +3,7 @@
 //! PLAN §7.3's third bullet: `l` on a `.zip` walks into it, and what is inside
 //! lists like any other directory. This module is the half that makes that
 //! possible without a window — turning a file into an [`ArchiveTree`] that
-//! answers "what is in `src/`" the way [`crate::fs::scan`] answers it for a real
+//! answers "what is in `src/`" the way [`crate::fs::Scanner`] answers it for a real
 //! directory.
 //!
 //! ```text
@@ -82,13 +82,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub use extract::{destination_for, plan_extract, ExtractItem, ExtractPlan, SkipReason};
-pub use unpack::{
-    destinations, extract, plan_record, read_entry, Destinations, ExtractReport, CANCEL_CHECK_BYTES,
-    EXTRACT_BUF,
-};
 pub use tree::{
     build, name_is_unsafe, normalize, ArchiveEntry, ArchiveTree, Method, RawEntry, MAX_ENTRIES,
     MAX_NAME_BYTES,
+};
+pub use unpack::{
+    destinations, extract, plan_record, read_entry, Destinations, ExtractReport,
+    CANCEL_CHECK_BYTES, EXTRACT_BUF,
 };
 
 use crate::preview::sniff;
@@ -198,7 +198,7 @@ impl From<ArchiveError> for crate::DfError {
 
 /// What `path` is, by its bytes.
 ///
-/// Signature first, through [`crate::preview::sniff`], so the answer does not
+/// Signature first, through [`fn@crate::preview::sniff`], so the answer does not
 /// depend on the name — an archive mailed with the extension stripped still
 /// opens. The extension is consulted only for the one case bytes cannot settle:
 /// a pre-POSIX tar, which has no magic anywhere in its header.

@@ -427,10 +427,7 @@ pub fn path_bar(
         );
         if index < last && rects[index + 1] != egui::Rect::NOTHING {
             painter.text(
-                egui::pos2(
-                    rect.right() + CRUMB_SEPARATOR_WIDTH / 2.0,
-                    bar.center().y,
-                ),
+                egui::pos2(rect.right() + CRUMB_SEPARATOR_WIDTH / 2.0, bar.center().y),
                 egui::Align2::CENTER_CENTER,
                 CRUMB_SEPARATOR,
                 font.clone(),
@@ -448,7 +445,11 @@ pub fn path_bar(
             egui::pos2(bar.right() - PAD_X - width, bar.top() + 3.0),
             egui::vec2(width, (bar.height() - 6.0).max(0.0)),
         );
-        painter.rect_filled(chip, ROW_RADIUS, mix(paint.palette.crust, palette.mauve, 0.16));
+        painter.rect_filled(
+            chip,
+            ROW_RADIUS,
+            mix(paint.palette.crust, palette.mauve, 0.16),
+        );
         painter.text(
             egui::pos2(chip.left() + PAD_X, chip.center().y),
             egui::Align2::LEFT_CENTER,
@@ -489,9 +490,11 @@ pub struct Status<'a> {
 /// The bar's ground: the window's own, so the bar reads as part of the frame
 /// rather than as a fourth pane.
 fn bar_ground(paint: &Painting<'_>, rect: egui::Rect) -> egui::Rect {
-    paint
-        .painter
-        .rect_filled(rect, ROW_RADIUS, mix(paint.palette.crust, paint.palette.base, 0.5));
+    paint.painter.rect_filled(
+        rect,
+        ROW_RADIUS,
+        mix(paint.palette.crust, paint.palette.base, 0.5),
+    );
     rect.shrink2(egui::vec2(PAD_X, 0.0))
 }
 
@@ -546,11 +549,10 @@ fn chip(
     text: &str,
     accent: egui::Color32,
 ) -> f32 {
-    let galley = paint.painter.layout_no_wrap(
-        text.to_string(),
-        egui::FontId::proportional(FONT),
-        accent,
-    );
+    let galley =
+        paint
+            .painter
+            .layout_no_wrap(text.to_string(), egui::FontId::proportional(FONT), accent);
     let width = galley.size().x + PAD_X * 2.0;
     let rect = egui::Rect::from_min_size(
         egui::pos2(left, inner.top() + 3.0),
@@ -649,8 +651,7 @@ fn prompt_field(paint: &Painting<'_>, inner: egui::Rect, prompt: &Prompt) {
         "REPLACE" => palette.peach,
         _ => palette.blue,
     };
-    let mode_galley =
-        painter.layout_no_wrap(mode.to_string(), key_font(FONT - 1.5), mode_color);
+    let mode_galley = painter.layout_no_wrap(mode.to_string(), key_font(FONT - 1.5), mode_color);
     let chip_width = mode_galley.size().x + 10.0;
     let chip_rect = egui::Rect::from_min_size(
         egui::pos2(
@@ -717,7 +718,10 @@ fn prompt_field(paint: &Painting<'_>, inner: egui::Rect, prompt: &Prompt) {
     if let Some(range) = prompt.selection() {
         // A visual run is a *region*, so it is drawn as one rather than as
         // differently coloured letters.
-        let (from, to) = (text_left + width_of(range.start), text_left + width_of(range.end));
+        let (from, to) = (
+            text_left + width_of(range.start),
+            text_left + width_of(range.end),
+        );
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(from, inner.top() + 4.0),
@@ -789,17 +793,18 @@ fn prompt_field(paint: &Painting<'_>, inner: egui::Rect, prompt: &Prompt) {
 
 /// The insert caret's width, in points. One-and-a-half rather than one: a
 /// hairline caret disappears against a busy line at fractional scaling.
-const CARET_WIDTH: f32 = 1.5;
+pub const CARET_WIDTH: f32 = 1.5;
 
 /// The bar while an overlay owns the keyboard: what the keys do now.
 pub fn hint_bar(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
     let inner = bar_ground(paint, rect);
     let mut x = inner.left();
     for (keys, what) in hints {
-        let key_galley =
-            paint
-                .painter
-                .layout_no_wrap(keys.to_string(), key_font(FONT - 0.5), paint.palette.text);
+        let key_galley = paint.painter.layout_no_wrap(
+            keys.to_string(),
+            key_font(FONT - 0.5),
+            paint.palette.text,
+        );
         paint.painter.galley(
             egui::pos2(x, inner.center().y - key_galley.size().y / 2.0),
             key_galley.clone(),
@@ -931,14 +936,30 @@ const HELP_MAX_WIDTH: f32 = 860.0;
 /// still see where you were.
 pub const HELP_SCRIM: u8 = 150;
 
+// ── Optical centring (`delightful-ui` §16) ──────────────────────────────────
+// Content centred in a large region reads as sitting *low* at the true 50/50
+// mark; the fix is to bias it up towards a 60/40 split. One rule, but it is
+// applied to two different quantities depending on what is being centred, so
+// it is two constants rather than one used two ways — and they live here, in
+// the module every surface already imports, rather than as a private constant
+// in one card and a bare literal in five others.
+
+/// The share of the *slack* that goes above a centred block — a card in a
+/// window, a panel in a pane. Four tenths above, six below.
+pub const OPTICAL_CENTRE: f32 = 0.4;
+
+/// The share of a *region's height* at which a single centred line of text
+/// sits. Milder than [`OPTICAL_CENTRE`] because it is measuring a different
+/// thing: a lone baseline in an otherwise empty pane needs a nudge, not the
+/// full 60/40 a whole card wants, and at 0.4 an empty-state label reads as
+/// having drifted towards the top rather than as being centred well.
+pub const OPTICAL_BASELINE: f32 = 0.42;
+
 /// Where the help card goes: most of the window, above the bar.
 pub fn help_rect(area: egui::Rect, bar: egui::Rect) -> egui::Rect {
     let width = (area.width() - CARD_MARGIN * 2.0).min(HELP_MAX_WIDTH);
     egui::Rect::from_min_max(
-        egui::pos2(
-            area.center().x - width / 2.0,
-            area.top() + CARD_MARGIN,
-        ),
+        egui::pos2(area.center().x - width / 2.0, area.top() + CARD_MARGIN),
         egui::pos2(
             area.center().x + width / 2.0,
             (bar.top() - GAP).max(area.top() + CARD_MARGIN + CHROME_HEIGHT),
@@ -971,7 +992,10 @@ pub fn help_overlay(
     card(paint, rect, 1.0);
 
     let shown = lines.iter().filter(|l| l.selectable()).count();
-    let heading = egui::pos2(rect.left() + CARD_PAD, rect.top() + CARD_PAD + CARD_ROW / 2.0);
+    let heading = egui::pos2(
+        rect.left() + CARD_PAD,
+        rect.top() + CARD_PAD + CARD_ROW / 2.0,
+    );
     painter.text(
         heading,
         egui::Align2::LEFT_CENTER,
@@ -1054,7 +1078,10 @@ pub fn help_overlay(
         // An empty state that says what to do about it, not "no results"
         // (`delightful-ui` §11).
         painter.text(
-            egui::pos2(content.center().x, content.top() + content.height() * 0.42),
+            egui::pos2(
+                content.center().x,
+                content.top() + content.height() * OPTICAL_BASELINE,
+            ),
             egui::Align2::CENTER_CENTER,
             "No binding matches. Backspace to widen the filter.",
             egui::FontId::proportional(FONT),
@@ -1199,7 +1226,10 @@ mod tests {
         for (index, rect) in rects.iter().enumerate() {
             assert_eq!(tab_at(strip, 4, rect.center()), Some(index));
         }
-        assert_eq!(tab_at(strip, 4, egui::pos2(strip.right() - 1.0, strip.center().y)), None);
+        assert_eq!(
+            tab_at(strip, 4, egui::pos2(strip.right() - 1.0, strip.center().y)),
+            None
+        );
         assert_eq!(tab_at(strip, 4, egui::pos2(-10.0, -10.0)), None);
     }
 
@@ -1230,7 +1260,8 @@ mod tests {
     fn the_crumbs_are_laid_out_and_hit_tested_the_same_way() {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
-            let bar = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(700.0, CHROME_HEIGHT));
+            let bar =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(700.0, CHROME_HEIGHT));
             let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile/crates"));
             let rects = crumb_rects(ui.painter(), bar, &path, 0.0);
             assert_eq!(rects.len(), path.len());
@@ -1313,7 +1344,10 @@ mod tests {
                 now: std::time::Instant::now(),
             };
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
-            let bar = egui::Rect::from_min_size(egui::pos2(8.0, 866.0), egui::vec2(1384.0, CHROME_HEIGHT));
+            let bar = egui::Rect::from_min_size(
+                egui::pos2(8.0, 866.0),
+                egui::vec2(1384.0, CHROME_HEIGHT),
+            );
 
             tab_strip(
                 &paint,
@@ -1342,7 +1376,15 @@ mod tests {
             let narrow =
                 egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(90.0, CHROME_HEIGHT));
             let rects = crumb_rects(paint.painter, narrow, &path, 0.0);
-            path_bar(&paint, narrow, &path, &rects, None, &Hovers::new(), &Ripples::new());
+            path_bar(
+                &paint,
+                narrow,
+                &path,
+                &rects,
+                None,
+                &Hovers::new(),
+                &Ripples::new(),
+            );
 
             status_bar(
                 &paint,

@@ -169,7 +169,8 @@ impl Tabs {
             return false;
         }
         let at = insert_position(self.active).min(self.tabs.len());
-        self.tabs.insert(at, Tab::open(path, mgr, sort, scanner, now));
+        self.tabs
+            .insert(at, Tab::open(path, mgr, sort, scanner, now));
         self.go_to(at, now);
         true
     }
@@ -374,13 +375,7 @@ mod tests {
     #[test]
     fn the_slide_arrives_and_stops() {
         let t0 = Instant::now();
-        let mut slide = Some(Tween::new(
-            SLIDE_DISTANCE,
-            0.0,
-            SLIDE,
-            Easing::OutQuint,
-            t0,
-        ));
+        let mut slide = Some(Tween::new(SLIDE_DISTANCE, 0.0, SLIDE, Easing::OutQuint, t0));
         let at = |slide: &Option<Tween>, now| slide.as_ref().map_or(0.0, |t: &Tween| t.value(now));
         assert!((at(&slide, t0) - SLIDE_DISTANCE).abs() < 1e-3);
         let mid = at(&slide, t0 + Duration::from_millis(60));

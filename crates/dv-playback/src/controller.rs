@@ -300,7 +300,11 @@ fn frame_covers(cur_pts: i64, target: i64, frame_dur: i64, jitter: i64) -> bool 
 /// files that otherwise play fine, so the requested target passes through and
 /// the decoder stops at EOF on its own.
 fn clamp_seek(us: i64, duration: i64) -> i64 {
-    if duration > 0 { us.clamp(0, duration) } else { us.max(0) }
+    if duration > 0 {
+        us.clamp(0, duration)
+    } else {
+        us.max(0)
+    }
 }
 
 /// How much decoded video a reverse shuttle may hold, in bytes.
@@ -2516,8 +2520,8 @@ mod tests {
     /// have.
     #[test]
     fn a_parked_decoder_is_checked_back_out_by_path() {
-        let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/k-clip-3s.mp4");
+        let clip =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/k-clip-3s.mp4");
         let mut cache = VidCache::new(3);
         // Software only: the trial decode this test is about not repeating is
         // also the slowest thing a hardware probe would do here.
@@ -2549,8 +2553,8 @@ mod tests {
     /// decoders in a folder of clips.
     #[test]
     fn parking_past_the_cap_evicts_the_oldest_file() {
-        let clip = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/k-clip-3s.mp4");
+        let clip =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/k-clip-3s.mp4");
         let mut cache = VidCache::new(1);
         let Some(slot) = acquire_slot(&mut cache, &[], &clip, None) else {
             eprintln!("skipped: no decodable fixture");

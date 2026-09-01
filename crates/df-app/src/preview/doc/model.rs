@@ -174,7 +174,11 @@ pub fn parse(bytes: &[u8], path: &Path) -> Result<Mesh, String> {
 /// One line for the pane's chip: the triangle count and the bounding box.
 pub fn summary(mesh: &Mesh) -> String {
     let triangles = mesh.triangle_count();
-    let word = if triangles == 1 { "triangle" } else { "triangles" };
+    let word = if triangles == 1 {
+        "triangle"
+    } else {
+        "triangles"
+    };
     let count = format!("{} {word}", grouped(triangles));
     match mesh.bounds() {
         Some((lo, hi)) => format!(
@@ -574,7 +578,14 @@ fn read_ply_ascii(body: &[u8], elements: &[PlyElement]) -> PlyBody {
                     at += 1;
                 }
             }
-            push_ply_row(element, &named, list, &mut positions, &mut normals, &mut faces);
+            push_ply_row(
+                element,
+                &named,
+                list,
+                &mut positions,
+                &mut normals,
+                &mut faces,
+            );
         }
     }
     (positions, normals, faces)
@@ -620,7 +631,14 @@ fn read_ply_binary(
                     }
                 }
             }
-            push_ply_row(element, &named, list, &mut positions, &mut normals, &mut faces);
+            push_ply_row(
+                element,
+                &named,
+                list,
+                &mut positions,
+                &mut normals,
+                &mut faces,
+            );
         }
     }
     Ok((positions, normals, faces))
@@ -921,10 +939,7 @@ const ZIP_EOCD_SEARCH_BYTES: usize = 66_000;
 /// dependency for. Every field read is bounds-checked, because the bytes are
 /// somebody else's file.
 fn zip_entry(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
-    let eocd = (0..bytes
-        .len()
-        .saturating_sub(21)
-        .min(ZIP_EOCD_SEARCH_BYTES))
+    let eocd = (0..bytes.len().saturating_sub(21).min(ZIP_EOCD_SEARCH_BYTES))
         .map(|back| bytes.len() - 22 - back)
         .find(|&at| bytes.get(at..at + 4) == Some(b"PK\x05\x06"))?;
     let count = u16::from_le_bytes([*bytes.get(eocd + 10)?, *bytes.get(eocd + 11)?]) as usize;
@@ -943,8 +958,9 @@ fn zip_entry(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
             return None;
         }
         let le16 = |o: usize| u16::from_le_bytes([entry[o], entry[o + 1]]) as usize;
-        let le32 =
-            |o: usize| u32::from_le_bytes([entry[o], entry[o + 1], entry[o + 2], entry[o + 3]]) as usize;
+        let le32 = |o: usize| {
+            u32::from_le_bytes([entry[o], entry[o + 1], entry[o + 2], entry[o + 3]]) as usize
+        };
         let method = le16(10);
         let compressed = le32(20);
         let uncompressed = le32(24);
@@ -968,7 +984,7 @@ fn zip_entry(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
             return match method {
                 0 => Some(data.to_vec()),
                 // A lying header cannot ask for the world.
-                8 =>miniz_oxide::inflate::decompress_to_vec_with_limit(
+                8 => miniz_oxide::inflate::decompress_to_vec_with_limit(
                     data,
                     uncompressed
                         .saturating_mul(2)
@@ -1837,7 +1853,10 @@ mod tests {
         // default and the assumption every other format gets.
         let mm = parse_3mf(&three_mf(&tris, "millimeter", None, true)).expect("stored 3mf");
         let (lo, hi) = mm.bounds().expect("bounds");
-        assert_eq!([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], [1.0, 1.0, 1.0]);
+        assert_eq!(
+            [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
+            [1.0, 1.0, 1.0]
+        );
         assert_eq!(
             parse_stl(&binary_stl(&tris)).expect("stl").units,
             Units::AssumedMillimetres
@@ -1924,12 +1943,16 @@ mod tests {
             ("cube.3mf", three_mf(&tris, "millimeter", None, false)),
         ];
         for (name, bytes) in files {
-            let mesh = parse(&bytes, &PathBuf::from(name))
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let mesh =
+                parse(&bytes, &PathBuf::from(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(mesh.triangle_count(), 12, "{name}");
             assert_eq!(mesh.positions.len(), 8, "{name}");
             let (lo, hi) = mesh.bounds().unwrap_or_default();
-            assert_eq!([hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], [20.0; 3], "{name}");
+            assert_eq!(
+                [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
+                [20.0; 3],
+                "{name}"
+            );
             assert_eq!(mesh.normals.len(), mesh.positions.len(), "{name}");
         }
     }
@@ -1943,15 +1966,38 @@ mod tests {
             Some(ModelFormat::Ply)
         );
         // A 3MF is a zip whose head names the part.
-        let mf = three_mf(&cube_triangles([0.0; 3], [1.0; 3]), "millimeter", None, true);
-        assert_eq!(sniff(&mf, Path::new("part.zip")), Some(ModelFormat::ThreeMf));
-        assert_eq!(sniff(&mf, Path::new("part.3mf")), Some(ModelFormat::ThreeMf));
+        let mf = three_mf(
+            &cube_triangles([0.0; 3], [1.0; 3]),
+            "millimeter",
+            None,
+            true,
+        );
+        assert_eq!(
+            sniff(&mf, Path::new("part.zip")),
+            Some(ModelFormat::ThreeMf)
+        );
+        assert_eq!(
+            sniff(&mf, Path::new("part.3mf")),
+            Some(ModelFormat::ThreeMf)
+        );
         // STL and OBJ have nothing to sniff, so the name is the whole answer.
-        assert_eq!(sniff(b"\x00\x01\x02", Path::new("part.stl")), Some(ModelFormat::Stl));
-        assert_eq!(sniff(b"# blender\n", Path::new("part.obj")), Some(ModelFormat::Obj));
-        assert_eq!(sniff(b"# blender\n", Path::new("part.OBJ")), Some(ModelFormat::Obj));
+        assert_eq!(
+            sniff(b"\x00\x01\x02", Path::new("part.stl")),
+            Some(ModelFormat::Stl)
+        );
+        assert_eq!(
+            sniff(b"# blender\n", Path::new("part.obj")),
+            Some(ModelFormat::Obj)
+        );
+        assert_eq!(
+            sniff(b"# blender\n", Path::new("part.OBJ")),
+            Some(ModelFormat::Obj)
+        );
         // …and nothing else is a mesh.
-        assert_eq!(sniff(b"solid but a text file\n", Path::new("notes.txt")), None);
+        assert_eq!(
+            sniff(b"solid but a text file\n", Path::new("notes.txt")),
+            None
+        );
         assert_eq!(sniff(b"", Path::new("part.gcode")), None);
     }
 
@@ -1973,7 +2019,12 @@ mod tests {
         assert_eq!(parse_obj(b"").expect("obj").triangle_count(), 0);
         assert_eq!(parse_stl(b"").expect("stl").triangle_count(), 0);
         // A truncated zip directory is read to its end and gives up.
-        let mut clipped = three_mf(&cube_triangles([0.0; 3], [1.0; 3]), "millimeter", None, true);
+        let mut clipped = three_mf(
+            &cube_triangles([0.0; 3], [1.0; 3]),
+            "millimeter",
+            None,
+            true,
+        );
         clipped.truncate(clipped.len() / 2);
         assert!(parse_3mf(&clipped).is_err());
     }
@@ -2029,10 +2080,7 @@ mod tests {
                 continue;
             }
             for c in 0..4 {
-                let (lo, hi) = (
-                    ink.dim[c].min(ink.accent[c]),
-                    ink.dim[c].max(ink.accent[c]),
-                );
+                let (lo, hi) = (ink.dim[c].min(ink.accent[c]), ink.dim[c].max(ink.accent[c]));
                 assert!(px[c] >= lo && px[c] <= hi, "{px:?} off the ramp");
             }
         }

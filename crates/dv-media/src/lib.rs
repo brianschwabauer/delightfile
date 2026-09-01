@@ -127,7 +127,9 @@ pub fn is_stream_url(path: &std::path::Path) -> bool {
 ///
 /// Plain files keep the bare open — an options dictionary on a local file is
 /// noise the demuxer has to ignore.
-pub(crate) fn open_input(path: &std::path::Path) -> std::result::Result<ffmpeg::format::context::Input, ffmpeg::Error> {
+pub(crate) fn open_input(
+    path: &std::path::Path,
+) -> std::result::Result<ffmpeg::format::context::Input, ffmpeg::Error> {
     if is_stream_url(path) {
         let mut opts = ffmpeg::Dictionary::new();
         opts.set("rtsp_transport", "tcp");

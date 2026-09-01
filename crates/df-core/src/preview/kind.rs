@@ -3,7 +3,7 @@
 //! One function, one table, one enum. PLAN §6 lists the built-in previewers —
 //! text, markdown, image, video, audio, PDF, font, 3D model, G-code, directory
 //! listing, archive contents — and this decides which of them a file belongs
-//! to, from its entry and its sniffed type ([`super::sniff`]).
+//! to, from its entry and its sniffed type ([`fn@super::sniff`]).
 //!
 //! It is deliberately a **pure function of two values**. Everything expensive
 //! has already happened by the time it is called (the stat at scan time, the
@@ -150,7 +150,7 @@ const FAMILIES: &[(&str, PreviewKind)] = &[
     ("application/vnd.oasis.", PreviewKind::Unsupported),
 ];
 
-/// Which previewer `entry` gets, given the type [`super::sniff`] settled on.
+/// Which previewer `entry` gets, given the type [`fn@super::sniff`] settled on.
 ///
 /// The order of the checks is the specification:
 ///

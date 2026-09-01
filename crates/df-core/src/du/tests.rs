@@ -207,7 +207,10 @@ fn an_unreadable_subdirectory_does_not_fail_the_walk() {
 
     // Running as root reads it anyway, and then there is nothing to assert.
     if totals.files == 1 {
-        assert_eq!(totals.dirs, 2, "the locked directory is counted, not entered");
+        assert_eq!(
+            totals.dirs, 2,
+            "the locked directory is counted, not entered"
+        );
     }
 }
 
@@ -267,7 +270,10 @@ fn the_flag_survives_the_trip_through_a_request() {
     };
     let token = du.request_with(tree.path(), options);
     let totals = wait_for_done(&du, token);
-    assert_eq!(totals.files, 2, "max_depth reached the worker, and so did the rest");
+    assert_eq!(
+        totals.files, 2,
+        "max_depth reached the worker, and so did the rest"
+    );
 }
 
 // ── streaming ───────────────────────────────────────────────────────────────
@@ -301,7 +307,9 @@ fn a_finished_directory_is_reported_exactly_once() {
     let done: Vec<&DuUpdate> = updates.iter().filter(|u| u.done).collect();
     assert_eq!(done.len(), 2, "root and sub: {done:#?}");
     assert!(done.iter().any(|u| u.dir == tree.path() && u.depth == 0));
-    assert!(done.iter().any(|u| u.dir == tree.join("sub") && u.depth == 1));
+    assert!(done
+        .iter()
+        .any(|u| u.dir == tree.join("sub") && u.depth == 1));
 }
 
 #[test]
@@ -380,7 +388,9 @@ fn wait_for_done(du: &DuScanner, token: DuToken) -> DuTotals {
             continue;
         };
         match message {
-            DuMessage::Done { token: t, totals, .. } if t == token => return totals,
+            DuMessage::Done {
+                token: t, totals, ..
+            } if t == token => return totals,
             DuMessage::Failed { error, .. } => panic!("walk failed: {error}"),
             _ => {}
         }
@@ -394,7 +404,10 @@ fn the_pool_walks_and_says_so() {
     let du = DuScanner::start(no_notifier());
     let token = du.request(tree.path(), 1);
     let totals = wait_for_done(&du, token);
-    assert_eq!(totals, walk_blocking(tree.path(), &DuOptions::default()).unwrap());
+    assert_eq!(
+        totals,
+        walk_blocking(tree.path(), &DuOptions::default()).unwrap()
+    );
     assert!(!du.is_live(token), "a finished walk is no longer live");
 }
 
@@ -411,7 +424,10 @@ fn the_notifier_rings_once_per_message() {
     }));
     let token = du.request(tree.path(), 1);
     wait_for_done(&du, token);
-    assert!(rings.load(Ordering::SeqCst) >= 2, "Started and Done at least");
+    assert!(
+        rings.load(Ordering::SeqCst) >= 2,
+        "Started and Done at least"
+    );
 }
 
 #[test]
@@ -449,7 +465,10 @@ fn a_missing_root_comes_back_as_failed() {
         let Ok(message) = du.updates().recv_timeout(Duration::from_millis(200)) else {
             continue;
         };
-        if let DuMessage::Failed { token: t, error, .. } = message {
+        if let DuMessage::Failed {
+            token: t, error, ..
+        } = message
+        {
             assert_eq!(t, token);
             assert!(matches!(error, DfError::Io { .. }), "{error}");
             return;
@@ -510,7 +529,10 @@ fn a_walk_fills_the_directory_sizes_in_a_listing() {
     let sub = entries.iter().find(|e| e.name == "sub").expect("sub");
     assert!(sub.len > 0, "and it now knows what is inside it");
     let file = entries.iter().find(|e| e.name == "a.txt").expect("a.txt");
-    assert_eq!(file.len, 1000, "files were already honest and stay untouched");
+    assert_eq!(
+        file.len, 1000,
+        "files were already honest and stay untouched"
+    );
 }
 
 #[test]
@@ -524,8 +546,7 @@ fn a_cached_record_hits_until_the_directory_changes() {
     // A directory's mtime has one-second granularity on some filesystems, so
     // changing the contents is not enough on its own — set it explicitly to a
     // time that cannot be the one recorded.
-    let long_ago =
-        std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let long_ago = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
     let file = std::fs::File::open(tree.path()).unwrap();
     file.set_times(std::fs::FileTimes::new().set_modified(long_ago))
         .unwrap();
@@ -581,7 +602,10 @@ fn the_cache_evicts_the_least_recently_touched() {
         "the oldest went first"
     );
     let newest = format!("/synthetic/{}", DU_CACHE_DIRS + 7);
-    assert!(cache.get_stale(Path::new(&newest)).is_some(), "the newest stayed");
+    assert!(
+        cache.get_stale(Path::new(&newest)).is_some(),
+        "the newest stayed"
+    );
 }
 
 #[test]
@@ -608,7 +632,9 @@ fn the_child_cap_keeps_the_big_ones() {
         children,
         true,
     );
-    let record = cache.get_stale(Path::new("/synthetic/big")).expect("record");
+    let record = cache
+        .get_stale(Path::new("/synthetic/big"))
+        .expect("record");
     assert_eq!(record.children.len(), MAX_CACHED_CHILDREN);
     assert!(!record.children_complete, "and it says it dropped some");
     assert_eq!(

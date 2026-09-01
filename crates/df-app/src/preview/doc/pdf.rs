@@ -28,7 +28,7 @@
 //! thread-safe: `pdfium-render`'s `thread_safe` feature adds `Send`/`Sync` to
 //! the handle types and serializes one internal cache, and nothing else. In
 //! delightfile there is exactly **one** thread that ever enters the library —
-//! [`super::Worker`]'s — so the serialization is structural rather than a
+//! `Worker`'s — so the serialization is structural rather than a
 //! mutex. A [`Doc`] is not `Send` and never leaves that thread.
 
 use std::path::{Path, PathBuf};

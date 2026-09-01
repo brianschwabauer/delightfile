@@ -227,7 +227,10 @@ pub fn items(facts: Facts) -> Vec<Item> {
             .position(|item| item.action == Action::OpenWithMenu)
             .map(|i| i + 1)
             .unwrap_or(1);
-        items.insert(at, Item::new("Extract here", "e", Action::ExtractHere, true));
+        items.insert(
+            at,
+            Item::new("Extract here", "e", Action::ExtractHere, true),
+        );
         items.insert(
             at + 1,
             Item::new("Extract to subfolder", "E", Action::ExtractSubfolder, true),
@@ -505,10 +508,7 @@ pub fn geometry(area: egui::Rect, menu: &Menu, painter: &egui::Painter) -> Geome
         // Anchored at the parent row's outer corner, so `place` flips it to the
         // *left* of the card near the right edge of the window — which is where
         // every submenu on every platform goes.
-        let anchor = egui::pos2(
-            card.right() - SUBMENU_OVERLAP,
-            parent.top() - CARD_PAD,
-        );
+        let anchor = egui::pos2(card.right() - SUBMENU_OVERLAP, parent.top() - CARD_PAD);
         let sub_card = if anchor.x + sub_size.x <= area.right() - MARGIN {
             place(area, anchor, sub_size)
         } else {
@@ -658,8 +658,7 @@ fn row(
     let keys_width = if keys.is_empty() {
         0.0
     } else {
-        let galley =
-            inside.layout_no_wrap(keys.to_string(), key_font(FONT - 1.0), key_color);
+        let galley = inside.layout_no_wrap(keys.to_string(), key_font(FONT - 1.0), key_color);
         let width = galley.size().x;
         inside.galley(
             egui::pos2(

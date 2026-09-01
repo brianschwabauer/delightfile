@@ -71,7 +71,13 @@ use winit::event_loop::EventLoop;
 pub struct Wake;
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Milliseconds, not seconds. PLAN §6's cold-start audit is a measurement of
+    // the first few hundred milliseconds of the process — "window mapped" and
+    // "first listing" land in the same second as the launch, so a
+    // second-resolution timestamp cannot express the answer at all.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .init();
 
     let args = match cli::parse(std::env::args().skip(1)) {
         cli::Outcome::Run(args) => args,

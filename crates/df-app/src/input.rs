@@ -189,7 +189,10 @@ mod tests {
         assert!(PromptKind::HelpFilter.is_help());
         assert!(!PromptKind::Filter.is_help());
         assert!(PromptKind::Filter.is_live());
-        assert!(!PromptKind::Shell.is_live(), "a shell line runs on Enter only");
+        assert!(
+            !PromptKind::Shell.is_live(),
+            "a shell line runs on Enter only"
+        );
         assert!(PromptKind::Rename.anchored());
         assert!(!PromptKind::Create.anchored());
     }
@@ -204,17 +207,21 @@ mod tests {
             InputBuffer::for_rename_stem("photo.jpg"),
         );
         assert_eq!(prompt.query(), "photo.jpg");
-        assert_eq!(prompt.caret(), "photo".len(), "the caret is before the extension");
+        assert_eq!(
+            prompt.caret(),
+            "photo".len(),
+            "the caret is before the extension"
+        );
         assert_eq!(prompt.mode_label(), "INSERT");
         assert!(!prompt.block_caret());
 
         // Escape to Normal, `0` to the start, `D` to kill the line's tail.
-        assert_eq!(
-            prompt.feed(Chord::plain(Key::Escape)),
-            InputEvent::Consumed
-        );
+        assert_eq!(prompt.feed(Chord::plain(Key::Escape)), InputEvent::Consumed);
         assert_eq!(prompt.mode_label(), "NORMAL");
-        assert!(prompt.block_caret(), "a normal-mode caret sits on a character");
+        assert!(
+            prompt.block_caret(),
+            "a normal-mode caret sits on a character"
+        );
         prompt.feed(chord('0'));
         prompt.feed(Chord::new(Mods::SHIFT, Key::Char('d')));
         assert_eq!(prompt.query(), "");

@@ -307,10 +307,22 @@ mod tests {
     #[test]
     fn the_display_matrix_reads_as_a_clockwise_turn() {
         assert_eq!(display_matrix_orientation(&matrix(0.0, false)), (0, false));
-        assert_eq!(display_matrix_orientation(&matrix(-90.0, false)), (90, false));
-        assert_eq!(display_matrix_orientation(&matrix(90.0, false)), (270, false));
-        assert_eq!(display_matrix_orientation(&matrix(180.0, false)), (180, false));
-        assert_eq!(display_matrix_orientation(&matrix(-270.0, false)), (270, false));
+        assert_eq!(
+            display_matrix_orientation(&matrix(-90.0, false)),
+            (90, false)
+        );
+        assert_eq!(
+            display_matrix_orientation(&matrix(90.0, false)),
+            (270, false)
+        );
+        assert_eq!(
+            display_matrix_orientation(&matrix(180.0, false)),
+            (180, false)
+        );
+        assert_eq!(
+            display_matrix_orientation(&matrix(-270.0, false)),
+            (270, false)
+        );
         assert_eq!(display_matrix_orientation(&matrix(-90.0, true)), (90, true));
         // Junk is upright, not a panic.
         assert_eq!(display_matrix_orientation(&[0u8; 36]), (0, false));

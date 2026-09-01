@@ -483,7 +483,10 @@ fn the_save_is_atomic_and_leaves_no_temp_file_behind() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|name| name != "state")
         .collect();
-    assert!(leftovers.is_empty(), "temp files were cleaned up: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "temp files were cleaned up: {leftovers:?}"
+    );
     assert!(dir.join("state").is_file());
 }
 
@@ -542,5 +545,8 @@ fn the_state_path_follows_xdg() {
         None,
         "nowhere to write is a session-only store, not a panic"
     );
-    assert_eq!(state_path_from(Some(OsString::new()), Some(OsString::new())), None);
+    assert_eq!(
+        state_path_from(Some(OsString::new()), Some(OsString::new())),
+        None
+    );
 }

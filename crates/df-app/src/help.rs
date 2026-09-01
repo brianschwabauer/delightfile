@@ -173,7 +173,12 @@ mod tests {
             row(Context::Files, "q", "Quit", "quit"),
             row(Context::Files, ", m", "Sort by modified", "sort-mtime"),
             row(Context::Files, "f", "Filter files", "filter"),
-            row(Context::Global, "Ctrl+p", "Command palette", "command-palette"),
+            row(
+                Context::Global,
+                "Ctrl+p",
+                "Command palette",
+                "command-palette",
+            ),
         ]
     }
 

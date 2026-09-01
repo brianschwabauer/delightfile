@@ -650,7 +650,7 @@ impl TaskEngine {
 
     /// Take the transition stream.
     ///
-    /// Single-owner on purpose (see [`Shared::events`]): the engine keeps no
+    /// Single-owner on purpose (see `Shared::events`): the engine keeps no
     /// receiver, so events are only ever queued while this receiver — or a
     /// clone of it — is alive, and everything published before this call, or
     /// after the last clone is dropped, is discarded rather than piling up.

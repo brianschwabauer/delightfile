@@ -16,11 +16,11 @@
 //! ## The paths are `sftp://` URLs, in a `PathBuf`
 //!
 //! A row in `sftp://showandtour1/srv/www` gets the path
-//! `sftp://showandtour1/srv/www/index.html`, carried in an [`Entry::path`] like
-//! any other. It is a *display* path and a *key*: [`at_of`] turns it back into
-//! the [`VfsPath`] the vfs is addressed by, and nothing in this module ever
+//! `sftp://showandtour1/srv/www/index.html`, carried in an [`df_core::fs::Entry::path`] like
+//! any other. It is a *display* path and a *key*: [`crate::remote::at_of`] turns it back into
+//! the [`df_core::vfs::VfsPath`] the vfs is addressed by, and nothing in this module ever
 //! hands one to the local filesystem. The only local paths a remote session
-//! produces are the temporary downloads [`Temps`] accounts for.
+//! produces are the temporary downloads [`crate::remote::Temps`] accounts for.
 //!
 //! ## What works remotely in v1, and what does not
 //!
@@ -31,7 +31,7 @@
 //! Does not, and says so: `x` cut, `D`, symlink and hardlink, `;`/`:` shell,
 //! `s`/`S` (they are `fd`/`rg` against a directory that is not on this
 //! machine), `Y`, `c t`, `u`, and "what's big". Every one of them is on
-//! [`inert_remotely`], because a key that silently does nothing is a key the
+//! [`crate::remote::inert_remotely`], because a key that silently does nothing is a key the
 //! user presses twice.
 //!
 //! ### The clipboard holds remote paths
@@ -39,7 +39,7 @@
 //! `y` inside a remote directory fills the ordinary
 //! [`Clipboard`](df_core::ops::paste::Clipboard) with `sftp://…` paths, because
 //! the clipboard is a list of paths and these *are* the paths of those rows.
-//! `p` then reads the ladder in one place — [`Transfer::of`]: remote paths into
+//! `p` then reads the ladder in one place — [`crate::remote::Transfer::of`]: remote paths into
 //! a local directory are a download, local paths into a remote directory are an
 //! upload, remote-to-remote is refused in v1 (it would be a download and an
 //! upload through this machine, and the user should be told that is what they
@@ -452,7 +452,10 @@ pub fn card_rows(entry: &Entry, service: &str) -> Vec<(String, String)> {
         rows.push(("Permissions".to_string(), entry.permissions_string()));
         rows.push(("Owner".to_string(), entry.owner_label()));
     }
-    rows.push(("Path".to_string(), entry.path.to_string_lossy().into_owned()));
+    rows.push((
+        "Path".to_string(),
+        entry.path.to_string_lossy().into_owned(),
+    ));
     rows
 }
 
@@ -482,6 +485,12 @@ pub fn no_body_reason(entry: &Entry) -> &'static str {
 const CARD_PAD: f32 = 12.0;
 const CARD_ROW: f32 = 19.0;
 const CARD_FONT: f32 = 13.0;
+/// The card's title. `CARD_FONT + 2`, which is the step every other titled
+/// surface in the window uses (`dialog`'s `FONT + 2.0`) — it was a bare `15.0`
+/// that would not have tracked a change to the face below it.
+const CARD_TITLE_FONT: f32 = CARD_FONT + 2.0;
+/// The title's row: its own line plus the gap down to the rule under it.
+const CARD_TITLE_ROW: f32 = 24.0;
 const CARD_LABEL: f32 = 86.0;
 const BODY_LINE: f32 = 16.0;
 const BODY_FONT: f32 = 12.0;
@@ -510,10 +519,10 @@ pub fn card(
         egui::pos2(content.left() + CARD_PAD, y),
         egui::Align2::LEFT_TOP,
         &entry.name,
-        egui::FontId::proportional(15.0),
+        egui::FontId::proportional(CARD_TITLE_FONT),
         palette.text,
     );
-    y += 24.0;
+    y += CARD_TITLE_ROW;
 
     painter.rect_filled(
         egui::Rect::from_min_max(
@@ -690,10 +699,22 @@ mod tests {
         let remote = PathBuf::from("sftp://showandtour1/srv/a.txt");
         let here = Path::new("/home/brian/Work");
         let there = Path::new("sftp://showandtour1/srv");
-        assert_eq!(Transfer::of(std::slice::from_ref(&local), here), Transfer::Local);
-        assert_eq!(Transfer::of(std::slice::from_ref(&local), there), Transfer::Upload);
-        assert_eq!(Transfer::of(std::slice::from_ref(&remote), here), Transfer::Download);
-        assert_eq!(Transfer::of(std::slice::from_ref(&remote), there), Transfer::Across);
+        assert_eq!(
+            Transfer::of(std::slice::from_ref(&local), here),
+            Transfer::Local
+        );
+        assert_eq!(
+            Transfer::of(std::slice::from_ref(&local), there),
+            Transfer::Upload
+        );
+        assert_eq!(
+            Transfer::of(std::slice::from_ref(&remote), here),
+            Transfer::Download
+        );
+        assert_eq!(
+            Transfer::of(std::slice::from_ref(&remote), there),
+            Transfer::Across
+        );
         // Half a paste is worse than none.
         assert_eq!(Transfer::of(&[local, remote], here), Transfer::Mixed);
         // An empty clipboard reads as local, which is what the existing "there
@@ -719,7 +740,13 @@ mod tests {
             "application/json",
             false
         )));
-        let big = entry("dump.txt", "sftp://s", PREVIEW_LIMIT + 1, "text/plain", false);
+        let big = entry(
+            "dump.txt",
+            "sftp://s",
+            PREVIEW_LIMIT + 1,
+            "text/plain",
+            false,
+        );
         assert!(!previewable(&big));
         assert!(no_body_reason(&big).contains("too big"));
         let media = entry("clip.mp4", "sftp://s", 400, "video/mp4", false);
@@ -737,7 +764,13 @@ mod tests {
     /// version 3 does not carry.
     #[test]
     fn the_card_reports_what_the_row_cannot() {
-        let mut e = entry("index.html", "sftp://showandtour1/srv", 4096, "text/html", false);
+        let mut e = entry(
+            "index.html",
+            "sftp://showandtour1/srv",
+            4096,
+            "text/html",
+            false,
+        );
         e.mode = 0o100_640;
         let rows = card_rows(&e, "showandtour1");
         let find = |label: &str| {

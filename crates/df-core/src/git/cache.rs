@@ -218,7 +218,7 @@ impl Git {
     ///
     /// Idempotent while one is queued or running, so the burst of watch events a
     /// build produces costs one scan, not one per event. Debouncing *when* to
-    /// call this is the caller's business — [`crate::fs::watch`] already
+    /// call this is the caller's business — [`crate::fs::Watcher`] already
     /// coalesces, and the right delay depends on which directory is on screen.
     pub fn refresh(&self, root: &Path) {
         if !self.available() {

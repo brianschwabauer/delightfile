@@ -413,7 +413,7 @@ pub struct Player {
 /// reported position and when it arrived, and hands the strip a wall-clock
 /// interpolation between the two, capped at one observed step so a stall shows
 /// as a stall rather than as a bar that keeps sailing on. Every seek reads
-/// [`Player::position_us`], which is the controller's own answer, unsmoothed.
+/// [`Playback::position_us`], which is the controller's own answer, unsmoothed.
 #[derive(Debug, Clone, Copy)]
 struct Playhead {
     raw: i64,

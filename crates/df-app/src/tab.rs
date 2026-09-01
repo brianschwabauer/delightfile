@@ -67,7 +67,12 @@ pub struct Listing {
 }
 
 impl Listing {
-    pub fn new(path: impl Into<PathBuf>, mgr: &MgrConfig, sort: SortOptions, now: Instant) -> Listing {
+    pub fn new(
+        path: impl Into<PathBuf>,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        now: Instant,
+    ) -> Listing {
         let mut dir = DirState::new(path, mgr);
         dir.set_sort(sort);
         Listing {
@@ -110,8 +115,13 @@ impl Listing {
     pub fn set_first_over(&mut self, first: usize, duration: Duration, now: Instant) {
         if self.fresh {
             self.first = first;
-            self.scroll =
-                Tween::new(first as f32, first as f32, Duration::ZERO, Easing::Linear, now);
+            self.scroll = Tween::new(
+                first as f32,
+                first as f32,
+                Duration::ZERO,
+                Easing::Linear,
+                now,
+            );
             // A listing is only "seen" once it has rows in it. Until the first
             // batch lands there is nothing on screen for a slide to move, and
             // the position computed from an empty list is not the one the
@@ -187,7 +197,8 @@ impl Listing {
     /// Is the view still moving? The `animating()` half of PLAN §1's idle-cost
     /// rule: a settled list must stop asking for frames.
     pub fn animating(&self, now: Instant) -> bool {
-        !self.scroll.finished(now) && (self.scroll.value(now) - self.first as f32).abs() > SCROLL_EPSILON
+        !self.scroll.finished(now)
+            && (self.scroll.value(now) - self.first as f32).abs() > SCROLL_EPSILON
     }
 
     pub fn begin_scan(&mut self, scanner: &Scanner, now: Instant) {
@@ -339,7 +350,10 @@ impl Tab {
             }
         }
         if leaving.parent() == Some(self.cwd.path()) {
-            if let Some(name) = leaving.file_name().map(|n| n.to_string_lossy().into_owned()) {
+            if let Some(name) = leaving
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+            {
                 self.cwd.dir.cursor_to_name(&name);
             }
         }
@@ -415,7 +429,7 @@ impl Tab {
 
     /// Point this tab at a remote place.
     ///
-    /// Returns the [`VfsPath`] that needs listing, or `None` when the cache
+    /// Returns the [`df_core::vfs::VfsPath`] that needs listing, or `None` when the cache
     /// already had it — which is the whole reason `←` back up a remote tree is
     /// instant. The caller queues the scan, because the [`Vfs`](df_core::vfs)
     /// lives on the app and this type has never been allowed to know about a
@@ -501,7 +515,7 @@ impl Tab {
     /// Not [`Tab::sync_parent_cursor`], because that one reads the cwd's
     /// `file_name()` — and the `file_name()` of `sftp://host/srv` is `srv`
     /// only by accident of the URL happening to look like a path. Asking the
-    /// [`VfsPath`] is the honest question.
+    /// [`df_core::vfs::VfsPath`] is the honest question.
     fn sync_remote_parent_cursor(&mut self, at: &df_core::vfs::VfsPath) {
         if at.parent().is_none() {
             return;
@@ -766,7 +780,10 @@ mod tests {
         // `/` has plenty of entries, but the pane in this test is deliberately
         // shorter than the listing so there is something to scroll.
         let visible = 5.min(rows.saturating_sub(1));
-        assert!(visible >= 2, "`/` should have more than a couple of entries");
+        assert!(
+            visible >= 2,
+            "`/` should have more than a couple of entries"
+        );
 
         assert!(l.wheel(3.0, visible, 1, 1, t0));
         assert_eq!(l.first(), 3);
@@ -861,7 +878,10 @@ mod tests {
         // At the service root the parent column is the local directory the
         // session came from, so the column still reads as "where you came
         // from" all the way out.
-        assert_eq!(tab.parent.as_ref().map(|p| p.path()), Some(Path::new("/tmp")));
+        assert_eq!(
+            tab.parent.as_ref().map(|p| p.path()),
+            Some(Path::new("/tmp"))
+        );
         // …and that is the only directory worth watching while we are away.
         assert_eq!(tab.watched(), vec![PathBuf::from("/tmp")]);
 
@@ -939,11 +959,20 @@ mod tests {
         assert_eq!(tab.cwd.path(), Path::new(crate::trashview::URL));
         assert_eq!(tab.cwd.dir.len(), 1);
         // The parent column is the real directory `←` goes back to.
-        assert_eq!(tab.parent.as_ref().map(|p| p.path()), Some(Path::new("/tmp")));
+        assert_eq!(
+            tab.parent.as_ref().map(|p| p.path()),
+            Some(Path::new("/tmp"))
+        );
 
         // Navigating anywhere real leaves the trash behind entirely — a pane
         // that still thought it was in the trash would offer restore on files.
-        tab.navigate("/tmp", &mgr, sort, &Scanner::start(df_core::fs::no_notifier()), t0);
+        tab.navigate(
+            "/tmp",
+            &mgr,
+            sort,
+            &Scanner::start(df_core::fs::no_notifier()),
+            t0,
+        );
         assert_eq!(tab.virtual_kind(), None);
         assert!(tab.trash.is_none());
     }

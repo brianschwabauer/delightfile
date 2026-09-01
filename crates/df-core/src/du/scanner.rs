@@ -1,6 +1,6 @@
 //! The worker pool that runs walks in the background.
 //!
-//! Structurally this is [`crate::fs::scan::Scanner`]'s twin, and deliberately
+//! Structurally this is [`crate::fs::Scanner`]'s twin, and deliberately
 //! so: a request channel a small pool shares, a monotonic token per request, a
 //! live-token map that doubles as the cancel switch, results on a crossbeam
 //! channel, and a [`Notifier`] callback to ring the app's bell because df-core
@@ -13,7 +13,7 @@
 //! directories with the size column on would otherwise pile up walks that will
 //! never be looked at), the cancellation check has to reach inside the walk
 //! rather than sitting between batches of it, and the results have to stream —
-//! see [`super::walk`], which does all three.
+//! see [`fn@super::walk`], which does all three.
 //!
 //! **The answer is worth keeping.** A directory scan is cheap enough to redo;
 //! a du is not, so every completed walk lands in a [`DuCache`] the scanner owns
@@ -399,7 +399,14 @@ fn run_walk(
         match walk(&root, &options, &cancelled, &mut emit) {
             Ok(totals) => {
                 lock(live).remove(&token);
-                store(cache, &root, root_mtime, totals, &tracked, tracking_complete);
+                store(
+                    cache,
+                    &root,
+                    root_mtime,
+                    totals,
+                    &tracked,
+                    tracking_complete,
+                );
                 send(DuMessage::Done {
                     token,
                     root: root.clone(),

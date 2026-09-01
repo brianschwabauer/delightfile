@@ -272,7 +272,10 @@ pub fn paint(
     chrome::card(paint, card, 1.0);
 
     painter.text(
-        egui::pos2(card.left() + CARD_PAD, card.top() + CARD_PAD + chrome::CARD_ROW / 2.0),
+        egui::pos2(
+            card.left() + CARD_PAD,
+            card.top() + CARD_PAD + chrome::CARD_ROW / 2.0,
+        ),
         egui::Align2::LEFT_CENTER,
         "Tasks",
         egui::FontId::proportional(FONT + 2.0),
@@ -283,7 +286,10 @@ pub fn paint(
         .filter(|r| matches!(r.tone, Tone::Running | Tone::Waiting | Tone::Paused))
         .count();
     painter.text(
-        egui::pos2(card.right() - CARD_PAD, card.top() + CARD_PAD + chrome::CARD_ROW / 2.0),
+        egui::pos2(
+            card.right() - CARD_PAD,
+            card.top() + CARD_PAD + chrome::CARD_ROW / 2.0,
+        ),
         egui::Align2::RIGHT_CENTER,
         if rows.is_empty() {
             String::new()
@@ -339,7 +345,11 @@ pub fn paint(
 
         let tone = tone_color(row.tone, palette);
         // The state chip, right-aligned on the name's line.
-        let chip = inside.layout_no_wrap(row.state.clone(), egui::FontId::proportional(FONT - 1.0), tone);
+        let chip = inside.layout_no_wrap(
+            row.state.clone(),
+            egui::FontId::proportional(FONT - 1.0),
+            tone,
+        );
         let chip_rect = egui::Rect::from_min_size(
             egui::pos2(
                 rect.right() - PAD_X - chip.size().x - 12.0,
@@ -357,7 +367,11 @@ pub fn paint(
             &inside,
             egui::pos2(rect.left() + PAD_X, rect.top() + 13.0),
             &row.name,
-            if on_cursor { palette.text } else { palette.subtext0 },
+            if on_cursor {
+                palette.text
+            } else {
+                palette.subtext0
+            },
             (chip_rect.left() - 8.0 - rect.left() - PAD_X).max(0.0),
         );
 
@@ -412,6 +426,17 @@ fn tone_color(tone: Tone, palette: &crate::theme::Palette) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The task panel's rows against its plate (`delightful-ui` §15). It was
+    /// already right — this pins it, because the two surfaces that were wrong
+    /// were wrong precisely because nothing asserted their own geometry.
+    #[test]
+    fn the_card_radii_are_concentric() {
+        assert_eq!(
+            chrome::CARD_ROW_RADIUS as f32 + CARD_PAD,
+            chrome::CARD_RADIUS as f32
+        );
+    }
     use df_core::tasks::{Lane, Progress};
 
     fn snapshot(id: TaskId, state: TaskState) -> TaskSnapshot {
@@ -520,7 +545,10 @@ mod tests {
             }),
         ))];
         panel.tick(&half, t0);
-        assert!(!panel.animating(t0), "the first sight of a task is not a sweep");
+        assert!(
+            !panel.animating(t0),
+            "the first sight of a task is not a sweep"
+        );
         assert!((panel.fill(1, t0) - 0.5).abs() < 1e-3);
 
         let full = vec![row_for(&snapshot(
@@ -581,11 +609,25 @@ mod tests {
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
             let (card, rects) = geometry(area, 860.0, rows.len());
             paint(
-                &painting, card, &rects, &rows, &panel, &Hovers::new(), &Ripples::new(), now,
+                &painting,
+                card,
+                &rects,
+                &rows,
+                &panel,
+                &Hovers::new(),
+                &Ripples::new(),
+                now,
             );
             let (card, rects) = geometry(area, 860.0, 0);
             paint(
-                &painting, card, &rects, &[], &panel, &Hovers::new(), &Ripples::new(), now,
+                &painting,
+                card,
+                &rects,
+                &[],
+                &panel,
+                &Hovers::new(),
+                &Ripples::new(),
+                now,
             );
         });
     }

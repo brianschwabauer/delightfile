@@ -15,15 +15,15 @@
 //! runs. That is the same data — per-directory recursive totals — asked for at
 //! depth 1 and sorted descending.
 //!
-//! So the module is one walker ([`walk`]), one pool that runs it off the event
+//! So the module is one walker ([`mod@walk`]), one pool that runs it off the event
 //! loop ([`scanner`]), and one bounded cache that makes the answers survive
 //! leaving the directory ([`cache`]). The interesting decisions each live next
 //! to the code they constrain:
 //!
-//! - **Blocks and apparent size, both, always** — [`walk`]'s essay on why a
+//! - **Blocks and apparent size, both, always** — [`mod@walk`]'s essay on why a
 //!   sparse VM image and a directory of tiny files break any single number.
 //! - **What is skipped**: symlinks always, other filesystems by default,
-//!   hardlinked content after the first sighting — also [`walk`].
+//!   hardlinked content after the first sighting — also [`mod@walk`].
 //! - **The cache is advisory** — [`cache`]'s essay on why a directory's `mtime`
 //!   cannot detect a change three levels down, and why the honest response is to
 //!   say so rather than to fake a freshness check.

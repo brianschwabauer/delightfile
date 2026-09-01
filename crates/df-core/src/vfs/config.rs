@@ -96,7 +96,7 @@ pub struct Service {
     /// directly against a temp directory exercises every byte of framing,
     /// pipelining and status handling that a real connection does — minus the
     /// ssh transport, which is the one part of this module that is not
-    /// delightfile's code. See [`super::tests`].
+    /// delightfile's code. See `super::tests`.
     ///
     /// It is a real field rather than a test-only one because it is also how a
     /// service could point at a local `sftp-server` or a container's, and

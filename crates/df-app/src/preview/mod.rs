@@ -921,7 +921,12 @@ impl Pane {
         }
     }
 
-    fn apply_decoded(&mut self, decoded: decode::Decoded, ctx: Option<&egui::Context>, now: Instant) {
+    fn apply_decoded(
+        &mut self,
+        decoded: decode::Decoded,
+        ctx: Option<&egui::Context>,
+        now: Instant,
+    ) {
         let Some(shown) = &mut self.shown else { return };
         let Body::Media(media) = &mut shown.body else {
             return;
@@ -1111,11 +1116,17 @@ mod tests {
     fn a_crossfade_is_eased_not_linear() {
         let t0 = Instant::now();
         let quarter = fade(t0, t0 + CROSSFADE / 4);
-        assert!(quarter > 0.5, "a quarter of the way in should be past half, got {quarter}");
+        assert!(
+            quarter > 0.5,
+            "a quarter of the way in should be past half, got {quarter}"
+        );
         let mut previous = 0.0;
         for step in 0..=16 {
             let value = fade(t0, t0 + CROSSFADE * step / 16);
-            assert!(value >= previous - 1e-4, "the fade went backwards at {step}");
+            assert!(
+                value >= previous - 1e-4,
+                "the fade went backwards at {step}"
+            );
             previous = value;
         }
     }
@@ -1159,7 +1170,10 @@ mod tests {
     #[test]
     fn paging_stops_at_both_ends_and_says_so() {
         let (mut pane, now) = documented(PreviewKind::Pdf, 42, doc::Counter::Page);
-        assert!(!pane.turn_page(false, now), "page one has nowhere back to go");
+        assert!(
+            !pane.turn_page(false, now),
+            "page one has nowhere back to go"
+        );
         assert!(pane.turn_page(true, now));
         assert_eq!(pane.doc_ref().map(|v| v.page), Some(1));
         assert_eq!(
@@ -1172,7 +1186,11 @@ mod tests {
         for _ in 0..100 {
             pane.turn_page(true, now);
         }
-        assert_eq!(pane.doc_ref().map(|v| v.page), Some(41), "past the last page");
+        assert_eq!(
+            pane.doc_ref().map(|v| v.page),
+            Some(41),
+            "past the last page"
+        );
         assert!(!pane.turn_page(true, now));
 
         // A one-page document never pages at all, so `←` falls through from the
@@ -1198,7 +1216,11 @@ mod tests {
         for _ in 0..10 {
             gcode.doc_scroll(1, now);
         }
-        assert_eq!(gcode.doc_ref().map(|v| v.page), Some(2), "the layer ran off the top");
+        assert_eq!(
+            gcode.doc_ref().map(|v| v.page),
+            Some(2),
+            "the layer ran off the top"
+        );
         for _ in 0..10 {
             gcode.doc_scroll(-1, now);
         }
@@ -1212,7 +1234,11 @@ mod tests {
         for _ in 0..10 {
             pdf.doc_scroll(1, now);
         }
-        assert_eq!(pdf.doc_ref().map(|v| v.pan), Some(50.0), "it panned off the page");
+        assert_eq!(
+            pdf.doc_ref().map(|v| v.pan),
+            Some(50.0),
+            "it panned off the page"
+        );
         pdf.doc_scroll(-100, now);
         assert_eq!(pdf.doc_ref().map(|v| v.pan), Some(0.0));
         // Turning the page starts at the top of it again.

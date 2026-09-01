@@ -1,6 +1,6 @@
 //! Producing a preview off the event loop, newest-request-wins.
 //!
-//! The same shape as [`crate::fs::scan`], for the same reason: reading a file
+//! The same shape as [`crate::fs::Scanner`], for the same reason: reading a file
 //! can block for as long as the disk feels like, and the event loop is never
 //! the thread it blocks on (PLAN §1). Requests go in on a channel, results
 //! come back on another, and df-core rings a [`Notifier`] the app supplies
@@ -115,7 +115,7 @@ pub const HEX_BYTES: usize = 64 * 1024;
 /// The most entries listed in a directory preview.
 ///
 /// A preview is a glance, not a pane you navigate — `→` is how you get the
-/// real listing, and that path is [`crate::fs::scan`]'s, batched and
+/// real listing, and that path is [`crate::fs::Scanner`]'s, batched and
 /// cancellable. 1000 is well past a screenful and keeps a peek at
 /// `/nix/store` from turning into a 200k-entry sort.
 pub const DIR_ENTRIES: usize = 1000;
@@ -409,7 +409,7 @@ impl Drop for Previewer {
 }
 
 /// Lock without ever panicking on a poisoned mutex — see
-/// [`crate::fs::scan`]'s note; the same argument applies to the same map.
+/// [`crate::fs::Scanner`]'s note; the same argument applies to the same map.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }

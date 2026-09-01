@@ -133,7 +133,10 @@ mod tests {
         let (rows, visible, off) = (100, 20, 5);
         // From the top, straight to row 60: the view moves to put 60 five rows
         // above its bottom edge.
-        assert_eq!(first_visible(0, 60, rows, visible, off), 60 + off + 1 - visible);
+        assert_eq!(
+            first_visible(0, 60, rows, visible, off),
+            60 + off + 1 - visible
+        );
         // …and back the other way.
         assert_eq!(first_visible(80, 10, rows, visible, off), 5);
     }

@@ -130,8 +130,7 @@ pub fn metrics(width: f32) -> Metrics {
     let columns = (((width + TILE_GAP) / (TILE_WIDTH + TILE_GAP)).floor() as usize).max(1);
     // The tiles stretch to divide the width exactly: `columns` tiles and
     // `columns - 1` gaps between them.
-    let tile_width =
-        ((width - TILE_GAP * (columns as f32 - 1.0)) / columns as f32).max(1.0);
+    let tile_width = ((width - TILE_GAP * (columns as f32 - 1.0)) / columns as f32).max(1.0);
     // A square picture plus the name under it. Square because the thumbnails
     // are every aspect ratio there is and a square is the shape that wastes the
     // least on the average of them.
@@ -298,7 +297,12 @@ pub fn step(cursor: usize, count: usize, columns: usize, step: Step) -> usize {
 /// Deliberately *not* symmetric. A view scrolls downwards far more than
 /// upwards, and the rows above have almost always been decoded already and are
 /// still in the cache — so the lookahead is spent where it buys something.
-pub fn wanted(count: usize, columns: usize, first_row: usize, rows: usize) -> std::ops::Range<usize> {
+pub fn wanted(
+    count: usize,
+    columns: usize,
+    first_row: usize,
+    rows: usize,
+) -> std::ops::Range<usize> {
     if count == 0 {
         return 0..0;
     }
@@ -418,11 +422,7 @@ impl Thumbs {
         for want in wants {
             self.touch(&want.path);
         }
-        let Ok((mut shared, condvar)) = self
-            .shared
-            .0
-            .lock()
-            .map(|shared| (shared, &self.shared.1))
+        let Ok((mut shared, condvar)) = self.shared.0.lock().map(|shared| (shared, &self.shared.1))
         else {
             return;
         };
@@ -494,7 +494,9 @@ impl Drop for Thumbs {
 fn worker(shared: Arc<(Mutex<Shared>, Condvar)>, out: Sender<Done>, notify: Notifier) {
     loop {
         let want = {
-            let Ok(mut held) = shared.0.lock() else { return };
+            let Ok(mut held) = shared.0.lock() else {
+                return;
+            };
             loop {
                 if held.stop {
                     return;
@@ -503,7 +505,9 @@ fn worker(shared: Arc<(Mutex<Shared>, Condvar)>, out: Sender<Done>, notify: Noti
                     held.inflight.insert(want.path.clone());
                     break want;
                 }
-                let Ok(next) = shared.1.wait(held) else { return };
+                let Ok(next) = shared.1.wait(held) else {
+                    return;
+                };
                 held = next;
             }
         };
@@ -564,7 +568,6 @@ fn upload(ctx: Option<&egui::Context>, path: &Path, image: &Rgba) -> Option<egui
         egui::TextureOptions::LINEAR,
     ))
 }
-
 
 // ── The seam ────────────────────────────────────────────────────────────────
 //
@@ -711,7 +714,9 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
     );
 
     for index in window {
-        let Some(entry) = dir.row(index) else { continue };
+        let Some(entry) = dir.row(index) else {
+            continue;
+        };
         let rect = tile_rect(content, &metrics, scroll_rows, index);
         let (rect, alpha) = match flip {
             Some(flip) => (
@@ -798,13 +803,19 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
             // teach two different marks.
             let bar = egui::Rect::from_min_max(
                 egui::pos2(rect.left(), rect.top() + TILE_PAD),
-                egui::pos2(rect.left() + crate::ui::SELECT_BAR_WIDTH, rect.bottom() - TILE_PAD),
+                egui::pos2(
+                    rect.left() + crate::ui::SELECT_BAR_WIDTH,
+                    rect.bottom() - TILE_PAD,
+                ),
             );
             painter.rect_filled(bar, 1, crate::chrome::fade(palette.yellow, alpha));
         }
         if marked {
             let chip = egui::Rect::from_min_max(
-                egui::pos2(rect.right() - crate::ui::CLIP_BAR_WIDTH, rect.top() + TILE_PAD),
+                egui::pos2(
+                    rect.right() - crate::ui::CLIP_BAR_WIDTH,
+                    rect.top() + TILE_PAD,
+                ),
                 egui::pos2(rect.right(), rect.bottom() - TILE_PAD),
             );
             let colour = if cut { palette.peach } else { palette.teal };
@@ -825,7 +836,11 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         // name is that card's caption.
         let label = metrics.label_rect(rect);
         let name_colour = if lifted || cut {
-            mix(crate::icons::name_color(entry, palette), ground, crate::ui::PARENT_DIM)
+            mix(
+                crate::icons::name_color(entry, palette),
+                ground,
+                crate::ui::PARENT_DIM,
+            )
         } else {
             crate::icons::name_color(entry, palette)
         };
@@ -906,11 +921,7 @@ fn name(
         overflow_character: Some('…'),
     };
     let galley = painter.layout_job(job);
-    painter.galley(
-        egui::pos2(rect.center().x, rect.top()),
-        galley,
-        colour,
-    );
+    painter.galley(egui::pos2(rect.center().x, rect.top()), galley, colour);
 }
 
 /// The tile name's font.
@@ -1123,16 +1134,17 @@ mod tests {
             dir.toggle_selected(0);
             assert!(dir.is_selected(&name));
         }
-        let clip_paths: HashSet<PathBuf> =
-            dir.row(1).map(|e| e.path.clone()).into_iter().collect();
-        let dragged: HashSet<PathBuf> =
-            dir.row(2).map(|e| e.path.clone()).into_iter().collect();
+        let clip_paths: HashSet<PathBuf> = dir.row(1).map(|e| e.path.clone()).into_iter().collect();
+        let dragged: HashSet<PathBuf> = dir.row(2).map(|e| e.path.clone()).into_iter().collect();
 
         let notify: df_core::fs::Notifier = Arc::new(|| {});
         let thumbs = Thumbs::start(notify);
         let mut before = crate::flip::Snapshot::new();
         if let Some(entry) = dir.row(0) {
-            before.insert(entry.path.clone(), egui::Rect::from_min_size(egui::pos2(0.0, 900.0), egui::vec2(10.0, 10.0)));
+            before.insert(
+                entry.path.clone(),
+                egui::Rect::from_min_size(egui::pos2(0.0, 900.0), egui::vec2(10.0, 10.0)),
+            );
         }
         let after = crate::flip::Snapshot::new();
         let flip = crate::flip::Flip::begin(&before, &after, now);

@@ -34,7 +34,7 @@
 //! nothing, possibly a second-old answer — and queues a refresh if one is due.
 //! The refresh happens on one worker thread and rings the app's
 //! [`Notifier`](crate::fs::Notifier) when it lands, the same handshake
-//! [`crate::fs::scan`] and [`crate::preview::job`] use. A repaint reads the
+//! [`crate::fs::Scanner`] and [`crate::preview::job`] use. A repaint reads the
 //! [`cache::Git::generation`] counter to know whether anything changed.
 //!
 //! Consequently there is no code path in here that can make a keystroke wait on

@@ -170,7 +170,9 @@ impl Zones {
                 .filter(|rect| rect.is_positive()),
             Target::Tab(index) => {
                 let strip = self.strip?;
-                crate::chrome::tab_rects(strip, self.tabs).get(index).copied()
+                crate::chrome::tab_rects(strip, self.tabs)
+                    .get(index)
+                    .copied()
             }
         }
     }
@@ -320,10 +322,7 @@ pub struct Card {
 /// card — the one with the icon and the name on it — is always last.
 pub fn ghost_cards(at: egui::Pos2, count: usize) -> Vec<Card> {
     let behind = count.saturating_sub(1).min(GHOST_STACK);
-    let top = egui::Rect::from_min_size(
-        at - GHOST_GRAB,
-        egui::vec2(GHOST_WIDTH, GHOST_HEIGHT),
-    );
+    let top = egui::Rect::from_min_size(at - GHOST_GRAB, egui::vec2(GHOST_WIDTH, GHOST_HEIGHT));
     let mut cards = Vec::with_capacity(behind + 1);
     for depth in (1..=behind).rev() {
         cards.push(Card {
@@ -333,7 +332,11 @@ pub fn ghost_cards(at: egui::Pos2, count: usize) -> Vec<Card> {
             )),
             // Alternating, so two cards behind do not lean the same way and
             // read as one thick card.
-            tilt: if depth % 2 == 0 { GHOST_TILT } else { -GHOST_TILT },
+            tilt: if depth % 2 == 0 {
+                GHOST_TILT
+            } else {
+                -GHOST_TILT
+            },
             // Each step back loses a fifth of its opacity: far enough to read
             // as depth, near enough that the bottom card is still an edge.
             alpha: 1.0 - 0.2 * depth as f32,
@@ -532,7 +535,6 @@ impl SpringBack {
     pub fn finished(&self, now: Instant) -> bool {
         self.tween.finished(now)
     }
-
 }
 
 // ── The drag-out payload ────────────────────────────────────────────────────
@@ -585,7 +587,10 @@ pub fn offer(paths: &[PathBuf]) -> Vec<(String, Vec<u8>)> {
         .join("\n");
     vec![
         ("text/uri-list".to_string(), uris.into_bytes()),
-        ("text/plain;charset=utf-8".to_string(), plain.clone().into_bytes()),
+        (
+            "text/plain;charset=utf-8".to_string(),
+            plain.clone().into_bytes(),
+        ),
         ("text/plain".to_string(), plain.into_bytes()),
         (self_mime().to_string(), Vec::new()),
     ]
@@ -701,9 +706,7 @@ mod tests {
         );
         // A directory row in the list, and a *file* row falling through to the
         // pane it is in.
-        let row = |index: usize| {
-            crate::ui::row_rect(z.list_content, 0.0, index).center()
-        };
+        let row = |index: usize| crate::ui::row_rect(z.list_content, 0.0, index).center();
         assert_eq!(
             target_at(&z, row(2), dirs),
             Some(Target::Row(Column::List, 2))
@@ -766,7 +769,10 @@ mod tests {
     /// The two refusals, and the case each of them must *not* refuse.
     #[test]
     fn a_destination_inside_the_drag_is_refused() {
-        let dragged = vec![PathBuf::from("/home/b/work"), PathBuf::from("/home/b/a.txt")];
+        let dragged = vec![
+            PathBuf::from("/home/b/work"),
+            PathBuf::from("/home/b/a.txt"),
+        ];
         assert!(!valid_dest(Path::new("/home/b/work"), &dragged, Verb::Copy));
         assert!(!valid_dest(
             Path::new("/home/b/work/deep"),
@@ -807,7 +813,10 @@ mod tests {
             assert!(pair[0].alpha <= pair[1].alpha);
         }
         assert!(cards[0].rect.top() > cards[1].rect.top());
-        assert!(cards[0].tilt * cards[1].tilt < 0.0, "the stack must alternate");
+        assert!(
+            cards[0].tilt * cards[1].tilt < 0.0,
+            "the stack must alternate"
+        );
     }
 
     /// The badge only appears once the cards stop counting.
@@ -859,7 +868,10 @@ mod tests {
         let half = autoscroll(content, egui::pos2(x, content.bottom() - EDGE_BAND / 2.0));
         assert!((half - EDGE_ROWS_PER_SEC * 0.25).abs() < 0.5, "{half}");
         // Beside the pane is not in the pane.
-        assert_eq!(autoscroll(content, egui::pos2(-40.0, content.top() + 2.0)), 0.0);
+        assert_eq!(
+            autoscroll(content, egui::pos2(-40.0, content.top() + 2.0)),
+            0.0
+        );
         // A drag dragged well past the pane keeps scrolling, but only as far as
         // one band's worth beyond it — past that the pointer is somewhere else
         // entirely and the list must stop.
@@ -897,7 +909,10 @@ mod tests {
         spring.aim(Some(folder), t0);
         spring.aim(Some(Target::Row(Column::List, 5)), half);
         assert_eq!(spring.fired(due), None);
-        assert_eq!(spring.fired(half + SPRING_OPEN), Some(Target::Row(Column::List, 5)));
+        assert_eq!(
+            spring.fired(half + SPRING_OPEN),
+            Some(Target::Row(Column::List, 5))
+        );
 
         // Moving to nothing cancels it, deadline and all.
         let mut spring = SpringOpen::default();

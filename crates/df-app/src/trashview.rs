@@ -5,7 +5,7 @@
 //!
 //! `g t` does not open a *trash manager*; it puts a different set of rows in
 //! the list pane. The rows are [`df_core::fs::Entry`] values built from
-//! [`TrashedItem`]s and handed to the pane's `DirState` through
+//! [`df_core::ops::TrashedItem`]s and handed to the pane's `DirState` through
 //! [`DirState::set_entries`](df_core::fs::DirState::set_entries) — the archive
 //! and remote pattern for the third time — so the cursor, `Space`, `Ctrl+a`,
 //! visual mode, the filter, the sorts, the icons and the preview pane all work
@@ -13,7 +13,7 @@
 //!
 //! ## The paths are real, which is what makes the preview work
 //!
-//! A row's [`Entry::path`] is its file inside `…/Trash/files/`, which genuinely
+//! A row's [`df_core::fs::Entry::path`] is its file inside `…/Trash/files/`, which genuinely
 //! exists. So the ordinary preview pipeline opens it, the ordinary icon table
 //! recognises it, and `Tab` shows real metadata — none of which needed a line
 //! of new code. The row's *name* is the name inside `files/`, not the original
@@ -163,11 +163,9 @@ pub fn row_from(item: &TrashedItem, meta: Option<&std::fs::Metadata>) -> Entry {
         // the mtime linemode shows it without a second column existing.
         mtime: deleted_at(&item.deleted_at),
         btime: None,
-        mode: meta.map(|m| m.mode()).unwrap_or(if is_dir {
-            0o040_755
-        } else {
-            0o100_644
-        }),
+        mode: meta
+            .map(|m| m.mode())
+            .unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 }),
         uid: meta.map(|m| m.uid()).unwrap_or(0),
         gid: meta.map(|m| m.gid()).unwrap_or(0),
         // Sniffed from the *original* name, so a `notes_1.txt` in the trash
@@ -273,10 +271,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 pub fn restore_refusal(item: &TrashedItem) -> Option<String> {
     let original = &item.original;
     if !item.files_path().exists() {
-        return Some(format!(
-            "{} is no longer in the trash",
-            original.display()
-        ));
+        return Some(format!("{} is no longer in the trash", original.display()));
     }
     if original.exists() {
         return Some(format!(
@@ -325,7 +320,11 @@ mod tests {
     /// real path, and the deletion date standing in for the modification time.
     #[test]
     fn a_trash_record_becomes_a_list_pane_row() {
-        let i = item("notes_1.txt", "/home/brian/Work/notes.txt", "2026-08-30T09:15:00");
+        let i = item(
+            "notes_1.txt",
+            "/home/brian/Work/notes.txt",
+            "2026-08-30T09:15:00",
+        );
         let row = row_from(&i, None);
         assert_eq!(row.name, "notes_1.txt");
         assert_eq!(
@@ -348,8 +347,20 @@ mod tests {
     /// rule must not depend on that.
     #[test]
     fn hidden_files_are_still_hidden_in_the_trash() {
-        assert!(row_from(&item("x", "/home/brian/.bashrc", "2026-08-30T09:15:00"), None).is_hidden);
-        assert!(!row_from(&item("x", "/home/brian/notes.txt", "2026-08-30T09:15:00"), None).is_hidden);
+        assert!(
+            row_from(
+                &item("x", "/home/brian/.bashrc", "2026-08-30T09:15:00"),
+                None
+            )
+            .is_hidden
+        );
+        assert!(
+            !row_from(
+                &item("x", "/home/brian/notes.txt", "2026-08-30T09:15:00"),
+                None
+            )
+            .is_hidden
+        );
     }
 
     /// Newest first is the sort the view opens on, and it falls out of the
@@ -391,7 +402,11 @@ mod tests {
     fn the_column_shows_where_each_row_came_from() {
         let home = std::env::var("HOME").unwrap_or_default();
         let items = vec![
-            item("a.txt", &format!("{home}/Work/a.txt"), "2026-08-30T09:15:00"),
+            item(
+                "a.txt",
+                &format!("{home}/Work/a.txt"),
+                "2026-08-30T09:15:00",
+            ),
             item("b.txt", "/etc/b.txt", "2026-08-30T09:15:00"),
         ];
         let notes = notes(&items);

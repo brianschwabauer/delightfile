@@ -180,7 +180,12 @@ fn scrim(painter: &egui::Painter, content: egui::Rect, hold: f32, peak: f32) {
         return;
     }
     let ink = |a: f32| {
-        egui::Color32::from_rgba_unmultiplied(0, 0, 0, (a * peak * 255.0).round().clamp(0.0, 255.0) as u8)
+        egui::Color32::from_rgba_unmultiplied(
+            0,
+            0,
+            0,
+            (a * peak * 255.0).round().clamp(0.0, 255.0) as u8,
+        )
     };
     let mut mesh = egui::Mesh::default();
     for (y0, y1, a0, a1) in bands(content.bottom(), hold) {
@@ -254,7 +259,12 @@ pub fn paint(paint: &Painting<'_>, content: egui::Rect, state: &TransportState, 
     );
     let mid = row.center().y;
 
-    state_glyph(&painter, egui::pos2(row.left() + 6.0, mid), state.playing, ink);
+    state_glyph(
+        &painter,
+        egui::pos2(row.left() + 6.0, mid),
+        state.playing,
+        ink,
+    );
 
     // `position / duration`, left of the bar: one readout, not two, because the
     // question is always "how far through".
@@ -287,7 +297,11 @@ pub fn paint(paint: &Painting<'_>, content: egui::Rect, state: &TransportState, 
         right -= GAP;
     };
     if state.muted {
-        chip("muted".into(), paint.palette.peach.gamma_multiply(alpha), &painter);
+        chip(
+            "muted".into(),
+            paint.palette.peach.gamma_multiply(alpha),
+            &painter,
+        );
     } else if (state.volume - 1.0).abs() > 0.01 {
         chip(
             format!("{}%", (state.volume * 100.0).round() as i32),
@@ -296,7 +310,11 @@ pub fn paint(paint: &Painting<'_>, content: egui::Rect, state: &TransportState, 
         );
     }
     if state.looping {
-        chip("loop".into(), paint.palette.teal.gamma_multiply(alpha), &painter);
+        chip(
+            "loop".into(),
+            paint.palette.teal.gamma_multiply(alpha),
+            &painter,
+        );
     }
     if let Some(rate) = rate_label(state.rate, state.playing) {
         // The rate badge is the loudest thing on the strip because it is the
@@ -371,7 +389,7 @@ pub fn audio_card(
     // and above the strip's own line as well.
     let centre = egui::pos2(
         content.center().x,
-        content.top() + (content.height() - HEIGHT) * 0.42,
+        content.top() + (content.height() - HEIGHT) * crate::chrome::OPTICAL_CENTRE,
     );
     let line_height = 20.0;
     let top = centre.y - (lines.len() as f32 - 1.0) * line_height / 2.0;
@@ -428,7 +446,10 @@ mod tests {
         }
         let steps: Vec<f32> = b[1..].iter().map(|band| band.2 - band.3).collect();
         let steepest = steps.iter().cloned().fold(0.0f32, f32::max);
-        assert!(steps[0] < steepest / 4.0, "a corner where it leaves the strip");
+        assert!(
+            steps[0] < steepest / 4.0,
+            "a corner where it leaves the strip"
+        );
         assert!(
             steps[steps.len() - 1] < steepest / 4.0,
             "a corner where it meets the picture"
@@ -442,7 +463,10 @@ mod tests {
     fn the_strip_holds_then_fades_and_never_comes_back() {
         let t0 = Instant::now();
         assert_eq!(linger_alpha(t0, t0), 1.0);
-        assert_eq!(linger_alpha(t0, t0 + LINGER - Duration::from_millis(1)), 1.0);
+        assert_eq!(
+            linger_alpha(t0, t0 + LINGER - Duration::from_millis(1)),
+            1.0
+        );
         let mid = linger_alpha(t0, t0 + LINGER + FADE / 2);
         assert!(mid > 0.0 && mid < 1.0, "{mid}");
         assert_eq!(linger_alpha(t0, t0 + LINGER + FADE), 0.0);
@@ -450,7 +474,10 @@ mod tests {
         let mut previous = 1.0;
         for step in 0..=20 {
             let value = linger_alpha(t0, t0 + LINGER + FADE * step / 20);
-            assert!(value <= previous + 1e-4, "the fade went backwards at {step}");
+            assert!(
+                value <= previous + 1e-4,
+                "the fade went backwards at {step}"
+            );
             previous = value;
         }
         // A `now` from before the activity — a stale instant carried into a

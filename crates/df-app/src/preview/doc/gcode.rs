@@ -149,8 +149,7 @@ pub struct Layer {
     pub moves: Vec<Move>,
 }
 
-impl Layer {
-}
+impl Layer {}
 
 /// A parsed toolpath: the layers, ascending, and whatever the slicer said about
 /// the print in its comments.

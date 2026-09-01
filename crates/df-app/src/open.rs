@@ -103,8 +103,8 @@ pub fn spawn_detached(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::
     let plain = shell_argv(&shell_program(), snippet, paths);
     let argv = detached_argv(plain.clone());
     let detached = argv.len() != plain.len();
-    let mut command = command_from(&argv, cwd)
-        .ok_or_else(|| std::io::Error::other("empty command"))?;
+    let mut command =
+        command_from(&argv, cwd).ok_or_else(|| std::io::Error::other("empty command"))?;
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -122,8 +122,8 @@ pub fn spawn_detached(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::
 /// task worker, never on the UI thread.
 pub fn run_blocking(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<i32> {
     let argv = shell_argv(&shell_program(), snippet, paths);
-    let mut command = command_from(&argv, cwd)
-        .ok_or_else(|| std::io::Error::other("empty command"))?;
+    let mut command =
+        command_from(&argv, cwd).ok_or_else(|| std::io::Error::other("empty command"))?;
     let status = command.status()?;
     // A signalled child has no code; 128 + signal is what every shell reports
     // for one, so the toast says the number the user would see in `$?`.
@@ -146,10 +146,7 @@ pub fn exit_text(snippet: &str, code: i32) -> String {
 /// A snippet, cut to something that fits on one line of chrome.
 pub fn short(snippet: &str) -> String {
     const MAX: usize = 42;
-    let one_line: String = snippet
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let one_line: String = snippet.split_whitespace().collect::<Vec<_>>().join(" ");
     if one_line.chars().count() <= MAX {
         return one_line;
     }
@@ -260,7 +257,10 @@ pub fn picker_geometry(
     let rects = (0..count)
         .map(|i| {
             egui::Rect::from_min_size(
-                egui::pos2(card.left() + CARD_PAD, card.top() + CARD_PAD + i as f32 * chrome::CARD_ROW),
+                egui::pos2(
+                    card.left() + CARD_PAD,
+                    card.top() + CARD_PAD + i as f32 * chrome::CARD_ROW,
+                ),
                 egui::vec2(card.width() - CARD_PAD * 2.0, chrome::CARD_ROW),
             )
         })
@@ -340,7 +340,11 @@ pub fn paint_picker(
             &inside,
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             &choice.description,
-            if on_cursor { palette.text } else { palette.subtext0 },
+            if on_cursor {
+                palette.text
+            } else {
+                palette.subtext0
+            },
             (rect.width() - PAD_X * 2.0 - name.size().x - 8.0).max(0.0),
         );
     }
@@ -383,7 +387,10 @@ mod tests {
         let argv = shell_argv("/bin/sh", "true", &[]);
         let detached = detached_argv(argv.clone());
         if which("setsid").is_some() {
-            assert_eq!(&detached[..2], &["setsid".to_string(), "--fork".to_string()]);
+            assert_eq!(
+                &detached[..2],
+                &["setsid".to_string(), "--fork".to_string()]
+            );
             assert_eq!(&detached[2..], &argv[..]);
         } else {
             assert_eq!(detached, argv, "no setsid: still open the file");
@@ -476,10 +483,24 @@ mod tests {
             };
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
             let (card, rects) = picker_geometry(area, anchor, picker.choices.len());
-            paint_picker(&painting, card, &rects, &picker, &Hovers::new(), &Ripples::new());
+            paint_picker(
+                &painting,
+                card,
+                &rects,
+                &picker,
+                &Hovers::new(),
+                &Ripples::new(),
+            );
             let empty = Picker::new(Vec::new(), Vec::new(), anchor);
             let (card, rects) = picker_geometry(area, anchor, 0);
-            paint_picker(&painting, card, &rects, &empty, &Hovers::new(), &Ripples::new());
+            paint_picker(
+                &painting,
+                card,
+                &rects,
+                &empty,
+                &Hovers::new(),
+                &Ripples::new(),
+            );
         });
     }
 }

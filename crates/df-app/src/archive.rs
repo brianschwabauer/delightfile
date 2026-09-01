@@ -5,8 +5,8 @@
 //! There is almost no new machinery here, and that is the design. `→` on a
 //! `.zip` does not open an archive *viewer*; it puts a different set of rows in
 //! the list pane. Those rows are [`df_core::fs::Entry`] values built from an
-//! [`ArchiveTree`] and handed to a [`DirState`] through
-//! [`DirState::set_entries`], so every single thing the list pane already does
+//! [`ArchiveTree`] and handed to a [`df_core::fs::DirState`] through
+//! [`df_core::fs::DirState::set_entries`], so every single thing the list pane already does
 //! keeps working inside an archive without knowing where the rows came from:
 //! the cursor, scrolloff, the scroll tween, `↑`/`↓`, `gg`/`G`, paging, the
 //! dir-first sort, `,` re-sorts with their FLIP animation, `f` filter, `/` find,
@@ -72,7 +72,7 @@ pub struct Browse {
 }
 
 impl Browse {
-    /// The display path for `inner` — what the list pane's [`DirState`] is
+    /// The display path for `inner` — what the list pane's [`df_core::fs::DirState`] is
     /// called and what the breadcrumb draws.
     pub fn display_path(&self, inner: &str) -> PathBuf {
         if inner.is_empty() {
@@ -107,7 +107,6 @@ impl Browse {
     pub fn rows(&self, inner: &str) -> Vec<Entry> {
         rows(&self.tree, inner, &self.path)
     }
-
 }
 
 /// One archive directory's rows, as list-pane entries.
@@ -272,7 +271,10 @@ pub fn previewable(entry: &ArchiveEntry) -> bool {
 /// as deliberate as the ones it does: no permissions (the tree does not carry
 /// them), no owner (likewise), and no "compressed" row for a stored entry,
 /// where the number would be the size again.
-pub fn card_rows(entry: &ArchiveEntry, format: df_core::archive::ArchiveFormat) -> Vec<(String, String)> {
+pub fn card_rows(
+    entry: &ArchiveEntry,
+    format: df_core::archive::ArchiveFormat,
+) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     rows.push((
         "Kind".to_string(),
@@ -300,7 +302,10 @@ pub fn card_rows(entry: &ArchiveEntry, format: df_core::archive::ArchiveFormat) 
         rows.push(("Method".to_string(), entry.method.label().to_string()));
     }
     if let Some(mtime) = entry.mtime.and_then(unix_time) {
-        rows.push(("Modified".to_string(), crate::format::long_stamp(Some(mtime))));
+        rows.push((
+            "Modified".to_string(),
+            crate::format::long_stamp(Some(mtime)),
+        ));
     }
     if let Some(target) = &entry.link_target {
         rows.push(("Link to".to_string(), target.clone()));
@@ -363,6 +368,12 @@ const CARD_PAD: f32 = 12.0;
 /// One label/value row.
 const CARD_ROW: f32 = 19.0;
 const CARD_FONT: f32 = 13.0;
+/// The card's title. `CARD_FONT + 2`, which is the step every other titled
+/// surface in the window uses (`dialog`'s `FONT + 2.0`) — it was a bare `15.0`
+/// that would not have tracked a change to the face below it.
+const CARD_TITLE_FONT: f32 = CARD_FONT + 2.0;
+/// The title's row: its own line plus the gap down to the rule under it.
+const CARD_TITLE_ROW: f32 = 24.0;
 /// How wide the label column is. Fixed rather than measured, so the values line
 /// up down the card instead of stepping in and out with the longest word.
 const CARD_LABEL: f32 = 86.0;
@@ -398,10 +409,10 @@ pub fn card(
         egui::pos2(content.left() + CARD_PAD, y),
         egui::Align2::LEFT_TOP,
         &entry.name,
-        egui::FontId::proportional(15.0),
+        egui::FontId::proportional(CARD_TITLE_FONT),
         palette.text,
     );
-    y += 24.0;
+    y += CARD_TITLE_ROW;
 
     // A hairline under the title, inset to the padding on both sides so the
     // rule reads as belonging to the card rather than crossing it.
@@ -521,7 +532,12 @@ mod tests {
                 raw
             })
             .collect();
-        df_core::archive::build(PathBuf::from("/dl/src.zip"), ArchiveFormat::Zip, raws, false)
+        df_core::archive::build(
+            PathBuf::from("/dl/src.zip"),
+            ArchiveFormat::Zip,
+            raws,
+            false,
+        )
     }
 
     fn browse() -> Browse {
@@ -618,7 +634,10 @@ mod tests {
             .find(|e| e.unsafe_name)
             .expect("the traversing name is flagged");
         assert_eq!(Badge::of(bad), Some(Badge::Unsafe));
-        assert_eq!(Badge::of(&tree.get("fine.txt").cloned().expect("fine")), None);
+        assert_eq!(
+            Badge::of(&tree.get("fine.txt").cloned().expect("fine")),
+            None
+        );
         assert_eq!(Badge::Unsafe.label(), "unsafe path");
     }
 
@@ -685,10 +704,7 @@ mod tests {
                 .map(|(_, v)| v.clone())
         };
         assert_eq!(find("Size").as_deref(), Some("1000 B"));
-        assert_eq!(
-            find("Compressed").as_deref(),
-            Some("250 B (75% smaller)")
-        );
+        assert_eq!(find("Compressed").as_deref(), Some("250 B (75% smaller)"));
         assert_eq!(find("Method").as_deref(), Some("deflate"));
         assert_eq!(find("In archive").as_deref(), Some("src/main.rs"));
         assert!(find("Modified").is_some());
@@ -771,7 +787,13 @@ mod tests {
             let pane = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(420.0, 600.0));
             for entry in tree.all() {
                 card(&paint, pane, entry, ArchiveFormat::Zip, None);
-                card(&paint, pane, entry, ArchiveFormat::Zip, Some("one\ntwo\nthree"));
+                card(
+                    &paint,
+                    pane,
+                    entry,
+                    ArchiveFormat::Zip,
+                    Some("one\ntwo\nthree"),
+                );
             }
             // A pane with no room at all must draw nothing rather than divide
             // by its own height.

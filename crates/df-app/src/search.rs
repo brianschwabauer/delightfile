@@ -136,7 +136,9 @@ pub struct Hit {
 enum Message {
     Hits(Vec<Hit>),
     /// The process ended — normally, or because the cap was reached.
-    Done { capped: bool },
+    Done {
+        capped: bool,
+    },
     /// The process could not be started, or died saying something.
     Failed(String),
 }
@@ -358,8 +360,13 @@ impl Search {
 
     /// Keep the cursor on screen, by the same scrolloff rule the panes use.
     pub fn scroll_into_view(&mut self, rows: usize, scrolloff: usize) {
-        self.first =
-            crate::viewport::first_visible(self.first, self.cursor, self.hits.len(), rows, scrolloff);
+        self.first = crate::viewport::first_visible(
+            self.first,
+            self.cursor,
+            self.hits.len(),
+            rows,
+            scrolloff,
+        );
     }
 
     /// Kill whatever is running and start a process for `query`.
@@ -492,7 +499,10 @@ fn read(
         Err(_) => None,
     };
     let Some(stdout) = stdout else {
-        let _ = out.send((generation, Message::Failed("no output from the search".into())));
+        let _ = out.send((
+            generation,
+            Message::Failed("no output from the search".into()),
+        ));
         notify();
         return;
     };

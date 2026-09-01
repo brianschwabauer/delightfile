@@ -474,7 +474,9 @@ pub(crate) fn extract_into<R: Read>(
         if !sink.open(&entry.name, entry.size) {
             return Ok(false);
         }
-        let result = copy_payload(reader, entry.size, &mut |chunk| sink.write(chunk).map(|_| ()));
+        let result = copy_payload(reader, entry.size, &mut |chunk| {
+            sink.write(chunk).map(|_| ())
+        });
         sink.close();
         result.map(|()| true)
     })
@@ -526,7 +528,8 @@ fn walk<R: Read>(
     let mut consumed = 0u64;
 
     loop {
-        let got = read_full(reader, &mut block).map_err(|e| crate::DfError::Op(format!("tar: {e}")))?;
+        let got =
+            read_full(reader, &mut block).map_err(|e| crate::DfError::Op(format!("tar: {e}")))?;
         if got < TAR_BLOCK || block.iter().all(|b| *b == 0) {
             return Ok(());
         }

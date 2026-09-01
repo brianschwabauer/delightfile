@@ -199,7 +199,9 @@ impl Canvas {
     fn digits(&mut self, x: f32, y: f32, text: &str, color: Rgba) {
         let mut pen = x;
         for character in text.chars() {
-            let Some(glyph) = digit(character) else { continue };
+            let Some(glyph) = digit(character) else {
+                continue;
+            };
             for (row, bits) in glyph.iter().enumerate() {
                 for column in 0..DIGIT_W {
                     if bits & (1 << (DIGIT_W - 1 - column)) == 0 {

@@ -144,7 +144,11 @@ fn static_image_mime(mime: &str) -> &'static str {
         "image/vnd.microsoft.icon",
     ];
     let base = mime.split(';').next().unwrap_or(mime).trim();
-    KNOWN.iter().copied().find(|k| *k == base).unwrap_or("image/png")
+    KNOWN
+        .iter()
+        .copied()
+        .find(|k| *k == base)
+        .unwrap_or("image/png")
 }
 
 /// What a branch is called in a toast: "Copied image (PNG)".
@@ -417,7 +421,10 @@ mod tests {
     #[test]
     fn the_branch_table_matches_the_script_it_was_ported_from() {
         let small = 1024;
-        assert_eq!(branch_for(1, "image/png", small), Branch::Image("image/png"));
+        assert_eq!(
+            branch_for(1, "image/png", small),
+            Branch::Image("image/png")
+        );
         assert_eq!(
             branch_for(1, "image/jpeg", small),
             Branch::Image("image/jpeg")
@@ -426,15 +433,24 @@ mod tests {
         // df-core's sniffer names source files by language; they are still text.
         assert_eq!(branch_for(1, "text/rust", small), Branch::Text);
         assert_eq!(branch_for(1, "application/json", small), Branch::Text);
-        assert_eq!(branch_for(1, "application/x-shellscript", small), Branch::Text);
+        assert_eq!(
+            branch_for(1, "application/x-shellscript", small),
+            Branch::Text
+        );
         assert_eq!(branch_for(1, "inode/x-empty", small), Branch::Text);
         // Documents, media and unknown binaries are all references.
         assert_eq!(branch_for(1, "application/pdf", small), Branch::Uris);
         assert_eq!(branch_for(1, "video/mp4", small), Branch::Uris);
         assert_eq!(branch_for(1, "audio/flac", small), Branch::Uris);
-        assert_eq!(branch_for(1, "application/octet-stream", small), Branch::Uris);
+        assert_eq!(
+            branch_for(1, "application/octet-stream", small),
+            Branch::Uris
+        );
         // A charset parameter must not defeat the match.
-        assert_eq!(branch_for(1, "text/plain;charset=utf-8", small), Branch::Text);
+        assert_eq!(
+            branch_for(1, "text/plain;charset=utf-8", small),
+            Branch::Text
+        );
     }
 
     /// The cap is checked before the mime: a huge image is a reference.

@@ -260,10 +260,7 @@ mod tests {
         let mid = flip.offset(Path::new("a"), now + TRAVEL / 2).y;
         assert!(mid < 0.0 && mid > -22.0, "got {mid}");
         // At the end, nothing is displaced and nothing is owed a frame.
-        assert_eq!(
-            flip.offset(Path::new("a"), now + TRAVEL),
-            egui::Vec2::ZERO
-        );
+        assert_eq!(flip.offset(Path::new("a"), now + TRAVEL), egui::Vec2::ZERO);
         assert!(flip.finished(now + TRAVEL));
         assert!(!flip.finished(now));
     }
@@ -302,7 +299,11 @@ mod tests {
         let after = snapshot(&[("a", 0.0), ("dotfile", 22.0)]);
         let flip = Flip::begin(&before, &after, now).expect("one in, one out");
         assert_eq!(flip.alpha(Path::new("a"), now), 1.0, "a was always there");
-        assert_eq!(flip.alpha(Path::new("dotfile"), now), 0.0, "starts invisible");
+        assert_eq!(
+            flip.alpha(Path::new("dotfile"), now),
+            0.0,
+            "starts invisible"
+        );
         assert!((flip.alpha(Path::new("dotfile"), now + FADE) - 1.0).abs() < 1e-4);
         let ghosts = flip.ghosts(now);
         assert_eq!(ghosts.len(), 1);
@@ -322,7 +323,10 @@ mod tests {
         let after = snapshot(&[("a", 0.0)]);
         let flip = Flip::begin(&before, &after, now).expect("it moved");
         let offset = flip.offset(Path::new("a"), now);
-        assert!((offset.y + MAX_TRAVEL).abs() < 0.01, "clamped, got {offset:?}");
+        assert!(
+            (offset.y + MAX_TRAVEL).abs() < 0.01,
+            "clamped, got {offset:?}"
+        );
         assert!(offset.y < 0.0, "still coming from above");
         // A diagonal keeps its direction rather than being bent by a
         // per-component clamp.
@@ -403,7 +407,11 @@ mod tests {
     fn no_sort_command_is_missing_from_the_trigger_set() {
         for command in Command::all() {
             if command.id().starts_with("sort-") {
-                assert!(reorders(command), "{} is a sort and must animate", command.id());
+                assert!(
+                    reorders(command),
+                    "{} is a sort and must animate",
+                    command.id()
+                );
             }
         }
     }

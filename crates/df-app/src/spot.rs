@@ -367,7 +367,10 @@ pub fn toggle(mode: u32, index: usize) -> u32 {
 pub enum Checksum {
     /// Nothing asked for. The chip is what is drawn.
     Idle,
-    Running { done: u64, total: u64 },
+    Running {
+        done: u64,
+        total: u64,
+    },
     /// The digest, as 64 lowercase hex characters.
     Done(String),
     Failed(String),
@@ -803,7 +806,7 @@ pub fn paint(
             geometry.card.top() + CARD_PAD + chrome::CARD_ROW / 2.0,
         ),
         egui::Align2::LEFT_CENTER,
-        "File Info",
+        "File info",
         egui::FontId::proportional(FONT + 2.0),
         palette.text,
     );
@@ -822,7 +825,9 @@ pub fn paint(
     );
 
     for (index, rect) in geometry.rows.iter().enumerate() {
-        let Some(row) = spot.rows.get(index) else { break };
+        let Some(row) = spot.rows.get(index) else {
+            break;
+        };
         let on_cursor = index == spot.cursor;
         let key = Control::PanelRow(index);
         let hover = hovers.hover(key);
@@ -863,12 +868,18 @@ pub fn paint(
                     &inside,
                     egui::pos2(value_left, rect.center().y),
                     text,
-                    if on_cursor { palette.text } else { palette.subtext0 },
+                    if on_cursor {
+                        palette.text
+                    } else {
+                        palette.subtext0
+                    },
                     room,
                 );
             }
             Value::Permissions => {
-                permissions(paint, &inside, spot, geometry, on_cursor, hovers, ripples, now);
+                permissions(
+                    paint, &inside, spot, geometry, on_cursor, hovers, ripples, now,
+                );
             }
             Value::Checksum => {
                 checksum(paint, &inside, spot, geometry, rect, hovers, ripples, now);
@@ -1009,12 +1020,20 @@ fn checksum(
             painter.rect_filled(
                 rect,
                 chrome::CARD_ROW_RADIUS,
-                mix(mix(palette.crust, palette.blue, 0.22), palette.surface0, hover),
+                mix(
+                    mix(palette.crust, palette.blue, 0.22),
+                    palette.surface0,
+                    hover,
+                ),
             );
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                if state.running() { "cancel" } else { "compute SHA-256" },
+                if state.running() {
+                    "cancel"
+                } else {
+                    "compute SHA-256"
+                },
                 egui::FontId::proportional(FONT),
                 palette.text,
             );
@@ -1061,6 +1080,15 @@ fn checksum(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The spot card's rows against its plate (`delightful-ui` §15).
+    #[test]
+    fn the_card_radii_are_concentric() {
+        assert_eq!(
+            crate::chrome::CARD_ROW_RADIUS as f32 + crate::chrome::CARD_PAD,
+            crate::chrome::CARD_RADIUS as f32
+        );
+    }
     use std::time::{Duration as Dur, SystemTime, UNIX_EPOCH};
 
     fn facts() -> Facts {
@@ -1266,11 +1294,7 @@ mod tests {
     fn a_progress_bar_only_appears_when_there_is_progress_to_report() {
         assert_eq!(Checksum::Idle.fraction(), None);
         assert_eq!(
-            Checksum::Running {
-                done: 1,
-                total: 4
-            }
-            .fraction(),
+            Checksum::Running { done: 1, total: 4 }.fraction(),
             Some(0.25)
         );
         // A file whose length is not known gets a track and no fill rather

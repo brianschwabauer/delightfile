@@ -277,12 +277,7 @@ fn flush(pending: &mut Vec<DuUpdate>, emit: &mut dyn FnMut(Vec<DuUpdate>)) {
 /// interest. At most `depth_of_interest + 1` updates, however deep the walk is.
 fn push_partials(stack: &[Frame], depth_of_interest: usize, pending: &mut Vec<DuUpdate>) {
     for frame in stack.iter().take(depth_of_interest + 1) {
-        pending.push(DuUpdate::new(
-            &frame.dir,
-            frame.depth,
-            &frame.totals,
-            false,
-        ));
+        pending.push(DuUpdate::new(&frame.dir, frame.depth, &frame.totals, false));
     }
 }
 
@@ -374,7 +369,7 @@ pub fn walk(
                 if cancelled() {
                     return Err(DfError::Cancelled);
                 }
-                continue
+                continue;
             }
         };
 

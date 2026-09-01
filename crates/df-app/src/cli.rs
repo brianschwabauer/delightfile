@@ -67,11 +67,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
             _ => match arg.strip_prefix("--cwd-file=") {
                 Some(path) if !path.is_empty() => out.cwd_file = Some(PathBuf::from(path)),
                 Some(_) => return Outcome::Fail("--cwd-file needs a path".to_string()),
-                None => {
-                    return Outcome::Fail(format!(
-                        "unknown option `{arg}`\n\n{USAGE}"
-                    ))
-                }
+                None => return Outcome::Fail(format!("unknown option `{arg}`\n\n{USAGE}")),
             },
         }
     }

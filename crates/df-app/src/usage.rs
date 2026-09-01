@@ -121,7 +121,10 @@ impl Usage {
             if update.depth != 1 {
                 continue;
             }
-            let Some(name) = update.dir.file_name().map(|n| n.to_string_lossy().into_owned())
+            let Some(name) = update
+                .dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
             else {
                 continue;
             };

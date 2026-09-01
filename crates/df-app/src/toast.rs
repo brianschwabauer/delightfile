@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use crate::motion::Easing;
 use crate::theme::mix;
-use crate::ui::{Painting, ROW_RADIUS};
+use crate::ui::Painting;
 
 /// A plain "that happened" — the yank, the shell that exited 0. There is
 /// nothing to decide, so it leaves quickly (delightviewer's number, kept).
@@ -301,8 +301,7 @@ impl Toasts {
     /// sentence you have to finish reading.
     pub fn paint(&self, paint: &Painting<'_>, area: egui::Rect, bottom: f32, now: Instant) {
         if let Some((toast, at)) = &self.leaving {
-            let t = now.saturating_duration_since(*at).as_secs_f32()
-                / REPLACE_FADE.as_secs_f32();
+            let t = now.saturating_duration_since(*at).as_secs_f32() / REPLACE_FADE.as_secs_f32();
             // Quad ease-in on the way out (`delightful-ui` §5), and it sinks
             // back down the way it came in.
             let alpha = (1.0 - t.clamp(0.0, 1.0)).powi(2);
@@ -365,10 +364,7 @@ impl Toasts {
         let width = (message.size().x + hint_width + PAD * 2.0 + RULE_WIDTH)
             .min(area.width() - MARGIN * 2.0);
         let rect = egui::Rect::from_center_size(
-            egui::pos2(
-                area.center().x,
-                bottom - MARGIN - HEIGHT / 2.0 + drop,
-            ),
+            egui::pos2(area.center().x, bottom - MARGIN - HEIGHT / 2.0 + drop),
             egui::vec2(width, HEIGHT),
         );
 
@@ -431,9 +427,16 @@ impl Toasts {
     }
 }
 
-/// The plate's radius: a row's radius plus the padding around it, so the gap
-/// stays a constant width as it turns the corner (`delightful-ui` §15).
-const TOAST_RADIUS: u8 = ROW_RADIUS + PAD as u8;
+/// The plate's radius — [`crate::chrome::CARD_RADIUS`], the same as every
+/// other floating plate in the window.
+///
+/// It used to be `ROW_RADIUS + PAD` (18), a concentric derivation
+/// (`delightful-ui` §15) with nothing to be concentric *with*: no rounded child
+/// is ever drawn inside a toast, and `PAD` is the horizontal text inset rather
+/// than a gap around a nested row. So the number was two points off the card
+/// radius for no reason, while the code beside it claimed the toast was the
+/// same surface as the which-key card and the help sheet. Now it is.
+const TOAST_RADIUS: u8 = crate::chrome::CARD_RADIUS;
 
 fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
     painter
@@ -451,7 +454,10 @@ mod tests {
         let t0 = Instant::now();
         let mut toasts = Toasts::new();
         toasts.notice("Yanked 3 items", t0);
-        assert_eq!(toasts.current().map(|t| t.message.as_str()), Some("Yanked 3 items"));
+        assert_eq!(
+            toasts.current().map(|t| t.message.as_str()),
+            Some("Yanked 3 items")
+        );
 
         // The replacement takes over immediately; the old one is only on screen
         // long enough to get out of the way.
@@ -554,7 +560,10 @@ mod tests {
         let now = Instant::now();
         let mut toasts = Toasts::new();
         toasts.notice("Yanked 3 items", now);
-        toasts.undo("Trashed 3 items — u to undo", now + Duration::from_millis(80));
+        toasts.undo(
+            "Trashed 3 items — u to undo",
+            now + Duration::from_millis(80),
+        );
         let _ = ctx.run_ui(Default::default(), |ui| {
             let palette = crate::theme::Palette::default();
             let theme = df_core::config::Theme::default();

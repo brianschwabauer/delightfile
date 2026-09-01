@@ -622,7 +622,11 @@ mod tests {
         let mut z = Finder::new(Source::Zoxide, rows.clone());
         let _ = z.buffer.insert_text("exact");
         z.requery();
-        assert_eq!(z.hits.len(), 2, "zoxide already filtered; nothing is dropped");
+        assert_eq!(
+            z.hits.len(),
+            2,
+            "zoxide already filtered; nothing is dropped"
+        );
         assert_eq!(z.hits[0].index, 0, "zoxide's order survives");
         let mut j = Finder::new(Source::Jump, rows);
         let _ = j.buffer.insert_text("exact");

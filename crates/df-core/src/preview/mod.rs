@@ -13,14 +13,14 @@
 //!                        cache (yazi handshake) ──────────────┘
 //! ```
 //!
-//! - [`sniff`] — what the bytes say it is, since the name lies often enough to
+//! - [`mod@sniff`] — what the bytes say it is, since the name lies often enough to
 //!   matter and says nothing at all for `LICENSE` or `deploy`.
 //! - [`kind`] — which of PLAN §6's previewers that type gets. A pure function
 //!   of an [`crate::fs::Entry`] and a mime, so the whole matrix is a table
 //!   test.
 //! - [`syntax`] — the language name the text highlighter in df-app wants.
 //! - [`job`] — the worker pool that reads the file, debounced and capped, in
-//!   the [`crate::fs::scan`] pattern.
+//!   the [`crate::fs::Scanner`] pattern.
 //! - [`cache`] — the yazi-compatible thumbnail cache the two programs share,
 //!   so opening a file in delightviewer from delightfile shows the frame that
 //!   was already on screen.

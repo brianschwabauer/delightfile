@@ -19,6 +19,8 @@
 //! files, `m` starts the linemode chord, and in the preview all three are the
 //! frame step and the mute.
 
+use std::time::{Duration, Instant};
+
 use df_core::keymap::WhenFlags;
 
 /// Which pane the keyboard is in. `List` is where a file manager lives, so it
@@ -142,9 +144,159 @@ pub fn escape_rung(state: EscapeState) -> EscapeRung {
     EscapeRung::Nothing
 }
 
+/// How long the focus treatment takes to move between panes.
+///
+/// PLAN §2.1 says 120 ms ease-out, which is also [`crate::flip`]'s,
+/// [`crate::menu`]'s and [`crate::whichkey`]'s state fade — one number for
+/// "a piece of chrome changed what it means", so the window never has two
+/// speeds for the same kind of event.
+pub const FOCUS_FADE: Duration = Duration::from_millis(120);
+
+/// Where the focus treatment *is*, as opposed to where focus is.
+///
+/// [`Focus`] commits the instant the key is pressed — `delightful-ui` §5's
+/// "state commits instantly, animation is presentation only" — and this is the
+/// presentation catching up. Without it the 4% tint, the 2 px rule and the
+/// ghost-cursor dim all pop on and off, and in a three-column miller layout
+/// that is the most frequent transition in the program.
+///
+/// Both directions are eased, not just the outro. This is not a hover: nothing
+/// is under a pointer that could leave, and a tint that snapped on while the
+/// old one faded would read as the two panes disagreeing about which of them
+/// had the keyboard.
+/// The default is [`Focus`]'s own default, already arrived — a window that has
+/// just opened is not mid-fade.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FocusFade {
+    /// Where the treatment is heading.
+    to: Focus,
+    /// Where it is coming from, and when it left. `None` once it has arrived —
+    /// an `Option` that is never `None` is a window that never stops asking for
+    /// frames (PLAN §1).
+    from: Option<(Focus, Instant)>,
+}
+
+impl FocusFade {
+    pub fn new() -> FocusFade {
+        FocusFade::default()
+    }
+
+    /// Point the fade at `focus`, and retire a fade that has arrived.
+    ///
+    /// Called every frame. A focus change *during* a fade retargets from
+    /// wherever the treatment currently is rather than restarting from the
+    /// original pane — `delightful-ui` §5's "every animation is interruptible
+    /// and retargets mid-flight".
+    pub fn tick(&mut self, focus: Focus, now: Instant) {
+        if focus != self.to {
+            self.from = Some((self.to, now));
+            self.to = focus;
+        } else if self
+            .from
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) >= FOCUS_FADE)
+        {
+            self.from = None;
+        }
+    }
+
+    /// How focused `pane` looks right now, `0.0..=1.0`.
+    pub fn amount(&self, pane: Focus, now: Instant) -> f32 {
+        let Some((from, at)) = self.from else {
+            return if pane == self.to { 1.0 } else { 0.0 };
+        };
+        let t = (now.saturating_duration_since(at).as_secs_f32()
+            / FOCUS_FADE.as_secs_f32().max(f32::EPSILON))
+        .clamp(0.0, 1.0);
+        let eased = crate::motion::Easing::OutQuint.apply(t);
+        if pane == self.to {
+            eased
+        } else if pane == from {
+            1.0 - eased
+        } else {
+            0.0
+        }
+    }
+
+    /// Whether the treatment is still moving. A settled focus is a constant,
+    /// and asking for frames to redraw a constant is PLAN §1's whole complaint.
+    pub fn animating(&self, now: Instant) -> bool {
+        self.from
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) < FOCUS_FADE)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PLAN §2.1's treatment, and PLAN §1's idle rule in the same test: the
+    /// amounts cross over, they add up to 1 the whole way across, and the fade
+    /// stops asking for frames the moment it has arrived.
+    #[test]
+    fn the_focus_treatment_crosses_over_and_then_stops() {
+        let t0 = Instant::now();
+        let mut fade = FocusFade::new();
+        fade.tick(Focus::List, t0);
+        assert_eq!(fade.amount(Focus::List, t0), 1.0);
+        assert_eq!(fade.amount(Focus::Preview, t0), 0.0);
+        assert!(!fade.animating(t0));
+
+        // Focus commits instantly; the picture starts moving.
+        fade.tick(Focus::Preview, t0);
+        assert!(fade.animating(t0));
+        let mid = t0 + FOCUS_FADE / 2;
+        let (leaving, arriving) = (
+            fade.amount(Focus::List, mid),
+            fade.amount(Focus::Preview, mid),
+        );
+        assert!(arriving > 0.0 && arriving < 1.0, "{arriving}");
+        // One pane arrives at exactly the rate the other leaves, so the window
+        // never looks like two panes both have the keyboard, or neither does.
+        assert!((leaving + arriving - 1.0).abs() < 1e-5);
+        // The pane that was never involved stays out of it.
+        assert_eq!(fade.amount(Focus::Parent, mid), 0.0);
+
+        // Arrived: a settled keyboard is a constant, and a constant costs no
+        // frames (PLAN §1).
+        let done = t0 + FOCUS_FADE;
+        assert!(!fade.animating(done));
+        fade.tick(Focus::Preview, done);
+        assert_eq!(fade.amount(Focus::Preview, done), 1.0);
+        assert_eq!(fade.amount(Focus::List, done), 0.0);
+        assert!(!fade.animating(done));
+    }
+
+    /// `delightful-ui` §5: an animation retargets mid-flight rather than
+    /// restarting. A change of mind halfway across must not snap the treatment
+    /// back to the pane it originally left.
+    #[test]
+    fn a_focus_change_mid_fade_retargets_rather_than_restarting() {
+        let t0 = Instant::now();
+        let mut fade = FocusFade::new();
+        fade.tick(Focus::List, t0);
+        fade.tick(Focus::Preview, t0);
+        let mid = t0 + FOCUS_FADE / 2;
+        // Off to the parent instead, from wherever the treatment now is.
+        fade.tick(Focus::Parent, mid);
+        assert_eq!(fade.amount(Focus::Parent, mid), 0.0);
+        // The pane it *was* heading for is what it now fades away from — not
+        // the one it started at, which is already gone.
+        assert_eq!(fade.amount(Focus::Preview, mid), 1.0);
+        assert_eq!(fade.amount(Focus::List, mid), 0.0);
+        let done = mid + FOCUS_FADE;
+        assert_eq!(fade.amount(Focus::Parent, done), 1.0);
+        assert!(!fade.animating(done));
+    }
+
+    /// The ghost bar is part of the same statement as the tint and the rule,
+    /// so it travels with them instead of popping (PLAN §2.1).
+    #[test]
+    fn the_ghost_cursor_rides_the_focus_fade() {
+        assert_eq!(crate::ui::ghost_cursor(0.0), crate::ui::GHOST_CURSOR);
+        assert_eq!(crate::ui::ghost_cursor(1.0), 1.0);
+        let half = crate::ui::ghost_cursor(0.5);
+        assert!(half > crate::ui::GHOST_CURSOR && half < 1.0, "{half}");
+    }
 
     /// `→` on a directory enters it (yazi, unchanged); `→` on a *file* moves
     /// the keyboard into the pane already showing it.
@@ -217,7 +369,10 @@ mod tests {
 
         // `.` is the hidden-files toggle in the list and the frame step in the
         // preview — and only when there is something with frames in it.
-        assert_eq!(dispatch(Focus::List, true, "."), Some(Command::ToggleHidden));
+        assert_eq!(
+            dispatch(Focus::List, true, "."),
+            Some(Command::ToggleHidden)
+        );
         assert_eq!(
             dispatch(Focus::Preview, true, "."),
             Some(Command::FrameStepForward)

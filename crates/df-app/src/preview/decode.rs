@@ -212,7 +212,15 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
     }
 
     let send = |stage, result| {
-        if live(state, token) && out.send(Decoded { token, stage, result }).is_ok() {
+        if live(state, token)
+            && out
+                .send(Decoded {
+                    token,
+                    stage,
+                    result,
+                })
+                .is_ok()
+        {
             notify();
             true
         } else {

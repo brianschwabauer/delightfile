@@ -412,7 +412,8 @@ mod tests {
 
     #[test]
     fn a_hash_that_was_already_cancelled_never_reads_a_byte() {
-        let path = std::env::temp_dir().join(format!("df-sha256-cancel-{}.bin", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("df-sha256-cancel-{}.bin", std::process::id()));
         fs::write(&path, b"whatever").expect("the fixture");
 
         let cancel = AtomicBool::new(true);

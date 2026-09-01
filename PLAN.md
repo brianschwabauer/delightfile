@@ -448,5 +448,5 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] SFTP vfs from vfs.toml (`g 1`/`g 2`)
 - [x] Multi-window; drag tabs out; cross-window DnD
 - [x] Trash browsing/restore view
-- [ ] Idle-cost audit (zero repaints at rest), cold-start ordering audit
-- [ ] Polish pass against `delightful-ui`/`ui-anti-slop` checklists
+- [x] Idle-cost audit (zero repaints at rest), cold-start ordering audit
+- [x] Polish pass against `delightful-ui`/`ui-anti-slop` checklists

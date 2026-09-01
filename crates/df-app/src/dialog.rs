@@ -181,9 +181,9 @@ impl ConflictAction {
         match self {
             ConflictAction::Overwrite => Resolution::Overwrite,
             ConflictAction::Skip => Resolution::Skip,
-            ConflictAction::Rename => Resolution::Rename(PathBuf::from(
-                suggested.file_name().unwrap_or_default(),
-            )),
+            ConflictAction::Rename => {
+                Resolution::Rename(PathBuf::from(suggested.file_name().unwrap_or_default()))
+            }
         }
     }
 }
@@ -290,7 +290,9 @@ impl ConflictDialog {
             return;
         };
         for path in [conflict.src, conflict.dst] {
-            self.facts.entry(path.clone()).or_insert_with(|| Facts::read(&path));
+            self.facts
+                .entry(path.clone())
+                .or_insert_with(|| Facts::read(&path));
         }
     }
 
@@ -407,7 +409,8 @@ impl ConflictDialog {
     /// Where the resolver's first visible conflict row is, so a long list
     /// scrolls with the cursor instead of hiding it.
     fn first_visible(&self) -> usize {
-        self.cursor.saturating_sub(CONFLICT_VISIBLE.saturating_sub(1))
+        self.cursor
+            .saturating_sub(CONFLICT_VISIBLE.saturating_sub(1))
     }
 }
 
@@ -445,7 +448,7 @@ fn card_rect(area: egui::Rect, height: f32) -> egui::Rect {
     let width = (area.width() - CARD_MARGIN * 2.0).min(MAX_WIDTH);
     let height = height.min((area.height() - CARD_MARGIN * 2.0).max(0.0));
     // 40 % of the free space above, 60 % below.
-    let top = area.top() + (area.height() - height).max(0.0) * 0.4;
+    let top = area.top() + (area.height() - height).max(0.0) * chrome::OPTICAL_CENTRE;
     egui::Rect::from_min_size(
         egui::pos2(area.center().x - width / 2.0, top),
         egui::vec2(width.max(0.0), height),
@@ -732,7 +735,7 @@ pub fn paint_bulk(
     painter.text(
         egui::pos2(left, geometry.card.top() + CARD_PAD + ROW / 2.0),
         egui::Align2::LEFT_CENTER,
-        "Rename Files",
+        "Rename files",
         egui::FontId::proportional(FONT + 2.0),
         palette.text,
     );
@@ -804,7 +807,9 @@ pub fn paint_bulk(
     let split = geometry.body.width() * BULK_SPLIT;
     for (i, rect) in geometry.rows.iter().enumerate() {
         let index = bulk.first + i;
-        let Some(row) = bulk.rows.get(index) else { break };
+        let Some(row) = bulk.rows.get(index) else {
+            break;
+        };
         let problem = problems.get(index).copied().flatten();
         let old = egui::Rect::from_min_size(rect.min, egui::vec2(split, rect.height()));
         chrome::truncated(
@@ -827,10 +832,8 @@ pub fn paint_bulk(
             egui::FontId::proportional(FONT),
             palette.overlay0,
         );
-        let new = egui::Rect::from_min_max(
-            egui::pos2(old.right() + BULK_ARROW, rect.top()),
-            rect.max,
-        );
+        let new =
+            egui::Rect::from_min_max(egui::pos2(old.right() + BULK_ARROW, rect.top()), rect.max);
         bulk_field(
             paint,
             new,
@@ -940,7 +943,10 @@ fn bulk_field(
     );
     if focused {
         let upto = caret.min(text.len());
-        let upto = (0..=upto).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+        let upto = (0..=upto)
+            .rev()
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
         let before = clipped
             .layout_no_wrap(text[..upto].to_string(), font, palette.text)
             .size()
@@ -948,7 +954,7 @@ fn bulk_field(
         clipped.rect_filled(
             egui::Rect::from_min_size(
                 egui::pos2(x + before, rect.top() + 4.0),
-                egui::vec2(1.5, (rect.height() - 8.0).max(0.0)),
+                egui::vec2(crate::chrome::CARET_WIDTH, (rect.height() - 8.0).max(0.0)),
             ),
             0,
             palette.blue,
@@ -1232,7 +1238,11 @@ pub fn button(
         egui::Align2::CENTER_CENTER,
         label,
         egui::FontId::proportional(FONT),
-        if selected { palette.text } else { palette.subtext0 },
+        if selected {
+            palette.text
+        } else {
+            palette.subtext0
+        },
     );
 }
 
@@ -1299,7 +1309,10 @@ mod tests {
         );
         assert_eq!(trash.title(), "Trash 2 selected files?");
         assert!(!trash.danger());
-        assert!(trash.subtitle().contains('u'), "it says how to take it back");
+        assert!(
+            trash.subtitle().contains('u'),
+            "it says how to take it back"
+        );
 
         let one = Confirm::new(ConfirmKind::Delete, vec![PathBuf::from("/tmp/a")]);
         assert_eq!(one.title(), "Delete 1 selected file?");
@@ -1312,7 +1325,9 @@ mod tests {
     /// no-ops rather than a list that walks off its own end.
     #[test]
     fn the_confirm_body_scrolls_within_its_bounds() {
-        let paths: Vec<PathBuf> = (0..10).map(|i| PathBuf::from(format!("/tmp/{i}"))).collect();
+        let paths: Vec<PathBuf> = (0..10)
+            .map(|i| PathBuf::from(format!("/tmp/{i}")))
+            .collect();
         let mut confirm = Confirm::new(ConfirmKind::Trash, paths);
         confirm.scroll_by(-1);
         assert_eq!(confirm.scroll, 0);
@@ -1369,7 +1384,10 @@ mod tests {
         let Step::NeedName(suggested) = dialog.apply() else {
             panic!("rename asks for a name");
         };
-        assert!(!suggested.contains('/'), "the suggestion is a name: {suggested}");
+        assert!(
+            !suggested.contains('/'),
+            "the suggestion is a name: {suggested}"
+        );
 
         let before = dialog.len();
         assert!(matches!(dialog.rename("../escape.txt"), Step::NeedName(_)));
@@ -1398,7 +1416,11 @@ mod tests {
 
         dialog.set_action(ConflictAction::Overwrite);
         dialog.cycle_action(-1);
-        assert_eq!(dialog.action, ConflictAction::Rename, "left from the first wraps");
+        assert_eq!(
+            dialog.action,
+            ConflictAction::Rename,
+            "left from the first wraps"
+        );
         dialog.cycle_action(1);
         assert_eq!(dialog.action, ConflictAction::Overwrite);
         assert_eq!(

@@ -79,7 +79,13 @@ const CHIP_PAD: f32 = 6.0;
 /// sized in *physical* pixels and the pane is measured in points — fitting one
 /// to the other without it is the classic HiDPI bug where every image is drawn
 /// at twice its size.
-pub fn preview(paint: &Painting<'_>, pane_rect: egui::Rect, pane: &mut Pane, ppp: f32, now: Instant) {
+pub fn preview(
+    paint: &Painting<'_>,
+    pane_rect: egui::Rect,
+    pane: &mut Pane,
+    ppp: f32,
+    now: Instant,
+) {
     let content = content_rect(pane_rect);
     if content.width() <= 0.0 || content.height() <= 0.0 {
         return;
@@ -148,9 +154,15 @@ pub fn preview(paint: &Painting<'_>, pane_rect: egui::Rect, pane: &mut Pane, ppp
             pane.scroll,
             alpha,
         ),
-        Body::Hex { bytes, truncated } => {
-            hex_body(paint, &painter, content, bytes, *truncated, pane.scroll, alpha)
-        }
+        Body::Hex { bytes, truncated } => hex_body(
+            paint,
+            &painter,
+            content,
+            bytes,
+            *truncated,
+            pane.scroll,
+            alpha,
+        ),
         Body::Media(media) => {
             doc_pan = Some(media_body(
                 paint,
@@ -175,13 +187,22 @@ pub fn preview(paint: &Painting<'_>, pane_rect: egui::Rect, pane: &mut Pane, ppp
     if pane.scroll > max_scroll {
         pane.scroll = max_scroll;
     }
-    scrollbar(paint, content, pane.scroll, max_scroll, pane.scrollbar_alpha(now) * alpha);
+    scrollbar(
+        paint,
+        content,
+        pane.scroll,
+        max_scroll,
+        pane.scrollbar_alpha(now) * alpha,
+    );
 }
 
 fn quiet(paint: &Painting<'_>, content: egui::Rect, text: &str, alpha: f32) {
     let color = paint.palette.overlay0.gamma_multiply(alpha);
     paint.painter.text(
-        egui::pos2(content.center().x, content.top() + content.height() * 0.42),
+        egui::pos2(
+            content.center().x,
+            content.top() + content.height() * crate::chrome::OPTICAL_BASELINE,
+        ),
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::proportional(BODY),
@@ -662,14 +683,19 @@ fn directory_body(
     let summary_height = LINE + 4.0;
     let rows_area = egui::Rect::from_min_max(
         content.min,
-        egui::pos2(content.right(), (content.bottom() - summary_height).max(content.top())),
+        egui::pos2(
+            content.right(),
+            (content.bottom() - summary_height).max(content.top()),
+        ),
     );
     let rows = (rows_area.height() / ROW_HEIGHT).floor().max(1.0) as usize;
     let first = scroll.min(entries.len());
     let ground = paint.palette.mantle;
 
     for (row, index) in (first..(first + rows).min(entries.len())).enumerate() {
-        let Some(entry) = entries.get(index) else { break };
+        let Some(entry) = entries.get(index) else {
+            break;
+        };
         let rect = egui::Rect::from_min_size(
             egui::pos2(rows_area.left(), rows_area.top() + row as f32 * ROW_HEIGHT),
             egui::vec2(rows_area.width(), ROW_HEIGHT),
@@ -725,9 +751,8 @@ fn directory_body(
 fn summarise(entries: &[Entry], truncated: bool) -> String {
     let dirs = entries.iter().filter(|e| e.is_dir()).count();
     let files = entries.len() - dirs;
-    let plural = |n: usize, one: &str, many: &str| {
-        format!("{n} {}", if n == 1 { one } else { many })
-    };
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut text = match (dirs, files) {
         (0, 0) => "empty".to_string(),
         (d, 0) => plural(d, "folder", "folders"),
@@ -797,7 +822,11 @@ fn hex_body(
     // The three columns are measured from the font rather than guessed, so a
     // different monospace face does not shear the layout.
     let offset_width = painter
-        .layout_no_wrap("00000000  ".to_string(), font.clone(), paint.palette.overlay0)
+        .layout_no_wrap(
+            "00000000  ".to_string(),
+            font.clone(),
+            paint.palette.overlay0,
+        )
         .size()
         .x;
     let hex_width = painter
@@ -888,9 +917,16 @@ pub fn fit_rect(area: egui::Rect, size: (u32, u32), ppp: f32) -> egui::Rect {
 pub fn doc_rect(content: egui::Rect, size: (u32, u32), zoom: f32, pan: f32) -> (egui::Rect, f32) {
     let (w, h) = (size.0 as f32, size.1 as f32);
     if w <= 0.0 || h <= 0.0 || content.width() <= 0.0 || content.height() <= 0.0 {
-        return (egui::Rect::from_center_size(content.center(), egui::Vec2::ZERO), 0.0);
+        return (
+            egui::Rect::from_center_size(content.center(), egui::Vec2::ZERO),
+            0.0,
+        );
     }
-    let zoom = if zoom.is_finite() { zoom.max(0.01) } else { 1.0 };
+    let zoom = if zoom.is_finite() {
+        zoom.max(0.01)
+    } else {
+        1.0
+    };
     let k = (content.width() / w).min(content.height() / h) * zoom;
     let drawn = egui::vec2(w * k, h * k);
     let overflow = (drawn.y - content.height()).max(0.0);
@@ -900,10 +936,8 @@ pub fn doc_rect(content: egui::Rect, size: (u32, u32), zoom: f32, pan: f32) -> (
     } else {
         content.center().y - drawn.y / 2.0
     };
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(content.center().x - drawn.x / 2.0, top),
-        drawn,
-    );
+    let rect =
+        egui::Rect::from_min_size(egui::pos2(content.center().x - drawn.x / 2.0, top), drawn);
     (rect, overflow)
 }
 
@@ -928,7 +962,13 @@ fn media_body(
     // photograph appears to be there instantly (PLAN §6).
     let swap = media
         .swapped_at
-        .map(|at| if media.thumb.is_some() { fade(at, now) } else { 1.0 })
+        .map(|at| {
+            if media.thumb.is_some() {
+                fade(at, now)
+            } else {
+                1.0
+            }
+        })
         .unwrap_or(0.0);
 
     if let Some(thumb) = &media.thumb {
@@ -968,7 +1008,14 @@ fn media_body(
     // on screen belongs to, which is exactly the thing a video's first frame
     // does not.
     if let Some(badge) = media.badge().filter(|_| !mounted) {
-        chip(paint, painter, content, badge, egui::Align2::LEFT_BOTTOM, alpha);
+        chip(
+            paint,
+            painter,
+            content,
+            badge,
+            egui::Align2::LEFT_BOTTOM,
+            alpha,
+        );
     }
     0.0
 }
@@ -988,7 +1035,13 @@ fn doc_body(
 ) -> f32 {
     let swap = view
         .swapped_at
-        .map(|at| if view.previous.is_some() { fade(at, now) } else { 1.0 })
+        .map(|at| {
+            if view.previous.is_some() {
+                fade(at, now)
+            } else {
+                1.0
+            }
+        })
         .unwrap_or(0.0);
     let mut overflow = 0.0;
 
@@ -1002,7 +1055,12 @@ fn doc_body(
     if let Some(current) = &view.current {
         let (rect, over) = doc_rect(content, current.size, view.zoom, view.pan);
         overflow = over;
-        draw_at(painter, rect, current, alpha * swap.max(f32::from(view.previous.is_none())));
+        draw_at(
+            painter,
+            rect,
+            current,
+            alpha * swap.max(f32::from(view.previous.is_none())),
+        );
     }
 
     let nothing_yet = view.current.is_none() && media.thumb.is_none() && media.full.is_none();
@@ -1015,7 +1073,14 @@ fn doc_body(
         // thumbnail and the kind badge are the answer, exactly as before
         // pdfium was here at all (PLAN §6).
         if let Some(badge) = media.badge() {
-            chip(paint, painter, content, badge, egui::Align2::LEFT_BOTTOM, alpha);
+            chip(
+                paint,
+                painter,
+                content,
+                badge,
+                egui::Align2::LEFT_BOTTOM,
+                alpha,
+            );
         } else if nothing_yet {
             quiet(paint, content, "no reader for this format", alpha);
         }
@@ -1061,7 +1126,12 @@ fn draw_texture(
     ppp: f32,
     alpha: f32,
 ) {
-    draw_at(painter, fit_rect(content, texture.size, ppp), texture, alpha);
+    draw_at(
+        painter,
+        fit_rect(content, texture.size, ppp),
+        texture,
+        alpha,
+    );
 }
 
 /// The same, at a rect somebody else worked out.
@@ -1106,10 +1176,7 @@ fn chip(
     } else {
         content.left()
     };
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(left, content.bottom() - size.y),
-        size,
-    );
+    let rect = egui::Rect::from_min_size(egui::pos2(left, content.bottom() - size.y), size);
     painter.rect_filled(
         rect,
         crate::ui::ROW_RADIUS,
@@ -1392,7 +1459,11 @@ mod tests {
             let mut pane = Pane::start(df_core::fs::no_notifier());
             for body in &bodies {
                 for scroll in [0usize, 3, 10_000] {
-                    for size in [egui::vec2(420.0, 800.0), egui::vec2(0.0, 0.0), egui::vec2(30.0, 24.0)] {
+                    for size in [
+                        egui::vec2(420.0, 800.0),
+                        egui::vec2(0.0, 0.0),
+                        egui::vec2(30.0, 24.0),
+                    ] {
                         let rect = egui::Rect::from_min_size(egui::pos2(900.0, 8.0), size);
                         pane.shown = Some(crate::preview::Shown {
                             body: clone_body(body),
@@ -1453,10 +1524,16 @@ mod tests {
         // survives, and what is left over is space above and below.
         let (rect, over) = doc_rect(content, (612, 792), 1.0, 0.0);
         assert!((rect.width() - 400.0).abs() < 1e-3, "{rect:?}");
-        assert!((rect.height() - 400.0 * 792.0 / 612.0).abs() < 1e-2, "{rect:?}");
+        assert!(
+            (rect.height() - 400.0 * 792.0 / 612.0).abs() < 1e-2,
+            "{rect:?}"
+        );
         assert_eq!(over, 0.0, "a fitted page has nothing to scroll");
         assert!((rect.center().x - content.center().x).abs() < 1e-3);
-        assert!((rect.center().y - content.center().y).abs() < 1e-3, "{rect:?}");
+        assert!(
+            (rect.center().y - content.center().y).abs() < 1e-3,
+            "{rect:?}"
+        );
 
         // A tiny page is *enlarged* to fit — a document viewer's rule.
         let (small, _) = doc_rect(content, (60, 80), 1.0, 0.0);
@@ -1465,9 +1542,18 @@ mod tests {
         // Zoomed, it overflows and can be scrolled by exactly the overflow.
         let (zoomed, over) = doc_rect(content, (612, 792), 2.0, 0.0);
         assert!((zoomed.width() - 800.0).abs() < 1e-2, "{zoomed:?}");
-        assert!((over - (zoomed.height() - 600.0)).abs() < 1e-3, "got {over}");
-        assert!(over > 400.0, "a doubled letter page overflows a 600 pt pane");
-        assert!((zoomed.top() - content.top()).abs() < 1e-3, "a zoomed page starts at its top");
+        assert!(
+            (over - (zoomed.height() - 600.0)).abs() < 1e-3,
+            "got {over}"
+        );
+        assert!(
+            over > 400.0,
+            "a doubled letter page overflows a 600 pt pane"
+        );
+        assert!(
+            (zoomed.top() - content.top()).abs() < 1e-3,
+            "a zoomed page starts at its top"
+        );
         let (panned, _) = doc_rect(content, (612, 792), 2.0, 1000.0);
         assert!(
             (panned.top() - (content.top() - over)).abs() < 1e-2,

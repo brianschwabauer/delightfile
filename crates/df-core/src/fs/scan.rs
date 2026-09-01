@@ -80,7 +80,7 @@ pub enum ScanUpdate {
     /// blanking the pane the instant a key was pressed.
     Started { token: ScanToken, dir: PathBuf },
     /// Some entries, in `read_dir` order (sorting is the model's job — see
-    /// [`super::sort`]).
+    /// [`super::sort_order`]).
     Batch {
         token: ScanToken,
         dir: PathBuf,

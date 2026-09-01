@@ -4,7 +4,7 @@
 //! into bytes, and every function in it is a pure one — which is the entire
 //! reason the protocol lives in its own module. A hand-rolled wire protocol is
 //! only trustworthy if the parsing half can be hammered by tests without a
-//! server, a socket or a network, and that is what [`super::tests`] does: every
+//! server, a socket or a network, and that is what `super::tests` does: every
 //! message type goes out through the encoder and comes back through the decoder
 //! and has to be the same thing on the other side.
 //!
@@ -38,7 +38,7 @@
 //!    `linkpath` then `targetpath`. OpenSSH's server reads `oldpath` (the
 //!    target) then `newpath` (the link) — an ancient bug that is now the de
 //!    facto protocol, because both OpenSSH's client and its server have agreed
-//!    on it for two decades. [`symlink`] emits OpenSSH's order. Sending the
+//!    on it for two decades. [`crate::vfs::wire::Request::Symlink`] emits OpenSSH's order. Sending the
 //!    draft's order to `sftp-server` silently creates the symlink the wrong way
 //!    round, which is worse than an error.
 //! 2. **`SSH_FXP_STATUS` may stop after the code.** The draft requires a
@@ -1045,7 +1045,7 @@ pub const MAX_NAME_ENTRIES: u32 = (MAX_PACKET / 12) as u32;
 /// Decode a reply, returning the request id it answers.
 ///
 /// `VERSION` has no id and reports `0`; nothing waits on id 0 because
-/// [`super::conn`] starts its counter at 1.
+/// `super::conn` starts its counter at 1.
 pub fn decode_reply(packet: &Packet) -> Result<(u32, Reply), ProtocolError> {
     let mut d = packet.decoder();
     match packet.kind {

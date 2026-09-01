@@ -207,10 +207,7 @@ impl StateStore {
     /// should survive a reboot but that nobody would put in a dotfiles repo.
     /// That is precisely the directory `$XDG_STATE_HOME` was added for.
     pub fn state_path() -> Option<PathBuf> {
-        state_path_from(
-            std::env::var_os("XDG_STATE_HOME"),
-            std::env::var_os("HOME"),
-        )
+        state_path_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
     }
 
     /// Load from the default location. Never fails: a missing file is a fresh
@@ -220,7 +217,9 @@ impl StateStore {
         match StateStore::state_path() {
             Some(path) => StateStore::load_from(path),
             None => {
-                log::warn!("state: no $XDG_STATE_HOME and no $HOME; view settings are session-only");
+                log::warn!(
+                    "state: no $XDG_STATE_HOME and no $HOME; view settings are session-only"
+                );
                 StateStore::empty(PathBuf::new())
             }
         }
@@ -440,11 +439,9 @@ impl StateStore {
         // Beside the target, never in `/tmp`: `rename` is only atomic within one
         // filesystem, and `$XDG_STATE_HOME` on a different mount from `/tmp` is
         // the ordinary case, not the exotic one.
-        let temp = self.path.with_file_name(format!(
-            ".state.tmp.{}.{}",
-            std::process::id(),
-            now_nanos()
-        ));
+        let temp =
+            self.path
+                .with_file_name(format!(".state.tmp.{}.{}", std::process::id(), now_nanos()));
         if let Err(e) = std::fs::write(&temp, &body) {
             let _ignored = std::fs::remove_file(&temp);
             return Err(DfError::io(temp, e));

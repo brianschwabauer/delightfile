@@ -225,10 +225,7 @@ pub fn score(haystack: &str, needle: &str) -> Option<Match> {
                 let (carried, bonus) = if k + 1 == j {
                     (best[k] + RUN, base[j].max(effective[k]))
                 } else {
-                    (
-                        best[k] - (((j - k - 1) as i32) * GAP).min(GAP_CAP),
-                        base[j],
-                    )
+                    (best[k] - (((j - k - 1) as i32) * GAP).min(GAP_CAP), base[j])
                 };
                 offer(MATCH + bonus + carried, bonus, k);
             }
@@ -287,7 +284,10 @@ const WINDOW: usize = (GAP_CAP / GAP) as usize;
 /// The characters a word can start after. `/` and `.` are here because these
 /// haystacks are paths as often as they are prose.
 fn is_separator(c: char) -> bool {
-    matches!(c, '/' | '\\' | '-' | '_' | '.' | ' ' | ',' | ':' | ';' | '(')
+    matches!(
+        c,
+        '/' | '\\' | '-' | '_' | '.' | ' ' | ',' | ':' | ';' | '('
+    )
 }
 
 /// A camel hump: a capital that follows something that is not one. Checked

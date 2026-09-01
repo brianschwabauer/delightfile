@@ -649,9 +649,9 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
         ),
         // A bulk rename *can* stop part way, and what is left rebuilds as
         // another bulk rename so a second `u` finishes the job.
-        OpRecord::Renames { moved } => {
-            undo_moves(moved, ctx, "Renamed", |rest| OpRecord::Renames { moved: rest })
-        }
+        OpRecord::Renames { moved } => undo_moves(moved, ctx, "Renamed", |rest| {
+            OpRecord::Renames { moved: rest }
+        }),
         OpRecord::Copy { created } => undo_copy(created, ctx),
         OpRecord::Trash { items } => whole(undo_trash(items, ctx)),
         OpRecord::Create {

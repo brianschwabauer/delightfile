@@ -428,10 +428,7 @@ mod tests {
         assert_eq!(bulk.changes(), 0);
         // Renaming onto a name that is *not* in the card is still refused.
         let names = vec!["c.txt", "b.txt"];
-        assert_eq!(
-            problems(&names, &set(&["c.txt"]))[0],
-            Some(Problem::Taken)
-        );
+        assert_eq!(problems(&names, &set(&["c.txt"]))[0], Some(Problem::Taken));
     }
 
     /// Find/replace rewrites the untouched rows and leaves the hand-edited one
@@ -573,7 +570,10 @@ mod tests {
         let mut bulk = card(&["a.txt", "b.txt"], &[]);
         bulk.rows[0].buffer = InputBuffer::new("z.txt".to_string(), 0);
         let renames = bulk.renames();
-        assert_eq!(renames, vec![(PathBuf::from("/tmp/x/a.txt"), PathBuf::from("/tmp/x/z.txt"))]);
+        assert_eq!(
+            renames,
+            vec![(PathBuf::from("/tmp/x/a.txt"), PathBuf::from("/tmp/x/z.txt"))]
+        );
         assert_eq!(bulk.changes(), 1);
     }
 }
