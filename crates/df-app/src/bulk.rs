@@ -148,7 +148,27 @@ impl Bulk {
     /// `siblings` is every name in the directory; the ones being renamed are
     /// removed from it here, so a row keeping its own name is not reported as
     /// colliding with itself.
-    pub fn new(dir: PathBuf, names: Vec<String>, siblings: &[String]) -> Bulk {
+    ///
+    /// **The directory has to be one on this machine.** This card commits with
+    /// [`df_core::ops::rename`] — a `rename(2)` against `dir.join(name)` — and
+    /// a remote pane's `dir` is an `sftp://…` display path, which resolves
+    /// against the process's own working directory. The command dispatch's
+    /// remote list cannot express "only with two rows selected", so the refusal
+    /// lives in the constructor: there is no way to build a card pointed at a
+    /// server, and the caller has a sentence to show instead.
+    pub fn new(
+        dir: PathBuf,
+        names: Vec<String>,
+        siblings: &[String],
+    ) -> Result<Bulk, &'static str> {
+        if crate::remote::is_remote(&dir) {
+            return Err("Rename one at a time over the link — r renames the row under the cursor");
+        }
+        Ok(Bulk::local(dir, names, siblings))
+    }
+
+    /// The card itself, once the directory has been vouched for.
+    fn local(dir: PathBuf, names: Vec<String>, siblings: &[String]) -> Bulk {
         let chosen: HashSet<&str> = names.iter().map(String::as_str).collect();
         let others = siblings
             .iter()
@@ -380,8 +400,33 @@ pub fn ordered_renames(dir: &Path, pairs: &[(String, String)]) -> Vec<(PathBuf, 
 mod tests {
     use super::*;
 
+    /// **The bug this fixes**: `r` with two rows selected opened the bulk card
+    /// wherever the pane was — including on a remote service, where `dir` is
+    /// the display path `sftp://host/srv`. Committing then called `rename(2)`
+    /// on `sftp:/host/srv/name`, a *relative* path resolved against the
+    /// process's own working directory: a rename of files nobody was looking
+    /// at, or forty error toasts. The card cannot be built pointed at a server.
+    #[test]
+    fn the_card_cannot_be_opened_over_a_link() {
+        let names = vec!["a.txt".to_string(), "b.txt".to_string()];
+        let refused = Bulk::new(
+            PathBuf::from("sftp://showandtour1/srv/www"),
+            names.clone(),
+            &[],
+        );
+        let why = refused
+            .err()
+            .expect("a remote directory has no bulk rename");
+        assert!(why.contains('r'), "the notice names the way out: {why}");
+
+        // A local directory is unaffected, and the card it builds is the one
+        // the rest of these tests exercise.
+        let ok = Bulk::new(PathBuf::from("/tmp/somewhere"), names, &[]).expect("a local card");
+        assert_eq!(ok.rows.len(), 2);
+    }
+
     fn card(names: &[&str], siblings: &[&str]) -> Bulk {
-        Bulk::new(
+        Bulk::local(
             PathBuf::from("/tmp/x"),
             names.iter().map(|s| s.to_string()).collect(),
             &siblings.iter().map(|s| s.to_string()).collect::<Vec<_>>(),

@@ -667,8 +667,79 @@ impl Vfs {
         Ok(local)
     }
 
+    /// Does `path` exist on the server?
+    ///
+    /// A `NO_SUCH_FILE` status is an *answer*, not a failure — everything else
+    /// still is, so a permission-denied on the parent directory can never be
+    /// read as "there is nothing there" by a caller about to write.
+    pub fn exists(&self, path: &VfsPath, ctx: &TaskCtx) -> Result<bool, VfsError> {
+        match self.stat(path, false, ctx) {
+            Ok(_) => Ok(true),
+            Err(VfsError::Status { status, .. }) if status.code == StatusCode::NoSuchFile => {
+                Ok(false)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The first free `name`, `name_1`, `name_2`… beside `remote` — the
+    /// server-side twin of [`crate::ops::paste::unique_name`].
+    ///
+    /// One `LSTAT` per candidate, which is the only way to ask: there is no
+    /// atomic "create if absent" in SFTP version 3 that also gives us the
+    /// pipelined write path, so this is a *ladder*, not a lock. The window it
+    /// leaves is closed the only way it can be — by being re-run immediately
+    /// before the transfer rather than once at plan time (see
+    /// [`Vfs::upload_new`]).
+    pub fn unique_name(&self, remote: &VfsPath, ctx: &TaskCtx) -> Result<VfsPath, VfsError> {
+        if !self.exists(remote, ctx)? {
+            return Ok(remote.clone());
+        }
+        let parent = remote
+            .parent()
+            .unwrap_or_else(|| VfsPath::new(&remote.service, ""));
+        let name = std::ffi::OsString::from(remote.name());
+        for n in 1..crate::ops::trash::MAX_TRASH_COLLISIONS {
+            let candidate = parent.join(&crate::ops::trash::suffixed(&name, n).to_string_lossy());
+            if !self.exists(&candidate, ctx)? {
+                return Ok(candidate);
+            }
+        }
+        Err(VfsError::Status {
+            path: remote.to_url(),
+            status: wire::Status {
+                code: StatusCode::Failure,
+                message: format!("no free name beside {}", remote.to_url()),
+            },
+        })
+    }
+
+    /// Upload `local` beside `remote` **without ever replacing anything**, and
+    /// say what it was actually called.
+    ///
+    /// The download half has always claimed its local name through
+    /// [`crate::ops::paste::unique_name`] so that a download cannot silently
+    /// overwrite (PLAN §5); this is the same promise pointing the other way. An
+    /// upload that means to replace a file says so by calling [`Vfs::upload`]
+    /// directly — which is one grep for every call site that can destroy
+    /// somebody's file.
+    pub fn upload_new(
+        &self,
+        local: &Path,
+        remote: &VfsPath,
+        ctx: &TaskCtx,
+    ) -> Result<(u64, VfsPath), VfsError> {
+        let target = self.unique_name(remote, ctx)?;
+        let bytes = self.upload(local, &target, ctx)?;
+        Ok((bytes, target))
+    }
+
     /// Upload `local` to `remote`, pipelined, with progress on `ctx`. Returns
     /// the byte count.
+    ///
+    /// **This replaces whatever is at `remote`.** It is the deliberate
+    /// overwrite; the answer to "is there something there?" belongs to the
+    /// caller, and [`Vfs::upload_new`] is the one that refuses to destroy.
     ///
     /// The bytes go to a sibling scratch file and are renamed into place at the
     /// end, so a failed or cancelled upload removes only its own partial file
@@ -1021,6 +1092,25 @@ fn convert_batch(
         .enumerate()
         .map(|(index, entry)| remote_entry(dir, entry, resolved.get(&index)))
         .collect())
+}
+
+/// One `STAT`ed remote path as the [`Entry`] the panes and the dialogs draw.
+///
+/// The listing path builds its rows from `READDIR` replies; this is the same
+/// mapping for a path that was asked about one at a time — what a conflict card
+/// needs to say "this is what is already on the server", with the size, the
+/// kind and the date coming off the wire rather than from a local `stat` that
+/// would find nothing at all.
+pub fn stat_entry(path: &VfsPath, attrs: Attrs) -> Entry {
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| VfsPath::new(&path.service, ""));
+    let entry = wire::NameEntry {
+        filename: path.name().as_bytes().to_vec(),
+        longname: Vec::new(),
+        attrs,
+    };
+    remote_entry(&parent, &entry, None)
 }
 
 /// One remote row as the [`Entry`] the panes already know how to draw.

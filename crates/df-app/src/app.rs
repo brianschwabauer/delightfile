@@ -269,6 +269,25 @@ struct RemoteDone {
     open: Option<(String, PathBuf)>,
     /// A file downloaded for the preview card: `(remote url, local path)`.
     preview: Option<(String, PathBuf)>,
+    /// An upload that has looked at its destination and now needs the plan
+    /// built — and, if anything is in the way, the conflict dialog put up.
+    upload: Option<UploadProbe>,
+}
+
+/// What the server said about the names an upload is about to write.
+///
+/// The round trip has to happen *before* the transfer and cannot happen on the
+/// UI thread, so the question and the answer are two frames apart: this is the
+/// answer, carried back through the same slot every other remote verb uses.
+#[derive(Debug)]
+struct UploadProbe {
+    /// The directory the files are going into.
+    dest: df_core::vfs::VfsPath,
+    /// The local files, in the order they were yanked.
+    sources: Vec<PathBuf>,
+    /// The rows already in `dest` whose names an upload would take — only
+    /// those, because a stat per source is the whole cost of asking.
+    taken: Vec<df_core::fs::Entry>,
 }
 
 /// The preview card's state for the remote row under the cursor.
@@ -1420,6 +1439,20 @@ impl App {
     }
 
     fn rescan(&mut self, dir: &Path, now: Instant) {
+        // **A listing is only ever re-read from a real directory.** `dir` comes
+        // from watcher events, from an operation's touched paths and from a
+        // finished remote job, and one of those used to be able to carry an
+        // `sftp://…` URL — which `begin_scan` would hand to `read_dir`, failing,
+        // and replacing the remote rows on screen with an error. Loud in the
+        // log rather than a `debug_assert`: this is a wrong path, not a reason
+        // to take a running session down.
+        if !scannable(dir) {
+            log::error!(
+                "rescan asked for {}, which is not a directory on this machine",
+                dir.display()
+            );
+            return;
+        }
         self.git_touched(dir);
         let scanner = &self.scanner;
         let tab = self.tabs.active_mut();
@@ -1903,6 +1936,24 @@ impl App {
         self.tab().remote.as_ref().map(|s| s.at.clone())
     }
 
+    /// The directory a child process may be started in.
+    ///
+    /// **Not [`App::cwd`].** Three of the places the list pane can be are not
+    /// directories on this machine — a remote service (`sftp://…`), the trash
+    /// (`trash://`) and the inside of an archive (`…/x.zip/inner`) — and every
+    /// one of them reaches `Command::current_dir` through the openers: `o` on a
+    /// remote file downloads it and then *launches* on it, and a blocking
+    /// opener runs a shell. A URL there is a spawn failure the user reads as
+    /// "the opener is broken", and a plausible-looking path that is not a
+    /// directory is worse: relative arguments would resolve somewhere else
+    /// entirely. [`local_origin`](App::local_origin) already knows the real
+    /// directory each of those three came from; this is the sentence that says
+    /// which question is being asked.
+    fn child_cwd(&self) -> PathBuf {
+        let cwd = self.cwd();
+        spawnable_cwd(&cwd, &self.local_origin())
+    }
+
     /// The local directory a jump away from here should be able to come back
     /// to: the one on screen, or the one the virtual listing already remembers.
     fn local_origin(&self) -> PathBuf {
@@ -2144,6 +2195,9 @@ impl App {
         if let Some((url, local)) = done.open {
             self.temps.remember(url, local.clone());
             self.open_local_temp(local, now);
+        }
+        if let Some(probe) = done.upload {
+            self.plan_upload(probe, now);
         }
         if !done.message.is_empty() {
             self.toasts.confirm(done.message, now);
@@ -2532,7 +2586,108 @@ impl App {
                 now,
             );
         }
-        let count = files.len();
+        // **The destination is asked about before a byte moves.** A download
+        // has always claimed a free local name (see `remote_download`); this is
+        // the same promise pointing the other way, and it is a round trip, so
+        // it goes on the pool and comes back through `apply_remote_done` like
+        // every other remote verb.
+        let here = dest.clone();
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
+        self.spawn_remote(
+            format!("Check {}", dest.to_url()),
+            Lane::Micro,
+            move |vfs, ctx| {
+                let mut taken = Vec::new();
+                for name in &names {
+                    let at = here.join(name);
+                    match vfs.stat(&at, false, ctx) {
+                        Ok(attrs) => taken.push(df_core::vfs::stat_entry(&at, attrs)),
+                        // Nothing there is the answer this is hoping for.
+                        Err(df_core::vfs::VfsError::Status { status, .. })
+                            if status.code == df_core::vfs::StatusCode::NoSuchFile => {}
+                        // Anything else — a permission problem on the
+                        // directory, a dropped link — must not be read as "the
+                        // name is free". The upload does not start.
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                Ok(RemoteDone {
+                    upload: Some(UploadProbe {
+                        dest: here,
+                        sources: files,
+                        taken,
+                    }),
+                    ..RemoteDone::default()
+                })
+            },
+        );
+    }
+
+    /// The probe came back: plan the upload, and ask about anything in the way.
+    ///
+    /// The plan is a [`PastePlan`](df_core::ops::paste::PastePlan) with
+    /// `sftp://…` paths in it, so the collision goes to the **same** dialog and
+    /// the same state machine a local paste uses — Overwrite / Skip / Rename /
+    /// apply-to-all, `Esc` cancels the whole thing — rather than to a second
+    /// resolver that would have to be kept in step with the first.
+    fn plan_upload(&mut self, probe: UploadProbe, now: Instant) {
+        let plan = crate::remote::plan_upload(&probe.sources, &probe.dest, &probe.taken);
+        if plan.is_settled() {
+            self.spawn_paste(plan, now);
+            return;
+        }
+        // The destinations' facts came off the wire; `Facts::read` would call
+        // them missing, which is the one thing a card about overwriting must
+        // not say.
+        let facts: HashMap<PathBuf, dialog::Facts> = probe
+            .taken
+            .iter()
+            .map(|entry| (entry.path.clone(), dialog::Facts::of(entry.clone())))
+            .collect();
+        self.dialog = Some(Dialog::Conflict(Box::new(ConflictDialog::with_facts(
+            plan, facts,
+        ))));
+        self.sync_context();
+    }
+
+    /// Carry out a settled upload plan.
+    ///
+    /// Two verbs, and which one an item gets is the answer the user gave:
+    /// `overwrite` is [`Vfs::upload`](df_core::vfs::Vfs::upload), which is the
+    /// atomic scratch-file-then-rename, and everything else is
+    /// [`Vfs::upload_new`](df_core::vfs::Vfs::upload_new), which climbs the
+    /// `name_1` ladder **on the server, immediately before the bytes move** —
+    /// the plan's suggestion came from a listing, and a listing is a
+    /// photograph.
+    ///
+    // VERIFY-LIVE: `y` a local file whose name is already on the server, `p` in
+    // the remote folder. The dialog must show the remote file's real size and
+    // date on the right; `o` must replace it, `r` must land `name_1`, `s` must
+    // leave both alone, and `Esc` must cancel without a byte moving.
+    fn spawn_upload(&mut self, plan: df_core::ops::paste::PastePlan, now: Instant) {
+        let Some(dest) = crate::remote::at_of(&plan.dest_dir) else {
+            return;
+        };
+        let items: Vec<(PathBuf, df_core::vfs::VfsPath, bool)> = plan
+            .ready
+            .iter()
+            .filter_map(|item| {
+                Some((
+                    item.src.clone(),
+                    crate::remote::at_of(&item.dst)?,
+                    item.overwrite,
+                ))
+            })
+            .collect();
+        if items.is_empty() {
+            self.toasts.notice("Nothing left to upload", now);
+            return;
+        }
+        let count = items.len();
         let here = dest.clone();
         self.spawn_remote(
             format!(
@@ -2544,12 +2699,13 @@ impl App {
             move |vfs, ctx| {
                 let mut done = 0;
                 let mut failure: Option<String> = None;
-                for local in &files {
-                    let Some(name) = local.file_name() else {
-                        continue;
+                for (local, remote, overwrite) in &items {
+                    let result = if *overwrite {
+                        vfs.upload(local, remote, ctx).map(|n| (n, remote.clone()))
+                    } else {
+                        vfs.upload_new(local, remote, ctx)
                     };
-                    let remote = here.join(&name.to_string_lossy());
-                    match vfs.upload(local, &remote, ctx) {
+                    match result {
                         Ok(_) => done += 1,
                         Err(e) => {
                             failure.get_or_insert_with(|| e.to_string());
@@ -2855,6 +3011,16 @@ impl App {
     }
 
     fn spawn_paste(&mut self, plan: df_core::ops::paste::PastePlan, now: Instant) {
+        // **The one place a settled plan is carried out**, and therefore the
+        // one place that has to know a plan can be pointed at a server. Both
+        // doors into it — a paste with nothing in the way, and the conflict
+        // dialog's `Settled` — arrive here, so an upload cannot reach the local
+        // paste engine (which would `copy` an `sftp://…` string into a
+        // directory named after a URL) by anybody forgetting a branch.
+        if crate::remote::at_of(&plan.dest_dir).is_some() {
+            self.spawn_upload(plan, now);
+            return;
+        }
         if plan.ready.is_empty() {
             self.toasts.notice("Nothing left to paste", now);
             return;
@@ -3094,7 +3260,7 @@ impl App {
             self.run_shell(&choice.command.clone(), paths, true, now);
             return;
         }
-        let cwd = self.cwd();
+        let cwd = self.child_cwd();
         if let Err(e) = open::spawn_detached(&choice.command, &paths, &cwd) {
             self.toasts.error(format!("{}: {e}", choice.name), now);
         }
@@ -3107,7 +3273,7 @@ impl App {
     /// exited. Streaming its output into a panel is deferred; the exit status
     /// comes back as a toast.
     fn run_shell(&mut self, snippet: &str, paths: Vec<PathBuf>, block: bool, now: Instant) {
-        let cwd = self.cwd();
+        let cwd = self.child_cwd();
         if !block {
             match open::spawn_detached(snippet, &paths, &cwd) {
                 Ok(()) => self
@@ -4589,14 +4755,14 @@ impl App {
     }
 
     /// `r` and `R`: the two rename presets, both anchored to the cursor's row.
-    fn open_rename(&mut self, empty_stem: bool) {
+    fn open_rename(&mut self, empty_stem: bool, now: Instant) {
         // PLAN §5: a selection of more than one is a *bulk* rename, and it gets
         // the diff card rather than a popup that would ask about the first file
         // and quietly ignore the rest. One selected file is still the popup —
         // that is what `r` has always meant, and a card for one name would be a
         // modal to change one word.
         if self.tab().cwd.dir.selected_count() > 1 {
-            self.open_bulk();
+            self.open_bulk(now);
             return;
         }
         let Some(entry) = self.tab().cwd.dir.cursor_entry() else {
@@ -4615,7 +4781,7 @@ impl App {
     }
 
     /// Open the two-column rename diff over the selection (PLAN §5).
-    fn open_bulk(&mut self) {
+    fn open_bulk(&mut self, now: Instant) {
         let dir = self.cwd();
         let listing = &self.tab().cwd.dir;
         // The selection in *listing* order, not in the order it was made: the
@@ -4637,10 +4803,17 @@ impl App {
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
-        self.dialog = Some(Dialog::Bulk(Box::new(crate::bulk::Bulk::new(
-            dir, names, &siblings,
-        ))));
-        self.sync_context();
+        // A card that cannot be built is a card that would have renamed the
+        // wrong thing — the constructor is the guard, and this is its sentence
+        // (a remote pane: `r` on one row is a `RENAME` over the link, which
+        // works, and a card of them is not implemented).
+        match crate::bulk::Bulk::new(dir, names, &siblings) {
+            Ok(card) => {
+                self.dialog = Some(Dialog::Bulk(Box::new(card)));
+                self.sync_context();
+            }
+            Err(why) => self.toasts.notice(why, now),
+        }
     }
 
     /// One keystroke into the bulk-rename card.
@@ -5258,15 +5431,20 @@ impl App {
         self.rewatch();
     }
 
-    fn run(&mut self, command: Command, page: usize, now: Instant) {
-        use Command as C;
-        // A command that shuffles the rows you are looking at gets a FLIP
-        // (PLAN §2, §8): where everything is *now* is captured before the
-        // command runs, because afterwards it is gone. The next frame's layout
-        // is the other half.
-        if flip::reorders(command) {
-            self.flip_before = Some(self.last_layout.clone());
-        }
+    /// The three gates a verb passes before it acts, in one place.
+    ///
+    /// Returns whether the command was refused (and said so). Where the list
+    /// pane is showing something that is not a directory on this machine —
+    /// an archive's interior, a remote service, the trash — a whole class of
+    /// verbs would act on a path that cannot be acted on: an `sftp://…` display
+    /// path is a *relative* `PathBuf`, and handing one to `rename(2)`, to a
+    /// child process or to the trash would write somewhere nobody was looking.
+    ///
+    /// **Every door to a verb goes through here**, not just the keyboard: the
+    /// context menu is a second dispatch over the same verbs (see
+    /// [`menu_command`]), and it used to reach them with only a hand-written
+    /// branch for `d` standing between a remote row and a local trash job.
+    fn refuse_where_we_are(&mut self, command: Command, now: Instant) -> bool {
         // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
         // the commands that would write into one are inert *out loud*. A key
         // that silently does nothing is a key the user presses twice — and the
@@ -5276,7 +5454,7 @@ impl App {
                 "Archives are read-only — press e to extract".to_string(),
                 now,
             );
-            return;
+            return true;
         }
         // PLAN §7.6: the same rule for a remote service, with a different list
         // and a different sentence. What is missing is missing for a reason the
@@ -5286,7 +5464,7 @@ impl App {
                 "Not over the link — press y then p in a local folder to bring it here".to_string(),
                 now,
             );
-            return;
+            return true;
         }
         // PLAN §7.4: the trash is a listing of things that have already been
         // deleted. Everything that would act on them *as files where they are*
@@ -5297,6 +5475,21 @@ impl App {
                 "Not in the trash — Enter restores, D destroys".to_string(),
                 now,
             );
+            return true;
+        }
+        false
+    }
+
+    fn run(&mut self, command: Command, page: usize, now: Instant) {
+        use Command as C;
+        // A command that shuffles the rows you are looking at gets a FLIP
+        // (PLAN §2, §8): where everything is *now* is captured before the
+        // command runs, because afterwards it is gone. The next frame's layout
+        // is the other half.
+        if flip::reorders(command) {
+            self.flip_before = Some(self.last_layout.clone());
+        }
+        if self.refuse_where_we_are(command, now) {
             return;
         }
         // Half a page rounds *down* but never to nothing: on a pane too short
@@ -5782,8 +5975,8 @@ impl App {
             // move back to the name it had, which is the closest thing to a
             // rename the view has.
             C::Rename if self.tab().trash.is_some() => self.trash_restore(now),
-            C::Rename => self.open_rename(false),
-            C::RenameEmptyStem => self.open_rename(true),
+            C::Rename => self.open_rename(false, now),
+            C::RenameEmptyStem => self.open_rename(true, now),
             C::Shell => self.open_prompt(PromptKind::Shell),
             C::ShellBlock => self.open_prompt(PromptKind::ShellBlock),
             C::Undo => self.undo(now),
@@ -6770,6 +6963,17 @@ impl App {
     /// Do what a menu row says. Every arm is a key that already exists.
     fn menu_action(&mut self, action: menu::Action, now: Instant) {
         use menu::Action as A;
+        // The menu is a **second dispatch** over the same verbs, and it used to
+        // walk straight past the gates the keyboard goes through — so "Open
+        // with…" on a remote row launched a viewer on the string
+        // `sftp://host/photo.png`, and only `d` had a hand-written branch
+        // keeping it honest. A row that is a command is now put through the
+        // same one gate, so the next row added to the menu cannot forget.
+        if let Some(command) = menu_command(action) {
+            if self.refuse_where_we_are(command, now) {
+                return;
+            }
+        }
         match action {
             A::Open => self.open_hovered(now),
             A::OpenWithMenu => {}
@@ -6790,12 +6994,13 @@ impl App {
             A::Yank => self.set_clipboard(false, now),
             A::Cut => self.set_clipboard(true, now),
             A::Paste => self.paste(false, now),
-            A::Rename => self.open_rename(false),
-            // The same choice `d` makes, and it has to be made here too: the
-            // menu is not gated by `inert_remotely`, so a plain
-            // `ConfirmKind::Trash` on a remote pane would hand a `TrashJob` a
-            // list of `sftp://…` strings — which are *relative* `PathBuf`s, and
-            // would be resolved against the process's own directory.
+            A::Rename => self.open_rename(false, now),
+            // The same choice `d` makes, and it still has to be made here:
+            // `Trash` is deliberately *not* inert remotely — it becomes a
+            // `RemoteDelete` — so the gate above lets it through, and a plain
+            // `ConfirmKind::Trash` would hand a `TrashJob` a list of `sftp://…`
+            // strings, which are *relative* `PathBuf`s resolved against the
+            // process's own directory.
             A::Trash => {
                 let kind = if self.tab().remote.is_some() {
                     ConfirmKind::RemoteDelete
@@ -7754,7 +7959,18 @@ impl App {
     }
 
     /// Save what the clipboard is holding as a file in this directory.
+    ///
+    /// The one paste that is a *local write* rather than a plan: `p` with an
+    /// image on the system clipboard lands a file with `std::fs::write`, so
+    /// unlike the file paste (which reads its meaning off both ends and can
+    /// become an upload) it needs the pane to be a directory on this machine.
     fn save_clipboard(&mut self, mime: &str, extension: &str, now: Instant) {
+        let cwd = self.cwd();
+        if !scannable(&cwd) {
+            self.toasts
+                .notice("The clipboard can only be saved into a local folder", now);
+            return;
+        }
         let bytes = match crate::clipboard::paste(mime) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -7770,7 +7986,7 @@ impl App {
             "clipboard_{}.{extension}",
             crate::format::file_stamp(std::time::SystemTime::now())
         );
-        let path = self.cwd().join(&name);
+        let path = cwd.join(&name);
         if let Err(error) = std::fs::write(&path, &bytes) {
             self.toasts
                 .error(format!("{}: {error}", path.display()), now);
@@ -9316,6 +9532,65 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// Whether a path may be handed to the local directory scanner.
+///
+/// The panes address two places by URL — `sftp://…` and `trash://` — and both
+/// are *display* paths: relative `PathBuf`s that `read_dir` would resolve
+/// against the process's own directory and fail on. A rescan of one wipes the
+/// listing it was supposed to refresh, which is how a remote pane could be
+/// emptied by an unrelated local operation finishing.
+fn scannable(dir: &Path) -> bool {
+    crate::remote::at_of(dir).is_none() && dir != Path::new(crate::trashview::URL)
+}
+
+/// The directory to start a child process in, given where the pane is and the
+/// real directory that pane's session came from.
+///
+/// Pure, so the rule is a test: anything that is not a directory on this
+/// machine — a URL, or an archive's interior, which *looks* like a path and is
+/// not one — falls back to the origin. The existence check is deliberate rather
+/// than a list of schemes: it is the actual question `Command::current_dir` is
+/// about to ask the kernel, and it catches the fourth case nobody has thought
+/// of yet.
+fn spawnable_cwd(pane: &Path, origin: &Path) -> PathBuf {
+    if scannable(pane) && pane.is_dir() {
+        return pane.to_path_buf();
+    }
+    origin.to_path_buf()
+}
+
+/// The command a context-menu row *is*, when it is one.
+///
+/// Pure, and the reason the menu cannot drift from the keyboard: every gate a
+/// key passes ([`App::refuse_where_we_are`]) is expressed over
+/// [`Command`], so a menu row that names the same verb is checked by the same
+/// list rather than by a branch somebody remembered to write. The three rows
+/// that are not commands — the opener submenu's own parent, and the two trash
+/// verbs the keymap spells with `Enter`/`D` in a view that already gates them —
+/// answer `None`.
+fn menu_command(action: menu::Action) -> Option<Command> {
+    use menu::Action as A;
+    use Command as C;
+    Some(match action {
+        A::Open => C::Open,
+        // Both the submenu and its rows launch a child process with the row's
+        // path as an argument, which is exactly what `O` does.
+        A::OpenWith(_) | A::OpenWithMenu => C::OpenInteractive,
+        A::Yank => C::Yank,
+        A::Cut => C::YankCut,
+        A::Paste => C::Paste,
+        A::Rename => C::Rename,
+        A::Trash => C::Trash,
+        A::ExtractHere => C::ArchiveExtractHere,
+        A::ExtractSubfolder => C::ArchiveExtractSubfolder,
+        A::CopyPath => C::CopyPath,
+        A::CopyName => C::CopyFilename,
+        A::Properties => C::Spot,
+        A::Purge => C::DeletePermanently,
+        A::Restore | A::EmptyTrash => return None,
+    })
+}
+
 /// Which commands are inert while the list pane is showing the trash.
 ///
 /// The rule is "everything whose subject would have to be the file where it
@@ -10096,6 +10371,90 @@ mod tests {
             df_core::preview::kind_for_mime(mime, "voice.opus"),
             PreviewKind::Audio
         );
+    }
+
+    /// **The bug this fixes**: `launch` and `run_shell` handed the *pane's*
+    /// path to `Command::current_dir`. On a remote service that is
+    /// `sftp://host/srv` and on the trash it is `trash://` — neither is a
+    /// directory, so `o` on a remote file downloaded it perfectly and then
+    /// failed to open it, and an opener with a relative argument would have
+    /// resolved it somewhere else entirely. It worked by luck everywhere else:
+    /// the pane usually *is* a real directory.
+    #[test]
+    fn a_child_process_is_never_started_in_a_place_that_is_not_a_directory() {
+        let origin = std::env::temp_dir();
+        let real = std::env::current_dir().expect("a working directory");
+
+        // A local pane is its own working directory — nothing changes for the
+        // overwhelmingly common case.
+        assert_eq!(spawnable_cwd(&real, &origin), real);
+
+        // The three that are not directories on this machine.
+        assert_eq!(
+            spawnable_cwd(Path::new("sftp://showandtour1/srv/www"), &origin),
+            origin
+        );
+        assert_eq!(
+            spawnable_cwd(Path::new(crate::trashview::URL), &origin),
+            origin
+        );
+        // An archive's interior *looks* like a path, which is exactly why the
+        // question asked is "is this a directory" and not "does it start with a
+        // scheme".
+        let inside = real.join("archive.zip/inner");
+        assert_eq!(spawnable_cwd(&inside, &origin), origin);
+
+        // …and the same rule keeps the scanner off them.
+        assert!(scannable(&real));
+        assert!(!scannable(Path::new("sftp://showandtour1/srv")));
+        assert!(!scannable(Path::new(crate::trashview::URL)));
+    }
+
+    /// The context menu is a second dispatch over the same verbs, and it must
+    /// be gated by the same list.
+    ///
+    /// **The bug this fixes**: `menu_action` walked past `inert_remotely`
+    /// entirely — "Open with…" on a remote row launched a viewer on the string
+    /// `sftp://host/photo.png`, and `d` was safe only because somebody had
+    /// hand-written a remote branch for that one row.
+    #[test]
+    fn every_menu_row_that_is_a_verb_is_gated_by_that_verbs_own_rules() {
+        use df_core::keymap::Command as C;
+        use menu::Action as A;
+        assert_eq!(menu_command(A::OpenWith(2)), Some(C::OpenInteractive));
+        assert_eq!(menu_command(A::OpenWithMenu), Some(C::OpenInteractive));
+        assert_eq!(menu_command(A::Cut), Some(C::YankCut));
+        assert_eq!(menu_command(A::Rename), Some(C::Rename));
+        assert_eq!(menu_command(A::Trash), Some(C::Trash));
+        // The two rows that are not verbs the keymap has: the trash view gates
+        // them itself, and mapping them to something they are not would be the
+        // very drift this function exists to stop.
+        assert_eq!(menu_command(A::Restore), None);
+        assert_eq!(menu_command(A::EmptyTrash), None);
+
+        // The rows that would act locally on a remote row are refused by the
+        // one list, without a branch of their own.
+        for action in [A::OpenWith(0), A::OpenWithMenu, A::Cut] {
+            let command = menu_command(action).expect("a verb");
+            assert!(
+                crate::remote::inert_remotely(command),
+                "{action:?} must not run over the link"
+            );
+        }
+        // …and the ones that genuinely work remotely still do.
+        for action in [A::Open, A::Yank, A::Paste, A::Rename, A::Trash] {
+            let command = menu_command(action).expect("a verb");
+            assert!(
+                !crate::remote::inert_remotely(command),
+                "{action:?} still works over the link"
+            );
+        }
+        // Extraction from the menu is still live inside an archive, which is
+        // the one place it is most wanted.
+        for action in [A::ExtractHere, A::ExtractSubfolder] {
+            let command = menu_command(action).expect("a verb");
+            assert!(!crate::archive::inert_in_archive(command));
+        }
     }
 
     #[test]

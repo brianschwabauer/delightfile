@@ -193,6 +193,15 @@ pub fn notes(items: &[TrashedItem]) -> std::collections::HashMap<String, String>
     items
         .iter()
         .map(|item| {
+            // An orphan has no origin to name; the column says what is wrong
+            // with the row instead, which is the fact a person is in the trash
+            // to read about it.
+            if item.is_orphan() {
+                return (
+                    item.name.to_string_lossy().into_owned(),
+                    "no record — D destroys it".to_string(),
+                );
+            }
             let dir = item
                 .original
                 .parent()
@@ -273,6 +282,16 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 /// because "the original name is taken again" is a sentence somebody can act on
 /// (PLAN §5: undo may never overwrite newer work).
 pub fn restore_refusal(item: &TrashedItem) -> Option<String> {
+    // A file in `files/` that no record describes — what a cancelled purge
+    // leaves behind (see [`df_core::ops::trash::purge`]). There is nowhere to
+    // put it back, and the row says so rather than failing with a sentence
+    // about a path that is the empty string.
+    if item.is_orphan() {
+        return Some(format!(
+            "{} has no record in the trash — D destroys it",
+            item.name.to_string_lossy()
+        ));
+    }
     let original = &item.original;
     // `symlink_metadata`, matching df-core's `exists`: a trashed *broken*
     // symlink is a thing this program supports trashing, and `Path::exists`

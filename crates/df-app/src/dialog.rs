@@ -240,6 +240,23 @@ impl Facts {
         }
     }
 
+    /// Facts about a row this program already has an [`Entry`] for.
+    ///
+    /// A remote destination's stat came off the wire — `Facts::read` would run
+    /// `Entry::read` on an `sftp://…` string, find nothing, and draw the file
+    /// that is about to be overwritten as **missing**, which is the one lie a
+    /// conflict card must never tell.
+    pub fn of(entry: Entry) -> Facts {
+        Facts {
+            name: entry.name.clone(),
+            size: entry.len,
+            is_dir: entry.is_dir(),
+            mtime: crate::format::linemode_text(&entry, df_core::config::LineMode::Mtime),
+            present: true,
+            entry: Some(entry),
+        }
+    }
+
     pub fn size_text(&self) -> String {
         if !self.present {
             return "missing".to_string();
@@ -271,13 +288,23 @@ pub struct ConflictDialog {
 
 impl ConflictDialog {
     pub fn new(plan: PastePlan) -> ConflictDialog {
+        ConflictDialog::with_facts(plan, HashMap::new())
+    }
+
+    /// The same dialog, with the facts for some of its paths already known.
+    ///
+    /// What an **upload** needs (PLAN §7.6): the destinations are `sftp://…`
+    /// display paths, whose sizes and dates arrived in the probe's stat replies
+    /// and cannot be read from this machine. Seeded first, so [`Facts::read`]
+    /// is only ever asked about the paths that really are local — the sources.
+    pub fn with_facts(plan: PastePlan, facts: HashMap<PathBuf, Facts>) -> ConflictDialog {
         let mut dialog = ConflictDialog {
             plan,
             cursor: 0,
             action: ConflictAction::Rename,
             apply_all: false,
             error: None,
-            facts: HashMap::new(),
+            facts,
         };
         dialog.load_facts();
         dialog
@@ -1430,6 +1457,53 @@ mod tests {
         assert_eq!(ConflictDialog::action_for_key('q'), None);
     }
 
+    /// A conflict about an **upload** draws the file that is really on the
+    /// server (PLAN §7.6).
+    ///
+    /// **The bug this pins**: the destinations are `sftp://…` strings, so the
+    /// card's own `Facts::read` found nothing and drew the file about to be
+    /// overwritten as "missing" — a card asking "replace this?" about what
+    /// looked like an empty slot. The probe's stat is seeded instead, and the
+    /// local source is still read from the disk it is on.
+    #[test]
+    fn an_upload_conflict_shows_the_file_that_is_really_on_the_server() {
+        let tree = TempTree::new("dialog-upload");
+        std::fs::create_dir_all(tree.join("src")).unwrap();
+        let src = tree.join("src/index.html");
+        std::fs::write(&src, b"local body").unwrap();
+
+        let dest = df_core::vfs::VfsPath::new("showandtour1", "/srv/www");
+        let there = df_core::vfs::stat_entry(
+            &dest.join("index.html"),
+            df_core::vfs::Attrs {
+                size: Some(4096),
+                permissions: Some(0o100_644),
+                mtime: Some(1_700_000_000),
+                ..df_core::vfs::Attrs::default()
+            },
+        );
+        let plan = crate::remote::plan_upload(
+            std::slice::from_ref(&src),
+            &dest,
+            std::slice::from_ref(&there),
+        );
+        let facts: HashMap<PathBuf, Facts> = [(there.path.clone(), Facts::of(there))]
+            .into_iter()
+            .collect();
+        let dialog = ConflictDialog::with_facts(plan, facts);
+
+        let conflict = dialog.conflict().expect("one conflict").clone();
+        let remote = dialog.facts_for(&conflict.dst).expect("seeded");
+        assert!(remote.present, "the server's file is not missing");
+        assert_eq!(remote.size, 4096);
+        assert_eq!(remote.size_text(), "4.0 KB");
+        assert!(!remote.mtime.is_empty(), "the date came off the wire");
+        // The source side is still read locally, from the file it really is.
+        let local = dialog.facts_for(&conflict.src).expect("read from disk");
+        assert!(local.present);
+        assert_eq!(local.size, "local body".len() as u64);
+    }
+
     /// A click lands on the button it looks like it landed on.
     #[test]
     fn the_geometry_hit_tests_where_it_draws() {
@@ -1486,7 +1560,8 @@ mod tests {
             // The rename card, in the three states it has: clean, refused, and
             // longer than it can show at once.
             let many: Vec<String> = (0..30).map(|i| format!("file-{i}.txt")).collect();
-            let mut bulk = crate::bulk::Bulk::new(tree.path.clone(), many.clone(), &many);
+            let mut bulk = crate::bulk::Bulk::new(tree.path.clone(), many.clone(), &many)
+                .expect("a local directory builds a card");
             let g = bulk_geometry(area, &bulk);
             paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
 
@@ -1516,7 +1591,7 @@ mod tests {
     #[test]
     fn the_rename_card_shows_what_it_can_and_scrolls_the_rest() {
         let names: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
-        let bulk = crate::bulk::Bulk::new(PathBuf::from("/tmp"), names, &[]);
+        let bulk = crate::bulk::Bulk::new(PathBuf::from("/tmp"), names, &[]).expect("local");
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
         let g = bulk_geometry(area, &bulk);
         assert_eq!(g.rows.len(), crate::bulk::ROWS);
@@ -1533,7 +1608,8 @@ mod tests {
             PathBuf::from("/tmp"),
             vec!["a".to_string(), "b".to_string()],
             &[],
-        );
+        )
+        .expect("local");
         assert!(bulk_geometry(area, &two).card.height() < g.card.height());
     }
 }

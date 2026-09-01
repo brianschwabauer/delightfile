@@ -76,6 +76,15 @@ impl TrashedItem {
         self.trash_root.join("files").join(&self.name)
     }
 
+    /// Whether this is a file in `files/` that no `.trashinfo` describes.
+    ///
+    /// An orphan has nowhere to be restored *to* — that is the whole content of
+    /// the record it is missing — so every caller that would move it back asks
+    /// this first. See [`Trash::orphans`] for where they come from.
+    pub fn is_orphan(&self) -> bool {
+        self.original.as_os_str().is_empty()
+    }
+
     pub fn info_path(&self) -> PathBuf {
         let mut name = self.name.clone();
         name.push(".");
@@ -275,7 +284,54 @@ impl Trash {
                 Err(e) => log::warn!("unparseable {}: {e}", info_path.display()),
             }
         }
+        out.extend(self.orphans(&out)?);
         out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
+    }
+
+    /// The things in `files/` that no record points at.
+    ///
+    /// A trash is two directories that have to agree, and they can stop
+    /// agreeing: a crash between [`Trash::trash`]'s two steps, another tool's
+    /// half-done delete, and — the reason this exists — a [`purge`] that was
+    /// **cancelled after it had removed the record**. Every one of those leaves
+    /// bytes in `files/` that used to be invisible: not listed, not restorable,
+    /// not destroyed by "empty trash", and reported as gone.
+    ///
+    /// They are listed instead, with an empty `original`, which is what
+    /// [`TrashedItem::is_orphan`] reads. A restore of one is refused by name
+    /// (there is nowhere to put it back), and `D` destroys it — so the trash
+    /// view is a complete account of what is in the trash directory, which is
+    /// the only version of that view worth trusting.
+    fn orphans(&self, known: &[TrashedItem]) -> Result<Vec<TrashedItem>> {
+        let dir = self.files_dir();
+        if !exists(&dir) {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir).map_err(|e| DfError::io(&dir, e))? {
+            let entry = entry.map_err(|e| DfError::io(&dir, e))?;
+            let name = entry.file_name();
+            if known.iter().any(|item| item.name == name) {
+                continue;
+            }
+            // Cross-checked against `info/` rather than against `known` alone:
+            // a record that failed to *parse* was logged and skipped above, and
+            // its file is not an orphan — it is a record this program could not
+            // read, and listing it twice would be worse than listing it once.
+            let mut info_name = name.clone();
+            info_name.push(".");
+            info_name.push(TRASHINFO_EXT);
+            if exists(&self.info_dir().join(&info_name)) {
+                continue;
+            }
+            out.push(TrashedItem {
+                trash_root: self.root.clone(),
+                name,
+                original: PathBuf::new(),
+                deleted_at: String::new(),
+            });
+        }
         Ok(out)
     }
 
@@ -290,29 +346,50 @@ impl Trash {
     }
 }
 
-/// Destroy a trashed item for good: its file *and* its record.
+/// Destroy a trashed item for good: its record *and* its file.
 ///
 /// The one operation in the program with no inverse, and it is spelled here
 /// rather than as "delete the path inside `files/`" at the call site because
 /// deleting only the file would leave an info record pointing at nothing — a
 /// row in the trash view that can never be restored and never goes away.
 ///
-/// The file goes first and the record second. A crash between them leaves an
-/// orphan record, which [`Trash::list`] already tolerates and the next purge
-/// tidies; the other order would leave a file in `files/` that nothing knows
-/// the origin of, which is a leak nobody can find.
+/// ## The record goes first, and that order is the safety property
+///
+/// **The bug this fixes**: the file went first. A purge of a directory is a
+/// recursive [`delete_permanent`](super::delete::delete_permanent) that honours
+/// cancel — so `D`, then `x` in the task panel, left half a tree in `files/`
+/// **behind an intact `.trashinfo`**. The row was still in the trash view, the
+/// record still said "this is your project directory", and `Enter` on it moved
+/// a silently truncated copy back over the name it came from. That is data loss
+/// wearing the mask of a restore, and it is the worst outcome this file can
+/// produce.
+///
+/// Removing the record first cannot produce it. What a cancelled or failed
+/// purge leaves is an **orphan**: bytes in `files/` that no record describes,
+/// which [`Trash::orphans`] lists as a row with no origin — visible, refused by
+/// [`restore`] with a sentence, and destroyed by the next `D` or "Empty trash".
+/// A user who cancels sees a broken thing that says it is broken instead of a
+/// whole-looking thing that is not.
+///
+/// The two alternatives were weighed and rejected. *Resumable* means recording
+/// progress into the trash directory — a third kind of state to get out of step
+/// with the other two. *Forbidding cancel* means a `D` on a hundred-gigabyte
+/// directory cannot be stopped, which is a worse promise than "you may be left
+/// with a broken row you can see".
 pub fn purge(item: &TrashedItem, ctx: &TaskCtx) -> Result<()> {
+    let info = item.info_path();
+    match std::fs::remove_file(&info) {
+        Ok(()) => {}
+        // Already gone is the outcome that was asked for — an orphan being
+        // purged has no record to remove, and this is that path too.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(DfError::io(&info, e)),
+    }
     let file = item.files_path();
     if exists(&file) {
         super::delete::delete_permanent(&file, ctx)?;
     }
-    let info = item.info_path();
-    match std::fs::remove_file(&info) {
-        Ok(()) => Ok(()),
-        // Already gone is the outcome that was asked for.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(DfError::io(&info, e)),
-    }
+    Ok(())
 }
 
 /// Whether a trashinfo's `Path=` names somewhere a restore may write.
@@ -342,6 +419,14 @@ fn restorable_destination(original: &Path) -> bool {
 /// never overwrite newer work (PLAN §5), and a restore that silently clobbers
 /// would be exactly that.
 pub fn restore(item: &TrashedItem, ctx: &TaskCtx) -> Result<PathBuf> {
+    // An orphan has no `Path=` to go back to, and saying that is more use than
+    // the generic refusal an empty path would otherwise fall into.
+    if item.is_orphan() {
+        return Err(DfError::Op(format!(
+            "{} has no record in the trash, so there is nowhere to put it back — D destroys it",
+            item.name.to_string_lossy()
+        )));
+    }
     if !restorable_destination(&item.original) {
         return Err(DfError::Op(format!(
             "{} is not a path a restore may write to",
@@ -726,6 +811,70 @@ mod tests {
         assert!(trash.list().unwrap().is_empty());
     }
 
+    /// **The bug this fixes**: a cancelled purge used to leave half a tree in
+    /// `files/` *behind an intact record*, and the record is what a restore
+    /// believes. `D` on a project directory, `x` in the task panel, `Enter` on
+    /// the row that is still there — and a directory missing most of its files
+    /// moved back over the name it came from, reported as "Restored 1 item".
+    ///
+    /// The record now goes first, so what a cancel leaves is an orphan: listed,
+    /// refused by name, and destroyed by the next `D`.
+    #[test]
+    fn a_cancelled_purge_leaves_a_broken_row_rather_than_a_lying_record() {
+        use crate::tasks::{ProgressSink, TaskFlags};
+        use std::sync::Arc;
+
+        /// Cancels the task the moment the walk removes anything — a hand on
+        /// `x` in the task panel, one file in.
+        struct CancelAfterFirst(Arc<TaskFlags>);
+        impl ProgressSink for CancelAfterFirst {
+            fn set_total(&self, _bytes: u64, _files: u64) {}
+            fn advance(&self, _bytes: u64, _files: u64) {
+                self.0.cancel();
+            }
+        }
+
+        let t = TempTree::new("trash-purge-cancel");
+        let trash = trash_in(&t);
+        let dir = t.dir("work/project");
+        for name in ["a", "b", "c", "d"] {
+            std::fs::write(dir.join(name), b"payload").unwrap();
+        }
+        let item = trash.trash(&dir, &ctx()).unwrap();
+
+        let flags = Arc::new(TaskFlags::new());
+        let cancelling = TaskCtx::with_sink(
+            Arc::clone(&flags),
+            Arc::new(CancelAfterFirst(Arc::clone(&flags))),
+        );
+        let err = purge(&item, &cancelling).unwrap_err();
+        assert!(matches!(err, DfError::Cancelled), "{err}");
+
+        // The half-deleted tree is still there — and the record that described
+        // it is not, which is the whole point.
+        assert!(exists(&item.files_path()), "the walk stopped part way");
+        assert!(
+            !exists(&item.info_path()),
+            "the record went before the first byte did"
+        );
+
+        // The view shows it, as a row with no origin.
+        let listed = trash.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].is_orphan());
+        assert_eq!(listed[0].name, item.name);
+
+        // A restore is refused *by name* rather than quietly handing back a
+        // directory with most of its files missing.
+        let refusal = restore(&listed[0], &ctx()).unwrap_err().to_string();
+        assert!(refusal.contains("no record"), "{refusal}");
+
+        // And the next `D` finishes what the first one started.
+        purge(&listed[0], &ctx()).unwrap();
+        assert!(!exists(&item.files_path()));
+        assert!(trash.list().unwrap().is_empty());
+    }
+
     /// Purging an item whose file has already gone still tidies the record —
     /// an interrupted purge, or somebody emptying the trash from another
     /// program, must not leave a row nothing can clear.
@@ -822,7 +971,8 @@ mod tests {
                 .expect("the record is still listed");
             let err = restore(forged_item, &ctx()).unwrap_err();
             assert!(
-                err.to_string().contains("not a path a restore may write to"),
+                err.to_string()
+                    .contains("not a path a restore may write to"),
                 "{forged}: {err}"
             );
             // And nothing moved: the trashed copy is still in the trash.

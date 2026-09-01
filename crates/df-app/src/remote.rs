@@ -30,7 +30,9 @@
 //!
 //! Does not, and says so: `x` cut, `D`, symlink and hardlink, `;`/`:` shell,
 //! `s`/`S` (they are `fd`/`rg` against a directory that is not on this
-//! machine), `Y`, `c t`, `u`, and "what's big". Every one of them is on
+//! machine), `O` (the opener picker launches a child process on the row's
+//! path, and a URL is not a file any viewer can open — `o` downloads first and
+//! still works), `Y`, `c t`, `u`, and "what's big". Every one of them is on
 //! [`crate::remote::inert_remotely`], because a key that silently does nothing is a key the
 //! user presses twice.
 //!
@@ -46,6 +48,17 @@
 //! are asking for rather than discovering it from the progress bar), and
 //! local-to-local is the paste engine that already exists. One clipboard, one
 //! `p`, and the decision made from the two ends rather than from a mode.
+//!
+//! ### And an upload asks before it destroys
+//!
+//! Both directions claim their name. A download climbs the `name_1` ladder so
+//! it cannot silently overwrite what is in the local folder (PLAN §5); an
+//! upload stats its destinations first and, when one is taken, builds the same
+//! [`PastePlan`](df_core::ops::paste::PastePlan) a local paste builds — so the
+//! collision is answered by the one conflict dialog, with the server's own size
+//! and date on the right-hand side of the comparison. See [`plan_upload`], and
+//! [`df_core::vfs::Vfs::upload_new`] for the ladder that is climbed again on
+//! the server immediately before the bytes move.
 //!
 //! ## Nothing hangs
 //!
@@ -66,6 +79,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use df_core::fs::Entry;
+use df_core::ops::paste::{Conflict, PasteItem, PastePlan};
 use df_core::vfs::VfsPath;
 
 /// How big a remote text file may be before the preview stops downloading it.
@@ -231,6 +245,13 @@ pub fn crumbs(at: &VfsPath) -> Vec<crate::chrome::Crumb> {
 /// commands are here (`fd` and `rg` would search this machine while the pane
 /// showed another), and `p` is deliberately **not** here — a paste into a
 /// remote directory is an upload, which is the feature.
+///
+/// This list is a **guard**, not a courtesy: it is consulted in one place, at
+/// the top of the command dispatch, and every command on it is one that would
+/// otherwise hand an `sftp://…` display path to something local. `O` is here
+/// for exactly that reason — the opener picker launches a child process with
+/// the row's path as an argument, and `sftp://showandtour1/srv/a.png` is not a
+/// file any viewer can open. `o` is not, because it downloads first.
 pub fn inert_remotely(command: df_core::keymap::Command) -> bool {
     use df_core::keymap::Command as C;
     matches!(
@@ -255,8 +276,21 @@ pub fn inert_remotely(command: df_core::keymap::Command) -> bool {
             | C::BasketToggle
             | C::ArchiveExtractHere
             | C::ArchiveExtractSubfolder
+            // `O` hands the row's path to a child process as an argument; a
+            // URL there opens nothing, or creates a file with a colon in its
+            // name. `o` downloads first and is deliberately still live.
+            | C::OpenInteractive
             | C::OpenTrash
     )
+}
+
+/// Is this a remote display path rather than a path on this machine?
+///
+/// The one question a local-only consumer asks. It is [`at_of`] with the answer
+/// thrown away, named for the way it is used: `if is_remote(&path) { refuse }`
+/// reads as a guard, and a guard is what these call sites are.
+pub fn is_remote(path: &Path) -> bool {
+    at_of(path).is_some()
 }
 
 /// What `p` means, decided from the two ends rather than from a mode.
@@ -290,6 +324,102 @@ impl Transfer {
             (_, false, false) => Transfer::Local,
         }
     }
+}
+
+// ── An upload is a paste, and it asks the same question ─────────────────────
+
+/// What uploading `sources` into `dest` would do, given what the server says is
+/// already in that directory.
+///
+/// **The symmetry that was missing.** A download claims its local name through
+/// [`df_core::ops::paste::unique_name`], so it can never silently overwrite
+/// (PLAN §5); an upload used to be a bare `TRUNC` open, so the same paste in
+/// the other direction destroyed the file that was there without a word. This
+/// builds the *same* [`PastePlan`](df_core::ops::paste::PastePlan) a local
+/// paste builds — ready items, conflicts, suggested names — so the collision is
+/// answered by the one conflict dialog and its one state machine, with
+/// `sftp://…` display paths where a local plan has local ones.
+///
+/// Pure: `taken` is the listing the probe brought back, so what the plan says
+/// is a table test rather than something that needs a server.
+pub fn plan_upload(sources: &[PathBuf], dest: &VfsPath, taken: &[Entry]) -> PastePlan {
+    let mut plan = PastePlan {
+        // Never `Cut`: a cut whose two ends are on different machines is a copy
+        // and a delete, which is exactly what `inert_remotely` refuses.
+        mode: df_core::ops::paste::PasteMode::Copy,
+        dest_dir: display(dest),
+        ready: Vec::new(),
+        conflicts: Vec::new(),
+        no_ops: Vec::new(),
+    };
+    // Names this same upload has already spoken for but not yet written — the
+    // local planner's `claimed`, for the same reason: two files called
+    // `notes.txt` from two directories must not both get the one slot.
+    let mut claimed: Vec<String> = Vec::new();
+    for src in sources {
+        let Some(name) = src.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        let on_server = taken.iter().any(|entry| entry.name == name);
+        if !on_server && !claimed.contains(&name) {
+            claimed.push(name.clone());
+            plan.ready.push(PasteItem {
+                src: src.clone(),
+                dst: display(&dest.join(&name)),
+                overwrite: false,
+            });
+            continue;
+        }
+        let free = free_name(&name, taken, &claimed);
+        if !on_server {
+            // Taken only by this paste's own earlier item: auto-named, exactly
+            // as a duplicate is locally, because the user asked for both.
+            if let Some(free) = &free {
+                claimed.push(free.clone());
+                plan.ready.push(PasteItem {
+                    src: src.clone(),
+                    dst: display(&dest.join(free)),
+                    overwrite: false,
+                });
+            }
+            continue;
+        }
+        // A conflict with no free name left still has to be *asked about* —
+        // overwrite and skip are both still answerable — so the suggestion
+        // falls back to the name itself rather than dropping the item.
+        let suggested = free.unwrap_or_else(|| name.clone());
+        plan.conflicts.push(Conflict {
+            src: src.clone(),
+            dst: display(&dest.join(&name)),
+            suggested: display(&dest.join(&suggested)),
+        });
+    }
+    plan
+}
+
+/// The first free `name`, `name_1`, `name_2`… in a remote directory, over the
+/// listing rather than over a filesystem.
+///
+/// The same ladder — literally the same `suffixed` — that the trash, the local
+/// paste and the archive extractor climb, so a file that lands as `notes_1.txt`
+/// locally lands as `notes_1.txt` on the server. It is a *suggestion*: the
+/// server is asked again immediately before the bytes move (see
+/// [`df_core::vfs::Vfs::upload_new`]), because a listing is a photograph.
+fn free_name(name: &str, taken: &[Entry], claimed: &[String]) -> Option<String> {
+    let occupied = |candidate: &str| {
+        taken.iter().any(|entry| entry.name == candidate) || claimed.iter().any(|c| c == candidate)
+    };
+    if !occupied(name) {
+        return Some(name.to_string());
+    }
+    let as_os = std::ffi::OsString::from(name);
+    (1..df_core::ops::trash::MAX_TRASH_COLLISIONS)
+        .map(|n| {
+            df_core::ops::trash::suffixed(&as_os, n)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .find(|candidate| !occupied(candidate))
 }
 
 // ── Temporary downloads ─────────────────────────────────────────────────────
@@ -722,6 +852,128 @@ mod tests {
         assert_eq!(Transfer::of(&[], there), Transfer::Upload);
     }
 
+    /// **The bug this pins**: an upload was a bare `TRUNC` open, so `p` of a
+    /// local `index.html` into a remote folder that already had one destroyed
+    /// the server's copy without a word — while the download half had always
+    /// claimed a free name "so a download never silently overwrites (PLAN §5)".
+    /// The plan an upload builds is now the same plan a paste builds, and a
+    /// taken name is a *conflict*, for the same dialog to answer.
+    #[test]
+    fn an_upload_onto_a_taken_name_is_a_conflict_not_an_overwrite() {
+        use df_core::ops::paste::Resolution;
+        let dest = VfsPath::new("showandtour1", "/srv/www");
+        let taken = [
+            entry(
+                "index.html",
+                "sftp://showandtour1/srv/www",
+                4096,
+                "text/html",
+                false,
+            ),
+            entry(
+                "index_1.html",
+                "sftp://showandtour1/srv/www",
+                10,
+                "text/html",
+                false,
+            ),
+        ];
+        let sources = vec![
+            PathBuf::from("/home/brian/site/index.html"),
+            PathBuf::from("/home/brian/site/new.css"),
+        ];
+        let mut plan = plan_upload(&sources, &dest, &taken);
+
+        // The free name goes straight through, addressed as a URL.
+        assert_eq!(plan.ready.len(), 1);
+        assert_eq!(plan.ready[0].src, PathBuf::from("/home/brian/site/new.css"));
+        assert_eq!(
+            plan.ready[0].dst,
+            PathBuf::from("sftp://showandtour1/srv/www/new.css")
+        );
+        assert!(!plan.ready[0].overwrite);
+
+        // The taken one is asked about, and the suggestion skips the `_1` that
+        // is *also* on the server.
+        assert!(!plan.is_settled());
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(
+            plan.conflicts[0].dst,
+            PathBuf::from("sftp://showandtour1/srv/www/index.html")
+        );
+        assert_eq!(
+            plan.conflicts[0].suggested,
+            PathBuf::from("sftp://showandtour1/srv/www/index_2.html")
+        );
+
+        // And the ordinary state machine answers it: rename lands beside the
+        // original, in the remote directory rather than in a local one.
+        let src = plan.conflicts[0].src.clone();
+        plan.resolve(&src, &Resolution::Rename(PathBuf::from("index_2.html")))
+            .expect("a bare name is a usable answer");
+        assert!(plan.is_settled());
+        let renamed = plan
+            .ready
+            .iter()
+            .find(|item| item.src == src)
+            .expect("the renamed item is ready");
+        assert_eq!(
+            renamed.dst,
+            PathBuf::from("sftp://showandtour1/srv/www/index_2.html")
+        );
+        assert!(!renamed.overwrite);
+
+        // Overwrite is the *deliberate* answer, and only it sets the flag the
+        // upload reads to allow a replacement.
+        let mut plan = plan_upload(&sources, &dest, &taken);
+        let src = plan.conflicts[0].src.clone();
+        plan.resolve(&src, &Resolution::Overwrite)
+            .expect("answered");
+        let over = plan
+            .ready
+            .iter()
+            .find(|item| item.src == src)
+            .expect("ready");
+        assert!(over.overwrite);
+        assert_eq!(
+            over.dst,
+            PathBuf::from("sftp://showandtour1/srv/www/index.html")
+        );
+
+        // Skip leaves the server's file alone and uploads nothing for it.
+        let mut plan = plan_upload(&sources, &dest, &taken);
+        let src = plan.conflicts[0].src.clone();
+        plan.resolve(&src, &Resolution::Skip).expect("answered");
+        assert!(plan.is_settled());
+        assert!(plan.ready.iter().all(|item| item.src != src));
+    }
+
+    /// Two files with one name, in one upload: the second is auto-named the way
+    /// a duplicate is locally, not turned into a dialog about a file that is
+    /// not on the server at all.
+    #[test]
+    fn two_sources_with_one_name_do_not_both_claim_it() {
+        let dest = VfsPath::new("showandtour1", "/srv");
+        let sources = vec![
+            PathBuf::from("/home/brian/a/notes.txt"),
+            PathBuf::from("/home/brian/b/notes.txt"),
+        ];
+        let plan = plan_upload(&sources, &dest, &[]);
+        assert!(plan.is_settled(), "nothing is on the server to ask about");
+        let dsts: Vec<PathBuf> = plan.ready.iter().map(|i| i.dst.clone()).collect();
+        assert_eq!(
+            dsts,
+            vec![
+                PathBuf::from("sftp://showandtour1/srv/notes.txt"),
+                PathBuf::from("sftp://showandtour1/srv/notes_1.txt"),
+            ]
+        );
+        // …and every destination really is a remote address again, which is
+        // what `spawn_paste` routes on.
+        assert!(dsts.iter().all(|d| at_of(d).is_some()));
+        assert_eq!(at_of(&plan.dest_dir), Some(dest));
+    }
+
     /// Only small text is downloaded on a hover; everything else is the facts
     /// card, with a reason a person can act on.
     #[test]
@@ -854,6 +1106,10 @@ mod tests {
             C::SearchName,
             C::Undo,
             C::CopyToClipboard,
+            // **The bug this pins**: `O` had no remote guard at all, so the
+            // opener picker launched a child process with the row's
+            // `sftp://…` display path as its argument.
+            C::OpenInteractive,
         ] {
             assert!(inert_remotely(c), "{c:?} should be inert");
         }

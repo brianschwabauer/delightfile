@@ -1374,6 +1374,67 @@ fn sftp_server_round_trip_everything() {
         b"tiny"
     );
 
+    // ── The upload that refuses to destroy (PLAN §5, both directions) ───
+    //
+    // **The bug this pins**: `upload` is a `TRUNC` open, so the paste path's
+    // upload replaced whatever was on the server without a word, while the
+    // download half had always claimed a free name. `exists`, `unique_name`
+    // and `upload_new` are the symmetric answer, and they are checked against
+    // a real server because "does this path exist" is a status code, not a
+    // local question.
+    assert!(vfs.exists(&root.join("uploaded.bin"), &ctx).unwrap());
+    assert!(!vfs.exists(&root.join("nothing-here.bin"), &ctx).unwrap());
+    // A free name is itself.
+    assert_eq!(
+        vfs.unique_name(&root.join("nothing-here.bin"), &ctx)
+            .unwrap(),
+        root.join("nothing-here.bin")
+    );
+    let keep = std::fs::read(remote.path.join("uploaded.bin")).unwrap();
+    let (sent, landed) = vfs
+        .upload_new(&source, &root.join("uploaded.bin"), &ctx)
+        .unwrap();
+    assert_eq!(sent, payload.len() as u64);
+    assert_eq!(
+        landed,
+        root.join("uploaded_1.bin"),
+        "the ladder is the same `name_1` a paste and a download use"
+    );
+    assert_eq!(
+        std::fs::read(remote.path.join("uploaded.bin")).unwrap(),
+        keep,
+        "what was already on the server is untouched"
+    );
+    assert_eq!(
+        std::fs::read(remote.path.join("uploaded_1.bin")).unwrap(),
+        payload
+    );
+    // And the ladder keeps climbing rather than stopping at `_1`.
+    let (_, again) = vfs
+        .upload_new(&source, &root.join("uploaded.bin"), &ctx)
+        .unwrap();
+    assert_eq!(again, root.join("uploaded_2.bin"));
+    // A directory in the way is "taken" too — an upload must not be handed a
+    // name a `RENAME` would fail on, or worse, succeed on.
+    vfs.mkdir(&root.join("blocked.bin"), &ctx).unwrap();
+    let (_, beside) = vfs
+        .upload_new(&source, &root.join("blocked.bin"), &ctx)
+        .unwrap();
+    assert_eq!(beside, root.join("blocked_1.bin"));
+    assert!(remote.path.join("blocked.bin").is_dir());
+    vfs.rmdir(&root.join("blocked.bin"), &ctx).unwrap();
+
+    // A stat, mapped to the row a conflict card draws.
+    let entry = super::stat_entry(
+        &root.join("uploaded.bin"),
+        vfs.stat(&root.join("uploaded.bin"), false, &ctx).unwrap(),
+    );
+    assert_eq!(entry.name, "uploaded.bin");
+    assert_eq!(entry.len, keep.len() as u64);
+    assert_eq!(entry.kind, Kind::File);
+    assert_eq!(entry.path, PathBuf::from("sftp://test/uploaded.bin"));
+    assert!(entry.mtime.is_some(), "the card shows a date off the wire");
+
     // ── mkdir / rename / rmdir / remove / symlink / readlink / chmod ────
     vfs.mkdir(&root.join("newdir"), &ctx).unwrap();
     assert!(remote.path.join("newdir").is_dir());

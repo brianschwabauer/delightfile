@@ -240,12 +240,20 @@ pub fn readable_error(name: &str, text: &str) -> String {
     }
 }
 
+/// The name the bus itself answers to, and the only sender its own replies may
+/// carry.
+pub const BUS_DRIVER: &str = "org.freedesktop.DBus";
+
 /// A connection to the system bus.
 pub struct Bus {
     sock: UnixStream,
     serial: u32,
     /// Anything read past the end of one message, kept for the next.
     buf: Vec<u8>,
+    /// How long one call may wait for its reply, *in total*. A field rather
+    /// than the constant so a test can ask for a deadline it can afford to
+    /// wait for; nothing but a test ever changes it.
+    timeout: Duration,
 }
 
 impl Bus {
@@ -257,16 +265,28 @@ impl Bus {
         };
         let sock = UnixStream::connect(&path)
             .map_err(|e| format!("connecting to the system bus at {path}: {e}"))?;
-        sock.set_read_timeout(Some(CALL_TIMEOUT)).ok();
-        sock.set_write_timeout(Some(Duration::from_secs(10))).ok();
-        let mut bus = Bus {
-            sock,
-            serial: 0,
-            buf: Vec::new(),
-        };
+        let mut bus = Bus::on_socket(sock);
         bus.authenticate()?;
         bus.hello()?;
         Ok(bus)
+    }
+
+    /// A client over an already-connected socket — the seam the tests use, and
+    /// the only place the serial is seeded.
+    ///
+    /// The socket timeouts are the *per-read* ones; they are not the call's
+    /// deadline, because a peer that sends one byte every eighty seconds resets
+    /// them for ever. [`Bus::call`] and [`Bus::read_line`] carry the deadline
+    /// (see [`Bus::deadline_read`]).
+    fn on_socket(sock: UnixStream) -> Bus {
+        sock.set_read_timeout(Some(CALL_TIMEOUT)).ok();
+        sock.set_write_timeout(Some(Duration::from_secs(10))).ok();
+        Bus {
+            sock,
+            serial: start_serial(),
+            buf: Vec::new(),
+            timeout: CALL_TIMEOUT,
+        }
     }
 
     /// SASL EXTERNAL: the kernel already told the bus who we are, so the whole
@@ -286,13 +306,21 @@ impl Bus {
         Ok(())
     }
 
+    /// One `\r\n`-terminated line of the SASL handshake.
+    ///
+    /// A byte at a time, because the handshake is text and the binary stream
+    /// starts immediately after `OK` — reading ahead would swallow the first
+    /// message. **Every one of those reads is under one deadline**: the length
+    /// cap alone bounded this at four thousand reads, each of which could take
+    /// the socket's own timeout, so a peer trickling one byte a minute held the
+    /// disks card open for days.
     fn read_line(&mut self) -> Result<String, String> {
+        let deadline = std::time::Instant::now() + self.timeout;
         let mut line = Vec::new();
         let mut byte = [0u8; 1];
         loop {
             let n = self
-                .sock
-                .read(&mut byte)
+                .deadline_read(&mut byte, deadline)
                 .map_err(|e| format!("bus auth: {e}"))?;
             if n == 0 {
                 return Err("the system bus closed the connection during auth".into());
@@ -306,6 +334,50 @@ impl Bus {
                 return Err("bus auth: reply too long".into());
             }
         }
+    }
+
+    /// Read once, waiting no longer than `deadline`.
+    ///
+    /// The socket's own timeout is *per read*; this is the one that is about
+    /// the whole wait. Both are needed: the socket timeout is what makes a
+    /// silent peer return at all, and this is what stops a chatty one from
+    /// resetting the clock for ever.
+    fn deadline_read(
+        &mut self,
+        into: &mut [u8],
+        deadline: std::time::Instant,
+    ) -> Result<usize, String> {
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Err(self.gave_up());
+            }
+            // Never longer than what is left, so the read itself cannot outlive
+            // the deadline it is being held to.
+            self.sock.set_read_timeout(Some(left)).ok();
+            return match self.sock.read(into) {
+                Ok(n) => Ok(n),
+                // The socket's own timeout firing *is* the deadline here, since
+                // it was set to what was left of it — but a shorter one can
+                // fire first (a signal, a coarse clock), so the loop asks the
+                // clock rather than assuming.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => Err(e.to_string()),
+            };
+        }
+    }
+
+    /// The sentence a wait that ran out says. One place, so the auth handshake
+    /// and the call loop cannot describe the same deadline two ways.
+    fn gave_up(&self) -> String {
+        format!("the system bus did not answer within {:?}", self.timeout)
     }
 
     /// `org.freedesktop.DBus.Hello` — mandatory first call.
@@ -327,6 +399,27 @@ impl Bus {
     /// about devices appearing, which this client does not subscribe to but may
     /// still be sent — are read past rather than queued: there is no second
     /// consumer to hand them to.
+    ///
+    /// ## Two things stop a reply being taken from the wrong message
+    ///
+    /// This socket is not a private channel: on the system bus every local
+    /// process can send this connection a message, and this client reads
+    /// whatever arrives. So a reply is believed only when both of these hold.
+    ///
+    /// - **Its `reply_serial` is this call's serial.** Serials used to start at
+    ///   0 and step by one, so the serial of the *next* call was the previous
+    ///   one plus one from the outside — guessable, which is to say forgeable.
+    ///   [`start_serial`] begins somewhere unpredictable instead.
+    /// - **Its sender is who was called.** The bus stamps `sender` on every
+    ///   message it routes and a peer cannot forge that field, so comparing it
+    ///   against the destination's owner is what actually rejects a race. The
+    ///   owner is resolved for this call rather than cached, because a service
+    ///   that restarts gets a new unique name and a stale expectation would
+    ///   drop the *real* reply.
+    ///
+    /// A message failing either check is discarded and the wait continues —
+    /// under one deadline (`CALL_TIMEOUT`) rather than one per read, so a peer
+    /// spraying signals cannot keep this loop alive for ever.
     pub fn call(
         &mut self,
         destination: &str,
@@ -336,11 +429,24 @@ impl Bus {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<Vec<u8>, String> {
+        let expected = self.expected_sender(destination);
         let serial = self.send_call(destination, path, interface, member, signature, body)?;
+        let deadline = std::time::Instant::now() + self.timeout;
         loop {
-            let msg = self.read_message()?;
+            let msg = self.read_message(deadline)?;
             if msg.reply_serial != Some(serial) {
                 continue;
+            }
+            if let Some(expected) = &expected {
+                if msg.sender.as_deref() != Some(expected.as_str()) {
+                    // Not an error: the real reply may still be behind it, and
+                    // saying so out loud is how a forged one is noticed.
+                    log::warn!(
+                        "ignoring a reply to serial {serial} from {:?}, which is not {expected}",
+                        msg.sender
+                    );
+                    continue;
+                }
             }
             return match msg.kind {
                 MSG_METHOD_RETURN => Ok(msg.body),
@@ -348,6 +454,36 @@ impl Bus {
                 _ => Err("the bus answered with something that is not a reply".into()),
             };
         }
+    }
+
+    /// Who a reply from `destination` must come from, when that can be known.
+    ///
+    /// The bus driver answers as itself. A unique name (`:1.42`) answers as
+    /// itself. A well-known name is *owned* by a unique name, which only the
+    /// bus can say — one `GetNameOwner`, whose own reply is checked against the
+    /// driver by this same rule (one level of recursion, never two).
+    ///
+    /// `None` means "cannot be established" — a bus that will not answer
+    /// `GetNameOwner`, or a service with no owner yet. The serial check still
+    /// applies; this is defence in depth, not the only lock on the door.
+    fn expected_sender(&mut self, destination: &str) -> Option<String> {
+        if destination == BUS_DRIVER || destination.starts_with(':') {
+            return Some(destination.to_string());
+        }
+        let mut body = Vec::new();
+        marshal_string(&mut body, destination);
+        let reply = self
+            .call(
+                BUS_DRIVER,
+                "/org/freedesktop/DBus",
+                BUS_DRIVER,
+                "GetNameOwner",
+                Some("s"),
+                &body,
+            )
+            .map_err(|e| log::warn!("cannot resolve the owner of {destination}: {e}"))
+            .ok()?;
+        Reader::new(&reply).string().ok()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -360,7 +496,9 @@ impl Bus {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u32, String> {
-        self.serial += 1;
+        // Wrapping, and never 0 — the specification reserves it, and a
+        // connection that lived long enough to wrap must not send one.
+        self.serial = self.serial.wrapping_add(1).max(1);
         let serial = self.serial;
         let mut fields = Vec::new();
         push_field(&mut fields, F_PATH, 'o', path);
@@ -377,22 +515,21 @@ impl Bus {
         Ok(serial)
     }
 
-    /// Read exactly one message off the wire.
-    pub fn read_message(&mut self) -> Result<Message, String> {
-        self.fill(16)?;
+    /// Read exactly one message off the wire, no later than `deadline`.
+    pub fn read_message(&mut self, deadline: std::time::Instant) -> Result<Message, String> {
+        self.fill(16, deadline)?;
         let total = frame_len(&self.buf)?;
-        self.fill(total)?;
+        self.fill(total, deadline)?;
         let msg = parse_message(&self.buf[..total])?;
         self.buf.drain(..total);
         Ok(msg)
     }
 
-    fn fill(&mut self, want: usize) -> Result<(), String> {
+    fn fill(&mut self, want: usize, deadline: std::time::Instant) -> Result<(), String> {
         let mut chunk = [0u8; 8192];
         while self.buf.len() < want {
             let n = self
-                .sock
-                .read(&mut chunk)
+                .deadline_read(&mut chunk, deadline)
                 .map_err(|e| format!("reading from the system bus: {e}"))?;
             if n == 0 {
                 return Err("the system bus closed the connection".into());
@@ -401,6 +538,30 @@ impl Bus {
         }
         Ok(())
     }
+}
+
+/// Where a connection's serials start.
+///
+/// Not 1. A serial is the token a reply is matched by, and a client that always
+/// began at 1 handed every local process on the system bus the serial of the
+/// call it was about to make. This is not a secret — anything watching the
+/// socket sees the number — but it stops a *blind* forgery, which is the only
+/// kind that costs nothing to attempt.
+///
+/// A quarter of the space, so a long-lived connection has a billion calls of
+/// headroom before it wraps (and wrapping is handled anyway). Time and pid,
+/// mixed: no `rand` dependency for eight bytes of unpredictability (PLAN §1).
+fn start_serial() -> u32 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64 ^ d.as_secs())
+        .unwrap_or(1);
+    let mixed = nanos
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .rotate_left(17)
+        ^ (std::process::id() as u64).wrapping_mul(2_654_435_761);
+    // 1..=0x3FFF_FFFF: never 0, never near the wrap.
+    (mixed as u32 % 0x3FFF_FFFF) + 1
 }
 
 /// The SASL line, split out so the handshake is a test rather than a socket.
@@ -1298,6 +1459,175 @@ mod tests {
         pad_to(out, 4);
         out.extend_from_slice(&value.to_le_bytes());
     }
+
+    // ── The two waits, and who is allowed to end them ───────────────────────
+
+    /// One method return, as the bus would route it.
+    fn reply_from(sender: &str, reply_serial: u32, text: &str) -> Vec<u8> {
+        let mut fields = Vec::new();
+        push_u32_field(&mut fields, F_REPLY_SERIAL, reply_serial);
+        push_field(&mut fields, F_SENDER, 's', sender);
+        push_signature_field(&mut fields, "s");
+        let mut body = Vec::new();
+        marshal_string(&mut body, text);
+        encode_message(MSG_METHOD_RETURN, 0, 77, &fields, &body)
+    }
+
+    /// A broadcast nobody asked for — what udisks2 sends while a call is in
+    /// flight, and what a hostile peer would send a great many of.
+    fn a_signal() -> Vec<u8> {
+        let mut fields = Vec::new();
+        push_field(&mut fields, F_PATH, 'o', "/org/freedesktop/UDisks2");
+        push_field(&mut fields, F_MEMBER, 's', "InterfacesAdded");
+        push_field(&mut fields, F_SENDER, 's', ":1.9");
+        encode_message(MSG_SIGNAL, 0, 5, &fields, &[])
+    }
+
+    /// Read one whole message off a socket, the way the client does.
+    fn read_one(sock: &mut UnixStream) -> Vec<u8> {
+        let mut head = [0u8; 16];
+        sock.read_exact(&mut head).unwrap();
+        let total = frame_len(&head).unwrap();
+        let mut rest = vec![0u8; total - 16];
+        sock.read_exact(&mut rest).unwrap();
+        let mut all = head.to_vec();
+        all.extend_from_slice(&rest);
+        all
+    }
+
+    /// **The bug this fixes**: the reply this client accepted was "the first
+    /// message carrying my serial", and the serial started at 0 and stepped by
+    /// one — so the serial of the next call was 1, from the outside, and any
+    /// local process could answer a call it had not been asked. The mount list
+    /// drives no destructive operation on its own, but it *feeds device nodes
+    /// to mount and unmount*, so a forged `GetManagedObjects` chooses which
+    /// device the next keystroke acts on.
+    ///
+    /// Two locks now: an unguessable starting serial, and the `sender` the bus
+    /// stamps — which a peer cannot forge, and which must be who was called.
+    #[test]
+    fn a_reply_is_believed_only_from_the_right_serial_and_the_right_sender() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        bus.timeout = Duration::from_secs(5);
+        // The serial this call will use. Not 1, which is the whole point.
+        let serial = bus.serial.wrapping_add(1).max(1);
+        assert!(serial > 1, "a fresh connection does not start at 1");
+
+        let peer = std::thread::spawn(move || {
+            let mut peer = theirs;
+            let call = read_one(&mut peer);
+            let sent = parse_message(&call).unwrap();
+            assert_eq!(sent.member.as_deref(), Some("Hello"));
+            assert_eq!(sent.serial, serial);
+            // A blind forgery at the serial this client used to have.
+            peer.write_all(&reply_from(BUS_DRIVER, 1, "forged-blind"))
+                .unwrap();
+            // A race: the right serial, from somebody who was not called.
+            peer.write_all(&reply_from(":1.66", serial, "forged-race"))
+                .unwrap();
+            // Noise, which is legitimate and must not be mistaken for either.
+            peer.write_all(&a_signal()).unwrap();
+            // And the real one.
+            peer.write_all(&reply_from(BUS_DRIVER, serial, "genuine"))
+                .unwrap();
+        });
+
+        let body = bus
+            .call(
+                BUS_DRIVER,
+                "/org/freedesktop/DBus",
+                BUS_DRIVER,
+                "Hello",
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(Reader::new(&body).string().unwrap(), "genuine");
+        peer.join().unwrap();
+    }
+
+    /// **The bug this fixes**: the discard loop had no deadline of its own.
+    /// The socket's read timeout is per read, so a peer that sends *anything* —
+    /// a signal every twenty milliseconds — reset it for ever and the worker
+    /// thread never came back. Ninety seconds is the promise; this checks the
+    /// promise is kept when the peer is chatty rather than silent.
+    #[test]
+    fn a_call_the_peer_talks_over_gives_up_on_time() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        bus.timeout = Duration::from_millis(200);
+
+        let peer = std::thread::spawn(move || {
+            let mut peer = theirs;
+            let _call = read_one(&mut peer);
+            // Never the reply. Just enough noise to keep a per-read timeout
+            // alive for as long as anybody is listening.
+            for _ in 0..200 {
+                if peer.write_all(&a_signal()).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        let start = std::time::Instant::now();
+        let err = bus
+            .call(
+                BUS_DRIVER,
+                "/org/freedesktop/DBus",
+                BUS_DRIVER,
+                "Hello",
+                None,
+                &[],
+            )
+            .unwrap_err();
+        assert!(err.contains("did not answer"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "it gave up when it said it would: {:?}",
+            start.elapsed()
+        );
+        drop(bus);
+        peer.join().unwrap();
+    }
+
+    /// The same deadline over the handshake, whose reads are one byte each.
+    #[test]
+    fn a_handshake_that_never_ends_is_not_waited_on_for_ever() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        bus.timeout = Duration::from_millis(150);
+        let peer = std::thread::spawn(move || {
+            let mut peer = theirs;
+            let mut byte = [0u8; 1];
+            // Read the AUTH line, then trickle a reply that never terminates.
+            let _ = peer.read(&mut byte);
+            for _ in 0..100 {
+                if peer.write_all(b"O").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let start = std::time::Instant::now();
+        let err = bus.authenticate().unwrap_err();
+        assert!(err.contains("did not answer"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(5));
+        drop(bus);
+        peer.join().unwrap();
+    }
+
+    /// The seed itself: in range, never the reserved 0, and never the constant
+    /// a forger would try first.
+    #[test]
+    fn the_first_serial_is_not_a_number_anyone_can_guess() {
+        for _ in 0..64 {
+            let n = start_serial();
+            assert!(n > 0, "0 is reserved by the specification");
+            assert!(n <= 0x3FFF_FFFF, "room to count without wrapping");
+        }
+    }
 }
 
 /// A peer on the system bus is not trusted, and udisks2 is not the only thing
@@ -1329,10 +1659,7 @@ mod hostile {
             ok.extend_from_slice(&[1, b'v', 0]);
         }
         ok.extend_from_slice(&[1, b'y', 0, 7]);
-        assert!(matches!(
-            Reader::new(&ok).value("v"),
-            Ok(Value::U8(7))
-        ));
+        assert!(matches!(Reader::new(&ok).value("v"), Ok(Value::U8(7))));
     }
 
     /// `take_one_type` hands an unterminated container back verbatim, and the
