@@ -1267,7 +1267,6 @@ mod tests {
                 decoding: false,
                 doc: Some(Box::new(view)),
             }),
-            at: now,
         });
         pane.sync(Some(b), target, now);
         assert_eq!(pane.resume_page, 0);
