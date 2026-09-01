@@ -151,34 +151,14 @@ const TAG_SIZE: f32 = FONT_SIZE - 2.0;
 /// The gap between the tag and whatever is to its right.
 const TAG_GAP: f32 = 8.0;
 
-/// The focused pane's accent rule, in logical points (PLAN §2.1).
-const FOCUS_RULE: f32 = 2.0;
-
-/// How far the focused pane's background is tinted towards the accent.
-/// PLAN §2.1 says ~4%: enough that the eye can find the focused column without
-/// looking for the rule, faint enough that the pane is still the palette's
-/// `base` and not a blue panel.
-const FOCUS_TINT: f32 = 0.04;
-
-/// How bright the cursor row is in a pane that does **not** have the keyboard
-/// (PLAN §2.1's ghost bar, ported from DelightMail's vim-split treatment).
+/// How bright the parent column's marker is, against the list cursor's 1.
 ///
-/// 35%: enough that "where am I" still has an answer in every pane at once,
-/// faint enough that "where do my keys go" has exactly one. The two questions
-/// are different questions, and a file manager that answers only the first is
-/// the reason people lose their place in a three-column layout.
-pub const GHOST_CURSOR: f32 = 0.35;
-
-/// The cursor-row brightness for a pane that is `focused` far through the
-/// focus fade: [`GHOST_CURSOR`] when the keyboard is elsewhere, 1 when it is
-/// here, and eased between the two while it is moving (PLAN §2.1).
-///
-/// The ghost bar is part of the same statement as the tint and the rule, so it
-/// travels at the same speed. Left as a hard `if`, it was the one piece of the
-/// treatment that still popped.
-pub fn ghost_cursor(focused: f32) -> f32 {
-    GHOST_CURSOR + (1.0 - GHOST_CURSOR) * focused.clamp(0.0, 1.0)
-}
+/// 35%. The keyboard is always in the list (PLAN §2.1), so the parent's marker
+/// is never a cursor somebody is steering — it reports *where you are*, which
+/// is a quieter fact than *what you are about to act on* and is drawn as one.
+/// Loud enough that "where am I" has an answer in the column at a glance,
+/// quiet enough that it never competes with the row the keys are aimed at.
+pub const PARENT_MARKER: f32 = 0.35;
 
 /// How far a *hovered* row is lifted from the pane towards `surface0`.
 /// The full step, because hover is the palette's own next surface — moving up
@@ -204,9 +184,8 @@ const GHOST_PLATE: f32 = 0.33;
 
 /// How far a *selected* row's ground is tinted towards the selection accent.
 ///
-/// Twice the focus tint, because it means something twice as consequential: the
-/// focus tint says where the keyboard is, and this says which files `d` is about
-/// to trash. Still a tint and not a fill — at much above this the file names
+/// A tenth of the way. Enough to say which files `d` is about to trash, and
+/// still a tint and not a fill — at much above this the file names
 /// start fighting the ground they are on, and a selection of forty rows would
 /// turn the column into a yellow block.
 pub(crate) const SELECT_TINT: f32 = 0.10;
@@ -244,16 +223,15 @@ pub const CHROME_HEIGHT: f32 = 26.0;
 /// another chip's worth of padding, only somewhere to put a sentence.
 pub const PROMPT_ERROR_LINE: f32 = 17.0;
 
-/// A drop target's ring, in logical points. Two: the same weight as the
-/// focused pane's accent rule ([`FOCUS_RULE`]), because it is the same kind of
-/// statement — "this is the one" — and a second thickness would be a second
-/// vocabulary for one idea.
+/// A drop target's ring, in logical points. Two: the same weight as the accent
+/// rules the chrome wears elsewhere, because it is the same kind of statement —
+/// "this is the one" — and a second thickness would be a second vocabulary for
+/// one idea.
 const DROP_RING: f32 = 2.0;
 
-/// How far a live drop target's ground is washed towards the accent. Between
-/// the focus tint and the selection tint: louder than "the keyboard is here",
-/// quieter than "these are marked", which is exactly where "let go and it lands
-/// here" belongs.
+/// How far a live drop target's ground is washed towards the accent. Under the
+/// selection tint: quieter than "these are marked", which is exactly where
+/// "let go and it lands here" belongs.
 const DROP_TINT: f32 = 0.08;
 
 /// The spring-open badge's radius, in logical points. Small enough to sit
@@ -562,8 +540,9 @@ pub struct ListView<'a> {
     /// parent's marker is a step quieter, because it reports where you are
     /// rather than what you are about to act on.
     pub cursor_fill: egui::Color32,
-    /// How strongly the cursor row is lit: 1 in the focused pane, and
-    /// [`GHOST_CURSOR`] everywhere else.
+    /// How strongly the cursor row is lit: 1 in the list, whose cursor is the
+    /// one the keys move, and [`PARENT_MARKER`] in the parent column, whose
+    /// marker only says where you are.
     pub cursor_alpha: f32,
     /// This pane's right-hand column. The parent passes [`LineMode::None`]: it
     /// is a sixth of the window wide and its job is to say where you are, so
@@ -639,45 +618,14 @@ pub struct Painting<'a> {
 }
 
 impl Painting<'_> {
-    /// A pane's background colour, focus tint included.
+    /// A pane's background.
     ///
-    /// Public because the rows are drawn *from* it — every row colour is a step
-    /// away from its pane's ground, so the two must be the same number and not
-    /// two constants that happen to agree.
-    /// `focused` is an *amount*, not a flag: 0 for a pane the keyboard has
-    /// left, 1 for the one it is in, and the eased values in between while
-    /// [`crate::focus::FocusFade`] carries the treatment across (PLAN §2.1's
-    /// 120 ms). Both the tint and the rule ride it, so the two halves of the
-    /// treatment always agree about where the keyboard is.
-    pub fn pane_fill(&self, fill: egui::Color32, focused: f32) -> egui::Color32 {
-        mix(
-            fill,
-            self.palette.blue,
-            FOCUS_TINT * focused.clamp(0.0, 1.0),
-        )
-    }
-
-    /// A pane's background, and the focus treatment if it has focus
-    /// (PLAN §2.1).
-    pub fn pane(&self, rect: egui::Rect, fill: egui::Color32, focused: f32) {
-        let focused = focused.clamp(0.0, 1.0);
-        let fill = self.pane_fill(fill, focused);
+    /// Every pane is painted the same: the keyboard is always in the list
+    /// (PLAN §2.1), so there is no "focused pane" treatment left to wear — no
+    /// accent rule across the top, no 4% tint — and a mark that never moves is
+    /// a mark that says nothing.
+    pub fn pane(&self, rect: egui::Rect, fill: egui::Color32) {
         self.painter.rect_filled(rect, PANE_RADIUS, fill);
-        if focused <= 0.0 {
-            return;
-        }
-        // Inset to the pane's corner radius so the rule stops where the corner
-        // starts turning, rather than being clipped square against it.
-        //
-        // The rule fades rather than growing out from the middle: it is a
-        // statement about the whole pane, and a 2 px bar unrolling across the
-        // top would draw the eye to the *motion* instead of to the column.
-        let rule = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + PANE_RADIUS as f32, rect.top()),
-            egui::pos2(rect.right() - PANE_RADIUS as f32, rect.top() + FOCUS_RULE),
-        );
-        self.painter
-            .rect_filled(rule, 1, crate::chrome::fade(self.palette.blue, focused));
     }
 
     /// A directory listing's rows.

@@ -744,7 +744,7 @@ mod tests {
             C::Undo,
             C::CommandPalette,
             C::Open,
-            C::EnterOrPreview,
+            C::EnterDirectory,
             C::Leave,
             C::CursorDown,
             C::ToggleSelect,

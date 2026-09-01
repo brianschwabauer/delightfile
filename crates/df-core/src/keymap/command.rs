@@ -114,14 +114,13 @@ commands! {
     PageUp => "page-up",
     PageDown => "page-down",
     Leave => "leave",
-    EnterOrPreview => "enter-or-preview",
+    // `→`. A directory is a place and an archive is a place; a file is not, so
+    // on one this does nothing at all (PLAN §2.1). It is deliberately not
+    // "open": `→` is a navigation key, and a navigation key that could launch
+    // a video player is a key you stop pressing.
+    EnterDirectory => "enter-directory",
     HistoryBack => "history-back",
     HistoryForward => "history-forward",
-    // The parent pane has its own cursor once the mouse has focused it —
-    // PLAN §2.1's `in_parent()` predicate, which otherwise has no user.
-    ParentPrev => "parent-prev",
-    ParentNext => "parent-next",
-    ParentEnter => "parent-enter",
     GotoGitRoot => "goto-git-root",
     GotoInteractive => "goto-interactive",
     FollowSymlink => "follow-symlink",
@@ -246,7 +245,10 @@ commands! {
     FrameStepForward => "frame-step-forward",
     Mute => "mute",
 
-    // ── Preview focus: the pane decides scroll vs. volume vs. page ────────
+    // ── The preview, driven from the list (PLAN §4.3) ─────────────────────
+    // The keyboard never enters the preview pane, so these act on whatever the
+    // list's cursor is standing on. Their keys are the modified ones, because
+    // the plain ones belong to the list and always did.
     PreviewUp => "preview-up",
     PreviewDown => "preview-down",
     PreviewLeft => "preview-left",

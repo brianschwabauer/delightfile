@@ -45,7 +45,7 @@ use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
 use crate::dnd;
 use crate::finder::{self, Choice, Finder, Source};
 use crate::flip::{self, Flip, Snapshot};
-use crate::focus::{escape_rung, EscapeRung, EscapeState, Focus, Hovered, Rightward};
+use crate::focus::{escape_rung, EscapeRung, EscapeState, Hovered, Rightward};
 use crate::graphics::{Gfx, GfxError};
 use crate::grid::{self, GridView, Thumbs};
 use crate::help::{self, Help};
@@ -685,13 +685,6 @@ pub struct App {
     /// The preview pane's whole state: its workers, what it is showing, and
     /// how far that has been scrolled (PLAN §6).
     preview: PreviewPane,
-    /// Which pane the keyboard is in (PLAN §2.1). One field, read by the
-    /// `when` predicates and by the paint — see [`crate::focus`].
-    focus: Focus,
-    /// Where the focus *treatment* is, which lags [`App::focus`] by
-    /// [`crate::focus::FOCUS_FADE`] (PLAN §2.1). Kept beside it rather than
-    /// inside it because focus is a decision and this is a picture of one.
-    focus_fade: crate::focus::FocusFade,
     /// The transport, built the first time a playable file is hovered and kept
     /// after that (PLAN §4.3). `None` is the resting state of a session that
     /// has only ever looked at photographs: no cpal device, no decode thread.
@@ -1207,8 +1200,6 @@ impl App {
             scanner,
             watcher,
             preview,
-            focus: Focus::default(),
-            focus_fade: crate::focus::FocusFade::new(),
             player: None,
             prober,
             probes: Vec::new(),
@@ -1485,10 +1476,9 @@ impl App {
             self.place_start_cursor();
         }
         // The parent's marker follows the path, and the row it belongs on may
-        // only just have arrived in a batch — *unless* the keyboard is in that
-        // pane, where the marker is a cursor somebody is steering and a scan
-        // update must not yank it back to the directory we are inside.
-        if changed && self.focus != Focus::Parent {
+        // only just have arrived in a batch. Nothing steers that marker by
+        // hand any more (PLAN §2.1), so a scan update always gets to place it.
+        if changed {
             for tab in self.tabs.iter_mut() {
                 tab.sync_parent_cursor();
             }
@@ -1882,7 +1872,6 @@ impl App {
         // Leaving is leaving, even into an archive: a visual run is anchored to
         // a row in a listing that is no longer on screen.
         self.visual = None;
-        self.focus = Focus::List;
         self.rewatch();
         self.archive_preview = None;
         if !warnings.is_empty() {
@@ -2169,7 +2158,6 @@ impl App {
         // Leaving is leaving: a visual run is anchored to a row in a listing
         // that is no longer on screen.
         self.visual = None;
-        self.focus = Focus::List;
         self.close_player();
         self.preview.cancel();
         self.rewatch();
@@ -2930,7 +2918,6 @@ impl App {
         let (mgr, sort) = (self.mgr.clone(), self.sort());
         self.tabs.active_mut().show_trash(view, &mgr, sort, now);
         self.visual = None;
-        self.focus = Focus::List;
         self.close_player();
         self.rewatch();
     }
@@ -3625,13 +3612,15 @@ impl App {
     /// `Ctrl+d` are measured in — hence keys being routed mid-frame, once the
     /// panes have been laid out.
     fn route_keys(&mut self, page: usize, now: Instant) {
-        // The `when` predicates, rebuilt from the two things that decide them:
-        // which pane has the keyboard, and whether the cursor is on something
-        // playable (PLAN §2.1, §4.3). Recomputed per keystroke rather than per
+        // The `when` predicate, rebuilt from the one thing left that decides
+        // it: whether the cursor is on something playable (PLAN §2.1 took the
+        // pane-focus half away). Recomputed per keystroke rather than per
         // frame, because a keystroke can move the cursor onto a clip and the
         // *next* keystroke in the same frame has to see that.
         for press in std::mem::take(&mut self.pending_keys) {
-            let flags = self.focus.flags(self.media_hovered());
+            let flags = WhenFlags {
+                media_hovered: self.media_hovered(),
+            };
             self.key_repeat = press.repeat;
             // The chord is the binding; the text is the fallback for a key the
             // chord table cannot name — a composed character, a layout's own
@@ -3742,7 +3731,7 @@ impl App {
         let stack = self.overlay_stack();
         let dispatch = self
             .keymap
-            .dispatch(&mut self.keys, &stack, WhenFlags::LIST, chord, now);
+            .dispatch(&mut self.keys, &stack, WhenFlags::NONE, chord, now);
         let Dispatch::Match(command) = dispatch else {
             // The two overlays with a field in them take every key the
             // registry did not claim — which is the same rule the bottom-bar
@@ -4053,7 +4042,9 @@ impl App {
     /// whose `when` predicate says it is not reachable right now is **absent**,
     /// not greyed: a palette is a list of things you can do.
     fn palette_rows(&self) -> Vec<finder::Row> {
-        let flags = self.focus.flags(self.media_hovered());
+        let flags = WhenFlags {
+            media_hovered: self.media_hovered(),
+        };
         let mut rows: Vec<finder::Row> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         for binding in self.keymap.active_bindings(&ContextStack::browser(), flags) {
@@ -5640,7 +5631,6 @@ impl App {
             visual: self.visual.is_some(),
             selection: self.dir().selected_count() > 0,
             filter: !self.dir().filter().is_empty(),
-            focus: self.focus,
         };
         match escape_rung(state) {
             EscapeRung::CloseOverlay => self.close_overlay(Instant::now()),
@@ -5653,9 +5643,9 @@ impl App {
             }
             EscapeRung::ClearSelection => self.dir().clear_selection(),
             EscapeRung::ClearFilter => self.dir().clear_filter(),
-            // The last rung, and the one PLAN §4.1 ends on: whatever else is
-            // going on, `Esc` gets you back to the list.
-            EscapeRung::FocusList => self.focus = Focus::List,
+            // …and there is no rung under that one. The keyboard is already in
+            // the list — it never left (PLAN §2.1) — so an `Esc` with nothing
+            // open and nothing marked does nothing, visibly and on purpose.
             EscapeRung::Nothing => {}
         }
     }
@@ -5796,22 +5786,22 @@ impl App {
                     self.navigate(parent, now);
                 }
             }
-            C::EnterOrPreview => {
+            C::EnterDirectory => {
                 // The mirror of `Leave` above: in a grid `→` is the next tile,
-                // and only the last tile enters or focuses the preview.
+                // and only the last tile in a row tries to enter anything.
                 if self.columns > 1 && self.step_cursor(grid::Step::Right) {
                     self.apply_visual();
                     return;
                 }
                 // PLAN §2.1's "rightward": a directory is a place and `→` goes
-                // there; a file has no inside, so `→` goes to the pane that is
-                // already showing it.
+                // there. A file is not, and `→` on one does nothing — the
+                // preview beside it is already showing that file, so there was
+                // never anywhere for the key to go.
                 let hovered = match self.tab().cwd.dir.cursor_entry() {
                     // In the trash even a folder is a *thing*, not a place: its
                     // real path is inside `…/Trash/files/`, and walking in
                     // would leave the view and strand somebody two levels down
-                    // a directory they never chose to open (PLAN §7.4). `→`
-                    // focuses the preview, which is what the row is for.
+                    // a directory they never chose to open (PLAN §7.4).
                     Some(_) if self.tab().trash.is_some() => Hovered::File,
                     Some(entry) if entry.is_dir() => Hovered::Directory,
                     Some(_) => Hovered::File,
@@ -5824,11 +5814,10 @@ impl App {
                             self.navigate(path, now);
                         }
                     }
-                    Rightward::FocusPreview => {
+                    Rightward::MaybeArchive => {
                         // PLAN §7.3: an archive *is* a place, so `→` on one goes
-                        // there rather than to the preview pane. Only in a real
-                        // directory — an archive inside an archive is a file
-                        // that has to come out first.
+                        // there. Only in a real directory — an archive inside an
+                        // archive is a file that has to come out first.
                         let archive = self
                             .tab()
                             .cwd
@@ -5837,45 +5826,15 @@ impl App {
                             .filter(|_| self.tab().archive.is_none())
                             // …and not on a remote service: the row's path is a
                             // URL, and the archive reader takes a file on this
-                            // machine. `o` downloads it; `→` focuses the card.
+                            // machine. `o` downloads it.
                             .filter(|_| self.tab().remote.is_none())
                             .filter(|entry| crate::archive::looks_like_archive(entry))
                             .map(|entry| entry.path.clone());
-                        match archive {
-                            Some(path) => self.ask_archive(path, ArchiveIntent::Browse),
-                            None => self.focus = Focus::Preview,
+                        if let Some(path) = archive {
+                            self.ask_archive(path, ArchiveIntent::Browse);
                         }
                     }
                     Rightward::Nothing => {}
-                }
-            }
-
-            // ── The parent pane, once a click or `←` has put the keyboard in
-            // it (PLAN §2.1's `in_parent`) ──────────────────────────────────
-            C::ParentPrev => {
-                if let Some(parent) = &mut self.tabs.active_mut().parent {
-                    parent.dir.wrap_cursor(-1);
-                }
-            }
-            C::ParentNext => {
-                if let Some(parent) = &mut self.tabs.active_mut().parent {
-                    parent.dir.wrap_cursor(1);
-                }
-            }
-            C::ParentEnter => {
-                // Entering from the parent pane puts the keyboard back in the
-                // list: the pane you steered with has become the pane you came
-                // from, and leaving focus behind would strand the cursor.
-                let target = self
-                    .tab()
-                    .parent
-                    .as_ref()
-                    .and_then(|parent| parent.dir.cursor_entry())
-                    .filter(|entry| entry.is_dir())
-                    .map(|entry| entry.path.clone());
-                if let Some(path) = target {
-                    self.focus = Focus::List;
-                    self.navigate(path, now);
                 }
             }
             C::HistoryBack => {
@@ -5949,17 +5908,16 @@ impl App {
                     self.preview.scroll_by(full, now);
                 }
             }
-            // `→` turns the page. `←` turns it back — and **at the first page
-            // it falls through to the list** (PLAN §4.3), which is also what a
-            // body with no pages at all does, so one key means "back" wherever
-            // you are and never leaves you stuck in the pane.
+            // `Ctrl+→` turns the page and `Ctrl+←` turns it back. At the first
+            // page — and on a body with no pages at all — there is nothing to
+            // turn to and the key is simply inert: it used to fall through to
+            // "back to the list", and there is no longer anywhere to fall to
+            // (PLAN §2.1).
             C::PreviewRight => {
                 self.preview.turn_page(true, now);
             }
             C::PreviewLeft => {
-                if !self.preview.turn_page(false, now) {
-                    self.focus = Focus::List;
-                }
+                self.preview.turn_page(false, now);
             }
             C::PreviewZoomIn => {
                 self.preview.zoom(crate::preview::Zoom::In, now);
@@ -5973,7 +5931,7 @@ impl App {
             C::PreviewTop => self.preview.scroll_to(0, now),
             C::PreviewBottom => self.preview.scroll_to(usize::MAX, now),
 
-            // ── Transport, on the hovered file, at any focus (PLAN §4.3) ────
+            // ── Transport, on the hovered file, from anywhere (PLAN §4.3) ───
             C::PlayPause => {
                 if let Some(player) = self.transport() {
                     player.play_pause(now);
@@ -6329,7 +6287,7 @@ impl App {
 
     /// The help sheet as it stands: every live binding, narrowed by `f`.
     fn help_lines(&self) -> Vec<crate::help::HelpLine> {
-        let rows = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::LIST);
+        let rows = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE);
         help::lines(&rows, &self.help_query)
     }
 
@@ -7148,7 +7106,6 @@ impl App {
                     .filter(|entry| entry.is_dir())
                     .map(|entry| entry.path.clone());
                 if let Some(path) = target {
-                    self.focus = Focus::List;
                     self.navigate(path, now);
                 }
                 rect
@@ -7158,7 +7115,6 @@ impl App {
                 if let Some(crumb) = self.path_bar.1.get(index) {
                     let path = crumb.path.clone();
                     if path != self.cwd() {
-                        self.focus = Focus::List;
                         self.navigate(path, now);
                     }
                 }
@@ -7169,7 +7125,6 @@ impl App {
             // something the keyboard typed (PLAN §7.2).
             Control::FilterChip => {
                 let rect = geom.top.filter.unwrap_or(egui::Rect::ZERO);
-                self.focus = Focus::List;
                 self.open_prompt(PromptKind::Filter);
                 rect
             }
@@ -8852,23 +8807,11 @@ impl App {
         }
 
         // ── Press ───────────────────────────────────────────────────────────
-        // **Mousedown-capture focuses a pane** (PLAN §2.1). Before the click
-        // itself, and on the pane rather than on anything in it: clicking the
-        // empty space under a listing is still a claim about where you want the
-        // keyboard, and a click that focused only when it landed on a row would
-        // be a rule nobody could see.
+        // **A press moves no focus** (PLAN §2.1): there is none to move. A
+        // click in the preview still works the transport and the scrubber, and
+        // a click on a parent row still goes there — they simply do it without
+        // also changing what the keyboard means.
         let any_press = pointer.pressed || pointer.secondary || pointer.middle;
-        if let (Some(position), true) = (pointer.at, any_press) {
-            if overlay.is_none() && !menu_live {
-                if layout.list.contains(position) {
-                    self.focus = Focus::List;
-                } else if layout.preview.contains(position) {
-                    self.focus = Focus::Preview;
-                } else if layout.parent.contains(position) {
-                    self.focus = Focus::Parent;
-                }
-            }
-        }
 
         // A press anywhere but on the menu dismisses it, and the press is spent
         // doing so: a click that closed a menu *and* moved the cursor under it
@@ -9091,8 +9034,6 @@ impl App {
             now,
         );
         let cursor = tab.cwd.dir.cursor();
-        // Focus commits instantly; its picture catches up (PLAN §2.1).
-        self.focus_fade.tick(self.focus, now);
         // Where a rename popup and the opener picker anchor themselves — the
         // row the cursor is on, as it was actually drawn this frame.
         self.cursor_rect = grid::pane_rect(list_content, metrics.as_ref(), scroll_rows, cursor);
@@ -9158,11 +9099,16 @@ impl App {
         }
         // The document worker's two inputs, both of which live on this side of
         // the seam: the four colours a rasteriser may draw with, and whether
-        // this pane has the keyboard — which is the turntable's whole switch
-        // (PLAN §1: idle discipline beats spin).
+        // the pointer is over the pane — which is the turntable's whole switch
+        // now that no pane has the keyboard (PLAN §1: idle discipline beats
+        // spin, and PLAN §2.1 took the focus flag that used to gate it away).
+        // The pointer is the honest signal: a model turns while somebody is
+        // looking at it and stops the moment they look away.
         self.preview
             .set_ink(crate::preview::doc::Ink::from_palette(&self.palette));
-        self.preview.set_focused(self.focus == Focus::Preview);
+        self.preview.set_pointer_over(
+            overlay.is_none() && pointer.at.is_some_and(|at| layout.preview.contains(at)),
+        );
         self.preview.sync_doc(now);
         // The wheel's coast over the document, sampled once a frame (PLAN §7.5).
         self.preview.tick_fling(now);
@@ -9219,7 +9165,7 @@ impl App {
             Some(mut help) => {
                 let rect = chrome::help_rect(area, area.bottom() - ui::GAP);
                 let lines = self.help_lines();
-                let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::LIST).len();
+                let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE).len();
                 // The same scrolloff rule the panes use, on the same numbers:
                 // one list-scrolling behaviour in the program, not two.
                 help.first = crate::viewport::first_visible(
@@ -9308,18 +9254,14 @@ impl App {
             now,
         };
 
-        // PLAN §2.1's focus visuals: the pane with the keyboard wears the 2 px
-        // accent rule and the 4% tint, and exactly one pane ever does.
-        // …as an *amount*, so the treatment eases across instead of popping
-        // (PLAN §2.1's 120 ms). The amounts always sum to 1: one pane is
-        // arriving at exactly the rate the other is leaving.
-        let parent_focus = self.focus_fade.amount(Focus::Parent, now);
-        let list_focus = self.focus_fade.amount(Focus::List, now);
-        let preview_focus = self.focus_fade.amount(Focus::Preview, now);
-        let list_ground = paint.pane_fill(self.palette.base, list_focus);
-        paint.pane(layout.parent, self.palette.mantle, parent_focus);
-        paint.pane(layout.list, self.palette.base, list_focus);
-        paint.pane(layout.preview, self.palette.mantle, preview_focus);
+        // The three panes, all painted alike. There used to be a 2 pt accent
+        // rule and a 4% tint on whichever one had the keyboard; the keyboard is
+        // always in the list now (PLAN §2.1), so a mark saying so would be a
+        // mark that never moves.
+        let list_ground = self.palette.base;
+        paint.pane(layout.parent, self.palette.mantle);
+        paint.pane(layout.list, self.palette.base);
+        paint.pane(layout.preview, self.palette.mantle);
 
         if let Some(parent) = &self.tab().parent {
             paint.listing(ListView {
@@ -9331,10 +9273,9 @@ impl App {
                 hovers: &self.hovers,
                 ripples: &self.ripples,
                 cursor_fill: self.palette.surface0,
-                // The parent's marker is normally a fact about the path rather
-                // than a cursor, so it stays quiet — until the keyboard is
-                // actually in that pane and it *is* the cursor.
-                cursor_alpha: crate::ui::ghost_cursor(parent_focus),
+                // The parent's marker is a fact about the path rather than a
+                // cursor — nothing steers it — so it stays quiet.
+                cursor_alpha: crate::ui::PARENT_MARKER,
                 linemode: LineMode::None,
                 dim: true,
                 slow_load: now.duration_since(parent.scan_started) >= LOADING_DELAY,
@@ -9375,11 +9316,9 @@ impl App {
             hovers: &self.hovers,
             ripples: &self.ripples,
             cursor_fill: self.palette.surface1,
-            // DelightMail's vim-split trick (PLAN §2.1): with the keyboard
-            // somewhere else the cursor row dims to a ghost bar, so "where am
-            // I" and "where do my keys go" are two questions with two answers
-            // and both are always on screen.
-            cursor_alpha: crate::ui::ghost_cursor(list_focus),
+            // Full strength, always: the list's cursor is the one cursor in the
+            // window and the keys always go to it (PLAN §2.1).
+            cursor_alpha: 1.0,
             linemode: self.mgr.linemode,
             dim: false,
             slow_load: now.duration_since(self.tab().cwd.scan_started) >= LOADING_DELAY,
@@ -9812,10 +9751,6 @@ impl App {
         // frame, and `animating()` says so — idle costs zero frames.
         let animating = [
             ("hovers", self.hovers.animating()),
-            // The focus treatment crossing between panes. It retires itself
-            // once it has arrived (see `FocusFade::tick`), so a settled
-            // keyboard costs nothing.
-            ("focus", self.focus_fade.animating(now)),
             ("ripples", self.ripples.animating(now)),
             // The clipboard chip's way off the top row. Instant in, so only
             // the leaving half ever asks for a frame (PLAN §1, §8).
@@ -10967,7 +10902,7 @@ mod tests {
             let mut state = KeymapState::new();
             let chord = df_core::keymap::parse_chord(key).expect("chord");
             let stack = ContextStack::with(&[context]);
-            match registry.dispatch(&mut state, &stack, WhenFlags::LIST, chord, Instant::now()) {
+            match registry.dispatch(&mut state, &stack, WhenFlags::NONE, chord, Instant::now()) {
                 Dispatch::Match(command) => Some(command),
                 _ => None,
             }

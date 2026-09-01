@@ -380,7 +380,7 @@ mod tests {
             C::LinemodeNone,
             // Navigation replaces the listing outright.
             C::Leave,
-            C::EnterOrPreview,
+            C::EnterDirectory,
             C::HistoryBack,
             C::HistoryForward,
             C::Goto(0),

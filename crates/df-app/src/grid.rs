@@ -261,8 +261,7 @@ pub enum Step {
 ///   the top goes to the bottom of *that same column*, so the key that moves
 ///   vertically never moves you sideways. `←`/`→` still refuse at the two ends,
 ///   and that refusal is load-bearing — [`crate::app`] reads it as "this key
-///   had nowhere to go" and turns it into leave-the-directory and
-///   enter-it/focus-the-preview.
+///   had nowhere to go" and turns it into leave-the-directory and enter-it.
 pub fn step(cursor: usize, count: usize, columns: usize, step: Step) -> usize {
     if count == 0 {
         return 0;
@@ -680,9 +679,9 @@ pub struct GridView<'a> {
     pub metrics: Metrics,
     pub hovers: &'a crate::hover::Hovers<crate::ui::Control>,
     pub ripples: &'a crate::ripple::Ripples<crate::ui::Control>,
-    /// How strongly the cursor tile is lit: 1 in the focused pane, and
-    /// [`crate::ui::GHOST_CURSOR`] everywhere else — the same "where am I"
-    /// answer the list gives (PLAN §2.1).
+    /// How strongly the cursor tile is lit. Always 1 in practice — the grid is
+    /// the list pane, and the keys always go there (PLAN §2.1) — and still a
+    /// number rather than a constant so it stays the list's own value.
     pub cursor_alpha: f32,
     pub thumbs: &'a Thumbs,
     pub clip: Option<crate::ui::ClipMark<'a>>,

@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn the_sheet_is_read_out_of_the_registry() {
         let registry = Registry::defaults();
-        let rows = all_rows(&registry, &ContextStack::browser(), WhenFlags::LIST);
+        let rows = all_rows(&registry, &ContextStack::browser(), WhenFlags::NONE);
         assert!(rows.iter().any(|r| r.id == "quit" && r.keys == "q"));
         assert!(rows.iter().any(|r| r.id == "sort-mtime" && r.keys == ", m"));
         // Most-specific context first: every Files row precedes every Global one.

@@ -1121,7 +1121,7 @@ mod tests {
             C::Create,
             C::Open,
             C::Leave,
-            C::EnterOrPreview,
+            C::EnterDirectory,
             C::CommandPalette,
             C::SortSize,
             C::Filter,

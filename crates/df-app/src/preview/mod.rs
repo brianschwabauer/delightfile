@@ -124,9 +124,9 @@ const CHIP_FADE: Duration = Duration::from_millis(500);
 /// Twenty-four seconds — fifteen degrees a second. Slow enough that it reads as
 /// a considered look at an object rather than as a spinning icon, and slow
 /// enough that the CPU rasteriser behind it is never the reason a frame is
-/// late. It runs **only while the preview has the keyboard**: idle discipline
-/// beats spin (PLAN §1), so a model the cursor merely passed over is a still
-/// picture that costs nothing.
+/// late. It runs **only while the pointer is over the pane**: idle discipline
+/// beats spin (PLAN §1), so a model nobody is looking at is a still picture
+/// that costs nothing.
 const TURNTABLE_PERIOD: Duration = Duration::from_secs(24);
 
 /// How many files' reading positions the pane remembers.
@@ -138,14 +138,15 @@ const TURNTABLE_PERIOD: Duration = Duration::from_secs(24);
 /// tomorrow opens at the top like any other.
 const PLACES: usize = 256;
 
-/// How far one press of `↑`/`↓` moves an oversized page, in logical points.
+/// How far one press of `Ctrl+↑`/`Ctrl+↓` moves an oversized page, in logical
+/// points.
 ///
 /// A shade over the list's row height, so a press moves about a line of body
 /// text at the sizes a PDF is set at — the same "one press, one line" the text
 /// body already obeys, in the unit a picture has.
 const PAN_STEP: f32 = 24.0;
 
-/// What `+`, `-` and `0` mean (PLAN §4.3).
+/// What `+`, `Alt+-` and `0` mean (PLAN §4.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zoom {
     In,
@@ -432,9 +433,15 @@ pub struct Pane {
     /// for: the body — and with it the page count — arrives from a worker
     /// several frames later.
     resume_page: usize,
-    /// Whether the keyboard is in this pane. The turntable's whole switch:
-    /// unfocused, a model is a still picture and asks for nothing.
-    focused: bool,
+    /// Whether the pointer is over this pane. The turntable's whole switch:
+    /// with nobody looking, a model is a still picture and asks for nothing.
+    ///
+    /// It used to be "does this pane have the keyboard". Nothing has the
+    /// keyboard but the list any more (PLAN §2.1), and the pointer is the
+    /// honest replacement — a model turns while somebody is looking at it and
+    /// stops the moment they look away, which is the same idle bargain
+    /// (PLAN §1) struck against a signal that still exists.
+    pointer_over: bool,
 }
 
 impl Pane {
@@ -448,7 +455,7 @@ impl Pane {
             preparer: prepare::Preparer::start(std::sync::Arc::clone(&notify)),
             decoder: decode::Decoder::start(notify),
             ink: doc::Ink::test(),
-            focused: false,
+            pointer_over: false,
             wanted: None,
             token: None,
             requested_target: (0, 0),
@@ -583,8 +590,8 @@ impl Pane {
         self.fling = None;
     }
 
-    /// Scroll by `delta` lines — the preview-focus arrows, `Ctrl+u`/`Ctrl+d`
-    /// and `Space` (PLAN §4.3).
+    /// Scroll by `delta` lines — `Ctrl+↑`/`Ctrl+↓`, `Ctrl+Shift+u`/`Ctrl+Shift+d`
+    /// and `Shift+Space` (PLAN §4.3).
     ///
     /// Same clamp as [`Pane::seek`], and the same scrollbar linger: one
     /// scrolling behaviour in this pane, whichever key asked for it.
@@ -621,7 +628,7 @@ impl Pane {
     ///
     /// Rendered documents take the wheel as a page turn instead — `doc_scroll`
     /// answers whether it did — because a page is what a PDF scrolls by, which
-    /// is the same split `↑`/`↓` make in preview focus (PLAN §4.3).
+    /// is the same split `Ctrl+↑`/`Ctrl+↓` make from the list (PLAN §4.3).
     pub fn wheel(&mut self, delta_lines: f32, now: Instant) -> bool {
         // One notch, one page — not one page per *line* the notch is worth. A
         // page is a big unit and the wheel is a fast control; multiplying them
@@ -775,9 +782,9 @@ impl Pane {
                     view.page = drawn.page;
                     view.error = None;
                     // The turntable's angle is carried on the *drawn* frame and
-                    // the clock restarts from it, so losing and regaining focus
-                    // picks the model up where it stopped instead of snapping
-                    // back to where it started.
+                    // the clock restarts from it, so the pointer leaving the
+                    // pane and coming back picks the model up where it stopped
+                    // instead of snapping back to where it started.
                     view.yaw = drawn.yaw;
                     if view.spinning_since.is_some() {
                         view.spinning_since = Some(now);
@@ -790,20 +797,20 @@ impl Pane {
         }
     }
 
-    /// The four colours the document rasterisers draw with, and whether this
-    /// pane has the keyboard. Both are set once a frame by the app, because
+    /// The four colours the document rasterisers draw with, and whether the
+    /// pointer is over this pane. Both are set once a frame by the app, because
     /// both live on the paint side and are needed on the worker side.
     pub fn set_ink(&mut self, ink: doc::Ink) {
         self.ink = ink;
     }
 
-    pub fn set_focused(&mut self, focused: bool) {
-        if self.focused == focused {
+    pub fn set_pointer_over(&mut self, pointer_over: bool) {
+        if self.pointer_over == pointer_over {
             return;
         }
-        self.focused = focused;
+        self.pointer_over = pointer_over;
         if let Some(view) = self.doc_mut() {
-            // The turntable's clock starts when the keyboard arrives and is
+            // The turntable's clock starts when the pointer arrives and is
             // thrown away when it leaves, so the model holds the angle it was
             // last drawn at rather than snapping back to where it started.
             view.spinning_since = None;
@@ -831,17 +838,17 @@ impl Pane {
     /// is in flight at a time: a held `→` through a long PDF renders the page
     /// it stopped on, not every page it passed.
     ///
-    /// **This is also the turntable's whole engine.** While the pane has the
-    /// keyboard a model's wanted angle moves with the clock, so each finished
+    /// **This is also the turntable's whole engine.** While the pointer is over
+    /// the pane a model's wanted angle moves with the clock, so each finished
     /// frame rings the wake bell, which brings a paint, which asks for the next
-    /// angle. Unfocused, the wanted angle is the angle on screen, nothing is
-    /// asked for, and the loop stops dead (PLAN §1).
+    /// angle. With the pointer away, the wanted angle is the angle on screen,
+    /// nothing is asked for, and the loop stops dead (PLAN §1).
     pub fn sync_doc(&mut self, now: Instant) {
         let (Some(path), Some(token)) = (self.wanted.clone(), self.token) else {
             return;
         };
         let target = self.requested_target;
-        let (ink, focused) = (self.ink, self.focused);
+        let (ink, turning) = (self.ink, self.pointer_over);
         let kind = match self.shown.as_ref().map(|s| &s.body) {
             Some(Body::Media(media)) => media.kind.clone(),
             _ => return,
@@ -856,7 +863,7 @@ impl Pane {
             return;
         }
         // …and only while the keyboard is here.
-        if turntable && focused && view.meta.is_some() && view.spinning_since.is_none() {
+        if turntable && turning && view.meta.is_some() && view.spinning_since.is_none() {
             view.spinning_since = Some(now);
         }
         let yaw = match view.spinning_since {
@@ -1422,9 +1429,9 @@ mod tests {
         (pane, now)
     }
 
-    /// PLAN §4.3: `→` turns the page, `←` turns it back, and **at the first
-    /// page `←` refuses** — which is what lets the app fall through to focusing
-    /// the list rather than leaving the keyboard stuck in the pane.
+    /// PLAN §4.3: `Ctrl+→` turns the page, `Ctrl+←` turns it back, and **at
+    /// the first page it refuses** — the app reads that as "nothing to turn to"
+    /// and the key is inert rather than wrapping round.
     #[test]
     fn paging_stops_at_both_ends_and_says_so() {
         let (mut pane, now) = documented(PreviewKind::Pdf, 42, doc::Counter::Page);

@@ -1,54 +1,19 @@
-//! Which pane the keyboard is in (PLAN §2.1 — the DelightMail model).
+//! What the keys mean at the edges of a listing (PLAN §2.1, §4.1).
 //!
-//! A dumb reactive enum and three pure functions over it. It lives in its own
-//! module rather than as a field and a `match` in [`crate::app`] because every
-//! interesting thing about focus is a *decision* — what `→` means, what `Esc`
-//! means, which bindings are live — and a decision that can be tested without a
-//! window is a decision that stays right.
+//! This module used to hold a `Pane` enum and the machinery that moved the
+//! keyboard between the three miller columns. **It does not any more: the list
+//! is the keyboard, always.** A file manager is a list of files with two
+//! columns of context beside it, and a three-way focus meant every key had to
+//! be read twice — once for what it does, once for where you were when you
+//! pressed it. The columns beside the list are still fully live under the
+//! pointer (click a parent row to go there, wheel or scrub the preview), and
+//! the preview's own keys are now modified keys that act on whatever the cursor
+//! is standing on (PLAN §4.3) — so nothing was lost except the question.
 //!
-//! **Focus does not change the keymap context stack.** That is PLAN §2.1's
-//! rule, and the reason df-core's registry takes [`WhenFlags`]: the same `↑` is
-//! a cursor move in the list, a scroll in the preview and a parent-pane step,
-//! and it is one binding table with three predicates rather than three stacks
-//! that have to be pushed and popped in the right order.
-//!
-//! With `hjkl` gone (PLAN's one deliberate break from yazi), the transport keys
-//! are global and need no focus at all. Preview focus exists for the *rest*:
-//! document scrolling, image pan/zoom, and the secondary transport keys whose
-//! letters the list still owns — `,` is the sort chord, `.` toggles hidden
-//! files, `m` starts the linemode chord, and in the preview all three are the
-//! frame step and the mute.
-
-use std::time::{Duration, Instant};
-
-use df_core::keymap::WhenFlags;
-
-/// Which pane the keyboard is in. `List` is where a file manager lives, so it
-/// is the default and every ladder ends there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Focus {
-    Parent,
-    #[default]
-    List,
-    Preview,
-}
-
-impl Focus {
-    /// Which `when` predicates are true, given what is under the cursor.
-    ///
-    /// `media_hovered` is deliberately *not* about focus: PLAN §4.3's whole
-    /// point is that `k` plays the file the cursor is on whatever pane has the
-    /// keyboard. What focus decides is only whether `,`, `.`, `m`, `Space` and
-    /// the plain arrows read as the transport's or as the list's.
-    pub fn flags(self, media_hovered: bool) -> WhenFlags {
-        WhenFlags {
-            in_list: self == Focus::List,
-            in_preview: self == Focus::Preview,
-            in_parent: self == Focus::Parent,
-            media_hovered,
-        }
-    }
-}
+//! What is left is the two *decisions* that were about focus and are now about
+//! the list: what `→` does at the right-hand edge of a row, and what `Esc`
+//! does. Both live here rather than as a `match` in [`crate::app`] because a
+//! decision that can be tested without a window is a decision that stays right.
 
 /// What the cursor is standing on, as far as `→` is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,16 +29,22 @@ pub enum Hovered {
 pub enum Rightward {
     /// yazi's `enter`: a directory is a place, and `→` goes there.
     Enter,
-    /// A file has no inside to enter, so `→` goes to the thing that is *showing*
-    /// it — which is the pane it is already being drawn in.
-    FocusPreview,
+    /// A file has no inside to enter — **unless it is an archive**, which
+    /// PLAN §7.3 says is a place after all. Only the caller knows whether the
+    /// archive reader can reach this particular file (not inside another
+    /// archive, not on a remote service), so the last word is its.
+    ///
+    /// When it is not an archive, `→` does nothing at all. Deliberately not
+    /// "open": `→` is a navigation key, and a navigation key that could launch
+    /// a video player is a key you stop pressing.
+    MaybeArchive,
     Nothing,
 }
 
 pub fn rightward(hovered: Hovered) -> Rightward {
     match hovered {
         Hovered::Directory => Rightward::Enter,
-        Hovered::File => Rightward::FocusPreview,
+        Hovered::File => Rightward::MaybeArchive,
         Hovered::Nothing => Rightward::Nothing,
     }
 }
@@ -95,7 +66,6 @@ pub struct EscapeState {
     pub visual: bool,
     pub selection: bool,
     pub filter: bool,
-    pub focus: Focus,
 }
 
 /// One rung of the `Esc` ladder (PLAN §4.1).
@@ -109,8 +79,7 @@ pub enum EscapeRung {
     LeaveVisual,
     ClearFilter,
     ClearSelection,
-    FocusList,
-    /// Everything is already put away and the list already has the keyboard.
+    /// Everything is already put away.
     Nothing,
 }
 
@@ -120,8 +89,7 @@ pub enum EscapeRung {
 /// an `Esc` that cleared everything means a stray press throws away a selection
 /// built up over a dozen keystrokes, and there is no undo for a selection. The
 /// modal card is checked first because it is the nearest thing to the user's
-/// eye, and focus is checked *last* because returning to the list is the rung
-/// that costs nothing to redo.
+/// eye.
 ///
 /// Two rungs are ordered by how *recent* the thing is rather than by how big:
 /// a help filter is undone before the overlay it narrows, and a file filter is
@@ -154,294 +122,99 @@ pub fn escape_rung(state: EscapeState) -> EscapeRung {
     if state.selection {
         return EscapeRung::ClearSelection;
     }
-    if state.focus != Focus::List {
-        return EscapeRung::FocusList;
-    }
     EscapeRung::Nothing
-}
-
-/// How long the focus treatment takes to move between panes.
-///
-/// PLAN §2.1 says 120 ms ease-out, which is also [`crate::flip`]'s,
-/// [`crate::menu`]'s and [`crate::whichkey`]'s state fade — one number for
-/// "a piece of chrome changed what it means", so the window never has two
-/// speeds for the same kind of event.
-pub const FOCUS_FADE: Duration = Duration::from_millis(120);
-
-/// Where the focus treatment *is*, as opposed to where focus is.
-///
-/// [`Focus`] commits the instant the key is pressed — `delightful-ui` §5's
-/// "state commits instantly, animation is presentation only" — and this is the
-/// presentation catching up. Without it the 4% tint, the 2 px rule and the
-/// ghost-cursor dim all pop on and off, and in a three-column miller layout
-/// that is the most frequent transition in the program.
-///
-/// Both directions are eased, not just the outro. This is not a hover: nothing
-/// is under a pointer that could leave, and a tint that snapped on while the
-/// old one faded would read as the two panes disagreeing about which of them
-/// had the keyboard.
-/// The default is [`Focus`]'s own default, already arrived — a window that has
-/// just opened is not mid-fade.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct FocusFade {
-    /// Where the treatment is heading.
-    to: Focus,
-    /// Where it is coming from, and when it left. `None` once it has arrived —
-    /// an `Option` that is never `None` is a window that never stops asking for
-    /// frames (PLAN §1).
-    from: Option<(Focus, Instant)>,
-}
-
-impl FocusFade {
-    pub fn new() -> FocusFade {
-        FocusFade::default()
-    }
-
-    /// Point the fade at `focus`, and retire a fade that has arrived.
-    ///
-    /// Called every frame. A focus change *during* a fade retargets from
-    /// wherever the treatment currently is rather than restarting from the
-    /// original pane — `delightful-ui` §5's "every animation is interruptible
-    /// and retargets mid-flight".
-    pub fn tick(&mut self, focus: Focus, now: Instant) {
-        if focus != self.to {
-            self.from = Some((self.to, now));
-            self.to = focus;
-        } else if self
-            .from
-            .is_some_and(|(_, at)| now.saturating_duration_since(at) >= FOCUS_FADE)
-        {
-            self.from = None;
-        }
-    }
-
-    /// How focused `pane` looks right now, `0.0..=1.0`.
-    pub fn amount(&self, pane: Focus, now: Instant) -> f32 {
-        let Some((from, at)) = self.from else {
-            return if pane == self.to { 1.0 } else { 0.0 };
-        };
-        let t = (now.saturating_duration_since(at).as_secs_f32()
-            / FOCUS_FADE.as_secs_f32().max(f32::EPSILON))
-        .clamp(0.0, 1.0);
-        let eased = crate::motion::Easing::OutQuint.apply(t);
-        if pane == self.to {
-            eased
-        } else if pane == from {
-            1.0 - eased
-        } else {
-            0.0
-        }
-    }
-
-    /// Whether the treatment is still moving. A settled focus is a constant,
-    /// and asking for frames to redraw a constant is PLAN §1's whole complaint.
-    pub fn animating(&self, now: Instant) -> bool {
-        self.from
-            .is_some_and(|(_, at)| now.saturating_duration_since(at) < FOCUS_FADE)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// PLAN §2.1's treatment, and PLAN §1's idle rule in the same test: the
-    /// amounts cross over, they add up to 1 the whole way across, and the fade
-    /// stops asking for frames the moment it has arrived.
+    /// `→` on a directory enters it (yazi, unchanged); `→` on a *file* is the
+    /// caller's question, because the only file `→` may go into is an archive.
     #[test]
-    fn the_focus_treatment_crosses_over_and_then_stops() {
-        let t0 = Instant::now();
-        let mut fade = FocusFade::new();
-        fade.tick(Focus::List, t0);
-        assert_eq!(fade.amount(Focus::List, t0), 1.0);
-        assert_eq!(fade.amount(Focus::Preview, t0), 0.0);
-        assert!(!fade.animating(t0));
-
-        // Focus commits instantly; the picture starts moving.
-        fade.tick(Focus::Preview, t0);
-        assert!(fade.animating(t0));
-        let mid = t0 + FOCUS_FADE / 2;
-        let (leaving, arriving) = (
-            fade.amount(Focus::List, mid),
-            fade.amount(Focus::Preview, mid),
-        );
-        assert!(arriving > 0.0 && arriving < 1.0, "{arriving}");
-        // One pane arrives at exactly the rate the other leaves, so the window
-        // never looks like two panes both have the keyboard, or neither does.
-        assert!((leaving + arriving - 1.0).abs() < 1e-5);
-        // The pane that was never involved stays out of it.
-        assert_eq!(fade.amount(Focus::Parent, mid), 0.0);
-
-        // Arrived: a settled keyboard is a constant, and a constant costs no
-        // frames (PLAN §1).
-        let done = t0 + FOCUS_FADE;
-        assert!(!fade.animating(done));
-        fade.tick(Focus::Preview, done);
-        assert_eq!(fade.amount(Focus::Preview, done), 1.0);
-        assert_eq!(fade.amount(Focus::List, done), 0.0);
-        assert!(!fade.animating(done));
-    }
-
-    /// `delightful-ui` §5: an animation retargets mid-flight rather than
-    /// restarting. A change of mind halfway across must not snap the treatment
-    /// back to the pane it originally left.
-    #[test]
-    fn a_focus_change_mid_fade_retargets_rather_than_restarting() {
-        let t0 = Instant::now();
-        let mut fade = FocusFade::new();
-        fade.tick(Focus::List, t0);
-        fade.tick(Focus::Preview, t0);
-        let mid = t0 + FOCUS_FADE / 2;
-        // Off to the parent instead, from wherever the treatment now is.
-        fade.tick(Focus::Parent, mid);
-        assert_eq!(fade.amount(Focus::Parent, mid), 0.0);
-        // The pane it *was* heading for is what it now fades away from — not
-        // the one it started at, which is already gone.
-        assert_eq!(fade.amount(Focus::Preview, mid), 1.0);
-        assert_eq!(fade.amount(Focus::List, mid), 0.0);
-        let done = mid + FOCUS_FADE;
-        assert_eq!(fade.amount(Focus::Parent, done), 1.0);
-        assert!(!fade.animating(done));
-    }
-
-    /// The ghost bar is part of the same statement as the tint and the rule,
-    /// so it travels with them instead of popping (PLAN §2.1).
-    #[test]
-    fn the_ghost_cursor_rides_the_focus_fade() {
-        assert_eq!(crate::ui::ghost_cursor(0.0), crate::ui::GHOST_CURSOR);
-        assert_eq!(crate::ui::ghost_cursor(1.0), 1.0);
-        let half = crate::ui::ghost_cursor(0.5);
-        assert!(half > crate::ui::GHOST_CURSOR && half < 1.0, "{half}");
-    }
-
-    /// `→` on a directory enters it (yazi, unchanged); `→` on a *file* moves
-    /// the keyboard into the pane already showing it.
-    #[test]
-    fn rightward_enters_a_directory_and_focuses_a_file() {
+    fn rightward_enters_a_directory_and_asks_about_a_file() {
         assert_eq!(rightward(Hovered::Directory), Rightward::Enter);
-        assert_eq!(rightward(Hovered::File), Rightward::FocusPreview);
-        // An empty listing has nothing to the right, and `→` must not focus a
-        // pane that is showing nothing.
+        assert_eq!(rightward(Hovered::File), Rightward::MaybeArchive);
+        // An empty listing has nothing to the right at all.
         assert_eq!(rightward(Hovered::Nothing), Rightward::Nothing);
     }
 
-    /// The predicates are exclusive by construction: exactly one pane has the
-    /// keyboard, so exactly one of the three pane flags is true.
+    /// **The transport does not care what is on screen** (PLAN §4.3): the only
+    /// predicate left is what the cursor is standing on, and it is the same
+    /// answer wherever the pointer happens to be.
     #[test]
-    fn exactly_one_pane_flag_is_true_at_a_time() {
-        for focus in [Focus::Parent, Focus::List, Focus::Preview] {
-            let f = focus.flags(false);
-            let count = [f.in_list, f.in_preview, f.in_parent]
-                .iter()
-                .filter(|on| **on)
-                .count();
-            assert_eq!(count, 1, "{focus:?}");
-        }
-        assert_eq!(Focus::default(), Focus::List);
-        assert_eq!(Focus::List.flags(false), WhenFlags::LIST);
+    fn the_only_predicate_left_is_what_is_hovered() {
+        use df_core::keymap::{When, WhenFlags};
+        assert!(WhenFlags::MEDIA.allows(When::MediaHovered));
+        assert!(!WhenFlags::NONE.allows(When::MediaHovered));
+        assert!(WhenFlags::NONE.allows(When::Always));
     }
 
-    /// **The transport does not care where the keyboard is** (PLAN §4.3): `k`
-    /// on a hovered clip works from any pane, which is the whole reason `hjkl`
-    /// was given up.
+    /// **The preview's keys, through the real registry.** The list keeps every
+    /// plain key it ever had, and the preview's versions are the modified ones
+    /// — which is the whole of PLAN §2.1's simplification, end to end.
     #[test]
-    fn media_hovered_is_independent_of_focus() {
-        for focus in [Focus::Parent, Focus::List, Focus::Preview] {
-            assert!(focus.flags(true).media_hovered, "{focus:?}");
-            assert!(!focus.flags(false).media_hovered, "{focus:?}");
-        }
-        // And the preview-focus extras need both halves.
-        use df_core::keymap::When;
-        assert!(Focus::Preview.flags(true).allows(When::PreviewMedia));
-        assert!(!Focus::Preview.flags(false).allows(When::PreviewMedia));
-        assert!(!Focus::List.flags(true).allows(When::PreviewMedia));
-        // …while a document in preview focus keeps the plain preview rows.
-        assert!(Focus::Preview.flags(false).allows(When::InPreview));
-    }
-
-    /// **The flags, through the real registry.** The predicates are only worth
-    /// anything if the keymap actually resolves them, and this is the wiring
-    /// end to end: one chord, three answers, decided entirely by focus and by
-    /// what is under the cursor.
-    #[test]
-    fn the_same_key_means_three_things_and_the_registry_agrees() {
-        use df_core::keymap::{Command, ContextStack, Dispatch, KeymapState, Registry};
+    fn the_list_keeps_the_plain_keys_and_the_preview_takes_the_modified_ones() {
+        use df_core::keymap::{Command, ContextStack, Dispatch, KeymapState, Registry, WhenFlags};
         let registry = Registry::defaults();
         let stack = ContextStack::browser();
-        let dispatch = |focus: Focus, media: bool, key: &str| {
+        let dispatch = |media: bool, key: &str| {
             let mut state = KeymapState::new();
             let chord = df_core::keymap::parse_chord(key).expect("chord");
-            match registry.dispatch(
-                &mut state,
-                &stack,
-                focus.flags(media),
-                chord,
-                std::time::Instant::now(),
-            ) {
+            let flags = if media {
+                WhenFlags::MEDIA
+            } else {
+                WhenFlags::NONE
+            };
+            match registry.dispatch(&mut state, &stack, flags, chord, std::time::Instant::now()) {
                 Dispatch::Match(command) => Some(command),
                 _ => None,
             }
         };
 
-        // `.` is the hidden-files toggle in the list and the frame step in the
-        // preview — and only when there is something with frames in it.
+        // The four keys that used to mean two things each now mean one, and it
+        // is the list's meaning — whatever is in the preview pane.
+        assert_eq!(dispatch(true, "."), Some(Command::ToggleHidden));
+        assert_eq!(dispatch(true, "space"), Some(Command::ToggleSelect));
+        assert_eq!(dispatch(true, "up"), Some(Command::CursorUp));
+        assert_eq!(dispatch(true, "down"), Some(Command::CursorDown));
+        // `m` is still the linemode chord and nothing else — it does not
+        // complete, it waits for its second key, even on a clip.
+        assert_eq!(dispatch(true, "m"), None);
+        assert_eq!(dispatch(true, "ctrl+m"), Some(Command::Mute));
+        assert_eq!(dispatch(false, "ctrl+m"), None);
+
+        // Ctrl+arrow is the preview's arrow family, and the sideways pair
+        // splits on what is under the cursor exactly as the transport does.
+        assert_eq!(dispatch(false, "ctrl+up"), Some(Command::PreviewUp));
+        assert_eq!(dispatch(true, "ctrl+up"), Some(Command::PreviewUp));
+        assert_eq!(dispatch(false, "ctrl+right"), Some(Command::PreviewRight));
         assert_eq!(
-            dispatch(Focus::List, true, "."),
-            Some(Command::ToggleHidden)
-        );
-        assert_eq!(
-            dispatch(Focus::Preview, true, "."),
+            dispatch(true, "ctrl+right"),
             Some(Command::FrameStepForward)
         );
-        assert_eq!(dispatch(Focus::Preview, false, "."), None);
-        // `Space` selects, plays, or pages.
+        assert_eq!(dispatch(true, "ctrl+left"), Some(Command::FrameStepBack));
         assert_eq!(
-            dispatch(Focus::List, false, "space"),
-            Some(Command::ToggleSelect)
-        );
-        assert_eq!(
-            dispatch(Focus::Preview, true, "space"),
-            Some(Command::PlayPause)
-        );
-        assert_eq!(
-            dispatch(Focus::Preview, false, "space"),
+            dispatch(false, "shift+space"),
             Some(Command::PreviewPageDown)
         );
-        // `↑` moves the cursor, the parent's cursor, the document, or the
-        // volume — four readings of one key, and never two at once.
-        assert_eq!(dispatch(Focus::List, false, "up"), Some(Command::CursorUp));
-        assert_eq!(
-            dispatch(Focus::Parent, false, "up"),
-            Some(Command::ParentPrev)
-        );
-        assert_eq!(
-            dispatch(Focus::Preview, false, "up"),
-            Some(Command::PreviewUp)
-        );
-        assert_eq!(
-            dispatch(Focus::Preview, true, "up"),
-            Some(Command::VolumeUp)
-        );
+        assert_eq!(dispatch(false, "alt+-"), Some(Command::PreviewZoomOut));
+        assert_eq!(dispatch(false, "-"), Some(Command::SymlinkAbsolute));
 
-        // **And the transport is global** (PLAN §4.3): `k` plays from any pane
-        // when the cursor is on a clip, and is inert on anything else — no
-        // beep, no surprise, and nothing on the help sheet either.
-        for focus in [Focus::Parent, Focus::List, Focus::Preview] {
-            assert_eq!(dispatch(focus, true, "k"), Some(Command::PlayPause));
-            assert_eq!(dispatch(focus, true, "l"), Some(Command::ShuttleForward));
-            assert_eq!(dispatch(focus, true, "j"), Some(Command::ShuttleReverse));
-            assert_eq!(dispatch(focus, true, "]"), Some(Command::NextEdge));
-            assert_eq!(dispatch(focus, true, "shift+up"), Some(Command::VolumeUp));
-            assert_eq!(dispatch(focus, false, "k"), None, "{focus:?}");
-            assert_eq!(dispatch(focus, false, "j"), None, "{focus:?}");
-            assert_eq!(dispatch(focus, false, "]"), None, "{focus:?}");
-        }
-        // `K`/`J` stay the list's, which is where yazi put them.
-        assert_eq!(
-            dispatch(Focus::List, true, "K"),
-            Some(Command::SeekPreviewUp)
-        );
-        assert_eq!(dispatch(Focus::Preview, true, "K"), None);
+        // **And the transport is still global** (PLAN §4.3): `k` plays the file
+        // the cursor is on, and is inert on anything else — no beep, no
+        // surprise, and nothing on the help sheet either.
+        assert_eq!(dispatch(true, "k"), Some(Command::PlayPause));
+        assert_eq!(dispatch(true, "l"), Some(Command::ShuttleForward));
+        assert_eq!(dispatch(true, "j"), Some(Command::ShuttleReverse));
+        assert_eq!(dispatch(true, "]"), Some(Command::NextEdge));
+        assert_eq!(dispatch(true, "shift+up"), Some(Command::VolumeUp));
+        assert_eq!(dispatch(false, "k"), None);
+        assert_eq!(dispatch(false, "j"), None);
+        assert_eq!(dispatch(false, "]"), None);
+        // `K`/`J` stay the list's nudge of the preview, which is where yazi
+        // put them.
+        assert_eq!(dispatch(true, "K"), Some(Command::SeekPreviewUp));
     }
 
     /// The ladder, from the top: every rung is reached in order and none is
@@ -459,7 +232,6 @@ mod tests {
             visual: true,
             selection: true,
             filter: true,
-            focus: Focus::Preview,
         };
         let order = [
             EscapeRung::CloseOverlay,
@@ -470,7 +242,6 @@ mod tests {
             EscapeRung::LeaveVisual,
             EscapeRung::ClearFilter,
             EscapeRung::ClearSelection,
-            EscapeRung::FocusList,
             EscapeRung::Nothing,
         ];
         for expected in order {
@@ -485,39 +256,9 @@ mod tests {
                 EscapeRung::LeaveVisual => state.visual = false,
                 EscapeRung::ClearSelection => state.selection = false,
                 EscapeRung::ClearFilter => state.filter = false,
-                EscapeRung::FocusList => state.focus = Focus::List,
                 EscapeRung::Nothing => {}
             }
         }
-    }
-
-    /// The common case: nothing is open, the keyboard is in the preview, and
-    /// `Esc` is the way back — one press, no side effects on the selection.
-    #[test]
-    fn escape_from_the_preview_only_moves_the_keyboard() {
-        let state = EscapeState {
-            focus: Focus::Preview,
-            ..EscapeState::default()
-        };
-        assert_eq!(escape_rung(state), EscapeRung::FocusList);
-        assert_eq!(
-            escape_rung(EscapeState {
-                focus: Focus::Parent,
-                ..EscapeState::default()
-            }),
-            EscapeRung::FocusList
-        );
-        assert_eq!(escape_rung(EscapeState::default()), EscapeRung::Nothing);
-        // A selection is worth more than a focus change, so it is asked about
-        // first even when the keyboard is somewhere else.
-        assert_eq!(
-            escape_rung(EscapeState {
-                focus: Focus::Preview,
-                selection: true,
-                ..EscapeState::default()
-            }),
-            EscapeRung::ClearSelection
-        );
     }
 
     /// A committed filter — `f`, type, `Enter` — is undone by `Esc` before the
@@ -547,5 +288,8 @@ mod tests {
             }),
             EscapeRung::CloseHelp
         );
+        // With nothing open and nothing marked, `Esc` is a no-op — it does not
+        // reach for something to undo (PLAN §4.1).
+        assert_eq!(escape_rung(EscapeState::default()), EscapeRung::Nothing);
     }
 }

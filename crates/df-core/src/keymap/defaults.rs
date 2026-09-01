@@ -6,7 +6,7 @@
 //!
 //! 1. `hjkl` navigation is gone (PLAN's opening paragraph). Arrows move the
 //!    cursor; `j` `k` `l` are delightviewer's shuttle keys, bound in Global so
-//!    they work at any focus, and `H`/`L` (yazi's history) retire in favour of
+//!    they work wherever you are, and `H`/`L` (yazi's history) retire in favour of
 //!    `Alt+←`/`Alt+→`, which is what every other program on the machine uses.
 //! 2. `[`/`]` are transport, so the tab keys move to `Alt+[`/`Alt+]` and the
 //!    swaps stay on `{`/`}` (PLAN §2).
@@ -46,7 +46,7 @@ use super::{Context, Registry, When};
 pub(super) fn build() -> Registry {
     use Command as C;
     use Context::{Confirm, Files, Global, Help, Input, Palette, Pick, Spot, Tasks};
-    use When::{Always, InList, InParent, InPreview, MediaHovered, PreviewMedia};
+    use When::{Always, MediaHovered};
 
     // Hand-aligned on purpose. rustfmt turns a 200-row tuple list into 900
     // lines of one field per line, and this table's entire value is that a
@@ -55,8 +55,8 @@ pub(super) fn build() -> Registry {
     let rows: &[(Context, &str, Command, &str, When)] = &[
         // ── Global ──────────────────────────────────────────────────────────
         // Esc is layered by the router, not by the table: one command whose
-        // meaning is the §4.1 ladder (cancel drag → visual off → clear
-        // selection → cancel search → focus List).
+        // meaning is the §4.1 ladder (close the overlay → cancel the chord →
+        // clear the filter → clear the selection).
         (Global, "esc",          C::Escape,         "Cancel, or step back",  Always),
         (Global, "ctrl+p",       C::CommandPalette, "Command palette",       Always),
         // `?` is the key everybody presses for help, so it is the one that
@@ -69,7 +69,7 @@ pub(super) fn build() -> Registry {
         (Global, "ctrl+n",       C::NewWindow,      "New window",            Always),
         (Global, "ctrl+shift+z", C::Undo,           "Undo last operation",   Always),
 
-        // ── Transport, on the hovered media file, at any focus (§4.3) ───────
+        // ── Transport, on the hovered media file, from anywhere (§4.3) ──────
         // Reserved keys, so Global is the only context they may live in — and
         // `MediaHovered` is how "on a non-media file these keys are inert" is
         // spelled: the row simply is not there, so nothing happens and the help
@@ -85,34 +85,35 @@ pub(super) fn build() -> Registry {
         (Global, "shift+up",   C::VolumeUp,       "Volume up",                MediaHovered),
         (Global, "shift+down", C::VolumeDown,     "Volume down",              MediaHovered),
 
-        // ── Preview focus, media (§4.3 "preview-focus extras") ──────────────
-        // These keys belong to the list at every other moment, which is exactly
-        // why they are guarded rather than moved: the list's rows are `InList`
-        // and these are `PreviewMedia`, so the same key is the sort chord in one
-        // pane and the frame step in the other, and neither is ever un-learned.
-        // Declared before the plain `InPreview` rows below so a video wins over
-        // the document reading of the key.
-        (Global, "space", C::PlayPause,        "Play / pause",           PreviewMedia),
-        (Global, ",",     C::FrameStepBack,    "Step back one frame",    PreviewMedia),
-        (Global, ".",     C::FrameStepForward, "Step forward one frame", PreviewMedia),
-        (Global, "m",     C::Mute,             "Mute",                   PreviewMedia),
-        (Global, "up",    C::VolumeUp,         "Volume up",              PreviewMedia),
-        (Global, "down",  C::VolumeDown,       "Volume down",            PreviewMedia),
+        // ── The preview, driven from the list (§4.3) ────────────────────────
+        // The keyboard never leaves the list (PLAN §2.1), so every one of these
+        // acts on the file the cursor is standing on and none of them may take
+        // a key the list already owns. **Ctrl+arrow is the preview's arrow
+        // family**: one modifier, four directions, and the pair that points
+        // sideways reads as the frame step on a clip and as the page turn on
+        // anything else — the same `MediaHovered` split the transport already
+        // uses, declared media-first so a video wins.
+        (Global, "ctrl+left",  C::FrameStepBack,    "Step back one frame",    MediaHovered),
+        (Global, "ctrl+right", C::FrameStepForward, "Step forward one frame", MediaHovered),
+        (Global, "ctrl+m",     C::Mute,             "Mute",                   MediaHovered),
 
-        // ── Preview focus, documents and images (§4.3) ──────────────────────
-        (Global, "up",     C::PreviewUp,           "Scroll up",                InPreview),
-        (Global, "down",   C::PreviewDown,         "Scroll down",              InPreview),
-        (Global, "left",   C::PreviewLeft,         "Previous page / pan left", InPreview),
-        (Global, "right",  C::PreviewRight,        "Next page / pan right",    InPreview),
-        (Global, "ctrl+u", C::PreviewHalfPageUp,   "Half page up",             InPreview),
-        (Global, "ctrl+d", C::PreviewHalfPageDown, "Half page down",           InPreview),
-        (Global, "space",  C::PreviewPageDown,     "Page down",                InPreview),
-        (Global, "g g",    C::PreviewTop,          "Top of document",          InPreview),
-        (Global, "G",      C::PreviewBottom,       "Bottom of document",       InPreview),
-        (Global, "+",      C::PreviewZoomIn,       "Zoom in",                  InPreview),
-        (Global, "=",      C::PreviewZoomIn,       "Zoom in",                  InPreview),
-        (Global, "-",      C::PreviewZoomOut,      "Zoom out",                 InPreview),
-        (Global, "0",      C::PreviewZoomReset,    "Reset zoom",               InPreview),
+        (Global, "ctrl+up",      C::PreviewUp,           "Preview: up a line / layer",   Always),
+        (Global, "ctrl+down",    C::PreviewDown,         "Preview: down a line / layer", Always),
+        (Global, "ctrl+left",    C::PreviewLeft,         "Preview: previous page",       Always),
+        (Global, "ctrl+right",   C::PreviewRight,        "Preview: next page",           Always),
+        (Global, "ctrl+shift+u", C::PreviewHalfPageUp,   "Preview: half page up",        Always),
+        (Global, "ctrl+shift+d", C::PreviewHalfPageDown, "Preview: half page down",      Always),
+        (Global, "shift+space",  C::PreviewPageDown,     "Preview: page down",           Always),
+        (Global, "ctrl+home",    C::PreviewTop,          "Preview: top",                 Always),
+        (Global, "ctrl+end",     C::PreviewBottom,       "Preview: bottom",              Always),
+        (Global, "+",            C::PreviewZoomIn,       "Preview: zoom in",             Always),
+        (Global, "=",            C::PreviewZoomIn,       "Preview: zoom in",             Always),
+        // The one key in the family that had to move: `-` is the absolute
+        // symlink in Files (PLAN §4.1) and a file operation outranks a zoom, so
+        // zoom out takes the Alt spelling of the same key rather than a letter
+        // nobody would guess.
+        (Global, "alt+-",        C::PreviewZoomOut,      "Preview: zoom out",            Always),
+        (Global, "0",            C::PreviewZoomReset,    "Preview: reset zoom",          Always),
 
         // ── Files: quitting ─────────────────────────────────────────────────
         (Files, "q",      C::Quit,          "Quit",                                 Always),
@@ -120,47 +121,42 @@ pub(super) fn build() -> Registry {
         (Files, "ctrl+c", C::CloseTab,      "Close tab, or quit if it is the last", Always),
 
         // ── Files: the cursor ───────────────────────────────────────────────
-        (Files, "up",             C::CursorUp,       "Previous file",                     InList),
-        (Files, "down",           C::CursorDown,     "Next file",                         InList),
-        (Files, "ctrl+u",         C::HalfPageUp,     "Half page up",                      InList),
-        (Files, "ctrl+d",         C::HalfPageDown,   "Half page down",                    InList),
-        (Files, "ctrl+b",         C::PageUp,         "Page up",                           InList),
-        (Files, "ctrl+f",         C::PageDown,       "Page down",                         InList),
-        (Files, "pageup",         C::PageUp,         "Page up",                           InList),
-        (Files, "pagedown",       C::PageDown,       "Page down",                         InList),
-        (Files, "shift+pageup",   C::HalfPageUp,     "Half page up",                      InList),
-        (Files, "shift+pagedown", C::HalfPageDown,   "Half page down",                    InList),
-        (Files, "g g",            C::CursorTop,      "Go to top",                         InList),
-        (Files, "G",              C::CursorBottom,   "Go to bottom",                      InList),
-        (Files, "left",           C::Leave,          "Back to the parent directory",      InList),
-        (Files, "right",          C::EnterOrPreview, "Enter directory, or focus preview", InList),
+        (Files, "up",             C::CursorUp,       "Previous file",                     Always),
+        (Files, "down",           C::CursorDown,     "Next file",                         Always),
+        (Files, "ctrl+u",         C::HalfPageUp,     "Half page up",                      Always),
+        (Files, "ctrl+d",         C::HalfPageDown,   "Half page down",                    Always),
+        (Files, "ctrl+b",         C::PageUp,         "Page up",                           Always),
+        (Files, "ctrl+f",         C::PageDown,       "Page down",                         Always),
+        (Files, "pageup",         C::PageUp,         "Page up",                           Always),
+        (Files, "pagedown",       C::PageDown,       "Page down",                         Always),
+        (Files, "shift+pageup",   C::HalfPageUp,     "Half page up",                      Always),
+        (Files, "shift+pagedown", C::HalfPageDown,   "Half page down",                    Always),
+        (Files, "g g",            C::CursorTop,      "Go to top",                         Always),
+        (Files, "G",              C::CursorBottom,   "Go to bottom",                      Always),
+        (Files, "left",           C::Leave,          "Back to the parent directory",      Always),
+        // `→` enters a directory (and an archive, §7.3). On a plain file there
+        // is nothing to the right to go into, so it does nothing at all.
+        (Files, "right",          C::EnterDirectory, "Enter directory",                   Always),
         (Files, "alt+left",       C::HistoryBack,    "Back to previous directory",        Always),
         (Files, "alt+right",      C::HistoryForward, "Forward to next directory",         Always),
-        // The parent pane gets a cursor of its own once a click has focused it
-        // — PLAN §2.1's `in_parent()`, which otherwise names a predicate with
-        // nothing behind it.
-        (Files, "up",             C::ParentPrev,     "Previous directory",                InParent),
-        (Files, "down",           C::ParentNext,     "Next directory",                    InParent),
-        (Files, "right",          C::ParentEnter,    "Enter directory",                   InParent),
-        (Files, "enter",          C::ParentEnter,    "Enter directory",                   InParent),
 
         // ── Files: selection ────────────────────────────────────────────────
-        (Files, "space",  C::ToggleSelect,    "Toggle selection and advance", InList),
-        (Files, "ctrl+a", C::SelectAll,       "Select all files",             InList),
-        (Files, "ctrl+r", C::InvertSelection, "Invert the selection",         InList),
-        (Files, "v",      C::VisualMode,      "Visual (selection) mode",      InList),
-        (Files, "V",      C::VisualUnset,     "Visual (unset) mode",          InList),
+        (Files, "space",  C::ToggleSelect,    "Toggle selection and advance", Always),
+        (Files, "ctrl+a", C::SelectAll,       "Select all files",             Always),
+        (Files, "ctrl+r", C::InvertSelection, "Invert the selection",         Always),
+        (Files, "v",      C::VisualMode,      "Visual (selection) mode",      Always),
+        (Files, "V",      C::VisualUnset,     "Visual (unset) mode",          Always),
         // yazi parity: nudge the preview without leaving the list.
-        (Files, "K",      C::SeekPreviewUp,   "Seek preview up 5",            InList),
-        (Files, "J",      C::SeekPreviewDown, "Seek preview down 5",          InList),
+        (Files, "K",      C::SeekPreviewUp,   "Seek preview up 5",            Always),
+        (Files, "J",      C::SeekPreviewDown, "Seek preview down 5",          Always),
         (Files, "tab",    C::Spot,            "Spot the hovered file",        Always),
         // No yazi ancestor: grid view is delightfile's own. ctrl+g is free in
         // yazi's mgr table, and g alone is the goto prefix — close cousins.
-        (Files, "ctrl+g", C::ToggleView,      "Toggle list / grid view",      InList),
+        (Files, "ctrl+g", C::ToggleView,      "Toggle list / grid view",      Always),
 
         // ── Files: opening ──────────────────────────────────────────────────
         (Files, "o",           C::Open,            "Open",       Always),
-        (Files, "enter",       C::Open,            "Open",       InList),
+        (Files, "enter",       C::Open,            "Open",       Always),
         (Files, "O",           C::OpenInteractive, "Open with…", Always),
         (Files, "shift+enter", C::OpenInteractive, "Open with…", Always),
 
@@ -172,8 +168,8 @@ pub(super) fn build() -> Registry {
         (Files, "Y",      C::CopyToClipboard,   "Copy to the system clipboard",        Always),
         (Files, "X",      C::Unyank,            "Cancel the yank",                     Always),
         // `-` is guarded because the preview owns it as the zoom-out.
-        (Files, "-",      C::SymlinkAbsolute,   "Symlink (absolute)",                  InList),
-        (Files, "_",      C::SymlinkRelative,   "Symlink (relative)",                  InList),
+        (Files, "-",      C::SymlinkAbsolute,   "Symlink (absolute)",                  Always),
+        (Files, "_",      C::SymlinkRelative,   "Symlink (relative)",                  Always),
         (Files, "ctrl+-", C::Hardlink,          "Hardlink",                            Always),
         (Files, "d",      C::Trash,             "Trash",                               Always),
         (Files, "D",      C::DeletePermanently, "Delete permanently",                  Always),
@@ -185,20 +181,20 @@ pub(super) fn build() -> Registry {
         (Files, "u",      C::Undo,              "Undo last operation",                 Always),
         (Files, "w",      C::TasksShow,         "Task manager",                        Always),
         (Files, "M",      C::MountManager,      "Mount manager",                       Always),
-        (Files, "b",      C::BasketToggle,      "Toss into / out of the basket",       InList),
+        (Files, "b",      C::BasketToggle,      "Toss into / out of the basket",       Always),
         (Files, "B",      C::BasketShow,        "Show the selection basket",           Always),
-        (Files, "e",      C::ArchiveExtractHere,      "Extract the archive here",      InList),
-        (Files, "E",      C::ArchiveExtractSubfolder, "Extract into a new folder",     InList),
+        (Files, "e",      C::ArchiveExtractHere,      "Extract the archive here",      Always),
+        (Files, "E",      C::ArchiveExtractSubfolder, "Extract into a new folder",     Always),
 
         // ── Files: what is shown ────────────────────────────────────────────
-        (Files, ".",   C::ToggleHidden,        "Toggle hidden files",   InList),
-        (Files, "m s", C::LinemodeSize,        "Linemode: size",        InList),
-        (Files, "m p", C::LinemodePermissions, "Linemode: permissions", InList),
-        (Files, "m b", C::LinemodeBtime,       "Linemode: created",     InList),
-        (Files, "m m", C::LinemodeMtime,       "Linemode: modified",    InList),
-        (Files, "m o", C::LinemodeOwner,       "Linemode: owner",       InList),
-        (Files, "m n", C::LinemodeNone,        "Linemode: none",        InList),
-        (Files, "m u", C::DiskUsage,           "Show disk usage",       InList),
+        (Files, ".",   C::ToggleHidden,        "Toggle hidden files",   Always),
+        (Files, "m s", C::LinemodeSize,        "Linemode: size",        Always),
+        (Files, "m p", C::LinemodePermissions, "Linemode: permissions", Always),
+        (Files, "m b", C::LinemodeBtime,       "Linemode: created",     Always),
+        (Files, "m m", C::LinemodeMtime,       "Linemode: modified",    Always),
+        (Files, "m o", C::LinemodeOwner,       "Linemode: owner",       Always),
+        (Files, "m n", C::LinemodeNone,        "Linemode: none",        Always),
+        (Files, "m u", C::DiskUsage,           "Show disk usage",       Always),
 
         // ── Files: copy the path, four ways, and the contents ───────────────
         (Files, "c c", C::CopyPath,     "Copy the file path",                      Always),
@@ -208,15 +204,15 @@ pub(super) fn build() -> Registry {
         (Files, "c t", C::CopyFileText, "Copy the text contents (yank if binary)", Always),
 
         // ── Files: filter, find, search, jump ───────────────────────────────
-        (Files, "f",      C::Filter,        "Filter files",                InList),
+        (Files, "f",      C::Filter,        "Filter files",                Always),
         // The vi set, minus the half of it that would cost the help key: `/`
         // searches forward, `n` is the next match and `N` the previous one.
         // Backwards *search* (`find-prev`) keeps its command id for anybody who
         // wants it back in `keymap.toml`; `?` is help (see Global above), which
         // is what the key is for in every other program on the machine.
-        (Files, "/",      C::FindNext,      "Find",                        InList),
-        (Files, "n",      C::FindArrowNext, "Next match",                  InList),
-        (Files, "N",      C::FindArrowPrev, "Previous match",              InList),
+        (Files, "/",      C::FindNext,      "Find",                        Always),
+        (Files, "n",      C::FindArrowNext, "Next match",                  Always),
+        (Files, "N",      C::FindArrowPrev, "Previous match",              Always),
         (Files, "s",      C::SearchName,    "Search by name (fd)",         Always),
         (Files, "S",      C::SearchContent, "Search by content (rg)",      Always),
         (Files, "ctrl+s", C::CancelSearch,  "Cancel the search",           Always),
@@ -226,30 +222,30 @@ pub(super) fn build() -> Registry {
         // ── Files: sort. The time and size sorts also switch the linemode, as
         // in the yazi config this is ported from — the column you just sorted
         // by is the column you want to see.
-        (Files, ", m", C::SortMtime,               "Sort by modified",              InList),
-        (Files, ", M", C::SortMtimeReverse,        "Sort by modified (reverse)",    InList),
-        (Files, ", b", C::SortBtime,               "Sort by created",               InList),
-        (Files, ", B", C::SortBtimeReverse,        "Sort by created (reverse)",     InList),
-        (Files, ", e", C::SortExtension,           "Sort by extension",             InList),
-        (Files, ", E", C::SortExtensionReverse,    "Sort by extension (reverse)",   InList),
-        (Files, ", a", C::SortAlphabetical,        "Sort alphabetically",           InList),
-        (Files, ", A", C::SortAlphabeticalReverse, "Sort alphabetically (reverse)", InList),
-        (Files, ", n", C::SortNatural,             "Sort naturally",                InList),
-        (Files, ", N", C::SortNaturalReverse,      "Sort naturally (reverse)",      InList),
-        (Files, ", s", C::SortSize,                "Sort by size",                  InList),
-        (Files, ", S", C::SortSizeReverse,         "Sort by size (reverse)",        InList),
-        (Files, ", r", C::SortRandom,              "Sort randomly",                 InList),
+        (Files, ", m", C::SortMtime,               "Sort by modified",              Always),
+        (Files, ", M", C::SortMtimeReverse,        "Sort by modified (reverse)",    Always),
+        (Files, ", b", C::SortBtime,               "Sort by created",               Always),
+        (Files, ", B", C::SortBtimeReverse,        "Sort by created (reverse)",     Always),
+        (Files, ", e", C::SortExtension,           "Sort by extension",             Always),
+        (Files, ", E", C::SortExtensionReverse,    "Sort by extension (reverse)",   Always),
+        (Files, ", a", C::SortAlphabetical,        "Sort alphabetically",           Always),
+        (Files, ", A", C::SortAlphabeticalReverse, "Sort alphabetically (reverse)", Always),
+        (Files, ", n", C::SortNatural,             "Sort naturally",                Always),
+        (Files, ", N", C::SortNaturalReverse,      "Sort naturally (reverse)",      Always),
+        (Files, ", s", C::SortSize,                "Sort by size",                  Always),
+        (Files, ", S", C::SortSizeReverse,         "Sort by size (reverse)",        Always),
+        (Files, ", r", C::SortRandom,              "Sort randomly",                 Always),
 
         // ── Files: the goto chords that are not bookmarks. The bookmark rows
         // (`g h`, `g w`, …) are registered from the config table below, so the
         // paths stay editable in one place (PLAN §3).
-        (Files, "g r",     C::GotoGitRoot,     "Go to the git root",         InList),
-        (Files, "g space", C::GotoInteractive, "Jump interactively",         InList),
-        (Files, "g f",     C::FollowSymlink,   "Follow the hovered symlink", InList),
+        (Files, "g r",     C::GotoGitRoot,     "Go to the git root",         Always),
+        (Files, "g space", C::GotoInteractive, "Jump interactively",         Always),
+        (Files, "g f",     C::FollowSymlink,   "Follow the hovered symlink", Always),
         // yazi binds `g t` to `/tmp`; PLAN §4.1 dropped that row, so the slot is
         // free and the trash — which PLAN §7.4 wants a virtual location for —
         // takes it. `t` for trash, one key from a list, next to the other places.
-        (Files, "g t",     C::OpenTrash,       "Browse the trash",           InList),
+        (Files, "g t",     C::OpenTrash,       "Browse the trash",           Always),
 
         // ── Files: tabs (§2). `[`/`]` belong to transport, so Alt carries the
         // switch and the swaps keep the shifted brackets.

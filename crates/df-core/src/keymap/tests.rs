@@ -25,15 +25,6 @@ fn files() -> ContextStack {
     ContextStack::browser()
 }
 
-fn preview_media() -> WhenFlags {
-    WhenFlags {
-        in_list: false,
-        in_preview: true,
-        in_parent: false,
-        media_hovered: true,
-    }
-}
-
 // ── The table itself ────────────────────────────────────────────────────────
 
 /// A panic here means a default row breaks the table's own rules — a duplicate
@@ -49,7 +40,7 @@ fn defaults_are_installable() {
 fn the_files_table_is_the_muscle_memory_contract() {
     let km = Registry::defaults();
     let stack = files();
-    let f = WhenFlags::LIST;
+    let f = WhenFlags::NONE;
     for (keys, expected) in [
         ("q", Command::Quit),
         ("Q", Command::QuitNoCwdFile),
@@ -63,7 +54,7 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("g g", Command::CursorTop),
         ("G", Command::CursorBottom),
         ("left", Command::Leave),
-        ("right", Command::EnterOrPreview),
+        ("right", Command::EnterDirectory),
         ("alt+left", Command::HistoryBack),
         ("alt+right", Command::HistoryForward),
         ("space", Command::ToggleSelect),
@@ -159,7 +150,7 @@ fn goto_chords_index_the_bookmark_table() {
     for (i, bookmark) in bookmarks.iter().enumerate() {
         let keys = format!("g {}", bookmark.key);
         assert_eq!(
-            press(&km, &files(), WhenFlags::LIST, &keys),
+            press(&km, &files(), WhenFlags::NONE, &keys),
             Dispatch::Match(Command::Goto(i as u8)),
             "`{keys}` should be bookmark {i}"
         );
@@ -178,11 +169,11 @@ fn a_chord_is_pending_until_it_completes() {
     let mut state = KeymapState::new();
     let now = Instant::now();
 
-    let first = km.dispatch(&mut state, &stack, WhenFlags::LIST, chord("g"), now);
+    let first = km.dispatch(&mut state, &stack, WhenFlags::NONE, chord("g"), now);
     assert!(matches!(first, Dispatch::Pending { .. }), "{first:?}");
     assert_eq!(state.pending(), &[chord("g")]);
 
-    let second = km.dispatch(&mut state, &stack, WhenFlags::LIST, chord("g"), now);
+    let second = km.dispatch(&mut state, &stack, WhenFlags::NONE, chord("g"), now);
     assert_eq!(second, Dispatch::Match(Command::CursorTop));
     // A completed chord clears itself, or the next `g` would finish the old one.
     assert!(!state.is_pending());
@@ -194,8 +185,8 @@ fn a_wrong_second_key_abandons_the_chord() {
     let stack = files();
     let mut state = KeymapState::new();
     let now = Instant::now();
-    km.dispatch(&mut state, &stack, WhenFlags::LIST, chord("g"), now);
-    let result = km.dispatch(&mut state, &stack, WhenFlags::LIST, chord("q"), now);
+    km.dispatch(&mut state, &stack, WhenFlags::NONE, chord("g"), now);
+    let result = km.dispatch(&mut state, &stack, WhenFlags::NONE, chord("q"), now);
     assert_eq!(result, Dispatch::NoMatch);
     assert!(!state.is_pending(), "a typo must not leave the chord armed");
 }
@@ -205,7 +196,7 @@ fn a_wrong_second_key_abandons_the_chord() {
 fn pending_lists_continuations_in_declaration_order() {
     let km = Registry::defaults();
     let stack = files();
-    let Dispatch::Pending { continuations, .. } = press(&km, &stack, WhenFlags::LIST, "m") else {
+    let Dispatch::Pending { continuations, .. } = press(&km, &stack, WhenFlags::NONE, "m") else {
         panic!("`m` should be a prefix");
     };
     let labels: Vec<String> = continuations.iter().map(|c| c.next.label()).collect();
@@ -217,7 +208,7 @@ fn pending_lists_continuations_in_declaration_order() {
 
     // The sort chord is the same shape, and its shifted twins are separate
     // rows: `, m` and `, M` are two different sorts.
-    let Dispatch::Pending { continuations, .. } = press(&km, &stack, WhenFlags::LIST, ",") else {
+    let Dispatch::Pending { continuations, .. } = press(&km, &stack, WhenFlags::NONE, ",") else {
         panic!("`,` should be a prefix");
     };
     let labels: Vec<String> = continuations.iter().map(|c| c.next.label()).collect();
@@ -233,7 +224,7 @@ fn which_key_waits_the_delay_out() {
     let km = Registry::defaults();
     let mut state = KeymapState::new();
     let start = Instant::now();
-    km.dispatch(&mut state, &files(), WhenFlags::LIST, chord("g"), start);
+    km.dispatch(&mut state, &files(), WhenFlags::NONE, chord("g"), start);
     assert!(!state.which_key_visible(start));
     assert!(!state.which_key_visible(start + Duration::from_millis(174)));
     assert!(state.which_key_visible(start + WHICH_KEY_DELAY));
@@ -251,19 +242,19 @@ fn the_most_recently_pushed_context_wins() {
     let mut stack = files();
     // In the browser, Tab spots the hovered file…
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "tab"),
+        press(&km, &stack, WhenFlags::NONE, "tab"),
         Dispatch::Match(Command::Spot)
     );
     // …and once the spot panel is up, the same key closes it.
     stack.push(Context::Spot);
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "tab"),
+        press(&km, &stack, WhenFlags::NONE, "tab"),
         Dispatch::Match(Command::OverlayClose)
     );
     // Popping it puts the browser's meaning back.
     assert!(stack.pop(Context::Spot));
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "tab"),
+        press(&km, &stack, WhenFlags::NONE, "tab"),
         Dispatch::Match(Command::Spot)
     );
 }
@@ -283,12 +274,8 @@ fn global_is_the_floor_and_is_never_popped() {
     assert_eq!(stack.top(), Context::Palette);
     // Global still answers from under an overlay: the transport works anywhere.
     let km = Registry::defaults();
-    let media = WhenFlags {
-        media_hovered: true,
-        ..WhenFlags::default()
-    };
     assert_eq!(
-        press(&km, &stack, media, "k"),
+        press(&km, &stack, WhenFlags::MEDIA, "k"),
         Dispatch::Match(Command::PlayPause)
     );
 }
@@ -317,78 +304,130 @@ fn a_nearer_prefix_beats_a_further_exact_match() {
     .expect("register");
     let stack = files();
     assert!(matches!(
-        press(&km, &stack, WhenFlags::LIST, "c"),
+        press(&km, &stack, WhenFlags::NONE, "c"),
         Dispatch::Pending { .. }
     ));
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "c c"),
+        press(&km, &stack, WhenFlags::NONE, "c c"),
         Dispatch::Match(Command::CopyPath)
     );
 }
 
 // ── `when` predicates ───────────────────────────────────────────────────────
 
-/// PLAN §2.1: focus does not change the context stack; the predicates do the
-/// work. The four keys the list and the preview both want are the proof.
+/// PLAN §2.1: the keyboard is always in the list, so the four keys the list and
+/// the preview used to fight over are the list's, full stop — and the preview's
+/// versions of them are the modified spellings that nothing else wanted.
 #[test]
-fn focus_changes_meaning_without_changing_the_stack() {
+fn the_list_owns_every_plain_key() {
     let km = Registry::defaults();
     let stack = files();
-    let list = WhenFlags::LIST;
-    let preview = preview_media();
+    // On a clip, which is the case that used to change all four meanings.
+    let media = WhenFlags::MEDIA;
 
-    // `,` is the sort chord in the list and the frame step in the preview.
+    // `,` is the sort chord, and only the sort chord.
     assert!(matches!(
-        press(&km, &stack, list, ","),
+        press(&km, &stack, media, ","),
         Dispatch::Pending { .. }
     ));
+    // `.` hides files. `m` is the linemode chord. `Space` selects.
     assert_eq!(
-        press(&km, &stack, preview, ","),
-        Dispatch::Match(Command::FrameStepBack)
-    );
-    // `.` hides files, or steps a frame.
-    assert_eq!(
-        press(&km, &stack, list, "."),
+        press(&km, &stack, media, "."),
         Dispatch::Match(Command::ToggleHidden)
     );
-    assert_eq!(
-        press(&km, &stack, preview, "."),
-        Dispatch::Match(Command::FrameStepForward)
-    );
-    // `m` is the linemode chord, or the mute.
     assert!(matches!(
-        press(&km, &stack, list, "m"),
+        press(&km, &stack, media, "m"),
         Dispatch::Pending { .. }
     ));
     assert_eq!(
-        press(&km, &stack, preview, "m"),
-        Dispatch::Match(Command::Mute)
-    );
-    // `Space` selects, or plays.
-    assert_eq!(
-        press(&km, &stack, list, "space"),
+        press(&km, &stack, media, "space"),
         Dispatch::Match(Command::ToggleSelect)
     );
+    // …and the arrows move the cursor whatever is in the preview pane.
     assert_eq!(
-        press(&km, &stack, preview, "space"),
-        Dispatch::Match(Command::PlayPause)
-    );
-    // …and on a *document* in the preview, Space pages instead of playing.
-    let preview_doc = WhenFlags {
-        in_preview: true,
-        ..WhenFlags::default()
-    };
-    assert_eq!(
-        press(&km, &stack, preview_doc, "space"),
-        Dispatch::Match(Command::PreviewPageDown)
+        press(&km, &stack, media, "up"),
+        Dispatch::Match(Command::CursorUp)
     );
     assert_eq!(
-        press(&km, &stack, preview_doc, "g g"),
-        Dispatch::Match(Command::PreviewTop)
+        press(&km, &stack, media, "left"),
+        Dispatch::Match(Command::Leave)
     );
     assert_eq!(
-        press(&km, &stack, preview_doc, "ctrl+d"),
-        Dispatch::Match(Command::PreviewHalfPageDown)
+        press(&km, &stack, media, "right"),
+        Dispatch::Match(Command::EnterDirectory)
+    );
+    assert_eq!(
+        press(&km, &stack, media, "g g"),
+        Dispatch::Match(Command::CursorTop)
+    );
+    assert_eq!(
+        press(&km, &stack, media, "ctrl+d"),
+        Dispatch::Match(Command::HalfPageDown)
+    );
+    assert_eq!(
+        press(&km, &stack, media, "-"),
+        Dispatch::Match(Command::SymlinkAbsolute)
+    );
+}
+
+/// The other half of the same contract: every preview key still exists, on a
+/// modified spelling, and works from the list on whatever the cursor is on.
+#[test]
+fn the_preview_keys_are_the_modified_ones() {
+    let km = Registry::defaults();
+    let stack = files();
+    for (keys, expected) in [
+        ("ctrl+up", Command::PreviewUp),
+        ("ctrl+down", Command::PreviewDown),
+        ("ctrl+shift+u", Command::PreviewHalfPageUp),
+        ("ctrl+shift+d", Command::PreviewHalfPageDown),
+        ("shift+space", Command::PreviewPageDown),
+        ("ctrl+home", Command::PreviewTop),
+        ("ctrl+end", Command::PreviewBottom),
+        ("+", Command::PreviewZoomIn),
+        ("=", Command::PreviewZoomIn),
+        ("alt+-", Command::PreviewZoomOut),
+        ("0", Command::PreviewZoomReset),
+    ] {
+        assert_eq!(
+            press(&km, &stack, WhenFlags::NONE, keys),
+            Dispatch::Match(expected),
+            "`{keys}`"
+        );
+        // …and none of them changes meaning because a clip is hovered.
+        assert_eq!(
+            press(&km, &stack, WhenFlags::MEDIA, keys),
+            Dispatch::Match(expected),
+            "`{keys}` on a clip"
+        );
+    }
+    // The one pair that does split, and the split is on what is under the
+    // cursor rather than on where the keyboard is: sideways is the page turn
+    // on a document and the frame step on a clip.
+    assert_eq!(
+        press(&km, &stack, WhenFlags::NONE, "ctrl+left"),
+        Dispatch::Match(Command::PreviewLeft)
+    );
+    assert_eq!(
+        press(&km, &stack, WhenFlags::NONE, "ctrl+right"),
+        Dispatch::Match(Command::PreviewRight)
+    );
+    assert_eq!(
+        press(&km, &stack, WhenFlags::MEDIA, "ctrl+left"),
+        Dispatch::Match(Command::FrameStepBack)
+    );
+    assert_eq!(
+        press(&km, &stack, WhenFlags::MEDIA, "ctrl+right"),
+        Dispatch::Match(Command::FrameStepForward)
+    );
+    // Mute is transport, so it is only there when there is something to mute.
+    assert_eq!(
+        press(&km, &stack, WhenFlags::MEDIA, "ctrl+m"),
+        Dispatch::Match(Command::Mute)
+    );
+    assert_eq!(
+        press(&km, &stack, WhenFlags::NONE, "ctrl+m"),
+        Dispatch::NoMatch
     );
 }
 
@@ -398,11 +437,6 @@ fn focus_changes_meaning_without_changing_the_stack() {
 fn transport_is_inert_on_a_file_that_cannot_play() {
     let km = Registry::defaults();
     let stack = files();
-    let media = WhenFlags {
-        in_list: true,
-        media_hovered: true,
-        ..WhenFlags::default()
-    };
     for (keys, expected) in [
         ("k", Command::PlayPause),
         ("j", Command::ShuttleReverse),
@@ -416,33 +450,32 @@ fn transport_is_inert_on_a_file_that_cannot_play() {
         ("shift+down", Command::VolumeDown),
     ] {
         assert_eq!(
-            press(&km, &stack, media, keys),
+            press(&km, &stack, WhenFlags::MEDIA, keys),
             Dispatch::Match(expected),
             "`{keys}`"
         );
         assert_eq!(
-            press(&km, &stack, WhenFlags::LIST, keys),
+            press(&km, &stack, WhenFlags::NONE, keys),
             Dispatch::NoMatch,
             "`{keys}` must do nothing on a text file"
         );
     }
 }
 
+/// The parent column has no cursor of its own any more (PLAN §2.1). It was
+/// only ever reachable by clicking the column to move the keyboard into it,
+/// and clicking one of its rows has always just gone there — so the three
+/// `parent-*` commands went with the focus that was their only door.
 #[test]
-fn the_parent_pane_has_its_own_cursor() {
-    let km = Registry::defaults();
-    let stack = files();
-    let parent = WhenFlags {
-        in_parent: true,
-        ..WhenFlags::default()
-    };
+fn the_parent_column_has_no_keyboard_cursor() {
+    assert_eq!(Command::from_id("parent-prev"), None);
+    assert_eq!(Command::from_id("parent-next"), None);
+    assert_eq!(Command::from_id("parent-enter"), None);
+    // …and `→` is plain "enter the directory" now, not enter-or-focus.
+    assert_eq!(Command::from_id("enter-or-preview"), None);
     assert_eq!(
-        press(&km, &stack, parent, "up"),
-        Dispatch::Match(Command::ParentPrev)
-    );
-    assert_eq!(
-        press(&km, &stack, parent, "enter"),
-        Dispatch::Match(Command::ParentEnter)
+        Command::from_id("enter-directory"),
+        Some(Command::EnterDirectory)
     );
 }
 
@@ -455,7 +488,7 @@ fn the_question_mark_is_help_in_every_context() {
         let mut stack = files();
         stack.push(context);
         assert_eq!(
-            press(&km, &stack, WhenFlags::LIST, "?"),
+            press(&km, &stack, WhenFlags::NONE, "?"),
             Dispatch::Match(Command::Help),
             "`?` in {context:?}"
         );
@@ -463,11 +496,11 @@ fn the_question_mark_is_help_in_every_context() {
     // …and the find keys are the vi set that is left: `/`, `n`, `N`.
     let stack = files();
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "/"),
+        press(&km, &stack, WhenFlags::NONE, "/"),
         Dispatch::Match(Command::FindNext)
     );
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "N"),
+        press(&km, &stack, WhenFlags::NONE, "N"),
         Dispatch::Match(Command::FindArrowPrev)
     );
 }
@@ -481,13 +514,13 @@ fn the_help_browser_only_lists_what_is_reachable() {
             .iter()
             .any(|b| b.command == command)
     };
-    assert!(listed(WhenFlags::LIST, Command::ToggleHidden));
-    assert!(!listed(WhenFlags::LIST, Command::PlayPause));
-    assert!(listed(preview_media(), Command::PlayPause));
+    assert!(listed(WhenFlags::NONE, Command::ToggleHidden));
+    assert!(!listed(WhenFlags::NONE, Command::PlayPause));
+    assert!(listed(WhenFlags::MEDIA, Command::PlayPause));
     // Most specific first, so the help sheet reads the way dispatch resolves.
     let mut stack = stack;
     stack.push(Context::Tasks);
-    let bindings = km.active_bindings(&stack, WhenFlags::LIST);
+    let bindings = km.active_bindings(&stack, WhenFlags::NONE);
     assert_eq!(bindings[0].context, Context::Tasks);
 }
 
@@ -506,12 +539,12 @@ fn the_conflict_dialog_answers_are_registry_rows() {
         ("a", Command::ConflictApplyAll, "Apply to all"),
     ] {
         assert_eq!(
-            press(&km, &stack, WhenFlags::LIST, keys),
+            press(&km, &stack, WhenFlags::NONE, keys),
             Dispatch::Match(expected),
             "{keys}"
         );
         assert_eq!(km.binding_label(expected).as_deref(), Some(keys));
-        let listed = km.active_bindings(&stack, WhenFlags::LIST);
+        let listed = km.active_bindings(&stack, WhenFlags::NONE);
         let row = listed
             .iter()
             .find(|b| b.command == expected)
@@ -521,7 +554,7 @@ fn the_conflict_dialog_answers_are_registry_rows() {
     }
     // The dialog's keys stay the dialog's: `s` is still search in the browser.
     assert_eq!(
-        press(&km, &files(), WhenFlags::LIST, "s"),
+        press(&km, &files(), WhenFlags::NONE, "s"),
         Dispatch::Match(Command::SearchName)
     );
 }
@@ -533,11 +566,11 @@ fn the_task_panel_binds_pause_resume_and_cancel() {
     let mut stack = files();
     stack.push(Context::Tasks);
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "p"),
+        press(&km, &stack, WhenFlags::NONE, "p"),
         Dispatch::Match(Command::TaskPauseResume)
     );
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "x"),
+        press(&km, &stack, WhenFlags::NONE, "x"),
         Dispatch::Match(Command::TaskCancel)
     );
     assert_eq!(
@@ -634,18 +667,13 @@ fn a_user_override_cannot_steal_a_transport_key() {
     assert!(warnings[0].message.contains("reserved"), "{warnings:?}");
     assert_eq!(warnings[0].line, 2);
     // The transport still owns `j`…
-    let media = WhenFlags {
-        in_list: true,
-        media_hovered: true,
-        ..WhenFlags::default()
-    };
     assert_eq!(
-        press(&km, &files(), media, "j"),
+        press(&km, &files(), WhenFlags::MEDIA, "j"),
         Dispatch::Match(Command::ShuttleReverse)
     );
     // …and the *other* line in the same file still applied (PLAN §3).
     assert_eq!(
-        press(&km, &files(), WhenFlags::LIST, "g m"),
+        press(&km, &files(), WhenFlags::NONE, "g m"),
         Dispatch::Match(Command::MountManager)
     );
 }
@@ -669,16 +697,16 @@ fn overrides_replace_rebind_and_unbind() {
     assert!(warnings.is_empty(), "{warnings:?}");
     let stack = files();
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "g m"),
+        press(&km, &stack, WhenFlags::NONE, "g m"),
         Dispatch::Match(Command::MountManager)
     );
-    assert_eq!(press(&km, &stack, WhenFlags::LIST, "q"), Dispatch::NoMatch);
+    assert_eq!(press(&km, &stack, WhenFlags::NONE, "q"), Dispatch::NoMatch);
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "d"),
+        press(&km, &stack, WhenFlags::NONE, "d"),
         Dispatch::Match(Command::DeletePermanently)
     );
     assert_eq!(
-        press(&km, &stack, WhenFlags::LIST, "f5"),
+        press(&km, &stack, WhenFlags::NONE, "f5"),
         Dispatch::Match(Command::Help)
     );
     // A rebound row inherits the command's description, so which-key does not
@@ -689,6 +717,40 @@ fn overrides_replace_rebind_and_unbind() {
         .find(|b| b.command == Command::MountManager)
         .expect("bound");
     assert_eq!(bound.description, "Mount manager");
+}
+
+/// A `keymap.toml` written against the old pane-focus model named a `[preview]`
+/// context and the three `parent-*` commands. None of them exists any more
+/// (PLAN §2.1), and a config that mentions them **warns and keeps going** — the
+/// file is not rejected, and every other line in it still applies (PLAN §3).
+#[test]
+fn a_config_from_the_pane_focus_era_warns_and_is_ignored() {
+    let mut km = Registry::defaults();
+    let warnings = km.apply_overrides(
+        r#"
+        [preview]
+        "up" = "preview-up"
+        [files]
+        "f9" = "parent-enter"
+        "f10" = "help"
+        "#,
+        Path::new("keymap.toml"),
+    );
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(
+        warnings[0].message.contains("unknown context"),
+        "{warnings:?}"
+    );
+    assert!(warnings[0].message.contains("preview"), "{warnings:?}");
+    assert!(
+        warnings[1].message.contains("unknown command"),
+        "{warnings:?}"
+    );
+    // …and the line under them still took effect.
+    assert_eq!(
+        press(&km, &files(), WhenFlags::NONE, "f10"),
+        Dispatch::Match(Command::Help)
+    );
 }
 
 #[test]
@@ -712,7 +774,7 @@ fn bad_override_lines_warn_and_the_rest_still_applies() {
     assert!(warnings[2].message.contains("unknown command"));
     assert!(warnings[3].message.contains("expected a command id"));
     assert_eq!(
-        press(&km, &files(), WhenFlags::LIST, "f8"),
+        press(&km, &files(), WhenFlags::NONE, "f8"),
         Dispatch::Match(Command::Help)
     );
 }
@@ -724,7 +786,7 @@ fn a_missing_keymap_file_says_nothing() {
     let warnings = km.apply_overrides_from_dir(Path::new("/nonexistent/delightfile-test"));
     assert!(warnings.is_empty());
     assert_eq!(
-        press(&km, &files(), WhenFlags::LIST, "q"),
+        press(&km, &files(), WhenFlags::NONE, "q"),
         Dispatch::Match(Command::Quit)
     );
 }
@@ -740,17 +802,17 @@ fn user_bookmarks_rebuild_the_goto_chords() {
     let warnings = km.apply_bookmarks(&bookmarks, Path::new("delightfile.toml"));
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(
-        press(&km, &files(), WhenFlags::LIST, "g m"),
+        press(&km, &files(), WhenFlags::NONE, "g m"),
         Dispatch::Match(Command::Goto(0))
     );
     // The shipped chords are gone, since the table replaced them.
     assert_eq!(
-        press(&km, &files(), WhenFlags::LIST, "g w"),
+        press(&km, &files(), WhenFlags::NONE, "g w"),
         Dispatch::NoMatch
     );
     // …but the goto chords that are not bookmarks stayed.
     assert_eq!(
-        press(&km, &files(), WhenFlags::LIST, "g r"),
+        press(&km, &files(), WhenFlags::NONE, "g r"),
         Dispatch::Match(Command::GotoGitRoot)
     );
 }

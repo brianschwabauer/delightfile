@@ -171,8 +171,8 @@ pub fn tab_strip(
         let rect = pressed_rect(rect, hovers.press(key));
         paint.painter.rect_filled(rect, ROW_RADIUS, fill);
         if is_active {
-            // The same 2 pt accent rule the focused pane wears (PLAN §2.1), on
-            // the same edge, because it is saying the same thing.
+            // A 2 pt accent rule on the top edge — the chrome's one mark for
+            // "this is the live one", used here and on the prompt row.
             let rule = egui::Rect::from_min_max(
                 egui::pos2(rect.left() + ROW_RADIUS as f32, rect.top()),
                 egui::pos2(rect.right() - ROW_RADIUS as f32, rect.top() + 2.0),
@@ -890,7 +890,7 @@ pub fn prompt_row(paint: &Painting<'_>, row: egui::Rect, prompt: &Prompt, tail: 
     let palette = paint.palette;
     let mut inner = bar_ground(paint, row);
     // The accent rule says the keyboard is *here* and not in the list — the
-    // same 2 pt mark a focused pane wears, for the same reason (PLAN §2.1).
+    // same 2 pt mark the active tab wears, for the same reason.
     paint.painter.rect_filled(
         egui::Rect::from_min_max(
             egui::pos2(row.left() + ROW_RADIUS as f32, row.top()),
@@ -2023,7 +2023,7 @@ mod tests {
 
             let registry = df_core::keymap::Registry::defaults();
             let stack = df_core::keymap::ContextStack::with(&[df_core::keymap::Context::Help]);
-            let all = crate::help::all_rows(&registry, &stack, df_core::keymap::WhenFlags::LIST);
+            let all = crate::help::all_rows(&registry, &stack, df_core::keymap::WhenFlags::NONE);
             let lines = crate::help::lines(&all, "");
             let mut help = Help::default();
             help.reset(&lines);

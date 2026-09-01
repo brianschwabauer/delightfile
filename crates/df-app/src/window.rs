@@ -20,7 +20,7 @@
 //!   journal, the clipboard, the basket, the config, the keymap registry, the
 //!   state store, the git front end, the vfs, the du scanner, the udisks
 //!   worker.
-//! - *Per window*: `gfx`, `tabs`, `focus`, the preview pane and its decoders,
+//! - *Per window*: `gfx`, `tabs`, the preview pane and its decoders,
 //!   the player, every overlay (`help`, `finder`, `search`, `dialog`,
 //!   `picker`, `panel`, `spot`, `menu`, `mounts`), the hover, ripple and
 //!   target tracks, `zones`, `drag`, `flip`, `path_bar`, `cursor_rect`.

@@ -11,12 +11,12 @@
 //! Ported from delightviewer's `keymap.rs`, with three additions the file
 //! manager needs and the viewer did not:
 //!
-//! 1. **`when` predicates.** PLAN §2.1 is emphatic that pane focus does *not*
-//!    change the context stack — the conflicts between "move the cursor" and
-//!    "scroll the preview" are resolved by predicates on the bindings instead.
-//!    df-core is headless, so a predicate cannot be a closure over the app; it
-//!    is a [`When`] tag, and dispatch is handed the [`WhenFlags`] that are true
-//!    right now.
+//! 1. **`when` predicates.** PLAN §2.1: the keyboard is always in the list, so
+//!    a binding's meaning turns on what the *cursor is standing on* rather than
+//!    on which pane has focus — `.` is the hidden-files toggle on a text file
+//!    and the frame step is somewhere else entirely. df-core is headless, so a
+//!    predicate cannot be a closure over the app; it is a [`When`] tag, and
+//!    dispatch is handed the [`WhenFlags`] that are true right now.
 //! 2. **Descriptions on every row**, because which-key and the palette are not
 //!    optional extras here.
 //! 3. **Continuations.** An unfinished chord returns the candidates that could
@@ -31,9 +31,9 @@
 //! if it has an exact match, that is the command; if it has only a longer
 //! binding this could be the start of, the chord is pending and no lower
 //! context gets a turn. Rows whose `when` is false are invisible to that walk,
-//! which is what lets Files bind `,` to the sort chord `in_list` while Global
-//! binds it to the frame step `in_preview` — the more specific context yields
-//! because, right now, it has no row.
+//! which is what lets Global read `Ctrl+→` as the frame step on a hovered clip
+//! and as the document's next page on anything else — the second row is simply
+//! not there while the first one is.
 //!
 //! ## `keymap.toml`
 //!
@@ -64,7 +64,8 @@
 //!   in that context, and the new row's `when` is [`When::Always`]: a user who
 //!   says "this key does this" gets exactly that, not a predicate they cannot
 //!   see. The default row it replaced is gone, so a predicate-guarded pair
-//!   (`,` in list vs. in preview) needs both halves rebound to keep both.
+//!   (`Ctrl+→` on a clip vs. on a document) needs both halves rebound to keep
+//!   both.
 //! - Anything unparseable — an unknown context, an unknown command, a bad
 //!   chord, or one of the reserved transport keys — is a warning naming the
 //!   file and line, and every other line in the file still applies (PLAN §3).
@@ -95,7 +96,7 @@ pub const WHICH_KEY_DELAY: Duration = Duration::from_millis(175);
 ///
 /// delightfile's one deliberate break from yazi is that `hjkl` navigation is
 /// gone and `j` `k` `l` are the shuttle keys *globally* — arrow onto a video
-/// and press `l` and it is shuttling, with no focus change. That only holds if
+/// and press `l` and it is shuttling, without leaving the list. That only holds if
 /// nothing else can ever claim them, so a non-Global binding of one is a
 /// registration error rather than a preference, and a `keymap.toml` that tries
 /// gets a warning.
@@ -239,55 +240,51 @@ impl ContextStack {
     }
 }
 
-/// A binding's precondition. PLAN §2.1's `in_list()` / `list_or_preview()` /
-/// `in_parent()`, plus the two the transport needs, as data instead of code —
-/// df-core has no app to close over.
+/// A binding's precondition, as data instead of code — df-core has no app to
+/// close over.
+///
+/// There used to be four of these, one per pane, because the keyboard could be
+/// *in* a pane. It cannot any more (PLAN §2.1): the list is always where the
+/// keys go, and the only thing left that a binding's meaning still turns on is
+/// what the cursor is standing on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum When {
     #[default]
     Always,
-    InList,
-    InPreview,
-    ListOrPreview,
-    InParent,
     /// The cursor is on a file the media pipeline can play. PLAN §4.3: on a
     /// non-media file the transport keys are *inert* — no beep, no surprise —
     /// which also means they should not be advertised on the help sheet while
     /// a text file is hovered.
     MediaHovered,
-    /// Preview focus *and* media: the extras (`Space`, `,`, `.`, `m`) whose
-    /// meaning depends on both.
-    PreviewMedia,
 }
 
 /// Which of [`When`]'s conditions are true right now. The app fills this in
 /// each dispatch; df-core never computes it.
+///
+/// One field, and still a struct: `allows` is the only thing that reads it, and
+/// a bare `bool` at every call site is how the *next* predicate gets added as a
+/// second positional argument nobody can name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WhenFlags {
-    pub in_list: bool,
-    pub in_preview: bool,
-    pub in_parent: bool,
     pub media_hovered: bool,
 }
 
 impl WhenFlags {
-    /// The resting state: the list has focus and nothing playable is hovered.
-    pub const LIST: WhenFlags = WhenFlags {
-        in_list: true,
-        in_preview: false,
-        in_parent: false,
+    /// The resting state: nothing playable is under the cursor, so the
+    /// transport rows are not there.
+    pub const NONE: WhenFlags = WhenFlags {
         media_hovered: false,
+    };
+
+    /// The cursor is on something the transport can act on.
+    pub const MEDIA: WhenFlags = WhenFlags {
+        media_hovered: true,
     };
 
     pub fn allows(self, when: When) -> bool {
         match when {
             When::Always => true,
-            When::InList => self.in_list,
-            When::InPreview => self.in_preview,
-            When::ListOrPreview => self.in_list || self.in_preview,
-            When::InParent => self.in_parent,
             When::MediaHovered => self.media_hovered,
-            When::PreviewMedia => self.in_preview && self.media_hovered,
         }
     }
 }
@@ -695,7 +692,7 @@ impl Registry {
                         seq,
                         Command::Goto(i as u8),
                         bookmark.description.clone(),
-                        When::InList,
+                        When::Always,
                     ) {
                         warnings.push(ConfigWarning::new(file, 0, e.to_string()));
                     }

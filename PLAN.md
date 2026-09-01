@@ -7,15 +7,15 @@ mouse support that feels like delightstack.
 
 **One deliberate break from yazi**: vim-style `hjkl` navigation is removed. Arrow keys
 navigate; `j` `k` `l` are delightviewer's video transport keys *globally* — arrow onto a
-video and immediately play/shuttle it without changing focus (§4.3).
+video and immediately play/shuttle it without leaving the list (§4.3).
 
 Sibling projects this plan borrows from directly:
 
 - **delightviewer** (`~/Work/delightviewer`) — the architectural template: winit + egui +
   egui-wgpu, headless core crate, hand-rolled TOML/D-Bus, pure-function motion, hover
   system, keymap engine, toasts, which-key card, shuttle transport.
-- **DelightMail** (`~/Work/mail.brianschwabauer.com`) — the pane-focus model and the
-  keyboard registry that feeds which-key, `?` help, and the command palette from one table.
+- **DelightMail** (`~/Work/mail.brianschwabauer.com`) — the keyboard registry that feeds
+  which-key, `?` help, and the command palette from one table.
 - **Brian's yazi config** (`~/.config/yazi/`) — the default keymap, opener rules, layout,
   theme, and scripts, ported binding-for-binding.
 
@@ -97,28 +97,35 @@ Yazi's miller columns at Brian's ratio `[1, 4, 3]`: **parent | list | preview**.
   in the same row rather than opening a line of its own. Modal surfaces carry their own
   hints along the bottom edge of their card.
 
-### 2.1 Pane focus (the DelightMail model)
+### 2.1 Keyboard focus: there isn't any
 
-A dumb reactive `Pane` enum: `Parent | List | Preview`. Default `List`.
+**The middle column is the keyboard, always.** There is no pane focus, no focused-pane
+treatment, and no key that moves the keyboard from one column to another. A file manager
+is a list of files with two columns of context beside it; a three-way focus meant every
+key had to be read twice — once for what it does, once for where you were when you
+pressed it — and the second reading was never worth its cost.
 
-- **Focus does not change the keymap context stack.** Conflicts are resolved by `when`
-  predicates on bindings (`in_list()`, `list_or_preview()`, `in_parent()`), and by
-  branching inside a handler on `focus == Preview` where one binding should mean
-  "scroll the preview" vs "move the cursor".
-- **Rightward**: `→` on a directory enters it (yazi behavior, focus stays `List`);
-  `→` on a *file* focuses the preview pane. **Leftward**: `←` from `Preview` returns
-  to `List`; from `List` goes to parent (yazi `leave`). `Esc` is a priority ladder
-  ending in `focus = List`.
-- Mouse: mousedown-capture on any pane focuses it.
-- Visuals (ported from DelightMail): focused pane gets a 2 px accent rule across its top
-  edge plus a ~4% primary-color background tint, 120 ms ease-out transition. When the
-  list is *not* focused, its cursor row dims to a 35%-opacity ghost bar — "where am I"
-  always has exactly one answer.
+- **Rightward**: `→` on a directory enters it (yazi behavior); `→` on an *archive*
+  browses it (§7.3); `→` on a plain file does **nothing** — the preview beside it is
+  already showing that file, so there was never anywhere for the key to go. It is
+  deliberately not "open": `→` is a navigation key, and a navigation key that could
+  launch a video player is a key you stop pressing. **Leftward**: `←` goes to the parent
+  (yazi `leave`).
+- `Esc` is a priority ladder, and its last rung is clearing the selection — there is no
+  focus underneath to return from.
+- The parent and preview columns are **fully live under the pointer**: a click on a
+  parent row goes there, the wheel scrolls whichever column it is aimed at, and the
+  preview's transport and scrubber take clicks and drags. None of that changes what the
+  keyboard means, because there is nothing for it to change.
+- The preview's own keys are reached from the list, on the file under the cursor — see
+  §4.3. `Ctrl+arrow` is the preview's arrow family; the plain arrows are always the
+  list's.
+- Visuals: every pane is painted the same. The list's cursor row is at full strength and
+  the parent column's marker sits at 35% — not because the keyboard is elsewhere, but
+  because "where you are" is a quieter fact than "what you are about to act on".
 
-With `hjkl` gone, the core transport keys work globally — no focus change needed to
-play/shuttle the hovered video. Preview focus exists for the *remaining* conflicts:
-arrow-key document scrolling/paging, image pan/zoom, and the secondary transport keys
-(frame step, mute) whose keys the list still needs (§4.3).
+With `hjkl` gone, the transport keys are global: arrow onto a video and press `k` and it
+plays, wherever the pointer happens to be.
 
 ---
 
@@ -157,19 +164,19 @@ ordering preserves declaration order, not alphabetical.
 
 | Keys | Action |
 |---|---|
-| `Esc` | ladder: cancel drag → visual mode off → clear selection → cancel search → focus List |
+| `Esc` | ladder: close overlay → cancel chord → close prompt → leave visual → clear filter → clear selection |
 | `q` / `Q` | quit (writing cwd-file) / quit without |
 | `Ctrl+c` | close tab (quit if last) |
 | `↑` / `↓` | cursor up/down |
 | `Ctrl+u/d` `Ctrl+b/f` | half page / full page |
 | `g g` / `G` | top / bottom |
-| `←` / `→` | leave / enter-or-focus-preview (§2.1) |
+| `←` / `→` | leave / enter directory (a file has no inside — §2.1) |
 | `Alt+←` / `Alt+→` | history back / forward (browser-style; `H`/`L` are retired) |
 | `j` `k` `l` `L` `[` `]` `<` `>` | media transport on the hovered file — global (§4.3) |
 | `Space` | toggle select + advance |
 | `Ctrl+a` / `Ctrl+r` | select all / invert |
 | `v` / `V` | visual select / visual unset |
-| `K` / `J` | scroll/seek preview ±5 (yazi parity, list focus) |
+| `K` / `J` | scroll/seek preview ±5 (yazi parity) |
 | `Tab` | spot panel on hovered file |
 | `o`/`Enter` | open (first opener rule) |
 | `O`/`Shift+Enter` | open interactively (picker) |
@@ -209,7 +216,7 @@ yazi.toml (rename anchored to the hovered row; others top-center). No cursor bli
 
 ### 4.3 Transport — delightviewer semantics, global
 
-**Global core** (any focus, acts on the media file the cursor is on — arrow to a video,
+**Global core** (acts on the media file the cursor is on — arrow to a video,
 press `l`, it's shuttling):
 
 - `k` play/pause — "the play key that is only ever the play key".
@@ -224,17 +231,27 @@ press `l`, it's shuttling):
 - On a non-media file these keys are inert (no beep, no surprise). `j`/`k`/`l`/`[`/`]`
   are hard-reserved; user overrides rejected.
 
-**Preview-focus extras** — keys the list still owns globally (`,` sort chord, `.` hidden
-toggle, `m` linemode chord, plain arrows, `Space` select) take their transport meaning
-only when `focus == Preview`:
+**The preview's own keys, from the list.** The keyboard never enters the preview pane
+(§2.1), so these act on whatever the cursor is standing on, and none of them may take a
+key the list already owns. `Ctrl+arrow` is the preview's arrow family — one modifier,
+four directions — and the sideways pair splits on what is under the cursor exactly as the
+transport does:
 
-- `,` / `.` frame step. `m` mute. `↑`/`↓` volume. `Space` play/pause.
-- Hover the timeline to scrub; position strip lingers 2.5 s after interaction.
+| Key | On a clip | On a document / image |
+|---|---|---|
+| `Ctrl+←` / `Ctrl+→` | frame step back / forward | previous / next page |
+| `Ctrl+↑` / `Ctrl+↓` | — | scroll a line, or step a G-code layer |
+| `Ctrl+Shift+u` / `Ctrl+Shift+d` | — | half page up / down |
+| `Shift+Space` | — | page down |
+| `Ctrl+Home` / `Ctrl+End` | — | top / bottom |
+| `+` `=` / `Alt+-` / `0` | — | zoom in / out / reset |
+| `Ctrl+m` | mute | — |
+| `k`, `Shift+↑`/`Shift+↓` | play/pause, volume (global, above) | — |
 
-For **documents/text/PDF** in preview focus: `↑`/`↓` scroll line, `Ctrl+d/u` half page,
-`g g`/`G` top/bottom, `Space` page down, `+`/`-`/`0` zoom, `←`/`→` PDF pages (at the
-first page, `←` falls through to focus-List). For **images**: arrow pan and zoom keys
-matching delightviewer's view context. `Esc` always returns focus to the list.
+Zoom out is the one key in the family that had to move: `-` is the absolute symlink in
+§4.1 and a file operation outranks a zoom, so it takes the `Alt` spelling of the same key.
+Paging past the last page (or before the first) is inert — there is no pane to fall out
+of. Hover the timeline to scrub; the position strip lingers 2.5 s after interaction.
 
 ### 4.4 Command palette
 
@@ -426,9 +443,9 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Preview workers + yazi-compatible thumbnail cache; 80 ms crossfade-in
 - [x] Text/syntax, rendered markdown, directory tree, image (incl. AVIF/HEIF)
 - [x] Video/audio playback in pane (dv-playback); `K`/`J` seek ±5 from list
-- [x] Pane focus model: `→`-on-file → Preview, visuals (accent rule, tint, ghost cursor)
-- [x] Global transport: j/k/l shuttle ladder, L [ ] < >, volume; preview-focus extras (, . m)
-- [x] Document scroll/zoom keys in preview focus; PDF (pdfium dlopen), fonts, 3D, gcode
+- [x] No pane focus: the list is always the keyboard; `→` enters a directory or an archive
+- [x] Global transport: j/k/l shuttle ladder, L [ ] < >, volume; `Ctrl+←`/`Ctrl+→` frame step
+- [x] Document scroll/zoom keys from the list (`Ctrl+arrow` family); PDF (pdfium dlopen), fonts, 3D, gcode
 - [x] Spot panel `Tab` with metadata, permissions editor, checksum
 
 ### Phase 4 — mouse & drag
