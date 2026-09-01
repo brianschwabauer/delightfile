@@ -34,6 +34,11 @@
 //! show_symlink = true
 //! scrolloff = 5
 //!
+//! [input]
+//! # Esc in a prompt: off, it cancels the prompt; on, it steps into vi's
+//! # Normal mode first and a second Esc cancels.
+//! vi_mode = false
+//!
 //! [tasks]
 //! micro_workers = 10
 //! macro_workers = 10
@@ -446,6 +451,21 @@ impl Default for MgrConfig {
     }
 }
 
+/// PLAN §4.2's prompts, as far as they are a matter of taste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InputConfig {
+    /// Whether `Esc` in a prompt walks yazi's modal ladder (Insert → Normal →
+    /// cancel) instead of cancelling outright.
+    ///
+    /// **Off**, and the default is the whole point: `Esc` means "close this"
+    /// in every dialog on the desktop, and a first press that instead leaves a
+    /// block caret sitting in the field reads as the prompt having broken. The
+    /// vi editor itself is untouched either way — `Ctrl+w`, `Ctrl+u`, the word
+    /// motions and the arrows all work from Insert. Turning this on is how
+    /// somebody who wants `cw` in a rename gets Normal mode back.
+    pub vi_mode: bool,
+}
+
 /// PLAN §5's worker pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TasksConfig {
@@ -581,6 +601,7 @@ pub struct OpenRule {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub mgr: MgrConfig,
+    pub input: InputConfig,
     pub tasks: TasksConfig,
     pub preview: PreviewConfig,
     pub goto: Vec<Bookmark>,
@@ -592,6 +613,7 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             mgr: MgrConfig::default(),
+            input: InputConfig::default(),
             tasks: TasksConfig::default(),
             preview: PreviewConfig::default(),
             goto: default_bookmarks(),
@@ -669,6 +691,18 @@ impl Config {
                     "show_symlink" => read_bool(value, &mut config.mgr.show_symlink),
                     "scrolloff" => read_usize(value, &mut config.mgr.scrolloff),
                     _ => Err(format!("unknown key `{}` in [mgr]", entry.key)),
+                };
+                if let Err(message) = ok {
+                    warnings.push(ConfigWarning::new(file, entry.line, message));
+                }
+            }
+        }
+
+        if let Some(input) = doc.table("input") {
+            for entry in &input.entries {
+                let ok = match entry.key.as_str() {
+                    "vi_mode" => read_bool(&entry.value, &mut config.input.vi_mode),
+                    _ => Err(format!("unknown key `{}` in [input]", entry.key)),
                 };
                 if let Err(message) = ok {
                     warnings.push(ConfigWarning::new(file, entry.line, message));
@@ -1248,6 +1282,20 @@ mod tests {
         assert_eq!(c.tasks.micro_workers, 10);
         assert_eq!(c.tasks.macro_workers, 10);
         assert_eq!(c.tasks.bizarre_retry, 3);
+        // …and the one default that is *not* yazi's: Esc closes a prompt.
+        assert!(!c.input.vi_mode);
+    }
+
+    /// `[input] vi_mode` is how somebody asks for the modal `Esc` back.
+    #[test]
+    fn the_input_table_switches_the_escape_ladder() {
+        let (config, warnings) = parse("[input]\nvi_mode = true\n");
+        assert!(config.input.vi_mode);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // A typo warns and changes nothing, like every other table.
+        let (config, warnings) = parse("[input]\nvi = true\n");
+        assert!(!config.input.vi_mode);
+        assert_eq!(warnings.len(), 1);
     }
 
     #[test]

@@ -243,9 +243,10 @@ impl DirState {
 
     /// Move the cursor by `delta` rows, clamped at both ends.
     ///
-    /// Clamped, not wrapping: `↓` at the bottom of a list stays at the bottom.
-    /// Wrapping here would mean holding `↓` teleports you to the top, which is
-    /// never what anyone meant.
+    /// Clamped rather than wrapping, because this is what a *page* is measured
+    /// in: `Ctrl+f` on the last page has to stop at the last row, not fling the
+    /// cursor back to the top of the directory. One arrow key's worth of
+    /// movement is [`DirState::wrap_cursor`].
     pub fn move_cursor(&mut self, delta: isize) {
         if self.view.is_empty() {
             self.cursor = 0;
@@ -254,6 +255,26 @@ impl DirState {
         let last = self.view.len() - 1;
         let next = self.cursor as isize + delta;
         self.cursor = next.clamp(0, last as isize) as usize;
+        self.remember_cursor();
+    }
+
+    /// Move the cursor by `delta` rows, **wrapping** at both ends.
+    ///
+    /// What `↑`/`↓` do: a listing is a ring, so `↓` on the last row is the
+    /// first row and `↑` on the first is the last. A directory is read far more
+    /// often than it is paged through, and the alternative — a key that does
+    /// nothing at the edge — costs a `g g` or a `G` to say the same thing.
+    /// Pages still clamp ([`DirState::move_cursor`]), because a page is a
+    /// distance rather than a step.
+    pub fn wrap_cursor(&mut self, delta: isize) {
+        if self.view.is_empty() {
+            self.cursor = 0;
+            return;
+        }
+        let len = self.view.len() as isize;
+        // `rem_euclid` rather than `%`: the remainder of a negative number is
+        // negative in Rust, and `↑` on the first row is exactly that case.
+        self.cursor = (self.cursor as isize + delta).rem_euclid(len) as usize;
         self.remember_cursor();
     }
 

@@ -1,11 +1,13 @@
 //! Drawing the preview pane.
 //!
 //! Five bodies — text, markdown, a listing, a hexdump, a picture — and one
-//! rule they all obey: whatever is drawn is drawn at the crossfade's alpha
-//! ([`super::CROSSFADE`]), so content never *snaps* into the pane. The alpha is
-//! applied with `gamma_multiply` on every colour rather than by drawing into a
-//! layer, because a layer would cost a render pass per frame for eighty
-//! milliseconds of fade.
+//! rule they all obey: whatever is drawn is drawn at the pane's alpha, which is
+//! 1 for a body that has just arrived (a new file appears instantly) and the
+//! [`super::CROSSFADE`] curve for the two swaps that happen *within* one file,
+//! thumbnail → photograph and page → page. The alpha is applied with
+//! `gamma_multiply` on every colour rather than by drawing into a layer,
+//! because a layer would cost a render pass per frame for eighty milliseconds
+//! of fade.
 //!
 //! Everything is painted through [`egui::Painter`], like the rest of the
 //! program (see [`crate::ui`]'s header). The directory body calls straight into
@@ -102,7 +104,12 @@ pub fn preview(
         return;
     };
 
-    let alpha = fade(shown.at, now);
+    // **The body does not fade in.** An item-to-item switch is instant: see
+    // `super::Shown`. The parameter stays because the two crossfades that are
+    // still real — thumbnail → full image, page → page — multiply into it, and
+    // because every drawing helper below takes the pane's alpha rather than
+    // deciding one for itself.
+    let alpha: f32 = 1.0;
     let painter = paint.painter.with_clip_rect(content);
     // How far a rendered page overflows the pane, in points — reported back to
     // the pane below, because only the paint knows how tall the page came out.
@@ -1467,17 +1474,9 @@ mod tests {
                         let rect = egui::Rect::from_min_size(egui::pos2(900.0, 8.0), size);
                         pane.shown = Some(crate::preview::Shown {
                             body: clone_body(body),
-                            at: now,
                         });
                         pane.scroll = scroll;
-                        // Mid-crossfade and arrived, because the alpha path and
-                        // the opaque path are different code.
-                        for at in [now, now - crate::preview::CROSSFADE / 2] {
-                            if let Some(shown) = &mut pane.shown {
-                                shown.at = at;
-                            }
-                            preview(&paint, rect, &mut pane, 2.0, now);
-                        }
+                        preview(&paint, rect, &mut pane, 2.0, now);
                     }
                 }
             }

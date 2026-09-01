@@ -25,8 +25,13 @@
 //!   that `hjkl` is gone. Overlays navigate with `↑`/`↓` (which yazi also
 //!   binds) and the spot panel swipes with `←`/`→` (likewise).
 //! - §4.1 lists `?` on both the find row and the help row. yazi's `[mgr]` binds
-//!   `?` to find-previous and reaches help through `~`/`F1`, and that is the
-//!   muscle memory the section is a contract for, so `?` stays find-previous.
+//!   `?` to find-previous and reaches help through `~`/`F1`, but `?` is the key
+//!   that means "what can I press" in every other program on the machine, and
+//!   somebody who has just opened delightfile presses it long before they have
+//!   any muscle memory to protect. So **`?` is help**, globally, and the find
+//!   family keeps the rest of the vi set: `/` searches, `n` is the next match
+//!   and `N` the previous one. `find-prev` is still a command id, so a
+//!   `keymap.toml` can put backwards search back wherever it likes.
 
 use std::path::Path;
 
@@ -54,6 +59,11 @@ pub(super) fn build() -> Registry {
         // selection → cancel search → focus List).
         (Global, "esc",          C::Escape,         "Cancel, or step back",  Always),
         (Global, "ctrl+p",       C::CommandPalette, "Command palette",       Always),
+        // `?` is the key everybody presses for help, so it is the one that
+        // opens it — everywhere, not only in the file list. `~` stays as the
+        // yazi alias it was ported as, and `F1` as the one key that means help
+        // in every program ever written.
+        (Global, "?",            C::Help,           "Help / keymap browser", Always),
         (Global, "~",            C::Help,           "Help / keymap browser", Always),
         (Global, "f1",           C::Help,           "Help / keymap browser", Always),
         (Global, "ctrl+n",       C::NewWindow,      "New window",            Always),
@@ -199,10 +209,14 @@ pub(super) fn build() -> Registry {
 
         // ── Files: filter, find, search, jump ───────────────────────────────
         (Files, "f",      C::Filter,        "Filter files",                InList),
-        (Files, "/",      C::FindNext,      "Find next",                   InList),
-        (Files, "?",      C::FindPrev,      "Find previous",               InList),
-        (Files, "n",      C::FindArrowNext, "Repeat find forward",         InList),
-        (Files, "N",      C::FindArrowPrev, "Repeat find backward",        InList),
+        // The vi set, minus the half of it that would cost the help key: `/`
+        // searches forward, `n` is the next match and `N` the previous one.
+        // Backwards *search* (`find-prev`) keeps its command id for anybody who
+        // wants it back in `keymap.toml`; `?` is help (see Global above), which
+        // is what the key is for in every other program on the machine.
+        (Files, "/",      C::FindNext,      "Find",                        InList),
+        (Files, "n",      C::FindArrowNext, "Next match",                  InList),
+        (Files, "N",      C::FindArrowPrev, "Previous match",              InList),
         (Files, "s",      C::SearchName,    "Search by name (fd)",         Always),
         (Files, "S",      C::SearchContent, "Search by content (rg)",      Always),
         (Files, "ctrl+s", C::CancelSearch,  "Cancel the search",           Always),
@@ -364,7 +378,7 @@ pub(super) fn build() -> Registry {
         (Help, "ctrl+c", C::OverlayClose, "Close the help",             Always),
         (Help, "up",     C::OverlayPrev,  "Previous line",              Always),
         (Help, "down",   C::OverlayNext,  "Next line",                  Always),
-        (Help, "f",      C::HelpFilter,   "Filter the help",            Always),
+        (Help, "f",      C::HelpFilter,   "Filter the help (or type)",  Always),
 
         // ── Palette (`Ctrl+p`, §4.4) ────────────────────────────────────────
         (Palette, "esc",    C::OverlayClose,  "Close the palette", Always),

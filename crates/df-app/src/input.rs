@@ -199,12 +199,15 @@ mod tests {
 
     /// The prompt is the df-core editor: modes, motions and all, with the app
     /// only holding the frame around it.
+    ///
+    /// In `[input] vi_mode`, because that is what puts `Esc` on the ladder
+    /// rather than on "close this" — the shipped default is the next test.
     #[test]
     fn the_prompt_is_the_vi_editor() {
         let mut prompt = Prompt::with(
             PromptKind::Rename,
             0,
-            InputBuffer::for_rename_stem("photo.jpg"),
+            InputBuffer::for_rename_stem("photo.jpg").vi_mode(true),
         );
         assert_eq!(prompt.query(), "photo.jpg");
         assert_eq!(
@@ -236,6 +239,20 @@ mod tests {
             prompt.feed(Chord::plain(Key::Enter)),
             InputEvent::Submit("cat.png".to_string())
         );
+    }
+
+    /// …and by default `Esc` closes the prompt on the first press, with no
+    /// block caret in between (PLAN §4.2, `[input] vi_mode = false`).
+    #[test]
+    fn escape_cancels_the_prompt_by_default() {
+        let mut prompt = Prompt::with(
+            PromptKind::Rename,
+            0,
+            InputBuffer::for_rename_stem("photo.jpg"),
+        );
+        assert_eq!(prompt.feed(Chord::plain(Key::Escape)), InputEvent::Cancel);
+        assert_eq!(prompt.mode_label(), "INSERT");
+        assert!(!prompt.block_caret());
     }
 
     /// `R` opens on the extension alone, caret at the front (PLAN §4.1).

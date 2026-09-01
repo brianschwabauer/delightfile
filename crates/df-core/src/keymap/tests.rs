@@ -112,7 +112,6 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("c t", Command::CopyFileText),
         ("f", Command::Filter),
         ("/", Command::FindNext),
-        ("?", Command::FindPrev),
         ("n", Command::FindArrowNext),
         ("N", Command::FindArrowPrev),
         (", m", Command::SortMtime),
@@ -139,6 +138,9 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("ctrl+p", Command::CommandPalette),
         ("~", Command::Help),
         ("f1", Command::Help),
+        // `?` is help, not find-backwards: the key that means "what can I
+        // press" everywhere else means it here too, in every context.
+        ("?", Command::Help),
     ] {
         assert_eq!(
             press(&km, &stack, f, keys),
@@ -441,6 +443,32 @@ fn the_parent_pane_has_its_own_cursor() {
     assert_eq!(
         press(&km, &stack, parent, "enter"),
         Dispatch::Match(Command::ParentEnter)
+    );
+}
+
+/// `?` opens the help from wherever you are, and nothing in a nearer context
+/// takes it away — the point of moving find-backwards off it.
+#[test]
+fn the_question_mark_is_help_in_every_context() {
+    let km = Registry::defaults();
+    for context in [Context::Tasks, Context::Spot, Context::Confirm] {
+        let mut stack = files();
+        stack.push(context);
+        assert_eq!(
+            press(&km, &stack, WhenFlags::LIST, "?"),
+            Dispatch::Match(Command::Help),
+            "`?` in {context:?}"
+        );
+    }
+    // …and the find keys are the vi set that is left: `/`, `n`, `N`.
+    let stack = files();
+    assert_eq!(
+        press(&km, &stack, WhenFlags::LIST, "/"),
+        Dispatch::Match(Command::FindNext)
+    );
+    assert_eq!(
+        press(&km, &stack, WhenFlags::LIST, "N"),
+        Dispatch::Match(Command::FindArrowPrev)
     );
 }
 

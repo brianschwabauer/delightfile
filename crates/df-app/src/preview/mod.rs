@@ -21,10 +21,14 @@
 //! wins the race anyway — so a slow decode of the file you arrowed past can
 //! never paint over the file you stopped on.
 //!
-//! **Everything arrives with the same 80 ms crossfade** ([`CROSSFADE`], PLAN
-//! §6). Not only images: text, a listing and a hexdump fade in on the same
-//! curve, because the alternative is a pane that snaps to a new state every
-//! time the cursor moves, and forty of those in a second is a strobe.
+//! **A new file appears instantly; a new picture of the *same* file
+//! crossfades.** PLAN §6 asks for an 80 ms crossfade ([`CROSSFADE`]) and it is
+//! still here — for the two swaps that are genuinely one thing turning into
+//! another: the cached thumbnail giving way to the full decode, and a document
+//! turning a page. Arrowing from one file to the next is not that. The old body
+//! is dropped the moment the path changes (there is nothing honest to blend a
+//! new file's text against), so a fade-in there was a blank pane followed by a
+//! dissolve — 80 ms of nothing on every single arrow key.
 //!
 //! ## The seam, and what has taken it up
 //!
@@ -63,12 +67,14 @@ use df_core::preview::{
 
 pub use paint::{fit_rect, preview};
 
-/// How long a preview takes to fade in — PLAN §6's "results crossfade in over
-/// ~80 ms", and delightviewer's `CROSSFADE` to the millisecond, so the two
-/// programs handing a file between them feel like one program.
+/// How long a picture takes to cross into the one it replaces — PLAN §6's
+/// "results crossfade in over ~80 ms", and delightviewer's `CROSSFADE` to the
+/// millisecond, so the two programs handing a file between them feel like one
+/// program.
 ///
 /// Short enough to read as "it was always there", long enough that a
-/// placeholder → full-resolution swap does not snap.
+/// placeholder → full-resolution swap does not snap. Only ever between two
+/// pictures of the same file: see the module header.
 pub const CROSSFADE: Duration = Duration::from_millis(80);
 
 /// How many lines `K` and `J` move the preview (PLAN §4.1's `seek preview ±5`,
@@ -323,11 +329,17 @@ enum Body {
     Failed(String),
 }
 
-/// What is on screen, and since when.
+/// What is on screen.
+///
+/// No "since when": moving the cursor from one file to the next **switches the
+/// preview instantly**. The body it replaces belonged to a different file, so
+/// there is nothing for a crossfade to blend — [`Pane::sync`] has already
+/// dropped it — and what an 80 ms fade-in actually bought was a blank pane and
+/// then a dissolve, on every single arrow key. The crossfades that survive are
+/// the ones *inside* one file, where two pictures of the same thing really do
+/// overlap: thumbnail → full image, and page → page in a document.
 struct Shown {
     body: Body,
-    /// The start of the content crossfade.
-    at: Instant,
 }
 
 /// The preview pane's whole state.
@@ -847,7 +859,7 @@ impl Pane {
             }
             PreviewUpdate::Ready { preview, .. } => self.body_for(preview, now),
         };
-        self.shown = Some(Shown { body, at: now });
+        self.shown = Some(Shown { body });
     }
 
     fn body_for(&mut self, preview: Preview, _now: Instant) -> Body {
@@ -970,9 +982,6 @@ impl Pane {
         let Some(shown) = &self.shown else {
             return false;
         };
-        if fade(shown.at, now) < 1.0 {
-            return true;
-        }
         if let Body::Media(media) = &shown.body {
             if media
                 .swapped_at
@@ -1159,7 +1168,6 @@ mod tests {
                 decoding: false,
                 doc: Some(Box::new(view)),
             }),
-            at: now,
         });
         (pane, now)
     }
