@@ -470,28 +470,6 @@ pub fn row_at(
     (index < rows).then_some(index)
 }
 
-/// How brightly each row is lit as "the cursor".
-#[derive(Clone, Copy)]
-pub enum CursorGlow<'a> {
-    /// The cursor row, and only it, at full strength. The parent column, whose
-    /// marker is a fact about the path rather than something that just moved.
-    Steady,
-    /// Per-row amounts from the hover system, so a cursor moved by the keyboard
-    /// snaps onto its new row and leaves the old one fading behind it — the
-    /// same "instant in, animated out" rule the pointer gets (`delightful-ui`
-    /// §3).
-    Fading(&'a Hovers<usize>),
-}
-
-impl CursorGlow<'_> {
-    fn at(self, index: usize, is_cursor: bool) -> f32 {
-        match self {
-            CursorGlow::Steady => f32::from(is_cursor),
-            CursorGlow::Fading(hovers) => hovers.hover(index),
-        }
-    }
-}
-
 /// Which rows are on the clipboard, and how they got there (PLAN §4.1's `y`
 /// and `x`).
 ///
@@ -506,6 +484,16 @@ pub struct ClipMark<'a> {
     /// `x` rather than `y`.
     pub cut: bool,
 }
+
+// **The keyboard cursor does not fade, in or out.** It used to be a
+// [`Hovers`] track of its own, so a cursor moved by the keyboard left the row
+// it came from glowing for 240 ms — the pointer's "instant in, animated out"
+// rule (`delightful-ui` §3) applied to something that is not a pointer. It is
+// wrong twice over: a trail behind an arrow key held down is a smear of four
+// half-lit rows and no answer to "where am I", and a fade nobody asked for
+// costs fourteen forced 60 fps frames per keypress (PLAN §1's idle rule). The
+// pointer keeps its trail — it is a real pointer, and its outro is what makes a
+// sweep down the column read as responsive.
 
 /// One call's worth of "draw this listing here".
 ///
@@ -526,7 +514,6 @@ pub struct ListView<'a> {
     /// parent's marker is a step quieter, because it reports where you are
     /// rather than what you are about to act on.
     pub cursor_fill: egui::Color32,
-    pub cursor_glow: CursorGlow<'a>,
     /// How strongly the cursor row is lit: 1 in the focused pane, and
     /// [`GHOST_CURSOR`] everywhere else.
     pub cursor_alpha: f32,
@@ -638,10 +625,10 @@ impl Painting<'_> {
 
     /// A directory listing's rows.
     ///
-    /// `hovers` and `cursor_glow` are the two "instant in, animated out" tracks
-    /// (`delightful-ui` §3): one for the pointer, one for the cursor, so a
-    /// cursor moved by the keyboard leaves the same fading trail behind it that
-    /// a pointer sweep does.
+    /// `hovers` is the pointer's "instant in, animated out" track
+    /// (`delightful-ui` §3), so a sweep down the column leaves a trail behind
+    /// it. The keyboard cursor is not on it: it snaps on and off (see the note
+    /// above [`ListView`]).
     pub fn listing(&self, view: ListView<'_>) {
         let ListView {
             pane,
@@ -652,7 +639,6 @@ impl Painting<'_> {
             hovers,
             ripples,
             cursor_fill: cursor_color,
-            cursor_glow,
             cursor_alpha,
             linemode,
             dim,
@@ -719,7 +705,7 @@ impl Painting<'_> {
             } else {
                 ground
             };
-            let glow = cursor_glow.at(index, on_cursor) * cursor_alpha;
+            let glow = f32::from(on_cursor) * cursor_alpha;
             let base = mix(ground_here, cursor_color, glow);
             let lift = if glow > 0.5 {
                 CURSOR_HOVER_LIFT

@@ -86,6 +86,11 @@ pub struct EscapeState {
     /// A chord is half-typed (`g`, `m`, `,`).
     pub chord_pending: bool,
     pub prompt_open: bool,
+    /// The help overlay is open **and** something has been typed into its
+    /// filter. Its own rung, above closing the overlay: the query is the more
+    /// recent thing, and the binding text promises "clear the filter, or
+    /// close".
+    pub help_filter: bool,
     pub help_open: bool,
     pub visual: bool,
     pub selection: bool,
@@ -99,10 +104,11 @@ pub enum EscapeRung {
     CloseOverlay,
     CancelChord,
     ClosePrompt,
+    ClearHelpFilter,
     CloseHelp,
     LeaveVisual,
-    ClearSelection,
     ClearFilter,
+    ClearSelection,
     FocusList,
     /// Everything is already put away and the list already has the keyboard.
     Nothing,
@@ -116,6 +122,13 @@ pub enum EscapeRung {
 /// modal card is checked first because it is the nearest thing to the user's
 /// eye, and focus is checked *last* because returning to the list is the rung
 /// that costs nothing to redo.
+///
+/// Two rungs are ordered by how *recent* the thing is rather than by how big:
+/// a help filter is undone before the overlay it narrows, and a file filter is
+/// undone before a selection. The filter is the thing you typed a second ago
+/// and can see in the bar; the selection may be a dozen `Space`s old and is
+/// the one state in the program with no undo, so it is the later rung of the
+/// two — `Esc` on a filtered listing must not throw it away.
 pub fn escape_rung(state: EscapeState) -> EscapeRung {
     if state.overlay_open {
         return EscapeRung::CloseOverlay;
@@ -126,17 +139,20 @@ pub fn escape_rung(state: EscapeState) -> EscapeRung {
     if state.prompt_open {
         return EscapeRung::ClosePrompt;
     }
+    if state.help_filter {
+        return EscapeRung::ClearHelpFilter;
+    }
     if state.help_open {
         return EscapeRung::CloseHelp;
     }
     if state.visual {
         return EscapeRung::LeaveVisual;
     }
-    if state.selection {
-        return EscapeRung::ClearSelection;
-    }
     if state.filter {
         return EscapeRung::ClearFilter;
+    }
+    if state.selection {
+        return EscapeRung::ClearSelection;
     }
     if state.focus != Focus::List {
         return EscapeRung::FocusList;
@@ -438,6 +454,7 @@ mod tests {
             overlay_open: true,
             chord_pending: true,
             prompt_open: true,
+            help_filter: true,
             help_open: true,
             visual: true,
             selection: true,
@@ -448,10 +465,11 @@ mod tests {
             EscapeRung::CloseOverlay,
             EscapeRung::CancelChord,
             EscapeRung::ClosePrompt,
+            EscapeRung::ClearHelpFilter,
             EscapeRung::CloseHelp,
             EscapeRung::LeaveVisual,
-            EscapeRung::ClearSelection,
             EscapeRung::ClearFilter,
+            EscapeRung::ClearSelection,
             EscapeRung::FocusList,
             EscapeRung::Nothing,
         ];
@@ -462,6 +480,7 @@ mod tests {
                 EscapeRung::CloseOverlay => state.overlay_open = false,
                 EscapeRung::CancelChord => state.chord_pending = false,
                 EscapeRung::ClosePrompt => state.prompt_open = false,
+                EscapeRung::ClearHelpFilter => state.help_filter = false,
                 EscapeRung::CloseHelp => state.help_open = false,
                 EscapeRung::LeaveVisual => state.visual = false,
                 EscapeRung::ClearSelection => state.selection = false,
@@ -498,6 +517,35 @@ mod tests {
                 ..EscapeState::default()
             }),
             EscapeRung::ClearSelection
+        );
+    }
+
+    /// A committed filter — `f`, type, `Enter` — is undone by `Esc` before the
+    /// selection underneath it, and a help filter before the help itself.
+    #[test]
+    fn a_committed_filter_is_undone_before_the_selection() {
+        assert_eq!(
+            escape_rung(EscapeState {
+                filter: true,
+                selection: true,
+                ..EscapeState::default()
+            }),
+            EscapeRung::ClearFilter
+        );
+        assert_eq!(
+            escape_rung(EscapeState {
+                help_open: true,
+                help_filter: true,
+                ..EscapeState::default()
+            }),
+            EscapeRung::ClearHelpFilter
+        );
+        assert_eq!(
+            escape_rung(EscapeState {
+                help_open: true,
+                ..EscapeState::default()
+            }),
+            EscapeRung::CloseHelp
         );
     }
 }

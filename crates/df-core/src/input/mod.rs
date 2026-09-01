@@ -176,6 +176,15 @@ pub struct InputBuffer {
     /// Set while an Insert run is in progress, so that a word of typing is one
     /// undo step rather than one per keystroke.
     tagged: bool,
+    /// Whether `Esc` walks the modal ladder (Insert → Normal → cancel) or
+    /// simply cancels — the `[input] vi_mode` switch, off by default.
+    ///
+    /// Everything else in this editor is live either way: `Ctrl+w`, `Ctrl+u`,
+    /// the arrows and the word motions are all reachable from Insert. The flag
+    /// buys back the *one* key whose vi meaning collides with what `Esc` means
+    /// in every dialog ever drawn — "I did not mean to open this" — and pays
+    /// for it with the mode the rest of the editor is entered through.
+    vi: bool,
 }
 
 impl InputBuffer {
@@ -197,7 +206,19 @@ impl InputBuffer {
             undo: Vec::new(),
             redo: Vec::new(),
             tagged: false,
+            vi: false,
         }
+    }
+
+    /// Turn the modal `Esc` ladder on (`[input] vi_mode = true`).
+    ///
+    /// A builder rather than a constructor argument because it is a *setting*,
+    /// not a property of the prompt: every call site builds the buffer the same
+    /// way and the app stamps the user's answer on it in one place
+    /// (`App::open_prompt_with`).
+    pub fn vi_mode(mut self, on: bool) -> InputBuffer {
+        self.vi = on;
+        self
     }
 
     /// `r` on a file: the whole name, caret **before the extension** — yazi's
@@ -528,11 +549,23 @@ impl InputBuffer {
 
     // ── Commands ────────────────────────────────────────────────────────────
 
-    /// yazi's `escape`, verbatim: an operator or a selection is dropped first,
-    /// Insert steps back into Normal, and only a bare Normal-mode `Esc` closes
-    /// the prompt. That ladder is why `Esc` never surprises you — it always
-    /// undoes the *most recent* thing you are in the middle of.
+    /// `Esc` **cancels the prompt**, first press.
+    ///
+    /// That is what the key means everywhere else in the program and everywhere
+    /// else on the desktop: the thing I opened, close it. yazi's ladder — drop
+    /// the operator, step Insert back into Normal, and only *then* close —
+    /// spends two presses on getting out of a prompt somebody opened by
+    /// mistake, and leaves a block caret behind on the first one, which reads
+    /// as the prompt having broken rather than as a mode having been entered.
+    ///
+    /// The ladder is still there behind `[input] vi_mode = true`
+    /// ([`InputBuffer::vi_mode`]), verbatim: an operator or a selection is
+    /// dropped first, Insert steps back into Normal, and only a bare
+    /// Normal-mode `Esc` closes the prompt.
     fn escape(&mut self) -> InputEvent {
+        if !self.vi {
+            return InputEvent::Cancel;
+        }
         match self.mode {
             Mode::Insert | Mode::Replace => {
                 self.mode = Mode::Normal;

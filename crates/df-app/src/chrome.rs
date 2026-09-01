@@ -569,8 +569,8 @@ fn chip(
     rect.right() + GAP
 }
 
-/// The bar while something is being typed into it: `f`, `/`, `?`, and the help
-/// browser's own filter.
+/// The bar while something is being typed into it: `f`, `/`, a rename, and the
+/// help browser's own filter.
 pub fn input_bar(paint: &Painting<'_>, rect: egui::Rect, prompt: &Prompt) {
     let palette = paint.palette;
     let inner = bar_ground(paint, rect);

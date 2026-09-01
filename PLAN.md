@@ -184,7 +184,7 @@ ordering preserves declaration order, not alphabetical.
 | `m s/p/b/m/o/n` | linemode: size/perms/btime/mtime/owner/none |
 | `c c/d/f/n` | copy path/dirname/filename/stem |
 | `c t` | copy file's text contents (binary → falls back to yank) |
-| `f` `/` `?` `n` `N` | filter --smart, find next/prev, repeat next/prev |
+| `f` `/` `n` `N` | filter --smart, find, next/previous match (`?` is help) |
 | `, m/M b/B e/E a/A n/N s/S r` | sort (time & size sorts also switch linemode, as now) |
 | `g h/c/d/w/s/p/a/r/1/2/Space/f` | goto: ~, ~/.config, ~/Downloads, ~/Work, server, plex, archive, git root, sftp1, sftp2, interactive, follow symlink |
 | `t` `1–9` `Alt+[`/`Alt+]` `{`/`}` | tabs (as §2; `[`/`]` belong to transport) |
@@ -405,7 +405,7 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Directory model: async read, watch (inotify), sort modes, dir-first, hidden toggle
 - [x] Three-pane miller render `[1,4,3]`, cursor, scrolloff, linemodes, icons + theme colors
 - [x] Navigation: arrow keys, gg/G, paging, Alt+←/→ history, `g` goto table, `--cwd-file`
-- [x] Selection: Space, visual mode, Ctrl+a/r; filter `f`, find `/ ? n N`
+- [x] Selection: Space, visual mode, Ctrl+a/r; filter `f`, find `/ n N`
 - [x] Tabs: t, 1–9, [/], {/}, tab strip
 - [x] Which-key card (175 ms), `?` help browser
 

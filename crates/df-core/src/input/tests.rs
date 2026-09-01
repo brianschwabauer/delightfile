@@ -45,13 +45,22 @@ fn run(buf: &mut InputBuffer, script: &str) -> InputEvent {
     last
 }
 
+/// A buffer with the modal `Esc` ladder on — `[input] vi_mode = true`.
+///
+/// Every test about the *modes* uses it, because Normal mode is only reachable
+/// through `Esc` and, in the shipped default, `Esc` cancels the prompt outright
+/// (see [`the_escape_key_cancels_unless_vi_mode_is_on`]).
+fn vi(text: &str, at: usize) -> InputBuffer {
+    InputBuffer::new(text, at).vi_mode(true)
+}
+
 /// A buffer holding `text`, in Normal mode, caret at char index `at`.
 ///
 /// Normal is the interesting starting mode for command tests, and getting
 /// there through `<esc>` would move the caret, so it is set directly the way a
 /// user who pressed `Esc` at position 0 would find it.
 fn normal(text: &str, at: usize) -> InputBuffer {
-    let mut buf = InputBuffer::new(text, at);
+    let mut buf = vi(text, at);
     buf.feed(parse_chord("esc").expect("esc"));
     buf.cursor = at.min(buf.limit());
     buf
@@ -614,7 +623,7 @@ fn insert_text_coalesces_with_the_insert_run_around_it() {
 /// the typing after it joins the same one.
 #[test]
 fn insert_text_opens_an_undo_step_of_its_own() {
-    let mut buf = InputBuffer::new("start", 5);
+    let mut buf = vi("start", 5);
     buf.insert_text("é");
     run(&mut buf, "xyz");
     assert_eq!(buf.text(), "startéxyz");
@@ -755,7 +764,7 @@ fn the_undo_stack_is_bounded() {
 #[test]
 fn enter_submits_the_text_from_any_mode() {
     for script in ["", "<esc>", "<esc>v"] {
-        let mut buf = InputBuffer::new("name.txt", 0);
+        let mut buf = vi("name.txt", 0);
         run(&mut buf, script);
         assert_eq!(
             buf.feed(parse_chord("enter").expect("enter")),
@@ -768,7 +777,7 @@ fn enter_submits_the_text_from_any_mode() {
 #[test]
 fn ctrl_c_cancels_from_any_mode() {
     for script in ["", "<esc>", "<esc>v", "<esc>d", "<esc>r"] {
-        let mut buf = InputBuffer::new("name.txt", 0);
+        let mut buf = vi("name.txt", 0);
         run(&mut buf, script);
         assert_eq!(
             buf.feed(parse_chord("ctrl+c").expect("ctrl+c")),
@@ -778,10 +787,31 @@ fn ctrl_c_cancels_from_any_mode() {
     }
 }
 
+/// The shipped default: one `Esc` closes the prompt, from any mode, with no
+/// block caret in between.
+#[test]
+fn the_escape_key_cancels_unless_vi_mode_is_on() {
+    let mut buf = InputBuffer::new("abc", 3);
+    assert_eq!(buf.feed(esc()), InputEvent::Cancel);
+    assert_eq!(buf.mode(), InputMode::Insert, "no mode was entered");
+
+    // Mid-edit is the same answer: the prompt is what `Esc` is about.
+    let mut buf = InputBuffer::new("abc", 0);
+    run(&mut buf, "xy");
+    assert_eq!(buf.feed(esc()), InputEvent::Cancel);
+
+    // `Ctrl+[` is the same key, so it is the same answer.
+    let mut buf = InputBuffer::new("abc", 3);
+    assert_eq!(
+        buf.feed(parse_chord("ctrl+[").expect("ctrl+[")),
+        InputEvent::Cancel
+    );
+}
+
 /// The ladder, one rung at a time: insert → normal → (selection) → cancel.
 #[test]
 fn the_escape_ladder() {
-    let mut buf = InputBuffer::new("abc", 3);
+    let mut buf = vi("abc", 3);
     assert_eq!(buf.feed(esc()), InputEvent::Consumed);
     assert_eq!(buf.mode(), InputMode::Normal);
     assert_eq!(
@@ -797,7 +827,7 @@ fn the_escape_ladder() {
 
 #[test]
 fn ctrl_bracket_is_the_same_key_as_escape() {
-    let mut buf = InputBuffer::new("abc", 3);
+    let mut buf = vi("abc", 3);
     assert_eq!(
         buf.feed(parse_chord("ctrl+[").expect("ctrl+[")),
         InputEvent::Consumed

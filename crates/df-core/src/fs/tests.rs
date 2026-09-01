@@ -756,8 +756,9 @@ fn a_selection_drops_files_that_are_gone_after_a_rescan() {
     assert!(state.is_selected("a.txt"));
 }
 
+/// A *page* clamps: `Ctrl+f` at the bottom stops there.
 #[test]
-fn the_cursor_clamps_and_never_wraps() {
+fn a_page_of_cursor_clamps_at_both_ends() {
     let mut state = loaded_state(files(&["a", "b", "c"]));
     state.move_cursor(-1);
     assert_eq!(state.cursor(), 0);
@@ -774,6 +775,32 @@ fn the_cursor_clamps_and_never_wraps() {
     assert_eq!(empty.cursor(), 0);
     assert!(empty.cursor_entry().is_none());
     assert!(empty.is_empty());
+}
+
+/// …and one arrow key's worth wraps: the listing is a ring.
+#[test]
+fn an_arrow_key_wraps_around_the_ends() {
+    let mut state = loaded_state(files(&["a", "b", "c"]));
+    state.wrap_cursor(-1);
+    assert_eq!(state.cursor(), 2, "up on the first row is the last row");
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("c"));
+    state.wrap_cursor(1);
+    assert_eq!(state.cursor(), 0, "down on the last row is the first row");
+    state.wrap_cursor(1);
+    assert_eq!(state.cursor(), 1);
+    // More than one turn of the ring still lands somewhere sensible.
+    state.wrap_cursor(7);
+    assert_eq!(state.cursor(), 2);
+    state.wrap_cursor(-7);
+    assert_eq!(state.cursor(), 1);
+
+    // A one-row listing wraps onto itself, and an empty one does nothing.
+    let mut one = loaded_state(files(&["only"]));
+    one.wrap_cursor(1);
+    assert_eq!(one.cursor(), 0);
+    let mut empty = loaded_state(Vec::new());
+    empty.wrap_cursor(-1);
+    assert_eq!(empty.cursor(), 0);
 }
 
 #[test]

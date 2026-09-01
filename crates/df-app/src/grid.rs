@@ -255,10 +255,14 @@ pub enum Step {
 ///   refusing. Nine files in a three-wide grid have no tile below the eighth,
 ///   and "nothing happens" is the wrong answer when there is obviously
 ///   somewhere below to go.
-/// - **Nothing wraps.** Off the top is the top and off the bottom is the
-///   bottom, exactly as [`df_core::fs::DirState::move_cursor`] clamps in the
-///   list. A directory has a beginning and an end and the cursor may not
-///   teleport between them.
+/// - **`↑`/`↓` wrap, `←`/`→` do not.** A column is a ring
+///   ([`df_core::fs::DirState::wrap_cursor`] is the list's half of the same
+///   rule): `↓` off the bottom of a column comes back at its top, and `↑` off
+///   the top goes to the bottom of *that same column*, so the key that moves
+///   vertically never moves you sideways. `←`/`→` still refuse at the two ends,
+///   and that refusal is load-bearing — [`crate::app`] reads it as "this key
+///   had nowhere to go" and turns it into leave-the-directory and
+///   enter-it/focus-the-preview.
 pub fn step(cursor: usize, count: usize, columns: usize, step: Step) -> usize {
     if count == 0 {
         return 0;
@@ -270,10 +274,13 @@ pub fn step(cursor: usize, count: usize, columns: usize, step: Step) -> usize {
         Step::Left => cursor.saturating_sub(1),
         Step::Right => (cursor + 1).min(last),
         Step::Up => {
-            if cursor < columns {
-                cursor
-            } else {
+            if cursor >= columns {
                 cursor - columns
+            } else {
+                // Off the top: the bottom-most tile in this column, which is
+                // the last one whose column matches — the last row may be
+                // short of it, in which case the row above it is the bottom.
+                bottom_of_column(cursor % columns, last, columns)
             }
         }
         Step::Down => {
@@ -281,13 +288,25 @@ pub fn step(cursor: usize, count: usize, columns: usize, step: Step) -> usize {
             if below <= last {
                 below
             } else if cursor / columns == last / columns {
-                // Already in the last row: there is nothing below.
-                cursor
+                // Already in the last row: off the bottom, back to the top of
+                // this column.
+                cursor % columns
             } else {
                 // The row below exists but is short of this column.
                 last
             }
         }
+    }
+}
+
+/// The last tile in `column`, out of `last + 1` tiles in `columns` columns.
+fn bottom_of_column(column: usize, last: usize, columns: usize) -> usize {
+    let rows = last / columns + 1;
+    let candidate = (rows - 1) * columns + column;
+    if candidate <= last {
+        candidate
+    } else {
+        candidate - columns
     }
 }
 
@@ -657,7 +676,6 @@ pub struct GridView<'a> {
     pub metrics: Metrics,
     pub hovers: &'a crate::hover::Hovers<crate::ui::Control>,
     pub ripples: &'a crate::ripple::Ripples<crate::ui::Control>,
-    pub cursor_glow: &'a crate::hover::Hovers<usize>,
     /// How strongly the cursor tile is lit: 1 in the focused pane, and
     /// [`crate::ui::GHOST_CURSOR`] everywhere else — the same "where am I"
     /// answer the list gives (PLAN §2.1).
@@ -687,7 +705,6 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         metrics,
         hovers,
         ripples,
-        cursor_glow,
         cursor_alpha,
         thumbs,
         clip,
@@ -740,7 +757,9 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         } else {
             ground
         };
-        let glow = cursor_glow.hover(index) * cursor_alpha;
+        // Instant, both ways: the keyboard cursor is not a pointer and does
+        // not leave a trail (see the note above `crate::ui::ListView`).
+        let glow = f32::from(index == dir.cursor()) * cursor_alpha;
         let base = mix(ground_here, palette.surface1, glow);
         let fill = mix(base, palette.surface0, hover * crate::ui::HOVER_LIFT);
         let rect = crate::hover::pressed_rect(rect, hovers.press(key));
@@ -1018,9 +1037,9 @@ mod tests {
     }
 
     /// Seven files in a three-wide grid: `[0 1 2] [3 4 5] [6]`. Every arrow at
-    /// every edge, and the ragged last row.
+    /// every edge, the ragged last row, and the vertical wrap.
     #[test]
-    fn the_arrows_move_in_two_dimensions_and_clamp_at_the_edges() {
+    fn the_arrows_move_in_two_dimensions_and_wrap_vertically() {
         let go = |from: usize, s: Step| step(from, 7, 3, s);
         // Down a full row.
         assert_eq!(go(0, Step::Down), 3);
@@ -1029,10 +1048,16 @@ mod tests {
         // somewhere below.
         assert_eq!(go(4, Step::Down), 6);
         assert_eq!(go(5, Step::Down), 6);
-        // Already in the last row: nothing below, and no wrap to the top.
-        assert_eq!(go(6, Step::Down), 6);
-        // Up out of the first row stays put.
-        assert_eq!(go(1, Step::Up), 1);
+        // Already in the last row: off the bottom and back to the top of the
+        // same column, never sideways.
+        assert_eq!(go(6, Step::Down), 0);
+        assert_eq!(go(4, Step::Up), 1);
+        // Up out of the first row is the bottom of that column — tile 6 for
+        // column 0, and the row above it for the two columns the ragged last
+        // row is short of.
+        assert_eq!(go(0, Step::Up), 6);
+        assert_eq!(go(1, Step::Up), 4);
+        assert_eq!(go(2, Step::Up), 5);
         assert_eq!(go(6, Step::Up), 3);
         // Left and right are linear: they walk off the end of a row into the
         // next one, because the tiles are one sequence read like a page.
@@ -1051,10 +1076,13 @@ mod tests {
             assert_eq!(step(0, 0, 3, s), 0);
             assert_eq!(step(0, 1, 0, s), 0);
             // A one-column grid is a list, and the arrows have to behave like
-            // one: `↑`/`←` are the previous file and `↓`/`→` the next.
+            // one: `↑`/`←` are the previous file and `↓`/`→` the next — except
+            // that `↓` on the last row wraps to the first and `→` refuses, so
+            // that `→` can still mean "enter" there.
             let expected = match s {
                 Step::Left | Step::Up => 1,
-                Step::Right | Step::Down => 2,
+                Step::Right => 2,
+                Step::Down => 0,
             };
             assert_eq!(step(5, 3, 1, s), expected, "{s:?}");
         }
@@ -1179,7 +1207,6 @@ mod tests {
                             metrics,
                             hovers: &crate::hover::Hovers::new(),
                             ripples: &crate::ripple::Ripples::new(),
-                            cursor_glow: &crate::hover::Hovers::new(),
                             cursor_alpha: 1.0,
                             thumbs: &thumbs,
                             clip: Some(crate::ui::ClipMark {

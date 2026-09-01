@@ -65,7 +65,7 @@ use crate::tab::Tab;
 use crate::tabs::Tabs;
 use crate::theme::Palette;
 use crate::toast::Toasts;
-use crate::ui::{self, ClipMark, Column, Control, CursorGlow, ListView};
+use crate::ui::{self, ClipMark, Column, Control, ListView};
 use crate::whichkey::WhichKey;
 
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
@@ -859,9 +859,6 @@ pub struct App {
     // ── Painting ────────────────────────────────────────────────────────────
     /// Hover/press amounts for every row on screen (PLAN §8).
     hovers: Hovers<Control>,
-    /// The cursor's own "instant in, animated out" track, keyed by row, so a
-    /// cursor moved by the keyboard leaves a trail exactly as the pointer does.
-    cursor_glow: Hovers<usize>,
     ripples: Ripples<Control>,
     /// Whether a patched font was found and the real icons can be drawn.
     nerd: bool,
@@ -1209,7 +1206,6 @@ impl App {
             which: WhichKey::new(),
             which_rows: Vec::new(),
             hovers: Hovers::new(),
-            cursor_glow: Hovers::new(),
             ripples: Ripples::new(),
             nerd: false,
             // Read before the window, like every other startup read: the very
@@ -3541,6 +3537,10 @@ impl App {
                 self.prompt_key(chord, now);
                 continue;
             }
+            // …and the help sheet is a search box the moment you type into it.
+            if self.help_typing(chord, now) {
+                continue;
+            }
             // A modal surface is matched against its own context **alone**.
             // Merely pushing `Confirm` onto the browser's stack would leave
             // `Files` reachable underneath it, and a `d` typed into a delete
@@ -4798,6 +4798,10 @@ impl App {
     }
 
     fn open_prompt_with(&mut self, kind: PromptKind, buffer: InputBuffer) {
+        // The one place the `[input] vi_mode` answer is stamped on a prompt.
+        // Off — the shipped default — `Esc` closes the prompt on the first
+        // press instead of dropping it into Normal mode with a block caret.
+        let buffer = buffer.vi_mode(self.config.input.vi_mode);
         let origin = self.tab().cwd.dir.cursor();
         self.prompt = Some(Prompt::with(kind, origin, buffer));
         self.sync_context();
@@ -5120,7 +5124,9 @@ impl App {
                 let origin = prompt.origin;
                 self.dir().set_cursor(origin);
             }
-            PromptKind::HelpFilter => self.help_query.clear(),
+            // The sheet widens back out, and its cursor goes back to the top
+            // with it — the row it was on was in the *narrowed* list.
+            PromptKind::HelpFilter => self.clear_help_filter(),
             // A cancelled conflict rename goes back to the dialog, which is
             // still holding the unanswered conflict.
             _ => {}
@@ -5329,6 +5335,67 @@ impl App {
         }
     }
 
+    /// A printable key with the help sheet open is the **filter**, not a file
+    /// command. Returns whether the key was taken.
+    ///
+    /// A sheet of four hundred bindings is read by narrowing it, and the only
+    /// thing a person does in front of one is type what they are looking for —
+    /// which, before this, ran `q` and quit, or armed the `g` chord. Nothing is
+    /// lost: the overlay's own keys (`↑`/`↓`, `Esc`, `Ctrl+c`) are not
+    /// printable, and the file commands underneath are one `Esc` away.
+    ///
+    /// The typed key opens the ordinary [`PromptKind::HelpFilter`] prompt and
+    /// is fed straight into it, so the query is edited by the same line editor,
+    /// shown in the same bar with the same caret, and cancelled by the same
+    /// `Esc` as every other prompt — one filter box, entered two ways. `f`
+    /// still opens it too, and opens it *empty-handed*: the binding says
+    /// "Filter the help", so it means the box rather than the letter.
+    fn help_typing(&mut self, chord: Chord, now: Instant) -> bool {
+        // A modal card is nearer to the user than the sheet behind it, so its
+        // keys are its own — the sheet only takes the keyboard when nothing is
+        // standing in front of it.
+        if self.help.is_none() || self.prompt.is_some() || self.overlay_open() {
+            return false;
+        }
+        let mods = chord.mods;
+        if mods.ctrl || mods.alt || mods.super_key {
+            return false;
+        }
+        let typed = match chord.key {
+            Key::Char('f') if !mods.shift => None,
+            Key::Char(_) | Key::Space => Some(chord),
+            // Backspace with a committed query re-opens the box on it and
+            // takes the last character off, which is what the key looks like
+            // it is doing.
+            Key::Backspace if !self.help_query.is_empty() => Some(chord),
+            _ => return false,
+        };
+        self.open_prompt(PromptKind::HelpFilter);
+        if let Some(chord) = typed {
+            self.prompt_key(chord, now);
+        }
+        true
+    }
+
+    /// `Esc` with something typed into the help filter: the query goes, the
+    /// sheet stays. The rung above [`App::close_help`], because the query is
+    /// the more recent thing and because the binding row says so out loud
+    /// ("Clear the filter, or close").
+    fn clear_help_filter(&mut self) {
+        self.help_query.clear();
+        if self.prompt.as_ref().is_some_and(|p| p.kind.is_help()) {
+            self.prompt = None;
+        }
+        // The narrowing that hid most of the sheet is gone, so the cursor goes
+        // back to the first binding rather than to wherever the short list
+        // left it.
+        let lines = self.help_lines();
+        if let Some(help) = &mut self.help {
+            help.reset(&lines);
+        }
+        self.sync_context();
+    }
+
     fn close_help(&mut self) {
         self.help = None;
         self.help_query.clear();
@@ -5437,6 +5504,7 @@ impl App {
             overlay_open: self.overlay_open(),
             chord_pending: self.keys.is_pending(),
             prompt_open: self.prompt.is_some(),
+            help_filter: self.help.is_some() && !self.help_query.is_empty(),
             help_open: self.help.is_some(),
             visual: self.visual.is_some(),
             selection: self.dir().selected_count() > 0,
@@ -5447,6 +5515,7 @@ impl App {
             EscapeRung::CloseOverlay => self.close_overlay(Instant::now()),
             EscapeRung::CancelChord => self.keys.cancel(),
             EscapeRung::ClosePrompt => self.cancel_prompt(),
+            EscapeRung::ClearHelpFilter => self.clear_help_filter(),
             EscapeRung::CloseHelp => self.close_help(),
             EscapeRung::LeaveVisual => {
                 self.visual = None;
@@ -5654,12 +5723,12 @@ impl App {
             // it (PLAN §2.1's `in_parent`) ──────────────────────────────────
             C::ParentPrev => {
                 if let Some(parent) = &mut self.tabs.active_mut().parent {
-                    parent.dir.move_cursor(-1);
+                    parent.dir.wrap_cursor(-1);
                 }
             }
             C::ParentNext => {
                 if let Some(parent) = &mut self.tabs.active_mut().parent {
-                    parent.dir.move_cursor(1);
+                    parent.dir.wrap_cursor(1);
                 }
             }
             C::ParentEnter => {
@@ -6092,7 +6161,8 @@ impl App {
     ///
     /// Returns whether the cursor actually moved, which is what lets `←` and
     /// `→` fall through to "leave" and "enter" at the two edges where they have
-    /// nowhere to go.
+    /// nowhere to go. `↑`/`↓` have no such edges — they wrap (`grid::step`) —
+    /// so they never fall through to anything.
     fn step_cursor(&mut self, step: grid::Step) -> bool {
         let columns = self.columns;
         let dir = self.dir();
@@ -8529,10 +8599,9 @@ impl App {
         );
         self.ripples.tick(now);
 
-        // `delightful-ui` §2: the pointer says what is clickable. A file row
-        // keeps the arrow — it is a place, and a hand over every row of a
-        // thousand-row listing is noise — while everything that is a *button*
-        // says so.
+        // `delightful-ui` §2: the pointer says what is clickable, and a file
+        // row *is* — one click moves the cursor, two open the file — so it
+        // wears the hand like every other control that answers a click.
         // A live drag says so with the cursor before it says so with anything
         // else (`delightful-ui` §2), and it overrides whatever is under it —
         // the hand is holding files, not pointing at a link.
@@ -8540,12 +8609,12 @@ impl App {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if let Some((control, _)) = over {
             ui.ctx().set_cursor_icon(match control {
-                Control::Row(..) => egui::CursorIcon::Default,
                 // A tab chip is draggable as well as clickable — it is how a
                 // tab becomes a window (PLAN §2) — so it wears the hand that
                 // says so (`delightful-ui` §2), like the basket's chip.
                 Control::Tab(_) | Control::BasketChip => egui::CursorIcon::Grab,
-                Control::Crumb(_)
+                Control::Row(..)
+                | Control::Crumb(_)
                 | Control::Action(_)
                 | Control::PanelRow(_)
                 | Control::MenuItem(_)
@@ -8578,7 +8647,6 @@ impl App {
             now,
         );
         let cursor = tab.cwd.dir.cursor();
-        self.cursor_glow.tick(Some(cursor), None, now);
         // Focus commits instantly; its picture catches up (PLAN §2.1).
         self.focus_fade.tick(self.focus, now);
         // Where a rename popup and the opener picker anchor themselves — the
@@ -8815,7 +8883,6 @@ impl App {
                 hovers: &self.hovers,
                 ripples: &self.ripples,
                 cursor_fill: self.palette.surface0,
-                cursor_glow: CursorGlow::Steady,
                 // The parent's marker is normally a fact about the path rather
                 // than a cursor, so it stays quiet — until the keyboard is
                 // actually in that pane and it *is* the cursor.
@@ -8857,7 +8924,6 @@ impl App {
             hovers: &self.hovers,
             ripples: &self.ripples,
             cursor_fill: self.palette.surface1,
-            cursor_glow: CursorGlow::Fading(&self.cursor_glow),
             // DelightMail's vim-split trick (PLAN §2.1): with the keyboard
             // somewhere else the cursor row dims to a ghost bar, so "where am
             // I" and "where do my keys go" are two questions with two answers
@@ -8894,7 +8960,6 @@ impl App {
                     metrics: *metrics,
                     hovers: list_view.hovers,
                     ripples: list_view.ripples,
-                    cursor_glow: &self.cursor_glow,
                     cursor_alpha: list_view.cursor_alpha,
                     thumbs,
                     clip: list_view.clip,
@@ -9103,7 +9168,7 @@ impl App {
             None if self.help.is_some() => chrome::hint_bar(
                 &paint,
                 layout.bar,
-                &[("↑↓", "move"), ("f", "filter"), ("Esc", "close")],
+                &[("↑↓", "move"), ("type", "to filter"), ("Esc", "close")],
             ),
             None => {
                 let dir = &self.tab().cwd.dir;
@@ -9305,7 +9370,6 @@ impl App {
             // once it has arrived (see `FocusFade::tick`), so a settled
             // keyboard costs nothing.
             ("focus", self.focus_fade.animating(now)),
-            ("cursor_glow", self.cursor_glow.animating()),
             ("ripples", self.ripples.animating(now)),
             ("tab", self.tab().animating(now)),
             ("tabs", self.tabs.animating(now)),
