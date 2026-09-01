@@ -129,6 +129,20 @@ impl<K: Key> Hovers<K> {
         self.amount(hit).0
     }
 
+    /// Everything still lit, with how brightly.
+    ///
+    /// The drop-target ring is drawn *from* the map rather than from a single
+    /// "what is under the pointer now": a drag that has moved off a row leaves
+    /// its ring fading behind it, which is the outro half of `delightful-ui`
+    /// §3 — and there is no other way to draw something that is no longer the
+    /// answer to any question.
+    pub fn warm(&self) -> impl Iterator<Item = (K, f32)> + '_ {
+        self.items
+            .iter()
+            .filter(|(_, hover, _)| *hover > 0.0)
+            .map(|(hit, hover, _)| (*hit, *hover))
+    }
+
     pub fn press(&self, hit: K) -> f32 {
         self.amount(hit).1
     }

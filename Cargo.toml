@@ -29,6 +29,12 @@ log = "0.4"
 env_logger = "0.11"
 crossbeam-channel = "0.5"
 libc = "0.2"
+# The `wl_data_device` client behind PLAN §7.1's drag out / drop in. **Not a new
+# crate in the build**: winit already compiles this exact version, with
+# `wayland-backend/client_system`, which is the feature that lets df-app adopt
+# winit's own `wl_display` instead of opening a second connection that could
+# never start a drag (see `df-app/src/wayland`).
+wayland-client = { version = "0.31", features = ["system"] }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 # `anyhow` and `serde_json` are here only because the vendored `dv-*` crates

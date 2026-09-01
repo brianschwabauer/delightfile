@@ -40,6 +40,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
 use crate::chrome;
+use crate::dnd;
 use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
 use crate::graphics::{Gfx, GfxError};
 use crate::help::{self, Help};
@@ -278,6 +279,9 @@ struct Pointer {
     shift: bool,
     /// `Ctrl` (or the platform's command key): toggle one row's selection.
     toggle: bool,
+    /// `Alt`, which only a drag reads — it is the third of the three drop verbs
+    /// (`crate::dnd::verb_for`).
+    alt: bool,
 }
 
 /// Where this frame drew the things a click can land on.
@@ -493,6 +497,82 @@ pub struct App {
     ripples: Ripples<Control>,
     /// Whether a patched font was found and the real icons can be drawn.
     nerd: bool,
+
+    // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────────
+    /// The compositor-side data device: drags out, drops in. `None` when the
+    /// protocol is not there to be had (see [`crate::wayland`]), and every use
+    /// of it is written so that is simply a session without cross-application
+    /// drags rather than a session with a hole in it.
+    data_device: Option<crate::wayland::DataDevice>,
+    /// The files in the hand, while there are any.
+    drag: Option<Drag>,
+    /// The ghost's flight home after a cancelled drag. Outlives the drag it
+    /// belongs to — that is the whole point of it.
+    spring_back: Option<SpringHome>,
+    /// Highlight amounts for drop targets: one more "instant in, animated out"
+    /// track (`delightful-ui` §3), so a ring snaps on as the drag arrives and
+    /// fades as it leaves.
+    targets: Hovers<dnd::Target>,
+    /// A drag from *another* application, while it is over the window.
+    incoming: Option<Incoming>,
+    /// The last frame's drop geometry. An external drop arrives from the
+    /// wayland thread between frames and has to be resolved against the frame
+    /// the user was actually looking at when they let go.
+    zones: Option<dnd::Zones>,
+}
+
+/// What one frame of a live drag hands the painter.
+struct DragFrame {
+    at: egui::Pos2,
+    verb: dnd::Verb,
+    /// The target under the pointer, and `None` when there is none *or* when
+    /// the one there is would refuse the drop — an inert target must look
+    /// inert (`delightful-ui` §6).
+    target: Option<dnd::Target>,
+}
+
+/// The drag in progress: what is in the hand and where it came from.
+struct Drag {
+    /// What will be moved, copied or linked. Fixed at press time — a drag that
+    /// re-read the selection as it went would act on rows the hand had scrolled
+    /// past rather than on the ones it picked up.
+    paths: Vec<PathBuf>,
+    /// The name on the top card. The *grabbed* row's, not the first selected
+    /// one's: the card has to show what the hand actually took hold of.
+    label: String,
+    /// The glyph and colour beside it, from the same table the rows use.
+    icon: crate::icons::Icon,
+    /// Where the ghost springs back to — the middle of the row it came off.
+    home: egui::Pos2,
+    at: egui::Pos2,
+    /// The hold-to-open timer, aimed at whatever the drag is over.
+    spring: dnd::SpringOpen,
+    /// The last frame's instant, so the auto-scroll is in rows per *second*
+    /// rather than rows per frame — a drag must not travel further on a fast
+    /// machine.
+    last: Instant,
+    /// The compositor has taken the pointer: this drag is now somebody else's
+    /// problem until it comes back as a `DragEnded`.
+    handed_off: bool,
+}
+
+/// A cancelled drag on its way back to the row it came off.
+///
+/// The card keeps its face: what flies home has to be recognisably the thing
+/// that was picked up, or the animation reads as a new object appearing rather
+/// than as the drag being undone.
+struct SpringHome {
+    spring: dnd::SpringBack,
+    label: String,
+    icon: crate::icons::Icon,
+}
+
+/// A drag from another application, over our window.
+struct Incoming {
+    at: egui::Pos2,
+    /// Whether it is our own drag come back through the compositor — see
+    /// [`crate::dnd::SELF_MIME`].
+    ours: bool,
 }
 
 impl App {
@@ -617,6 +697,12 @@ impl App {
             cursor_glow: Hovers::new(),
             ripples: Ripples::new(),
             nerd: false,
+            data_device: None,
+            drag: None,
+            spring_back: None,
+            targets: Hovers::new(),
+            incoming: None,
+            zones: None,
         }
     }
 
@@ -667,8 +753,49 @@ impl App {
             }
         });
 
+        // The data device needs the window's own surface, so it cannot be
+        // started with the other workers before the window exists (PLAN §1's
+        // ordering rule bends exactly this far and no further). A session
+        // without one is a session with no cross-application drags and
+        // everything else intact.
+        self.data_device = Self::start_data_device(event_loop, &gfx.window, self.waker.clone());
+        if self.data_device.is_none() {
+            log::info!("no wayland data device — drag out and drop in are off");
+        }
+
         self.gfx = Some(gfx);
         Ok(())
+    }
+
+    /// Adopt winit's Wayland connection for [`crate::wayland`].
+    ///
+    /// `None` on X11, on a compositor without the protocol, or when the handles
+    /// cannot be had — all of which are "this desktop does not do that", not
+    /// errors.
+    fn start_data_device(
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        waker: Waker,
+    ) -> Option<crate::wayland::DataDevice> {
+        use winit::raw_window_handle::{
+            HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+        };
+        let RawDisplayHandle::Wayland(display) = event_loop.display_handle().ok()?.as_raw() else {
+            return None;
+        };
+        let RawWindowHandle::Wayland(surface) = window.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        // SAFETY: both handles describe objects winit owns and keeps alive for
+        // the lifetime of the window, and the device is dropped in `finish`
+        // before the window is. The workspace warns on `unsafe_code`; this is
+        // the one call site in df-app outside `crate::wayland`, and it is here
+        // rather than inside that module because this is where the two handles
+        // — and the promise about their lifetime — actually come from.
+        #[allow(unsafe_code)]
+        unsafe {
+            crate::wayland::DataDevice::start(display.display, surface.surface, waker)
+        }
     }
 
     /// Drain whatever the workers finished. Returns true when something changed
@@ -933,7 +1060,17 @@ impl App {
 
     /// Plan and run a paste of `clipboard` into the current directory.
     fn paste_from(&mut self, clipboard: &Clipboard, force: bool, now: Instant) {
-        let dest = self.cwd();
+        self.paste_into(clipboard, self.cwd(), force, now);
+    }
+
+    /// The same, into a directory that is not necessarily the one you are in.
+    ///
+    /// The destination is a parameter because a *drop* names one (PLAN §7.1):
+    /// a folder row, a breadcrumb, another tab. Everything downstream — the
+    /// conflict dialog, the task, the journal record, the undo toast — is the
+    /// same code either way, which is the point of routing a drop through here
+    /// rather than giving it a pipeline of its own.
+    fn paste_into(&mut self, clipboard: &Clipboard, dest: PathBuf, force: bool, now: Instant) {
         let plan = match plan_paste(clipboard, &dest, force) {
             Ok(plan) => plan,
             Err(e) => {
@@ -1008,8 +1145,19 @@ impl App {
             self.toasts.notice("Nothing yanked to link", now);
             return;
         }
-        let cwd = self.cwd();
-        let paths = self.clipboard.paths.clone();
+        let (cwd, paths) = (self.cwd(), self.clipboard.paths.clone());
+        self.link_into(paths, cwd, kind, now);
+    }
+
+    /// The same, for a set of files and a directory that were both named by a
+    /// drop rather than by the clipboard and the cursor (PLAN §7.1).
+    fn link_into(
+        &mut self,
+        paths: Vec<PathBuf>,
+        cwd: PathBuf,
+        kind: Option<LinkKind>,
+        now: Instant,
+    ) {
         let mut made = 0;
         let mut failure = None;
         for target in &paths {
@@ -2245,6 +2393,18 @@ impl App {
             self.cancel_band();
             return;
         }
+        // The third, and above both: a drag is the most immediate thing the
+        // hand is doing, and `Esc` cancelling anything else while files are
+        // being carried would be `Esc` answering a question nobody asked.
+        // A drag the compositor has taken is *not* cancellable from here — the
+        // pointer is not ours, and only the compositor can call that off.
+        if self.drag.as_ref().is_some_and(|drag| !drag.handed_off) {
+            if let Some(drag) = self.drag.take() {
+                self.spring_home(drag, Instant::now());
+            }
+            self.press = None;
+            return;
+        }
         // The rungs and their order are [`crate::focus::escape_rung`]'s, so the
         // ladder can be walked in a test with no window and no dialog; this is
         // only the doing of them.
@@ -3251,7 +3411,7 @@ impl App {
     // ── Band select (PLAN §7.5) ─────────────────────────────────────────────
 
     /// The pointer has moved with the button down.
-    fn drag(&mut self, at: Option<egui::Pos2>, list: egui::Rect, scroll_rows: f32) {
+    fn drag(&mut self, at: Option<egui::Pos2>, list: egui::Rect, scroll_rows: f32, now: Instant) {
         let (Some(at), Some(press)) = (at, self.press) else {
             return;
         };
@@ -3263,13 +3423,10 @@ impl App {
                 press.dragging = true;
             }
             if press.on_row {
-                // **The seam.** A drag that began on a row is a *file* drag —
-                // internal DnD, the next checkbox in Phase 4 — and until that
-                // lands it does nothing at all. What it must not do is band
-                // select: a drag from a row is how every file manager moves
-                // files, and teaching the hand otherwise for one release would
-                // be worse than the feature being absent.
-                log::trace!("row drag armed; internal DnD lands with the next checkbox");
+                // **The seam.** A drag that began on a row is a *file* drag,
+                // never a band select: a drag from a row is how every file
+                // manager moves files.
+                self.begin_drag(press.at, at, list, scroll_rows, now);
                 return;
             }
             if !press.in_list {
@@ -3345,6 +3502,357 @@ impl App {
         }
         // The press is spent as well, or letting go would start it again.
         self.press = None;
+    }
+
+    // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────────
+
+    /// A press on a row has travelled far enough to be a drag. Pick the files
+    /// up.
+    ///
+    /// **The selection is not changed.** Dragging a row that is not in the
+    /// selection drags that row alone and leaves the selection where it was —
+    /// which is what every file manager does, and the alternative (a drag that
+    /// silently re-selects) would make "drag this one file out of a marked set"
+    /// impossible to express.
+    fn begin_drag(
+        &mut self,
+        from: egui::Pos2,
+        at: egui::Pos2,
+        content: egui::Rect,
+        scroll_rows: f32,
+        now: Instant,
+    ) {
+        let dir = &self.tab().cwd.dir;
+        let Some(index) = ui::row_at(content, scroll_rows, dir.len(), from) else {
+            return;
+        };
+        let Some(entry) = dir.row(index) else { return };
+        let grabbed = entry.path.clone();
+        let label = entry.name.clone();
+        let icon = crate::icons::icon_for(entry, &self.theme, &self.palette, self.nerd);
+        let selected = dir.selected_paths();
+        let paths = if selected.contains(&grabbed) {
+            selected
+        } else {
+            vec![grabbed]
+        };
+        self.drag = Some(Drag {
+            paths,
+            label,
+            icon,
+            home: ui::row_rect(content, scroll_rows, index).center(),
+            at,
+            spring: dnd::SpringOpen::default(),
+            last: now,
+            handed_off: false,
+        });
+        // A drag that starts is a drag the cancel of an older one has nothing
+        // to say about.
+        self.spring_back = None;
+    }
+
+    /// One frame of a live drag: where it is, what it is over, and whether it
+    /// has ended. Returns what the painter needs.
+    fn tick_drag(
+        &mut self,
+        zones: &dnd::Zones,
+        pointer: &Pointer,
+        window: egui::Rect,
+        pages: (usize, usize),
+        now: Instant,
+    ) -> Option<DragFrame> {
+        let drag = self.drag.as_ref()?;
+        if drag.handed_off {
+            // The compositor has the pointer. Nothing local moves the drag now;
+            // it ends when [`crate::wayland`] says it did.
+            return None;
+        }
+        let verb = dnd::verb_for(pointer.toggle, pointer.alt);
+        let at = pointer.at.unwrap_or(drag.at);
+        let dt = now.saturating_duration_since(drag.last).as_secs_f32().min(0.25);
+        if let Some(drag) = self.drag.as_mut() {
+            drag.at = at;
+            drag.last = now;
+        }
+
+        // Out of the window: hand it to the compositor and stop drawing it.
+        // The implicit pointer grab means motion keeps arriving even outside
+        // our own surface, so "left the window" is a question this side can
+        // still answer — and the moment it becomes true is the moment the
+        // pointer stops being ours (see [`crate::wayland`]).
+        if !window.contains(at) && pointer.down {
+            self.hand_off_drag(now);
+            return None;
+        }
+
+        // Where a drop would land. Resolved from this frame's geometry, never
+        // from the highlight, because a highlight is an animation and a drop is
+        // a commitment.
+        let target = {
+            let tab = self.tab();
+            dnd::target_at(zones, at, |column, index| match column {
+                Column::List => tab.cwd.dir.row(index).is_some_and(|e| e.is_dir()),
+                Column::Parent => tab
+                    .parent
+                    .as_ref()
+                    .and_then(|p| p.dir.row(index))
+                    .is_some_and(|e| e.is_dir()),
+            })
+        };
+        let dest = target.and_then(|target| self.dest_of(target));
+        let paths = self.drag.as_ref().map(|d| d.paths.clone()).unwrap_or_default();
+        let valid = dest
+            .as_deref()
+            .is_some_and(|dest| dnd::valid_dest(dest, &paths, verb));
+        let lit = target.filter(|_| valid);
+
+        // The hold-to-open timer, and the two panes' edge bands.
+        if let Some(drag) = self.drag.as_mut() {
+            drag.spring.aim(lit.filter(|t| t.is_row()), now);
+        }
+        let sprung = self
+            .drag
+            .as_mut()
+            .and_then(|drag| drag.spring.fired(now))
+            .and_then(|target| self.dest_of(target));
+        if let Some(dest) = sprung {
+            // macOS's spring-loaded folder: the pane you are dragging over
+            // *goes there*, so a drag can reach anywhere without being let go.
+            self.navigate(dest, now);
+        }
+        self.autoscroll(zones, at, dt, pages, now);
+
+        // The release is the drop.
+        if pointer.released {
+            let drag = self.drag.take();
+            self.targets.tick(None, None, now);
+            match (drag, dest.filter(|_| valid)) {
+                (Some(_), Some(dest)) => self.drop_here(&paths, &dest, verb, now),
+                (Some(drag), None) => self.spring_home(drag, now),
+                (None, _) => {}
+            }
+            return None;
+        }
+        Some(DragFrame {
+            at,
+            verb,
+            target: lit,
+        })
+    }
+
+    /// Where a target's files would go.
+    fn dest_of(&self, target: dnd::Target) -> Option<PathBuf> {
+        match target {
+            dnd::Target::Row(Column::List, index) => self
+                .tab()
+                .cwd
+                .dir
+                .row(index)
+                .map(|entry| entry.path.clone()),
+            dnd::Target::Row(Column::Parent, index) => self
+                .tab()
+                .parent
+                .as_ref()
+                .and_then(|parent| parent.dir.row(index))
+                .map(|entry| entry.path.clone()),
+            dnd::Target::Pane(Column::List) => Some(self.cwd()),
+            dnd::Target::Pane(Column::Parent) => self
+                .tab()
+                .parent
+                .as_ref()
+                .map(|parent| parent.path().to_path_buf()),
+            dnd::Target::Crumb(index) => {
+                self.path_bar.1.get(index).map(|crumb| crumb.path.clone())
+            }
+            dnd::Target::Tab(index) => self
+                .tabs
+                .iter()
+                .nth(index)
+                .map(|tab| tab.cwd.path().to_path_buf()),
+        }
+    }
+
+    /// Scroll a listing the drag is hanging over the edge of.
+    ///
+    /// Through [`crate::tab::Listing::wheel`], which is the one place in the
+    /// program that moves a view: it carries the sub-row remainder and drags
+    /// the cursor along, so the scrolloff rule does not undo the travel on the
+    /// next frame (the same subtlety the wheel documents).
+    fn autoscroll(
+        &mut self,
+        zones: &dnd::Zones,
+        at: egui::Pos2,
+        dt: f32,
+        pages: (usize, usize),
+        now: Instant,
+    ) {
+        let scrolloff = self.mgr.scrolloff;
+        let list = dnd::autoscroll(zones.list_content, at) * dt;
+        if list != 0.0 {
+            self.tabs.active_mut().cwd.wheel(list, pages.0, scrolloff, now);
+        }
+        let parent = dnd::autoscroll(zones.parent_content, at) * dt;
+        if parent != 0.0 {
+            if let Some(pane) = &mut self.tabs.active_mut().parent {
+                pane.wheel(parent, pages.1, scrolloff, now);
+            }
+        }
+    }
+
+    /// Carry out a drop, through the pipeline `y`/`x`/`p` and `-` already use.
+    ///
+    /// Nothing here is new machinery: a move is a cut pasted somewhere else, a
+    /// copy is a yank pasted somewhere else, and a link is `-` aimed at another
+    /// directory. Conflicts open the same dialog, the journal gets the same
+    /// records, and `u` takes any of it back.
+    fn drop_here(&mut self, paths: &[PathBuf], dest: &Path, verb: dnd::Verb, now: Instant) {
+        match verb {
+            dnd::Verb::Move => {
+                let clip = Clipboard::cut(paths.to_vec());
+                self.paste_into(&clip, dest.to_path_buf(), false, now);
+            }
+            dnd::Verb::Copy => {
+                let clip = Clipboard::yank(paths.to_vec());
+                self.paste_into(&clip, dest.to_path_buf(), false, now);
+            }
+            // The same default `-` has: a symlink, because a hard link across
+            // filesystems is not a thing and a drag crosses them freely.
+            dnd::Verb::Link => {
+                self.link_into(paths.to_vec(), dest.to_path_buf(), Some(LinkKind::Absolute), now)
+            }
+        }
+    }
+
+    /// `Esc`, or a release over nothing: the ghost flies home and nothing
+    /// happens.
+    fn spring_home(&mut self, drag: Drag, now: Instant) {
+        self.spring_back = Some(SpringHome {
+            spring: dnd::SpringBack::new(drag.at, drag.home, drag.paths.len(), now),
+            label: drag.label,
+            icon: drag.icon,
+        });
+    }
+
+    /// The pointer has left the window: give the drag to the compositor.
+    ///
+    // VERIFY-LIVE: the handoff itself. The ghost should vanish at the window's
+    // edge and the compositor's drag icon should appear in its place, in one
+    // motion with no gap — and dragging back *in* should light the targets
+    // again through the data device rather than through egui.
+    fn hand_off_drag(&mut self, now: Instant) {
+        let Some(drag) = self.drag.as_mut() else { return };
+        drag.handed_off = true;
+        let paths = drag.paths.clone();
+        let count = paths.len();
+        let Some(device) = &self.data_device else {
+            // No protocol, so there is nowhere for the drag to go. It is not
+            // an error and it is not silence either: the ghost springs home,
+            // which is what "that did not happen" looks like everywhere else
+            // in this gesture.
+            if let Some(drag) = self.drag.take() {
+                self.spring_home(drag, now);
+            }
+            return;
+        };
+        let scale = self
+            .gfx
+            .as_ref()
+            .map(|gfx| gfx.egui_ctx.pixels_per_point().round() as i32)
+            .unwrap_or(1);
+        let rgba = |color: egui::Color32| {
+            crate::wayland::Rgba(color.r(), color.g(), color.b(), color.a())
+        };
+        device.drag(
+            dnd::offer(&paths),
+            count,
+            rgba(self.palette.surface1),
+            rgba(self.palette.text),
+            scale,
+        );
+    }
+
+    /// What [`crate::wayland`] has to say, once a frame.
+    fn poll_data_device(&mut self, now: Instant) {
+        let Some(device) = &self.data_device else { return };
+        for event in device.poll() {
+            match event {
+                crate::wayland::Event::Enter { at, ours } => {
+                    self.incoming = Some(Incoming {
+                        at: egui::pos2(at.0, at.1),
+                        ours,
+                    });
+                }
+                crate::wayland::Event::Motion { at } => {
+                    if let Some(incoming) = &mut self.incoming {
+                        incoming.at = egui::pos2(at.0, at.1);
+                    }
+                }
+                crate::wayland::Event::Leave => self.incoming = None,
+                crate::wayland::Event::Drop { paths, ours } => {
+                    let at = self.incoming.take().map(|incoming| incoming.at);
+                    self.take_external_drop(paths, ours, at, now);
+                }
+                crate::wayland::Event::DragEnded => {
+                    // Our own drag, back from the compositor. Whatever it did
+                    // out there, this side is done holding files.
+                    self.drag = None;
+                    self.press = None;
+                    self.targets.tick(None, None, now);
+                }
+            }
+        }
+    }
+
+    /// A drop from another application (PLAN §7.1's "drop in").
+    ///
+    /// Always a **copy**, whatever the source thought it was offering: the file
+    /// is somebody else's until they say otherwise, and a drop that moved files
+    /// out of another program's directory on its own initiative is not a
+    /// behaviour a file manager gets to have.
+    fn take_external_drop(
+        &mut self,
+        paths: Vec<PathBuf>,
+        ours: bool,
+        at: Option<egui::Pos2>,
+        now: Instant,
+    ) {
+        if ours {
+            // Our own drag, dropped back on our own window after a trip
+            // through the compositor. The local gesture is over — and the verb
+            // went with it: once the compositor owns the pointer nothing tells
+            // this side which modifiers are held, so the drop takes the same
+            // copy every other external drop does rather than guessing at a
+            // move it cannot undo the guess for.
+            self.drag = None;
+        }
+        if paths.is_empty() {
+            self.toasts
+                .notice("Nothing in that drop this can open", now);
+            return;
+        }
+        let dest = at
+            .and_then(|at| self.dropped_target(at))
+            .unwrap_or_else(|| self.cwd());
+        let clip = Clipboard::yank(paths);
+        self.paste_into(&clip, dest, false, now);
+    }
+
+    /// Where an external drop at `at` lands.
+    ///
+    /// Recomputed from the *last frame's* geometry, which is the only geometry
+    /// there is at the moment a `wl_data_device.drop` arrives — the frame that
+    /// drew the highlight the user was aiming at.
+    fn dropped_target(&self, at: egui::Pos2) -> Option<PathBuf> {
+        let target = dnd::target_at(self.zones.as_ref()?, at, |column, index| match column {
+            Column::List => self.tab().cwd.dir.row(index).is_some_and(|e| e.is_dir()),
+            Column::Parent => self
+                .tab()
+                .parent
+                .as_ref()
+                .and_then(|p| p.dir.row(index))
+                .is_some_and(|e| e.is_dir()),
+        })?;
+        self.dest_of(target)
     }
 
     // ── The system clipboard (PLAN §7.4) ────────────────────────────────────
@@ -3691,6 +4199,7 @@ impl App {
                 .sum::<f32>(),
             shift: i.modifiers.shift,
             toggle: i.modifiers.command || i.modifiers.ctrl,
+            alt: i.modifiers.alt,
         });
         let scroll_rows = self.tab().cwd.scroll_rows(now);
         let parent_content = ui::content_rect(layout.parent);
@@ -3875,13 +4384,75 @@ impl App {
             });
         }
         if pointer.released {
+            // …but *not* the drag: `tick_drag` reads the release as the drop,
+            // and clearing the press here only stops the gesture re-arming.
             self.press = None;
             // The band commits as it goes, so releasing is only letting go.
             self.band = None;
         }
         if pointer.down {
-            self.drag(pointer.at, list_content, scroll_rows);
+            self.drag(pointer.at, list_content, scroll_rows, now);
         }
+
+        // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────
+        // The geometry is built whether or not anything is being dragged: a
+        // drop from another application arrives between frames, and it is
+        // resolved against the frame the hand was aiming at.
+        let zones = dnd::Zones {
+            strip: layout.strip,
+            tabs: tab_count,
+            crumbs: crumb_rects.clone(),
+            list_pane: layout.list,
+            list_content,
+            list_scroll: scroll_rows,
+            list_rows: self.tab().cwd.dir.len(),
+            parent_pane: layout.parent,
+            parent_content,
+            parent_scroll,
+            parent_rows: parent_len,
+        };
+        self.poll_data_device(now);
+        let dragging = self.tick_drag(&zones, &pointer, area, (page, parent_page), now);
+        // The external drag's own highlight follows the pointer exactly as the
+        // internal one's does — `wl_data_device` reports surface-local motion,
+        // so a drop from another application is aimed, not guessed.
+        let incoming_target = self.incoming.as_ref().map(|incoming| incoming.at).and_then(|at| {
+            let tab = self.tab();
+            dnd::target_at(&zones, at, |column, index| match column {
+                Column::List => tab.cwd.dir.row(index).is_some_and(|e| e.is_dir()),
+                Column::Parent => tab
+                    .parent
+                    .as_ref()
+                    .and_then(|p| p.dir.row(index))
+                    .is_some_and(|e| e.is_dir()),
+            })
+        });
+        self.targets.tick(
+            dragging
+                .as_ref()
+                .and_then(|frame| frame.target)
+                .or(incoming_target),
+            None,
+            now,
+        );
+        self.zones = Some(zones);
+        // A spring-back that has landed is over: an `Option` that is never
+        // `None` is a window that never stops asking for frames (PLAN §1).
+        if self
+            .spring_back
+            .as_ref()
+            .is_some_and(|home| home.spring.finished(now))
+        {
+            self.spring_back = None;
+        }
+        // The rows in the hand are dimmed while they are in it — the same
+        // treatment a cut row gets, and for the same reason: it is on its way
+        // out of this listing.
+        let drag_paths: HashSet<PathBuf> = self
+            .drag
+            .as_ref()
+            .map(|drag| drag.paths.iter().cloned().collect())
+            .unwrap_or_default();
 
         self.hovers.tick(
             over.map(|(control, _)| control),
@@ -3894,7 +4465,12 @@ impl App {
         // keeps the arrow — it is a place, and a hand over every row of a
         // thousand-row listing is noise — while everything that is a *button*
         // says so.
-        if let Some((control, _)) = over {
+        // A live drag says so with the cursor before it says so with anything
+        // else (`delightful-ui` §2), and it overrides whatever is under it —
+        // the hand is holding files, not pointing at a link.
+        if dragging.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if let Some((control, _)) = over {
             ui.ctx().set_cursor_icon(match control {
                 Control::Row(..) => egui::CursorIcon::Default,
                 Control::Tab(_)
@@ -4091,6 +4667,7 @@ impl App {
                 // made in, which is the list — the parent shows where you are,
                 // not what you are carrying.
                 clip: None,
+                dragged: &drag_paths,
             });
         }
         paint.listing(ListView {
@@ -4117,6 +4694,7 @@ impl App {
                 paths: &clip_paths,
                 cut: self.clipboard.mode == PasteMode::Cut,
             }),
+            dragged: &drag_paths,
         });
         // The band, over the rows it is selecting (PLAN §7.5). A wash and a
         // hairline: it has to be unmistakable without hiding the names it is
@@ -4300,6 +4878,69 @@ impl App {
             chrome::prompt_popup(&paint, area, anchor, prompt);
         }
 
+        // ── The drag, over everything it is being carried across ────────────
+        // After the chrome, because two of the four kinds of target *are* the
+        // chrome: a ring drawn before the tab strip would be painted over by
+        // the chip it is ringing.
+        // A drag from another application, announced at the window's own edge.
+        // Not for our *own* drag come back through the compositor: the window
+        // does not need telling that it is about to be handed something it is
+        // holding.
+        if self.incoming.as_ref().is_some_and(|incoming| !incoming.ours) {
+            paint.drop_window(area);
+        }
+        if let Some(zones) = &self.zones {
+            let progress = self
+                .drag
+                .as_ref()
+                .map(|drag| drag.spring.progress(now))
+                .unwrap_or(0.0);
+            let live = dragging.as_ref().and_then(|frame| frame.target);
+            for (target, amount) in self.targets.warm() {
+                let Some(rect) = zones.rect_of(target) else {
+                    continue;
+                };
+                let radius = match target {
+                    dnd::Target::Pane(_) => ui::PANE_RADIUS,
+                    _ => ui::ROW_RADIUS,
+                };
+                // The badge only fills on the target the hold is actually
+                // against — a ring left fading behind the drag is a memory,
+                // and a memory does not have a countdown running.
+                let filling = if Some(target) == live { progress } else { 0.0 };
+                paint.drop_target(rect, radius, amount, filling);
+            }
+        }
+        if let (Some(frame), Some(drag)) = (&dragging, &self.drag) {
+            let cards = dnd::ghost_cards(frame.at, drag.paths.len());
+            paint.ghost(
+                &cards,
+                &ui::GhostFace {
+                    icon: drag.icon,
+                    name: &drag.label,
+                    count: dnd::ghost_badge(drag.paths.len()),
+                    verb: frame.verb.label(),
+                },
+                1.0,
+            );
+        }
+        // …and the cancelled one on its way home, which outlives the drag.
+        if let Some(home) = &self.spring_back {
+            let cards = dnd::ghost_cards(home.spring.at(now), home.spring.count());
+            paint.ghost(
+                &cards,
+                &ui::GhostFace {
+                    icon: home.icon,
+                    name: &home.label,
+                    count: dnd::ghost_badge(home.spring.count()),
+                    // A drag that is being cancelled is not carrying a verb any
+                    // more; the chip goes with the decision it described.
+                    verb: "",
+                },
+                home.spring.alpha(now),
+            );
+        }
+
         // The toast sits above the bar and under the which-key card: a message
         // about what just happened must not cover the answer to the key being
         // held down now.
@@ -4358,6 +4999,12 @@ impl App {
                 self.menu.as_ref().is_some_and(|menu| !menu.live()),
             ),
             ("toast", self.toasts.animating(now)),
+            // The drop rings' fade-out, and the ghost's flight home. The drag
+            // itself is not here: a ghost parked under a stationary pointer is
+            // the same pixels next frame, and it moves only when the pointer
+            // does — which brings its own frame with it.
+            ("targets", self.targets.animating()),
+            ("spring", self.spring_back.is_some()),
             (
                 "tasks",
                 self.panel.as_ref().is_some_and(|p| p.animating(now)),
@@ -4406,6 +5053,14 @@ impl App {
             .as_ref()
             .and_then(Player::grace_deadline)
             .map(|at| at.saturating_duration_since(now));
+        // …and the drag's: a hold over a folder has to spring it open even if
+        // the hand never moves again, which is a single instant known in
+        // advance and therefore a deadline rather than a poll.
+        let spring = self
+            .drag
+            .as_ref()
+            .and_then(|drag| drag.spring.deadline())
+            .map(|at| at.saturating_duration_since(now));
         [
             self.loading_deadline(now),
             card,
@@ -4413,6 +5068,7 @@ impl App {
             self.toasts.deadline(now),
             strip,
             grace,
+            spring,
         ]
             .into_iter()
             .flatten()
@@ -4494,6 +5150,11 @@ impl App {
         if let (Some(Quit::WriteCwd), Some(path)) = (self.quit, self.cwd_file.as_deref()) {
             crate::cli::write_cwd_file(path, self.tab().cwd.path());
         }
+        // Before the window, and therefore before the `wl_surface` the data
+        // device holds a proxy to: dropping it joins its thread, which is the
+        // one place that promise is kept (see `DataDevice::start`'s safety
+        // note).
+        self.data_device = None;
         event_loop.exit();
     }
 }

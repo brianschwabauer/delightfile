@@ -28,6 +28,7 @@ use std::time::Instant;
 use df_core::config::{LineMode, Theme};
 use df_core::fs::{DirState, LoadState, Span};
 
+use crate::chrome::fade;
 use crate::format::linemode_text;
 use crate::hover::{pressed_rect, Hovers};
 use crate::icons::{icon_for, name_color, ICON_FAMILY};
@@ -155,6 +156,55 @@ const CLIP_BAR_WIDTH: f32 = 2.0;
 /// wobble in the window's vertical rhythm for no reason. 26 is [`ROW_HEIGHT`]
 /// plus the four points that keep a chip's text off its own edge.
 pub const CHROME_HEIGHT: f32 = 26.0;
+
+/// A drop target's ring, in logical points. Two: the same weight as the
+/// focused pane's accent rule ([`FOCUS_RULE`]), because it is the same kind of
+/// statement — "this is the one" — and a second thickness would be a second
+/// vocabulary for one idea.
+const DROP_RING: f32 = 2.0;
+
+/// How far a live drop target's ground is washed towards the accent. Between
+/// the focus tint and the selection tint: louder than "the keyboard is here",
+/// quieter than "these are marked", which is exactly where "let go and it lands
+/// here" belongs.
+const DROP_TINT: f32 = 0.08;
+
+/// The spring-open badge's radius, in logical points. Small enough to sit
+/// inside a 22 pt row without touching its edges.
+const DROP_BADGE: f32 = 7.0;
+
+/// The ghost's chips — the count and the verb. One height and one radius for
+/// both, because they are the same object twice.
+const GHOST_CHIP_HEIGHT: f32 = 15.0;
+const GHOST_CHIP_RADIUS: u8 = 5;
+
+/// The gap between the bottom of the card stack and the verb chip under it.
+const GHOST_CHIP_GAP: f32 = 5.0;
+
+/// What is written on the ghost's top card.
+pub struct GhostFace<'a> {
+    pub icon: crate::icons::Icon,
+    pub name: &'a str,
+    /// The count chip, when the stack has stopped counting for itself.
+    pub count: Option<usize>,
+    pub verb: &'a str,
+}
+
+/// A progress arc, clockwise from twelve o'clock.
+///
+/// Tessellated at a fixed angular step rather than at a fixed number of
+/// segments, so a badge a tenth full is not drawn with the same forty points as
+/// a full one — delightviewer's `dismiss.rs` arc, same step.
+fn arc(centre: egui::Pos2, radius: f32, progress: f32) -> Vec<egui::Pos2> {
+    let sweep = progress.clamp(0.0, 1.0) * std::f32::consts::TAU;
+    let steps = ((sweep / 0.15).ceil() as usize).max(2);
+    (0..=steps)
+        .map(|i| {
+            let angle = -std::f32::consts::FRAC_PI_2 + sweep * i as f32 / steps as f32;
+            centre + egui::vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect()
+}
 
 /// Which pane a row belongs to. The hover map's key has to distinguish them —
 /// row 3 of the parent column is not row 3 of the list.
@@ -390,6 +440,9 @@ pub struct ListView<'a> {
     pub show_selection: bool,
     /// The clipboard's marks, when this pane's directory has any in it.
     pub clip: Option<ClipMark<'a>>,
+    /// The rows currently in the hand (PLAN §7.1). Dimmed while they are, the
+    /// same way a cut row is: both mean "this is on its way out of here".
+    pub dragged: &'a std::collections::HashSet<PathBuf>,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -460,6 +513,7 @@ impl Painting<'_> {
             offset_x,
             show_selection,
             clip,
+            dragged,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
@@ -489,6 +543,7 @@ impl Painting<'_> {
             // On the clipboard: marked either way, and dimmed when it is a cut.
             let marked = clip.is_some_and(|c| c.paths.contains(&entry.path));
             let cut = marked && clip.is_some_and(|c| c.cut);
+            let lifted = !dragged.is_empty() && dragged.contains(&entry.path);
 
             // The row's ground, in one expression: the pane, tinted for a
             // selection, lifted to `surface1` for the cursor row and towards
@@ -568,7 +623,7 @@ impl Painting<'_> {
                 dir.row_spans(index),
                 ground,
                 linemode,
-                dim || cut,
+                dim || cut || lifted,
             );
         }
     }
@@ -781,6 +836,176 @@ impl Painting<'_> {
         }
     }
 
+    /// A live drop target: an accent ring and a wash inside it (PLAN §7.1's
+    /// "valid targets highlight as the drag approaches").
+    ///
+    /// `amount` is the hover track's, so the ring snaps on the instant the drag
+    /// arrives and fades over [`crate::hover::FADE`] when it leaves
+    /// (`delightful-ui` §3). `progress` is the spring-open hold, drawn as the
+    /// badge filling around a disc on the target's trailing edge —
+    /// delightviewer's `dismiss.rs` commit threshold, on a timer instead of on
+    /// a distance.
+    pub fn drop_target(&self, rect: egui::Rect, radius: u8, amount: f32, progress: f32) {
+        if amount <= 0.0 || !rect.is_positive() {
+            return;
+        }
+        let accent = self.palette.blue;
+        self.painter
+            .rect_filled(rect, radius, fade(accent, DROP_TINT * amount));
+        self.painter.rect_stroke(
+            rect,
+            radius,
+            egui::Stroke::new(DROP_RING, fade(accent, amount)),
+            egui::StrokeKind::Inside,
+        );
+        if progress <= 0.0 {
+            return;
+        }
+        // The badge sits inside the target's trailing edge, where a linemode
+        // column has already given up its space to the ring.
+        let centre = egui::pos2(
+            rect.right() - DROP_BADGE - DROP_RING * 2.0,
+            rect.center().y,
+        );
+        self.painter
+            .circle_filled(centre, DROP_BADGE, fade(self.palette.crust, 0.85 * amount));
+        self.painter.add(egui::Shape::line(
+            arc(centre, DROP_BADGE - DROP_RING, progress),
+            egui::Stroke::new(DROP_RING, fade(accent, amount)),
+        ));
+    }
+
+    /// A drag from *another* application is over the window (PLAN §7.1's "drop
+    /// in").
+    ///
+    /// A ring around the whole window and no wash: the window-level statement
+    /// is "this program will take that", and the *place* it would land is said
+    /// by [`Painting::drop_target`] on the row or pane under the pointer. Two
+    /// facts, two marks — a tint here as well would make the second one harder
+    /// to see, which is the one that matters.
+    pub fn drop_window(&self, area: egui::Rect) {
+        self.painter.rect_stroke(
+            area.shrink(GAP / 2.0),
+            PANE_RADIUS + (GAP / 2.0) as u8,
+            egui::Stroke::new(DROP_RING, fade(self.palette.blue, 0.9)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    /// The ghost: a stack of cards under the pointer, and the verb it is
+    /// carrying (PLAN §7.1, `delightful-ui` §6).
+    pub fn ghost(&self, cards: &[crate::dnd::Card], top: &GhostFace<'_>, alpha: f32) {
+        if alpha <= 0.0 {
+            return;
+        }
+        let card_fill = self.palette.surface1;
+        for card in cards {
+            let a = card.alpha * alpha;
+            if card.tilt != 0.0 {
+                // A tilted card has no rounding — egui has no rotated rounded
+                // rect — which costs a few pixels on cards that are mostly
+                // behind the top one anyway (see `crate::dnd::tilted`).
+                self.painter.add(egui::Shape::convex_polygon(
+                    crate::dnd::tilted(card.rect, card.tilt),
+                    fade(card_fill, a),
+                    egui::Stroke::new(1.0, fade(self.palette.crust, a * 0.6)),
+                ));
+                continue;
+            }
+            self.painter
+                .rect_filled(card.rect, crate::dnd::GHOST_RADIUS, fade(card_fill, a));
+            self.painter.rect_stroke(
+                card.rect,
+                crate::dnd::GHOST_RADIUS,
+                egui::Stroke::new(1.0, fade(self.palette.crust, a * 0.6)),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let Some(face) = cards.last() else { return };
+        let rect = face.rect;
+        let icon_family = if self.nerd {
+            egui::FontFamily::Name(ICON_FAMILY.into())
+        } else {
+            egui::FontFamily::Monospace
+        };
+        self.painter.text(
+            egui::pos2(rect.left() + ROW_PAD_X, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            top.icon.glyph,
+            egui::FontId::new(ICON_SIZE, icon_family),
+            fade(top.icon.color, alpha),
+        );
+        // The badge takes its room out of the name's, so a count never lands on
+        // top of a file name however long the name is.
+        let badge = top.count.map(|count| {
+            let font = egui::FontId::proportional(FONT_SIZE - 1.5);
+            let width = self
+                .painter
+                .layout_no_wrap(count.to_string(), font.clone(), self.palette.crust)
+                .size()
+                .x;
+            (count.to_string(), font, width + DROP_BADGE)
+        });
+        let reserved = badge.as_ref().map(|(_, _, w)| *w + ROW_PAD_X).unwrap_or(0.0);
+        let left = rect.left() + ROW_PAD_X + ICON_COLUMN;
+        let inside = self.painter.with_clip_rect(rect);
+        self.text_truncated(
+            &inside,
+            egui::pos2(left, rect.center().y),
+            top.name,
+            fade(self.palette.text, alpha),
+            (rect.right() - ROW_PAD_X - reserved - left).max(0.0),
+        );
+        if let Some((text, font, width)) = badge {
+            let chip = egui::Rect::from_center_size(
+                egui::pos2(rect.right() - ROW_PAD_X - width / 2.0, rect.center().y),
+                egui::vec2(width, GHOST_CHIP_HEIGHT),
+            );
+            self.painter
+                .rect_filled(chip, GHOST_CHIP_RADIUS, fade(self.palette.blue, alpha));
+            self.painter.text(
+                chip.center(),
+                egui::Align2::CENTER_CENTER,
+                text,
+                font,
+                fade(self.palette.crust, alpha),
+            );
+        }
+        // The verb, under the stack rather than on it: what the drop *is* is a
+        // different fact from what is being dropped, and putting them on one
+        // card would make the card read as a file called "Move". A cancelled
+        // drag has no verb left to say, and says nothing.
+        if top.verb.is_empty() {
+            return;
+        }
+        let font = egui::FontId::proportional(FONT_SIZE - 1.5);
+        let width = self
+            .painter
+            .layout_no_wrap(top.verb.to_string(), font.clone(), self.palette.crust)
+            .size()
+            .x;
+        let chip = egui::Rect::from_min_size(
+            egui::pos2(
+                rect.left(),
+                cards
+                    .iter()
+                    .map(|card| card.rect.bottom())
+                    .fold(f32::MIN, f32::max)
+                    + GHOST_CHIP_GAP,
+            ),
+            egui::vec2(width + ROW_PAD_X * 2.0, GHOST_CHIP_HEIGHT),
+        );
+        self.painter
+            .rect_filled(chip, GHOST_CHIP_RADIUS, fade(self.palette.blue, alpha));
+        self.painter.text(
+            chip.center(),
+            egui::Align2::CENTER_CENTER,
+            top.verb,
+            font,
+            fade(self.palette.crust, alpha),
+        );
+    }
+
     /// A quiet centred line: the empty state, the error, the "loading…".
     ///
     /// Biased above true centre (`delightful-ui` §16): text at the mathematical
@@ -910,6 +1135,77 @@ mod tests {
         assert_eq!(row_at(content, 0.0, 3, inside(10)), None);
         // …and neither is there outside the pane.
         assert_eq!(row_at(content, 0.0, 40, egui::pos2(-5.0, -5.0)), None);
+    }
+
+    /// The drag chrome draws, at every stage and over every degenerate
+    /// geometry a resize can hand it.
+    ///
+    /// A smoke test rather than a pixel test, for the reason `chrome.rs`'s is:
+    /// what these functions can actually get wrong is an inverted rectangle, a
+    /// zero-radius arc or an empty stack, and every one of those is a panic
+    /// inside egui's tessellator rather than a wrong colour.
+    #[test]
+    fn the_drag_chrome_paints_without_panicking() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let palette = Palette::default();
+            let theme = Theme::default();
+            let paint = Painting {
+                painter: ui.painter(),
+                palette: &palette,
+                theme: &theme,
+                nerd: false,
+                show_symlink: true,
+                now: Instant::now(),
+            };
+            let area = area();
+            paint.drop_window(area);
+            // A window too small for its own chrome must not paint an inverted
+            // ring, and neither must a target that has been scrolled to nothing.
+            paint.drop_window(egui::Rect::from_min_size(area.min, egui::vec2(4.0, 4.0)));
+            let row = egui::Rect::from_min_size(egui::pos2(300.0, 400.0), egui::vec2(400.0, 22.0));
+            for progress in [0.0, 0.01, 0.5, 1.0] {
+                paint.drop_target(row, ROW_RADIUS, 1.0, progress);
+                paint.drop_target(row, PANE_RADIUS, 0.4, progress);
+            }
+            // Nothing is drawn for a target that has faded out, or one with no
+            // rectangle left.
+            paint.drop_target(row, ROW_RADIUS, 0.0, 0.5);
+            paint.drop_target(egui::Rect::NOTHING, ROW_RADIUS, 1.0, 0.5);
+
+            let icon = crate::icons::Icon {
+                glyph: '/',
+                color: palette.blue,
+            };
+            for count in [1usize, 2, 4, 137] {
+                let cards = crate::dnd::ghost_cards(egui::pos2(600.0, 380.0), count);
+                paint.ghost(
+                    &cards,
+                    &GhostFace {
+                        icon,
+                        name: "a name long enough to need truncating in a 176 pt card",
+                        count: crate::dnd::ghost_badge(count),
+                        verb: "Move",
+                    },
+                    1.0,
+                );
+            }
+            // The spring-back's ghost: no name, no verb, half faded.
+            let cards = crate::dnd::ghost_cards(egui::pos2(60.0, 60.0), 3);
+            paint.ghost(
+                &cards,
+                &GhostFace {
+                    icon,
+                    name: "",
+                    count: None,
+                    verb: "",
+                },
+                0.5,
+            );
+            // …and one that has finished fading draws nothing at all.
+            paint.ghost(&cards, &GhostFace { icon, name: "", count: None, verb: "" }, 0.0);
+            paint.ghost(&[], &GhostFace { icon, name: "x", count: None, verb: "Copy" }, 1.0);
+        });
     }
 
     #[test]

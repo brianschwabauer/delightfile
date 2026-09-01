@@ -12,6 +12,7 @@ mod chrome;
 mod cli;
 mod clipboard;
 mod dialog;
+mod dnd;
 mod focus;
 mod format;
 mod graphics;
@@ -37,6 +38,7 @@ mod theme;
 mod toast;
 mod ui;
 mod viewport;
+mod wayland;
 mod whichkey;
 
 use winit::event_loop::EventLoop;
