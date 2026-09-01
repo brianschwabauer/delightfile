@@ -2924,17 +2924,20 @@ impl App {
                 self.remote_delete(confirm.paths, now);
                 return;
             }
-            ConfirmKind::Purge => {
-                let items = self.trash_targets();
-                self.trash_purge(items, now);
-                return;
-            }
-            ConfirmKind::EmptyTrash => {
+            // Both resolve the items from `confirm.paths` — the list the dialog
+            // rendered and the user assented to — rather than re-deriving them
+            // from the selection now. A watcher event while the dialog is up
+            // routes to `refresh_all`, which rebuilds the trash listing and
+            // clears the selection; `trash_targets()` would then fall through
+            // to the cursor row and destroy one item, possibly not one of the
+            // five the dialog named. Purge has no inverse, so the subject has
+            // to be the one that was on screen.
+            ConfirmKind::Purge | ConfirmKind::EmptyTrash => {
                 let items = self
                     .tab()
                     .trash
                     .as_ref()
-                    .map(|view| view.items.clone())
+                    .map(|view| view.items_for(&confirm.paths))
                     .unwrap_or_default();
                 self.trash_purge(items, now);
                 return;
@@ -4458,9 +4461,36 @@ impl App {
     /// call site that changes.
     fn set_mode(&mut self, mode: u32, now: Instant) {
         use std::os::unix::fs::PermissionsExt;
-        let Some(path) = self.spot.as_ref().map(|s| s.facts.path.clone()) else {
+        let Some(facts) = self.spot.as_ref().map(|s| s.facts.clone()) else {
             return;
         };
+        let path = facts.path;
+        // A remote row's `path` is an `sftp://…` URL, which is a *relative*
+        // `PathBuf` — `set_permissions` would resolve it against the process's
+        // own directory. The vfs has a `chmod`; until this call site uses it,
+        // the card's chips do not act remotely.
+        if crate::remote::at_of(&path).is_some() {
+            self.toasts
+                .notice("Permissions cannot be changed over sftp yet", now);
+            return;
+        }
+        // `chmod` follows a symlink, and there is no `lchmod` on Linux. So
+        // applying these chips to a link row would change the mode of the file
+        // it points at — a file the user did not select and which may not be in
+        // this directory at all. The card already shows the *target's* mode,
+        // which makes the swap invisible. Refusing and naming the target is the
+        // only honest answer.
+        if let Some(target) = &facts.link_target {
+            self.toasts.error(
+                format!(
+                    "{} is a link to {}: changing these would change that file's permissions",
+                    facts.name,
+                    target.display()
+                ),
+                now,
+            );
+            return;
+        }
         match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
             Ok(()) => {
                 if let Some(spot) = &mut self.spot {
@@ -6761,7 +6791,19 @@ impl App {
             A::Cut => self.set_clipboard(true, now),
             A::Paste => self.paste(false, now),
             A::Rename => self.open_rename(false),
-            A::Trash => self.open_confirm(ConfirmKind::Trash, now),
+            // The same choice `d` makes, and it has to be made here too: the
+            // menu is not gated by `inert_remotely`, so a plain
+            // `ConfirmKind::Trash` on a remote pane would hand a `TrashJob` a
+            // list of `sftp://…` strings — which are *relative* `PathBuf`s, and
+            // would be resolved against the process's own directory.
+            A::Trash => {
+                let kind = if self.tab().remote.is_some() {
+                    ConfirmKind::RemoteDelete
+                } else {
+                    ConfirmKind::Trash
+                };
+                self.open_confirm(kind, now);
+            }
             A::CopyPath => self.copy_piece(Piece::Path, now),
             A::CopyName => self.copy_piece(Piece::Filename, now),
             A::Properties => self.toggle_spot(),

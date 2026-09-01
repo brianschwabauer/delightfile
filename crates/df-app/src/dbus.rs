@@ -83,6 +83,15 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(90);
 /// The largest message this client will accept.
 pub const MAX_MESSAGE: usize = 32 * 1024 * 1024;
 
+/// The deepest a value may nest before it is refused.
+///
+/// The D-Bus specification's own limit, and the reason it has one: the reader
+/// below descends a container by recursing, and a variant costs three bytes on
+/// the wire per level. Without a ceiling, a peer sends twelve kilobytes and the
+/// worker thread's stack is gone — a `SIGSEGV`, not something a `Result` can
+/// carry. Real replies from udisks2 nest four or five deep.
+pub const MAX_NESTING: u32 = 32;
+
 /// A value read off the wire, whatever its type.
 ///
 /// D-Bus is statically typed and this client mostly knows what it is asking
@@ -644,7 +653,16 @@ impl<'a> Reader<'a> {
     pub fn signature(&mut self) -> Result<String, String> {
         let len = self.u8()? as usize;
         self.need(len + 1)?;
-        let s = String::from_utf8_lossy(&self.bytes[self.pos..self.pos + len]).into_owned();
+        let raw = &self.bytes[self.pos..self.pos + len];
+        // Rejected here rather than tolerated downstream: a signature is ASCII
+        // type codes and nothing else, and `from_utf8_lossy` on arbitrary bytes
+        // produces a `String` whose char boundaries are not its byte
+        // boundaries — which the `sig[1..len - 1]` slicing below would then
+        // panic on. One check at the door beats three at the windows.
+        if !raw.is_ascii() {
+            return Err("D-Bus signature is not ASCII".into());
+        }
+        let s = String::from_utf8_lossy(raw).into_owned();
         self.pos += len + 1;
         Ok(s)
     }
@@ -656,15 +674,35 @@ impl<'a> Reader<'a> {
     /// every step, so a reply describing interfaces this build has never heard
     /// of parses correctly and is then simply not looked at.
     pub fn value(&mut self, sig: &str) -> Result<Value, String> {
+        self.value_at(sig, 0)
+    }
+
+    fn value_at(&mut self, sig: &str, depth: u32) -> Result<Value, String> {
         let mut chars = sig.chars().peekable();
         let one = take_one_type(&mut chars);
         if one.is_empty() {
             return Err("empty D-Bus signature".into());
         }
-        self.one(&one)
+        self.one_at(&one, depth)
     }
 
     fn one(&mut self, sig: &str) -> Result<Value, String> {
+        self.one_at(sig, 0)
+    }
+
+    /// `depth` is how many containers deep this value sits.
+    ///
+    /// It exists for one shape: a variant whose contents are a variant, whose
+    /// contents are a variant. The signature of each is three bytes on the
+    /// wire, and without a limit twelve kilobytes of body is enough recursion
+    /// to overflow the thread's stack — which is an abort, not an error the
+    /// worker can report. The spec's own ceiling is 32 nested containers, so
+    /// nothing legitimate is refused.
+    fn one_at(&mut self, sig: &str, depth: u32) -> Result<Value, String> {
+        if depth > MAX_NESTING {
+            return Err("D-Bus value is nested too deeply".into());
+        }
+        let depth = depth + 1;
         let mut chars = sig.chars();
         let Some(head) = chars.next() else {
             return Err("empty D-Bus signature".into());
@@ -685,7 +723,7 @@ impl<'a> Reader<'a> {
             'h' => Ok(Value::U32(self.u32()?)),
             'v' => {
                 let inner = self.signature()?;
-                self.value(&inner)
+                self.value_at(&inner, depth)
             }
             'a' => {
                 let element = sig[1..].to_string();
@@ -705,20 +743,28 @@ impl<'a> Reader<'a> {
                 let mut items = Vec::new();
                 let mut pairs = Vec::new();
                 while self.pos < end {
+                    // Where the element started, so an element type that
+                    // consumes nothing — `a()`, an array of empty structs — is
+                    // a parse error rather than a loop that pushes `Value`s
+                    // until the allocator gives up.
+                    let before = self.pos;
                     if dict {
                         self.align(8);
                         if self.pos >= end {
                             break;
                         }
-                        let inner = &element[1..element.len() - 1];
+                        let inner = dict_entry(&element)?;
                         let mut chars = inner.chars().peekable();
                         let key_sig = take_one_type(&mut chars);
                         let value_sig: String = chars.collect();
-                        let key = self.one(&key_sig)?;
-                        let value = self.one(&value_sig)?;
+                        let key = self.one_at(&key_sig, depth)?;
+                        let value = self.one_at(&value_sig, depth)?;
                         pairs.push((key, value));
                     } else {
-                        items.push(self.one(&element)?);
+                        items.push(self.one_at(&element, depth)?);
+                    }
+                    if self.pos <= before {
+                        return Err("D-Bus array element consumes no bytes".into());
                     }
                 }
                 // Trust the declared length over where the elements happened to
@@ -733,7 +779,14 @@ impl<'a> Reader<'a> {
             }
             '(' => {
                 self.align(8);
-                let inner = &sig[1..sig.len().saturating_sub(1)];
+                // `take_one_type` hands back an *unclosed* opener verbatim, so
+                // `sig` can be a bare `(` — and `[1..len - 1]` on that is the
+                // range `1..0`, which panics. An unterminated struct is a
+                // malformed signature and says so.
+                let inner = sig
+                    .strip_prefix('(')
+                    .and_then(|s| s.strip_suffix(')'))
+                    .ok_or_else(|| "unterminated D-Bus struct signature".to_string())?;
                 let mut chars = inner.chars().peekable();
                 let mut fields = Vec::new();
                 loop {
@@ -741,7 +794,7 @@ impl<'a> Reader<'a> {
                     if one.is_empty() {
                         break;
                     }
-                    fields.push(self.one(&one)?);
+                    fields.push(self.one_at(&one, depth)?);
                 }
                 Ok(Value::Struct(fields))
             }
@@ -760,6 +813,17 @@ impl<'a> Reader<'a> {
             self.one(&one)?;
         }
     }
+}
+
+/// The key-and-value signature inside a `{...}` dict entry.
+///
+/// The same trap `(` has: `take_one_type` returns an unclosed `{` as itself,
+/// and slicing the braces off that is a backwards range.
+fn dict_entry(element: &str) -> Result<&str, String> {
+    element
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .ok_or_else(|| "unterminated D-Bus dict entry signature".to_string())
 }
 
 /// The alignment of the first element of an array of `sig`.
@@ -1233,5 +1297,101 @@ mod tests {
         marshal_signature(out, "u");
         pad_to(out, 4);
         out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+/// A peer on the system bus is not trusted, and udisks2 is not the only thing
+/// that can answer: any local process can send this connection a reply. So the
+/// unmarshaller's failure mode on hostile bytes has to be an `Err`, never a
+/// panic and never an abort.
+#[cfg(test)]
+mod hostile {
+    #![allow(clippy::unwrap_used)] // tests: a broken fixture should panic
+
+    use super::*;
+
+    /// A body of nested variants: three bytes per level, and before the depth
+    /// limit this recursed until the thread's stack was gone — an abort the
+    /// worker could not catch and the app could not survive.
+    #[test]
+    fn a_tower_of_variants_is_refused_rather_than_overflowing_the_stack() {
+        let mut body = Vec::new();
+        for _ in 0..100_000 {
+            body.extend_from_slice(&[1, b'v', 0]);
+        }
+        body.extend_from_slice(&[1, b'y', 0, 0]);
+        let err = Reader::new(&body).value("v").unwrap_err();
+        assert!(err.contains("nested too deeply"), "{err}");
+
+        // And the depth a real reply uses still parses.
+        let mut ok = Vec::new();
+        for _ in 0..8 {
+            ok.extend_from_slice(&[1, b'v', 0]);
+        }
+        ok.extend_from_slice(&[1, b'y', 0, 7]);
+        assert!(matches!(
+            Reader::new(&ok).value("v"),
+            Ok(Value::U8(7))
+        ));
+    }
+
+    /// `take_one_type` hands an unterminated container back verbatim, and the
+    /// braces used to be sliced off it with `[1..len - 1]` — a backwards range.
+    #[test]
+    fn an_unterminated_container_signature_is_an_error_not_a_panic() {
+        assert!(Reader::new(&[]).value("(").is_err());
+        assert!(Reader::new(&[]).value("{").is_err());
+        // Reached the way a peer would reach it: through a variant.
+        let body = [1, b'(', 0];
+        assert!(Reader::new(&body).value("v").is_err());
+        // `a{` — an array whose element type is an unclosed dict entry, with a
+        // declared length big enough that the loop actually runs an element.
+        let mut nested = vec![2, b'a', b'{', 0];
+        nested.extend_from_slice(&8u32.to_le_bytes());
+        nested.extend_from_slice(&[0u8; 8]);
+        assert!(Reader::new(&nested).value("v").is_err());
+    }
+
+    /// A signature is ASCII type codes. Anything else used to become a
+    /// `String` whose byte offsets are not char boundaries, and slicing it
+    /// panicked.
+    #[test]
+    fn a_signature_that_is_not_ascii_is_refused() {
+        let body = [3, b'(', 0xC3, 0xA9, 0];
+        assert!(Reader::new(&body).value("v").is_err());
+        let invalid = [2, b'(', 0xFF, 0];
+        assert!(Reader::new(&invalid).value("v").is_err());
+    }
+
+    /// An array of empty structs: every element consumes nothing, so the loop
+    /// never reached its end and pushed a `Value` per turn until the allocator
+    /// gave up.
+    #[test]
+    fn an_array_of_zero_width_elements_terminates() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&8u32.to_le_bytes());
+        // Structs are 8-aligned, so the elements start on the next boundary.
+        body.extend_from_slice(&[0u8; 4]);
+        body.extend_from_slice(&[0u8; 8]);
+        let err = Reader::new(&body).value("a()").unwrap_err();
+        assert!(err.contains("consumes no bytes"), "{err}");
+    }
+
+    /// The same three shapes, arriving as a *header field* — the path that runs
+    /// before any reply-serial filter, on every message the bus delivers.
+    #[test]
+    fn a_hostile_header_field_cannot_panic_the_parser() {
+        for variant in [
+            vec![1, b'(', 0],
+            vec![1, b'{', 0],
+            vec![3, b'(', 0xC3, 0xA9, 0],
+        ] {
+            let mut fields = Vec::new();
+            pad_to(&mut fields, 8);
+            fields.push(9u8); // a field code this client does not know
+            fields.extend_from_slice(&variant);
+            let msg = encode_message(MSG_METHOD_RETURN, 0, 1, &fields, &[]);
+            assert!(parse_message(&msg).is_err());
+        }
     }
 }

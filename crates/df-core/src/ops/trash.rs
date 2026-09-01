@@ -242,12 +242,22 @@ impl Trash {
         for entry in std::fs::read_dir(&dir).map_err(|e| DfError::io(&dir, e))? {
             let entry = entry.map_err(|e| DfError::io(&dir, e))?;
             let info_path = entry.path();
-            let name = match info_path.file_name().and_then(|n| n.to_str()) {
-                Some(n) if n.ends_with(&format!(".{TRASHINFO_EXT}")) => {
-                    OsString::from(&n[..n.len() - TRASHINFO_EXT.len() - 1])
-                }
-                _ => continue,
+            // Bytes, not `to_str`: `claim_name` builds the trash name from the
+            // original's bytes, so a file whose name is not UTF-8 — off a FAT
+            // stick, out of an archive, from another machine's rsync — gets a
+            // `.trashinfo` that is not UTF-8 either. Skipping those made them
+            // invisible in `trash://`, impossible to restore, and *survivors of
+            // "empty trash"*, which reported them destroyed.
+            use std::os::unix::ffi::{OsStrExt, OsStringExt};
+            let suffix = format!(".{TRASHINFO_EXT}");
+            let Some(file) = info_path.file_name() else {
+                continue;
             };
+            let bytes = file.as_bytes();
+            if !bytes.ends_with(suffix.as_bytes()) {
+                continue;
+            }
+            let name = OsString::from_vec(bytes[..bytes.len() - suffix.len()].to_vec());
             let text = match std::fs::read_to_string(&info_path) {
                 Ok(t) => t,
                 Err(e) => {
@@ -305,12 +315,39 @@ pub fn purge(item: &TrashedItem, ctx: &TaskCtx) -> Result<()> {
     }
 }
 
+/// Whether a trashinfo's `Path=` names somewhere a restore may write.
+///
+/// A `.trashinfo` is a text file in a directory, and the spec constrains
+/// nothing about what `Path=` says. Most of them this program wrote — but a
+/// `$topdir/.Trash-$uid` on a stick someone handed you, an archive extracted
+/// over `~/.local/share/Trash`, and a trash directory that came back from a
+/// backup are all records this code did not author. So the destination is
+/// input, and two rules make it safe to rename into:
+///
+/// - **Absolute.** A relative `Path=notes.txt` resolves against whatever
+///   directory the app was launched from, which turns "restore" into "write a
+///   file of my choosing into the user's cwd".
+/// - **No `..`.** `rename(2)` resolves those against the real tree, so a
+///   lexical normalisation would not even describe where the file lands.
+fn restorable_destination(original: &Path) -> bool {
+    original.is_absolute()
+        && !original
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 /// Put a trashed item back where it came from — the inverse `u` runs.
 ///
 /// Refuses if something has taken the original name in the meantime: undo may
 /// never overwrite newer work (PLAN §5), and a restore that silently clobbers
 /// would be exactly that.
 pub fn restore(item: &TrashedItem, ctx: &TaskCtx) -> Result<PathBuf> {
+    if !restorable_destination(&item.original) {
+        return Err(DfError::Op(format!(
+            "{} is not a path a restore may write to",
+            item.original.display()
+        )));
+    }
     let src = item.files_path();
     if !exists(&src) {
         return Err(DfError::Op(format!(
@@ -735,6 +772,62 @@ mod tests {
             std::fs::read_link(&link).unwrap(),
             Path::new("/nowhere/at/all")
         );
+    }
+
+    /// A name is bytes, not text. A file off a FAT stick or out of an archive
+    /// can carry one that is not UTF-8, and dropping it from the listing meant
+    /// the user could not see it, could not restore it, and — worst — was told
+    /// "emptied the trash" while it stayed on disk forever.
+    #[test]
+    fn a_trashed_name_that_is_not_utf8_is_still_listed_and_restorable() {
+        use std::os::unix::ffi::OsStrExt;
+        let t = TempTree::new("trash-not-utf8");
+        let trash = trash_in(&t);
+        let name = OsStr::from_bytes(b"caf\xE9.txt");
+        let file = t.file(Path::new("work").join(name), b"bytes");
+        let item = trash.trash(&file, &ctx()).unwrap();
+
+        let listed = trash.list().unwrap();
+        assert_eq!(listed.len(), 1, "a non-UTF-8 name must still list");
+        assert_eq!(listed[0].name, item.name);
+        assert_eq!(listed[0].original, normalize(&file));
+
+        restore(&listed[0], &ctx()).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"bytes");
+        assert!(trash.list().unwrap().is_empty());
+    }
+
+    /// A `.trashinfo` is a text file, and not every one of them was written by
+    /// this program: a removable stick's `.Trash-$uid`, an extracted archive, a
+    /// trash directory restored from a backup. A `Path=` that is relative or
+    /// climbs is a rename into somewhere the user never trashed anything from,
+    /// so the restore refuses rather than performing it.
+    #[test]
+    fn a_hand_written_trashinfo_cannot_aim_a_restore_anywhere_it_likes() {
+        let t = TempTree::new("trash-forged-path");
+        let trash = trash_in(&t);
+        let file = t.file("work/notes.txt", b"mine");
+        let item = trash.trash(&file, &ctx()).unwrap();
+
+        for forged in ["notes.txt", "../../../../tmp/notes.txt", "%2E%2E/notes.txt"] {
+            std::fs::write(
+                item.info_path(),
+                format!("[Trash Info]\nPath={forged}\nDeletionDate=2026-01-01T00:00:00\n"),
+            )
+            .unwrap();
+            let listed = trash.list().unwrap();
+            let forged_item = listed
+                .iter()
+                .find(|i| i.name == item.name)
+                .expect("the record is still listed");
+            let err = restore(forged_item, &ctx()).unwrap_err();
+            assert!(
+                err.to_string().contains("not a path a restore may write to"),
+                "{forged}: {err}"
+            );
+            // And nothing moved: the trashed copy is still in the trash.
+            assert!(exists(&item.files_path()), "{forged}");
+        }
     }
 
     #[test]

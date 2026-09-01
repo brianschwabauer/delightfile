@@ -263,7 +263,12 @@ fn read_zip64<R: Read + Seek>(
     let at = read_u64(locator, 8)?;
     // The offset is absolute in the file; a bogus one must not become a seek to
     // the middle of nowhere followed by a 56-byte read of whatever is there.
-    if at + 56 > tail_at + tail.len() as u64 {
+    // Checked rather than added: the offset is a `u64` straight off the wire, so
+    // the *bounds check itself* is where an archive gets to overflow.
+    let end = at
+        .checked_add(56)
+        .ok_or_else(|| malformed("zip64 locator points past the end of the file"))?;
+    if end > tail_at + tail.len() as u64 {
         return Err(malformed("zip64 locator points past the end of the file"));
     }
     reader
@@ -535,7 +540,13 @@ pub(crate) fn extract_into<R: Read + Seek>(
             sink.write(chunk)?;
             Ok(())
         });
-        sink.close();
+        // Only a payload that ran to its end is a finished file. An error here
+        // is a cancel or a corrupt stream, and closing on it would count the
+        // half-written entry as extracted *and* leave it on disk — `finish` has
+        // to be the one that finds it still open, so it can remove it.
+        if result.is_ok() {
+            sink.close();
+        }
         result.map(Consume::Read)
     })
 }
@@ -692,9 +703,17 @@ fn walk_members<R: Read + Seek>(reader: &mut R, visit: Visit<'_, R>) -> crate::R
             },
         };
 
-        at = data_at + used;
+        // `used` is the header's own compressed length whenever the payload was
+        // skipped, and a zip64 extra field can spell that as sixteen exabytes.
+        // Adding it unchecked is an overflow panic on a file anyone can mail.
+        let Some(next) = data_at.checked_add(used) else {
+            return Err(crate::DfError::Op(
+                "zip: a member declares a length that runs past the end of the file".to_string(),
+            ));
+        };
+        at = next;
         if streamed {
-            at += descriptor_len(reader, at)?;
+            at = at.saturating_add(descriptor_len(reader, at)?);
         }
     }
 }

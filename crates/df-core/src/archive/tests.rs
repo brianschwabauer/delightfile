@@ -1233,6 +1233,126 @@ fn a_cancelled_extraction_leaves_no_half_written_file() {
     );
 }
 
+/// The same contract, but for a cancel that lands *while an entry is being
+/// written* rather than before the walk starts. This is the case the walkers
+/// have to get right: they must not `close` an entry whose payload stopped
+/// early, or the truncated file is counted as extracted and left on disk.
+#[test]
+fn a_cancel_mid_entry_removes_the_file_it_was_writing() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// Cancels the task the moment any bytes have gone by, so "cancel with a
+    /// file open" is deterministic rather than a sleep.
+    struct CancelOnFirstChunk {
+        flags: Arc<crate::tasks::TaskFlags>,
+        seen: AtomicU64,
+    }
+    impl crate::tasks::ProgressSink for CancelOnFirstChunk {
+        fn set_total(&self, _bytes: u64, _files: u64) {}
+        fn advance(&self, bytes: u64, _files: u64) {
+            if self.seen.fetch_add(bytes, Ordering::SeqCst) + bytes > 0 {
+                self.flags.cancel();
+            }
+        }
+    }
+
+    for (label, archive_name, bytes) in [
+        (
+            "zip",
+            "big.zip",
+            build_zip(
+                &[ZipMember::file(
+                    "big.bin",
+                    &vec![b'x'; unpack::EXTRACT_BUF * 8],
+                )],
+                b"",
+            ),
+        ),
+        ("tar", "big.tar", {
+            let mut out = Vec::new();
+            tar_entry(&mut out, "big.bin", &vec![b'x'; unpack::EXTRACT_BUF * 8], b'0');
+            tar_end(&mut out);
+            out
+        }),
+    ] {
+        let t = TempTree::new(&format!("archive-extract-cancel-mid-{label}"));
+        let archive = write(&t, archive_name, &bytes);
+        let dest = t.path().join("out");
+        std::fs::create_dir_all(&dest).unwrap();
+
+        let tree = list(&archive).unwrap();
+        let plan = plan_extract(&tree, &[], &dest);
+        let flags = Arc::new(crate::tasks::TaskFlags::new());
+        let ctx = TaskCtx::with_sink(
+            Arc::clone(&flags),
+            Arc::new(CancelOnFirstChunk {
+                flags: Arc::clone(&flags),
+                seen: AtomicU64::new(0),
+            }),
+        );
+        let report = unpack::extract(&plan, &ctx).unwrap();
+
+        assert!(report.cancelled, "{label}");
+        assert_eq!(report.files, 0, "{label}: a half file is not a file");
+        assert!(
+            !dest.join("big.bin").exists(),
+            "{label}: the mid-flight file was left behind"
+        );
+    }
+}
+
+/// A local header may declare a zip64 compressed size of anything at all, and
+/// the walk's "skip to the next member" arithmetic has to survive it rather
+/// than overflow.
+#[test]
+fn a_member_claiming_a_sixteen_exabyte_length_does_not_overflow_the_walk() {
+    let t = TempTree::new("archive-zip64-lie");
+    let mut z = Vec::new();
+    z.extend_from_slice(b"PK\x03\x04");
+    z.extend_from_slice(&20u16.to_le_bytes());
+    z.extend_from_slice(&0u16.to_le_bytes()); // flags
+    z.extend_from_slice(&0u16.to_le_bytes()); // stored
+    z.extend_from_slice(&0u16.to_le_bytes());
+    z.extend_from_slice(&0x0021u16.to_le_bytes());
+    z.extend_from_slice(&0u32.to_le_bytes()); // crc
+    z.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // compressed: see the extra
+    z.extend_from_slice(&1u32.to_le_bytes()); // uncompressed
+    z.extend_from_slice(&5u16.to_le_bytes()); // name length
+    z.extend_from_slice(&12u16.to_le_bytes()); // extra length
+    z.extend_from_slice(b"x.txt");
+    z.extend_from_slice(&0x0001u16.to_le_bytes()); // zip64 extra
+    z.extend_from_slice(&8u16.to_le_bytes());
+    z.extend_from_slice(&u64::MAX.to_le_bytes());
+    z.push(b'x');
+    // An empty central directory: the walk under test reads local headers.
+    z.extend_from_slice(b"PK\x05\x06");
+    z.extend_from_slice(&[0u8; 16]);
+    z.extend_from_slice(&0u16.to_le_bytes());
+
+    let path = write(&t, "lie.zip", &z);
+    // Whatever this answers, it must answer — not panic on an overflowing add.
+    let _ = unpack::read_entry(&path, "nope.txt", 1024);
+}
+
+/// The zip64 locator carries an absolute file offset, and the bounds check on
+/// it must not be the thing that overflows.
+#[test]
+fn a_zip64_locator_pointing_past_the_universe_is_refused_not_overflowed() {
+    let mut z = Vec::new();
+    z.extend_from_slice(b"PK\x06\x07"); // zip64 EOCD locator
+    z.extend_from_slice(&0u32.to_le_bytes()); // disk
+    z.extend_from_slice(&u64::MAX.to_le_bytes()); // offset of the zip64 EOCD
+    z.extend_from_slice(&1u32.to_le_bytes()); // total disks
+    z.extend_from_slice(b"PK\x05\x06");
+    z.extend_from_slice(&[0u8; 16]);
+    z.extend_from_slice(&0u16.to_le_bytes());
+
+    let len = z.len() as u64;
+    let err = zip::list(&mut Cursor::new(z), len);
+    assert!(err.is_err(), "an impossible locator offset must be refused");
+}
+
 /// The bomb guard: a member that keeps producing bytes past the length its own
 /// header declared is stopped, and the partial file it made is removed.
 #[test]

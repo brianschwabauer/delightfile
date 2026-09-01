@@ -477,13 +477,17 @@ pub fn extract(plan: &ExtractPlan, ctx: &TaskCtx) -> Result<ExtractReport> {
     };
 
     let cancelled = matches!(outcome, Err(DfError::Cancelled));
+    // `finish` before the error return, not after: a walk that failed part-way
+    // through an entry — a corrupt deflate stream as readily as a cancel — has
+    // a half-written file open, and bailing out around this call would leave it
+    // on disk with nobody left holding a path to it.
+    let mut report = sink.finish(cancelled);
     if let Err(e) = outcome {
         if !cancelled {
             return Err(e);
         }
     }
 
-    let mut report = sink.finish(cancelled);
     report.skipped = plan.skipped.clone();
     // A cancelled extraction has half a tree on disk, and half a tree is
     // exactly what a manifest describes correctly — so it is still undoable,

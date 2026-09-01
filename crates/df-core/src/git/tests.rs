@@ -674,3 +674,36 @@ fn the_cache_fills_in_asynchronously_and_bumps_the_generation() {
     assert!(git.ensure(&repo.join("a.txt")).is_some());
     assert_eq!(git.generation(), 1);
 }
+
+/// A repository is untrusted content: it can arrive in an archive, on a stick,
+/// or out of a download, and `.git/config` carries keys that git executes.
+/// Walking the cursor into such a directory runs `status_blocking` on it, so
+/// this is the difference between browsing a folder and running its contents.
+#[test]
+fn a_repository_config_cannot_run_a_command_of_its_own() {
+    if !git_installed() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let t = TempTree::new("git-hostile-config");
+    let repo = t.dir("dropped");
+    git_in(&repo, &["init", "-q", "-b", "trunk"]);
+    std::fs::write(repo.join("a.txt"), b"hello\n").unwrap();
+
+    let marker = t.path().join("EXECUTED");
+    let config = repo.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "\tfsmonitor = \"touch {}; false\"\n",
+        marker.display()
+    ));
+    std::fs::write(&config, text).unwrap();
+
+    // The listing itself must still work — the guard is not "refuse the repo".
+    let data = status_blocking(&repo).expect("git status");
+    assert_eq!(data.branch.as_deref(), Some("trunk"));
+    assert!(
+        !marker.exists(),
+        "the repository's own config ran a command"
+    );
+}

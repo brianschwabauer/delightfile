@@ -61,6 +61,7 @@
 //! restore refuses with "…is no longer in the trash", which is both true and
 //! the sentence somebody needs.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -94,8 +95,11 @@ pub struct View {
 impl View {
     /// The item a row belongs to. By name, which is unique inside one trash's
     /// `files/` by construction — see the module note.
-    pub fn item(&self, name: &str) -> Option<&TrashedItem> {
-        self.items.iter().find(|i| i.name.to_string_lossy() == name)
+    pub fn item(&self, name: &OsStr) -> Option<&TrashedItem> {
+        // `OsStr`, not a lossy `String`: two different names that are both
+        // invalid UTF-8 can render as the same replacement characters, and
+        // `find` would then hand a purge the wrong item.
+        self.items.iter().find(|i| i.name == name)
     }
 
     /// The items a set of row paths names, in the pane's order.
@@ -103,7 +107,7 @@ impl View {
         paths
             .iter()
             .filter_map(|path| path.file_name())
-            .filter_map(|name| self.item(&name.to_string_lossy()))
+            .filter_map(|name| self.item(name))
             .cloned()
             .collect()
     }
@@ -270,17 +274,21 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 /// (PLAN §5: undo may never overwrite newer work).
 pub fn restore_refusal(item: &TrashedItem) -> Option<String> {
     let original = &item.original;
-    if !item.files_path().exists() {
+    // `symlink_metadata`, matching df-core's `exists`: a trashed *broken*
+    // symlink is a thing this program supports trashing, and `Path::exists`
+    // follows the link and answers "gone" — which refused a restore that
+    // df-core would have carried out perfectly.
+    if std::fs::symlink_metadata(item.files_path()).is_err() {
         return Some(format!("{} is no longer in the trash", original.display()));
     }
-    if original.exists() {
+    if std::fs::symlink_metadata(original).is_ok() {
         return Some(format!(
             "{} exists again — rename it and restore afterwards",
             original.display()
         ));
     }
     match original.parent() {
-        Some(parent) if !parent.exists() => Some(format!(
+        Some(parent) if std::fs::symlink_metadata(parent).is_err() => Some(format!(
             "{} is gone, so {} cannot go back into it",
             parent.display(),
             name_of(original)
@@ -481,10 +489,10 @@ mod tests {
             origin: PathBuf::from("/home/brian"),
         };
         assert_eq!(
-            view.item("a_1.txt").map(|i| i.original.clone()),
+            view.item(OsStr::new("a_1.txt")).map(|i| i.original.clone()),
             Some(PathBuf::from("/etc/a.txt"))
         );
-        assert!(view.item("nope.txt").is_none());
+        assert!(view.item(OsStr::new("nope.txt")).is_none());
         let rows = rows(&view.items);
         let picked: Vec<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
         let items = view.items_for(&picked);

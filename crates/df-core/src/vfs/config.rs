@@ -364,6 +364,24 @@ fn parse_service(name: &str, table: &Table) -> Result<Service, String> {
         None => optional_string(table, name, "path")?,
     };
 
+    // `ssh` parses its operands with `getopt`, and there is no `--` that would
+    // stop it: a value beginning with `-` becomes a *flag*. `host =
+    // "-oProxyCommand=sh -c …"` is a command line, and delightfile reads
+    // yazi's `vfs.toml` as well as its own, so this file is not always one the
+    // user wrote today. Refused at parse rather than quoted at spawn, because
+    // there is no quoting that helps and no legitimate value of this shape.
+    for (key, value) in [
+        ("host", Some(&host)),
+        ("user", user.as_ref()),
+        ("key_file", key_file.as_ref()),
+    ] {
+        if value.is_some_and(|v| v.starts_with('-')) {
+            return Err(format!(
+                "[services.{name}] `{key}` starts with `-`, which ssh would read as an option"
+            ));
+        }
+    }
+
     Ok(Service {
         name: name.to_string(),
         kind,

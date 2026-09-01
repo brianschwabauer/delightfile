@@ -477,7 +477,12 @@ pub(crate) fn extract_into<R: Read>(
         let result = copy_payload(reader, entry.size, &mut |chunk| {
             sink.write(chunk).map(|_| ())
         });
-        sink.close();
+        // See the same guard in `zip::extract_into`: an entry whose payload
+        // stopped early — a cancel, most often — is left open so that `finish`
+        // removes the truncated file rather than counting it as extracted.
+        if result.is_ok() {
+            sink.close();
+        }
         result.map(|()| true)
     })
 }

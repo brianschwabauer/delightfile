@@ -667,9 +667,12 @@ impl Vfs {
         Ok(local)
     }
 
-    /// Upload `local` to `remote` (`OPEN` with `WRITE|CREAT|TRUNC`),
-    /// pipelined, with progress on `ctx`. Returns the byte count. A failed or
-    /// cancelled upload removes its partial remote file.
+    /// Upload `local` to `remote`, pipelined, with progress on `ctx`. Returns
+    /// the byte count.
+    ///
+    /// The bytes go to a sibling scratch file and are renamed into place at the
+    /// end, so a failed or cancelled upload removes only its own partial file
+    /// and leaves whatever was at `remote` exactly as it was.
     pub fn upload(&self, local: &Path, remote: &VfsPath, ctx: &TaskCtx) -> Result<u64, VfsError> {
         match self.op(
             &remote.service,

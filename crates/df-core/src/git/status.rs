@@ -277,6 +277,22 @@ pub enum StatusError {
 ///   would be easiest to forget.
 pub fn status_blocking(root: &Path) -> Result<StatusData, StatusError> {
     let mut child = Command::new("git")
+        // The repository is untrusted content. `.git/config` is read before
+        // anything else git does, and several of its keys are *command lines*:
+        // a directory that arrived in an archive, on a stick, or out of a
+        // download can carry `core.fsmonitor = sh -c ...` and git runs it on a
+        // plain `status`. In this program that means walking the cursor into a
+        // directory is enough — no click, no opener. `safe.directory` does not
+        // help, because a file the user just extracted is owned by the user.
+        // `-c` is applied after the repository's own config, so these win.
+        .arg("-c")
+        .arg("core.fsmonitor=")
+        .arg("-c")
+        .arg("core.hooksPath=/dev/null")
+        .arg("-c")
+        .arg("core.pager=cat")
+        .arg("-c")
+        .arg("core.sshCommand=")
         .arg("--no-optional-locks")
         .arg("status")
         .arg("--porcelain=v2")
