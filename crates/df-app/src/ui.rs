@@ -109,7 +109,7 @@ pub const GHOST_CURSOR: f32 = 0.35;
 /// How far a *hovered* row is lifted from the pane towards `surface0`.
 /// The full step, because hover is the palette's own next surface — moving up
 /// the ramp rather than inventing a colour (see [`crate::theme`]).
-const HOVER_LIFT: f32 = 1.0;
+pub(crate) const HOVER_LIFT: f32 = 1.0;
 
 /// How far a hovered row *under the cursor bar* is lifted further. Small: the
 /// cursor row is already the brightest thing in the column, and a hover that
@@ -119,7 +119,14 @@ const CURSOR_HOVER_LIFT: f32 = 0.35;
 /// The parent pane's rows, mixed towards its own background. Two thirds of the
 /// way: the column is there to say where you are, not to be read, and at full
 /// strength it competes with the list for attention.
-const PARENT_DIM: f32 = 0.45;
+pub(crate) const PARENT_DIM: f32 = 0.45;
+
+/// How solid a departing row's plate is at the start of its fade.
+///
+/// A third. It has to say "something was here" without competing with the rows
+/// that are actually still in the list and travelling past it — a full-strength
+/// plate under a name that is leaving reads as a new selection.
+const GHOST_PLATE: f32 = 0.33;
 
 /// How far a *selected* row's ground is tinted towards the selection accent.
 ///
@@ -128,7 +135,7 @@ const PARENT_DIM: f32 = 0.45;
 /// to trash. Still a tint and not a fill — at much above this the file names
 /// start fighting the ground they are on, and a selection of forty rows would
 /// turn the column into a yellow block.
-const SELECT_TINT: f32 = 0.10;
+pub(crate) const SELECT_TINT: f32 = 0.10;
 
 /// The selected row's accent bar, in logical points.
 ///
@@ -137,7 +144,7 @@ const SELECT_TINT: f32 = 0.10;
 /// of difference that vanishes on a dim panel or under a colour-blind eye. The
 /// bar is the second, redundant channel: a hard edge at a fixed x, which reads
 /// as a *list* of marks down the column even at a glance from across the room.
-const SELECT_BAR_WIDTH: f32 = 2.5;
+pub(crate) const SELECT_BAR_WIDTH: f32 = 2.5;
 
 /// How far the accent bar is inset from the row's top and bottom, so it reads
 /// as a mark on the row rather than as a continuous rule down the pane — two
@@ -147,7 +154,7 @@ const SELECT_BAR_INSET: f32 = 3.5;
 /// The clipboard mark's width, on the row's trailing edge. A shade narrower
 /// than the selection bar: a yank is a thing you did to a row a moment ago,
 /// not a thing you are about to act on, so it says its piece more quietly.
-const CLIP_BAR_WIDTH: f32 = 2.0;
+pub(crate) const CLIP_BAR_WIDTH: f32 = 2.0;
 
 /// Height of the tab strip and of the bottom bar, in logical points.
 ///
@@ -443,6 +450,11 @@ pub struct ListView<'a> {
     /// The rows currently in the hand (PLAN §7.1). Dimmed while they are, the
     /// same way a cut row is: both mean "this is on its way out of here".
     pub dragged: &'a std::collections::HashSet<PathBuf>,
+    /// A re-sort in flight (PLAN §2's FLIP). Every row is drawn at the place
+    /// the layout says, displaced by however far this animation still has to
+    /// carry it — so the *state* is committed and correct and only the pixels
+    /// are catching up (`delightful-ui` §5).
+    pub flip: Option<&'a crate::flip::Flip>,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -514,6 +526,7 @@ impl Painting<'_> {
             show_selection,
             clip,
             dragged,
+            flip,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
@@ -535,6 +548,16 @@ impl Painting<'_> {
             if !rect.intersects(content) {
                 continue;
             }
+            // The FLIP displacement, and how solid a row that has just
+            // arrived is. Both are zero and one for every row on a settled
+            // list, which is the common case and costs a hash miss.
+            let (rect, alpha) = match flip {
+                Some(flip) => (
+                    rect.translate(flip.offset(&entry.path, self.now)),
+                    flip.alpha(&entry.path, self.now),
+                ),
+                None => (rect, 1.0),
+            };
             let key = Control::Row(column, index);
             let hover = hovers.hover(key);
             let press = hovers.press(key);
@@ -623,9 +646,10 @@ impl Painting<'_> {
                 dir.row_spans(index),
                 ground,
                 linemode,
-                dim || cut || lifted,
+                if dim || cut || lifted { PARENT_DIM } else { 0.0 }.max(1.0 - alpha),
             );
         }
+        self.flip_ghosts(&painter, flip, content, ROW_RADIUS);
     }
 
     /// One row's contents: icon, name, and the linemode column.
@@ -643,11 +667,18 @@ impl Painting<'_> {
         spans: &[Span],
         ground: egui::Color32,
         linemode: LineMode,
-        dim: bool,
+        // `mute` is how far this row's ink is mixed back into the pane behind
+        // it, 0–1. One number rather than the `dim: bool` it replaced, because
+        // three different things now want to mute a row by three different
+        // amounts: the parent column and a cut row by `PARENT_DIM`, and a row
+        // *arriving* in a FLIP re-sort by however far through its fade it is
+        // (see `crate::flip`). A boolean could only express the first.
+        mute: f32,
     ) {
+        let mute = mute.clamp(0.0, 1.0);
         let fade = |c: egui::Color32| {
-            if dim {
-                mix(c, ground, PARENT_DIM)
+            if mute > 0.0 {
+                mix(c, ground, mute)
             } else {
                 c
             }
@@ -713,7 +744,7 @@ impl Painting<'_> {
         // a symlink row must never lose its *name* to its target. Not in the
         // parent column, for the reason its linemode is off: that column is
         // one name wide.
-        if self.show_symlink && !dim && entry.is_symlink() {
+        if self.show_symlink && mute <= 0.0 && entry.is_symlink() {
             if let Some(target) = entry.link_target() {
                 let room = rect.right() - ROW_PAD_X - mode_width - name_end;
                 if room > FONT_SIZE * 3.0 {
@@ -811,7 +842,7 @@ impl Painting<'_> {
     /// Three states, and they must not look alike (`delightful-ui` §11): a
     /// directory that is empty, one that could not be read, and one whose first
     /// batch has not landed yet.
-    fn pane_state_message(&self, dir: &DirState, slow_load: bool) -> Option<String> {
+    pub(crate) fn pane_state_message(&self, dir: &DirState, slow_load: bool) -> Option<String> {
         match dir.state() {
             LoadState::Failed => Some(
                 dir.error()
@@ -1011,6 +1042,46 @@ impl Painting<'_> {
     /// Biased above true centre (`delightful-ui` §16): text at the mathematical
     /// middle of a tall pane reads as sitting low, and 42% is the usual 60/40
     /// answer.
+    /// The rows a re-sort has removed, fading out of where they were.
+    ///
+    /// Drawn *after* the surviving rows and from the [`crate::flip::Flip`]
+    /// rather than from the listing, because the listing no longer contains
+    /// them — that is what "removed" means. There is no entry left to ask for
+    /// an icon or a colour, so a ghost is the name it had, in the quietest
+    /// colour on the palette, on its way out. `.` toggling a directory of
+    /// dotfiles closed should look like the names leaving, not like the list
+    /// blinking.
+    pub(crate) fn flip_ghosts(
+        &self,
+        painter: &egui::Painter,
+        flip: Option<&crate::flip::Flip>,
+        clip: egui::Rect,
+        radius: u8,
+    ) {
+        let Some(flip) = flip else { return };
+        for (path, rect, alpha) in flip.ghosts(self.now) {
+            if !rect.intersects(clip) {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            painter.rect_filled(
+                rect,
+                radius,
+                crate::chrome::fade(self.palette.surface0, alpha * GHOST_PLATE),
+            );
+            crate::chrome::truncated(
+                painter,
+                egui::pos2(rect.left() + ROW_PAD_X + ICON_COLUMN, rect.center().y),
+                &name,
+                crate::chrome::fade(self.palette.overlay0, alpha),
+                (rect.width() - ROW_PAD_X * 2.0 - ICON_COLUMN).max(0.0),
+            );
+        }
+    }
+
     pub fn quiet_label(&self, content: egui::Rect, text: &str) {
         self.painter.text(
             egui::pos2(content.center().x, content.top() + content.height() * 0.42),

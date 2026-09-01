@@ -428,9 +428,9 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Clipboard native: `Y`, `c t`, paste files/images
 
 ### Phase 5 — power
-- [ ] Command palette `Ctrl+p` from the registry
-- [ ] `s`/`S` fd/rg streaming overlays with live preview; `z`/`Z` zoxide db + fuzzy jump
-- [ ] Grid/thumbnail view with per-dir memory; FLIP animated re-sorts
+- [x] Command palette `Ctrl+p` from the registry
+- [x] `s`/`S` fd/rg streaming overlays with live preview; `z`/`Z` zoxide db + fuzzy jump
+- [x] Grid/thumbnail view with per-dir memory; FLIP animated re-sorts
 - [ ] Git status dots, ignored dimming, branch breadcrumb
 - [ ] Archives as read-only directories + extract with progress
 - [ ] "What's big" du mode

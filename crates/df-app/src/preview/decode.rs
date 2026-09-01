@@ -265,7 +265,7 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
 /// takes an output size) and immediately after where it cannot, so the only
 /// full-resolution buffer that ever exists is the one the decoder had to
 /// produce anyway.
-fn decode_file(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
+pub(crate) fn decode_file(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_SOURCE_BYTES {
         return Err(format!(

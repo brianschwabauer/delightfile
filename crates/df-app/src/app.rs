@@ -31,6 +31,7 @@ use df_core::preview::PreviewKind;
 use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord};
 use df_core::ops::paste::{plan_paste, Clipboard, PasteMode};
 use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
+use df_core::state::{StateStore, View};
 use df_core::tasks::{FnJob, Lane, TaskCtx, TaskEngine, TaskEvent, TaskId, TaskState};
 
 use winit::application::ApplicationHandler;
@@ -43,16 +44,21 @@ use crate::chrome;
 use crate::dnd;
 use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
 use crate::graphics::{Gfx, GfxError};
+use crate::finder::{self, Choice, Finder, Source};
+use crate::flip::{self, Flip, Snapshot};
+use crate::grid::{self, GridView, Thumbs};
 use crate::help::{self, Help};
 use crate::hover::Hovers;
 use crate::input::{Prompt, PromptKind};
 use crate::menu::{self, Menu};
 use crate::open::{self, Picker};
+use crate::overlay::{self, FinderGeom, SearchGeom};
 use crate::focus::{escape_rung, EscapeRung, EscapeState, Focus, Hovered, Rightward};
 use crate::panel::{self, TaskPanel, TaskRow};
 use crate::playback::{Player, Prober, TemporalInfo};
 use crate::preview::Pane as PreviewPane;
 use crate::ripple::Ripples;
+use crate::search::{self, Search};
 use crate::toast::Toasts;
 use crate::select::{self, Visual};
 use crate::spot::{self, Spot};
@@ -193,6 +199,12 @@ enum OverlayGeom {
     Picker(egui::Rect, Vec<egui::Rect>),
     Panel(egui::Rect, Vec<egui::Rect>, Vec<TaskRow>),
     Spot(spot::Geometry),
+    /// The fuzzy card (PLAN §4.4).
+    Finder(FinderGeom),
+    /// The `s` / `S` panel (PLAN §7.2). Boxed for the same reason the conflict
+    /// dialog is: it carries a row rectangle per visible hit and the enum is
+    /// otherwise a few words wide.
+    Search(Box<SearchGeom>),
 }
 
 impl OverlayGeom {
@@ -216,6 +228,8 @@ impl OverlayGeom {
                 .iter()
                 .position(|r| r.contains(pos))
                 .map(Control::PanelRow),
+            OverlayGeom::Finder(geometry) => geometry.row_at(pos).map(Control::PanelRow),
+            OverlayGeom::Search(geometry) => geometry.row_at(pos).map(Control::PanelRow),
             // The spot has two kinds of target on one card — nine permission
             // chips and the checksum's button — so it does its own hit test.
             OverlayGeom::Spot(geometry) => geometry.hit(pos),
@@ -235,6 +249,8 @@ impl OverlayGeom {
                 OverlayGeom::Picker(_, rows) | OverlayGeom::Panel(_, rows, _),
                 Control::PanelRow(i),
             ) => rows.get(i).copied(),
+            (OverlayGeom::Finder(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
+            (OverlayGeom::Search(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
             (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
             _ => None,
         }
@@ -290,9 +306,15 @@ struct Pointer {
 /// handler can still be given the geometry it needs.
 struct Geom<'a> {
     layout: &'a ui::Layout,
+    /// How many items fit in the list pane — what a half-page means, and what
+    /// a palette row has to hand `run` when it dispatches a command.
+    page: usize,
     /// The list pane's content box, and how far it has scrolled.
     list: egui::Rect,
     list_scroll: f32,
+    /// `Some` when this directory is drawn as a grid: the tile geometry every
+    /// hit test goes through (see [`crate::grid::pane_at`]).
+    grid: Option<grid::Metrics>,
     parent: egui::Rect,
     parent_scroll: f32,
     crumbs: &'a [egui::Rect],
@@ -317,6 +339,89 @@ fn wheel_unit(unit: egui::MouseWheelUnit) -> crate::mouse::WheelUnit {
         egui::MouseWheelUnit::Line => crate::mouse::WheelUnit::Line,
         egui::MouseWheelUnit::Page => crate::mouse::WheelUnit::Page,
     }
+}
+
+/// How long after the last change the state file is written (PLAN §2).
+///
+/// Two seconds. Long enough that walking through five directories toggling
+/// views is one write rather than five, short enough that anything you did more
+/// than a moment ago is already on disk if the machine goes down. It is a
+/// deadline, not a timer: one scheduled wake-up, and the resting state has
+/// none.
+const STATE_FLUSH: Duration = Duration::from_secs(2);
+
+/// How many rows either side of the visible window take part in a FLIP.
+///
+/// Four. Enough that a row travelling in from just off the edge is already in
+/// the animation when it arrives — otherwise it would pop into place at the top
+/// of the pane rather than sliding in — and small enough that a re-sort of a
+/// ten-thousand-file directory animates a couple of dozen things rather than
+/// ten thousand.
+const FLIP_MARGIN: usize = 4;
+
+/// The state file's write-behind timer (PLAN §2).
+///
+/// df-core's [`StateStore`] knows *what* changed and refuses to write when
+/// nothing has; this owns *when*. The two failures it sits between are real:
+/// writing on every change is an atomic replace per keystroke of a `,` chord,
+/// and writing only at quit loses the session to any crash. A deadline rather
+/// than a timer, so an idle window with a pending write schedules exactly one
+/// wake-up and then sleeps (PLAN §1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct WriteBehind {
+    due: Option<Instant>,
+}
+
+impl WriteBehind {
+    /// Something changed. Arms the write, or leaves it alone when the store
+    /// says there is nothing to save.
+    ///
+    /// The deadline is pushed out by each change rather than fixed at the
+    /// first, which is what makes it a debounce: toggling five directories in
+    /// four seconds is one write, not five.
+    fn touch(&mut self, dirty: bool, now: Instant) {
+        if dirty {
+            self.due = Some(now + STATE_FLUSH);
+        }
+    }
+
+    /// Is the write owed? Disarms itself when it says yes, so one arming is
+    /// one write.
+    fn ready(&mut self, now: Instant) -> bool {
+        match self.due {
+            Some(due) if now >= due => {
+                self.due = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// How long until the write, for the repaint deadline. `None` is the
+    /// resting state: nothing pending, no frame owed.
+    fn deadline(&self, now: Instant) -> Option<Duration> {
+        Some(self.due?.saturating_duration_since(now))
+    }
+
+    /// Forget the pending write — the quit path, which is doing it now.
+    fn disarm(&mut self) {
+        self.due = None;
+    }
+}
+
+/// `$HOME`, for shortening the paths a jump overlay lists.
+fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+/// Seconds since the epoch, which is the clock zoxide's frecency is scored
+/// against. A clock before 1970 scores everything as ancient rather than
+/// panicking, which is the right way for a bad clock to fail.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// A path's last component, as a `String`.
@@ -441,6 +546,30 @@ pub struct App {
     /// so that submitting the filter can close the bar without also throwing
     /// away what was typed into it.
     help_query: String,
+    /// `Ctrl+p`, `z` and `Z` — the one fuzzy card, whichever of the three
+    /// opened it (PLAN §4.4, §7.2). One field because they are one surface:
+    /// two of them open at once is not a state that exists.
+    finder: Option<Finder>,
+    /// Which commands have been run from the palette this session, so an empty
+    /// palette opens on what you did last. Session-local; see
+    /// [`crate::finder::Mru`].
+    mru: finder::Mru,
+    /// zoxide's database, read once when `z` or `Z` first asks for it.
+    ///
+    /// Lazy because a session that never jumps should not pay to parse a
+    /// database it will not look at, and cached because re-reading it on every
+    /// keystroke of a `Z` query would be a file read per character.
+    zoxide: Option<Vec<df_core::zoxide::ZoxideDir>>,
+    /// `s` / `S`, while one is open (PLAN §7.2).
+    search: Option<Search>,
+    /// The preview owes the search cursor a scroll-to-line.
+    ///
+    /// A flag rather than a scroll every frame: `scroll_to` clamps against the
+    /// height the *last* paint measured, so the first attempt after a result is
+    /// highlighted usually lands short and has to be repeated once the preview
+    /// has loaded — but repeating it unconditionally would be a window that
+    /// never goes to sleep (PLAN §1).
+    search_follow: bool,
     // ── Operations (PLAN §5) ────────────────────────────────────────────────
     /// The worker pool. Started before the window, like every other worker.
     engine: TaskEngine,
@@ -497,6 +626,42 @@ pub struct App {
     ripples: Ripples<Control>,
     /// Whether a patched font was found and the real icons can be drawn.
     nerd: bool,
+    /// Which directories are drawn as grids, and the rest of the per-directory
+    /// memory (PLAN §2). Loaded at startup, written back on a debounce — the
+    /// store tracks *what* changed and this file owns *when* it is written.
+    state: StateStore,
+    /// When the state file is due to be written. See [`WriteBehind`].
+    state_due: WriteBehind,
+    /// The grid's thumbnail workers, started the first time a directory is
+    /// drawn as a grid and kept after that.
+    ///
+    /// `None` is the resting state of a session that has only ever used the
+    /// list: no threads, no textures, nothing decoded.
+    thumbs: Option<Thumbs>,
+    /// How many entries share one row of the list pane: 1 in the list, the
+    /// grid's column count in the grid.
+    ///
+    /// Held on the app rather than passed around because the two places that
+    /// need it — the cursor commands in [`App::run`] and the wheel — run
+    /// *before* the frame that measures the pane, so there is nothing to pass
+    /// yet. Set at the top of every frame, so it is at most one resize stale
+    /// and a resize cannot happen between a key and the frame it is routed in.
+    columns: usize,
+    /// How tall one row of the list pane is: [`ui::ROW_HEIGHT`] in the list, a
+    /// whole row of tiles in the grid. Held for the same reason `columns` is.
+    pane_step: f32,
+    /// A re-sort in flight (PLAN §2's FLIP).
+    flip: Option<Flip>,
+    /// Where the visible rows were the moment a reordering command ran, waiting
+    /// for the next frame's layout to animate against.
+    ///
+    /// Captured in [`App::run`] rather than in the frame, because by the time
+    /// the frame runs the sort has already happened and "where things were" is
+    /// gone.
+    flip_before: Option<Snapshot>,
+    /// Where the visible rows were drawn last frame — the thing `flip_before`
+    /// is a copy of.
+    last_layout: Snapshot,
 
     // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────────
     /// The compositor-side data device: drags out, drops in. `None` when the
@@ -691,12 +856,28 @@ impl App {
             last_find: None,
             help: None,
             help_query: String::new(),
+            finder: None,
+            mru: finder::Mru::default(),
+            zoxide: None,
+            search: None,
+            search_follow: false,
             which: WhichKey::new(),
             which_rows: Vec::new(),
             hovers: Hovers::new(),
             cursor_glow: Hovers::new(),
             ripples: Ripples::new(),
             nerd: false,
+            // Read before the window, like every other startup read: the very
+            // first frame has to know whether the directory it is opening is a
+            // grid, or it would draw a list and then swap under the eye.
+            state: StateStore::load(),
+            state_due: WriteBehind::default(),
+            thumbs: None,
+            columns: 1,
+            pane_step: ui::ROW_HEIGHT,
+            flip: None,
+            flip_before: None,
+            last_layout: Snapshot::new(),
             data_device: None,
             drag: None,
             spring_back: None,
@@ -822,6 +1003,22 @@ impl App {
             // the probe is cheaper than the memory of it.
             while self.probes.len() > PROBE_MEMORY {
                 self.probes.remove(0);
+            }
+        }
+        // The search's reader thread (PLAN §7.2) and the grid's tile workers
+        // (PLAN §2), both of which wake the loop the same way every other
+        // worker does.
+        if let Some(search) = &mut self.search {
+            if search.poll() {
+                changed = true;
+                // A result arriving where the cursor is means the preview owes
+                // it a scroll to the line it matched on.
+                self.search_follow = true;
+            }
+        }
+        if let Some(thumbs) = &mut self.thumbs {
+            if thumbs.poll(ctx.as_ref()) {
+                changed = true;
             }
         }
         for update in self.scanner.drain() {
@@ -1502,7 +1699,7 @@ impl App {
             // confirmation would queue a second trash. A dialog that is asking
             // "are you sure" must not also be a file manager.
             if self.overlay_open() {
-                self.overlay_key(chord, now);
+                self.overlay_key(chord, page, now);
                 continue;
             }
             match self
@@ -1531,6 +1728,8 @@ impl App {
             || self.picker.is_some()
             || self.panel.is_some()
             || self.spot.is_some()
+            || self.finder.is_some()
+            || self.search.is_some()
     }
 
     /// The context an open surface is matched in. Never stacked on `Files`:
@@ -1538,6 +1737,14 @@ impl App {
     fn overlay_stack(&self) -> ContextStack {
         let context = if self.dialog.is_some() {
             Context::Confirm
+        } else if self.finder.is_some() {
+            Context::Palette
+        } else if self.search.is_some() {
+            // The search panel takes `[pick]`'s five keys — Esc, Ctrl+c, Enter
+            // and the two arrows — because that is the same "choose one of
+            // these" vocabulary, and a sixth context whose table would be an
+            // exact copy of `[pick]`'s is a sixth table to keep in step.
+            Context::Pick
         } else if self.picker.is_some() {
             Context::Pick
         } else if self.spot.is_some() {
@@ -1548,7 +1755,7 @@ impl App {
         ContextStack::with(&[context])
     }
 
-    fn overlay_key(&mut self, chord: Chord, now: Instant) {
+    fn overlay_key(&mut self, chord: Chord, page: usize, now: Instant) {
         if self.overlay_literal(chord, now) {
             return;
         }
@@ -1557,6 +1764,11 @@ impl App {
             .keymap
             .dispatch(&mut self.keys, &stack, WhenFlags::LIST, chord, now);
         let Dispatch::Match(command) = dispatch else {
+            // The two overlays with a field in them take every key the
+            // registry did not claim — which is the same rule the bottom-bar
+            // prompt follows, and the reason a `q` typed into a search is a
+            // `q` and not a quit.
+            self.overlay_text(chord);
             return;
         };
         use Command as C;
@@ -1566,7 +1778,7 @@ impl App {
             // a `~` help sheet opening *behind* a modal card would be a second
             // surface nobody asked for.
             C::Escape | C::OverlayClose => self.close_overlay(now),
-            C::OverlaySubmit => self.submit_overlay(now),
+            C::OverlaySubmit => self.submit_overlay(page, now),
             C::OverlayPrev => self.overlay_move(-1),
             C::OverlayNext => self.overlay_move(1),
             C::TaskInspect => {
@@ -1621,6 +1833,18 @@ impl App {
                 _ => {}
             }
         }
+        // `Ctrl+s` stops a running search without closing the panel — PLAN
+        // §7.2's cancel. It is matched literally because df-core's `[pick]`
+        // table has no row for it: the binding lives in `[files]`, which the
+        // panel deliberately does not stack on (see `overlay_stack`). A
+        // `[pick]` row for `cancel-search` would put it on the help sheet,
+        // which is where it belongs.
+        if let Some(search) = &mut self.search {
+            if chord == Chord::ctrl(Key::Char('s')) {
+                search.cancel();
+                return true;
+            }
+        }
         if self.panel.is_some() && plain && chord.key == Key::Char('p') {
             self.pause_selected_task(now);
             return true;
@@ -1653,7 +1877,43 @@ impl App {
         false
     }
 
+    /// A key the registry did not claim, offered to whichever overlay has a
+    /// field in it.
+    ///
+    /// df-core's [`InputBuffer`] decides what each key *means*, including which
+    /// ones are text — the same editor the rename prompt and the filter use
+    /// (PLAN §4.2), so there is one set of Unicode edge cases in this program
+    /// rather than three.
+    fn overlay_text(&mut self, chord: Chord) {
+        if self.finder.is_some() {
+            let consumed = self
+                .finder
+                .as_mut()
+                .map(|finder| finder.buffer.feed(chord))
+                .is_some_and(|event| matches!(event, InputEvent::Consumed));
+            if consumed {
+                self.finder_changed();
+            }
+            return;
+        }
+        let Some(search) = &mut self.search else {
+            return;
+        };
+        if matches!(search.buffer.feed(chord), InputEvent::Consumed) {
+            search.changed(Instant::now());
+        }
+    }
+
     fn overlay_move(&mut self, delta: isize) {
+        if let Some(finder) = &mut self.finder {
+            finder.move_cursor(delta);
+            return;
+        }
+        if let Some(search) = &mut self.search {
+            search.move_cursor(delta);
+            self.search_follow = true;
+            return;
+        }
         match &mut self.dialog {
             Some(Dialog::Confirm(confirm)) => {
                 confirm.scroll_by(delta);
@@ -1680,7 +1940,15 @@ impl App {
     }
 
     /// `Enter` on whatever is up.
-    fn submit_overlay(&mut self, now: Instant) {
+    fn submit_overlay(&mut self, page: usize, now: Instant) {
+        if self.finder.is_some() {
+            self.finder_submit(page, now);
+            return;
+        }
+        if self.search.is_some() {
+            self.search_submit(now);
+            return;
+        }
         if self.spot.is_some() {
             self.spot_action(now);
             return;
@@ -1744,9 +2012,374 @@ impl App {
         }
         self.picker = None;
         self.panel = None;
+        self.finder = None;
+        // Dropping the search kills its process — see `search::Running`'s
+        // `Drop`. Closing the panel must not leave an `rg` walking a home
+        // directory for a list nobody will ever see.
+        self.search = None;
         // Dropping the panel stops its hasher: see `spot::Hasher`'s `Drop`.
         self.spot = None;
         self.sync_context();
+    }
+
+    // ── The fuzzy card: `Ctrl+p`, `z`, `Z` (PLAN §4.4, §7.2) ────────────────
+
+    /// `Ctrl+p`. Every command that is live right now, plus the places and the
+    /// tabs.
+    fn open_palette(&mut self) {
+        let rows = self.palette_rows();
+        self.finder = Some(Finder::new(Source::Commands, rows));
+        self.sync_context();
+    }
+
+    /// What the palette lists.
+    ///
+    /// Read out of the registry, never out of a hand-written table — PLAN §4's
+    /// "one registry feeds four surfaces", and this is the fourth. A command
+    /// whose `when` predicate says it is not reachable right now is **absent**,
+    /// not greyed: a palette is a list of things you can do.
+    fn palette_rows(&self) -> Vec<finder::Row> {
+        let flags = self.focus.flags(self.media_hovered());
+        let mut rows: Vec<finder::Row> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for binding in self.keymap.active_bindings(&ContextStack::browser(), flags) {
+            // A command bound twice — `~` and `F1` are both the help sheet —
+            // is one thing you can do, and it appears once, under the first
+            // chord the registry declares for it.
+            if !seen.insert(binding.command.id()) {
+                continue;
+            }
+            // The goto bookmarks come back below as places, with their paths
+            // showing, which is more use than "Go to Work — g w".
+            if matches!(binding.command, Command::Goto(_)) {
+                continue;
+            }
+            rows.push(finder::Row {
+                label: binding.description.clone(),
+                detail: binding.label(),
+                kind: finder::Kind::Command,
+                choice: Choice::Run(binding.command),
+            });
+        }
+        // The commands a person has actually used, first.
+        finder::by_recency(&mut rows, &self.mru);
+        // The view toggle, which has no registry row to be found under — see
+        // `Choice::ToggleView`.
+        rows.push(finder::Row {
+            label: if self.is_grid() {
+                "Show this folder as a list".to_string()
+            } else {
+                "Show this folder as a grid".to_string()
+            },
+            detail: String::new(),
+            kind: finder::Kind::View,
+            choice: Choice::ToggleView,
+        });
+        // Then the places: bookmarks, then where this tab has been.
+        rows.extend(finder::merge_places(
+            self.tab().history.back_stack(),
+            &self.config.goto,
+            &[],
+            home().as_deref(),
+        ));
+        // And the open tabs, when there is more than one to choose between.
+        if self.tabs.len() > 1 {
+            for (n, tab) in self.tabs.iter().enumerate() {
+                rows.push(finder::Row {
+                    label: format!("Tab {}: {}", n + 1, file_name(tab.cwd.path())),
+                    detail: finder::shorten_home(tab.cwd.path(), home().as_deref()),
+                    kind: finder::Kind::Tab,
+                    choice: Choice::Tab(n),
+                });
+            }
+        }
+        rows
+    }
+
+    /// `z` and `Z`.
+    fn open_jump(&mut self, source: Source) {
+        let rows = self.jump_rows(source, "");
+        self.finder = Some(Finder::new(source, rows));
+        self.sync_context();
+    }
+
+    /// The place list for a jump overlay.
+    ///
+    /// `z` merges everything and lets the fuzzy ranker sort it out; `Z` asks
+    /// zoxide, whose own ordering is the answer and must survive (see
+    /// [`Finder::ranking_query`]).
+    fn jump_rows(&mut self, source: Source, query: &str) -> Vec<finder::Row> {
+        let home = home();
+        match source {
+            Source::Zoxide => {
+                let dirs = self.zoxide_db().to_vec();
+                let matches = df_core::zoxide::query(&dirs, query, unix_now());
+                finder::zoxide_rows(&matches, home.as_deref())
+            }
+            _ => {
+                let dirs = self.zoxide_db().to_vec();
+                finder::merge_places(
+                    self.tab().history.back_stack(),
+                    &self.config.goto,
+                    &dirs,
+                    home.as_deref(),
+                )
+            }
+        }
+    }
+
+    /// zoxide's database, read once per session.
+    fn zoxide_db(&mut self) -> &[df_core::zoxide::ZoxideDir] {
+        self.zoxide.get_or_insert_with(df_core::zoxide::load)
+    }
+
+    /// A keystroke landed in the card: re-rank, and for `Z` re-ask zoxide.
+    fn finder_changed(&mut self) {
+        let Some(finder) = &self.finder else { return };
+        let source = finder.source;
+        if source == Source::Zoxide {
+            let query = finder.query().to_string();
+            let rows = self.jump_rows(source, &query);
+            if let Some(finder) = &mut self.finder {
+                finder.set_pool(rows);
+                finder.cursor = 0;
+                finder.first = 0;
+            }
+            return;
+        }
+        if let Some(finder) = &mut self.finder {
+            finder.requery();
+        }
+    }
+
+    /// `Enter` on the card.
+    fn finder_submit(&mut self, page: usize, now: Instant) {
+        let Some(finder) = &self.finder else { return };
+        let Some(choice) = finder.chosen().map(|row| row.choice.clone()) else {
+            return;
+        };
+        self.finder = None;
+        self.sync_context();
+        match choice {
+            // Straight back through `run`, so there is exactly one
+            // implementation of every command and the palette cannot drift
+            // from the key that runs it.
+            Choice::Run(command) => {
+                self.mru.touch(command.id());
+                self.run(command, page, now);
+            }
+            Choice::Cd(path) => self.jump_to(path, now),
+            Choice::Tab(n) => {
+                if self.tabs.switch_to(n, now) {
+                    self.tab_changed(now);
+                }
+            }
+            Choice::ToggleView => self.toggle_view(now),
+        }
+    }
+
+    /// Go to a directory a jump overlay named.
+    ///
+    /// A directory that has gone away says so rather than leaving you looking
+    /// at the old one wondering whether the key worked — zoxide's database and
+    /// a tab's history both outlive the directories in them.
+    fn jump_to(&mut self, path: PathBuf, now: Instant) {
+        if !path.is_dir() {
+            self.toasts
+                .error(format!("{} is not there any more", path.display()), now);
+            return;
+        }
+        self.navigate(path, now);
+    }
+
+    // ── The search panel: `s` / `S` (PLAN §7.2) ─────────────────────────────
+
+    /// `s` and `S`. Opens empty: the first keystroke arms the debounce and the
+    /// process starts 150 ms later.
+    fn open_search(&mut self, mode: search::Mode) {
+        let notify: df_core::fs::Notifier = {
+            let waker = self.waker.clone();
+            Arc::new(move || waker.wake())
+        };
+        self.search = Some(Search::new(
+            mode,
+            self.tab().cwd.path().to_path_buf(),
+            self.mgr.show_hidden,
+            notify,
+        ));
+        self.sync_context();
+    }
+
+    /// `Enter` on a result: go to the file's directory, put the cursor on it,
+    /// and close.
+    ///
+    /// Not "open it" — a file manager's answer to "I found it" is to *be
+    /// there*, with the file under the cursor and every key that acts on a file
+    /// pointed at it. `Enter` again opens it, which is one more keystroke and
+    /// the one you would have pressed anyway.
+    fn search_submit(&mut self, now: Instant) {
+        let Some(hit) = self.search.as_ref().and_then(Search::chosen) else {
+            return;
+        };
+        let (path, name) = (hit.path.clone(), file_name(&hit.path));
+        let Some(dir) = path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        self.search = None;
+        self.sync_context();
+        if dir != self.tab().cwd.path() {
+            self.navigate(dir, now);
+            // The scan is asynchronous, so the cursor cannot land yet — the
+            // same problem `delightfile <file>` has on the command line, and
+            // the same answer.
+            self.start_cursor = Some((path, name));
+        } else if !self.dir().cursor_to_name(&name) {
+            self.toasts
+                .error(format!("{name} is not in this folder any more"), now);
+        }
+    }
+
+    // ── The grid, and the state file it is remembered in (PLAN §2) ──────────
+
+    /// How this directory is drawn. The config has no grid setting, so a
+    /// directory nobody has toggled is a list.
+    fn view_of(&self, dir: &Path) -> View {
+        self.state.view(dir).unwrap_or(View::List)
+    }
+
+    fn is_grid(&self) -> bool {
+        self.view_of(self.tab().cwd.path()) == View::Grid
+    }
+
+    /// Flip this directory between the list and the grid, and remember it.
+    fn toggle_view(&mut self, now: Instant) {
+        let path = self.tab().cwd.path().to_path_buf();
+        let next = self.view_of(&path).toggled();
+        // `List` is the default, so it is stored as "no preference" rather than
+        // as a record — otherwise every directory anyone ever glanced at in a
+        // grid and switched back would live in the state file for ever.
+        self.state.set_view(
+            path,
+            match next {
+                View::Grid => Some(View::Grid),
+                View::List => None,
+            },
+        );
+        self.state_changed(now);
+        // The two geometries count their scroll in different units — list rows
+        // one side, rows of tiles the other — so the view *jumps* rather than
+        // slides: animating a number from one unit to the other would draw a
+        // travel that means nothing. The scrolloff rule puts it where the
+        // cursor says, this frame.
+        self.tabs
+            .active_mut()
+            .cwd
+            .set_first_over(0, Duration::ZERO, now);
+        self.toasts.notice(
+            match next {
+                View::Grid => "Grid view",
+                View::List => "List view",
+            },
+            now,
+        );
+    }
+
+    /// The state file has something new in it. Arms the write.
+    ///
+    /// PLAN §2's contract: df-core's store knows *what* changed and this side
+    /// owns *when* it is written. A write per keystroke would be an fsync per
+    /// `,` chord; a write only at quit would lose everything to a crash. The
+    /// debounce is the middle, and it is one scheduled wake-up rather than a
+    /// poll.
+    fn state_changed(&mut self, now: Instant) {
+        self.state_due.touch(self.state.is_dirty(), now);
+    }
+
+    /// Write the state file if its debounce has expired.
+    fn tick_state(&mut self, now: Instant) {
+        if self.state_due.ready(now) {
+            self.flush_state();
+        }
+    }
+
+    /// Write the state file now — the quit path, where there is no later.
+    fn flush_state(&mut self) {
+        self.state_due.disarm();
+        if let Err(e) = self.state.flush() {
+            // A state file that will not write costs the memory of which
+            // folders are grids and nothing else, so it is a log line rather
+            // than a toast in the user's face on the way out.
+            log::warn!("could not write the state file: {e}");
+        }
+    }
+
+    /// Where the items the list pane will draw are, keyed by path.
+    ///
+    /// The FLIP's participants, and therefore where the cap on them lives: the
+    /// visible window plus [`FLIP_MARGIN`] rows either side, so a re-sort
+    /// animates the rows a person can see and the ones just off the edge that
+    /// are about to travel into view — and never the ten thousand it cannot.
+    fn pane_layout(
+        &self,
+        content: egui::Rect,
+        metrics: Option<&grid::Metrics>,
+        scroll_rows: f32,
+    ) -> Snapshot {
+        let dir = &self.tab().cwd.dir;
+        let columns = metrics.map(|m| m.columns).unwrap_or(1);
+        let visible = crate::viewport::visible_rows(content.height(), grid::pane_step(metrics));
+        let first_row = scroll_rows.floor().max(0.0) as usize;
+        let from = first_row.saturating_sub(FLIP_MARGIN) * columns;
+        // `visible + 1` for the row half on screen at the bottom.
+        let to = ((first_row + visible + 1 + FLIP_MARGIN) * columns).min(dir.len());
+        (from..to)
+            .filter_map(|index| {
+                let entry = dir.row(index)?;
+                Some((
+                    entry.path.clone(),
+                    grid::pane_rect(content, metrics, scroll_rows, index),
+                ))
+            })
+            .collect()
+    }
+
+    /// The tiles worth a thumbnail this frame, nearest first.
+    fn tile_wants(
+        &self,
+        content: egui::Rect,
+        metrics: &grid::Metrics,
+        scroll_rows: f32,
+    ) -> Vec<grid::Want> {
+        let dir = &self.tab().cwd.dir;
+        let window = grid::wanted(
+            dir.len(),
+            metrics.columns,
+            scroll_rows.floor().max(0.0) as usize,
+            metrics.visible_rows(content.height()),
+        );
+        window
+            .filter_map(|index| {
+                let entry = dir.row(index)?;
+                let kind = df_core::preview::kind_for(entry, entry.mime);
+                Some(grid::Want {
+                    path: entry.path.clone(),
+                    // Only a still image is decoded from the file itself; see
+                    // `grid::Want::decode_source` for why forty videos are not.
+                    decode_source: kind == PreviewKind::Image,
+                })
+            })
+            .collect()
+    }
+
+    /// The grid's thumbnail workers, started on first use.
+    fn thumbs(&mut self) -> &mut Thumbs {
+        if self.thumbs.is_none() {
+            let waker = self.waker.clone();
+            let notify: df_core::fs::Notifier = Arc::new(move || waker.wake());
+            self.thumbs = Some(Thumbs::start(notify));
+        }
+        // Just assigned above when it was `None`.
+        self.thumbs.as_mut().expect("the pool was just started")
     }
 
     // ── The spot panel (PLAN §6) ────────────────────────────────────────────
@@ -2460,6 +3093,13 @@ impl App {
 
     fn run(&mut self, command: Command, page: usize, now: Instant) {
         use Command as C;
+        // A command that shuffles the rows you are looking at gets a FLIP
+        // (PLAN §2, §8): where everything is *now* is captured before the
+        // command runs, because afterwards it is gone. The next frame's layout
+        // is the other half.
+        if flip::reorders(command) {
+            self.flip_before = Some(self.last_layout.clone());
+        }
         // Half a page rounds *down* but never to nothing: on a pane too short
         // to have a half, `Ctrl+d` still has to move.
         let half = (page / 2).max(1) as isize;
@@ -2467,22 +3107,44 @@ impl App {
 
         match command {
             // ── The cursor ──────────────────────────────────────────────────
-            C::CursorUp => self.dir().move_cursor(-1),
-            C::CursorDown => self.dir().move_cursor(1),
-            C::HalfPageUp => self.dir().move_cursor(-half),
-            C::HalfPageDown => self.dir().move_cursor(half),
-            C::PageUp => self.dir().move_cursor(-full),
-            C::PageDown => self.dir().move_cursor(full),
+            C::CursorUp => {
+                self.step_cursor(grid::Step::Up);
+            }
+            C::CursorDown => {
+                self.step_cursor(grid::Step::Down);
+            }
+            // A page is a page of the *pane*, so in a grid it is that many
+            // rows of tiles rather than that many files.
+            C::HalfPageUp => self.page_cursor(-half),
+            C::HalfPageDown => self.page_cursor(half),
+            C::PageUp => self.page_cursor(-full),
+            C::PageDown => self.page_cursor(full),
             C::CursorTop => self.dir().set_cursor(0),
             C::CursorBottom => self.dir().set_cursor(usize::MAX),
 
             // ── Moving between directories ──────────────────────────────────
             C::Leave => {
+                // In a grid, `←` is "the previous tile" — the tiles are one
+                // sequence read like a page (PLAN §2, `grid::step`). It only
+                // means "leave" at the very first tile, where there is no
+                // previous one and the key would otherwise do nothing at all,
+                // so no capability is lost and no key changes meaning anywhere
+                // it had one.
+                if self.columns > 1 && self.step_cursor(grid::Step::Left) {
+                    self.apply_visual();
+                    return;
+                }
                 if let Some(parent) = self.tab().cwd.path().parent().map(Path::to_path_buf) {
                     self.navigate(parent, now);
                 }
             }
             C::EnterOrPreview => {
+                // The mirror of `Leave` above: in a grid `→` is the next tile,
+                // and only the last tile enters or focuses the preview.
+                if self.columns > 1 && self.step_cursor(grid::Step::Right) {
+                    self.apply_visual();
+                    return;
+                }
                 // PLAN §2.1's "rightward": a directory is a place and `→` goes
                 // there; a file has no inside, so `→` goes to the pane that is
                 // already showing it.
@@ -2693,6 +3355,13 @@ impl App {
             C::CancelSearch => {
                 self.dir().clear_filter();
                 self.last_find = None;
+                // …and stops an `fd`/`rg` still walking, when one is (PLAN
+                // §7.2). Reachable from the browser as well as from inside the
+                // panel, because a search left running behind a closed panel is
+                // exactly what this key is for.
+                if let Some(search) = &mut self.search {
+                    search.cancel();
+                }
             }
 
             // ── Tabs ────────────────────────────────────────────────────────
@@ -2834,6 +3503,13 @@ impl App {
             C::Open => self.open_hovered(now),
             C::OpenInteractive => self.open_picker(now),
 
+            // ── The palette and the jumps (PLAN §4.4, §7.2) ─────────────────
+            C::CommandPalette => self.open_palette(),
+            C::FuzzyJump => self.open_jump(Source::Jump),
+            C::ZoxideJump => self.open_jump(Source::Zoxide),
+            C::SearchName => self.open_search(search::Mode::Names),
+            C::SearchContent => self.open_search(search::Mode::Content),
+
             // ── Leaving ─────────────────────────────────────────────────────
             C::Quit => self.quit = Some(Quit::WriteCwd),
             C::QuitNoCwdFile => self.quit = Some(Quit::Silent),
@@ -2844,6 +3520,31 @@ impl App {
         // Any of the above can move the cursor, and none of them should have to
         // remember that visual mode is on.
         self.apply_visual();
+    }
+
+    /// One arrow key's worth of cursor movement, in whichever geometry the
+    /// pane is drawn in.
+    ///
+    /// Returns whether the cursor actually moved, which is what lets `←` and
+    /// `→` fall through to "leave" and "enter" at the two edges where they have
+    /// nowhere to go.
+    fn step_cursor(&mut self, step: grid::Step) -> bool {
+        let columns = self.columns;
+        let dir = self.dir();
+        let (before, count) = (dir.cursor(), dir.len());
+        let after = grid::step(before, count, columns, step);
+        if after == before {
+            return false;
+        }
+        dir.set_cursor(after);
+        true
+    }
+
+    /// A page of the pane, up or down — a page of *rows*, which in a grid is
+    /// that many rows of tiles.
+    fn page_cursor(&mut self, pages: isize) {
+        let columns = self.columns.max(1) as isize;
+        self.dir().move_cursor(pages * columns);
     }
 
     /// Move the help browser's cursor, if it is open.
@@ -2907,7 +3608,12 @@ impl App {
     /// Where the open surface's pieces are this frame. Built before the
     /// pointer is looked at, so a click lands on the card rather than on the row
     /// behind it, and reused by the paint so the two cannot disagree.
-    fn overlay_geometry(&self, area: egui::Rect, bar_top: f32) -> Option<OverlayGeom> {
+    fn overlay_geometry(
+        &self,
+        area: egui::Rect,
+        layout: &ui::Layout,
+        bar_top: f32,
+    ) -> Option<OverlayGeom> {
         match &self.dialog {
             Some(Dialog::Confirm(confirm)) => {
                 return Some(OverlayGeom::Confirm(dialog::confirm_geometry(area, confirm)))
@@ -2931,13 +3637,48 @@ impl App {
         if let Some(spot) = &self.spot {
             return Some(OverlayGeom::Spot(spot::geometry(area, bar_top, spot)));
         }
+        if let Some(finder) = &self.finder {
+            // As many rows as there are, up to the card's cap — an empty
+            // result list is a field and a sentence, not a field over eleven
+            // rows of nothing.
+            let shown = finder.hits.len().min(crate::finder::ROWS);
+            return Some(OverlayGeom::Finder(overlay::finder_geometry(area, shown)));
+        }
+        if let Some(search) = &self.search {
+            // The two left columns only: the live preview is half of what this
+            // overlay is for, so the pane showing it stays uncovered.
+            return Some(OverlayGeom::Search(Box::new(overlay::search_geometry(
+                layout.parent.left(),
+                layout.list.right(),
+                layout.parent.top(),
+                bar_top - crate::ui::GAP,
+                search.mode,
+            ))));
+        }
         None
     }
 
     /// A click on a surface. Pressing a button *is* choosing it — the pointer
     /// does not get a two-step "select, then confirm" the keyboard does not
     /// have.
-    fn overlay_click(&mut self, control: Control, now: Instant) {
+    fn overlay_click(&mut self, control: Control, page: usize, now: Instant) {
+        // The two overlays with a list of results: a click is "this one", the
+        // same as arrowing to it and pressing Enter.
+        if self.finder.is_some() || self.search.is_some() {
+            let Control::PanelRow(offset) = control else {
+                return;
+            };
+            if let Some(finder) = &mut self.finder {
+                finder.cursor = (finder.first + offset).min(finder.hits.len().saturating_sub(1));
+                self.finder_submit(page, now);
+                return;
+            }
+            if let Some(search) = &mut self.search {
+                search.cursor = (search.first + offset).min(search.hits.len().saturating_sub(1));
+                self.search_submit(now);
+            }
+            return;
+        }
         // The spot's chips are pressed, not selected-then-confirmed: a click on
         // a permission bit flips it, and a click on the checksum starts it.
         if self.spot.is_some() {
@@ -2989,14 +3730,14 @@ impl App {
                     if index == 0 {
                         self.close_overlay(now);
                     } else {
-                        self.submit_overlay(now);
+                        self.submit_overlay(page, now);
                     }
                 }
                 Some(Dialog::Conflict(conflict)) => {
                     match dialog::ConflictAction::ALL.get(index) {
                         Some(action) => {
                             conflict.set_action(*action);
-                            self.submit_overlay(now);
+                            self.submit_overlay(page, now);
                         }
                         // Past the three answers is the apply-to-all toggle.
                         None => conflict.toggle_apply_all(),
@@ -3012,7 +3753,7 @@ impl App {
                 }
                 if let Some(picker) = &mut self.picker {
                     picker.cursor = index.min(picker.choices.len().saturating_sub(1));
-                    self.submit_overlay(now);
+                    self.submit_overlay(page, now);
                     return;
                 }
                 let rows = self.task_rows();
@@ -3058,7 +3799,10 @@ impl App {
         parent_page: usize,
         now: Instant,
     ) {
-        let rows = crate::mouse::wheel_rows(points, ui::ROW_HEIGHT);
+        // One "row" of the list pane, which is a row of *tiles* when the
+        // directory is a grid — so a wheel roll travels the same distance down
+        // the window in both views.
+        let rows = crate::mouse::wheel_rows(points, self.pane_step);
         if rows == 0.0 {
             return;
         }
@@ -3071,13 +3815,19 @@ impl App {
         }
         if layout.parent.contains(at) {
             if let Some(parent) = &mut self.tabs.active_mut().parent {
-                parent.wheel(rows, parent_page, scrolloff, now);
+                parent.wheel(rows, parent_page, scrolloff, 1, now);
             }
             return;
         }
         // Everywhere else is the list: it is the pane a wheel means when it is
         // not pointed at one of the other two.
-        if self.tabs.active_mut().cwd.wheel(rows, page, scrolloff, now) {
+        let columns = self.columns;
+        if self
+            .tabs
+            .active_mut()
+            .cwd
+            .wheel(rows, page, scrolloff, columns, now)
+        {
             // Scrolling carries the cursor, and a visual run follows the
             // cursor wherever it goes.
             self.apply_visual();
@@ -3095,7 +3845,8 @@ impl App {
     ) -> egui::Rect {
         match control {
             Control::Row(Column::List, index) => {
-                let rect = ui::row_rect(geom.list, geom.list_scroll, index);
+                let rect =
+                    grid::pane_rect(geom.list, geom.grid.as_ref(), geom.list_scroll, index);
                 if pointer.shift {
                     // Shift-click: the run from the cursor to here, the way
                     // every list in every program extends a selection.
@@ -3172,7 +3923,7 @@ impl App {
                     .as_ref()
                     .and_then(|o| o.rect_of(control))
                     .unwrap_or(egui::Rect::ZERO);
-                self.overlay_click(control, now);
+                self.overlay_click(control, geom.page, now);
                 rect
             }
         }
@@ -3411,7 +4162,14 @@ impl App {
     // ── Band select (PLAN §7.5) ─────────────────────────────────────────────
 
     /// The pointer has moved with the button down.
-    fn drag(&mut self, at: Option<egui::Pos2>, list: egui::Rect, scroll_rows: f32, now: Instant) {
+    fn drag(
+        &mut self,
+        at: Option<egui::Pos2>,
+        list: egui::Rect,
+        scroll_rows: f32,
+        metrics: Option<grid::Metrics>,
+        now: Instant,
+    ) {
         let (Some(at), Some(press)) = (at, self.press) else {
             return;
         };
@@ -3426,7 +4184,7 @@ impl App {
                 // **The seam.** A drag that began on a row is a *file* drag,
                 // never a band select: a drag from a row is how every file
                 // manager moves files.
-                self.begin_drag(press.at, at, list, scroll_rows, now);
+                self.begin_drag(press.at, at, list, scroll_rows, metrics.as_ref(), now);
                 return;
             }
             if !press.in_list {
@@ -3438,13 +4196,11 @@ impl App {
             return;
         };
         let rows = self.tab().cwd.dir.len();
-        let run = crate::mouse::band_rows(
-            list,
-            scroll_rows,
-            rows,
-            ui::ROW_HEIGHT,
-            crate::mouse::band(origin, at),
-        );
+        let band = crate::mouse::band(origin, at);
+        let run = match &metrics {
+            Some(metrics) => grid::band_items(list, metrics, scroll_rows, rows, band),
+            None => crate::mouse::band_rows(list, scroll_rows, rows, ui::ROW_HEIGHT, band),
+        };
         self.apply_band(run);
     }
 
@@ -3520,10 +4276,11 @@ impl App {
         at: egui::Pos2,
         content: egui::Rect,
         scroll_rows: f32,
+        metrics: Option<&grid::Metrics>,
         now: Instant,
     ) {
         let dir = &self.tab().cwd.dir;
-        let Some(index) = ui::row_at(content, scroll_rows, dir.len(), from) else {
+        let Some(index) = grid::pane_at(content, metrics, scroll_rows, dir.len(), from) else {
             return;
         };
         let Some(entry) = dir.row(index) else { return };
@@ -3540,7 +4297,7 @@ impl App {
             paths,
             label,
             icon,
-            home: ui::row_rect(content, scroll_rows, index).center(),
+            home: grid::pane_rect(content, metrics, scroll_rows, index).center(),
             at,
             spring: dnd::SpringOpen::default(),
             last: now,
@@ -3689,12 +4446,16 @@ impl App {
         let scrolloff = self.mgr.scrolloff;
         let list = dnd::autoscroll(zones.list_content, at) * dt;
         if list != 0.0 {
-            self.tabs.active_mut().cwd.wheel(list, pages.0, scrolloff, now);
+            let columns = self.columns;
+            self.tabs
+                .active_mut()
+                .cwd
+                .wheel(list, pages.0, scrolloff, columns, now);
         }
         let parent = dnd::autoscroll(zones.parent_content, at) * dt;
         if parent != 0.0 {
             if let Some(pane) = &mut self.tabs.active_mut().parent {
-                pane.wheel(parent, pages.1, scrolloff, now);
+                pane.wheel(parent, pages.1, scrolloff, 1, now);
             }
         }
     }
@@ -4165,16 +4926,45 @@ impl App {
         // the pre-keystroke geometry would leave the strip a frame behind the
         // key that asked for it, on a frame nothing would follow.
         let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1);
+        // How the list pane is drawn, published to the two things that run
+        // *before* the pane is measured: the cursor commands and the wheel.
+        let first_metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
+            .then(|| grid::metrics(ui::content_rect(layout.list).width()));
+        self.columns = first_metrics.as_ref().map(|m| m.columns).unwrap_or(1);
+        self.pane_step = grid::pane_step(first_metrics.as_ref());
         let page = crate::viewport::visible_rows(
             ui::content_rect(layout.list).height(),
-            ui::ROW_HEIGHT,
+            self.pane_step,
         );
         self.route_keys(page, now);
         self.which.update(self.keys.which_key_due(), now);
+        // The two write-behind timers, both of which are deadlines rather than
+        // polls: the search's debounce and the state file's.
+        if let Some(search) = &mut self.search {
+            search.tick(now);
+            // PLAN §7.2's "missing fd/rg → notice". The panel's own status line
+            // already says it, but the panel is where you are *not* looking
+            // when nothing appears in it, so the failure is also raised where
+            // every other failure in this program is.
+            if let Some(message) = search.take_notice() {
+                self.toasts.error(message, now);
+            }
+        }
+        self.tick_state(now);
 
         let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1);
         let list_content = ui::content_rect(layout.list);
-        let page = crate::viewport::visible_rows(list_content.height(), ui::ROW_HEIGHT);
+        // Which geometry this directory is drawn in, decided once and threaded
+        // everywhere through `grid::pane_*` (PLAN §2). `None` is the list.
+        let metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
+            .then(|| grid::metrics(list_content.width()));
+        // A "page" is a *row* of the pane either way — for a grid that is a
+        // whole row of tiles, so `Ctrl+d` moves the same distance down the
+        // window in both views.
+        let page = crate::viewport::visible_rows(
+            list_content.height(),
+            grid::pane_step(metrics.as_ref()),
+        );
 
         // ── Pointer (PLAN §7.5) ─────────────────────────────────────────────
         let pointer = ui.input(|i| Pointer {
@@ -4214,7 +5004,7 @@ impl App {
         let parent_len = self.tab().parent.as_ref().map(|p| p.dir.len()).unwrap_or(0);
         let slide = self.tabs.offset(now);
         let tab_count = self.tabs.len();
-        let overlay = self.overlay_geometry(area, layout.bar.top());
+        let overlay = self.overlay_geometry(area, &layout, layout.bar.top());
 
         // The breadcrumb is measured once and used by both the hit test and the
         // paint, for the reason `tab_rects` is: two functions computing this
@@ -4256,8 +5046,14 @@ impl App {
                         .map(Control::Crumb)
                 })
                 .or_else(|| {
-                    ui::row_at(list_content, scroll_rows, self.tab().cwd.dir.len(), p)
-                        .map(|index| Control::Row(Column::List, index))
+                    grid::pane_at(
+                        list_content,
+                        metrics.as_ref(),
+                        scroll_rows,
+                        self.tab().cwd.dir.len(),
+                        p,
+                    )
+                    .map(|index| Control::Row(Column::List, index))
                 })
                 .or_else(|| {
                     // The parent column is clickable too (PLAN §7.5): a click
@@ -4340,8 +5136,10 @@ impl App {
 
         let geom = Geom {
             layout: &layout,
+            page,
             list: list_content,
             list_scroll: scroll_rows,
+            grid: metrics,
             parent: parent_content,
             parent_scroll,
             crumbs: &crumb_rects,
@@ -4391,7 +5189,7 @@ impl App {
             self.band = None;
         }
         if pointer.down {
-            self.drag(pointer.at, list_content, scroll_rows, now);
+            self.drag(pointer.at, list_content, scroll_rows, metrics, now);
         }
 
         // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────
@@ -4405,6 +5203,7 @@ impl App {
             list_pane: layout.list,
             list_content,
             list_scroll: scroll_rows,
+            list_grid: metrics,
             list_rows: self.tab().cwd.dir.len(),
             parent_pane: layout.parent,
             parent_content,
@@ -4487,10 +5286,18 @@ impl App {
         // rows have animated to, so the maths never chases its own animation.
         let scrolloff = self.mgr.scrolloff;
         let tab = self.tabs.active_mut();
+        // Counted in *rows of the pane*: one entry per row in the list, a
+        // whole row of tiles in the grid. With one column this is the
+        // arithmetic the list always had, to the digit.
+        let columns = metrics.as_ref().map(|m| m.columns).unwrap_or(1);
+        let pane_rows = match &metrics {
+            Some(metrics) => metrics.rows(tab.cwd.dir.len()),
+            None => tab.cwd.dir.len(),
+        };
         let list_first = crate::viewport::first_visible(
             tab.cwd.first(),
-            tab.cwd.dir.cursor(),
-            tab.cwd.dir.len(),
+            tab.cwd.dir.cursor() / columns,
+            pane_rows,
             page,
             scrolloff,
         );
@@ -4499,7 +5306,8 @@ impl App {
         self.cursor_glow.tick(Some(cursor), None, now);
         // Where a rename popup and the opener picker anchor themselves — the
         // row the cursor is on, as it was actually drawn this frame.
-        self.cursor_rect = ui::row_rect(list_content, scroll_rows, cursor);
+        self.cursor_rect =
+            grid::pane_rect(list_content, metrics.as_ref(), scroll_rows, cursor);
 
         if let Some(parent) = &mut self.tabs.active_mut().parent {
             let first = crate::viewport::first_visible(
@@ -4522,13 +5330,33 @@ impl App {
             (preview_content.width() * ppp).max(0.0) as u32,
             (preview_content.height() * ppp).max(0.0) as u32,
         );
-        let hovered = self
-            .tab()
-            .cwd
-            .dir
-            .cursor_entry()
-            .map(|entry| entry.path.clone());
+        // PLAN §7.2's live preview: while the search panel is open, the pane
+        // shows the *highlighted result*, not the row the cursor happens to be
+        // parked on behind it. That is what makes the panel a search and not a
+        // list of paths.
+        let searched = self
+            .search
+            .as_ref()
+            .and_then(Search::chosen)
+            .map(|hit| (hit.path.clone(), hit.line));
+        let hovered = match &searched {
+            Some((path, _)) => Some(path.clone()),
+            None => self
+                .tab()
+                .cwd
+                .dir
+                .cursor_entry()
+                .map(|entry| entry.path.clone()),
+        };
         self.preview.sync(hovered.as_deref(), target, now);
+        // …and a content hit scrolls the pane to the line it matched on. Only
+        // when something changed — the cursor moved, or the preview finished
+        // loading — so a settled panel is not re-scrolling the pane sixty times
+        // a second and holding the window awake.
+        if let (true, Some((_, Some(line)))) = (self.search_follow, &searched) {
+            self.preview.scroll_to(line.saturating_sub(1), now);
+            self.search_follow = false;
+        }
         // The document worker's two inputs, both of which live on this side of
         // the seam: the four colours a rasteriser may draw with, and whether
         // this pane has the keyboard — which is the turntable's whole switch
@@ -4605,6 +5433,15 @@ impl App {
             None => None,
         };
 
+        // The two new overlays' scroll, by the same scrolloff rule the panes
+        // use — one list-scrolling behaviour in the program, not three.
+        if let Some(finder) = &mut self.finder {
+            finder.scroll_into_view(scrolloff);
+        }
+        if let (Some(search), Some(OverlayGeom::Search(geometry))) = (&mut self.search, &overlay) {
+            search.scroll_into_view(geometry.page(), scrolloff);
+        }
+
         // ── The clock-driven bits, ticked once, before anything is drawn ────
         self.toasts.tick(now);
         // The rows the `w` panel is about, and the bars' targets. Built here
@@ -4620,6 +5457,32 @@ impl App {
         // What the clipboard is holding, as a set the row painter can ask in
         // constant time.
         let clip_paths: HashSet<PathBuf> = self.clipboard.paths.iter().cloned().collect();
+
+        // ── The FLIP's "Last" (PLAN §2, §8) ─────────────────────────────────
+        // Where every item the pane is about to draw *is*. Captured before the
+        // painter exists because building it needs `&self` and the painter
+        // holds the palette, and captured every frame because it is also the
+        // "First" of whatever re-sort happens next.
+        let layout_now = self.pane_layout(list_content, metrics.as_ref(), scroll_rows);
+        if let Some(before) = self.flip_before.take() {
+            self.flip = Flip::begin(&before, &layout_now, now);
+        }
+        self.last_layout = layout_now;
+        // A finished animation is dropped rather than left holding a `Some`:
+        // an option that is never `None` is a window that never stops asking
+        // for frames (PLAN §1).
+        if self.flip.as_ref().is_some_and(|flip| flip.finished(now)) {
+            self.flip = None;
+        }
+
+        // ── The grid's thumbnails (PLAN §2) ─────────────────────────────────
+        // Asked for before the painter, for the same borrow reason, and only
+        // for the tiles that are on screen or one row past it — the cancel on
+        // scroll past is `Thumbs::want` replacing the queue outright.
+        if let Some(metrics) = &metrics {
+            let wants = self.tile_wants(list_content, metrics, scroll_rows);
+            self.thumbs().want(&wants);
+        }
 
         // ── Paint ───────────────────────────────────────────────────────────
         let paint = ui::Painting {
@@ -4668,9 +5531,12 @@ impl App {
                 // not what you are carrying.
                 clip: None,
                 dragged: &drag_paths,
+                // The parent column never re-sorts on its own — it follows the
+                // list's sort, and by then it is a *different* listing.
+                flip: None,
             });
         }
-        paint.listing(ListView {
+        let list_view = ListView {
             pane: layout.list,
             ground: list_ground,
             dir: &self.tab().cwd.dir,
@@ -4695,7 +5561,36 @@ impl App {
                 cut: self.clipboard.mode == PasteMode::Cut,
             }),
             dragged: &drag_paths,
-        });
+            flip: self.flip.as_ref(),
+        };
+        match (&metrics, &self.thumbs) {
+            // PLAN §2's grid. Same directory, same cursor, same selection and
+            // the same drag — a different function from an index to a
+            // rectangle, and nothing else.
+            (Some(metrics), Some(thumbs)) => grid::paint(
+                &paint,
+                GridView {
+                    pane: list_view.pane,
+                    ground: list_view.ground,
+                    dir: list_view.dir,
+                    scroll_rows: list_view.scroll_rows,
+                    metrics: *metrics,
+                    hovers: list_view.hovers,
+                    ripples: list_view.ripples,
+                    cursor_glow: &self.cursor_glow,
+                    cursor_alpha: list_view.cursor_alpha,
+                    thumbs,
+                    clip: list_view.clip,
+                    dragged: list_view.dragged,
+                    flip: list_view.flip,
+                    slow_load: list_view.slow_load,
+                },
+            ),
+            // The list, and the impossible case where a grid is wanted but its
+            // workers would not start — which is a directory drawn as a list
+            // rather than a directory drawn as nothing.
+            _ => paint.listing(list_view),
+        }
         // The band, over the rows it is selecting (PLAN §7.5). A wash and a
         // hairline: it has to be unmistakable without hiding the names it is
         // being drawn across, so the fill is barely there and the *edge* is
@@ -4796,6 +5691,21 @@ impl App {
                 );
             }
             Some(prompt) => chrome::input_bar(&paint, layout.bar, prompt),
+            None if self.finder.is_some() => chrome::hint_bar(
+                &paint,
+                layout.bar,
+                &[("↑↓", "move"), ("Enter", "run"), ("Esc", "close")],
+            ),
+            None if self.search.is_some() => chrome::hint_bar(
+                &paint,
+                layout.bar,
+                &[
+                    ("↑↓", "move"),
+                    ("Enter", "go there"),
+                    ("Ctrl+s", "stop"),
+                    ("Esc", "close"),
+                ],
+            ),
             None if self.overlay_open() => chrome::hint_bar(
                 &paint,
                 layout.bar,
@@ -4855,6 +5765,12 @@ impl App {
         }
         if let (Some(OverlayGeom::Spot(geometry)), Some(spot)) = (&overlay, &self.spot) {
             spot::paint(&paint, spot, geometry, &self.hovers, &self.ripples, now);
+        }
+        if let (Some(OverlayGeom::Finder(geometry)), Some(finder)) = (&overlay, &self.finder) {
+            overlay::paint_finder(&paint, area, geometry, finder, &self.hovers, &self.ripples);
+        }
+        if let (Some(OverlayGeom::Search(geometry)), Some(search)) = (&overlay, &self.search) {
+            overlay::paint_search(&paint, geometry, search, &self.hovers, &self.ripples);
         }
         if let (Some(OverlayGeom::Panel(card, rects, _)), Some(panel)) = (&overlay, &self.panel) {
             panel::paint(
@@ -4999,6 +5915,10 @@ impl App {
                 self.menu.as_ref().is_some_and(|menu| !menu.live()),
             ),
             ("toast", self.toasts.animating(now)),
+            // The FLIP's travel and the fades either side of it. It is dropped
+            // the moment it arrives (see the frame), so this can never be
+            // stuck on.
+            ("flip", self.flip.is_some()),
             // The drop rings' fade-out, and the ghost's flight home. The drag
             // itself is not here: a ghost parked under a stationary pointer is
             // the same pixels next frame, and it moves only when the pointer
@@ -5061,6 +5981,13 @@ impl App {
             .as_ref()
             .and_then(|drag| drag.spring.deadline())
             .map(|at| at.saturating_duration_since(now));
+        // …the search's debounce, which is the instant a query stops changing
+        // and a process is owed (PLAN §7.2)…
+        let search = self.search.as_ref().and_then(|s| s.deadline(now));
+        // …and the state file's write-behind (PLAN §2). Both are a single
+        // instant known in advance, so both are a `WaitUntil` and neither is a
+        // poll.
+        let state = self.state_due.deadline(now);
         [
             self.loading_deadline(now),
             card,
@@ -5069,6 +5996,8 @@ impl App {
             strip,
             grace,
             spring,
+            search,
+            state,
         ]
             .into_iter()
             .flatten()
@@ -5475,6 +6404,11 @@ impl ApplicationHandler<crate::Wake> for App {
     /// delightviewer hit — so anything holding a platform resource is dropped
     /// in this window and not later.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // PLAN §2's other half of the debounce: whatever the timer has not
+        // written yet is written now, because there is no later. Written first,
+        // before anything that can take time, so a slow worker shutdown cannot
+        // eat the state file.
+        self.flush_state();
         // Stop the workers before the window goes: a scan that finished into a
         // dropped channel is harmless, but joining them here keeps the shutdown
         // order the same every time.
@@ -5505,6 +6439,86 @@ impl ApplicationHandler<crate::Wake> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PLAN §2's flush contract, both halves of it: df-core's store decides
+    /// there is something to save, this side decides when — and a change while
+    /// one is already pending pushes the deadline out rather than queueing a
+    /// second write.
+    #[test]
+    fn the_state_file_is_written_behind_a_debounce_and_not_before() {
+        let t0 = Instant::now();
+        let mut timer = WriteBehind::default();
+        // Nothing to save is nothing to schedule: the resting state costs no
+        // wake-up at all.
+        timer.touch(false, t0);
+        assert_eq!(timer.deadline(t0), None);
+        assert!(!timer.ready(t0));
+
+        timer.touch(true, t0);
+        assert_eq!(timer.deadline(t0), Some(STATE_FLUSH));
+        assert!(!timer.ready(t0), "not yet");
+        assert!(!timer.ready(t0 + STATE_FLUSH / 2));
+        // A second change while one is pending is a *debounce*, not a second
+        // write: the deadline moves.
+        timer.touch(true, t0 + STATE_FLUSH / 2);
+        assert!(!timer.ready(t0 + STATE_FLUSH));
+        assert!(timer.ready(t0 + STATE_FLUSH + STATE_FLUSH));
+        // One arming is one write, and afterwards nothing is owed a frame.
+        assert!(!timer.ready(t0 + STATE_FLUSH * 4));
+        assert_eq!(timer.deadline(t0 + STATE_FLUSH * 4), None);
+
+        // …and the quit path, which has no later.
+        timer.touch(true, t0);
+        timer.disarm();
+        assert_eq!(timer.deadline(t0), None);
+        assert!(!timer.ready(t0 + STATE_FLUSH * 4));
+    }
+
+    /// And the store it drives really does round-trip a directory's view, so
+    /// the debounce is protecting something that works (PLAN §2's per-directory
+    /// memory).
+    #[test]
+    fn a_grid_toggle_survives_a_write_and_a_reload() {
+        // A throwaway path under `$TMPDIR`. df-core's own `TempTree` is
+        // `#[cfg(test)]` and does not cross the crate boundary; one file needs
+        // one path, so this is it.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("df-app-state-{nanos}"));
+        let _cleanup = scopeguard(&path);
+        let mut store = StateStore::load_from(&path);
+        assert_eq!(store.view(Path::new("/pictures")), None, "list by default");
+        store.set_view("/pictures", Some(View::Grid));
+        assert!(store.is_dirty());
+        store.flush().expect("the state file writes");
+        assert!(!store.is_dirty(), "flushing clears the dirt");
+
+        let reloaded = StateStore::load_from(&path);
+        assert_eq!(reloaded.view(Path::new("/pictures")), Some(View::Grid));
+        assert_eq!(reloaded.view(Path::new("/elsewhere")), None);
+
+        // Back to the default is stored as *no preference* rather than as a
+        // record, so a folder glanced at in a grid and switched back does not
+        // live in the file for ever.
+        let mut store = StateStore::load_from(&path);
+        store.set_view("/pictures", None);
+        store.flush().expect("the state file writes");
+        assert!(StateStore::load_from(&path).is_empty());
+    }
+
+    /// Removes a test's file when it goes out of scope, so a failing assertion
+    /// does not leave one behind for the next run to read.
+    fn scopeguard(path: &Path) -> impl Drop {
+        struct Remove(PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        Remove(path.to_path_buf())
+    }
 
     #[test]
     fn a_file_argument_opens_its_directory_with_it_under_the_cursor() {

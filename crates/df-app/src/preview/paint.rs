@@ -685,10 +685,10 @@ fn directory_body(
             &[],
             ground,
             LineMode::Size,
-            // Faded rather than dimmed: `dim` is the parent column's treatment
-            // and means "not the thing you are acting on", which is also true
-            // of a previewed listing.
-            true,
+            // Muted by the parent column's amount: that treatment means "not
+            // the thing you are acting on", which is also true of a previewed
+            // listing.
+            crate::ui::PARENT_DIM,
         );
         if alpha < 1.0 {
             // The crossfade, done by veiling rather than by re-tinting every

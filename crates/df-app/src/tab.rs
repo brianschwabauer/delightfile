@@ -142,9 +142,15 @@ impl Listing {
         delta_rows: f32,
         visible: usize,
         scrolloff: usize,
+        // How many entries share one row of the pane: one in the list, a whole
+        // row of tiles in the grid (PLAN §2). Every number below counts *rows
+        // of the pane*, so this is the only place the two geometries differ —
+        // and passing 1 gives back exactly the arithmetic the list always had.
+        columns: usize,
         now: Instant,
     ) -> bool {
-        let rows = self.dir.len();
+        let columns = columns.max(1);
+        let rows = self.dir.len().div_ceil(columns);
         if visible == 0 || rows <= visible {
             // Everything fits: there is nothing to scroll, and the cursor
             // belongs to the keyboard.
@@ -163,14 +169,18 @@ impl Listing {
             return false;
         }
         self.set_first_over(target, crate::mouse::WHEEL_GLIDE, now);
-        let cursor = crate::viewport::cursor_in_view(
+        let cursor_row = crate::viewport::cursor_in_view(
             target,
-            self.dir.cursor(),
+            self.dir.cursor() / columns,
             rows,
             visible,
             scrolloff,
         );
-        self.dir.set_cursor(cursor);
+        // Back from a row of the pane to an entry: the same column of that row,
+        // so a wheel roll does not also drag the cursor sideways across the
+        // grid.
+        let column = self.dir.cursor() % columns;
+        self.dir.set_cursor(cursor_row * columns + column);
         true
     }
 
@@ -446,7 +456,7 @@ mod tests {
         let visible = 5.min(rows.saturating_sub(1));
         assert!(visible >= 2, "`/` should have more than a couple of entries");
 
-        assert!(l.wheel(3.0, visible, 1, t0));
+        assert!(l.wheel(3.0, visible, 1, 1, t0));
         assert_eq!(l.first(), 3);
         // The commit is instant; only the drawing lags — and it lags over the
         // wheel's own, longer glide.
@@ -465,18 +475,18 @@ mod tests {
 
         // Sub-row travel accumulates rather than rounding to nothing.
         let at = t0 + crate::mouse::WHEEL_GLIDE;
-        assert!(!l.wheel(0.4, visible, 1, at));
+        assert!(!l.wheel(0.4, visible, 1, 1, at));
         assert_eq!(l.first(), 3);
-        assert!(l.wheel(0.8, visible, 1, at));
+        assert!(l.wheel(0.8, visible, 1, 1, at));
         assert_eq!(l.first(), 4);
 
         // …and it never scrolls past either end.
         for _ in 0..200 {
-            l.wheel(-5.0, visible, 1, at);
+            l.wheel(-5.0, visible, 1, 1, at);
         }
         assert_eq!(l.first(), 0);
         for _ in 0..400 {
-            l.wheel(5.0, visible, 1, at);
+            l.wheel(5.0, visible, 1, 1, at);
         }
         assert_eq!(l.first(), rows - visible);
     }
@@ -489,7 +499,7 @@ mod tests {
         let mut l = listing(t0);
         l.dir.set_cursor(2);
         let visible = l.dir.len() + 10;
-        assert!(!l.wheel(4.0, visible, 5, t0));
+        assert!(!l.wheel(4.0, visible, 5, 1, t0));
         assert_eq!(l.first(), 0);
         assert_eq!(l.dir.cursor(), 2);
     }

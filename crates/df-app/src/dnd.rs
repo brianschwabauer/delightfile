@@ -132,6 +132,10 @@ pub struct Zones {
     pub list_pane: egui::Rect,
     pub list_content: egui::Rect,
     pub list_scroll: f32,
+    /// `Some` when the list pane is drawn as a grid: the geometry a drop ring
+    /// has to be measured in (PLAN §2). `None` is the list, which is what every
+    /// test in this file builds.
+    pub list_grid: Option<crate::grid::Metrics>,
     pub list_rows: usize,
     pub parent_pane: egui::Rect,
     pub parent_content: egui::Rect,
@@ -146,9 +150,12 @@ impl Zones {
     /// mid-drag, a crumb elided by a narrower window, a row scrolled away.
     pub fn rect_of(&self, target: Target) -> Option<egui::Rect> {
         match target {
-            Target::Row(Column::List, index) => {
-                Some(crate::ui::row_rect(self.list_content, self.list_scroll, index))
-            }
+            Target::Row(Column::List, index) => Some(crate::grid::pane_rect(
+                self.list_content,
+                self.list_grid.as_ref(),
+                self.list_scroll,
+                index,
+            )),
             Target::Row(Column::Parent, index) => Some(crate::ui::row_rect(
                 self.parent_content,
                 self.parent_scroll,
@@ -193,13 +200,14 @@ pub fn target_at(
     if let Some(index) = zones.crumbs.iter().position(|rect| rect.contains(pos)) {
         return Some(Target::Crumb(index));
     }
-    for (column, pane, content, scroll, rows) in [
+    for (column, pane, content, scroll, rows, metrics) in [
         (
             Column::List,
             zones.list_pane,
             zones.list_content,
             zones.list_scroll,
             zones.list_rows,
+            zones.list_grid.as_ref(),
         ),
         (
             Column::Parent,
@@ -207,12 +215,15 @@ pub fn target_at(
             zones.parent_content,
             zones.parent_scroll,
             zones.parent_rows,
+            // The parent column is always a list: it is a sixth of the window
+            // wide, and a grid in it would be one tile across.
+            None,
         ),
     ] {
         if !pane.contains(pos) {
             continue;
         }
-        if let Some(index) = crate::ui::row_at(content, scroll, rows, pos) {
+        if let Some(index) = crate::grid::pane_at(content, metrics, scroll, rows, pos) {
             if is_dir(column, index) {
                 return Some(Target::Row(column, index));
             }
@@ -621,6 +632,7 @@ mod tests {
 
     fn zones(crumbs: &[egui::Rect], layout: &crate::ui::Layout) -> Zones {
         Zones {
+            list_grid: None,
             strip: layout.strip,
             tabs: 3,
             crumbs: crumbs.to_vec(),
