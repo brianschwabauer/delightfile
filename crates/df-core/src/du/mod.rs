@@ -66,6 +66,7 @@ pub use cache::{
 };
 pub use scanner::{du_blocking, DuMessage, DuScanner, DuToken, DU_WORKERS, MAX_TRACKED_DIRS};
 pub use walk::{
-    crosses_boundary, walk, walk_blocking, DuOptions, DuTotals, DuUpdate, BLOCK_UNIT,
-    CANCEL_CHECK_ENTRIES, DU_BATCH, MAX_DEPTH, MAX_HARDLINK_ENTRIES, UPDATE_INTERVAL,
+    child_counts, crosses_boundary, walk, walk_blocking, DuOptions, DuTotals, DuUpdate, BLOCK_UNIT,
+    CANCEL_CHECK_ENTRIES, DU_BATCH, MAX_COUNTED_CHILDREN, MAX_DEPTH, MAX_HARDLINK_ENTRIES,
+    UPDATE_INTERVAL,
 };

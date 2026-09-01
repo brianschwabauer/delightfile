@@ -17,6 +17,7 @@ pub mod fs;
 pub mod git;
 pub mod input;
 pub mod keymap;
+/// Thread priority: how a background walk gets out of the UI thread's way.
 pub mod ops;
 pub mod preview;
 pub mod state;

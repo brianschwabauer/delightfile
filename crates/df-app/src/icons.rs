@@ -19,14 +19,47 @@
 //! **When no patched font is installed the icons degrade to `ls -F`.** Not to a
 //! different pictogram set — there isn't one that is reliably present — but to
 //! the classifier suffixes every Unix user already reads: `/` for a directory,
-//! `@` for a symlink, nothing at all for a regular file. Those are ASCII, so
-//! they cannot fail to render, and a column of them is still a column that says
-//! what each row is.
+//! `@` for a symlink, `*` for something you can run, nothing at all for a
+//! regular file. Those are ASCII, so they cannot fail to render, and a column of
+//! them is still a column that says what each row is. The **colours** do not
+//! degrade — they are the half of the treatment that needs no font — so a
+//! fontless machine still reads a Downloads folder by hue.
+//!
+//! ## What a row's icon says
+//!
+//! Two channels, and they answer two different questions:
+//!
+//! - **The glyph says what the file is** — [`df_core::fs::FileKind`] decides,
+//!   and an extension the set has a logo for (`.rs`, `.py`, `.pdf`) replaces
+//!   the family picture with its own.
+//! - **The colour says which family it belongs to** — eight hues, one per group
+//!   of kinds, so a folder of photos is one colour whatever the photos are
+//!   called. See [`kind_color`] for the table and for why it is eight.
+//!
+//! The *name* beside it is almost always `palette.text`. That is deliberate and
+//! it is the difference between a legible list and a paint chart: colour is
+//! spent once, on the icon, and the two exceptions in [`name_color`] are facts
+//! about salience rather than about type.
+//!
+//! ## No bold, and why
+//!
+//! PLAN §8 would give directories weight as well as colour. egui draws text
+//! through the families in [`egui::FontDefinitions`], and the default
+//! definition ships exactly one Latin face — there is no bold sibling of the UI
+//! font to register, and egui has no synthetic emboldening. The patched icon
+//! font *does* ship a bold cut, but it is a **monospace** face: using it for
+//! directory names would change their typeface, not their weight, and a list
+//! where every folder is in a different font is worse than one where every
+//! folder is merely blue. So weight is not part of the vocabulary; a directory
+//! is said with the palette's brightest name colour, its own glyph and — in the
+//! sort — its position.
 
 use std::path::PathBuf;
 
 use df_core::config::{Color, Theme};
-use df_core::fs::{Entry, Kind, LinkTarget};
+use df_core::fs::{Entry, FileKind};
+#[cfg(test)]
+use df_core::fs::{Kind, LinkTarget};
 
 use crate::theme::Palette;
 
@@ -159,12 +192,178 @@ const BROKEN_LINK: char = '\u{f127}'; // nf-fa-chain_broken
 const PLAIN_DIR: char = '/';
 const PLAIN_LINK: char = '@';
 const PLAIN_FILE: char = ' ';
+/// `ls -F`'s mark for something you can run — the one extra classifier worth
+/// carrying, because "can I execute this" is the question the fallback set is
+/// otherwise silent about.
+const PLAIN_EXEC: char = '*';
 
-/// The icon for one row.
+/// One glyph per [`FileKind`], all from FontAwesome 4 (`U+F000`–`U+F2E0`) apart
+/// from the two Octicons the file already used.
 ///
-/// `theme` supplies the per-directory rules (PLAN §3's nineteen, plus whatever
-/// the user prepended); `palette` supplies the colours for everything else.
-/// `nerd` says whether the private-use glyphs can actually be drawn.
+/// One family, on purpose. Nerd Fonts carry six icon sets drawn by six
+/// different hands at six different weights, and a column that mixes them reads
+/// as a ransom note — the *set* has to be consistent even when the pictures are
+/// not. FontAwesome 4 is the one every patched font has had since the
+/// beginning, so this degrades on the widest range of installs.
+fn kind_glyph(kind: FileKind) -> char {
+    match kind {
+        FileKind::Directory => GENERIC_DIR,
+        FileKind::BrokenLink => BROKEN_LINK,
+        FileKind::Special => '\u{f1e6}',    // nf-fa-plug
+        FileKind::Image => '\u{f03e}',      // nf-fa-picture_o
+        FileKind::Video => '\u{f008}',      // nf-fa-film
+        FileKind::Audio => '\u{f001}',      // nf-fa-music
+        FileKind::Archive => '\u{f1c6}',    // nf-fa-file_archive_o
+        FileKind::DiskImage => '\u{f0a0}',  // nf-fa-hdd_o
+        FileKind::Document => '\u{f15c}',   // nf-fa-file_text
+        FileKind::Markdown => '\u{f48a}',   // nf-oct-markdown
+        FileKind::Text => '\u{f0f6}',       // nf-fa-file_text_o
+        FileKind::Code => '\u{f121}',       // nf-fa-code
+        FileKind::Data => '\u{f1c0}',       // nf-fa-database
+        FileKind::Config => '\u{f013}',     // nf-fa-cog
+        FileKind::Executable => '\u{f120}', // nf-fa-terminal
+        FileKind::Font => '\u{f031}',       // nf-fa-font
+        FileKind::Model3d => '\u{f1b2}',    // nf-fa-cube
+        FileKind::Binary => GENERIC_FILE,
+    }
+}
+
+/// The colour of each kind, as a *name* on the palette rather than a value.
+///
+/// ## Eight hues, and why not more
+///
+/// A colour only means something if the eye can hold the whole set at once. Past
+/// about eight, "which hue was audio again" stops being answerable at a glance
+/// and the column becomes decoration — `ui-anti-slop`'s rainbow, the thing that
+/// makes a file manager look busy and read no faster. So the kinds are grouped
+/// by *what you would do with the file*, and the groups get the hues:
+///
+/// | hue     | kinds                | why                                     |
+/// |---------|----------------------|-----------------------------------------|
+/// | blue    | directories          | already the colour of a folder's name   |
+/// | mauve   | images               | the flavour's most saturated hue, for the kind you scan a folder *looking* for |
+/// | pink    | video                | next to images, because they sit next to each other in a media folder |
+/// | teal    | audio                | far from pink, so an album beside a film is not a judgement call |
+/// | peach   | archives, disk images| things that are sealed and must be opened |
+/// | maroon  | documents            | the colour a PDF has worn for twenty years, one step off `red` |
+/// | yellow  | code                 | the flavour's "type" colour in the syntax theme, so source is source in both panes |
+/// | green   | executables          | `ls` has coloured a runnable file green since 1996 |
+/// | sky     | data, fonts, models  | assets a program eats rather than a person reads |
+///
+/// Everything else is a **neutral** — prose, markdown, configuration and
+/// unrecognised bytes are the rows that must not shout, and giving them a tenth
+/// hue would be spending the vocabulary on the files nobody is hunting for.
+///
+/// `red` is deliberately absent: it is the window's word for *broken*, and a
+/// kind that wore it would make a working file look like a failure.
+fn kind_color(kind: FileKind, palette: &Palette) -> egui::Color32 {
+    match kind {
+        FileKind::Directory => palette.blue,
+        FileKind::Image => palette.mauve,
+        FileKind::Video => palette.pink,
+        FileKind::Audio => palette.teal,
+        FileKind::Archive | FileKind::DiskImage => palette.peach,
+        FileKind::Document => palette.maroon,
+        FileKind::Code => palette.yellow,
+        FileKind::Executable => palette.green,
+        FileKind::Data | FileKind::Font | FileKind::Model3d => palette.sky,
+        FileKind::BrokenLink => palette.red,
+        // The neutrals, on the palette's own grey ramp: markdown and prose sit
+        // one step brighter than configuration, which sits one step brighter
+        // than "we could not say".
+        FileKind::Markdown | FileKind::Text => palette.subtext0,
+        FileKind::Config => palette.overlay1,
+        FileKind::Binary | FileKind::Special => palette.overlay2,
+    }
+}
+
+/// Extension → glyph, for the formats a person recognises by their *mark*
+/// rather than by their family.
+///
+/// The kind table above already draws every row correctly; this is the layer
+/// that makes a directory of source read like a directory of source, with Rust
+/// and Python and Go each wearing their own logo. Only formats whose mark is
+/// genuinely recognisable are here — an extension that would draw the same
+/// picture its kind already draws is left out rather than restated, because a
+/// second table saying the same thing is a second table to keep in step.
+///
+/// Colour is **not** overridden: the hue is the kind's, so a `.rs` and a `.py`
+/// are two marks in one colour and the column still reads as "these are all
+/// code". Every codepoint here was checked against an installed patched font;
+/// on a machine with none, none of this runs (see the module header).
+const EXTENSION_GLYPHS: &[(&str, char)] = &[
+    // Source, from Devicons and Seti — the logos, which is the whole point.
+    ("rs", '\u{e7a8}'),
+    ("py", '\u{e73c}'),
+    ("go", '\u{e724}'),
+    ("rb", '\u{e7b0}'),
+    ("php", '\u{e73d}'),
+    ("java", '\u{e738}'),
+    ("kt", '\u{e738}'),
+    ("lua", '\u{e620}'),
+    ("c", '\u{e61e}'),
+    ("h", '\u{e61e}'),
+    ("cc", '\u{e61d}'),
+    ("cpp", '\u{e61d}'),
+    ("hpp", '\u{e61d}'),
+    ("swift", '\u{e755}'),
+    ("js", '\u{e781}'),
+    ("mjs", '\u{e781}'),
+    ("cjs", '\u{e781}'),
+    ("jsx", '\u{e781}'),
+    ("ts", '\u{e628}'),
+    ("tsx", '\u{e628}'),
+    ("vue", '\u{e6a0}'),
+    ("svelte", '\u{e697}'),
+    ("html", '\u{f13b}'),
+    ("htm", '\u{f13b}'),
+    ("css", '\u{e749}'),
+    ("scss", '\u{e749}'),
+    ("md", '\u{e73e}'),
+    ("markdown", '\u{e73e}'),
+    // Data and configuration, where the *shape* of the file is the useful fact.
+    ("json", '\u{e60b}'),
+    ("toml", '\u{e615}'),
+    ("yaml", '\u{e615}'),
+    ("yml", '\u{e615}'),
+    ("ini", '\u{e615}'),
+    ("conf", '\u{e615}'),
+    ("cfg", '\u{e615}'),
+    ("lock", '\u{f023}'), // nf-fa-lock: a file you do not edit
+    // Documents, which are four different things wearing one word.
+    ("pdf", '\u{f1c1}'),
+    ("doc", '\u{f1c2}'),
+    ("docx", '\u{f1c2}'),
+    ("odt", '\u{f1c2}'),
+    ("rtf", '\u{f1c2}'),
+    ("xls", '\u{f1c3}'),
+    ("xlsx", '\u{f1c3}'),
+    ("ods", '\u{f1c3}'),
+    ("csv", '\u{f1c3}'),
+    ("tsv", '\u{f1c3}'),
+    ("ppt", '\u{f1c4}'),
+    ("pptx", '\u{f1c4}'),
+    ("odp", '\u{f1c4}'),
+    ("epub", '\u{f02d}'), // nf-fa-book
+    ("mobi", '\u{f02d}'),
+    // The one picture format that is a picture of something else.
+    ("svg", '\u{e698}'),
+];
+
+/// The glyph an extension asks for, or `None` to use the kind's.
+fn extension_glyph(name: &str) -> Option<char> {
+    let lower = name.to_ascii_lowercase();
+    // A leading dot is the hidden marker, not an extension — df-core's rule,
+    // followed here so `.ts` and `.gitignore` mean what they mean everywhere
+    // else in the program.
+    let stem = lower.strip_prefix('.').unwrap_or(&lower);
+    let (_, ext) = stem.rsplit_once('.')?;
+    EXTENSION_GLYPHS
+        .iter()
+        .find(|(e, _)| *e == ext)
+        .map(|(_, glyph)| *glyph)
+}
+
 /// The plain file glyph, for a card that stands for several files at once —
 /// the selection basket's drag ghost (PLAN §7.1).
 ///
@@ -186,10 +385,29 @@ pub fn folder(palette: &Palette, nerd: bool) -> Icon {
     }
 }
 
+/// The icon for one row.
+///
+/// `theme` supplies the user's rules — `[[icon.dir]]`'s nineteen and whatever
+/// `[[icon.file]]` adds; `palette` supplies the colours for everything else.
+/// `nerd` says whether the private-use glyphs can actually be drawn.
+///
+/// ## The order of the four answers
+///
+/// 1. **A themed directory** — `~/Work` is the Work folder, and stays the Work
+///    folder when it is reached through a symlink.
+/// 2. **A user `[[icon.file]]` rule**, first match wins. Written rules outrank
+///    the built-in table by definition; that is what they are for.
+/// 3. **An extension the set has a logo for** — the glyph only, so the hue
+///    stays the kind's and a folder of source still reads as one thing.
+/// 4. **The kind**, which always answers.
+///
+/// A **broken** link short-circuits all four: nothing about what a name claims
+/// is true of a link that points at nothing.
 pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> Icon {
     let broken = entry.is_broken_symlink();
     let link = entry.is_symlink();
     let dir = entry.is_dir();
+    let kind = df_core::fs::kind_of(entry);
 
     // A themed directory icon outranks the generic ones — including for a
     // symlink *to* a directory, because `~/Work` being a link does not make it
@@ -199,17 +417,25 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
     } else {
         None
     };
+    let ruled = if dir || broken {
+        None
+    } else {
+        theme.file_icon(&entry.name)
+    };
 
     let color = if broken {
         palette.red
     } else if let Some(fg) = themed.and_then(|i| i.fg) {
         to_color32(fg)
-    } else if dir {
-        palette.blue
-    } else if link {
+    } else if let Some(fg) = ruled.and_then(|i| i.fg) {
+        to_color32(fg)
+    } else if link && !dir {
+        // A link keeps the link colour even though its glyph says what it
+        // points at: the glyph answers "what is this" and the colour answers
+        // "is it really here", and both questions are worth one channel.
         palette.sky
     } else {
-        palette.overlay2
+        kind_color(kind, palette)
     };
 
     let glyph = if !nerd {
@@ -217,6 +443,8 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
             PLAIN_DIR
         } else if link {
             PLAIN_LINK
+        } else if kind.is_runnable() {
+            PLAIN_EXEC
         } else {
             PLAIN_FILE
         }
@@ -224,36 +452,52 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
         BROKEN_LINK
     } else if let Some(icon) = themed {
         icon.text
+    } else if let Some(icon) = ruled {
+        icon.text
     } else if dir {
         GENERIC_DIR
-    } else if link {
+    } else if link && kind == FileKind::Binary {
+        // Nothing about the name said what this is — but it *is* a link, and
+        // that is a better thing to draw than the shrug the generic file glyph
+        // would be.
         GENERIC_LINK
     } else {
-        GENERIC_FILE
+        extension_glyph(&entry.name).unwrap_or_else(|| kind_glyph(kind))
     };
 
     Icon { glyph, color }
 }
 
-/// The colour a row's *name* is drawn in — yazi's rules, which are the ones
-/// Brian's eye is trained on: directories blue, broken links red, everything
-/// else the default foreground.
+/// The colour a row's *name* is drawn in.
+///
+/// yazi's rules, which are the ones Brian's eye is trained on — directories
+/// blue, broken links red — plus two of this program's own, and the two are the
+/// reason this is not just `palette.text`:
+///
+/// - **Executables are green.** `ls` has said so for thirty years, and it is
+///   the one property of a file that changes what pressing `Enter` on it does.
+/// - **Configuration is a step quieter.** A directory listing is half lockfiles
+///   and dotfiles, and they are never what you came for. `subtext0` is one step
+///   down the palette's own ramp: legible at a glance, and not competing with
+///   the row above it.
+///
+/// Everything else stays `text`. That restraint is the point (PLAN §8): the
+/// *icon* carries the kind, in colour, and a name tinted to match would say the
+/// same thing twice at the cost of a listing that reads like a paint chart.
 pub fn name_color(entry: &Entry, palette: &Palette) -> egui::Color32 {
     if entry.is_broken_symlink() {
-        palette.red
-    } else if entry.is_dir() {
-        palette.blue
-    } else if matches!(
-        entry.kind,
-        Kind::Symlink {
-            target: Some(LinkTarget::Other)
-        }
-    ) {
+        return palette.red;
+    }
+    if entry.is_dir() {
+        return palette.blue;
+    }
+    match df_core::fs::kind_of(entry) {
         // A socket, fifo or device node: real, listed, and not openable. Given
         // its own colour so `→` on one is visibly not going to do anything.
-        palette.overlay2
-    } else {
-        palette.text
+        FileKind::Special => palette.overlay2,
+        FileKind::Executable => palette.green,
+        FileKind::Config => palette.subtext0,
+        _ => palette.text,
     }
 }
 
@@ -271,15 +515,19 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from("/home/brian").join(name),
             kind,
-            len: 0,
+            len: 10,
             mtime: None,
             btime: None,
-            mode: 0,
+            mode: 0o644,
             uid: 0,
             gid: 0,
             is_hidden: name.starts_with('.'),
-            mime: "application/octet-stream",
+            mime: df_core::fs::mime::hint_for_name(name),
         }
+    }
+
+    fn file(name: &str) -> Entry {
+        entry(name, Kind::File)
     }
 
     /// The nineteen ported rules have to actually reach a row — that is the
@@ -313,6 +561,151 @@ mod tests {
         assert_eq!(name_color(&e, &palette), palette.red);
     }
 
+    /// The feature in one assertion: a folder of mixed downloads draws a
+    /// different picture, in a different colour, for every family in it.
+    #[test]
+    fn a_downloads_folder_is_legible_at_a_glance() {
+        let theme = Theme::default();
+        let p = Palette::from_theme(&theme);
+        let cases: &[(&str, egui::Color32)] = &[
+            ("holiday.jpg", p.mauve),
+            ("IMG_4821.HEIC", p.mauve),
+            ("clip.mov", p.pink),
+            ("song.flac", p.teal),
+            ("release.zip", p.peach),
+            ("arch.iso", p.peach),
+            ("invoice.pdf", p.maroon),
+            ("main.rs", p.yellow),
+            ("Zed.AppImage", p.green),
+            ("package.json", p.sky),
+            ("notes.txt", p.subtext0),
+            (".zshrc", p.overlay1),
+        ];
+        let mut glyphs = std::collections::HashSet::new();
+        for (name, colour) in cases {
+            let icon = icon_for(&file(name), &theme, &p, true);
+            assert_eq!(icon.color, *colour, "colour for {name}");
+            glyphs.insert(icon.glyph);
+        }
+        assert!(glyphs.len() >= 10, "only {} distinct glyphs", glyphs.len());
+    }
+
+    /// The hues are a closed set, and `red` is not in it: red means broken.
+    #[test]
+    fn the_kind_palette_stays_small_and_never_claims_red() {
+        let p = Palette::default();
+        let kinds = [
+            FileKind::Directory,
+            FileKind::Image,
+            FileKind::Video,
+            FileKind::Audio,
+            FileKind::Archive,
+            FileKind::DiskImage,
+            FileKind::Document,
+            FileKind::Markdown,
+            FileKind::Text,
+            FileKind::Code,
+            FileKind::Data,
+            FileKind::Config,
+            FileKind::Executable,
+            FileKind::Font,
+            FileKind::Model3d,
+            FileKind::Binary,
+            FileKind::Special,
+        ];
+        let mut hues = std::collections::HashSet::new();
+        for kind in kinds {
+            let colour = kind_color(kind, &p);
+            assert_ne!(colour, p.red, "{kind:?} took the broken colour");
+            hues.insert(colour);
+        }
+        assert!(
+            hues.len() <= 12,
+            "{} distinct colours is a rainbow",
+            hues.len()
+        );
+    }
+
+    /// A language's own mark, in its kind's colour — so a directory of source
+    /// is still one colour with several pictures in it.
+    #[test]
+    fn an_extension_changes_the_glyph_and_not_the_hue() {
+        let theme = Theme::default();
+        let p = Palette::from_theme(&theme);
+        let rust = icon_for(&file("main.rs"), &theme, &p, true);
+        let python = icon_for(&file("train.py"), &theme, &p, true);
+        assert_ne!(rust.glyph, python.glyph);
+        assert_eq!(rust.color, python.color);
+        assert_eq!(rust.color, p.yellow);
+        // A language the table has no logo for still gets the kind's glyph.
+        assert_eq!(
+            icon_for(&file("build.zig"), &theme, &p, true).glyph,
+            kind_glyph(FileKind::Code)
+        );
+    }
+
+    /// `[[icon.file]]` outranks the built-in table — glyph and colour both.
+    #[test]
+    fn a_user_file_rule_wins() {
+        let (theme, warnings) = Theme::parse(
+            "[[icon.file]]\nname = \"*.rs\"\ntext = \"R\"\nfg = \"#ffffff\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let p = Palette::from_theme(&theme);
+        let icon = icon_for(&file("main.rs"), &theme, &p, true);
+        assert_eq!(icon.glyph, 'R');
+        assert_eq!(icon.color, egui::Color32::WHITE);
+        // …and only for the rows it matches.
+        assert_eq!(
+            icon_for(&file("train.py"), &theme, &p, true).color,
+            p.yellow
+        );
+    }
+
+    /// A link's glyph says what it points at and its colour says it is a link:
+    /// two facts, two channels, neither one spent on the other.
+    #[test]
+    fn a_link_keeps_its_colour_and_borrows_its_targets_glyph() {
+        let theme = Theme::default();
+        let p = Palette::from_theme(&theme);
+        let link = entry(
+            "shot.png",
+            Kind::Symlink {
+                target: Some(LinkTarget::File),
+            },
+        );
+        assert_eq!(icon_for(&link, &theme, &p, true).color, p.sky);
+        assert_eq!(
+            icon_for(&link, &theme, &p, true).glyph,
+            kind_glyph(FileKind::Image)
+        );
+
+        // …and when the name says nothing at all, the link glyph is the best
+        // thing left to draw.
+        let opaque = entry(
+            "socket-ish",
+            Kind::Symlink {
+                target: Some(LinkTarget::File),
+            },
+        );
+        assert_eq!(icon_for(&opaque, &theme, &p, true).glyph, GENERIC_LINK);
+    }
+
+    /// Names stay `text` almost always — the icon carries the kind. The two
+    /// exceptions are the two facts a *name* is the right place for.
+    #[test]
+    fn only_salience_tints_a_name() {
+        let p = Palette::default();
+        assert_eq!(name_color(&file("holiday.jpg"), &p), p.text);
+        assert_eq!(name_color(&file("invoice.pdf"), &p), p.text);
+        assert_eq!(name_color(&file("main.rs"), &p), p.text);
+        assert_eq!(name_color(&file("deploy.sh"), &p), p.green);
+        assert_eq!(name_color(&file(".gitignore"), &p), p.subtext0);
+        assert_eq!(name_color(&file("Cargo.lock"), &p), p.subtext0);
+        assert_eq!(name_color(&entry("src", Kind::Dir), &p), p.blue);
+    }
+
     /// Without a patched font every glyph must be one a plain Latin face has.
     #[test]
     fn the_fallback_glyphs_are_ascii() {
@@ -321,6 +714,8 @@ mod tests {
         for (name, kind) in [
             ("Work", Kind::Dir),
             ("notes.txt", Kind::File),
+            ("deploy.sh", Kind::File),
+            ("holiday.jpg", Kind::File),
             (
                 "link",
                 Kind::Symlink {
@@ -331,6 +726,11 @@ mod tests {
             let icon = icon_for(&entry(name, kind), &theme, &palette, false);
             assert!(icon.glyph.is_ascii(), "{name} drew {:?}", icon.glyph);
         }
+        // …and the one classifier the fallback set gains: `ls -F`'s `*`.
+        assert_eq!(
+            icon_for(&file("deploy.sh"), &theme, &palette, false).glyph,
+            PLAIN_EXEC
+        );
     }
 
     /// …and the themed rule still colours the row even when its glyph cannot
@@ -342,5 +742,22 @@ mod tests {
         let icon = icon_for(&entry("Work", Kind::Dir), &theme, &palette, false);
         assert_eq!(icon.glyph, PLAIN_DIR);
         assert_eq!(icon.color, egui::Color32::from_rgb(0xf7, 0x76, 0x8e));
+        // The kind colours survive too — that is the half of the treatment
+        // that does not need a font at all.
+        assert_eq!(
+            icon_for(&file("holiday.jpg"), &theme, &palette, false).color,
+            palette.mauve
+        );
+    }
+
+    /// Every extension the glyph table names is spelled the way the lookup
+    /// spells it, and named once.
+    #[test]
+    fn the_glyph_table_is_lowercase_and_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for (ext, _) in EXTENSION_GLYPHS {
+            assert!(seen.insert(*ext), "{ext} appears twice");
+            assert_eq!(*ext, ext.to_lowercase(), "{ext} is not lowercase");
+        }
     }
 }

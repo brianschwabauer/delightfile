@@ -20,6 +20,7 @@ mod dnd;
 mod finder;
 mod flip;
 mod focus;
+mod folders;
 mod format;
 mod fuzzy;
 mod graphics;

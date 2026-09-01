@@ -823,6 +823,10 @@ pub struct App {
     du: Option<df_core::du::DuScanner>,
     /// PLAN §7.3's "what's big" mode, while it is on.
     usage: Option<crate::usage::Usage>,
+    /// Recursive sizes for the directories in the listing on screen
+    /// (PLAN §7.3). Always present and usually empty; see
+    /// [`crate::folders`].
+    folders: crate::folders::Folders,
     /// The udisks2 worker, started the first time `M` is pressed. `None` is the
     /// resting state of a session that never asked about disks: no thread, no
     /// system-bus connection.
@@ -1238,6 +1242,7 @@ impl App {
             trash_notes: HashMap::new(),
             du: None,
             usage: None,
+            folders: crate::folders::Folders::default(),
             udisks: None,
             mounts: None,
             basket: crate::basket::Basket::default(),
@@ -1522,7 +1527,10 @@ impl App {
         if self.sync_remote_preview(now) {
             changed = true;
         }
-        // The recursive-size walk's running totals (PLAN §7.3).
+        // The size column's recursive directory sizes, counting up (PLAN §7.3).
+        if self.poll_folders() {
+            changed = true;
+        }
         if self.poll_usage(now) {
             changed = true;
         }
@@ -1587,6 +1595,18 @@ impl App {
             return;
         }
         self.git_touched(dir);
+        // A directory whose contents changed has a size that changed, and the
+        // du cache cannot see it — its freshness check is the directory's own
+        // `mtime`, which says nothing about a file written three levels down
+        // (`df_core::du::cache`). Dropping the state here is what makes the
+        // next frame ask again; `request` supersedes, so a burst of watcher
+        // events costs one walk rather than one each.
+        if self.folders.is_about(dir) {
+            self.stop_folder_sizes();
+            if let Some(du) = &self.du {
+                du.forget(dir);
+            }
+        }
         let scanner = &self.scanner;
         let tab = self.tabs.active_mut();
         if dir == tab.cwd.path() {
@@ -4732,12 +4752,22 @@ impl App {
             let git = self.git();
             git_line(git, path)
         });
+        // The same lookup, asked as a yes/no: the card's "Visibility" row is
+        // about why the *list* draws this row dim, which is a different
+        // question from what the branch is called.
+        let ignored = path.as_deref().is_some_and(|path| {
+            self.git()
+                .ensure(path)
+                .and_then(|status| status.status_for(path))
+                == Some(df_core::git::FileStatus::Ignored)
+        });
         let Some(spot) = &mut self.spot else {
             return false;
         };
         let mut changed = spot.poll();
-        if spot.facts.git != git {
+        if spot.facts.git != git || spot.facts.ignored != ignored {
             spot.facts.git = git;
+            spot.facts.ignored = ignored;
             spot.refresh();
             changed = true;
         }
@@ -6333,6 +6363,161 @@ impl App {
             .get_or_insert_with(|| df_core::du::DuScanner::start(Arc::new(move || waker.wake())))
     }
 
+    // ── Folder sizes (PLAN §7.3) ────────────────────────────────────────────
+
+    /// Whether the directory on screen is one a recursive walk may touch.
+    ///
+    /// Three conditions, and each one is a way of asking "would this walk be
+    /// work nobody asked for": the feature is on, the listing is a real
+    /// directory on this machine rather than an archive/sftp/trash view, and
+    /// the size column is the one being shown. The last is not an optimisation
+    /// — a walk whose answer has nowhere to go is pure heat.
+    fn folder_sizes_wanted(&self) -> bool {
+        self.mgr.folder_sizes
+            && self.mgr.linemode == LineMode::Size
+            && self.tab().virtual_kind().is_none()
+            // Not while the listing itself is still arriving. The walker is two
+            // threads and a queue, and starting them during the cold-start path
+            // would spend PLAN §6's first-frame budget on a number the user
+            // cannot see yet — there are no rows to put it in.
+            && self.tab().cwd.dir.state() != df_core::fs::LoadState::Loading
+            && scannable(&self.cwd())
+    }
+
+    /// Keep the folder-size walk pointed at the directory on screen, and take
+    /// whatever it has said. Returns whether anything on screen moved.
+    ///
+    /// Driven from the frame rather than from every navigation path on purpose:
+    /// "which directory is on screen" has a dozen doors into it — a bookmark, a
+    /// breadcrumb, a tab switch, an undo that moved you — and one comparison
+    /// per frame is cheaper than remembering to call something from all of
+    /// them.
+    fn poll_folders(&mut self) -> bool {
+        if !self.folder_sizes_wanted() {
+            // Leaving for a remote listing, or turning the column off: stop
+            // paying for an answer nothing will draw.
+            if self.folders.token().is_some() || !self.folders.is_empty() {
+                self.stop_folder_sizes();
+                return true;
+            }
+            return false;
+        }
+
+        // The "what's big" mode owns the walker while it is on. Checked before
+        // anything is requested, not after: `DuScanner::request` cancels any
+        // walk of the same root, so starting one here would quietly kill the
+        // drill-down the user is watching. Leaving the mode clears this state,
+        // and the next frame starts again from the cache the mode just filled.
+        if self.usage.is_some() {
+            return false;
+        }
+
+        let cwd = self.cwd();
+        let mut changed = false;
+        if !self.folders.is_about(&cwd) {
+            changed = self.begin_folder_sizes(cwd.clone());
+        }
+        let Some(token) = self.folders.token() else {
+            return changed;
+        };
+        let messages = match &self.du {
+            Some(du) => du.drain(),
+            None => return changed,
+        };
+        for message in messages {
+            if message.token() != token {
+                continue;
+            }
+            match message {
+                df_core::du::DuMessage::Counts { counts, .. } => {
+                    changed |= self.folders.apply_counts(&counts);
+                }
+                df_core::du::DuMessage::Progress { updates, .. } => {
+                    changed |= self.folders.apply(&updates);
+                }
+                df_core::du::DuMessage::Done { .. } => {
+                    self.folders.finish();
+                    changed = true;
+                }
+                // Silent. A directory that could not be walked is one whose
+                // rows keep their em dash; a toast for it would fire every time
+                // you passed a folder you cannot read, which is a complaint
+                // about a thing you did not ask for.
+                df_core::du::DuMessage::Failed { root, error, .. } => {
+                    log::debug!("folder sizes for {}: {error}", root.display());
+                    self.folders.finish();
+                    changed = true;
+                }
+                df_core::du::DuMessage::Started { .. } => {}
+            }
+        }
+        if changed {
+            self.apply_folder_sizes();
+        }
+        changed
+    }
+
+    /// Point the walk at `dir`, seeding whatever the cache already knows so a
+    /// revisit is instant.
+    fn begin_folder_sizes(&mut self, dir: PathBuf) -> bool {
+        // Depth 1 and the cheap child-count pass: the column is about this
+        // directory's own rows, and everything below them is counted *into*
+        // them rather than reported.
+        let options = df_core::du::DuOptions::at_depth(1).counting_children();
+        let token = self.du().request_with(dir.clone(), options);
+        let cached = self.du().cached(&dir);
+        self.folders.begin(dir, token);
+        if let Some(record) = cached {
+            self.folders.seed(&record);
+            self.apply_folder_sizes();
+        }
+        true
+    }
+
+    fn stop_folder_sizes(&mut self) {
+        if let (Some(du), Some(token)) = (&self.du, self.folders.token()) {
+            du.cancel(token);
+        }
+        self.folders.clear();
+    }
+
+    /// Push the walk's numbers into the rows, so the size *sort* sees them.
+    ///
+    /// The twin of [`App::apply_usage_sizes`], and the same argument: `len` is
+    /// the field the sort reads, so writing it there is what makes `, s` order
+    /// directories by what is in them. The `~` and the `12 items` cannot live
+    /// in a `u64` and stay in [`crate::folders::Folders`].
+    fn apply_folder_sizes(&mut self) {
+        let sizes: HashMap<String, u64> = self
+            .tab()
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir())
+            .filter_map(|entry| {
+                self.folders
+                    .size(&entry.name)
+                    .map(|size| (entry.name.clone(), size.bytes))
+            })
+            .collect();
+        if sizes.is_empty() {
+            return;
+        }
+        self.tabs.active_mut().cwd.dir.revise_entries(|entries| {
+            let mut changed = false;
+            for entry in entries.iter_mut() {
+                if let Some(bytes) = sizes.get(&entry.name) {
+                    if entry.len != *bytes {
+                        entry.len = *bytes;
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        });
+    }
+
     /// `m u`, and the palette's "Show disk usage": the mode goes on, or off.
     fn toggle_usage(&mut self, now: Instant) {
         if self.usage.is_some() {
@@ -6372,6 +6557,11 @@ impl App {
         // Re-read, so the directory rows go back to the honest zero they
         // started as rather than keeping numbers nothing is maintaining.
         self.rescan(&usage.dir.clone(), now);
+        // The mode's own walk superseded the size column's — same root, so
+        // `request` cancelled it — and the cache it filled is exactly what the
+        // column wants. Dropping this makes the next frame ask again, and the
+        // answer is already sitting in the cache.
+        self.folders.clear();
     }
 
     /// Take whatever the walk has said since the last frame.
@@ -6421,7 +6611,11 @@ impl App {
                     self.toasts.error(message, now);
                     return true;
                 }
-                df_core::du::DuMessage::Started { .. } => {}
+                // Neither is asked for by this mode: `Started` is the bell
+                // that a walk exists, and `Counts` is the size column's cheap
+                // pass, which a drill-down that is about to have real numbers
+                // has no use for.
+                df_core::du::DuMessage::Started { .. } | df_core::du::DuMessage::Counts { .. } => {}
             }
         }
         if changed {
@@ -9167,6 +9361,9 @@ impl App {
                 // …and neither is the trash's column: the parent beside the
                 // trash is a real directory, whose rows want their linemode.
                 notes: None,
+                // The walk measures the directory you are in, not the one
+                // above it — and the parent column's linemode is off anyway.
+                folders: None,
             });
         }
         let list_view = ListView {
@@ -9199,6 +9396,11 @@ impl App {
             // PLAN §7.4: in the trash the column is where each row came from,
             // which is the fact the view is read for.
             notes: self.tab().trash.is_some().then_some(&self.trash_notes),
+            folders: self
+                .folders
+                .is_about(&cwd_now)
+                .then_some(&self.folders)
+                .filter(|f| !f.is_empty()),
         };
         match (&metrics, &self.thumbs) {
             // PLAN §2's grid. Same directory, same cursor, same selection and
@@ -9220,6 +9422,7 @@ impl App {
                     dragged: list_view.dragged,
                     flip: list_view.flip,
                     slow_load: list_view.slow_load,
+                    git: list_view.git,
                 },
             ),
             // The list, and the impossible case where a grid is wanted but its

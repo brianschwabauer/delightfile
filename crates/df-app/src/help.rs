@@ -17,6 +17,21 @@
 //!    order, not alphabetical"); and
 //! 2. narrow them by the `f` filter field, using the same smart-case matcher the
 //!    file listing uses, so `f` means the same thing in both places.
+//!
+//! ## …and one thing that is not a binding
+//!
+//! [`LEGEND`] — what the *marks* on a row mean. A dimmed row, a coloured bar
+//! down an edge, a dot before the size: the window says a dozen things without
+//! words, and until now there was nowhere to look them up. It lives here rather
+//! than in a second overlay because "what does that mean" and "what do I press"
+//! are the same reflex, reached by the same key, and a second sheet would be a
+//! second thing to remember the existence of.
+//!
+//! It is hand-written, and that is the one exception to this file's rule that
+//! nothing is. A binding can be read out of the registry because the registry
+//! *is* the binding; a colour's meaning lives in a painter's argument list and
+//! cannot be read out of anything. The unit test below is the substitute: it
+//! pins the wording, so a legend that drifts from the painter drifts loudly.
 
 use df_core::fs::match_name;
 use df_core::keymap::{Context, ContextStack, Registry, WhenFlags};
@@ -36,15 +51,103 @@ pub struct HelpRow {
     pub id: String,
 }
 
-/// A printable line: either a context heading or one binding.
+/// One entry in the legend: a mark, and what it means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegendRow {
+    /// What you see on a row — `dimmed`, `yellow bar`, `~ 4.2 MB`.
+    pub mark: &'static str,
+    pub meaning: &'static str,
+}
+
+/// Every wordless thing the list pane says, in one place.
+///
+/// Ordered by how often a person meets it rather than by colour: the dim is
+/// what sends people looking, the bars are what an operation is about to act
+/// on, and the dots are git. The size column's two marks come last because they
+/// explain themselves the moment they change.
+///
+/// The wording is shared with the rest of the window on purpose — `ignored` is
+/// the word on the tag in [`crate::ui::IGNORED_TAG`] and in the spot card's
+/// "Visibility" row, so the three surfaces teach one vocabulary.
+pub const LEGEND: &[LegendRow] = &[
+    LegendRow {
+        mark: "dimmed row",
+        meaning: "git is ignoring it, it has been cut, or it is in the parent column",
+    },
+    LegendRow {
+        mark: "ignored",
+        meaning: "the tag beside the size: git is ignoring this path",
+    },
+    LegendRow {
+        mark: "yellow bar, left",
+        meaning: "selected — what the next operation acts on",
+    },
+    LegendRow {
+        mark: "teal bar, right",
+        meaning: "yanked: copied to the clipboard, still where it was",
+    },
+    LegendRow {
+        mark: "peach bar, right",
+        meaning: "cut: it moves when you paste",
+    },
+    LegendRow {
+        mark: "green dot",
+        meaning: "added to the index",
+    },
+    LegendRow {
+        mark: "faint green dot",
+        meaning: "untracked: git has never seen it",
+    },
+    LegendRow {
+        mark: "peach dot",
+        meaning: "modified since the last commit",
+    },
+    LegendRow {
+        mark: "maroon dot",
+        meaning: "deleted",
+    },
+    LegendRow {
+        mark: "blue dot",
+        meaning: "renamed",
+    },
+    LegendRow {
+        mark: "yellow dot",
+        meaning: "type changed — a file became a link, or the other way round",
+    },
+    LegendRow {
+        mark: "red dot",
+        meaning: "conflicted: a merge left it for you",
+    },
+    LegendRow {
+        mark: "green name",
+        meaning: "you can run it",
+    },
+    LegendRow {
+        mark: "grey name",
+        meaning: "configuration or a lockfile — there, and rarely what you want",
+    },
+    LegendRow {
+        mark: "~ 4.2 MB",
+        meaning: "a folder still being measured; the number only goes up",
+    },
+    LegendRow {
+        mark: "12 items",
+        meaning: "a folder counted but not yet measured",
+    },
+];
+
+/// A printable line: a context heading, one binding, or one legend entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HelpLine {
     Group(&'static str),
     Row(HelpRow),
+    /// A mark and its meaning. Not selectable: there is nothing to press.
+    Legend(LegendRow),
 }
 
 impl HelpLine {
-    /// Whether the cursor can land here. Headings are read, not selected.
+    /// Whether the cursor can land here. Headings and legend entries are read,
+    /// not selected.
     pub fn selectable(&self) -> bool {
         matches!(self, HelpLine::Row(_))
     }
@@ -79,6 +182,18 @@ pub fn lines(rows: &[HelpRow], query: &str) -> Vec<HelpLine> {
         }
         out.push(HelpLine::Row(row.clone()));
     }
+
+    // The legend goes last, under its own heading, and narrows to the same
+    // query — so typing `ignored` finds the explanation as readily as typing
+    // `sort` finds the chord.
+    let legend: Vec<&LegendRow> = LEGEND
+        .iter()
+        .filter(|entry| legend_matches(entry, query))
+        .collect();
+    if !legend.is_empty() {
+        out.push(HelpLine::Group("Marks"));
+        out.extend(legend.into_iter().map(|entry| HelpLine::Legend(*entry)));
+    }
     out
 }
 
@@ -93,6 +208,15 @@ fn matches(row: &HelpRow, query: &str) -> bool {
         return true;
     }
     [&row.keys, &row.description, &row.id]
+        .into_iter()
+        .any(|field| match_name(field, query).is_some())
+}
+
+fn legend_matches(entry: &LegendRow, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    [entry.mark, entry.meaning]
         .into_iter()
         .any(|field| match_name(field, query).is_some())
 }
@@ -186,11 +310,59 @@ mod tests {
     #[test]
     fn every_group_gets_one_heading_in_order() {
         let lines = lines(&sample(), "");
-        assert_eq!(lines.len(), 6, "four rows plus two headings");
+        assert_eq!(
+            lines.len(),
+            6 + 1 + LEGEND.len(),
+            "four rows, two headings, and the legend under its own"
+        );
         assert_eq!(lines[0], HelpLine::Group("Files"));
         assert!(matches!(&lines[1], HelpLine::Row(r) if r.keys == "q"));
         assert!(matches!(&lines[2], HelpLine::Row(r) if r.keys == ", m"));
         assert_eq!(lines[4], HelpLine::Group("Global"));
+        assert_eq!(lines[6], HelpLine::Group("Marks"));
+        assert!(matches!(lines[7], HelpLine::Legend(_)));
+    }
+
+    /// The legend answers the question people actually arrive with — "why is
+    /// that row grey" — and it answers it in the same word the row itself uses.
+    #[test]
+    fn the_legend_explains_the_marks_the_pane_draws() {
+        let marks: Vec<&str> = LEGEND.iter().map(|e| e.mark).collect();
+        assert!(marks.contains(&"dimmed row"), "{marks:?}");
+        assert!(marks.contains(&"ignored"), "{marks:?}");
+        assert!(
+            marks.iter().any(|m| m.contains("yellow bar")),
+            "the selection bar: {marks:?}"
+        );
+        assert!(
+            marks.iter().any(|m| m.contains("teal bar"))
+                && marks.iter().any(|m| m.contains("peach bar")),
+            "both yank bars: {marks:?}"
+        );
+        assert!(
+            marks.iter().filter(|m| m.ends_with("dot")).count() >= 7,
+            "every git status has a dot: {marks:?}"
+        );
+        // Every entry says something, and says it once.
+        let mut seen = std::collections::HashSet::new();
+        for entry in LEGEND {
+            assert!(seen.insert(entry.mark), "{} appears twice", entry.mark);
+            assert!(!entry.meaning.is_empty(), "{} explains nothing", entry.mark);
+        }
+        // The word on the row's tag is the word in the legend.
+        assert!(LEGEND.iter().any(|e| e.mark == crate::ui::IGNORED_TAG));
+    }
+
+    /// …and it narrows with everything else, so the sheet does not turn into a
+    /// wall of legend the moment you filter the bindings away.
+    #[test]
+    fn the_legend_answers_the_filter_too() {
+        let found = lines(&sample(), "ignoring");
+        assert_eq!(found[0], HelpLine::Group("Marks"), "{found:?}");
+        assert!(found.iter().all(|l| !l.selectable()), "{found:?}");
+
+        // A query that matches neither takes the heading with it.
+        assert!(lines(&sample(), "nothing at all").is_empty());
     }
 
     /// The filter reads the keys, the description and the command id.
@@ -202,7 +374,7 @@ mod tests {
                 .into_iter()
                 .filter_map(|l| match l {
                     HelpLine::Row(r) => Some(r.id),
-                    HelpLine::Group(_) => None,
+                    HelpLine::Group(_) | HelpLine::Legend(_) => None,
                 })
                 .collect()
         };
@@ -230,7 +402,8 @@ mod tests {
         assert_eq!(lines[0], HelpLine::Group("Global"));
     }
 
-    /// The cursor lands on bindings and steps over the headings between them.
+    /// The cursor lands on bindings and steps over the headings — and over the
+    /// legend, which has nothing to press.
     #[test]
     fn the_cursor_skips_the_headings() {
         let lines = lines(&sample(), "");

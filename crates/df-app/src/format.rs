@@ -37,10 +37,13 @@ fn time_text(time: Option<SystemTime>) -> String {
         .unwrap_or_else(|| UNKNOWN_SIZE.to_string())
 }
 
-/// A directory's size, which is not known. An em dash rather than `0 B`:
-/// [`Entry::len`] is deliberately zero for directories until the recursive walk
-/// of PLAN §7.3 exists, and printing that zero would be a lie a person can act
-/// on, while a dash is visibly "nothing to say here".
+/// Nothing to say here. An em dash rather than `0 B` or a blank: a zero is a
+/// lie a person can act on, and a blank column looks like a rendering fault.
+///
+/// A directory wears it only until [`crate::folders`] has something — a child
+/// count within a frame or two, a recursive size a moment later. It is still
+/// the honest answer for the seconds before that, for a directory that could
+/// not be read, and for a timestamp the C library would not convert.
 const UNKNOWN_SIZE: &str = "—";
 
 fn size_text(entry: &Entry) -> String {
@@ -48,6 +51,36 @@ fn size_text(entry: &Entry) -> String {
         return UNKNOWN_SIZE.to_string();
     }
     human_size(entry.len)
+}
+
+/// The size column's text for a **directory**, from whatever the walk has said
+/// so far (PLAN §7.3). `None` means "nothing yet", and the caller draws its em
+/// dash.
+///
+/// Three answers, best first:
+///
+/// - a settled size — `4.2 MB`, the real recursive total;
+/// - a running size — `~4.2 MB`, where the tilde means *still counting, and it
+///   will only go up*. The mark is on the **left** because that is where the
+///   eye starts a right-aligned number, so a column of them reads as one state
+///   rather than as a footnote per row;
+/// - a child count — `12 items`, which is not a size and does not look like
+///   one. The unit word is the whole point: a bare `12` in a column of `4.2 MB`
+///   would read as twelve bytes.
+pub fn folder_size_text(size: Option<crate::folders::Size>, count: Option<u64>) -> Option<String> {
+    if let Some(size) = size {
+        let bytes = human_size(size.bytes);
+        return Some(if size.settled {
+            bytes
+        } else {
+            format!("~{bytes}")
+        });
+    }
+    let count = count?;
+    Some(format!(
+        "{count} {}",
+        if count == 1 { "item" } else { "items" }
+    ))
 }
 
 /// Bytes, the way a file manager says them.
@@ -197,6 +230,48 @@ mod tests {
         // The top unit does not run out: an absurd number stays in PB rather
         // than indexing past the table.
         assert!(human_size(u64::MAX).ends_with(" PB"));
+    }
+
+    /// The three things a directory row can say, and the order they are said
+    /// in. This is the whole of PLAN §7.3's size column as a pure function.
+    #[test]
+    fn a_folder_says_the_best_thing_it_knows() {
+        use crate::folders::Size;
+        let settled = |bytes| {
+            Some(Size {
+                bytes,
+                settled: true,
+            })
+        };
+        let counting = |bytes| {
+            Some(Size {
+                bytes,
+                settled: false,
+            })
+        };
+
+        assert_eq!(folder_size_text(None, None), None, "the em dash stands");
+        assert_eq!(
+            folder_size_text(None, Some(12)).as_deref(),
+            Some("12 items")
+        );
+        // A count is a count, not a size: singular reads as English and an
+        // empty folder says so rather than showing a dash.
+        assert_eq!(folder_size_text(None, Some(1)).as_deref(), Some("1 item"));
+        assert_eq!(folder_size_text(None, Some(0)).as_deref(), Some("0 items"));
+
+        // A size outranks a count the moment there is one, tilde and all.
+        assert_eq!(
+            folder_size_text(counting(1536), Some(12)).as_deref(),
+            Some("~1.5 KB")
+        );
+        assert_eq!(
+            folder_size_text(settled(1536), Some(12)).as_deref(),
+            Some("1.5 KB")
+        );
+        // A settled empty directory is `0 B`, which is true — the dash was
+        // only ever "we do not know".
+        assert_eq!(folder_size_text(settled(0), None).as_deref(), Some("0 B"));
     }
 
     /// The rounding corner: a shade under the next unit must not print a
