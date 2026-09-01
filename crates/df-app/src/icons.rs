@@ -177,6 +177,15 @@ pub fn generic(palette: &Palette, nerd: bool) -> Icon {
     }
 }
 
+/// The plain directory glyph, for a card that stands for a *place* rather than
+/// for a file: the ghost of a tab being dragged out of the strip (PLAN §2).
+pub fn folder(palette: &Palette, nerd: bool) -> Icon {
+    Icon {
+        glyph: if nerd { GENERIC_DIR } else { ' ' },
+        color: palette.blue,
+    }
+}
+
 pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> Icon {
     let broken = entry.is_broken_symlink();
     let link = entry.is_symlink();

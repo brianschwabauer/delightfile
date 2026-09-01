@@ -83,6 +83,13 @@ Yazi's miller columns at Brian's ratio `[1, 4, 3]`: **parent | list | preview**.
   positions (FLIP-style) rather than teleporting.
 - **Multi-window**: `Ctrl+N` new window; drag a tab out to spawn a window; drag files
   between windows/tabs (drop on a tab header targets that tab's cwd).
+  **A window is a process.** `Ctrl+N` and a detached tab both start a new `delightfile`
+  on that directory rather than adding a second window to this event loop — the reasoning,
+  the cost, and what an in-process split would take are written out in `df-app/src/window.rs`.
+  Window→window file drags therefore go through the compositor's data device, which is the
+  cross-application path Phase 4b already built; the state file is last-writer-wins across
+  windows; and `--cwd-file` belongs to the process that was launched with it and is never
+  inherited by a window spawned from it.
 - Breadcrumb path bar at top: clickable segments, shows git branch when inside a repo,
   drop target per segment.
 
@@ -439,7 +446,7 @@ Work top to bottom; tick boxes in the same commit as the work.
 
 ### Phase 6 — reach
 - [x] SFTP vfs from vfs.toml (`g 1`/`g 2`)
-- [ ] Multi-window; drag tabs out; cross-window DnD
+- [x] Multi-window; drag tabs out; cross-window DnD
 - [x] Trash browsing/restore view
 - [ ] Idle-cost audit (zero repaints at rest), cold-start ordering audit
 - [ ] Polish pass against `delightful-ui`/`ui-anti-slop` checklists

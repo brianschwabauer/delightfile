@@ -790,7 +790,11 @@ impl Dispatch<WlDataDevice, ()> for State {
             wl_data_device::Event::Enter { serial, x, y, id, .. } => {
                 let Some(offer) = id else { return };
                 let mimes = state.mimes(&offer);
-                let ours = mimes.iter().any(|mime| mime == crate::dnd::SELF_MIME);
+                // *This* window's own drag, come back through the compositor —
+                // not merely some delightfile's, which with one process per
+                // window is an ordinary external drag (see
+                // [`crate::dnd::is_ours`]).
+                let ours = crate::dnd::is_ours(&mimes);
                 let wanted = crate::dnd::wanted_mime(&mimes);
                 // Accepting is what turns the cursor into a "yes" in the
                 // source application; a `None` accept is the honest answer for

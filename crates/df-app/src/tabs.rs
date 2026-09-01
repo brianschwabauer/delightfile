@@ -85,6 +85,23 @@ pub fn after_close(len: usize, closing: usize) -> usize {
     closing.min(remaining.saturating_sub(1))
 }
 
+/// Which tab is active after closing *any* tab — the one being looked at or
+/// another one (a tab dragged out of the strip, [`crate::window`]).
+///
+/// `len` is the count **before** the close. Closing the active tab is
+/// [`after_close`]'s rule; closing one to the left of it shifts the index down
+/// so the same tab stays on screen, which is the whole point — a chip
+/// disappearing from the strip must not change what the window is showing.
+pub fn active_after_close(len: usize, closing: usize, active: usize) -> usize {
+    if closing == active {
+        after_close(len, closing)
+    } else if closing < active {
+        active.saturating_sub(1)
+    } else {
+        active
+    }
+}
+
 /// Where a new tab goes: immediately after the active one.
 ///
 /// Not at the end. `t` opens a tab on the directory you are in, and the tab you
@@ -191,12 +208,24 @@ impl Tabs {
     /// `Ctrl+c`. Returns whether a tab is still open — `false` means this was
     /// the last one and the app should quit (PLAN §4.1).
     pub fn close_active(&mut self) -> bool {
-        if self.tabs.len() <= 1 {
+        self.close(self.active)
+    }
+
+    /// Close any tab, active or not — what a tab dragged out of the strip
+    /// leaves behind (PLAN §2, [`crate::window`]).
+    ///
+    /// Closing a tab to the *left* of the active one shifts the active index
+    /// down by one so the same tab stays on screen: the window you are looking
+    /// at must not change because a chip beside it went away. Closing the
+    /// active one falls back to [`after_close`], which is the rule `Ctrl+c`
+    /// already uses. Returns whether a tab is still open — `false` means this
+    /// was the last one and nothing was closed.
+    pub fn close(&mut self, index: usize) -> bool {
+        if self.tabs.len() <= 1 || index >= self.tabs.len() {
             return false;
         }
-        let closing = self.active;
-        self.tabs.remove(closing);
-        self.active = after_close(self.tabs.len() + 1, closing);
+        self.active = active_after_close(self.tabs.len(), index, self.active);
+        self.tabs.remove(index);
         // No slide: nothing arrived from anywhere, the strip simply has one
         // fewer chip. Sliding here would say a direction that did not happen.
         self.slide = None;
@@ -273,6 +302,34 @@ mod tests {
         assert_eq!(after_close(3, 2), 1, "the last tab hands over to the left");
         assert_eq!(after_close(2, 1), 0);
         assert_eq!(after_close(2, 0), 0);
+    }
+
+    /// Dragging a tab out of the strip closes a tab that is not necessarily
+    /// the active one, and the window must go on showing what it was showing.
+    #[test]
+    fn detaching_another_tab_leaves_the_view_where_it_was() {
+        // Four tabs, looking at 'c' (index 2).
+        let mut order = vec!['a', 'b', 'c', 'd'];
+        let mut active = 2usize;
+
+        // Drag 'a' out: the view stays on 'c', now one place to the left.
+        let before = order.len();
+        active = active_after_close(before, 0, active);
+        order.remove(0);
+        assert_eq!(order[active], 'c');
+
+        // Drag 'd' out: nothing to the left of the cursor moved.
+        let before = order.len();
+        active = active_after_close(before, 2, active);
+        order.remove(2);
+        assert_eq!(order[active], 'c');
+
+        // Drag out the one being looked at: the tab to its right takes over.
+        let before = order.len();
+        active = active_after_close(before, active, active);
+        order.remove(1);
+        assert_eq!(order, vec!['b']);
+        assert_eq!(order[active], 'b');
     }
 
     /// A new tab lands beside the one it was spawned from, so `Alt+[` is the

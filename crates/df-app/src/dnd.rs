@@ -537,13 +537,37 @@ impl SpringBack {
 
 // ── The drag-out payload ────────────────────────────────────────────────────
 
-/// The private mime that marks an offer as *ours*.
+/// The private mime that marks an offer as delightfile's.
 ///
 /// A drag that leaves the window and comes back is still the drag the user
 /// started, and it must not turn into an anonymous external copy on the way. It
 /// carries no bytes — a target that asks for it gets an empty stream — because
 /// its whole content is its name.
 pub const SELF_MIME: &str = "application/x-delightfile-drag";
+
+/// The same name with **this process's** pid on it, which is the one actually
+/// offered.
+///
+/// The bare [`SELF_MIME`] would say "some delightfile started this drag", and
+/// with multi-window that is no longer the question (PLAN §2,
+/// [`crate::window`]): every window is its own process, so a drag from one
+/// window dropped on another is a genuinely *external* drop that happens to
+/// come from a program with the same name. Marking it as ours would suppress
+/// the window's drop ring and hand the drop to the local-drag path, which for
+/// the receiving window is a drag it never started. The pid makes "ours" mean
+/// "this window's", which is what every use of the flag actually wants.
+pub fn self_mime() -> &'static str {
+    static MIME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MIME.get_or_init(|| format!("{SELF_MIME};pid={}", std::process::id()))
+}
+
+/// Was this offer started by *this* window?
+///
+/// An exact match, so another delightfile's drag is external — which it is.
+pub fn is_ours(offered: &[String]) -> bool {
+    let mine = self_mime();
+    offered.iter().any(|mime| mime == mine)
+}
 
 /// What the drag offers, in the order it offers it.
 ///
@@ -563,7 +587,7 @@ pub fn offer(paths: &[PathBuf]) -> Vec<(String, Vec<u8>)> {
         ("text/uri-list".to_string(), uris.into_bytes()),
         ("text/plain;charset=utf-8".to_string(), plain.clone().into_bytes()),
         ("text/plain".to_string(), plain.into_bytes()),
-        (SELF_MIME.to_string(), Vec::new()),
+        (self_mime().to_string(), Vec::new()),
     ]
 }
 
@@ -925,7 +949,7 @@ mod tests {
                 "text/uri-list",
                 "text/plain;charset=utf-8",
                 "text/plain",
-                SELF_MIME
+                self_mime()
             ]
         );
         let uris = String::from_utf8(offered[0].1.clone()).expect("utf-8");
@@ -936,6 +960,45 @@ mod tests {
         assert_eq!(plain, "/tmp/one.txt\n/tmp/two files.txt");
         // The self-marker carries nothing but its name.
         assert!(offered[3].1.is_empty());
+    }
+
+    /// **The multi-window rule** (PLAN §2, [`crate::window`]): "ours" means
+    /// *this* window's drag, not any delightfile's. A drag from another
+    /// window is another program's drag as far as this one is concerned —
+    /// which is what makes window→window drops light the drop ring and paste
+    /// like any other external drop.
+    #[test]
+    fn another_windows_drag_is_not_this_windows_drag() {
+        let mine = offer(&[PathBuf::from("/tmp/a")])
+            .into_iter()
+            .map(|(mime, _)| mime)
+            .collect::<Vec<_>>();
+        assert!(is_ours(&mine));
+        // The same program, a different process: the pid is the only thing
+        // that differs, and it is enough.
+        let sibling: Vec<String> = mine
+            .iter()
+            .map(|mime| {
+                if mime.starts_with(SELF_MIME) {
+                    format!("{SELF_MIME};pid={}", std::process::id() + 1)
+                } else {
+                    mime.clone()
+                }
+            })
+            .collect();
+        assert!(!is_ours(&sibling));
+        // An older delightfile's unqualified marker is not ours either, and
+        // neither is a drag from anything else.
+        assert!(!is_ours(&[SELF_MIME.to_string()]));
+        assert!(!is_ours(&["text/uri-list".to_string()]));
+        assert!(!is_ours(&[]));
+        // …and it is still a *file* drag, so the receiving window knows what
+        // to ask for.
+        assert_eq!(
+            wanted_mime(&sibling),
+            Some("text/uri-list".to_string()),
+            "a sibling window's drag must still be readable as files"
+        );
     }
 
     /// The incoming half: which mime to ask for, and what comes back.

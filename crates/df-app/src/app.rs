@@ -351,6 +351,9 @@ struct PressStart {
     /// The press landed on the basket's chip, which drags the whole basket
     /// (PLAN §7.1).
     on_basket: bool,
+    /// The press landed on a tab chip, which drags the tab out into a window
+    /// (PLAN §2).
+    on_tab: Option<usize>,
     /// The press landed inside the list pane, which is the only pane a band
     /// can be drawn in.
     in_list: bool,
@@ -832,6 +835,16 @@ pub struct App {
     data_device: Option<crate::wayland::DataDevice>,
     /// The files in the hand, while there are any.
     drag: Option<Drag>,
+    /// A tab chip being pulled out of the strip (PLAN §2's "drag a tab out to
+    /// spawn a window"). Separate from [`Drag`] because it carries a *tab*, not
+    /// files: nothing about targets, verbs, spring-open or the Wayland hand-off
+    /// applies to it, and the one thing they share — the ghost and its flight
+    /// home — is shared by using the same painter and the same
+    /// [`dnd::SpringBack`].
+    tab_drag: Option<TabDrag>,
+    /// Windows this one has opened, so none of them becomes a zombie. See
+    /// [`crate::window`] for why a window is a process.
+    windows: crate::window::Windows,
     /// The ghost's flight home after a cancelled drag. Outlives the drag it
     /// belongs to — that is the whole point of it.
     spring_back: Option<SpringHome>,
@@ -880,6 +893,28 @@ struct Drag {
     /// The compositor has taken the pointer: this drag is now somebody else's
     /// problem until it comes back as a `DragEnded`.
     handed_off: bool,
+}
+
+/// A tab chip on its way out of the strip (PLAN §2).
+///
+/// The gesture is decided by [`crate::window::armed`] from `from` and `at`, so
+/// what the ghost advertises and what letting go does are the same three facts
+/// — a ghost that says "new window" and a release that springs back would be
+/// the drag lying about itself.
+struct TabDrag {
+    /// Which tab, by index. Re-read at the moment of the detach rather than
+    /// held as a `Tab`, because the strip can change under a drag (a scan
+    /// landing, a `}`), and an index that no longer exists is a detach that
+    /// does nothing rather than one that takes the wrong tab.
+    tab: usize,
+    /// Where the button went down — the threshold is measured from here.
+    from: egui::Pos2,
+    at: egui::Pos2,
+    /// The middle of the chip, which is where the ghost flies home to.
+    home: egui::Pos2,
+    /// The tab's title, on the face of the ghost.
+    label: String,
+    icon: crate::icons::Icon,
 }
 
 /// A cancelled drag on its way back to the row it came off.
@@ -1058,6 +1093,8 @@ impl App {
             last_layout: Snapshot::new(),
             data_device: None,
             drag: None,
+            tab_drag: None,
+            windows: crate::window::Windows::default(),
             spring_back: None,
             targets: Hovers::new(),
             incoming: None,
@@ -4993,6 +5030,14 @@ impl App {
             self.press = None;
             return;
         }
+        // A tab in the hand is the same kind of thing and gets the same rung
+        // (PLAN §2): `Esc` puts the chip back, and nothing is opened or closed.
+        if let Some(drag) = self.tab_drag.take() {
+            let at = drag.at;
+            self.spring_tab_home(drag, at, Instant::now());
+            self.press = None;
+            return;
+        }
         // The tray is the smallest thing on screen that `Esc` can take back,
         // so it goes first: closing it is never what somebody meant `Esc` to
         // do *instead* of something bigger.
@@ -5410,6 +5455,16 @@ impl App {
                 if let Some(search) = &mut self.search {
                     search.cancel();
                 }
+            }
+
+            // ── Windows (PLAN §2) ───────────────────────────────────────────
+            // `Ctrl+N`. The directory is the *local* one, for the same reason
+            // the cwd-file's is: a window opened from inside an archive, the
+            // trash or a remote listing has to start somewhere a second process
+            // can actually read.
+            C::NewWindow => {
+                let dir = self.local_origin();
+                self.open_window(&dir, now);
             }
 
             // ── Tabs ────────────────────────────────────────────────────────
@@ -6572,6 +6627,7 @@ impl App {
         &mut self,
         at: Option<egui::Pos2>,
         list: egui::Rect,
+        strip: Option<egui::Rect>,
         scroll_rows: f32,
         metrics: Option<grid::Metrics>,
         now: Instant,
@@ -6579,12 +6635,25 @@ impl App {
         let (Some(at), Some(press)) = (at, self.press) else {
             return;
         };
+        // A tab in the hand owns the gesture: the pointer is carrying a chip,
+        // not drawing a band and not holding files.
+        if let Some(tab_drag) = &mut self.tab_drag {
+            tab_drag.at = at;
+            return;
+        }
         if !press.dragging {
             if (at - press.at).length() < crate::mouse::DRAG_THRESHOLD {
                 return;
             }
             if let Some(press) = &mut self.press {
                 press.dragging = true;
+            }
+            if let (Some(index), Some(strip)) = (press.on_tab, strip) {
+                // PLAN §2: "drag a tab out to spawn a window". The chip is
+                // picked up here and the decision is made on release, by
+                // [`crate::window::release`].
+                self.begin_tab_drag(index, press.at, at, strip);
+                return;
             }
             if press.on_basket {
                 // PLAN §7.1: "drag the whole basket as one payload". The same
@@ -6761,6 +6830,135 @@ impl App {
         // A drag that starts is a drag the cancel of an older one has nothing
         // to say about.
         self.spring_back = None;
+    }
+
+    // ── Windows (PLAN §2) ───────────────────────────────────────────────────
+
+    /// Open a window on `dir` — `Ctrl+N`, and the far end of a tab dragged out
+    /// of the strip.
+    ///
+    // VERIFY-LIVE: `Ctrl+N` in a directory, then a file dragged from the new
+    // window onto a folder row in the old one. The second window should open on
+    // the same directory with its own tab strip; the drag between them should
+    // ring the *receiving* window's edge (the drop-in path, not the local-drag
+    // path — that is what [`crate::dnd::is_ours`]'s pid is for) and paste with
+    // the usual conflict dialog and undo toast.
+    ///
+    /// A whole new process, for the reasons set out in [`crate::window`]. The
+    /// failure is a toast rather than a log line because there is nothing else
+    /// on screen to notice: a window that did not appear looks exactly like a
+    /// key that was not pressed.
+    fn open_window(&mut self, dir: &Path, now: Instant) -> bool {
+        match self.windows.open(dir) {
+            Ok(()) => {
+                self.toasts
+                    .notice(format!("New window: {}", file_name(dir)), now);
+                true
+            }
+            Err(e) => {
+                log::warn!("could not open a window on {}: {e}", dir.display());
+                self.toasts.error("Could not open a new window", now);
+                false
+            }
+        }
+    }
+
+    /// The local directory a given tab would open a window on.
+    ///
+    /// [`App::local_origin`]'s rule, applied to a tab that is not necessarily
+    /// the active one: a window is a second process, and an archive's inner
+    /// path, a trash entry or a remote URL are not things a second process can
+    /// be started in.
+    fn tab_origin(&self, index: usize) -> Option<PathBuf> {
+        let tab = self.tabs.iter().nth(index)?;
+        if let Some(session) = &tab.remote {
+            return Some(session.origin.clone());
+        }
+        if let Some(view) = &tab.trash {
+            return Some(view.origin.clone());
+        }
+        if let Some(browse) = &tab.archive {
+            return Some(browse.real());
+        }
+        Some(tab.cwd.path().to_path_buf())
+    }
+
+    /// A press on a tab chip has travelled far enough to be a gesture: pick the
+    /// chip up.
+    ///
+    /// The ghost appears at [`crate::mouse::DRAG_THRESHOLD`] like every other
+    /// drag in the program, and only *arms* at
+    /// [`crate::window::DETACH_THRESHOLD`] — so the hand sees it has hold of
+    /// something long before the gesture can do anything, which is what makes
+    /// the big threshold feel like a decision rather than a dead zone.
+    fn begin_tab_drag(&mut self, index: usize, from: egui::Pos2, at: egui::Pos2, strip: egui::Rect) {
+        let Some(label) = self.tabs.iter().nth(index).map(Tab::title) else {
+            return;
+        };
+        let home = chrome::tab_rects(strip, self.tabs.len())
+            .get(index)
+            .map(egui::Rect::center)
+            .unwrap_or(from);
+        self.tab_drag = Some(TabDrag {
+            tab: index,
+            from,
+            at,
+            home,
+            label,
+            icon: crate::icons::folder(&self.palette, self.nerd),
+        });
+        // A gesture that starts is one the cancel of an older one has nothing
+        // to say about.
+        self.spring_back = None;
+    }
+
+    // VERIFY-LIVE: with two tabs open, press a chip and pull it downwards. The
+    // ghost should appear within a few pixels of travel, pick up the "New
+    // window" chip as it clears the strip, and on release open a window on that
+    // tab's directory and leave one fewer chip behind. Let go inside the strip,
+    // or press `Esc` mid-gesture, and the ghost should fly back to its chip
+    // with nothing opened and nothing closed.
+    /// Letting go of a tab chip (PLAN §2).
+    ///
+    /// Detaching the **last** tab is a notice rather than an action: with one
+    /// process per window there is no window identity to move — closing the tab
+    /// would quit this window and opening the new one would put the same
+    /// directory back on screen, which is a lot of flicker to achieve nothing.
+    /// `Ctrl+N` is what that gesture meant, and the notice says so.
+    fn release_tab_drag(&mut self, at: egui::Pos2, strip: egui::Rect, now: Instant) {
+        let Some(drag) = self.tab_drag.take() else {
+            return;
+        };
+        if crate::window::release(drag.from, at, strip) == crate::window::Release::SpringBack {
+            self.spring_tab_home(drag, at, now);
+            return;
+        }
+        if self.tabs.len() <= 1 {
+            self.toasts
+                .notice("This is the only tab — Ctrl+N opens another window", now);
+            self.spring_tab_home(drag, at, now);
+            return;
+        }
+        let Some(dir) = self.tab_origin(drag.tab) else {
+            self.spring_tab_home(drag, at, now);
+            return;
+        };
+        // The tab only closes if the window really opened: a detach that lost
+        // the tab *and* failed to show it anywhere would be the one outcome
+        // this gesture may never have.
+        if self.open_window(&dir, now) && self.tabs.close(drag.tab) {
+            self.tab_changed(now);
+        }
+    }
+
+    /// The tab ghost flies back to its chip: `Esc`, or a release that did not
+    /// arm. The same spring the file ghost uses (`delightful-ui` §6).
+    fn spring_tab_home(&mut self, drag: TabDrag, at: egui::Pos2, now: Instant) {
+        self.spring_back = Some(SpringHome {
+            spring: dnd::SpringBack::new(at, drag.home, 1, now),
+            label: drag.label,
+            icon: drag.icon,
+        });
     }
 
     /// One frame of a live drag: where it is, what it is over, and whether it
@@ -7673,19 +7871,37 @@ impl App {
                 at,
                 on_row: matches!(over, Some((Control::Row(Column::List, _), _))),
                 on_basket: matches!(over, Some((Control::BasketChip, _))),
+                on_tab: match over {
+                    Some((Control::Tab(index), _)) => Some(index),
+                    _ => None,
+                },
                 in_list: layout.list.contains(at) && overlay.is_none(),
                 dragging: false,
             });
         }
         if pointer.released {
-            // …but *not* the drag: `tick_drag` reads the release as the drop,
-            // and clearing the press here only stops the gesture re-arming.
+            // A tab in the hand is decided *here*, unlike a file drag: there is
+            // no drop target to resolve, only the question of whether the chip
+            // was really pulled out of the strip.
+            if self.tab_drag.is_some() {
+                if let (Some(at), Some(strip)) = (pointer.at, layout.strip) {
+                    self.release_tab_drag(at, strip, now);
+                } else if let Some(drag) = self.tab_drag.take() {
+                    // No strip to measure against — the last tab closed under
+                    // the gesture. Nothing happens, visibly.
+                    let at = drag.at;
+                    self.spring_tab_home(drag, at, now);
+                }
+            }
+            // …but *not* the file drag: `tick_drag` reads the release as the
+            // drop, and clearing the press here only stops the gesture
+            // re-arming.
             self.press = None;
             // The band commits as it goes, so releasing is only letting go.
             self.band = None;
         }
         if pointer.down {
-            self.drag(pointer.at, list_content, scroll_rows, metrics, now);
+            self.drag(pointer.at, list_content, layout.strip, scroll_rows, metrics, now);
         }
 
         // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────
@@ -7763,22 +7979,22 @@ impl App {
         // A live drag says so with the cursor before it says so with anything
         // else (`delightful-ui` §2), and it overrides whatever is under it —
         // the hand is holding files, not pointing at a link.
-        if dragging.is_some() {
+        if dragging.is_some() || self.tab_drag.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if let Some((control, _)) = over {
             ui.ctx().set_cursor_icon(match control {
                 Control::Row(..) => egui::CursorIcon::Default,
-                Control::Tab(_)
-                | Control::Crumb(_)
+                // A tab chip is draggable as well as clickable — it is how a
+                // tab becomes a window (PLAN §2) — so it wears the hand that
+                // says so (`delightful-ui` §2), like the basket's chip.
+                Control::Tab(_) | Control::BasketChip => egui::CursorIcon::Grab,
+                Control::Crumb(_)
                 | Control::Action(_)
                 | Control::PanelRow(_)
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
                 | Control::BasketRow(_)
                 | Control::BasketRemove(_) => egui::CursorIcon::PointingHand,
-                // The chip is draggable as well as clickable, so it wears the
-                // hand that says so (`delightful-ui` §2).
-                Control::BasketChip => egui::CursorIcon::Grab,
             });
         }
 
@@ -8485,6 +8701,25 @@ impl App {
                 1.0,
             );
         }
+        // A tab being pulled out of the strip (PLAN §2). One card, because a
+        // tab is one thing; the verb chip says what letting go would do, and
+        // it is empty until the gesture has actually armed — a ghost that
+        // promised a window before the threshold was crossed would be the
+        // gesture lying about itself.
+        if let (Some(drag), Some(strip)) = (&self.tab_drag, layout.strip) {
+            let armed = crate::window::armed(drag.from, drag.at, strip);
+            let cards = dnd::ghost_cards(drag.at, 1);
+            paint.ghost(
+                &cards,
+                &ui::GhostFace {
+                    icon: drag.icon,
+                    name: &drag.label,
+                    count: None,
+                    verb: if armed { "New window" } else { "" },
+                },
+                1.0,
+            );
+        }
         // …and the cancelled one on its way home, which outlives the drag.
         if let Some(home) = &self.spring_back {
             let cards = dnd::ghost_cards(home.spring.at(now), home.spring.count());
@@ -9108,8 +9343,16 @@ impl ApplicationHandler<crate::Wake> for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(gfx) = &mut self.gfx else { return };
+        // One process, one window (PLAN §2 — see [`crate::window`] for why a
+        // second window is a second process). The id is still checked rather
+        // than ignored: it is the invariant written down where it holds, and if
+        // an in-process second window is ever added this is the line that turns
+        // into the routing table instead of a silent misdelivery.
+        if gfx.window.id() != id {
+            return;
+        }
         let response = gfx.egui_state.on_window_event(&gfx.window, &event);
         // egui-winit answers `repaint: true` to `RedrawRequested` itself, so
         // honouring it unconditionally is a vsync-paced self-loop — the app
