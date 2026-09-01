@@ -20,6 +20,12 @@
 //! and [`DuScanner::heavy_hitters`] reads. That cache is the "what's big" mode's
 //! actual data structure — the message stream is only how it fills up live.
 //!
+//! **The workers step aside.** A du of `~` is a thread issuing `stat` as fast
+//! as the kernel will answer, and on a busy machine it is scheduled against the
+//! UI thread as an equal. Each worker nices itself to
+//! [`crate::nice::BACKGROUND_NICE`] on the way in, so the sizes arrive a moment
+//! later on a loaded laptop and never at the cost of a frame (PLAN §1).
+//!
 //! **Two workers, not three.** These threads are not waiting on a slow mount;
 //! they are issuing `stat` back to back, and past two of them a du of one tree
 //! is competing with itself for the same page cache and the same disk queue.
@@ -37,7 +43,7 @@ use crate::fs::Notifier;
 use crate::{DfError, Result};
 
 use super::cache::{current_mtime, DuCache, DuRecord, HeavyHitter};
-use super::walk::{walk, DuOptions, DuTotals, DuUpdate};
+use super::walk::{child_counts, walk, DuOptions, DuTotals, DuUpdate};
 
 /// Walk workers. See the module essay.
 pub const DU_WORKERS: usize = 2;
@@ -68,6 +74,15 @@ pub enum DuMessage {
     /// The walk began. Sent before any numbers, so the UI can put up an empty
     /// drill-down at the moment it knows one is coming.
     Started { token: DuToken, root: PathBuf },
+    /// How many entries each immediate subdirectory holds, from the cheap
+    /// `read_dir` pass — sent once, before the walk, when
+    /// [`DuOptions::count_children`] asked for it. The size column's first
+    /// honest answer; see [`fn@super::walk::child_counts`].
+    Counts {
+        token: DuToken,
+        root: PathBuf,
+        counts: Vec<(PathBuf, u64)>,
+    },
     /// Per-directory totals. Some are running (`done: false`) and some final;
     /// a consumer keyed by [`DuUpdate::dir`] just overwrites.
     Progress {
@@ -94,6 +109,7 @@ impl DuMessage {
     pub fn token(&self) -> DuToken {
         match self {
             DuMessage::Started { token, .. }
+            | DuMessage::Counts { token, .. }
             | DuMessage::Progress { token, .. }
             | DuMessage::Done { token, .. }
             | DuMessage::Failed { token, .. } => *token,
@@ -103,6 +119,7 @@ impl DuMessage {
     pub fn root(&self) -> &Path {
         match self {
             DuMessage::Started { root, .. }
+            | DuMessage::Counts { root, .. }
             | DuMessage::Progress { root, .. }
             | DuMessage::Done { root, .. }
             | DuMessage::Failed { root, .. } => root,
@@ -148,6 +165,9 @@ impl DuScanner {
             let handle = std::thread::Builder::new()
                 .name(format!("df-du-{i}"))
                 .spawn(move || {
+                    // Before the first request, so it costs one syscall per
+                    // worker for the life of the session.
+                    crate::nice::step_aside();
                     for request in req_rx {
                         run_walk(request, &up_tx, &live, &cache, &notify);
                     }
@@ -356,6 +376,23 @@ fn run_walk(
         root: root.clone(),
     }) {
         return;
+    }
+
+    // The cheap pass first: one `read_dir` per subdirectory, so the size column
+    // has something true to say within a frame or two of entering a directory
+    // rather than after the whole subtree has been added up.
+    if options.count_children {
+        let cancelled = || !lock(live).contains_key(&token);
+        let counts = child_counts(&root, &cancelled);
+        if !counts.is_empty()
+            && !send(DuMessage::Counts {
+                token,
+                root: root.clone(),
+                counts,
+            })
+        {
+            return;
+        }
     }
 
     // Read before the walk, not after: a directory changed *during* the walk

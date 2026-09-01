@@ -47,6 +47,7 @@ mod entry;
 mod filter;
 mod history;
 mod inotify;
+pub mod kind;
 pub mod mime;
 pub mod owner;
 mod scan;
@@ -64,6 +65,7 @@ pub use filter::{
     filter_indices, find_from, is_case_sensitive, match_name, FindDirection, Matched, Span,
 };
 pub use history::{History, HISTORY_LIMIT};
+pub use kind::{kind_for_name, kind_of, FileKind};
 pub use scan::{
     no_notifier, scan_blocking, Notifier, ScanToken, ScanUpdate, Scanner, BATCH, FIRST_BATCH,
     SCAN_WORKERS,

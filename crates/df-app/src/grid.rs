@@ -667,6 +667,14 @@ pub struct GridView<'a> {
     pub dragged: &'a std::collections::HashSet<PathBuf>,
     pub flip: Option<&'a crate::flip::Flip>,
     pub slow_load: bool,
+    /// What git thinks of these tiles (PLAN §7.3), or `None` outside a
+    /// repository.
+    ///
+    /// The grid draws no dots — a tile has no right-hand column to put them in
+    /// — but it *must* dim what the list dims. A `target/` that is grey in the
+    /// list and bright in the grid is the same directory telling you two
+    /// different things depending on which key you last pressed.
+    pub git: Option<&'a df_core::git::RepoStatus>,
 }
 
 /// Draw a directory as a wall of tiles.
@@ -694,6 +702,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         dragged,
         flip,
         slow_load,
+        git,
     } = view;
     let content = crate::ui::content_rect(pane);
     // The same sentence the list would show — "empty", "still reading", the
@@ -730,6 +739,10 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         }
         let key = crate::ui::Control::Row(crate::ui::Column::List, index);
         let hover = hovers.hover(key);
+        // Asked once per tile, exactly as the list asks it per row.
+        let ignored = git
+            .and_then(|g| g.status_for(&entry.path))
+            .is_some_and(|s| s == df_core::git::FileStatus::Ignored);
         let selected = dir.is_selected(&entry.name);
         let marked = clip.is_some_and(|c| c.paths.contains(&entry.path));
         let cut = marked && clip.is_some_and(|c| c.cut);
@@ -763,7 +776,12 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
                     egui::epaint::RectShape::filled(
                         fitted,
                         THUMB_RADIUS,
-                        crate::chrome::fade(egui::Color32::WHITE, alpha),
+                        // The tint a texture is drawn through, so the same
+                        // mute that greys a glyph greys a photograph.
+                        crate::chrome::fade(
+                            mute(egui::Color32::WHITE, ground, lifted || cut, ignored),
+                            alpha,
+                        ),
                     )
                     .with_texture(
                         texture.id(),
@@ -783,14 +801,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
                     egui::Align2::CENTER_CENTER,
                     icon.glyph,
                     egui::FontId::new(ICON_TILE, family),
-                    crate::chrome::fade(
-                        if lifted || cut {
-                            mix(icon.color, ground, crate::ui::PARENT_DIM)
-                        } else {
-                            icon.color
-                        },
-                        alpha,
-                    ),
+                    crate::chrome::fade(mute(icon.color, ground, lifted || cut, ignored), alpha),
                 );
             }
         }
@@ -835,15 +846,12 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         // rather than left-aligned: the tile is a card about one file and its
         // name is that card's caption.
         let label = metrics.label_rect(rect);
-        let name_colour = if lifted || cut {
-            mix(
-                crate::icons::name_color(entry, palette),
-                ground,
-                crate::ui::PARENT_DIM,
-            )
-        } else {
-            crate::icons::name_color(entry, palette)
-        };
+        let name_colour = mute(
+            crate::icons::name_color(entry, palette),
+            ground,
+            lifted || cut,
+            ignored,
+        );
         name(
             &inside,
             label,
@@ -854,6 +862,31 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         );
     }
     paint.flip_ghosts(&painter, flip, content, TILE_RADIUS);
+}
+
+/// How far one tile's ink is mixed back into the pane behind it.
+///
+/// The list's two answers, in the list's order of precedence: a tile on its way
+/// out of here ([`crate::ui::PARENT_DIM`], for a cut or a lift) outranks one
+/// that is merely gitignored ([`crate::ui::IGNORED_DIM`]), because "this is
+/// leaving" is the more urgent of the two facts and they cannot both be said in
+/// one channel. Both numbers are the list's own — a grid that dimmed by its own
+/// amount would be the same directory looking different depending on which key
+/// you last pressed.
+fn mute(
+    colour: egui::Color32,
+    ground: egui::Color32,
+    leaving: bool,
+    ignored: bool,
+) -> egui::Color32 {
+    use crate::theme::mix;
+    if leaving {
+        mix(colour, ground, crate::ui::PARENT_DIM)
+    } else if ignored {
+        mix(colour, ground, crate::ui::IGNORED_DIM)
+    } else {
+        colour
+    }
 }
 
 /// How big the stand-in glyph is on a tile with no picture.
@@ -1189,6 +1222,7 @@ mod tests {
                             dragged: &dragged,
                             flip: flip.as_ref(),
                             slow_load: false,
+                            git: None,
                         },
                     );
                 }

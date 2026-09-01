@@ -659,3 +659,98 @@ fn a_zero_byte_parent_gives_zero_shares_not_nan() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].fraction, 0.0, "not NaN, which would panic a layout");
 }
+
+// ── the cheap child-count pass ──────────────────────────────────────────────
+
+/// The number the size column shows before a single byte has been added up.
+#[test]
+fn child_counts_are_immediate_children_by_name() {
+    let tree = TempTree::new("du-counts");
+    tree.file("sub/b.txt", b"b");
+    tree.file("sub/deep/c.txt", b"c");
+    tree.file("empty/.keep", b"");
+    std::fs::remove_file(tree.path().join("empty/.keep")).unwrap();
+    tree.file("a.txt", b"a");
+
+    let never = || false;
+    let counts = child_counts(tree.path(), &never);
+    let find = |name: &str| {
+        counts
+            .iter()
+            .find(|(p, _)| p.file_name().unwrap() == name)
+            .map(|(_, n)| *n)
+    };
+    // `sub` holds `b.txt` and `deep` — two names, not the three files under it:
+    // the pass counts entries, and says so.
+    assert_eq!(find("sub"), Some(2));
+    assert_eq!(find("empty"), Some(0));
+    // Files in the root are not counted at all; their own length is already in
+    // the listing.
+    assert!(find("a.txt").is_none(), "{counts:?}");
+    assert_eq!(counts.len(), 2, "{counts:?}");
+}
+
+/// A symlink to a directory is not a directory here, for the reason the walk
+/// skips them: the tree it points at is somewhere else.
+#[test]
+fn child_counts_skip_symlinks() {
+    let tree = TempTree::new("du-counts-link");
+    tree.file("real/a.txt", b"a");
+    std::os::unix::fs::symlink(tree.path().join("real"), tree.path().join("link")).unwrap();
+    let never = || false;
+    let counts = child_counts(tree.path(), &never);
+    assert_eq!(counts.len(), 1, "{counts:?}");
+    assert_eq!(counts[0].0.file_name().unwrap(), "real");
+}
+
+/// Cancellation reaches inside the pass, so leaving a directory stops it.
+#[test]
+fn child_counts_stop_when_cancelled() {
+    let tree = TempTree::new("du-counts-cancel");
+    for i in 0..8 {
+        tree.file(format!("d{i}/a.txt"), b"a");
+    }
+    let always = || true;
+    assert!(child_counts(tree.path(), &always).is_empty());
+}
+
+/// The pass streams through the scanner ahead of the walk, under the same
+/// token — which is what lets the app drop both when it moves on.
+#[test]
+fn the_scanner_sends_counts_before_the_totals() {
+    let tree = TempTree::new("du-counts-stream");
+    tree.file("sub/b.txt", b"b");
+    let du = DuScanner::new(1, no_notifier());
+    let token = du.request_with(tree.path(), DuOptions::at_depth(1).counting_children());
+
+    let mut counted = None;
+    let mut done = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && !done {
+        let Ok(message) = du.updates().recv_timeout(Duration::from_millis(200)) else {
+            continue;
+        };
+        assert_eq!(message.token(), token);
+        match message {
+            DuMessage::Counts { counts, .. } => {
+                assert!(!done, "counts must arrive before the walk finishes");
+                counted = Some(counts);
+            }
+            DuMessage::Done { .. } => done = true,
+            _ => {}
+        }
+    }
+    assert!(done, "the walk never finished");
+    let counts = counted.expect("no Counts message");
+    assert_eq!(counts.len(), 1);
+    assert_eq!(counts[0].1, 1);
+}
+
+/// …and it is off unless asked for: the "what's big" mode wants totals, not a
+/// pass over every subdirectory it is about to walk anyway.
+#[test]
+fn counting_children_is_opt_in() {
+    assert!(!DuOptions::default().count_children);
+    assert!(!DuOptions::at_depth(1).count_children);
+    assert!(DuOptions::at_depth(1).counting_children().count_children);
+}

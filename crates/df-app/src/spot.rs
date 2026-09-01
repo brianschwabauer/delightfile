@@ -165,6 +165,14 @@ pub struct Facts {
     pub media: Option<MediaFacts>,
     /// git's word for this path, once the status has landed.
     pub git: Option<String>,
+    /// A leading dot: the file is out of the listing unless `.` is on.
+    pub hidden: bool,
+    /// git is ignoring this path — the reason its row in the list is dim.
+    ///
+    /// Separate from [`Facts::git`], which is a sentence about the repository,
+    /// because this is a fact about *why the row looks like that* and belongs
+    /// next to `hidden` rather than after the branch name.
+    pub ignored: bool,
 }
 
 impl Facts {
@@ -189,6 +197,8 @@ impl Facts {
             broken_link: entry.is_broken_symlink(),
             media: None,
             git: None,
+            hidden: entry.is_hidden,
+            ignored: false,
         }
     }
 }
@@ -281,6 +291,16 @@ pub fn rows(facts: &Facts) -> Vec<Row> {
             rows.push(Row::text("Media", text));
         }
     }
+    // Why this row is not quite like the others. One line for both facts, and
+    // only when there is one to make: a card that said "Visibility: normal" on
+    // every file would be a row of noise explaining nothing.
+    //
+    // This is the panel's half of PLAN §7.3's ignored vocabulary — the list
+    // says it with a dim row and a small `ignored` tag, and the card is where
+    // you go when a mark is not enough of an answer.
+    if let Some(text) = visibility_text(facts) {
+        rows.push(Row::text("Visibility", text));
+    }
     if let Some(git) = &facts.git {
         rows.push(Row::text("Git", git.clone()));
     }
@@ -289,6 +309,22 @@ pub fn rows(facts: &Facts) -> Vec<Row> {
         value: Value::Checksum,
     });
     rows
+}
+
+/// "hidden · git-ignored", or `None` when the file is neither.
+///
+/// The two words are the two the rest of the window uses: `hidden` is what the
+/// `.` toggle calls it, and `git-ignored` is what the list's tag and the help
+/// sheet's legend call it. One vocabulary, three surfaces.
+fn visibility_text(facts: &Facts) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if facts.hidden {
+        parts.push("hidden");
+    }
+    if facts.ignored {
+        parts.push("git-ignored");
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// "1920 × 1080 · 3:12 · h264 + aac 48 kHz", as much of it as is known.
@@ -1107,6 +1143,8 @@ mod tests {
             broken_link: false,
             media: None,
             git: None,
+            hidden: false,
+            ignored: false,
         }
     }
 
@@ -1160,6 +1198,36 @@ mod tests {
             row.value,
             Value::Text("../elsewhere/notes.md  (missing)".to_string())
         );
+    }
+
+    /// Why a row is dim, in the one place a mark is not enough of an answer.
+    #[test]
+    fn the_card_says_why_a_row_is_quiet() {
+        let mut facts = facts();
+        assert!(
+            !rows(&facts).iter().any(|r| r.label == "Visibility"),
+            "an ordinary file gets no row about being ordinary"
+        );
+
+        facts.hidden = true;
+        let row = |f: &Facts| {
+            rows(f)
+                .into_iter()
+                .find(|r| r.label == "Visibility")
+                .map(|r| match r.value {
+                    Value::Text(t) => t,
+                    _ => unreachable!("Visibility is text"),
+                })
+        };
+        assert_eq!(row(&facts).as_deref(), Some("hidden"));
+
+        facts.hidden = false;
+        facts.ignored = true;
+        assert_eq!(row(&facts).as_deref(), Some("git-ignored"));
+
+        // Both at once is one row, not two: they are the same sentence.
+        facts.hidden = true;
+        assert_eq!(row(&facts).as_deref(), Some("hidden · git-ignored"));
     }
 
     #[test]

@@ -1071,6 +1071,31 @@ pub fn help_overlay(
                     (row.right() - PAD_X - id_galley.size().x - GAP - description_left).max(0.0),
                 );
             }
+            // A legend entry, in a binding's geometry: the mark where the keys
+            // go and the meaning where the description goes, so the eye tracks
+            // one pair of columns down the whole sheet.
+            //
+            // The mark is `subtext1` rather than the bindings' `yellow` — it is
+            // a description of something on screen, not a key you press, and
+            // wearing the key colour would invite people to try pressing it.
+            // No third column: a mark has no id to write in `keymap.toml`.
+            HelpLine::Legend(entry) => {
+                painter.text(
+                    egui::pos2(row.left() + PAD_X, row.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    entry.mark,
+                    egui::FontId::proportional(FONT),
+                    palette.subtext1,
+                );
+                let meaning_left = row.left() + PAD_X + HELP_KEYS_COLUMN;
+                truncated(
+                    &painter,
+                    egui::pos2(meaning_left, row.center().y),
+                    entry.meaning,
+                    palette.subtext0,
+                    (row.right() - PAD_X - meaning_left).max(0.0),
+                );
+            }
         }
     }
 

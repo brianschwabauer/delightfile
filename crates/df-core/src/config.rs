@@ -33,6 +33,7 @@
 //! show_hidden = false
 //! show_symlink = true
 //! scrolloff = 5
+//! folder_sizes = true      # recursive directory sizes in the size column
 //!
 //! [tasks]
 //! micro_workers = 10
@@ -83,6 +84,13 @@
 //! name = "Work"          # a glob; matched against the full path if it has a `/`
 //! text = ""
 //! fg = "#f7768e"
+//!
+//! # The same rule for files, matched against the file *name*. Written rules
+//! # are checked before the built-in per-kind table, first match wins.
+//! [[icon.file]]
+//! name = "*.blend"
+//! text = "󰂫"
+//! fg = "#fab387"
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -428,6 +436,14 @@ pub struct MgrConfig {
     pub show_hidden: bool,
     pub show_symlink: bool,
     pub scrolloff: usize,
+    /// Whether directories get a recursive size in the size column (PLAN §7.3).
+    ///
+    /// On, because a size column that says nothing for half its rows is a
+    /// column you stop reading. Off is for the machine where `~` is an NFS
+    /// mount and a background walk is a bill somebody pays — the flag exists so
+    /// that person does not have to choose between the size column and their
+    /// network.
+    pub folder_sizes: bool,
 }
 
 impl Default for MgrConfig {
@@ -442,6 +458,7 @@ impl Default for MgrConfig {
             show_hidden: false,
             show_symlink: true,
             scrolloff: DEFAULT_SCROLLOFF,
+            folder_sizes: true,
         }
     }
 }
@@ -668,6 +685,7 @@ impl Config {
                     "show_hidden" => read_bool(value, &mut config.mgr.show_hidden),
                     "show_symlink" => read_bool(value, &mut config.mgr.show_symlink),
                     "scrolloff" => read_usize(value, &mut config.mgr.scrolloff),
+                    "folder_sizes" => read_bool(value, &mut config.mgr.folder_sizes),
                     _ => Err(format!("unknown key `{}` in [mgr]", entry.key)),
                 };
                 if let Err(message) = ok {
@@ -860,6 +878,30 @@ pub struct DirIcon {
     pub fg: Option<Color>,
 }
 
+/// A file that gets its own icon, written as `[[icon.file]]` (PLAN §3, §8).
+///
+/// The same three fields [`DirIcon`] has and a separate type rather than a
+/// shared one, because the two are matched against different things and grew
+/// different defaults: a directory rule can address a *path* and ships with
+/// nineteen entries transcribed from yazi, while a file rule is always about a
+/// name and ships with none.
+///
+/// **Shipping none is the point.** The built-in file icons are per
+/// [`crate::fs::FileKind`] and live in df-app, where the palette is — so they
+/// re-tint when a user overrides `[palette]`, which a table of hex codes here
+/// could never do. What `[[icon.file]]` adds is the escape hatch on top of
+/// that: rules written here are checked first, so one line pins `*.blend` to
+/// whatever glyph and colour you want without disturbing the other thousand
+/// rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileIcon {
+    /// A glob, matched against the file's name — `*.rs`, `Cargo.toml`,
+    /// `*.tar.*`.
+    pub pattern: String,
+    pub text: char,
+    pub fg: Option<Color>,
+}
+
 /// Everything `theme.toml` says.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
@@ -867,6 +909,9 @@ pub struct Theme {
     /// Named colours, in declaration order so the theme browser can list them.
     pub palette: Vec<(String, Color)>,
     pub dir_icons: Vec<DirIcon>,
+    /// User `[[icon.file]]` rules, in declaration order. Empty by default; see
+    /// [`FileIcon`].
+    pub file_icons: Vec<FileIcon>,
 }
 
 impl Default for Theme {
@@ -885,6 +930,7 @@ impl Default for Theme {
                     fg: fg.and_then(Color::parse),
                 })
                 .collect(),
+            file_icons: Vec::new(),
         }
     }
 }
@@ -904,6 +950,14 @@ impl Theme {
             let subject = if i.pattern.contains('/') { path } else { name };
             glob_match(&i.pattern, subject)
         })
+    }
+
+    /// The user's icon rule for a file, first rule wins, or `None` to fall
+    /// through to df-app's per-kind table.
+    pub fn file_icon(&self, name: &str) -> Option<&FileIcon> {
+        self.file_icons
+            .iter()
+            .find(|i| glob_match(&i.pattern, name))
     }
 
     pub fn parse(text: &str, file: &Path) -> (Theme, Vec<ConfigWarning>) {
@@ -960,37 +1014,54 @@ impl Theme {
             theme.dir_icons = icons;
         }
 
+        // File rules ship empty, so there is nothing to prepend to: the list is
+        // the user's, in the order they wrote it, and first match still wins.
+        for table in doc.tables_named("icon.file") {
+            match parse_file_icon(table) {
+                Ok(icon) => theme.file_icons.push(icon),
+                Err(message) => {
+                    warnings.push(ConfigWarning::new(file, table.line, message));
+                }
+            }
+        }
+
         (theme, warnings)
     }
 }
 
 fn parse_dir_icon(table: &Table) -> Result<DirIcon, String> {
+    let (pattern, text, fg) = parse_icon_fields(table, "[[icon.dir]]")?;
+    Ok(DirIcon { pattern, text, fg })
+}
+
+fn parse_file_icon(table: &Table) -> Result<FileIcon, String> {
+    let (pattern, text, fg) = parse_icon_fields(table, "[[icon.file]]")?;
+    Ok(FileIcon { pattern, text, fg })
+}
+
+/// The three fields both icon rules share, validated once. `what` is the table
+/// name, so a warning names the table the user actually wrote.
+fn parse_icon_fields(table: &Table, what: &str) -> Result<(String, char, Option<Color>), String> {
     let pattern = table
         .get("name")
         .and_then(Value::as_str)
-        .ok_or("[[icon.dir]] has no `name`")?;
+        .ok_or_else(|| format!("{what} has no `name`"))?;
     let text = table
         .get("text")
         .and_then(Value::as_str)
-        .ok_or("[[icon.dir]] has no `text`")?;
+        .ok_or_else(|| format!("{what} has no `text`"))?;
     let mut chars = text.chars();
     let (Some(glyph), None) = (chars.next(), chars.next()) else {
-        return Err(format!(
-            "[[icon.dir]] `text = \"{text}\"` must be one character"
-        ));
+        return Err(format!("{what} `text = \"{text}\"` must be one character"));
     };
     let fg = match table.get("fg") {
         Some(value) => match value.as_str().and_then(Color::parse) {
             Some(color) => Some(color),
-            None => return Err("[[icon.dir]] `fg` must be a colour like \"#89b4fa\"".to_string()),
+            None => return Err(format!("{what} `fg` must be a colour like \"#89b4fa\"")),
         },
         None => None,
     };
-    Ok(DirIcon {
-        pattern: pattern.to_string(),
-        text: glyph,
-        fg,
-    })
+    Ok((pattern.to_string(), glyph, fg))
 }
 
 // ── Loading ─────────────────────────────────────────────────────────────────
@@ -1483,6 +1554,44 @@ mod tests {
         let (c, warnings) = parse("[[open.rules]]\nuse = [\"open\"]\n");
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(c.rules, Config::default().rules);
+    }
+
+    /// `[[icon.file]]` ships empty and is the user's escape hatch: what they
+    /// write is what is checked, in the order they wrote it.
+    #[test]
+    fn file_icon_rules_come_only_from_the_user() {
+        assert!(Theme::default().file_icons.is_empty());
+        let (t, warnings) = Theme::parse(
+            "[[icon.file]]\nname = \"*.blend\"\ntext = \"B\"\nfg = \"#fab387\"\n\n\
+             [[icon.file]]\nname = \"*\"\ntext = \"?\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(t.file_icons.len(), 2);
+        let blend = t.file_icon("cube.blend").expect("*.blend");
+        assert_eq!(blend.text, 'B');
+        assert_eq!(blend.fg, Color::parse("#fab387"));
+        // First match wins, so the catch-all only answers for what the
+        // specific rule did not.
+        assert_eq!(t.file_icon("notes.txt").map(|i| i.text), Some('?'));
+    }
+
+    /// A bad file rule warns and the good ones still apply — PLAN §3's rule,
+    /// and the same wording the directory rules produce.
+    #[test]
+    fn a_bad_file_icon_names_its_own_table() {
+        let (t, warnings) = Theme::parse(
+            "[[icon.file]]\nname = \"*.rs\"\ntext = \"too long\"\n\n\
+             [[icon.file]]\nname = \"*.md\"\ntext = \"M\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].message.contains("[[icon.file]]"),
+            "{warnings:?}"
+        );
+        assert_eq!(t.file_icons.len(), 1);
+        assert_eq!(t.file_icon("readme.md").map(|i| i.text), Some('M'));
     }
 
     #[test]

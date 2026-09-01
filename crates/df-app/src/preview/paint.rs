@@ -723,6 +723,9 @@ fn directory_body(
             // A previewed listing is a real directory, so its column is the
             // linemode; the note override belongs to the virtual listings.
             None,
+            // …and nobody is measuring a directory nobody is in: the walk is
+            // for the pane you are standing in (PLAN §1).
+            None,
         );
         if alpha < 1.0 {
             // The crossfade, done by veiling rather than by re-tinting every

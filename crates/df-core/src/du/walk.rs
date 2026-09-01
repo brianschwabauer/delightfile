@@ -220,6 +220,9 @@ pub struct DuOptions {
     pub batch: usize,
     /// How often running totals are re-emitted. See [`UPDATE_INTERVAL`].
     pub update_interval: Duration,
+    /// Count each immediate subdirectory's entries and report them *before* the
+    /// walk starts. See [`child_counts`].
+    pub count_children: bool,
 }
 
 impl Default for DuOptions {
@@ -231,6 +234,7 @@ impl Default for DuOptions {
             hardlink_cap: MAX_HARDLINK_ENTRIES,
             batch: DU_BATCH,
             update_interval: UPDATE_INTERVAL,
+            count_children: false,
         }
     }
 }
@@ -243,6 +247,65 @@ impl DuOptions {
             ..DuOptions::default()
         }
     }
+
+    /// The same, with the cheap child-count pass turned on — what the size
+    /// column asks for, so a directory says `12 items` while its bytes are
+    /// still being added up.
+    pub fn counting_children(self) -> DuOptions {
+        DuOptions {
+            count_children: true,
+            ..self
+        }
+    }
+}
+
+/// How many subdirectories one child-count pass will visit.
+///
+/// The pass is one `read_dir` per row, so its cost is linear in what is on
+/// screen — and a screen holds a few dozen rows. 4,096 is far past any listing
+/// a person is looking at and near enough to free; past it the walk's real
+/// numbers are along shortly anyway, and a directory of 200,000 subdirectories
+/// must not turn "enter a folder" into 200,000 syscalls.
+pub const MAX_COUNTED_CHILDREN: usize = 4_096;
+
+/// How many immediate entries each of `root`'s subdirectories holds.
+///
+/// **The number that is on screen before the walk has counted a byte.** A
+/// recursive size takes seconds on a big tree; `read_dir` of one directory
+/// takes microseconds, and "12 items" is a true, useful thing to say in the
+/// meantime — where an em dash says nothing and a `0 B` would be a lie.
+///
+/// Deliberately *not* recursive and deliberately not stat'ing anything: this
+/// counts names, which is all `read_dir` hands over and all the answer claims.
+/// Symlinks to directories are skipped for the same reason [`walk`] skips them
+/// — the listing shows them as links, and following one here would count a tree
+/// that is somewhere else.
+///
+/// Returns pairs in `read_dir` order. A subdirectory that could not be read is
+/// simply absent: an unreadable folder has no honest count, and inventing a
+/// zero would be worse than the dash it replaces.
+pub fn child_counts(root: &Path, cancelled: &dyn Fn() -> bool) -> Vec<(PathBuf, u64)> {
+    let Ok(reader) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in reader.flatten() {
+        if out.len() >= MAX_COUNTED_CHILDREN || cancelled() {
+            break;
+        }
+        // `file_type` on a `DirEntry` comes from the `d_type` the kernel
+        // already returned, so this is free on every filesystem that fills it
+        // in and one `lstat` on the ones that do not.
+        if !item.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let path = item.path();
+        let Ok(children) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        out.push((path, children.count() as u64));
+    }
+    out
 }
 
 /// Whether an entry on device `child_dev` is off-limits for a walk rooted on

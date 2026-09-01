@@ -118,12 +118,38 @@ pub(crate) const GIT_DOT_COLUMN: f32 = GIT_DOT_RADIUS * 2.0 + 10.0;
 
 /// How far a gitignored row's ink is mixed back into the pane behind it.
 ///
-/// The same treatment a parent-column row gets, and for the same reason: it is
-/// there, it is legible, and it is not what you are looking at. Deliberately
-/// *not* hidden — `target/` has to stay enterable — and deliberately the same
-/// number as [`PARENT_DIM`] rather than a second one, so the window has one
-/// answer to "how far away is 'quieter'".
-pub(crate) const IGNORED_DIM: f32 = PARENT_DIM;
+/// It is there, it is legible, and it is not what you are looking at.
+/// Deliberately *not* hidden — `target/` has to stay enterable.
+///
+/// **A third, not [`PARENT_DIM`]'s 45%.** They were one number, on the argument
+/// that the window should have one answer to "how far away is quieter". They
+/// are two now because they are two different sentences: the parent column is
+/// dim because *the whole column* is context, and every row in it agrees, while
+/// an ignored row is dim in the middle of bright ones and has to stay readable
+/// against them. At 45% a `build/` sitting between two source folders was a
+/// smudge you could not read the name of; a third is unmistakably quieter and
+/// still a name.
+///
+/// The dim is also no longer the *only* signal — see [`IGNORED_TAG`]. A row
+/// that is greyer than its neighbours for a reason the user cannot see is a
+/// rendering bug as far as they are concerned.
+pub(crate) const IGNORED_DIM: f32 = 0.3;
+
+/// What an ignored row says for itself, next to the size column.
+///
+/// The word rather than a glyph: this is the answer to "why is that one grey",
+/// and the pane has no tooltips to put it in — every row here is painted, not a
+/// widget. Four letters of `overlay0` at [`TAG_SIZE`] is quieter than the size
+/// beside it and still a word you can read.
+pub(crate) const IGNORED_TAG: &str = "ignored";
+
+/// The tag's text size, in logical points. Two under the row's, which is the
+/// smallest step that reads as a different *register* rather than as a
+/// rendering accident, and still above `ui-anti-slop`'s 12 pt floor.
+const TAG_SIZE: f32 = FONT_SIZE - 2.0;
+
+/// The gap between the tag and whatever is to its right.
+const TAG_GAP: f32 = 8.0;
 
 /// The focused pane's accent rule, in logical points (PLAN §2.1).
 const FOCUS_RULE: f32 = 2.0;
@@ -264,8 +290,8 @@ pub struct GhostFace<'a> {
 /// yet, so it should read as "nearly nothing" beside a real modification.
 ///
 /// [`df_core::git::FileStatus::Ignored`] gets no dot at all. It is said with
-/// [`IGNORED_DIM`] instead — a dot would be a mark drawing the eye to the one
-/// row in the pane that is asking for less of it.
+/// [`IGNORED_DIM`] and [`IGNORED_TAG`] instead — a dot would be a mark drawing
+/// the eye to the one row in the pane that is asking for less of it.
 /// The git decoration for one row.
 ///
 /// Two fields rather than one `Option`, because "this pane is in a repository"
@@ -277,6 +303,15 @@ pub struct GhostFace<'a> {
 pub(crate) struct GitMark {
     pub column: bool,
     pub status: Option<df_core::git::FileStatus>,
+    /// Whether this pane spells out *why* an ignored row is dim (see
+    /// [`IGNORED_TAG`]).
+    ///
+    /// The list pane does. The parent column does not, and neither does a
+    /// previewed listing: both of those are already uniformly dim for a reason
+    /// of their own, so a tag there would be explaining the wrong dimming — and
+    /// the parent column is one name wide, with no room for a second word
+    /// anyway.
+    pub explain: bool,
 }
 
 pub(crate) fn git_dot(
@@ -579,6 +614,15 @@ pub struct ListView<'a> {
     /// name. `None` — every listing but that one — costs a `None` check per row
     /// and nothing else.
     pub notes: Option<&'a std::collections::HashMap<String, String>>,
+    /// What the background walk has said about this pane's directories
+    /// (PLAN §7.3), or `None` when folder sizes are off, when the listing is
+    /// virtual, or in a pane whose linemode is not the size.
+    ///
+    /// It fills in the size column for directory rows only, and only when
+    /// neither [`ListView::usage`] nor [`ListView::notes`] has claimed that
+    /// column first — the three are the same strip of pixels and the one that
+    /// was asked for most explicitly wins.
+    pub folders: Option<&'a crate::folders::Folders>,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -665,6 +709,7 @@ impl Painting<'_> {
             git,
             usage,
             notes,
+            folders,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
@@ -801,6 +846,8 @@ impl Painting<'_> {
                 GitMark {
                     column: git.is_some(),
                     status,
+                    // Not in the parent column: see [`GitMark::explain`].
+                    explain: !dim,
                 },
                 usage.map(|usage| {
                     // A directory's weight comes from the walk; a file's is
@@ -818,6 +865,7 @@ impl Painting<'_> {
                 notes
                     .and_then(|notes| notes.get(&entry.name))
                     .map(String::as_str),
+                folders,
             );
         }
         self.flip_ghosts(&painter, flip, content, ROW_RADIUS);
@@ -859,6 +907,11 @@ impl Painting<'_> {
         // Outranked by `usage` for the reason above, and outranking the
         // linemode for the reason in [`ListView::notes`].
         note: Option<&str>,
+        // Recursive directory sizes, when they are being measured for this
+        // pane (PLAN §7.3). Last in precedence: it fills in the one thing the
+        // plain linemode cannot say, and gets out of the way of the two modes
+        // that own the column outright.
+        folders: Option<&crate::folders::Folders>,
     ) {
         let mute = mute.clamp(0.0, 1.0);
         let fade = |c: egui::Color32| {
@@ -892,7 +945,13 @@ impl Painting<'_> {
         let mode_text = match (&usage, note) {
             (Some(usage), _) => usage.label(),
             (None, Some(note)) => note.to_string(),
-            (None, None) => linemode_text(entry, linemode),
+            // A directory's recursive size, if the walk has one — otherwise the
+            // linemode's own answer, which for a directory is the em dash it
+            // has always been.
+            (None, None) => folders
+                .filter(|_| linemode == LineMode::Size && entry.is_dir())
+                .and_then(|folders| folders.label(&entry.name))
+                .unwrap_or_else(|| linemode_text(entry, linemode)),
         };
         let mode_width = if mode_text.is_empty() {
             0.0
@@ -941,6 +1000,31 @@ impl Painting<'_> {
                 }
                 mode_width + USAGE_BAR + USAGE_BAR_GAP
             }
+        };
+
+        // `ignored`, left of the dot column: the word that says why this row is
+        // grey. Drawn at *half* the row's mute rather than at all of it —
+        // fading the explanation as hard as the thing it explains is how the
+        // reason ends up as unreadable as the problem.
+        let mode_width = if git.explain && git.status == Some(df_core::git::FileStatus::Ignored) {
+            let galley = painter.layout_no_wrap(
+                IGNORED_TAG.to_string(),
+                egui::FontId::proportional(TAG_SIZE),
+                self.palette.overlay0,
+            );
+            let width = galley.size().x;
+            let colour = mix(self.palette.overlay0, ground, mute * 0.5);
+            painter.galley(
+                egui::pos2(
+                    rect.right() - ROW_PAD_X - mode_width - width,
+                    rect.center().y - galley.size().y / 2.0,
+                ),
+                galley,
+                colour,
+            );
+            mode_width + width + TAG_GAP
+        } else {
+            mode_width
         };
 
         // The dot sits between the name and the linemode column, so the two
@@ -1585,6 +1669,7 @@ mod tests {
         let with = GitMark {
             column: true,
             status: None,
+            explain: true,
         };
         let without = GitMark::default();
         assert!(with.column && with.status.is_none());
