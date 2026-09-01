@@ -1,5 +1,6 @@
-//! The `wl_data_device` client: dragging files out, and taking a drop in
-//! (PLAN §7.1, the plan's own "biggest technical risk").
+//! The `wl_data_device` client: dragging files out, taking a drop in
+//! (PLAN §7.1, the plan's own "biggest technical risk"), and owning the
+//! clipboard selection (PLAN §7.4).
 //!
 //! ## Why there is no hand-rolled wire client here
 //!
@@ -49,11 +50,41 @@
 //! ## Where the serial comes from
 //!
 //! winit does not expose input serials, so this queue binds **its own
-//! `wl_pointer`** on the same seat. A client that has two pointer resources
-//! gets every button event on both, with the *same* serial — serials are the
+//! `wl_pointer`** on the same seat — and, since `c c` is a *keyboard* gesture,
+//! its own `wl_keyboard` too. A client that has two pointer resources gets
+//! every button event on both, with the *same* serial — serials are the
 //! compositor's, not the object's — so the number recorded here is the number
 //! the implicit grab is keyed by. Again, `smithay-clipboard` does the same
-//! thing for `set_selection`.
+//! thing for `set_selection`, keyboard included; the keyboard here does nothing
+//! else, and its keymap fd is dropped (and so closed) on arrival, because winit
+//! is the one translating keys.
+//!
+//! The two serials are *not* interchangeable, so [`Serials`] keeps them apart:
+//! `start_drag` may only name the serial of a button press that is still held
+//! (a release ends the implicit grab), while `set_selection` wants the serial
+//! of whatever input event triggered it — the key press that spelled `c c`,
+//! most of the time.
+//!
+//! ## The selection
+//!
+//! A copy is a `wl_data_source` offering [`crate::clipboard::offer_mimes`]'s
+//! types, handed to `wl_data_device.set_selection`; a `send` is answered from
+//! this thread with the same [`hand_over`] and the same [`SEND_TIMEOUT`] that
+//! serves a drag, and `cancelled` — another client took the clipboard — drops
+//! the source and its bytes. Because the compositor only calls back while we
+//! are alive, quitting hands the clipboard back; [`crate::clipboard`]'s header
+//! argues that trade.
+//!
+//! Paste is the same machinery pointed the other way. Incoming
+//! `wl_data_device.selection` offers used to be destroyed on arrival; now the
+//! current one is kept with its mime list and mirrored to the window as
+//! [`Event::Selection`], so `p` can decide what to ask for without a round
+//! trip. The `receive` and the pipe read happen **here**, with
+//! [`RECEIVE_TIMEOUT`], and the bytes go back over the event channel — a paste
+//! must never park the paint loop on a pipe some other application is filling.
+//! Pasting our *own* selection is served straight out of memory: asking the
+//! compositor would have this thread waiting for bytes only this thread can
+//! write.
 //!
 //! ## Sharing a socket with winit, safely
 //!
@@ -107,6 +138,8 @@ use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -119,6 +152,7 @@ use wayland_client::protocol::{
     wl_data_device_manager::{DndAction, WlDataDeviceManager},
     wl_data_offer::{self, WlDataOffer},
     wl_data_source::{self, WlDataSource},
+    wl_keyboard::{self, WlKeyboard},
     wl_pointer::{self, WlPointer},
     wl_registry::WlRegistry,
     wl_seat::{self, WlSeat},
@@ -165,6 +199,21 @@ pub enum Event {
     },
     /// **Our** outgoing drag is over, whatever became of it.
     DragEnded,
+    /// The clipboard changed hands: this is what it now offers, in the order
+    /// the owner announced it. Empty when the selection was cleared.
+    Selection {
+        mimes: Vec<String>,
+    },
+    /// The compositor's answer to a [`Command::SetSelection`]. `false` means
+    /// the copy did *not* happen and the window must say so.
+    Copied {
+        ok: bool,
+    },
+    /// The bytes a [`Command::Receive`] asked for. `None` when there was no
+    /// offer left to ask, which is a clipboard that changed under the paste.
+    Pasted {
+        bytes: Option<Vec<u8>>,
+    },
 }
 
 /// What the paint thread asks the wayland thread to do.
@@ -175,6 +224,20 @@ enum Command {
         card: Rgba,
         ink: Rgba,
         scale: i32,
+    },
+    /// Take the clipboard, offering one payload under `mimes`.
+    ///
+    /// One `bytes` for all of them rather than a list of pairs like a drag's:
+    /// every copy this program makes is one thing under one or two names, and
+    /// a `Vec<(String, Vec<u8>)>` would mean a second 50 MB in the channel to
+    /// say so.
+    SetSelection {
+        mimes: Vec<String>,
+        bytes: Vec<u8>,
+    },
+    /// Ask the current selection for `mime` and read the pipe.
+    Receive {
+        mime: String,
     },
     Exit,
 }
@@ -187,6 +250,13 @@ pub struct DataDevice {
     /// wayland fd *and* this one, so a command sent from the paint thread wakes
     /// it without a timeout to poll on (PLAN §1: no polling loops).
     bell: OwnedFd,
+    /// Set once the thread has a seat, a manager and a data device — i.e. once
+    /// there is a clipboard to take. The handle exists as soon as the thread
+    /// spawns, but the thread bails out on a session that has none of that, and
+    /// a command sent into a dead thread would be a copy that never happened
+    /// and never said so. [`crate::clipboard`]'s `wl-copy` path is what the
+    /// window falls back to while this is false.
+    ready: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -222,16 +292,39 @@ impl DataDevice {
         let (bell_read, bell) = pipe()?;
         let (commands, rx) = crossbeam_channel::unbounded();
         let (tx, events) = crossbeam_channel::unbounded();
+        let ready = Arc::new(AtomicBool::new(false));
+        let mine = ready.clone();
         let thread = std::thread::Builder::new()
             .name("df-wayland".to_string())
-            .spawn(move || run(connection, origin, bell_read, rx, tx, waker))
+            .spawn(move || run(connection, origin, bell_read, rx, tx, waker, mine))
             .ok()?;
         Some(DataDevice {
             commands,
             events,
             bell,
+            ready,
             thread: Some(thread),
         })
+    }
+
+    /// Is there a data device to talk to? See the `ready` field above for what
+    /// the window does when there is not.
+    pub fn ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
+    /// Take the clipboard, offering `bytes` under every name in `mimes`.
+    ///
+    /// Answered later with [`Event::Copied`] — the toast waits for it, because
+    /// "Copied" before the compositor has accepted the selection is a claim
+    /// this program cannot make yet.
+    pub fn set_selection(&self, mimes: Vec<String>, bytes: Vec<u8>) {
+        self.send(Command::SetSelection { mimes, bytes });
+    }
+
+    /// Ask the clipboard for `mime`. Answered with [`Event::Pasted`].
+    pub fn receive(&self, mime: String) {
+        self.send(Command::Receive { mime });
     }
 
     /// Start a drag out of the window, offering `offers` and carrying an icon
@@ -343,9 +436,10 @@ fn run(
     commands: Receiver<Command>,
     events: Sender<Event>,
     waker: Waker,
+    ready: Arc<AtomicBool>,
 ) {
     let Ok((globals, mut queue)) = registry_queue_init::<State>(&connection) else {
-        log::info!("wayland: no registry — drag and drop is off");
+        log::info!("wayland: no registry — drag and drop and the clipboard are off");
         return;
     };
     let qh = queue.handle();
@@ -354,22 +448,23 @@ fn run(
     let origin = unsafe { ObjectId::from_ptr(WlSurface::interface(), origin as *mut _) }
         .ok()
         .and_then(|id| WlSurface::from_id(&connection, id).ok());
-    let Some(origin) = origin else {
+    if origin.is_none() {
+        // Only *drag-out* names a surface; the clipboard does not, so this is
+        // one feature lost rather than the thread's reason to exist.
         log::info!("wayland: the window is not a wl_surface — drag-out is off");
-        return;
-    };
+    }
 
     let manager = match globals.bind::<WlDataDeviceManager, _, _>(&qh, 1..=3, ()) {
         Ok(manager) => manager,
         Err(e) => {
-            log::info!("wayland: no data device manager ({e}) — drag and drop is off");
+            log::info!("wayland: no data device manager ({e}) — drag, drop and clipboard are off");
             return;
         }
     };
     let seat = match globals.bind::<WlSeat, _, _>(&qh, 1..=7, ()) {
         Ok(seat) => seat,
         Err(e) => {
-            log::info!("wayland: no seat ({e}) — drag and drop is off");
+            log::info!("wayland: no seat ({e}) — drag, drop and clipboard are off");
             return;
         }
     };
@@ -385,20 +480,27 @@ fn run(
         manager,
         device,
         events,
-        serial: None,
+        serials: Serials::default(),
         offers: Vec::new(),
         incoming: None,
         source: None,
         payload: Vec::new(),
+        selection: None,
+        selection_mimes: Vec::new(),
+        selection_bytes: Vec::new(),
+        selection_offer: None,
         icon: None,
         pending: false,
         exit: false,
     };
-    // The seat's capabilities arrive on the first round trip; the pointer this
-    // thread's serials come from is created when they do.
+    // The seat's capabilities arrive on the first round trip; the pointer and
+    // keyboard this thread's serials come from are created when they do. The
+    // compositor also hands a focused client its current selection here, which
+    // is what makes the mirror right before the first `p`.
     let _ = queue.roundtrip(&mut state);
+    ready.store(true, Ordering::Relaxed);
     log::info!(
-        "wayland: data device ready (manager v{}, icon {})",
+        "wayland: data device ready (manager v{}, icon {}) — clipboard is native",
         state.manager.version(),
         if state.shm.is_some() && state.compositor.is_some() {
             "on"
@@ -420,6 +522,18 @@ fn run(
                     ink,
                     scale,
                 } => state.start_drag(&qh, offers, count, card, ink, scale),
+                Command::SetSelection { mimes, bytes } => {
+                    // The toast waits on this answer, so the round trip is
+                    // here rather than a flush: it is the compositor saying it
+                    // has the selection, and a `cancelled` that arrives inside
+                    // it (somebody else was faster) clears the source again.
+                    let asked = state.set_selection(&qh, mimes, bytes);
+                    let ok = asked && queue.roundtrip(&mut state).is_ok();
+                    state.tell(Event::Copied {
+                        ok: ok && state.selection.is_some(),
+                    });
+                }
+                Command::Receive { mime } => state.take_paste(mime),
             }
         }
         if state.exit {
@@ -457,24 +571,72 @@ fn run(
         }
     }
     // Whatever is still in flight is cancelled by the objects going away, and
-    // the compositor treats a destroyed source as a cancelled drag.
+    // the compositor treats a destroyed source as a cancelled drag. The
+    // selection goes the same way, and deliberately: a source whose thread has
+    // stopped dispatching would leave the next application to paste waiting on
+    // a pipe nobody is going to write into.
+    if let Some(selection) = state.selection.take() {
+        selection.destroy();
+    }
     state.clear_icon();
+    let _ = connection.flush();
+}
+
+/// The two serials this thread harvests, kept apart because the compositor
+/// keeps them apart.
+///
+/// `start_drag` may only name the serial of a pointer press whose implicit
+/// grab is *still held* — a release ends the grab, so remembering its serial
+/// would mean sometimes starting a drag the compositor refuses. `set_selection`
+/// wants something else entirely: the serial of whatever input event the user
+/// meant by it, which for `c c` is a key press and never a button at all.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Serials {
+    grab: Option<u32>,
+    latest: Option<u32>,
+}
+
+impl Serials {
+    fn button(&mut self, serial: u32, pressed: bool) {
+        if pressed {
+            self.grab = Some(serial);
+        }
+        self.latest = Some(serial);
+    }
+
+    /// A key press or release, or the keyboard focus arriving. All three are
+    /// serials `set_selection` may be made with, and the focus one matters:
+    /// it is the only serial a window that has been clicked into but not typed
+    /// in yet has.
+    fn key(&mut self, serial: u32) {
+        self.latest = Some(serial);
+    }
+
+    /// The implicit grab a `start_drag` names.
+    fn grab(&self) -> Option<u32> {
+        self.grab
+    }
+
+    /// The last input serial of any kind — what `set_selection` names.
+    fn latest(&self) -> Option<u32> {
+        self.latest
+    }
 }
 
 /// Everything the thread holds between events.
 struct State {
     connection: Connection,
     /// winit's window surface — the drag's origin, and the only surface a
-    /// `start_drag` of ours may name.
-    origin: WlSurface,
+    /// `start_drag` of ours may name. `None` only in the odd session where the
+    /// handle did not resolve, which costs drag-out and not the clipboard.
+    origin: Option<WlSurface>,
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     manager: WlDataDeviceManager,
     device: WlDataDevice,
     events: Sender<Event>,
-    /// The serial of the last pointer button *press*: the implicit grab a
-    /// `start_drag` has to name.
-    serial: Option<u32>,
+    /// The input serials a `start_drag` and a `set_selection` are made with.
+    serials: Serials,
     /// What each live offer says it can provide.
     offers: Vec<(ObjectId, Vec<String>)>,
     /// The drag currently over our window, and the mime we accepted from it.
@@ -482,6 +644,14 @@ struct State {
     source: Option<WlDataSource>,
     /// The bytes our own source will hand over, by mime.
     payload: Vec<(String, Vec<u8>)>,
+    /// The clipboard source, while this program owns the selection.
+    selection: Option<WlDataSource>,
+    /// What that source announced, and the one payload all of it names.
+    selection_mimes: Vec<String>,
+    selection_bytes: Vec<u8>,
+    /// The selection somebody *else* is offering — kept alive, because an
+    /// offer that has been destroyed is an offer nothing can be received from.
+    selection_offer: Option<WlDataOffer>,
     icon: Option<(WlSurface, WlBuffer, WlShmPool)>,
     /// Something has been put on the channel that the window has not been told
     /// about yet.
@@ -513,7 +683,7 @@ impl State {
         ink: Rgba,
         scale: i32,
     ) {
-        let Some(serial) = self.serial else {
+        let (Some(serial), Some(origin)) = (self.serials.grab(), self.origin.clone()) else {
             // No button press has been seen on this queue, so there is no
             // implicit grab to name and the compositor would refuse.
             log::debug!("wayland: no grab serial — drag-out skipped");
@@ -539,7 +709,7 @@ impl State {
         self.payload = offers;
         let icon = self.make_icon(qh, count, card, ink, scale);
         self.device
-            .start_drag(Some(&source), &self.origin, icon.as_ref(), serial);
+            .start_drag(Some(&source), &origin, icon.as_ref(), serial);
         if let Some(surface) = icon {
             // The role is set by `start_drag`, so the buffer goes on after it.
             if let Some((buffer, _)) = self.icon.as_ref().map(|(_, b, p)| (b, p)) {
@@ -645,6 +815,89 @@ impl State {
         let _ = self.connection.flush();
         self.tell(Event::Drop { paths, ours });
     }
+
+    // ── The selection (PLAN §7.4) ───────────────────────────────────────────
+
+    /// Take the clipboard. `false` when there was no serial to take it with,
+    /// which is the one refusal we can see coming.
+    ///
+    // VERIFY-LIVE: `c c` in delightfile, then paste into a terminal, a browser
+    // address bar and a GTK app; `Y` on an image and paste into GIMP; `Y` on a
+    // multi-file selection and paste into Nautilus. None of the compositor's
+    // half of this — the serial being accepted, another client's paste
+    // arriving as a `send` — exists without a real compositor and a real
+    // second application. `RUST_LOG=info` names the path each copy took.
+    fn set_selection(
+        &mut self,
+        qh: &QueueHandle<State>,
+        mimes: Vec<String>,
+        bytes: Vec<u8>,
+    ) -> bool {
+        let Some(serial) = self.serials.latest() else {
+            log::warn!("wayland: no input serial — the compositor would refuse set_selection");
+            return false;
+        };
+        // Out first, so the `cancelled` the compositor sends the old source
+        // when the new one takes over arrives for an object this thread has
+        // already stopped believing in.
+        let previous = self.selection.take();
+        let source = self.manager.create_data_source(qh, ());
+        for mime in &mimes {
+            source.offer(mime.clone());
+        }
+        self.device.set_selection(Some(&source), serial);
+        self.selection = Some(source);
+        self.selection_mimes = mimes;
+        self.selection_bytes = bytes;
+        if let Some(previous) = previous {
+            previous.destroy();
+        }
+        true
+    }
+
+    /// Our own selection is the one being pasted, and these mimes are ours.
+    ///
+    /// Both halves matter. Owning a source is not enough on its own — for the
+    /// instant between another client taking the clipboard and our `cancelled`
+    /// arriving, both could look true — so the offer's own mime list has to be
+    /// the list we announced as well.
+    fn owns_selection(&self, mime: &str) -> bool {
+        self.selection.is_some()
+            && self.selection_mimes.iter().any(|known| known == mime)
+            && self
+                .selection_offer
+                .as_ref()
+                .is_some_and(|offer| self.mimes(offer) == self.selection_mimes)
+    }
+
+    /// The clipboard changed hands. Keep the offer and tell the window what is
+    /// on it.
+    fn take_selection(&mut self, offer: Option<WlDataOffer>) {
+        if let Some(previous) = self.selection_offer.take() {
+            self.offers.retain(|(id, _)| *id != previous.id());
+            previous.destroy();
+        }
+        let mimes = offer.as_ref().map(|o| self.mimes(o)).unwrap_or_default();
+        self.selection_offer = offer;
+        self.tell(Event::Selection { mimes });
+    }
+
+    /// Read the clipboard, here, and send the bytes back to the window.
+    fn take_paste(&mut self, mime: String) {
+        if self.owns_selection(&mime) {
+            // Our own copy. Going through the compositor would have this
+            // thread blocked on a pipe that only this thread can write into —
+            // the `send` arrives as an event nobody is left to dispatch.
+            let bytes = self.selection_bytes.clone();
+            self.tell(Event::Pasted { bytes: Some(bytes) });
+            return;
+        }
+        let bytes = self
+            .selection_offer
+            .as_ref()
+            .and_then(|offer| receive(&self.connection, offer, &mime));
+        self.tell(Event::Pasted { bytes });
+    }
 }
 
 /// Ask an offer for one mime and read the pipe it writes into.
@@ -737,11 +990,41 @@ impl Dispatch<WlSeat, ()> for State {
             capabilities: WEnum::Value(capabilities),
         } = event
         {
+            // The whole reason this thread has input objects at all: serials.
+            // The pointer's press serial is the drag's implicit grab; the
+            // keyboard's is what a `set_selection` from `c c` is made with.
+            let _ = state;
             if capabilities.contains(wl_seat::Capability::Pointer) {
-                // The whole reason this thread has a pointer at all: serials.
-                let _ = state;
                 seat.get_pointer(qh, ());
             }
+            if capabilities.contains(wl_seat::Capability::Keyboard) {
+                seat.get_keyboard(qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            // Presses *and* releases: unlike a drag's grab there is nothing to
+            // still be holding, so the last input serial is simply the last
+            // one, and a `c c` released before the frame runs must not lose it.
+            wl_keyboard::Event::Key { serial, .. } => state.serials.key(serial),
+            wl_keyboard::Event::Enter { serial, .. } => state.serials.key(serial),
+            // The keymap is winit's business, not ours — this keyboard exists
+            // for its serials. The fd arrives owned and is dropped here, which
+            // closes it; leaking one per focus change would be a descriptor
+            // leak in the longest-running thread in the program.
+            wl_keyboard::Event::Keymap { fd, .. } => drop(fd),
+            _ => {}
         }
     }
 }
@@ -755,16 +1038,18 @@ impl Dispatch<WlPointer, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        // Only presses. A release ends the implicit grab, so its serial is no
-        // longer one a `start_drag` may name, and remembering it would mean
-        // sometimes starting a drag with a serial the compositor rejects.
+        // Both ends of a click, and [`Serials`] files them differently: only a
+        // press is an implicit grab a `start_drag` may name, while either is
+        // an input serial a `set_selection` may be made with.
         if let wl_pointer::Event::Button {
             serial,
-            state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+            state: WEnum::Value(button),
             ..
         } = event
         {
-            state.serial = Some(serial);
+            state
+                .serials
+                .button(serial, button == wl_pointer::ButtonState::Pressed);
         }
     }
 }
@@ -839,12 +1124,16 @@ impl Dispatch<WlDataDevice, ()> for State {
                 state.tell(Event::Leave);
             }
             wl_data_device::Event::Drop => state.take_drop(),
-            // The clipboard's offer, which is `wl-paste`'s business
-            // ([`crate::clipboard`]) and not this file's.
-            wl_data_device::Event::Selection { id: Some(offer) } => {
-                state.offers.retain(|(known, _)| *known != offer.id());
-                offer.destroy();
-            }
+            // The clipboard, ours or somebody else's. This used to be
+            // destroyed on sight and pasting shelled out to `wl-paste`; the
+            // offer is now kept, because it is the only thing a `receive` can
+            // be asked of (see the module header's "The selection").
+            //
+            // VERIFY-LIVE: copy in another application, then `p` here with
+            // nothing yanked — a `text/uri-list` from a file manager should
+            // paste files, an image from a screenshot tool should land a PNG,
+            // text should land a `.txt`. `RUST_LOG=info` shows the path taken.
+            wl_data_device::Event::Selection { id } => state.take_selection(id),
             _ => {}
         }
     }
@@ -880,6 +1169,39 @@ impl Dispatch<WlDataSource, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        // The clipboard's source, which outlives every drag and answers a
+        // `send` for as long as this program owns the selection.
+        if state.selection.as_ref() == Some(source) {
+            match event {
+                wl_data_source::Event::Send { mime_type, fd } => {
+                    if state.selection_mimes.contains(&mime_type) {
+                        // Taken out and put back rather than cloned: this is a
+                        // file's contents, up to `clipboard::SIZE_CAP` of it,
+                        // and every paste from every application lands here.
+                        let bytes = std::mem::take(&mut state.selection_bytes);
+                        hand_over(fd, &bytes);
+                        state.selection_bytes = bytes;
+                    } else {
+                        // Asked for something we never offered: close the pipe
+                        // empty rather than leave the other side waiting.
+                        drop(fd);
+                    }
+                }
+                // Another client took the clipboard. Ours is over — the source
+                // may not be used again, and the bytes it was holding are no
+                // longer anybody's business.
+                wl_data_source::Event::Cancelled => {
+                    if let Some(source) = state.selection.take() {
+                        source.destroy();
+                    }
+                    state.selection_mimes.clear();
+                    state.selection_bytes = Vec::new();
+                    log::info!("wayland: another client took the clipboard");
+                }
+                _ => {}
+            }
+            return;
+        }
         // A source that is not the live one is a drag that has already ended;
         // its events are noise from an object on its way out.
         if state.source.as_ref() != Some(source) {
@@ -910,3 +1232,42 @@ wayland_client::delegate_noop!(State: ignore WlSurface);
 wayland_client::delegate_noop!(State: ignore WlShm);
 wayland_client::delegate_noop!(State: ignore WlShmPool);
 wayland_client::delegate_noop!(State: ignore WlBuffer);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two serials, and the rule that keeps them apart.
+    #[test]
+    fn a_release_ends_the_grab_but_is_still_an_input_serial() {
+        let mut serials = Serials::default();
+        assert_eq!(serials.grab(), None);
+        assert_eq!(serials.latest(), None);
+
+        serials.button(7, true);
+        assert_eq!(serials.grab(), Some(7));
+        assert_eq!(serials.latest(), Some(7));
+
+        // The release is not a grab — a `start_drag` naming it would be
+        // refused — but it *is* the most recent input event on the seat.
+        serials.button(8, false);
+        assert_eq!(serials.grab(), Some(7));
+        assert_eq!(serials.latest(), Some(8));
+    }
+
+    /// A keyboard-triggered copy has a serial even though nothing was clicked.
+    #[test]
+    fn a_key_press_gives_a_selection_serial_and_no_grab() {
+        let mut serials = Serials::default();
+        serials.key(12);
+        assert_eq!(serials.latest(), Some(12));
+        assert_eq!(serials.grab(), None, "a key is not an implicit grab");
+
+        // …and typing after a click does not make the old press look fresh.
+        let mut serials = Serials::default();
+        serials.button(3, true);
+        serials.key(4);
+        assert_eq!(serials.grab(), Some(3));
+        assert_eq!(serials.latest(), Some(4));
+    }
+}

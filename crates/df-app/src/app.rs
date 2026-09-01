@@ -908,6 +908,19 @@ pub struct App {
     /// of it is written so that is simply a session without cross-application
     /// drags rather than a session with a hole in it.
     data_device: Option<crate::wayland::DataDevice>,
+    /// What the system clipboard is offering, mirrored from the data device's
+    /// `selection` events (PLAN §7.4). Kept rather than asked for, because
+    /// asking means `wl-paste --list-types` and a process spawn inside a frame.
+    clipboard_types: Vec<String>,
+    /// Has the compositor ever told us about a selection? Until it has, the
+    /// mirror being empty means "we have not been told", not "the clipboard is
+    /// empty" — and a paste guesses wrong either way, so it shells out instead.
+    clipboard_seen: bool,
+    /// The toast a copy will show *if* the compositor takes the selection. A
+    /// copy is not a copy until it has (see [`crate::wayland`]).
+    pending_copy: Option<String>,
+    /// What a paste will do with the bytes it asked the clipboard for.
+    pending_paste: Option<PendingPaste>,
     /// The files in the hand, while there are any.
     drag: Option<Drag>,
     /// A tab chip being pulled out of the strip (PLAN §2's "drag a tab out to
@@ -1001,6 +1014,18 @@ struct SpringHome {
     spring: dnd::SpringBack,
     label: String,
     icon: crate::icons::Icon,
+}
+
+/// A paste that has asked the clipboard for its bytes and is waiting for them.
+///
+/// The wait is the point: the read happens on [`crate::wayland`]'s thread, over
+/// a pipe some other application is filling at its own pace, so the decision of
+/// *what this paste is* is made when `p` is pressed and acted on a frame or two
+/// later when the bytes arrive.
+struct PendingPaste {
+    offer: crate::clipboard::Offer,
+    /// Whether the paste overwrites without asking — `P` rather than `p`.
+    force: bool,
 }
 
 /// A drag from another application, over our window.
@@ -1199,6 +1224,10 @@ impl App {
             flip_before: None,
             last_layout: Snapshot::new(),
             data_device: None,
+            clipboard_types: Vec::new(),
+            clipboard_seen: false,
+            pending_copy: None,
+            pending_paste: None,
             drag: None,
             tab_drag: None,
             windows: crate::window::Windows::default(),
@@ -7668,6 +7697,36 @@ impl App {
                     self.press = None;
                     self.targets.tick(None, None, now);
                 }
+                crate::wayland::Event::Selection { mimes } => {
+                    self.clipboard_types = mimes;
+                    self.clipboard_seen = true;
+                }
+                crate::wayland::Event::Copied { ok } => {
+                    let Some(message) = self.pending_copy.take() else {
+                        continue;
+                    };
+                    if ok {
+                        log::info!("clipboard: copied via wl_data_device");
+                        self.toasts.notice(message, now);
+                    } else {
+                        // The one thing worse than a copy that fails is a copy
+                        // that fails and says "Copied".
+                        self.toasts.error("The compositor refused the copy", now);
+                    }
+                }
+                crate::wayland::Event::Pasted { bytes } => {
+                    let Some(pending) = self.pending_paste.take() else {
+                        continue;
+                    };
+                    match bytes {
+                        // The clipboard changed hands between `p` and the read
+                        // that answered it, or the owner never wrote anything.
+                        None => self
+                            .toasts
+                            .error("The clipboard did not hand anything over", now),
+                        Some(bytes) => self.take_pasted(pending, bytes, now),
+                    }
+                }
             }
         }
     }
@@ -7844,20 +7903,39 @@ impl App {
     }
 
     /// Hand bytes to the clipboard and say what happened, either way.
+    ///
+    /// The toast is *not* shown here on the native path. `set_selection` is a
+    /// request, and until the compositor has answered it the only honest thing
+    /// to say is nothing: the old shell-out claimed "Copied" the moment
+    /// `wl-copy`'s parent exited, which it does before its forked server has
+    /// taken anything. The message waits in [`App::pending_copy`] for
+    /// [`crate::wayland::Event::Copied`].
     fn offer(&mut self, mime: Option<&str>, bytes: &[u8], message: String, now: Instant) {
+        if self.data_device.as_ref().is_some_and(|d| d.ready()) {
+            let mimes = crate::clipboard::offer_mimes(mime);
+            if let Some(device) = &self.data_device {
+                device.set_selection(mimes, bytes.to_vec());
+            }
+            self.pending_copy = Some(message);
+            return;
+        }
+        // No data device: an X11 session, or a compositor without the
+        // protocol. `wl-copy` is the fallback and its failures are failures.
         match crate::clipboard::copy(mime, bytes) {
-            Ok(()) => self.toasts.notice(message, now),
+            Ok(()) => {
+                log::info!("clipboard: copied via wl-copy ({} bytes)", bytes.len());
+                self.toasts.notice(message, now);
+            }
             Err(error) => self.clip_failed(error, now),
         }
     }
 
     fn clip_failed(&mut self, error: crate::clipboard::ClipError, now: Instant) {
-        match error {
-            // `wl-clipboard` not being installed is not something the user did,
-            // so it is a plain notice rather than a red bar.
-            crate::clipboard::ClipError::Missing(_) => self.toasts.notice(error.to_string(), now),
-            crate::clipboard::ClipError::Failed(_) => self.toasts.error(error.to_string(), now),
-        }
+        // Red, whichever it is. A missing `wl-clipboard` is only ever reached
+        // when the protocol was not there either, so it is not a degradation
+        // any more — it is a copy that did not happen, and a quiet grey notice
+        // for that is how a clipboard silently stops working.
+        self.toasts.error(error.to_string(), now);
     }
 
     /// What a path is, and how big — the two inputs to
@@ -7913,6 +7991,23 @@ impl App {
     /// case, which is also the case where the old behaviour was a notice saying
     /// there was nothing to paste.
     fn paste_system(&mut self, force: bool, now: Instant) {
+        // The native path decides from the mirror and then *waits*: the read
+        // is a pipe another application fills, and doing that here would park
+        // the paint loop for as long as it felt like taking.
+        let native = self.clipboard_seen && self.data_device.as_ref().is_some_and(|d| d.ready());
+        if native {
+            let Some(offer) = crate::clipboard::choose_offer(&self.clipboard_types) else {
+                self.toasts.notice("Nothing yanked — y copies, x cuts", now);
+                return;
+            };
+            let mime = offer.mime().to_string();
+            log::info!("clipboard: pasting {mime} via wl_data_device");
+            self.pending_paste = Some(PendingPaste { offer, force });
+            if let Some(device) = &self.data_device {
+                device.receive(mime);
+            }
+            return;
+        }
         let types = match crate::clipboard::offered_types() {
             Ok(types) => types,
             Err(error) => {
@@ -7920,25 +8015,37 @@ impl App {
                 return;
             }
         };
-        match crate::clipboard::choose_offer(&types) {
-            None => self.toasts.notice("Nothing yanked — y copies, x cuts", now),
-            Some(crate::clipboard::Offer::Files) => self.paste_clipboard_files(force, now),
-            Some(crate::clipboard::Offer::Image(mime)) => {
-                let extension = crate::clipboard::image_extension(&mime);
-                self.save_clipboard(&mime, extension, now);
+        let Some(offer) = crate::clipboard::choose_offer(&types) else {
+            self.toasts.notice("Nothing yanked — y copies, x cuts", now);
+            return;
+        };
+        let mime = offer.mime().to_string();
+        match crate::clipboard::paste(&mime) {
+            Ok(bytes) => {
+                log::info!(
+                    "clipboard: pasted {mime} via wl-paste ({} bytes)",
+                    bytes.len()
+                );
+                self.take_pasted(PendingPaste { offer, force }, bytes, now);
             }
-            Some(crate::clipboard::Offer::Text(mime)) => self.save_clipboard(&mime, "txt", now),
+            Err(error) => self.clip_failed(error, now),
         }
     }
 
-    fn paste_clipboard_files(&mut self, force: bool, now: Instant) {
-        let bytes = match crate::clipboard::paste("text/uri-list") {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.clip_failed(error, now);
-                return;
+    /// The bytes the clipboard finally handed over, whichever path fetched
+    /// them, and what the paste that asked for them meant to do.
+    fn take_pasted(&mut self, pending: PendingPaste, bytes: Vec<u8>, now: Instant) {
+        match pending.offer {
+            crate::clipboard::Offer::Files => self.paste_clipboard_files(bytes, pending.force, now),
+            crate::clipboard::Offer::Image(mime) => {
+                let extension = crate::clipboard::image_extension(&mime);
+                self.save_clipboard(bytes, extension, now);
             }
-        };
+            crate::clipboard::Offer::Text(_) => self.save_clipboard(bytes, "txt", now),
+        }
+    }
+
+    fn paste_clipboard_files(&mut self, bytes: Vec<u8>, force: bool, now: Instant) {
         let text = String::from_utf8_lossy(&bytes);
         let offered = crate::clipboard::parse_uri_list(&text);
         let count = offered.len();
@@ -7976,20 +8083,13 @@ impl App {
     /// image on the system clipboard lands a file with `std::fs::write`, so
     /// unlike the file paste (which reads its meaning off both ends and can
     /// become an upload) it needs the pane to be a directory on this machine.
-    fn save_clipboard(&mut self, mime: &str, extension: &str, now: Instant) {
+    fn save_clipboard(&mut self, bytes: Vec<u8>, extension: &str, now: Instant) {
         let cwd = self.cwd();
         if !scannable(&cwd) {
             self.toasts
                 .notice("The clipboard can only be saved into a local folder", now);
             return;
         }
-        let bytes = match crate::clipboard::paste(mime) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.clip_failed(error, now);
-                return;
-            }
-        };
         if bytes.is_empty() {
             self.toasts.notice("The clipboard is empty", now);
             return;

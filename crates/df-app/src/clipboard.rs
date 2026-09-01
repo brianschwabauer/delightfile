@@ -1,27 +1,30 @@
 //! The system clipboard (PLAN §7.4): a native port of Brian's yazi
 //! `clipboard.sh` and `copy-text.sh`.
 //!
-//! ## Why `wl-copy` and not the protocol
+//! ## The protocol first, `wl-copy` second
 //!
-//! PLAN §7.4 says "all via Wayland data-control/data-device", and that is where
-//! this ends up — but not yet, and deliberately. A clipboard *source* on
-//! Wayland has to stay alive to serve the data: the client that offers it is
-//! asked for the bytes, over a pipe, whenever some other application pastes.
-//! Owning that means a second event loop or a thread parked on a Wayland fd for
-//! the lifetime of the copy, which is exactly the piece the data-device work in
-//! the next phase brings. Until it does, shelling out to `wl-copy` is the
-//! honest answer rather than the lazy one:
+//! PLAN §7.4 says "all via Wayland data-control/data-device", and that is now
+//! where a copy goes: [`crate::wayland`]'s thread owns a `wl_data_source`,
+//! answers `set_selection` with it and serves the bytes over a pipe when some
+//! other application pastes — the same machinery, and the same 5 s send
+//! timeout, drag-out already uses. A clipboard *source* on Wayland has to stay
+//! alive to serve its data, and that thread is the thing that stays alive.
 //!
-//! - **It is what yazi does.** These two scripts are the behavioural
-//!   specification for this file, and matching them exactly matters more than
-//!   the transport underneath.
-//! - **It is what delightviewer degrades to** for the same reason.
-//! - `wl-copy` forks and keeps the selection alive after we exit, which is the
-//!   part a naive protocol implementation gets wrong — copy a file, quit the
-//!   file manager, paste: it still works.
+//! [`copy`], [`offered_types`] and [`paste`] below are what is left of the old
+//! answer, and they are now the **fallback**: a session with no seat and no
+//! data device (X11, a compositor without `wl_data_device_manager`, a registry
+//! that did not answer) still copies and pastes by shelling out, exactly as
+//! yazi's scripts do. Two things that used to be arguments for `wl-copy` are
+//! worth writing down as the cost of the change:
 //!
-//! When the data-device client lands, [`copy`] and [`paste`] are the two
-//! functions that change and nothing above them does.
+//! - `wl-copy` forks a server and the selection survives the file manager
+//!   exiting. Ours does not: quitting hands the selection back, which is what
+//!   every application that owns its own clipboard does, and what the protocol
+//!   is shaped for.
+//! - In exchange, a failure is now *visible*. `wl-copy`'s forked server could
+//!   fail after the parent exited zero and the toast had already said "Copied";
+//!   the protocol path only says so once the compositor has taken the
+//!   selection.
 //!
 //! ## What is pure and what is not
 //!
@@ -275,13 +278,35 @@ pub fn parse_uri_list(text: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-// ── The two calls that touch the world ──────────────────────────────────────
+// ── What a selection offers ─────────────────────────────────────────────────
 
-/// What can go wrong, in the two shapes the caller reacts differently to.
+/// The mime types one copy is announced under.
+///
+/// A caller says what it has — `Some("image/png")`, `Some("text/uri-list")`, or
+/// `None` for text — and gets the list the `wl_data_source` offers, most
+/// specific first. Only text has more than one name: `text/plain;charset=utf-8`
+/// is what modern toolkits ask for and bare `text/plain` is what older ones
+/// ask for, and the same bytes answer both because the bytes *are* UTF-8. A
+/// typed copy is offered under its own type and nothing else — a PNG announced
+/// as `text/plain` is a paste that produces mojibake in whatever asked.
+pub fn offer_mimes(mime: Option<&str>) -> Vec<String> {
+    match mime {
+        Some(mime) => vec![mime.to_string()],
+        None => vec![
+            "text/plain;charset=utf-8".to_string(),
+            "text/plain".to_string(),
+        ],
+    }
+}
+
+// ── The fallback calls that touch the world ─────────────────────────────────
+
+/// What can go wrong, in the two shapes the caller words differently.
 #[derive(Debug)]
 pub enum ClipError {
-    /// `wl-copy`/`wl-paste` are not on `PATH`. Not an error the user did
-    /// anything to cause, so it gets a plain notice and no red.
+    /// `wl-copy`/`wl-paste` are not on `PATH` — and this path is only reached
+    /// when the data device was not there either, so the copy did not happen
+    /// and it says so in red like any other failure.
     Missing(&'static str),
     Failed(String),
 }
@@ -298,7 +323,7 @@ impl std::fmt::Display for ClipError {
 }
 
 /// Put `bytes` on the clipboard, offered as `mime` (or as plain text when it is
-/// `None`).
+/// `None`) — the **fallback** copy, for a session with no data device.
 ///
 /// `wl-copy` forks a server for the selection and the parent exits at once, so
 /// the `wait` here is on the parent and does not block for the lifetime of the
@@ -337,7 +362,8 @@ pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<(), ClipError> {
 }
 
 /// The mime types the clipboard is currently offering, most specific first —
-/// `wl-paste --list-types`.
+/// `wl-paste --list-types`. The fallback for [`crate::wayland`]'s own mirror of
+/// the selection's offer.
 pub fn offered_types() -> Result<Vec<String>, ClipError> {
     let output = Command::new("wl-paste")
         .arg("--list-types")
@@ -384,6 +410,20 @@ pub enum Offer {
     Image(String),
     /// Text: save it as a `.txt`.
     Text(String),
+}
+
+impl Offer {
+    /// The mime to actually ask the clipboard for.
+    ///
+    /// The image and text branches carry the offered spelling — asking for
+    /// `image/png` when the owner said `image/PNG` gets nothing back — and the
+    /// file branch is the one type it was chosen by.
+    pub fn mime(&self) -> &str {
+        match self {
+            Offer::Files => "text/uri-list",
+            Offer::Image(mime) | Offer::Text(mime) => mime,
+        }
+    }
 }
 
 /// Pick the best offer out of `wl-paste --list-types`.
@@ -556,6 +596,42 @@ mod tests {
         );
         assert_eq!(choose_offer(&[]), None);
         assert_eq!(choose_offer(&types(&["application/x-weird"])), None);
+    }
+
+    /// What the `wl_data_source` announces, per branch.
+    #[test]
+    fn a_selection_offers_both_text_spellings_and_one_of_everything_else() {
+        assert_eq!(
+            offer_mimes(None),
+            vec![
+                "text/plain;charset=utf-8".to_string(),
+                "text/plain".to_string()
+            ]
+        );
+        // A typed copy is offered under exactly its own type: a PNG announced
+        // as text is a paste that lands as mojibake.
+        assert_eq!(
+            offer_mimes(Some("image/png")),
+            vec!["image/png".to_string()]
+        );
+        assert_eq!(
+            offer_mimes(Some("text/uri-list")),
+            vec!["text/uri-list".to_string()]
+        );
+        // Every branch of a `Y` produces an offer some other application can
+        // find: the image and uri-list branches by their own name, the text
+        // branch by the two names a paste asks for.
+        for (mime, wanted) in [
+            (Some("image/png"), "image/png"),
+            (Some("text/uri-list"), "text/uri-list"),
+            (None, "text/plain"),
+            (None, "text/plain;charset=utf-8"),
+        ] {
+            assert!(
+                offer_mimes(mime).iter().any(|m| m == wanted),
+                "{mime:?} should be askable as {wanted}"
+            );
+        }
     }
 
     #[test]
