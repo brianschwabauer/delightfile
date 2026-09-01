@@ -95,6 +95,19 @@ pub fn stamp(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> String 
     )
 }
 
+/// A timestamp for the spot panel (PLAN §6): the **full** year, and a dash when
+/// there is nothing to say.
+///
+/// The list's column is two characters of year because it is scanned in a
+/// column six times a second; the spot panel is read once, deliberately, and is
+/// where "was this 2015 or 2025" gets answered.
+pub fn long_stamp(time: Option<SystemTime>) -> String {
+    let Some((year, month, day, hour, minute)) = time.and_then(civil_local) else {
+        return UNKNOWN_SIZE.to_string();
+    };
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
+}
+
 fn local_stamp(time: SystemTime) -> Option<String> {
     let (year, month, day, hour, minute) = civil_local(time)?;
     Some(stamp(year, month, day, hour, minute))

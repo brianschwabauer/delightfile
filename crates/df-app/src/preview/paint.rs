@@ -98,6 +98,9 @@ pub fn preview(paint: &Painting<'_>, pane_rect: egui::Rect, pane: &mut Pane, ppp
 
     let alpha = fade(shown.at, now);
     let painter = paint.painter.with_clip_rect(content);
+    // How far a rendered page overflows the pane, in points — reported back to
+    // the pane below, because only the paint knows how tall the page came out.
+    let mut doc_pan: Option<f32> = None;
     let max_scroll = match &shown.body {
         Body::Empty => {
             quiet(paint, content, "empty", alpha);
@@ -149,7 +152,7 @@ pub fn preview(paint: &Painting<'_>, pane_rect: egui::Rect, pane: &mut Pane, ppp
             hex_body(paint, &painter, content, bytes, *truncated, pane.scroll, alpha)
         }
         Body::Media(media) => {
-            media_body(
+            doc_pan = Some(media_body(
                 paint,
                 &painter,
                 content,
@@ -158,11 +161,14 @@ pub fn preview(paint: &Painting<'_>, pane_rect: egui::Rect, pane: &mut Pane, ppp
                 alpha,
                 now,
                 pane.media_mounted,
-            );
+            ));
             0
         }
     };
 
+    if let Some(pan) = doc_pan {
+        pane.set_max_pan(pan);
+    }
     // The paint is the only thing that knows how tall the content came out, so
     // it is the thing that tells `seek` how far it may go.
     pane.max_scroll = max_scroll;
@@ -858,6 +864,43 @@ pub fn fit_rect(area: egui::Rect, size: (u32, u32), ppp: f32) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), natural * k)
 }
 
+/// Where a rendered document page goes inside the pane.
+///
+/// **Fit, then zoom, then pan.** The page is fitted to the pane by aspect (a
+/// PDF page smaller than the pane *is* enlarged — that is what fit-to-pane
+/// means and what every document viewer does, unlike a photograph, which would
+/// only get blurrier), the fit is multiplied by the zoom, and the result is
+/// centred horizontally and scrolled vertically. Deriving the rect from the
+/// pane rather than from the texture's own pixel count means a page that hit
+/// the rasteriser's size cap is drawn at the right *size* and merely softer,
+/// instead of shrinking.
+///
+/// Returns the rect and how far it overflows the pane, which is how far `↑`/`↓`
+/// may scroll it.
+pub fn doc_rect(content: egui::Rect, size: (u32, u32), zoom: f32, pan: f32) -> (egui::Rect, f32) {
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    if w <= 0.0 || h <= 0.0 || content.width() <= 0.0 || content.height() <= 0.0 {
+        return (egui::Rect::from_center_size(content.center(), egui::Vec2::ZERO), 0.0);
+    }
+    let zoom = if zoom.is_finite() { zoom.max(0.01) } else { 1.0 };
+    let k = (content.width() / w).min(content.height() / h) * zoom;
+    let drawn = egui::vec2(w * k, h * k);
+    let overflow = (drawn.y - content.height()).max(0.0);
+    let pan = pan.clamp(0.0, overflow);
+    let top = if overflow > 0.0 {
+        content.top() - pan
+    } else {
+        content.center().y - drawn.y / 2.0
+    };
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(content.center().x - drawn.x / 2.0, top),
+        drawn,
+    );
+    (rect, overflow)
+}
+
+/// Draw a picture-shaped body, and return how far a rendered page overflows the
+/// pane (zero for everything that is not a document).
 #[allow(clippy::too_many_arguments)]
 fn media_body(
     paint: &Painting<'_>,
@@ -871,7 +914,7 @@ fn media_body(
     // position strip are drawn over this pane by `crate::playback` — the kind
     // badge and the "no decoder" line both stand down.
     mounted: bool,
-) {
+) -> f32 {
     // The placeholder is at full strength the moment it decodes; the real
     // pixels fade in over it. That is delightviewer's trick and the reason a
     // photograph appears to be there instantly (PLAN §6).
@@ -885,6 +928,13 @@ fn media_body(
     }
     if let Some(full) = &media.full {
         draw_texture(painter, content, full, ppp, alpha * swap);
+    }
+
+    // A document's own pixels go over the cached thumbnail that stood in for
+    // them, on the same crossfade every other arrival gets.
+    if let Some(view) = &media.doc {
+        let overflow = doc_body(paint, painter, content, view, media, alpha, now);
+        return overflow;
     }
 
     if media.full.is_none() && media.thumb.is_none() {
@@ -902,7 +952,7 @@ fn media_body(
         } else {
             quiet(paint, content, "no decoder for this format", alpha);
         }
-        return;
+        return 0.0;
     }
 
     // A kind badge in the corner for everything that is not a still image —
@@ -910,8 +960,90 @@ fn media_body(
     // on screen belongs to, which is exactly the thing a video's first frame
     // does not.
     if let Some(badge) = media.badge().filter(|_| !mounted) {
-        chip(paint, painter, content, badge, alpha);
+        chip(paint, painter, content, badge, egui::Align2::LEFT_BOTTOM, alpha);
     }
+    0.0
+}
+
+/// A rendered document page, its summary and its page indicator.
+///
+/// Returns how far the page overflows the pane, which is how far `↑`/`↓` may
+/// scroll it.
+fn doc_body(
+    paint: &Painting<'_>,
+    painter: &egui::Painter,
+    content: egui::Rect,
+    view: &super::DocView,
+    media: &Media,
+    alpha: f32,
+    now: Instant,
+) -> f32 {
+    let swap = view
+        .swapped_at
+        .map(|at| if view.previous.is_some() { fade(at, now) } else { 1.0 })
+        .unwrap_or(0.0);
+    let mut overflow = 0.0;
+
+    // The outgoing page underneath, at full strength, with the incoming one
+    // fading in over it: the same trick the thumbnail-to-photograph swap uses,
+    // so a page turn reads as a page turn and not as a blink.
+    if let Some(previous) = &view.previous {
+        let (rect, _) = doc_rect(content, previous.size, view.zoom, view.pan);
+        draw_at(painter, rect, previous, alpha);
+    }
+    if let Some(current) = &view.current {
+        let (rect, over) = doc_rect(content, current.size, view.zoom, view.pan);
+        overflow = over;
+        draw_at(painter, rect, current, alpha * swap.max(f32::from(view.previous.is_none())));
+    }
+
+    let nothing_yet = view.current.is_none() && media.thumb.is_none() && media.full.is_none();
+    if let Some(message) = &view.error {
+        if nothing_yet {
+            quiet(paint, content, message, alpha);
+        }
+    } else if view.unavailable {
+        // The library is missing, which is a missing *feature*: the cached
+        // thumbnail and the kind badge are the answer, exactly as before
+        // pdfium was here at all (PLAN §6).
+        if let Some(badge) = media.badge() {
+            chip(paint, painter, content, badge, egui::Align2::LEFT_BOTTOM, alpha);
+        } else if nothing_yet {
+            quiet(paint, content, "no reader for this format", alpha);
+        }
+    } else if nothing_yet {
+        // Blank: the render is in flight, and a spinner over a page about to
+        // appear is a flash rather than feedback.
+    }
+
+    // The two chips, on the same linger-then-leave the playback strip uses:
+    // what the document *is* on the left, where you are in it on the right.
+    let chip_alpha = view.chip_alpha(now) * alpha;
+    if chip_alpha > 0.0 {
+        if let Some(meta) = &view.meta {
+            if !meta.summary.is_empty() {
+                chip(
+                    paint,
+                    painter,
+                    content,
+                    &meta.summary,
+                    egui::Align2::LEFT_BOTTOM,
+                    chip_alpha,
+                );
+            }
+        }
+        if let Some(counter) = view.counter() {
+            chip(
+                paint,
+                painter,
+                content,
+                &counter,
+                egui::Align2::RIGHT_BOTTOM,
+                chip_alpha,
+            );
+        }
+    }
+    overflow
 }
 
 fn draw_texture(
@@ -921,10 +1053,14 @@ fn draw_texture(
     ppp: f32,
     alpha: f32,
 ) {
+    draw_at(painter, fit_rect(content, texture.size, ppp), texture, alpha);
+}
+
+/// The same, at a rect somebody else worked out.
+fn draw_at(painter: &egui::Painter, rect: egui::Rect, texture: &Texture, alpha: f32) {
     if alpha <= 0.0 {
         return;
     }
-    let rect = fit_rect(content, texture.size, ppp);
     let mut mesh = egui::Mesh::with_texture(texture.handle.id());
     mesh.add_rect_with_uv(
         rect,
@@ -934,7 +1070,8 @@ fn draw_texture(
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// The kind badge: a small plate in the pane's bottom-left corner.
+/// A small plate in one of the pane's bottom corners: the kind badge, the
+/// document's summary, the page indicator.
 ///
 /// Inset from both adjacent edges by the same amount and rounded concentrically
 /// with the pane (`delightful-ui` §15), so the gap around it stays a constant
@@ -944,16 +1081,25 @@ fn chip(
     painter: &egui::Painter,
     content: egui::Rect,
     text: &str,
+    align: egui::Align2,
     alpha: f32,
 ) {
+    if alpha <= 0.0 {
+        return;
+    }
     let galley = painter.layout_no_wrap(
         text.to_string(),
         egui::FontId::proportional(BODY - 2.0),
         paint.palette.subtext0,
     );
     let size = galley.size() + egui::vec2(CHIP_PAD * 2.0, CHIP_PAD);
+    let left = if align.x() == egui::Align::Max {
+        content.right() - size.x
+    } else {
+        content.left()
+    };
     let rect = egui::Rect::from_min_size(
-        egui::pos2(content.left(), content.bottom() - size.y),
+        egui::pos2(left, content.bottom() - size.y),
         size,
     );
     painter.rect_filled(
@@ -1176,6 +1322,7 @@ mod tests {
                 swapped_at: None,
                 error: None,
                 decoding: false,
+                doc: None,
             }),
             Body::Media(Media {
                 kind: PreviewKind::Image,
@@ -1184,6 +1331,37 @@ mod tests {
                 swapped_at: None,
                 error: Some("no decoder for this format".to_string()),
                 decoding: false,
+                doc: None,
+            }),
+            // A document whose worker has answered but whose page has not
+            // arrived, and one that has no reader at all: the two states a PDF
+            // is in on a machine with and without pdfium.
+            Body::Media(Media {
+                kind: PreviewKind::Pdf,
+                thumb: None,
+                full: None,
+                swapped_at: None,
+                error: None,
+                decoding: false,
+                doc: Some(Box::new(doc_fixture(42, crate::preview::doc::Counter::Page, false))),
+            }),
+            Body::Media(Media {
+                kind: PreviewKind::Pdf,
+                thumb: None,
+                full: None,
+                swapped_at: None,
+                error: None,
+                decoding: false,
+                doc: Some(Box::new(doc_fixture(1, crate::preview::doc::Counter::Page, true))),
+            }),
+            Body::Media(Media {
+                kind: PreviewKind::Gcode,
+                thumb: None,
+                full: None,
+                swapped_at: None,
+                error: None,
+                decoding: false,
+                doc: Some(Box::new(doc_fixture(312, crate::preview::doc::Counter::Layer, false))),
             }),
         ];
 
@@ -1236,6 +1414,72 @@ mod tests {
         });
     }
 
+    /// A document that has been opened but has no pixels yet — the state every
+    /// PDF, specimen and toolpath passes through, and the one where the chips
+    /// and the fallbacks are all that is on screen.
+    fn doc_fixture(
+        pages: usize,
+        counter: crate::preview::doc::Counter,
+        unavailable: bool,
+    ) -> crate::preview::DocView {
+        let mut view = crate::preview::DocView::new();
+        view.meta = Some(crate::preview::doc::Meta {
+            pages,
+            summary: "312 layers · 0.20 mm".to_string(),
+            counter,
+        });
+        view.page = pages / 2;
+        view.unavailable = unavailable;
+        view.chip_at = Some(Instant::now());
+        view
+    }
+
+    /// `delightful-ui` §8: stepping pages must not move the page under the
+    /// pointer, and a page smaller than the pane is enlarged to fit — which is
+    /// what fit-to-pane means for a document and is the opposite of what a
+    /// photograph gets.
+    #[test]
+    fn a_page_fits_the_pane_and_zooms_from_there() {
+        let content = area();
+        // US Letter in a 400×600 pane: the *width* binds, the aspect ratio
+        // survives, and what is left over is space above and below.
+        let (rect, over) = doc_rect(content, (612, 792), 1.0, 0.0);
+        assert!((rect.width() - 400.0).abs() < 1e-3, "{rect:?}");
+        assert!((rect.height() - 400.0 * 792.0 / 612.0).abs() < 1e-2, "{rect:?}");
+        assert_eq!(over, 0.0, "a fitted page has nothing to scroll");
+        assert!((rect.center().x - content.center().x).abs() < 1e-3);
+        assert!((rect.center().y - content.center().y).abs() < 1e-3, "{rect:?}");
+
+        // A tiny page is *enlarged* to fit — a document viewer's rule.
+        let (small, _) = doc_rect(content, (60, 80), 1.0, 0.0);
+        assert!(small.height() > 100.0, "{small:?}");
+
+        // Zoomed, it overflows and can be scrolled by exactly the overflow.
+        let (zoomed, over) = doc_rect(content, (612, 792), 2.0, 0.0);
+        assert!((zoomed.width() - 800.0).abs() < 1e-2, "{zoomed:?}");
+        assert!((over - (zoomed.height() - 600.0)).abs() < 1e-3, "got {over}");
+        assert!(over > 400.0, "a doubled letter page overflows a 600 pt pane");
+        assert!((zoomed.top() - content.top()).abs() < 1e-3, "a zoomed page starts at its top");
+        let (panned, _) = doc_rect(content, (612, 792), 2.0, 1000.0);
+        assert!(
+            (panned.top() - (content.top() - over)).abs() < 1e-2,
+            "the pan was not clamped to the overflow"
+        );
+    }
+
+    #[test]
+    fn a_degenerate_page_does_not_produce_a_nan() {
+        for size in [(0u32, 0u32), (100, 0), (0, 100)] {
+            let (rect, over) = doc_rect(area(), size, 1.0, 0.0);
+            assert!(rect.width().is_finite() && over.is_finite(), "{size:?}");
+        }
+        let (rect, _) = doc_rect(area(), (100, 100), f32::NAN, f32::NAN);
+        assert!(rect.width().is_finite() && rect.width() > 0.0);
+        let empty = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::Vec2::ZERO);
+        let (rect, over) = doc_rect(empty, (100, 100), 1.0, 0.0);
+        assert!(rect.width().is_finite() && over == 0.0);
+    }
+
     /// `Body` holds a texture handle and so cannot derive `Clone`; the test
     /// only needs the variants it builds by hand.
     fn clone_body(body: &Body) -> Body {
@@ -1273,6 +1517,17 @@ mod tests {
                 swapped_at: media.swapped_at,
                 error: media.error.clone(),
                 decoding: media.decoding,
+                doc: media.doc.as_deref().map(|view| {
+                    let mut copy = crate::preview::DocView::new();
+                    copy.meta = view.meta.clone();
+                    copy.page = view.page;
+                    copy.zoom = view.zoom;
+                    copy.pan = view.pan;
+                    copy.unavailable = view.unavailable;
+                    copy.error = view.error.clone();
+                    copy.chip_at = view.chip_at;
+                    Box::new(copy)
+                }),
             }),
         }
     }

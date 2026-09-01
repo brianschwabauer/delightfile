@@ -38,6 +38,32 @@ pollster.workspace = true
 # Only for `localtime_r`: the mtime/btime linemodes have to be in the machine's
 # timezone, and the zoneinfo rules that decide the offset live behind libc.
 libc.workspace = true
+# PDF pages (PLAN §6). The version and the `pdfium_7881` ABI are delightviewer's
+# to the digit, so the two programs load the *same* `libpdfium.so` — there is one
+# copy of it on this machine and neither program may be the one that needs a
+# different build of it.
+#
+# **No `static` feature**: nothing is linked at build time, the library is
+# dlopen'd at runtime, and a machine without it loses PDF pages and nothing else
+# (PLAN §6's "missing lib = missing feature, never a failure").
+#
+# delightviewer also takes `image_025`, which lets it hand `image` buffers to
+# pdfium when it *writes* a redacted page. delightfile never writes a PDF, so
+# that feature is left off rather than dragging the image crate's default
+# codecs into the build through pdfium-render's feature unification.
+pdfium-render = { version = "0.9.3", default-features = false, features = [
+    "pdfium_7881",
+    "thread_safe",
+] }
+# What a font says about itself, and the glyph outlines the specimen sheet is
+# set in (PLAN §6). **Not a new dependency**: epaint already builds this exact
+# version, so naming it costs no new compilation.
+ttf-parser = "0.25"
+# The one thing a 3MF needs that is impractical to rewrite: deflate. Already in
+# the build behind the png codec `image` brings, so naming it costs no new
+# compilation either — everything else about the zip a 3MF is lives in
+# `preview::doc::model`.
+miniz_oxide = "0.8"
 
 [lints]
 workspace = true

@@ -53,6 +53,7 @@ use crate::preview::Pane as PreviewPane;
 use crate::ripple::Ripples;
 use crate::toast::Toasts;
 use crate::select::{self, Visual};
+use crate::spot::{self, Spot};
 use crate::tab::Tab;
 use crate::tabs::Tabs;
 use crate::theme::Palette;
@@ -177,6 +178,7 @@ enum OverlayGeom {
     Conflict(dialog::Geometry),
     Picker(egui::Rect, Vec<egui::Rect>),
     Panel(egui::Rect, Vec<egui::Rect>, Vec<TaskRow>),
+    Spot(spot::Geometry),
 }
 
 impl OverlayGeom {
@@ -200,6 +202,9 @@ impl OverlayGeom {
                 .iter()
                 .position(|r| r.contains(pos))
                 .map(Control::PanelRow),
+            // The spot has two kinds of target on one card — nine permission
+            // chips and the checksum's button — so it does its own hit test.
+            OverlayGeom::Spot(geometry) => geometry.hit(pos),
         }
     }
 
@@ -216,6 +221,7 @@ impl OverlayGeom {
                 OverlayGeom::Picker(_, rows) | OverlayGeom::Panel(_, rows, _),
                 Control::PanelRow(i),
             ) => rows.get(i).copied(),
+            (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
             _ => None,
         }
     }
@@ -287,6 +293,15 @@ pub struct App {
     /// beside the press rather than threaded through every command's signature.
     key_repeat: bool,
     tabs: Tabs,
+    /// The file named on the command line, and the directory it is in, until
+    /// the scan that will contain it has landed and the cursor is on it.
+    ///
+    /// `delightfile /path/to/file.txt` opens the *directory* and points at the
+    /// file, and the directory read is asynchronous — so the name has to
+    /// outlive the moment it was asked for. Cleared the instant it lands, or
+    /// when the scan finishes without it (a file that was deleted between the
+    /// shell and here).
+    start_cursor: Option<(PathBuf, String)>,
     /// `--cwd-file`, written on a `q` quit (PLAN §3).
     cwd_file: Option<PathBuf>,
     quit: Option<Quit>,
@@ -332,6 +347,14 @@ pub struct App {
     picker: Option<Picker>,
     /// `w`'s task panel.
     panel: Option<TaskPanel>,
+    /// `Tab`'s spot panel (PLAN §6).
+    spot: Option<Spot>,
+    /// The git front end, started the first time something asks it a question.
+    ///
+    /// Lazy because most of what this program does needs no git at all: a
+    /// session spent in `~/Pictures` should not pay for a worker thread and a
+    /// `git status` process that nothing was ever going to read.
+    git: Option<df_core::git::Git>,
     /// Where the cursor row was last drawn: what a rename popup and the opener
     /// picker anchor themselves to (PLAN §4.2, §6).
     cursor_rect: egui::Rect,
@@ -406,11 +429,18 @@ impl App {
         let now = Instant::now();
         let (start, focus) = start_directory(args.start.as_deref());
         let mut tab = Tab::open(start, &mgr, sort, &scanner, now);
-        if let Some(name) = focus {
-            // Opening on a *file* puts the cursor on it once its row arrives.
-            // Set now as well, so a blocking-fast scan is not missed.
-            tab.cwd.dir.cursor_to_name(&name);
-        }
+        // **Opening on a file puts the cursor on it once its row arrives.**
+        // Trying only here was the bug: `Tab::open` *queues* the scan, so at
+        // this line the listing is empty and `cursor_to_name` has nothing to
+        // find — `delightfile /path/to/file.txt` left the cursor on row 0 and
+        // looked like it had ignored the argument. The name is remembered
+        // instead and retried as each batch lands (see
+        // [`App::place_start_cursor`]). The attempt is still made now as well,
+        // in case some future path has the entries in hand already.
+        let start_cursor = focus.and_then(|name| {
+            place_start_cursor(&mut tab.cwd.dir, &name)
+                .then(|| (tab.cwd.path().to_path_buf(), name))
+        });
         watcher.watch(tab.watched());
 
         App {
@@ -436,6 +466,7 @@ impl App {
             probing: None,
             key_repeat: false,
             tabs: Tabs::new(tab),
+            start_cursor,
             cwd_file: args.cwd_file,
             quit: None,
             engine,
@@ -447,6 +478,8 @@ impl App {
             dialog: None,
             picker: None,
             panel: None,
+            spot: None,
+            git: None,
             cursor_rect: egui::Rect::ZERO,
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
@@ -548,6 +581,13 @@ impl App {
                 changed = true;
             }
         }
+        // The file named on the command line, whose row may only just have
+        // arrived. Same shape as the parent's marker below, and for the same
+        // reason: a cursor that has to land on a name cannot land before the
+        // name is in the listing.
+        if changed {
+            self.place_start_cursor();
+        }
         // The parent's marker follows the path, and the row it belongs on may
         // only just have arrived in a batch — *unless* the keyboard is in that
         // pane, where the marker is a cursor somebody is steering and a scan
@@ -565,6 +605,10 @@ impl App {
         for event in events {
             changed = true;
             self.task_event(event, now);
+        }
+
+        if self.sync_spot() {
+            changed = true;
         }
 
         for event in self.watcher.drain() {
@@ -586,6 +630,25 @@ impl App {
             }
         }
         changed
+    }
+
+    /// Retry the start-up cursor against whatever has arrived.
+    ///
+    /// Gives up for good the moment the user has navigated somewhere else —
+    /// a cursor placement asked for at startup must never fight a person who
+    /// has already moved on.
+    fn place_start_cursor(&mut self) {
+        let Some((dir, name)) = self.start_cursor.clone() else {
+            return;
+        };
+        let tab = self.tabs.active_mut();
+        if tab.cwd.path() != dir {
+            self.start_cursor = None;
+            return;
+        }
+        if !place_start_cursor(&mut tab.cwd.dir, &name) {
+            self.start_cursor = None;
+        }
     }
 
     fn rescan(&mut self, dir: &Path, now: Instant) {
@@ -1177,7 +1240,10 @@ impl App {
     // ── The modal surfaces: dialog, picker, task panel ──────────────────────
 
     fn overlay_open(&self) -> bool {
-        self.dialog.is_some() || self.picker.is_some() || self.panel.is_some()
+        self.dialog.is_some()
+            || self.picker.is_some()
+            || self.panel.is_some()
+            || self.spot.is_some()
     }
 
     /// The context an open surface is matched in. Never stacked on `Files`:
@@ -1187,6 +1253,8 @@ impl App {
             Context::Confirm
         } else if self.picker.is_some() {
             Context::Pick
+        } else if self.spot.is_some() {
+            Context::Spot
         } else {
             Context::Tasks
         };
@@ -1220,6 +1288,11 @@ impl App {
                 }
             }
             C::TaskCancel => self.cancel_selected_task(now),
+            // The spot's own two: `←`/`→` walk the directory with the card
+            // following, which is what makes it a panel rather than a dialog.
+            C::SpotSwipePrev | C::SpotSwipeNext => {
+                self.swipe_spot(if command == C::SpotSwipeNext { 1 } else { -1 })
+            }
             other => log::trace!("`{}` is not an overlay key", other.id()),
         }
     }
@@ -1262,6 +1335,31 @@ impl App {
             self.pause_selected_task(now);
             return true;
         }
+        // The spot's two keys df-core's `[spot]` table has no row for, and the
+        // reason each is here rather than there:
+        //
+        // `Space` acts on the focused row — it is the *same* "do the thing
+        // under the cursor" `Enter` is, and binding a second row for it in a
+        // context where `Enter` is already the verb would put two identical
+        // lines on the help sheet.
+        //
+        // `Shift+←`/`Shift+→` move the permission selection, because the plain
+        // arrows are the file swipe and that is the binding the keymap
+        // documents (PLAN §4.1's note on `h`/`l`).
+        if self.spot.is_some() {
+            if plain && chord.key == Key::Space {
+                self.spot_action(now);
+                return true;
+            }
+            let shifted = chord.mods == df_core::keymap::Mods::SHIFT;
+            if shifted && matches!(chord.key, Key::ArrowLeft | Key::ArrowRight) {
+                let delta = if chord.key == Key::ArrowRight { 1 } else { -1 };
+                if let Some(spot) = &mut self.spot {
+                    spot.move_bit(delta);
+                }
+                return true;
+            }
+        }
         false
     }
 
@@ -1281,6 +1379,10 @@ impl App {
             picker.move_cursor(delta);
             return;
         }
+        if let Some(spot) = &mut self.spot {
+            spot.move_cursor(delta);
+            return;
+        }
         let rows = self.task_rows();
         if let Some(panel) = &mut self.panel {
             panel.move_cursor(delta, rows.len());
@@ -1289,6 +1391,10 @@ impl App {
 
     /// `Enter` on whatever is up.
     fn submit_overlay(&mut self, now: Instant) {
+        if self.spot.is_some() {
+            self.spot_action(now);
+            return;
+        }
         if let Some(Dialog::Confirm(_)) = &self.dialog {
             let Some(Dialog::Confirm(confirm)) = self.dialog.take() else {
                 return;
@@ -1348,7 +1454,179 @@ impl App {
         }
         self.picker = None;
         self.panel = None;
+        // Dropping the panel stops its hasher: see `spot::Hasher`'s `Drop`.
+        self.spot = None;
         self.sync_context();
+    }
+
+    // ── The spot panel (PLAN §6) ────────────────────────────────────────────
+
+    /// `Tab`: the card about the hovered file, which the same key closes again.
+    fn toggle_spot(&mut self) {
+        if self.spot.is_some() {
+            self.spot = None;
+            self.sync_context();
+            return;
+        }
+        let Some(entry) = self.tab().cwd.dir.cursor_entry() else {
+            // An empty directory has nothing to spot, and a card about nothing
+            // is worse than no card.
+            return;
+        };
+        self.spot = Some(Spot::new(self.spot_facts(entry)));
+        self.sync_context();
+    }
+
+    /// `←`/`→` in the panel: move the list's cursor and let the card follow.
+    ///
+    /// The **list** cursor moves, not just the card's subject — closing the
+    /// panel must leave you where the panel left you, or the swipe was a lie
+    /// about where you are.
+    fn swipe_spot(&mut self, delta: isize) {
+        if self.spot.is_none() {
+            return;
+        }
+        self.dir().move_cursor(delta);
+        let facts = self
+            .tab()
+            .cwd
+            .dir
+            .cursor_entry()
+            .map(|entry| self.spot_facts(entry));
+        if let (Some(spot), Some(facts)) = (&mut self.spot, facts) {
+            spot.swipe(facts);
+        }
+    }
+
+    /// Everything the card knows, from what is already in hand.
+    ///
+    /// The **sniff** is the one blocking read here: 8 KiB off the front of the
+    /// file, on a key press, and it is the same 8 KiB the preview worker read
+    /// for this file a moment ago. It is done inline rather than on a worker
+    /// because a mime that appears a frame later would make the card reflow
+    /// under the pointer (`delightful-ui` §8), and because the alternative —
+    /// showing the extension's guess and then correcting it — is the panel
+    /// contradicting itself.
+    fn spot_facts(&self, entry: &df_core::fs::Entry) -> spot::Facts {
+        let mut facts = spot::Facts::from_entry(entry);
+        if !entry.is_dir() {
+            if let Ok(mime) = df_core::preview::sniff_file(&entry.path, entry.mime) {
+                facts.mime = mime.to_string();
+            }
+        }
+        // What ffmpeg already said about this file, if the cursor has been on
+        // it. Never a fresh probe: the card is not a reason to open a codec.
+        facts.media = self
+            .probes
+            .iter()
+            .find(|(path, _)| *path == entry.path)
+            .and_then(|(_, info)| info.as_ref())
+            .map(|info| spot::MediaFacts {
+                width: info.width,
+                height: info.height,
+                duration_us: info.duration_us,
+                video_codec: info.video_codec.clone(),
+                audio_codec: info.audio_codec.clone(),
+                sample_rate: info.sample_rate,
+            });
+        facts
+    }
+
+    /// Keep the card's asynchronous halves up to date: git, and the hasher.
+    ///
+    /// Called once a frame while the panel is open. Both are cheap when there
+    /// is nothing new — `Git::ensure` reads a memoised map and `Spot::poll`
+    /// compares one enum — so an open panel over a settled file asks for no
+    /// frames at all (PLAN §1).
+    fn sync_spot(&mut self) -> bool {
+        if self.spot.is_none() {
+            return false;
+        }
+        let path = self.spot.as_ref().map(|s| s.facts.path.clone());
+        let git = match (&self.git, path.as_deref()) {
+            (_, None) => None,
+            (Some(git), Some(path)) => git_line(git, path),
+            (None, Some(path)) => {
+                // First question of the session: start the worker, ask, and
+                // take whatever it has — which is nothing, until the scan it
+                // just queued rings the bell.
+                let waker = self.waker.clone();
+                let git = df_core::git::Git::start(Arc::new(move || waker.wake()));
+                let line = git_line(&git, path);
+                self.git = Some(git);
+                line
+            }
+        };
+        let Some(spot) = &mut self.spot else {
+            return false;
+        };
+        let mut changed = spot.poll();
+        if spot.facts.git != git {
+            spot.facts.git = git;
+            spot.refresh();
+            changed = true;
+        }
+        changed
+    }
+
+    /// `Space` / `Enter` on the card's focused row.
+    fn spot_action(&mut self, now: Instant) {
+        let Some(action) = self.spot.as_ref().map(Spot::activate) else {
+            return;
+        };
+        match action {
+            spot::Action::SetMode(mode) => self.set_mode(mode, now),
+            spot::Action::StartChecksum => {
+                let waker = self.waker.clone();
+                if let Some(spot) = &mut self.spot {
+                    spot.start_checksum(move || waker.wake());
+                }
+            }
+            spot::Action::CancelChecksum => {
+                if let Some(spot) = &mut self.spot {
+                    spot.cancel_checksum();
+                }
+            }
+            spot::Action::None => {}
+        }
+    }
+
+    /// Write a new mode to the spotted file.
+    ///
+    /// **Not undoable, and the toast says so.** PLAN §5's journal has records
+    /// for every operation that moves bytes around — copy, rename, trash,
+    /// create, link — and none for a mode change, because df-core has no chmod
+    /// operation at all. So this goes straight to `set_permissions` and raises a
+    /// plain notice rather than the undo toast every other mutation gets: a
+    /// toast that offered `u` and then did nothing would be worse than no offer.
+    /// When df-core grows `ops::chmod` and an `OpRecord::Chmod`, this is the one
+    /// call site that changes.
+    fn set_mode(&mut self, mode: u32, now: Instant) {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(path) = self.spot.as_ref().map(|s| s.facts.path.clone()) else {
+            return;
+        };
+        match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
+            Ok(()) => {
+                if let Some(spot) = &mut self.spot {
+                    spot.facts.mode = mode;
+                }
+                self.toasts.notice(
+                    format!("Permissions are now {}", spot::octal(mode)),
+                    now,
+                );
+                // The list's permissions linemode is showing the old string
+                // until the directory is read again.
+                if let Some(dir) = path.parent().map(Path::to_path_buf) {
+                    self.rescan(&dir, now);
+                }
+            }
+            Err(e) => {
+                // The common one is somebody else's file, and the message says
+                // which file rather than only which errno.
+                self.toasts.error(format!("{}: {e}", path.display()), now);
+            }
+        }
     }
 
     /// `w`: the task panel, which the same key closes again.
@@ -1977,20 +2255,57 @@ impl App {
             }
 
             // ── The preview, with the keyboard in it (PLAN §4.3) ────────────
-            // Images and PDFs are somebody else's box; what a document does
-            // here is scroll, which is the pane's own `seek` at the sizes the
-            // keys name.
-            C::PreviewUp => self.preview.scroll_by(-1, now),
-            C::PreviewDown => self.preview.scroll_by(1, now),
-            C::PreviewHalfPageUp => self.preview.scroll_by(-half, now),
-            C::PreviewHalfPageDown => self.preview.scroll_by(half, now),
-            C::PreviewPageDown => self.preview.scroll_by(full, now),
-            // `←` out of the preview is the leftward half of PLAN §2.1, and it
-            // is the *fall-through*: a PDF's page-back and an image's pan will
-            // claim this key first when they land, and at the first page (or a
-            // document that has no pages) it goes back to the list, which is
-            // what it does today for everything.
-            C::PreviewLeft => self.focus = Focus::List,
+            // **One key, two units, again.** In a text body `↑`/`↓` move a
+            // line; in a rendered document they move the page under the pane,
+            // and in a G-code toolpath they step a layer — which is the one
+            // thing anybody opens a G-code file to do. `doc_scroll` answers
+            // whether it took the key, so nothing has to ask what is on screen.
+            C::PreviewUp => {
+                if !self.preview.doc_scroll(-1, now) {
+                    self.preview.scroll_by(-1, now);
+                }
+            }
+            C::PreviewDown => {
+                if !self.preview.doc_scroll(1, now) {
+                    self.preview.scroll_by(1, now);
+                }
+            }
+            C::PreviewHalfPageUp => {
+                if !self.preview.doc_scroll(-(half.max(1)), now) {
+                    self.preview.scroll_by(-half, now);
+                }
+            }
+            C::PreviewHalfPageDown => {
+                if !self.preview.doc_scroll(half.max(1), now) {
+                    self.preview.scroll_by(half, now);
+                }
+            }
+            C::PreviewPageDown => {
+                if !self.preview.doc_scroll(full.max(1), now) {
+                    self.preview.scroll_by(full, now);
+                }
+            }
+            // `→` turns the page. `←` turns it back — and **at the first page
+            // it falls through to the list** (PLAN §4.3), which is also what a
+            // body with no pages at all does, so one key means "back" wherever
+            // you are and never leaves you stuck in the pane.
+            C::PreviewRight => {
+                self.preview.turn_page(true, now);
+            }
+            C::PreviewLeft => {
+                if !self.preview.turn_page(false, now) {
+                    self.focus = Focus::List;
+                }
+            }
+            C::PreviewZoomIn => {
+                self.preview.zoom(crate::preview::Zoom::In, now);
+            }
+            C::PreviewZoomOut => {
+                self.preview.zoom(crate::preview::Zoom::Out, now);
+            }
+            C::PreviewZoomReset => {
+                self.preview.zoom(crate::preview::Zoom::Fit, now);
+            }
             C::PreviewTop => self.preview.scroll_to(0, now),
             C::PreviewBottom => self.preview.scroll_to(usize::MAX, now),
 
@@ -2194,6 +2509,7 @@ impl App {
             C::ShellBlock => self.open_prompt(PromptKind::ShellBlock),
             C::Undo => self.undo(now),
             C::TasksShow => self.toggle_panel(),
+            C::Spot => self.toggle_spot(),
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
             C::Open => self.open_hovered(now),
@@ -2293,6 +2609,9 @@ impl App {
             let (card, rects) = panel::geometry(area, bar_top, rows.len());
             return Some(OverlayGeom::Panel(card, rects, rows));
         }
+        if let Some(spot) = &self.spot {
+            return Some(OverlayGeom::Spot(spot::geometry(area, bar_top, spot)));
+        }
         None
     }
 
@@ -2300,6 +2619,44 @@ impl App {
     /// does not get a two-step "select, then confirm" the keyboard does not
     /// have.
     fn overlay_click(&mut self, control: Control, now: Instant) {
+        // The spot's chips are pressed, not selected-then-confirmed: a click on
+        // a permission bit flips it, and a click on the checksum starts it.
+        if self.spot.is_some() {
+            match control {
+                Control::Action(index) if index < spot::BITS.len() => {
+                    let mode = self
+                        .spot
+                        .as_ref()
+                        .map(|spot| spot::toggle(spot.facts.mode, index));
+                    if let (Some(mode), Some(row)) =
+                        (mode, self.spot.as_ref().and_then(Spot::perm_row))
+                    {
+                        // The keyboard follows the pointer: the ring lands on
+                        // the chip that was just clicked, so `Space` repeats it.
+                        if let Some(spot) = &mut self.spot {
+                            spot.select(row);
+                            spot.bit = index;
+                        }
+                        self.set_mode(mode, now);
+                    }
+                }
+                Control::Action(_) => {
+                    if let Some(row) = self.spot.as_ref().and_then(Spot::hash_row) {
+                        if let Some(spot) = &mut self.spot {
+                            spot.select(row);
+                        }
+                    }
+                    self.spot_action(now);
+                }
+                Control::PanelRow(index) => {
+                    if let Some(spot) = &mut self.spot {
+                        spot.select(index);
+                    }
+                }
+                Control::Row(..) | Control::Tab(_) => {}
+            }
+            return;
+        }
         match control {
             Control::Action(index) => match &mut self.dialog {
                 Some(Dialog::Confirm(_)) => {
@@ -2505,6 +2862,14 @@ impl App {
             .cursor_entry()
             .map(|entry| entry.path.clone());
         self.preview.sync(hovered.as_deref(), target, now);
+        // The document worker's two inputs, both of which live on this side of
+        // the seam: the four colours a rasteriser may draw with, and whether
+        // this pane has the keyboard — which is the turntable's whole switch
+        // (PLAN §1: idle discipline beats spin).
+        self.preview
+            .set_ink(crate::preview::doc::Ink::from_palette(&self.palette));
+        self.preview.set_focused(self.focus == Focus::Preview);
+        self.preview.sync_doc(now);
         // The transport follows the same cursor, one line later and by the same
         // rule: after the keys, so a held `↓` mounts what it stopped on.
         self.sync_playback(now);
@@ -2735,7 +3100,7 @@ impl App {
             None if self.overlay_open() => chrome::hint_bar(
                 &paint,
                 layout.bar,
-                &overlay_hints(&self.dialog, self.picker.is_some()),
+                &overlay_hints(&self.dialog, self.picker.is_some(), self.spot.is_some()),
             ),
             None if self.help.is_some() => chrome::hint_bar(
                 &paint,
@@ -2788,6 +3153,9 @@ impl App {
         }
         if let (Some(OverlayGeom::Picker(card, rows)), Some(picker)) = (&overlay, &self.picker) {
             open::paint_picker(&paint, *card, rows, picker, &self.hovers, &self.ripples);
+        }
+        if let (Some(OverlayGeom::Spot(geometry)), Some(spot)) = (&overlay, &self.spot) {
+            spot::paint(&paint, spot, geometry, &self.hovers, &self.ripples, now);
         }
         if let (Some(OverlayGeom::Panel(card, rects, _)), Some(panel)) = (&overlay, &self.panel) {
             panel::paint(
@@ -3040,7 +3408,24 @@ fn op_toast(outcome: &df_core::ops::OpOutcome) -> (String, crate::toast::ToastKi
 }
 
 /// What the bar says while a modal surface owns the keyboard.
-fn overlay_hints(dialog: &Option<Dialog>, picker: bool) -> Vec<(&'static str, &'static str)> {
+fn overlay_hints(
+    dialog: &Option<Dialog>,
+    picker: bool,
+    spot: bool,
+) -> Vec<(&'static str, &'static str)> {
+    if spot {
+        // Every key the card answers to, including the two df-core's `[spot]`
+        // table has no row for — which is exactly why they are listed here: a
+        // key that is not on the help sheet has to be on the hint bar or it
+        // may as well not exist.
+        return vec![
+            ("↑↓", "row"),
+            ("←→", "previous / next file"),
+            ("⇧←→", "permission bit"),
+            ("Space", "toggle / hash"),
+            ("Tab / Esc", "close"),
+        ];
+    }
     match dialog {
         Some(Dialog::Confirm(_)) => vec![("Enter / y", "confirm"), ("Esc / n", "cancel"), ("↑↓", "scroll")],
         Some(Dialog::Conflict(_)) => vec![
@@ -3123,6 +3508,54 @@ fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>) {
             (fallback(), None)
         }
     }
+}
+
+/// Put the start-up cursor on `name` if it is there yet, and say whether it is
+/// still worth trying again.
+///
+/// The whole point is the second half. A directory read is asynchronous, so the
+/// name a person typed on the command line arrives *before* the row it belongs
+/// on; a placement attempted once, at startup, always fails, and the cursor
+/// sits on row 0 as though the argument had been ignored. Retrying on every
+/// batch fixes it, and the retries have to stop somewhere — which is when the
+/// scan finishes without the file, because it was deleted between the shell and
+/// here, or is hidden and `.` is off.
+///
+/// Pure, so both halves of that are a test rather than something you find out
+/// by opening a file from a shell.
+fn place_start_cursor(dir: &mut df_core::fs::DirState, name: &str) -> bool {
+    if dir.cursor_to_name(name) {
+        return false;
+    }
+    matches!(
+        dir.state(),
+        df_core::fs::LoadState::Idle | df_core::fs::LoadState::Loading
+    )
+}
+
+/// The spot panel's git row: the branch, and what git says about this path.
+///
+/// `None` when the file is not in a repository, or when the first status scan
+/// has been queued and has not landed — an absent row rather than a row saying
+/// "loading", because a fact that is not known yet is not a fact.
+fn git_line(git: &df_core::git::Git, path: &Path) -> Option<String> {
+    use df_core::git::FileStatus;
+    let status = git.ensure(path)?;
+    let branch = status.branch().unwrap_or("HEAD").to_string();
+    let word = match status.status_for(path) {
+        Some(FileStatus::Ignored) => "ignored",
+        Some(FileStatus::Untracked) => "untracked",
+        Some(FileStatus::Added) => "added",
+        Some(FileStatus::Deleted) => "deleted",
+        Some(FileStatus::Renamed) => "renamed",
+        Some(FileStatus::Typechange) => "type changed",
+        Some(FileStatus::Modified) => "modified",
+        Some(FileStatus::Conflict) => "conflicted",
+        // Tracked and clean: git has an opinion about the repository and none
+        // about this file, which is the good news.
+        None => "unchanged",
+    };
+    Some(format!("{branch} · {word}"))
 }
 
 /// The nearest ancestor of `path` that still exists — where to go when the
@@ -3283,6 +3716,71 @@ mod tests {
         );
     }
 
+    /// **The bug this fixes**: `Tab::open` queues the directory read, so at the
+    /// moment `App::new` runs there is nothing in the listing to point at and a
+    /// single `cursor_to_name` finds nothing. The name has to be remembered and
+    /// retried as the batches land.
+    ///
+    /// Driven against a real scanner and a real directory, because the failure
+    /// is entirely about *ordering* — a mocked listing that already had the rows
+    /// in it would pass with the bug still in place.
+    #[test]
+    fn the_start_up_cursor_waits_for_the_scan_that_will_contain_it() {
+        use df_core::fs::{no_notifier, LoadState};
+
+        // A real directory, made by hand rather than through df-core's
+        // `test-support` fixture: this is the binary crate, and pulling a
+        // feature of another crate in for one `mkdir` is not worth it.
+        let tree = std::env::temp_dir().join(format!("df-start-cursor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        std::fs::create_dir_all(&tree).expect("make the fixture directory");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tree.join(name), b"x").expect("write the fixture");
+        }
+        let scanner = Scanner::start(no_notifier());
+        let now = Instant::now();
+        let mgr = MgrConfig::default();
+        let sort = sort_options(&mgr, 0);
+        let mut tab = Tab::open(tree.clone(), &mgr, sort, &scanner, now);
+
+        // Before anything has arrived: the placement fails, and it says so by
+        // asking to be tried again. This is exactly the state `App::new` is in.
+        assert!(
+            place_start_cursor(&mut tab.cwd.dir, "c.txt"),
+            "an empty listing must ask to be retried, not give up"
+        );
+        assert_eq!(tab.cwd.dir.cursor(), 0);
+
+        // Now let the scan land, retrying on each update the way `poll_workers`
+        // does.
+        let mut waiting = true;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while waiting && Instant::now() < deadline {
+            for update in scanner.drain() {
+                tab.apply(&update);
+                if waiting {
+                    waiting = place_start_cursor(&mut tab.cwd.dir, "c.txt");
+                }
+            }
+            if waiting {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        assert!(!waiting, "the scan never landed");
+        assert_eq!(tab.cwd.dir.state(), LoadState::Loaded);
+        let name = tab.cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_eq!(name.as_deref(), Some("c.txt"), "the cursor did not follow");
+
+        // …and a name that is not in the directory gives up once the scan is
+        // over rather than retrying for the life of the process.
+        assert!(
+            !place_start_cursor(&mut tab.cwd.dir, "nope.txt"),
+            "a finished scan without the file must stop the retries"
+        );
+
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
     #[test]
     fn a_directory_argument_opens_it() {
         let (dir, focus) = start_directory(Some(Path::new("/")));
@@ -3363,6 +3861,49 @@ mod tests {
         );
     }
 
+    /// The spot panel's keyboard, through the **real** registry: `Tab` opens
+    /// it from the browser and closes it from inside, `←`/`→` swipe, `↑`/`↓`
+    /// walk the rows, and `Esc` and `Ctrl+c` both put it away.
+    ///
+    /// PLAN §4.1's note on the overlays is the thing this pins: yazi swipes the
+    /// spot with `h`/`l`, and §4.3 hard-reserves those, so the arrows carry it
+    /// here and nothing else may claim them while the card is up.
+    #[test]
+    fn the_spot_panel_answers_the_keys_the_card_advertises() {
+        let registry = Registry::defaults();
+        let dispatch = |context: Context, key: &str| {
+            let mut state = KeymapState::new();
+            let chord = df_core::keymap::parse_chord(key).expect("chord");
+            let stack = ContextStack::with(&[context]);
+            match registry.dispatch(&mut state, &stack, WhenFlags::LIST, chord, Instant::now()) {
+                Dispatch::Match(command) => Some(command),
+                _ => None,
+            }
+        };
+        assert_eq!(dispatch(Context::Files, "tab"), Some(Command::Spot));
+        for key in ["tab", "esc", "ctrl+c"] {
+            assert_eq!(
+                dispatch(Context::Spot, key),
+                Some(Command::OverlayClose),
+                "`{key}` did not close the card"
+            );
+        }
+        assert_eq!(
+            dispatch(Context::Spot, "left"),
+            Some(Command::SpotSwipePrev)
+        );
+        assert_eq!(
+            dispatch(Context::Spot, "right"),
+            Some(Command::SpotSwipeNext)
+        );
+        assert_eq!(dispatch(Context::Spot, "up"), Some(Command::OverlayPrev));
+        assert_eq!(dispatch(Context::Spot, "down"), Some(Command::OverlayNext));
+        // …and the two the table has no row for are handled literally, so they
+        // must *not* resolve to something else by accident.
+        assert_eq!(dispatch(Context::Spot, "space"), None);
+        assert_eq!(dispatch(Context::Spot, "shift+left"), None);
+    }
+
     /// Every modal surface says what its keys do, and never claims a key the
     /// surface does not have.
     #[test]
@@ -3373,13 +3914,20 @@ mod tests {
                 vec![PathBuf::from("/tmp/a")],
             ))),
             false,
+            false,
         );
         assert!(confirm.iter().any(|(k, _)| k.contains("Enter")));
         assert!(confirm.iter().any(|(k, _)| k.contains("Esc")));
-        let panel = overlay_hints(&None, false);
+        let panel = overlay_hints(&None, false, false);
         assert!(panel.iter().any(|(k, what)| *k == "x" && *what == "cancel"));
-        let picker = overlay_hints(&None, true);
+        let picker = overlay_hints(&None, true, false);
         assert!(picker.iter().any(|(_, what)| *what == "open"));
+        // The spot's hints cover the two keys df-core's `[spot]` table has no
+        // row for, which is the only place they are ever advertised.
+        let spot = overlay_hints(&None, false, true);
+        assert!(spot.iter().any(|(k, _)| k.contains("Space")));
+        assert!(spot.iter().any(|(k, _)| k.contains('⇧')));
+        assert!(spot.iter().any(|(k, _)| k.contains("Tab")));
     }
 
     /// **Only video and audio grow a transport** (PLAN §4.3). A PDF has pages

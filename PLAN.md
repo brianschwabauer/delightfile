@@ -417,8 +417,8 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Video/audio playback in pane (dv-playback); `K`/`J` seek ±5 from list
 - [x] Pane focus model: `→`-on-file → Preview, visuals (accent rule, tint, ghost cursor)
 - [x] Global transport: j/k/l shuttle ladder, L [ ] < >, volume; preview-focus extras (, . m)
-- [ ] Document scroll/zoom keys in preview focus; PDF (pdfium dlopen), fonts, 3D, gcode
-- [ ] Spot panel `Tab` with metadata, permissions editor, checksum
+- [x] Document scroll/zoom keys in preview focus; PDF (pdfium dlopen), fonts, 3D, gcode
+- [x] Spot panel `Tab` with metadata, permissions editor, checksum
 
 ### Phase 4 — mouse & drag
 - [ ] Click/double/middle/right + context menu, band select, momentum scroll

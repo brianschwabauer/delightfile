@@ -26,6 +26,8 @@ mod playback;
 mod preview;
 mod ripple;
 mod select;
+mod sha256;
+mod spot;
 mod tab;
 mod tabs;
 mod theme;
