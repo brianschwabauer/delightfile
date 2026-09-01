@@ -253,6 +253,16 @@ pub struct TemporalInfo {
     pub duration_us: i64,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Degrees **clockwise** the decoded frame has to be turned to sit upright
+    /// — the container's display matrix, which every phone writes into a
+    /// portrait clip and which dv-playback hands out frames *without* applying
+    /// (`dv_media::ProbeInfo::rotation`). The pane inverts it into the four
+    /// UVs it draws the frame with, so the frame lands on the same rectangle
+    /// the poster did (`preview::oriented_uvs`).
+    pub rotation: u32,
+    /// The same matrix's left-to-right flip, applied to the source *before*
+    /// the rotation.
+    pub mirrored: bool,
     pub video_codec: Option<String>,
     pub audio_codec: Option<String>,
     pub sample_rate: Option<u32>,
@@ -300,6 +310,9 @@ impl Prober {
         std::thread::Builder::new()
             .name("df-probe".into())
             .spawn(move || {
+                // An ffmpeg probe is somebody's cursor waiting on a demuxer;
+                // it must not preempt the paint thread (`df_core::thread`).
+                df_core::thread::lower_priority(df_core::thread::NICE_INTERACTIVE);
                 for (token, path) in rx {
                     if worker_live.load(Ordering::Relaxed) != token {
                         continue;
@@ -310,6 +323,8 @@ impl Prober {
                         duration_us: p.duration_us.unwrap_or(0),
                         width: p.width,
                         height: p.height,
+                        rotation: p.rotation,
+                        mirrored: p.mirrored,
                         video_codec: p.video_codec,
                         audio_codec: p.audio_codec,
                         sample_rate: p.sample_rate,
@@ -1084,6 +1099,8 @@ mod tests {
             duration_us: 0,
             width: None,
             height: None,
+            rotation: 0,
+            mirrored: false,
             video_codec: None,
             audio_codec: None,
             sample_rate: None,

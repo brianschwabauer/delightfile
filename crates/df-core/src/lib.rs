@@ -26,6 +26,7 @@ pub mod tasks;
 /// df-app's tests get the same `TempTree` instead of a second copy of it.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
+pub mod thread;
 pub mod toml;
 pub mod vfs;
 pub mod zoxide;

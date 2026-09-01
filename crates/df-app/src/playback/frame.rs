@@ -205,7 +205,11 @@ impl FrameConverter {
 
         // Identity placement: the target IS the source frame, at source size,
         // and the pane's `fit_rect` does the framing — the same one the still
-        // images use.
+        // images use. The container's **display matrix** is framing too, and
+        // it is applied the same way: `preview::oriented_size` turns the
+        // footprint and `preview::oriented_mesh` turns the four UVs, so a
+        // portrait clip costs four different floats per frame rather than a
+        // rotated blit (`app::redraw_inner`).
         let uniforms = FrameUniforms::new(
             frame.limited_range,
             1.0,

@@ -403,8 +403,12 @@ impl Thumbs {
             let notify = Arc::clone(&notify);
             match std::thread::Builder::new()
                 .name(format!("df-thumb-{n}"))
-                .spawn(move || worker(shared, tx, notify))
-            {
+                .spawn(move || {
+                    // Eight of these decoding JPEGs while the grid scrolls; the
+                    // scroll is what has to stay smooth (`df_core::thread`).
+                    df_core::thread::lower_priority(df_core::thread::NICE_INTERACTIVE);
+                    worker(shared, tx, notify)
+                }) {
                 Ok(handle) => workers.push(handle),
                 // A worker that will not spawn costs some thumbnails and
                 // nothing else; the tiles fall back to their icons.

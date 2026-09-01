@@ -180,6 +180,7 @@ pub fn preview(
                 alpha,
                 now,
                 pane.media_mounted,
+                pane.media_frame,
             ));
             0
         }
@@ -893,19 +894,106 @@ fn hex_body(
 
 /// Where a texture of `size` physical pixels goes inside `area`.
 ///
-/// Centred, aspect preserved, and **never enlarged past 1:1** — an icon blown
-/// up to fill the pane is a blurry lie about the file. Pure, so the HiDPI
-/// arithmetic is a test rather than a thing noticed on a second monitor.
+/// Centred, aspect preserved, and **fitted to the pane in both directions** —
+/// a small picture is enlarged to fill the space the same way a large one is
+/// shrunk to fit it. The pane exists to show you the file; a 64-pixel icon
+/// stranded in the middle of a 900-pixel pane shows you less of it than it
+/// could for no reason a person asked for. What keeps the enlargement honest
+/// is the *sampling*: anything small enough to be pixel art is drawn with
+/// nearest-neighbour (see [`nearest_for`]), so it comes out crisp rather than
+/// as the blurry lie a bilinear upscale would be.
+///
+/// The decode is still capped at the pane (`decode::fit` never enlarges
+/// either): what grows is the rectangle, never the memory.
+///
+/// Pure, so the HiDPI arithmetic is a test rather than a thing noticed on a
+/// second monitor.
 pub fn fit_rect(area: egui::Rect, size: (u32, u32), ppp: f32) -> egui::Rect {
     let ppp = if ppp > 0.0 { ppp } else { 1.0 };
     let natural = egui::vec2(size.0 as f32 / ppp, size.1 as f32 / ppp);
     if natural.x <= 0.0 || natural.y <= 0.0 {
         return egui::Rect::from_center_size(area.center(), egui::Vec2::ZERO);
     }
-    let k = (area.width() / natural.x)
-        .min(area.height() / natural.y)
-        .min(1.0);
+    let k = (area.width() / natural.x).min(area.height() / natural.y);
     egui::Rect::from_center_size(area.center(), natural * k)
+}
+
+/// The long edge, in source pixels, at or below which a picture is drawn with
+/// nearest-neighbour sampling.
+///
+/// Icons, favicons and pixel art. 128 is the largest of the standard icon
+/// sizes (`.ico` stops at 256 but a 256 is a small picture, not a glyph), and
+/// a photograph that small is a thumbnail nobody is inspecting. Below the
+/// line, "crisp" is what the file *means*; above it, "smooth" is.
+pub const NEAREST_MAX_SIDE: u32 = 128;
+
+/// Should a source of `size` physical pixels be sampled nearest-neighbour?
+pub fn nearest_for(size: (u32, u32)) -> bool {
+    size.0.max(size.1) <= NEAREST_MAX_SIDE
+}
+
+/// The size a frame *occupies* once the container's display matrix has been
+/// applied: a quarter turn swaps the axes, a half turn does not.
+///
+/// `rotation` is degrees **clockwise**, exactly as `dv_media::ProbeInfo`
+/// reports it. Anything that is not a quarter turn is treated as none, which
+/// is what every container in practice writes anyway.
+pub fn oriented_size(size: (u32, u32), rotation: u32) -> (u32, u32) {
+    if matches!(rotation % 360, 90 | 270) {
+        (size.1, size.0)
+    } else {
+        size
+    }
+}
+
+/// The source UV each corner of the destination rect samples, in the order
+/// `[top-left, top-right, bottom-right, bottom-left]` of the **destination**.
+///
+/// This is the inverse of the display matrix: `rotation` degrees clockwise is
+/// the turn the decoded frame needs to sit upright, and `mirrored` is a
+/// left-to-right flip applied to the source *before* that turn (dv-media's
+/// convention, and ffmpeg's autorotate's). Inverting it here rather than
+/// rotating pixels means a portrait clip costs a different set of four UVs and
+/// not one byte of extra work per frame.
+pub fn oriented_uvs(rotation: u32, mirrored: bool) -> [egui::Pos2; 4] {
+    // Read each row as "the destination's TL, TR, BR, BL sample *this* source
+    // corner". Derived once, tested exhaustively below.
+    let base: [(f32, f32); 4] = match rotation % 360 {
+        90 => [(0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
+        180 => [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0)],
+        270 => [(1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)],
+        _ => [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)],
+    };
+    base.map(|(u, v)| egui::pos2(if mirrored { 1.0 - u } else { u }, v))
+}
+
+/// A textured quad at `rect` with the display matrix already inverted into its
+/// UVs — the one place the still pictures and the video frames agree on what
+/// "upright" means.
+pub fn oriented_mesh(
+    texture: egui::TextureId,
+    rect: egui::Rect,
+    rotation: u32,
+    mirrored: bool,
+    tint: egui::Color32,
+) -> egui::Mesh {
+    let mut mesh = egui::Mesh::with_texture(texture);
+    let corners = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    for (pos, uv) in corners.into_iter().zip(oriented_uvs(rotation, mirrored)) {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos,
+            uv,
+            color: tint,
+        });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    mesh
 }
 
 /// Where a rendered document page goes inside the pane.
@@ -963,6 +1051,9 @@ fn media_body(
     // position strip are drawn over this pane by `crate::playback` — the kind
     // badge and the "no decoder" line both stand down.
     mounted: bool,
+    // `frame`: the player has a *decoded* frame over this pane, so the poster
+    // it stood in for is done — see `Pane::set_media_frame`.
+    frame: bool,
 ) -> f32 {
     // The placeholder is at full strength the moment it decodes; the real
     // pixels fade in over it. That is delightviewer's trick and the reason a
@@ -978,11 +1069,18 @@ fn media_body(
         })
         .unwrap_or(0.0);
 
-    if let Some(thumb) = &media.thumb {
-        draw_texture(painter, content, thumb, ppp, alpha);
-    }
-    if let Some(full) = &media.full {
-        draw_texture(painter, content, full, ppp, alpha * swap);
+    // …unless the player has landed a real frame, in which case the poster has
+    // done its job. Two pictures of the same moment stacked on each other read
+    // as one picture right up until they disagree about their footprint — a
+    // portrait clip whose frame is turned and whose poster is not — and then
+    // they read as a rendering bug.
+    if !frame {
+        if let Some(thumb) = &media.thumb {
+            draw_texture(painter, content, thumb, ppp, alpha);
+        }
+        if let Some(full) = &media.full {
+            draw_texture(painter, content, full, ppp, alpha * swap);
+        }
     }
 
     // A document's own pixels go over the cached thumbnail that stood in for
@@ -1281,20 +1379,102 @@ mod tests {
         assert!((rect.width() - 200.0).abs() < 1e-3);
     }
 
-    /// A texture is physical pixels and the pane is points; at 2× a 800-pixel
-    /// image is 400 points wide and must not be drawn at 800.
+    /// A texture is physical pixels and the pane is points; at 2× a
+    /// 1600-pixel image is 800 points wide, so it is the *height* of this
+    /// pane that binds and not the width it would bind at if the division
+    /// were missed.
     #[test]
     fn a_picture_respects_the_scale_factor() {
-        let rect = fit_rect(area(), (400, 400), 2.0);
-        assert!((rect.width() - 200.0).abs() < 1e-3, "{rect:?}");
-        assert!((rect.height() - 200.0).abs() < 1e-3);
+        let rect = fit_rect(area(), (1600, 1600), 2.0);
+        assert!((rect.width() - 400.0).abs() < 1e-3, "{rect:?}");
+        assert!((rect.height() - 400.0).abs() < 1e-3);
+    }
+
+    /// The rule that changed: a picture smaller than the pane is *enlarged* to
+    /// it, because a pane exists to show the file (PLAN §6). What keeps that
+    /// honest is [`nearest_for`], not a scale cap.
+    #[test]
+    fn a_small_picture_fills_the_pane() {
+        let rect = fit_rect(area(), (32, 32), 1.0);
+        assert!((rect.width() - 400.0).abs() < 1e-3, "{rect:?}");
+        assert!((rect.height() - 400.0).abs() < 1e-3);
+        assert!((rect.center() - area().center()).length() < 1e-3);
     }
 
     #[test]
-    fn a_small_picture_is_never_enlarged() {
-        let rect = fit_rect(area(), (32, 32), 1.0);
-        assert!((rect.width() - 32.0).abs() < 1e-3);
-        assert!((rect.height() - 32.0).abs() < 1e-3);
+    fn only_small_sources_are_sampled_nearest() {
+        assert!(nearest_for((16, 16)));
+        assert!(nearest_for((128, 40)));
+        assert!(!nearest_for((129, 40)));
+        assert!(!nearest_for((4000, 3000)));
+    }
+
+    /// A quarter turn swaps the footprint; a half turn does not. This is what
+    /// makes a rotated clip's frame cover the same rectangle its poster did.
+    #[test]
+    fn a_quarter_turn_swaps_the_footprint() {
+        assert_eq!(oriented_size((1920, 1080), 0), (1920, 1080));
+        assert_eq!(oriented_size((1920, 1080), 90), (1080, 1920));
+        assert_eq!(oriented_size((1920, 1080), 180), (1920, 1080));
+        assert_eq!(oriented_size((1920, 1080), 270), (1080, 1920));
+        // Not a quarter turn, and a full turn: neither swaps.
+        assert_eq!(oriented_size((1920, 1080), 45), (1920, 1080));
+        assert_eq!(oriented_size((1920, 1080), 360), (1920, 1080));
+    }
+
+    /// The UVs are the *inverse* of the display matrix, so the check is: take
+    /// the source corner each destination corner samples, push it forward
+    /// through the matrix, and it must land back on that destination corner.
+    #[test]
+    fn the_uvs_invert_the_display_matrix() {
+        // The forward transform dv-media describes: mirror left-to-right
+        // first, then turn `rotation` degrees clockwise.
+        fn forward(u: f32, v: f32, rotation: u32, mirrored: bool) -> (f32, f32) {
+            let u = if mirrored { 1.0 - u } else { u };
+            match rotation % 360 {
+                90 => (1.0 - v, u),
+                180 => (1.0 - u, 1.0 - v),
+                270 => (v, 1.0 - u),
+                _ => (u, v),
+            }
+        }
+        // Destination corners in the order `oriented_uvs` returns them.
+        let dest = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        for rotation in [0, 90, 180, 270] {
+            for mirrored in [false, true] {
+                let uvs = oriented_uvs(rotation, mirrored);
+                for (i, uv) in uvs.iter().enumerate() {
+                    let landed = forward(uv.x, uv.y, rotation, mirrored);
+                    assert_eq!(
+                        landed, dest[i],
+                        "rotation {rotation}, mirrored {mirrored}, corner {i}"
+                    );
+                }
+                // …and the four are still the four distinct corners, which is
+                // what rules out a transform that folds the picture onto
+                // itself.
+                let mut seen: Vec<(u32, u32)> =
+                    uvs.iter().map(|p| (p.x as u32, p.y as u32)).collect();
+                seen.sort_unstable();
+                seen.dedup();
+                assert_eq!(seen.len(), 4, "rotation {rotation}, mirrored {mirrored}");
+            }
+        }
+    }
+
+    /// 0° unmirrored has to be exactly what `add_rect_with_uv` would have
+    /// written, or every unrotated picture in the program moves.
+    #[test]
+    fn an_unrotated_picture_is_left_alone() {
+        assert_eq!(
+            oriented_uvs(0, false),
+            [
+                egui::pos2(0.0, 0.0),
+                egui::pos2(1.0, 0.0),
+                egui::pos2(1.0, 1.0),
+                egui::pos2(0.0, 1.0),
+            ]
+        );
     }
 
     #[test]

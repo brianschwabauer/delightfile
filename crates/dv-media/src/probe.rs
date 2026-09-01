@@ -192,7 +192,12 @@ fn probe_av(path: &Path) -> Result<ProbeInfo> {
 
 /// The turn a stream's display matrix asks for: `(degrees clockwise, mirrored)`.
 /// `(0, false)` when the stream carries no matrix, or a degenerate one.
-fn display_orientation(stream: &ffmpeg::format::stream::Stream) -> (u32, bool) {
+///
+/// Public because a still frame pulled out of a container by anything other
+/// than [`probe`] — delightfile's HEIC/AVIF and video-poster path — needs the
+/// same answer from the same code, and a second reading of the same nine
+/// integers somewhere else is how the two would come to disagree.
+pub fn display_orientation(stream: &ffmpeg::format::stream::Stream) -> (u32, bool) {
     stream
         .side_data()
         .find(|sd| sd.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)

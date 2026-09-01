@@ -97,9 +97,17 @@ pub enum Stage {
 pub struct Decoded {
     pub token: PreviewToken,
     pub stage: Stage,
+    /// **Already an [`egui::ColorImage`]**, built on this worker.
+    ///
+    /// `ColorImage::from_rgba_unmultiplied` is a full second copy of the
+    /// picture — twenty-odd milliseconds on a pane-sized photo — and doing it
+    /// on the UI thread is doing it in the middle of an animation frame, which
+    /// is precisely the jank this seam exists to prevent. The UI thread's
+    /// share is now the `load_texture` upload and nothing else.
+    ///
     /// `Err` carries something the pane can print. A failed *thumb* is not
     /// worth showing (the full decode is still coming), a failed *full* is.
-    pub result: Result<Rgba, String>,
+    pub result: Result<egui::ColorImage, String>,
 }
 
 /// What the pane asks for.
@@ -142,6 +150,9 @@ impl Decoder {
         let handle = std::thread::Builder::new()
             .name("df-decode".to_string())
             .spawn(move || {
+                // A held `↓` puts this thread on every core it can reach; the
+                // paint thread has to win that race (`df_core::thread`).
+                df_core::thread::lower_priority(df_core::thread::NICE_INTERACTIVE);
                 for job in job_rx {
                     run(job, &res_tx, &worker_live, &notify);
                 }
@@ -231,7 +242,7 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
     // The placeholder first, always: it is a 600-pixel JPEG and it is on
     // screen before the real decode has finished opening its file.
     if let Some(thumb) = &thumb {
-        match decode_file(thumb, target) {
+        match decode_file(thumb, target).and_then(|image| to_color(&image)) {
             Ok(image) => {
                 if !send(Stage::Thumb, Ok(image)) {
                     return;
@@ -250,7 +261,14 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
     match decode_file(&path, target) {
         Ok(image) => {
             let store_from = store.then(|| (image.width, image.height, image.pixels.clone()));
-            if !send(Stage::Full, Ok(image)) {
+            let color = match to_color(&image) {
+                Ok(color) => color,
+                Err(e) => {
+                    send(Stage::Full, Err(e));
+                    return;
+                }
+            };
+            if !send(Stage::Full, Ok(color)) {
                 return;
             }
             // After the pane has its pixels, never before: the write-back is a
@@ -265,6 +283,22 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
             send(Stage::Full, Err(e));
         }
     }
+}
+
+/// Pack decoded pixels into the shape egui uploads from, **on this thread**.
+///
+/// The size sanity-check that used to live next to `load_texture` comes with
+/// it: a buffer shorter than its own dimensions claim is a decoder bug, and
+/// the worker is where a decoder bug should be turned into a message.
+pub fn to_color(image: &Rgba) -> Result<egui::ColorImage, String> {
+    let (w, h) = (image.width as usize, image.height as usize);
+    if w == 0 || h == 0 || image.pixels.len() < w * h * 4 {
+        return Err("decoded nothing".to_string());
+    }
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [w, h],
+        &image.pixels[..w * h * 4],
+    ))
 }
 
 /// Decode `path`, scaled to fit `target` physical pixels.
@@ -349,6 +383,10 @@ fn ffmpeg_still(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
         .best(ffmpeg::media::Type::Video)
         .ok_or_else(|| "no decoder for this format".to_string())?;
     let index = stream.index();
+    // The container's display matrix, read by the same code `dv_media::probe`
+    // reads it with. A poster that ignores it is a portrait clip lying on its
+    // side, and — worse — a poster the *player's* frame cannot line up with.
+    let (rotation, mirrored) = dv_media::display_orientation(&stream);
     let context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
         .map_err(|e| e.to_string())?;
     let mut decoder = context.decoder().video().map_err(|e| e.to_string())?;
@@ -376,7 +414,13 @@ fn ffmpeg_still(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
     }
 
     let (w, h) = (frame.width().max(1), frame.height().max(1));
-    let (tw, th) = fit(w, h, target);
+    // Fit the *upright* picture to the pane, then ask swscale for that size
+    // back in coded orientation — so a portrait clip is scaled to the pane's
+    // height rather than to the height of the landscape it is stored as.
+    let quarter = matches!(rotation % 360, 90 | 270);
+    let (ow, oh) = if quarter { (h, w) } else { (w, h) };
+    let (ow, oh) = fit(ow, oh, target);
+    let (tw, th) = if quarter { (oh, ow) } else { (ow, oh) };
     let mut scaler = Scaler::get(
         frame.format(),
         w,
@@ -392,11 +436,59 @@ fn ffmpeg_still(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
     let mut rgba = VideoFrame::empty();
     scaler.run(&frame, &mut rgba).map_err(|e| e.to_string())?;
 
-    Ok(Rgba {
-        width: tw,
-        height: th,
-        pixels: pack(rgba.data(0), rgba.stride(0), tw, th),
-    })
+    let pixels = pack(rgba.data(0), rgba.stride(0), tw, th);
+    Ok(rotate_rgba(
+        Rgba {
+            width: tw,
+            height: th,
+            pixels,
+        },
+        rotation,
+        mirrored,
+    ))
+}
+
+/// Apply a container's display matrix to decoded pixels: `rotation` degrees
+/// **clockwise**, after a left-to-right flip when `mirrored`.
+///
+/// The video *frames* invert this into four UVs instead (`preview::paint`),
+/// which costs nothing per frame; a poster is decoded once and then drawn for
+/// as long as the cursor sits on the file, so it is cheaper to turn the pixels
+/// here and hand the rest of the program an upright picture. Pure, so the
+/// eight cases are a table test rather than a thing squinted at in the pane.
+pub fn rotate_rgba(image: Rgba, rotation: u32, mirrored: bool) -> Rgba {
+    let rotation = rotation % 360;
+    if rotation == 0 && !mirrored {
+        return image;
+    }
+    let (w, h) = (image.width as usize, image.height as usize);
+    if w == 0 || h == 0 || image.pixels.len() < w * h * 4 {
+        return image;
+    }
+    let quarter = matches!(rotation, 90 | 270);
+    let (ow, oh) = if quarter { (h, w) } else { (w, h) };
+    let mut out = vec![0u8; ow * oh * 4];
+    for y in 0..oh {
+        for x in 0..ow {
+            // Where this destination pixel comes from — the inverse of
+            // "mirror, then turn clockwise".
+            let (u, v) = match rotation {
+                90 => (y, h - 1 - x),
+                180 => (w - 1 - x, h - 1 - y),
+                270 => (w - 1 - y, x),
+                _ => (x, y),
+            };
+            let u = if mirrored { w - 1 - u } else { u };
+            let src = (v * w + u) * 4;
+            let dst = (y * ow + x) * 4;
+            out[dst..dst + 4].copy_from_slice(&image.pixels[src..src + 4]);
+        }
+    }
+    Rgba {
+        width: ow as u32,
+        height: oh as u32,
+        pixels: out,
+    }
 }
 
 /// swscale pads rows to its own alignment; hand back a tightly packed buffer.
@@ -519,10 +611,87 @@ mod tests {
 
     #[test]
     fn fitting_never_enlarges() {
-        // Smaller than the pane: left exactly as it is, because a 16×16 icon
-        // blown up to 400 points is a blurry lie about the file.
+        // Smaller than the pane: left exactly as it is. The *pane* does draw a
+        // 16×16 icon at 400 points now (`paint::fit_rect`); what it must never
+        // do is spend 400 points of memory on 16 points of picture, so the
+        // enlargement is a rectangle and never a resample.
         assert_eq!(fit(16, 16, (400, 600)), (16, 16));
         assert_eq!(fit(400, 600, (400, 600)), (400, 600));
+    }
+
+    /// The eight cases of a display matrix, on a picture whose every pixel
+    /// says where it came from.
+    #[test]
+    fn a_display_matrix_turns_the_pixels() {
+        // 2×3 (w×h), each pixel tagged with its own (x, y).
+        let source = Rgba {
+            width: 2,
+            height: 3,
+            pixels: (0..3)
+                .flat_map(|y: u8| (0..2).flat_map(move |x: u8| [x, y, 0, 255]))
+                .collect(),
+        };
+        let at = |image: &Rgba, x: u32, y: u32| {
+            let i = ((y * image.width + x) * 4) as usize;
+            (image.pixels[i], image.pixels[i + 1])
+        };
+        let copy = |image: &Rgba| Rgba {
+            width: image.width,
+            height: image.height,
+            pixels: image.pixels.clone(),
+        };
+
+        // No matrix: the same buffer, untouched.
+        let same = rotate_rgba(copy(&source), 0, false);
+        assert_eq!((same.width, same.height), (2, 3));
+        assert_eq!(at(&same, 1, 2), (1, 2));
+
+        // A quarter turn clockwise: the source's top-left ends up top-right.
+        let turned = rotate_rgba(copy(&source), 90, false);
+        assert_eq!((turned.width, turned.height), (3, 2));
+        assert_eq!(at(&turned, 2, 0), (0, 0));
+        assert_eq!(at(&turned, 0, 0), (0, 2));
+        assert_eq!(at(&turned, 2, 1), (1, 0));
+
+        // A half turn: opposite corners swap and the footprint does not.
+        let flipped = rotate_rgba(copy(&source), 180, false);
+        assert_eq!((flipped.width, flipped.height), (2, 3));
+        assert_eq!(at(&flipped, 0, 0), (1, 2));
+        assert_eq!(at(&flipped, 1, 2), (0, 0));
+
+        // Three quarters: the source's top-left ends up bottom-left.
+        let back = rotate_rgba(copy(&source), 270, false);
+        assert_eq!((back.width, back.height), (3, 2));
+        assert_eq!(at(&back, 0, 1), (0, 0));
+        assert_eq!(at(&back, 0, 0), (1, 0));
+
+        // Mirrored, unturned: columns reverse, rows do not.
+        let mirrored = rotate_rgba(copy(&source), 0, true);
+        assert_eq!((mirrored.width, mirrored.height), (2, 3));
+        assert_eq!(at(&mirrored, 0, 0), (1, 0));
+        assert_eq!(at(&mirrored, 1, 2), (0, 2));
+
+        // Mirrored *then* turned, which is the order the display matrix means.
+        let both = rotate_rgba(copy(&source), 90, true);
+        assert_eq!((both.width, both.height), (3, 2));
+        assert_eq!(at(&both, 2, 0), (1, 0));
+
+        // Four quarter turns is where it started.
+        let round = (0..4).fold(copy(&source), |image, _| rotate_rgba(image, 90, false));
+        assert_eq!((round.width, round.height), (2, 3));
+        assert_eq!(round.pixels, source.pixels);
+
+        // A truncated buffer is a decoder bug, not a panic.
+        let short = rotate_rgba(
+            Rgba {
+                width: 4,
+                height: 4,
+                pixels: vec![0; 8],
+            },
+            90,
+            false,
+        );
+        assert_eq!((short.width, short.height), (4, 4));
     }
 
     #[test]
