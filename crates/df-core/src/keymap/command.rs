@@ -162,6 +162,7 @@ commands! {
     TasksShow => "tasks-show",
     SeekPreviewUp => "seek-preview-up",
     SeekPreviewDown => "seek-preview-down",
+    ToggleView => "toggle-view",
 
     // ── Copy the path, in its four useful shapes, plus the contents ───────
     CopyPath => "copy-path",

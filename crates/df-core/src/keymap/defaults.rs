@@ -144,6 +144,9 @@ pub(super) fn build() -> Registry {
         (Files, "K",      C::SeekPreviewUp,   "Seek preview up 5",            InList),
         (Files, "J",      C::SeekPreviewDown, "Seek preview down 5",          InList),
         (Files, "tab",    C::Spot,            "Spot the hovered file",        Always),
+        // No yazi ancestor: grid view is delightfile's own. ctrl+g is free in
+        // yazi's mgr table, and g alone is the goto prefix — close cousins.
+        (Files, "ctrl+g", C::ToggleView,      "Toggle list / grid view",      InList),
 
         // ── Files: opening ──────────────────────────────────────────────────
         (Files, "o",           C::Open,            "Open",       Always),
@@ -322,6 +325,8 @@ pub(super) fn build() -> Registry {
         (Pick, "enter",  C::OverlaySubmit, "Choose",          Always),
         (Pick, "up",     C::OverlayPrev,   "Previous option", Always),
         (Pick, "down",   C::OverlayNext,   "Next option",     Always),
+        // The search panel stacks on Pick; this puts ctrl+s on its help sheet.
+        (Pick, "ctrl+s", C::CancelSearch,  "Cancel the search", Always),
 
         // ── Tasks (`w`) ─────────────────────────────────────────────────────
         (Tasks, "esc",    C::OverlayClose, "Close the task manager", Always),

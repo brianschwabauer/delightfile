@@ -3497,6 +3497,7 @@ impl App {
             C::ShellBlock => self.open_prompt(PromptKind::ShellBlock),
             C::Undo => self.undo(now),
             C::TasksShow => self.toggle_panel(),
+            C::ToggleView => self.toggle_view(now),
             C::Spot => self.toggle_spot(),
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
