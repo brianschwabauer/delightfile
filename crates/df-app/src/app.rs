@@ -6612,7 +6612,6 @@ impl App {
         if rows == 0.0 {
             return;
         }
-        let scrolloff = self.mgr.scrolloff;
         if layout.preview.contains(at) {
             // A document scrolls by lines with the same coast; a *rendered*
             // document turns pages instead (see `Pane::wheel`).
@@ -6621,23 +6620,17 @@ impl App {
         }
         if layout.parent.contains(at) {
             if let Some(parent) = &mut self.tabs.active_mut().parent {
-                parent.wheel(rows, parent_page, scrolloff, 1, now);
+                parent.wheel(rows, parent_page, 1, now);
             }
             return;
         }
         // Everywhere else is the list: it is the pane a wheel means when it is
         // not pointed at one of the other two.
         let columns = self.columns;
-        if self
-            .tabs
-            .active_mut()
-            .cwd
-            .wheel(rows, page, scrolloff, columns, now)
-        {
-            // Scrolling carries the cursor, and a visual run follows the
-            // cursor wherever it goes.
-            self.apply_visual();
-        }
+        // Scrolling moves the view and leaves the cursor — and with it the
+        // preview, the counter and any visual run — exactly where it was, so
+        // there is nothing to re-apply here (see `Listing::wheel`).
+        self.tabs.active_mut().cwd.wheel(rows, page, columns, now);
     }
 
     /// A primary click on something. Returns where it landed, for the ripple.
@@ -7518,9 +7511,11 @@ impl App {
     /// Scroll a listing the drag is hanging over the edge of.
     ///
     /// Through [`crate::tab::Listing::wheel`], which is the one place in the
-    /// program that moves a view: it carries the sub-row remainder and drags
-    /// the cursor along, so the scrolloff rule does not undo the travel on the
-    /// next frame (the same subtlety the wheel documents).
+    /// program that moves a view on its own: it carries the sub-row remainder
+    /// and detaches the view from the cursor, so the scrolloff rule does not
+    /// undo the travel on the next frame. A drag is a mouse gesture like the
+    /// wheel, so it leaves the cursor alone for the same reason — the row you
+    /// were on is still the row you were on when the drop lands.
     fn autoscroll(
         &mut self,
         zones: &dnd::Zones,
@@ -7529,19 +7524,18 @@ impl App {
         pages: (usize, usize),
         now: Instant,
     ) {
-        let scrolloff = self.mgr.scrolloff;
         let list = dnd::autoscroll(zones.list_content, at) * dt;
         if list != 0.0 {
             let columns = self.columns;
             self.tabs
                 .active_mut()
                 .cwd
-                .wheel(list, pages.0, scrolloff, columns, now);
+                .wheel(list, pages.0, columns, now);
         }
         let parent = dnd::autoscroll(zones.parent_content, at) * dt;
         if parent != 0.0 {
             if let Some(pane) = &mut self.tabs.active_mut().parent {
-                pane.wheel(parent, pages.1, scrolloff, 1, now);
+                pane.wheel(parent, pages.1, 1, now);
             }
         }
     }
@@ -8474,14 +8468,15 @@ impl App {
             Some(metrics) => metrics.rows(tab.cwd.dir.len()),
             None => tab.cwd.dir.len(),
         };
-        let list_first = crate::viewport::first_visible(
-            tab.cwd.first(),
+        // …and the view follows the cursor unless the mouse has scrolled away
+        // from it, which `follow_cursor` is the one place that decides.
+        tab.cwd.follow_cursor(
             tab.cwd.dir.cursor() / columns,
             pane_rows,
             page,
             scrolloff,
+            now,
         );
-        tab.cwd.set_first(list_first, now);
         let cursor = tab.cwd.dir.cursor();
         self.cursor_glow.tick(Some(cursor), None, now);
         // Focus commits instantly; its picture catches up (PLAN §2.1).
@@ -8491,14 +8486,13 @@ impl App {
         self.cursor_rect = grid::pane_rect(list_content, metrics.as_ref(), scroll_rows, cursor);
 
         if let Some(parent) = &mut self.tabs.active_mut().parent {
-            let first = crate::viewport::first_visible(
-                parent.first(),
+            parent.follow_cursor(
                 parent.dir.cursor(),
                 parent.dir.len(),
                 parent_page,
                 scrolloff,
+                now,
             );
-            parent.set_first(first, now);
         }
 
         // ── The preview (PLAN §6) ───────────────────────────────────────────

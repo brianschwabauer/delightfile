@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use df_core::config::MgrConfig;
-use df_core::fs::{DirState, History, ScanUpdate, Scanner, SortOptions};
+use df_core::fs::{CursorMemory, DirState, History, ScanUpdate, Scanner, SortOptions};
 
 use crate::motion::{Easing, Tween};
 
@@ -53,6 +53,18 @@ pub struct Listing {
     /// would round to zero rows and the list would not move at all. See
     /// [`crate::mouse::Fling`], which does the same thing for the preview.
     wheel_carry: f32,
+    /// The cursor the view was left behind by, while the view is **detached**.
+    ///
+    /// A wheel roll (or a drag hanging over the edge) scrolls the *view* and
+    /// leaves the cursor exactly where it was — the active row, its preview and
+    /// the position counter all stay put even when the row scrolls off screen,
+    /// which is what makes the wheel a way to *look* somewhere rather than a
+    /// second way to move. That only works if the scrolloff rule stops deriving
+    /// the view from the cursor for as long as it lasts, so this holds the
+    /// cursor as it was when the gesture started: the next cursor move — any
+    /// key, or a click — makes it stale, and [`Listing::follow_cursor`] takes
+    /// the view back and re-anchors it around wherever the cursor went.
+    detached: Option<usize>,
     /// Nothing has been drawn yet, so the first scroll position is a *jump*.
     ///
     /// Entering a directory and landing mid-list — `←` back out of a folder,
@@ -80,6 +92,7 @@ impl Listing {
             first: 0,
             scroll: Tween::new(0.0, 0.0, SCROLL_TWEEN, Easing::OutQuint, now),
             wheel_carry: 0.0,
+            detached: None,
             fresh: true,
             scan_started: now,
         }
@@ -89,6 +102,7 @@ impl Listing {
         self.dir.path()
     }
 
+    #[cfg(test)]
     pub fn first(&self) -> usize {
         self.first
     }
@@ -139,19 +153,18 @@ impl Listing {
 
     /// A wheel roll over this pane (PLAN §7.5's "scroll with momentum").
     ///
-    /// The view is moved directly and the **cursor is dragged into it**, which
-    /// is the one subtlety here: [`crate::viewport::first_visible`] derives the
-    /// view from the cursor every frame, so a wheel that moved only the view
-    /// would be undone by the next frame's scrolloff. Dragging the cursor is
-    /// also what yazi does, and it means the row you scrolled to is the row the
-    /// keyboard is on when you stop.
+    /// The view moves and the **cursor does not**: scrolling is looking, not
+    /// selecting, so the active row keeps its preview and its place in the
+    /// counter while you read somewhere else in the directory. Because
+    /// [`crate::viewport::first_visible`] would otherwise put the view back
+    /// under the cursor on the very next frame, the roll *detaches* the view —
+    /// see [`Listing::detached`] — until a cursor move takes it back.
     ///
     /// Returns whether anything moved.
     pub fn wheel(
         &mut self,
         delta_rows: f32,
         visible: usize,
-        scrolloff: usize,
         // How many entries share one row of the pane: one in the list, a whole
         // row of tiles in the grid (PLAN §2). Every number below counts *rows
         // of the pane*, so this is the only place the two geometries differ —
@@ -179,19 +192,46 @@ impl Listing {
             return false;
         }
         self.set_first_over(target, crate::mouse::WHEEL_GLIDE, now);
-        let cursor_row = crate::viewport::cursor_in_view(
-            target,
-            self.dir.cursor() / columns,
-            rows,
-            visible,
-            scrolloff,
-        );
-        // Back from a row of the pane to an entry: the same column of that row,
-        // so a wheel roll does not also drag the cursor sideways across the
-        // grid.
-        let column = self.dir.cursor() % columns;
-        self.dir.set_cursor(cursor_row * columns + column);
+        self.detached = Some(self.dir.cursor());
         true
+    }
+
+    /// Whether the view has been scrolled away from the cursor.
+    pub fn is_detached(&self) -> bool {
+        self.detached.is_some_and(|at| at == self.dir.cursor())
+    }
+
+    /// Put the view where the cursor says it should be, this frame.
+    ///
+    /// The scrolloff rule ([`crate::viewport::first_visible`]) applied to the
+    /// *target* row, so the maths never chases its own animation — with the one
+    /// exception a mouse earns: while the view is detached the cursor is left
+    /// off screen on purpose, and all this does is keep the position legal for
+    /// a listing that has since got shorter. The first cursor move of any kind
+    /// re-attaches, which is why the check is "is the cursor still where the
+    /// wheel left it" rather than a flag somebody has to remember to clear.
+    ///
+    /// `cursor_row`, `rows` and `visible` are all counted in *rows of the
+    /// pane*: one entry per row in the list, a whole row of tiles in the grid.
+    pub fn follow_cursor(
+        &mut self,
+        cursor_row: usize,
+        rows: usize,
+        visible: usize,
+        scrolloff: usize,
+        now: Instant,
+    ) {
+        if self.is_detached() {
+            let max_first = rows.saturating_sub(visible);
+            if self.first > max_first {
+                self.set_first(max_first, now);
+            }
+            return;
+        }
+        self.detached = None;
+        let first =
+            crate::viewport::first_visible(self.first, cursor_row, rows, visible, scrolloff);
+        self.set_first(first, now);
     }
 
     /// Is the view still moving? The `animating()` half of PLAN §1's idle-cost
@@ -214,6 +254,15 @@ pub struct Tab {
     /// is drawn empty rather than showing `/` twice.
     pub parent: Option<Listing>,
     pub history: History,
+    /// Which row this tab was on, per directory it has left (PLAN §2).
+    ///
+    /// Going *up* has always landed on the child you came out of; this is the
+    /// other three directions. Entering a directory you were in a minute ago,
+    /// or `Alt+←` back to one, puts the cursor where you left it rather than on
+    /// row 0 — the same "the view does not move under you" rule the reload path
+    /// obeys, extended over a navigation. Bounded, and per tab because a tab is
+    /// a browsing session: a new tab starts with no memories.
+    pub cursors: CursorMemory,
     /// The archive this tab is inside (PLAN §7.3), when it is inside one.
     ///
     /// Per tab, not per app: one tab can be reading a zip while another is in a
@@ -261,6 +310,7 @@ impl Tab {
             cwd: Listing::new(path.clone(), mgr, sort, now),
             parent: None,
             history: History::new(path),
+            cursors: CursorMemory::default(),
             archive: None,
             remote: None,
             trash: None,
@@ -332,6 +382,11 @@ impl Tab {
         // The name to land the cursor on in the *new* directory: the one we are
         // stepping out of, when this is a step upwards.
         let leaving = self.cwd.path().to_path_buf();
+        // Leaving is what makes a memory: the row under the cursor now is the
+        // row this directory should show when the tab comes back to it.
+        if let Some(name) = self.cwd.dir.cursor_entry().map(|entry| entry.name.clone()) {
+            self.cursors.remember(leaving.clone(), name);
+        }
         // Still inside the open archive: the rows come out of the tree, and no
         // scan is queued for a directory that is not on the disk.
         match self.archive.as_ref().and_then(|b| b.inner(&path)) {
@@ -349,13 +404,20 @@ impl Tab {
                 self.rescan_all(mgr, sort, scanner, now);
             }
         }
-        if leaving.parent() == Some(self.cwd.path()) {
-            if let Some(name) = leaving
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-            {
-                self.cwd.dir.cursor_to_name(&name);
-            }
+        // Where the cursor goes in the directory we have arrived in. The
+        // step-up rule wins when both apply: walking out of a folder puts you
+        // *on that folder*, which is a stronger statement about where you are
+        // than what you were looking at here last time.
+        //
+        // Aimed rather than placed, because the scan that will contain the row
+        // has only just been queued — see [`DirState::aim_cursor`].
+        let stepped_out_of = (leaving.parent() == Some(self.cwd.path()))
+            .then(|| leaving.file_name())
+            .flatten()
+            .map(|name| name.to_string_lossy().into_owned());
+        let land_on = stepped_out_of.or_else(|| self.cursors.recall(self.cwd.path()).cloned());
+        if let Some(name) = land_on {
+            self.cwd.dir.aim_cursor(name);
         }
     }
 
@@ -770,10 +832,10 @@ mod tests {
         assert!((l.scroll_rows(at + SCROLL_TWEEN) - 4.0).abs() < 1e-3);
     }
 
-    /// The wheel moves the view and carries the cursor with it, over the
-    /// momentum glide rather than the keyboard's shorter step.
+    /// The wheel moves the view and **leaves the cursor**, over the momentum
+    /// glide rather than the keyboard's shorter step.
     #[test]
-    fn the_wheel_scrolls_the_view_and_carries_the_cursor() {
+    fn the_wheel_scrolls_the_view_and_leaves_the_cursor() {
         let t0 = Instant::now();
         let mut l = listing(t0);
         let rows = l.dir.len();
@@ -785,39 +847,106 @@ mod tests {
             "`/` should have more than a couple of entries"
         );
 
-        assert!(l.wheel(3.0, visible, 1, 1, t0));
+        assert!(l.wheel(3.0, visible, 1, t0));
         assert_eq!(l.first(), 3);
         // The commit is instant; only the drawing lags — and it lags over the
         // wheel's own, longer glide.
         assert_eq!(l.scroll_rows(t0), 0.0);
         assert!(l.animating(t0));
         assert!(!l.animating(t0 + crate::mouse::WHEEL_GLIDE));
-        // The cursor came along, and it is inside the window the view landed on.
-        let cursor = l.dir.cursor();
-        // The window is rows 3..3+visible, and the margin of one keeps the
-        // cursor off both of its edges.
-        let margin = 1;
-        assert!(
-            cursor >= 3 + margin && cursor <= 3 + visible - 1 - margin,
-            "got {cursor}"
-        );
+        // The cursor stayed exactly where it was, off the top of the window:
+        // scrolling is looking, not selecting.
+        assert_eq!(l.dir.cursor(), 0);
+        assert!(l.is_detached());
+        // …and no number of frames drags the view back to it.
+        for _ in 0..3 {
+            l.follow_cursor(l.dir.cursor(), rows, visible, 1, t0);
+            assert_eq!(l.first(), 3);
+        }
 
         // Sub-row travel accumulates rather than rounding to nothing.
         let at = t0 + crate::mouse::WHEEL_GLIDE;
-        assert!(!l.wheel(0.4, visible, 1, 1, at));
+        assert!(!l.wheel(0.4, visible, 1, at));
         assert_eq!(l.first(), 3);
-        assert!(l.wheel(0.8, visible, 1, 1, at));
+        assert!(l.wheel(0.8, visible, 1, at));
         assert_eq!(l.first(), 4);
 
         // …and it never scrolls past either end.
         for _ in 0..200 {
-            l.wheel(-5.0, visible, 1, 1, at);
+            l.wheel(-5.0, visible, 1, at);
         }
         assert_eq!(l.first(), 0);
         for _ in 0..400 {
-            l.wheel(5.0, visible, 1, 1, at);
+            l.wheel(5.0, visible, 1, at);
         }
         assert_eq!(l.first(), rows - visible);
+    }
+
+    /// The other half of the rule: the next key takes the view back, moving the
+    /// cursor from where it *was* and re-anchoring the window around it.
+    #[test]
+    fn the_next_cursor_move_re_anchors_the_view() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        let rows = l.dir.len();
+        let visible = 5.min(rows.saturating_sub(1));
+        assert!(visible >= 2);
+
+        l.dir.set_cursor(1);
+        l.follow_cursor(l.dir.cursor(), rows, visible, 1, t0);
+        let parked = l.first();
+
+        assert!(l.wheel(3.0, visible, 1, t0));
+        assert_ne!(l.first(), parked);
+        assert_eq!(l.dir.cursor(), 1);
+
+        // `↓`: the cursor moves from row 1, not from the top of the window the
+        // wheel left behind…
+        l.dir.move_cursor(1);
+        assert_eq!(l.dir.cursor(), 2);
+        assert!(!l.is_detached());
+        // …and the view comes back to a position that shows it.
+        l.follow_cursor(l.dir.cursor(), rows, visible, 1, t0);
+        assert!(
+            l.first() <= 2 && 2 < l.first() + visible,
+            "the cursor must be back on screen, first = {}",
+            l.first()
+        );
+    }
+
+    /// A click is a cursor move like any other: it takes the view back too.
+    #[test]
+    fn a_click_after_a_wheel_takes_the_cursor_and_the_view_with_it() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        let rows = l.dir.len();
+        let visible = 5.min(rows.saturating_sub(1));
+        assert!(visible >= 2);
+
+        assert!(l.wheel(4.0, visible, 1, t0));
+        assert!(l.is_detached());
+        // The row under the pointer, which is a row of the *scrolled* window.
+        let clicked = l.first() + 1;
+        l.dir.set_cursor(clicked);
+        assert!(!l.is_detached());
+        l.follow_cursor(l.dir.cursor(), rows, visible, 1, t0);
+        assert_eq!(l.dir.cursor(), clicked);
+        assert!(l.first() <= clicked && clicked < l.first() + visible);
+    }
+
+    /// A detached view must stay legal when the listing shrinks under it —
+    /// a directory whose files were deleted elsewhere, mid-scroll.
+    #[test]
+    fn a_detached_view_is_clamped_to_a_listing_that_shrank() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        let rows = l.dir.len();
+        let visible = 5.min(rows.saturating_sub(1));
+        assert!(visible >= 2);
+        assert!(l.wheel(4.0, visible, 1, t0));
+        // Only two rows left: the view has nowhere legal to be but the top.
+        l.follow_cursor(l.dir.cursor(), 2, visible, 1, t0);
+        assert_eq!(l.first(), 0);
     }
 
     /// A listing that fits has nothing to scroll, and the wheel must not move
@@ -828,7 +957,7 @@ mod tests {
         let mut l = listing(t0);
         l.dir.set_cursor(2);
         let visible = l.dir.len() + 10;
-        assert!(!l.wheel(4.0, visible, 5, 1, t0));
+        assert!(!l.wheel(4.0, visible, 1, t0));
         assert_eq!(l.first(), 0);
         assert_eq!(l.dir.cursor(), 2);
     }
@@ -861,6 +990,7 @@ mod tests {
             cwd: Listing::new("/tmp", &mgr, sort, t0),
             parent: None,
             history: History::new("/tmp"),
+            cursors: CursorMemory::default(),
             archive: None,
             remote: None,
             trash: None,
@@ -941,6 +1071,7 @@ mod tests {
             cwd: Listing::new("/tmp", &mgr, sort, t0),
             parent: None,
             history: History::new("/tmp"),
+            cursors: CursorMemory::default(),
             archive: None,
             remote: None,
             trash: None,
@@ -995,6 +1126,93 @@ mod tests {
             uid: 0,
             gid: 0,
             mime: "text/plain",
+        }
+    }
+
+    /// PLAN §2's per-directory cursor, end to end against a real scanner —
+    /// which is the only way to test it, because every one of these placements
+    /// happens while the directory read is still in flight.
+    #[test]
+    fn a_tab_remembers_where_the_cursor_was_in_each_directory() {
+        let tree = std::env::temp_dir().join(format!("df-cursor-memory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        for dir in ["one", "two"] {
+            std::fs::create_dir_all(tree.join(dir)).expect("make the fixture");
+            for name in ["a.txt", "b.txt", "c.txt"] {
+                std::fs::write(tree.join(dir).join(name), b"x").expect("write the fixture");
+            }
+        }
+
+        let scanner = Scanner::start(df_core::fs::no_notifier());
+        let (mgr, sort) = (MgrConfig::default(), SortOptions::default());
+        let t0 = Instant::now();
+        let mut tab = Tab::open(tree.clone(), &mgr, sort, &scanner, t0);
+        settle(&mut tab, &scanner);
+
+        // Into `one`, and down to the third file.
+        tab.navigate(tree.join("one"), &mgr, sort, &scanner, t0);
+        settle(&mut tab, &scanner);
+        tab.cwd.dir.cursor_to_name("c.txt");
+
+        // Out again. The step-up rule puts the cursor on the folder we left,
+        // even though the directory read had not returned when it was asked
+        // for.
+        tab.navigate(tree.clone(), &mgr, sort, &scanner, t0);
+        settle(&mut tab, &scanner);
+        assert_eq!(
+            tab.cwd.dir.cursor_entry().map(|e| e.name.as_str()),
+            Some("one")
+        );
+
+        // …and back in: the row we were on, not row 0.
+        tab.navigate(tree.join("one"), &mgr, sort, &scanner, t0);
+        settle(&mut tab, &scanner);
+        assert_eq!(
+            tab.cwd.dir.cursor_entry().map(|e| e.name.as_str()),
+            Some("c.txt")
+        );
+
+        // The step-up rule still wins over the memory when both apply: we were
+        // last on `one` up there, and we are coming out of `two`.
+        tab.navigate(tree.join("two"), &mgr, sort, &scanner, t0);
+        settle(&mut tab, &scanner);
+        tab.navigate(tree.clone(), &mgr, sort, &scanner, t0);
+        settle(&mut tab, &scanner);
+        assert_eq!(
+            tab.cwd.dir.cursor_entry().map(|e| e.name.as_str()),
+            Some("two")
+        );
+
+        // `Alt+←` is a navigation like any other, so it remembers too.
+        assert!(tab.back(&mgr, sort, &scanner, t0));
+        settle(&mut tab, &scanner);
+        assert_eq!(tab.cwd.path(), tree.join("two"));
+        assert!(tab.back(&mgr, sort, &scanner, t0));
+        settle(&mut tab, &scanner);
+        assert!(tab.forward(&mgr, sort, &scanner, t0));
+        settle(&mut tab, &scanner);
+        assert_eq!(tab.cwd.path(), tree.join("two"));
+        assert_eq!(
+            tab.cwd.dir.cursor_entry().map(|e| e.name.as_str()),
+            Some("a.txt")
+        );
+
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// Drive the scans to completion the way `App::poll_workers` does.
+    fn settle(tab: &mut Tab, scanner: &Scanner) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while tab.cwd.dir.state() != df_core::fs::LoadState::Loaded && Instant::now() < deadline {
+            for update in scanner.drain() {
+                tab.apply(&update);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // One more pass, so the parent column's batches are not left in the
+        // channel for the next navigation to pick up.
+        for update in scanner.drain() {
+            tab.apply(&update);
         }
     }
 

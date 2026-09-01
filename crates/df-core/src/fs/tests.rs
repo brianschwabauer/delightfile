@@ -446,6 +446,126 @@ fn loaded_state(entries: Vec<Entry>) -> DirState {
     state
 }
 
+/// The cursor a caller aims at a directory it has only just asked for lands
+/// when the row does — which is the whole reason `aim_cursor` exists, since
+/// every caller of it (`←` out of a folder, a tab returning somewhere it
+/// remembers) asks while the scan is still in flight.
+#[test]
+fn an_aimed_cursor_waits_for_the_row_it_names() {
+    let mgr = MgrConfig {
+        sort_by: SortBy::Alphabetical,
+        ..MgrConfig::default()
+    };
+    let mut state = DirState::new("/fixture", &mgr);
+    let token = ScanToken(1);
+    state.token = Some(token);
+    // Empty, exactly as it is the instant a navigation queues the scan.
+    state.aim_cursor("m.txt");
+    assert_eq!(state.cursor(), 0);
+
+    state.apply(&ScanUpdate::Started {
+        token,
+        dir: PathBuf::from("/fixture"),
+    });
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: PathBuf::from("/fixture"),
+        entries: files(&["a.txt", "m.txt", "z.txt"]),
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("m.txt"));
+
+    // Once honoured it is spent: a later batch does not drag the cursor back
+    // to it after the user has moved on.
+    state.set_cursor(0);
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: PathBuf::from("/fixture"),
+        entries: files(&["n.txt"]),
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("a.txt"));
+}
+
+/// …and an aim the user overrules, or that the directory turns out not to
+/// contain, is dropped rather than pouncing later.
+#[test]
+fn an_aimed_cursor_gives_up_when_it_is_overruled_or_never_arrives() {
+    let mut state = loaded_state(files(&["a.txt", "b.txt"]));
+    let token = ScanToken(7);
+    state.token = Some(token);
+    state.aim_cursor("gone.txt");
+    // The user moves the cursor themselves: the aim is off.
+    state.move_cursor(1);
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: PathBuf::from("/fixture"),
+        entries: files(&["gone.txt"]),
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("b.txt"));
+
+    // And an aim nobody overrules still stops at the end of the scan, so a
+    // file created in this directory ten minutes later is not pounced on.
+    state.aim_cursor("later.txt");
+    state.apply(&ScanUpdate::Done {
+        token,
+        dir: PathBuf::from("/fixture"),
+        total: 3,
+    });
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: PathBuf::from("/fixture"),
+        entries: files(&["later.txt"]),
+    });
+    assert_ne!(
+        state.cursor_entry().map(|e| e.name.as_str()),
+        Some("later.txt")
+    );
+}
+
+// ── Recent ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_memory_recalls_what_it_was_told_and_forgets_the_oldest_first() {
+    let mut recent: Recent<String> = Recent::new(3);
+    for name in ["a", "b", "c"] {
+        recent.remember(format!("/dir/{name}"), name.to_string());
+    }
+    assert_eq!(recent.len(), 3);
+    assert_eq!(
+        recent.recall(Path::new("/dir/a")).map(String::as_str),
+        Some("a")
+    );
+
+    // Touching `a` again makes `b` the oldest, so `b` is what the fourth
+    // directory pushes out.
+    recent.remember("/dir/a", "a2".to_string());
+    recent.remember("/dir/d", "d".to_string());
+    assert_eq!(recent.len(), 3);
+    assert_eq!(recent.recall(Path::new("/dir/b")), None);
+    assert_eq!(
+        recent.recall(Path::new("/dir/a")).map(String::as_str),
+        Some("a2")
+    );
+    assert_eq!(
+        recent.recall(Path::new("/dir/d")).map(String::as_str),
+        Some("d")
+    );
+
+    // Forgetting one takes it out of the eviction order too, so the map cannot
+    // drift out of step with itself.
+    recent.forget(Path::new("/dir/a"));
+    assert_eq!(recent.len(), 2);
+    recent.remember("/dir/e", "e".to_string());
+    recent.remember("/dir/f", "f".to_string());
+    assert_eq!(recent.len(), 3);
+    assert_eq!(recent.recall(Path::new("/dir/c")), None);
+
+    // A memory that holds nothing is a legal way to turn the feature off.
+    let mut none: Recent<String> = Recent::new(0);
+    none.remember("/dir/a", "a".to_string());
+    assert!(none.is_empty());
+    assert_eq!(none.recall(Path::new("/dir/a")), None);
+}
+
 #[test]
 fn the_cursor_stays_on_the_same_file_across_a_reload() {
     let mut state = loaded_state(files(&["a.txt", "m.txt", "z.txt"]));
