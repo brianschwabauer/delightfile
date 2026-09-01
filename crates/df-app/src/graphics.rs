@@ -48,7 +48,13 @@ impl Gfx {
             force_fallback_adapter: false,
         }))
         .map_err(|e| GfxError(format!("no suitable adapter: {e}")))?;
-        log::debug!("adapter: {:?}", adapter.get_info().name);
+        let info = adapter.get_info();
+        log::info!(
+            "adapter: {} ({:?}, {:?})",
+            info.name,
+            info.device_type,
+            info.backend
+        );
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|e| GfxError(format!("request device: {e}")))?;
@@ -60,14 +66,33 @@ impl Gfx {
             // error rather than an empty picture.
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| GfxError("surface not supported by adapter".into()))?;
-        // AutoVsync: a file manager is idle most of its life and must never
-        // spin the GPU. Tearing buys nothing here — there is no game loop to
-        // shave a frame off.
-        surface_config.present_mode = wgpu::PresentMode::AutoVsync;
+        let caps = surface.get_capabilities(&adapter);
+        // Mailbox over Fifo, when the driver offers it. This app paints only
+        // when something happened (PLAN §1), so it never needs vsync to pace
+        // itself — and Fifo has a cost that is not about pacing at all: on
+        // Wayland the Fifo acquire blocks until the compositor answers a frame
+        // callback, and a compositor does not answer for a window that is on
+        // another workspace, fully covered, or on a screen hypridle has
+        // switched off. wgpu gives the acquire a one-second timeout, so under
+        // Fifo every redraw after the window came back could stall the whole
+        // UI thread for a second and then fail (`present-fail` in
+        // `DF_FRAME_LOG`), which is a file manager that stops answering keys
+        // the moment you alt-tab. Measured on Hyprland + NVIDIA. Mailbox never
+        // waits on the frame callback, and with no game loop behind it never
+        // burns a frame either.
+        surface_config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+        log::info!(
+            "present mode {:?} (offered {:?})",
+            surface_config.present_mode,
+            caps.present_modes
+        );
         // egui outputs sRGB-encoded colors; give it a non-sRGB view format so
         // the hardware does not encode them a second time and wash the theme
         // out.
-        let caps = surface.get_capabilities(&adapter);
         if let Some(&fmt) = caps.formats.iter().find(|f| {
             matches!(
                 f,
@@ -121,11 +146,29 @@ impl Gfx {
         let frame = match self.surface.get_current_texture() {
             Cst::Success(f) | Cst::Suboptimal(f) => f,
             Cst::Lost | Cst::Outdated => {
+                log::warn!("surface lost or outdated; reconfiguring");
                 self.surface.configure(&self.device, &self.surface_config);
                 return false;
             }
-            Cst::Timeout | Cst::Occluded | Cst::Validation => {
-                log::debug!("surface frame unavailable; skipping");
+            // A timed-out acquire is the swapchain waiting on a compositor
+            // that is not answering (see the present-mode note in `new`).
+            // Reconfiguring hands the driver a fresh swapchain, which is the
+            // one thing that has been seen to get it answering again; the
+            // caller backs off before asking for another frame, so a
+            // compositor that stays silent costs one acquire per retry rather
+            // than a tight loop of them.
+            Cst::Timeout => {
+                log::warn!("surface acquire timed out; reconfiguring");
+                self.surface.configure(&self.device, &self.surface_config);
+                return false;
+            }
+            Cst::Occluded => {
+                log::warn!("surface occluded; reconfiguring");
+                self.surface.configure(&self.device, &self.surface_config);
+                return false;
+            }
+            Cst::Validation => {
+                log::warn!("surface frame unavailable (validation); skipping");
                 return false;
             }
         };

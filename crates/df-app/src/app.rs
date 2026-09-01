@@ -85,6 +85,10 @@ const APP_ID: &str = "delightfile";
 /// sentinel wearing a number.
 const REPAINT_HORIZON: Duration = Duration::from_secs(3600);
 
+/// The first wait after a frame could not be presented; each consecutive
+/// failure adds another, capped at eight (see `redraw`).
+const PRESENT_RETRY: Duration = Duration::from_millis(250);
+
 /// How long a directory read may take before the pane admits it is reading.
 ///
 /// The first batch is 64 entries (`df_core::fs::FIRST_BATCH`) and normally
@@ -602,6 +606,12 @@ pub struct App {
     /// When the next frame is owed, if one is. `None` means "asleep until
     /// something happens" — the resting state.
     repaint_at: Option<Instant>,
+    /// Consecutive frames the surface refused (`Gfx::present` returned false).
+    /// Drives the retry back-off in `redraw`, and is reset by the first frame
+    /// that lands.
+    present_failures: u32,
+    /// The off-thread stall detector (see [`crate::watchdog`]).
+    watchdog: crate::watchdog::Watchdog,
     logged_first_frame: bool,
     /// One-shot marker for PLAN §6's cold-start measurement: the first frame
     /// that actually had rows in it. Separate from `logged_first_frame`,
@@ -1099,6 +1109,8 @@ impl App {
             gfx: None,
             waker,
             repaint_at: None,
+            present_failures: 0,
+            watchdog: crate::watchdog::Watchdog::start(),
             logged_first_frame: false,
             logged_first_listing: false,
             palette: Palette::from_theme(&theme),
@@ -9324,6 +9336,12 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        self.watchdog.frame_started();
+        self.redraw_inner();
+        self.watchdog.frame_finished();
+    }
+
+    fn redraw_inner(&mut self) {
         self.repaint_at = None;
         // Drain first, so this frame already carries whatever the workers
         // finished while it was being asked for.
@@ -9352,8 +9370,24 @@ impl App {
             if frame_log_enabled() {
                 log::info!("present-fail");
             }
-            gfx.window.request_redraw();
+            // Not an immediate re-request: a failed acquire has just cost up
+            // to a second of wall-clock on this thread (see `Gfx::present`),
+            // and asking again at once is a loop that blocks the UI for as
+            // long as the compositor stays quiet. A short deadline lets input
+            // and worker results through between attempts, and grows with
+            // each consecutive failure so a window that is truly hidden costs
+            // one probe every couple of seconds instead of one every frame.
+            self.present_failures = self.present_failures.saturating_add(1);
+            let backoff = PRESENT_RETRY * self.present_failures.min(8);
+            self.repaint_at = Some(Instant::now() + backoff);
             return;
+        }
+        if self.present_failures > 0 {
+            log::info!(
+                "surface recovered after {} failed frame(s)",
+                self.present_failures
+            );
+            self.present_failures = 0;
         }
         if !self.logged_first_frame {
             self.logged_first_frame = true;
@@ -9855,6 +9889,7 @@ impl ApplicationHandler<crate::Wake> for App {
             if frame_log_enabled() {
                 log::info!("event-repaint: {event:?}");
             }
+            self.watchdog.redraw_requested();
             gfx.window.request_redraw();
         }
         match event {
@@ -9906,6 +9941,7 @@ impl ApplicationHandler<crate::Wake> for App {
         }
         self.poll_workers();
         if let Some(gfx) = &self.gfx {
+            self.watchdog.redraw_requested();
             gfx.window.request_redraw();
         }
     }

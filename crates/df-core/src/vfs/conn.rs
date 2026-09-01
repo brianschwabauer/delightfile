@@ -938,11 +938,7 @@ impl Connection {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let name = format!(
-            ".{}.df-upload-{}-{n}",
-            remote.name(),
-            std::process::id()
-        );
+        let name = format!(".{}.df-upload-{}-{n}", remote.name(), std::process::id());
         match remote.parent() {
             Some(parent) => parent.join(&name),
             None => VfsPath::new(&remote.service, name),

@@ -54,9 +54,10 @@ mod trashview;
 mod ui;
 mod usage;
 mod viewport;
+/// More than one window (PLAN §2): `Ctrl+N`, and dragging a tab out.
+mod watchdog;
 mod wayland;
 mod whichkey;
-/// More than one window (PLAN §2): `Ctrl+N`, and dragging a tab out.
 mod window;
 
 use winit::event_loop::EventLoop;

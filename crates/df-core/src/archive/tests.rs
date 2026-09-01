@@ -1271,7 +1271,12 @@ fn a_cancel_mid_entry_removes_the_file_it_was_writing() {
         ),
         ("tar", "big.tar", {
             let mut out = Vec::new();
-            tar_entry(&mut out, "big.bin", &vec![b'x'; unpack::EXTRACT_BUF * 8], b'0');
+            tar_entry(
+                &mut out,
+                "big.bin",
+                &vec![b'x'; unpack::EXTRACT_BUF * 8],
+                b'0',
+            );
             tar_end(&mut out);
             out
         }),
