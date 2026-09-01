@@ -431,11 +431,11 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Command palette `Ctrl+p` from the registry
 - [x] `s`/`S` fd/rg streaming overlays with live preview; `z`/`Z` zoxide db + fuzzy jump
 - [x] Grid/thumbnail view with per-dir memory; FLIP animated re-sorts
-- [ ] Git status dots, ignored dimming, branch breadcrumb
-- [ ] Archives as read-only directories + extract with progress
-- [ ] "What's big" du mode
-- [ ] Bulk rename diff view; selection basket
-- [ ] Mount manager `M` (udisks2 D-Bus)
+- [x] Git status dots, ignored dimming, branch breadcrumb
+- [x] Archives as read-only directories + extract with progress
+- [x] "What's big" du mode
+- [x] Bulk rename diff view; selection basket
+- [x] Mount manager `M` (udisks2 D-Bus)
 
 ### Phase 6 — reach
 - [ ] SFTP vfs from vfs.toml (`g 1`/`g 2`)

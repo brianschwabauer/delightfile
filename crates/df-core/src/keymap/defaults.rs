@@ -175,6 +175,10 @@ pub(super) fn build() -> Registry {
         (Files, "u",      C::Undo,              "Undo last operation",                 Always),
         (Files, "w",      C::TasksShow,         "Task manager",                        Always),
         (Files, "M",      C::MountManager,      "Mount manager",                       Always),
+        (Files, "b",      C::BasketToggle,      "Toss into / out of the basket",       InList),
+        (Files, "B",      C::BasketShow,        "Show the selection basket",           Always),
+        (Files, "e",      C::ArchiveExtractHere,      "Extract the archive here",      InList),
+        (Files, "E",      C::ArchiveExtractSubfolder, "Extract into a new folder",     InList),
 
         // ── Files: what is shown ────────────────────────────────────────────
         (Files, ".",   C::ToggleHidden,        "Toggle hidden files",   InList),
@@ -184,6 +188,7 @@ pub(super) fn build() -> Registry {
         (Files, "m m", C::LinemodeMtime,       "Linemode: modified",    InList),
         (Files, "m o", C::LinemodeOwner,       "Linemode: owner",       InList),
         (Files, "m n", C::LinemodeNone,        "Linemode: none",        InList),
+        (Files, "m u", C::DiskUsage,           "Show disk usage",       InList),
 
         // ── Files: copy the path, four ways, and the contents ───────────────
         (Files, "c c", C::CopyPath,     "Copy the file path",                      Always),

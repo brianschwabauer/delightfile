@@ -203,6 +203,14 @@ pub struct Tab {
     /// is drawn empty rather than showing `/` twice.
     pub parent: Option<Listing>,
     pub history: History,
+    /// The archive this tab is inside (PLAN §7.3), when it is inside one.
+    ///
+    /// Per tab, not per app: one tab can be reading a zip while another is in a
+    /// real directory, and switching between them switches this with them. When
+    /// it is `Some`, [`Tab::cwd`] holds rows built from the tree rather than
+    /// from a scan, and its path is a display path that does not exist — see
+    /// [`crate::archive`].
+    pub archive: Option<crate::archive::Browse>,
 }
 
 impl Tab {
@@ -219,6 +227,7 @@ impl Tab {
             cwd: Listing::new(path.clone(), mgr, sort, now),
             parent: None,
             history: History::new(path),
+            archive: None,
         };
         tab.rescan_all(mgr, sort, scanner, now);
         tab
@@ -287,13 +296,89 @@ impl Tab {
         // The name to land the cursor on in the *new* directory: the one we are
         // stepping out of, when this is a step upwards.
         let leaving = self.cwd.path().to_path_buf();
-        self.cwd = Listing::new(path, mgr, sort, now);
-        self.rescan_all(mgr, sort, scanner, now);
+        // Still inside the open archive: the rows come out of the tree, and no
+        // scan is queued for a directory that is not on the disk.
+        match self.archive.as_ref().and_then(|b| b.inner(&path)) {
+            Some(inner) => self.show_archive(&inner, mgr, sort, scanner, now),
+            None => {
+                // Anywhere else is leaving the archive — including the real
+                // directory it lives in, which `←` at its root walks out to.
+                self.archive = None;
+                self.cwd = Listing::new(path, mgr, sort, now);
+                self.rescan_all(mgr, sort, scanner, now);
+            }
+        }
         if leaving.parent() == Some(self.cwd.path()) {
             if let Some(name) = leaving.file_name().map(|n| n.to_string_lossy().into_owned()) {
                 self.cwd.dir.cursor_to_name(&name);
             }
         }
+    }
+
+    /// Walk into an archive: this tab's list pane becomes its root listing
+    /// (PLAN §7.3).
+    ///
+    /// The history is *not* touched. Back and forward are about directories a
+    /// person navigated between, and an archive is a place you step into and
+    /// straight back out of; putting `~/dl/src.zip/src` on the history stack
+    /// would make `Alt+←` re-open an archive the user had closed.
+    pub fn open_archive(
+        &mut self,
+        browse: crate::archive::Browse,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        scanner: &Scanner,
+        now: Instant,
+    ) {
+        self.archive = Some(browse);
+        self.show_archive("", mgr, sort, scanner, now);
+    }
+
+    /// Point both panes at one directory inside the open archive.
+    ///
+    /// The parent pane is the interesting half: one level in it is another
+    /// archive listing, and at the root it is the **real** directory the archive
+    /// file lives in — so the column keeps reading as "where you came from" all
+    /// the way out, and the archive's own row is the one the cursor sits on.
+    fn show_archive(
+        &mut self,
+        inner: &str,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        scanner: &Scanner,
+        now: Instant,
+    ) {
+        let Some(browse) = &self.archive else { return };
+        // Where the cursor is, by name. Rebuilding the listing is also how the
+        // archive view *refreshes*, and a refresh that dropped the cursor to
+        // the top would move the row under somebody's hand
+        // (`delightful-ui` §8).
+        let on = (browse.inner(self.cwd.path()).as_deref() == Some(inner))
+            .then(|| self.cwd.dir.cursor_entry().map(|entry| entry.name.clone()))
+            .flatten();
+        let display = browse.display_path(inner);
+        let rows = browse.rows(inner);
+        let (parent_path, parent_rows) = match inner.rsplit_once('/') {
+            Some((up, _)) => (browse.display_path(up), Some(browse.rows(up))),
+            None if inner.is_empty() => (browse.real(), None),
+            None => (browse.display_path(""), Some(browse.rows(""))),
+        };
+
+        self.cwd = Listing::new(display, mgr, sort, now);
+        self.cwd.dir.set_entries(rows);
+        if let Some(name) = on {
+            self.cwd.dir.cursor_to_name(&name);
+        }
+
+        let mut parent = Listing::new(parent_path, mgr, sort, now);
+        match parent_rows {
+            Some(rows) => parent.dir.set_entries(rows),
+            // The one pane in an open archive that is a real directory, and so
+            // the one that still gets a scan.
+            None => parent.begin_scan(scanner, now),
+        }
+        self.parent = Some(parent);
+        self.sync_parent_cursor();
     }
 
     /// Rebuild the parent listing for the current directory and queue both
@@ -305,6 +390,13 @@ impl Tab {
         scanner: &Scanner,
         now: Instant,
     ) {
+        // Inside an archive there is nothing to re-read: the tree was parsed
+        // once and the file behind it has not been reopened. Rebuilding the
+        // rows from it is both the refresh and the no-op.
+        if let Some(inner) = self.inner_path() {
+            self.show_archive(&inner, mgr, sort, scanner, now);
+            return;
+        }
         self.cwd.begin_scan(scanner, now);
         self.parent = match self.cwd.path().parent() {
             Some(parent) => {
@@ -333,15 +425,34 @@ impl Tab {
     /// (PLAN §2 watches the active tab's directories), so what it is showing may
     /// be minutes old, but it is showing the right *place* and should not jump.
     pub fn rescan(&mut self, scanner: &Scanner, now: Instant) {
+        if self.archive.is_some() {
+            // The rows came from a tree, not from a directory; asking the
+            // scanner for a path that does not exist would only produce a
+            // failed listing where a correct one already is.
+            return;
+        }
         self.cwd.begin_scan(scanner, now);
         if let Some(parent) = &mut self.parent {
             parent.begin_scan(scanner, now);
         }
     }
 
+    /// Where in the open archive this tab is, or `None` when it is in a real
+    /// directory.
+    pub fn inner_path(&self) -> Option<String> {
+        let browse = self.archive.as_ref()?;
+        browse.inner(self.cwd.path())
+    }
+
     /// The directories this tab wants watched (PLAN §2: the list and its
     /// parent).
     pub fn watched(&self) -> Vec<PathBuf> {
+        // Inside an archive the only real directory in sight is the one the
+        // archive file is in — watching it is how the pane finds out the
+        // archive has been deleted out from under it.
+        if let Some(browse) = &self.archive {
+            return vec![browse.real()];
+        }
         let mut dirs = vec![self.cwd.path().to_path_buf()];
         if let Some(parent) = &self.parent {
             dirs.push(parent.path().to_path_buf());

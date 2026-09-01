@@ -16,7 +16,7 @@
 //! silently did *nearly* the right thing would be worse than one that has not
 //! landed yet.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -182,6 +182,34 @@ struct PendingOp {
     dirs: Vec<PathBuf>,
 }
 
+/// An `archive::list` running on the pool, and what its result is for.
+///
+/// The listing is a job like any other because it is a *read of a whole file*:
+/// a 400 MB `.tar.zst` is streamed through `zstd` and parsed block by block, and
+/// doing that on the event loop would be `→` freezing the window for a second.
+struct PendingArchive {
+    id: TaskId,
+    path: PathBuf,
+    intent: ArchiveIntent,
+    slot: Arc<std::sync::Mutex<Option<std::result::Result<df_core::archive::ArchiveTree, String>>>>,
+}
+
+/// Why an archive is being listed.
+///
+/// Extraction needs the tree as much as browsing does — [`plan_extract`] is a
+/// function of it — so "extract this archive without opening it" is the same
+/// read with a different ending, and it is spelled as one here rather than as a
+/// second pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveIntent {
+    /// Walk into it.
+    Browse,
+    /// Unpack it into the directory it lives in.
+    ExtractHere,
+    /// Unpack it into a new folder named after it.
+    ExtractSubfolder,
+}
+
 /// The modal card that is up, if one is.
 enum Dialog {
     /// `d` / `D`.
@@ -190,17 +218,23 @@ enum Dialog {
     /// [`PastePlan`](df_core::ops::paste::PastePlan) and the enum is otherwise
     /// a few words wide.
     Conflict(Box<ConflictDialog>),
+    /// `r` on a multi-selection: the two-column rename diff (PLAN §5). Boxed
+    /// for the same reason — it carries a line editor per row.
+    Bulk(Box<crate::bulk::Bulk>),
 }
 
 /// One frame's worth of "where the open surface's pieces are".
 enum OverlayGeom {
     Confirm(dialog::Geometry),
     Conflict(dialog::Geometry),
+    Bulk(dialog::Geometry),
     Picker(egui::Rect, Vec<egui::Rect>),
     Panel(egui::Rect, Vec<egui::Rect>, Vec<TaskRow>),
     Spot(spot::Geometry),
     /// The fuzzy card (PLAN §4.4).
     Finder(FinderGeom),
+    /// The disks card (PLAN §7.4).
+    Mounts(crate::mounts::Geometry),
     /// The `s` / `S` panel (PLAN §7.2). Boxed for the same reason the conflict
     /// dialog is: it carries a row rectangle per visible hit and the enum is
     /// otherwise a few words wide.
@@ -213,7 +247,7 @@ impl OverlayGeom {
     /// swallows the pointer either way (see the hit test in `frame`).
     fn hit(&self, pos: egui::Pos2) -> Option<Control> {
         match self {
-            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g
+            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g
                 .action_at(pos)
                 .map(Control::Action)
                 .or_else(|| {
@@ -230,6 +264,7 @@ impl OverlayGeom {
                 .map(Control::PanelRow),
             OverlayGeom::Finder(geometry) => geometry.row_at(pos).map(Control::PanelRow),
             OverlayGeom::Search(geometry) => geometry.row_at(pos).map(Control::PanelRow),
+            OverlayGeom::Mounts(geometry) => geometry.row_at(pos).map(Control::PanelRow),
             // The spot has two kinds of target on one card — nine permission
             // chips and the checksum's button — so it does its own hit test.
             OverlayGeom::Spot(geometry) => geometry.hit(pos),
@@ -251,6 +286,7 @@ impl OverlayGeom {
             ) => rows.get(i).copied(),
             (OverlayGeom::Finder(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
             (OverlayGeom::Search(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
+            (OverlayGeom::Mounts(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
             (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
             _ => None,
         }
@@ -270,6 +306,9 @@ struct PressStart {
     at: egui::Pos2,
     /// The press landed on a row of the list — reserved for DnD.
     on_row: bool,
+    /// The press landed on the basket's chip, which drags the whole basket
+    /// (PLAN §7.1).
+    on_basket: bool,
     /// The press landed inside the list pane, which is the only pane a band
     /// can be drawn in.
     in_list: bool,
@@ -320,6 +359,8 @@ struct Geom<'a> {
     crumbs: &'a [egui::Rect],
     overlay: &'a Option<OverlayGeom>,
     menu: &'a Option<menu::Geometry>,
+    /// The selection basket's tray (PLAN §7.1).
+    basket: &'a crate::basket::Geometry,
     tabs: usize,
 }
 
@@ -599,6 +640,49 @@ pub struct App {
     /// session spent in `~/Pictures` should not pay for a worker thread and a
     /// `git status` process that nothing was ever going to read.
     git: Option<df_core::git::Git>,
+    /// An archive being listed off the event loop (PLAN §7.3), and what the
+    /// listing is for.
+    ///
+    /// One at a time: opening a second archive while the first is still being
+    /// read replaces the request, because there is one list pane and only the
+    /// last thing asked for can land in it.
+    archive_job: Option<PendingArchive>,
+    /// The recursive-size walker, started the first time "what's big" is asked
+    /// for. `None` is the resting state of a session that never asked: two
+    /// worker threads and a cache bought for a feature nobody used is exactly
+    /// the cost PLAN §1's idle discipline is about.
+    du: Option<df_core::du::DuScanner>,
+    /// PLAN §7.3's "what's big" mode, while it is on.
+    usage: Option<crate::usage::Usage>,
+    /// The udisks2 worker, started the first time `M` is pressed. `None` is the
+    /// resting state of a session that never asked about disks: no thread, no
+    /// system-bus connection.
+    udisks: Option<crate::mounts::Mounts>,
+    /// The disks card, while it is open (PLAN §7.4).
+    mounts: Option<crate::mounts::Card>,
+    /// Files collected across directories (PLAN §7.1). Session-lived: see
+    /// [`crate::basket`].
+    basket: crate::basket::Basket,
+    /// Whether the tray is expanded. The *chip* is always there while the
+    /// basket has anything in it — that is what makes the basket visible enough
+    /// to earn its place ahead of the system clipboard in `p`'s ladder.
+    basket_open: bool,
+    /// The first row the expanded tray draws.
+    basket_first: usize,
+    /// The archive entry the preview card is showing, and its text if it had
+    /// any: `(archive, inner path, body)`.
+    archive_preview: Option<(PathBuf, String, Option<String>)>,
+    /// The repository the current directory is in, recomputed only when the
+    /// directory changes.
+    ///
+    /// This field is what keeps the laziness above honest now that the *rows*
+    /// want git too. The dots are wanted on every frame, and asking
+    /// [`df_core::git::Git`] for them would start the worker in every session —
+    /// including the ones spent entirely outside a repository, which is most of
+    /// them. A walk up for `.git` is one `stat` per level, so doing it once per
+    /// navigation and caching the `None` costs nothing and means a session in
+    /// `~/Pictures` still never spawns a thread.
+    repo: Option<PathBuf>,
     /// Where the cursor row was last drawn: what a rename popup and the opener
     /// picker anchor themselves to (PLAN §4.2, §6).
     cursor_rect: egui::Rect,
@@ -843,6 +927,16 @@ impl App {
             panel: None,
             spot: None,
             git: None,
+            repo: None,
+            archive_job: None,
+            archive_preview: None,
+            du: None,
+            usage: None,
+            udisks: None,
+            mounts: None,
+            basket: crate::basket::Basket::default(),
+            basket_open: false,
+            basket_first: 0,
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
             pending_keys: Vec::new(),
@@ -1057,6 +1151,22 @@ impl App {
         if self.sync_spot() {
             changed = true;
         }
+        // The archive listing that `→` asked for, if it has landed (PLAN §7.3).
+        if self.poll_archive(now) {
+            changed = true;
+        }
+        // The card's body, read once per entry the cursor stops on.
+        if self.sync_archive_preview() {
+            changed = true;
+        }
+        // The recursive-size walk's running totals (PLAN §7.3).
+        if self.poll_usage(now) {
+            changed = true;
+        }
+        // Whatever udisks2 has said (PLAN §7.4).
+        if self.poll_mounts(now) {
+            changed = true;
+        }
 
         for event in self.watcher.drain() {
             changed = true;
@@ -1099,6 +1209,7 @@ impl App {
     }
 
     fn rescan(&mut self, dir: &Path, now: Instant) {
+        self.git_touched(dir);
         let scanner = &self.scanner;
         let tab = self.tabs.active_mut();
         if dir == tab.cwd.path() {
@@ -1112,6 +1223,9 @@ impl App {
     }
 
     fn refresh_all(&mut self, now: Instant) {
+        if let Some(root) = self.repo.clone() {
+            self.git().refresh(&root);
+        }
         let (mgr, sort) = (self.mgr.clone(), self.sort());
         self.tabs
             .active_mut()
@@ -1216,6 +1330,286 @@ impl App {
         self.ops.push(PendingOp { id, slot, dirs });
     }
 
+    // ── Archives as directories (PLAN §7.3) ─────────────────────────────────
+
+    /// Read an archive off the event loop, and then browse or unpack it.
+    ///
+    /// A job rather than an inline call because listing is a read of the whole
+    /// file: a 400 MB `.tar.zst` is streamed through `zstd` and parsed block by
+    /// block, and doing that between two frames is `→` freezing the window.
+    fn ask_archive(&mut self, path: PathBuf, intent: ArchiveIntent) {
+        // One list pane, so one request: opening a second archive while the
+        // first is still being read cancels it, because only the last thing
+        // asked for can land.
+        if let Some(pending) = self.archive_job.take() {
+            self.engine.cancel(pending.id);
+        }
+        let slot: Arc<std::sync::Mutex<Option<std::result::Result<_, String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let job_slot = Arc::clone(&slot);
+        let job_path = path.clone();
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let job = FnJob::new(format!("Read {name}"), Lane::Micro, move |_ctx| {
+            let result = df_core::archive::list(&job_path).map_err(|e| e.to_string());
+            match job_slot.lock() {
+                Ok(mut guard) => *guard = Some(result),
+                Err(poisoned) => *poisoned.into_inner() = Some(result),
+            }
+            Ok(())
+        });
+        let id = self.engine.spawn(job);
+        self.archive_job = Some(PendingArchive {
+            id,
+            path,
+            intent,
+            slot,
+        });
+    }
+
+    /// Has the listing landed? Called once a frame, and a hash-free early
+    /// return when nothing is in flight (PLAN §1).
+    fn poll_archive(&mut self, now: Instant) -> bool {
+        let Some(pending) = self.archive_job.as_ref() else {
+            return false;
+        };
+        let landed = match pending.slot.lock() {
+            Ok(mut guard) => guard.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(result) = landed else {
+            return false;
+        };
+        let Some(pending) = self.archive_job.take() else {
+            return false;
+        };
+        let tree = match result {
+            Ok(tree) => Arc::new(tree),
+            Err(message) => {
+                self.toasts.error(message, now);
+                return true;
+            }
+        };
+        match pending.intent {
+            ArchiveIntent::Browse => self.enter_archive(pending.path, tree, now),
+            ArchiveIntent::ExtractHere | ArchiveIntent::ExtractSubfolder => {
+                let into = pending.path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.cwd());
+                let dest = self.extract_dest(
+                    &pending.path,
+                    into,
+                    pending.intent == ArchiveIntent::ExtractSubfolder,
+                    now,
+                );
+                if let Some(dest) = dest {
+                    self.spawn_extract(&tree, &[], dest, now);
+                }
+            }
+        }
+        true
+    }
+
+    /// Put the tab inside the archive.
+    fn enter_archive(&mut self, path: PathBuf, tree: Arc<df_core::archive::ArchiveTree>, now: Instant) {
+        // Everything worth warning about, in one notice rather than three: the
+        // listing is about to appear and a stack of toasts over it would be
+        // read as an error (PLAN §5's one-at-a-time rule).
+        let mut warnings: Vec<String> = Vec::new();
+        if tree.truncated() {
+            warnings.push("the listing was cut short".to_string());
+        }
+        if tree.unsafe_count() > 0 {
+            warnings.push(format!(
+                "{} cannot be extracted safely",
+                plural(tree.unsafe_count(), "entry", "entries")
+            ));
+        }
+        if tree.has_encrypted() {
+            warnings.push("some entries are encrypted".to_string());
+        }
+
+        let browse = crate::archive::Browse { path, tree };
+        let (mgr, sort) = (self.mgr.clone(), self.sort());
+        self.tabs
+            .active_mut()
+            .open_archive(browse, &mgr, sort, &self.scanner, now);
+        // Leaving is leaving, even into an archive: a visual run is anchored to
+        // a row in a listing that is no longer on screen.
+        self.visual = None;
+        self.focus = Focus::List;
+        self.rewatch();
+        self.archive_preview = None;
+        if !warnings.is_empty() {
+            self.toasts.notice(warnings.join("; "), now);
+        }
+    }
+
+    /// `e` / `E`, and the context menu's two extract rows.
+    fn extract(&mut self, subfolder: bool, now: Instant) {
+        // Inside an archive the tree is already in hand and the subject is the
+        // selection; outside, the subject is the archive under the cursor and
+        // the tree has to be read first.
+        if self.tab().archive.is_some() {
+            self.extract_selection(subfolder, now);
+            return;
+        }
+        let Some(entry) = self.tab().cwd.dir.cursor_entry() else {
+            self.toasts.notice("Nothing here to extract", now);
+            return;
+        };
+        if !crate::archive::looks_like_archive(entry) {
+            self.toasts.notice("Not an archive", now);
+            return;
+        }
+        let path = entry.path.clone();
+        self.ask_archive(
+            path,
+            if subfolder {
+                ArchiveIntent::ExtractSubfolder
+            } else {
+                ArchiveIntent::ExtractHere
+            },
+        );
+    }
+
+    /// Extract what is selected inside the archive being browsed.
+    ///
+    /// The subject, in order: the rows marked with `Space`; failing that the row
+    /// under the cursor; failing that the whole archive. The same ladder every
+    /// other operation in the program uses for "what am I acting on", so `Enter`
+    /// inside an archive needs no explanation to somebody who has used `d`.
+    fn extract_selection(&mut self, subfolder: bool, now: Instant) {
+        let Some(browse) = &self.tab().archive else {
+            return;
+        };
+        let tree = Arc::clone(&browse.tree);
+        let archive = browse.path.clone();
+        let into = browse.real();
+        let dir = &self.tab().cwd.dir;
+        let mut selection: Vec<String> = dir
+            .selected_paths()
+            .iter()
+            .filter_map(|path| browse.inner(path))
+            .collect();
+        if selection.is_empty() {
+            if let Some(inner) = dir.cursor_entry().and_then(|e| browse.inner(&e.path)) {
+                selection.push(inner);
+            }
+        }
+        // An empty selection means the whole archive to `plan_extract`, which
+        // is exactly right at the root of an empty listing.
+        let Some(dest) = self.extract_dest(&archive, into, subfolder, now) else {
+            return;
+        };
+        let borrowed: Vec<&str> = selection.iter().map(String::as_str).collect();
+        self.spawn_extract(&tree, &borrowed, dest, now);
+    }
+
+    /// Where an extraction lands: the directory itself, or a fresh folder named
+    /// after the archive.
+    ///
+    /// The subfolder is claimed through the same `name_1` ladder a paste uses,
+    /// so "Extract to subfolder" twice gives `src` and `src_1` rather than
+    /// merging the second one into the first.
+    fn extract_dest(
+        &mut self,
+        archive: &Path,
+        into: PathBuf,
+        subfolder: bool,
+        now: Instant,
+    ) -> Option<PathBuf> {
+        if !subfolder {
+            return Some(into);
+        }
+        let name = crate::archive::subfolder_name(archive);
+        match df_core::ops::paste::unique_name(&into, std::ffi::OsStr::new(&name), &[]) {
+            Ok(dest) => match std::fs::create_dir_all(&dest) {
+                Ok(()) => Some(dest),
+                Err(e) => {
+                    self.toasts.error(df_core::DfError::io(&dest, e).to_string(), now);
+                    None
+                }
+            },
+            Err(e) => {
+                self.toasts.error(e.to_string(), now);
+                None
+            }
+        }
+    }
+
+    /// Plan and queue the extraction.
+    fn spawn_extract(
+        &mut self,
+        tree: &df_core::archive::ArchiveTree,
+        selection: &[&str],
+        dest: PathBuf,
+        now: Instant,
+    ) {
+        let plan = df_core::archive::plan_extract(tree, selection, &dest);
+        if plan.is_empty() {
+            // Two different nothings, and they must not read alike: an empty
+            // selection, and a selection every entry of which was refused.
+            let message = if plan.skipped.is_empty() {
+                "Nothing to extract".to_string()
+            } else {
+                format!(
+                    "Nothing extractable — {} refused",
+                    plural(plan.skipped.len(), "entry was", "entries were")
+                )
+            };
+            self.toasts.notice(message, now);
+            return;
+        }
+        let job = df_core::ops::ExtractJob::new(plan);
+        let slot = job.outcome();
+        let id = self.engine.spawn(job);
+        self.track(id, slot, vec![dest]);
+    }
+
+    /// The preview card's body: the entry under the cursor, decompressed once.
+    ///
+    /// One slot, keyed by the entry it holds, so a settled cursor costs nothing
+    /// and a held `↓` costs one read per row it stops on rather than one per
+    /// frame (PLAN §1).
+    fn sync_archive_preview(&mut self) -> bool {
+        let Some(browse) = &self.tab().archive else {
+            let had = self.archive_preview.is_some();
+            self.archive_preview = None;
+            return had;
+        };
+        let archive = browse.path.clone();
+        let Some(inner) = self
+            .tab()
+            .cwd
+            .dir
+            .cursor_entry()
+            .and_then(|entry| browse.inner(&entry.path))
+        else {
+            let had = self.archive_preview.is_some();
+            self.archive_preview = None;
+            return had;
+        };
+        if self
+            .archive_preview
+            .as_ref()
+            .is_some_and(|(a, i, _)| *a == archive && *i == inner)
+        {
+            return false;
+        }
+        let wanted = browse
+            .tree
+            .get(&inner)
+            .is_some_and(crate::archive::previewable);
+        let body = if wanted {
+            df_core::archive::read_entry(&archive, &inner, crate::archive::PREVIEW_LIMIT)
+                .ok()
+                .flatten()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+        } else {
+            None
+        };
+        self.archive_preview = Some((archive, inner, body));
+        true
+    }
+
     /// `y` / `x`.
     fn set_clipboard(&mut self, cut: bool, now: Instant) {
         let paths = self.targets();
@@ -1234,25 +1628,50 @@ impl App {
     }
 
     /// `X`: the yank is off. The marks come off the rows with it.
+    ///
+    /// With nothing yanked, the same key empties the **basket** — it is the
+    /// other thing the program is carrying, `X` already means "stop carrying
+    /// this", and a tray of thirty files with no way to put them all down but
+    /// thirty clicks on an `×` would be a collection you cannot get rid of. The
+    /// order matches `p`'s ladder (see [`crate::basket`]): the clipboard first,
+    /// because it is the more recent gesture.
     fn unyank(&mut self, now: Instant) {
-        if self.clipboard.is_empty() {
+        if !self.clipboard.is_empty() {
+            self.clipboard.clear();
+            self.toasts.notice("Clipboard cleared", now);
             return;
         }
-        self.clipboard.clear();
-        self.toasts.notice("Clipboard cleared", now);
+        if !self.basket.is_empty() {
+            let n = self.basket.len();
+            self.basket.clear();
+            self.clamp_basket();
+            self.toasts
+                .notice(format!("Basket emptied — {}", plural(n, "file", "files")), now);
+        }
     }
 
     /// `p` / `P`. Conflicts open the dialog; a settled plan goes straight to
     /// the pool.
     fn paste(&mut self, force: bool, now: Instant) {
-        if self.clipboard.is_empty() {
-            // …and *only* when it is empty: see [`App::paste_system`] for why
-            // the internal clipboard always wins.
-            self.paste_system(force, now);
-            return;
+        // The three-way ladder, spelled out in [`crate::basket`]: the internal
+        // clipboard, then the basket, then whatever another application put on
+        // the system clipboard. The rule itself is a pure function there so
+        // that it is a test rather than three `if`s.
+        match crate::basket::Precedence::of(!self.clipboard.is_empty(), !self.basket.is_empty()) {
+            crate::basket::Precedence::Clipboard => {
+                let clipboard = self.clipboard.clone();
+                self.paste_from(&clipboard, force, now);
+            }
+            crate::basket::Precedence::Basket => {
+                // A copy, always. A basket gathered over five directories has
+                // no single origin to have been *cut* from, and a `p` that
+                // emptied five folders at once would be the most destructive
+                // keystroke in the program.
+                let clipboard = Clipboard::yank(self.basket.paths().to_vec());
+                self.paste_from(&clipboard, force, now);
+            }
+            crate::basket::Precedence::System => self.paste_system(force, now),
         }
-        let clipboard = self.clipboard.clone();
-        self.paste_from(&clipboard, force, now);
     }
 
     /// Plan and run a paste of `clipboard` into the current directory.
@@ -1540,6 +1959,13 @@ impl App {
     /// it is a pure function, so this is also what makes `media_hovered`
     /// testable.
     fn hovered_kind(&self) -> Option<(PathBuf, PreviewKind)> {
+        if self.tab().archive.is_some() {
+            // Inside an archive there is no file to decode, so the transport
+            // keys are inert and the `MediaHovered` bindings are simply not
+            // there — which is how PLAN §4.3's reserved keys stay reserved
+            // without a special case in the router.
+            return None;
+        }
         let entry = self.tab().cwd.dir.cursor_entry()?;
         let mime = df_core::fs::mime::hint_for_name(&entry.name);
         Some((entry.path.clone(), df_core::preview::kind_for(entry, mime)))
@@ -1745,6 +2171,11 @@ impl App {
             // these" vocabulary, and a sixth context whose table would be an
             // exact copy of `[pick]`'s is a sixth table to keep in step.
             Context::Pick
+        } else if self.mounts.is_some() {
+            // The disks card is a "choose one of these" surface, so it takes
+            // `[pick]`'s vocabulary — Esc, Enter and the two arrows — rather
+            // than growing a table that would be a copy of it.
+            Context::Pick
         } else if self.picker.is_some() {
             Context::Pick
         } else if self.spot.is_some() {
@@ -1756,6 +2187,12 @@ impl App {
     }
 
     fn overlay_key(&mut self, chord: Chord, page: usize, now: Instant) {
+        // The rename card is a grid of line editors, so it takes the keystroke
+        // *before* the registry gets a look at it — otherwise typing `d` into a
+        // name would be the `[confirm]` table's `d`.
+        if self.bulk_key(chord, now) {
+            return;
+        }
         if self.overlay_literal(chord, now) {
             return;
         }
@@ -1808,6 +2245,22 @@ impl App {
     /// keymap can grow rows for them without this code changing shape.
     fn overlay_literal(&mut self, chord: Chord, now: Instant) -> bool {
         let plain = chord.mods.is_none() || chord.mods == df_core::keymap::Mods::SHIFT;
+        // The disks card's two extra verbs. Matched literally for the same
+        // reason the conflict resolver's answers were: `[pick]` is the shared
+        // "choose one of these" table and it has no row for ejecting a drive.
+        if self.mounts.is_some() && chord.mods.is_none() {
+            match chord.key {
+                Key::Char('e') => {
+                    self.eject_selected(now);
+                    return true;
+                }
+                Key::Char('u') => {
+                    self.unmount_selected(now);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if let Some(Dialog::Conflict(dialog)) = &mut self.dialog {
             match chord.key {
                 Key::Char(c) if plain => {
@@ -1923,7 +2376,15 @@ impl App {
                 dialog.move_cursor(delta);
                 return;
             }
+            Some(Dialog::Bulk(bulk)) => {
+                bulk.step(delta);
+                return;
+            }
             None => {}
+        }
+        if let Some(card) = &mut self.mounts {
+            card.move_cursor(delta);
+            return;
         }
         if let Some(picker) = &mut self.picker {
             picker.move_cursor(delta);
@@ -1947,6 +2408,10 @@ impl App {
         }
         if self.search.is_some() {
             self.search_submit(now);
+            return;
+        }
+        if self.mounts.is_some() {
+            self.mount_action(now);
             return;
         }
         if self.spot.is_some() {
@@ -2008,6 +2473,9 @@ impl App {
                 // clipboard is untouched, so `p` starts it again.
                 self.toasts.notice("Paste cancelled", now);
             }
+            Some(Dialog::Bulk(_)) => {
+                self.toasts.notice("Rename cancelled", now);
+            }
             Some(Dialog::Confirm(_)) | None => {}
         }
         self.picker = None;
@@ -2019,6 +2487,9 @@ impl App {
         self.search = None;
         // Dropping the panel stops its hasher: see `spot::Hasher`'s `Drop`.
         self.spot = None;
+        // The card goes; the worker stays. A session that opens the disks card
+        // three times should authenticate to the system bus once.
+        self.mounts = None;
         self.sync_context();
     }
 
@@ -2175,6 +2646,252 @@ impl App {
                 }
             }
             Choice::ToggleView => self.toggle_view(now),
+        }
+    }
+
+    // ── The mount manager: `M` (PLAN §7.4) ──────────────────────────────────
+
+    /// The udisks2 worker, started the first time the card is opened.
+    fn udisks(&mut self) -> &crate::mounts::Mounts {
+        let waker = self.waker.clone();
+        self.udisks
+            .get_or_insert_with(|| crate::mounts::Mounts::start(Arc::new(move || waker.wake())))
+    }
+
+    /// `M`: open the card and ask for the listing.
+    fn open_mounts(&mut self) {
+        self.mounts = Some(crate::mounts::Card::new());
+        self.udisks().ask(crate::mounts::Request::List);
+        self.sync_context();
+    }
+
+    /// `Enter` on a row: mount it, or — if it is already mounted — go there.
+    ///
+    /// The two on one key, because they are the same intention. What a person
+    /// wants from a disk in a file manager is to be *in* it; mounting is the
+    /// step that has to happen first when it has not happened yet, and pressing
+    /// `Enter` twice on a fresh USB stick doing both is the shortest true
+    /// description of the job.
+    fn mount_action(&mut self, now: Instant) {
+        let Some(card) = &self.mounts else { return };
+        if card.busy.is_some() {
+            // One call at a time: two mounts of the same device is one of them
+            // failing with `AlreadyMounted`.
+            return;
+        }
+        let Some(device) = card.selected().cloned() else {
+            return;
+        };
+        match &device.mount {
+            Some(path) => {
+                let path = path.clone();
+                self.close_overlay(now);
+                self.jump_to(path, now);
+            }
+            None => {
+                if let Some(card) = &mut self.mounts {
+                    card.busy = Some(device.object.clone());
+                }
+                self.udisks()
+                    .ask(crate::mounts::Request::Mount(device.object));
+            }
+        }
+    }
+
+    /// `u` on a mounted row: put it away.
+    fn unmount_selected(&mut self, now: Instant) {
+        let Some(device) = self
+            .mounts
+            .as_ref()
+            .filter(|card| card.busy.is_none())
+            .and_then(|card| card.selected())
+            .cloned()
+        else {
+            return;
+        };
+        if !device.is_mounted() {
+            self.toasts.notice(format!("{} is not mounted", device.label), now);
+            return;
+        }
+        if let Some(card) = &mut self.mounts {
+            card.busy = Some(device.object.clone());
+        }
+        self.udisks()
+            .ask(crate::mounts::Request::Unmount(device.object));
+    }
+
+    /// `e`: eject the whole drive, which is what "safely remove" means.
+    fn eject_selected(&mut self, now: Instant) {
+        let Some(device) = self
+            .mounts
+            .as_ref()
+            .filter(|card| card.busy.is_none())
+            .and_then(|card| card.selected())
+            .cloned()
+        else {
+            return;
+        };
+        let Some(drive) = device.drive.clone().filter(|_| device.ejectable) else {
+            self.toasts
+                .notice(format!("{} cannot be ejected", device.label), now);
+            return;
+        };
+        if let Some(card) = &mut self.mounts {
+            card.busy = Some(device.object.clone());
+        }
+        self.udisks().ask(crate::mounts::Request::Eject(drive));
+    }
+
+    /// Take whatever the worker has said. Returns whether anything changed.
+    fn poll_mounts(&mut self, now: Instant) -> bool {
+        let replies = match &self.udisks {
+            Some(udisks) => udisks.drain(),
+            None => return false,
+        };
+        if replies.is_empty() {
+            return false;
+        }
+        let mut refresh = false;
+        for reply in replies {
+            if let Some(card) = &mut self.mounts {
+                card.busy = None;
+            }
+            match reply {
+                crate::mounts::Reply::Devices(devices) => {
+                    if let Some(card) = &mut self.mounts {
+                        card.update(devices);
+                    }
+                }
+                crate::mounts::Reply::Mounted(path) => {
+                    self.toasts
+                        .notice(format!("Mounted at {}", path.display()), now);
+                    refresh = true;
+                }
+                crate::mounts::Reply::Unmounted => {
+                    self.toasts.notice("Unmounted", now);
+                    refresh = true;
+                }
+                crate::mounts::Reply::Ejected => {
+                    self.toasts.notice("Safe to remove", now);
+                    refresh = true;
+                }
+                crate::mounts::Reply::Failed(message) => {
+                    // The card stays up: the failure is about one row, and
+                    // closing the surface would take the other disks away too.
+                    self.toasts.error(message, now);
+                    if self.mounts.as_ref().is_some_and(|card| card.loading) {
+                        // …unless nothing ever arrived, in which case there is
+                        // no card to stay up.
+                        self.mounts = None;
+                        self.sync_context();
+                    }
+                }
+            }
+        }
+        if refresh && self.mounts.is_some() {
+            self.udisks().ask(crate::mounts::Request::List);
+        }
+        true
+    }
+
+    // ── The selection basket (PLAN §7.1) ────────────────────────────────────
+
+    /// `b`: toss the selection — or the row under the cursor — in, or back out.
+    fn toss_basket(&mut self, now: Instant) {
+        let paths = self.targets();
+        if paths.is_empty() {
+            self.toasts.notice("Nothing to put in the basket", now);
+            return;
+        }
+        let tossed = self.basket.toss(&paths);
+        self.clamp_basket();
+        let message = if tossed.full {
+            format!(
+                "The basket is full at {} — took {}",
+                crate::basket::CAPACITY,
+                plural(tossed.added, "file", "files")
+            )
+        } else if tossed.removed > 0 {
+            format!(
+                "Took {} out of the basket",
+                plural(tossed.removed, "file", "files")
+            )
+        } else {
+            format!(
+                "{} in the basket — {} in all",
+                plural(tossed.added, "file", "files"),
+                self.basket.len()
+            )
+        };
+        self.toasts.notice(message, now);
+        // Advance the cursor like `Space` does: `b b b` down a listing is the
+        // gesture, and stopping to move the cursor between each would make it
+        // six keystrokes instead of three.
+        if self.tab().cwd.dir.selected_count() == 0 {
+            self.dir().move_cursor(1);
+        }
+    }
+
+    /// `B`, and the palette's "Show the selection basket".
+    fn show_basket(&mut self, now: Instant) {
+        if self.basket.is_empty() {
+            self.toasts
+                .notice("The basket is empty — press b to put files in it", now);
+            return;
+        }
+        self.basket_open = !self.basket_open;
+        if self.basket_open {
+            self.prune_basket(now);
+        }
+    }
+
+    /// Drop paths that are gone, and say how many. Called when the tray opens:
+    /// that is the moment the list is about to be read, and so the moment it
+    /// has to be true.
+    fn prune_basket(&mut self, now: Instant) {
+        let gone = self.basket.prune();
+        self.clamp_basket();
+        if gone > 0 {
+            self.toasts.notice(
+                format!("{} no longer there", plural(gone, "file is", "files are")),
+                now,
+            );
+        }
+    }
+
+    /// Keep the tray's scroll inside the list it is about, and close it when
+    /// there is nothing left to show.
+    fn clamp_basket(&mut self) {
+        let len = self.basket.len();
+        if len == 0 {
+            self.basket_open = false;
+            self.basket_first = 0;
+            return;
+        }
+        self.basket_first = self
+            .basket_first
+            .min(len.saturating_sub(crate::basket::ROWS.min(len)));
+    }
+
+    /// A click on a tray row: go to the file, wherever it is.
+    ///
+    /// The basket's whole point is that its contents are somewhere else, so a
+    /// row is a *link* — the pane navigates to the directory and the cursor
+    /// lands on the file.
+    fn reveal(&mut self, path: &Path, now: Instant) {
+        let Some(parent) = path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            return;
+        };
+        if parent != self.cwd() {
+            self.navigate(parent.clone(), now);
+        }
+        // The scan may not have landed yet, so this is the same deferred
+        // placement `--cwd-file` uses.
+        if !self.tabs.active_mut().cwd.dir.cursor_to_name(&name) {
+            self.start_cursor = Some((parent, name));
         }
     }
 
@@ -2466,20 +3183,13 @@ impl App {
             return false;
         }
         let path = self.spot.as_ref().map(|s| s.facts.path.clone());
-        let git = match (&self.git, path.as_deref()) {
-            (_, None) => None,
-            (Some(git), Some(path)) => git_line(git, path),
-            (None, Some(path)) => {
-                // First question of the session: start the worker, ask, and
-                // take whatever it has — which is nothing, until the scan it
-                // just queued rings the bell.
-                let waker = self.waker.clone();
-                let git = df_core::git::Git::start(Arc::new(move || waker.wake()));
-                let line = git_line(&git, path);
-                self.git = Some(git);
-                line
-            }
-        };
+        // The card asks about one path, so unlike the rows it may start the
+        // worker for a directory the list pane never needed one in: opening the
+        // panel is an explicit question about *this* file.
+        let git = path.as_deref().and_then(|path| {
+            let git = self.git();
+            git_line(git, path)
+        });
         let Some(spot) = &mut self.spot else {
             return false;
         };
@@ -2630,6 +3340,15 @@ impl App {
 
     /// `r` and `R`: the two rename presets, both anchored to the cursor's row.
     fn open_rename(&mut self, empty_stem: bool) {
+        // PLAN §5: a selection of more than one is a *bulk* rename, and it gets
+        // the diff card rather than a popup that would ask about the first file
+        // and quietly ignore the rest. One selected file is still the popup —
+        // that is what `r` has always meant, and a card for one name would be a
+        // modal to change one word.
+        if self.tab().cwd.dir.selected_count() > 1 {
+            self.open_bulk();
+            return;
+        }
         let Some(entry) = self.tab().cwd.dir.cursor_entry() else {
             return;
         };
@@ -2643,6 +3362,180 @@ impl App {
             (PromptKind::Rename, InputBuffer::for_rename_stem(&name))
         };
         self.open_prompt_with(kind, buffer);
+    }
+
+    /// Open the two-column rename diff over the selection (PLAN §5).
+    fn open_bulk(&mut self) {
+        let dir = self.cwd();
+        let listing = &self.tab().cwd.dir;
+        // The selection in *listing* order, not in the order it was made: the
+        // card is read against the pane behind it, and rows in a different
+        // order from the pane would be a puzzle.
+        let names: Vec<String> = listing
+            .entries()
+            .iter()
+            .filter(|entry| listing.is_selected(&entry.name))
+            .map(|entry| entry.name.clone())
+            .collect();
+        if names.len() < 2 {
+            return;
+        }
+        // Every name in the directory, including the hidden ones and the ones
+        // a filter is hiding: a name is taken whether or not you can see it.
+        let siblings: Vec<String> = listing
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        self.dialog = Some(Dialog::Bulk(Box::new(crate::bulk::Bulk::new(
+            dir, names, &siblings,
+        ))));
+        self.sync_context();
+    }
+
+    /// One keystroke into the bulk-rename card.
+    ///
+    /// Returns whether it was taken. The card is a grid of line editors, so
+    /// almost every key goes to whichever one has the caret — the same rule the
+    /// bottom-bar prompt follows, and the reason a `q` typed into a name is a
+    /// `q`. Only the keys the vi editor has no use for are intercepted:
+    /// `Tab`/`Shift+Tab` and the two arrows, which move between fields.
+    fn bulk_key(&mut self, chord: Chord, now: Instant) -> bool {
+        let Some(Dialog::Bulk(bulk)) = &mut self.dialog else {
+            return false;
+        };
+        let plain = chord.mods.is_none();
+        match chord.key {
+            Key::Tab if plain => {
+                bulk.step(1);
+                return true;
+            }
+            Key::Tab if chord.mods == df_core::keymap::Mods::SHIFT => {
+                bulk.step(-1);
+                return true;
+            }
+            Key::ArrowUp if plain => {
+                bulk.step(-1);
+                return true;
+            }
+            Key::ArrowDown if plain => {
+                bulk.step(1);
+                return true;
+            }
+            _ => {}
+        }
+        let field = bulk.field;
+        let Some(buffer) = bulk.buffer_mut() else {
+            return false;
+        };
+        match buffer.feed(chord) {
+            InputEvent::Consumed => {
+                match field {
+                    // The two top fields rewrite every row that has not been
+                    // hand-edited, live, as you type.
+                    crate::bulk::Field::Find | crate::bulk::Field::Replace => {
+                        bulk.apply_replace()
+                    }
+                    // …and typing in a row is what exempts it from that.
+                    crate::bulk::Field::Row(_) => bulk.touched(),
+                }
+                true
+            }
+            InputEvent::Submit(_) => {
+                self.submit_bulk(now);
+                true
+            }
+            InputEvent::Cancel => {
+                self.close_overlay(now);
+                true
+            }
+        }
+    }
+
+    /// `Enter` on a card with nothing wrong on it.
+    fn submit_bulk(&mut self, now: Instant) {
+        let Some(Dialog::Bulk(bulk)) = &self.dialog else {
+            return;
+        };
+        if !bulk.valid() {
+            // Refused rather than partly done: the card already says which rows
+            // are wrong and in what way, so there is nothing to add.
+            return;
+        }
+        if bulk.changes() == 0 {
+            self.close_overlay(now);
+            return;
+        }
+        let renames = bulk.renames();
+        let dir = bulk.dir.clone();
+        let cursor_on = bulk
+            .rows
+            .iter()
+            .find(|row| row.changed())
+            .map(|row| row.new_name().to_string());
+        self.dialog = None;
+        self.sync_context();
+        self.run_bulk(renames, dir, cursor_on, now);
+    }
+
+    /// Carry the renames out, as one journal entry.
+    ///
+    /// On the calling thread, not on the pool: a rename is a `renameat2` and a
+    /// card of forty of them is forty syscalls in the same directory — faster
+    /// than the frame it was asked in. Sending it to a worker would buy nothing
+    /// and cost the guarantee that the listing on screen after `Enter` is the
+    /// listing the rename produced.
+    ///
+    /// Journalled as [`OpRecord::Renames`], which is one `u` for the whole card
+    /// (PLAN §5). A failure part way records what did land, so `u` still takes
+    /// back exactly what happened.
+    fn run_bulk(
+        &mut self,
+        renames: Vec<(PathBuf, PathBuf)>,
+        dir: PathBuf,
+        cursor_on: Option<String>,
+        now: Instant,
+    ) {
+        let mut moved: Vec<MovedPath> = Vec::new();
+        let mut failed: Option<String> = None;
+        for (from, to) in &renames {
+            if let Err(e) = df_core::ops::create::rename(from, to, false) {
+                failed = Some(e.to_string());
+                break;
+            }
+            match MovedPath::record(from, to) {
+                Ok(record) => moved.push(record),
+                // The rename happened but cannot be described, so it cannot be
+                // undone. Stop rather than build a record with a hole in it.
+                Err(e) => {
+                    failed = Some(e.to_string());
+                    break;
+                }
+            }
+        }
+        // The temporary legs of a swap are internal: the record has to describe
+        // where each file *started* and where it *ended*, or `u` would put a
+        // file back to a name that was only ever a detour. Collapsing the chain
+        // is what makes a swap undoable in one press.
+        let moved = collapse_renames(moved);
+        let count = moved.len();
+        if !moved.is_empty() {
+            self.journal.record(OpRecord::Renames { moved });
+        }
+        match failed {
+            Some(error) => self.toasts.error(error, now),
+            None => self.toasts.undo(
+                format!("Renamed {}", plural(count, "file", "files")),
+                now,
+            ),
+        }
+        self.rescan(&dir, now);
+        if let Some(name) = cursor_on {
+            // The cursor follows the first file that moved, so the card closes
+            // onto the change it made rather than onto wherever the list
+            // happens to sort it (`delightful-ui` §8).
+            self.tabs.active_mut().cwd.dir.cursor_to_name(&name);
+        }
     }
 
     /// One keystroke into the open prompt.
@@ -3038,6 +3931,21 @@ impl App {
             self.press = None;
             return;
         }
+        // The tray is the smallest thing on screen that `Esc` can take back,
+        // so it goes first: closing it is never what somebody meant `Esc` to
+        // do *instead* of something bigger.
+        if self.basket_open {
+            self.basket_open = false;
+            return;
+        }
+        // Above the ladder proper for the same reason a band is: the usage
+        // mode is a state the user turned on a moment ago and expects `Esc` to
+        // turn off, and it is a *bigger* change to the pane than clearing a
+        // selection is (PLAN §7.3: "Esc/toggle leaves").
+        if self.usage.is_some() {
+            self.leave_usage(Instant::now());
+            return;
+        }
         // The rungs and their order are [`crate::focus::escape_rung`]'s, so the
         // ladder can be walked in a test with no window and no dialog; this is
         // only the doing of them.
@@ -3100,6 +4008,17 @@ impl App {
         if flip::reorders(command) {
             self.flip_before = Some(self.last_layout.clone());
         }
+        // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
+        // the commands that would write into one are inert *out loud*. A key
+        // that silently does nothing is a key the user presses twice — and the
+        // notice names the way out, which is the whole point of saying it.
+        if self.tab().archive.is_some() && crate::archive::inert_in_archive(command) {
+            self.toasts.notice(
+                "Archives are read-only — press e to extract".to_string(),
+                now,
+            );
+            return;
+        }
         // Half a page rounds *down* but never to nothing: on a pane too short
         // to have a half, `Ctrl+d` still has to move.
         let half = (page / 2).max(1) as isize;
@@ -3160,7 +4079,24 @@ impl App {
                             self.navigate(path, now);
                         }
                     }
-                    Rightward::FocusPreview => self.focus = Focus::Preview,
+                    Rightward::FocusPreview => {
+                        // PLAN §7.3: an archive *is* a place, so `→` on one goes
+                        // there rather than to the preview pane. Only in a real
+                        // directory — an archive inside an archive is a file
+                        // that has to come out first.
+                        let archive = self
+                            .tab()
+                            .cwd
+                            .dir
+                            .cursor_entry()
+                            .filter(|_| self.tab().archive.is_none())
+                            .filter(|entry| crate::archive::looks_like_archive(entry))
+                            .map(|entry| entry.path.clone());
+                        match archive {
+                            Some(path) => self.ask_archive(path, ArchiveIntent::Browse),
+                            None => self.focus = Focus::Preview,
+                        }
+                    }
                     Rightward::Nothing => {}
                 }
             }
@@ -3458,6 +4394,10 @@ impl App {
             C::SortMtimeReverse => self.sort_by(SortBy::Mtime, true, Some(LineMode::Mtime)),
             C::SortBtime => self.sort_by(SortBy::Btime, false, Some(LineMode::Btime)),
             C::SortBtimeReverse => self.sort_by(SortBy::Btime, true, Some(LineMode::Btime)),
+            C::DiskUsage => self.toggle_usage(now),
+            C::MountManager => self.open_mounts(),
+            C::BasketToggle => self.toss_basket(now),
+            C::BasketShow => self.show_basket(now),
             C::SortSize => self.sort_by(SortBy::Size, false, Some(LineMode::Size)),
             C::SortSizeReverse => self.sort_by(SortBy::Size, true, Some(LineMode::Size)),
             C::SortExtension => self.sort_by(SortBy::Extension, false, None),
@@ -3501,7 +4441,30 @@ impl App {
             C::Spot => self.toggle_spot(),
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
-            C::Open => self.open_hovered(now),
+            C::Open => {
+                // Inside an archive `Enter` has no opener to reach for — the
+                // file is not on the disk. On a directory it walks in, which is
+                // what `Enter` on a folder already means; on anything else it
+                // extracts what is selected (PLAN §7.3).
+                if self.tab().archive.is_some() {
+                    let into = self
+                        .tab()
+                        .cwd
+                        .dir
+                        .cursor_entry()
+                        .filter(|entry| entry.is_dir())
+                        .filter(|_| self.tab().cwd.dir.selected_count() == 0)
+                        .map(|entry| entry.path.clone());
+                    match into {
+                        Some(path) => self.navigate(path, now),
+                        None => self.extract_selection(false, now),
+                    }
+                    return;
+                }
+                self.open_hovered(now)
+            }
+            C::ArchiveExtractHere => self.extract(false, now),
+            C::ArchiveExtractSubfolder => self.extract(true, now),
             C::OpenInteractive => self.open_picker(now),
 
             // ── The palette and the jumps (PLAN §4.4, §7.2) ─────────────────
@@ -3589,6 +4552,156 @@ impl App {
         tab.sync_parent_cursor();
     }
 
+    // ── "What's big" mode (PLAN §7.3) ───────────────────────────────────────
+
+    /// The recursive-size walker, started the first time it is asked for.
+    fn du(&mut self) -> &df_core::du::DuScanner {
+        let waker = self.waker.clone();
+        self.du
+            .get_or_insert_with(|| df_core::du::DuScanner::start(Arc::new(move || waker.wake())))
+    }
+
+    /// `m u`, and the palette's "Show disk usage": the mode goes on, or off.
+    fn toggle_usage(&mut self, now: Instant) {
+        if self.usage.is_some() {
+            self.leave_usage(now);
+            return;
+        }
+        let dir = self.cwd();
+        // Depth 1: the mode shows this directory's children, and every level
+        // below that is counted into them rather than listed.
+        let token = self.du().request(dir.clone(), 1);
+        let previous = SortOptions {
+            by: self.mgr.sort_by,
+            reverse: self.mgr.sort_reverse,
+            ..self.sort()
+        };
+        self.usage = Some(crate::usage::Usage::new(dir, token, previous, now));
+        // Biggest first — which *is* the drill-down (PLAN §7.3). The sort is
+        // the existing one, applied by the existing command, so the FLIP
+        // animation carries the rows to their new places exactly as `, S`
+        // would.
+        self.flip_before = Some(self.last_layout.clone());
+        self.sort_by(SortBy::Size, true, None);
+        self.toasts.notice("Measuring…", now);
+    }
+
+    /// `Esc`, the toggle again, or navigating away.
+    fn leave_usage(&mut self, now: Instant) {
+        let Some(usage) = self.usage.take() else {
+            return;
+        };
+        if let Some(du) = &self.du {
+            // A walk nobody is looking at is work nobody asked for (PLAN §1).
+            du.cancel(usage.token);
+        }
+        self.flip_before = Some(self.last_layout.clone());
+        self.sort_by(usage.previous_sort.by, usage.previous_sort.reverse, None);
+        // Re-read, so the directory rows go back to the honest zero they
+        // started as rather than keeping numbers nothing is maintaining.
+        self.rescan(&usage.dir.clone(), now);
+    }
+
+    /// Take whatever the walk has said since the last frame.
+    ///
+    /// Returns whether anything on screen moved. Early-returns on the common
+    /// case — the mode is off — so a session that never used it never touches
+    /// a channel.
+    fn poll_usage(&mut self, now: Instant) -> bool {
+        if self.usage.is_none() {
+            return false;
+        }
+        // The mode belongs to a directory; walking out of it ends it.
+        let cwd = self.cwd();
+        if self.usage.as_ref().is_some_and(|u| !u.is_about(&cwd)) {
+            self.leave_usage(now);
+            return true;
+        }
+        let messages = match &self.du {
+            Some(du) => du.drain(),
+            None => return false,
+        };
+        let mut changed = false;
+        for message in messages {
+            let Some(usage) = &mut self.usage else { break };
+            if message.token() != usage.token {
+                // A walk that has been superseded. Its numbers are about a
+                // directory nobody is looking at.
+                continue;
+            }
+            match message {
+                df_core::du::DuMessage::Progress { updates, .. } => {
+                    changed |= usage.apply(&updates);
+                }
+                df_core::du::DuMessage::Done { totals, .. } => {
+                    usage.finish(totals.total_bytes);
+                    let summary = format!(
+                        "{} in {}",
+                        crate::format::human_size(usage.total()),
+                        plural(totals.files as usize, "file", "files")
+                    );
+                    self.toasts.notice(summary, now);
+                    changed = true;
+                }
+                df_core::du::DuMessage::Failed { error, .. } => {
+                    let message = error.to_string();
+                    self.leave_usage(now);
+                    self.toasts.error(message, now);
+                    return true;
+                }
+                df_core::du::DuMessage::Started { .. } => {}
+            }
+        }
+        if changed {
+            self.apply_usage_sizes();
+        }
+        changed
+    }
+
+    /// Push the walk's numbers into the rows, and re-sort around them.
+    ///
+    /// The sizes go into [`df_core::fs::Entry::len`] itself rather than being
+    /// carried alongside, because that is the field the size *sort* reads — and
+    /// the whole point of the mode is that the biggest thing floats to the top
+    /// while the walk is still running. Free as a side effect: `Tab`'s size
+    /// linemode and the spot panel agree with the bars, because there is one
+    /// number.
+    fn apply_usage_sizes(&mut self) {
+        let Some(usage) = &self.usage else { return };
+        // A map, not a list to scan: a walk reports ten times a second and a
+        // directory can hold thousands of rows, so a linear search per row
+        // would be the one part of this mode that got slower the more there was
+        // to measure.
+        let weights: HashMap<String, u64> = self
+            .tab()
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir())
+            .filter_map(|entry| {
+                usage
+                    .weight(&entry.name)
+                    .map(|weight| (entry.name.clone(), weight.bytes))
+            })
+            .collect();
+        if weights.is_empty() {
+            return;
+        }
+        self.tabs.active_mut().cwd.dir.revise_entries(|entries| {
+            let mut changed = false;
+            for entry in entries.iter_mut() {
+                if let Some(bytes) = weights.get(&entry.name) {
+                    if entry.len != *bytes {
+                        entry.len = *bytes;
+                        changed = true;
+                    }
+                }
+            }
+            changed
+        });
+    }
+
     /// The `g` chord's bookmarks (PLAN §3's `[goto]` table).
     fn goto(&mut self, slot: u8, now: Instant) {
         let Some(bookmark) = self.config.goto.get(slot as usize) else {
@@ -3624,6 +4737,9 @@ impl App {
                     area, conflict,
                 )))
             }
+            Some(Dialog::Bulk(bulk)) => {
+                return Some(OverlayGeom::Bulk(dialog::bulk_geometry(area, bulk)))
+            }
             None => {}
         }
         if let Some(picker) = &self.picker {
@@ -3634,6 +4750,9 @@ impl App {
             let rows = self.task_rows();
             let (card, rects) = panel::geometry(area, bar_top, rows.len());
             return Some(OverlayGeom::Panel(card, rects, rows));
+        }
+        if let Some(card) = &self.mounts {
+            return Some(OverlayGeom::Mounts(crate::mounts::geometry(area, card)));
         }
         if let Some(spot) = &self.spot {
             return Some(OverlayGeom::Spot(spot::geometry(area, bar_top, spot)));
@@ -3680,6 +4799,19 @@ impl App {
             }
             return;
         }
+        // The disks card: a click puts the cursor on the row and acts on it,
+        // which is the same one-click-is-Enter rule the opener picker follows.
+        if self.mounts.is_some() {
+            if let Control::PanelRow(offset) = control {
+                if let Some(card) = &mut self.mounts {
+                    let index = (card.first + offset).min(card.devices.len().saturating_sub(1));
+                    let delta = index as isize - card.cursor as isize;
+                    card.move_cursor(delta);
+                }
+                self.mount_action(now);
+            }
+            return;
+        }
         // The spot's chips are pressed, not selected-then-confirmed: a click on
         // a permission bit flips it, and a click on the checksum starts it.
         if self.spot.is_some() {
@@ -3721,7 +4853,10 @@ impl App {
                 | Control::Tab(_)
                 | Control::Crumb(_)
                 | Control::MenuItem(_)
-                | Control::SubmenuItem(_) => {}
+                | Control::SubmenuItem(_)
+                | Control::BasketChip
+                | Control::BasketRow(_)
+                | Control::BasketRemove(_) => {}
             }
             return;
         }
@@ -3742,6 +4877,13 @@ impl App {
                         }
                         // Past the three answers is the apply-to-all toggle.
                         None => conflict.toggle_apply_all(),
+                    }
+                }
+                Some(Dialog::Bulk(_)) => {
+                    if index == 0 {
+                        self.close_overlay(now);
+                    } else {
+                        self.submit_overlay(page, now);
                     }
                 }
                 None => {}
@@ -3766,7 +4908,10 @@ impl App {
             | Control::Tab(_)
             | Control::Crumb(_)
             | Control::MenuItem(_)
-            | Control::SubmenuItem(_) => {}
+            | Control::SubmenuItem(_)
+            | Control::BasketChip
+            | Control::BasketRow(_)
+            | Control::BasketRemove(_) => {}
         }
     }
 
@@ -3774,20 +4919,86 @@ impl App {
 
     /// Rebuild the breadcrumb when the directory has changed under it.
     ///
-    /// The branch comes from [`df_core::git::repo`] — a walk up for `.git` and
-    /// a 41-byte read of `HEAD` — and **not** from the status worker: the
-    /// breadcrumb wants the branch name, which is a file read, and starting a
-    /// `git status` process for every directory a session passes through would
-    /// be a thread and a subprocess bought for one word of text. The dots and
-    /// the dirty count that *do* need the worker are Phase 5's.
+    /// The crumbs are cached against the path they describe; the **chip is
+    /// not**. It is re-derived from the status cache every frame, because it
+    /// carries a dirty count that changes while the directory does not — a chip
+    /// rebuilt only on navigation would freeze at whatever the repository looked
+    /// like when you walked in, which is worse than having no count at all. The
+    /// cost is a hash lookup and a short `format!`, and only inside a
+    /// repository.
     fn sync_path_bar(&mut self) {
         let cwd = self.cwd();
-        if self.path_bar.0 == cwd && !self.path_bar.1.is_empty() {
+        if self.path_bar.0 != cwd || self.path_bar.1.is_empty() {
+            // The one walk up for `.git` per navigation. See [`App::repo`].
+            self.repo = df_core::git::repo_root(&cwd);
+            self.path_bar = (cwd, chrome::crumbs(&self.cwd()), None);
+            // …and the one *request* per navigation. Deliberately here rather
+            // than in `repo_status`: a status that fails for good — a corrupt
+            // index, a permission problem — stores nothing, so a `repo_status`
+            // that asked whenever it found nothing would spawn a `git status`
+            // on every frame, which is once per keystroke and once per mouse
+            // move. Asking on arrival and on a watch event is the whole
+            // schedule.
+            if let Some(root) = self.repo.clone() {
+                self.git().refresh(&root);
+            }
+        }
+        self.path_bar.2 = self.branch_chip();
+    }
+
+    /// The git front end, started the first time a repository is entered.
+    ///
+    /// Every caller of this has already established that there is a repository
+    /// to ask about — see [`App::repo`] — except the spot panel, which asks
+    /// about one path and can afford to.
+    fn git(&mut self) -> &df_core::git::Git {
+        let waker = self.waker.clone();
+        self.git
+            .get_or_insert_with(|| df_core::git::Git::start(Arc::new(move || waker.wake())))
+    }
+
+    /// What git currently knows about the directory on screen, queueing a first
+    /// scan if there has never been one.
+    ///
+    /// `None` outside a repository *and* while the first scan is still running:
+    /// the rows simply have no dots for that half second, which is the correct
+    /// picture of what is known.
+    ///
+    /// **Reads only.** The scan is asked for in [`App::sync_path_bar`] when the
+    /// directory changes and in [`App::git_touched`] when something moves; see
+    /// the note there for why this one must not ask.
+    fn repo_status(&mut self) -> Option<Arc<df_core::git::RepoStatus>> {
+        let root = self.repo.clone()?;
+        self.git().status(&root)
+    }
+
+    /// The breadcrumb's branch chip, or nothing outside a repository.
+    fn branch_chip(&mut self) -> Option<String> {
+        let root = self.repo.clone()?;
+        let status = self.repo_status();
+        let counts = status.as_ref().map(|s| s.counts());
+        // The porcelain's spelling when there is one, and `HEAD`'s otherwise —
+        // a 41-byte read that answers before the worker does, so the chip is
+        // there on the first frame in a directory rather than a second later.
+        let branch = match status.as_ref().and_then(|s| s.branch()) {
+            Some(name) => name.to_string(),
+            None => self.git().branch(&root)?,
+        };
+        Some(chrome::branch_label(&branch, counts))
+    }
+
+    /// Tell git something under `dir` moved.
+    ///
+    /// Called from the watch-driven rescans, which the watcher has already
+    /// coalesced; [`df_core::git::Git::refresh`] dedupes again while a scan is
+    /// queued or running, so a `cargo build` under the cursor costs one status,
+    /// not one per event.
+    fn git_touched(&mut self, dir: &Path) {
+        let Some(root) = self.repo.clone() else { return };
+        if !dir.starts_with(&root) {
             return;
         }
-        let crumbs = chrome::crumbs(&cwd);
-        let branch = df_core::git::repo_root(&cwd).and_then(|root| df_core::git::branch(&root));
-        self.path_bar = (cwd, crumbs, branch);
+        self.git().refresh(&root);
     }
 
     /// A wheel roll, routed to the pane it was pointed at.
@@ -3927,6 +5138,28 @@ impl App {
                 self.overlay_click(control, geom.page, now);
                 rect
             }
+            // The basket tray (PLAN §7.1): the chip opens and closes it, a row
+            // goes to the file it names, and the `×` takes that file back out.
+            Control::BasketChip => {
+                self.basket_open = !self.basket_open;
+                if self.basket_open {
+                    self.prune_basket(now);
+                }
+                geom.basket.chip
+            }
+            Control::BasketRemove(index) => {
+                let rect = geom.basket.removes.get(index).copied().unwrap_or(egui::Rect::ZERO);
+                self.basket.remove(self.basket_first + index);
+                self.clamp_basket();
+                rect
+            }
+            Control::BasketRow(index) => {
+                let rect = geom.basket.rows.get(index).copied().unwrap_or(egui::Rect::ZERO);
+                if let Some(path) = self.basket.paths().get(self.basket_first + index).cloned() {
+                    self.reveal(&path, now);
+                }
+                rect
+            }
         }
     }
 
@@ -4024,6 +5257,13 @@ impl App {
             targets: self.targets().len(),
             clipboard: !self.clipboard.is_empty(),
             openers: openers.len(),
+            // Only in a real directory: an archive nested inside one has to
+            // come out before it can be opened, so offering "Extract here" on
+            // it would offer something that cannot be done.
+            archive: self.tab().archive.is_none()
+                && entry
+                    .as_ref()
+                    .is_some_and(crate::archive::looks_like_archive),
         };
         let names = openers.iter().map(|choice| choice.name.clone()).collect();
         self.menu = Some(Menu::new(at, menu::items(facts), names));
@@ -4149,6 +5389,8 @@ impl App {
                     self.launch(&choice, self.targets(), now);
                 }
             }
+            A::ExtractHere => self.extract(false, now),
+            A::ExtractSubfolder => self.extract(true, now),
             A::Yank => self.set_clipboard(false, now),
             A::Cut => self.set_clipboard(true, now),
             A::Paste => self.paste(false, now),
@@ -4180,6 +5422,15 @@ impl App {
             }
             if let Some(press) = &mut self.press {
                 press.dragging = true;
+            }
+            if press.on_basket {
+                // PLAN §7.1: "drag the whole basket as one payload". The same
+                // drag machinery, given a different set of paths — so the
+                // ghost, the target highlighting, the modifier badges, the
+                // spring-back and the Wayland hand-off are all the ones that
+                // already work.
+                self.drag_basket(press.at, at, now);
+                return;
             }
             if press.on_row {
                 // **The seam.** A drag that began on a row is a *file* drag,
@@ -4263,6 +5514,38 @@ impl App {
 
     // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────────
 
+    /// The basket's chip has been dragged: pick up everything in it.
+    ///
+    /// Deliberately a separate entry point from [`App::begin_drag`] and not a
+    /// parameter on it: that one is about a *row*, and half of it (the pane
+    /// geometry, the index, the "is the grabbed row in the selection" rule) has
+    /// no meaning here. What they share is the `Drag` they build, which is the
+    /// part that matters.
+    fn drag_basket(&mut self, from: egui::Pos2, at: egui::Pos2, now: Instant) {
+        let paths = self.basket.paths().to_vec();
+        if paths.is_empty() {
+            return;
+        }
+        let label = paths
+            .first()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "basket".to_string());
+        self.drag = Some(Drag {
+            paths,
+            label,
+            // The generic file glyph: a basket holds whatever it holds, and a
+            // card wearing the first file's icon would claim they are all that
+            // kind.
+            icon: crate::icons::generic(&self.palette, self.nerd),
+            home: from,
+            at,
+            spring: dnd::SpringOpen::default(),
+            last: now,
+            handed_off: false,
+        });
+    }
+
     /// A press on a row has travelled far enough to be a drag. Pick the files
     /// up.
     ///
@@ -4280,6 +5563,12 @@ impl App {
         metrics: Option<&grid::Metrics>,
         now: Instant,
     ) {
+        if self.tab().archive.is_some() {
+            // The rows inside an archive name paths that do not exist; a drag
+            // out of one would offer another application a `text/uri-list` of
+            // fictions (PLAN §7.1, §7.3). Extract first.
+            return;
+        }
         let dir = &self.tab().cwd.dir;
         let Some(index) = grid::pane_at(content, metrics, scroll_rows, dir.len(), from) else {
             return;
@@ -5021,6 +6310,12 @@ impl App {
         // A menu that is fading is pixels, not a surface: it takes no pointer.
         let menu_live = self.menu.as_ref().is_some_and(Menu::live);
 
+        // The basket tray (PLAN §7.1), measured before the hit test for the
+        // reason the breadcrumb is: two functions working it out separately is
+        // how a floating surface grows a one-pixel lie at its edges.
+        let basket_geometry =
+            crate::basket::geometry(area, &self.basket, self.basket_open, self.basket_first);
+
         let over = pointer.at.and_then(|p| {
             // The menu is over everything, a modal card included: it is the
             // most recent thing the user asked for.
@@ -5035,6 +6330,16 @@ impl App {
             // cursor under a question about the row it was on.
             if let Some(overlay) = &overlay {
                 return overlay.hit(p).map(|control| (control, p));
+            }
+            // The tray floats over the panes, so it is hit-tested before them:
+            // a click on the chip must not also land on the row underneath it.
+            if basket_geometry.contains(p) {
+                let control = basket_geometry
+                    .remove_at(p)
+                    .map(Control::BasketRemove)
+                    .or_else(|| basket_geometry.row_at(p).map(Control::BasketRow))
+                    .or_else(|| basket_geometry.chip.contains(p).then_some(Control::BasketChip))?;
+                return Some((control, p));
             }
             let control = layout
                 .strip
@@ -5146,6 +6451,7 @@ impl App {
             crumbs: &crumb_rects,
             overlay: &overlay,
             menu: &menu_geometry,
+            basket: &basket_geometry,
             tabs: tab_count,
         };
 
@@ -5178,6 +6484,7 @@ impl App {
             self.press = pointer.at.map(|at| PressStart {
                 at,
                 on_row: matches!(over, Some((Control::Row(Column::List, _), _))),
+                on_basket: matches!(over, Some((Control::BasketChip, _))),
                 in_list: layout.list.contains(at) && overlay.is_none(),
                 dragging: false,
             });
@@ -5278,7 +6585,12 @@ impl App {
                 | Control::Action(_)
                 | Control::PanelRow(_)
                 | Control::MenuItem(_)
-                | Control::SubmenuItem(_) => egui::CursorIcon::PointingHand,
+                | Control::SubmenuItem(_)
+                | Control::BasketRow(_)
+                | Control::BasketRemove(_) => egui::CursorIcon::PointingHand,
+                // The chip is draggable as well as clickable, so it wears the
+                // hand that says so (`delightful-ui` §2).
+                Control::BasketChip => egui::CursorIcon::Grab,
             });
         }
 
@@ -5349,7 +6661,16 @@ impl App {
                 .cursor_entry()
                 .map(|entry| entry.path.clone()),
         };
-        self.preview.sync(hovered.as_deref(), target, now);
+        // Inside an archive the hovered path is a fiction, so the preview
+        // workers are given nothing at all and the pane draws the entry's card
+        // instead (see `paint_archive_card`). Handing them a path that is not
+        // on the disk would be a failed read per cursor move.
+        let in_archive = self.tab().archive.is_some();
+        if in_archive {
+            self.preview.sync(None, target, now);
+        } else {
+            self.preview.sync(hovered.as_deref(), target, now);
+        }
         // …and a content hit scrolls the pane to the line it matched on. Only
         // when something changed — the cursor moved, or the preview finished
         // loading — so a settled panel is not re-scrolling the pane sixty times
@@ -5485,6 +6806,18 @@ impl App {
             self.thumbs().want(&wants);
         }
 
+        // What git thinks of this directory (PLAN §7.3), asked once for the
+        // whole frame. An `Arc` clone out of the cache: the rows then read it
+        // without touching the lock the worker swaps statuses in under, so a
+        // status landing mid-frame cannot change the picture half way down a
+        // pane.
+        let repo_status = self.repo_status();
+        let repo_status = repo_status.as_deref();
+        // The du mode is only ever about the directory that is on screen, and
+        // it is ended by navigating away — this check is the belt to that
+        // brace, for the frame between a navigation and the next update.
+        let cwd_now = self.cwd();
+
         // ── Paint ───────────────────────────────────────────────────────────
         let paint = ui::Painting {
             painter: &painter,
@@ -5535,6 +6868,16 @@ impl App {
                 // The parent column never re-sorts on its own — it follows the
                 // list's sort, and by then it is a *different* listing.
                 flip: None,
+                // The same repository the list is in: the parent is an ancestor
+                // of the current directory, so either it is inside the same
+                // work tree — where the repository root's own row wants its
+                // rollup dot — or it is above it, where every lookup misses and
+                // the column is drawn empty. Both are right.
+                git: repo_status,
+                // Never in the parent column: the mode is about the directory
+                // you are in, and a bar there would be measuring a different
+                // parent's children.
+                usage: None,
             });
         }
         let list_view = ListView {
@@ -5563,6 +6906,8 @@ impl App {
             }),
             dragged: &drag_paths,
             flip: self.flip.as_ref(),
+            git: repo_status,
+            usage: self.usage.as_ref().filter(|u| u.is_about(&cwd_now)),
         };
         match (&metrics, &self.thumbs) {
             // PLAN §2's grid. Same directory, same cursor, same selection and
@@ -5611,7 +6956,45 @@ impl App {
                 egui::StrokeKind::Inside,
             );
         }
-        crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now);
+        // Inside an archive the preview pane is the entry's facts card
+        // (PLAN §7.3), because there is no file on the disk for the preview
+        // pipeline to open.
+        match self.tab().archive.as_ref() {
+            Some(browse) => {
+                let entry = self
+                    .tab()
+                    .cwd
+                    .dir
+                    .cursor_entry()
+                    .and_then(|row| browse.inner(&row.path))
+                    .and_then(|inner| browse.tree.get(&inner));
+                match entry {
+                    Some(entry) => {
+                        let body = self
+                            .archive_preview
+                            .as_ref()
+                            .filter(|(a, i, _)| *a == browse.path && *i == entry.path)
+                            .and_then(|(_, _, body)| body.as_deref());
+                        crate::archive::card(
+                            &paint,
+                            layout.preview,
+                            entry,
+                            browse.tree.format(),
+                            body,
+                        );
+                    }
+                    // An empty archive, or a filter that matched nothing: the
+                    // same quiet label an empty directory's preview gets.
+                    None => paint.quiet_label(
+                        ui::content_rect(layout.preview),
+                        "nothing to show",
+                    ),
+                }
+            }
+            None => {
+                crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now)
+            }
+        }
         // Over the pane's own body — the cached thumbnail is the poster the
         // first decoded frame lands on top of — and under everything else.
         if let Some(state) = &transport {
@@ -5653,6 +7036,15 @@ impl App {
                 &self.ripples,
             );
         }
+        // The basket tray, over the panes and under every modal (PLAN §7.1).
+        crate::basket::paint(
+            &paint,
+            &self.basket,
+            &basket_geometry,
+            self.basket_first,
+            &self.hovers,
+            &self.ripples,
+        );
         chrome::path_bar(
             &paint,
             layout.path,
@@ -5710,7 +7102,12 @@ impl App {
             None if self.overlay_open() => chrome::hint_bar(
                 &paint,
                 layout.bar,
-                &overlay_hints(&self.dialog, self.picker.is_some(), self.spot.is_some()),
+                &overlay_hints(
+                    &self.dialog,
+                    self.picker.is_some(),
+                    self.spot.is_some(),
+                    self.mounts.is_some(),
+                ),
             ),
             None if self.help.is_some() => chrome::hint_bar(
                 &paint,
@@ -5739,6 +7136,21 @@ impl App {
 
         // ── The modal surfaces, over the panes and the bar ──────────────────
         match (&overlay, &self.dialog) {
+            (Some(OverlayGeom::Mounts(geometry)), _) => {
+                if let Some(card) = &self.mounts {
+                    crate::mounts::paint(&paint, area, card, geometry, &self.hovers);
+                }
+            }
+            (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) => {
+                dialog::paint_bulk(
+                    &paint,
+                    area,
+                    bulk,
+                    geometry,
+                    &self.hovers,
+                    &self.ripples,
+                );
+            }
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
                 dialog::paint_confirm(
                     &paint,
@@ -5898,6 +7310,14 @@ impl App {
             ("tab", self.tab().animating(now)),
             ("tabs", self.tabs.animating(now)),
             ("preview", self.preview.animating(now)),
+            // The usage bars' grow-in, which stops asking the moment the sweep
+            // has landed — and a walk that is still streaming does not ask
+            // either, because a new number wakes the loop through the notifier
+            // rather than by polling (PLAN §1).
+            (
+                "usage",
+                self.usage.as_ref().is_some_and(|u| u.animating(now)),
+            ),
             // A *playing* file streams frames and says so; a paused one says
             // so only while a frame it asked for — a seek, a step, a new
             // source — has not landed, and then stops (PLAN §1's idle rule).
@@ -6143,7 +7563,21 @@ fn overlay_hints(
     dialog: &Option<Dialog>,
     picker: bool,
     spot: bool,
+    mounts: bool,
 ) -> Vec<(&'static str, &'static str)> {
+    if mounts {
+        // The disks card's own vocabulary, including the two `[pick]` has no
+        // row for — which is exactly why they are listed here: a key that is
+        // not on the help sheet has to be on the hint bar or it may as well not
+        // exist.
+        return vec![
+            ("↑↓", "choose"),
+            ("Enter", "mount / open"),
+            ("u", "unmount"),
+            ("e", "eject"),
+            ("Esc", "close"),
+        ];
+    }
     if spot {
         // Every key the card answers to, including the two df-core's `[spot]`
         // table has no row for — which is exactly why they are listed here: a
@@ -6159,6 +7593,11 @@ fn overlay_hints(
     }
     match dialog {
         Some(Dialog::Confirm(_)) => vec![("Enter / y", "confirm"), ("Esc / n", "cancel"), ("↑↓", "scroll")],
+        Some(Dialog::Bulk(_)) => vec![
+            ("Tab / ↑↓", "next field"),
+            ("Enter", "rename"),
+            ("Esc", "cancel"),
+        ],
         Some(Dialog::Conflict(_)) => vec![
             ("↑↓", "choose"),
             ("o s r", "overwrite / skip / rename"),
@@ -6262,6 +7701,34 @@ fn place_start_cursor(dir: &mut df_core::fs::DirState, name: &str) -> bool {
         dir.state(),
         df_core::fs::LoadState::Idle | df_core::fs::LoadState::Loading
     )
+}
+
+/// Collapse a chain of renames into where each file started and ended.
+///
+/// A swap runs as three moves — `a`→`tmp`, `b`→`a`, `tmp`→`b` — and the
+/// temporary is an implementation detail of doing it one syscall at a time. The
+/// journal must not see it: a record saying `tmp`→`b` would, on `u`, put a file
+/// back to a name that never existed as far as the user is concerned, and the
+/// verify would fail besides.
+///
+/// So consecutive legs are stitched: whenever one rename's destination is a
+/// later rename's source, the two become one, keeping the *first* origin and the
+/// *last* destination — and the fingerprint of the last, which is the file as it
+/// finally sits on disk.
+fn collapse_renames(moved: Vec<MovedPath>) -> Vec<MovedPath> {
+    let mut out: Vec<MovedPath> = Vec::new();
+    for leg in moved {
+        match out.iter_mut().find(|prior| prior.to == leg.from) {
+            Some(prior) => {
+                prior.to = leg.to;
+                prior.fingerprint = leg.fingerprint;
+            }
+            None => out.push(leg),
+        }
+    }
+    // A file that ended up back where it started is not a rename at all.
+    out.retain(|leg| leg.from != leg.to);
+    out
 }
 
 /// The spot panel's git row: the branch, and what git says about this path.
@@ -6440,6 +7907,50 @@ impl ApplicationHandler<crate::Wake> for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The temporary leg of a swap is an implementation detail of running the
+    /// renames one at a time, and the journal must not see it: `u` has to put
+    /// the file back where it *started*, not to a name that was only ever a
+    /// detour.
+    #[test]
+    fn a_swaps_temporary_leg_never_reaches_the_journal() {
+        use df_core::ops::journal::{FileKind, Fingerprint};
+        let print = Fingerprint {
+            kind: FileKind::File,
+            len: 0,
+            mtime: None,
+            entries: None,
+        };
+        let leg = |from: &str, to: &str| MovedPath {
+            from: PathBuf::from(from),
+            to: PathBuf::from(to),
+            fingerprint: print.clone(),
+        };
+        // `a`→`tmp`, `b`→`a`, `tmp`→`b`: the three moves a swap actually runs.
+        let collapsed = collapse_renames(vec![
+            leg("/d/a", "/d/b.df-rename-1"),
+            leg("/d/b", "/d/a"),
+            leg("/d/b.df-rename-1", "/d/b"),
+        ]);
+        assert_eq!(collapsed.len(), 2, "{collapsed:?}");
+        let pairs: Vec<(PathBuf, PathBuf)> = collapsed
+            .iter()
+            .map(|m| (m.from.clone(), m.to.clone()))
+            .collect();
+        assert!(pairs.contains(&(PathBuf::from("/d/a"), PathBuf::from("/d/b"))));
+        assert!(pairs.contains(&(PathBuf::from("/d/b"), PathBuf::from("/d/a"))));
+        // Nothing in the record mentions the detour.
+        assert!(collapsed
+            .iter()
+            .all(|m| !m.to.to_string_lossy().contains("df-rename")));
+
+        // A plain batch passes through untouched…
+        let plain = collapse_renames(vec![leg("/d/x", "/d/y"), leg("/d/p", "/d/q")]);
+        assert_eq!(plain.len(), 2);
+        // …and a file that ends up back where it started is not a rename.
+        let round_trip = collapse_renames(vec![leg("/d/x", "/d/t"), leg("/d/t", "/d/x")]);
+        assert!(round_trip.is_empty());
+    }
 
     /// PLAN §2's flush contract, both halves of it: df-core's store decides
     /// there is something to save, this side decides when — and a change while
@@ -6731,19 +8242,24 @@ mod tests {
             ))),
             false,
             false,
+            false,
         );
         assert!(confirm.iter().any(|(k, _)| k.contains("Enter")));
         assert!(confirm.iter().any(|(k, _)| k.contains("Esc")));
-        let panel = overlay_hints(&None, false, false);
+        let panel = overlay_hints(&None, false, false, false);
         assert!(panel.iter().any(|(k, what)| *k == "x" && *what == "cancel"));
-        let picker = overlay_hints(&None, true, false);
+        let picker = overlay_hints(&None, true, false, false);
         assert!(picker.iter().any(|(_, what)| *what == "open"));
         // The spot's hints cover the two keys df-core's `[spot]` table has no
         // row for, which is the only place they are ever advertised.
-        let spot = overlay_hints(&None, false, true);
+        let spot = overlay_hints(&None, false, true, false);
         assert!(spot.iter().any(|(k, _)| k.contains("Space")));
         assert!(spot.iter().any(|(k, _)| k.contains('⇧')));
         assert!(spot.iter().any(|(k, _)| k.contains("Tab")));
+        // The disks card advertises the two verbs `[pick]` has no row for.
+        let mounts = overlay_hints(&None, false, false, true);
+        assert!(mounts.iter().any(|(k, what)| *k == "e" && *what == "eject"));
+        assert!(mounts.iter().any(|(k, what)| *k == "u" && *what == "unmount"));
     }
 
     /// **Only video and audio grow a transport** (PLAN §4.3). A PDF has pages

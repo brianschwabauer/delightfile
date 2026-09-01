@@ -689,6 +689,11 @@ fn directory_body(
             // the thing you are acting on", which is also true of a previewed
             // listing.
             crate::ui::PARENT_DIM,
+            // No dots in a previewed listing: the preview says what is in a
+            // directory, and a git column there would reserve width in the
+            // narrowest pane for a fact about a directory nobody is in.
+            crate::ui::GitMark::default(),
+            None,
         );
         if alpha < 1.0 {
             // The crossfade, done by veiling rather than by re-tinting every

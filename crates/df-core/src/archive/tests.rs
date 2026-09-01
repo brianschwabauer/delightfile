@@ -26,6 +26,10 @@ struct ZipMember {
     /// not UTF-8.
     name: Vec<u8>,
     data: Vec<u8>,
+    /// What actually goes on the wire, when it is not `data` itself. Set only
+    /// by [`ZipMember::really_deflated`] — the listing tests never read a
+    /// payload, so for them the two are the same bytes.
+    wire: Option<Vec<u8>>,
     external: u32,
     flags: u16,
     method: u16,
@@ -36,6 +40,7 @@ impl ZipMember {
         ZipMember {
             name: name.as_bytes().to_vec(),
             data: data.to_vec(),
+            wire: None,
             external: 0,
             flags: 0,
             method: 0,
@@ -46,6 +51,7 @@ impl ZipMember {
         ZipMember {
             name: name.to_vec(),
             data: b"x".to_vec(),
+            wire: None,
             external: 0,
             flags: 0,
             method: 0,
@@ -56,6 +62,7 @@ impl ZipMember {
         ZipMember {
             name: format!("{}/", name.trim_end_matches('/')).into_bytes(),
             data: Vec::new(),
+            wire: None,
             external: 0x10,
             flags: 0,
             method: 0,
@@ -70,6 +77,18 @@ impl ZipMember {
     fn deflated(mut self) -> ZipMember {
         self.method = 8;
         self
+    }
+
+    /// Method 8 *and* real deflate bytes, for the tests that decompress.
+    fn really_deflated(mut self) -> ZipMember {
+        self.method = 8;
+        self.wire = Some(miniz_oxide::deflate::compress_to_vec(&self.data, 6));
+        self
+    }
+
+    /// The payload as it appears in the file.
+    fn wire(&self) -> &[u8] {
+        self.wire.as_deref().unwrap_or(&self.data)
     }
 }
 
@@ -88,12 +107,12 @@ fn build_zip(members: &[ZipMember], comment: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0x0021u16.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes()); // crc, unread by a listing
-        out.extend_from_slice(&(m.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(m.wire().len() as u32).to_le_bytes());
         out.extend_from_slice(&(m.data.len() as u32).to_le_bytes());
         out.extend_from_slice(&(m.name.len() as u16).to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&m.name);
-        out.extend_from_slice(&m.data);
+        out.extend_from_slice(m.wire());
 
         central.extend_from_slice(b"PK\x01\x02");
         central.extend_from_slice(&20u16.to_le_bytes());
@@ -103,7 +122,7 @@ fn build_zip(members: &[ZipMember], comment: &[u8]) -> Vec<u8> {
         central.extend_from_slice(&0u16.to_le_bytes());
         central.extend_from_slice(&0x0021u16.to_le_bytes());
         central.extend_from_slice(&0u32.to_le_bytes());
-        central.extend_from_slice(&(m.data.len() as u32).to_le_bytes());
+        central.extend_from_slice(&(m.wire().len() as u32).to_le_bytes());
         central.extend_from_slice(&(m.data.len() as u32).to_le_bytes());
         central.extend_from_slice(&(m.name.len() as u16).to_le_bytes());
         central.extend_from_slice(&0u16.to_le_bytes());
@@ -969,4 +988,323 @@ fn a_zip_written_by_a_real_archiver_lists_the_same_way() {
     assert_eq!(names(&tree.entries("sub")), vec!["two.txt"]);
     assert_eq!(tree.get("sub/two.txt").unwrap().len, 11);
     assert_eq!(tree.unsafe_count(), 0);
+}
+
+// ── extraction ──────────────────────────────────────────────────────────────
+//
+// The plan's tests above settle *what would happen*; these settle that it does,
+// against real bytes on a real disk. Every one of them is also a safety test:
+// the thing being checked is not only that the right files appear, but that no
+// file appears anywhere the plan did not put it.
+
+use crate::tasks::TaskCtx;
+
+/// Extract everything in `archive` into a fresh directory and hand back the
+/// report and the directory.
+fn extract_all(t: &TempTree, archive: &Path, into: &str) -> (unpack::ExtractReport, std::path::PathBuf) {
+    let dest = t.path().join(into);
+    std::fs::create_dir_all(&dest).unwrap();
+    let tree = list(archive).unwrap();
+    let plan = plan_extract(&tree, &[], &dest);
+    let report = unpack::extract(&plan, &TaskCtx::detached()).unwrap();
+    (report, dest)
+}
+
+fn read(path: &Path) -> String {
+    String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned()
+}
+
+#[test]
+fn a_zip_extracts_stored_and_deflated_members_alike() {
+    let t = TempTree::new("archive-extract-zip");
+    // Long enough that the deflate stream is more than one block and the
+    // chunked inflate loop actually goes round twice.
+    let big = "the quick brown fox jumps over the lazy dog\n".repeat(4000);
+    let bytes = build_zip(
+        &[
+            ZipMember::file("readme.txt", b"hello"),
+            ZipMember::dir("src"),
+            ZipMember::file("src/main.rs", b"fn main() {}").really_deflated(),
+            ZipMember::file("src/big.txt", big.as_bytes()).really_deflated(),
+        ],
+        b"",
+    );
+    let archive = write(&t, "bundle.zip", &bytes);
+    let (report, dest) = extract_all(&t, &archive, "out");
+
+    assert_eq!(report.files, 3, "{:?}", report.errors);
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert!(!report.cancelled);
+    assert_eq!(read(&dest.join("readme.txt")), "hello");
+    assert_eq!(read(&dest.join("src/main.rs")), "fn main() {}");
+    assert_eq!(read(&dest.join("src/big.txt")), big);
+    assert_eq!(report.bytes, 5 + 12 + big.len() as u64);
+}
+
+#[test]
+fn a_tar_extracts_its_members() {
+    let t = TempTree::new("archive-extract-tar");
+    let mut bytes = Vec::new();
+    tar_entry(&mut bytes, "docs/", b"", b'5');
+    tar_entry(&mut bytes, "docs/notes.md", b"# notes\n", b'0');
+    tar_entry(&mut bytes, "link", b"", b'2');
+    tar_end(&mut bytes);
+    let archive = write(&t, "docs.tar", &bytes);
+    let (report, dest) = extract_all(&t, &archive, "out");
+
+    assert_eq!(read(&dest.join("docs/notes.md")), "# notes\n");
+    assert!(dest.join("docs").is_dir());
+    // A symlink entry is a name pointing somewhere the extraction has no
+    // business following, so nothing is written for it.
+    assert!(!dest.join("link").exists());
+    assert_eq!(report.files, 1);
+}
+
+/// The property the whole feature rests on: an entry whose name climbs out of
+/// the destination writes nothing, anywhere, and the caller is told how many.
+#[test]
+fn a_traversing_name_writes_nothing_and_is_counted_in_the_summary() {
+    let t = TempTree::new("archive-extract-evil");
+    let bytes = build_zip(
+        &[
+            ZipMember::raw(b"../escaped.txt"),
+            ZipMember::raw(b"/absolute.txt"),
+            ZipMember::file("fine.txt", b"ok"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "evil.zip", &bytes);
+    let (report, dest) = extract_all(&t, &archive, "out");
+
+    assert_eq!(read(&dest.join("fine.txt")), "ok");
+    assert!(!t.path().join("escaped.txt").exists());
+    assert!(!dest.join("escaped.txt").exists());
+    assert!(!dest.join("absolute.txt").exists());
+    assert_eq!(report.files, 1);
+    // Three, not two: `../escaped.txt` also synthesizes a `..` directory, and
+    // that is every bit as unsafe to join onto a destination as the leaf is.
+    assert_eq!(report.skipped.len(), 3);
+    assert!(report
+        .skipped
+        .iter()
+        .all(|(_, r)| *r == SkipReason::UnsafeName));
+    let message = report.message();
+    assert!(message.contains("3 entries with unsafe paths"), "{message}");
+}
+
+#[test]
+fn an_encrypted_member_is_skipped_and_named() {
+    let t = TempTree::new("archive-extract-encrypted");
+    let bytes = build_zip(
+        &[
+            ZipMember::file("open.txt", b"a"),
+            ZipMember::file("secret.txt", b"nope").encrypted(),
+        ],
+        b"",
+    );
+    let archive = write(&t, "locked.zip", &bytes);
+    let (report, dest) = extract_all(&t, &archive, "out");
+    assert!(dest.join("open.txt").exists());
+    assert!(!dest.join("secret.txt").exists());
+    assert!(
+        report.message().contains("1 encrypted entry"),
+        "{}",
+        report.message()
+    );
+}
+
+/// Nothing on disk is ever overwritten by an archive: a colliding file gets the
+/// `_1` ladder a paste uses, and a colliding *directory* is merged into.
+#[test]
+fn a_collision_gets_a_suffix_and_never_an_overwrite() {
+    let t = TempTree::new("archive-extract-collision");
+    let bytes = build_zip(
+        &[
+            ZipMember::file("notes.txt", b"from the archive"),
+            ZipMember::dir("src"),
+            ZipMember::file("src/main.rs", b"archive"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "c.zip", &bytes);
+    let dest = t.path().join("out");
+    std::fs::create_dir_all(dest.join("src")).unwrap();
+    std::fs::write(dest.join("notes.txt"), b"mine").unwrap();
+    std::fs::write(dest.join("src/main.rs"), b"mine too").unwrap();
+
+    let tree = list(&archive).unwrap();
+    let plan = plan_extract(&tree, &[], &dest);
+    assert_eq!(plan.conflicts, 3);
+    let report = unpack::extract(&plan, &TaskCtx::detached()).unwrap();
+
+    assert_eq!(read(&dest.join("notes.txt")), "mine");
+    assert_eq!(read(&dest.join("notes_1.txt")), "from the archive");
+    assert_eq!(read(&dest.join("src/main.rs")), "mine too");
+    assert_eq!(read(&dest.join("src/main_1.rs")), "archive");
+    assert_eq!(report.files, 2);
+    // Everything landed inside a directory that was already there, so there is
+    // no honest inverse. See `unpack::plan_record`.
+    assert!(report.record.is_none());
+}
+
+/// `u` after an extraction removes what the extraction made, and only that.
+#[test]
+fn an_extraction_into_fresh_ground_is_undoable() {
+    let t = TempTree::new("archive-extract-undo");
+    let bytes = build_zip(
+        &[
+            ZipMember::dir("pkg"),
+            ZipMember::file("pkg/a.txt", b"a").really_deflated(),
+            ZipMember::file("pkg/b.txt", b"b"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "pkg.zip", &bytes);
+    let dest = t.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    // A file of our own beside the extraction, which the undo must not touch.
+    std::fs::write(dest.join("keep.txt"), b"keep").unwrap();
+
+    let tree = list(&archive).unwrap();
+    let plan = plan_extract(&tree, &[], &dest);
+    let report = unpack::extract(&plan, &TaskCtx::detached()).unwrap();
+    assert_eq!(report.files, 2);
+
+    let record = report.record.expect("a fresh extraction is undoable");
+    assert_eq!(record.describe(), "copied 1 item");
+    crate::ops::journal::undo_record(&record, &TaskCtx::detached()).unwrap();
+
+    assert!(!dest.join("pkg").exists());
+    assert_eq!(read(&dest.join("keep.txt")), "keep");
+}
+
+/// A selection extracts its subtree and nothing else, keeping the prefix.
+#[test]
+fn a_selection_extracts_only_its_subtree() {
+    let t = TempTree::new("archive-extract-selection");
+    let bytes = build_zip(
+        &[
+            ZipMember::dir("src"),
+            ZipMember::file("src/lib.rs", b"lib"),
+            ZipMember::dir("docs"),
+            ZipMember::file("docs/guide.md", b"guide"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "s.zip", &bytes);
+    let dest = t.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+    let tree = list(&archive).unwrap();
+    let plan = plan_extract(&tree, &["docs"], &dest);
+    unpack::extract(&plan, &TaskCtx::detached()).unwrap();
+
+    assert_eq!(read(&dest.join("docs/guide.md")), "guide");
+    assert!(!dest.join("src").exists());
+}
+
+/// PLAN §5's contract for a cancel: what landed is real, and the file that was
+/// mid-flight is not left behind as a truncated copy of something.
+#[test]
+fn a_cancelled_extraction_leaves_no_half_written_file() {
+    let t = TempTree::new("archive-extract-cancel");
+    let big = "x".repeat(unpack::EXTRACT_BUF * 8);
+    let bytes = build_zip(&[ZipMember::file("big.bin", big.as_bytes())], b"");
+    let archive = write(&t, "big.zip", &bytes);
+    let dest = t.path().join("out");
+    std::fs::create_dir_all(&dest).unwrap();
+
+    let tree = list(&archive).unwrap();
+    let plan = plan_extract(&tree, &[], &dest);
+    let ctx = TaskCtx::detached();
+    ctx.flags().cancel();
+    let report = unpack::extract(&plan, &ctx).unwrap();
+
+    assert!(report.cancelled);
+    assert_eq!(report.files, 0);
+    assert!(!dest.join("big.bin").exists());
+    assert!(report.message().starts_with("Cancelled"), "{}", report.message());
+}
+
+/// The bomb guard: a member that keeps producing bytes past the length its own
+/// header declared is stopped, and the partial file it made is removed.
+#[test]
+fn a_member_that_outgrows_its_declared_length_is_refused() {
+    let t = TempTree::new("archive-extract-bomb");
+    let mut member = ZipMember::file("lie.txt", b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").really_deflated();
+    // Keep the real (large) payload on the wire and claim it is two bytes.
+    member.data = b"aa".to_vec();
+    let bytes = build_zip(&[member], b"");
+    let archive = write(&t, "lie.zip", &bytes);
+    let (report, dest) = extract_all(&t, &archive, "out");
+
+    assert!(!dest.join("lie.txt").exists());
+    assert_eq!(report.files, 0);
+    assert!(
+        report.errors.iter().any(|(_, m)| m.contains("larger than")),
+        "{:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn one_entry_can_be_read_back_for_a_preview() {
+    let t = TempTree::new("archive-read-entry");
+    let bytes = build_zip(
+        &[
+            ZipMember::file("a.txt", b"first"),
+            ZipMember::file("b.txt", b"second").really_deflated(),
+        ],
+        b"",
+    );
+    let zip = write(&t, "r.zip", &bytes);
+    assert_eq!(
+        unpack::read_entry(&zip, "b.txt", 1024).unwrap().as_deref(),
+        Some(&b"second"[..])
+    );
+    assert_eq!(unpack::read_entry(&zip, "nope.txt", 1024).unwrap(), None);
+    // Over the cap: nothing, rather than a file with its end cut off.
+    assert_eq!(unpack::read_entry(&zip, "a.txt", 2).unwrap(), None);
+
+    let mut tar_bytes = Vec::new();
+    tar_entry(&mut tar_bytes, "notes.md", b"# hi\n", b'0');
+    tar_end(&mut tar_bytes);
+    let tar_path = write(&t, "r.tar", &tar_bytes);
+    assert_eq!(
+        unpack::read_entry(&tar_path, "notes.md", 1024)
+            .unwrap()
+            .as_deref(),
+        Some(&b"# hi\n"[..])
+    );
+}
+
+/// The destination map is the whole safety story, so it is checked on its own:
+/// directories merge, files ladder, and the top-level "did we create this"
+/// answer is what decides whether there is an inverse.
+#[test]
+fn destinations_merge_directories_and_ladder_files() {
+    let t = TempTree::new("archive-destinations");
+    let bytes = build_zip(
+        &[
+            ZipMember::dir("pkg"),
+            ZipMember::file("pkg/a.txt", b"a"),
+            ZipMember::file("top.txt", b"t"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "d.zip", &bytes);
+    let dest = t.path().join("out");
+    std::fs::create_dir_all(dest.join("pkg")).unwrap();
+    std::fs::write(dest.join("pkg/a.txt"), b"mine").unwrap();
+
+    let tree = list(&archive).unwrap();
+    let plan = plan_extract(&tree, &[], &dest);
+    let dests = unpack::destinations(&plan).unwrap();
+
+    assert_eq!(dests.files["pkg/a.txt"], dest.join("pkg/a_1.txt"));
+    assert_eq!(dests.files["top.txt"], dest.join("top.txt"));
+    assert_eq!(dests.dirs, vec![dest.join("pkg")]);
+    assert!(dests.merged);
+    assert_eq!(dests.fresh, vec![dest.join("top.txt")]);
+    // Something merged, so there is no honest inverse to record.
+    assert!(unpack::plan_record(&dests).is_none());
 }

@@ -624,6 +624,315 @@ pub fn paint_confirm(
     }
 }
 
+// ── Bulk rename (PLAN §5) ───────────────────────────────────────────────────
+
+/// The gap between the two columns of the diff.
+const BULK_ARROW: f32 = 22.0;
+/// The old-name column's share of the card's inner width.
+const BULK_SPLIT: f32 = 0.42;
+/// One editable line's height. Taller than a body row: it is a *field*, and a
+/// field the caret sits in needs room around the text (`delightful-ui` §1).
+const BULK_ROW: f32 = 24.0;
+
+/// Lay out the bulk-rename card.
+///
+/// [`Geometry::rows`] is one rect per *visible* name row, and
+/// [`Geometry::apply_all`] is borrowed to carry the find/replace strip — the
+/// struct is the shape every modal here reports, and growing a variant of it for
+/// one dialog would mean a second hit-test path for the same three questions.
+pub fn bulk_geometry(area: egui::Rect, bulk: &crate::bulk::Bulk) -> Geometry {
+    let visible = bulk.rows.len().min(crate::bulk::ROWS);
+    let height = CARD_PAD * 2.0
+        + ROW * 2.0                       // title and subtitle
+        + 8.0
+        + BULK_ROW                        // the find / replace strip
+        + 10.0
+        + visible as f32 * BULK_ROW
+        + 10.0
+        + BUTTON_HEIGHT;
+    let card = card_rect(area, height);
+    let inner_left = card.left() + CARD_PAD;
+    let inner_right = card.right() - CARD_PAD;
+
+    let strip_top = card.top() + CARD_PAD + ROW * 2.0 + 8.0;
+    let apply_all = Some(egui::Rect::from_min_max(
+        egui::pos2(inner_left, strip_top),
+        egui::pos2(inner_right, strip_top + BULK_ROW),
+    ));
+
+    let body_top = strip_top + BULK_ROW + 10.0;
+    let body = egui::Rect::from_min_max(
+        egui::pos2(inner_left, body_top),
+        egui::pos2(inner_right, body_top + visible as f32 * BULK_ROW),
+    );
+    let rows = (0..visible)
+        .map(|i| {
+            egui::Rect::from_min_size(
+                egui::pos2(inner_left, body_top + i as f32 * BULK_ROW),
+                egui::vec2(body.width(), BULK_ROW),
+            )
+        })
+        .collect();
+    let actions = button_row(
+        inner_right,
+        card.bottom() - CARD_PAD - BUTTON_HEIGHT,
+        &["Cancel", "Rename"],
+    );
+    Geometry {
+        card,
+        body,
+        rows,
+        actions,
+        apply_all,
+    }
+}
+
+/// Draw the two-column diff.
+pub fn paint_bulk(
+    paint: &Painting<'_>,
+    area: egui::Rect,
+    bulk: &crate::bulk::Bulk,
+    geometry: &Geometry,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    use crate::bulk::Field;
+    let palette = paint.palette;
+    let painter = paint.painter;
+    painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
+    chrome::card(paint, geometry.card, 1.0);
+
+    let problems = bulk.problems();
+    let valid = problems.iter().all(Option::is_none);
+    let changes = bulk.changes();
+    let left = geometry.card.left() + CARD_PAD;
+    painter.text(
+        egui::pos2(left, geometry.card.top() + CARD_PAD + ROW / 2.0),
+        egui::Align2::LEFT_CENTER,
+        "Rename Files",
+        egui::FontId::proportional(FONT + 2.0),
+        palette.text,
+    );
+    // The subtitle is the answer to "what will Enter do", and it is the one
+    // place the card says *no* — a disabled button with no reason beside it is
+    // a dead end (`delightful-ui` §9).
+    let (subtitle, tint) = if !valid {
+        ("fix the names in red to continue".to_string(), palette.red)
+    } else if changes == 0 {
+        ("nothing has changed yet".to_string(), palette.overlay1)
+    } else {
+        (
+            format!(
+                "{} will be renamed",
+                if changes == 1 {
+                    "1 file".to_string()
+                } else {
+                    format!("{changes} files")
+                }
+            ),
+            palette.green,
+        )
+    };
+    painter.text(
+        egui::pos2(left, geometry.card.top() + CARD_PAD + ROW + ROW / 2.0),
+        egui::Align2::LEFT_CENTER,
+        subtitle,
+        egui::FontId::proportional(FONT),
+        tint,
+    );
+
+    // ── The find / replace strip ────────────────────────────────────────────
+    if let Some(strip) = geometry.apply_all {
+        let half = (strip.width() - BULK_ARROW) / 2.0;
+        let find = egui::Rect::from_min_size(strip.min, egui::vec2(half, strip.height()));
+        let replace = egui::Rect::from_min_size(
+            egui::pos2(strip.left() + half + BULK_ARROW, strip.top()),
+            egui::vec2(half, strip.height()),
+        );
+        bulk_field(
+            paint,
+            find,
+            "Find",
+            bulk.find.text(),
+            bulk.find.cursor_byte(),
+            bulk.field == Field::Find,
+            None,
+        );
+        painter.text(
+            egui::pos2(strip.left() + half + BULK_ARROW / 2.0, strip.center().y),
+            egui::Align2::CENTER_CENTER,
+            "→",
+            egui::FontId::proportional(FONT),
+            palette.overlay0,
+        );
+        bulk_field(
+            paint,
+            replace,
+            "Replace",
+            bulk.replace.text(),
+            bulk.replace.cursor_byte(),
+            bulk.field == Field::Replace,
+            None,
+        );
+    }
+
+    // ── The rows ────────────────────────────────────────────────────────────
+    let clipped = painter.with_clip_rect(geometry.body);
+    let split = geometry.body.width() * BULK_SPLIT;
+    for (i, rect) in geometry.rows.iter().enumerate() {
+        let index = bulk.first + i;
+        let Some(row) = bulk.rows.get(index) else { break };
+        let problem = problems.get(index).copied().flatten();
+        let old = egui::Rect::from_min_size(rect.min, egui::vec2(split, rect.height()));
+        chrome::truncated(
+            &clipped,
+            egui::pos2(old.left() + PAD_X, old.center().y),
+            &row.old,
+            // The old name is history: it is here to be compared against, not
+            // read, so it is a step quieter than the name being typed.
+            if row.changed() {
+                palette.overlay1
+            } else {
+                palette.subtext0
+            },
+            (old.width() - PAD_X * 2.0).max(0.0),
+        );
+        clipped.text(
+            egui::pos2(old.right() + BULK_ARROW / 2.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            "→",
+            egui::FontId::proportional(FONT),
+            palette.overlay0,
+        );
+        let new = egui::Rect::from_min_max(
+            egui::pos2(old.right() + BULK_ARROW, rect.top()),
+            rect.max,
+        );
+        bulk_field(
+            paint,
+            new,
+            "",
+            row.new_name(),
+            row.buffer.cursor_byte(),
+            bulk.field == Field::Row(index),
+            problem,
+        );
+    }
+    if bulk.rows.len() > geometry.rows.len() {
+        let more = bulk.rows.len() - geometry.rows.len() - bulk.first;
+        if more > 0 {
+            painter.text(
+                egui::pos2(geometry.body.right(), geometry.body.bottom() + 5.0),
+                egui::Align2::RIGHT_TOP,
+                format!("+{more} more"),
+                egui::FontId::proportional(FONT - 1.0),
+                palette.overlay0,
+            );
+        }
+    }
+
+    for (i, rect) in geometry.actions.iter().enumerate() {
+        button(
+            paint,
+            *rect,
+            ["Cancel", "Rename"][i],
+            i == 1,
+            false,
+            Control::Action(i),
+            hovers,
+            ripples,
+        );
+        // A disabled commit is drawn as a veil over the button rather than as a
+        // different button, so it stays in the same place and at the same size
+        // (`delightful-ui` §8) and the reason is in the subtitle above.
+        if i == 1 && (!valid || changes == 0) {
+            painter.rect_filled(*rect, ROW_RADIUS, chrome::fade(palette.crust, 0.55));
+        }
+    }
+}
+
+/// One editable line: a plate, an optional label, the text, the caret, and the
+/// inline reason when the name is refused.
+fn bulk_field(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    label: &str,
+    text: &str,
+    caret: usize,
+    focused: bool,
+    problem: Option<crate::bulk::Problem>,
+) {
+    let palette = paint.palette;
+    let painter = paint.painter;
+    if !rect.is_positive() {
+        return;
+    }
+    let font = egui::FontId::proportional(FONT);
+    // The focused field is lit; a refused one is washed in red. Both at once is
+    // possible and correct — the field you are in is the one you are fixing.
+    let ground = match (focused, problem) {
+        (_, Some(_)) => mix(palette.crust, palette.red, 0.14),
+        (true, None) => palette.surface0,
+        (false, None) => mix(palette.crust, palette.surface0, 0.45),
+    };
+    painter.rect_filled(rect.shrink(1.0), ROW_RADIUS, ground);
+
+    let mut x = rect.left() + PAD_X;
+    if !label.is_empty() {
+        let galley = painter.layout_no_wrap(label.to_string(), font.clone(), palette.overlay1);
+        painter.galley(
+            egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+            galley.clone(),
+            palette.overlay1,
+        );
+        x += galley.size().x + PAD_X;
+    }
+
+    // The reason, right-aligned, taking room from the text rather than
+    // overlapping it.
+    let mut right = rect.right() - PAD_X;
+    if let Some(problem) = problem {
+        let galley =
+            painter.layout_no_wrap(problem.message().to_string(), font.clone(), palette.red);
+        let width = galley.size().x.min((right - x).max(0.0));
+        painter.galley(
+            egui::pos2(right - width, rect.center().y - galley.size().y / 2.0),
+            galley,
+            palette.red,
+        );
+        right -= width + PAD_X;
+    }
+
+    let room = (right - x).max(0.0);
+    let clipped = painter.with_clip_rect(egui::Rect::from_min_max(
+        egui::pos2(x, rect.top()),
+        egui::pos2(x + room, rect.bottom()),
+    ));
+    chrome::truncated(
+        &clipped,
+        egui::pos2(x, rect.center().y),
+        text,
+        palette.text,
+        room,
+    );
+    if focused {
+        let upto = caret.min(text.len());
+        let upto = (0..=upto).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+        let before = clipped
+            .layout_no_wrap(text[..upto].to_string(), font, palette.text)
+            .size()
+            .x;
+        clipped.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(x + before, rect.top() + 4.0),
+                egui::vec2(1.5, (rect.height() - 8.0).max(0.0)),
+            ),
+            0,
+            palette.blue,
+        );
+    }
+}
+
 /// Draw the conflict resolver.
 pub fn paint_conflict(
     paint: &Painting<'_>,
@@ -1128,6 +1437,58 @@ mod tests {
             paint_conflict(&paint, area, &dialog, &g, &hovers, &ripples);
             let g = confirm_geometry(area, &confirm);
             paint_confirm(&paint, area, &confirm, &g, &hovers, &ripples);
+
+            // The rename card, in the three states it has: clean, refused, and
+            // longer than it can show at once.
+            let many: Vec<String> = (0..30).map(|i| format!("file-{i}.txt")).collect();
+            let mut bulk = crate::bulk::Bulk::new(tree.path.clone(), many.clone(), &many);
+            let g = bulk_geometry(area, &bulk);
+            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
+
+            bulk.field = crate::bulk::Field::Find;
+            bulk.find = df_core::input::InputBuffer::new("file-".to_string(), 5);
+            bulk.apply_replace();
+            let g = bulk_geometry(area, &bulk);
+            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
+
+            // Two rows wanting the same name, so the refusal treatment draws.
+            bulk.rows[0].buffer = df_core::input::InputBuffer::new("same".to_string(), 0);
+            bulk.rows[1].buffer = df_core::input::InputBuffer::new("same".to_string(), 0);
+            bulk.field = crate::bulk::Field::Row(1);
+            assert!(!bulk.valid());
+            let g = bulk_geometry(area, &bulk);
+            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
+
+            // …and a window with no room for a card at all.
+            let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 60.0));
+            let g = bulk_geometry(tiny, &bulk);
+            paint_bulk(&paint, tiny, &bulk, &g, &hovers, &ripples);
         });
+    }
+
+    /// The card's geometry: as many rows as it can show, the strip above them,
+    /// and a card that fits the window it is given.
+    #[test]
+    fn the_rename_card_shows_what_it_can_and_scrolls_the_rest() {
+        let names: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
+        let bulk = crate::bulk::Bulk::new(PathBuf::from("/tmp"), names, &[]);
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+        let g = bulk_geometry(area, &bulk);
+        assert_eq!(g.rows.len(), crate::bulk::ROWS);
+        assert!(g.apply_all.is_some(), "the find/replace strip is there");
+        assert!(g.actions.len() == 2);
+        assert!(g.card.width() <= MAX_WIDTH + 1e-3);
+        // Every row is inside the body, and the strip is above all of them.
+        for rect in &g.rows {
+            assert!(g.body.contains_rect(*rect));
+            assert!(g.apply_all.unwrap().bottom() <= rect.top());
+        }
+        // A short card is only as tall as it needs to be.
+        let two = crate::bulk::Bulk::new(
+            PathBuf::from("/tmp"),
+            vec!["a".to_string(), "b".to_string()],
+            &[],
+        );
+        assert!(bulk_geometry(area, &two).card.height() < g.card.height());
     }
 }

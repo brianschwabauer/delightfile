@@ -470,6 +470,50 @@ impl DirState {
         true
     }
 
+    /// Fill this listing from rows a caller already has, rather than from a
+    /// directory read.
+    ///
+    /// The virtual-listing door. An archive browsed as a directory (PLAN §7.3)
+    /// has rows no `readdir` produces — and everything else a listing does is a
+    /// pure function of its [`Entry`]s: the sort, the dir-first rule, the `f`
+    /// filter, `/` and `n`, the selection, the cursor-keeps-its-name rule, and
+    /// the whole row painter downstream of them. All of that should work
+    /// unchanged inside an archive, so the entries arrive by hand and the rest
+    /// of the type never learns the difference.
+    ///
+    /// The scan token is cleared, which is what makes this safe next to the
+    /// asynchronous path: a late [`ScanUpdate`] for a scan this listing used to
+    /// be waiting on is dropped by [`DirState::apply`] rather than overwriting
+    /// rows that did not come from a filesystem.
+    pub fn set_entries(&mut self, entries: Vec<Entry>) {
+        self.entries = entries;
+        self.state = LoadState::Loaded;
+        self.error = None;
+        self.token = None;
+        self.rebuild();
+    }
+
+    /// Rewrite the entries in place, and rebuild the view if anything moved.
+    ///
+    /// The one mutable door onto rows that are already here, opened for PLAN
+    /// §7.3's "what's big" mode: a recursive directory size arrives *after* the
+    /// scan that produced the row, and it has to land in
+    /// [`Entry::len`](crate::fs::Entry::len) itself rather than beside it —
+    /// because that is the field the size sort reads, and the whole point of
+    /// the mode is that the biggest thing floats to the top while the walk is
+    /// still running.
+    ///
+    /// `revise` returns whether it changed anything; a `false` skips the
+    /// rebuild, so a walk that reports the same numbers again costs one pass
+    /// over the rows and no re-sort.
+    pub fn revise_entries(&mut self, revise: impl FnOnce(&mut [Entry]) -> bool) -> bool {
+        if !revise(&mut self.entries) {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
+
     /// Load synchronously. For startup's parent pane and for tests; everything
     /// interactive goes through [`DirState::begin_scan`].
     pub fn load_blocking(&mut self) -> Result<(), DfError> {

@@ -298,6 +298,29 @@ pub fn crumb_rects(
     rects
 }
 
+/// The text of the breadcrumb's git chip: the branch, and the dirty count once
+/// a status has landed (PLAN §7.3).
+///
+/// `main ·3` — the branch, a middle dot, and one number. **One** number, not
+/// git's four: the chip is read at a glance while doing something else, and its
+/// job is to answer "is there anything uncommitted here", which is a yes or a
+/// no with a magnitude. The breakdown lives in the terminal the user is going to
+/// type `git status` into anyway.
+///
+/// The count is omitted entirely when the tree is clean and when no scan has
+/// landed yet, and those two are deliberately the same picture: a chip that read
+/// `main ·0` for the half-second before the first status came back would be a
+/// lie, and one that showed a spinner would be motion asking to be watched. The
+/// branch is what the breadcrumb is for; the count arrives when it arrives.
+///
+/// Pure, so the formatting is a test rather than a repository.
+pub fn branch_label(branch: &str, counts: Option<df_core::git::DirtyCounts>) -> String {
+    match counts {
+        Some(counts) if !counts.is_clean() => format!("{branch} ·{}", counts.total()),
+        _ => branch.to_string(),
+    }
+}
+
 /// How wide the git chip is, so the crumbs can be measured against what is
 /// left. Zero when there is no branch to show.
 pub fn branch_width(painter: &egui::Painter, branch: Option<&str>) -> f32 {
@@ -1090,6 +1113,43 @@ mod tests {
 
     fn strip() -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(1384.0, CHROME_HEIGHT))
+    }
+
+    /// The chip is the branch alone until there is something to count, and the
+    /// two states that show no number — clean, and not yet scanned — look the
+    /// same on purpose.
+    #[test]
+    fn the_branch_chip_counts_only_when_there_is_something_to_count() {
+        use df_core::git::DirtyCounts;
+        assert_eq!(branch_label("main", None), "main");
+        assert_eq!(branch_label("main", Some(DirtyCounts::default())), "main");
+        assert_eq!(
+            branch_label(
+                "main",
+                Some(DirtyCounts {
+                    staged: 1,
+                    unstaged: 2,
+                    ..Default::default()
+                })
+            ),
+            "main ·3"
+        );
+        // Untracked and conflicted are dirt too — a repository with one
+        // unmerged path is not clean.
+        assert_eq!(
+            branch_label(
+                "feature/long-name",
+                Some(DirtyCounts {
+                    untracked: 4,
+                    conflicted: 1,
+                    ..Default::default()
+                })
+            ),
+            "feature/long-name ·5"
+        );
+        // A detached head's short hash goes through unchanged: it is whatever
+        // the caller decided to call the place you are standing.
+        assert_eq!(branch_label("a1b2c3d", None), "a1b2c3d");
     }
 
     /// The chips tile the strip left to right with one gap between, and stop

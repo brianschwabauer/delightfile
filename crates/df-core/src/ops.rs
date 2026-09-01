@@ -47,7 +47,7 @@ use crate::{DfError, Result};
 pub use copy::{copy_tree, measure, move_cross_device, move_path, CopyStats, COPY_CHUNK};
 pub use create::{create, rename, Created};
 pub use delete::{check_deletable, check_deletable_here, delete_permanent, remove_tree};
-pub use jobs::{DeleteJob, OpOutcome, Outcome, PasteJob, TrashJob};
+pub use jobs::{DeleteJob, ExtractJob, OpOutcome, Outcome, PasteJob, TrashJob};
 pub use journal::{
     undo_attempt, undo_record, CopyManifest, CreatedLink, FileKind, Fingerprint, Journal,
     MovedPath, OpRecord, UndoAttempt, UndoReport, JOURNAL_DEPTH, MAX_MANIFEST_ENTRIES,

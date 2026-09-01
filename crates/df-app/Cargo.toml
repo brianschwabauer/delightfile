@@ -72,7 +72,7 @@ ttf-parser = "0.25"
 # the build behind the png codec `image` brings, so naming it costs no new
 # compilation either — everything else about the zip a 3MF is lives in
 # `preview::doc::model`.
-miniz_oxide = "0.8"
+miniz_oxide.workspace = true
 
 [lints]
 workspace = true

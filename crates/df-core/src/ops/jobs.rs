@@ -263,6 +263,74 @@ impl Job for DeleteJob {
     }
 }
 
+/// Unpack an archive (PLAN §7.3). The runner behind "Extract here" and
+/// "Extract to subfolder", and behind `Enter` on a selection inside an archive.
+///
+/// Lives here with the other jobs rather than beside the extractor because this
+/// file is the one place `ops` and `tasks` know about each other, and an
+/// extraction is an operation like any other: it has a name for the `w` panel,
+/// a lane, a cancel, and an inverse to leave in the outcome slot.
+///
+/// [`Lane::Macro`], because it is a long read and a long write. The plan is
+/// settled before the job is spawned, so everything the cancel and the toast
+/// need is already decided by the time a worker picks it up.
+pub struct ExtractJob {
+    plan: crate::archive::ExtractPlan,
+    outcome: Outcome,
+}
+
+impl ExtractJob {
+    pub fn new(plan: crate::archive::ExtractPlan) -> ExtractJob {
+        ExtractJob {
+            plan,
+            outcome: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn outcome(&self) -> Outcome {
+        Arc::clone(&self.outcome)
+    }
+}
+
+impl Job for ExtractJob {
+    fn name(&self) -> String {
+        format!(
+            "Extract {} → {}",
+            self.plan
+                .archive
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
+            self.plan.dest_dir.display()
+        )
+    }
+
+    fn lane(&self) -> Lane {
+        Lane::Macro
+    }
+
+    fn run(&mut self, ctx: &TaskCtx) -> Result<()> {
+        let report = crate::archive::extract(&self.plan, ctx)?;
+        let message = report.message();
+        store(
+            &self.outcome,
+            OpOutcome {
+                record: report.record,
+                message,
+                // The per-entry failures, given a path each so the toast and the
+                // `w` panel can name them the way every other operation does.
+                errors: report
+                    .errors
+                    .into_iter()
+                    .map(|(inner, message)| (self.plan.dest_dir.join(inner), message))
+                    .collect(),
+                cancelled: report.cancelled,
+            },
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point

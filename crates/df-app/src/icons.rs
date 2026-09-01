@@ -165,6 +165,18 @@ const PLAIN_FILE: char = ' ';
 /// `theme` supplies the per-directory rules (PLAN §3's nineteen, plus whatever
 /// the user prepended); `palette` supplies the colours for everything else.
 /// `nerd` says whether the private-use glyphs can actually be drawn.
+/// The plain file glyph, for a card that stands for several files at once —
+/// the selection basket's drag ghost (PLAN §7.1).
+///
+/// A basket holds whatever it holds; a ghost wearing the first file's icon
+/// would claim they are all that kind of thing.
+pub fn generic(palette: &Palette, nerd: bool) -> Icon {
+    Icon {
+        glyph: if nerd { GENERIC_FILE } else { ' ' },
+        color: palette.text,
+    }
+}
+
 pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> Icon {
     let broken = entry.is_broken_symlink();
     let link = entry.is_symlink();

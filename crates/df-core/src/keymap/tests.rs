@@ -204,7 +204,7 @@ fn pending_lists_continuations_in_declaration_order() {
         panic!("`m` should be a prefix");
     };
     let labels: Vec<String> = continuations.iter().map(|c| c.next.label()).collect();
-    assert_eq!(labels, vec!["s", "p", "b", "m", "o", "n"]);
+    assert_eq!(labels, vec!["s", "p", "b", "m", "o", "n", "u"]);
     // Every row carries the description the which-key card prints.
     assert_eq!(continuations[0].description, "Linemode: size");
     assert_eq!(continuations[0].command, Command::LinemodeSize);

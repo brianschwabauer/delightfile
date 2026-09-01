@@ -777,6 +777,7 @@ dependencies = [
  "crossbeam-channel",
  "libc",
  "log",
+ "miniz_oxide 0.8.9",
  "thiserror 2.0.20",
 ]
 

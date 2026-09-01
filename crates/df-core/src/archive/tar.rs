@@ -439,3 +439,175 @@ fn read_full<R: Read>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> 
     }
     Ok(at)
 }
+
+// ── Extraction ──────────────────────────────────────────────────────────────
+//
+// A second walk of the same format, deliberately separate from [`list`].
+//
+// The two want different things from the stream: listing reads a header and
+// *skips* the payload, extraction reads a header and *writes* the payload, and
+// the tar loop is short enough that folding both into one callback-driven walk
+// would cost more in indirection than it saves in lines. The parts that are
+// genuinely shared — the checksum, the octal fields, the ustar name, the pax
+// records — are the private helpers above, called by both, so a fix to the
+// number parser fixes both walks.
+//
+// The whole extra rule this walk carries: a member's name is a **key**. It goes
+// to `sink.wants` and `sink.open` and nowhere else. A tar full of
+// `../../../etc/shadow` walks through here writing nothing, because none of
+// those names is in the destination map the plan built.
+
+/// Walk a tar and write the members the plan asked for.
+pub(crate) fn extract_into<R: Read>(
+    mut reader: R,
+    sink: &mut super::unpack::Sink<'_>,
+) -> crate::Result<()> {
+    walk(&mut reader, &mut |entry, reader| {
+        sink.checkpoint()?;
+        // Directories, links and device nodes carry no payload worth writing:
+        // the directories the plan wanted were created before the walk, and a
+        // link inside an archive is a name pointing somewhere the extraction
+        // has no business following.
+        if !entry.is_file || !sink.wants(&entry.name) {
+            return Ok(false);
+        }
+        if !sink.open(&entry.name, entry.size) {
+            return Ok(false);
+        }
+        let result = copy_payload(reader, entry.size, &mut |chunk| sink.write(chunk).map(|_| ()));
+        sink.close();
+        result.map(|()| true)
+    })
+}
+
+/// Find one member and hand its bytes back whole (the preview path).
+pub(crate) fn read_one<R: Read>(
+    mut reader: R,
+    buffer: &mut super::unpack::Buffer<'_>,
+) -> crate::Result<()> {
+    walk(&mut reader, &mut |entry, reader| {
+        if buffer.done() || !entry.is_file || !buffer.wants(&entry.name) {
+            return Ok(false);
+        }
+        if entry.size > buffer.limit() as u64 {
+            return Ok(false);
+        }
+        let mut out = Vec::with_capacity(entry.size as usize);
+        copy_payload(reader, entry.size, &mut |chunk| {
+            out.extend_from_slice(chunk);
+            Ok(())
+        })?;
+        buffer.take(out);
+        Ok(true)
+    })
+}
+
+/// What one tar header said. The extracting walk's much smaller [`RawEntry`].
+struct Entry {
+    /// The archive's own spelling. A key, never a path.
+    name: String,
+    size: u64,
+    is_file: bool,
+}
+
+/// Walk headers, handing each to `visit`.
+///
+/// `visit` returns whether it consumed the payload; when it did not, the walk
+/// skips it. Either way the walk lands on the next block boundary, because a
+/// tar's structure is nothing but block arithmetic and getting it wrong once
+/// desynchronises everything after it.
+fn walk<R: Read>(
+    reader: &mut R,
+    visit: &mut dyn FnMut(&Entry, &mut R) -> crate::Result<bool>,
+) -> crate::Result<()> {
+    let mut long_name: Option<String> = None;
+    let mut pax = Pax::default();
+    let mut block = [0u8; TAR_BLOCK];
+    let mut consumed = 0u64;
+
+    loop {
+        let got = read_full(reader, &mut block).map_err(|e| crate::DfError::Op(format!("tar: {e}")))?;
+        if got < TAR_BLOCK || block.iter().all(|b| *b == 0) {
+            return Ok(());
+        }
+        consumed += TAR_BLOCK as u64;
+        if consumed >= MAX_STREAM_BYTES {
+            return Ok(());
+        }
+        verify_checksum(&block)?;
+
+        let type_flag = block[156];
+        let declared = number(&block[124..136])
+            .ok_or_else(|| crate::DfError::Op("tar: unreadable size".to_string()))?;
+
+        match type_flag {
+            b'L' | b'K' => {
+                let want = declared.min(MAX_LONG_NAME as u64) as usize;
+                let payload = read_payload(reader, declared, want)?;
+                consumed += padded(declared);
+                if type_flag == b'L' {
+                    long_name = Some(decode(&payload));
+                }
+            }
+            b'x' | b'X' | b'g' => {
+                let want = declared.min(MAX_PAX_BYTES as u64) as usize;
+                let payload = read_payload(reader, declared, want)?;
+                consumed += padded(declared);
+                if type_flag != b'g' {
+                    pax = parse_pax(&payload);
+                }
+            }
+            _ => {
+                let name = pax
+                    .path
+                    .take()
+                    .or_else(|| long_name.take())
+                    .unwrap_or_else(|| ustar_name(&block));
+                let is_dir = type_flag == b'5' || name.ends_with('/');
+                let entry = Entry {
+                    name,
+                    // The header's own size, not pax's. Everything downstream
+                    // is block arithmetic against *this* number — the same one
+                    // [`list`] skips by — and a payload read against a length
+                    // the stream does not agree with desynchronises the walk
+                    // for every entry after it.
+                    size: declared,
+                    // Regular files only: `0`, the pre-POSIX `\0`, and nothing
+                    // else. A `2` is a symlink whose "payload" is its target,
+                    // and a `1` is a hardlink with no payload at all.
+                    is_file: !is_dir && matches!(type_flag, b'0' | 0),
+                };
+                let took = visit(&entry, reader)?;
+                // Whether the payload was read or not, the stream now has to
+                // land on the next 512-byte boundary.
+                let already = if took { declared } else { 0 };
+                skip_exact(reader, padded(declared).saturating_sub(already))?;
+                consumed += padded(declared);
+                pax = Pax::default();
+            }
+        }
+    }
+}
+
+/// Read exactly `size` bytes of payload, handing whole chunks to `emit`.
+fn copy_payload<R: Read>(
+    reader: &mut R,
+    size: u64,
+    emit: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
+) -> crate::Result<()> {
+    let mut left = size;
+    let mut buf = vec![0u8; super::unpack::EXTRACT_BUF];
+    while left > 0 {
+        let want = (buf.len() as u64).min(left) as usize;
+        let got = read_full(reader, &mut buf[..want])
+            .map_err(|e| crate::DfError::Op(format!("tar: {e}")))?;
+        if got == 0 {
+            // Truncated. What arrived stands; the sink notices the shortfall
+            // and says so on that one entry.
+            return Ok(());
+        }
+        emit(&buf[..got])?;
+        left -= got as u64;
+    }
+    Ok(())
+}

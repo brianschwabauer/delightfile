@@ -310,7 +310,7 @@ impl ArchiveTree {
 }
 
 /// Turn a parser's flat list into a tree.
-pub(crate) fn build(
+pub fn build(
     path: PathBuf,
     format: ArchiveFormat,
     raws: Vec<RawEntry>,

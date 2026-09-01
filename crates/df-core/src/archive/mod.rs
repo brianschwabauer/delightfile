@@ -70,6 +70,7 @@
 pub mod extract;
 pub mod tar;
 pub mod tree;
+pub mod unpack;
 pub mod zip;
 
 #[cfg(test)]
@@ -81,8 +82,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub use extract::{destination_for, plan_extract, ExtractItem, ExtractPlan, SkipReason};
+pub use unpack::{
+    destinations, extract, plan_record, read_entry, Destinations, ExtractReport, CANCEL_CHECK_BYTES,
+    EXTRACT_BUF,
+};
 pub use tree::{
-    name_is_unsafe, normalize, ArchiveEntry, ArchiveTree, Method, MAX_ENTRIES, MAX_NAME_BYTES,
+    build, name_is_unsafe, normalize, ArchiveEntry, ArchiveTree, Method, RawEntry, MAX_ENTRIES,
+    MAX_NAME_BYTES,
 };
 
 use crate::preview::sniff;

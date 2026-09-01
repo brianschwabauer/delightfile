@@ -411,6 +411,22 @@ pub enum OpRecord {
     /// `r` / `R`. Inverse: rename back. Kept apart from `Move` only so the
     /// toast can say "renamed" — which is what the user did.
     Rename { moved: MovedPath },
+    /// `r` on a multi-selection: the bulk-rename diff view's whole card,
+    /// committed as one gesture (PLAN §5).
+    ///
+    /// The same argument [`OpRecord::Links`] makes, and it is the reason this
+    /// is not just a `Vec` inside [`OpRecord::Rename`]. Editing forty names in
+    /// one card is *one* thing the user did, so it has to be one `u` — forty
+    /// records would mean forty presses to take back one Enter, and
+    /// thirty-nine intermediate states in which half the directory is renamed
+    /// and half is not. The renames are also verified as a set before any of
+    /// them is undone, so a card that half-committed is put back whole or not
+    /// at all.
+    ///
+    /// Distinct from [`OpRecord::Move`], which has the identical shape, purely
+    /// so the toast says "renamed 40 items" — a bulk rename that reported
+    /// itself as a move would describe an operation the user did not perform.
+    Renames { moved: Vec<MovedPath> },
     /// A yank-and-paste. Inverse: delete what was created, and nothing else —
     /// one [`CopyManifest`] per item that landed, every path in it verified
     /// before any of it is removed.
@@ -466,6 +482,13 @@ impl OpRecord {
                 "renamed {}",
                 moved.to.file_name().unwrap_or_default().to_string_lossy()
             ),
+            OpRecord::Renames { moved } => match moved.as_slice() {
+                [one] => format!(
+                    "renamed {}",
+                    one.to.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                many => format!("renamed {}", plural(many.len(), "item", "items")),
+            },
             OpRecord::Copy { created } => {
                 format!("copied {}", plural(created.len(), "item", "items"))
             }
@@ -624,6 +647,11 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
             // A rename is one leg; there is no "part way" for it to stop at.
             |rest| OpRecord::Move { moves: rest },
         ),
+        // A bulk rename *can* stop part way, and what is left rebuilds as
+        // another bulk rename so a second `u` finishes the job.
+        OpRecord::Renames { moved } => {
+            undo_moves(moved, ctx, "Renamed", |rest| OpRecord::Renames { moved: rest })
+        }
         OpRecord::Copy { created } => undo_copy(created, ctx),
         OpRecord::Trash { items } => whole(undo_trash(items, ctx)),
         OpRecord::Create {
@@ -1013,6 +1041,55 @@ mod tests {
         assert!(report.description.starts_with("Renamed"), "{report:?}");
         assert!(from.is_file());
         assert!(!super::exists(&to));
+    }
+
+    /// A bulk rename is one gesture, so it is one `u` — and the undo puts
+    /// every name back or none of them (PLAN §5).
+    #[test]
+    fn undo_of_a_bulk_rename_puts_every_name_back_at_once() {
+        let t = TempTree::new("j-bulk-rename");
+        let mut moved = Vec::new();
+        for (old, new) in [("a.txt", "1.txt"), ("b.txt", "2.txt"), ("c.txt", "3.txt")] {
+            let from = t.file(old, b"x");
+            let to = t.join(new);
+            create::rename(&from, &to, false).unwrap();
+            moved.push(MovedPath::record(&from, &to).unwrap());
+        }
+
+        let mut j = Journal::default();
+        j.record(OpRecord::Renames {
+            moved: moved.clone(),
+        });
+        assert_eq!(
+            OpRecord::Renames {
+                moved: moved.clone()
+            }
+            .describe(),
+            "renamed 3 items"
+        );
+
+        let report = j.undo(&ctx()).unwrap();
+        assert!(report.description.starts_with("Renamed"), "{report:?}");
+        assert!(j.is_empty(), "one gesture, one undo");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            assert!(t.join(name).is_file(), "{name} is not back");
+        }
+        for name in ["1.txt", "2.txt", "3.txt"] {
+            assert!(!super::exists(&t.join(name)), "{name} is still there");
+        }
+    }
+
+    /// A single-row card still reads as one file, not as "1 item".
+    #[test]
+    fn a_one_row_bulk_rename_names_the_file() {
+        let t = TempTree::new("j-bulk-rename-one");
+        let from = t.file("only.txt", b"x");
+        let to = t.join("renamed.txt");
+        create::rename(&from, &to, false).unwrap();
+        let record = OpRecord::Renames {
+            moved: vec![MovedPath::record(&from, &to).unwrap()],
+        };
+        assert_eq!(record.describe(), "renamed renamed.txt");
     }
 
     /// The journal entry a real paste of `dst` would produce.

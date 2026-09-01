@@ -8,9 +8,13 @@
 //! and workers being startable before the window exists.
 
 mod app;
+mod archive;
+mod basket;
+mod bulk;
 mod chrome;
 mod cli;
 mod clipboard;
+mod dbus;
 mod dialog;
 mod dnd;
 mod finder;
@@ -27,6 +31,7 @@ mod input;
 mod keys;
 mod menu;
 mod motion;
+mod mounts;
 mod mouse;
 mod open;
 mod overlay;
@@ -43,6 +48,7 @@ mod tabs;
 mod theme;
 mod toast;
 mod ui;
+mod usage;
 mod viewport;
 mod wayland;
 mod whichkey;

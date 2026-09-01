@@ -88,6 +88,43 @@ const ROW_PAD_X: f32 = 7.0;
 /// readable however long the file names get.
 const LINEMODE_GAP: f32 = 12.0;
 
+/// The usage bar's track width, in logical points (PLAN §7.3's du mode).
+///
+/// 46 — a third of the linemode column, which is as much as can be given to a
+/// proportion without the *names* losing width to it. The bar is a comparison
+/// between rows, and a comparison only needs enough length to be ordered by eye;
+/// the exact number is the text beside it.
+pub(crate) const USAGE_BAR: f32 = 46.0;
+
+/// How thick that bar is. Two points: a hairline, because there is one of these
+/// on every row and anything heavier turns the column into a chart nobody asked
+/// for (`delightful-ui`: restraint over decoration).
+pub(crate) const USAGE_BAR_HEIGHT: f32 = 2.5;
+
+/// The gap between the bar and the number beside it.
+pub(crate) const USAGE_BAR_GAP: f32 = 7.0;
+
+/// The git dot's radius, in logical points (PLAN §7.3).
+///
+/// 2.5 — a 5 px disc. Big enough to read as a deliberate mark at a glance down
+/// a column, small enough that a directory of modified files does not turn into
+/// a row of bullets competing with the names. It is a *decoration*: the row is
+/// read for its name, and the dot is what the eye finds when it goes looking.
+pub(crate) const GIT_DOT_RADIUS: f32 = 2.5;
+
+/// The width the dot reserves between the name and the linemode column, gaps
+/// included. The name truncates into this rather than running under the dot.
+pub(crate) const GIT_DOT_COLUMN: f32 = GIT_DOT_RADIUS * 2.0 + 10.0;
+
+/// How far a gitignored row's ink is mixed back into the pane behind it.
+///
+/// The same treatment a parent-column row gets, and for the same reason: it is
+/// there, it is legible, and it is not what you are looking at. Deliberately
+/// *not* hidden — `target/` has to stay enterable — and deliberately the same
+/// number as [`PARENT_DIM`] rather than a second one, so the window has one
+/// answer to "how far away is 'quieter'".
+pub(crate) const IGNORED_DIM: f32 = PARENT_DIM;
+
 /// The focused pane's accent rule, in logical points (PLAN §2.1).
 const FOCUS_RULE: f32 = 2.0;
 
@@ -202,6 +239,49 @@ pub struct GhostFace<'a> {
 /// Tessellated at a fixed angular step rather than at a fixed number of
 /// segments, so a badge a tenth full is not drawn with the same forty points as
 /// a full one — delightviewer's `dismiss.rs` arc, same step.
+/// The colour of one row's git dot, or `None` for a row that does not get one.
+///
+/// A pure function of the status and the palette, so the mapping is a test
+/// rather than a thing you have to run a repository to check (PLAN §9).
+///
+/// The assignments are PLAN §7.3's, and each one is the palette's own word for
+/// what the state means elsewhere in the window: `peach` is the colour a cut row
+/// already wears (something is in flight), `green` is new, `red` is the only
+/// thing in the palette that means *stop*, `blue` is the colour of a directory —
+/// a rename is a path that came from somewhere else. Untracked is green mixed
+/// most of the way back into the pane's own grey: git does not know about it
+/// yet, so it should read as "nearly nothing" beside a real modification.
+///
+/// [`FileStatus::Ignored`] gets no dot at all. It is said with
+/// [`IGNORED_DIM`] instead — a dot would be a mark drawing the eye to the one
+/// row in the pane that is asking for less of it.
+/// The git decoration for one row.
+///
+/// Two fields rather than one `Option`, because "this pane is in a repository"
+/// and "this row has a status" are different questions and the *column* answers
+/// the first: it is reserved for every row of a repository listing, so every
+/// name in the pane truncates at the same x and a status arriving a second after
+/// the scan does not reflow the row under the cursor (`delightful-ui` §8).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct GitMark {
+    pub column: bool,
+    pub status: Option<df_core::git::FileStatus>,
+}
+
+pub(crate) fn git_dot(status: df_core::git::FileStatus, palette: &Palette) -> Option<egui::Color32> {
+    use df_core::git::FileStatus as S;
+    Some(match status {
+        S::Ignored => return None,
+        S::Untracked => mix(palette.green, palette.overlay0, 0.55),
+        S::Added => palette.green,
+        S::Deleted => palette.maroon,
+        S::Renamed => palette.blue,
+        S::Typechange => palette.yellow,
+        S::Modified => palette.peach,
+        S::Conflict => palette.red,
+    })
+}
+
 fn arc(centre: egui::Pos2, radius: f32, progress: f32) -> Vec<egui::Pos2> {
     let sweep = progress.clamp(0.0, 1.0) * std::f32::consts::TAU;
     let steps = ((sweep / 0.15).ceil() as usize).max(2);
@@ -240,6 +320,11 @@ pub enum Control {
     /// (PLAN §7.5).
     MenuItem(usize),
     SubmenuItem(usize),
+    /// The selection basket's chip, and the rows of the tray it opens
+    /// (PLAN §7.1).
+    BasketChip,
+    BasketRow(usize),
+    BasketRemove(usize),
 }
 
 /// Where the panes and the chrome go.
@@ -455,6 +540,18 @@ pub struct ListView<'a> {
     /// carry it — so the *state* is committed and correct and only the pixels
     /// are catching up (`delightful-ui` §5).
     pub flip: Option<&'a crate::flip::Flip>,
+    /// What git thinks of this pane's rows (PLAN §7.3), or `None` outside a
+    /// repository and on a machine without git — where the feature is silently
+    /// absent rather than an empty column reserved for it.
+    ///
+    /// One `RepoStatus` for the whole pane rather than a lookup per row: the
+    /// walk up for a repository root is the expensive half, and it is the same
+    /// answer a thousand times over for one listing.
+    pub git: Option<&'a df_core::git::RepoStatus>,
+    /// PLAN §7.3's "what's big" mode, while it is on for this directory. The
+    /// list pane only: the parent column is one name wide, and the preview's
+    /// directory body is about a folder nobody is measuring.
+    pub usage: Option<&'a crate::usage::Usage>,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -527,6 +624,8 @@ impl Painting<'_> {
             clip,
             dragged,
             flip,
+            git,
+            usage,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
@@ -639,6 +738,13 @@ impl Painting<'_> {
                 );
             }
 
+            // git's word for this row, asked once. `status_for` is a hash
+            // lookup plus — only for a repository that reported collapsed
+            // directories — a walk up the ancestors, so a pane of rows in a
+            // clean repository costs one miss each.
+            let status = git.and_then(|g| g.status_for(&entry.path));
+            let ignored = status == Some(df_core::git::FileStatus::Ignored);
+
             self.row(
                 &painter,
                 rect,
@@ -646,7 +752,31 @@ impl Painting<'_> {
                 dir.row_spans(index),
                 ground,
                 linemode,
-                if dim || cut || lifted { PARENT_DIM } else { 0.0 }.max(1.0 - alpha),
+                if dim || cut || lifted {
+                    PARENT_DIM
+                } else if ignored {
+                    IGNORED_DIM
+                } else {
+                    0.0
+                }
+                .max(1.0 - alpha),
+                GitMark {
+                    column: git.is_some(),
+                    status,
+                },
+                usage.map(|usage| {
+                    // A directory's weight comes from the walk; a file's is
+                    // simply its own length, which is known and final from the
+                    // moment the row was scanned.
+                    let weight = usage.weight(&entry.name);
+                    let bytes = weight.map(|w| w.bytes).unwrap_or(entry.len);
+                    crate::usage::RowUsage {
+                        fraction: usage.fraction(bytes),
+                        bytes,
+                        estimate: weight.is_some_and(|w| !w.settled),
+                        growth: usage.growth(index.saturating_sub(first), self.now),
+                    }
+                }),
             );
         }
         self.flip_ghosts(&painter, flip, content, ROW_RADIUS);
@@ -674,6 +804,16 @@ impl Painting<'_> {
         // *arriving* in a FLIP re-sort by however far through its fade it is
         // (see `crate::flip`). A boolean could only express the first.
         mute: f32,
+        // What git says about this path (PLAN §7.3), already looked up by the
+        // caller — the listing asks its repository once and hands the answer
+        // down, because the row painter has no idea which repository it is in
+        // and finding out would be a walk up the tree per row.
+        git: GitMark,
+        // The "what's big" column, when the mode is on (PLAN §7.3). `Some`
+        // *replaces* the linemode text rather than sitting beside it: the two
+        // are the same strip of pixels, and a row showing both a usage bar and
+        // a permission string would have no room left for its name.
+        usage: Option<crate::usage::RowUsage>,
     ) {
         let mute = mute.clamp(0.0, 1.0);
         let fade = |c: egui::Color32| {
@@ -704,7 +844,10 @@ impl Painting<'_> {
 
         // The linemode is measured first: the name gets whatever is left, so a
         // long name truncates rather than running under the size column.
-        let mode_text = linemode_text(entry, linemode);
+        let mode_text = match &usage {
+            Some(usage) => usage.label(),
+            None => linemode_text(entry, linemode),
+        };
         let mode_width = if mode_text.is_empty() {
             0.0
         } else {
@@ -724,6 +867,54 @@ impl Painting<'_> {
             );
             width + LINEMODE_GAP
         };
+
+        // The bar, immediately left of its number, so the column reads as one
+        // measurement rather than as a graphic and a caption.
+        let mode_width = match &usage {
+            None => mode_width,
+            Some(usage) => {
+                let right = rect.right() - ROW_PAD_X - mode_width;
+                let track = egui::Rect::from_min_max(
+                    egui::pos2(
+                        right - USAGE_BAR_GAP - USAGE_BAR,
+                        rect.center().y - USAGE_BAR_HEIGHT / 2.0,
+                    ),
+                    egui::pos2(
+                        right - USAGE_BAR_GAP,
+                        rect.center().y + USAGE_BAR_HEIGHT / 2.0,
+                    ),
+                );
+                if track.is_positive() {
+                    painter.rect_filled(track, 1, fade(self.palette.surface1));
+                    let filled = usage.filled();
+                    if filled > 0.0 {
+                        let mut bar = track;
+                        bar.set_right(track.left() + track.width() * filled);
+                        painter.rect_filled(bar, 1, fade(self.palette.blue));
+                    }
+                }
+                mode_width + USAGE_BAR + USAGE_BAR_GAP
+            }
+        };
+
+        // The dot sits between the name and the linemode column, so the two
+        // right-hand facts read as one column of marks and one column of
+        // numbers rather than as text with a bullet in the middle of it. Its
+        // width is added to what the name is measured against *whether or not
+        // there is a dot*, so a row does not reflow under the cursor when a
+        // status lands (`delightful-ui` §8).
+        let dot_width = if git.column { GIT_DOT_COLUMN } else { 0.0 };
+        if let Some(color) = git.status.and_then(|s| git_dot(s, self.palette)) {
+            painter.circle_filled(
+                egui::pos2(
+                    rect.right() - ROW_PAD_X - mode_width - GIT_DOT_COLUMN / 2.0,
+                    rect.center().y,
+                ),
+                GIT_DOT_RADIUS,
+                fade(color),
+            );
+        }
+        let mode_width = mode_width + dot_width;
 
         let name_left = rect.left() + ROW_PAD_X + ICON_COLUMN;
         let name_room = (rect.right() - ROW_PAD_X - mode_width - name_left).max(0.0);
@@ -1277,6 +1468,62 @@ mod tests {
             paint.ghost(&cards, &GhostFace { icon, name: "", count: None, verb: "" }, 0.0);
             paint.ghost(&[], &GhostFace { icon, name: "x", count: None, verb: "Copy" }, 1.0);
         });
+    }
+
+    /// PLAN §7.3's mapping, pinned: each state gets the palette's own word for
+    /// what it means, and no two states share a colour — a dot the eye cannot
+    /// tell from its neighbour is a decoration, not information.
+    #[test]
+    fn every_git_state_gets_its_own_colour() {
+        use df_core::git::FileStatus as S;
+        let palette = Palette::from_theme(&Theme::default());
+        assert_eq!(git_dot(S::Modified, &palette), Some(palette.peach));
+        assert_eq!(git_dot(S::Added, &palette), Some(palette.green));
+        assert_eq!(git_dot(S::Conflict, &palette), Some(palette.red));
+        assert_eq!(git_dot(S::Renamed, &palette), Some(palette.blue));
+        assert_eq!(git_dot(S::Deleted, &palette), Some(palette.maroon));
+        assert_eq!(git_dot(S::Typechange, &palette), Some(palette.yellow));
+
+        // Untracked is a green nobody would mistake for `Added`: git has not
+        // been told about the file, so the dot says "nearly nothing".
+        let untracked = git_dot(S::Untracked, &palette);
+        assert!(untracked.is_some());
+        assert_ne!(untracked, Some(palette.green));
+
+        // Ignored is said by dimming the whole row, not by a mark on it.
+        assert_eq!(git_dot(S::Ignored, &palette), None);
+
+        let all = [
+            S::Untracked,
+            S::Added,
+            S::Deleted,
+            S::Renamed,
+            S::Typechange,
+            S::Modified,
+            S::Conflict,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(git_dot(*a, &palette), git_dot(*b, &palette), "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    /// The dot column is reserved for every row of a repository listing, so a
+    /// status landing after the scan does not reflow a name under the cursor
+    /// (`delightful-ui` §8).
+    #[test]
+    fn the_dot_column_is_reserved_whether_or_not_the_row_has_a_dot() {
+        let with = GitMark {
+            column: true,
+            status: None,
+        };
+        let without = GitMark::default();
+        assert!(with.column && with.status.is_none());
+        assert!(!without.column);
+        // The reserved width has to be wider than the disc it holds, or the dot
+        // would touch the name beside it.
+        const { assert!(GIT_DOT_COLUMN > GIT_DOT_RADIUS * 2.0) };
     }
 
     #[test]

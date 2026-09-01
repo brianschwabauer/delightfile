@@ -84,6 +84,10 @@ pub enum Action {
     Paste,
     Rename,
     Trash,
+    /// Unpack the hovered archive into this directory (PLAN §7.3).
+    ExtractHere,
+    /// …or into a new folder named after it.
+    ExtractSubfolder,
     CopyPath,
     CopyName,
     Properties,
@@ -151,6 +155,15 @@ pub struct Facts {
     pub clipboard: bool,
     /// How many opener rules match the hovered file.
     pub openers: usize,
+    /// Whether the cursor row is an archive this build can read (PLAN §7.3).
+    ///
+    /// The two extract rows are **hidden**, not disabled, when it is not — the
+    /// menu's general rule is that a row stays put and greys out, so the shape
+    /// is aimable from memory, and that rule is about rows that *sometimes*
+    /// apply to the thing under the pointer. "Extract" never applies to a text
+    /// file, and two permanently grey rows on every right-click in a source
+    /// directory would be two rows of noise to read past.
+    pub archive: bool,
 }
 
 /// The rows, in order, with their enablement.
@@ -178,6 +191,20 @@ pub fn items(facts: Facts) -> Vec<Item> {
         Item::new("Copy name", "c f", Action::CopyName, facts.has_row),
         Item::new("Properties", "Tab", Action::Properties, facts.has_row).after_gap(),
     ];
+    if facts.archive {
+        // Directly under "Open with", where the eye already is when the
+        // question is "what else can I do with this file".
+        let at = items
+            .iter()
+            .position(|item| item.action == Action::OpenWithMenu)
+            .map(|i| i + 1)
+            .unwrap_or(1);
+        items.insert(at, Item::new("Extract here", "e", Action::ExtractHere, true));
+        items.insert(
+            at + 1,
+            Item::new("Extract to subfolder", "E", Action::ExtractSubfolder, true),
+        );
+    }
     // A menu that opened on empty pane space with everything grey would be a
     // menu about nothing; Paste is the one row that still makes sense there,
     // and `items` already says so.
@@ -647,6 +674,7 @@ mod tests {
             targets: 1,
             clipboard: true,
             openers: 2,
+            archive: false,
         }
     }
 
@@ -676,6 +704,7 @@ mod tests {
             targets: 0,
             clipboard: true,
             openers: 0,
+            archive: false,
         };
         assert_eq!(enabled(empty, Action::Open), Some(false));
         assert_eq!(enabled(empty, Action::Yank), Some(false));
@@ -749,6 +778,28 @@ mod tests {
         assert!((rect.top() - (tiny.top() + MARGIN)).abs() < 1e-3);
     }
 
+    /// The two extract rows appear only for an archive, and they land where
+    /// the eye already is — next to "Open with", not at the bottom.
+    #[test]
+    fn extract_rows_appear_only_on_an_archive() {
+        let plain = items(facts());
+        assert!(plain.iter().all(|i| i.action != Action::ExtractHere));
+
+        let rows = items(Facts {
+            archive: true,
+            ..facts()
+        });
+        let at = |action: Action| rows.iter().position(|i| i.action == action);
+        let here = at(Action::ExtractHere).expect("extract here");
+        let sub = at(Action::ExtractSubfolder).expect("extract to subfolder");
+        assert_eq!(sub, here + 1, "the two extract rows are adjacent");
+        assert!(here > at(Action::Open).expect("open"));
+        assert!(here < at(Action::Yank).expect("copy"));
+        assert!(rows[here].enabled && rows[sub].enabled);
+        assert_eq!(rows[here].keys, "e");
+        assert_eq!(rows[sub].keys, "E");
+    }
+
     /// The keyboard skips grey rows and wraps at both ends.
     #[test]
     fn the_keyboard_walks_only_the_rows_it_can_use() {
@@ -758,6 +809,7 @@ mod tests {
             targets: 0,
             clipboard: true,
             openers: 0,
+            archive: false,
         };
         let mut menu = Menu::new(egui::pos2(0.0, 0.0), items(sparse), Vec::new());
         assert_eq!(menu.cursor, None, "an unaimed menu picks nothing");

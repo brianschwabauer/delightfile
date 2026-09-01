@@ -33,6 +33,11 @@ crossbeam-channel.workspace = true
 # behind reflink copies (PLAN §5) and `getuid` for the freedesktop trash
 # `.Trash-$uid` directory.
 libc.workspace = true
+# Inflate, for the deflate members of a zip (`archive::unpack`). Already in the
+# tree — df-app's PDF reader decompresses object streams with it — and a
+# from-scratch inflate is exactly the "rewriting is impractical" the dependency
+# rule reserves an exception for. No zlib, no C, no feature flags.
+miniz_oxide.workspace = true
 
 [lints]
 workspace = true

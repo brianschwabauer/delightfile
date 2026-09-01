@@ -155,6 +155,15 @@ commands! {
     Shell => "shell",
     ShellBlock => "shell-block",
     MountManager => "mount-manager",
+    // Archives, browsed as directories and unpacked (PLAN §7.3). Both act on
+    // the hovered archive in a real directory, and on the archive being
+    // browsed when the list pane is inside one.
+    ArchiveExtractHere => "archive-extract-here",
+    ArchiveExtractSubfolder => "archive-extract-subfolder",
+    // The selection basket (PLAN §7.1): files collected across directories and
+    // pasted or dragged as one payload.
+    BasketToggle => "basket-toggle",
+    BasketShow => "basket-show",
 
     // ── View ──────────────────────────────────────────────────────────────
     ToggleHidden => "toggle-hidden",
@@ -178,6 +187,10 @@ commands! {
     LinemodeMtime => "linemode-mtime",
     LinemodeOwner => "linemode-owner",
     LinemodeNone => "linemode-none",
+    // Not a linemode but the thing that replaces one: PLAN §7.3's "what's big"
+    // mode, where the right-hand column becomes a usage bar and directories
+    // grow real recursive sizes.
+    DiskUsage => "disk-usage",
 
     // ── Search, filter, find ──────────────────────────────────────────────
     Filter => "filter",
