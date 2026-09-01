@@ -1249,9 +1249,18 @@ impl App {
         // wakeup path (PLAN §1). Only immediate requests ring it: a *delayed*
         // one is already carried by `repaint_delay` in `redraw`, and waking now
         // for a frame wanted later is how a wait turns into a poll.
+        //
+        // And only requests from *other* threads: egui also runs this callback
+        // for every `request_repaint` made on this thread inside the frame,
+        // and those are the same requests `repaint_delay` reports at the end
+        // of it. Ringing the bell for them too would request the next frame
+        // the instant this one is submitted, ahead of the paced deadline
+        // `redraw` sets — under a Mailbox swapchain that measured ~1700 fps
+        // during a cursor glow.
         let waker = self.waker.named("egui");
+        let ui_thread = std::thread::current().id();
         gfx.egui_ctx.set_request_repaint_callback(move |info| {
-            if info.delay.is_zero() {
+            if info.delay.is_zero() && std::thread::current().id() != ui_thread {
                 waker.wake();
             }
         });
@@ -9342,6 +9351,7 @@ impl App {
     }
 
     fn redraw_inner(&mut self) {
+        let frame_began = Instant::now();
         self.repaint_at = None;
         // Drain first, so this frame already carries whatever the workers
         // finished while it was being asked for.
@@ -9409,17 +9419,45 @@ impl App {
         // "immediately" (something is mid-animation); anything past the horizon
         // is the "never" sentinel and is dropped so the loop can actually
         // sleep.
+        //
+        // "Immediately" is paced to the display, not to the loop. The swapchain
+        // is Mailbox (`Gfx::new`), so presenting no longer blocks until the
+        // next vblank the way Fifo did — and an animation that asks for a
+        // frame the moment the last one is submitted would run at whatever
+        // rate the GPU can manage (measured: ~1700 fps during a cursor glow).
+        // Nothing on screen can change faster than the monitor shows it, so
+        // the next frame is due one refresh interval after this one *began*,
+        // which keeps the cadence steady rather than drifting by the frame's
+        // own cost.
+        let interval = self.frame_interval();
         match repaint_delay {
-            Some(delay) if delay.is_zero() => {
+            Some(delay) if delay < interval => {
                 if frame_log_enabled() {
                     log::info!("egui-zero-delay");
                 }
-                gfx.window.request_redraw();
+                let due = frame_began + interval;
+                self.repaint_at = Some(due.max(Instant::now()));
             }
             Some(delay) if delay < REPAINT_HORIZON => {
                 self.repaint_at = Some(Instant::now() + delay);
             }
             _ => {}
+        }
+    }
+
+    /// One display refresh, from the monitor the window is on; 60 Hz when the
+    /// compositor will not say. Re-asked every frame rather than cached: a
+    /// window dragged to a 144 Hz monitor should animate at 144 Hz there.
+    fn frame_interval(&self) -> Duration {
+        let millihertz = self
+            .gfx
+            .as_ref()
+            .and_then(|gfx| gfx.window.current_monitor())
+            .and_then(|monitor| monitor.refresh_rate_millihertz())
+            .filter(|&rate| rate >= 10_000);
+        match millihertz {
+            Some(rate) => Duration::from_secs_f64(1000.0 / f64::from(rate)),
+            None => Duration::from_micros(16_667),
         }
     }
 
