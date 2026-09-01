@@ -124,6 +124,9 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("g r", Command::GotoGitRoot),
         ("g space", Command::GotoInteractive),
         ("g f", Command::FollowSymlink),
+        // yazi's `/tmp` slot, reused for PLAN §7.4's trash view — the one goto
+        // chord that does not lead to a directory.
+        ("g t", Command::OpenTrash),
         ("t", Command::TabCreate),
         ("1", Command::TabSwitch(0)),
         ("9", Command::TabSwitch(8)),

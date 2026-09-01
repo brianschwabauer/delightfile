@@ -59,6 +59,15 @@ pub enum ConfirmKind {
     Trash,
     /// `D`. The one operation with no inverse (PLAN §5).
     Delete,
+    /// `d` on a remote service (PLAN §7.6). Its own kind rather than
+    /// [`ConfirmKind::Trash`] with different words, because it is a different
+    /// promise: **there is no trash on the other machine**, so the body has to
+    /// say so before the key lands, not in the toast afterwards.
+    RemoteDelete,
+    /// `D` inside the trash view (PLAN §7.4): destroy what is already deleted.
+    Purge,
+    /// "Empty trash", from the palette or the context menu. The scary one.
+    EmptyTrash,
 }
 
 /// A yes/no card over the panes.
@@ -88,6 +97,9 @@ impl Confirm {
         match self.kind {
             ConfirmKind::Trash => format!("Trash {n} selected {noun}?"),
             ConfirmKind::Delete => format!("Delete {n} selected {noun}?"),
+            ConfirmKind::RemoteDelete => format!("Delete {n} remote {noun}?"),
+            ConfirmKind::Purge => format!("Destroy {n} trashed {noun}?"),
+            ConfirmKind::EmptyTrash => format!("Empty the trash — all {n} {noun}?"),
         }
     }
 
@@ -96,11 +108,19 @@ impl Confirm {
         match self.kind {
             ConfirmKind::Trash => "They go to the trash — u puts them back.",
             ConfirmKind::Delete => "Permanently delete — cannot be undone.",
+            // The one sentence this dialog exists to say. A remote `d` looks
+            // exactly like a local one and does something irreversible; the
+            // body is where the difference is allowed to be noticed.
+            ConfirmKind::RemoteDelete => {
+                "There is no trash on the server — this deletes them for good."
+            }
+            ConfirmKind::Purge => crate::trashview::PURGE_SUBTITLE,
+            ConfirmKind::EmptyTrash => crate::trashview::PURGE_SUBTITLE,
         }
     }
 
     pub fn danger(&self) -> bool {
-        self.kind == ConfirmKind::Delete
+        !matches!(self.kind, ConfirmKind::Trash)
     }
 
     /// The names, which is the body the `↑`/`↓` keys scroll.
@@ -477,6 +497,9 @@ pub fn confirm_verb(kind: ConfirmKind) -> &'static str {
     match kind {
         ConfirmKind::Trash => "Trash",
         ConfirmKind::Delete => "Delete",
+        ConfirmKind::RemoteDelete => "Delete",
+        ConfirmKind::Purge => "Destroy",
+        ConfirmKind::EmptyTrash => "Empty",
     }
 }
 

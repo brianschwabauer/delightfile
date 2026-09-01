@@ -74,5 +74,11 @@ ttf-parser = "0.25"
 # `preview::doc::model`.
 miniz_oxide.workspace = true
 
+[dev-dependencies]
+# The `TempTree` fixture and PLAN §9's gnarly names, shared rather than
+# re-typed: the trash and remote views are exercised against real directories,
+# and one fixture used on both sides of the split cannot drift from itself.
+df-core = { workspace = true, features = ["test-support"] }
+
 [lints]
 workspace = true

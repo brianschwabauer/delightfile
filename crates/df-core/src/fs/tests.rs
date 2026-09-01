@@ -1096,3 +1096,62 @@ fn a_watched_directory_that_disappears_reports_itself_gone() {
         eprintln!("skipping: no inotify watch could be installed (watch limit?)");
     }
 }
+
+// ── External listings (PLAN §7.4, §7.6) ─────────────────────────────────────
+
+/// A listing whose rows arrive from somewhere that is not the local scanner —
+/// a remote directory streaming over SFTP — is *loading* until its last batch
+/// lands, and that is what the pane's "loading…" hint reads.
+///
+/// The distinction from [`DirState::set_entries`] is the whole point: that one
+/// is "here is the listing", this one is "here is some of it".
+#[test]
+fn an_external_listing_streams_and_only_then_is_loaded() {
+    let mut dir = DirState::new("sftp://showandtour1/srv", &MgrConfig::default());
+    dir.set_sort(options(SortBy::Alphabetical));
+    dir.begin_external();
+    assert_eq!(dir.state(), LoadState::Loading);
+    assert!(dir.is_empty());
+    // No scan token, so a late `ScanUpdate` for a scan this listing used to be
+    // waiting on cannot overwrite rows that did not come from a filesystem.
+    assert!(dir.token().is_none());
+
+    dir.extend_external(files(&["b.txt", "a.txt"]));
+    // Rows are visible and sorted while the rest is still arriving — the whole
+    // reason a slow listing streams at all.
+    assert_eq!(dir.len(), 2);
+    assert_eq!(dir.row(0).map(|e| e.name.as_str()), Some("a.txt"));
+    assert_eq!(dir.state(), LoadState::Loading, "still arriving");
+
+    dir.extend_external(files(&["c.txt"]));
+    dir.finish_external();
+    assert_eq!(dir.state(), LoadState::Loaded);
+    assert_eq!(dir.len(), 3);
+
+    // A selection is pruned to what is still here on completion, exactly as a
+    // finished scan prunes it: a `y` on a row the server no longer has would
+    // otherwise paste a ghost.
+    dir.toggle_selected(0);
+    assert_eq!(dir.selected_count(), 1);
+    dir.begin_external();
+    dir.extend_external(files(&["z.txt"]));
+    dir.finish_external();
+    assert_eq!(dir.selected_count(), 0);
+    assert_eq!(dir.len(), 1, "a new listing replaces the old one");
+}
+
+/// A failed external listing says why, in the pane, instead of looking like an
+/// empty directory.
+#[test]
+fn a_failed_external_listing_keeps_its_sentence() {
+    let mut dir = DirState::new("sftp://showandtour1/srv", &MgrConfig::default());
+    dir.begin_external();
+    dir.extend_external(files(&["a.txt"]));
+    dir.fail_external("showandtour1: cannot log in: Permission denied (publickey)");
+    assert_eq!(dir.state(), LoadState::Failed);
+    assert!(dir.is_empty(), "half a listing is not shown as the listing");
+    assert_eq!(
+        dir.error(),
+        Some("showandtour1: cannot log in: Permission denied (publickey)")
+    );
+}

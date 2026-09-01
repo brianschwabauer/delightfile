@@ -273,6 +273,36 @@ impl Trash {
     pub fn restore(&self, item: &TrashedItem, ctx: &TaskCtx) -> Result<PathBuf> {
         restore(item, ctx)
     }
+
+    /// Destroy one item for good — the trash view's `D` (PLAN §7.4).
+    pub fn purge(&self, item: &TrashedItem, ctx: &TaskCtx) -> Result<()> {
+        purge(item, ctx)
+    }
+}
+
+/// Destroy a trashed item for good: its file *and* its record.
+///
+/// The one operation in the program with no inverse, and it is spelled here
+/// rather than as "delete the path inside `files/`" at the call site because
+/// deleting only the file would leave an info record pointing at nothing — a
+/// row in the trash view that can never be restored and never goes away.
+///
+/// The file goes first and the record second. A crash between them leaves an
+/// orphan record, which [`Trash::list`] already tolerates and the next purge
+/// tidies; the other order would leave a file in `files/` that nothing knows
+/// the origin of, which is a leak nobody can find.
+pub fn purge(item: &TrashedItem, ctx: &TaskCtx) -> Result<()> {
+    let file = item.files_path();
+    if exists(&file) {
+        super::delete::delete_permanent(&file, ctx)?;
+    }
+    let info = item.info_path();
+    match std::fs::remove_file(&info) {
+        Ok(()) => Ok(()),
+        // Already gone is the outcome that was asked for.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(DfError::io(&info, e)),
+    }
 }
 
 /// Put a trashed item back where it came from — the inverse `u` runs.
@@ -633,6 +663,47 @@ mod tests {
         assert_eq!(std::fs::read(&file).unwrap(), b"the contents");
         assert!(!exists(&item.info_path()), "the record goes with it");
         assert!(!exists(&item.files_path()));
+    }
+
+    /// A purge destroys the file *and* its record — the second half is the
+    /// point, because a record with no file is a row in the trash view that can
+    /// never be restored and never goes away.
+    #[test]
+    fn purging_takes_the_record_with_the_file() {
+        let t = TempTree::new("trash-purge");
+        let trash = trash_in(&t);
+        let file = t.file("work/notes.txt", b"gone");
+        let dir = t.dir("work/project");
+        std::fs::write(dir.join("a"), b"a").unwrap();
+
+        let item = trash.trash(&file, &ctx()).unwrap();
+        let folder = trash.trash(&dir, &ctx()).unwrap();
+        assert_eq!(trash.list().unwrap().len(), 2);
+
+        trash.purge(&item, &ctx()).unwrap();
+        assert!(!exists(&item.files_path()));
+        assert!(!exists(&item.info_path()));
+        // A whole tree goes too — a trashed directory is a directory.
+        purge(&folder, &ctx()).unwrap();
+        assert!(!exists(&folder.files_path()));
+        assert!(trash.list().unwrap().is_empty());
+    }
+
+    /// Purging an item whose file has already gone still tidies the record —
+    /// an interrupted purge, or somebody emptying the trash from another
+    /// program, must not leave a row nothing can clear.
+    #[test]
+    fn purging_an_orphaned_record_still_removes_it() {
+        let t = TempTree::new("trash-purge-orphan");
+        let trash = trash_in(&t);
+        let item = trash.trash(&t.file("a.txt", b"x"), &ctx()).unwrap();
+        std::fs::remove_file(item.files_path()).unwrap();
+        purge(&item, &ctx()).unwrap();
+        assert!(!exists(&item.info_path()));
+        assert!(trash.list().unwrap().is_empty());
+        // …and doing it twice is not an error: "already gone" is the outcome
+        // that was asked for.
+        purge(&item, &ctx()).unwrap();
     }
 
     #[test]

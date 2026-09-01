@@ -91,6 +91,12 @@ pub enum Action {
     CopyPath,
     CopyName,
     Properties,
+    /// Put a trashed item back where it came from (PLAN §7.4).
+    Restore,
+    /// Destroy trashed items for good.
+    Purge,
+    /// …and destroy all of them.
+    EmptyTrash,
 }
 
 /// One row.
@@ -164,11 +170,33 @@ pub struct Facts {
     /// file, and two permanently grey rows on every right-click in a source
     /// directory would be two rows of noise to read past.
     pub archive: bool,
+    /// Whether the list pane is showing the trash (PLAN §7.4).
+    ///
+    /// A *different menu*, not the ordinary one with rows greyed out. The
+    /// menu's usual rule — rows stay put so the shape is aimable from memory —
+    /// is about one directory's rows differing from another's; the trash is a
+    /// different place with three verbs of its own, and eight permanently grey
+    /// rows above them would be eight rows to read past every time.
+    pub trash: bool,
+    /// How many items the trash holds, for the "Empty trash" row.
+    pub trashed: usize,
 }
 
 /// The rows, in order, with their enablement.
 pub fn items(facts: Facts) -> Vec<Item> {
     let acts = facts.targets > 0;
+    if facts.trash {
+        return vec![
+            Item::new("Restore", "Enter", Action::Restore, acts),
+            Item::new("Destroy permanently", "D", Action::Purge, acts),
+            Item::new("Copy original path", "c c", Action::CopyPath, facts.has_row).after_gap(),
+            Item::new("Properties", "Tab", Action::Properties, facts.has_row),
+            // Last, after a gap, and the only row that acts on things the
+            // pointer is not on: it is the one gesture in this menu that cannot
+            // be taken back, so it is the hardest one to hit by accident.
+            Item::new("Empty trash", "", Action::EmptyTrash, facts.trashed > 0).after_gap(),
+        ];
+    }
     let mut items = vec![
         Item::new(
             if facts.is_dir { "Open folder" } else { "Open" },
@@ -675,6 +703,8 @@ mod tests {
             clipboard: true,
             openers: 2,
             archive: false,
+            trash: false,
+            trashed: 0,
         }
     }
 
@@ -705,6 +735,8 @@ mod tests {
             clipboard: true,
             openers: 0,
             archive: false,
+            trash: false,
+            trashed: 0,
         };
         assert_eq!(enabled(empty, Action::Open), Some(false));
         assert_eq!(enabled(empty, Action::Yank), Some(false));
@@ -800,6 +832,56 @@ mod tests {
         assert_eq!(rows[sub].keys, "E");
     }
 
+    /// The trash gets a menu of its own — three verbs, not the ordinary ten
+    /// with seven of them grey (PLAN §7.4).
+    #[test]
+    fn the_trash_gets_its_own_menu() {
+        let in_trash = Facts {
+            trash: true,
+            trashed: 4,
+            ..facts()
+        };
+        let rows = items(in_trash);
+        let actions: Vec<Action> = rows.iter().map(|item| item.action).collect();
+        assert_eq!(
+            actions,
+            vec![
+                Action::Restore,
+                Action::Purge,
+                Action::CopyPath,
+                Action::Properties,
+                Action::EmptyTrash,
+            ]
+        );
+        // Nothing that would act on a trashed file where it lies.
+        assert!(!actions.contains(&Action::Trash));
+        assert!(!actions.contains(&Action::Paste));
+        assert!(!actions.contains(&Action::Rename));
+        // …and the irreversible row is last, after a gap, so it is the hardest
+        // one in the menu to hit by accident.
+        let last = rows.last().expect("a row");
+        assert_eq!(last.action, Action::EmptyTrash);
+        assert!(last.gap_before);
+
+        // An empty trash still shows the row, greyed: a menu whose shape
+        // changes with its contents is a menu you cannot aim at from memory.
+        let empty = Facts {
+            trash: true,
+            trashed: 0,
+            targets: 0,
+            has_row: false,
+            ..facts()
+        };
+        let enabled = |action: Action| {
+            items(empty)
+                .into_iter()
+                .find(|i| i.action == action)
+                .map(|i| i.enabled)
+        };
+        assert_eq!(enabled(Action::EmptyTrash), Some(false));
+        assert_eq!(enabled(Action::Restore), Some(false));
+    }
+
     /// The keyboard skips grey rows and wraps at both ends.
     #[test]
     fn the_keyboard_walks_only_the_rows_it_can_use() {
@@ -810,6 +892,8 @@ mod tests {
             clipboard: true,
             openers: 0,
             archive: false,
+            trash: false,
+            trashed: 0,
         };
         let mut menu = Menu::new(egui::pos2(0.0, 0.0), items(sparse), Vec::new());
         assert_eq!(menu.cursor, None, "an unaimed menu picks nothing");

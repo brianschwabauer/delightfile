@@ -38,6 +38,8 @@ mod overlay;
 mod panel;
 mod playback;
 mod preview;
+/// Remote services browsed as directories (PLAN §7.6).
+mod remote;
 mod ripple;
 mod search;
 mod select;
@@ -47,6 +49,8 @@ mod tab;
 mod tabs;
 mod theme;
 mod toast;
+/// The trash, browsed as a directory (PLAN §7.4).
+mod trashview;
 mod ui;
 mod usage;
 mod viewport;

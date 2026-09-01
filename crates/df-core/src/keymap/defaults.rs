@@ -232,6 +232,10 @@ pub(super) fn build() -> Registry {
         (Files, "g r",     C::GotoGitRoot,     "Go to the git root",         InList),
         (Files, "g space", C::GotoInteractive, "Jump interactively",         InList),
         (Files, "g f",     C::FollowSymlink,   "Follow the hovered symlink", InList),
+        // yazi binds `g t` to `/tmp`; PLAN §4.1 dropped that row, so the slot is
+        // free and the trash — which PLAN §7.4 wants a virtual location for —
+        // takes it. `t` for trash, one key from a list, next to the other places.
+        (Files, "g t",     C::OpenTrash,       "Browse the trash",           InList),
 
         // ── Files: tabs (§2). `[`/`]` belong to transport, so Alt carries the
         // switch and the swaps keep the shifted brackets.

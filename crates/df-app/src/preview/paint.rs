@@ -694,6 +694,9 @@ fn directory_body(
             // narrowest pane for a fact about a directory nobody is in.
             crate::ui::GitMark::default(),
             None,
+            // A previewed listing is a real directory, so its column is the
+            // linemode; the note override belongs to the virtual listings.
+            None,
         );
         if alpha < 1.0 {
             // The crossfade, done by veiling rather than by re-tinting every

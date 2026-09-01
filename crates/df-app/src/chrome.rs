@@ -208,6 +208,17 @@ pub struct Crumb {
     pub label: String,
     /// Where clicking goes.
     pub path: std::path::PathBuf,
+    /// Draw this segment as a **chip** — a plate in the accent colour — rather
+    /// than as plain text.
+    ///
+    /// A local path has none: every segment of it is a directory on this
+    /// machine and they are all the same kind of thing. The virtual locations
+    /// have exactly one, and it is the first (PLAN §7.4, §7.6): the machine a
+    /// remote listing is on, or the word `Trash`. Neither is a folder, and a
+    /// bar reading `showandtour1 › srv › www` in one colour would look like a
+    /// directory called `showandtour1` on this computer — which is precisely
+    /// the mistake those two features must not invite.
+    pub accent: bool,
 }
 
 /// The path, as segments from the root rightwards.
@@ -227,6 +238,7 @@ pub fn crumbs(path: &std::path::Path) -> Vec<Crumb> {
                 out.push(Crumb {
                     label: "/".to_string(),
                     path: here.clone(),
+                    accent: false,
                 });
             }
             Component::Normal(name) => {
@@ -234,6 +246,7 @@ pub fn crumbs(path: &std::path::Path) -> Vec<Crumb> {
                 out.push(Crumb {
                     label: name.to_string_lossy().into_owned(),
                     path: here.clone(),
+                    accent: false,
                 });
             }
             // A relative path's `.`/`..`/prefix components cannot be clicked to
@@ -371,7 +384,16 @@ pub fn path_bar(
         let key = Control::Crumb(index);
         let hover = hovers.hover(key);
         let rect = pressed_rect(*rect, hovers.press(key));
-        if hover > 0.0 {
+        if crumb.accent {
+            // The chip that says "this is not a folder on this machine" — the
+            // same plate treatment the git branch wears at the other end of the
+            // bar, so the two read as one kind of ornament (PLAN §7.4, §7.6).
+            painter.rect_filled(
+                rect,
+                ROW_RADIUS,
+                mix(paint.palette.crust, palette.sky, 0.16 + 0.14 * hover),
+            );
+        } else if hover > 0.0 {
             painter.rect_filled(
                 rect,
                 ROW_RADIUS,
@@ -387,8 +409,11 @@ pub fn path_bar(
             );
         }
         // The directory you are actually in is the bright one; the ancestors
-        // are the route you took to it.
-        let color = if index == last {
+        // are the route you took to it. A chip has its own ink for the same
+        // reason it has its own plate.
+        let color = if crumb.accent {
+            palette.sky
+        } else if index == last {
             palette.text
         } else {
             mix(palette.overlay1, palette.text, hover)

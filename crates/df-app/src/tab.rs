@@ -211,6 +211,29 @@ pub struct Tab {
     /// from a scan, and its path is a display path that does not exist — see
     /// [`crate::archive`].
     pub archive: Option<crate::archive::Browse>,
+    /// The remote service this tab is on (PLAN §7.6), when it is on one.
+    ///
+    /// Per tab for the same reason the archive is, and mutually exclusive with
+    /// it in practice — an archive on a remote service has to be downloaded
+    /// first — though nothing here enforces that beyond the fact that entering
+    /// one clears the other.
+    pub remote: Option<crate::remote::Session>,
+    /// The trash, while this tab is browsing it (PLAN §7.4).
+    pub trash: Option<crate::trashview::View>,
+}
+
+/// Which virtual listing a tab is in, if any.
+///
+/// One question with one answer, asked by everything that has to know whether
+/// the rows on screen are files on this machine: the watcher, the preview, the
+/// drag source, the operations, and the commands that are inert. Three
+/// `is_some()` checks scattered over 8000 lines is how the fourth one gets
+/// forgotten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Virtual {
+    Archive,
+    Remote,
+    Trash,
 }
 
 impl Tab {
@@ -228,6 +251,8 @@ impl Tab {
             parent: None,
             history: History::new(path),
             archive: None,
+            remote: None,
+            trash: None,
         };
         tab.rescan_all(mgr, sort, scanner, now);
         tab
@@ -303,7 +328,12 @@ impl Tab {
             None => {
                 // Anywhere else is leaving the archive — including the real
                 // directory it lives in, which `←` at its root walks out to.
+                // Leaving is leaving: the remote session and the trash go too,
+                // so a `Alt+←` out of either lands in a plain local listing
+                // rather than in a pane that thinks it is still somewhere else.
                 self.archive = None;
+                self.remote = None;
+                self.trash = None;
                 self.cwd = Listing::new(path, mgr, sort, now);
                 self.rescan_all(mgr, sort, scanner, now);
             }
@@ -381,6 +411,156 @@ impl Tab {
         self.sync_parent_cursor();
     }
 
+    // ── The remote pane (PLAN §7.6) ─────────────────────────────────────────
+
+    /// Point this tab at a remote place.
+    ///
+    /// Returns the [`VfsPath`] that needs listing, or `None` when the cache
+    /// already had it — which is the whole reason `←` back up a remote tree is
+    /// instant. The caller queues the scan, because the [`Vfs`](df_core::vfs)
+    /// lives on the app and this type has never been allowed to know about a
+    /// worker (it is the same split that keeps [`Scanner`] a parameter).
+    ///
+    /// The history is *not* touched, for the reason walking into an archive
+    /// does not touch it: `Alt+←` is about directories a person navigated
+    /// between, and putting `sftp://…` on that stack would make the back button
+    /// re-open a connection the user had closed.
+    #[must_use]
+    pub fn show_remote(
+        &mut self,
+        at: crate::remote::Session,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        now: Instant,
+    ) -> Option<df_core::vfs::VfsPath> {
+        self.archive = None;
+        self.trash = None;
+        self.remote = Some(at);
+        self.refresh_remote(mgr, sort, now)
+    }
+
+    /// Rebuild both panes from the session's current place. The shared half of
+    /// entering, navigating and refreshing.
+    #[must_use]
+    pub fn refresh_remote(
+        &mut self,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        now: Instant,
+    ) -> Option<df_core::vfs::VfsPath> {
+        let session = self.remote.as_ref()?;
+        let at = session.at.clone();
+        // The row the cursor is on, so a refresh does not move what is under
+        // somebody's hand (`delightful-ui` §8).
+        let on = (self.cwd.path() == crate::remote::display(&at))
+            .then(|| self.cwd.dir.cursor_entry().map(|e| e.name.clone()))
+            .flatten();
+
+        let cached = session.cached(&at).cloned();
+        let parent_rows = at
+            .parent()
+            .and_then(|parent| session.cached(&parent).cloned());
+        let parent_place = at.parent();
+        let origin = session.origin.clone();
+
+        self.cwd = Listing::new(crate::remote::display(&at), mgr, sort, now);
+        match &cached {
+            Some(rows) => self.cwd.dir.set_entries(rows.clone()),
+            // Loading, honestly: the pane's 150 ms hint reads this state, and
+            // on a link with real latency it is the state the pane is genuinely
+            // in (see `DirState::begin_external`).
+            None => self.cwd.dir.begin_external(),
+        }
+        if let Some(name) = on {
+            self.cwd.dir.cursor_to_name(&name);
+        }
+
+        // The parent column, from the cache alone. A miss draws it empty rather
+        // than spending a second round trip on a column nobody asked to read —
+        // and a miss only happens on the first directory of a session, since
+        // every step down was listed on the way in.
+        let mut parent = match (&parent_place, &parent_rows) {
+            (Some(place), _) => Listing::new(crate::remote::display(place), mgr, sort, now),
+            // At the service root the parent column is the local directory the
+            // session came from, which is also where `←` goes. The column keeps
+            // reading as "where you came from" all the way out.
+            (None, _) => Listing::new(origin, mgr, sort, now),
+        };
+        match (&parent_place, parent_rows) {
+            (Some(_), Some(rows)) => parent.dir.set_entries(rows),
+            (Some(_), None) => parent.dir.set_entries(Vec::new()),
+            (None, _) => parent.dir.load_blocking().unwrap_or_default(),
+        }
+        self.parent = Some(parent);
+        self.sync_remote_parent_cursor(&at);
+        cached.is_none().then_some(at)
+    }
+
+    /// Put the parent column's marker on the remote directory we are inside.
+    ///
+    /// Not [`Tab::sync_parent_cursor`], because that one reads the cwd's
+    /// `file_name()` — and the `file_name()` of `sftp://host/srv` is `srv`
+    /// only by accident of the URL happening to look like a path. Asking the
+    /// [`VfsPath`] is the honest question.
+    fn sync_remote_parent_cursor(&mut self, at: &df_core::vfs::VfsPath) {
+        if at.parent().is_none() {
+            return;
+        }
+        let name = at.name().to_string();
+        if let Some(parent) = &mut self.parent {
+            parent.dir.cursor_to_name(&name);
+        }
+    }
+
+    // ── The trash (PLAN §7.4) ───────────────────────────────────────────────
+
+    /// Point this tab at the trash. The rows are all in hand — a trash listing
+    /// is one directory read of `info/` — so there is nothing asynchronous
+    /// about it and nothing to return.
+    pub fn show_trash(
+        &mut self,
+        view: crate::trashview::View,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        now: Instant,
+    ) {
+        self.archive = None;
+        self.remote = None;
+        let on = self
+            .trash
+            .is_some()
+            .then(|| self.cwd.dir.cursor_entry().map(|e| e.name.clone()))
+            .flatten();
+        let rows = crate::trashview::rows(&view.items);
+        let origin = view.origin.clone();
+        self.trash = Some(view);
+
+        self.cwd = Listing::new(crate::trashview::URL, mgr, sort, now);
+        self.cwd.dir.set_entries(rows);
+        if let Some(name) = on {
+            self.cwd.dir.cursor_to_name(&name);
+        }
+        // The parent column is the directory `←` goes back to, listed for real
+        // — the trash has no parent of its own, and a blank column beside it
+        // would waste the one piece of context the view can offer.
+        let mut parent = Listing::new(origin, mgr, sort, now);
+        parent.dir.load_blocking().unwrap_or_default();
+        self.parent = Some(parent);
+    }
+
+    /// Which virtual listing this tab is in, if any.
+    pub fn virtual_kind(&self) -> Option<Virtual> {
+        if self.archive.is_some() {
+            Some(Virtual::Archive)
+        } else if self.remote.is_some() {
+            Some(Virtual::Remote)
+        } else if self.trash.is_some() {
+            Some(Virtual::Trash)
+        } else {
+            None
+        }
+    }
+
     /// Rebuild the parent listing for the current directory and queue both
     /// scans. Also the "everything changed" path after a watch overflow.
     pub fn rescan_all(
@@ -395,6 +575,13 @@ impl Tab {
         // rows from it is both the refresh and the no-op.
         if let Some(inner) = self.inner_path() {
             self.show_archive(&inner, mgr, sort, scanner, now);
+            return;
+        }
+        // The two other virtual listings are rebuilt by whoever owns their
+        // rows — the app, which has the vfs and the trash. A scan of
+        // `sftp://…` or `trash://` would be a failed read of a path that is not
+        // one, landing a "could not read this directory" over a correct pane.
+        if self.remote.is_some() || self.trash.is_some() {
             return;
         }
         self.cwd.begin_scan(scanner, now);
@@ -425,7 +612,7 @@ impl Tab {
     /// (PLAN §2 watches the active tab's directories), so what it is showing may
     /// be minutes old, but it is showing the right *place* and should not jump.
     pub fn rescan(&mut self, scanner: &Scanner, now: Instant) {
-        if self.archive.is_some() {
+        if self.virtual_kind().is_some() {
             // The rows came from a tree, not from a directory; asking the
             // scanner for a path that does not exist would only produce a
             // failed listing where a correct one already is.
@@ -452,6 +639,20 @@ impl Tab {
         // archive has been deleted out from under it.
         if let Some(browse) = &self.archive {
             return vec![browse.real()];
+        }
+        // On a remote service the only local directory in sight is the one the
+        // session came from — watched so that `←` out of it lands on a listing
+        // that is current. The trash watches the same, plus the trash's own
+        // `files/` directory, so emptying it from another program is seen.
+        if let Some(session) = &self.remote {
+            return vec![session.origin.clone()];
+        }
+        if let Some(view) = &self.trash {
+            let mut dirs = vec![view.origin.clone()];
+            if let Some(item) = view.items.first() {
+                dirs.push(item.trash_root.join("info"));
+            }
+            return dirs;
         }
         let mut dirs = vec![self.cwd.path().to_path_buf()];
         if let Some(parent) = &self.parent {
@@ -628,6 +829,144 @@ mod tests {
         // …and the *second* one animates, because those rows have been seen.
         l.set_first(31, t0);
         assert!(l.animating(t0));
+    }
+
+    /// The remote pane's whole state machine, without a network: entering asks
+    /// for a listing, the cache answers the second time, and the parent column
+    /// is filled from the cache rather than from a second round trip
+    /// (PLAN §7.6).
+    #[test]
+    fn a_remote_pane_lists_once_and_reads_the_cache_after() {
+        use df_core::vfs::VfsPath;
+        let t0 = Instant::now();
+        let (mgr, sort) = (MgrConfig::default(), SortOptions::default());
+        let mut tab = Tab {
+            cwd: Listing::new("/tmp", &mgr, sort, t0),
+            parent: None,
+            history: History::new("/tmp"),
+            archive: None,
+            remote: None,
+            trash: None,
+        };
+
+        let root = VfsPath::new("showandtour1", "");
+        let session = crate::remote::Session::new(root.clone(), PathBuf::from("/tmp"));
+        // Nothing cached, so the caller is told to go and list it — and the
+        // pane is honestly `Loading` while it does, which is the state the
+        // 150 ms hint reads.
+        assert_eq!(tab.show_remote(session, &mgr, sort, t0), Some(root.clone()));
+        assert_eq!(tab.cwd.path(), Path::new("sftp://showandtour1"));
+        assert_eq!(tab.cwd.dir.state(), df_core::fs::LoadState::Loading);
+        assert_eq!(tab.virtual_kind(), Some(Virtual::Remote));
+        // At the service root the parent column is the local directory the
+        // session came from, so the column still reads as "where you came
+        // from" all the way out.
+        assert_eq!(tab.parent.as_ref().map(|p| p.path()), Some(Path::new("/tmp")));
+        // …and that is the only directory worth watching while we are away.
+        assert_eq!(tab.watched(), vec![PathBuf::from("/tmp")]);
+
+        // The listing arrives.
+        let rows = vec![row("srv", true), row("readme.md", false)];
+        if let Some(session) = &mut tab.remote {
+            session.pending = Some((df_core::vfs::VfsToken(1), root.clone()));
+        }
+        tab.cwd.dir.begin_external();
+        tab.cwd.dir.extend_external(rows.clone());
+        tab.cwd.dir.finish_external();
+        if let Some(session) = &mut tab.remote {
+            session.store(&root, rows);
+        }
+        assert_eq!(tab.cwd.dir.len(), 2);
+        assert_eq!(tab.cwd.dir.state(), df_core::fs::LoadState::Loaded);
+
+        // Step into `srv`. Unlisted, so it needs a round trip — but the parent
+        // column is free, because its rows were in hand a moment ago.
+        let srv = root.join("srv");
+        let session = crate::remote::Session::new(srv.clone(), PathBuf::from("/tmp"));
+        let mut session = session;
+        session.store(&root, tab.cwd.dir.entries().to_vec());
+        assert_eq!(tab.show_remote(session, &mgr, sort, t0), Some(srv));
+        let parent = tab.parent.as_ref().expect("a parent column");
+        assert_eq!(parent.path(), Path::new("sftp://showandtour1"));
+        assert_eq!(parent.dir.len(), 2);
+        // …with its marker on the directory we walked into, which is what
+        // makes the column read as a path rather than as a second listing.
+        assert_eq!(
+            parent.dir.cursor_entry().map(|e| e.name.as_str()),
+            Some("srv")
+        );
+
+        // Back out to the root: cached, so no listing is asked for at all.
+        let mut session = crate::remote::Session::new(root.clone(), PathBuf::from("/tmp"));
+        session.store(&root, vec![row("srv", true), row("readme.md", false)]);
+        assert_eq!(tab.show_remote(session, &mgr, sort, t0), None);
+        assert_eq!(tab.cwd.dir.len(), 2);
+        assert_eq!(tab.cwd.dir.state(), df_core::fs::LoadState::Loaded);
+
+        // …and an operation that changes a directory takes it back out, so the
+        // next visit is a real read.
+        if let Some(session) = &mut tab.remote {
+            session.invalidate(&root);
+        }
+        assert_eq!(tab.refresh_remote(&mgr, sort, t0), Some(root));
+    }
+
+    /// Walking into the trash and back out again (PLAN §7.4). The pane is not a
+    /// directory, and `←` returns to the one the user came from.
+    #[test]
+    fn the_trash_is_a_listing_you_can_walk_back_out_of() {
+        let t0 = Instant::now();
+        let (mgr, sort) = (MgrConfig::default(), SortOptions::default());
+        let mut tab = Tab {
+            cwd: Listing::new("/tmp", &mgr, sort, t0),
+            parent: None,
+            history: History::new("/tmp"),
+            archive: None,
+            remote: None,
+            trash: None,
+        };
+        let view = crate::trashview::View {
+            items: vec![df_core::ops::TrashedItem {
+                trash_root: PathBuf::from("/tmp/Trash"),
+                name: std::ffi::OsString::from("a.txt"),
+                original: PathBuf::from("/tmp/a.txt"),
+                deleted_at: "2026-08-30T09:15:00".to_string(),
+            }],
+            origin: PathBuf::from("/tmp"),
+        };
+        tab.show_trash(view, &mgr, sort, t0);
+        assert_eq!(tab.virtual_kind(), Some(Virtual::Trash));
+        assert_eq!(tab.cwd.path(), Path::new(crate::trashview::URL));
+        assert_eq!(tab.cwd.dir.len(), 1);
+        // The parent column is the real directory `←` goes back to.
+        assert_eq!(tab.parent.as_ref().map(|p| p.path()), Some(Path::new("/tmp")));
+
+        // Navigating anywhere real leaves the trash behind entirely — a pane
+        // that still thought it was in the trash would offer restore on files.
+        tab.navigate("/tmp", &mgr, sort, &Scanner::start(df_core::fs::no_notifier()), t0);
+        assert_eq!(tab.virtual_kind(), None);
+        assert!(tab.trash.is_none());
+    }
+
+    /// A row from nowhere, for the tests above.
+    fn row(name: &str, is_dir: bool) -> df_core::fs::Entry {
+        df_core::fs::Entry {
+            is_hidden: false,
+            name: name.to_string(),
+            path: PathBuf::from(format!("sftp://showandtour1/{name}")),
+            kind: if is_dir {
+                df_core::fs::Kind::Dir
+            } else {
+                df_core::fs::Kind::File
+            },
+            len: 0,
+            mtime: None,
+            btime: None,
+            mode: 0o100_644,
+            uid: 0,
+            gid: 0,
+            mime: "text/plain",
+        }
     }
 
     /// A listing whose scan has not landed stays fresh: the position computed

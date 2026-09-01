@@ -493,6 +493,56 @@ impl DirState {
         self.rebuild();
     }
 
+    /// Begin a listing whose rows will arrive in batches from somewhere other
+    /// than the local scanner — PLAN §7.6's remote panes.
+    ///
+    /// [`DirState::set_entries`] is the whole-listing-at-once door and lands
+    /// the pane in [`LoadState::Loaded`]; a remote directory streams, and until
+    /// its last batch has arrived the pane is genuinely *loading* — which is
+    /// the state the 150 ms "loading…" hint reads, and the one thing a link
+    /// with real latency must be honest about. Clearing the token is the same
+    /// safety [`DirState::set_entries`] takes: a late [`ScanUpdate`] for a scan
+    /// this listing used to be waiting on is dropped rather than overwriting
+    /// rows that did not come from a filesystem.
+    pub fn begin_external(&mut self) {
+        self.entries.clear();
+        self.state = LoadState::Loading;
+        self.error = None;
+        self.token = None;
+        self.rebuild();
+    }
+
+    /// One batch of an external listing.
+    pub fn extend_external(&mut self, entries: Vec<Entry>) {
+        self.entries.extend(entries);
+        // The same guard [`DirState::apply`] uses: re-sorting per batch is
+        // quadratic in the batch count, and a remote directory of a hundred
+        // thousand files must not become quadratic because it arrives a
+        // hundred rows at a time.
+        if self.entries.len() <= STREAM_SORT_LIMIT {
+            self.rebuild();
+        }
+    }
+
+    /// Every row of an external listing has arrived.
+    pub fn finish_external(&mut self) {
+        self.state = LoadState::Loaded;
+        self.rebuild();
+        // Same rule as a finished scan: a selection can only contain rows that
+        // are still here.
+        let present: BTreeSet<String> = self.entries.iter().map(|e| e.name.clone()).collect();
+        self.selected.retain(|name| present.contains(name));
+    }
+
+    /// An external listing could not be produced. The message is the one the
+    /// pane shows in place of rows, so it has to be a sentence.
+    pub fn fail_external(&mut self, error: impl Into<String>) {
+        self.entries.clear();
+        self.state = LoadState::Failed;
+        self.error = Some(error.into());
+        self.rebuild();
+    }
+
     /// Rewrite the entries in place, and rebuild the view if anything moved.
     ///
     /// The one mutable door onto rows that are already here, opened for PLAN

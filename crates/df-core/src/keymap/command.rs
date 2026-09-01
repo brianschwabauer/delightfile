@@ -160,6 +160,13 @@ commands! {
     // browsed when the list pane is inside one.
     ArchiveExtractHere => "archive-extract-here",
     ArchiveExtractSubfolder => "archive-extract-subfolder",
+    // The trash, browsed as a directory (PLAN §7.4). `OpenTrash` is `g t` — the
+    // slot yazi spent on `/tmp`, which this plan dropped. Restore and purge are
+    // *not* commands of their own: inside the trash view `Enter`/`r` restore and
+    // `D` purges, so the keys keep the meanings they already have and the trash
+    // needs no second keymap to learn.
+    OpenTrash => "open-trash",
+    EmptyTrash => "empty-trash",
     // The selection basket (PLAN §7.1): files collected across directories and
     // pasted or dragged as one payload.
     BasketToggle => "basket-toggle",

@@ -552,6 +552,15 @@ pub struct ListView<'a> {
     /// list pane only: the parent column is one name wide, and the preview's
     /// directory body is about a folder nobody is measuring.
     pub usage: Option<&'a crate::usage::Usage>,
+    /// A per-row replacement for the linemode column, keyed by row name.
+    ///
+    /// One virtual listing wants it (PLAN §7.4's trash, where the column is the
+    /// directory each row came out of), and it is a *replacement* rather than a
+    /// second column for the same reason the usage bar is: they are the same
+    /// strip of pixels, and a row showing both would have no room left for its
+    /// name. `None` — every listing but that one — costs a `None` check per row
+    /// and nothing else.
+    pub notes: Option<&'a std::collections::HashMap<String, String>>,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -626,6 +635,7 @@ impl Painting<'_> {
             flip,
             git,
             usage,
+            notes,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
@@ -777,6 +787,7 @@ impl Painting<'_> {
                         growth: usage.growth(index.saturating_sub(first), self.now),
                     }
                 }),
+                notes.and_then(|notes| notes.get(&entry.name)).map(String::as_str),
             );
         }
         self.flip_ghosts(&painter, flip, content, ROW_RADIUS);
@@ -814,6 +825,10 @@ impl Painting<'_> {
         // are the same strip of pixels, and a row showing both a usage bar and
         // a permission string would have no room left for its name.
         usage: Option<crate::usage::RowUsage>,
+        // A virtual listing's own text for the linemode column (PLAN §7.4).
+        // Outranked by `usage` for the reason above, and outranking the
+        // linemode for the reason in [`ListView::notes`].
+        note: Option<&str>,
     ) {
         let mute = mute.clamp(0.0, 1.0);
         let fade = |c: egui::Color32| {
@@ -844,9 +859,10 @@ impl Painting<'_> {
 
         // The linemode is measured first: the name gets whatever is left, so a
         // long name truncates rather than running under the size column.
-        let mode_text = match &usage {
-            Some(usage) => usage.label(),
-            None => linemode_text(entry, linemode),
+        let mode_text = match (&usage, note) {
+            (Some(usage), _) => usage.label(),
+            (None, Some(note)) => note.to_string(),
+            (None, None) => linemode_text(entry, linemode),
         };
         let mode_width = if mode_text.is_empty() {
             0.0

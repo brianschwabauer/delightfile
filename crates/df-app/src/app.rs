@@ -210,6 +210,48 @@ enum ArchiveIntent {
     ExtractSubfolder,
 }
 
+/// A remote operation running on the pool (PLAN §7.6), and its result slot.
+///
+/// The vfs's own calls are blocking and take a [`TaskCtx`], which its
+/// documentation says is because they are meant to run inside a job. This is
+/// that job's bookkeeping: an `ssh` round trip must never happen between two
+/// frames, so *every* remote verb — including the one-packet ones like `MKDIR`
+/// — goes onto the pool and comes back through here.
+struct PendingRemote {
+    id: TaskId,
+    slot: Arc<std::sync::Mutex<Option<std::result::Result<RemoteDone, String>>>>,
+}
+
+/// What a finished remote operation owes the UI.
+///
+/// One flat shape rather than a variant per verb, because every remote
+/// operation answers the same four questions and a rename that forgot to
+/// invalidate its directory is the bug this makes structurally hard.
+#[derive(Debug, Default)]
+struct RemoteDone {
+    /// One line for the toast. Empty says nothing.
+    message: String,
+    /// The remote directory whose cached listing is now wrong.
+    invalidate: Option<df_core::vfs::VfsPath>,
+    /// Local directories to re-read — a download's destination.
+    dirs: Vec<PathBuf>,
+    /// A file downloaded in order to be opened: `(remote url, local path)`.
+    open: Option<(String, PathBuf)>,
+    /// A file downloaded for the preview card: `(remote url, local path)`.
+    preview: Option<(String, PathBuf)>,
+}
+
+/// The preview card's state for the remote row under the cursor.
+struct RemotePreview {
+    /// The row it is about, as its `sftp://…` URL.
+    url: String,
+    /// The text, once it has arrived.
+    body: Option<String>,
+    /// Whether a download for it is in flight, so the card can say "reading…"
+    /// instead of showing the facts as though they were the answer.
+    loading: bool,
+}
+
 /// The modal card that is up, if one is.
 enum Dialog {
     /// `d` / `D`.
@@ -672,6 +714,41 @@ pub struct App {
     /// The archive entry the preview card is showing, and its text if it had
     /// any: `(archive, inner path, body)`.
     archive_preview: Option<(PathBuf, String, Option<String>)>,
+
+    // ── Remote services (PLAN §7.6) ─────────────────────────────────────────
+    /// The vfs, started the first time `g 1` asks for a service.
+    ///
+    /// `None` is the resting state of a session that never went anywhere
+    /// remote: no worker thread, no `ssh`, no `vfs.toml` read — the same
+    /// laziness `git`, `du` and `udisks` get, and for the same reason.
+    /// [`Arc`] because a download job outlives the frame that spawned it.
+    vfs: Option<Arc<df_core::vfs::Vfs>>,
+    /// Every local file a remote session has produced, and the one place they
+    /// are removed from. Swept on quit.
+    temps: crate::remote::Temps,
+    /// Remote operations running on the pool, and what each owes the UI when it
+    /// lands. Plural because a download and a rename can be in flight at once.
+    remote_ops: Vec<PendingRemote>,
+    /// The preview card's state for the remote row under the cursor.
+    remote_preview: Option<RemotePreview>,
+    /// The row the cursor is resting on and since when — the preview's debounce
+    /// (see [`crate::remote::PREVIEW_DEBOUNCE`]). A held `↓` through a hundred
+    /// remote rows has to cost nothing at all.
+    remote_hover: Option<(String, Instant)>,
+    /// Services that have answered at least once this session.
+    ///
+    /// What the "Connecting to …" sticky toast is keyed on: the *first* listing
+    /// of a service is a TCP connect, a key exchange and possibly a whole
+    /// `ProxyJump` chain, and it is the only wait the user needs telling about.
+    /// Every listing after it is one round trip on a connection that is already
+    /// up, and a toast for that would be noise.
+    remote_connected: HashSet<String>,
+
+    // ── The trash (PLAN §7.4) ───────────────────────────────────────────────
+    /// What the linemode column says in the trash view: each row's original
+    /// directory, by name. Rebuilt with the listing, so it cannot describe rows
+    /// that are no longer there.
+    trash_notes: HashMap<String, String>,
     /// The repository the current directory is in, recomputed only when the
     /// directory changes.
     ///
@@ -930,6 +1007,13 @@ impl App {
             repo: None,
             archive_job: None,
             archive_preview: None,
+            vfs: None,
+            temps: crate::remote::Temps::default(),
+            remote_ops: Vec::new(),
+            remote_preview: None,
+            remote_hover: None,
+            remote_connected: HashSet::new(),
+            trash_notes: HashMap::new(),
             du: None,
             usage: None,
             udisks: None,
@@ -1159,6 +1243,19 @@ impl App {
         if self.sync_archive_preview() {
             changed = true;
         }
+        // Whatever the remote services have listed (PLAN §7.6), and whatever
+        // their operations have finished.
+        if self.poll_vfs(now) {
+            changed = true;
+        }
+        if self.poll_remote_ops(now) {
+            changed = true;
+        }
+        // …and the remote preview card's body, once the cursor has rested on a
+        // row long enough to be worth a round trip for.
+        if self.sync_remote_preview(now) {
+            changed = true;
+        }
         // The recursive-size walk's running totals (PLAN §7.3).
         if self.poll_usage(now) {
             changed = true;
@@ -1226,6 +1323,23 @@ impl App {
         if let Some(root) = self.repo.clone() {
             self.git().refresh(&root);
         }
+        // A remote pane refreshes by forgetting: the cache is the only reason
+        // it did not go back to the server, so a deliberate refresh drops it
+        // and re-lists where you are (PLAN §7.6).
+        if self.tab().remote.is_some() {
+            let (mgr, sort) = (self.mgr.clone(), self.sort());
+            if let Some(session) = &mut self.tabs.active_mut().remote {
+                session.forget_all();
+            }
+            if let Some(at) = self.tabs.active_mut().refresh_remote(&mgr, sort, now) {
+                self.scan_remote(at, now);
+            }
+            return;
+        }
+        if self.tab().trash.is_some() {
+            self.refresh_trash(now);
+            return;
+        }
         let (mgr, sort) = (self.mgr.clone(), self.sort());
         self.tabs
             .active_mut()
@@ -1234,6 +1348,19 @@ impl App {
     }
 
     fn navigate(&mut self, path: PathBuf, now: Instant) {
+        // The two virtual locations are addressed by URL, so *every* door into
+        // them — a `g` bookmark, a breadcrumb click, the palette, a `z` jump,
+        // an `--cwd-file` argument — arrives here and is routed in one place.
+        // A URL that reached the scanner would be a failed read of a directory
+        // that does not exist.
+        if let Some(at) = crate::remote::at_of(&path) {
+            self.enter_remote(at, now);
+            return;
+        }
+        if path == Path::new(crate::trashview::URL) {
+            self.open_trash(now);
+            return;
+        }
         let (mgr, sort) = (self.mgr.clone(), self.sort());
         self.tabs
             .active_mut()
@@ -1289,7 +1416,15 @@ impl App {
     /// from [`TaskEngine::snapshot`], never from this.
     fn task_event(&mut self, event: TaskEvent, now: Instant) {
         match event.state {
-            TaskState::Done | TaskState::Cancelled => self.finish_op(event.id, now),
+            TaskState::Done | TaskState::Cancelled => {
+                self.finish_op(event.id, now);
+                // A remote job's result is in its slot, not in the event, so
+                // the slot is read *before* the op is forgotten — and forgotten
+                // it is, because a job cancelled before a worker picked it up
+                // never fills one and would otherwise sit here for ever.
+                self.poll_remote_ops(now);
+                self.remote_ops.retain(|op| op.id != event.id);
+            }
             // A failure is not always the end — a transient one is republished
             // as `Failed { retries }` and then runs again — so the op stays
             // pending and only the message goes out now.
@@ -1610,6 +1745,837 @@ impl App {
         true
     }
 
+    // ── Remote services (PLAN §7.6) ─────────────────────────────────────────
+
+    /// The vfs, started the first time something asks for it.
+    ///
+    /// Lazy for the same reason `git` and `udisks` are: a session spent
+    /// entirely in `~/Pictures` should not read `vfs.toml`, and it certainly
+    /// should not hold a worker thread for a service it will never reach.
+    fn vfs(&mut self) -> Arc<df_core::vfs::Vfs> {
+        if self.vfs.is_none() {
+            let waker = self.waker.clone();
+            let notifier: df_core::fs::Notifier = Arc::new(move || waker.wake());
+            let vfs = df_core::vfs::Vfs::start(notifier);
+            for warning in vfs.warnings() {
+                log::warn!("{warning}");
+            }
+            self.vfs = Some(Arc::new(vfs));
+        }
+        // The line above filled it; the fallback keeps this infallible rather
+        // than panicking in the one place a panic would take the window.
+        match &self.vfs {
+            Some(vfs) => Arc::clone(vfs),
+            None => Arc::new(df_core::vfs::Vfs::start(Arc::new(|| {}))),
+        }
+    }
+
+    /// Where the tab is, remotely, or `None` when it is on this machine.
+    fn remote_at(&self) -> Option<df_core::vfs::VfsPath> {
+        self.tab().remote.as_ref().map(|s| s.at.clone())
+    }
+
+    /// The local directory a jump away from here should be able to come back
+    /// to: the one on screen, or the one the virtual listing already remembers.
+    fn local_origin(&self) -> PathBuf {
+        if let Some(session) = &self.tab().remote {
+            return session.origin.clone();
+        }
+        if let Some(view) = &self.tab().trash {
+            return view.origin.clone();
+        }
+        if let Some(browse) = &self.tab().archive {
+            return browse.real();
+        }
+        self.cwd()
+    }
+
+    /// Go to a remote place — `g 1`, a breadcrumb click, `←`, `→`, or a
+    /// palette row.
+    ///
+    // VERIFY-LIVE: `g 1` against showandtour1 with the key in the agent. The
+    // sticky "Connecting to showandtour1…" should appear, the pane should show
+    // "loading…" after 150 ms rather than an empty directory, and both should
+    // be replaced by rows in one step — no flash of "empty" in between. A
+    // machine that is *down* should end in a readable toast within
+    // `df_core::vfs::CONNECT_TIMEOUT` and never leave the sticky up.
+    fn enter_remote(&mut self, at: df_core::vfs::VfsPath, now: Instant) {
+        let vfs = self.vfs();
+        if vfs.service(&at.service).is_none() {
+            // Naming what *is* configured is the difference between an error
+            // and an error a person can act on: the usual cause is a typo in a
+            // bookmark, and the fix is in the sentence.
+            let known: Vec<&str> = vfs.services().iter().map(|s| s.name.as_str()).collect();
+            let known = if known.is_empty() {
+                "vfs.toml defines no services".to_string()
+            } else {
+                format!("vfs.toml has {}", known.join(", "))
+            };
+            self.toasts
+                .error(format!("No service called {} — {known}", at.service), now);
+            return;
+        }
+
+        let origin = self.local_origin();
+        let session = match self.tabs.active_mut().remote.take() {
+            // Staying on the same service keeps the cache and the origin: this
+            // is a step, not a new session.
+            Some(mut session) if session.at.service == at.service => {
+                session.at = at.clone();
+                session
+            }
+            _ => crate::remote::Session::new(at.clone(), origin),
+        };
+        let (mgr, sort) = (self.mgr.clone(), self.sort());
+        let wanted = self
+            .tabs
+            .active_mut()
+            .show_remote(session, &mgr, sort, now);
+        // Leaving is leaving: a visual run is anchored to a row in a listing
+        // that is no longer on screen.
+        self.visual = None;
+        self.focus = Focus::List;
+        self.close_player();
+        self.preview.cancel();
+        self.rewatch();
+        self.remote_preview = None;
+        self.remote_hover = None;
+        if let Some(at) = wanted {
+            self.scan_remote(at, now);
+        }
+    }
+
+    /// Queue a listing and remember its token.
+    ///
+    // VERIFY-LIVE: hold `↓` through a large remote directory and then `→` into
+    // one, twice quickly. Only the last directory's rows may land; the tokens
+    // are what drop the rest, and a stale batch appearing in the wrong pane is
+    // the failure this is guarding against.
+    fn scan_remote(&mut self, at: df_core::vfs::VfsPath, now: Instant) {
+        let vfs = self.vfs();
+        // The one wait the user can see, said out loud — and as a *sticky*
+        // toast, which has no clock: a connect that takes twelve seconds must
+        // not have its own notice expire underneath it. It comes down on the
+        // service's first answer, whichever answer that is.
+        if !self.remote_connected.contains(&at.service) {
+            self.toasts
+                .sticky(format!("Connecting to {}…", at.service), now);
+        }
+        let token = vfs.scan(at.clone());
+        if let Some(session) = &mut self.tabs.active_mut().remote {
+            // A listing this tab has walked away from is not wanted; dropping
+            // the old token is also what stops its batches landing in the new
+            // directory's pane.
+            if let Some((old, _)) = session.pending.replace((token, at)) {
+                if old != token {
+                    vfs.cancel(old);
+                }
+            }
+        }
+    }
+
+    /// Whatever the vfs has said since the last frame.
+    fn poll_vfs(&mut self, now: Instant) -> bool {
+        let Some(vfs) = self.vfs.clone() else {
+            return false;
+        };
+        let updates = vfs.drain();
+        if updates.is_empty() {
+            return false;
+        }
+        for update in updates {
+            let service = update.dir().service.clone();
+            let mut wanted = false;
+            for tab in self.tabs.iter_mut() {
+                wanted |= apply_vfs(tab, &update);
+            }
+            match update {
+                df_core::vfs::VfsUpdate::Started { .. } => {
+                    if self.remote_connected.insert(service) {
+                        self.toasts.clear_sticky(now);
+                    }
+                }
+                df_core::vfs::VfsUpdate::Failed { error, .. } => {
+                    // The connection is up as far as the toast is concerned:
+                    // whatever happens next, the "connecting…" notice has been
+                    // answered and must come down (PLAN §7.6's "never hangs").
+                    self.remote_connected.insert(service);
+                    self.toasts.clear_sticky(now);
+                    if wanted {
+                        self.toasts.error(error.to_string(), now);
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Spawn a remote operation on the pool.
+    ///
+    /// Every remote verb goes through here, including the ones that are a
+    /// single packet: an `ssh` round trip between two frames is a frozen
+    /// window, and "this one is quick" is how that gets written by accident.
+    fn spawn_remote<F>(&mut self, name: String, lane: Lane, work: F)
+    where
+        F: FnOnce(&df_core::vfs::Vfs, &TaskCtx) -> std::result::Result<RemoteDone, String>
+            + Send
+            + 'static,
+    {
+        let vfs = self.vfs();
+        let slot: Arc<std::sync::Mutex<Option<std::result::Result<RemoteDone, String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let job_slot = Arc::clone(&slot);
+        let mut work = Some(work);
+        let job = FnJob::new(name, lane, move |ctx| {
+            // `FnJob` is `FnMut` because the engine may retry; a remote verb is
+            // taken once and a retry finds nothing to do rather than sending a
+            // second `RENAME` the user did not ask for.
+            let Some(work) = work.take() else {
+                return Ok(());
+            };
+            let result = work(&vfs, ctx);
+            match job_slot.lock() {
+                Ok(mut guard) => *guard = Some(result),
+                Err(poisoned) => *poisoned.into_inner() = Some(result),
+            }
+            Ok(())
+        });
+        let id = self.engine.spawn(job);
+        self.remote_ops.push(PendingRemote { id, slot });
+    }
+
+    /// Have any remote operations landed?
+    fn poll_remote_ops(&mut self, now: Instant) -> bool {
+        if self.remote_ops.is_empty() {
+            return false;
+        }
+        let mut landed: Vec<std::result::Result<RemoteDone, String>> = Vec::new();
+        self.remote_ops.retain(|op| {
+            let result = match op.slot.lock() {
+                Ok(mut guard) => guard.take(),
+                Err(poisoned) => poisoned.into_inner().take(),
+            };
+            match result {
+                Some(result) => {
+                    landed.push(result);
+                    false
+                }
+                // Still running. A job that ends without filling its slot —
+                // cancelled before a worker picked it up — is dropped by
+                // [`App::task_event`], so this cannot leak.
+                None => true,
+            }
+        });
+        if landed.is_empty() {
+            return false;
+        }
+        for result in landed {
+            match result {
+                Err(message) => {
+                    // A cancelled operation is not a failure and stays quiet,
+                    // the same rule `finish_op` follows.
+                    if message != df_core::DfError::Cancelled.to_string() {
+                        self.toasts.error(message, now);
+                    }
+                    if let Some(preview) = &mut self.remote_preview {
+                        preview.loading = false;
+                    }
+                }
+                Ok(done) => self.apply_remote_done(done, now),
+            }
+        }
+        true
+    }
+
+    fn apply_remote_done(&mut self, done: RemoteDone, now: Instant) {
+        if let Some(at) = &done.invalidate {
+            if let Some(session) = &mut self.tabs.active_mut().remote {
+                session.invalidate(at);
+            }
+            // Only re-list if it is the directory on screen; invalidating is
+            // enough for anywhere else, and a listing nobody is looking at is a
+            // round trip nobody asked for.
+            if self.remote_at().as_ref() == Some(at) {
+                let (mgr, sort) = (self.mgr.clone(), self.sort());
+                if let Some(at) = self.tabs.active_mut().refresh_remote(&mgr, sort, now) {
+                    self.scan_remote(at, now);
+                }
+            }
+        }
+        for dir in &done.dirs {
+            self.rescan(dir, now);
+        }
+        if let Some((url, local)) = done.preview {
+            let body = read_preview_text(&local);
+            self.temps.remember(url.clone(), local);
+            if let Some(preview) = &mut self.remote_preview {
+                if preview.url == url {
+                    preview.body = body;
+                    preview.loading = false;
+                }
+            }
+        }
+        if let Some((url, local)) = done.open {
+            self.temps.remember(url, local.clone());
+            self.open_local_temp(local, now);
+        }
+        if !done.message.is_empty() {
+            self.toasts.confirm(done.message, now);
+        }
+    }
+
+    /// `o` / `Enter` on a remote file: the download, then the local opener.
+    ///
+    /// The temp file is kept and reused, so opening the same row twice costs
+    /// one download — and it is *accounted for*, so quitting removes it
+    /// (see [`crate::remote::Temps`]).
+    ///
+    // VERIFY-LIVE: `o` on a remote image. It should download once (visible in
+    // the `w` panel with progress), open in the configured viewer, and open
+    // *instantly* the second time. On quit, `$TMPDIR/delightfile-vfs-<pid>/`
+    // must be gone.
+    fn open_remote(&mut self, at: df_core::vfs::VfsPath, name: String, now: Instant) {
+        let url = at.to_url();
+        if let Some(local) = self.temps.get(&url).map(Path::to_path_buf) {
+            self.open_local_temp(local, now);
+            return;
+        }
+        self.toasts.notice(format!("Downloading {name}…"), now);
+        self.spawn_remote(format!("Download {name}"), Lane::Macro, move |vfs, ctx| {
+            let local = vfs.download_to_temp(&at, ctx).map_err(|e| e.to_string())?;
+            Ok(RemoteDone {
+                open: Some((url, local)),
+                ..RemoteDone::default()
+            })
+        });
+    }
+
+    /// Hand a downloaded file to the opener rules, as though it were local —
+    /// which, by this point, it is.
+    fn open_local_temp(&mut self, local: PathBuf, now: Instant) {
+        let entry = match df_core::fs::Entry::read(&local) {
+            Ok(entry) => entry,
+            Err(e) => {
+                self.toasts.error(e.to_string(), now);
+                return;
+            }
+        };
+        let Some(choice) = open::choices_for(&self.config, &entry).into_iter().next() else {
+            self.toasts
+                .notice(format!("No opener rule matches {}", entry.name), now);
+            return;
+        };
+        self.launch(&choice, vec![local], now);
+    }
+
+    /// The preview card's body: the row under the cursor, downloaded once it
+    /// has been rested on.
+    ///
+    /// Two gates before a byte moves — [`crate::remote::previewable`] and the
+    /// debounce — because this is the one place in the program where moving the
+    /// cursor spends somebody's bandwidth.
+    ///
+    // VERIFY-LIVE: hold `↓` through a remote directory of source files. The
+    // `w` panel must stay empty — not one download per row — and a pause of a
+    // beat on one row must produce exactly one "Preview …" task.
+    fn sync_remote_preview(&mut self, now: Instant) -> bool {
+        if self.tab().remote.is_none() {
+            let had = self.remote_preview.is_some() || self.remote_hover.is_some();
+            self.remote_preview = None;
+            self.remote_hover = None;
+            return had;
+        }
+        let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
+            let had = self.remote_preview.is_some();
+            self.remote_preview = None;
+            self.remote_hover = None;
+            return had;
+        };
+        let url = entry.path.to_string_lossy().into_owned();
+        if self.remote_preview.as_ref().is_some_and(|p| p.url == url) {
+            return false;
+        }
+
+        // A row with no body to fetch settles immediately: the card is the
+        // facts and the reason there is nothing under them.
+        if !crate::remote::previewable(&entry) {
+            self.remote_hover = None;
+            self.remote_preview = Some(RemotePreview {
+                url,
+                body: None,
+                loading: false,
+            });
+            return true;
+        }
+        // Already downloaded — `o` on this row earlier in the session, or a
+        // second visit. No round trip, and the body is there this frame.
+        if let Some(local) = self.temps.get(&url).map(Path::to_path_buf) {
+            self.remote_hover = None;
+            self.remote_preview = Some(RemotePreview {
+                body: read_preview_text(&local),
+                url,
+                loading: false,
+            });
+            return true;
+        }
+
+        match &self.remote_hover {
+            Some((resting, since)) if *resting == url => {
+                if now.duration_since(*since) < crate::remote::PREVIEW_DEBOUNCE {
+                    // Not yet. The deadline is scheduled by
+                    // `remote_preview_deadline`, so this costs no frames.
+                    return false;
+                }
+            }
+            _ => {
+                self.remote_hover = Some((url, now));
+                return true;
+            }
+        }
+
+        self.remote_hover = None;
+        self.remote_preview = Some(RemotePreview {
+            url: url.clone(),
+            body: None,
+            loading: true,
+        });
+        let at = df_core::vfs::VfsPath::parse(&url);
+        let Some(at) = at else { return true };
+        // `Lane::Micro`: it is a small read the user is waiting on, and putting
+        // it behind a queued 4 GB download would make the pane lie for minutes.
+        self.spawn_remote(format!("Preview {}", entry.name), Lane::Micro, move |vfs, ctx| {
+            let local = vfs.download_to_temp(&at, ctx).map_err(|e| e.to_string())?;
+            Ok(RemoteDone {
+                preview: Some((url, local)),
+                ..RemoteDone::default()
+            })
+        });
+        true
+    }
+
+    /// When the resting cursor is due its preview download, if one is pending.
+    fn remote_preview_deadline(&self, now: Instant) -> Option<Duration> {
+        let (_, since) = self.remote_hover.as_ref()?;
+        let due = (*since + crate::remote::PREVIEW_DEBOUNCE).saturating_duration_since(now);
+        (!due.is_zero()).then_some(due)
+    }
+
+    /// `a` with a trailing `/` on a remote service. Files are not offered:
+    /// SFTP can make an empty one, but "create a file here" on a machine you
+    /// are not going to edit on is a gesture with no follow-through, and
+    /// uploading is the way files get there.
+    fn remote_create(&mut self, at: df_core::vfs::VfsPath, text: &str) -> Result<(), String> {
+        let name = text.trim().trim_end_matches('/');
+        if name.is_empty() {
+            return Err("no name given".to_string());
+        }
+        if !text.trim().ends_with('/') {
+            return Err("only folders can be created remotely — end the name with /".to_string());
+        }
+        if name.contains('/') {
+            return Err("one folder at a time: remote create makes no parents".to_string());
+        }
+        let target = at.join(name);
+        let label = name.to_string();
+        self.spawn_remote(format!("Make {label}"), Lane::Micro, move |vfs, ctx| {
+            vfs.mkdir(&target, ctx).map_err(|e| e.to_string())?;
+            Ok(RemoteDone {
+                message: format!("Created folder {label}"),
+                invalidate: Some(at),
+                ..RemoteDone::default()
+            })
+        });
+        Ok(())
+    }
+
+    /// `r` on a remote row.
+    fn remote_rename(&mut self, at: df_core::vfs::VfsPath, text: &str) -> Result<(), String> {
+        let name = text.trim();
+        if name.is_empty() {
+            return Err("no name given".to_string());
+        }
+        if name.contains('/') {
+            return Err("a rename is a name, not a path".to_string());
+        }
+        let Some(from) = self
+            .tab()
+            .cwd
+            .dir
+            .cursor_entry()
+            .and_then(|entry| crate::remote::at_of(&entry.path))
+        else {
+            return Err("nothing under the cursor".to_string());
+        };
+        let to = at.join(name);
+        let old_url = from.to_url();
+        let label = name.to_string();
+        // The temp file was a copy of the *old* name, and an opener that
+        // sniffs extensions must not be handed it under the new one.
+        self.temps.forget(&old_url);
+        self.spawn_remote(format!("Rename to {label}"), Lane::Micro, move |vfs, ctx| {
+            vfs.rename(&from, &to, ctx).map_err(|e| e.to_string())?;
+            Ok(RemoteDone {
+                message: format!("Renamed to {label}"),
+                invalidate: Some(at),
+                ..RemoteDone::default()
+            })
+        });
+        Ok(())
+    }
+
+    /// `d` on a remote selection, once the confirm has been answered.
+    ///
+    /// No trash, and the dialog said so. Directories go through `RMDIR` and
+    /// files through `REMOVE`; a non-empty directory fails with the server's
+    /// own words, which is the honest outcome — a recursive remote delete is a
+    /// walk plus N round trips, and doing it silently behind one keystroke is
+    /// how people lose a `node_modules` they meant to keep.
+    ///
+    // VERIFY-LIVE: `d` on a remote file and on a non-empty remote folder. The
+    // dialog body must read "There is no trash on the server", the file must
+    // go, and the folder must fail with the server's own words rather than
+    // being emptied.
+    fn remote_delete(&mut self, paths: Vec<PathBuf>, now: Instant) {
+        let Some(at) = self.remote_at() else { return };
+        let targets: Vec<(df_core::vfs::VfsPath, bool)> = paths
+            .iter()
+            .filter_map(|path| {
+                let entry = self
+                    .tab()
+                    .cwd
+                    .dir
+                    .entries()
+                    .iter()
+                    .find(|entry| &entry.path == path)?;
+                Some((crate::remote::at_of(path)?, entry.is_dir()))
+            })
+            .collect();
+        if targets.is_empty() {
+            self.toasts.notice("Nothing selected", now);
+            return;
+        }
+        for (place, _) in &targets {
+            self.temps.forget(&place.to_url());
+        }
+        let count = targets.len();
+        let here = at.clone();
+        self.spawn_remote(
+            format!("Delete {}", plural(count, "remote item", "remote items")),
+            Lane::Macro,
+            move |vfs, ctx| {
+                let mut gone = 0;
+                let mut failure: Option<String> = None;
+                for (place, is_dir) in &targets {
+                    let result = if *is_dir {
+                        vfs.rmdir(place, ctx)
+                    } else {
+                        vfs.remove(place, ctx)
+                    };
+                    match result {
+                        Ok(()) => gone += 1,
+                        // The first failure is the one reported, and the rest
+                        // of the selection still goes: a permission problem on
+                        // one file is not a reason to keep the other thirty.
+                        Err(e) => {
+                            failure.get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                }
+                match failure {
+                    // Something went, and something did not: the count is the
+                    // fact, and the error is the sentence.
+                    Some(message) if gone > 0 => Err(format!(
+                        "Deleted {} — {message}",
+                        plural(gone, "item", "items")
+                    )),
+                    Some(message) => Err(message),
+                    None => Ok(RemoteDone {
+                        message: format!("Deleted {}", plural(gone, "remote item", "remote items")),
+                        invalidate: Some(here),
+                        ..RemoteDone::default()
+                    }),
+                }
+            },
+        );
+    }
+
+    /// `p` in a local directory with remote paths yanked.
+    ///
+    // VERIFY-LIVE: `y` on a remote selection, `←` out to a local folder, `p`.
+    // The `w` panel should show byte progress per file, the local pane should
+    // fill in as each lands (inotify), and a name that is already taken should
+    // become `name_1` rather than overwriting.
+    fn remote_download(&mut self, sources: Vec<PathBuf>, dest: PathBuf, now: Instant) {
+        let places: Vec<df_core::vfs::VfsPath> = sources
+            .iter()
+            .filter_map(|p| crate::remote::at_of(p))
+            .collect();
+        if places.is_empty() {
+            self.toasts.notice("Nothing remote to download", now);
+            return;
+        }
+        let count = places.len();
+        let into = dest.clone();
+        self.spawn_remote(
+            format!("Download {} → {}", plural(count, "file", "files"), dest.display()),
+            Lane::Macro,
+            move |vfs, ctx| {
+                let mut done = 0;
+                let mut failure: Option<String> = None;
+                for place in &places {
+                    // The name is claimed through the same `name_1` ladder a
+                    // paste uses, so a download never silently overwrites what
+                    // is already in the directory (PLAN §5).
+                    let local = match df_core::ops::paste::unique_name(
+                        &into,
+                        std::ffi::OsStr::new(place.name()),
+                        &[],
+                    ) {
+                        Ok(path) => path,
+                        Err(e) => {
+                            failure.get_or_insert_with(|| e.to_string());
+                            continue;
+                        }
+                    };
+                    match vfs.download(place, &local, ctx) {
+                        Ok(_) => done += 1,
+                        Err(e) => {
+                            failure.get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                }
+                match failure {
+                    Some(message) if done > 0 => {
+                        Err(format!("Downloaded {} — {message}", plural(done, "file", "files")))
+                    }
+                    Some(message) => Err(message),
+                    None => Ok(RemoteDone {
+                        message: format!("Downloaded {}", plural(done, "file", "files")),
+                        dirs: vec![into],
+                        ..RemoteDone::default()
+                    }),
+                }
+            },
+        );
+    }
+
+    /// `p` inside a remote directory with local paths yanked — and the same
+    /// runner a drop from a local pane uses (PLAN §7.1's target seam hands both
+    /// a `Vec<PathBuf>` and a destination, so there is one upload here rather
+    /// than one per gesture).
+    ///
+    // VERIFY-LIVE: both doors. `y` locally then `p` in a remote folder, and a
+    // drag from the parent column onto the remote list pane — the second must
+    // say "Uploaded as a copy" and leave the local originals alone. The remote
+    // listing must refresh itself when the upload lands, without an `R`.
+    fn remote_upload(&mut self, sources: Vec<PathBuf>, dest: df_core::vfs::VfsPath, now: Instant) {
+        let files: Vec<PathBuf> = sources.iter().filter(|p| p.is_file()).cloned().collect();
+        let folders = sources.len() - files.len();
+        if files.is_empty() {
+            // Said rather than silently doing nothing: a directory in the
+            // clipboard is the common case and the reason is not obvious.
+            self.toasts.notice(
+                if folders > 0 {
+                    "Only files upload in v1 — folders are not walked yet"
+                } else {
+                    "Nothing local to upload"
+                },
+                now,
+            );
+            return;
+        }
+        if folders > 0 {
+            self.toasts.notice(
+                format!("Skipping {}: only files upload in v1", plural(folders, "folder", "folders")),
+                now,
+            );
+        }
+        let count = files.len();
+        let here = dest.clone();
+        self.spawn_remote(
+            format!("Upload {} → {}", plural(count, "file", "files"), dest.to_url()),
+            Lane::Macro,
+            move |vfs, ctx| {
+                let mut done = 0;
+                let mut failure: Option<String> = None;
+                for local in &files {
+                    let Some(name) = local.file_name() else { continue };
+                    let remote = here.join(&name.to_string_lossy());
+                    match vfs.upload(local, &remote, ctx) {
+                        Ok(_) => done += 1,
+                        Err(e) => {
+                            failure.get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                }
+                match failure {
+                    Some(message) if done > 0 => {
+                        Err(format!("Uploaded {} — {message}", plural(done, "file", "files")))
+                    }
+                    Some(message) => Err(message),
+                    None => Ok(RemoteDone {
+                        message: format!("Uploaded {}", plural(done, "file", "files")),
+                        invalidate: Some(here),
+                        ..RemoteDone::default()
+                    }),
+                }
+            },
+        );
+    }
+
+    // ── The trash, browsed (PLAN §7.4) ──────────────────────────────────────
+
+    /// `g t`, and the palette's "Open trash".
+    fn open_trash(&mut self, now: Instant) {
+        let origin = self.local_origin();
+        self.show_trash(origin, now);
+    }
+
+    /// Read the trash and put it in the list pane.
+    ///
+    /// Synchronous, unlike every other listing in this program, and defensibly
+    /// so: a trash listing is one `read_dir` of `info/` plus a short file read
+    /// per item, over a directory whose size is bounded by what one person has
+    /// deleted and not emptied. The asynchronous machinery exists for
+    /// directories that can be enormous; this is not one.
+    fn show_trash(&mut self, origin: PathBuf, now: Instant) {
+        let trash = match df_core::ops::Trash::home() {
+            Ok(trash) => trash,
+            Err(e) => {
+                self.toasts.error(e.to_string(), now);
+                return;
+            }
+        };
+        let items = match trash.list() {
+            Ok(items) => items,
+            Err(e) => {
+                self.toasts.error(e.to_string(), now);
+                return;
+            }
+        };
+        self.trash_notes = crate::trashview::notes(&items);
+        let view = crate::trashview::View { items, origin };
+        let (mgr, sort) = (self.mgr.clone(), self.sort());
+        self.tabs.active_mut().show_trash(view, &mgr, sort, now);
+        self.visual = None;
+        self.focus = Focus::List;
+        self.close_player();
+        self.rewatch();
+    }
+
+    /// Rebuild the trash listing from disk, keeping the cursor.
+    fn refresh_trash(&mut self, now: Instant) {
+        let Some(origin) = self.tab().trash.as_ref().map(|v| v.origin.clone()) else {
+            return;
+        };
+        self.show_trash(origin, now);
+    }
+
+    /// The trashed items a set of row paths names.
+    fn trash_targets(&self) -> Vec<df_core::ops::TrashedItem> {
+        let paths = self.targets();
+        self.tab()
+            .trash
+            .as_ref()
+            .map(|view| view.items_for(&paths))
+            .unwrap_or_default()
+    }
+
+    /// `Enter` / `r` in the trash: put things back where they came from.
+    ///
+    /// Every refusal is checked *before* anything moves and reported as one
+    /// sentence, because a restore of forty items that stops on the third is a
+    /// worse outcome than one that says which three cannot go back. The move
+    /// itself is [`df_core::ops::trash::restore`] — the same function `u` runs
+    /// after a `d`, so the two doors to a restore cannot drift apart.
+    fn trash_restore(&mut self, now: Instant) {
+        let items = self.trash_targets();
+        if items.is_empty() {
+            self.toasts.notice("Nothing selected", now);
+            return;
+        }
+        let ctx = TaskCtx::detached();
+        let mut restored = 0;
+        let mut refusal: Option<String> = None;
+        for item in &items {
+            if let Some(message) = crate::trashview::restore_refusal(item) {
+                refusal.get_or_insert(message);
+                continue;
+            }
+            match df_core::ops::trash::restore(item, &ctx) {
+                Ok(_) => restored += 1,
+                Err(e) => {
+                    refusal.get_or_insert_with(|| e.to_string());
+                }
+            }
+        }
+        self.refresh_trash(now);
+        match refusal {
+            Some(message) if restored > 0 => self
+                .toasts
+                .error(format!("Restored {} — {message}", plural(restored, "item", "items")), now),
+            Some(message) => self.toasts.error(message, now),
+            None => self
+                .toasts
+                .confirm(format!("Restored {}", plural(restored, "item", "items")), now),
+        }
+    }
+
+    /// `D` in the trash, and "Empty trash" — the same job with a different
+    /// subject. Never journalled: there is nothing to record.
+    fn trash_purge(&mut self, items: Vec<df_core::ops::TrashedItem>, now: Instant) {
+        if items.is_empty() {
+            self.toasts.notice("Nothing to destroy", now);
+            return;
+        }
+        let count = items.len();
+        let slot: Arc<std::sync::Mutex<Option<std::result::Result<RemoteDone, String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let job_slot = Arc::clone(&slot);
+        let job = FnJob::new(
+            format!("Destroy {}", plural(count, "trashed item", "trashed items")),
+            Lane::Macro,
+            move |ctx| {
+                let mut gone = 0;
+                let mut failure: Option<String> = None;
+                for item in &items {
+                    match df_core::ops::purge(item, ctx) {
+                        Ok(()) => gone += 1,
+                        Err(e) => {
+                            failure.get_or_insert_with(|| e.to_string());
+                        }
+                    }
+                }
+                let result = match failure {
+                    Some(message) if gone > 0 => Err(format!(
+                        "Destroyed {} — {message}",
+                        plural(gone, "item", "items")
+                    )),
+                    Some(message) => Err(message),
+                    None => Ok(RemoteDone {
+                        message: format!("Destroyed {}", plural(gone, "item", "items")),
+                        ..RemoteDone::default()
+                    }),
+                };
+                match job_slot.lock() {
+                    Ok(mut guard) => *guard = Some(result),
+                    Err(poisoned) => *poisoned.into_inner() = Some(result),
+                }
+                Ok(())
+            },
+        );
+        let id = self.engine.spawn(job);
+        // The purge shares the remote pipeline's bookkeeping, which is not a
+        // pun: both are "a job whose result is a message and a listing that has
+        // to be re-read", and a second copy of that would be a second place for
+        // the toast to go missing.
+        self.remote_ops.push(PendingRemote { id, slot });
+        // The rows are gone the moment the job is queued as far as the *view*
+        // is concerned; the re-read below is what makes that true on screen.
+        self.refresh_trash(now);
+    }
+
     /// `y` / `x`.
     fn set_clipboard(&mut self, cut: bool, now: Instant) {
         let paths = self.targets();
@@ -1687,6 +2653,36 @@ impl App {
     /// same code either way, which is the point of routing a drop through here
     /// rather than giving it a pipeline of its own.
     fn paste_into(&mut self, clipboard: &Clipboard, dest: PathBuf, force: bool, now: Instant) {
+        // PLAN §7.6: one clipboard, one `p`, and the meaning read off the two
+        // ends rather than off a mode (see [`crate::remote::Transfer`]).
+        match crate::remote::Transfer::of(&clipboard.paths, &dest) {
+            crate::remote::Transfer::Local => {}
+            crate::remote::Transfer::Download => {
+                self.remote_download(clipboard.paths.clone(), dest, now);
+                return;
+            }
+            crate::remote::Transfer::Upload => {
+                let Some(at) = crate::remote::at_of(&dest) else { return };
+                self.remote_upload(clipboard.paths.clone(), at, now);
+                return;
+            }
+            crate::remote::Transfer::Across => {
+                // Refused *by name*: it would be a download and an upload
+                // through this machine, and the user should be told that is
+                // what they are asking for rather than working it out from a
+                // progress bar that runs twice.
+                self.toasts.notice(
+                    "Server to server would come through this machine — download it first",
+                    now,
+                );
+                return;
+            }
+            crate::remote::Transfer::Mixed => {
+                self.toasts
+                    .notice("Local and remote files in one paste — yank one or the other", now);
+                return;
+            }
+        }
         let plan = match plan_paste(clipboard, &dest, force) {
             Ok(plan) => plan,
             Err(e) => {
@@ -1725,9 +2721,26 @@ impl App {
 
     /// `d` and `D`, both of which ask first.
     fn open_confirm(&mut self, kind: ConfirmKind, now: Instant) {
-        let paths = self.targets();
+        // "Empty trash" is about the whole trash, not about what is selected —
+        // and it is the one confirm whose body has to be able to say how many
+        // things it is destroying even when nothing is highlighted.
+        let paths = if kind == ConfirmKind::EmptyTrash {
+            match &self.tab().trash {
+                Some(view) => view.items.iter().map(|i| i.files_path()).collect(),
+                None => Vec::new(),
+            }
+        } else {
+            self.targets()
+        };
         if paths.is_empty() {
-            self.toasts.notice("Nothing selected", now);
+            self.toasts.notice(
+                if kind == ConfirmKind::EmptyTrash {
+                    "The trash is already empty"
+                } else {
+                    "Nothing selected"
+                },
+                now,
+            );
             return;
         }
         self.dialog = Some(Dialog::Confirm(Confirm::new(kind, paths)));
@@ -1735,7 +2748,7 @@ impl App {
     }
 
     /// The confirm was answered yes.
-    fn run_confirm(&mut self, confirm: Confirm, _now: Instant) {
+    fn run_confirm(&mut self, confirm: Confirm, now: Instant) {
         let dirs = Self::affected(&confirm.paths, None);
         let (id, slot) = match confirm.kind {
             ConfirmKind::Trash => {
@@ -1747,6 +2760,28 @@ impl App {
                 let job = DeleteJob::new(confirm.paths);
                 let slot = job.outcome();
                 (self.engine.spawn(job), slot)
+            }
+            // The three that do not go through the ops pipeline: two of them
+            // have no local inverse to journal, and the third is not on this
+            // machine at all.
+            ConfirmKind::RemoteDelete => {
+                self.remote_delete(confirm.paths, now);
+                return;
+            }
+            ConfirmKind::Purge => {
+                let items = self.trash_targets();
+                self.trash_purge(items, now);
+                return;
+            }
+            ConfirmKind::EmptyTrash => {
+                let items = self
+                    .tab()
+                    .trash
+                    .as_ref()
+                    .map(|view| view.items.clone())
+                    .unwrap_or_default();
+                self.trash_purge(items, now);
+                return;
             }
         };
         self.track(id, slot, dirs);
@@ -1847,6 +2882,13 @@ impl App {
         if entry.is_dir() {
             let path = entry.path.clone();
             self.navigate(path, now);
+            return;
+        }
+        // PLAN §7.6's download-on-open: a remote file has no local path for an
+        // opener to take, so it is fetched first and the opener runs on the
+        // temp file (which the session's ledger removes on quit).
+        if let Some(at) = crate::remote::at_of(&entry.path) {
+            self.open_remote(at, entry.name.clone(), now);
             return;
         }
         let choices = open::choices_for(&self.config, &entry);
@@ -1959,11 +3001,12 @@ impl App {
     /// it is a pure function, so this is also what makes `media_hovered`
     /// testable.
     fn hovered_kind(&self) -> Option<(PathBuf, PreviewKind)> {
-        if self.tab().archive.is_some() {
-            // Inside an archive there is no file to decode, so the transport
-            // keys are inert and the `MediaHovered` bindings are simply not
-            // there — which is how PLAN §4.3's reserved keys stay reserved
-            // without a special case in the router.
+        if self.tab().archive.is_some() || self.tab().remote.is_some() {
+            // Inside an archive, and on a remote service, there is no file to
+            // decode: the transport keys are inert and the `MediaHovered`
+            // bindings are simply not there — which is how PLAN §4.3's reserved
+            // keys stay reserved without a special case in the router. (The
+            // trash *is* files on this machine, so it keeps its transport.)
             return None;
         }
         let entry = self.tab().cwd.dir.cursor_entry()?;
@@ -2534,6 +3577,19 @@ impl App {
         }
         // The commands a person has actually used, first.
         finder::by_recency(&mut rows, &self.mru);
+        // "Empty trash", which is reachable only while the trash is on screen
+        // and therefore has no chord to be found under: a key bound to
+        // "destroy everything I have deleted" is a key somebody presses by
+        // accident, and this one asks first *and* has to be typed for.
+        if self.tab().trash.is_some() {
+            let n = self.tab().trash.as_ref().map(|v| v.items.len()).unwrap_or(0);
+            rows.push(finder::Row {
+                label: "Empty trash".to_string(),
+                detail: plural(n, "item", "items"),
+                kind: finder::Kind::Command,
+                choice: Choice::Run(Command::EmptyTrash),
+            });
+        }
         // The view toggle, which has no registry row to be found under — see
         // `Choice::ToggleView`.
         rows.push(finder::Row {
@@ -3664,6 +4720,9 @@ impl App {
         if text.is_empty() {
             return Err("no name given".to_string());
         }
+        if let Some(at) = self.remote_at() {
+            return self.remote_create(at, text);
+        }
         let path = self.cwd().join(text);
         let created = df_core::ops::create(&path).map_err(|e| e.to_string())?;
         let name = created
@@ -3697,6 +4756,9 @@ impl App {
         let text = text.trim();
         if text.is_empty() {
             return Err("no name given".to_string());
+        }
+        if let Some(at) = self.remote_at() {
+            return self.remote_rename(at, text);
         }
         let Some(from) = self
             .tab()
@@ -4019,6 +5081,28 @@ impl App {
             );
             return;
         }
+        // PLAN §7.6: the same rule for a remote service, with a different list
+        // and a different sentence. What is missing is missing for a reason the
+        // notice names, so the key is not simply dead.
+        if self.tab().remote.is_some() && crate::remote::inert_remotely(command) {
+            self.toasts.notice(
+                "Not over the link — press y then p in a local folder to bring it here"
+                    .to_string(),
+                now,
+            );
+            return;
+        }
+        // PLAN §7.4: the trash is a listing of things that have already been
+        // deleted. Everything that would act on them *as files where they are*
+        // is inert, and the three verbs that are not are Enter/r, D and the
+        // palette's "Empty trash".
+        if self.tab().trash.is_some() && inert_in_trash(command) {
+            self.toasts.notice(
+                "Not in the trash — Enter restores, D destroys".to_string(),
+                now,
+            );
+            return;
+        }
         // Half a page rounds *down* but never to nothing: on a pane too short
         // to have a half, `Ctrl+d` still has to move.
         let half = (page / 2).max(1) as isize;
@@ -4053,6 +5137,22 @@ impl App {
                     self.apply_visual();
                     return;
                 }
+                // `←` on a remote service walks up the remote tree, and at the
+                // service root walks *out* — back to the local directory the
+                // session started in (`crate::remote::leave`).
+                if let Some(at) = self.remote_at() {
+                    let origin = self.local_origin();
+                    match crate::remote::leave(&at, &origin) {
+                        crate::remote::Leave::Up(up) => self.enter_remote(up, now),
+                        crate::remote::Leave::Out(home) => self.navigate(home, now),
+                    }
+                    return;
+                }
+                // The trash has no inside, so `←` is the only way out of it.
+                if let Some(origin) = self.tab().trash.as_ref().map(|v| v.origin.clone()) {
+                    self.navigate(origin, now);
+                    return;
+                }
                 if let Some(parent) = self.tab().cwd.path().parent().map(Path::to_path_buf) {
                     self.navigate(parent, now);
                 }
@@ -4068,6 +5168,12 @@ impl App {
                 // there; a file has no inside, so `→` goes to the pane that is
                 // already showing it.
                 let hovered = match self.tab().cwd.dir.cursor_entry() {
+                    // In the trash even a folder is a *thing*, not a place: its
+                    // real path is inside `…/Trash/files/`, and walking in
+                    // would leave the view and strand somebody two levels down
+                    // a directory they never chose to open (PLAN §7.4). `→`
+                    // focuses the preview, which is what the row is for.
+                    Some(_) if self.tab().trash.is_some() => Hovered::File,
                     Some(entry) if entry.is_dir() => Hovered::Directory,
                     Some(_) => Hovered::File,
                     None => Hovered::Nothing,
@@ -4090,6 +5196,10 @@ impl App {
                             .dir
                             .cursor_entry()
                             .filter(|_| self.tab().archive.is_none())
+                            // …and not on a remote service: the row's path is a
+                            // URL, and the archive reader takes a file on this
+                            // machine. `o` downloads it; `→` focuses the card.
+                            .filter(|_| self.tab().remote.is_none())
                             .filter(|entry| crate::archive::looks_like_archive(entry))
                             .map(|entry| entry.path.clone());
                         match archive {
@@ -4144,6 +5254,8 @@ impl App {
                 }
             }
             C::Goto(slot) => self.goto(slot, now),
+            C::OpenTrash => self.open_trash(now),
+            C::EmptyTrash => self.open_confirm(ConfirmKind::EmptyTrash, now),
 
             // ── The preview, from the list (PLAN §4.1's yazi parity) ────────
             // **One key, two units.** yazi's `K`/`J` "seek preview ±5" moves a
@@ -4425,12 +5537,33 @@ impl App {
             C::CopyFilename => self.copy_piece(Piece::Filename, now),
             C::CopyStem => self.copy_piece(Piece::Stem, now),
 
-            C::Trash => self.open_confirm(ConfirmKind::Trash, now),
-            C::DeletePermanently => self.open_confirm(ConfirmKind::Delete, now),
+            // `d`: the trash locally, and a confirm that says there is no trash
+            // remotely (PLAN §7.6). In the trash view it is on `inert_in_trash`,
+            // because what it names has already been trashed.
+            C::Trash => {
+                let kind = if self.tab().remote.is_some() {
+                    ConfirmKind::RemoteDelete
+                } else {
+                    ConfirmKind::Trash
+                };
+                self.open_confirm(kind, now);
+            }
+            C::DeletePermanently => {
+                let kind = if self.tab().trash.is_some() {
+                    ConfirmKind::Purge
+                } else {
+                    ConfirmKind::Delete
+                };
+                self.open_confirm(kind, now);
+            }
             C::SymlinkAbsolute => self.link(Some(LinkKind::Absolute), now),
             C::SymlinkRelative => self.link(Some(LinkKind::Relative), now),
             C::Hardlink => self.link(None, now),
             C::Create => self.open_prompt(PromptKind::Create),
+            // `r` in the trash is the same verb as `Enter`: a restore *is* the
+            // move back to the name it had, which is the closest thing to a
+            // rename the view has.
+            C::Rename if self.tab().trash.is_some() => self.trash_restore(now),
             C::Rename => self.open_rename(false),
             C::RenameEmptyStem => self.open_rename(true),
             C::Shell => self.open_prompt(PromptKind::Shell),
@@ -4459,6 +5592,13 @@ impl App {
                         Some(path) => self.navigate(path, now),
                         None => self.extract_selection(false, now),
                     }
+                    return;
+                }
+                // PLAN §7.4: `Enter` in the trash is *restore*. It is the verb
+                // somebody came here for, and it is one key from `u`'s meaning
+                // — putting something back where it was.
+                if self.tab().trash.is_some() {
+                    self.trash_restore(now);
                     return;
                 }
                 self.open_hovered(now)
@@ -4709,13 +5849,10 @@ impl App {
             return;
         };
         let path = bookmark.expanded_path();
-        // The SFTP bookmarks are real entries in the shipped table and will be
-        // real destinations in Phase 6; until the vfs exists, saying so is
-        // better than a "no such directory" about a path that is not one.
-        if path.contains("://") {
-            log::info!("{path} needs the remote vfs, which is a later phase");
-            return;
-        }
+        // `g 1` / `g 2` — the `sftp://` rows of the shipped table (PLAN §3,
+        // §7.6). A bookmark is a string, so a service is reached by writing its
+        // URL in `[goto]` and nothing else has to know these two rows are
+        // special.
         self.navigate(PathBuf::from(path), now);
     }
 
@@ -4928,6 +6065,27 @@ impl App {
     /// repository.
     fn sync_path_bar(&mut self) {
         let cwd = self.cwd();
+        // The two virtual locations build their own bars — a service chip and a
+        // remote path (PLAN §7.6), or the single word `Trash` (PLAN §7.4).
+        // `chrome::crumbs` walks `Path::components`, which would read
+        // `sftp://host/srv` as a relative directory called `sftp:` and offer a
+        // segment that goes nowhere.
+        if let Some(at) = self.remote_at() {
+            if self.path_bar.0 != cwd {
+                self.repo = None;
+                self.path_bar = (cwd, crate::remote::crumbs(&at), None);
+            }
+            self.path_bar.2 = None;
+            return;
+        }
+        if self.tab().trash.is_some() {
+            if self.path_bar.0 != cwd {
+                self.repo = None;
+                self.path_bar = (cwd, crate::trashview::crumbs(), None);
+            }
+            self.path_bar.2 = None;
+            return;
+        }
         if self.path_bar.0 != cwd || self.path_bar.1.is_empty() {
             // The one walk up for `.git` per navigation. See [`App::repo`].
             self.repo = df_core::git::repo_root(&cwd);
@@ -5260,7 +6418,9 @@ impl App {
             // Only in a real directory: an archive nested inside one has to
             // come out before it can be opened, so offering "Extract here" on
             // it would offer something that cannot be done.
-            archive: self.tab().archive.is_none()
+            trash: self.tab().trash.is_some(),
+            trashed: self.tab().trash.as_ref().map(|v| v.items.len()).unwrap_or(0),
+            archive: self.tab().virtual_kind().is_none()
                 && entry
                     .as_ref()
                     .is_some_and(crate::archive::looks_like_archive),
@@ -5399,6 +6559,9 @@ impl App {
             A::CopyPath => self.copy_piece(Piece::Path, now),
             A::CopyName => self.copy_piece(Piece::Filename, now),
             A::Properties => self.toggle_spot(),
+            A::Restore => self.trash_restore(now),
+            A::Purge => self.open_confirm(ConfirmKind::Purge, now),
+            A::EmptyTrash => self.open_confirm(ConfirmKind::EmptyTrash, now),
         }
     }
 
@@ -5563,10 +6726,12 @@ impl App {
         metrics: Option<&grid::Metrics>,
         now: Instant,
     ) {
-        if self.tab().archive.is_some() {
-            // The rows inside an archive name paths that do not exist; a drag
-            // out of one would offer another application a `text/uri-list` of
-            // fictions (PLAN §7.1, §7.3). Extract first.
+        if self.tab().archive.is_some() || self.tab().remote.is_some() {
+            // The rows inside an archive name paths that do not exist, and a
+            // remote row names a URL no other application can open; a drag out
+            // of either would offer a `text/uri-list` of fictions (PLAN §7.1,
+            // §7.3, §7.6). Extract, or `y` then `p` in a local folder, first.
+            // The trash is exempt: its rows are real files.
             return;
         }
         let dir = &self.tab().cwd.dir;
@@ -5757,6 +6922,29 @@ impl App {
     /// directory. Conflicts open the same dialog, the journal gets the same
     /// records, and `u` takes any of it back.
     fn drop_here(&mut self, paths: &[PathBuf], dest: &Path, verb: dnd::Verb, now: Instant) {
+        // PLAN §7.1's target seam already hands this function a `Vec<PathBuf>`
+        // and a destination, and PLAN §7.6's `p` already reads its meaning off
+        // the two ends — so **dropping local files onto a remote pane uploads
+        // them** with no drop-specific code at all (`paste_into` routes it).
+        //
+        // The one thing that does need saying: a *move* onto a remote service
+        // would have to delete the local originals after an upload, and an
+        // upload that half-succeeded would then delete files that never
+        // arrived. So a drop onto a remote destination is always a copy, and
+        // the notice says so rather than leaving the user to notice their
+        // originals are still here.
+        let verb = match (verb, crate::remote::at_of(dest)) {
+            (dnd::Verb::Move, Some(_)) => {
+                self.toasts
+                    .notice("Uploaded as a copy — moving to a server is not in v1", now);
+                dnd::Verb::Copy
+            }
+            (dnd::Verb::Link, Some(_)) => {
+                self.toasts.notice("Cannot link onto a server", now);
+                return;
+            }
+            (verb, _) => verb,
+        };
         match verb {
             dnd::Verb::Move => {
                 let clip = Clipboard::cut(paths.to_vec());
@@ -6665,7 +7853,10 @@ impl App {
         // workers are given nothing at all and the pane draws the entry's card
         // instead (see `paint_archive_card`). Handing them a path that is not
         // on the disk would be a failed read per cursor move.
-        let in_archive = self.tab().archive.is_some();
+        // The trash is deliberately *not* on this list: its rows are real
+        // files inside `…/Trash/files/`, so the ordinary preview pipeline
+        // opens them and a trashed photo looks like a photo (PLAN §7.4).
+        let in_archive = self.tab().archive.is_some() || self.tab().remote.is_some();
         if in_archive {
             self.preview.sync(None, target, now);
         } else {
@@ -6878,6 +8069,9 @@ impl App {
                 // you are in, and a bar there would be measuring a different
                 // parent's children.
                 usage: None,
+                // …and neither is the trash's column: the parent beside the
+                // trash is a real directory, whose rows want their linemode.
+                notes: None,
             });
         }
         let list_view = ListView {
@@ -6908,6 +8102,13 @@ impl App {
             flip: self.flip.as_ref(),
             git: repo_status,
             usage: self.usage.as_ref().filter(|u| u.is_about(&cwd_now)),
+            // PLAN §7.4: in the trash the column is where each row came from,
+            // which is the fact the view is read for.
+            notes: self
+                .tab()
+                .trash
+                .is_some()
+                .then_some(&self.trash_notes),
         };
         match (&metrics, &self.thumbs) {
             // PLAN §2's grid. Same directory, same cursor, same selection and
@@ -6985,6 +8186,37 @@ impl App {
                     }
                     // An empty archive, or a filter that matched nothing: the
                     // same quiet label an empty directory's preview gets.
+                    None => paint.quiet_label(
+                        ui::content_rect(layout.preview),
+                        "nothing to show",
+                    ),
+                }
+            }
+            // On a remote service the hovered path is a URL, so the pane is the
+            // row's facts card and — for small text that has come down — its
+            // body (PLAN §7.6).
+            None if self.tab().remote.is_some() => {
+                let service = self
+                    .tab()
+                    .remote
+                    .as_ref()
+                    .map(|s| s.at.service.clone())
+                    .unwrap_or_default();
+                match self.tab().cwd.dir.cursor_entry() {
+                    Some(entry) => {
+                        let state = self
+                            .remote_preview
+                            .as_ref()
+                            .filter(|p| Path::new(&p.url) == entry.path);
+                        crate::remote::card(
+                            &paint,
+                            layout.preview,
+                            entry,
+                            &service,
+                            state.and_then(|p| p.body.as_deref()),
+                            state.is_some_and(|p| p.loading),
+                        );
+                    }
                     None => paint.quiet_label(
                         ui::content_rect(layout.preview),
                         "nothing to show",
@@ -7411,6 +8643,7 @@ impl App {
         let state = self.state_due.deadline(now);
         [
             self.loading_deadline(now),
+            self.remote_preview_deadline(now),
             card,
             self.preview.next_deadline(now),
             self.toasts.deadline(now),
@@ -7498,7 +8731,15 @@ impl App {
     /// Write the cwd-file if this quit calls for one, and say goodbye.
     fn finish(&mut self, event_loop: &ActiveEventLoop) {
         if let (Some(Quit::WriteCwd), Some(path)) = (self.quit, self.cwd_file.as_deref()) {
-            crate::cli::write_cwd_file(path, self.tab().cwd.path());
+            // Never a URL: the file is `cd`'d into by a shell function, and
+            // quitting out of a remote service or the trash has to leave the
+            // shell in the local directory that session came from.
+            let cwd = self.tab().cwd.path().to_path_buf();
+            let cwd = match self.tab().virtual_kind() {
+                Some(_) => self.local_origin(),
+                None => cwd,
+            };
+            crate::cli::write_cwd_file(path, &cwd);
         }
         // Before the window, and therefore before the `wl_surface` the data
         // device holds a proxy to: dropping it joins its thread, which is the
@@ -7624,6 +8865,94 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     } else {
         format!("{n} {many}")
     }
+}
+
+/// Which commands are inert while the list pane is showing the trash.
+///
+/// The rule is "everything whose subject would have to be the file where it
+/// currently is". A trashed file *is* somewhere — inside `…/Trash/files/` —
+/// and every one of these would act on it there: renaming it would break the
+/// info record that says how to put it back, trashing it again is a
+/// contradiction, and pasting into `trash://` is a directory that does not
+/// exist. `Enter`/`r` restore, `D` destroys, and everything about *looking* —
+/// the sorts, the filter, the selection, `Tab`, `Ctrl+p` — is untouched.
+fn inert_in_trash(command: Command) -> bool {
+    use Command as C;
+    matches!(
+        command,
+        C::Yank
+            | C::YankCut
+            | C::Paste
+            | C::PasteForce
+            | C::SymlinkAbsolute
+            | C::SymlinkRelative
+            | C::Hardlink
+            // Already trashed. A `d` here would be the user asking for
+            // something that has happened.
+            | C::Trash
+            | C::Create
+            | C::RenameEmptyStem
+            | C::Shell
+            | C::ShellBlock
+            | C::SearchName
+            | C::SearchContent
+            | C::DiskUsage
+            | C::BasketToggle
+            | C::ArchiveExtractHere
+            | C::ArchiveExtractSubfolder
+            // Nested trash is not a place.
+            | C::OpenTrash
+    )
+}
+
+/// Route one remote listing update to the tab that asked for it (PLAN §7.6).
+///
+/// Returns whether anybody wanted it. The token is the whole staleness
+/// contract, exactly as it is for a local scan: arrowing quickly through remote
+/// directories leaves several listings in the air, and every one that is not
+/// this tab's current token is dropped on arrival rather than landing in the
+/// wrong pane.
+fn apply_vfs(tab: &mut Tab, update: &df_core::vfs::VfsUpdate) -> bool {
+    use df_core::vfs::VfsUpdate as U;
+    let Some(session) = &mut tab.remote else {
+        return false;
+    };
+    if session.pending.as_ref().map(|(token, _)| *token) != Some(update.token()) {
+        return false;
+    }
+    match update {
+        U::Started { .. } => tab.cwd.dir.begin_external(),
+        U::Batch { entries, .. } => tab.cwd.dir.extend_external(entries.clone()),
+        U::Done { dir, .. } => {
+            tab.cwd.dir.finish_external();
+            // Cached now that it is complete, never mid-stream: half a
+            // directory in the cache would make `←` back into it show half a
+            // directory and never find out.
+            let rows = tab.cwd.dir.entries().to_vec();
+            if let Some(session) = &mut tab.remote {
+                session.store(dir, rows);
+                session.pending = None;
+            }
+        }
+        U::Failed { error, .. } => {
+            tab.cwd.dir.fail_external(error.to_string());
+            if let Some(session) = &mut tab.remote {
+                session.pending = None;
+            }
+        }
+    }
+    true
+}
+
+/// A downloaded preview file as text, or `None` when it is not text after all.
+///
+/// The size gate happened before the download ([`crate::remote::previewable`]);
+/// this is the second half of the same honesty, because a `.txt` full of bytes
+/// is a screen of replacement characters and the facts card is the better
+/// answer.
+fn read_preview_text(local: &Path) -> Option<String> {
+    let bytes = std::fs::read(local).ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// Gate for the per-frame `DF_FRAME_LOG` diagnostic, read once.
@@ -7877,6 +9206,14 @@ impl ApplicationHandler<crate::Wake> for App {
         // before anything that can take time, so a slow worker shutdown cannot
         // eat the state file.
         self.flush_state();
+        // PLAN §7.6: every file a remote session downloaded goes with it. The
+        // ledger names them all — the previews, the download-on-opens, the
+        // stale copies of renamed rows — and this is the one sweep.
+        if !self.temps.is_empty() {
+            let held = self.temps.len();
+            let swept = self.temps.clear();
+            log::info!("removed {swept} of {held} temporary remote file(s)");
+        }
         // Stop the workers before the window goes: a scan that finished into a
         // dropped channel is harmless, but joining them here keeps the shutdown
         // order the same every time.

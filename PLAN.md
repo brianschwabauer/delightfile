@@ -438,8 +438,8 @@ Work top to bottom; tick boxes in the same commit as the work.
 - [x] Mount manager `M` (udisks2 D-Bus)
 
 ### Phase 6 — reach
-- [ ] SFTP vfs from vfs.toml (`g 1`/`g 2`)
+- [x] SFTP vfs from vfs.toml (`g 1`/`g 2`)
 - [ ] Multi-window; drag tabs out; cross-window DnD
-- [ ] Trash browsing/restore view
+- [x] Trash browsing/restore view
 - [ ] Idle-cost audit (zero repaints at rest), cold-start ordering audit
 - [ ] Polish pass against `delightful-ui`/`ui-anti-slop` checklists

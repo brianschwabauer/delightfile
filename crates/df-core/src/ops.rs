@@ -57,7 +57,7 @@ pub use paste::{
     execute as paste, plan_paste, unique_name, Clipboard, Conflict, PasteItem, PasteMode,
     PastePlan, PasteReport, Resolution,
 };
-pub use trash::{Trash, TrashedItem};
+pub use trash::{purge, Trash, TrashedItem};
 
 /// Make a path absolute and lexically clean, without touching the disk.
 ///
