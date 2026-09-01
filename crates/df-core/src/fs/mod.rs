@@ -47,6 +47,7 @@ mod entry;
 mod filter;
 mod history;
 mod inotify;
+mod memory;
 pub mod mime;
 pub mod owner;
 mod scan;
@@ -64,6 +65,7 @@ pub use filter::{
     filter_indices, find_from, is_case_sensitive, match_name, FindDirection, Matched, Span,
 };
 pub use history::{History, HISTORY_LIMIT};
+pub use memory::{CursorMemory, Recent, CURSOR_MEMORY};
 pub use scan::{
     no_notifier, scan_blocking, Notifier, ScanToken, ScanUpdate, Scanner, BATCH, FIRST_BATCH,
     SCAN_WORKERS,
@@ -126,6 +128,14 @@ pub struct DirState {
     /// The name under the cursor, so a reload can put it back on the same file
     /// even though its index changed.
     cursor_name: Option<String>,
+    /// A name the cursor has been *aimed* at that is not in the listing yet.
+    ///
+    /// A directory read is asynchronous, so every caller that knows where the
+    /// cursor belongs in a directory it is about to open — the child you
+    /// stepped out of, the row this tab was last on (`Recent`) — knows it
+    /// before there is a row to point at. Held here and honoured by the next
+    /// [`DirState::rebuild`], which is the moment the row exists.
+    wanted_cursor: Option<String>,
     /// Selected file names. Names rather than paths because a `DirState` is one
     /// directory, and a `BTreeSet` rather than a hash set because paste order
     /// has to be deterministic — an operation that processes files in a
@@ -152,6 +162,7 @@ impl DirState {
             spans: Vec::new(),
             cursor: 0,
             cursor_name: None,
+            wanted_cursor: None,
             selected: BTreeSet::new(),
             sort: SortOptions::from_config(mgr),
             show_hidden: mgr.show_hidden,
@@ -238,6 +249,7 @@ impl DirState {
     /// Put the cursor at a view position, clamped.
     pub fn set_cursor(&mut self, position: usize) {
         self.cursor = position.min(self.view.len().saturating_sub(1));
+        self.wanted_cursor = None;
         self.remember_cursor();
     }
 
@@ -254,6 +266,7 @@ impl DirState {
         let last = self.view.len() - 1;
         let next = self.cursor as isize + delta;
         self.cursor = next.clamp(0, last as isize) as usize;
+        self.wanted_cursor = None;
         self.remember_cursor();
     }
 
@@ -264,8 +277,27 @@ impl DirState {
             return false;
         };
         self.cursor = position;
+        self.wanted_cursor = None;
         self.remember_cursor();
         true
+    }
+
+    /// Aim the cursor at a name that may not have arrived yet.
+    ///
+    /// [`DirState::cursor_to_name`] can only work on rows that are already
+    /// here, and the callers that know where the cursor belongs — `←` landing
+    /// on the child you stepped out of, a tab returning to a directory it
+    /// remembers — ask *while the scan is still in flight*, when the listing is
+    /// empty and there is nothing to point at. The name is kept and the next
+    /// batch that contains it moves the cursor; a scan that finishes without it
+    /// gives up (the file was deleted, or `.` is off), and a cursor the user
+    /// moves themselves cancels the aim rather than being yanked off it later.
+    pub fn aim_cursor(&mut self, name: impl Into<String>) {
+        let name = name.into();
+        if self.cursor_to_name(&name) {
+            return;
+        }
+        self.wanted_cursor = Some(name);
     }
 
     /// The view position of a named file, if it is visible.
@@ -332,6 +364,7 @@ impl DirState {
             return false;
         };
         self.cursor = position;
+        self.wanted_cursor = None;
         self.remember_cursor();
         true
     }
@@ -453,6 +486,10 @@ impl DirState {
             ScanUpdate::Done { .. } => {
                 self.state = LoadState::Loaded;
                 self.rebuild();
+                // Everything the directory has is here, so a name still being
+                // waited for is not coming: stop, rather than pouncing on a
+                // file that happens to be created there later.
+                self.wanted_cursor = None;
                 // A selection can only contain files that are still here. Left
                 // alone, a `y` on a file someone else deleted would paste a
                 // ghost.
@@ -602,6 +639,19 @@ impl DirState {
 
         if self.view.is_empty() {
             self.cursor = 0;
+            return;
+        }
+        // An aimed name beats the remembered one: it is the more recent
+        // instruction, from a caller that knows where this listing is being
+        // opened *to*.
+        if let Some(position) = self
+            .wanted_cursor
+            .as_deref()
+            .and_then(|name| self.position_of(name))
+        {
+            self.wanted_cursor = None;
+            self.cursor = position;
+            self.remember_cursor();
             return;
         }
         let restored = self

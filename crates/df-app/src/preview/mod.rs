@@ -56,7 +56,7 @@ mod paint;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use df_core::fs::{Entry, Notifier, SortOptions};
+use df_core::fs::{Entry, Notifier, Recent, SortOptions};
 use df_core::preview::{
     PaneId, Preview, PreviewKind, PreviewToken, PreviewUpdate, Previewer, TargetSize,
 };
@@ -115,6 +115,15 @@ const CHIP_FADE: Duration = Duration::from_millis(500);
 /// beats spin (PLAN §1), so a model the cursor merely passed over is a still
 /// picture that costs nothing.
 const TURNTABLE_PERIOD: Duration = Duration::from_secs(24);
+
+/// How many files' reading positions the pane remembers.
+///
+/// A session's worth of "where was I in that file", and no more: 256 files is
+/// far past what anybody arrows back and forth between, and a few words apiece
+/// makes the whole map smaller than one line of a preview. It is a *session*
+/// memory on purpose — nothing here is written to disk, so a file re-read
+/// tomorrow opens at the top like any other.
+const PLACES: usize = 256;
 
 /// How far one press of `↑`/`↓` moves an oversized page, in logical points.
 ///
@@ -330,6 +339,19 @@ struct Shown {
     at: Instant,
 }
 
+/// How far into a file the pane had got, kept for the length of the session.
+///
+/// Both numbers, because "where I was" in a text file is a line and in a PDF is
+/// a page, and one file can be neither — a default `Spot` is the top of the
+/// first page, which is where an unremembered file opens.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Spot {
+    /// [`Pane::scroll`]: the first line drawn.
+    scroll: usize,
+    /// [`DocView::page`]: the page or layer on screen.
+    page: usize,
+}
+
 /// The preview pane's whole state.
 pub struct Pane {
     previewer: Previewer,
@@ -366,6 +388,23 @@ pub struct Pane {
     /// The four colours a worker-thread rasteriser is allowed, refreshed each
     /// frame from the palette (see [`doc::Ink`]).
     ink: doc::Ink,
+    /// Where the cursor had got to in each file previewed this session.
+    ///
+    /// Arrowing off a long file and back on to it is a thing people do
+    /// constantly — comparing two files, or checking a directory and returning
+    /// — and starting again from line one every time makes the pane feel like
+    /// it has forgotten what you were doing (`delightful-ui` §8: the view does
+    /// not move under you). Bounded by [`PLACES`], and *not* keyed on the
+    /// file's mtime: a file rewritten under a remembered position is rare, and
+    /// the position is clamped to what the new content can use on the first
+    /// paint, so the worst case is landing further up a file than expected.
+    places: Recent<Spot>,
+    /// The page a [`DocView`] should be built at, from [`Pane::places`].
+    ///
+    /// Deferred because the view does not exist yet when the file is asked
+    /// for: the body — and with it the page count — arrives from a worker
+    /// several frames later.
+    resume_page: usize,
     /// Whether the keyboard is in this pane. The turntable's whole switch:
     /// unfocused, a model is a still picture and asks for nothing.
     focused: bool,
@@ -392,6 +431,8 @@ impl Pane {
             scrolled_at: None,
             fling: None,
             media_mounted: false,
+            places: Recent::new(PLACES),
+            resume_page: 0,
         }
     }
 
@@ -426,16 +467,25 @@ impl Pane {
             return;
         }
         if !same_path {
+            // Where the file being left had got to, before anything about it is
+            // dropped — this is the only moment both the path and the position
+            // are still in hand.
+            self.remember_place();
             // The content on screen belongs to a different file, and a pane
             // that kept it would be labelling file A with file B.
             self.shown = None;
-            self.scroll = 0;
             self.max_scroll = 0;
             self.scrolled_at = None;
             // A coast belongs to the document it was started in.
             self.fling = None;
             self.decoder.cancel();
             self.docs.cancel();
+            // …and back to wherever this file was last read to. The scroll is
+            // clamped by the first paint, which is the only thing that knows
+            // how tall the content came out.
+            let spot = self.places.recall(path).copied().unwrap_or_default();
+            self.scroll = spot.scroll;
+            self.resume_page = spot.page;
         }
         self.wanted = Some(path.to_path_buf());
         self.requested_target = target;
@@ -449,6 +499,9 @@ impl Pane {
 
     /// Stop previewing anything — a tab switch, a directory with nothing in it.
     pub fn cancel(&mut self) {
+        // A tab switch is leaving the file, not losing it: the position is
+        // remembered here for the same reason it is when the cursor moves.
+        self.remember_place();
         self.previewer.cancel(PREVIEW_PANE);
         self.decoder.cancel();
         self.docs.cancel();
@@ -459,6 +512,27 @@ impl Pane {
         self.max_scroll = 0;
         self.scrolled_at = None;
         self.fling = None;
+        self.resume_page = 0;
+    }
+
+    /// Record how far into the file on screen the reader had got.
+    ///
+    /// A file at the very top is recorded like any other: it is a real answer
+    /// to "where was I", and skipping it would mean scrolling down, going away,
+    /// coming back, scrolling to the top and going away again left the *old*
+    /// position behind to pounce on the next visit.
+    fn remember_place(&mut self) {
+        let Some(path) = self.wanted.clone() else {
+            return;
+        };
+        let page = self.doc_ref().map(|view| view.page).unwrap_or(0);
+        self.places.remember(
+            path,
+            Spot {
+                scroll: self.scroll,
+                page,
+            },
+        );
     }
 
     /// `K` / `J`: move the preview by [`SEEK_LINES`] without leaving the list.
@@ -915,7 +989,14 @@ impl Pane {
                     // The first render is asked for by `sync_doc` on the next
                     // frame, which is where the pane's real pixel size and the
                     // palette are both known.
-                    doc: is_doc.then(|| Box::new(DocView::new())),
+                    doc: is_doc.then(|| {
+                        let mut view = Box::new(DocView::new());
+                        // Back to the page this document was last left on.
+                        // `apply_doc` clamps it once the real page count
+                        // arrives, so a file that has shrunk is not a problem.
+                        view.page = self.resume_page;
+                        view
+                    }),
                 })
             }
         }
@@ -1137,6 +1218,61 @@ mod tests {
     fn a_crossfade_sampled_early_has_not_begun() {
         let t0 = Instant::now() + Duration::from_secs(1);
         assert_eq!(fade(t0, t0 - Duration::from_millis(500)), 0.0);
+    }
+
+    /// PLAN §6's session memory: arrowing off a file and back on to it lands
+    /// where the reading was, not at the top.
+    #[test]
+    fn the_pane_remembers_how_far_into_each_file_it_had_got() {
+        let now = Instant::now();
+        let mut pane = Pane::start(df_core::fs::no_notifier());
+        let (a, b) = (Path::new("/etc/hostname"), Path::new("/etc/hosts"));
+        let target = (400, 400);
+
+        pane.sync(Some(a), target, now);
+        // The paint is what discovers how far the content goes; this stands in
+        // for it so the scroll below is a legal one.
+        pane.max_scroll = 40;
+        pane.scroll_to(12, now);
+
+        // Onto another file: its own position, which is the top.
+        pane.sync(Some(b), target, now);
+        assert_eq!(pane.scroll, 0);
+
+        // …and back. The clamp is the next paint's job, so the line is
+        // restored as it was.
+        pane.sync(Some(a), target, now);
+        assert_eq!(pane.scroll, 12);
+
+        // A document remembers its page rather than a line, and the page is
+        // handed to the `DocView` the body builds several frames later.
+        let mut view = DocView::new();
+        view.page = 3;
+        pane.shown = Some(Shown {
+            body: Body::Media(Media {
+                kind: PreviewKind::Pdf,
+                thumb: None,
+                full: None,
+                swapped_at: None,
+                error: None,
+                decoding: false,
+                doc: Some(Box::new(view)),
+            }),
+            at: now,
+        });
+        pane.sync(Some(b), target, now);
+        assert_eq!(pane.resume_page, 0);
+        pane.sync(Some(a), target, now);
+        assert_eq!(pane.resume_page, 3);
+
+        // Leaving the pane entirely — a tab switch — is leaving the file, not
+        // losing it.
+        pane.scroll_to(0, now);
+        pane.max_scroll = 40;
+        pane.scroll_to(7, now);
+        pane.cancel();
+        pane.sync(Some(a), target, now);
+        assert_eq!(pane.scroll, 7);
     }
 
     /// A pane showing a document with `pages` pages and nothing rendered yet.
