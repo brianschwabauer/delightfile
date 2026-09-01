@@ -890,6 +890,10 @@ impl Drop for TaskEngine {
 }
 
 fn worker_loop(shared: Arc<Shared>, rx: Receiver<Queued>) {
+    // Twenty of these against however many cores the machine has: a directory
+    // copy must not be what makes the cursor stutter (PLAN §1). Best effort,
+    // from inside the thread, because that is where niceness applies.
+    crate::thread::lower_priority(crate::thread::NICE_BULK);
     while let Ok((id, mut job)) = rx.recv() {
         run_one(&shared, id, job.as_mut());
     }

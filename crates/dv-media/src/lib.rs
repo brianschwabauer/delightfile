@@ -42,7 +42,7 @@ pub use decode::{
     AUDIO_CHANNELS, AUDIO_RATE,
 };
 pub use keyframe::{KeyframeEntry, KeyframeIndex};
-pub use probe::{probe, Chapter, ProbeInfo};
+pub use probe::{display_orientation, probe, Chapter, ProbeInfo};
 pub use proxy::{generate_proxy, proxy_needed, ProxyOpts};
 pub use sync::{correlate_envelopes, sync_offset, SyncResult};
 pub use thumbnail::{generate_thumbnails, ThumbnailOpts};

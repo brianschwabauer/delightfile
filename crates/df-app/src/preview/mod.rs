@@ -5,16 +5,21 @@
 //!                                        │                        newest wins)
 //!                    Pane::poll ◀── PreviewUpdate ────────────────┘
 //!                        │
-//!                        ├─ Text / Markdown / Directory / Hex ──▶ paint
+//!                        ├─ Text / Markdown ──▶ prepare::Preparer ──▶ paint
+//!                        ├─ Directory / Hex ──▶ paint
 //!                        └─ NeedsDecode ──▶ decode::Decoder ──▶ texture ──▶ paint
 //! ```
 //!
 //! Three rules hold the whole thing together.
 //!
-//! **Nothing decodes on the paint thread.** df-core's workers read the file and
-//! [`decode`]'s worker turns bytes into pixels; this module only ever receives
-//! finished work and hands it to egui. Both workers ring the same
-//! [`crate::Wake`] bell every other worker rings (PLAN §1).
+//! **Nothing decodes on the paint thread — and nothing parses on it either.**
+//! df-core's workers read the file, [`decode`]'s worker turns bytes into
+//! pixels (and into the `ColorImage` egui uploads from), and [`prepare`]'s
+//! worker runs the highlighter and the markdown parser. This module only ever
+//! receives finished work and hands it to egui. Every one of those workers
+//! rings the same [`crate::Wake`] bell every other worker rings (PLAN §1).
+//! [`body`] is the same rule for the two cards that do not come through this
+//! pane at all — an archive entry and a remote row.
 //!
 //! **Every answer is checked against its token.** df-core cancels a superseded
 //! request before it opens anything, and the token check here catches whatever
@@ -47,11 +52,13 @@
 //! indicator — even though a specimen sheet has one page and a mesh does not
 //! really have pages at all.
 
+pub mod body;
 pub mod decode;
 pub mod doc;
 pub mod highlight;
 pub mod markdown;
 mod paint;
+pub mod prepare;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -61,7 +68,7 @@ use df_core::preview::{
     PaneId, Preview, PreviewKind, PreviewToken, PreviewUpdate, Previewer, TargetSize,
 };
 
-pub use paint::{fit_rect, preview};
+pub use paint::{fit_rect, oriented_mesh, oriented_size, preview};
 
 /// How long a preview takes to fade in — PLAN §6's "results crossfade in over
 /// ~80 ms", and delightviewer's `CROSSFADE` to the millisecond, so the two
@@ -334,6 +341,10 @@ struct Shown {
 pub struct Pane {
     previewer: Previewer,
     decoder: decode::Decoder,
+    /// The highlighter and the markdown parser, off the paint thread (see
+    /// [`prepare`]). df-core hands back lines; this is what turns them into a
+    /// [`Body`], and it is not cheap enough to do inside a frame.
+    preparer: prepare::Preparer,
     /// The path the live request is for, or `None` when nothing is wanted
     /// (an empty directory).
     wanted: Option<PathBuf>,
@@ -361,6 +372,10 @@ pub struct Pane {
     /// Set by the app each frame: a playback controller is mounted on this
     /// file, so the kind badge stands down (see [`Pane::set_media_mounted`]).
     media_mounted: bool,
+    /// Set by the app each frame: the player has a decoded frame over this
+    /// pane, so the poster underneath it stands down too (see
+    /// [`Pane::set_media_frame`]).
+    media_frame: bool,
     /// The document worker: PDF pages, specimen sheets, meshes, toolpaths.
     docs: doc::Docs,
     /// The four colours a worker-thread rasteriser is allowed, refreshed each
@@ -379,6 +394,7 @@ impl Pane {
         Pane {
             previewer: Previewer::start(std::sync::Arc::clone(&notify)),
             docs: doc::Docs::start(std::sync::Arc::clone(&notify)),
+            preparer: prepare::Preparer::start(std::sync::Arc::clone(&notify)),
             decoder: decode::Decoder::start(notify),
             ink: doc::Ink::test(),
             focused: false,
@@ -392,6 +408,7 @@ impl Pane {
             scrolled_at: None,
             fling: None,
             media_mounted: false,
+            media_frame: false,
         }
     }
 
@@ -435,6 +452,7 @@ impl Pane {
             // A coast belongs to the document it was started in.
             self.fling = None;
             self.decoder.cancel();
+            self.preparer.cancel();
             self.docs.cancel();
         }
         self.wanted = Some(path.to_path_buf());
@@ -451,6 +469,7 @@ impl Pane {
     pub fn cancel(&mut self) {
         self.previewer.cancel(PREVIEW_PANE);
         self.decoder.cancel();
+        self.preparer.cancel();
         self.docs.cancel();
         self.wanted = None;
         self.token = None;
@@ -562,6 +581,23 @@ impl Pane {
     /// has a transport strip under it.
     pub fn set_media_mounted(&mut self, mounted: bool) {
         self.media_mounted = mounted;
+        if !mounted {
+            // Unmounting hands the pane back its own picture in the same
+            // breath, so `↓` off a clip and back onto it never shows an empty
+            // pane between the source going away and the poster returning.
+            self.media_frame = false;
+        }
+    }
+
+    /// Whether the player has a **decoded frame** on screen over this pane.
+    ///
+    /// The poster and the frame are the same picture, and drawing both means
+    /// drawing one of them twice — visibly so the instant they disagree about
+    /// their footprint, which is exactly what a rotated clip does. So the
+    /// cached thumbnail stands in only until the real frame lands, and the
+    /// swap back is [`Pane::set_media_mounted`]'s job.
+    pub fn set_media_frame(&mut self, showing: bool) {
+        self.media_frame = showing;
     }
 
     /// Take whatever the workers finished. `ctx` is where decoded pixels
@@ -578,11 +614,34 @@ impl Pane {
             changed = true;
             self.apply(update, now);
         }
-        for decoded in self.decoder.drain() {
-            if Some(decoded.token) != self.token {
+        for prepared in self.preparer.drain() {
+            if Some(prepared.token) != self.token {
                 continue;
             }
             changed = true;
+            self.apply_prepared(prepared, now);
+        }
+        // The two stages of one picture usually arrive a whole file-read
+        // apart, which is what the crossfade is for. When they arrive in the
+        // *same* poll — a small JPEG, a warm cache — the placeholder has
+        // nothing to place-hold: uploading it would be a second texture and a
+        // second crossfade for a picture that was already there. So the batch
+        // is looked at whole, and a thumb with its own full behind it is
+        // dropped unopened.
+        let batch: Vec<decode::Decoded> = self
+            .decoder
+            .drain()
+            .into_iter()
+            .filter(|decoded| Some(decoded.token) == self.token)
+            .collect();
+        let full_here = batch
+            .iter()
+            .any(|d| d.stage == decode::Stage::Full && d.result.is_ok());
+        for decoded in batch {
+            changed = true;
+            if full_here && decoded.stage == decode::Stage::Thumb {
+                continue;
+            }
             self.apply_decoded(decoded, ctx, now);
         }
         for update in self.docs.drain() {
@@ -845,32 +904,50 @@ impl Pane {
             PreviewUpdate::Failed { path, error, .. } => {
                 Body::Failed(readable(&error.to_string(), &path))
             }
-            PreviewUpdate::Ready { preview, .. } => self.body_for(preview, now),
+            PreviewUpdate::Ready { preview, .. } => match self.body_for(preview, now) {
+                Some(body) => body,
+                // Handed to the prepare worker instead. The pane keeps showing
+                // what it was showing — the same thing it does for the whole
+                // read that preceded this — and `apply_prepared` puts the
+                // finished body up when it comes back.
+                None => return,
+            },
         };
         self.shown = Some(Shown { body, at: now });
     }
 
-    fn body_for(&mut self, preview: Preview, _now: Instant) -> Body {
-        match preview {
+    /// The body this preview becomes, or `None` when the answer has been sent
+    /// to a worker and will arrive later.
+    fn body_for(&mut self, preview: Preview, _now: Instant) -> Option<Body> {
+        let body = match preview {
             Preview::Empty => Body::Empty,
+            // The two expensive ones go to [`prepare`]: `block_states` over
+            // 20 000 lines and a mebibyte of markdown are both too much to do
+            // inside a frame (see that module's essay).
             Preview::Text {
                 lines,
                 syntax,
                 truncated,
             } => {
-                let profile = highlight::profile_for(syntax);
-                let states = highlight::block_states(&lines, profile);
-                Body::Text {
-                    lines,
-                    syntax,
-                    truncated,
-                    states,
-                }
+                let token = self.token?;
+                self.preparer.request(prepare::Job {
+                    token,
+                    source: prepare::Source::Text {
+                        lines,
+                        syntax,
+                        truncated,
+                    },
+                });
+                return None;
             }
-            Preview::Markdown { source, truncated } => Body::Markdown {
-                blocks: markdown::parse(&source),
-                truncated,
-            },
+            Preview::Markdown { source, truncated } => {
+                let token = self.token?;
+                self.preparer.request(prepare::Job {
+                    token,
+                    source: prepare::Source::Markdown { source, truncated },
+                });
+                return None;
+            }
             Preview::Directory { entries, truncated } => Body::Directory { entries, truncated },
             Preview::Hex { bytes, truncated } => Body::Hex { bytes, truncated },
             Preview::Unsupported { kind } => Body::Unsupported { kind },
@@ -881,7 +958,7 @@ impl Pane {
                 thumb,
             } => {
                 let Some(token) = self.token else {
-                    return Body::Unsupported { kind };
+                    return Some(Body::Unsupported { kind });
                 };
                 // Pictures decode here; documents go to their own worker and
                 // are drawn over whatever thumbnail the shared cache had.
@@ -918,7 +995,30 @@ impl Pane {
                     doc: is_doc.then(|| Box::new(DocView::new())),
                 })
             }
-        }
+        };
+        Some(body)
+    }
+
+    /// A finished highlight or markdown parse, from [`prepare`].
+    fn apply_prepared(&mut self, prepared: prepare::Prepared, now: Instant) {
+        let body = match prepared.ready {
+            prepare::Ready::Text {
+                lines,
+                syntax,
+                truncated,
+                states,
+            } => Body::Text {
+                lines,
+                syntax,
+                truncated,
+                states,
+            },
+            prepare::Ready::Markdown { blocks, truncated } => Body::Markdown { blocks, truncated },
+        };
+        // The crossfade starts *here*, not when df-core answered: the pane's
+        // content changes the instant this lands, and the 80 ms is a property
+        // of what the eye sees (PLAN §6).
+        self.shown = Some(Shown { body, at: now });
     }
 
     fn apply_decoded(
@@ -936,11 +1036,11 @@ impl Pane {
                 // Only while the real thing is still missing: a placeholder
                 // that arrives late is worthless (delightviewer's rule).
                 if media.full.is_none() {
-                    media.thumb = upload(ctx, "df-preview-thumb", &image);
+                    media.thumb = upload_color(ctx, "df-preview-thumb", image);
                 }
             }
             (decode::Stage::Full, Ok(image)) => {
-                media.full = upload(ctx, "df-preview", &image);
+                media.full = upload_color(ctx, "df-preview", image);
                 media.swapped_at = Some(now);
                 media.decoding = false;
             }
@@ -1066,22 +1166,38 @@ pub fn fade(at: Instant, now: Instant) -> f32 {
 /// window was mapped, which the next frame's poll will not repeat, so the
 /// preview is simply re-requested by the cursor that is already on the row.
 fn upload(ctx: Option<&egui::Context>, name: &str, image: &decode::Rgba) -> Option<Texture> {
+    // The conversion the decode worker already does for itself; this is the
+    // path the *document* rasterisers still come in on, where the page buffer
+    // was built on their own thread and the conversion is what is left.
+    upload_color(ctx, name, decode::to_color(image).ok()?)
+}
+
+/// Put a worker-built [`egui::ColorImage`] on the GPU.
+///
+/// The **filtering** decision lives here because it is a decision about what
+/// the file *is*: a 32-pixel favicon blown up to a 900-pixel pane is pixel art
+/// and wants nearest-neighbour; a photograph wants linear (PLAN §6, and
+/// `preview::paint::fit_rect`, which is the other half of the same rule).
+fn upload_color(
+    ctx: Option<&egui::Context>,
+    name: &str,
+    color: egui::ColorImage,
+) -> Option<Texture> {
     let ctx = ctx?;
     let max = ctx.input(|i| i.max_texture_side).max(1);
-    let (w, h) = (image.width as usize, image.height as usize);
+    let [w, h] = color.size;
     if w == 0 || h == 0 || w > max || h > max {
         log::debug!("{w}×{h} is past this GPU's {max} px texture limit");
         return None;
     }
-    if image.pixels.len() < w * h * 4 {
-        return None;
-    }
-    let color = egui::ColorImage::from_rgba_unmultiplied([w, h], &image.pixels[..w * h * 4]);
-    let handle = ctx.load_texture(name, color, egui::TextureOptions::LINEAR);
-    Some(Texture {
-        handle,
-        size: (image.width, image.height),
-    })
+    let size = (w as u32, h as u32);
+    let options = if paint::nearest_for(size) {
+        egui::TextureOptions::NEAREST
+    } else {
+        egui::TextureOptions::LINEAR
+    };
+    let handle = ctx.load_texture(name, color, options);
+    Some(Texture { handle, size })
 }
 
 /// Turn a `DfError` string into something a person can act on: the path is

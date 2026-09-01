@@ -295,6 +295,10 @@ impl Previewer {
             let handle = std::thread::Builder::new()
                 .name(format!("df-preview-{i}"))
                 .spawn(move || {
+                    // Milder than the bulk pool: somebody is looking at the
+                    // pane waiting for this, so it gives way to the paint
+                    // thread and to nothing else (`df_core::thread`).
+                    crate::thread::lower_priority(crate::thread::NICE_INTERACTIVE);
                     for job in req_rx {
                         run_job(job, &up_tx, &live, &notify, debounce);
                     }

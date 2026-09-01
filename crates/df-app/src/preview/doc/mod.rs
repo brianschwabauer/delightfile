@@ -331,7 +331,12 @@ impl Docs {
         let worker_live = Arc::clone(&live);
         let handle = std::thread::Builder::new()
             .name("df-doc".to_string())
-            .spawn(move || run(&job_rx, &res_tx, &worker_live, &notify));
+            .spawn(move || {
+                // Rasterising a PDF page is tens of milliseconds; it gives way
+                // to the paint thread and to nothing else (`df_core::thread`).
+                df_core::thread::lower_priority(df_core::thread::NICE_INTERACTIVE);
+                run(&job_rx, &res_tx, &worker_live, &notify)
+            });
         let worker = match handle {
             Ok(h) => Some(h),
             // A thread that will not spawn costs the document previews and

@@ -790,8 +790,13 @@ pub struct App {
     /// The first row the expanded tray draws.
     basket_first: usize,
     /// The archive entry the preview card is showing, and its text if it had
-    /// any: `(archive, inner path, body)`.
+    /// any: `(archive, inner path, body)`. The body is `None` until the
+    /// worker that reads it comes back (see [`crate::preview::body`]).
     archive_preview: Option<(PathBuf, String, Option<String>)>,
+    /// The one worker behind both card bodies — the archive entry's text and
+    /// the remote row's downloaded text. A tab is in an archive *or* on a
+    /// remote service, never both, so one thread and one token serve them.
+    bodies: crate::preview::body::Bodies,
 
     // ── Remote services (PLAN §7.6) ─────────────────────────────────────────
     /// The vfs, started the first time `g 1` asks for a service.
@@ -1049,6 +1054,9 @@ impl App {
         // Before the window as well, and for the same reason: the first thing
         // a probe is asked about is whatever file the cursor opens on.
         let prober = Prober::start(bell("prober"));
+        // The archive and remote cards' bodies (PLAN §7.3, §7.6), which used
+        // to be read inside the frame that noticed the cursor had moved.
+        let bodies = crate::preview::body::Bodies::start(bell("card-body"));
 
         // ── What that ordering actually buys, measured (PLAN §6) ────────────
         // Debug build (`opt-level = 1`), warm page cache, five runs each,
@@ -1149,6 +1157,7 @@ impl App {
             repo: None,
             archive_job: None,
             archive_preview: None,
+            bodies,
             vfs: None,
             temps: crate::remote::Temps::default(),
             remote_ops: Vec::new(),
@@ -1326,6 +1335,34 @@ impl App {
             // the probe is cheaper than the memory of it.
             while self.probes.len() > PROBE_MEMORY {
                 self.probes.remove(0);
+            }
+        }
+        // The card bodies (PLAN §7.3, §7.6). Checked against the subject the
+        // cursor is on rather than trusted: the token retires the stale ones,
+        // and this catches whatever wins the race anyway.
+        for body in self.bodies.drain() {
+            match body {
+                crate::preview::body::Body::Archive {
+                    archive,
+                    inner,
+                    text,
+                } => {
+                    if let Some((a, i, slot)) = &mut self.archive_preview {
+                        if *a == archive && *i == inner {
+                            *slot = text;
+                            changed = true;
+                        }
+                    }
+                }
+                crate::preview::body::Body::Remote { url, text } => {
+                    if let Some(preview) = &mut self.remote_preview {
+                        if preview.url == url {
+                            preview.body = text;
+                            preview.loading = false;
+                            changed = true;
+                        }
+                    }
+                }
             }
         }
         // The search's reader thread (PLAN §7.2) and the grid's tile workers
@@ -1906,15 +1943,21 @@ impl App {
             .tree
             .get(&inner)
             .is_some_and(crate::archive::previewable);
-        let body = if wanted {
-            df_core::archive::read_entry(&archive, &inner, crate::archive::PREVIEW_LIMIT)
-                .ok()
-                .flatten()
-                .and_then(|bytes| String::from_utf8(bytes).ok())
+        // The read itself is a container re-scan and up to a mebibyte of
+        // inflate, so it is a worker's (`preview::body`). The card goes up now
+        // with the entry's facts; the body lands under them a frame or two
+        // later, which is what a card whose subject is inside an archive
+        // already does for its listing.
+        if wanted {
+            self.bodies.request(crate::preview::body::Job::Archive {
+                archive: archive.clone(),
+                inner: inner.clone(),
+                limit: crate::archive::PREVIEW_LIMIT,
+            });
         } else {
-            None
-        };
-        self.archive_preview = Some((archive, inner, body));
+            self.bodies.cancel();
+        }
+        self.archive_preview = Some((archive, inner, None));
         true
     }
 
@@ -2195,13 +2238,14 @@ impl App {
             self.rescan(dir, now);
         }
         if let Some((url, local)) = done.preview {
-            let body = read_preview_text(&local);
-            self.temps.remember(url.clone(), local);
-            if let Some(preview) = &mut self.remote_preview {
-                if preview.url == url {
-                    preview.body = body;
-                    preview.loading = false;
-                }
+            self.temps.remember(url.clone(), local.clone());
+            if self.remote_preview.as_ref().is_some_and(|p| p.url == url) {
+                // The download landed on a worker; reading what it wrote goes
+                // to one too (`preview::body`). The card keeps saying
+                // "reading…" for the one extra hop, which is honest — it is
+                // still reading.
+                self.bodies
+                    .request(crate::preview::body::Job::Remote { url, local });
             }
         }
         if let Some((url, local)) = done.open {
@@ -2303,10 +2347,17 @@ impl App {
         // second visit. No round trip, and the body is there this frame.
         if let Some(local) = self.temps.get(&url).map(Path::to_path_buf) {
             self.remote_hover = None;
+            // No round trip, but still a file read, and a temp file can be on
+            // anything — so it goes to the same worker the archive bodies do
+            // rather than into the middle of this frame.
+            self.bodies.request(crate::preview::body::Job::Remote {
+                url: url.clone(),
+                local,
+            });
             self.remote_preview = Some(RemotePreview {
-                body: read_preview_text(&local),
                 url,
-                loading: false,
+                body: None,
+                loading: true,
             });
             return true;
         }
@@ -8581,6 +8632,10 @@ impl App {
             }
             _ => None,
         };
+        // …and the poster underneath it stands down the moment it lands: the
+        // two are the same picture, and a rotated clip makes that visible by
+        // drawing them at different sizes (`Pane::set_media_frame`).
+        self.preview.set_media_frame(frame_tex.is_some());
         let strip_alpha = self
             .player
             .as_ref()
@@ -8893,14 +8948,24 @@ impl App {
             let clipped = painter.with_clip_rect(content);
             match frame_tex {
                 Some(tex) => {
-                    let rect = crate::preview::fit_rect(content, (tex.width, tex.height), ppp);
-                    let mut mesh = egui::Mesh::with_texture(tex.id);
-                    mesh.add_rect_with_uv(
+                    // The decoder hands out coded pixels; the container's
+                    // display matrix is the pane's to apply (PLAN §6). Turning
+                    // the *footprint* as well as the picture is what makes a
+                    // portrait clip's frame cover exactly the rectangle its
+                    // poster covered.
+                    let (rotation, mirrored) = media_info
+                        .as_ref()
+                        .map(|info| (info.rotation, info.mirrored))
+                        .unwrap_or((0, false));
+                    let size = crate::preview::oriented_size((tex.width, tex.height), rotation);
+                    let rect = crate::preview::fit_rect(content, size, ppp);
+                    clipped.add(egui::Shape::mesh(crate::preview::oriented_mesh(
+                        tex.id,
                         rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        rotation,
+                        mirrored,
                         egui::Color32::WHITE,
-                    );
-                    clipped.add(egui::Shape::mesh(mesh));
+                    )));
                 }
                 // Audio, or a video whose first frame has not landed: the card
                 // says what the list cannot — how long, what codec, what rate.
@@ -9702,17 +9767,6 @@ fn apply_vfs(tab: &mut Tab, update: &df_core::vfs::VfsUpdate) -> bool {
     true
 }
 
-/// A downloaded preview file as text, or `None` when it is not text after all.
-///
-/// The size gate happened before the download ([`crate::remote::previewable`]);
-/// this is the second half of the same honesty, because a `.txt` full of bytes
-/// is a screen of replacement characters and the facts card is the better
-/// answer.
-fn read_preview_text(local: &Path) -> Option<String> {
-    let bytes = std::fs::read(local).ok()?;
-    String::from_utf8(bytes).ok()
-}
-
 /// Gate for the per-frame `DF_FRAME_LOG` diagnostic, read once.
 fn frame_log_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -9935,11 +9989,19 @@ impl ApplicationHandler<crate::Wake> for App {
     /// `Wake` is only ever sent by something that has already decided a frame
     /// is warranted, so second-guessing it here would drop egui's own requests
     /// on the floor. It stays event-driven — no `Wake`, no frame.
+    ///
+    /// **It does not poll.** It used to, and `redraw_inner` polls again at the
+    /// top of the frame the wake asks for, so every result was looked for
+    /// twice and the expensive half of "a result arrived" ran on whichever of
+    /// the two got there first — often mid-animation, which is the jank. The
+    /// early poll bought nothing the redraw's own does not: the redraw drains
+    /// before it builds the frame, so the frame still carries everything that
+    /// finished while it was being asked for. Several wakes that coalesce into
+    /// one frame now cost one drain instead of one each.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: crate::Wake) {
         if frame_log_enabled() {
             log::info!("wake");
         }
-        self.poll_workers();
         if let Some(gfx) = &self.gfx {
             self.watchdog.redraw_requested();
             gfx.window.request_redraw();
