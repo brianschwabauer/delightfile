@@ -414,9 +414,9 @@ Work top to bottom; tick boxes in the same commit as the work.
 ### Phase 3 — preview
 - [x] Preview workers + yazi-compatible thumbnail cache; 80 ms crossfade-in
 - [x] Text/syntax, rendered markdown, directory tree, image (incl. AVIF/HEIF)
-- [ ] Video/audio playback in pane (dv-playback); `K`/`J` seek ±5 from list
-- [ ] Pane focus model: `→`-on-file → Preview, visuals (accent rule, tint, ghost cursor)
-- [ ] Global transport: j/k/l shuttle ladder, L [ ] < >, volume; preview-focus extras (, . m)
+- [x] Video/audio playback in pane (dv-playback); `K`/`J` seek ±5 from list
+- [x] Pane focus model: `→`-on-file → Preview, visuals (accent rule, tint, ghost cursor)
+- [x] Global transport: j/k/l shuttle ladder, L [ ] < >, volume; preview-focus extras (, . m)
 - [ ] Document scroll/zoom keys in preview focus; PDF (pdfium dlopen), fonts, 3D, gcode
 - [ ] Spot panel `Tab` with metadata, permissions editor, checksum
 

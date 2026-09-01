@@ -25,6 +25,11 @@ dv-media.workspace = true
 # a thumbnail back into the shared yazi cache. Already in the workspace and
 # already compiled for dv-media; no new dependency enters the tree for it.
 image.workspace = true
+# The playback half of PLAN §6's seam: the controller thread, the audio
+# device and the NV12 frame shader the preview pane draws video with. Already a
+# workspace member; it reaches wgpu at the same version egui-wgpu re-exports,
+# which is what keeps exactly one wgpu in the build (PLAN §1).
+dv-playback.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 egui-winit.workspace = true

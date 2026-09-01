@@ -96,6 +96,15 @@ const FOCUS_RULE: f32 = 2.0;
 /// `base` and not a blue panel.
 const FOCUS_TINT: f32 = 0.04;
 
+/// How bright the cursor row is in a pane that does **not** have the keyboard
+/// (PLAN §2.1's ghost bar, ported from DelightMail's vim-split treatment).
+///
+/// 35%: enough that "where am I" still has an answer in every pane at once,
+/// faint enough that "where do my keys go" has exactly one. The two questions
+/// are different questions, and a file manager that answers only the first is
+/// the reason people lose their place in a three-column layout.
+pub const GHOST_CURSOR: f32 = 0.35;
+
 /// How far a *hovered* row is lifted from the pane towards `surface0`.
 /// The full step, because hover is the palette's own next surface — moving up
 /// the ramp rather than inventing a colour (see [`crate::theme`]).
@@ -334,6 +343,9 @@ pub struct ListView<'a> {
     /// rather than what you are about to act on.
     pub cursor_fill: egui::Color32,
     pub cursor_glow: CursorGlow<'a>,
+    /// How strongly the cursor row is lit: 1 in the focused pane, and
+    /// [`GHOST_CURSOR`] everywhere else.
+    pub cursor_alpha: f32,
     /// This pane's right-hand column. The parent passes [`LineMode::None`]: it
     /// is a sixth of the window wide and its job is to say where you are, so
     /// spending a third of it on sizes you did not ask about would crowd out
@@ -417,6 +429,7 @@ impl Painting<'_> {
             ripples,
             cursor_fill: cursor_color,
             cursor_glow,
+            cursor_alpha,
             linemode,
             dim,
             slow_load,
@@ -464,7 +477,7 @@ impl Painting<'_> {
             } else {
                 ground
             };
-            let glow = cursor_glow.at(index, on_cursor);
+            let glow = cursor_glow.at(index, on_cursor) * cursor_alpha;
             let base = mix(ground_here, cursor_color, glow);
             let lift = if glow > 0.5 {
                 CURSOR_HOVER_LIFT

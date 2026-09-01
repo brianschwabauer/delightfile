@@ -26,13 +26,19 @@
 //! curve, because the alternative is a pane that snaps to a new state every
 //! time the cursor moves, and forty of those in a second is a strobe.
 //!
-//! ## The seam for the next agent
+//! ## The seam, and what has taken it up
 //!
 //! Video, audio, PDFs, fonts and models reach [`decode::Job`] with `full:
 //! false`: they get their cached thumbnail and a kind badge, and no decoder is
-//! called. PLAN §10's "Video/audio playback in pane (dv-playback)" replaces
-//! [`Media::badge`] and sets `full` for those kinds; nothing else here has to
-//! change.
+//! called here.
+//!
+//! **Video and audio are now [`crate::playback`]'s.** The cached thumbnail is
+//! still what this module draws — it is the poster the first decoded frame
+//! lands on top of — and [`Pane::set_media_mounted`] is how it is told that a
+//! transport has the file, at which point the kind badge stands down and the
+//! frame, the audio card and the position strip are painted over this pane by
+//! the player. PDFs, fonts, models and G-code are still waiting on the seam,
+//! and [`Media::badge`] is still what they say in the meantime.
 
 pub mod decode;
 pub mod highlight;
@@ -47,7 +53,7 @@ use df_core::preview::{
     PaneId, Preview, PreviewKind, PreviewToken, PreviewUpdate, Previewer, TargetSize,
 };
 
-pub use paint::preview;
+pub use paint::{fit_rect, preview};
 
 /// How long a preview takes to fade in — PLAN §6's "results crossfade in over
 /// ~80 ms", and delightviewer's `CROSSFADE` to the millisecond, so the two
@@ -187,6 +193,9 @@ pub struct Pane {
     max_scroll: usize,
     /// When the scroll last moved, for the scrollbar's linger-then-leave.
     scrolled_at: Option<Instant>,
+    /// Set by the app each frame: a playback controller is mounted on this
+    /// file, so the kind badge stands down (see [`Pane::set_media_mounted`]).
+    media_mounted: bool,
 }
 
 impl Pane {
@@ -205,6 +214,7 @@ impl Pane {
             scroll: 0,
             max_scroll: 0,
             scrolled_at: None,
+            media_mounted: false,
         }
     }
 
@@ -283,6 +293,44 @@ impl Pane {
         if self.scroll != was {
             self.scrolled_at = Some(now);
         }
+    }
+
+    /// Scroll by `delta` lines — the preview-focus arrows, `Ctrl+u`/`Ctrl+d`
+    /// and `Space` (PLAN §4.3).
+    ///
+    /// Same clamp as [`Pane::seek`], and the same scrollbar linger: one
+    /// scrolling behaviour in this pane, whichever key asked for it.
+    pub fn scroll_by(&mut self, delta: isize, now: Instant) {
+        let was = self.scroll;
+        self.scroll = if delta >= 0 {
+            self.scroll
+                .saturating_add(delta as usize)
+                .min(self.max_scroll)
+        } else {
+            self.scroll.saturating_sub(delta.unsigned_abs())
+        };
+        if self.scroll != was {
+            self.scrolled_at = Some(now);
+        }
+    }
+
+    /// `g g` / `G`: the top, or as far down as the content goes.
+    pub fn scroll_to(&mut self, line: usize, now: Instant) {
+        let was = self.scroll;
+        self.scroll = line.min(self.max_scroll);
+        if self.scroll != was {
+            self.scrolled_at = Some(now);
+        }
+    }
+
+    /// Whether a transport is mounted on what this pane is showing.
+    ///
+    /// The seam this module's header promised: with a controller behind it, a
+    /// video's own frame is drawn over the pane by [`crate::playback`] and the
+    /// "video" badge would be labelling a picture that is plainly a video and
+    /// has a transport strip under it.
+    pub fn set_media_mounted(&mut self, mounted: bool) {
+        self.media_mounted = mounted;
     }
 
     /// Take whatever the workers finished. `ctx` is where decoded pixels

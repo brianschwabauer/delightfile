@@ -149,7 +149,16 @@ pub fn preview(paint: &Painting<'_>, pane_rect: egui::Rect, pane: &mut Pane, ppp
             hex_body(paint, &painter, content, bytes, *truncated, pane.scroll, alpha)
         }
         Body::Media(media) => {
-            media_body(paint, &painter, content, media, ppp, alpha, now);
+            media_body(
+                paint,
+                &painter,
+                content,
+                media,
+                ppp,
+                alpha,
+                now,
+                pane.media_mounted,
+            );
             0
         }
     };
@@ -849,6 +858,7 @@ pub fn fit_rect(area: egui::Rect, size: (u32, u32), ppp: f32) -> egui::Rect {
     egui::Rect::from_center_size(area.center(), natural * k)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn media_body(
     paint: &Painting<'_>,
     painter: &egui::Painter,
@@ -857,6 +867,10 @@ fn media_body(
     ppp: f32,
     alpha: f32,
     now: Instant,
+    // `mounted`: a transport is mounted on this file, so the frame and the
+    // position strip are drawn over this pane by `crate::playback` — the kind
+    // badge and the "no decoder" line both stand down.
+    mounted: bool,
 ) {
     // The placeholder is at full strength the moment it decodes; the real
     // pixels fade in over it. That is delightviewer's trick and the reason a
@@ -874,7 +888,11 @@ fn media_body(
     }
 
     if media.full.is_none() && media.thumb.is_none() {
-        if let Some(message) = &media.error {
+        if mounted {
+            // The poster frame is on its way from the decoder and the strip is
+            // already under it; a "video" label in the middle of the pane would
+            // be a caption on a picture about to appear.
+        } else if let Some(message) = &media.error {
             quiet(paint, content, message, alpha);
         } else if media.decoding {
             // Blank: the decode is in flight and a spinner over an image about
@@ -891,7 +909,7 @@ fn media_body(
     // the seam PLAN §10's playback checkbox replaces. It says what the frame
     // on screen belongs to, which is exactly the thing a video's first frame
     // does not.
-    if let Some(badge) = media.badge() {
+    if let Some(badge) = media.badge().filter(|_| !mounted) {
         chip(paint, painter, content, badge, alpha);
     }
 }

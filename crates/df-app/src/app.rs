@@ -27,6 +27,7 @@ use df_core::input::{InputBuffer, InputEvent};
 use df_core::keymap::{
     Chord, Command, Context, ContextStack, Dispatch, Key, KeymapState, Registry, WhenFlags,
 };
+use df_core::preview::PreviewKind;
 use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord};
 use df_core::ops::paste::{plan_paste, Clipboard, PasteMode};
 use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
@@ -45,7 +46,9 @@ use crate::help::{self, Help};
 use crate::hover::Hovers;
 use crate::input::{Prompt, PromptKind};
 use crate::open::{self, Picker};
+use crate::focus::{escape_rung, EscapeRung, EscapeState, Focus, Hovered, Rightward};
 use crate::panel::{self, TaskPanel, TaskRow};
+use crate::playback::{Player, Prober, TemporalInfo};
 use crate::preview::Pane as PreviewPane;
 use crate::ripple::Ripples;
 use crate::toast::Toasts;
@@ -82,6 +85,12 @@ const REPAINT_HORIZON: Duration = Duration::from_secs(3600);
 /// enough that a sleeping disk or a dead NFS mount does not leave the pane
 /// looking empty and wrong.
 const LOADING_DELAY: Duration = Duration::from_millis(150);
+
+/// How many probed files are remembered (see [`App::probes`]).
+///
+/// Four: a `↓ ↑`, and a step back up out of a directory onto the clip you were
+/// just on. Past that, asking ffmpeg again is cheaper than the memory of it.
+const PROBE_MEMORY: usize = 4;
 
 /// Wakes the event loop from a worker thread.
 ///
@@ -130,6 +139,9 @@ impl std::fmt::Debug for Waker {
 /// matching for no reason.
 #[derive(Debug, Clone)]
 struct Press {
+    /// winit's own answer to "is this key repeating", which is the only
+    /// honest source for it: a timer here would guess.
+    repeat: bool,
     chord: Option<Chord>,
     text: Option<String>,
 }
@@ -250,6 +262,30 @@ pub struct App {
     /// The preview pane's whole state: its workers, what it is showing, and
     /// how far that has been scrolled (PLAN §6).
     preview: PreviewPane,
+    /// Which pane the keyboard is in (PLAN §2.1). One field, read by the
+    /// `when` predicates and by the paint — see [`crate::focus`].
+    focus: Focus,
+    /// The transport, built the first time a playable file is hovered and kept
+    /// after that (PLAN §4.3). `None` is the resting state of a session that
+    /// has only ever looked at photographs: no cpal device, no decode thread.
+    player: Option<Player>,
+    /// ffmpeg's answer about the hovered file, off the paint thread.
+    prober: Prober,
+    /// The last few probes, so arrowing back onto a clip does not re-open it.
+    ///
+    /// A tiny ring rather than a cache with a policy: what it has to cover is a
+    /// `↓ ↑` and a walk back up a directory, and past that the probe is cheaper
+    /// than remembering.
+    probes: Vec<(PathBuf, Option<TemporalInfo>)>,
+    /// What a probe is in flight for, so a held `↓` asks once per file.
+    probing: Option<PathBuf>,
+    /// Whether the keystroke being routed came from key **repeat**.
+    ///
+    /// The shuttle ladder is the only thing in the program that cares — a held
+    /// `l` is paced to one doubling per `SHUTTLE_HOLD_STEP` while discrete
+    /// presses double instantly (PLAN §4.3) — so it is carried as one field
+    /// beside the press rather than threaded through every command's signature.
+    key_repeat: bool,
     tabs: Tabs,
     /// `--cwd-file`, written on a `q` quit (PLAN §3).
     cwd_file: Option<PathBuf>,
@@ -348,7 +384,10 @@ impl App {
         let watcher = Watcher::start(Arc::clone(&notifier));
         // Before the window, with the scanner (PLAN §6's cold-start ordering:
         // "decode workers started **before** the window").
-        let mut preview = PreviewPane::start(notifier);
+        let mut preview = PreviewPane::start(Arc::clone(&notifier));
+        // Before the window as well, and for the same reason: the first thing
+        // a probe is asked about is whatever file the cursor opens on.
+        let prober = Prober::start(notifier);
 
         // Before the window as well (PLAN §6's cold-start ordering), and wired
         // to the same bell every other worker rings.
@@ -390,6 +429,12 @@ impl App {
             scanner,
             watcher,
             preview,
+            focus: Focus::default(),
+            player: None,
+            prober,
+            probes: Vec::new(),
+            probing: None,
+            key_repeat: false,
             tabs: Tabs::new(tab),
             cwd_file: args.cwd_file,
             quit: None,
@@ -479,6 +524,23 @@ impl App {
         // happen on the thread egui lives on.
         let ctx = self.gfx.as_ref().map(|g| g.egui_ctx.clone());
         let mut changed = self.preview.poll(ctx.as_ref(), now);
+        // ffmpeg's answers about hovered files. Kept as a small ring so a
+        // `↓ ↑` does not re-open the clip, and applied by the next frame's
+        // `sync_playback` — which is the one place that decides what to mount.
+        let probed: Vec<crate::playback::Probed> = self.prober.drain().collect();
+        for result in probed {
+            changed = true;
+            if self.probing.as_deref() == Some(result.path.as_path()) {
+                self.probing = None;
+            }
+            self.probes.retain(|(path, _)| *path != result.path);
+            self.probes.push((result.path, result.info));
+            // Four is a `↓ ↑` and a step back up out of a directory. Past that
+            // the probe is cheaper than the memory of it.
+            while self.probes.len() > PROBE_MEMORY {
+                self.probes.remove(0);
+            }
+        }
         for update in self.scanner.drain() {
             // Every tab, not only the active one: a tab opened a moment ago is
             // still loading behind the strip.
@@ -486,9 +548,11 @@ impl App {
                 changed = true;
             }
         }
-        if changed {
-            // The parent's marker follows the path, and the row it belongs on
-            // may only just have arrived in a batch.
+        // The parent's marker follows the path, and the row it belongs on may
+        // only just have arrived in a batch — *unless* the keyboard is in that
+        // pane, where the marker is a cursor somebody is steering and a scan
+        // update must not yank it back to the directory we are inside.
+        if changed && self.focus != Focus::Parent {
             for tab in self.tabs.iter_mut() {
                 tab.sync_parent_cursor();
             }
@@ -925,6 +989,130 @@ impl App {
         self.track(id, slot, dirs);
     }
 
+    // ── Playback (PLAN §4.3, §6) ────────────────────────────────────────────
+
+    /// The hovered file and what the preview pipeline would call it.
+    ///
+    /// Classified from the **name** rather than from the preview pane's answer,
+    /// which is a debounced round trip through a worker: `→ ↓ l` typed at speed
+    /// would otherwise find `l` inert on a file whose preview had not landed
+    /// yet, and "the transport keys are always the transport keys" is the whole
+    /// contract (PLAN §4.3). The name is what yazi's own opener rules go on and
+    /// it is a pure function, so this is also what makes `media_hovered`
+    /// testable.
+    fn hovered_kind(&self) -> Option<(PathBuf, PreviewKind)> {
+        let entry = self.tab().cwd.dir.cursor_entry()?;
+        let mime = df_core::fs::mime::hint_for_name(&entry.name);
+        Some((entry.path.clone(), df_core::preview::kind_for(entry, mime)))
+    }
+
+    /// Is the cursor on something the transport could act on?
+    fn media_hovered(&self) -> bool {
+        self.hovered_kind()
+            .is_some_and(|(_, kind)| is_temporal(&kind))
+    }
+
+    /// Keep the controller pointed at the hovered file (PLAN §10's mount /
+    /// teardown).
+    ///
+    /// Called once per frame *after* the keys are routed, like the preview's
+    /// own `sync`, so a held `↓` mounts where it stopped rather than at every
+    /// row it passed.
+    fn sync_playback(&mut self, now: Instant) {
+        let hovered = self
+            .hovered_kind()
+            .filter(|(_, kind)| is_temporal(kind))
+            .map(|(path, _)| path);
+
+        match hovered {
+            Some(path) => {
+                if self.player.as_ref().and_then(Player::path) == Some(path.as_path()) {
+                    // Already mounted — including after a flick away and back
+                    // inside the grace, which is the whole point of it. The
+                    // transport is left exactly as the last key left it.
+                    if let Some(player) = self.player.as_mut() {
+                        player.stay();
+                    }
+                } else if let Some((_, probed)) = self.probes.iter().find(|(p, _)| *p == path) {
+                    match probed.clone() {
+                        // A file dv-media can open, and something in it to play.
+                        Some(info) if info.playable() => self.mount(&path, &info, now),
+                        // A `.mp4` that is really a text file, or a download
+                        // that stopped half way: no transport, and the preview
+                        // pane keeps whatever it was already showing.
+                        _ => {
+                            if let Some(player) = &mut self.player {
+                                player.leave(now);
+                            }
+                        }
+                    }
+                } else {
+                    if self.probing.as_deref() != Some(path.as_path()) {
+                        self.prober.probe(&path);
+                        self.probing = Some(path.clone());
+                    }
+                    if let Some(player) = &mut self.player {
+                        player.leave(now);
+                    }
+                }
+            }
+            // Off a playable file entirely: the sound stops now, and the source
+            // itself goes when the grace runs out.
+            None => {
+                if let Some(player) = &mut self.player {
+                    player.leave(now);
+                }
+            }
+        }
+
+        // The teardown, on its own scheduled wake-up (see `next_deadline`).
+        let expired = self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.grace_expired(now));
+        if expired {
+            self.close_player();
+        }
+    }
+
+    /// Build the controller if this is the first playable file, and point it at
+    /// `path` — paused, on its first frame.
+    fn mount(&mut self, path: &Path, info: &TemporalInfo, now: Instant) {
+        if self.player.is_none() {
+            let Some(gfx) = &self.gfx else {
+                // No device yet: the cursor is on a clip before the window has
+                // been mapped. The next frame's sync mounts it.
+                return;
+            };
+            let (device, queue) = (gfx.device.clone(), gfx.queue.clone());
+            self.player = Some(Player::new(&device, &queue, now));
+        }
+        if let Some(player) = &mut self.player {
+            player.open(path, info, now);
+        }
+    }
+
+    /// Drop the source and the frame texture it registered. Kept in one place
+    /// because forgetting the `free_texture` half leaks a video-sized texture
+    /// per clip.
+    fn close_player(&mut self) {
+        let Some(gfx) = &mut self.gfx else { return };
+        if let Some(player) = &mut self.player {
+            player.close(&mut gfx.renderer);
+        }
+    }
+
+    /// The transport, when there is one pointed at the file under the cursor.
+    ///
+    /// Every transport command goes through this rather than through
+    /// `self.player` directly: a `k` that reached a controller still holding
+    /// the *previous* file would play a file nobody is looking at.
+    fn transport(&mut self) -> Option<&mut Player> {
+        let hovered = self.tab().cwd.dir.cursor_entry().map(|e| e.path.clone())?;
+        let player = self.player.as_mut()?;
+        (player.path() == Some(hovered.as_path())).then_some(player)
+    }
+
     // ── Commands ────────────────────────────────────────────────────────────
 
     /// Turn queued keystrokes into commands and run them.
@@ -933,11 +1121,14 @@ impl App {
     /// `Ctrl+d` are measured in — hence keys being routed mid-frame, once the
     /// panes have been laid out.
     fn route_keys(&mut self, page: usize, now: Instant) {
-        // Only the list is focusable in Phase 1 (PLAN §2.1's pane focus lands
-        // with the preview in Phase 3), and nothing playable can be hovered
-        // until there is a media pipeline to say so.
-        let flags = WhenFlags::LIST;
+        // The `when` predicates, rebuilt from the two things that decide them:
+        // which pane has the keyboard, and whether the cursor is on something
+        // playable (PLAN §2.1, §4.3). Recomputed per keystroke rather than per
+        // frame, because a keystroke can move the cursor onto a clip and the
+        // *next* keystroke in the same frame has to see that.
         for press in std::mem::take(&mut self.pending_keys) {
+            let flags = self.focus.flags(self.media_hovered());
+            self.key_repeat = press.repeat;
             // The chord is the binding; the text is the fallback for a key the
             // chord table cannot name — a composed character, a layout's own
             // letter — which still has to be typeable into a prompt.
@@ -1625,39 +1816,36 @@ impl App {
     /// would mean a stray press throws away a selection built up over a dozen
     /// keystrokes, and there is no undo for a selection.
     fn escape(&mut self) {
-        // A modal card is the nearest thing to the user, and its own `Esc`
-        // knows whether it is holding a prompt of its own (PLAN §4.1's extended
-        // ladder: dialog → prompt → …). Reached from `Global`'s `Esc` when no
-        // overlay is open, and from [`App::overlay_key`] when one is.
-        if self.overlay_open() {
-            self.close_overlay(Instant::now());
-            return;
+        // The rungs and their order are [`crate::focus::escape_rung`]'s, so the
+        // ladder can be walked in a test with no window and no dialog; this is
+        // only the doing of them.
+        let state = EscapeState {
+            // A modal card is the nearest thing to the user, and its own `Esc`
+            // knows whether it is holding a prompt of its own.
+            overlay_open: self.overlay_open(),
+            chord_pending: self.keys.is_pending(),
+            prompt_open: self.prompt.is_some(),
+            help_open: self.help.is_some(),
+            visual: self.visual.is_some(),
+            selection: self.dir().selected_count() > 0,
+            filter: !self.dir().filter().is_empty(),
+            focus: self.focus,
+        };
+        match escape_rung(state) {
+            EscapeRung::CloseOverlay => self.close_overlay(Instant::now()),
+            EscapeRung::CancelChord => self.keys.cancel(),
+            EscapeRung::ClosePrompt => self.cancel_prompt(),
+            EscapeRung::CloseHelp => self.close_help(),
+            EscapeRung::LeaveVisual => {
+                self.visual = None;
+            }
+            EscapeRung::ClearSelection => self.dir().clear_selection(),
+            EscapeRung::ClearFilter => self.dir().clear_filter(),
+            // The last rung, and the one PLAN §4.1 ends on: whatever else is
+            // going on, `Esc` gets you back to the list.
+            EscapeRung::FocusList => self.focus = Focus::List,
+            EscapeRung::Nothing => {}
         }
-        if self.keys.is_pending() {
-            self.keys.cancel();
-            return;
-        }
-        if self.prompt.is_some() {
-            self.cancel_prompt();
-            return;
-        }
-        if self.help.is_some() {
-            self.close_help();
-            return;
-        }
-        if self.visual.take().is_some() {
-            return;
-        }
-        let dir = self.dir();
-        if dir.selected_count() > 0 {
-            dir.clear_selection();
-            return;
-        }
-        if !dir.filter().is_empty() {
-            dir.clear_filter();
-        }
-        // The last rung is `focus = List`, which is where focus already is
-        // until the preview pane lands in Phase 3.
     }
 
     // ── Tabs (PLAN §2) ──────────────────────────────────────────────────────
@@ -1672,6 +1860,11 @@ impl App {
         // preview is decoding is work for a pane nobody is looking at. The
         // next frame's `sync` asks for the new tab's file.
         self.preview.cancel();
+        // A tab switch is a deliberate move to somewhere else, not a flick past
+        // a row: the source goes now rather than after the grace, because the
+        // file it was holding belongs to a directory that is no longer on
+        // screen.
+        self.close_player();
         self.tabs.active_mut().rescan(&self.scanner, now);
         self.rewatch();
     }
@@ -1701,15 +1894,52 @@ impl App {
                 }
             }
             C::EnterOrPreview => {
-                // Directories only, for now: `→` on a *file* focuses the
-                // preview pane (PLAN §2.1), and there is no preview yet.
-                match self.tab().cwd.dir.cursor_entry() {
-                    Some(entry) if entry.is_dir() => {
-                        let path = entry.path.clone();
-                        self.navigate(path, now);
+                // PLAN §2.1's "rightward": a directory is a place and `→` goes
+                // there; a file has no inside, so `→` goes to the pane that is
+                // already showing it.
+                let hovered = match self.tab().cwd.dir.cursor_entry() {
+                    Some(entry) if entry.is_dir() => Hovered::Directory,
+                    Some(_) => Hovered::File,
+                    None => Hovered::Nothing,
+                };
+                match crate::focus::rightward(hovered) {
+                    Rightward::Enter => {
+                        if let Some(entry) = self.tab().cwd.dir.cursor_entry() {
+                            let path = entry.path.clone();
+                            self.navigate(path, now);
+                        }
                     }
-                    Some(_) => log::debug!("preview focus arrives in Phase 3"),
-                    None => {}
+                    Rightward::FocusPreview => self.focus = Focus::Preview,
+                    Rightward::Nothing => {}
+                }
+            }
+
+            // ── The parent pane, once a click or `←` has put the keyboard in
+            // it (PLAN §2.1's `in_parent`) ──────────────────────────────────
+            C::ParentPrev => {
+                if let Some(parent) = &mut self.tabs.active_mut().parent {
+                    parent.dir.move_cursor(-1);
+                }
+            }
+            C::ParentNext => {
+                if let Some(parent) = &mut self.tabs.active_mut().parent {
+                    parent.dir.move_cursor(1);
+                }
+            }
+            C::ParentEnter => {
+                // Entering from the parent pane puts the keyboard back in the
+                // list: the pane you steered with has become the pane you came
+                // from, and leaving focus behind would strand the cursor.
+                let target = self
+                    .tab()
+                    .parent
+                    .as_ref()
+                    .and_then(|parent| parent.dir.cursor_entry())
+                    .filter(|entry| entry.is_dir())
+                    .map(|entry| entry.path.clone());
+                if let Some(path) = target {
+                    self.focus = Focus::List;
+                    self.navigate(path, now);
                 }
             }
             C::HistoryBack => {
@@ -1729,8 +1959,97 @@ impl App {
             C::Goto(slot) => self.goto(slot, now),
 
             // ── The preview, from the list (PLAN §4.1's yazi parity) ────────
-            C::SeekPreviewUp => self.preview.seek(false, now),
-            C::SeekPreviewDown => self.preview.seek(true, now),
+            // **One key, two units.** yazi's `K`/`J` "seek preview ±5" moves a
+            // document by five *lines*; on a mounted clip the same key moves it
+            // by five *seconds* (`playback::SEEK_US`), because five lines of a
+            // video is not a quantity. The split is on what is actually in the
+            // pane, so nothing has to be un-learned in either direction.
+            C::SeekPreviewUp | C::SeekPreviewDown => {
+                let down = command == C::SeekPreviewDown;
+                match crate::playback::list_seek(down, self.transport().is_some()) {
+                    crate::playback::ListSeek::Micros(delta) => {
+                        if let Some(player) = self.transport() {
+                            player.skip(delta, now);
+                        }
+                    }
+                    crate::playback::ListSeek::Lines(_) => self.preview.seek(down, now),
+                }
+            }
+
+            // ── The preview, with the keyboard in it (PLAN §4.3) ────────────
+            // Images and PDFs are somebody else's box; what a document does
+            // here is scroll, which is the pane's own `seek` at the sizes the
+            // keys name.
+            C::PreviewUp => self.preview.scroll_by(-1, now),
+            C::PreviewDown => self.preview.scroll_by(1, now),
+            C::PreviewHalfPageUp => self.preview.scroll_by(-half, now),
+            C::PreviewHalfPageDown => self.preview.scroll_by(half, now),
+            C::PreviewPageDown => self.preview.scroll_by(full, now),
+            // `←` out of the preview is the leftward half of PLAN §2.1, and it
+            // is the *fall-through*: a PDF's page-back and an image's pan will
+            // claim this key first when they land, and at the first page (or a
+            // document that has no pages) it goes back to the list, which is
+            // what it does today for everything.
+            C::PreviewLeft => self.focus = Focus::List,
+            C::PreviewTop => self.preview.scroll_to(0, now),
+            C::PreviewBottom => self.preview.scroll_to(usize::MAX, now),
+
+            // ── Transport, on the hovered file, at any focus (PLAN §4.3) ────
+            C::PlayPause => {
+                if let Some(player) = self.transport() {
+                    player.play_pause(now);
+                }
+            }
+            C::ShuttleForward | C::ShuttleReverse => {
+                let dir = if command == C::ShuttleForward { 1.0 } else { -1.0 };
+                let held = self.key_repeat;
+                if let Some(player) = self.transport() {
+                    player.shuttle(dir, held, now);
+                }
+            }
+            C::ToggleLoop => {
+                if let Some(player) = self.transport() {
+                    let on = player.toggle_loop(now);
+                    log::debug!("loop {}", if on { "on" } else { "off" });
+                }
+            }
+            C::PrevEdge | C::NextEdge => {
+                let end = command == C::NextEdge;
+                if let Some(player) = self.transport() {
+                    player.seek_edge(end, now);
+                }
+            }
+            C::SkipBack | C::SkipForward => {
+                let delta = if command == C::SkipForward {
+                    crate::playback::SKIP_US
+                } else {
+                    -crate::playback::SKIP_US
+                };
+                if let Some(player) = self.transport() {
+                    player.skip(delta, now);
+                }
+            }
+            C::FrameStepBack | C::FrameStepForward => {
+                let frames = if command == C::FrameStepForward { 1 } else { -1 };
+                if let Some(player) = self.transport() {
+                    player.step(frames, now);
+                }
+            }
+            C::Mute => {
+                if let Some(player) = self.transport() {
+                    player.toggle_mute(now);
+                }
+            }
+            C::VolumeUp | C::VolumeDown => {
+                let delta = if command == C::VolumeUp {
+                    crate::playback::VOLUME_STEP
+                } else {
+                    -crate::playback::VOLUME_STEP
+                };
+                if let Some(player) = self.transport() {
+                    player.nudge_volume(delta, now);
+                }
+            }
 
             // ── Selection ───────────────────────────────────────────────────
             C::ToggleSelect => self.toggle_select(),
@@ -2081,6 +2400,22 @@ impl App {
                 })?;
             Some((control, p))
         });
+        // **Mousedown-capture focuses a pane** (PLAN §2.1). Before the click
+        // itself, and on the pane rather than on anything in it: clicking the
+        // empty space under a listing is still a claim about where you want the
+        // keyboard, and a click that focused only when it landed on a row would
+        // be a rule nobody could see.
+        if let (Some(position), true) = (pointer, just_pressed) {
+            if overlay.is_none() {
+                if layout.list.contains(position) {
+                    self.focus = Focus::List;
+                } else if layout.preview.contains(position) {
+                    self.focus = Focus::Preview;
+                } else if layout.parent.contains(position) {
+                    self.focus = Focus::Parent;
+                }
+            }
+        }
         if let Some((control, position)) = over.filter(|_| just_pressed) {
             // Everything happens on mouse-*down*, with the ripple: waiting for
             // the release would put the acknowledgement after the thing it is
@@ -2170,6 +2505,47 @@ impl App {
             .cursor_entry()
             .map(|entry| entry.path.clone());
         self.preview.sync(hovered.as_deref(), target, now);
+        // The transport follows the same cursor, one line later and by the same
+        // rule: after the keys, so a held `↓` mounts what it stopped on.
+        self.sync_playback(now);
+        // What the player has open, and the frame it is showing. Both are read
+        // here — before the painter's borrow of the palette — because the frame
+        // conversion needs `&mut self.gfx` and the paint needs `&self`.
+        let mounted = self.transport().is_some();
+        self.preview.set_media_mounted(mounted);
+        // What the strip draws, with the playhead interpolated between decoded
+        // frames so the bar glides rather than hopping one frame at a time.
+        let transport = self
+            .player
+            .as_mut()
+            .filter(|_| mounted)
+            .map(|player| player.state_at(now));
+        // The loop's wrap is asked once per frame while `L` is on — it is an
+        // anticipation of the end, not a reaction to it (see `wrap_if_ending`).
+        if let Some(player) = self.player.as_mut() {
+            player.wrap_if_ending(now);
+        }
+        // The decoded frame, converted into an egui texture. One pass per
+        // *decoded* frame, not per painted one: a paused video re-uses the
+        // texture it already has.
+        let frame_tex = match (self.gfx.as_mut(), self.player.as_mut()) {
+            (Some(gfx), Some(player)) if mounted => {
+                let (device, queue) = (gfx.device.clone(), gfx.queue.clone());
+                player.frame(&device, &queue, &mut gfx.renderer)
+            }
+            _ => None,
+        };
+        let strip_alpha = self
+            .player
+            .as_ref()
+            .filter(|_| mounted)
+            .map(|player| player.strip_alpha(now))
+            .unwrap_or(0.0);
+        let media_info = self
+            .player
+            .as_ref()
+            .filter(|_| mounted)
+            .and_then(|player| player.info().cloned());
 
         // ── The help sheet, and where it has scrolled to ─────────────────────
         // Built before the painter exists, because building it needs `&mut
@@ -2221,12 +2597,13 @@ impl App {
             now,
         };
 
-        // The list is the only focusable pane in Phase 1, so it is the one that
-        // carries PLAN §2.1's accent rule and tint.
-        let list_ground = paint.pane_fill(self.palette.base, true);
-        paint.pane(layout.parent, self.palette.mantle, false);
-        paint.pane(layout.list, self.palette.base, true);
-        paint.pane(layout.preview, self.palette.mantle, false);
+        // PLAN §2.1's focus visuals: the pane with the keyboard wears the 2 px
+        // accent rule and the 4% tint, and exactly one pane ever does.
+        let list_focused = self.focus == Focus::List;
+        let list_ground = paint.pane_fill(self.palette.base, list_focused);
+        paint.pane(layout.parent, self.palette.mantle, self.focus == Focus::Parent);
+        paint.pane(layout.list, self.palette.base, list_focused);
+        paint.pane(layout.preview, self.palette.mantle, self.focus == Focus::Preview);
 
         if let Some(parent) = &self.tab().parent {
             paint.listing(ListView {
@@ -2239,6 +2616,14 @@ impl App {
                 ripples: &self.ripples,
                 cursor_fill: self.palette.surface0,
                 cursor_glow: CursorGlow::Steady,
+                // The parent's marker is normally a fact about the path rather
+                // than a cursor, so it stays quiet — until the keyboard is
+                // actually in that pane and it *is* the cursor.
+                cursor_alpha: if self.focus == Focus::Parent {
+                    1.0
+                } else {
+                    crate::ui::GHOST_CURSOR
+                },
                 linemode: LineMode::None,
                 dim: true,
                 slow_load: now.duration_since(parent.scan_started) >= LOADING_DELAY,
@@ -2260,6 +2645,11 @@ impl App {
             ripples: &self.ripples,
             cursor_fill: self.palette.surface1,
             cursor_glow: CursorGlow::Fading(&self.cursor_glow),
+            // DelightMail's vim-split trick (PLAN §2.1): with the keyboard
+            // somewhere else the cursor row dims to a ghost bar, so "where am
+            // I" and "where do my keys go" are two questions with two answers
+            // and both are always on screen.
+            cursor_alpha: if list_focused { 1.0 } else { crate::ui::GHOST_CURSOR },
             linemode: self.mgr.linemode,
             dim: false,
             slow_load: now.duration_since(self.tab().cwd.scan_started) >= LOADING_DELAY,
@@ -2271,6 +2661,34 @@ impl App {
             }),
         });
         crate::preview::preview(&paint, layout.preview, &mut self.preview, ppp, now);
+        // Over the pane's own body — the cached thumbnail is the poster the
+        // first decoded frame lands on top of — and under everything else.
+        if let Some(state) = &transport {
+            let content = ui::content_rect(layout.preview);
+            let clipped = painter.with_clip_rect(content);
+            match frame_tex {
+                Some(tex) => {
+                    let rect = crate::preview::fit_rect(content, (tex.width, tex.height), ppp);
+                    let mut mesh = egui::Mesh::with_texture(tex.id);
+                    mesh.add_rect_with_uv(
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                    clipped.add(egui::Shape::mesh(mesh));
+                }
+                // Audio, or a video whose first frame has not landed: the card
+                // says what the list cannot — how long, what codec, what rate.
+                None => {
+                    if let Some(info) = &media_info {
+                        if !info.has_video {
+                            crate::playback::strip::audio_card(&paint, content, info, 1.0);
+                        }
+                    }
+                }
+            }
+            crate::playback::strip::paint(&paint, content, state, strip_alpha);
+        }
 
         // ── The chrome ──────────────────────────────────────────────────────
         if let Some(strip) = layout.strip {
@@ -2421,6 +2839,15 @@ impl App {
             ("tab", self.tab().animating(now)),
             ("tabs", self.tabs.animating(now)),
             ("preview", self.preview.animating(now)),
+            // A *playing* file streams frames and says so; a paused one says
+            // so only while a frame it asked for — a seek, a step, a new
+            // source — has not landed, and then stops (PLAN §1's idle rule).
+            (
+                "playback",
+                self.player
+                    .as_ref()
+                    .is_some_and(|p| p.is_playing() || p.awaiting_frame()),
+            ),
             ("which", self.which.fading()),
             ("toast", self.toasts.animating(now)),
             (
@@ -2456,11 +2883,28 @@ impl App {
         // Four waiters now: a slow directory read, a held chord, the preview
         // (its own "reading…" label and its scrollbar's linger), and the toast
         // — which asks for exactly one wake-up, the instant its fade begins.
+        // …and two of the transport's: the moment the position strip finishes
+        // its linger and starts to fade, and the moment a source the cursor has
+        // left runs out of its grace and is torn down. Both are single instants
+        // known in advance, so both are a `WaitUntil` and neither is a poll.
+        let strip = self
+            .player
+            .as_ref()
+            .filter(|player| player.is_playing())
+            .map(|player| player.strip_deadline().saturating_duration_since(now))
+            .filter(|d| !d.is_zero());
+        let grace = self
+            .player
+            .as_ref()
+            .and_then(Player::grace_deadline)
+            .map(|at| at.saturating_duration_since(now));
         [
             self.loading_deadline(now),
             card,
             self.preview.next_deadline(now),
             self.toasts.deadline(now),
+            strip,
+            grace,
         ]
             .into_iter()
             .flatten()
@@ -2544,6 +2988,15 @@ impl App {
         }
         event_loop.exit();
     }
+}
+
+/// Is this a kind the transport can act on (PLAN §4.3)?
+///
+/// Video and audio, and nothing else: a PDF has pages, a font has glyphs and a
+/// 3D model has a turntable, and none of those is a thing `k` plays. Kept as a
+/// free function so the answer is one line to read and one line to test.
+fn is_temporal(kind: &PreviewKind) -> bool {
+    matches!(kind, PreviewKind::Video | PreviewKind::Audio)
 }
 
 /// How a finished operation reads, and for how long.
@@ -2728,7 +3181,11 @@ impl ApplicationHandler<crate::Wake> for App {
                 let chord = crate::keys::chord(&event, self.modifiers);
                 let text = crate::keys::text(&event);
                 if chord.is_some() || text.is_some() {
-                    self.pending_keys.push(Press { chord, text });
+                    self.pending_keys.push(Press {
+                        repeat: event.repeat,
+                        chord,
+                        text,
+                    });
                     gfx.window.request_redraw();
                 }
             }
@@ -2799,6 +3256,14 @@ impl ApplicationHandler<crate::Wake> for App {
             log::warn!("quitting with {running} task(s) still running; cancelling them");
         }
         self.engine.cancel_all();
+        // The audio device and the decode thread go before the window does: a
+        // controller still holding a cpal stream while the Wayland connection
+        // is torn down is the shape of crash-at-quit this program's ordering
+        // exists to avoid.
+        if let Some(player) = &mut self.player {
+            player.shutdown();
+        }
+        self.player = None;
         self.gfx = None;
     }
 }
@@ -2915,6 +3380,42 @@ mod tests {
         assert!(panel.iter().any(|(k, what)| *k == "x" && *what == "cancel"));
         let picker = overlay_hints(&None, true);
         assert!(picker.iter().any(|(_, what)| *what == "open"));
+    }
+
+    /// **Only video and audio grow a transport** (PLAN §4.3). A PDF has pages
+    /// and a font has glyphs; `k` on either must do nothing at all, which is
+    /// what keeps the reserved keys from being a surprise on the wrong file.
+    #[test]
+    fn the_transport_keys_are_live_on_clips_and_nothing_else() {
+        assert!(is_temporal(&PreviewKind::Video));
+        assert!(is_temporal(&PreviewKind::Audio));
+        for kind in [
+            PreviewKind::Image,
+            PreviewKind::Pdf,
+            PreviewKind::Font,
+            PreviewKind::Model3d,
+            PreviewKind::Gcode,
+            PreviewKind::Archive,
+            PreviewKind::Directory,
+            PreviewKind::Binary,
+            PreviewKind::Markdown,
+            PreviewKind::Text { syntax: None },
+        ] {
+            assert!(!is_temporal(&kind), "{kind:?}");
+        }
+        // …and the classification a hovered row gets is the name-based one, so
+        // `l` is live the instant the cursor lands rather than a preview round
+        // trip later.
+        let mime = df_core::fs::mime::hint_for_name("clip.mkv");
+        assert_eq!(
+            df_core::preview::kind_for_mime(mime, "clip.mkv"),
+            PreviewKind::Video
+        );
+        let mime = df_core::fs::mime::hint_for_name("voice.opus");
+        assert_eq!(
+            df_core::preview::kind_for_mime(mime, "voice.opus"),
+            PreviewKind::Audio
+        );
     }
 
     #[test]
