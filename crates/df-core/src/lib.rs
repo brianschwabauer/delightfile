@@ -27,6 +27,7 @@ pub mod tasks;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod toml;
+pub mod vfs;
 pub mod zoxide;
 
 /// Everything this crate can fail at.
