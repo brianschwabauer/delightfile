@@ -84,6 +84,64 @@ pub const TILE_RADIUS: u8 = ROW_RADIUS;
 /// width as it turns the corner.
 pub const THUMB_RADIUS: u8 = TILE_RADIUS - TILE_PAD as u8;
 
+/// The ring a cursor or a selected tile wears, in logical points.
+///
+/// Two, which is the weight every other "this is the one" statement in the
+/// window is drawn at — the drop target's ring, the chrome's accent rules. A
+/// tile is a *card*, and the mark that says a card is chosen goes around it;
+/// the list's left-hand bar was inherited from the row it is not, and on a wall
+/// of pictures it read as a stripe of colour beside a photograph rather than as
+/// a selection.
+pub const TILE_RING: f32 = 2.0;
+
+/// The air between the tile's own edge and the ring around it.
+///
+/// One point. The ring has to read as a ring *around* the tile rather than as a
+/// border drawn on it, and one point of the pane showing through is the least
+/// that does it without eating into the gap between neighbours.
+pub const TILE_RING_GAP: f32 = 1.0;
+
+/// The ring's outer corner radius.
+///
+/// Derived, never picked: `delightful-ui` §15's concentric rule again, from the
+/// other side. The card is the inner element and the ring is what encloses it,
+/// so the ring's radius is the card's plus everything between the two edges —
+/// the ring's own weight and the air inside it — and the space around the
+/// corner stays the width it is along the sides.
+pub const TILE_RING_RADIUS: u8 = TILE_RADIUS + TILE_RING_GAP as u8 + TILE_RING as u8;
+
+/// The card inside one tile's cell.
+///
+/// [`tile_rect`] gives the whole **cell**, which is what the hit test, the drag
+/// and the drop ring are measured in and what the ring is drawn around. The
+/// card is what the cell *contains*: the ground, the picture and the name,
+/// inset by the ring and the air inside it.
+///
+/// Reserved on every tile whether or not one is wearing a ring, because a
+/// picture that grew three points the moment the cursor arrived would be a
+/// reflow (`delightful-ui` §8) — and because a ring that had to fit outside the
+/// cell would be clipped off at the pane's edge, where the first column and the
+/// last one live.
+pub fn card_rect(cell: egui::Rect) -> egui::Rect {
+    cell.shrink(TILE_RING + TILE_RING_GAP)
+}
+
+/// The clipboard badge's radius, in logical points.
+///
+/// The list marks a yank with a bar down the row's trailing edge; a tile has no
+/// trailing edge worth the name — it is a square of picture — so the same fact
+/// is a pip in its top corner instead. Small: it is a note about something you
+/// did a moment ago, not a thing you are about to act on, and it must not
+/// become a sticker on every photograph in the directory.
+pub const TILE_BADGE: f32 = 4.0;
+
+/// How far the badge's halo of pane-ground extends past it.
+///
+/// A teal pip on a bright photograph is a teal pip nobody can see. The halo is
+/// the same trick a caption bar is: put the mark on the pane's own colour so it
+/// is read against something known, whatever the picture underneath is doing.
+pub const TILE_BADGE_HALO: f32 = 1.5;
+
 /// How many rows of tiles beyond the visible ones are decoded ahead.
 ///
 /// One. A wheel roll or a `↓` moves the view by less than a row per frame, so
@@ -606,10 +664,11 @@ pub fn pane_rect(
     metrics: Option<&Metrics>,
     scroll_rows: f32,
     index: usize,
+    scale: crate::ui::Scale,
 ) -> egui::Rect {
     match metrics {
         Some(metrics) => tile_rect(content, metrics, scroll_rows, index),
-        None => crate::ui::row_rect(content, scroll_rows, index),
+        None => crate::ui::row_rect(content, scroll_rows, index, scale.row_height),
     }
 }
 
@@ -620,19 +679,20 @@ pub fn pane_at(
     scroll_rows: f32,
     count: usize,
     pos: egui::Pos2,
+    scale: crate::ui::Scale,
 ) -> Option<usize> {
     match metrics {
         Some(metrics) => tile_at(content, metrics, scroll_rows, count, pos),
-        None => crate::ui::row_at(content, scroll_rows, count, pos),
+        None => crate::ui::row_at(content, scroll_rows, count, pos, scale.row_height),
     }
 }
 
 /// How tall one item of the list pane is — what the wheel converts points into
 /// and what the scrolloff rule counts.
-pub fn pane_step(metrics: Option<&Metrics>) -> f32 {
+pub fn pane_step(metrics: Option<&Metrics>, scale: crate::ui::Scale) -> f32 {
     match metrics {
         Some(metrics) => metrics.step.y,
-        None => crate::ui::ROW_HEIGHT,
+        None => scale.row_height,
     }
 }
 
@@ -776,15 +836,25 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         // Instant, both ways: the keyboard cursor is not a pointer and does
         // not leave a trail (see the note above `crate::ui::ListView`).
         let glow = f32::from(index == dir.cursor()) * cursor_alpha;
-        let base = mix(ground_here, palette.surface1, glow);
+        // The cursor's inner glow is lit only when the ring is busy saying
+        // something else — on a *selected* tile, where the ring is yellow and
+        // the cursor still has to be findable inside the selection. On a tile
+        // that is only the cursor, the ring is already the cursor's own colour,
+        // and lifting the ground to that same colour underneath it would rub
+        // the ring out against its own fill.
+        let inner_glow = if selected { glow } else { 0.0 };
+        let base = mix(ground_here, palette.surface1, inner_glow);
         let fill = mix(base, palette.surface0, hover * crate::ui::HOVER_LIFT);
         let rect = crate::hover::pressed_rect(rect, hovers.press(key));
+        // The cell is what the pointer and the ring are measured against; the
+        // card is what is drawn (see [`card_rect`]).
+        let card = card_rect(rect);
         if fill != ground {
-            painter.rect_filled(rect, TILE_RADIUS, fill);
+            painter.rect_filled(card, TILE_RADIUS, fill);
         }
 
         // The picture, or the icon standing in for one.
-        let thumb = metrics.thumb_rect(rect);
+        let thumb = metrics.thumb_rect(card);
         match thumbs.get(&entry.path) {
             Some(texture) => {
                 let fitted = fit_into(texture.size_vec2(), thumb);
@@ -836,34 +906,48 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
             }
         }
 
-        if selected {
-            // The redundant channel, exactly as on a row: a hard mark at a
-            // fixed edge, so a selection is legible as a shape and not only as
-            // a colour. Down the tile's left side rather than across it,
-            // because that is where a row's is and the two views must not
-            // teach two different marks.
-            let bar = egui::Rect::from_min_max(
-                egui::pos2(rect.left(), rect.top() + TILE_PAD),
-                egui::pos2(
-                    rect.left() + crate::ui::SELECT_BAR_WIDTH,
-                    rect.bottom() - TILE_PAD,
-                ),
+        // The redundant channel (`delightful-ui`: a selection has to be
+        // unmistakable at a glance, and a 10% wash is not). On a row it is a
+        // bar at a fixed x; on a tile it is a **ring around the whole card**,
+        // because a tile is a card and the thing a card is chosen by is its
+        // edge. Yellow for a selection, the cursor's own colour for the cursor,
+        // and when a tile is both the ring stays yellow — the cursor is already
+        // saying its piece with the glow in the fill underneath, and two rings
+        // is one more ring than there is room for.
+        let ring = if selected {
+            Some(palette.yellow)
+        } else if glow > 0.0 {
+            // TODO: use `cursor_fill(palette)` once `crate::ui` exposes it.
+            Some(palette.surface1)
+        } else {
+            None
+        };
+        if let Some(colour) = ring {
+            painter.rect_stroke(
+                rect,
+                TILE_RING_RADIUS,
+                egui::Stroke::new(TILE_RING, crate::chrome::fade(colour, alpha)),
+                egui::StrokeKind::Inside,
             );
-            painter.rect_filled(bar, 1, crate::chrome::fade(palette.yellow, alpha));
         }
         if marked {
-            let chip = egui::Rect::from_min_max(
-                egui::pos2(
-                    rect.right() - crate::ui::CLIP_BAR_WIDTH,
-                    rect.top() + TILE_PAD,
-                ),
-                egui::pos2(rect.right(), rect.bottom() - TILE_PAD),
+            // A pip in the top corner rather than a bar down the side: the
+            // side is where the ring is now, and a mark competing with it for
+            // the same two points of edge would read as a broken ring.
+            let centre = egui::pos2(
+                card.right() - TILE_PAD - TILE_BADGE,
+                card.top() + TILE_PAD + TILE_BADGE,
             );
             let colour = if cut { palette.peach } else { palette.teal };
-            painter.rect_filled(chip, 1, crate::chrome::fade(colour, alpha));
+            painter.circle_filled(
+                centre,
+                TILE_BADGE + TILE_BADGE_HALO,
+                crate::chrome::fade(ground, alpha),
+            );
+            painter.circle_filled(centre, TILE_BADGE, crate::chrome::fade(colour, alpha));
         }
 
-        let inside = painter.with_clip_rect(rect);
+        let inside = painter.with_clip_rect(card);
         for splash in ripples.splashes(key, paint.now) {
             inside.circle_filled(
                 splash.center,
@@ -875,7 +959,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         // The name, over two lines, ellipsised. Centred under the picture
         // rather than left-aligned: the tile is a card about one file and its
         // name is that card's caption.
-        let label = metrics.label_rect(rect);
+        let label = metrics.label_rect(card);
         let name_colour = mute(
             crate::icons::name_color(entry, palette),
             ground,
@@ -891,7 +975,8 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
             crate::chrome::fade(palette.sky, alpha),
         );
     }
-    paint.flip_ghosts(&painter, flip, content, TILE_RADIUS);
+    // The ghosts are drawn at whole cells, so they take the cell's radius.
+    paint.flip_ghosts(&painter, flip, content, TILE_RING_RADIUS);
 }
 
 /// How far one tile's ink is mixed back into the pane behind it.
@@ -1171,16 +1256,28 @@ mod tests {
     #[test]
     fn the_seam_answers_for_both_geometries_and_stays_invertible() {
         let (content, m) = (content(), three_wide());
+        let scale = crate::ui::Scale::default();
         // List: the seam is `ui::row_rect` / `ui::row_at`, unchanged.
-        let row = pane_rect(content, None, 0.0, 3);
-        assert_eq!(row, crate::ui::row_rect(content, 0.0, 3));
-        assert_eq!(pane_at(content, None, 0.0, 7, row.center()), Some(3));
-        assert_eq!(pane_step(None), crate::ui::ROW_HEIGHT);
+        let row = pane_rect(content, None, 0.0, 3, scale);
+        assert_eq!(row, crate::ui::row_rect(content, 0.0, 3, scale.row_height));
+        assert_eq!(pane_at(content, None, 0.0, 7, row.center(), scale), Some(3));
+        assert_eq!(pane_step(None, scale), crate::ui::ROW_HEIGHT);
         // Grid: the tiles, and the step is a whole row of them.
-        let tile = pane_rect(content, Some(&m), 0.0, 4);
+        let tile = pane_rect(content, Some(&m), 0.0, 4, scale);
         assert_eq!(tile, tile_rect(content, &m, 0.0, 4));
-        assert_eq!(pane_at(content, Some(&m), 0.0, 7, tile.center()), Some(4));
-        assert_eq!(pane_step(Some(&m)), m.step.y);
+        assert_eq!(
+            pane_at(content, Some(&m), 0.0, 7, tile.center(), scale),
+            Some(4)
+        );
+        assert_eq!(pane_step(Some(&m), scale), m.step.y);
+        // The list half of the seam follows the ladder; the grid half is the
+        // top of that ladder and has a geometry of its own, so the scale it is
+        // handed changes nothing about it.
+        let roomy = crate::ui::Scale::new(df_core::config::ViewScale::Roomy);
+        assert_eq!(pane_step(None, roomy), roomy.row_height);
+        assert!(roomy.row_height > scale.row_height);
+        assert_eq!(pane_step(Some(&m), roomy), m.step.y);
+        assert_eq!(pane_rect(content, Some(&m), 0.0, 4, roomy), tile);
     }
 
     /// A band over a grid selects everything from the first tile it touches to
@@ -1294,5 +1391,42 @@ mod tests {
         // And a tile sits the same distance from the pane's edge as a row does,
         // so toggling the view does not move where the content starts.
         assert_eq!(TILE_GAP, ROW_INSET);
+        // The ring is the next shell out, by the same rule: its radius is the
+        // card's plus everything between the two edges.
+        assert_eq!(
+            u32::from(TILE_RING_RADIUS),
+            u32::from(TILE_RADIUS) + TILE_RING as u32 + TILE_RING_GAP as u32
+        );
+    }
+
+    /// The ring goes *around* the card, inside the cell — so it is never
+    /// clipped off against the pane's edge, which is exactly where the first
+    /// and last columns of every grid live.
+    #[test]
+    fn the_ring_fits_inside_the_cell_it_rings() {
+        let (content, m) = (content(), three_wide());
+        for index in [0usize, 2, 3, 5] {
+            let cell = tile_rect(content, &m, 0.0, index);
+            let card = card_rect(cell);
+            // The card is inset by the ring and its air, on every side.
+            let inset = TILE_RING + TILE_RING_GAP;
+            assert!(
+                (card.left() - (cell.left() + inset)).abs() < 1e-3,
+                "{index}"
+            );
+            assert!(
+                (card.bottom() - (cell.bottom() - inset)).abs() < 1e-3,
+                "{index}"
+            );
+            // …and the cell — which is what the ring is stroked inside — is
+            // within the pane's content box, first column and last alike.
+            assert!(cell.left() >= content.left() - 1e-3, "{index}");
+            assert!(cell.right() <= content.right() + 1e-3, "{index}");
+        }
+        // Neighbouring cells still do not touch: the ring took its room out of
+        // the card, not out of the gap between tiles.
+        let first = tile_rect(content, &m, 0.0, 0);
+        let second = tile_rect(content, &m, 0.0, 1);
+        assert!((second.left() - first.right() - TILE_GAP).abs() < 1e-3);
     }
 }

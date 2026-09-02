@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! # delightfile state v1
-//! /home/brian/Pictures\tview=grid\tlinemode=none\tt=1756598400
+//! /home/brian/Pictures\tview=grid\tscale=roomy\tlinemode=none\tt=1756598400
 //! /home/brian/src\tsort=mtime\tsort_reverse=1\tt=1756598000
 //! !tabs\t0=/home/brian\t1=/tmp\tactive=1\tt=1756598400
 //! ```
@@ -70,7 +70,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{LineMode, SortBy};
+use crate::config::{LineMode, SortBy, ViewScale};
 use crate::{DfError, Result};
 
 #[cfg(test)]
@@ -159,6 +159,15 @@ pub struct SortOverride {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewState {
     pub view: Option<View>,
+    /// The *list* step chosen here (see [`ViewScale`]), or `None` for "whatever
+    /// `[mgr] view_scale` says".
+    ///
+    /// A list step only: whether this directory is a grid is [`ViewState::view`]'s
+    /// answer and has been since v1 of this file, so storing the grid in both
+    /// places would be two records free to disagree. What this field is *for*
+    /// while a directory is a grid is the step to come back to — the list size
+    /// the grid toggle returns to.
+    pub scale: Option<ViewScale>,
     pub sort: Option<SortOverride>,
     pub linemode: Option<LineMode>,
     pub show_hidden: Option<bool>,
@@ -169,6 +178,7 @@ impl ViewState {
     /// [`StateStore::set_view`] and friends.
     pub fn is_empty(&self) -> bool {
         self.view.is_none()
+            && self.scale.is_none()
             && self.sort.is_none()
             && self.linemode.is_none()
             && self.show_hidden.is_none()
@@ -298,6 +308,12 @@ impl StateStore {
         self.dirs.get(dir).and_then(|r| r.state.view)
     }
 
+    /// This directory's list step, or `None` to mean "whatever the config
+    /// says". Never [`ViewScale::Grid`] — see [`ViewState::scale`].
+    pub fn scale(&self, dir: &Path) -> Option<ViewScale> {
+        self.dirs.get(dir).and_then(|r| r.state.scale)
+    }
+
     pub fn sort(&self, dir: &Path) -> Option<SortOverride> {
         self.dirs.get(dir).and_then(|r| r.state.sort)
     }
@@ -329,6 +345,14 @@ impl StateStore {
     /// a line behind holding an LRU slot.
     pub fn set_view(&mut self, dir: impl Into<PathBuf>, view: Option<View>) {
         self.update(dir, |state| state.view = view);
+    }
+
+    /// Set or clear the list step. The grid is not a list step and is dropped
+    /// rather than stored, so the two records cannot disagree about which
+    /// geometry this directory is drawn in.
+    pub fn set_scale(&mut self, dir: impl Into<PathBuf>, scale: Option<ViewScale>) {
+        let scale = scale.filter(|s| !s.is_grid());
+        self.update(dir, |state| state.scale = scale);
     }
 
     pub fn set_sort(&mut self, dir: impl Into<PathBuf>, sort: Option<SortOverride>) {
@@ -478,6 +502,9 @@ impl StateStore {
             if let Some(view) = state.view {
                 push_field(&mut out, "view", view.name().as_bytes());
             }
+            if let Some(scale) = state.scale {
+                push_field(&mut out, "scale", scale.name().as_bytes());
+            }
             if let Some(sort) = state.sort {
                 push_field(&mut out, "sort", sort_name(sort.by).as_bytes());
                 push_field(&mut out, "sort_reverse", bool_bytes(sort.reverse));
@@ -545,6 +572,12 @@ impl StateStore {
                 };
                 match name.as_slice() {
                     b"view" => state.view = View::from_name(&text(&value)),
+                    // `scale=grid` is not something this ever writes, and a
+                    // hand edit that says it is asking for the geometry `view`
+                    // already owns; drop it rather than keep a second opinion.
+                    b"scale" => {
+                        state.scale = ViewScale::from_name(&text(&value)).filter(|s| !s.is_grid())
+                    }
                     b"sort" => sort_by = SortBy::from_name(&text(&value)),
                     b"sort_reverse" => sort_reverse = value.as_slice() == b"1".as_slice(),
                     b"linemode" => state.linemode = LineMode::from_name(&text(&value)),

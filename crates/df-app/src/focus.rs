@@ -198,8 +198,14 @@ mod tests {
             dispatch(false, "shift+space"),
             Some(Command::PreviewPageDown)
         );
-        assert_eq!(dispatch(false, "alt+-"), Some(Command::PreviewZoomOut));
-        assert_eq!(dispatch(false, "-"), Some(Command::SymlinkAbsolute));
+        // The zoom family is on Ctrl, and the bare keys are the view-scale
+        // ladder — the same split, one more time: a key you press on the thing
+        // you are looking *at* keeps the plain spelling.
+        assert_eq!(dispatch(false, "ctrl+-"), Some(Command::PreviewZoomOut));
+        assert_eq!(dispatch(false, "ctrl+="), Some(Command::PreviewZoomIn));
+        assert_eq!(dispatch(false, "ctrl+0"), Some(Command::PreviewZoomReset));
+        assert_eq!(dispatch(false, "-"), Some(Command::ViewScaleDown));
+        assert_eq!(dispatch(false, "="), Some(Command::ViewScaleUp));
 
         // **And the transport is still global** (PLAN §4.3): `k` plays the file
         // the cursor is on, and is inert on anything else — no beep, no

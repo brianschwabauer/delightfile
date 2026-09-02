@@ -97,6 +97,26 @@ fn gnarly_paths_survive_a_save_and_a_load() {
     }
 }
 
+/// The grid lives in `view`, and only there. A `scale=grid` — from a hand edit
+/// or from a caller that got confused — is dropped rather than kept as a second
+/// opinion about which geometry the directory is in.
+#[test]
+fn the_grid_is_never_stored_as_a_list_scale() {
+    let tree = TempTree::new("state-scale-grid");
+    let dir = Path::new("/tmp/pictures");
+    let mut store = store_at(&tree);
+    store.set_scale(dir, Some(ViewScale::Grid));
+    assert_eq!(store.scale(dir), None);
+    // A record with nothing left in it does not survive at all.
+    assert_eq!(store.get(dir), None);
+
+    store.set_scale(dir, Some(ViewScale::Comfortable));
+    store.flush().unwrap();
+    let text = std::fs::read_to_string(tree.join("state")).unwrap();
+    assert!(text.contains("scale=comfortable"), "{text}");
+    assert!(!text.contains("scale=grid"), "{text}");
+}
+
 #[test]
 fn every_override_round_trips() {
     let tree = TempTree::new("state-overrides");
@@ -110,12 +130,14 @@ fn every_override_round_trips() {
             reverse: true,
         }),
     );
+    store.set_scale(dir, Some(ViewScale::Roomy));
     store.set_linemode(dir, Some(LineMode::Owner));
     store.set_hidden(dir, Some(true));
     store.flush().unwrap();
 
     let reloaded = store_at(&tree);
     assert_eq!(reloaded.view(dir), Some(View::Grid));
+    assert_eq!(reloaded.scale(dir), Some(ViewScale::Roomy));
     assert_eq!(
         reloaded.sort(dir),
         Some(SortOverride {

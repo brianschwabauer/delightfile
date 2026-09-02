@@ -106,14 +106,17 @@ pub(super) fn build() -> Registry {
         (Global, "shift+space",  C::PreviewPageDown,     "Preview: page down",           Always),
         (Global, "ctrl+home",    C::PreviewTop,          "Preview: top",                 Always),
         (Global, "ctrl+end",     C::PreviewBottom,       "Preview: bottom",              Always),
-        (Global, "+",            C::PreviewZoomIn,       "Preview: zoom in",             Always),
-        (Global, "=",            C::PreviewZoomIn,       "Preview: zoom in",             Always),
-        // The one key in the family that had to move: `-` is the absolute
-        // symlink in Files (PLAN §4.1) and a file operation outranks a zoom, so
-        // zoom out takes the Alt spelling of the same key rather than a letter
-        // nobody would guess.
-        (Global, "alt+-",        C::PreviewZoomOut,      "Preview: zoom out",            Always),
-        (Global, "0",            C::PreviewZoomReset,    "Preview: reset zoom",          Always),
+        // **The zoom family is on Ctrl.** The bare `+`/`=`/`-`/`0` it used to
+        // wear are the view-scale ladder now (PLAN §4.1): those are keys you
+        // press dozens of times a session on the thing you are looking *at*,
+        // and the preview's zoom is a thing you reach for on the one file you
+        // are peering into. One modifier for the whole family also ends the
+        // odd-one-out `Alt+-` that the old symlink binding had forced on zoom
+        // out — three keys, one Ctrl, no exceptions.
+        (Global, "ctrl+=",       C::PreviewZoomIn,       "Preview: zoom in",             Always),
+        (Global, "ctrl++",       C::PreviewZoomIn,       "Preview: zoom in",             Always),
+        (Global, "ctrl+-",       C::PreviewZoomOut,      "Preview: zoom out",            Always),
+        (Global, "ctrl+0",       C::PreviewZoomReset,    "Preview: reset zoom",          Always),
 
         // ── Files: quitting ─────────────────────────────────────────────────
         (Files, "q",      C::Quit,          "Quit",                                 Always),
@@ -154,6 +157,19 @@ pub(super) fn build() -> Registry {
         // yazi's mgr table, and g alone is the goto prefix — close cousins.
         (Files, "ctrl+g", C::ToggleView,      "Toggle list / grid view",      Always),
 
+        // ── Files: how big the list draws itself (§4.1) ─────────────────────
+        // Explorer's view slider as two keys. `-` and `=` are the pair every
+        // program on the machine uses for smaller/bigger, and `+` is the same
+        // key with Shift on it — nobody who means "bigger" should have to
+        // notice which one they hit. The ladder's top step *is* the grid, so
+        // `=` off the largest list lands in the tiles and `-` climbs back out.
+        // These take the keys the preview's zoom used to have; the zoom is on
+        // Ctrl now (see the Global block above), and the symlink family that
+        // used to own `-`/`_`/`Ctrl+-` is unbound (see `Command`).
+        (Files, "-",      C::ViewScaleDown,   "Smaller rows / leave the grid", Always),
+        (Files, "=",      C::ViewScaleUp,     "Bigger rows / into the grid",   Always),
+        (Files, "+",      C::ViewScaleUp,     "Bigger rows / into the grid",   Always),
+
         // ── Files: opening ──────────────────────────────────────────────────
         (Files, "o",           C::Open,            "Open",       Always),
         (Files, "enter",       C::Open,            "Open",       Always),
@@ -167,10 +183,11 @@ pub(super) fn build() -> Registry {
         (Files, "P",      C::PasteForce,        "Paste, overwriting",                  Always),
         (Files, "Y",      C::CopyToClipboard,   "Copy to the system clipboard",        Always),
         (Files, "X",      C::Unyank,            "Cancel the yank",                     Always),
-        // `-` is guarded because the preview owns it as the zoom-out.
-        (Files, "-",      C::SymlinkAbsolute,   "Symlink (absolute)",                  Always),
-        (Files, "_",      C::SymlinkRelative,   "Symlink (relative)",                  Always),
-        (Files, "ctrl+-", C::Hardlink,          "Hardlink",                            Always),
+        // No symlink or hardlink row. `-`/`_`/`Ctrl+-` were yazi's, and all
+        // three are worth more as the view-scale ladder and the preview's zoom
+        // than as an operation somebody performs deliberately once a month.
+        // `symlink-absolute`, `symlink-relative` and `hardlink` are still
+        // commands — a `keymap.toml` line puts any of them on any key.
         (Files, "d",      C::Trash,             "Trash",                               Always),
         (Files, "D",      C::DeletePermanently, "Delete permanently",                  Always),
         (Files, "a",      C::Create,            "Create (trailing / for a directory)", Always),

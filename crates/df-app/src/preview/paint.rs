@@ -699,7 +699,11 @@ fn directory_body(
     let rows = (rows_area.height() / ROW_HEIGHT).floor().max(1.0) as usize;
     let first = scroll.min(entries.len());
     let ground = paint.palette.mantle;
-    let columns = paint.row_columns(painter);
+    // The compact step, whatever the list pane is at: this is a *picture* of a
+    // folder in the narrowest of the three panes, not the folder you are
+    // steering, and scaling it up would spend the preview's width on rows
+    // nobody is reading (PLAN §4.1's ladder is about the list).
+    let columns = paint.row_columns(painter, crate::ui::Scale::default());
 
     for (row, index) in (first..(first + rows).min(entries.len())).enumerate() {
         let Some(entry) = entries.get(index) else {

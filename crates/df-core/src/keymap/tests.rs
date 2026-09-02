@@ -74,9 +74,9 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("P", Command::PasteForce),
         ("Y", Command::CopyToClipboard),
         ("X", Command::Unyank),
-        ("-", Command::SymlinkAbsolute),
-        ("_", Command::SymlinkRelative),
-        ("ctrl+-", Command::Hardlink),
+        ("-", Command::ViewScaleDown),
+        ("=", Command::ViewScaleUp),
+        ("+", Command::ViewScaleUp),
         ("d", Command::Trash),
         ("D", Command::DeletePermanently),
         ("a", Command::Create),
@@ -366,7 +366,7 @@ fn the_list_owns_every_plain_key() {
     );
     assert_eq!(
         press(&km, &stack, media, "-"),
-        Dispatch::Match(Command::SymlinkAbsolute)
+        Dispatch::Match(Command::ViewScaleDown)
     );
 }
 
@@ -384,10 +384,10 @@ fn the_preview_keys_are_the_modified_ones() {
         ("shift+space", Command::PreviewPageDown),
         ("ctrl+home", Command::PreviewTop),
         ("ctrl+end", Command::PreviewBottom),
-        ("+", Command::PreviewZoomIn),
-        ("=", Command::PreviewZoomIn),
-        ("alt+-", Command::PreviewZoomOut),
-        ("0", Command::PreviewZoomReset),
+        ("ctrl+=", Command::PreviewZoomIn),
+        ("ctrl++", Command::PreviewZoomIn),
+        ("ctrl+-", Command::PreviewZoomOut),
+        ("ctrl+0", Command::PreviewZoomReset),
     ] {
         assert_eq!(
             press(&km, &stack, WhenFlags::NONE, keys),

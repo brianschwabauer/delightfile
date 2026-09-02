@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use df_core::config::{Config, LineMode, MgrConfig, SortBy, Theme};
+use df_core::config::{Config, LineMode, MgrConfig, SortBy, Theme, ViewScale};
 use df_core::fs::{random_seed, FindDirection, Scanner, SortOptions, WatchEvent, Watcher};
 use df_core::input::{InputBuffer, InputEvent};
 use df_core::keymap::{
@@ -1076,9 +1076,17 @@ pub struct App {
     /// yet. Set at the top of every frame, so it is at most one resize stale
     /// and a resize cannot happen between a key and the frame it is routed in.
     columns: usize,
-    /// How tall one row of the list pane is: [`ui::ROW_HEIGHT`] in the list, a
-    /// whole row of tiles in the grid. Held for the same reason `columns` is.
+    /// How tall one row of the list pane is: a scaled row in the list, a whole
+    /// row of tiles in the grid. Held for the same reason `columns` is.
     pane_step: f32,
+    /// The row metrics the list pane and the parent column are both drawn at —
+    /// PLAN §4.1's view-scale ladder, resolved for the directory the active tab
+    /// is in. Published here for the same reason `pane_step` is: the hit test,
+    /// the wheel and the cursor commands all run before the pane is measured.
+    ///
+    /// Beside a *grid* this is the largest list step, because the parent column
+    /// is still a list and still has to line up with something.
+    scale: ui::Scale,
     /// A re-sort in flight (PLAN §2's FLIP).
     flip: Option<Flip>,
     /// Where the visible rows were the moment a reordering command ran, waiting
@@ -1489,6 +1497,7 @@ impl App {
             thumbs: None,
             columns: 1,
             pane_step: ui::ROW_HEIGHT,
+            scale: ui::Scale::default(),
             flip: None,
             flip_before: None,
             last_layout: Snapshot::new(),
@@ -4766,6 +4775,76 @@ impl App {
         self.view_of(self.tab().cwd.path()) == View::Grid
     }
 
+    /// Where this directory sits on PLAN §4.1's view-scale ladder.
+    ///
+    /// Composed rather than stored whole: the grid is `view`'s answer and has
+    /// been since the state file's first version, and the list step is a
+    /// second, quieter record that survives a trip through the grid — so
+    /// `Ctrl+g` comes back to the size you were reading at rather than to a
+    /// default.
+    fn scale_of(&self, dir: &Path) -> ViewScale {
+        if self.view_of(dir) == View::Grid {
+            return ViewScale::Grid;
+        }
+        self.state.scale(dir).unwrap_or(self.mgr.view_scale)
+    }
+
+    /// Put this directory at `next` on the ladder, and remember it.
+    ///
+    /// Both halves of the record move together, which is what keeps them from
+    /// disagreeing: the grid is written to `view`, the list step to `scale`,
+    /// and a step that matches the config's default is stored as "no
+    /// preference" so a directory somebody stepped up and back down again does
+    /// not hold an LRU slot for ever (the same rule [`App::toggle_view`] uses).
+    fn set_scale(&mut self, dir: PathBuf, next: ViewScale, now: Instant) {
+        self.state
+            .set_view(dir.clone(), next.is_grid().then_some(View::Grid));
+        if !next.is_grid() {
+            self.state
+                .set_scale(dir, (next != self.mgr.view_scale).then_some(next));
+        }
+        self.state_changed(now);
+    }
+
+    /// `-` and `=`: one step down or up the ladder (PLAN §4.1).
+    ///
+    /// A step that would fall off either end does nothing at all — no write, no
+    /// toast. A key that reports "Compact" every time you press it at the
+    /// bottom is a key claiming to have done something it did not.
+    fn step_scale(&mut self, larger: bool, now: Instant) {
+        let path = self.tab().cwd.path().to_path_buf();
+        let at = self.scale_of(&path);
+        let Some(next) = (if larger { at.larger() } else { at.smaller() }) else {
+            return;
+        };
+        // Crossing into or out of the grid changes what the scroll position is
+        // *counted in* — list rows one side, rows of tiles the other — so the
+        // view jumps rather than slides, exactly as the explicit toggle does.
+        // A step within the list keeps its place: the rows only got taller.
+        if at.is_grid() != next.is_grid() {
+            self.tabs
+                .active_mut()
+                .cwd
+                .set_first_over(0, Duration::ZERO, now);
+        }
+        self.set_scale(path, next, now);
+        self.toasts.notice(Self::scale_notice(next), now);
+    }
+
+    /// The one line a step of the ladder says for itself.
+    ///
+    /// The two ends of the ladder are named for what they *are* rather than for
+    /// the direction you arrived from — "Grid view" is the same sentence
+    /// whether `=` or `Ctrl+g` got you there, because it is the same place.
+    fn scale_notice(scale: ViewScale) -> &'static str {
+        match scale {
+            ViewScale::Compact => "Compact rows",
+            ViewScale::Comfortable => "Comfortable rows",
+            ViewScale::Roomy => "Roomy rows",
+            ViewScale::Grid => "Grid view",
+        }
+    }
+
     /// Flip this directory between the list and the grid, and remember it.
     fn toggle_view(&mut self, now: Instant) {
         let path = self.tab().cwd.path().to_path_buf();
@@ -4842,7 +4921,8 @@ impl App {
     ) -> Snapshot {
         let dir = &self.tab().cwd.dir;
         let columns = metrics.map(|m| m.columns).unwrap_or(1);
-        let visible = crate::viewport::visible_rows(content.height(), grid::pane_step(metrics));
+        let visible =
+            crate::viewport::visible_rows(content.height(), grid::pane_step(metrics, self.scale));
         let first_row = scroll_rows.floor().max(0.0) as usize;
         let from = first_row.saturating_sub(FLIP_MARGIN) * columns;
         // `visible + 1` for the row half on screen at the bottom.
@@ -4852,7 +4932,7 @@ impl App {
                 let entry = dir.row(index)?;
                 Some((
                     entry.path.clone(),
-                    grid::pane_rect(content, metrics, scroll_rows, index),
+                    grid::pane_rect(content, metrics, scroll_rows, index, self.scale),
                 ))
             })
             .collect()
@@ -6485,6 +6565,8 @@ impl App {
             C::Undo => self.undo(now),
             C::TasksShow => self.toggle_panel(),
             C::ToggleView => self.toggle_view(now),
+            C::ViewScaleUp => self.step_scale(true, now),
+            C::ViewScaleDown => self.step_scale(false, now),
             C::Spot => self.toggle_spot(),
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
@@ -7667,7 +7749,13 @@ impl App {
     ) -> egui::Rect {
         match control {
             Control::Row(Column::List, index) => {
-                let rect = grid::pane_rect(geom.list, geom.grid.as_ref(), geom.list_scroll, index);
+                let rect = grid::pane_rect(
+                    geom.list,
+                    geom.grid.as_ref(),
+                    geom.list_scroll,
+                    index,
+                    self.scale,
+                );
                 // A click is a cursor command made with the hand that scrolled:
                 // it ends the scroll and the view comes back to the row.
                 self.attach_view();
@@ -7697,7 +7785,12 @@ impl App {
                 // A click on the parent column is "go there" (PLAN §7.5). One
                 // click, not two: the column is a path, and every segment of it
                 // is somewhere you have already been.
-                let rect = ui::row_rect(geom.parent, geom.parent_scroll, index);
+                let rect = ui::row_rect(
+                    geom.parent,
+                    geom.parent_scroll,
+                    index,
+                    self.scale.row_height,
+                );
                 let target = self
                     .tab()
                     .parent
@@ -8134,7 +8227,7 @@ impl App {
         let band = crate::mouse::band(origin, at);
         let run = match &metrics {
             Some(metrics) => grid::band_items(list, metrics, scroll_rows, rows, band),
-            None => crate::mouse::band_rows(list, scroll_rows, rows, ui::ROW_HEIGHT, band),
+            None => crate::mouse::band_rows(list, scroll_rows, rows, self.scale.row_height, band),
         };
         self.apply_band(run);
     }
@@ -8257,7 +8350,8 @@ impl App {
             return;
         }
         let dir = &self.tab().cwd.dir;
-        let Some(index) = grid::pane_at(content, metrics, scroll_rows, dir.len(), from) else {
+        let Some(index) = grid::pane_at(content, metrics, scroll_rows, dir.len(), from, self.scale)
+        else {
             return;
         };
         let Some(entry) = dir.row(index) else { return };
@@ -8274,7 +8368,7 @@ impl App {
             paths,
             label,
             icon,
-            home: grid::pane_rect(content, metrics, scroll_rows, index).center(),
+            home: grid::pane_rect(content, metrics, scroll_rows, index, self.scale).center(),
             at,
             spring: dnd::SpringOpen::default(),
             last: now,
@@ -9490,7 +9584,11 @@ impl App {
         let first_metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
             .then(|| grid::metrics(ui::content_rect(layout.list).width()));
         self.columns = first_metrics.as_ref().map(|m| m.columns).unwrap_or(1);
-        self.pane_step = grid::pane_step(first_metrics.as_ref());
+        // The step this directory is at, published before anything measures a
+        // row: the parent column and the list pane both draw at it, and beside
+        // a grid it is the largest list step (see [`ui::Scale`]).
+        self.scale = ui::Scale::new(self.scale_of(self.tab().cwd.path()));
+        self.pane_step = grid::pane_step(first_metrics.as_ref(), self.scale);
         let page =
             crate::viewport::visible_rows(ui::content_rect(layout.list).height(), self.pane_step);
         self.route_keys(page, now);
@@ -9518,11 +9616,17 @@ impl App {
         // everywhere through `grid::pane_*` (PLAN §2). `None` is the list.
         let metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
             .then(|| grid::metrics(list_content.width()));
+        // Re-read for the same reason the layout is: `-`/`=` and `Ctrl+g` have
+        // just run, and painting this frame at the pre-keystroke row height
+        // would leave the rows a frame behind the key that resized them.
+        self.scale = ui::Scale::new(self.scale_of(self.tab().cwd.path()));
         // A "page" is a *row* of the pane either way — for a grid that is a
         // whole row of tiles, so `Ctrl+d` moves the same distance down the
         // window in both views.
-        let page =
-            crate::viewport::visible_rows(list_content.height(), grid::pane_step(metrics.as_ref()));
+        let page = crate::viewport::visible_rows(
+            list_content.height(),
+            grid::pane_step(metrics.as_ref(), self.scale),
+        );
 
         // ── Pointer (PLAN §7.5) ─────────────────────────────────────────────
         let pointer = ui.input(|i| Pointer {
@@ -9563,7 +9667,10 @@ impl App {
         }
         let scroll_rows = self.tab().cwd.scroll_rows(now);
         let parent_content = ui::content_rect(layout.parent);
-        let parent_page = crate::viewport::visible_rows(parent_content.height(), ui::ROW_HEIGHT);
+        // The parent column is a list at the *list's* step, whatever the list
+        // pane itself is drawn as — the two columns are one listing.
+        let parent_page =
+            crate::viewport::visible_rows(parent_content.height(), self.scale.row_height);
         let parent_scroll = self
             .tab()
             .parent
@@ -9719,14 +9826,21 @@ impl App {
                         scroll_rows,
                         self.tab().cwd.dir.len(),
                         p,
+                        self.scale,
                     )
                     .map(|index| Control::Row(Column::List, index))
                 })
                 .or_else(|| {
                     // The parent column is clickable too (PLAN §7.5): a click
                     // on it is "go there", which is what the column is showing.
-                    ui::row_at(parent_content, parent_scroll, parent_len, p)
-                        .map(|index| Control::Row(Column::Parent, index))
+                    ui::row_at(
+                        parent_content,
+                        parent_scroll,
+                        parent_len,
+                        p,
+                        self.scale.row_height,
+                    )
+                    .map(|index| Control::Row(Column::Parent, index))
                 })?;
             Some((control, p))
         });
@@ -9887,6 +10001,7 @@ impl App {
             list_content,
             list_scroll: scroll_rows,
             list_grid: metrics,
+            scale: self.scale,
             list_rows: self.tab().cwd.dir.len(),
             parent_pane: layout.parent,
             parent_content,
@@ -10008,7 +10123,13 @@ impl App {
         let cursor = tab.cwd.dir.cursor();
         // Where a rename popup and the opener picker anchor themselves — the
         // row the cursor is on, as it was actually drawn this frame.
-        self.cursor_rect = grid::pane_rect(list_content, metrics.as_ref(), scroll_rows, cursor);
+        self.cursor_rect = grid::pane_rect(
+            list_content,
+            metrics.as_ref(),
+            scroll_rows,
+            cursor,
+            self.scale,
+        );
 
         if let Some(parent) = &mut self.tabs.active_mut().parent {
             parent.follow_cursor(
@@ -10267,6 +10388,11 @@ impl App {
                 ground: self.palette.mantle,
                 dir: &parent.dir,
                 scroll_rows: parent.scroll_rows(now),
+                // The list's step, not one of its own: the two columns are one
+                // listing, and a parent whose rows were a different height
+                // would put the folder you are in out of line with the folder
+                // you came from.
+                scale: self.scale,
                 column: Column::Parent,
                 hovers: &self.hovers,
                 ripples: &self.ripples,
@@ -10310,6 +10436,7 @@ impl App {
             ground: list_ground,
             dir: &self.tab().cwd.dir,
             scroll_rows,
+            scale: self.scale,
             column: Column::List,
             hovers: &self.hovers,
             ripples: &self.ripples,
