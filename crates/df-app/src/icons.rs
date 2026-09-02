@@ -876,7 +876,10 @@ mod glyph_tests {
         let ctx = egui::Context::default();
         let nerd = super::install(&ctx);
         let _ = ctx.run_ui(Default::default(), |_| {});
-        let plain = ['Y', 'f', '⊞', '☰', '✓', '☐', '•', '◂', '▣', '▸', '›', '…', '×', '·', '→', '↑', '↓', '←', '⇧', '≈'];
+        let plain = [
+            'Y', 'f', '⊞', '☰', '✓', '☐', '•', '◂', '▣', '▸', '›', '…', '×', '·', '→', '↑', '↓',
+            '←', '⇧', '≈',
+        ];
         let patched = ['\u{f418}', '\u{f0b0}', '\u{f01c}'];
         let font = egui::FontId::proportional(14.0);
         for c in plain.iter().chain(patched.iter().filter(|_| nerd)) {
@@ -886,7 +889,10 @@ mod glyph_tests {
                 *c as u32
             );
         }
-        for c in [super::GENERIC_DIR, super::GENERIC_FILE].iter().filter(|_| nerd) {
+        for c in [super::GENERIC_DIR, super::GENERIC_FILE]
+            .iter()
+            .filter(|_| nerd)
+        {
             assert!(ctx.fonts_mut(|f| f.has_glyph(&font, *c)), "{c:?}");
         }
     }
