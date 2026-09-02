@@ -2,7 +2,7 @@
 //! create prompt and the shell line as well.
 //!
 //! PLAN §4.2 asks for **one** input implementation shared by rename, filter,
-//! create, cd, search and shell, with the full vi line editor on it. That editor
+//! create, cd, search and shell. That editor
 //! is [`df_core::input::InputBuffer`], and this file is the thin app-side shell
 //! around it: which prompt is open, what its title says, where it is drawn, and
 //! the inline error it shows when what was typed cannot be used.
@@ -10,10 +10,10 @@
 //! Phase 1 had a byte-offset `Line` here with backspace and the kill keys on it.
 //! It is gone rather than kept alongside: two line editors in one program is
 //! two sets of Unicode edge cases, and the one in df-core is the one with the
-//! modes, the operators and the tests.
+//! word motions, the selection and the tests.
 
 use df_core::input::{InputBuffer, InputEvent};
-use df_core::keymap::{Chord, InputMode};
+use df_core::keymap::Chord;
 
 /// What the prompt is being typed into, which is also what its title says.
 ///
@@ -138,24 +138,7 @@ impl Prompt {
         event
     }
 
-    /// The mode chip's text. Shown for every prompt, because the whole point of
-    /// a modal editor is that you can tell which mode you are in.
-    pub fn mode_label(&self) -> &'static str {
-        match self.buffer.mode() {
-            InputMode::Insert => "INSERT",
-            InputMode::Normal => "NORMAL",
-            InputMode::Visual => "VISUAL",
-            InputMode::Replace => "REPLACE",
-        }
-    }
-
-    /// Whether the caret is a block (Normal, Visual, Replace — it sits *on* a
-    /// character) or a bar (Insert — it sits *between* two).
-    pub fn block_caret(&self) -> bool {
-        !matches!(self.buffer.mode(), InputMode::Insert)
-    }
-
-    /// The visual selection, in bytes.
+    /// The selection, in bytes.
     pub fn selection(&self) -> Option<std::ops::Range<usize>> {
         self.buffer.selection_bytes()
     }
@@ -197,17 +180,15 @@ mod tests {
         assert!(!PromptKind::Create.anchored());
     }
 
-    /// The prompt is the df-core editor: modes, motions and all, with the app
-    /// only holding the frame around it.
-    ///
-    /// In `[input] vi_mode`, because that is what puts `Esc` on the ladder
-    /// rather than on "close this" — the shipped default is the next test.
+    /// The prompt is the df-core editor: motions, kills and all, with the app
+    /// only holding the frame around it — and no mode to be in, so every
+    /// letter types itself from the first keystroke.
     #[test]
-    fn the_prompt_is_the_vi_editor() {
+    fn the_prompt_is_the_line_editor() {
         let mut prompt = Prompt::with(
             PromptKind::Rename,
             0,
-            InputBuffer::for_rename_stem("photo.jpg").vi_mode(true),
+            InputBuffer::for_rename_stem("photo.jpg"),
         );
         assert_eq!(prompt.query(), "photo.jpg");
         assert_eq!(
@@ -215,44 +196,33 @@ mod tests {
             "photo".len(),
             "the caret is before the extension"
         );
-        assert_eq!(prompt.mode_label(), "INSERT");
-        assert!(!prompt.block_caret());
 
-        // Escape to Normal, `0` to the start, `D` to kill the line's tail.
-        assert_eq!(prompt.feed(Chord::plain(Key::Escape)), InputEvent::Consumed);
-        assert_eq!(prompt.mode_label(), "NORMAL");
-        assert!(
-            prompt.block_caret(),
-            "a normal-mode caret sits on a character"
-        );
-        prompt.feed(chord('0'));
-        prompt.feed(Chord::new(Mods::SHIFT, Key::Char('d')));
-        assert_eq!(prompt.query(), "");
-
-        // …and typing goes back through insert.
+        // `i` is an `i`, not a mode; `Ctrl+u` kills back to the start.
         prompt.feed(chord('i'));
+        assert_eq!(prompt.query(), "photoi.jpg");
+        prompt.feed(Chord::new(Mods::CTRL, Key::Char('u')));
+        assert_eq!(prompt.query(), ".jpg");
+
+        prompt.feed(Chord::new(Mods::CTRL, Key::Char('k')));
+        assert_eq!(prompt.query(), "");
         for c in "cat.png".chars() {
             prompt.feed(chord(c));
         }
-        assert_eq!(prompt.query(), "cat.png");
         assert_eq!(
             prompt.feed(Chord::plain(Key::Enter)),
             InputEvent::Submit("cat.png".to_string())
         );
     }
 
-    /// …and by default `Esc` closes the prompt on the first press, with no
-    /// block caret in between (PLAN §4.2, `[input] vi_mode = false`).
+    /// `Esc` closes the prompt on the first press, always (PLAN §4.2).
     #[test]
-    fn escape_cancels_the_prompt_by_default() {
+    fn escape_cancels_the_prompt() {
         let mut prompt = Prompt::with(
             PromptKind::Rename,
             0,
             InputBuffer::for_rename_stem("photo.jpg"),
         );
         assert_eq!(prompt.feed(Chord::plain(Key::Escape)), InputEvent::Cancel);
-        assert_eq!(prompt.mode_label(), "INSERT");
-        assert!(!prompt.block_caret());
     }
 
     /// `R` opens on the extension alone, caret at the front (PLAN §4.1).

@@ -35,11 +35,6 @@
 //! scrolloff = 5
 //! folder_sizes = true      # recursive directory sizes in the size column
 //!
-//! [input]
-//! # Esc in a prompt: off, it cancels the prompt; on, it steps into vi's
-//! # Normal mode first and a second Esc cancels.
-//! vi_mode = false
-//!
 //! [tasks]
 //! micro_workers = 10
 //! macro_workers = 10
@@ -468,21 +463,6 @@ impl Default for MgrConfig {
     }
 }
 
-/// PLAN §4.2's prompts, as far as they are a matter of taste.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct InputConfig {
-    /// Whether `Esc` in a prompt walks yazi's modal ladder (Insert → Normal →
-    /// cancel) instead of cancelling outright.
-    ///
-    /// **Off**, and the default is the whole point: `Esc` means "close this"
-    /// in every dialog on the desktop, and a first press that instead leaves a
-    /// block caret sitting in the field reads as the prompt having broken. The
-    /// vi editor itself is untouched either way — `Ctrl+w`, `Ctrl+u`, the word
-    /// motions and the arrows all work from Insert. Turning this on is how
-    /// somebody who wants `cw` in a rename gets Normal mode back.
-    pub vi_mode: bool,
-}
-
 /// PLAN §5's worker pool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TasksConfig {
@@ -618,7 +598,6 @@ pub struct OpenRule {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub mgr: MgrConfig,
-    pub input: InputConfig,
     pub tasks: TasksConfig,
     pub preview: PreviewConfig,
     pub goto: Vec<Bookmark>,
@@ -630,7 +609,6 @@ impl Default for Config {
     fn default() -> Config {
         Config {
             mgr: MgrConfig::default(),
-            input: InputConfig::default(),
             tasks: TasksConfig::default(),
             preview: PreviewConfig::default(),
             goto: default_bookmarks(),
@@ -716,15 +694,19 @@ impl Config {
             }
         }
 
+        // `[input]` has no settings left. It is still read so that a config
+        // carried over from the modal era says *why* it stopped doing
+        // anything, rather than being reported as a table full of typos.
         if let Some(input) = doc.table("input") {
             for entry in &input.entries {
-                let ok = match entry.key.as_str() {
-                    "vi_mode" => read_bool(&entry.value, &mut config.input.vi_mode),
-                    _ => Err(format!("unknown key `{}` in [input]", entry.key)),
+                let message = if entry.key == "vi_mode" {
+                    "`vi_mode` is gone: prompts are never modal, and `Esc` \
+                     always cancels"
+                        .to_string()
+                } else {
+                    format!("unknown key `{}` in [input]", entry.key)
                 };
-                if let Err(message) = ok {
-                    warnings.push(ConfigWarning::new(file, entry.line, message));
-                }
+                warnings.push(ConfigWarning::new(file, entry.line, message));
             }
         }
 
@@ -1503,20 +1485,20 @@ mod tests {
         assert_eq!(c.tasks.micro_workers, 10);
         assert_eq!(c.tasks.macro_workers, 10);
         assert_eq!(c.tasks.bizarre_retry, 3);
-        // …and the one default that is *not* yazi's: Esc closes a prompt.
-        assert!(!c.input.vi_mode);
     }
 
-    /// `[input] vi_mode` is how somebody asks for the modal `Esc` back.
+    /// `[input]` is an empty table now, and a config that still sets
+    /// `vi_mode` is told why nothing happened rather than being left to
+    /// wonder — a silent no-op is how a setting becomes a bug report.
     #[test]
-    fn the_input_table_switches_the_escape_ladder() {
-        let (config, warnings) = parse("[input]\nvi_mode = true\n");
-        assert!(config.input.vi_mode);
-        assert!(warnings.is_empty(), "{warnings:?}");
-        // A typo warns and changes nothing, like every other table.
-        let (config, warnings) = parse("[input]\nvi = true\n");
-        assert!(!config.input.vi_mode);
+    fn the_retired_vi_mode_switch_warns() {
+        let (_, warnings) = parse("[input]\nvi_mode = true\n");
         assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("vi_mode"), "{warnings:?}");
+        // A typo in the same table warns like every other table's does.
+        let (_, warnings) = parse("[input]\nvi = true\n");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].message.contains("unknown key"), "{warnings:?}");
     }
 
     #[test]

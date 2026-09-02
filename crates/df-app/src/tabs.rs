@@ -7,46 +7,23 @@
 //! last one? what does `}` do on the rightmost tab?), so it is four free
 //! functions with tests and no `Tab` in sight.
 //!
-//! ## The slide
+//! ## No switch animation
 //!
-//! Switching tabs moves the panes horizontally by a short distance, in the
-//! direction of travel: tab 3 → tab 4 arrives from the right, `Alt+[` from the
-//! left. It is presentation only (`delightful-ui` §5) — the new tab's model is
-//! live and keyboard-ready on the frame the key lands, and the motion is an
-//! offset applied to where the rows are *drawn*, exactly as [`Listing`]'s scroll
-//! is.
-//!
-//! [`Listing`]: crate::tab::Listing
+//! Switching tabs used to slide the panes in the direction of travel. It is
+//! gone: a switch is something a person does repeatedly with `Alt+]` and `1`–
+//! `9`, often several times in a second to find the tab they meant, and a
+//! motion on every one of those turns the strip into something that has to be
+//! waited out. The strip itself already says which tab is live, on the frame
+//! the key lands. Motion is for things that *move* (`delightful-ui` §5); a tab
+//! switch is a cut.
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use df_core::config::MgrConfig;
 use df_core::fs::{ScanUpdate, Scanner, SortOptions};
 
-use crate::motion::{Easing, Tween};
 use crate::tab::Tab;
-
-/// How long the pane slide takes on a tab switch.
-///
-/// PLAN §8's slide band is 250–600 ms *viewport-scaled*, and this is at the
-/// short end of it on purpose: the travel is a few dozen points, not a
-/// viewport, and a switch is something a person does repeatedly with `Alt+]`.
-/// 200 ms with [`Easing::OutQuint`] puts the panes visually in place after
-/// ~70 ms — the eye gets the direction of travel, the hand never waits for it.
-const SLIDE: Duration = Duration::from_millis(200);
-
-/// How far the panes travel on a switch, in logical points.
-///
-/// Enough to read as a direction, far too little to read as a page turn: at
-/// 44 pt a row's text moves about two characters' width, which the eye catches
-/// as motion without ever making the names unreadable mid-slide.
-const SLIDE_DISTANCE: f32 = 44.0;
-
-/// Below this the offset is not worth a frame — a sub-point shift nobody can
-/// see, and the difference between a slide that ends and one that asks for
-/// frames forever (PLAN §1).
-const SLIDE_EPSILON: f32 = 0.2;
 
 /// How many tabs there can be.
 ///
@@ -115,8 +92,6 @@ pub fn insert_position(active: usize) -> usize {
 pub struct Tabs {
     tabs: Vec<Tab>,
     active: usize,
-    /// The pane offset, in points, on its way back to zero after a switch.
-    slide: Option<Tween>,
 }
 
 impl Tabs {
@@ -124,7 +99,6 @@ impl Tabs {
         Tabs {
             tabs: vec![tab],
             active: 0,
-            slide: None,
         }
     }
 
@@ -171,27 +145,27 @@ impl Tabs {
         let at = insert_position(self.active).min(self.tabs.len());
         self.tabs
             .insert(at, Tab::open(path, mgr, sort, scanner, now));
-        self.go_to(at, now);
+        self.active = at;
         true
     }
 
     /// `1`–`9`, and a click on the strip. Out-of-range is a no-op — pressing
     /// `7` with three tabs open should do nothing, not land on the last one.
-    pub fn switch_to(&mut self, index: usize, now: Instant) -> bool {
+    pub fn switch_to(&mut self, index: usize) -> bool {
         if index >= self.tabs.len() || index == self.active {
             return false;
         }
-        self.go_to(index, now);
+        self.active = index;
         true
     }
 
     /// `Alt+[` / `Alt+]`.
-    pub fn cycle(&mut self, delta: isize, now: Instant) -> bool {
+    pub fn cycle(&mut self, delta: isize) -> bool {
         let next = cycled(self.tabs.len(), self.active, delta);
         if next == self.active {
             return false;
         }
-        self.go_to(next, now);
+        self.active = next;
         true
     }
 
@@ -227,38 +201,7 @@ impl Tabs {
         }
         self.active = active_after_close(self.tabs.len(), index, self.active);
         self.tabs.remove(index);
-        // No slide: nothing arrived from anywhere, the strip simply has one
-        // fewer chip. Sliding here would say a direction that did not happen.
-        self.slide = None;
         true
-    }
-
-    fn go_to(&mut self, index: usize, now: Instant) {
-        let direction = if index > self.active { 1.0 } else { -1.0 };
-        self.active = index;
-        // The panes start displaced towards where the new tab came *from* and
-        // travel to zero, so the content arrives from the side the strip says
-        // it should.
-        self.slide = Some(Tween::new(
-            SLIDE_DISTANCE * direction,
-            0.0,
-            SLIDE,
-            Easing::OutQuint,
-            now,
-        ));
-    }
-
-    /// How far the panes are displaced right now, in points.
-    pub fn offset(&self, now: Instant) -> f32 {
-        match &self.slide {
-            Some(tween) => tween.value(now),
-            None => 0.0,
-        }
-    }
-
-    /// PLAN §1's idle rule: a settled strip asks for no frames.
-    pub fn animating(&self, now: Instant) -> bool {
-        self.offset(now).abs() > SLIDE_EPSILON
     }
 
     /// Route a scan update to whichever tab asked for it.
@@ -368,20 +311,5 @@ mod tests {
         active = after_close(before, active);
         assert_eq!(order, vec!['a', 'c']);
         assert_eq!(order[active], 'c');
-    }
-
-    /// The slide is presentation: it starts displaced towards where the tab
-    /// came from, arrives at zero, and then stops asking for frames.
-    #[test]
-    fn the_slide_arrives_and_stops() {
-        let t0 = Instant::now();
-        let mut slide = Some(Tween::new(SLIDE_DISTANCE, 0.0, SLIDE, Easing::OutQuint, t0));
-        let at = |slide: &Option<Tween>, now| slide.as_ref().map_or(0.0, |t: &Tween| t.value(now));
-        assert!((at(&slide, t0) - SLIDE_DISTANCE).abs() < 1e-3);
-        let mid = at(&slide, t0 + Duration::from_millis(60));
-        assert!(mid > 0.0 && mid < SLIDE_DISTANCE, "got {mid}");
-        assert!(at(&slide, t0 + SLIDE).abs() < SLIDE_EPSILON);
-        slide = None;
-        assert_eq!(at(&slide, t0), 0.0);
     }
 }

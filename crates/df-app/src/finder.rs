@@ -369,13 +369,6 @@ impl Finder {
         }
     }
 
-    /// Stamp `[input] vi_mode` on the query field — `App::input_buffer`'s half
-    /// of the same answer, for the one buffer this card owns.
-    pub fn vi_mode(mut self, on: bool) -> Finder {
-        self.buffer.set_vi_mode(on);
-        self
-    }
-
     pub fn query(&self) -> &str {
         self.buffer.text()
     }

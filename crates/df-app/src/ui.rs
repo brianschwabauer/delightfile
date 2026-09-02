@@ -449,9 +449,10 @@ pub struct Layout {
     /// The top row (PLAN §2): the breadcrumbs and the status cluster, or the
     /// prompt that has taken their place.
     ///
-    /// Under the strip because a tab *contains* a path: the strip says which
-    /// session you are in and the row says where that session is, and the
-    /// outer fact goes above the inner one. Always reserved — a pane that
+    /// Directly under the strip, touching it, because a tab *contains* a path:
+    /// the strip says which session you are in and the row says where that
+    /// session is, and the active tab is drawn joined to this row to say so.
+    /// Always reserved — a pane that
     /// changed height when a second tab opened would move rows under the
     /// pointer.
     pub path: egui::Rect,
@@ -490,8 +491,11 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool, path_lines: us
             egui::vec2(outer.width(), CHROME_HEIGHT.min(outer.height())),
         )
     });
+    // **Flush**, with no gap: the active tab is drawn as a folder tab joined to
+    // this row and filled with its ground (see [`crate::chrome::tab_strip`]),
+    // and a gap between them would be a seam through the middle of one shape.
     let top = match strip {
-        Some(strip) => strip.bottom() + GAP,
+        Some(strip) => strip.bottom(),
         None => outer.top(),
     };
     // The second line is a *line*, not a second row: it is the same plate
@@ -628,10 +632,6 @@ pub struct ListView<'a> {
     pub dim: bool,
     /// The scan has been running long enough to say so out loud.
     pub slow_load: bool,
-    /// How far the rows are displaced horizontally, in points: the tab switch's
-    /// slide (see [`crate::tabs`]). The *clip* stays on the pane, so the
-    /// content slides inside its column rather than the column moving.
-    pub offset_x: f32,
     /// Whether selection marks are drawn in this pane. Off for the parent
     /// column: a selection belongs to the directory it was made in, and marking
     /// the parent's rows would claim you had selected directories you have not
@@ -805,7 +805,6 @@ impl Painting<'_> {
             linemode,
             dim,
             slow_load,
-            offset_x,
             show_selection,
             clip,
             dragged,
@@ -834,7 +833,7 @@ impl Painting<'_> {
             let Some(entry) = dir.row(index) else {
                 continue;
             };
-            let rect = row_rect(content, scroll_rows, index).translate(egui::vec2(offset_x, 0.0));
+            let rect = row_rect(content, scroll_rows, index);
             if !rect.intersects(content) {
                 continue;
             }
@@ -859,9 +858,11 @@ impl Painting<'_> {
             let lifted = !dragged.is_empty() && dragged.contains(&entry.path);
 
             // The row's ground, in one expression: the pane, tinted for a
-            // selection, lifted to `surface1` for the cursor row and towards
-            // `surface0` for a hover — the last two steps up the palette's own
-            // ramp. The selection tint goes on *first* so the cursor still
+            // selection, lifted to the cursor's fill for the cursor row and
+            // towards the hover's for a pointer — the last two steps up the
+            // palette's own ramp, both derived in [`crate::theme`] so the list
+            // and the grid cannot drift apart. The selection tint goes on
+            // *first* so the cursor still
             // reads as the brightest thing in the column when it is standing on
             // a selected row.
             let ground_here = if selected {
@@ -876,7 +877,7 @@ impl Painting<'_> {
             } else {
                 HOVER_LIFT
             };
-            let fill = mix(base, self.palette.surface0, hover * lift);
+            let fill = mix(base, crate::theme::hover_fill(self.palette), hover * lift);
             let rect = pressed_rect(rect, press);
             // Nothing is drawn for a row that is the same colour as the pane
             // it sits on — the common case, and one fewer quad per row.
@@ -1690,11 +1691,13 @@ mod tests {
         let with_strip = layout(area(), [1, 4, 3], true, 1);
         let strip = with_strip.strip.expect("a strip was asked for");
         assert!((strip.height() - CHROME_HEIGHT).abs() < 1e-3);
-        assert!((with_strip.path.top() - (strip.bottom() + GAP)).abs() < 1e-3);
+        // Flush: the active tab is drawn joined to the top row, so there is no
+        // gap between the two for a seam to appear in.
+        assert!((with_strip.path.top() - strip.bottom()).abs() < 1e-3);
         assert!((with_strip.list.top() - (with_strip.path.bottom() + GAP)).abs() < 1e-3);
-        // The strip costs the panes exactly its own height plus one gap, and
-        // nothing else moves.
-        assert!((bare.list.height() - with_strip.list.height() - CHROME_HEIGHT - GAP).abs() < 1e-3);
+        // The strip costs the panes exactly its own height, and nothing else
+        // moves.
+        assert!((bare.list.height() - with_strip.list.height() - CHROME_HEIGHT).abs() < 1e-3);
         assert!((bare.list.width() - with_strip.list.width()).abs() < 1e-3);
     }
 

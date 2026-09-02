@@ -140,11 +140,6 @@ pub struct Bulk {
     /// "taken" test, snapshotted when the card opened rather than re-read per
     /// keystroke.
     others: HashSet<String>,
-    /// `[input] vi_mode`, kept rather than only applied: find/replace builds a
-    /// *fresh* buffer per row (see [`Bulk::apply_replace`]), and a setting that
-    /// was stamped once at construction would come off again the first time
-    /// somebody typed in the find field.
-    vi_mode: bool,
 }
 
 impl Bulk {
@@ -188,21 +183,7 @@ impl Bulk {
             field: Field::Row(0),
             first: 0,
             others,
-            vi_mode: false,
         }
-    }
-
-    /// Turn the modal `Esc` ladder on for every field of the card, and keep it
-    /// on for the rows find/replace rebuilds. `App::input_buffer`'s half of the
-    /// same answer.
-    pub fn vi_mode(mut self, on: bool) -> Bulk {
-        self.vi_mode = on;
-        self.find.set_vi_mode(on);
-        self.replace.set_vi_mode(on);
-        for row in &mut self.rows {
-            row.buffer.set_vi_mode(on);
-        }
-        self
     }
 
     /// The buffer the keyboard is typing into.
@@ -273,7 +254,7 @@ impl Bulk {
                 // A fresh buffer rather than an edit: the caret belongs at the
                 // stem of the *new* name, and carrying the old caret over would
                 // put it inside a word that is no longer there.
-                row.buffer = InputBuffer::for_rename_stem(&next).vi_mode(self.vi_mode);
+                row.buffer = InputBuffer::for_rename_stem(&next);
             }
         }
     }

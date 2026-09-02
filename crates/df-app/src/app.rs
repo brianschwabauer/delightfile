@@ -4286,7 +4286,7 @@ impl App {
     /// tabs.
     fn open_palette(&mut self) {
         let rows = self.palette_rows();
-        self.finder = Some(Finder::new(Source::Commands, rows).vi_mode(self.config.input.vi_mode));
+        self.finder = Some(Finder::new(Source::Commands, rows));
         self.sync_context();
     }
 
@@ -4377,7 +4377,7 @@ impl App {
     /// `z` and `Z`.
     fn open_jump(&mut self, source: Source) {
         let rows = self.jump_rows(source, "");
-        self.finder = Some(Finder::new(source, rows).vi_mode(self.config.input.vi_mode));
+        self.finder = Some(Finder::new(source, rows));
         self.sync_context();
     }
 
@@ -4448,7 +4448,7 @@ impl App {
             }
             Choice::Cd(path) => self.jump_to(path, now),
             Choice::Tab(n) => {
-                if self.tabs.switch_to(n, now) {
+                if self.tabs.switch_to(n) {
                     self.tab_changed(now);
                 }
             }
@@ -4726,15 +4726,12 @@ impl App {
             let waker = self.waker.named("search");
             Arc::new(move || waker.wake())
         };
-        self.search = Some(
-            Search::new(
-                mode,
-                self.tab().cwd.path().to_path_buf(),
-                self.mgr.show_hidden,
-                notify,
-            )
-            .vi_mode(self.config.input.vi_mode),
-        );
+        self.search = Some(Search::new(
+            mode,
+            self.tab().cwd.path().to_path_buf(),
+            self.mgr.show_hidden,
+            notify,
+        ));
         self.sync_context();
     }
 
@@ -5178,20 +5175,7 @@ impl App {
         self.open_prompt_with(kind, InputBuffer::new(existing, cursor));
     }
 
-    /// Stamp `[input] vi_mode` on a field the user is about to type into.
-    ///
-    /// Off — the shipped default — `Esc` closes the field on the first press
-    /// instead of dropping it into Normal mode with a block caret. Every
-    /// [`InputBuffer`] this program hands to the keyboard goes through here or
-    /// through the `vi_mode` builder on the card that owns it: the setting is
-    /// one answer about how `Esc` behaves, and a bulk-rename row that ignored
-    /// it was the same key doing two things in one session.
-    fn input_buffer(&self, buffer: InputBuffer) -> InputBuffer {
-        buffer.vi_mode(self.config.input.vi_mode)
-    }
-
     fn open_prompt_with(&mut self, kind: PromptKind, buffer: InputBuffer) {
-        let buffer = self.input_buffer(buffer);
         let origin = self.tab().cwd.dir.cursor();
         self.prompt = Some(Prompt::with(kind, origin, buffer));
         self.sync_context();
@@ -5253,7 +5237,6 @@ impl App {
         // works, and a card of them is not implemented).
         match crate::bulk::Bulk::new(dir, names, &siblings) {
             Ok(card) => {
-                let card = card.vi_mode(self.config.input.vi_mode);
                 self.dialog = Some(Dialog::Bulk(Box::new(card)));
                 self.sync_context();
             }
@@ -6357,17 +6340,17 @@ impl App {
                 }
             }
             C::TabSwitch(n) => {
-                if self.tabs.switch_to(n as usize, now) {
+                if self.tabs.switch_to(n as usize) {
                     self.tab_changed(now);
                 }
             }
             C::TabPrev => {
-                if self.tabs.cycle(-1, now) {
+                if self.tabs.cycle(-1) {
                     self.tab_changed(now);
                 }
             }
             C::TabNext => {
-                if self.tabs.cycle(1, now) {
+                if self.tabs.cycle(1) {
                     self.tab_changed(now);
                 }
             }
@@ -7834,7 +7817,7 @@ impl App {
                 rect
             }
             Control::Tab(index) => {
-                if self.tabs.switch_to(index, now) {
+                if self.tabs.switch_to(index) {
                     self.tab_changed(now);
                 }
                 geom.layout
@@ -9687,7 +9670,6 @@ impl App {
             .map(|parent| parent.scroll_rows(now))
             .unwrap_or(0.0);
         let parent_len = self.tab().parent.as_ref().map(|p| p.dir.len()).unwrap_or(0);
-        let slide = self.tabs.offset(now);
         let tab_count = self.tabs.len();
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
@@ -10441,14 +10423,13 @@ impl App {
                 column: Column::Parent,
                 hovers: &self.hovers,
                 ripples: &self.ripples,
-                cursor_fill: self.palette.surface0,
+                cursor_fill: crate::theme::hover_fill(&self.palette),
                 // The parent's marker is a fact about the path rather than a
                 // cursor — nothing steers it — so it stays quiet.
                 cursor_alpha: crate::ui::PARENT_MARKER,
                 linemode: LineMode::None,
                 dim: true,
                 slow_load: now.duration_since(parent.scan_started) >= LOADING_DELAY,
-                offset_x: slide,
                 show_selection: false,
                 // The clipboard's marks belong to the directory the yank was
                 // made in, which is the list — the parent shows where you are,
@@ -10484,14 +10465,13 @@ impl App {
             column: Column::List,
             hovers: &self.hovers,
             ripples: &self.ripples,
-            cursor_fill: self.palette.surface1,
+            cursor_fill: crate::theme::cursor_fill(&self.palette),
             // Full strength, always: the list's cursor is the one cursor in the
             // window and the keys always go to it (PLAN §2.1).
             cursor_alpha: 1.0,
             linemode: self.mgr.linemode,
             dim: false,
             slow_load: now.duration_since(self.tab().cwd.scan_started) >= LOADING_DELAY,
-            offset_x: slide,
             show_selection: true,
             clip: (!clip_paths.is_empty()).then(|| ClipMark {
                 paths: &clip_paths,
@@ -10679,6 +10659,20 @@ impl App {
         }
 
         // ── The chrome ──────────────────────────────────────────────────────
+        // How far the top row's ground is tinted towards the filter's blue,
+        // which is the *only* mark a committed filter leaves on the chrome
+        // besides its chip. Measured once because the active tab is drawn in
+        // that same ground: the two are one shape and must be one colour.
+        // Zero while a prompt is open — the prompt row is its own indication,
+        // and the filter it is editing is not committed yet.
+        let bar_filter = match &self.prompt {
+            Some(prompt) if !prompt.kind.anchored() => 0.0,
+            _ => self
+                .filter_chip
+                .as_ref()
+                .map(|chip| chip.alpha(now))
+                .unwrap_or(0.0),
+        };
         if let Some(strip) = layout.strip {
             let titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
             chrome::tab_strip(
@@ -10686,6 +10680,7 @@ impl App {
                 strip,
                 &titles,
                 self.tabs.active_index(),
+                bar_filter,
                 &self.hovers,
                 &self.ripples,
             );
@@ -10718,10 +10713,7 @@ impl App {
                     layout.path,
                     &self.path_bar.1,
                     self.filter_chip_text(),
-                    self.filter_chip
-                        .as_ref()
-                        .map(|chip| chip.alpha(now))
-                        .unwrap_or(0.0),
+                    bar_filter,
                     &cluster,
                     &top_geom,
                     &self.hovers,
@@ -10962,7 +10954,6 @@ impl App {
                     .is_some_and(|chip| chip.leaving.is_some() && !chip.spent(now)),
             ),
             ("tab", self.tab().animating(now)),
-            ("tabs", self.tabs.animating(now)),
             ("preview", self.preview.animating(now)),
             // The usage bars' grow-in, which stops asking the moment the sweep
             // has landed — and a walk that is still streaming does not ask
