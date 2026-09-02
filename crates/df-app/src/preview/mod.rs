@@ -72,7 +72,7 @@ use df_core::preview::{
     PaneId, Preview, PreviewKind, PreviewToken, PreviewUpdate, Previewer, TargetSize,
 };
 
-pub use paint::{fit_rect, oriented_mesh, oriented_size, preview};
+pub use paint::{fit_rect, nearest_for, oriented_mesh, oriented_size, preview};
 
 /// How long a picture takes to cross into the one it replaces — PLAN §6's
 /// "results crossfade in over ~80 ms", and delightviewer's `CROSSFADE` to the

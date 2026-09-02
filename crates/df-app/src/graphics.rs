@@ -27,6 +27,28 @@ pub struct Gfx {
     pub renderer: egui_wgpu::Renderer,
     pub egui_ctx: egui::Context,
     pub egui_state: egui_winit::State,
+    /// Whether the last acquire said the window is not being composited, so the
+    /// log says so once per transition rather than once per attempted frame.
+    occluded: bool,
+    /// Consecutive timed-out acquires, for the same reason — and so the
+    /// recovery line can say how many there were.
+    timeouts: u32,
+}
+
+/// What one call to [`Gfx::present`] did.
+pub enum Presented {
+    /// A frame went to the compositor.
+    Shown,
+    /// The surface was not available and the swapchain has been reconfigured.
+    /// The caller backs off and asks for another frame.
+    Retry,
+    /// The window is not visible. There is nothing to retry: a covered window
+    /// does not start answering because it was asked again, and probing it
+    /// costs an acquire — which can block for up to a second — for as long as
+    /// it stays covered. The next frame comes from an event: winit's
+    /// `WindowEvent::Occluded(false)`, a key, or anything else that asks for a
+    /// redraw.
+    Occluded,
 }
 
 /// The window background: catppuccin-mocha `base` (#1e1e2e), the same ground
@@ -127,6 +149,8 @@ impl Gfx {
             renderer,
             egui_ctx,
             egui_state,
+            occluded: false,
+            timeouts: 0,
         })
     }
 
@@ -139,16 +163,28 @@ impl Gfx {
         self.surface.configure(&self.device, &self.surface_config);
     }
 
-    /// Tessellate and present one egui frame. Returns false when the surface
-    /// was unavailable and the caller should just ask for another redraw.
-    pub fn present(&mut self, full_output: egui::FullOutput) -> bool {
+    /// Tessellate and present one egui frame.
+    pub fn present(&mut self, full_output: egui::FullOutput) -> Presented {
         use wgpu::CurrentSurfaceTexture as Cst;
         let frame = match self.surface.get_current_texture() {
-            Cst::Success(f) | Cst::Suboptimal(f) => f,
+            Cst::Success(f) | Cst::Suboptimal(f) => {
+                if self.occluded {
+                    self.occluded = false;
+                    log::debug!("surface visible again");
+                }
+                if self.timeouts > 0 {
+                    log::info!(
+                        "surface acquire recovered after {} timeout(s)",
+                        self.timeouts
+                    );
+                    self.timeouts = 0;
+                }
+                f
+            }
             Cst::Lost | Cst::Outdated => {
                 log::warn!("surface lost or outdated; reconfiguring");
                 self.surface.configure(&self.device, &self.surface_config);
-                return false;
+                return Presented::Retry;
             }
             // A timed-out acquire is the swapchain waiting on a compositor
             // that is not answering (see the present-mode note in `new`).
@@ -158,18 +194,31 @@ impl Gfx {
             // compositor that stays silent costs one acquire per retry rather
             // than a tight loop of them.
             Cst::Timeout => {
-                log::warn!("surface acquire timed out; reconfiguring");
+                // Once per run of timeouts. A compositor that has gone quiet
+                // stays quiet, and a warning per attempt turns a stall into a
+                // log flood that says one thing many times.
+                self.timeouts = self.timeouts.saturating_add(1);
+                if self.timeouts == 1 {
+                    log::warn!("surface acquire timed out; reconfiguring");
+                }
                 self.surface.configure(&self.device, &self.surface_config);
-                return false;
+                return Presented::Retry;
             }
+            // **Not reconfigured.** Nothing is wrong with the swapchain: the
+            // window is simply not on screen, and handing the driver a fresh
+            // one every time it says so is work done on behalf of a window
+            // nobody can see. Logged at debug, once, because it is a normal
+            // thing for a window to be behind another one.
             Cst::Occluded => {
-                log::warn!("surface occluded; reconfiguring");
-                self.surface.configure(&self.device, &self.surface_config);
-                return false;
+                if !self.occluded {
+                    self.occluded = true;
+                    log::debug!("surface occluded; frames paused until the window is shown");
+                }
+                return Presented::Occluded;
             }
             Cst::Validation => {
                 log::warn!("surface frame unavailable (validation); skipping");
-                return false;
+                return Presented::Retry;
             }
         };
         let view = frame
@@ -230,7 +279,7 @@ impl Gfx {
         self.queue
             .submit(user_buffers.into_iter().chain([encoder.finish()]));
         frame.present();
-        true
+        Presented::Shown
     }
 }
 

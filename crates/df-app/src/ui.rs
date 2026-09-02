@@ -139,14 +139,14 @@ pub(crate) const IGNORED_DIM: f32 = 0.3;
 ///
 /// The word rather than a glyph: this is the answer to "why is that one grey",
 /// and the pane has no tooltips to put it in — every row here is painted, not a
-/// widget. Four letters of `overlay0` at [`TAG_SIZE`] is quieter than the size
+/// widget. One word of `overlay0` at [`TAG_SIZE`] is quieter than the size
 /// beside it and still a word you can read.
 pub(crate) const IGNORED_TAG: &str = "ignored";
 
 /// The tag's text size, in logical points. Two under the row's, which is the
 /// smallest step that reads as a different *register* rather than as a
 /// rendering accident, and still above `ui-anti-slop`'s 12 pt floor.
-const TAG_SIZE: f32 = FONT_SIZE - 2.0;
+pub(crate) const TAG_SIZE: f32 = FONT_SIZE - 2.0;
 
 /// The gap between the tag and whatever is to its right.
 const TAG_GAP: f32 = 8.0;
@@ -202,7 +202,7 @@ pub(crate) const SELECT_BAR_WIDTH: f32 = 2.5;
 /// How far the accent bar is inset from the row's top and bottom, so it reads
 /// as a mark on the row rather than as a continuous rule down the pane — two
 /// adjacent selected rows must still look like two rows.
-const SELECT_BAR_INSET: f32 = 3.5;
+pub(crate) const SELECT_BAR_INSET: f32 = 3.5;
 
 /// The clipboard mark's width, on the row's trailing edge. A shade narrower
 /// than the selection bar: a yank is a thing you did to a row a moment ago,
@@ -297,6 +297,35 @@ pub(crate) struct GitMark {
     /// anyway.
     pub explain: bool,
 }
+
+/// The widths the right-hand columns keep **whatever an individual row says**.
+///
+/// Measured once per listing and handed to every row in it, for the reason
+/// [`GIT_DOT_COLUMN`] is a constant: a column whose width is whatever this
+/// row's text happens to need is a column that reflows the name beside it every
+/// time the text changes. The size column changes constantly — a directory goes
+/// `—` → `12 items` → `~4.2 MB` → `4.2 MB` while the walk runs — and a name
+/// re-ellipsised four times per directory reads as a rendering fault
+/// (`delightful-ui` §8).
+///
+/// Once per listing rather than once per row because measuring text means
+/// laying it out, and the answer is the same for all sixty rows on screen.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RowColumns {
+    /// The widest thing the size column can ever hold.
+    pub size: f32,
+    /// The [`IGNORED_TAG`]'s own width, gap excluded.
+    pub tag: f32,
+}
+
+/// The two size-column strings that fight for widest, so the constant is
+/// derived from the formats rather than guessed at.
+///
+/// `999.9 GB` is the longest a human size gets before petabytes, which is not a
+/// directory anyone is browsing; `999 items` is the longest a child count gets
+/// before it is superseded by a size anyway. The tilde on a running size is
+/// narrower than the digit it would displace, so neither needs a variant.
+const SIZE_COLUMN_WIDEST: [&str; 2] = ["999 items", "999.9 GB"];
 
 pub(crate) fn git_dot(
     status: df_core::git::FileStatus,
@@ -628,6 +657,30 @@ impl Painting<'_> {
         self.painter.rect_filled(rect, PANE_RADIUS, fill);
     }
 
+    /// Measure the fixed right-hand columns for one listing. See
+    /// [`RowColumns`].
+    pub(crate) fn row_columns(&self, painter: &egui::Painter) -> RowColumns {
+        let font = egui::FontId::proportional(FONT_SIZE);
+        let size = SIZE_COLUMN_WIDEST
+            .iter()
+            .map(|text| {
+                painter
+                    .layout_no_wrap((*text).to_string(), font.clone(), self.palette.overlay1)
+                    .size()
+                    .x
+            })
+            .fold(0.0, f32::max);
+        let tag = painter
+            .layout_no_wrap(
+                IGNORED_TAG.to_string(),
+                egui::FontId::proportional(TAG_SIZE),
+                self.palette.overlay0,
+            )
+            .size()
+            .x;
+        RowColumns { size, tag }
+    }
+
     /// A directory listing's rows.
     ///
     /// `hovers` is the pointer's "instant in, animated out" track
@@ -666,6 +719,7 @@ impl Painting<'_> {
         // Rows are clipped to the pane's content box so a row half-scrolled off
         // the top does not paint over the pane above it mid-slide.
         let painter = self.painter.with_clip_rect(content);
+        let columns = self.row_columns(&painter);
         let visible = crate::viewport::visible_rows(content.height(), ROW_HEIGHT);
         let first = scroll_rows.floor().max(0.0) as usize;
         // One extra row at each end: mid-slide, the rows entering and leaving
@@ -813,6 +867,7 @@ impl Painting<'_> {
                     .and_then(|notes| notes.get(&entry.name))
                     .map(String::as_str),
                 folders,
+                columns,
             );
         }
         self.flip_ghosts(&painter, flip, content, ROW_RADIUS);
@@ -859,6 +914,9 @@ impl Painting<'_> {
         // plain linemode cannot say, and gets out of the way of the two modes
         // that own the column outright.
         folders: Option<&crate::folders::Folders>,
+        // What the right-hand columns keep whatever this row says, measured
+        // once for the whole listing (see [`RowColumns`]).
+        columns: RowColumns,
     ) {
         let mute = mute.clamp(0.0, 1.0);
         let fade = |c: egui::Color32| {
@@ -900,7 +958,17 @@ impl Painting<'_> {
                 .and_then(|folders| folders.label(&entry.name))
                 .unwrap_or_else(|| linemode_text(entry, linemode)),
         };
-        let mode_width = if mode_text.is_empty() {
+        // …but the *reservation* is fixed, and only in the size linemode: that
+        // is the one whose text changes under you while a directory is being
+        // measured. A permission string and a timestamp are the same width on
+        // every row already, and the two modes that take the column over
+        // (`usage`, `note`) do their own arithmetic below.
+        let reserved = if usage.is_none() && note.is_none() && linemode == LineMode::Size {
+            columns.size
+        } else {
+            0.0
+        };
+        let mode_width = if mode_text.is_empty() && reserved <= 0.0 {
             0.0
         } else {
             let galley = painter.layout_no_wrap(
@@ -909,6 +977,9 @@ impl Painting<'_> {
                 fade(self.palette.overlay1),
             );
             let width = galley.size().x;
+            // Right-aligned inside the reserved column, which for a column
+            // whose right edge is the row's is the same place it was drawn
+            // before — what changed is only what the name is measured against.
             painter.galley(
                 egui::pos2(
                     rect.right() - ROW_PAD_X - width,
@@ -917,7 +988,7 @@ impl Painting<'_> {
                 galley,
                 fade(self.palette.overlay1),
             );
-            width + LINEMODE_GAP
+            width.max(reserved) + LINEMODE_GAP
         };
 
         // The bar, immediately left of its number, so the column reads as one
@@ -953,7 +1024,18 @@ impl Painting<'_> {
         // grey. Drawn at *half* the row's mute rather than at all of it —
         // fading the explanation as hard as the thing it explains is how the
         // reason ends up as unreadable as the problem.
-        let mode_width = if git.explain && git.status == Some(df_core::git::FileStatus::Ignored) {
+        //
+        // Its column is reserved on every row of a repository pane, dot-style:
+        // one row in a listing wearing the tag must not push its own name in
+        // while its neighbours keep theirs out, and a status landing on a row
+        // under the cursor must not reflow it.
+        let ignored = git.explain && git.status == Some(df_core::git::FileStatus::Ignored);
+        let tag_column = if git.explain && (git.column || ignored) {
+            columns.tag + TAG_GAP
+        } else {
+            0.0
+        };
+        if ignored {
             let galley = painter.layout_no_wrap(
                 IGNORED_TAG.to_string(),
                 egui::FontId::proportional(TAG_SIZE),
@@ -969,10 +1051,8 @@ impl Painting<'_> {
                 galley,
                 colour,
             );
-            mode_width + width + TAG_GAP
-        } else {
-            mode_width
-        };
+        }
+        let mode_width = mode_width + tag_column;
 
         // The dot sits between the name and the linemode column, so the two
         // right-hand facts read as one column of marks and one column of

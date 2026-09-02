@@ -156,18 +156,20 @@ const SHEBANGS: &[(&str, &str)] = &[
 
 /// The language `name` is written in, or `None` for "highlight it as prose".
 pub fn syntax_for_name(name: &str) -> Option<&'static str> {
-    let lower = name.to_ascii_lowercase();
-    if let Some((_, lang)) = SYNTAX_NAMES.iter().find(|(n, _)| *n == lower) {
+    if let Some((_, lang)) = SYNTAX_NAMES
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+    {
         return Some(lang);
     }
     // A leading dot marks a hidden file, it does not introduce an extension —
     // the same rule [`crate::fs::mime::hint_for_name`] follows, for the same
-    // reason.
-    let stem = lower.strip_prefix('.').unwrap_or(&lower);
-    let (_, ext) = stem.rsplit_once('.')?;
+    // reason. Compared case-insensitively against the slice, so classifying a
+    // directory of 200k rows does not allocate a lowercase copy of every name.
+    let ext = crate::fs::extension_of(name)?;
     SYNTAX
         .iter()
-        .find(|(e, _)| *e == ext)
+        .find(|(e, _)| e.eq_ignore_ascii_case(ext))
         .map(|(_, lang)| *lang)
 }
 

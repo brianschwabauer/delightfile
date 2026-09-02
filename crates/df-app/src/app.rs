@@ -318,13 +318,16 @@ enum Dialog {
     Bulk(Box<crate::bulk::Bulk>),
 }
 
-/// How long the clipboard chip takes to leave the top row after `X`.
+/// How long a top-row chip takes to leave after the thing it is about is gone
+/// — the clipboard's after `X`, the committed filter's after `Esc`.
 ///
 /// PLAN §8's state-fade duration. Instant in — a yank is *made* the moment the
 /// key is pressed and the chip has to be there to say so — and eased out,
 /// because a chip that vanished would leave the eye wondering whether it had
-/// been there at all.
-const YANK_FADE: Duration = Duration::from_millis(120);
+/// been there at all. One number for both, because two chips an inch apart on
+/// one strip of chrome leaving by two different rules is the thing the eye
+/// notices instead of the file list.
+const CHIP_FADE: Duration = Duration::from_millis(120);
 
 /// What the top row's clipboard chip is drawn from.
 ///
@@ -341,6 +344,28 @@ struct YankChip {
 
 impl YankChip {
     /// The chip's opacity now, and whether it has anything left to draw.
+    fn alpha(&self, now: Instant) -> f32 {
+        self.leaving.map(|t| t.value(now)).unwrap_or(1.0)
+    }
+
+    fn spent(&self, now: Instant) -> bool {
+        self.leaving.is_some_and(|t| t.finished(now))
+    }
+}
+
+/// The committed filter's chip on the top row, on the same terms.
+///
+/// It used to snap out the frame the filter was cleared, next to a yank chip
+/// that eases: two chips an inch apart on one strip of chrome, leaving by two
+/// different rules. The text is owned for the reason [`YankChip`]'s names are —
+/// the chip outlives the filter by one fade and has to keep saying what it was.
+struct FilterChip {
+    text: String,
+    /// `None` while the filter is live; the fade once it is not.
+    leaving: Option<crate::motion::Tween>,
+}
+
+impl FilterChip {
     fn alpha(&self, now: Instant) -> f32 {
         self.leaving.map(|t| t.value(now)).unwrap_or(1.0)
     }
@@ -653,10 +678,14 @@ pub struct App {
     /// When the next frame is owed, if one is. `None` means "asleep until
     /// something happens" — the resting state.
     repaint_at: Option<Instant>,
-    /// Consecutive frames the surface refused (`Gfx::present` returned false).
-    /// Drives the retry back-off in `redraw`, and is reset by the first frame
-    /// that lands.
+    /// Consecutive frames the surface refused (`Gfx::present` answered
+    /// `Retry`). Drives the retry back-off in `redraw`, and is reset by the
+    /// first frame that lands. An *occluded* window is not counted: it is not a
+    /// failure, and there is nothing to retry.
     present_failures: u32,
+    /// One display refresh on the monitor the window is on, cached (see
+    /// [`App::frame_interval`]). `None` means "ask the windowing system again".
+    frame_interval: Option<Duration>,
     /// The off-thread stall detector (see [`crate::watchdog`]).
     watchdog: crate::watchdog::Watchdog,
     logged_first_frame: bool,
@@ -785,6 +814,11 @@ pub struct App {
     clipboard: Clipboard,
     /// What the top row's clipboard chip is drawn from (PLAN §4.1).
     yank: Option<YankChip>,
+    /// The committed filter's chip, which outlives the filter by one fade.
+    filter_chip: Option<FilterChip>,
+    /// How many lines the top row is showing, a high-water mark for the life of
+    /// one prompt (see [`App::sync_path_lines`]).
+    path_lines: usize,
     /// The one-at-a-time toast.
     toasts: Toasts,
     /// The modal card, when one is up. While it is, keys are matched against
@@ -1186,6 +1220,7 @@ impl App {
             waker,
             repaint_at: None,
             present_failures: 0,
+            frame_interval: None,
             watchdog: crate::watchdog::Watchdog::start(),
             logged_first_frame: false,
             logged_first_listing: false,
@@ -1242,6 +1277,8 @@ impl App {
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
             yank: None,
+            filter_chip: None,
+            path_lines: 1,
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
             prompt: None,
@@ -6446,34 +6483,30 @@ impl App {
     /// directories by what is in them. The `~` and the `12 items` cannot live
     /// in a `u64` and stay in [`crate::folders::Folders`].
     fn apply_folder_sizes(&mut self) {
-        let sizes: HashMap<String, u64> = self
-            .tab()
-            .cwd
-            .dir
-            .entries()
-            .iter()
-            .filter(|entry| entry.is_dir())
-            .filter_map(|entry| {
-                self.folders
-                    .size(&entry.name)
-                    .map(|size| (entry.name.clone(), size.bytes))
-            })
-            .collect();
-        if sizes.is_empty() {
-            return;
-        }
+        // Lent out and given back rather than copied into a `HashMap` keyed by
+        // an owned `String` per directory row. This runs about ten times a
+        // second while a walk streams, and the map existed only to end the
+        // borrow of `self.folders` before `self.tabs` is taken mutably; taking
+        // the whole thing for the duration says the same thing and allocates
+        // nothing. `Folders::default()` is empty, so the borrow checker's
+        // stand-in is also the honest value if a panic unwound past here.
+        let folders = std::mem::take(&mut self.folders);
         self.tabs.active_mut().cwd.dir.revise_entries(|entries| {
             let mut changed = false;
             for entry in entries.iter_mut() {
-                if let Some(bytes) = sizes.get(&entry.name) {
-                    if entry.len != *bytes {
-                        entry.len = *bytes;
+                if !entry.is_dir() {
+                    continue;
+                }
+                if let Some(size) = folders.size(&entry.name) {
+                    if entry.len != size.bytes {
+                        entry.len = size.bytes;
                         changed = true;
                     }
                 }
             }
             changed
         });
+        self.folders = folders;
     }
 
     /// `m u`, and the palette's "Show disk usage": the mode goes on, or off.
@@ -6877,7 +6910,7 @@ impl App {
                 chip.leaving = Some(crate::motion::Tween::new(
                     1.0,
                     0.0,
-                    YANK_FADE,
+                    CHIP_FADE,
                     crate::motion::Easing::OutQuint,
                     now,
                 ));
@@ -6885,6 +6918,47 @@ impl App {
             Some(chip) if chip.spent(now) => self.yank = None,
             _ => {}
         }
+    }
+
+    /// The same, for the committed filter's chip — here rather than at each of
+    /// the several places that can clear a filter, for the same reason.
+    fn sync_filter_chip(&mut self, now: Instant) {
+        let filter = self.tab().cwd.dir.filter();
+        if !filter.is_empty() {
+            let stale = match &self.filter_chip {
+                Some(chip) => chip.leaving.is_some() || chip.text != filter,
+                None => true,
+            };
+            if stale {
+                self.filter_chip = Some(FilterChip {
+                    text: filter.to_string(),
+                    leaving: None,
+                });
+            }
+            return;
+        }
+        match &mut self.filter_chip {
+            Some(chip) if chip.leaving.is_none() => {
+                chip.leaving = Some(crate::motion::Tween::new(
+                    1.0,
+                    0.0,
+                    CHIP_FADE,
+                    crate::motion::Easing::OutQuint,
+                    now,
+                ));
+            }
+            Some(chip) if chip.spent(now) => self.filter_chip = None,
+            _ => {}
+        }
+    }
+
+    /// What the filter chip says this frame — the live filter, or the one it is
+    /// still fading out. Empty when there is no chip at all.
+    fn filter_chip_text(&self) -> &str {
+        self.filter_chip
+            .as_ref()
+            .map(|chip| chip.text.as_str())
+            .unwrap_or("")
     }
 
     /// What the top row's right-hand cluster says this frame.
@@ -6905,13 +6979,26 @@ impl App {
     }
 
     /// How many lines the top row needs this frame — see [`ui::layout`].
-    fn path_lines(&self, painter: &egui::Painter, area: egui::Rect) -> usize {
-        match &self.prompt {
-            Some(prompt) if !prompt.kind.anchored() => {
-                chrome::prompt_lines(painter, prompt, area.width() - ui::GAP * 2.0)
-            }
+    /// …and it is a **high-water mark for the life of one prompt**, not a
+    /// per-keystroke answer.
+    ///
+    /// Whether the error fits beside the query depends on how much the user has
+    /// typed, so a row that shrank the moment it could would grow and collapse
+    /// under the fingers — and every pane in the window moves a line each time
+    /// it does. Once a prompt has needed two lines it keeps two until it
+    /// closes, which is the frame the `_` arm resets it (`delightful-ui` §8).
+    fn sync_path_lines(&mut self, painter: &egui::Painter, area: egui::Rect) {
+        self.path_lines = match &self.prompt {
+            Some(prompt) if !prompt.kind.anchored() => self
+                .path_lines
+                .max(chrome::prompt_lines(
+                    painter,
+                    prompt,
+                    area.width() - ui::GAP * 2.0,
+                ))
+                .max(1),
             _ => 1,
-        }
+        };
     }
 
     /// Rebuild the breadcrumb when the directory has changed under it.
@@ -8557,12 +8644,8 @@ impl App {
         // strip and therefore how tall the panes are — painting this frame with
         // the pre-keystroke geometry would leave the strip a frame behind the
         // key that asked for it, on a frame nothing would follow.
-        let layout = ui::layout(
-            area,
-            self.mgr.ratio,
-            self.tabs.len() > 1,
-            self.path_lines(&painter, area),
-        );
+        self.sync_path_lines(&painter, area);
+        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1, self.path_lines);
         // How the list pane is drawn, published to the two things that run
         // *before* the pane is measured: the cursor commands and the wheel.
         let first_metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
@@ -8587,13 +8670,10 @@ impl App {
         }
         self.tick_state(now);
         self.sync_yank(now);
+        self.sync_filter_chip(now);
+        self.sync_path_lines(&painter, area);
 
-        let layout = ui::layout(
-            area,
-            self.mgr.ratio,
-            self.tabs.len() > 1,
-            self.path_lines(&painter, area),
-        );
+        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1, self.path_lines);
         let list_content = ui::content_rect(layout.list);
         // Which geometry this directory is drawn in, decided once and threaded
         // everywhere through `grid::pane_*` (PLAN §2). `None` is the list.
@@ -8659,7 +8739,7 @@ impl App {
                 &painter,
                 layout.path,
                 &self.path_bar.1,
-                self.tab().cwd.dir.filter(),
+                self.filter_chip_text(),
                 &cluster,
             )
         };
@@ -8729,9 +8809,15 @@ impl App {
                     if prompting {
                         return None;
                     }
+                    // …and not while *this* chip is fading out either: there is
+                    // no filter left to re-open a prompt on.
+                    let filter_live = self
+                        .filter_chip
+                        .as_ref()
+                        .is_some_and(|chip| chip.leaving.is_none());
                     top_geom
                         .filter
-                        .is_some_and(|rect| rect.contains(p))
+                        .is_some_and(|rect| filter_live && rect.contains(p))
                         .then_some(Control::FilterChip)
                         .or_else(|| {
                             // …but not while the chip is fading out: it is
@@ -9529,7 +9615,11 @@ impl App {
                     area,
                     layout.path,
                     &self.path_bar.1,
-                    self.tab().cwd.dir.filter(),
+                    self.filter_chip_text(),
+                    self.filter_chip
+                        .as_ref()
+                        .map(|chip| chip.alpha(now))
+                        .unwrap_or(0.0),
                     &cluster,
                     &top_geom,
                     &self.hovers,
@@ -9760,6 +9850,13 @@ impl App {
                     .as_ref()
                     .is_some_and(|chip| chip.leaving.is_some() && !chip.spent(now)),
             ),
+            // …and the committed filter's, which leaves by the same rule.
+            (
+                "filter-chip",
+                self.filter_chip
+                    .as_ref()
+                    .is_some_and(|chip| chip.leaving.is_some() && !chip.spent(now)),
+            ),
             ("tab", self.tab().animating(now)),
             ("tabs", self.tabs.animating(now)),
             ("preview", self.preview.animating(now)),
@@ -9923,21 +10020,37 @@ impl App {
             .get(&egui::ViewportId::ROOT)
             .map(|vp| vp.repaint_delay);
 
-        if !gfx.present(full_output) {
-            if frame_log_enabled() {
-                log::info!("present-fail");
+        match gfx.present(full_output) {
+            crate::graphics::Presented::Shown => {}
+            // A window nobody can see is not a failure and is not something to
+            // probe: the retry below would cost an acquire every couple of
+            // seconds for as long as it stayed covered, forever. No deadline at
+            // all, so the loop sleeps on events — and the frame comes back with
+            // `WindowEvent::Occluded(false)`, a key, or any other redraw
+            // request.
+            crate::graphics::Presented::Occluded => {
+                if frame_log_enabled() {
+                    log::info!("present-occluded");
+                }
+                self.repaint_at = None;
+                return;
             }
             // Not an immediate re-request: a failed acquire has just cost up
             // to a second of wall-clock on this thread (see `Gfx::present`),
             // and asking again at once is a loop that blocks the UI for as
             // long as the compositor stays quiet. A short deadline lets input
-            // and worker results through between attempts, and grows with
-            // each consecutive failure so a window that is truly hidden costs
-            // one probe every couple of seconds instead of one every frame.
-            self.present_failures = self.present_failures.saturating_add(1);
-            let backoff = PRESENT_RETRY * self.present_failures.min(8);
-            self.repaint_at = Some(Instant::now() + backoff);
-            return;
+            // and worker results through between attempts, and grows with each
+            // consecutive failure so a surface that stays unavailable costs one
+            // probe every couple of seconds instead of one every frame.
+            crate::graphics::Presented::Retry => {
+                if frame_log_enabled() {
+                    log::info!("present-fail");
+                }
+                self.present_failures = self.present_failures.saturating_add(1);
+                let backoff = PRESENT_RETRY * self.present_failures.min(8);
+                self.repaint_at = Some(Instant::now() + backoff);
+                return;
+            }
         }
         if self.present_failures > 0 {
             log::info!(
@@ -9993,19 +10106,30 @@ impl App {
     }
 
     /// One display refresh, from the monitor the window is on; 60 Hz when the
-    /// compositor will not say. Re-asked every frame rather than cached: a
-    /// window dragged to a 144 Hz monitor should animate at 144 Hz there.
-    fn frame_interval(&self) -> Duration {
+    /// compositor will not say.
+    ///
+    /// Cached, because `current_monitor()` is a round trip to the windowing
+    /// system for an answer that changes only when the window changes monitors
+    /// — and every frame is one frame. The three events that can change it
+    /// clear the cache: `Moved`, `Resized` and `ScaleFactorChanged`. A window
+    /// dragged to a 144 Hz monitor still animates at 144 Hz there, because it
+    /// cannot get there without moving.
+    fn frame_interval(&mut self) -> Duration {
+        if let Some(interval) = self.frame_interval {
+            return interval;
+        }
         let millihertz = self
             .gfx
             .as_ref()
             .and_then(|gfx| gfx.window.current_monitor())
             .and_then(|monitor| monitor.refresh_rate_millihertz())
             .filter(|&rate| rate >= 10_000);
-        match millihertz {
+        let interval = match millihertz {
             Some(rate) => Duration::from_secs_f64(1000.0 / f64::from(rate)),
             None => Duration::from_micros(16_667),
-        }
+        };
+        self.frame_interval = Some(interval);
+        interval
     }
 
     /// Write the cwd-file if this quit calls for one, and say goodbye.
@@ -10484,6 +10608,19 @@ impl ApplicationHandler<crate::Wake> for App {
             }
             WindowEvent::Resized(size) => {
                 gfx.resize(size.width, size.height);
+                self.frame_interval = None;
+                gfx.window.request_redraw();
+            }
+            // The window has moved or the scale changed: which monitor it is on
+            // may have changed with it, and the refresh interval is that
+            // monitor's (see [`App::frame_interval`]).
+            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.frame_interval = None;
+            }
+            // Uncovered. `Gfx::present` stopped asking for frames while the
+            // window was hidden (see `graphics::Presented::Occluded`), so this
+            // is what starts them again — nothing else would.
+            WindowEvent::Occluded(false) => {
                 gfx.window.request_redraw();
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),

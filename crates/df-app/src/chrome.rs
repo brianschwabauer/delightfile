@@ -23,7 +23,7 @@
 
 use df_core::fs::is_case_sensitive;
 
-use crate::help::{Help, HelpLine};
+use crate::help::{self, Help, HelpLine};
 use crate::hover::{pressed_rect, Hovers};
 use crate::input::Prompt;
 use crate::ripple::Ripples;
@@ -414,7 +414,7 @@ const YANK_TOOLTIP_NAMES: usize = 6;
 /// Where each piece of the cluster is, measured before the crumbs so they know
 /// how much of the row is left (and so a click lands on the chip it looks like
 /// it landed on).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClusterGeom {
     /// What the crumbs must keep clear on the right, the separating gap
     /// included.
@@ -424,6 +424,22 @@ pub struct ClusterGeom {
     pub yank: Option<egui::Rect>,
     pub selected: Option<egui::Rect>,
     pub visual: Option<egui::Rect>,
+    /// The three strings the measuring already built, kept rather than built a
+    /// second time by the painter a few lines later. Measuring text means
+    /// laying it out, which means having the string; formatting each of them
+    /// twice per frame bought nothing but the allocations.
+    pub labels: ClusterLabels,
+}
+
+/// What the cluster's chips say, formatted once (see [`ClusterGeom::labels`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClusterLabels {
+    /// `12 / 340`.
+    pub counter: String,
+    /// `3 yanked` / `3 cut`, when there is a clipboard.
+    pub yank: Option<String>,
+    /// `4 selected`, when there is a selection.
+    pub selected: Option<String>,
 }
 
 /// `12 / 340`, or `0 / 0` for an empty directory.
@@ -457,7 +473,8 @@ pub fn cluster_geometry(
 ) -> ClusterGeom {
     let font = egui::FontId::proportional(FONT);
     let inner = row.shrink2(egui::vec2(PAD_X, 0.0));
-    let counter_w = text_width(painter, &counter_text(cluster), font.clone());
+    let counter_label = counter_text(cluster);
+    let counter_w = text_width(painter, &counter_label, font.clone());
     let counter = egui::Rect::from_min_max(
         egui::pos2(inner.right() - counter_w, inner.top()),
         egui::pos2(inner.right(), inner.bottom()),
@@ -479,6 +496,7 @@ pub fn cluster_geometry(
         let width = text_width(painter, branch, font.clone()) + PAD_X * 2.0 + FONT;
         chip_at(width, &mut right)
     });
+    let mut yank_text = None;
     let yank = cluster
         .yank
         .as_ref()
@@ -486,11 +504,14 @@ pub fn cluster_geometry(
         .map(|y| {
             let label = yank_label(y.paths.len(), y.cut);
             let width = text_width(painter, &label, font.clone()) + PAD_X * 2.0;
+            yank_text = Some(label);
             chip_at(width, &mut right)
         });
+    let mut selected_text = None;
     let selected = (cluster.selected > 0).then(|| {
         let label = format!("{} selected", cluster.selected);
         let width = text_width(painter, &label, font.clone()) + PAD_X * 2.0;
+        selected_text = Some(label);
         chip_at(width, &mut right)
     });
     let visual = cluster.visual.map(|selecting| {
@@ -507,6 +528,11 @@ pub fn cluster_geometry(
         yank,
         selected,
         visual,
+        labels: ClusterLabels {
+            counter: counter_label,
+            yank: yank_text,
+            selected: selected_text,
+        },
     }
 }
 
@@ -533,7 +559,7 @@ fn paint_cluster(
     painter.text(
         egui::pos2(geom.counter.right(), geom.counter.center().y),
         egui::Align2::RIGHT_CENTER,
-        counter_text(cluster),
+        &geom.labels.counter,
         egui::FontId::proportional(FONT),
         palette.overlay1,
     );
@@ -578,7 +604,7 @@ fn paint_cluster(
         inside.text(
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            yank_label(yank.paths.len(), yank.cut),
+            geom.labels.yank.as_deref().unwrap_or(""),
             egui::FontId::proportional(FONT),
             fade(accent, yank.alpha),
         );
@@ -590,7 +616,7 @@ fn paint_cluster(
         chip(
             paint,
             rect,
-            &format!("{} selected", cluster.selected),
+            geom.labels.selected.as_deref().unwrap_or(""),
             palette.yellow,
         );
     }
@@ -715,15 +741,26 @@ pub fn top_geometry(
     // before it: the committed filter reads as one more step down the path,
     // because that is what it is — `Downloads › ⌕ invoice` is the directory
     // and then the part of it you are looking at (PLAN §7.2).
-    let filter_rect = (filter_w > 0.0)
-        .then(|| rects.iter().rev().find(|r| **r != egui::Rect::NOTHING))
-        .flatten()
-        .map(|last| {
-            egui::Rect::from_min_max(
-                egui::pos2(last.right() + CRUMB_SEPARATOR_WIDTH, row.top() + CHIP_INSET),
-                egui::pos2(last.right() + filter_w, row.bottom() - CHIP_INSET),
-            )
-        });
+    //
+    // …and when *no* crumb fitted, at the row's own left edge. A path narrow
+    // enough to elide entirely is exactly the case where the filter is the only
+    // thing on the row worth reading, and hanging the chip off a crumb that is
+    // not there made it the one thing that disappeared.
+    let filter_rect = (filter_w > 0.0).then(|| {
+        let left = rects
+            .iter()
+            .rev()
+            .find(|r| **r != egui::Rect::NOTHING)
+            .map(|last| last.right() + CRUMB_SEPARATOR_WIDTH)
+            .unwrap_or(row.left() + PAD_X);
+        egui::Rect::from_min_max(
+            egui::pos2(left, row.top() + CHIP_INSET),
+            egui::pos2(
+                left + filter_w - CRUMB_SEPARATOR_WIDTH,
+                row.bottom() - CHIP_INSET,
+            ),
+        )
+    });
     TopGeom {
         crumbs: rects,
         filter: filter_rect,
@@ -751,6 +788,10 @@ pub fn path_bar(
     bar: egui::Rect,
     crumbs: &[Crumb],
     filter: &str,
+    // The committed filter chip's fade: 1 while a filter is on, and its eased
+    // way out after it is cleared — the same instant-in/eased-out the yank chip
+    // an inch to its right rides (PLAN §8).
+    filter_alpha: f32,
     cluster: &Cluster<'_>,
     geom: &TopGeom,
     hovers: &Hovers<Control>,
@@ -837,10 +878,14 @@ pub fn path_bar(
     // re-opens the prompt that set it, which is the only way the pointer has of
     // editing a query the keyboard typed.
     if let Some(rect) = geom.filter {
+        let alpha = filter_alpha.clamp(0.0, 1.0);
         let key = Control::FilterChip;
         let hover = hovers.hover(key);
         let rect = pressed_rect(rect, hovers.press(key));
-        plate(paint, rect, palette.blue, 1.0 + hover * 0.9);
+        // The plate's strength carries the fade, exactly as the yank chip's
+        // does: `plate` reads `strength` as both tint and opacity, so a chip on
+        // its way out thins towards the row rather than blinking off it.
+        plate(paint, rect, palette.blue, (1.0 + hover * 0.9) * alpha);
         let inside = painter.with_clip_rect(rect);
         for splash in ripples.splashes(key, paint.now) {
             inside.circle_filled(
@@ -854,14 +899,14 @@ pub fn path_bar(
             egui::Align2::LEFT_CENTER,
             FILTER_GLYPH,
             font.clone(),
-            palette.blue,
+            fade(palette.blue, alpha),
         );
         inside.text(
             egui::pos2(rect.left() + PAD_X + FONT, rect.center().y),
             egui::Align2::LEFT_CENTER,
             filter,
             font.clone(),
-            palette.blue,
+            fade(palette.blue, alpha),
         );
     }
 
@@ -1253,6 +1298,12 @@ pub fn hint_rect(card: egui::Rect) -> egui::Rect {
 /// On the overlay rather than on a strip of window chrome: a hint is about the
 /// card it belongs to, and the eye that is reading the card should not have to
 /// travel to the other end of the window to find out what `Enter` does there.
+/// A pair that does not fit is **dropped whole**, and so is everything after
+/// it. The strip used to be clipped, which cut the last hint off mid-word —
+/// `Enter ope` — and a hint that has been truncated into a different word is
+/// worse than no hint, because the reader has no way of telling that is what
+/// happened. The pairs are in importance order already, so dropping from the
+/// end drops the least important thing on the strip.
 pub fn hints(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
     let painter = paint.painter;
     let painter = painter.with_clip_rect(rect);
@@ -1263,17 +1314,21 @@ pub fn hints(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
             key_font(HINT_FONT),
             paint.palette.subtext0,
         );
-        painter.galley(
-            egui::pos2(x, rect.center().y - key_galley.size().y / 2.0),
-            key_galley.clone(),
-            paint.palette.subtext0,
-        );
-        x += key_galley.size().x + 6.0;
         let what_galley = painter.layout_no_wrap(
             what.to_string(),
             egui::FontId::proportional(HINT_FONT),
             paint.palette.overlay0,
         );
+        let pair = key_galley.size().x + HINT_KEY_GAP + what_galley.size().x;
+        if x + pair > rect.right() {
+            break;
+        }
+        painter.galley(
+            egui::pos2(x, rect.center().y - key_galley.size().y / 2.0),
+            key_galley.clone(),
+            paint.palette.subtext0,
+        );
+        x += key_galley.size().x + HINT_KEY_GAP;
         painter.galley(
             egui::pos2(x, rect.center().y - what_galley.size().y / 2.0),
             what_galley.clone(),
@@ -1282,6 +1337,10 @@ pub fn hints(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
         x += what_galley.size().x + GAP * 2.0;
     }
 }
+
+/// Between a hint's key and what it does. Narrower than the gap between two
+/// hints, so the strip reads as pairs rather than as a row of words.
+const HINT_KEY_GAP: f32 = 6.0;
 
 // ── The which-key card (PLAN §4, §8) ────────────────────────────────────────
 
@@ -1378,7 +1437,29 @@ pub const HELP_ROW: f32 = 20.0;
 /// descriptions have to start at the same x on every line or the sheet is a
 /// ragged mess, and the widest chord in the shipped table (`Ctrl+Shift+z`) fits
 /// inside this.
-const HELP_KEYS_COLUMN: f32 = 104.0;
+///
+/// It is the *legend* that sets the number, though, not the chords: a legend
+/// row spends [`LEGEND_SWATCH`] and its gap on the mark itself before the word
+/// for it starts, and `faint green dot` after that lane is the longest thing
+/// this column ever carries. One column for both, because the meanings and the
+/// descriptions have to start at the same x or the sheet reads as two sheets.
+const HELP_KEYS_COLUMN: f32 = 119.0;
+
+/// The legend's swatch column: where the mark itself is drawn, left of the word
+/// for it.
+///
+/// Narrow on purpose. A dot is five pixels and a bar is two and a half, and a
+/// wide column would leave each of them adrift in the middle of nothing; this
+/// is about the width of the widest of them plus room to sit off the edge.
+const LEGEND_SWATCH: f32 = 7.0;
+
+/// Between the swatch and the word it stands for.
+const LEGEND_SWATCH_GAP: f32 = 8.0;
+
+/// How far a bar swatch stops short of the row's own top and bottom: the row
+/// painter's own inset, so the mark in the legend is the shape the mark on the
+/// row is.
+const LEGEND_SWATCH_INSET: f32 = crate::ui::SELECT_BAR_INSET;
 
 /// The widest the help card gets. Beyond about this a line of "keys …
 /// description … command-id" is three things separated by a desert, and the eye
@@ -1542,14 +1623,35 @@ pub fn help_overlay(
             // wearing the key colour would invite people to try pressing it.
             // No third column: a mark has no id to write in `keymap.toml`.
             HelpLine::Legend(entry) => {
-                painter.text(
-                    egui::pos2(row.left() + PAD_X, row.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    entry.mark,
-                    egui::FontId::proportional(FONT),
-                    palette.subtext1,
+                let swatch = egui::Rect::from_min_max(
+                    egui::pos2(row.left() + PAD_X, row.top() + LEGEND_SWATCH_INSET),
+                    egui::pos2(
+                        row.left() + PAD_X + LEGEND_SWATCH,
+                        row.bottom() - LEGEND_SWATCH_INSET,
+                    ),
                 );
+                legend_swatch(&painter, swatch, entry.swatch, palette);
+                let mark_left = swatch.right() + LEGEND_SWATCH_GAP;
                 let meaning_left = row.left() + PAD_X + HELP_KEYS_COLUMN;
+                // The tag wears its own type, because *that* is the mark: a
+                // row's `ignored` is two points smaller than the text beside it
+                // and a step quieter, and a legend that set it in the sheet's
+                // own face would be naming a different thing.
+                let (font, colour) = match entry.swatch {
+                    help::Swatch::Tag => (
+                        egui::FontId::proportional(crate::ui::TAG_SIZE),
+                        palette.overlay0,
+                    ),
+                    _ => (egui::FontId::proportional(FONT), palette.subtext1),
+                };
+                truncated_in(
+                    &painter,
+                    egui::pos2(mark_left, row.center().y),
+                    entry.mark,
+                    colour,
+                    (meaning_left - GAP - mark_left).max(0.0),
+                    font,
+                );
                 truncated(
                     &painter,
                     egui::pos2(meaning_left, row.center().y),
@@ -1574,6 +1676,49 @@ pub fn help_overlay(
             egui::FontId::proportional(FONT),
             palette.overlay0,
         );
+    }
+}
+
+/// The mark a legend row is about, drawn where the keys column starts.
+///
+/// Every colour and every dimension is the row painter's own — [`ui::git_dot`]
+/// for the dots, [`ui::SELECT_BAR_WIDTH`] and the palette's yellow/teal/peach
+/// for the bars — so a swatch cannot say something the pane does not.
+///
+/// [`ui::git_dot`]: crate::ui::git_dot
+/// [`ui::SELECT_BAR_WIDTH`]: crate::ui::SELECT_BAR_WIDTH
+fn legend_swatch(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    swatch: help::Swatch,
+    palette: &crate::theme::Palette,
+) {
+    match swatch {
+        // The tag draws itself, as its own word (see the caller).
+        help::Swatch::None | help::Swatch::Tag => {}
+        help::Swatch::Dot(status) => {
+            if let Some(colour) = crate::ui::git_dot(status, palette) {
+                painter.circle_filled(rect.center(), crate::ui::GIT_DOT_RADIUS, colour);
+            }
+        }
+        help::Swatch::Bar(mark) => {
+            let colour = match mark {
+                help::Mark::Selected => palette.yellow,
+                help::Mark::Yanked => palette.teal,
+                help::Mark::Cut => palette.peach,
+            };
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(
+                    rect.center().x - crate::ui::SELECT_BAR_WIDTH / 2.0,
+                    rect.top(),
+                ),
+                egui::pos2(
+                    rect.center().x + crate::ui::SELECT_BAR_WIDTH / 2.0,
+                    rect.bottom(),
+                ),
+            );
+            painter.rect_filled(bar, 1, colour);
+        }
     }
 }
 
@@ -1623,11 +1768,31 @@ pub fn truncated(
     color: egui::Color32,
     max_width: f32,
 ) {
+    truncated_in(
+        painter,
+        pos,
+        text,
+        color,
+        max_width,
+        egui::FontId::proportional(FONT),
+    );
+}
+
+/// The same, in a face of your choosing — the legend's `ignored` tag is set in
+/// the row's tag type, not the sheet's.
+pub fn truncated_in(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    text: &str,
+    color: egui::Color32,
+    max_width: f32,
+    font: egui::FontId,
+) {
     use egui::text::{LayoutJob, TextFormat, TextWrapping};
     let mut job = LayoutJob::single_section(
         text.to_string(),
         TextFormat {
-            font_id: egui::FontId::proportional(FONT),
+            font_id: font,
             color,
             ..Default::default()
         },
@@ -1946,6 +2111,7 @@ mod tests {
                     path_rect,
                     &path,
                     filter,
+                    1.0,
                     &cluster,
                     &geom,
                     &Hovers::new(),
@@ -1970,6 +2136,7 @@ mod tests {
                 narrow,
                 &path,
                 "",
+                0.0,
                 &cluster,
                 &geom,
                 &Hovers::new(),

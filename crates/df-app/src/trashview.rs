@@ -150,13 +150,24 @@ pub fn row_from(item: &TrashedItem, meta: Option<&std::fs::Metadata>) -> Entry {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| name.clone());
+    let kind = if is_dir { Kind::Dir } else { Kind::File };
+    let mode = meta
+        .map(|m| m.mode())
+        .unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 });
+    // Sniffed from the *original* name, so a `notes_1.txt` in the trash still
+    // gets the icon and the preview of the `notes.txt` it was.
+    let mime = if is_dir {
+        mime::DIR_MIME
+    } else {
+        mime::hint_for_name(&original_name)
+    };
     Entry {
         // A dotfile is hidden in the trash too: `.` still means "show me the
         // ones I normally do not look at", and a trash full of `.cache`
         // fragments is exactly what that key is for.
         is_hidden: original_name.starts_with('.'),
         path: item.files_path(),
-        kind: if is_dir { Kind::Dir } else { Kind::File },
+        kind,
         len: if is_dir {
             0
         } else {
@@ -167,18 +178,12 @@ pub fn row_from(item: &TrashedItem, meta: Option<&std::fs::Metadata>) -> Entry {
         // the mtime linemode shows it without a second column existing.
         mtime: deleted_at(&item.deleted_at),
         btime: None,
-        mode: meta
-            .map(|m| m.mode())
-            .unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 }),
+        mode,
         uid: meta.map(|m| m.uid()).unwrap_or(0),
         gid: meta.map(|m| m.gid()).unwrap_or(0),
-        // Sniffed from the *original* name, so a `notes_1.txt` in the trash
-        // still gets the icon and the preview of the `notes.txt` it was.
-        mime: if is_dir {
-            mime::DIR_MIME
-        } else {
-            mime::hint_for_name(&original_name)
-        },
+        mime,
+        // …and the kind follows the original name for the same reason.
+        file_kind: df_core::fs::classify(kind, &original_name, mime, mode),
         name,
     }
 }
