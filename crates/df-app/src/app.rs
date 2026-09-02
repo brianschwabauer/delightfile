@@ -878,6 +878,10 @@ pub struct App {
     /// When the pointer last did anything — moved, clicked, or turned the
     /// wheel. `None` until it does. See [`POINTER_PARKED`].
     pointer_moved_at: Option<Instant>,
+    /// Whether the mouse's row highlight is parked because the keyboard moved
+    /// the cursor — see [`crate::hover::Parking`], which is where the rule and
+    /// its reasons live.
+    row_hover: crate::hover::Parking,
     /// The top row's prompt, when something is being typed into it.
     prompt: Option<Prompt>,
     /// Visual mode (`v` / `V`), while it is on.
@@ -1542,6 +1546,7 @@ impl App {
             window_focused: true,
             clipboard_ready: false,
             pointer_moved_at: None,
+            row_hover: crate::hover::Parking::default(),
             prompt: None,
             visual: None,
             clicks: crate::mouse::Clicks::new(),
@@ -4058,6 +4063,21 @@ impl App {
     /// `Ctrl+d` are measured in — hence keys being routed mid-frame, once the
     /// panes have been laid out.
     fn route_keys(&mut self, page: usize, now: Instant) {
+        // Nothing queued is the ordinary case — most frames are here for an
+        // animation, not for a keystroke — and everything below, the cursor
+        // mark included, is work only a keystroke can make interesting.
+        if self.pending_keys.is_empty() {
+            return;
+        }
+        // Where the keyboard's cursor was before this batch, so the parking
+        // rule can be asked the one question it cares about: did a *key* move
+        // it? (See [`crate::hover::Parking`].) Read either side of the loop
+        // rather than from each command, because the commands that move the
+        // cursor are legion — the arrows, the pages, `gg`/`G`, `n`/`N`, a jump,
+        // a filter that resorts under it — and a rule that has to be remembered
+        // at thirty call sites is a rule that will be forgotten at one of them.
+        let cursor_before = self.cursor_mark();
+
         // The `when` predicate, rebuilt from the one thing left that decides
         // it: whether the cursor is on something playable (PLAN §2.1 took the
         // pane-focus half away). Recomputed per keystroke rather than per
@@ -4141,6 +4161,35 @@ impl App {
                 Dispatch::NoMatch => log::trace!("unbound: {}", chord.label()),
             }
         }
+
+        // **The keyboard moved the cursor, so the mouse's highlight stands
+        // down.** No frame is asked for here and none is needed: this runs
+        // inside the frame the keystroke itself brought, [`App::frame`] feeds
+        // the row `None` later in that same frame, and a fade on its way down
+        // is what
+        // `Hovers::animating` asks for frames *for* — so the fade plays out of
+        // the repaint discipline already in place rather than out of a second
+        // one written beside it.
+        if self.cursor_mark() != cursor_before {
+            self.row_hover.park();
+        }
+    }
+
+    /// Where the keyboard's cursor is, as one comparable value: which tab,
+    /// which directory, which row.
+    ///
+    /// The directory is part of it because entering one moves the cursor
+    /// without moving its *index* — row 0 of the folder you just opened is a
+    /// different row from row 0 of the folder you opened it from, and the
+    /// mouse's highlight is no more about the new listing than it was about
+    /// the cursor's old row.
+    fn cursor_mark(&self) -> (usize, PathBuf, usize) {
+        let tab = self.tab();
+        (
+            self.tabs.active_index(),
+            tab.cwd.path().to_path_buf(),
+            tab.cwd.dir.cursor(),
+        )
     }
 
     // ── The modal surfaces: dialog, picker, task panel ──────────────────────
@@ -10321,6 +10370,23 @@ impl App {
         if pointer.moved {
             self.pointer_moved_at = Some(now);
         }
+        // …and the narrower question the row hover asks: did the *hand* move?
+        // `pointer.moved` counts a wheel and a button too, which is right for
+        // the turntable's "is anybody there" but wrong here — see
+        // [`crate::hover::Parking`]. The last motion event of the frame is
+        // where the pointer has got to; several coalesce into one on a fast
+        // sweep, and only the destination matters. Read after `route_keys`, so
+        // a frame carrying both a keystroke and a real movement ends with the
+        // hover awake: the hand on the mouse is the more recent answer.
+        let travelled = ui.input(|i| {
+            i.events.iter().rev().find_map(|event| match event {
+                egui::Event::PointerMoved(at) => Some(*at),
+                _ => None,
+            })
+        });
+        if let Some(at) = travelled {
+            self.row_hover.moved(at);
+        }
         let scroll_rows = self.tab().cwd.scroll_rows(now);
         let parent_content = ui::content_rect(layout.parent);
         // The parent column is a list at the *list's* step, whatever the list
@@ -10774,9 +10840,18 @@ impl App {
             .map(|drag| drag.paths.iter().cloned().collect())
             .unwrap_or_default();
 
+        // What the pointer is over, minus the row it has been parked off (see
+        // [`crate::hover::Parking`]). **Rows only.** A chip, a menu item or a
+        // panel row has no second highlight of its own to be confused with, so
+        // putting one of those out under a resting pointer would be a control
+        // going dark for no reason the hand can see. The press is left whole
+        // for the same reason in reverse: a button going down is a deliberate
+        // act aimed at the row under the pointer, and it moves the cursor there
+        // anyway — a depress with nothing behind it is the honest picture.
+        let hot = over.map(|(control, _)| control);
         self.hovers.tick(
-            over.map(|(control, _)| control),
-            over.map(|(control, _)| control).filter(|_| pointer.down),
+            hot.filter(|control| !(self.row_hover.parked() && matches!(control, Control::Row(..)))),
+            hot.filter(|_| pointer.down),
             now,
         );
         self.ripples.tick(now);
@@ -11105,9 +11180,17 @@ impl App {
         // small right-hand marks it is inside (see [`ui::RowTips`]). Only over
         // the list: the parent column wears neither mark, and the preview's
         // directory body is a picture of a listing rather than one you point at.
+        // …and not while the row hover is parked: the card belongs to the
+        // highlight, and a tip hanging off a row that is not lit would be the
+        // second answer to "which row is this?" all over again, in words.
         let row_tips = pointer
             .at
-            .filter(|at| list_content.contains(*at) && overlay.is_none() && !menu_live)
+            .filter(|at| {
+                list_content.contains(*at)
+                    && overlay.is_none()
+                    && !menu_live
+                    && !self.row_hover.parked()
+            })
             .map(ui::RowTips::new);
         let paint = ui::Painting {
             painter: &painter,

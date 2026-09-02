@@ -184,6 +184,62 @@ impl<K: Key> Hovers<K> {
     }
 }
 
+/// Whether row hover is *parked*: held off the rows because the keyboard just
+/// moved the cursor and the mouse has not moved since.
+///
+/// Two rows lit at once is what this is for. The pointer's hover and the
+/// keyboard's cursor are different facts drawn in nearly the same way, so a
+/// mouse left lying on row 12 while `↑` walks the cursor up the listing leaves
+/// the window showing two answers to "which row is this?" — and neither of them
+/// is wrong, which is what makes it confusing rather than merely wrong. The
+/// hand actually being used wins: a keystroke that moves the cursor parks the
+/// hover, it leaves over [`FADE`] exactly like a hover the pointer walked off
+/// (there is no second animation to explain), and the first real *movement* of
+/// the mouse brings it straight back, instant-in, on whichever row is under it
+/// by then.
+///
+/// A movement is a movement: not a wheel, not a button. Rows scrolling under a
+/// still mouse are the list moving, not the hand, and re-lighting a row the
+/// user never pointed at would put the second highlight back for a gesture that
+/// was aimed at the listing rather than at a row.
+///
+/// Not to be confused with the app's `POINTER_PARKED`, which asks a different
+/// question — has the mouse been touched in the last half minute — to retire
+/// the 3D turntable.
+#[derive(Debug, Default)]
+pub struct Parking {
+    parked: bool,
+    /// Where the pointer was when it was last seen moving. Compared rather than
+    /// counted, because a compositor re-sends a cursor position for reasons
+    /// that have nothing to do with a hand — the window moved out from under
+    /// it, the surface was re-entered — and waking the hover on one of those
+    /// would undo the parking a keystroke had just asked for.
+    at: Option<egui::Pos2>,
+}
+
+impl Parking {
+    /// The keyboard moved the cursor: park the hover. Answers whether that
+    /// changed anything, so a caller can ask for the frame the fade needs.
+    pub fn park(&mut self) -> bool {
+        !std::mem::replace(&mut self.parked, true)
+    }
+
+    /// A pointer position from this frame's motion events. Only a position
+    /// *different* from the last one wakes the hover. Answers whether that
+    /// changed anything.
+    pub fn moved(&mut self, at: egui::Pos2) -> bool {
+        if self.at == Some(at) {
+            return false;
+        }
+        self.at = Some(at);
+        std::mem::replace(&mut self.parked, false)
+    }
+
+    pub fn parked(&self) -> bool {
+        self.parked
+    }
+}
+
 /// How far a fully pressed control's edges move, in logical pixels. Small
 /// enough that a 30 px row does not visibly change size, large enough to read
 /// as travel at arm's length on a 27" display.
@@ -337,6 +393,48 @@ mod tests {
         h.tick(None, None, t0 + Duration::from_secs(30));
         assert_eq!(h.hover(Ctl::Save), 0.0);
         assert!(!h.animating());
+    }
+
+    /// The whole of the parking rule: a keystroke puts the hover out, and only
+    /// a mouse that has actually travelled brings it back.
+    #[test]
+    fn a_keystroke_parks_the_hover_and_only_movement_wakes_it() {
+        let mut parking = Parking::default();
+        assert!(!parking.parked());
+        // The pointer arrives and settles on a row.
+        assert!(!parking.moved(egui::pos2(40.0, 120.0)));
+        assert!(!parking.parked());
+
+        // `↓`: the cursor moves, the mouse does not.
+        assert!(parking.park(), "the first park is a change worth a frame");
+        assert!(parking.parked());
+        // …and a second `↓` changes nothing, so it asks for nothing.
+        assert!(!parking.park());
+        assert!(parking.parked());
+
+        // The compositor re-sending the position the mouse is already at is not
+        // a hand moving.
+        assert!(!parking.moved(egui::pos2(40.0, 120.0)));
+        assert!(parking.parked(), "a re-sent position is not a movement");
+
+        // A real movement, and the hover is back.
+        assert!(parking.moved(egui::pos2(41.0, 120.0)));
+        assert!(!parking.parked());
+        // Movement while nothing is parked is not a change either.
+        assert!(!parking.moved(egui::pos2(60.0, 130.0)));
+    }
+
+    /// The pointer that has never moved at all: parking must not depend on
+    /// having seen one, or the first keystroke of a session would be a no-op.
+    #[test]
+    fn parking_works_before_the_pointer_has_ever_been_seen() {
+        let mut parking = Parking::default();
+        assert!(parking.park());
+        assert!(parking.parked());
+        // The very first position the pointer reports is a movement: there is
+        // nothing to compare it against, and it is where the hand is now.
+        assert!(parking.moved(egui::pos2(10.0, 10.0)));
+        assert!(!parking.parked());
     }
 
     /// The depress is a fixed pixel squeeze, not a ratio — a wide control and a
