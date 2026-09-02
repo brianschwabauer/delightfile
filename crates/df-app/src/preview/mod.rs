@@ -59,6 +59,7 @@
 pub mod body;
 pub mod decode;
 pub mod doc;
+pub mod gesture;
 pub mod highlight;
 pub mod markdown;
 mod paint;
@@ -138,7 +139,7 @@ const TURNTABLE_PERIOD: Duration = Duration::from_secs(24);
 /// tomorrow opens at the top like any other.
 const PLACES: usize = 256;
 
-/// How far one press of `Ctrl+↑`/`Ctrl+↓` moves an oversized page, in logical
+/// How far one press of `Ctrl+↑`/`Ctrl+↓` moves a zoomed picture, in logical
 /// points.
 ///
 /// A shade over the list's row height, so a press moves about a line of body
@@ -147,11 +148,14 @@ const PLACES: usize = 256;
 const PAN_STEP: f32 = 24.0;
 
 /// What `+`, `Alt+-` and `0` mean (PLAN §4.3).
+///
+/// Read by [`gesture::Gestures::zoom_command`], which is what makes the
+/// keyboard and the pointer two ways of moving one view rather than two views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Zoom {
     In,
     Out,
-    /// `0`: back to fit, which is the only zoom a document starts at.
+    /// `0`: back to fit, which is the only zoom a picture starts at.
     Fit,
 }
 
@@ -319,13 +323,16 @@ struct DocView {
     meta: Option<doc::Meta>,
     /// The page, or the G-code layer. Zero-based.
     page: usize,
-    /// 1.0 is fit-to-pane.
+    /// The **rasterisation** zoom: 1.0 is fit-to-pane, and higher asks the
+    /// worker for a bigger page so a magnified one is sharp rather than
+    /// blurry.
+    ///
+    /// Not the transform — that is [`gesture::View`], which every picture in
+    /// this pane shares. This follows it, quantised to the `+`/`-` rungs and
+    /// only once the gesture has settled, so a smooth wheel zoom costs one
+    /// re-render at the end instead of one per frame (see
+    /// [`Pane::sync_doc_zoom`]).
     zoom: f32,
-    /// How far an oversized page is scrolled, in logical points.
-    pan: f32,
-    /// The most [`DocView::pan`] the last paint could actually use — the paint
-    /// is the only thing that knows how tall the page came out.
-    max_pan: f32,
     /// The turntable's angle, in radians.
     yaw: f32,
     /// When the turntable started running, or `None` while it is still.
@@ -353,8 +360,6 @@ impl DocView {
             meta: None,
             page: 0,
             zoom: 1.0,
-            pan: 0.0,
-            max_pan: 0.0,
             yaw: 0.0,
             spinning_since: None,
             current: None,
@@ -528,6 +533,19 @@ pub struct Pane {
     /// stops the moment they look away, which is the same idle bargain
     /// (PLAN §1) struck against a signal that still exists.
     pointer_over: bool,
+    /// Zoom and pan over whatever picture the pane is showing — the pointer's
+    /// and the keyboard's, driving one [`gesture::View`] so the two can never
+    /// disagree about where the picture is (see [`gesture`]).
+    gestures: gesture::Gestures,
+    /// The pane's content box and the size the picture is drawn at when the
+    /// view is fitted, both in points, as of the last frame that measured them.
+    ///
+    /// Remembered because the *keyboard* zoom has no geometry of its own: keys
+    /// are dispatched before the frame knows how big the video frame it is
+    /// about to draw is, and re-deriving the fit in the key path would be the
+    /// second copy of a fit this module has already been careful to have only
+    /// one of. `None` while the body is not a picture.
+    picture: Option<(egui::Rect, egui::Vec2)>,
     /// Whether this pane is on screen and being looked at: no modal surface or
     /// help sheet over it, and the window itself focused.
     ///
@@ -552,6 +570,8 @@ impl Pane {
             preparer: prepare::Preparer::start(std::sync::Arc::clone(&notify)),
             decoder: decode::Decoder::start(notify),
             ink: doc::Ink::test(),
+            gestures: gesture::Gestures::new(),
+            picture: None,
             pointer_over: false,
             visible: true,
             wanted: None,
@@ -610,8 +630,12 @@ impl Pane {
             self.shown = None;
             self.max_scroll = 0;
             self.scrolled_at = None;
-            // A coast belongs to the document it was started in.
+            // A coast belongs to the document it was started in, and so does
+            // the zoom: a photograph left at 4× and arrived back at is a
+            // photograph you cannot see (see `Gestures::reset_for_new_item`).
             self.fling = None;
+            self.gestures.reset_for_new_item();
+            self.picture = None;
             self.decoder.cancel();
             self.preparer.cancel();
             self.docs.cancel();
@@ -648,6 +672,8 @@ impl Pane {
         self.max_scroll = 0;
         self.scrolled_at = None;
         self.fling = None;
+        self.gestures.reset_for_new_item();
+        self.picture = None;
         self.resume_page = 0;
     }
 
@@ -722,20 +748,21 @@ impl Pane {
         self.fling = None;
     }
 
-    /// A wheel roll over this pane (PLAN §7.5), in lines.
+    /// A wheel roll over a **text-shaped** body (PLAN §7.5), in lines.
     ///
-    /// Rendered documents take the wheel as a page turn instead — `doc_scroll`
-    /// answers whether it did — because a page is what a PDF scrolls by, which
-    /// is the same split `Ctrl+↑`/`Ctrl+↓` make from the list (PLAN §4.3).
+    /// Text, markdown, a listing and a hexdump scroll; every picture takes the
+    /// wheel as a zoom instead (see [`gesture`]), and a multi-page document
+    /// turns pages with it while it is fitted — which is the same split
+    /// `Ctrl+↑`/`Ctrl+↓` make from the list (PLAN §4.3), moved to the pointer.
     pub fn wheel(&mut self, delta_lines: f32, now: Instant) -> bool {
-        // One notch, one page — not one page per *line* the notch is worth. A
-        // page is a big unit and the wheel is a fast control; multiplying them
-        // together turns a flick of the finger into a document you have lost
-        // your place in.
-        let page = delta_lines.trunc() as isize;
-        if page != 0 && self.doc_scroll(page.signum(), now) {
-            self.fling = None;
-            return true;
+        // **A picture never reaches here.** Over a photograph, a clip, a GIF or
+        // a rendered page the wheel is the zoom (`preview::gesture`), and that
+        // pass runs later in the frame — where the video frame's own size is
+        // finally known. The caller checks [`Pane::is_picture`] first; this is
+        // the belt to that pass's braces, so a routing mistake scrolls nothing
+        // rather than scrolling a photograph by lines.
+        if self.is_picture() {
+            return false;
         }
         // Every other way of moving this pane clears the fling, so a coast that
         // exists here started from the current position and is still the only
@@ -951,6 +978,38 @@ impl Pane {
         }
     }
 
+    /// The rect this pane's *own* picture occupies at fit, in points.
+    ///
+    /// The one fit in the program (`paint::fit_rect` for a photograph,
+    /// `paint::doc_fit_rect` for a rendered page — a page is enlarged to fill
+    /// the pane where a photograph is not), asked here so the gesture layer and
+    /// the paint cannot disagree about where the picture is.
+    ///
+    /// `None` for a body that is not a picture, and for a picture that has not
+    /// decoded yet — a video whose poster and first frame are both still in
+    /// flight has no footprint to zoom.
+    pub fn fitted_rect(&self, content: egui::Rect, ppp: f32) -> Option<egui::Rect> {
+        let Body::Media(media) = &self.shown.as_ref()?.body else {
+            return None;
+        };
+        if let Some(view) = &media.doc {
+            if let Some(texture) = view.current.as_ref().or(view.previous.as_ref()) {
+                return Some(paint::doc_fit_rect(content, texture.size));
+            }
+        }
+        // The still, in the order the paint stacks them: the loop's frame over
+        // the photograph over the cached thumbnail. They are the same picture
+        // at the same fit, so any of them answers — the order only decides
+        // which one answers first.
+        let texture = media
+            .anim
+            .as_ref()
+            .and_then(Anim::texture)
+            .or(media.full.as_ref())
+            .or(media.thumb.as_ref())?;
+        Some(paint::fit_rect(content, texture.size, ppp))
+    }
+
     fn doc_mut(&mut self) -> Option<&mut DocView> {
         match self.shown.as_mut().map(|s| &mut s.body) {
             Some(Body::Media(media)) => media.doc.as_deref_mut(),
@@ -1055,10 +1114,16 @@ impl Pane {
             return false;
         }
         view.page = next;
-        // A new page starts at its top: carrying the scroll across would land
-        // you in the middle of a page you have not seen the start of.
-        view.pan = 0.0;
         view.chip_at = Some(now);
+        // A new page starts at the edge you are arriving from — the top going
+        // forward, the bottom going back. Carrying the pan across would land
+        // you in the middle of a page you have not seen the start of, and
+        // zeroing it would send you to the middle of it instead
+        // (`Gestures::land_on_page`).
+        if let Some(input) = self.gesture_input(now) {
+            self.gestures
+                .land_on_page(if forward { 1 } else { -1 }, &input);
+        }
         true
     }
 
@@ -1075,48 +1140,154 @@ impl Pane {
             // thing a person opens a G-code file to do.
             return self.turn_page(delta > 0, now);
         }
-        let Some(view) = self.doc_mut() else {
+        // Everything else moves the *picture*, which is the gesture's job now:
+        // a page, a photograph and a paused video frame all pan the same way,
+        // by the same clamp, whether the hand or the keyboard asked.
+        let Some(input) = self.gesture_input(now) else {
             return false;
         };
-        let was = view.pan;
-        view.pan = (view.pan + delta as f32 * PAN_STEP).clamp(0.0, view.max_pan);
-        if (view.pan - was).abs() > f32::EPSILON {
-            view.chip_at = Some(now);
-        }
-        true
-    }
-
-    /// `+` / `-` / `0`.
-    pub fn zoom(&mut self, step: Zoom, now: Instant) -> bool {
-        let Some(view) = self.doc_mut() else {
-            return false;
-        };
-        let was = view.zoom;
-        view.zoom = match step {
-            Zoom::In => doc::zoom_in(view.zoom),
-            Zoom::Out => doc::zoom_out(view.zoom),
-            Zoom::Fit => doc::ZOOM_MIN,
-        };
-        if (view.zoom - was).abs() > f32::EPSILON {
-            // Zooming out to fit has nothing left to scroll to.
-            view.pan = if view.zoom <= doc::ZOOM_MIN {
-                0.0
-            } else {
-                view.pan
-            };
-            view.chip_at = Some(now);
-        }
-        true
-    }
-
-    /// How far the last paint found the page overflowing the pane. The paint is
-    /// the only thing that knows, exactly as it is for [`Pane::max_scroll`].
-    pub(crate) fn set_max_pan(&mut self, max_pan: f32) {
-        if let Some(view) = self.doc_mut() {
-            view.max_pan = max_pan;
-            if view.pan > max_pan {
-                view.pan = max_pan;
+        // Content down is the view moving up, which is what `↓` means.
+        let moved = self
+            .gestures
+            .pan_by(egui::vec2(0.0, -(delta as f32) * PAN_STEP), &input);
+        if moved {
+            if let Some(view) = self.doc_mut() {
+                view.chip_at = Some(now);
             }
+        }
+        moved
+    }
+
+    /// `+` / `-` / `0`, on **every** picture the pane draws — a photograph and
+    /// a video frame as much as a page.
+    ///
+    /// It drives the same [`gesture::View`] the pointer does, on the same
+    /// curve, so the keyboard and the wheel can never end up arguing about
+    /// where the picture is. `false` when there is no picture to zoom, which is
+    /// how the key stays inert over a text body.
+    pub fn zoom(&mut self, step: Zoom, now: Instant) -> bool {
+        let Some(input) = self.gesture_input(now) else {
+            return false;
+        };
+        self.gestures.zoom_command(step, &input);
+        if let Some(view) = self.doc_mut() {
+            view.chip_at = Some(now);
+        }
+        true
+    }
+
+    /// Is the zoom moving — a wheel blend, a double-click, a fling, the
+    /// sub-fit spring?
+    ///
+    /// Its own wake source rather than a line inside [`Pane::animating`], so
+    /// `DF_FRAME_LOG` can name it: a zoom that never settles is exactly the
+    /// kind of stuck animation PLAN §1's audit exists to catch, and "preview"
+    /// would not say which half of the pane was holding the frame rate up.
+    /// Every one of the four *does* settle — each is a sampled animation that
+    /// drops itself the frame it arrives.
+    pub fn gesture_animating(&self) -> bool {
+        self.gestures.is_animating()
+    }
+
+    /// Is a drag on the picture live? Once it is, the pointer belongs to it
+    /// until the release, wherever it wanders — the same capture the seek bar
+    /// takes.
+    pub fn gesture_live(&self) -> bool {
+        self.gestures.phase() != gesture::Phase::Idle
+    }
+
+    /// The pane's content box and the picture's fitted size, as
+    /// [`Pane::set_picture`] was last told them.
+    pub fn picture_geometry(&self) -> Option<(egui::Rect, egui::Vec2)> {
+        self.picture
+    }
+
+    /// The transform every picture in this pane is drawn under.
+    pub fn view(&self) -> gesture::View {
+        self.gestures.view()
+    }
+
+    /// Is the view zoomed past fit? The cursor asks, so a zoomed picture can
+    /// advertise that it can be dragged (`delightful-ui` §2).
+    pub fn is_zoomed(&self) -> bool {
+        self.gestures.is_zoomed()
+    }
+
+    /// Is the pane showing something zoom and pan act on — a photograph, an
+    /// animated image, a poster, a video frame, a rendered page?
+    ///
+    /// The wheel's fork: a picture takes it as a zoom, everything else keeps
+    /// scrolling by lines ([`Pane::wheel`]).
+    pub fn is_picture(&self) -> bool {
+        self.picture.is_some()
+    }
+
+    /// Tell the pane where this frame is drawing the picture: the content box,
+    /// and the size the picture occupies at fit — both in points.
+    ///
+    /// Measured by the caller because only the caller knows about the *video*
+    /// frame, which the player owns and draws over this pane. `None` retires
+    /// the geometry, and with it the wheel's fork and the keyboard's zoom.
+    pub fn set_picture(&mut self, geometry: Option<(egui::Rect, egui::Vec2)>) {
+        self.picture = geometry;
+    }
+
+    /// The gesture layer's input for a frame with nothing happening in it —
+    /// what the keyboard paths build on. `None` when there is no picture.
+    fn gesture_input(&self, now: Instant) -> Option<gesture::Input> {
+        let (content, fitted) = self.picture?;
+        Some(gesture::Input::still(content.size(), fitted, now))
+    }
+
+    /// Run one frame of pointer and wheel over the picture.
+    ///
+    /// Returns whether a plain click landed on it — Task A's play/pause — and
+    /// whether that click was the second half of a double, which has *also*
+    /// just zoomed.
+    pub fn gesture(&mut self, input: &gesture::Input, now: Instant) -> Option<bool> {
+        // A wheel roll at fit turns the page of a document that has pages;
+        // nothing else in this pane has a "next item" to reach for, so nothing
+        // else lets the wheel do anything but zoom (see
+        // `Gestures::set_navigates_at_fit`).
+        let paged = self.doc_ref().is_some_and(|view| view.pages() > 1);
+        self.gestures.set_navigates_at_fit(paged);
+        let mut tap = None;
+        for event in self.gestures.update(input) {
+            match event {
+                gesture::GestureEvent::Tap { double } => tap = Some(double),
+                gesture::GestureEvent::PageStep(step) => {
+                    self.turn_page(step > 0, now);
+                }
+            }
+        }
+        self.sync_doc_zoom();
+        tap
+    }
+
+    /// Point the document rasteriser at the zoom the gesture has settled on, so
+    /// a magnified page is *sharp* rather than a magnified texture.
+    ///
+    /// Two rules keep this from being a re-render per frame, which on a PDF is
+    /// a worker thread saturated by a wheel roll:
+    ///
+    /// * **Only once the gesture has settled.** A zoom in flight is drawn by
+    ///   magnifying the page already on screen, which is exactly what the eye
+    ///   wants during the 200–300 ms it is moving.
+    /// * **Quantised to the `+`/`-` rungs.** A settled 2.3× renders at 2.83×
+    ///   (the next √2 rung up) rather than at 2.3, so wheeling in and back out
+    ///   lands on renders the worker has already done rather than on a new
+    ///   resolution every time.
+    fn sync_doc_zoom(&mut self) {
+        if self.gestures.is_animating() {
+            return;
+        }
+        let scale = self.gestures.view().scale;
+        let mut rung = doc::ZOOM_MIN;
+        while rung < scale && rung < doc::ZOOM_MAX {
+            rung = doc::zoom_in(rung);
+        }
+        if let Some(view) = self.doc_mut() {
+            view.zoom = rung;
         }
     }
 
@@ -1368,7 +1539,13 @@ impl Pane {
             .anim()
             .filter(|_| self.visible)
             .and_then(|anim| anim.next_deadline(now));
-        [loading, bar, chip, anim].into_iter().flatten().min()
+        // The sub-fit spring's one scheduled wake-up: the instant the last
+        // wheel tick's blend runs out and the picture is owed its way home.
+        let spring = self.gestures.next_deadline(now).filter(|d| !d.is_zero());
+        [loading, bar, chip, anim, spring]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// How visible the scrollbar is, 0–1: held for [`SCROLLBAR_LINGER`] after
@@ -1719,49 +1896,128 @@ mod tests {
         }
         assert_eq!(gcode.doc_ref().map(|v| v.page), Some(0));
 
-        // A page: the arrows pan it, and only as far as it actually overflows.
+        // A page: the arrows move the *picture*, which only exists to move
+        // once it is zoomed — at fit the key falls through to the text scroll,
+        // because a fitted page has nothing left to show.
         let (mut pdf, now) = documented(PreviewKind::Pdf, 2, doc::Counter::Page);
-        pdf.set_max_pan(50.0);
+        pdf.set_picture(Some((PANE, PANE.size())));
+        assert!(!pdf.doc_scroll(1, now), "a fitted page has nowhere to pan");
+        pdf.zoom(Zoom::In, now);
+        pdf.zoom(Zoom::In, now);
+        settle(&mut pdf, now);
+        assert!(pdf.is_zoomed());
         assert!(pdf.doc_scroll(1, now));
-        assert_eq!(pdf.doc_ref().map(|v| v.pan), Some(PAN_STEP));
-        for _ in 0..10 {
-            pdf.doc_scroll(1, now);
-        }
-        assert_eq!(
-            pdf.doc_ref().map(|v| v.pan),
-            Some(50.0),
-            "it panned off the page"
+        settle(&mut pdf, now);
+        assert!(
+            pdf.view().pan.y < 0.0,
+            "`↓` moves the picture up: {:?}",
+            pdf.view().pan
         );
-        pdf.doc_scroll(-100, now);
-        assert_eq!(pdf.doc_ref().map(|v| v.pan), Some(0.0));
-        // Turning the page starts at the top of it again.
+        // …and only as far as the clamp allows, however long the key is held.
+        for _ in 0..40 {
+            pdf.doc_scroll(1, now);
+            settle(&mut pdf, now);
+        }
+        let floor = pdf.view().pan.y;
         pdf.doc_scroll(1, now);
-        pdf.turn_page(true, now);
-        assert_eq!(pdf.doc_ref().map(|v| v.pan), Some(0.0));
+        settle(&mut pdf, now);
+        assert!(
+            (pdf.view().pan.y - floor).abs() < 0.01,
+            "the pan ran past the clamp"
+        );
 
-        // Anything that is not a document refuses the key, and the caller
+        // Anything that is not a picture refuses the key, and the caller
         // scrolls text with it instead.
         let mut text = Pane::start(df_core::fs::no_notifier());
         assert!(!text.doc_scroll(1, Instant::now()));
         assert!(!text.turn_page(true, Instant::now()));
     }
 
+    /// A pane, and a picture fitted to exactly fill it.
+    const PANE: egui::Rect = egui::Rect {
+        min: egui::pos2(0.0, 0.0),
+        max: egui::pos2(400.0, 600.0),
+    };
+
+    /// Run the gesture layer forward past every animation it could be in the
+    /// middle of, with no pointer and no wheel.
+    fn settle(pane: &mut Pane, now: Instant) {
+        let at = now + Duration::from_millis(2000);
+        let (content, fitted) = pane.picture_geometry().expect("a picture");
+        pane.gesture(&gesture::Input::still(content.size(), fitted, at), at);
+    }
+
+    /// `+` / `-` / `0` drive the same view the wheel does, and the document
+    /// rasteriser follows the scale they settle on — the sharpness, not the
+    /// transform (`Pane::sync_doc_zoom`).
     #[test]
-    fn zooming_a_page_and_resetting_it_moves_the_pan_with_it() {
+    fn zooming_a_page_drives_the_shared_view_and_the_raster_follows() {
         let (mut pane, now) = documented(PreviewKind::Pdf, 2, doc::Counter::Page);
-        pane.set_max_pan(100.0);
+        pane.set_picture(Some((PANE, PANE.size())));
+        assert_eq!(pane.doc_ref().map(|v| v.zoom), Some(doc::ZOOM_MIN));
+
         pane.zoom(Zoom::In, now);
-        let zoomed = pane.doc_ref().map(|v| v.zoom).unwrap_or(0.0);
-        assert!(zoomed > 1.0, "got {zoomed}");
-        pane.doc_scroll(2, now);
-        assert!(pane.doc_ref().map(|v| v.pan).unwrap_or(0.0) > 0.0);
-        // `0` is fit, and a fitted page has nothing left to scroll.
+        pane.zoom(Zoom::In, now);
+        settle(&mut pane, now);
+        let scale = pane.view().scale;
+        assert!(scale > 1.0, "got {scale}");
+        // The rung is the *next* one up from the settled scale, so wheeling in
+        // and back out lands on renders the worker has already done.
+        let rung = pane.doc_ref().map(|v| v.zoom).unwrap_or(0.0);
+        assert!(
+            rung >= scale,
+            "the raster must not be coarser: {rung} < {scale}"
+        );
+        assert!(
+            rung <= scale * doc::ZOOM_STEP + 1e-4,
+            "and no finer than a rung"
+        );
+
+        // `0` is fit, and a fitted page is back to one raster.
         pane.zoom(Zoom::Fit, now);
+        settle(&mut pane, now);
+        assert!((pane.view().scale - 1.0).abs() < 1e-3);
         assert_eq!(pane.doc_ref().map(|v| v.zoom), Some(doc::ZOOM_MIN));
-        assert_eq!(pane.doc_ref().map(|v| v.pan), Some(0.0));
-        // `-` at fit is a no-op rather than a page shrinking into the corner.
+
+        // `-` at fit is a no-op rather than a page shrinking into the corner:
+        // the rubber band belongs to a gesture, which has a release to spring
+        // back from, and a key press does not.
         pane.zoom(Zoom::Out, now);
-        assert_eq!(pane.doc_ref().map(|v| v.zoom), Some(doc::ZOOM_MIN));
+        settle(&mut pane, now);
+        assert!((pane.view().scale - 1.0).abs() < 1e-3);
+    }
+
+    /// A picture arrives at fit however the last one was left — the zoom is not
+    /// remembered per file the way the reading position is.
+    #[test]
+    fn a_new_file_arrives_fitted() {
+        let (mut pane, now) = documented(PreviewKind::Pdf, 2, doc::Counter::Page);
+        pane.set_picture(Some((PANE, PANE.size())));
+        pane.zoom(Zoom::In, now);
+        settle(&mut pane, now);
+        assert!(pane.is_zoomed());
+        pane.sync(Some(Path::new("/tmp/some-other-file")), (400, 600), now);
+        assert!(!pane.is_zoomed());
+        assert_eq!(pane.view(), gesture::View::FIT);
+        assert!(
+            !pane.is_picture(),
+            "and it has no footprint until it decodes"
+        );
+    }
+
+    /// The wheel forks on what the body is: text scrolls by lines, a picture
+    /// takes it as a zoom (which the gesture pass, not `wheel`, applies).
+    #[test]
+    fn the_wheel_declines_a_picture_and_scrolls_text() {
+        let (mut pdf, now) = documented(PreviewKind::Pdf, 2, doc::Counter::Page);
+        pdf.set_picture(Some((PANE, PANE.size())));
+        assert!(pdf.is_picture());
+        assert!(!pdf.wheel(-3.0, now), "a picture never scrolls by lines");
+
+        let mut text = Pane::start(df_core::fs::no_notifier());
+        assert!(!text.is_picture());
+        text.max_scroll = 100;
+        assert!(text.wheel(3.0, now), "and text still coasts by lines");
     }
 
     /// PLAN §8's "linger then leave", and PLAN §1's "one scheduled wake-up in
