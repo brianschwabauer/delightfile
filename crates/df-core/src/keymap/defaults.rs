@@ -351,11 +351,29 @@ pub(super) fn build() -> Registry {
         (Spot, "c c",    C::SpotCopyCell,  "Copy the selected cell",     Always),
 
         // ── Help (`~` / `F1`) ───────────────────────────────────────────────
-        (Help, "esc",    C::Escape,       "Clear the filter, or close", Always),
-        (Help, "ctrl+c", C::OverlayClose, "Close the help",             Always),
-        (Help, "up",     C::OverlayPrev,  "Previous line",              Always),
-        (Help, "down",   C::OverlayNext,  "Next line",                  Always),
-        (Help, "f",      C::HelpFilter,   "Filter — or just type",      Always),
+        // The sheet takes the keyboard whole while it is up, so every key that
+        // walks a list has to have a row here. A page key with no row used to
+        // fall through to the pane *behind* the scrim, and the list scrolled
+        // under a sheet that could not show it — the reader's `PageDown` moved
+        // something they could not see.
+        (Help, "esc",     C::Escape,       "Clear the filter, or close", Always),
+        (Help, "ctrl+c",  C::OverlayClose, "Close the help",             Always),
+        // The key that opened it closes it, as `w` does for the task panel and
+        // `Tab` for the spot card. Only `F1`: `?` and `~` are printable, and a
+        // printable key in front of this sheet is filter text.
+        (Help, "f1",      C::OverlayClose, "Close the help",             Always),
+        (Help, "up",      C::OverlayPrev,  "Previous line",              Always),
+        (Help, "down",    C::OverlayNext,  "Next line",                  Always),
+        (Help, "pageup",  C::HelpPageUp,       "A page up",              Always),
+        (Help, "pagedown",C::HelpPageDown,     "A page down",            Always),
+        (Help, "ctrl+u",  C::HelpHalfPageUp,   "Half a page up",         Always),
+        (Help, "ctrl+d",  C::HelpHalfPageDown, "Half a page down",       Always),
+        // `home`/`end` rather than `g g`/`G`: the sheet's other job is to be
+        // typed into, and a `g` that armed a chord would be a `g` the filter
+        // never received.
+        (Help, "home",    C::HelpTop,          "First binding",          Always),
+        (Help, "end",     C::HelpBottom,       "Last binding",           Always),
+        (Help, "f",       C::HelpFilter,   "Filter — or just type",      Always),
 
         // ── Palette (`Ctrl+p`, §4.4) ────────────────────────────────────────
         (Palette, "esc",    C::OverlayClose,  "Close the palette", Always),

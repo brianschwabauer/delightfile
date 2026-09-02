@@ -1818,6 +1818,10 @@ pub fn help_page(rect: egui::Rect) -> usize {
 /// reference sheet — it is read, not admired — so it is a card, a heading per
 /// group, and three columns: what to press, what it does, and the id to write in
 /// `keymap.toml` if you want to change it.
+/// `filter` is what the sheet is narrowed by, drawn in the heading. It used to
+/// be typed into the top row, which this card is painted *over*: the one thing
+/// on screen that was changing under the fingers was the one thing behind the
+/// scrim.
 pub fn help_overlay(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -1825,7 +1829,9 @@ pub fn help_overlay(
     lines: &[HelpLine],
     help: &Help,
     total: usize,
+    filter: crate::help::Filter<'_>,
 ) {
+    let (query, caret) = (filter.query, filter.caret);
     let painter = paint.painter;
     let palette = paint.palette;
     painter.rect_filled(area, 0, egui::Color32::from_black_alpha(HELP_SCRIM));
@@ -1836,24 +1842,80 @@ pub fn help_overlay(
         rect.left() + CARD_PAD,
         rect.top() + CARD_PAD + CARD_ROW / 2.0,
     );
+    let title = egui::FontId::proportional(FONT + 3.0);
     painter.text(
         heading,
         egui::Align2::LEFT_CENTER,
         "Keys",
-        egui::FontId::proportional(FONT + 3.0),
+        title.clone(),
         palette.text,
     );
+    let count = if shown == total {
+        format!("{total} bindings")
+    } else {
+        format!("{shown} of {total}")
+    };
+    let count_width = text_width(painter, &count, egui::FontId::proportional(FONT));
     painter.text(
         egui::pos2(rect.right() - CARD_PAD, heading.y),
         egui::Align2::RIGHT_CENTER,
-        if shown == total {
-            format!("{total} bindings")
-        } else {
-            format!("{shown} of {total}")
-        },
+        &count,
         egui::FontId::proportional(FONT),
         palette.overlay0,
     );
+
+    // The filter, between the title and the count: what has been typed, with
+    // the caret in it while the field is open, and an invitation when it is
+    // empty. The invitation is in `overlay0` and the query in `text`, so the
+    // two never read as the same thing.
+    let filter_left = heading.x + text_width(painter, "Keys", title) + GAP * 2.0;
+    let filter_width = (rect.right() - CARD_PAD - count_width - GAP * 2.0 - filter_left).max(0.0);
+    let font = egui::FontId::proportional(FONT);
+    let clipped = painter.with_clip_rect(egui::Rect::from_min_max(
+        egui::pos2(filter_left, rect.top()),
+        egui::pos2(filter_left + filter_width, rect.bottom()),
+    ));
+    // The caret goes at the head of the line while the field is empty, and the
+    // invitation steps aside for it rather than being drawn under it.
+    let caret_room = if caret.is_some() {
+        CARET_WIDTH + 4.0
+    } else {
+        0.0
+    };
+    if query.is_empty() {
+        truncated_in(
+            &clipped,
+            egui::pos2(filter_left + caret_room, heading.y),
+            "type to filter",
+            palette.overlay0,
+            (filter_width - caret_room).max(0.0),
+            font.clone(),
+        );
+    } else {
+        truncated_in(
+            &clipped,
+            egui::pos2(filter_left, heading.y),
+            query,
+            palette.text,
+            filter_width,
+            font.clone(),
+        );
+    }
+    if let Some(at) = caret {
+        let before = &query[..at.min(query.len())];
+        let x = filter_left + text_width(painter, before, font);
+        // A line's half-height, and the palette's caret colour: the field is
+        // the same field it was in the top row, so it keeps the same caret.
+        let half = FONT * 0.75;
+        clipped.rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(x, heading.y - half),
+                egui::vec2(CARET_WIDTH, half * 2.0),
+            ),
+            0,
+            palette.blue,
+        );
+    }
 
     let content = egui::Rect::from_min_max(
         egui::pos2(rect.left() + CARD_PAD, rect.top() + CARD_PAD + CARD_ROW),
@@ -2590,8 +2652,36 @@ mod tests {
             let mut help = Help::default();
             help.reset(&lines);
             let rect = help_rect(area, area.top() + CHROME_HEIGHT + GAP, area.bottom() - GAP);
-            help_overlay(&paint, area, rect, &lines, &help, all.len());
-            help_overlay(&paint, area, rect, &[], &help, all.len());
+            // Three headings: an empty field, a query with a caret in it, and
+            // the placeholder that stands in for both.
+            let filter = |query, caret| crate::help::Filter { query, caret };
+            help_overlay(
+                &paint,
+                area,
+                rect,
+                &lines,
+                &help,
+                all.len(),
+                filter("", None),
+            );
+            help_overlay(
+                &paint,
+                area,
+                rect,
+                &lines,
+                &help,
+                all.len(),
+                filter("so", Some(1)),
+            );
+            help_overlay(
+                &paint,
+                area,
+                rect,
+                &[],
+                &help,
+                all.len(),
+                filter("", Some(0)),
+            );
         });
     }
 }

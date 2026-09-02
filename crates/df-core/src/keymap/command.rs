@@ -264,6 +264,19 @@ commands! {
     SpotSwipeNext => "spot-swipe-next",
     SpotCopyCell => "spot-copy-cell",
     HelpFilter => "help-filter",
+    // The sheet's own paging, rather than `[help]` rows pointing at the
+    // listing's `page-up`/`cursor-top`. Sharing those would have been fewer
+    // variants and one wrong answer: `Registry::binding_label` teaches the
+    // cheapest chord a command has, so a `[help]` row on `Home` would have
+    // retaught `g g` as "Home" in the palette, the which-key card and the
+    // sheet itself. A surface with its own paging gets its own commands, as
+    // the preview pane's already do.
+    HelpPageUp => "help-page-up",
+    HelpPageDown => "help-page-down",
+    HelpHalfPageUp => "help-half-page-up",
+    HelpHalfPageDown => "help-half-page-down",
+    HelpTop => "help-top",
+    HelpBottom => "help-bottom",
 
     // ── Input: the shared line editor (PLAN §4.2) ─────────────────────────
     // Plain-editor commands only. The modal half — `input-insert`,
