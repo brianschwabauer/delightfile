@@ -20,11 +20,15 @@
 //! - `wl-copy` forks a server and the selection survives the file manager
 //!   exiting. Ours does not: quitting hands the selection back, which is what
 //!   every application that owns its own clipboard does, and what the protocol
-//!   is shaped for.
-//! - In exchange, a failure is now *visible*. `wl-copy`'s forked server could
-//!   fail after the parent exited zero and the toast had already said "Copied";
-//!   the protocol path only says so once the compositor has taken the
-//!   selection.
+//!   is shaped for. The fallback below is now the same shape — it runs
+//!   `--foreground` and the window owns the process — so both paths behave
+//!   alike and neither leaves a stranger's process holding this program's
+//!   bytes after it has quit.
+//! - In exchange, a failure is now *visible* on both paths. `wl-copy`'s *forked*
+//!   server could fail after the parent exited zero and the toast had already
+//!   said "Copied"; the protocol path says so only once the compositor has
+//!   taken the selection, and the fallback only once the server it started has
+//!   lived long enough to be serving one.
 //!
 //! ## What is pure and what is not
 //!
@@ -35,7 +39,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 
 /// The largest file whose *contents* go on the clipboard. Past this only a
 /// `file://` reference does.
@@ -325,11 +329,16 @@ impl std::fmt::Display for ClipError {
 /// Put `bytes` on the clipboard, offered as `mime` (or as plain text when it is
 /// `None`) — the **fallback** copy, for a session with no data device.
 ///
-/// `wl-copy` forks a server for the selection and the parent exits at once, so
-/// the `wait` here is on the parent and does not block for the lifetime of the
-/// copy.
-pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<(), ClipError> {
+/// Returns the running `wl-copy`, which the caller owns and must eventually
+/// [`reap`]. `--foreground` is the whole point: without it `wl-copy` forks a
+/// server and the parent exits zero *before* that server has taken the
+/// selection, so a successful `wait` here says nothing at all about whether the
+/// copy happened — which is exactly the false "Copied" this program used to
+/// show. With it, the process that is serving the selection is the process this
+/// function hands back, and it being alive a moment later is evidence.
+pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<Child, ClipError> {
     let mut command = Command::new("wl-copy");
+    command.arg("--foreground");
     if let Some(mime) = mime {
         command.arg("--type").arg(mime);
     }
@@ -346,19 +355,40 @@ pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<(), ClipError> {
             std::io::ErrorKind::NotFound => ClipError::Missing("wl-copy"),
             _ => ClipError::Failed(e.to_string()),
         })?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(bytes)
-            .map_err(|e| ClipError::Failed(e.to_string()))?;
+    // Every failure from here on has a process attached to it, and each one
+    // reaps it: an error return that left `wl-copy` running would be a stranger
+    // holding the clipboard, and one that left it exited but unwaited would be
+    // a zombie for the rest of the session.
+    let Some(mut stdin) = child.stdin.take() else {
+        // Piped a line ago, so this cannot happen — and a copy that silently
+        // succeeded with nothing written is the one way it could go wrong that
+        // the user would never see, so it is an error rather than an `if let`
+        // with no `else`.
+        reap(&mut child);
+        return Err(ClipError::Failed(
+            "wl-copy gave us nothing to write to".to_string(),
+        ));
+    };
+    let written = stdin.write_all(bytes);
+    // Closed before anything waits on the process, or `wl-copy` sits reading a
+    // pipe nobody is going to close.
+    drop(stdin);
+    if let Err(e) = written {
+        reap(&mut child);
+        return Err(ClipError::Failed(e.to_string()));
     }
-    // Dropped before the wait, or `wl-copy` sits reading a pipe nobody is
-    // going to close.
-    drop(child.stdin.take());
-    match child.wait() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(ClipError::Failed(format!("wl-copy exited {status}"))),
-        Err(e) => Err(ClipError::Failed(e.to_string())),
-    }
+    Ok(child)
+}
+
+/// Stop a `wl-copy` we are done with and collect it.
+///
+/// Both halves. `kill` alone leaves a zombie until this process exits, and
+/// `wait` alone would block forever on a `--foreground` server that is doing
+/// exactly what it was asked to do. Called when a newer copy replaces this one
+/// and when the window quits.
+pub fn reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The mime types the clipboard is currently offering, most specific first —

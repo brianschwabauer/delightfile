@@ -147,6 +147,19 @@ const OCCLUDED_PROBE: Duration = Duration::from_secs(2);
 /// short enough that nobody is left wondering.
 const CLIPBOARD_ANSWER: Duration = Duration::from_secs(10);
 
+/// How long a `wl-copy --foreground` has to stay alive before its copy counts.
+///
+/// The fallback copy is a *process*, and the only evidence this program has
+/// that it took the selection is that it is still running: `wl-copy` exits
+/// immediately when the compositor refuses it, when there is no display to
+/// connect to, and when its arguments are wrong. So the toast waits for the
+/// child to survive this long and then says "Copied" on the strength of it.
+///
+/// 150 ms: long enough to cover a process start and a compositor round trip,
+/// and short enough that the toast still reads as the answer to the keystroke
+/// rather than as something that happened later.
+const WL_COPY_SETTLE: Duration = Duration::from_millis(150);
+
 /// How many probed files are remembered (see [`App::probes`]).
 ///
 /// Four: a `↓ ↑`, and a step back up out of a directory onto the clip you were
@@ -1104,6 +1117,9 @@ pub struct App {
     pending_copy: std::collections::VecDeque<PendingCopy>,
     /// What a paste will do with the bytes it asked the clipboard for.
     pending_paste: Option<PendingPaste>,
+    /// The `wl-copy --foreground` currently serving the fallback selection, and
+    /// the toast it has not earned yet. See [`WlCopy`].
+    wl_copy: Option<WlCopy>,
     /// The number the next [`PendingPaste`] carries. See that type.
     paste_seq: u64,
     /// The files in the hand, while there are any.
@@ -1249,6 +1265,26 @@ struct PendingCopy {
     /// [`CLIPBOARD_ANSWER`]: an answer that never comes must not leave a toast
     /// waiting for the rest of the session.
     asked: Instant,
+}
+
+/// The `wl-copy --foreground` this program handed the fallback clipboard to.
+///
+/// A `--foreground` `wl-copy` *is* the selection: it stays alive serving the
+/// bytes, so the window has to own it — which is the difference between a copy
+/// this program can vouch for and the old one, where the parent exited zero
+/// before its forked server had taken anything and the toast said "Copied" on
+/// the strength of that. Here the toast waits for [`WL_COPY_SETTLE`], and the
+/// child is killed and collected when a newer copy replaces it or the window
+/// quits (see [`App::retire_wl_copy`]).
+struct WlCopy {
+    child: std::process::Child,
+    /// The toast this copy owes, until it has been said. `None` once the child
+    /// has settled and the user has been told — which is also what stops a
+    /// server that later exits, because another client took the clipboard, from
+    /// being reported as a failure.
+    message: Option<String>,
+    /// When the child was spawned. See [`WL_COPY_SETTLE`].
+    started: Instant,
 }
 
 /// A drag from another application, over our window.
@@ -1461,6 +1497,7 @@ impl App {
             clipboard_seen: false,
             pending_copy: std::collections::VecDeque::new(),
             pending_paste: None,
+            wl_copy: None,
             paste_seq: 0,
             drag: None,
             tab_drag: None,
@@ -8720,12 +8757,16 @@ impl App {
                         continue;
                     };
                     match bytes {
+                        Ok(bytes) => self.take_pasted(pending, bytes, now),
                         // The clipboard changed hands between `p` and the read
-                        // that answered it, or the owner never wrote anything.
-                        None => self
-                            .toasts
-                            .error("The clipboard did not hand anything over", now),
-                        Some(bytes) => self.take_pasted(pending, bytes, now),
+                        // that answered it, or the source stopped part way
+                        // through. Either way nothing is written: the bytes
+                        // that did arrive are half a file, and a half file
+                        // written under a green toast is worse than no paste.
+                        Err(failure) => {
+                            log::warn!("clipboard: the paste came back incomplete: {failure}");
+                            self.toasts.error(failure.to_string(), now);
+                        }
                     }
                 }
             }
@@ -8985,12 +9026,14 @@ impl App {
 
     /// Hand bytes to the clipboard and say what happened, either way.
     ///
-    /// The toast is *not* shown here on the native path. `set_selection` is a
+    /// The toast is *not* shown here, on either path. `set_selection` is a
     /// request, and until the compositor has answered it the only honest thing
-    /// to say is nothing: the old shell-out claimed "Copied" the moment
-    /// `wl-copy`'s parent exited, which it does before its forked server has
-    /// taken anything. The message waits in [`App::pending_copy`] for
-    /// [`crate::wayland::Event::Copied`].
+    /// to say is nothing: the message waits in [`App::pending_copy`] for
+    /// [`crate::wayland::Event::Copied`]. The fallback waits too, in
+    /// [`WlCopy`] — the shell-out used to claim "Copied" the moment `wl-copy`'s
+    /// parent exited, which it does *before* its forked server has taken
+    /// anything, so the one toast that path could show was the one it had not
+    /// earned.
     fn offer(&mut self, mime: Option<&str>, bytes: &[u8], message: String, now: Instant) {
         // `ready()` *and* the send being accepted. The flag is cleared when the
         // wayland thread exits, but a thread that exits between the two lines
@@ -9017,6 +9060,12 @@ impl App {
 
     /// The `wl-copy` half of a copy, used both when there was never a data
     /// device and when there was one and it said no.
+    ///
+    /// **The toast is not shown here**, for the same reason the native path
+    /// does not show one in [`App::offer`]: `wl-copy` has been started, and a
+    /// process that has been started is not a clipboard that has been taken.
+    /// [`App::settle_wl_copy`] says so a frame or two later, once the child has
+    /// lived through [`WL_COPY_SETTLE`]. `true` means it was started.
     fn copy_via_wl_copy(
         &mut self,
         mime: Option<&str>,
@@ -9024,10 +9073,18 @@ impl App {
         message: &str,
         now: Instant,
     ) -> bool {
+        // The old server goes before the new one starts. Two `--foreground`
+        // copies cannot both hold the selection, and the loser would sit there
+        // for the rest of the session with nobody left to notice it.
+        self.retire_wl_copy();
         match crate::clipboard::copy(mime, bytes) {
-            Ok(()) => {
-                log::info!("clipboard: copied via wl-copy ({} bytes)", bytes.len());
-                self.toasts.notice(message.to_string(), now);
+            Ok(child) => {
+                log::info!("clipboard: handed {} bytes to wl-copy", bytes.len());
+                self.wl_copy = Some(WlCopy {
+                    child,
+                    message: Some(message.to_string()),
+                    started: now,
+                });
                 true
             }
             Err(error) => {
@@ -9035,6 +9092,77 @@ impl App {
                 false
             }
         }
+    }
+
+    /// Has the `wl-copy` we started earned its toast, or lost the copy?
+    ///
+    /// Once a frame, and cheap: a `try_wait` on a child that is nearly always
+    /// still running. The frame it needs is asked for by
+    /// [`App::next_deadline`], because a copy typed into an otherwise idle
+    /// window would otherwise have nothing to wake it 150 ms later.
+    fn settle_wl_copy(&mut self, now: Instant) {
+        let Some(state) = self.wl_copy.as_mut() else {
+            return;
+        };
+        let exit = match state.child.try_wait() {
+            Ok(exit) => exit,
+            // A child we cannot ask after is a child we cannot answer for.
+            Err(error) => {
+                let owed = state.message.is_some();
+                self.wl_copy = None;
+                if owed {
+                    self.toasts.error(format!("wl-copy: {error}"), now);
+                }
+                return;
+            }
+        };
+        let settled = now.saturating_duration_since(state.started) >= WL_COPY_SETTLE;
+        match exit {
+            // Still serving, too soon to say so.
+            None if !settled => {}
+            // Still serving after the settle window. That is as close to "the
+            // clipboard has it" as a separate process gets, and it is a great
+            // deal closer than the old exit-zero was.
+            None => {
+                if let Some(message) = state.message.take() {
+                    log::info!("clipboard: wl-copy is serving the selection");
+                    self.toasts.notice(message, now);
+                }
+            }
+            Some(status) => {
+                let owed = state.message.take();
+                self.wl_copy = None;
+                match owed {
+                    // Gone before it had served anything: no display, a
+                    // compositor that refused it, an argument it did not like.
+                    Some(_) if !status.success() => self.toasts.error(
+                        format!("The clipboard refused the copy — wl-copy exited {status}"),
+                        now,
+                    ),
+                    // Gone, but cleanly and quickly. Nothing to be gained by
+                    // calling that a failure when the tool says it is not one.
+                    Some(message) => self.toasts.notice(message, now),
+                    // Nothing owed: this is the copy the user was already told
+                    // about, ending because another client took the clipboard.
+                    // That is the clipboard working.
+                    None => log::info!("clipboard: wl-copy handed the selection on ({status})"),
+                }
+            }
+        }
+    }
+
+    /// Kill and collect the `wl-copy` we are done with, if there is one.
+    fn retire_wl_copy(&mut self) {
+        let Some(mut state) = self.wl_copy.take() else {
+            return;
+        };
+        if state.message.is_some() {
+            // Replaced inside its own settle window. The newer copy is the one
+            // the user is waiting on, and two toasts for one keystroke's worth
+            // of intent would be one too many.
+            log::info!("clipboard: a newer copy replaced a wl-copy that had not settled");
+        }
+        crate::clipboard::reap(&mut state.child);
     }
 
     /// The compositor's answer to the oldest outstanding `set_selection`.
@@ -9766,6 +9894,11 @@ impl App {
             parent_rows: parent_len,
         };
         self.poll_data_device(now);
+        // Outside `poll_data_device`, which returns early on a session that has
+        // no data device — which is the session the `wl-copy` fallback exists
+        // for, so its answer has to be checked where that early return cannot
+        // swallow it.
+        self.settle_wl_copy(now);
         let dragging = self.tick_drag(&zones, &pointer, area, (page, parent_page), now);
         // The external drag's own highlight follows the pointer exactly as the
         // internal one's does — `wl_data_device` reports surface-local motion,
@@ -10757,6 +10890,14 @@ impl App {
             .chain(self.pending_paste.as_ref().map(|paste| paste.asked))
             .min()
             .map(|at| (at + CLIPBOARD_ANSWER).saturating_duration_since(now));
+        // …and the fallback copy's settle window, which is the same rule at a
+        // shorter distance: `c c` in a window nothing else is happening in owes
+        // a toast 150 ms later and needs a frame to say it in.
+        let wl_copy = self
+            .wl_copy
+            .as_ref()
+            .filter(|copy| copy.message.is_some())
+            .map(|copy| (copy.started + WL_COPY_SETTLE).saturating_duration_since(now));
         [
             self.loading_deadline(now),
             self.remote_preview_deadline(now),
@@ -10770,6 +10911,7 @@ impl App {
             state,
             folders,
             clipboard,
+            wl_copy,
         ]
         .into_iter()
         .flatten()
@@ -11559,6 +11701,11 @@ impl ApplicationHandler<crate::Wake> for App {
         // dropped channel is harmless, but joining them here keeps the shutdown
         // order the same every time.
         self.scanner.cancel_all();
+        // The fallback clipboard's server goes with the window, exactly as the
+        // native selection does (`crate::clipboard`'s header argues that
+        // trade). Leaving it running would be a `wl-copy` this program started,
+        // still holding the selection, with nothing left to ever collect it.
+        self.retire_wl_copy();
         // The task engine joins its workers when it is dropped, so anything
         // still running has to be told to stop *first* — otherwise closing the
         // window during a 40 GB copy leaves a dead window on screen until the

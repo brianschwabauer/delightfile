@@ -84,7 +84,8 @@
 //! must never park the paint loop on a pipe some other application is filling.
 //! Pasting our *own* selection is served straight out of memory: asking the
 //! compositor would have this thread waiting for bytes only this thread can
-//! write.
+//! write. [`serve_locally`] decides that, and it does not wait for the
+//! compositor's echo to decide it.
 //!
 //! ## Sharing a socket with winit, safely
 //!
@@ -174,7 +175,9 @@ use crate::app::Waker;
 /// would keep working and drags would silently stop.
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// …and how long we will wait for a drop's bytes to arrive from *their* side.
+/// …and how long we will wait for a drop's or a paste's bytes to arrive from
+/// *their* side. Running out is a failure with a name — see [`PasteFailure`] —
+/// and never a short answer dressed up as a whole one.
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the pointer's own drag machinery learns from the compositor.
@@ -209,8 +212,8 @@ pub enum Event {
     Copied {
         ok: bool,
     },
-    /// The bytes a [`Command::Receive`] asked for. `None` when there was no
-    /// offer left to ask, which is a clipboard that changed under the paste.
+    /// The bytes a [`Command::Receive`] asked for, or why they never came in
+    /// full — see [`PasteFailure`].
     ///
     /// `seq` is the number the request carried, echoed back. `p` then `P`
     /// inside one round trip asks twice, and the window is only waiting for the
@@ -219,8 +222,47 @@ pub enum Event {
     /// before overwriting overwrites.
     Pasted {
         seq: u64,
-        bytes: Option<Vec<u8>>,
+        bytes: Result<Vec<u8>, PasteFailure>,
     },
+}
+
+/// Why a paste came back with nothing usable.
+///
+/// The distinction is the whole point of this type. A read that ran out of
+/// [`RECEIVE_TIMEOUT`], or broke on the pipe, used to come back as `Some(what
+/// arrived so far)` — indistinguishable from a source that wrote its bytes and
+/// closed. So a clipboard that stalled halfway through a 40 MB image wrote 20
+/// MB of it to disk and put up a green toast saying so, and a truncated
+/// `text/uri-list` read as "those files are gone". Half a file is not a paste,
+/// and the only honest answer to one is red.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteFailure {
+    /// There was no offer left to ask: the clipboard changed hands between the
+    /// keystroke and the read.
+    Gone,
+    /// The source stopped writing and never closed the pipe. `got` is how much
+    /// had arrived — enough to say *where* it stopped, never enough to keep.
+    Stalled { got: usize },
+    /// The pipe itself failed part way through.
+    Broken { got: usize },
+}
+
+impl std::fmt::Display for PasteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PasteFailure::Gone => f.write_str("The clipboard did not hand anything over"),
+            PasteFailure::Stalled { got } => write!(
+                f,
+                "The clipboard source stopped sending after {}",
+                crate::format::human_size(*got as u64)
+            ),
+            PasteFailure::Broken { got } => write!(
+                f,
+                "The clipboard broke off after {}",
+                crate::format::human_size(*got as u64)
+            ),
+        }
+    }
 }
 
 /// What the paint thread asks the wayland thread to do.
@@ -858,9 +900,15 @@ impl State {
             return;
         };
         let paths = match &mime {
+            // A truncated list is not a shorter drop, it is an unknown one: the
+            // cut can fall mid-URI, and half a `file://` line names a path
+            // nobody dragged. An incomplete read drops nothing.
             Some(mime) => match receive(&self.connection, &offer, mime) {
-                Some(bytes) => crate::dnd::paths_from(mime, &bytes),
-                None => Vec::new(),
+                Ok(bytes) => crate::dnd::paths_from(mime, &bytes),
+                Err(failure) => {
+                    log::warn!("wayland: the drop never arrived in full: {failure}");
+                    Vec::new()
+                }
             },
             None => Vec::new(),
         };
@@ -913,18 +961,14 @@ impl State {
     }
 
     /// Our own selection is the one being pasted, and these mimes are ours.
-    ///
-    /// Both halves matter. Owning a source is not enough on its own — for the
-    /// instant between another client taking the clipboard and our `cancelled`
-    /// arriving, both could look true — so the offer's own mime list has to be
-    /// the list we announced as well.
     fn owns_selection(&self, mime: &str) -> bool {
-        self.selection.is_some()
-            && self.selection_mimes.iter().any(|known| known == mime)
-            && self
-                .selection_offer
-                .as_ref()
-                .is_some_and(|offer| self.mimes(offer) == self.selection_mimes)
+        let echoed = self.selection_offer.as_ref().map(|offer| self.mimes(offer));
+        serve_locally(
+            mime,
+            self.selection.is_some(),
+            &self.selection_mimes,
+            echoed.as_deref(),
+        )
     }
 
     /// The clipboard changed hands. Keep the offer and tell the window what is
@@ -948,23 +992,51 @@ impl State {
             let bytes = self.selection_bytes.clone();
             self.tell(Event::Pasted {
                 seq,
-                bytes: Some(bytes),
+                bytes: Ok(bytes),
             });
             return;
         }
-        let bytes = self
-            .selection_offer
-            .as_ref()
-            .and_then(|offer| receive(&self.connection, offer, &mime));
+        let bytes = match self.selection_offer.as_ref() {
+            Some(offer) => receive(&self.connection, offer, &mime),
+            None => Err(PasteFailure::Gone),
+        };
         self.tell(Event::Pasted { seq, bytes });
     }
 }
 
+/// May a paste of `mime` be answered out of our own copy of the bytes?
+///
+/// `ours` is whether we still hold a live `wl_data_source`, `announced` the
+/// mime list we offered with it, and `echoed` the mime list of the selection
+/// offer the compositor has handed back — `None` while none has arrived.
+///
+/// **The echo is a veto, not a requirement.** `set_selection` and the
+/// `selection` event that mirrors it back are two round trips, and `y c`
+/// followed straight away by `p` lands in the gap between them: the source is
+/// ours, the bytes are in memory, and the offer has simply not returned yet.
+/// Requiring the echo meant that paste reported an empty clipboard while the
+/// answer was sitting one field away. So an echo that has not arrived decides
+/// nothing, and an echo that has arrived and announces a *different* list is
+/// somebody else's selection with our `cancelled` still in flight — which is
+/// the one case the echo was ever there to catch.
+fn serve_locally(mime: &str, ours: bool, announced: &[String], echoed: Option<&[String]>) -> bool {
+    ours && announced.iter().any(|known| known == mime)
+        && echoed.is_none_or(|mimes| mimes == announced)
+}
+
 /// Ask an offer for one mime and read the pipe it writes into.
-fn receive(connection: &Connection, offer: &WlDataOffer, mime: &str) -> Option<Vec<u8>> {
-    let (read, write) = pipe()?;
+fn receive(
+    connection: &Connection,
+    offer: &WlDataOffer,
+    mime: &str,
+) -> Result<Vec<u8>, PasteFailure> {
+    let Some((read, write)) = pipe() else {
+        return Err(PasteFailure::Broken { got: 0 });
+    };
     offer.receive(mime.to_string(), write.as_fd());
-    connection.flush().ok()?;
+    if connection.flush().is_err() {
+        return Err(PasteFailure::Broken { got: 0 });
+    }
     // Our copy of the write end has to go, or the read below never sees EOF:
     // the pipe stays open as long as *anybody* holds a writer, and that would
     // be us.
@@ -977,17 +1049,28 @@ fn receive(connection: &Connection, offer: &WlDataOffer, mime: &str) -> Option<V
     let mut chunk = [0u8; 4096];
     loop {
         match file.read(&mut chunk) {
-            Ok(0) => return Some(out),
+            // The only complete answer: the writer closed its end, so what is
+            // in `out` is all there was.
+            Ok(0) => return Ok(out),
             Ok(n) => out.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 let left = deadline.saturating_duration_since(std::time::Instant::now());
                 if left.is_zero() {
-                    log::warn!("wayland: a drop's data never arrived");
-                    return Some(out);
+                    log::warn!(
+                        "wayland: {mime} stopped arriving after {} byte(s)",
+                        out.len()
+                    );
+                    return Err(PasteFailure::Stalled { got: out.len() });
                 }
                 wait(fd, fd, Some(left));
             }
-            Err(_) => return Some(out),
+            Err(e) => {
+                log::warn!(
+                    "wayland: the {mime} pipe broke after {} byte(s): {e}",
+                    out.len()
+                );
+                return Err(PasteFailure::Broken { got: out.len() });
+            }
         }
     }
 }
@@ -1329,5 +1412,36 @@ mod tests {
         serials.key(4);
         assert_eq!(serials.grab(), Some(3));
         assert_eq!(serials.latest(), Some(4));
+    }
+
+    fn mimes(list: &[&str]) -> Vec<String> {
+        list.iter().map(|m| (*m).to_string()).collect()
+    }
+
+    /// `y c` then `p` before the compositor has echoed the offer back.
+    #[test]
+    fn our_own_copy_is_served_before_the_echo_arrives() {
+        let ours = mimes(&["text/uri-list", "text/plain"]);
+        assert!(serve_locally("text/uri-list", true, &ours, None));
+        // …and the echo, when it does arrive saying what we said, changes
+        // nothing.
+        assert!(serve_locally("text/uri-list", true, &ours, Some(&ours)));
+    }
+
+    /// The one thing the echo is for: another client's selection with our own
+    /// `cancelled` still in flight.
+    #[test]
+    fn somebody_elses_selection_is_not_served_from_our_bytes() {
+        let ours = mimes(&["text/uri-list", "text/plain"]);
+        let theirs = mimes(&["image/png"]);
+        assert!(!serve_locally("text/uri-list", true, &ours, Some(&theirs)));
+    }
+
+    #[test]
+    fn a_mime_we_never_offered_and_a_source_we_no_longer_hold() {
+        let ours = mimes(&["text/uri-list"]);
+        assert!(!serve_locally("image/png", true, &ours, None));
+        assert!(!serve_locally("text/uri-list", false, &ours, None));
+        assert!(!serve_locally("text/uri-list", true, &[], None));
     }
 }
