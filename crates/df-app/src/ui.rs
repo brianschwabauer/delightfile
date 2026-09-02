@@ -25,7 +25,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use df_core::config::{LineMode, Theme};
+use df_core::config::{LineMode, Theme, ViewScale};
 use df_core::fs::{DirState, LoadState, Span};
 
 use crate::chrome::fade;
@@ -73,6 +73,57 @@ const FONT_SIZE: f32 = 13.5;
 /// their em box while a lowercase letter does not, so matching the numbers
 /// would make every icon read as larger than the name beside it.
 const ICON_SIZE: f32 = 12.5;
+
+/// The four numbers above, at one step of [`ViewScale`]'s ladder.
+///
+/// One multiplier over all of them rather than four independently tuned sets,
+/// because the row's proportions are the thing that was designed: the icon is a
+/// hair under the text, the name starts at a column wide enough for the widest
+/// glyph, and the line box is about 1.5× the face. A step that tuned those
+/// relationships separately would be three more row designs to keep in
+/// agreement, and the first one to drift would do it silently.
+///
+/// It is a *value*, threaded down from whoever knows which directory is being
+/// drawn, rather than a global anybody can read: the parent column and the list
+/// pane are drawn at the same step in one frame and the preview pane's listing
+/// is not, and a hidden global is exactly how those three quietly disagree.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Scale {
+    /// What every row-counting sum in the window multiplies by — the scrolloff
+    /// arithmetic, the wheel, the FLIP's travel, the hit test.
+    pub row_height: f32,
+    /// The name's and the linemode column's face.
+    pub font: f32,
+    /// The icon glyph's size.
+    pub icon: f32,
+    /// How far the name is indented past the row's padding.
+    pub icon_column: f32,
+    /// The `ignored` tag's face — a fixed two points under the name at every
+    /// step, so the register difference survives the scaling.
+    pub tag: f32,
+}
+
+impl Scale {
+    /// The metrics one step of the ladder draws at.
+    pub fn new(scale: ViewScale) -> Scale {
+        let factor = scale.row_factor();
+        Scale {
+            row_height: ROW_HEIGHT * factor,
+            font: FONT_SIZE * factor,
+            icon: ICON_SIZE * factor,
+            icon_column: ICON_COLUMN * factor,
+            tag: FONT_SIZE * factor - 2.0,
+        }
+    }
+}
+
+impl Default for Scale {
+    /// The compact list — the constants above, untouched. Every surface that
+    /// draws rows without being part of the scaled panes takes this.
+    fn default() -> Scale {
+        Scale::new(ViewScale::Compact)
+    }
+}
 
 /// The icon column's width, from the row's left padding. Wide enough for the
 /// widest glyph in the ported set plus the space that separates it from the
@@ -316,6 +367,13 @@ pub(crate) struct RowColumns {
     pub size: f32,
     /// The [`IGNORED_TAG`]'s own width, gap excluded.
     pub tag: f32,
+    /// How big this listing's rows are drawn ([`Scale`]).
+    ///
+    /// It rides along here rather than as a tenth argument to [`Painting::row`]
+    /// because the two are the same fact measured twice: the widths above were
+    /// laid out at this face, and a row drawn at another one would truncate its
+    /// name against a column measured for a different listing.
+    pub scale: Scale,
 }
 
 /// The size-column strings that fight for widest, **produced by the same
@@ -548,26 +606,40 @@ pub fn content_rect(pane: egui::Rect) -> egui::Rect {
 }
 
 /// One row's rectangle, given how far the view has scrolled (in rows).
-pub fn row_rect(content: egui::Rect, scroll_rows: f32, index: usize) -> egui::Rect {
-    let top = content.top() + (index as f32 - scroll_rows) * ROW_HEIGHT;
+///
+/// `row_height` is [`Scale::row_height`] — the constant is only the *smallest*
+/// step's answer now (see [`Scale`]), and a caller that reached past this
+/// argument for [`ROW_HEIGHT`] would draw a scaled listing on unscaled
+/// geometry: rows overlapping, and a click landing two names away.
+pub fn row_rect(
+    content: egui::Rect,
+    scroll_rows: f32,
+    index: usize,
+    row_height: f32,
+) -> egui::Rect {
+    let top = content.top() + (index as f32 - scroll_rows) * row_height;
     egui::Rect::from_min_size(
         egui::pos2(content.left(), top),
-        egui::vec2(content.width(), ROW_HEIGHT),
+        egui::vec2(content.width(), row_height),
     )
 }
 
 /// Which row a point is over, if any. `rows` bounds it so the empty space below
 /// a short listing is not row 400.
+///
+/// The exact inverse of [`row_rect`], and it has to stay one — including the
+/// `row_height` it is asked at.
 pub fn row_at(
     content: egui::Rect,
     scroll_rows: f32,
     rows: usize,
     pos: egui::Pos2,
+    row_height: f32,
 ) -> Option<usize> {
-    if !content.contains(pos) || rows == 0 {
+    if !content.contains(pos) || rows == 0 || row_height <= 0.0 {
         return None;
     }
-    let offset = (pos.y - content.top()) / ROW_HEIGHT + scroll_rows;
+    let offset = (pos.y - content.top()) / row_height + scroll_rows;
     if offset < 0.0 {
         return None;
     }
@@ -612,6 +684,14 @@ pub struct ListView<'a> {
     pub ground: egui::Color32,
     pub dir: &'a DirState,
     pub scroll_rows: f32,
+    /// How big this pane's rows are (PLAN §4.1's view-scale ladder).
+    ///
+    /// The list pane and the parent column are handed the **same** one, because
+    /// they are two columns of one listing and a parent whose rows were a
+    /// different height would put the directory you are in out of line with the
+    /// one you came from. The preview pane's directory body keeps the default:
+    /// it is a picture of a folder, not the folder you are steering.
+    pub scale: Scale,
     pub column: Column,
     pub hovers: &'a Hovers<Control>,
     pub ripples: &'a Ripples<Control>,
@@ -763,8 +843,8 @@ impl Painting<'_> {
 
     /// Measure the fixed right-hand columns for one listing. See
     /// [`RowColumns`].
-    pub(crate) fn row_columns(&self, painter: &egui::Painter) -> RowColumns {
-        let font = egui::FontId::proportional(FONT_SIZE);
+    pub(crate) fn row_columns(&self, painter: &egui::Painter, scale: Scale) -> RowColumns {
+        let font = egui::FontId::proportional(scale.font);
         let size = size_column_widest()
             .into_iter()
             .map(|text| {
@@ -777,12 +857,12 @@ impl Painting<'_> {
         let tag = painter
             .layout_no_wrap(
                 IGNORED_TAG.to_string(),
-                egui::FontId::proportional(TAG_SIZE),
+                egui::FontId::proportional(scale.tag),
                 self.palette.overlay0,
             )
             .size()
             .x;
-        RowColumns { size, tag }
+        RowColumns { size, tag, scale }
     }
 
     /// A directory listing's rows.
@@ -797,6 +877,7 @@ impl Painting<'_> {
             ground,
             dir,
             scroll_rows,
+            scale,
             column,
             hovers,
             ripples,
@@ -822,8 +903,8 @@ impl Painting<'_> {
         // Rows are clipped to the pane's content box so a row half-scrolled off
         // the top does not paint over the pane above it mid-slide.
         let painter = self.painter.with_clip_rect(content);
-        let columns = self.row_columns(&painter);
-        let visible = crate::viewport::visible_rows(content.height(), ROW_HEIGHT);
+        let columns = self.row_columns(&painter, scale);
+        let visible = crate::viewport::visible_rows(content.height(), scale.row_height);
         let first = scroll_rows.floor().max(0.0) as usize;
         // One extra row at each end: mid-slide, the rows entering and leaving
         // are both partly on screen.
@@ -833,7 +914,7 @@ impl Painting<'_> {
             let Some(entry) = dir.row(index) else {
                 continue;
             };
-            let rect = row_rect(content, scroll_rows, index);
+            let rect = row_rect(content, scroll_rows, index, scale.row_height);
             if !rect.intersects(content) {
                 continue;
             }
@@ -1023,6 +1104,9 @@ impl Painting<'_> {
         // once for the whole listing (see [`RowColumns`]).
         columns: RowColumns,
     ) {
+        // How big this listing draws itself — measured once for the whole
+        // pane and handed down with the column widths it produced.
+        let scale = columns.scale;
         let mute = mute.clamp(0.0, 1.0);
         let fade = |c: egui::Color32| {
             if mute > 0.0 {
@@ -1046,7 +1130,7 @@ impl Painting<'_> {
             egui::pos2(rect.left() + ROW_PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
             icon.glyph,
-            egui::FontId::new(ICON_SIZE, icon_family),
+            egui::FontId::new(scale.icon, icon_family),
             fade(icon.color),
         );
 
@@ -1078,7 +1162,7 @@ impl Painting<'_> {
         } else {
             let galley = painter.layout_no_wrap(
                 mode_text.clone(),
-                egui::FontId::proportional(FONT_SIZE),
+                egui::FontId::proportional(scale.font),
                 fade(self.palette.overlay1),
             );
             let width = galley.size().x;
@@ -1176,7 +1260,7 @@ impl Painting<'_> {
             let colour = mix(self.palette.overlay0, ground, mute * 0.5);
             let galley = painter.layout_no_wrap(
                 IGNORED_TAG.to_string(),
-                egui::FontId::proportional(TAG_SIZE),
+                egui::FontId::proportional(scale.tag),
                 colour,
             );
             let width = galley.size().x;
@@ -1219,12 +1303,13 @@ impl Painting<'_> {
         }
         let mode_width = mode_width + dot_width;
 
-        let name_left = rect.left() + ROW_PAD_X + ICON_COLUMN;
+        let name_left = rect.left() + ROW_PAD_X + scale.icon_column;
         let name_room = (rect.right() - ROW_PAD_X - mode_width - name_left).max(0.0);
         let name_end = self.text_spans(
             painter,
             egui::pos2(name_left, rect.center().y),
             &entry.name,
+            scale.font,
             fade(name_color(entry, self.palette)),
             // The part `f` or `/` matched, in the one colour on the palette
             // that is neither a file type nor the selection: the highlight has
@@ -1241,11 +1326,12 @@ impl Painting<'_> {
         if self.show_symlink && mute <= 0.0 && entry.is_symlink() {
             if let Some(target) = entry.link_target() {
                 let room = rect.right() - ROW_PAD_X - mode_width - name_end;
-                if room > FONT_SIZE * 3.0 {
+                if room > scale.font * 3.0 {
                     self.text_truncated(
                         painter,
                         egui::pos2(name_end, rect.center().y),
                         &format!(" → {}", target.to_string_lossy()),
+                        scale.font,
                         fade(self.palette.overlay0),
                         room,
                     );
@@ -1261,10 +1347,11 @@ impl Painting<'_> {
         painter: &egui::Painter,
         pos: egui::Pos2,
         text: &str,
+        font: f32,
         color: egui::Color32,
         max_width: f32,
     ) -> f32 {
-        self.text_spans(painter, pos, text, color, color, &[], max_width)
+        self.text_spans(painter, pos, text, font, color, color, &[], max_width)
     }
 
     /// The same, with the filter's matched runs in `highlight`.
@@ -1280,6 +1367,7 @@ impl Painting<'_> {
         painter: &egui::Painter,
         pos: egui::Pos2,
         text: &str,
+        font: f32,
         color: egui::Color32,
         highlight: egui::Color32,
         spans: &[Span],
@@ -1287,7 +1375,7 @@ impl Painting<'_> {
     ) -> f32 {
         use egui::text::{LayoutJob, TextFormat, TextWrapping};
         let format = |color: egui::Color32| TextFormat {
-            font_id: egui::FontId::proportional(FONT_SIZE),
+            font_id: egui::FontId::proportional(font),
             color,
             ..Default::default()
         };
@@ -1478,6 +1566,7 @@ impl Painting<'_> {
             &inside,
             egui::pos2(left, rect.center().y),
             top.name,
+            FONT_SIZE,
             fade(self.palette.text, alpha),
             (rect.right() - ROW_PAD_X - reserved - left).max(0.0),
         );
@@ -1717,29 +1806,66 @@ mod tests {
     #[test]
     fn rows_stack_downwards_from_the_scroll_position() {
         let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
-        let top = row_rect(content, 0.0, 0);
+        let top = row_rect(content, 0.0, 0, ROW_HEIGHT);
         assert!((top.top() - content.top()).abs() < 1e-3);
         assert!((top.height() - ROW_HEIGHT).abs() < 1e-3);
         // Scrolled by three rows, row 3 is at the top.
-        let scrolled = row_rect(content, 3.0, 3);
+        let scrolled = row_rect(content, 3.0, 3, ROW_HEIGHT);
         assert!((scrolled.top() - content.top()).abs() < 1e-3);
         // …and a fractional scroll moves it by a fraction of a row.
-        let half = row_rect(content, 3.5, 3);
+        let half = row_rect(content, 3.5, 3, ROW_HEIGHT);
         assert!((half.top() - (content.top() - ROW_HEIGHT / 2.0)).abs() < 1e-3);
+    }
+
+    /// The same arithmetic at every step of the ladder: a scaled row is taller
+    /// by exactly its factor, the rows still stack without a gap or an overlap,
+    /// and the hit test still lands on the row that was drawn.
+    #[test]
+    fn a_scaled_row_stacks_and_hit_tests_at_its_own_height() {
+        let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
+        for step in df_core::config::VIEW_SCALES {
+            let scale = Scale::new(step);
+            assert!(
+                (scale.row_height - ROW_HEIGHT * step.row_factor()).abs() < 1e-3,
+                "{step:?}"
+            );
+            let first = row_rect(content, 0.0, 0, scale.row_height);
+            let second = row_rect(content, 0.0, 1, scale.row_height);
+            assert!((first.height() - scale.row_height).abs() < 1e-3, "{step:?}");
+            // No gap and no overlap: one row's bottom is the next one's top.
+            assert!((second.top() - first.bottom()).abs() < 1e-3, "{step:?}");
+            // …and the hit test is the exact inverse at that height.
+            for index in [0usize, 1, 5] {
+                let rect = row_rect(content, 0.0, index, scale.row_height);
+                assert_eq!(
+                    row_at(content, 0.0, 40, rect.center(), scale.row_height),
+                    Some(index),
+                    "{step:?} {index}"
+                );
+            }
+        }
+        // The smallest step is today's list, to the point.
+        assert!((Scale::default().row_height - ROW_HEIGHT).abs() < 1e-3);
     }
 
     #[test]
     fn hit_testing_finds_the_row_under_the_pointer() {
         let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
-        let inside = |index: usize| row_rect(content, 0.0, index).center();
-        assert_eq!(row_at(content, 0.0, 40, inside(0)), Some(0));
-        assert_eq!(row_at(content, 0.0, 40, inside(7)), Some(7));
+        let inside = |index: usize| row_rect(content, 0.0, index, ROW_HEIGHT).center();
+        assert_eq!(row_at(content, 0.0, 40, inside(0), ROW_HEIGHT), Some(0));
+        assert_eq!(row_at(content, 0.0, 40, inside(7), ROW_HEIGHT), Some(7));
         // Scrolling moves which row is under a fixed point.
-        assert_eq!(row_at(content, 5.0, 40, inside(0)), Some(5));
+        assert_eq!(row_at(content, 5.0, 40, inside(0), ROW_HEIGHT), Some(5));
         // Past the end of a short listing there is no row, only pane.
-        assert_eq!(row_at(content, 0.0, 3, inside(10)), None);
+        assert_eq!(row_at(content, 0.0, 3, inside(10), ROW_HEIGHT), None);
         // …and neither is there outside the pane.
-        assert_eq!(row_at(content, 0.0, 40, egui::pos2(-5.0, -5.0)), None);
+        assert_eq!(
+            row_at(content, 0.0, 40, egui::pos2(-5.0, -5.0), ROW_HEIGHT),
+            None
+        );
+        // A pane mid-resize can hand this a zero height; that is no row, not a
+        // division by zero.
+        assert_eq!(row_at(content, 0.0, 40, inside(0), 0.0), None);
     }
 
     /// The drag chrome draws, at every stage and over every degenerate

@@ -48,9 +48,11 @@ use crate::ui::{Column, ROW_HEIGHT};
 /// The three verbs and their modifiers are the desktop's, not ours: move is the
 /// bare drag everywhere from Finder to Nautilus, `Ctrl` copies, and `Alt` links
 /// (GNOME's `Ctrl+Shift` spelling is a two-hand chord for a one-hand gesture,
-/// so the shorter one wins). They are the same three operations `x`/`y`/`-`
-/// already spell on the keyboard, which is the point — a drag is a mouse
-/// spelling of a command that exists, not a fourth way to move a file.
+/// so the shorter one wins). They are the same three operations the command
+/// vocabulary already has — `x`, `y` and `symlink-absolute` — which is the
+/// point: a drag is a mouse spelling of a command that exists, not a fourth way
+/// to move a file. (Alt-drag is now the *only* shipped spelling of the link:
+/// `-` is the view-scale key, and the link commands ship unbound.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
     Move,
@@ -137,6 +139,10 @@ pub struct Zones {
     /// test in this file builds.
     pub list_grid: Option<crate::grid::Metrics>,
     pub list_rows: usize,
+    /// How tall a row is in whichever step the list is at (PLAN §4.1's
+    /// view-scale ladder). The parent column reads it too — the two panes are
+    /// one listing and share a row height.
+    pub scale: crate::ui::Scale,
     pub parent_pane: egui::Rect,
     pub parent_content: egui::Rect,
     pub parent_scroll: f32,
@@ -155,11 +161,13 @@ impl Zones {
                 self.list_grid.as_ref(),
                 self.list_scroll,
                 index,
+                self.scale,
             )),
             Target::Row(Column::Parent, index) => Some(crate::ui::row_rect(
                 self.parent_content,
                 self.parent_scroll,
                 index,
+                self.scale.row_height,
             )),
             Target::Pane(Column::List) => Some(self.list_pane),
             Target::Pane(Column::Parent) => Some(self.parent_pane),
@@ -225,7 +233,8 @@ pub fn target_at(
         if !pane.contains(pos) {
             continue;
         }
-        if let Some(index) = crate::grid::pane_at(content, metrics, scroll, rows, pos) {
+        if let Some(index) = crate::grid::pane_at(content, metrics, scroll, rows, pos, zones.scale)
+        {
             if is_dir(column, index) {
                 return Some(Target::Row(column, index));
             }
@@ -662,6 +671,7 @@ mod tests {
     fn zones(crumbs: &[egui::Rect], layout: &crate::ui::Layout) -> Zones {
         Zones {
             list_grid: None,
+            scale: crate::ui::Scale::default(),
             strip: layout.strip,
             tabs: 3,
             crumbs: crumbs.to_vec(),
@@ -706,7 +716,9 @@ mod tests {
         );
         // A directory row in the list, and a *file* row falling through to the
         // pane it is in.
-        let row = |index: usize| crate::ui::row_rect(z.list_content, 0.0, index).center();
+        let row = |index: usize| {
+            crate::ui::row_rect(z.list_content, 0.0, index, z.scale.row_height).center()
+        };
         assert_eq!(
             target_at(&z, row(2), dirs),
             Some(Target::Row(Column::List, 2))
@@ -716,7 +728,7 @@ mod tests {
             Some(Target::Pane(Column::List))
         );
         // The parent column takes drops too.
-        let parent_row = crate::ui::row_rect(z.parent_content, 0.0, 0).center();
+        let parent_row = crate::ui::row_rect(z.parent_content, 0.0, 0, z.scale.row_height).center();
         assert_eq!(
             target_at(&z, parent_row, dirs),
             Some(Target::Row(Column::Parent, 0))
@@ -737,7 +749,7 @@ mod tests {
         let layout = crate::ui::layout(area, [1, 4, 3], false, 1);
         let mut z = zones(&crumbs, &layout);
         z.list_rows = 2;
-        let below = crate::ui::row_rect(z.list_content, 0.0, 9).center();
+        let below = crate::ui::row_rect(z.list_content, 0.0, 9, z.scale.row_height).center();
         assert_eq!(
             target_at(&z, below, |_, _| true),
             Some(Target::Pane(Column::List))

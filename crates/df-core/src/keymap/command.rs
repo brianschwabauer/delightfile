@@ -125,6 +125,11 @@ commands! {
     Paste => "paste",
     PasteForce => "paste-force",
     CopyToClipboard => "copy-to-clipboard",
+    // The three link operations. **Unbound by default**: `-` and `_` are the
+    // view-scale keys now (PLAN §4.1), and a symlink is a thing people do
+    // deliberately once a month rather than reach for by muscle memory. They
+    // are still commands, so a `keymap.toml` can put them back on any key —
+    // which is the whole reason the id vocabulary exists.
     SymlinkAbsolute => "symlink-absolute",
     SymlinkRelative => "symlink-relative",
     Hardlink => "hardlink",
@@ -160,6 +165,12 @@ commands! {
     SeekPreviewUp => "seek-preview-up",
     SeekPreviewDown => "seek-preview-down",
     ToggleView => "toggle-view",
+    // The view-scale ladder (`df_core::config::ViewScale`): one axis from the
+    // compact list to the thumbnail grid, walked a step at a time. `ToggleView`
+    // is still the jump between the grid and whatever list step you were last
+    // at, which is the thing a toggle is good for and a ladder is not.
+    ViewScaleUp => "view-scale-up",
+    ViewScaleDown => "view-scale-down",
 
     // ── Copy the path, in its four useful shapes, plus the contents ───────
     CopyPath => "copy-path",

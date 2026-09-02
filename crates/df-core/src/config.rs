@@ -33,6 +33,7 @@
 //! show_hidden = false
 //! show_symlink = true
 //! scrolloff = 5
+//! view_scale = "compact"     # compact comfortable roomy — how big list rows start
 //! folder_sizes = true      # recursive directory sizes in the size column
 //! folder_size_ttl = 600    # seconds a walked size is reused before re-walking
 //!
@@ -432,6 +433,129 @@ impl LineMode {
     }
 }
 
+/// How big the list pane draws itself — Windows Explorer's view slider, as an
+/// ordered ladder rather than a continuous zoom.
+///
+/// The four steps are one axis, which is the whole point: `-` walks down it and
+/// `=` walks up it, and the top of the ladder **is** the grid. A separate "list
+/// size" setting beside a separate "grid on/off" toggle would be two controls
+/// for one question — how much room does a file get — and the person dragging
+/// Explorer's slider from Details to Extra Large Icons is not thinking about
+/// two of anything.
+///
+/// A step scales the row's *content*: its height, its icon and its text, in one
+/// ratio so the row keeps its proportions. Nothing else moves. The top bar, the
+/// pane widths and the rest of the chrome are the window's furniture rather
+/// than the listing's, and a step that grew the tab strip with it would be a
+/// zoom, which this deliberately is not.
+///
+/// Declaration order is the ladder's order, and [`Ord`] is derived from it, so
+/// the step functions and the tests are comparisons rather than match arms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+pub enum ViewScale {
+    /// Today's list: 22 pt rows at a 13.5 pt face, the density yazi's muscle
+    /// memory expects. The smallest step, and the default, because the program
+    /// is a port of that muscle memory before it is anything else.
+    #[default]
+    Compact,
+    /// A fifth taller. The step somebody reaches for on a 4K panel across a
+    /// desk, where compact is honest and small.
+    Comfortable,
+    /// The largest the *list* goes: names at nearly half again, icons big
+    /// enough to tell a folder from a film at a glance down the column.
+    Roomy,
+    /// The thumbnail grid — the top of the ladder, not a mode beside it.
+    Grid,
+}
+
+/// The steps, in order. One array, so the ladder is written down once and the
+/// step functions, the config parser and the tests all read the same one.
+pub const VIEW_SCALES: [ViewScale; 4] = [
+    ViewScale::Compact,
+    ViewScale::Comfortable,
+    ViewScale::Roomy,
+    ViewScale::Grid,
+];
+
+impl ViewScale {
+    pub fn from_name(name: &str) -> Option<ViewScale> {
+        Some(match name {
+            "compact" => ViewScale::Compact,
+            "comfortable" => ViewScale::Comfortable,
+            "roomy" => ViewScale::Roomy,
+            "grid" => ViewScale::Grid,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ViewScale::Compact => "compact",
+            ViewScale::Comfortable => "comfortable",
+            ViewScale::Roomy => "roomy",
+            ViewScale::Grid => "grid",
+        }
+    }
+
+    /// The next step up, or `None` at the top.
+    ///
+    /// `None` rather than a saturating step, so the caller can tell "already at
+    /// the largest" from "moved" and skip the write and the toast that go with
+    /// a change — a key that says "Grid view" every time you press it at the
+    /// top of the ladder is a key that is lying about having done something.
+    pub fn larger(self) -> Option<ViewScale> {
+        let at = VIEW_SCALES.iter().position(|s| *s == self)?;
+        VIEW_SCALES.get(at + 1).copied()
+    }
+
+    /// The next step down, or `None` at the bottom.
+    pub fn smaller(self) -> Option<ViewScale> {
+        let at = VIEW_SCALES.iter().position(|s| *s == self)?;
+        at.checked_sub(1).and_then(|i| VIEW_SCALES.get(i).copied())
+    }
+
+    /// Whether this step draws the pane as a wall of tiles.
+    pub fn is_grid(self) -> bool {
+        self == ViewScale::Grid
+    }
+
+    /// The largest step that is still a list.
+    ///
+    /// What the grid falls back to for anything still measured in rows: the
+    /// parent column beside a grid, and the step `-` lands on coming down out
+    /// of one.
+    pub const fn largest_list() -> ViewScale {
+        ViewScale::Roomy
+    }
+
+    /// This step as a *list* step: itself, or [`ViewScale::largest_list`] for
+    /// the grid.
+    pub fn as_list(self) -> ViewScale {
+        if self.is_grid() {
+            ViewScale::largest_list()
+        } else {
+            self
+        }
+    }
+
+    /// How far a row's height, icon and text are multiplied at this step.
+    ///
+    /// 1, 1.2, 1.45 — a ratio a shade under a fifth each time, which is the
+    /// smallest step that reads as a *different size* rather than as a
+    /// rendering wobble, and small enough that three of them do not turn a
+    /// screenful into six rows. The grid reports the largest list step's
+    /// number, because the only thing still measured in rows beside a grid is
+    /// a list (see [`ViewScale::as_list`]).
+    pub fn row_factor(self) -> f32 {
+        match self.as_list() {
+            ViewScale::Comfortable => 1.2,
+            ViewScale::Roomy => 1.45,
+            // `Compact`; the grid never reaches here.
+            _ => 1.0,
+        }
+    }
+}
+
 /// PLAN §2's layout and sorting.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MgrConfig {
@@ -444,6 +568,15 @@ pub struct MgrConfig {
     pub show_hidden: bool,
     pub show_symlink: bool,
     pub scrolloff: usize,
+    /// How big a directory draws itself before anyone has said otherwise here
+    /// (see [`ViewScale`]).
+    ///
+    /// A *list* step only. `grid` parses as a name but is rejected as a
+    /// default, because "every directory is a grid until you say otherwise" is
+    /// a different setting from "this is how big rows are" — the grid is a
+    /// per-directory choice with a per-directory memory behind it, and a global
+    /// default would fight it on every first visit.
+    pub view_scale: ViewScale,
     /// Whether directories get a recursive size in the size column (PLAN §7.3).
     ///
     /// On, because a size column that says nothing for half its rows is a
@@ -479,6 +612,7 @@ impl Default for MgrConfig {
             show_hidden: false,
             show_symlink: true,
             scrolloff: DEFAULT_SCROLLOFF,
+            view_scale: ViewScale::Compact,
             folder_sizes: true,
             folder_size_ttl: DEFAULT_FOLDER_SIZE_TTL,
         }
@@ -707,6 +841,15 @@ impl Config {
                     "show_hidden" => read_bool(value, &mut config.mgr.show_hidden),
                     "show_symlink" => read_bool(value, &mut config.mgr.show_symlink),
                     "scrolloff" => read_usize(value, &mut config.mgr.scrolloff),
+                    // `grid` is a step of the ladder but not a legal default —
+                    // see [`MgrConfig::view_scale`]. Named in the message
+                    // rather than silently dropped, so somebody who tried it
+                    // learns where the setting actually lives.
+                    "view_scale" => read_enum(
+                        value,
+                        |name| ViewScale::from_name(name).filter(|s| !s.is_grid()),
+                        &mut config.mgr.view_scale,
+                    ),
                     "folder_sizes" => read_bool(value, &mut config.mgr.folder_sizes),
                     "folder_size_ttl" => {
                         let mut seconds = config.mgr.folder_size_ttl as usize;
@@ -1513,6 +1656,89 @@ mod tests {
         assert_eq!(c.tasks.micro_workers, 10);
         assert_eq!(c.tasks.macro_workers, 10);
         assert_eq!(c.tasks.bizarre_retry, 3);
+    }
+
+    /// The ladder is an *order*, and `-`/`=` are a walk along it: from the
+    /// bottom, three steps up reach the grid and nothing is skipped.
+    #[test]
+    fn the_view_scale_ladder_climbs_compact_to_grid_one_step_at_a_time() {
+        let mut at = ViewScale::Compact;
+        let mut walked = vec![at];
+        while let Some(next) = at.larger() {
+            at = next;
+            walked.push(at);
+        }
+        assert_eq!(walked, VIEW_SCALES.to_vec());
+        assert_eq!(at, ViewScale::Grid);
+        // …and back down the same rungs, in the same order.
+        let mut back = vec![at];
+        while let Some(prev) = at.smaller() {
+            at = prev;
+            back.push(at);
+        }
+        back.reverse();
+        assert_eq!(back, VIEW_SCALES.to_vec());
+        // The ends are ends: `-` at the bottom and `=` at the top do nothing.
+        assert_eq!(ViewScale::Compact.smaller(), None);
+        assert_eq!(ViewScale::Grid.larger(), None);
+        // Declaration order is the ladder's order, so `Ord` agrees with it.
+        assert!(ViewScale::Compact < ViewScale::Comfortable);
+        assert!(ViewScale::Roomy < ViewScale::Grid);
+    }
+
+    /// The grid transition, from both sides: `=` off the largest list step
+    /// lands in the tiles, and `-` out of the tiles lands back on that same
+    /// step rather than on wherever the list happened to be before.
+    #[test]
+    fn the_top_of_the_ladder_is_the_grid() {
+        assert_eq!(ViewScale::largest_list(), ViewScale::Roomy);
+        assert_eq!(ViewScale::Roomy.larger(), Some(ViewScale::Grid));
+        assert_eq!(ViewScale::Grid.smaller(), Some(ViewScale::largest_list()));
+        assert!(ViewScale::Grid.is_grid());
+        assert!(!ViewScale::Roomy.is_grid());
+        // Anything measured in rows beside a grid — the parent column — reads
+        // the grid as the largest list step rather than as a hole.
+        assert_eq!(ViewScale::Grid.as_list(), ViewScale::Roomy);
+        assert_eq!(ViewScale::Grid.row_factor(), ViewScale::Roomy.row_factor());
+    }
+
+    /// Each step is bigger than the one below it, and the bottom one is
+    /// today's list untouched — a scale that moved the default row height
+    /// would be a redesign wearing a feature's name.
+    #[test]
+    fn every_step_is_larger_than_the_last_and_the_smallest_changes_nothing() {
+        assert_eq!(ViewScale::Compact.row_factor(), 1.0);
+        for pair in VIEW_SCALES.windows(2) {
+            let [small, large] = pair else { continue };
+            assert!(
+                large.row_factor() >= small.row_factor(),
+                "{small:?} → {large:?}"
+            );
+        }
+        assert!(ViewScale::Roomy.row_factor() > ViewScale::Comfortable.row_factor());
+    }
+
+    /// Every step round-trips through its name, which is what the state file
+    /// and the config both store.
+    #[test]
+    fn view_scale_names_round_trip() {
+        for scale in VIEW_SCALES {
+            assert_eq!(ViewScale::from_name(scale.name()), Some(scale));
+        }
+        assert_eq!(ViewScale::from_name("huge"), None);
+    }
+
+    /// `[mgr] view_scale` names a list step. `grid` is a step of the ladder and
+    /// still not a legal default — the grid is remembered per directory.
+    #[test]
+    fn the_view_scale_default_is_a_list_step() {
+        assert_eq!(Config::default().mgr.view_scale, ViewScale::Compact);
+        let (config, warnings) = parse("[mgr]\nview_scale = \"roomy\"\n");
+        assert_eq!(config.mgr.view_scale, ViewScale::Roomy);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (config, warnings) = parse("[mgr]\nview_scale = \"grid\"\n");
+        assert_eq!(config.mgr.view_scale, ViewScale::Compact);
+        assert_eq!(warnings.len(), 1);
     }
 
     /// `[input]` is an empty table now, and a config that still sets

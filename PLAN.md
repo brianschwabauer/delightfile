@@ -77,10 +77,15 @@ Yazi's miller columns at Brian's ratio `[1, 4, 3]`: **parent | list | preview**.
   `scrolloff = 5` — all as current yazi defaults, all configurable.
 - **Tabs**: `t` new tab, `1`–`9` switch, `Alt+[`/`Alt+]` prev/next, `{`/`}` swap
   (`[`/`]` now belong to transport, §4.3). Tab strip only visible with 2+ tabs.
-- **Grid view**: per-directory toggle between list and thumbnail grid (for Pictures,
-  plex mounts). Remembered per directory in a small state db
-  (`~/.local/state/delightfile/`). Sort changes animate rows/tiles to their new
-  positions (FLIP-style) rather than teleporting.
+- **View scale**: one ordered ladder from the compact list to the thumbnail grid —
+  compact → comfortable → roomy → grid — walked with `-` and `=`/`+`, Windows
+  Explorer's view slider. A list step scales the row height, the icon and the text
+  together and touches no other chrome; the parent column follows the list's step so
+  the two panes stay in line. `Ctrl+g` still jumps straight between the grid and the
+  last list step. Remembered per directory in a small state db
+  (`~/.local/state/delightfile/`), with `[mgr] view_scale` as the default list step.
+  Sort changes animate rows/tiles to their new positions (FLIP-style) rather than
+  teleporting.
 - **Multi-window**: `Ctrl+N` new window; drag a tab out to spawn a window; drag files
   between windows/tabs (drop on a tab header targets that tab's cwd).
   **A window is a process.** `Ctrl+N` and a detached tab both start a new `delightfile`
@@ -178,12 +183,13 @@ ordering preserves declaration order, not alphabetical.
 | `v` / `V` | visual select / visual unset |
 | `K` / `J` | scroll/seek preview ±5 (yazi parity) |
 | `Tab` | spot panel on hovered file |
+| `-` / `=` `+` | view scale down / up — Explorer's slider (§2) |
+| `Ctrl+g` | jump between the grid and the last list step |
 | `o`/`Enter` | open (first opener rule) |
 | `O`/`Shift+Enter` | open interactively (picker) |
 | `y` / `x` / `p` / `P` | yank / cut / paste / paste --force |
 | `Y` | mime-aware copy to system clipboard (§7.4) |
 | `X` | unyank |
-| `-` / `_` / `Ctrl+-` | symlink abs / rel / hardlink |
 | `d` / `D` | trash / delete permanently (both undoable where possible, §5) |
 | `a` | create (trailing `/` = dir) |
 | `r` / `R` | rename (cursor before ext) / rename empty stem |
@@ -253,12 +259,14 @@ transport does:
 | `Ctrl+Shift+u` / `Ctrl+Shift+d` | — | half page up / down |
 | `Shift+Space` | — | page down |
 | `Ctrl+Home` / `Ctrl+End` | — | top / bottom |
-| `+` `=` / `Alt+-` / `0` | — | zoom in / out / reset |
+| `Ctrl+=` `Ctrl++` / `Ctrl+-` / `Ctrl+0` | — | zoom in / out / reset |
 | `Ctrl+m` | mute | — |
 | `k`, `Shift+↑`/`Shift+↓` | play/pause, volume (global, above) | — |
 
-Zoom out is the one key in the family that had to move: `-` is the absolute symlink in
-§4.1 and a file operation outranks a zoom, so it takes the `Alt` spelling of the same key.
+The zoom family is on `Ctrl`: the bare `+` `=` `-` `0` are the view-scale ladder (§4.1),
+which is a key you press dozens of times a session on the thing you are looking *at*,
+while a zoom is for the one file you are peering into. One modifier, three keys, no
+exceptions — which also retires the odd-one-out `Alt+-` the old symlink binding forced.
 Paging past the last page (or before the first) is inert — there is no pane to fall out
 of. Hover the timeline to scrub; the position strip lingers 2.5 s after interaction.
 
@@ -441,7 +449,9 @@ Work top to bottom; tick boxes in the same commit as the work.
 
 ### Phase 2 — operate
 - [x] Task engine: workers, progress, pause/cancel, `w` panel
-- [x] yank/cut/paste (+force), reflink-first copy, symlink/hardlink
+- [x] yank/cut/paste (+force), reflink-first copy, symlink/hardlink (commands only —
+      `symlink-absolute`, `symlink-relative`, `hardlink` ship unbound; `keymap.toml`
+      puts them on a key)
 - [x] Trash (freedesktop) + permanent delete + confirm dialogs
 - [x] Create `a`, rename `r`/`R` with vi input editor
 - [x] Op journal + `u` undo + toast system (one-at-a-time, kind lifetimes)
