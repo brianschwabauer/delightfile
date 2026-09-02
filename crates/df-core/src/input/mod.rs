@@ -215,10 +215,16 @@ impl InputBuffer {
     /// A builder rather than a constructor argument because it is a *setting*,
     /// not a property of the prompt: every call site builds the buffer the same
     /// way and the app stamps the user's answer on it in one place
-    /// (`App::open_prompt_with`).
+    /// (`App::input_buffer`).
     pub fn vi_mode(mut self, on: bool) -> InputBuffer {
-        self.vi = on;
+        self.set_vi_mode(on);
         self
+    }
+
+    /// The same setting, in place — for a card that owns several buffers and
+    /// stamps them all at once rather than rebuilding each one.
+    pub fn set_vi_mode(&mut self, on: bool) {
+        self.vi = on;
     }
 
     /// `r` on a file: the whole name, caret **before the extension** — yazi's

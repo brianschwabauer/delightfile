@@ -211,7 +211,14 @@ pub enum Event {
     },
     /// The bytes a [`Command::Receive`] asked for. `None` when there was no
     /// offer left to ask, which is a clipboard that changed under the paste.
+    ///
+    /// `seq` is the number the request carried, echoed back. `p` then `P`
+    /// inside one round trip asks twice, and the window is only waiting for the
+    /// second one: without the number the first answer to arrive is applied
+    /// with the *second* request's meaning, so a `p` that should have asked
+    /// before overwriting overwrites.
     Pasted {
+        seq: u64,
         bytes: Option<Vec<u8>>,
     },
 }
@@ -235,8 +242,10 @@ enum Command {
         mimes: Vec<String>,
         bytes: Vec<u8>,
     },
-    /// Ask the current selection for `mime` and read the pipe.
+    /// Ask the current selection for `mime` and read the pipe. `seq` comes back
+    /// on the [`Event::Pasted`] that answers it — see that variant.
     Receive {
+        seq: u64,
         mime: String,
     },
     Exit,
@@ -317,18 +326,24 @@ impl DataDevice {
     ///
     /// Answered later with [`Event::Copied`] — the toast waits for it, because
     /// "Copied" before the compositor has accepted the selection is a claim
-    /// this program cannot make yet.
-    pub fn set_selection(&self, mimes: Vec<String>, bytes: Vec<u8>) {
-        self.send(Command::SetSelection { mimes, bytes });
+    /// this program cannot make yet. `false` means the command was not even
+    /// accepted, and no `Copied` is coming.
+    #[must_use]
+    pub fn set_selection(&self, mimes: Vec<String>, bytes: Vec<u8>) -> bool {
+        self.send(Command::SetSelection { mimes, bytes })
     }
 
-    /// Ask the clipboard for `mime`. Answered with [`Event::Pasted`].
-    pub fn receive(&self, mime: String) {
-        self.send(Command::Receive { mime });
+    /// Ask the clipboard for `mime`. Answered with [`Event::Pasted`] carrying
+    /// `seq`. `false` means no answer is coming.
+    #[must_use]
+    pub fn receive(&self, seq: u64, mime: String) -> bool {
+        self.send(Command::Receive { seq, mime })
     }
 
     /// Start a drag out of the window, offering `offers` and carrying an icon
-    /// drawn for `count` files.
+    /// drawn for `count` files. `false` means the thread is gone and no drag
+    /// will happen — the caller has a ghost to spring home.
+    #[must_use]
     pub fn drag(
         &self,
         offers: Vec<(String, Vec<u8>)>,
@@ -336,14 +351,14 @@ impl DataDevice {
         card: Rgba,
         ink: Rgba,
         scale: i32,
-    ) {
+    ) -> bool {
         self.send(Command::Drag {
             offers,
             count,
             card,
             ink,
             scale,
-        });
+        })
     }
 
     /// Everything that has happened since the last frame.
@@ -351,17 +366,22 @@ impl DataDevice {
         self.events.try_iter().collect()
     }
 
-    fn send(&self, command: Command) {
+    /// Hand a command to the thread. `false` means the receiving end is gone —
+    /// the thread has exited — and the command will never be acted on, which is
+    /// a fact the caller has to be told rather than a thing to swallow: every
+    /// one of these is answered by an event the window is waiting for.
+    fn send(&self, command: Command) -> bool {
         if self.commands.send(command).is_err() {
-            return;
+            return false;
         }
         ring(&self.bell);
+        true
     }
 }
 
 impl Drop for DataDevice {
     fn drop(&mut self) {
-        self.send(Command::Exit);
+        let _ = self.send(Command::Exit);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -429,6 +449,11 @@ fn drain(bell: i32) {
 
 // ── The thread ──────────────────────────────────────────────────────────────
 
+/// The thread. `ready` is *its* flag, not the handle's: it is true only while
+/// this function is running with a data device in hand, and the guard below
+/// puts it back to false on every way out — including the ones in the middle of
+/// the loop, where a dispatch error ends the thread with the window still
+/// holding a handle that used to say "the clipboard is native".
 fn run(
     connection: Connection,
     origin: usize,
@@ -438,6 +463,19 @@ fn run(
     waker: Waker,
     ready: Arc<AtomicBool>,
 ) {
+    /// Clears `ready` however this thread leaves — an early bail, a broken
+    /// socket, `Exit`, or a panic. A handle that goes on claiming a live data
+    /// device sends copies into a channel nobody reads, and the window's
+    /// `wl-copy` fallback never gets its turn.
+    struct NotReadyOnExit(Arc<AtomicBool>);
+    impl Drop for NotReadyOnExit {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+    }
+    let guard = NotReadyOnExit(ready);
+    let ready = &guard.0;
+
     let Ok((globals, mut queue)) = registry_queue_init::<State>(&connection) else {
         log::info!("wayland: no registry — drag and drop and the clipboard are off");
         return;
@@ -533,7 +571,7 @@ fn run(
                         ok: ok && state.selection.is_some(),
                     });
                 }
-                Command::Receive { mime } => state.take_paste(mime),
+                Command::Receive { seq, mime } => state.take_paste(seq, mime),
             }
         }
         if state.exit {
@@ -883,20 +921,23 @@ impl State {
     }
 
     /// Read the clipboard, here, and send the bytes back to the window.
-    fn take_paste(&mut self, mime: String) {
+    fn take_paste(&mut self, seq: u64, mime: String) {
         if self.owns_selection(&mime) {
             // Our own copy. Going through the compositor would have this
             // thread blocked on a pipe that only this thread can write into —
             // the `send` arrives as an event nobody is left to dispatch.
             let bytes = self.selection_bytes.clone();
-            self.tell(Event::Pasted { bytes: Some(bytes) });
+            self.tell(Event::Pasted {
+                seq,
+                bytes: Some(bytes),
+            });
             return;
         }
         let bytes = self
             .selection_offer
             .as_ref()
             .and_then(|offer| receive(&self.connection, offer, &mime));
-        self.tell(Event::Pasted { bytes });
+        self.tell(Event::Pasted { seq, bytes });
     }
 }
 

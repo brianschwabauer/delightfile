@@ -295,8 +295,29 @@ impl Listing {
     }
 }
 
+/// A tab's identity, stable for as long as the tab is open.
+///
+/// Not its index: tabs are reordered with `{`/`}`, closed from anywhere in the
+/// strip, and dragged out into other windows, so "tab 2" names a different tab
+/// a keystroke later. Anything that remembers a tab *across a wait* — an
+/// asynchronous paste, most of all, which decides its destination when the key
+/// is pressed and acts on it when the bytes arrive — has to hold this instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabId(u64);
+
+impl TabId {
+    fn next() -> TabId {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // Starts at 1 so no id is ever the default-looking zero.
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        TabId(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// One tab: the listing, its parent, and the back/forward stacks.
 pub struct Tab {
+    /// Stable for the life of the tab. See [`TabId`].
+    pub id: TabId,
     pub cwd: Listing,
     /// `None` at the filesystem root, which genuinely has no parent — the pane
     /// is drawn empty rather than showing `/` twice.
@@ -355,6 +376,7 @@ impl Tab {
     ) -> Tab {
         let path = path.into();
         let mut tab = Tab {
+            id: TabId::next(),
             cwd: Listing::new(path.clone(), mgr, sort, now),
             parent: None,
             history: History::new(path),
@@ -1097,6 +1119,7 @@ mod tests {
         let t0 = Instant::now();
         let (mgr, sort) = (MgrConfig::default(), SortOptions::default());
         let mut tab = Tab {
+            id: TabId::next(),
             cwd: Listing::new("/tmp", &mgr, sort, t0),
             parent: None,
             history: History::new("/tmp"),
@@ -1178,6 +1201,7 @@ mod tests {
         let t0 = Instant::now();
         let (mgr, sort) = (MgrConfig::default(), SortOptions::default());
         let mut tab = Tab {
+            id: TabId::next(),
             cwd: Listing::new("/tmp", &mgr, sort, t0),
             parent: None,
             history: History::new("/tmp"),

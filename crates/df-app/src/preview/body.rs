@@ -26,6 +26,30 @@ use std::sync::Arc;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use df_core::fs::Notifier;
 
+/// Which card a job belongs to.
+///
+/// **The two are retired independently, and that is the whole point of this
+/// type.** One `AtomicU64` for both meant an archive card cancelling its body
+/// also retired the remote card's in-flight read — and the remote side's
+/// "already showing this url" early return then never asked again, so the card
+/// sat with an empty body until the cursor left the row and came back. Two
+/// counters, one per kind, because they are two independent newest-wins races
+/// that happen to share a thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Which {
+    Archive,
+    Remote,
+}
+
+impl Which {
+    fn slot(self) -> usize {
+        match self {
+            Which::Archive => 0,
+            Which::Remote => 1,
+        }
+    }
+}
+
 /// What to read.
 pub enum Job {
     /// An entry inside an archive the tab is browsing.
@@ -38,6 +62,15 @@ pub enum Job {
     },
     /// A remote row whose bytes are already on the disk as a temp file.
     Remote { url: String, local: PathBuf },
+}
+
+impl Job {
+    fn which(&self) -> Which {
+        match self {
+            Job::Archive { .. } => Which::Archive,
+            Job::Remote { .. } => Which::Remote,
+        }
+    }
 }
 
 /// What came back. Carries its own subject, so the app can check the answer is
@@ -59,31 +92,33 @@ pub enum Body {
 /// Dropping it closes the channel; the worker finishes the job it is on and
 /// exits, and the drop joins it so nothing outlives the window.
 pub struct Bodies {
-    jobs: Option<Sender<(u64, Job)>>,
+    jobs: Option<Sender<(Which, u64, Job)>>,
     results: Receiver<Body>,
-    live: Arc<AtomicU64>,
-    next: u64,
+    /// One counter per [`Which`] — see that type for why they are not one.
+    live: Arc<[AtomicU64; 2]>,
+    next: [u64; 2],
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Bodies {
     pub fn start(notify: Notifier) -> Bodies {
-        let (job_tx, job_rx) = unbounded::<(u64, Job)>();
+        let (job_tx, job_rx) = unbounded::<(Which, u64, Job)>();
         let (res_tx, res_rx) = unbounded::<Body>();
-        let live = Arc::new(AtomicU64::new(0));
+        let live = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
         let worker_live = Arc::clone(&live);
         let handle = std::thread::Builder::new()
             .name("df-card-body".to_string())
             .spawn(move || {
                 df_core::thread::lower_priority(df_core::thread::NICE_INTERACTIVE);
-                for (token, job) in job_rx {
+                for (which, token, job) in job_rx {
+                    let slot = &worker_live[which.slot()];
                     // Checked before the read and again before the send: a
                     // held `↓` through a zip asks for forty and wants one.
-                    if worker_live.load(Ordering::Relaxed) != token {
+                    if slot.load(Ordering::Relaxed) != token {
                         continue;
                     }
                     let body = read(job);
-                    if worker_live.load(Ordering::Relaxed) != token {
+                    if slot.load(Ordering::Relaxed) != token {
                         continue;
                     }
                     if res_tx.send(body).is_err() {
@@ -105,25 +140,34 @@ impl Bodies {
             jobs: Some(job_tx),
             results: res_rx,
             live,
-            next: 0,
+            next: [0, 0],
             worker,
         }
     }
 
-    /// Queue a read, retiring whatever was in flight.
+    /// Queue a read, retiring whatever was in flight **for that kind of card**.
     pub fn request(&mut self, job: Job) {
-        self.next += 1;
-        self.live.store(self.next, Ordering::Relaxed);
+        let which = job.which();
+        let slot = which.slot();
+        self.next[slot] += 1;
+        self.live[slot].store(self.next[slot], Ordering::Relaxed);
         if let Some(jobs) = &self.jobs {
-            if jobs.send((self.next, job)).is_err() {
+            if jobs.send((which, self.next[slot], job)).is_err() {
                 log::debug!("the card-body worker is gone");
             }
         }
     }
 
-    /// Stop caring about whatever is in flight.
-    pub fn cancel(&self) {
-        self.live.store(0, Ordering::Relaxed);
+    /// Stop caring about whatever is in flight for one kind of card. The other
+    /// kind's read is not this card's to retire.
+    pub fn cancel(&self, which: Which) {
+        self.live[which.slot()].store(0, Ordering::Relaxed);
+    }
+
+    /// Both, for the drop.
+    fn cancel_all(&self) {
+        self.cancel(Which::Archive);
+        self.cancel(Which::Remote);
     }
 
     pub fn drain(&self) -> Vec<Body> {
@@ -133,7 +177,7 @@ impl Bodies {
 
 impl Drop for Bodies {
     fn drop(&mut self) {
-        self.cancel();
+        self.cancel_all();
         self.jobs = None;
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();

@@ -1023,7 +1023,7 @@ impl Pane {
                 truncated,
             } => {
                 let token = self.token?;
-                self.preparer.request(prepare::Job {
+                let prepared = self.preparer.request(prepare::Job {
                     token,
                     source: prepare::Source::Text {
                         lines,
@@ -1031,15 +1031,20 @@ impl Pane {
                         truncated,
                     },
                 });
-                return None;
+                // `None` is the worker having taken it — the `?` returns, and
+                // `apply_prepared` puts the body up when it comes back. `Some`
+                // is there being no worker to take it, so it was prepared in
+                // this frame instead: the jank, in exchange for a preview at
+                // all.
+                body_from_ready(prepared?.ready)
             }
             Preview::Markdown { source, truncated } => {
                 let token = self.token?;
-                self.preparer.request(prepare::Job {
+                let prepared = self.preparer.request(prepare::Job {
                     token,
                     source: prepare::Source::Markdown { source, truncated },
                 });
-                return None;
+                body_from_ready(prepared?.ready)
             }
             Preview::Directory { entries, truncated } => Body::Directory { entries, truncated },
             Preview::Hex { bytes, truncated } => Body::Hex { bytes, truncated },
@@ -1101,20 +1106,7 @@ impl Pane {
 
     /// A finished highlight or markdown parse, from [`prepare`].
     fn apply_prepared(&mut self, prepared: prepare::Prepared) {
-        let body = match prepared.ready {
-            prepare::Ready::Text {
-                lines,
-                syntax,
-                truncated,
-                states,
-            } => Body::Text {
-                lines,
-                syntax,
-                truncated,
-                states,
-            },
-            prepare::Ready::Markdown { blocks, truncated } => Body::Markdown { blocks, truncated },
-        };
+        let body = body_from_ready(prepared.ready);
         // Shown the instant it lands, at full strength: an item-to-item switch
         // does not fade (PLAN §6 — a preview that eases in reads as slow).
         self.shown = Some(Shown { body });
@@ -1251,6 +1243,26 @@ const SCROLLBAR_FADE: Duration = Duration::from_millis(250);
 /// `OutQuint` rather than linear: a linear opacity ramp reads as a dissolve
 /// with a hard start and stop, and this is the same curve every other motion
 /// in the program uses (PLAN §8).
+/// What [`prepare`] finished, as the body the pane draws. Split out of
+/// `apply_prepared` because the in-frame fallback (see `Preparer::request`)
+/// reaches the same translation without going through the channel.
+fn body_from_ready(ready: prepare::Ready) -> Body {
+    match ready {
+        prepare::Ready::Text {
+            lines,
+            syntax,
+            truncated,
+            states,
+        } => Body::Text {
+            lines,
+            syntax,
+            truncated,
+            states,
+        },
+        prepare::Ready::Markdown { blocks, truncated } => Body::Markdown { blocks, truncated },
+    }
+}
+
 pub fn fade(at: Instant, now: Instant) -> f32 {
     let t = now.saturating_duration_since(at).as_secs_f32() / CROSSFADE.as_secs_f32();
     crate::motion::Easing::OutQuint.apply(t.clamp(0.0, 1.0))

@@ -291,63 +291,79 @@ fn kind_color(kind: FileKind, palette: &Palette) -> egui::Color32 {
 /// are two marks in one colour and the column still reads as "these are all
 /// code". Every codepoint here was checked against an installed patched font;
 /// on a machine with none, none of this runs (see the module header).
-const EXTENSION_GLYPHS: &[(&str, char)] = &[
+///
+/// ## The third column is a guard, not a fact
+///
+/// Each row also names the [`FileKind`] the glyph *assumes*, and the glyph is
+/// only drawn when the row really is that kind. Without it this table is a
+/// second, dumber classifier arguing with df-core's: `00001.ts` is a transport
+/// stream that got the TypeScript logo, and `package-lock.json` — configuration
+/// by name — got the JSON mark instead of the cog every other lockfile wears.
+/// The mime table has already done that thinking (see
+/// [`df_core::fs::kind`]); this column is how the glyphs defer to it, and
+/// `extension_glyph_agrees_with_the_kind_table` is the test that keeps the two
+/// from drifting apart.
+const EXTENSION_GLYPHS: &[(&str, char, FileKind)] = &[
     // Source, from Devicons and Seti — the logos, which is the whole point.
-    ("rs", '\u{e7a8}'),
-    ("py", '\u{e73c}'),
-    ("go", '\u{e724}'),
-    ("rb", '\u{e7b0}'),
-    ("php", '\u{e73d}'),
-    ("java", '\u{e738}'),
-    ("kt", '\u{e738}'),
-    ("lua", '\u{e620}'),
-    ("c", '\u{e61e}'),
-    ("h", '\u{e61e}'),
-    ("cc", '\u{e61d}'),
-    ("cpp", '\u{e61d}'),
-    ("hpp", '\u{e61d}'),
-    ("swift", '\u{e755}'),
-    ("js", '\u{e781}'),
-    ("mjs", '\u{e781}'),
-    ("cjs", '\u{e781}'),
-    ("jsx", '\u{e781}'),
-    ("ts", '\u{e628}'),
-    ("tsx", '\u{e628}'),
-    ("vue", '\u{e6a0}'),
-    ("svelte", '\u{e697}'),
-    ("html", '\u{f13b}'),
-    ("htm", '\u{f13b}'),
-    ("css", '\u{e749}'),
-    ("scss", '\u{e749}'),
-    ("md", '\u{e73e}'),
-    ("markdown", '\u{e73e}'),
+    ("rs", '\u{e7a8}', FileKind::Code),
+    ("py", '\u{e73c}', FileKind::Code),
+    ("go", '\u{e724}', FileKind::Code),
+    ("rb", '\u{e7b0}', FileKind::Code),
+    ("php", '\u{e73d}', FileKind::Code),
+    ("java", '\u{e738}', FileKind::Code),
+    ("kt", '\u{e738}', FileKind::Code),
+    ("lua", '\u{e620}', FileKind::Code),
+    ("c", '\u{e61e}', FileKind::Code),
+    ("h", '\u{e61e}', FileKind::Code),
+    ("cc", '\u{e61d}', FileKind::Code),
+    ("cpp", '\u{e61d}', FileKind::Code),
+    ("hpp", '\u{e61d}', FileKind::Code),
+    ("swift", '\u{e755}', FileKind::Code),
+    ("js", '\u{e781}', FileKind::Code),
+    ("mjs", '\u{e781}', FileKind::Code),
+    ("cjs", '\u{e781}', FileKind::Code),
+    ("jsx", '\u{e781}', FileKind::Code),
+    ("ts", '\u{e628}', FileKind::Code),
+    ("tsx", '\u{e628}', FileKind::Code),
+    ("vue", '\u{e6a0}', FileKind::Code),
+    ("svelte", '\u{e697}', FileKind::Code),
+    ("html", '\u{f13b}', FileKind::Code),
+    ("htm", '\u{f13b}', FileKind::Code),
+    ("css", '\u{e749}', FileKind::Code),
+    ("scss", '\u{e749}', FileKind::Code),
+    ("md", '\u{e73e}', FileKind::Markdown),
+    ("markdown", '\u{e73e}', FileKind::Markdown),
     // Data and configuration, where the *shape* of the file is the useful fact.
-    ("json", '\u{e60b}'),
-    ("toml", '\u{e615}'),
-    ("yaml", '\u{e615}'),
-    ("yml", '\u{e615}'),
-    ("ini", '\u{e615}'),
-    ("conf", '\u{e615}'),
-    ("cfg", '\u{e615}'),
-    ("lock", '\u{f023}'), // nf-fa-lock: a file you do not edit
+    ("json", '\u{e60b}', FileKind::Data),
+    ("toml", '\u{e615}', FileKind::Data),
+    ("yaml", '\u{e615}', FileKind::Data),
+    ("yml", '\u{e615}', FileKind::Data),
+    ("ini", '\u{e615}', FileKind::Config),
+    ("conf", '\u{e615}', FileKind::Config),
+    ("cfg", '\u{e615}', FileKind::Config),
+    // nf-fa-lock: a file you do not edit.
+    ("lock", '\u{f023}', FileKind::Config),
     // Documents, which are four different things wearing one word.
-    ("pdf", '\u{f1c1}'),
-    ("doc", '\u{f1c2}'),
-    ("docx", '\u{f1c2}'),
-    ("odt", '\u{f1c2}'),
-    ("rtf", '\u{f1c2}'),
-    ("xls", '\u{f1c3}'),
-    ("xlsx", '\u{f1c3}'),
-    ("ods", '\u{f1c3}'),
-    ("csv", '\u{f1c3}'),
-    ("tsv", '\u{f1c3}'),
-    ("ppt", '\u{f1c4}'),
-    ("pptx", '\u{f1c4}'),
-    ("odp", '\u{f1c4}'),
-    ("epub", '\u{f02d}'), // nf-fa-book
-    ("mobi", '\u{f02d}'),
+    ("pdf", '\u{f1c1}', FileKind::Document),
+    ("doc", '\u{f1c2}', FileKind::Document),
+    ("docx", '\u{f1c2}', FileKind::Document),
+    ("odt", '\u{f1c2}', FileKind::Document),
+    ("rtf", '\u{f1c2}', FileKind::Document),
+    ("xls", '\u{f1c3}', FileKind::Document),
+    ("xlsx", '\u{f1c3}', FileKind::Document),
+    ("ods", '\u{f1c3}', FileKind::Document),
+    // Spreadsheet-shaped, but *data* to the classifier — the hue stays the
+    // kind's, so these read as data wearing a table rather than as documents.
+    ("csv", '\u{f1c3}', FileKind::Data),
+    ("tsv", '\u{f1c3}', FileKind::Data),
+    ("ppt", '\u{f1c4}', FileKind::Document),
+    ("pptx", '\u{f1c4}', FileKind::Document),
+    ("odp", '\u{f1c4}', FileKind::Document),
+    // nf-fa-book.
+    ("epub", '\u{f02d}', FileKind::Document),
+    ("mobi", '\u{f02d}', FileKind::Document),
     // The one picture format that is a picture of something else.
-    ("svg", '\u{e698}'),
+    ("svg", '\u{e698}', FileKind::Image),
 ];
 
 /// The glyph an extension asks for, or `None` to use the kind's.
@@ -357,12 +373,17 @@ const EXTENSION_GLYPHS: &[(&str, char)] = &[
 /// in the program. The comparison is case-insensitive against the slice rather
 /// than against a lowercased copy: this is asked for every visible row on every
 /// frame, and a `String` per row per frame is a `String` per row per frame.
-fn extension_glyph(name: &str) -> Option<char> {
+///
+/// `kind` is the answer df-core already gave for this row, and it is a veto: a
+/// `.ts` that classified as video is a transport stream, and the TypeScript
+/// logo would be the icon column stating something the rest of the program
+/// disagrees with.
+fn extension_glyph(name: &str, kind: FileKind) -> Option<char> {
     let ext = df_core::fs::extension_of(name)?;
     EXTENSION_GLYPHS
         .iter()
-        .find(|(e, _)| e.eq_ignore_ascii_case(ext))
-        .map(|(_, glyph)| *glyph)
+        .find(|(e, _, k)| e.eq_ignore_ascii_case(ext) && *k == kind)
+        .map(|(_, glyph, _)| *glyph)
 }
 
 /// The plain file glyph, for a card that stands for several files at once —
@@ -466,7 +487,7 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
         // would be.
         GENERIC_LINK
     } else {
-        extension_glyph(&entry.name).unwrap_or_else(|| kind_glyph(kind))
+        extension_glyph(&entry.name, kind).unwrap_or_else(|| kind_glyph(kind))
     };
 
     Icon { glyph, color }
@@ -765,9 +786,46 @@ mod tests {
     #[test]
     fn the_glyph_table_is_lowercase_and_unique() {
         let mut seen = std::collections::HashSet::new();
-        for (ext, _) in EXTENSION_GLYPHS {
+        for (ext, _, _) in EXTENSION_GLYPHS {
             assert!(seen.insert(*ext), "{ext} appears twice");
             assert_eq!(*ext, ext.to_lowercase(), "{ext} is not lowercase");
         }
+    }
+
+    /// **The contract of the third column.** Every row's declared kind is the
+    /// kind df-core actually gives a plain `file.<ext>`, so the glyph table can
+    /// never state something the classifier disagrees with. A row that drifts
+    /// fails here rather than in a listing.
+    #[test]
+    fn the_glyph_table_agrees_with_the_kind_table() {
+        let mut wrong = Vec::new();
+        for (ext, _, declared) in EXTENSION_GLYPHS {
+            let name = format!("sample.{ext}");
+            let actual = df_core::fs::kind_of(&file(&name));
+            if actual != *declared {
+                wrong.push(format!(
+                    "{ext}: table says {declared:?}, df-core says {actual:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// The three rows the third column exists for: a name whose *kind* is not
+    /// what its extension would suggest keeps its kind's glyph.
+    #[test]
+    fn a_glyph_never_overrules_the_classifier() {
+        let theme = Theme::default();
+        let palette = Palette::from_theme(&theme);
+        let glyph = |name: &str| icon_for(&file(name), &theme, &palette, true).glyph;
+
+        // `app.ts` is TypeScript; `00001.ts` is a transport stream, and the
+        // TypeScript logo on it was the bug.
+        assert_eq!(glyph("app.ts"), '\u{e628}');
+        assert_eq!(glyph("00001.ts"), kind_glyph(FileKind::Video));
+
+        // A lockfile is configuration whatever it is written in.
+        assert_eq!(glyph("package-lock.json"), kind_glyph(FileKind::Config));
+        assert_eq!(glyph("tsconfig.json"), '\u{e60b}');
     }
 }

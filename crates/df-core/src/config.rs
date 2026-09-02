@@ -599,10 +599,10 @@ impl Opener {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Matcher {
     /// Matched against the mime type, with `*` and `{a,b}` (`image/*`).
-    Mime(String),
+    Mime(Glob),
     /// Matched against the file name, or the full path when the pattern
     /// contains a `/`. A trailing `/` means "a directory" (`*/`).
-    Glob(String),
+    Name(Glob),
 }
 
 /// One `[[open.rules]]` row.
@@ -647,9 +647,9 @@ impl Default for Config {
                 .iter()
                 .map(|(kind, pattern, openers)| OpenRule {
                     matcher: if *kind == "mime" {
-                        Matcher::Mime((*pattern).to_string())
+                        Matcher::Mime(Glob::new(*pattern))
                     } else {
-                        Matcher::Glob((*pattern).to_string())
+                        Matcher::Name(Glob::new(*pattern))
                     },
                     openers: openers.iter().map(|o| (*o).to_string()).collect(),
                 })
@@ -678,8 +678,8 @@ impl Config {
         };
         for rule in &self.rules {
             let hit = match &rule.matcher {
-                Matcher::Mime(pattern) => !is_dir && glob_match(pattern, mime),
-                Matcher::Glob(pattern) => glob_match(pattern, &dir_name),
+                Matcher::Mime(pattern) => !is_dir && pattern.matches(mime),
+                Matcher::Name(pattern) => pattern.matches(&dir_name),
             };
             if hit {
                 return rule.openers.iter().filter_map(|n| self.opener(n)).collect();
@@ -820,11 +820,13 @@ impl Config {
         // still there under whatever the user added.
         let mut user_rules = Vec::new();
         for table in doc.tables_named("open.rules") {
-            match parse_rule(table) {
+            let mut said = Vec::new();
+            match parse_rule(table, &mut said) {
                 Ok(rule) => user_rules.push(rule),
-                Err(message) => {
-                    warnings.push(ConfigWarning::new(file, table.line, message));
-                }
+                Err(message) => said.push(message),
+            }
+            for message in said {
+                warnings.push(ConfigWarning::new(file, table.line, message));
             }
         }
         if !user_rules.is_empty() {
@@ -836,13 +838,21 @@ impl Config {
     }
 }
 
-fn parse_rule(table: &Table) -> Result<OpenRule, String> {
+/// One `[[open.rules]]`. `said` collects the things that are worth a warning
+/// but are not a reason to throw the rule away — a brace expansion that had to
+/// stop, most of all.
+fn parse_rule(table: &Table, said: &mut Vec<String>) -> Result<OpenRule, String> {
+    let mut compile = |pattern: &str| {
+        let (glob, warning) = Glob::compile(pattern);
+        said.extend(warning);
+        glob
+    };
     let matcher = match (
         table.get("mime").and_then(Value::as_str),
         table.get("glob").and_then(Value::as_str),
     ) {
-        (Some(mime), None) => Matcher::Mime(mime.to_string()),
-        (None, Some(glob)) => Matcher::Glob(glob.to_string()),
+        (Some(mime), None) => Matcher::Mime(compile(mime)),
+        (None, Some(glob)) => Matcher::Name(compile(glob)),
         (Some(_), Some(_)) => {
             return Err("[[open.rules]] has both `mime` and `glob` — pick one".to_string())
         }
@@ -907,7 +917,7 @@ pub struct DirIcon {
     /// A glob. Matched against the directory's name, or against the full path
     /// when the pattern contains a `/` — so both `Work` and `/mnt/*/plex` are
     /// sayable.
-    pub pattern: String,
+    pub pattern: Glob,
     pub text: char,
     pub fg: Option<Color>,
 }
@@ -931,7 +941,7 @@ pub struct DirIcon {
 pub struct FileIcon {
     /// A glob, matched against the file's name — `*.rs`, `Cargo.toml`,
     /// `*.tar.*`.
-    pub pattern: String,
+    pub pattern: Glob,
     pub text: char,
     pub fg: Option<Color>,
 }
@@ -959,7 +969,7 @@ impl Default for Theme {
             dir_icons: DEFAULT_DIR_ICONS
                 .iter()
                 .map(|(pattern, text, fg)| DirIcon {
-                    pattern: (*pattern).to_string(),
+                    pattern: Glob::new(*pattern),
                     text: *text,
                     fg: fg.and_then(Color::parse),
                 })
@@ -981,17 +991,19 @@ impl Theme {
     /// `name` its last component; a pattern with a `/` matches the path.
     pub fn dir_icon(&self, path: &str, name: &str) -> Option<&DirIcon> {
         self.dir_icons.iter().find(|i| {
-            let subject = if i.pattern.contains('/') { path } else { name };
-            glob_match(&i.pattern, subject)
+            let subject = if i.pattern.as_str().contains('/') {
+                path
+            } else {
+                name
+            };
+            i.pattern.matches(subject)
         })
     }
 
     /// The user's icon rule for a file, first rule wins, or `None` to fall
     /// through to df-app's per-kind table.
     pub fn file_icon(&self, name: &str) -> Option<&FileIcon> {
-        self.file_icons
-            .iter()
-            .find(|i| glob_match(&i.pattern, name))
+        self.file_icons.iter().find(|i| i.pattern.matches(name))
     }
 
     pub fn parse(text: &str, file: &Path) -> (Theme, Vec<ConfigWarning>) {
@@ -1036,11 +1048,13 @@ impl Theme {
         // prepending is the only way to override `Work` without deleting it.
         let mut icons = Vec::new();
         for table in doc.tables_named("icon.dir") {
-            match parse_dir_icon(table) {
+            let mut said = Vec::new();
+            match parse_dir_icon(table, &mut said) {
                 Ok(icon) => icons.push(icon),
-                Err(message) => {
-                    warnings.push(ConfigWarning::new(file, table.line, message));
-                }
+                Err(message) => said.push(message),
+            }
+            for message in said {
+                warnings.push(ConfigWarning::new(file, table.line, message));
             }
         }
         if !icons.is_empty() {
@@ -1051,11 +1065,13 @@ impl Theme {
         // File rules ship empty, so there is nothing to prepend to: the list is
         // the user's, in the order they wrote it, and first match still wins.
         for table in doc.tables_named("icon.file") {
-            match parse_file_icon(table) {
+            let mut said = Vec::new();
+            match parse_file_icon(table, &mut said) {
                 Ok(icon) => theme.file_icons.push(icon),
-                Err(message) => {
-                    warnings.push(ConfigWarning::new(file, table.line, message));
-                }
+                Err(message) => said.push(message),
+            }
+            for message in said {
+                warnings.push(ConfigWarning::new(file, table.line, message));
             }
         }
 
@@ -1063,39 +1079,84 @@ impl Theme {
     }
 }
 
-fn parse_dir_icon(table: &Table) -> Result<DirIcon, String> {
-    let (pattern, text, fg) = parse_icon_fields(table, "[[icon.dir]]")?;
+fn parse_dir_icon(table: &Table, said: &mut Vec<String>) -> Result<DirIcon, String> {
+    let (pattern, text, fg) = parse_icon_fields(table, "icon.dir", said)?;
     Ok(DirIcon { pattern, text, fg })
 }
 
-fn parse_file_icon(table: &Table) -> Result<FileIcon, String> {
-    let (pattern, text, fg) = parse_icon_fields(table, "[[icon.file]]")?;
+fn parse_file_icon(table: &Table, said: &mut Vec<String>) -> Result<FileIcon, String> {
+    let (pattern, text, fg) = parse_icon_fields(table, "icon.file", said)?;
+    // A file rule is matched against the *name*, never the path (see
+    // [`Theme::file_icon`]), so a `/` in the pattern is a rule that can never
+    // fire. That is almost always somebody reaching for the directory rule's
+    // path matching, so say which one they wanted.
+    if pattern.as_str().contains('/') {
+        said.push(format!(
+            "[[icon.file]] `name = \"{}\"` can never match — file rules are matched against the name alone; [[icon.dir]] is the one that takes a path",
+            pattern.as_str()
+        ));
+    }
     Ok(FileIcon { pattern, text, fg })
 }
 
+/// The keys an icon rule may have. Anything else is a typo, and a typo that is
+/// quietly ignored is a rule that does not do what it says.
+const ICON_KEYS: &[&str] = &["name", "text", "fg"];
+
 /// The three fields both icon rules share, validated once. `what` is the table
-/// name, so a warning names the table the user actually wrote.
-fn parse_icon_fields(table: &Table, what: &str) -> Result<(String, char, Option<Color>), String> {
+/// name without its brackets, so a warning can name either spelling of it.
+///
+/// `said` takes the complaints that do not sink the rule — an unknown key, a
+/// brace expansion that had to stop, the single-bracket header — because a
+/// rule with a typo beside three good fields is still a rule the user wants.
+fn parse_icon_fields(
+    table: &Table,
+    what: &str,
+    said: &mut Vec<String>,
+) -> Result<(Glob, char, Option<Color>), String> {
+    // `[icon.file]` parses into the same `Table` as `[[icon.file]]` and would
+    // work exactly once, then silently swallow every rule after it — TOML only
+    // allows one table of a given name. Warn and keep going: the rule the user
+    // wrote is the rule they meant.
+    if !table.array_element {
+        said.push(format!(
+            "`[{what}]` is a single table — icon rules are a list, so write `[[{what}]]`"
+        ));
+    }
+    for entry in &table.entries {
+        if !ICON_KEYS.contains(&entry.key.as_str()) {
+            said.push(format!("unknown key `{}` in [[{what}]]", entry.key));
+        }
+    }
     let pattern = table
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("{what} has no `name`"))?;
+        .ok_or_else(|| format!("[[{what}]] has no `name`"))?;
     let text = table
         .get("text")
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("{what} has no `text`"))?;
+        .ok_or_else(|| format!("[[{what}]] has no `text`"))?;
     let mut chars = text.chars();
     let (Some(glyph), None) = (chars.next(), chars.next()) else {
-        return Err(format!("{what} `text = \"{text}\"` must be one character"));
+        return Err(format!(
+            "[[{what}]] `text = \"{text}\"` must be one character"
+        ));
     };
     let fg = match table.get("fg") {
         Some(value) => match value.as_str().and_then(Color::parse) {
             Some(color) => Some(color),
-            None => return Err(format!("{what} `fg` must be a colour like \"#89b4fa\"")),
+            None => return Err(format!("[[{what}]] `fg` must be a colour like \"#89b4fa\"")),
         },
         None => None,
     };
-    Ok((pattern.to_string(), glyph, fg))
+    // An empty pattern matches nothing at all, which is the other way to write
+    // a rule that never fires.
+    if pattern.is_empty() {
+        said.push(format!("[[{what}]] `name` is empty — it can never match"));
+    }
+    let (pattern, warning) = Glob::compile(pattern);
+    said.extend(warning);
+    Ok((pattern, glyph, fg))
 }
 
 // ── Loading ─────────────────────────────────────────────────────────────────
@@ -1235,30 +1296,122 @@ fn read_ratio(value: &Value, dst: &mut [u16; 3]) -> Result<(), String> {
 
 // ── Glob matching ───────────────────────────────────────────────────────────
 
+/// The most alternatives one `{a,b,c}` pattern may expand to.
+///
+/// Brace expansion multiplies: `{a,b}{c,d}{e,f}…` doubles per group, so a
+/// pattern a person can type in half a line can name millions of strings. Sixty
+/// four is well past every rule in the shipped tables (the biggest, yazi's
+/// 3D-model list, is twenty) and small enough that the worst case is a shrug
+/// rather than a hang. Past it the pattern stops expanding and is matched with
+/// its braces intact — and the reader is told, because a rule that quietly
+/// stopped meaning what it says is worse than one that never fired.
+const MAX_ALTERNATIVES: usize = 64;
+
+/// A glob, expanded and lowercased once.
+///
 /// `*`, `?` and `{a,b,c}` alternatives, matched case-insensitively.
 ///
 /// Case-insensitive on purpose: the yazi config this is ported from spells
 /// every extension twice (`{stl,STL,obj,OBJ,…}`) because its matcher is not,
 /// and a rule that opens `photo.JPG` in a text editor is not a rule anybody
-/// wanted. Mime types are matched with the same function — `image/*` and
+/// wanted. Mime types are matched the same way — `image/*` and
 /// `application/{json,xml}` are the same shape of pattern.
-pub fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern = pattern.to_ascii_lowercase();
-    let text = text.to_ascii_lowercase();
-    for alternative in expand_braces(&pattern) {
-        if wildcard_match(alternative.as_bytes(), text.as_bytes()) {
-            return true;
-        }
-    }
-    false
+///
+/// **The work happens at parse time.** Lowercasing the pattern and expanding
+/// its braces used to happen inside every call, so a directory of 200k rows
+/// re-expanded the same twenty alternatives per row per rule — and the
+/// expansion is exponential, so the cost of a pattern was paid over and over
+/// instead of once. Here it is paid when the rule is read, and matching is a
+/// byte walk over strings that are already in the right case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Glob {
+    /// As the user wrote it, for warnings and for the `/` test that decides
+    /// whether a directory rule addresses a path or a name.
+    pattern: String,
+    /// Lowercased, braces expanded. Never empty: a pattern with nothing to
+    /// expand is its own single alternative.
+    alternatives: Vec<String>,
 }
 
-/// `a{b,c}d` → `["abd", "acd"]`. Only the first brace group is expanded per
-/// pass, recursively, which handles nesting without a parser.
-fn expand_braces(pattern: &str) -> Vec<String> {
-    let Some(open) = pattern.find('{') else {
-        return vec![pattern.to_string()];
-    };
+impl Glob {
+    pub fn new(pattern: impl Into<String>) -> Glob {
+        Glob::compile(pattern).0
+    }
+
+    /// Compile, and say so when the brace expansion hit [`MAX_ALTERNATIVES`].
+    pub fn compile(pattern: impl Into<String>) -> (Glob, Option<String>) {
+        let pattern = pattern.into();
+        let (alternatives, truncated) = expand_braces(&pattern.to_ascii_lowercase());
+        let warning = truncated.then(|| {
+            format!(
+                "`{pattern}` expands past {MAX_ALTERNATIVES} alternatives — the rest of its braces are matched literally"
+            )
+        });
+        (
+            Glob {
+                pattern,
+                alternatives,
+            },
+            warning,
+        )
+    }
+
+    /// The pattern as written.
+    pub fn as_str(&self) -> &str {
+        &self.pattern
+    }
+
+    /// Does `text` match? `text` is folded a byte at a time rather than
+    /// lowercased into a new `String`, because this is the per-row call.
+    pub fn matches(&self, text: &str) -> bool {
+        self.alternatives
+            .iter()
+            .any(|alt| wildcard_match(alt.as_bytes(), text.as_bytes()))
+    }
+}
+
+/// `*`, `?` and `{a,b,c}`, compiled on the spot. For one-off matches and tests;
+/// anything matched once per row keeps a [`Glob`] instead.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    Glob::new(pattern).matches(text)
+}
+
+/// `a{b,c}d` → `["abd", "acd"]`, breadth-first so the queue's length is the
+/// running count and the cap can be applied before the work is done rather
+/// than after it. The `bool` is "this hit [`MAX_ALTERNATIVES`]".
+fn expand_braces(pattern: &str) -> (Vec<String>, bool) {
+    let mut done: Vec<String> = Vec::new();
+    let mut queue: Vec<String> = vec![pattern.to_string()];
+    let mut at = 0usize;
+    let mut truncated = false;
+    while at < queue.len() {
+        let current = std::mem::take(&mut queue[at]);
+        at += 1;
+        let Some((head, pieces, tail)) = split_first_brace(&current) else {
+            done.push(current);
+            continue;
+        };
+        // Everything finished, everything still queued, and what this group is
+        // about to add. Over the line, the pattern keeps its braces and is
+        // matched as the literal text it is.
+        if done.len() + (queue.len() - at) + pieces.len() > MAX_ALTERNATIVES {
+            truncated = true;
+            done.push(current);
+            continue;
+        }
+        for piece in pieces {
+            queue.push(format!("{head}{piece}{tail}"));
+        }
+    }
+    (done, truncated)
+}
+
+/// The first balanced `{…}` group: what is before it, its comma-separated
+/// pieces, and what is after. `None` when there is no group to expand —
+/// including an unbalanced brace, which is a literal brace and not an error: a
+/// file really can be called `{draft}.txt`.
+fn split_first_brace(pattern: &str) -> Option<(String, Vec<String>, String)> {
+    let open = pattern.find('{')?;
     let mut depth = 0i32;
     let mut close = None;
     for (i, c) in pattern[open..].char_indices() {
@@ -1274,40 +1427,37 @@ fn expand_braces(pattern: &str) -> Vec<String> {
             _ => {}
         }
     }
-    let Some(close) = close else {
-        // An unbalanced brace is a literal brace, not an error: a file really
-        // can be called `{draft}.txt`.
-        return vec![pattern.to_string()];
-    };
-    let (head, tail) = (&pattern[..open], &pattern[close + 1..]);
-    let mut out = Vec::new();
+    let close = close?;
+    let mut pieces = Vec::new();
     let mut depth = 0i32;
     let mut start = open + 1;
-    let body = &pattern[open + 1..close];
-    for (i, c) in body.char_indices() {
+    for (i, c) in pattern[open + 1..close].char_indices() {
         match c {
             '{' => depth += 1,
             '}' => depth -= 1,
             ',' if depth == 0 => {
-                let piece = &pattern[start..open + 1 + i];
-                out.extend(expand_braces(&format!("{head}{piece}{tail}")));
+                pieces.push(pattern[start..open + 1 + i].to_string());
                 start = open + 1 + i + 1;
             }
             _ => {}
         }
     }
-    let piece = &pattern[start..close];
-    out.extend(expand_braces(&format!("{head}{piece}{tail}")));
-    out
+    pieces.push(pattern[start..close].to_string());
+    Some((
+        pattern[..open].to_string(),
+        pieces,
+        pattern[close + 1..].to_string(),
+    ))
 }
 
 /// `*` (any run) and `?` (one character), iteratively with backtracking — no
-/// recursion, so a pathological pattern cannot blow the stack.
+/// recursion, so a pathological pattern cannot blow the stack. `pattern` is
+/// already lowercase; `text` is folded as it is walked.
 fn wildcard_match(pattern: &[u8], text: &[u8]) -> bool {
     let (mut p, mut t) = (0usize, 0usize);
     let (mut star, mut mark) = (None, 0usize);
     while t < text.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == text[t]) {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == text[t].to_ascii_lowercase()) {
             p += 1;
             t += 1;
         } else if p < pattern.len() && pattern[p] == b'*' {
@@ -1640,6 +1790,82 @@ mod tests {
         );
         assert_eq!(t.file_icons.len(), 1);
         assert_eq!(t.file_icon("readme.md").map(|i| i.text), Some('M'));
+    }
+
+    /// Everything an icon rule can get wrong that is not fatal to it: a typo
+    /// for a key, the single-bracket header, and a pattern that can never fire.
+    #[test]
+    fn icon_rules_warn_about_what_they_quietly_ignored() {
+        let (t, warnings) = Theme::parse(
+            "[[icon.file]]\nname = \"*.rs\"\ntext = \"R\"\ncolour = \"#ff0000\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert_eq!(t.file_icons.len(), 1, "the rule itself is still good");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].message.contains("colour"), "{warnings:?}");
+
+        let (t, warnings) = Theme::parse(
+            "[icon.file]\nname = \"*.rs\"\ntext = \"R\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert_eq!(t.file_icons.len(), 1);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].message.contains("[[icon.file]]"),
+            "{warnings:?}"
+        );
+
+        // `/` never appears in a file name, so this rule is dead on arrival.
+        let (_, warnings) = Theme::parse(
+            "[[icon.file]]\nname = \"/mnt/*/plex\"\ntext = \"P\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].message.contains("can never match"),
+            "{warnings:?}"
+        );
+
+        // …but a directory rule may address a path, and must not warn.
+        let (_, warnings) = Theme::parse(
+            "[[icon.dir]]\nname = \"/mnt/*/plex\"\ntext = \"P\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A pattern that would expand into millions of alternatives stops, says
+    /// so, and matches what is left literally rather than hanging the parse.
+    #[test]
+    fn brace_expansion_is_capped_and_says_so() {
+        let wide: String = std::iter::repeat_n("{a,b}", 20).collect();
+        let (glob, warning) = Glob::compile(format!("*{wide}"));
+        assert!(warning.is_some(), "a 2^20 pattern must warn");
+        assert!(glob.matches("*aaaaaaaaaaaaaaaaaaaa") || !glob.matches("anything"));
+
+        // The rules people actually write are nowhere near the cap.
+        let (glob, warning) = Glob::compile("*.{png,jpg,jpeg,gif,webp,avif,heic}");
+        assert!(warning.is_none());
+        assert!(glob.matches("holiday.HEIC"));
+        assert!(!glob.matches("holiday.raw"));
+
+        let (_, warning) = Theme::parse(
+            &format!("[[icon.file]]\nname = \"*{wide}\"\ntext = \"X\"\n"),
+            std::path::Path::new("theme.toml"),
+        );
+        assert_eq!(warning.len(), 1, "{warning:?}");
+        assert!(warning[0].message.contains("alternatives"), "{warning:?}");
+    }
+
+    /// The expansion is done once, at parse time, and the alternatives are
+    /// already lowercase — so a match is a byte walk and nothing else.
+    #[test]
+    fn a_glob_expands_once_and_keeps_its_pattern() {
+        let glob = Glob::new("*.{RS,Md}");
+        assert_eq!(glob.as_str(), "*.{RS,Md}", "the warning needs the original");
+        assert_eq!(glob.alternatives, vec!["*.rs", "*.md"]);
+        assert!(glob.matches("LIB.RS"));
+        assert!(glob.matches("lib.rs"));
     }
 
     #[test]
