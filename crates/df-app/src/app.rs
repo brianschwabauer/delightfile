@@ -878,6 +878,10 @@ pub struct App {
     /// so that submitting the filter can close the bar without also throwing
     /// away what was typed into it.
     help_query: String,
+    /// How many lines the sheet is showing, published by the frame that laid it
+    /// out so that `PageDown` in the sheet moves by a page *of the sheet*
+    /// rather than by a page of the pane behind it.
+    help_rows: usize,
     /// `Ctrl+p`, `z` and `Z` — the one fuzzy card, whichever of the three
     /// opened it (PLAN §4.4, §7.2). One field because they are one surface:
     /// two of them open at once is not a state that exists.
@@ -1471,6 +1475,7 @@ impl App {
             last_find: None,
             help: None,
             help_query: String::new(),
+            help_rows: 0,
             finder: None,
             mru: finder::Mru::default(),
             zoxide: None,
@@ -3882,14 +3887,20 @@ impl App {
                 self.menu_key(chord, now);
                 continue;
             }
+            // The help sheet is a modal surface like any other, and it is
+            // matched against its own context **alone** — see [`App::help_key`]
+            // for what that buys and what it costs.
+            if self.help.is_some()
+                && !self.overlay_open()
+                && self.prompt.as_ref().is_none_or(|p| p.kind.is_help())
+            {
+                self.help_key(chord, now);
+                continue;
+            }
             // A prompt swallows every key: df-core's editor decides what each
             // one means, including which ones are text (PLAN §4.2).
             if self.prompt.is_some() {
                 self.prompt_key(chord, now);
-                continue;
-            }
-            // …and the help sheet is a search box the moment you type into it.
-            if self.help_typing(chord, now) {
                 continue;
             }
             // A modal surface is matched against its own context **alone**.
@@ -3922,6 +3933,16 @@ impl App {
 
     // ── The modal surfaces: dialog, picker, task panel ──────────────────────
 
+    /// Whether a modal surface has the keyboard.
+    ///
+    /// The disks card belongs on this list and was missing from it, which is
+    /// the whole of why `Esc` did not close it: every other function here —
+    /// [`App::overlay_stack`], [`App::overlay_key`], [`App::close_overlay`],
+    /// the `Esc` ladder's `overlay_open` rung — already knew about the card,
+    /// and this predicate is the gate they are all behind. So `M` opened a
+    /// surface that took no keys at all: `Esc` walked the ladder past it,
+    /// `Enter` and the arrows went to the list underneath, and the only way
+    /// out was the pointer.
     fn overlay_open(&self) -> bool {
         self.dialog.is_some()
             || self.picker.is_some()
@@ -3929,6 +3950,7 @@ impl App {
             || self.spot.is_some()
             || self.finder.is_some()
             || self.search.is_some()
+            || self.mounts.is_some()
     }
 
     /// The context an open surface is matched in. Never stacked on `Files`:
@@ -5753,11 +5775,14 @@ impl App {
     /// printable, and the file commands underneath are one `Esc` away.
     ///
     /// The typed key opens the ordinary [`PromptKind::HelpFilter`] prompt and
-    /// is fed straight into it, so the query is edited by the same line editor,
-    /// shown in the same bar with the same caret, and cancelled by the same
-    /// `Esc` as every other prompt — one filter box, entered two ways. `f`
-    /// still opens it too, and opens it *empty-handed*: the binding says
-    /// "Filter the help", so it means the box rather than the letter.
+    /// is fed straight into it, so the query is edited by the same line editor
+    /// and cancelled by the same `Esc` as every other prompt — one filter box,
+    /// entered two ways. It is *drawn* in the sheet's own heading rather than
+    /// in the top row (see [`crate::chrome::help_overlay`]), because the top
+    /// row is behind the sheet's scrim: the field was legible only as a smear
+    /// of dark grey. `f` still opens it too, and opens it *empty-handed*: the
+    /// binding says "Filter the help", so it means the box rather than the
+    /// letter.
     fn help_typing(&mut self, chord: Chord, now: Instant) -> bool {
         // A modal card is nearer to the user than the sheet behind it, so its
         // keys are its own — the sheet only takes the keyboard when nothing is
@@ -5783,6 +5808,82 @@ impl App {
             self.prompt_key(chord, now);
         }
         true
+    }
+
+    /// Every key while the sheet is up, matched against `[help]` **alone**.
+    ///
+    /// Alone is the point. The sheet stacks on the browser — that is what makes
+    /// it honest about what the keyboard can do, and it is still the stack the
+    /// sheet *lists* — but it must not be the stack the sheet *dispatches*. It
+    /// was, and a key `[help]` had no row for went to `[files]` underneath:
+    /// `PageDown` scrolled the pane behind the scrim, so a sheet nobody could
+    /// see through moved a cursor nobody could see, and closing it landed the
+    /// reader somewhere they had never navigated to.
+    ///
+    /// What `[help]` does not claim is the filter, which is the only other
+    /// thing anyone does in front of this sheet: a printable key opens the
+    /// field and types itself into it, the field's own editing keys reach it,
+    /// and anything left over stops here rather than behind the scrim.
+    fn help_key(&mut self, chord: Chord, now: Instant) {
+        // While the field is open every printable key is text — otherwise the
+        // `f` that means "filter" would re-open the field over the word being
+        // typed into it, and `q` would still quit.
+        let typing = self.prompt.is_some();
+        let mods = chord.mods;
+        let text = !mods.ctrl
+            && !mods.alt
+            && !mods.super_key
+            && matches!(chord.key, Key::Char(_) | Key::Space);
+        if typing && text {
+            self.prompt_key(chord, now);
+            return;
+        }
+        let stack = ContextStack::with(&[Context::Help]);
+        let command =
+            match self
+                .keymap
+                .dispatch(&mut self.keys, &stack, WhenFlags::NONE, chord, now)
+            {
+                Dispatch::Match(command) => command,
+                Dispatch::Pending { continuations, .. } => {
+                    self.which_rows = continuations
+                        .iter()
+                        .map(|c| (c.label(), c.description.clone()))
+                        .collect();
+                    return;
+                }
+                Dispatch::NoMatch => {
+                    if typing {
+                        // The field's own vocabulary: `Enter`, `Backspace`, the
+                        // caret keys, `Ctrl+w`.
+                        self.prompt_key(chord, now);
+                    } else {
+                        // A printable key opens the field on itself; a key that is
+                        // neither a binding nor text is swallowed, on purpose.
+                        self.help_typing(chord, now);
+                    }
+                    return;
+                }
+            };
+        // A page is what the *sheet* shows, measured the same way the pane
+        // measures its own — see [`App::frame`], which publishes it before the
+        // keys are routed for exactly this.
+        let rows = self.help_rows.max(1) as isize;
+        use Command as C;
+        match command {
+            C::Escape => self.escape(),
+            C::OverlayClose => self.close_help(),
+            C::OverlayPrev => self.move_help_cursor(-1),
+            C::OverlayNext => self.move_help_cursor(1),
+            C::HelpPageUp => self.move_help_cursor(-rows),
+            C::HelpPageDown => self.move_help_cursor(rows),
+            C::HelpHalfPageUp => self.move_help_cursor(-(rows / 2).max(1)),
+            C::HelpHalfPageDown => self.move_help_cursor((rows / 2).max(1)),
+            C::HelpTop => self.move_help_cursor(isize::MIN),
+            C::HelpBottom => self.move_help_cursor(isize::MAX),
+            C::HelpFilter => self.open_prompt(PromptKind::HelpFilter),
+            other => log::trace!("`{}` is not a help key", other.id()),
+        }
     }
 
     /// `Esc` with something typed into the help filter: the query goes, the
@@ -7474,7 +7575,9 @@ impl App {
     /// closes, which is the frame the `_` arm resets it (`delightful-ui` §8).
     fn sync_path_lines(&mut self, painter: &egui::Painter, area: egui::Rect) {
         self.path_lines = match &self.prompt {
-            Some(prompt) if !prompt.kind.anchored() => self
+            // The help filter is drawn in the sheet's own heading, not here, so
+            // it never asks the top row for a second line.
+            Some(prompt) if !prompt.kind.anchored() && !prompt.kind.is_help() => self
                 .path_lines
                 .max(chrome::prompt_lines(
                     painter,
@@ -9493,6 +9596,14 @@ impl App {
         self.pane_step = grid::pane_step(first_metrics.as_ref());
         let page =
             crate::viewport::visible_rows(ui::content_rect(layout.list).height(), self.pane_step);
+        // How many lines the help sheet is showing, measured before the keys
+        // are routed and off the same rect the paint uses: its `PageDown` is a
+        // page of the sheet, not of the pane behind it.
+        self.help_rows = chrome::help_page(chrome::help_rect(
+            area,
+            layout.path.bottom() + ui::GAP,
+            area.bottom() - ui::GAP,
+        ));
         self.route_keys(page, now);
         self.which.update(self.keys.which_key_due(), now);
         // The two write-behind timers, both of which are deadlines rather than
@@ -10514,7 +10625,11 @@ impl App {
         // of its own would move every row in the window to say so
         // (`delightful-ui` §8).
         match &self.prompt {
-            Some(prompt) if !prompt.kind.anchored() => {
+            // …except the help filter, which belongs to the sheet drawn over
+            // this row: a field painted here would be behind the sheet's own
+            // scrim, which is where it used to be — the caret was legible only
+            // as a smear.
+            Some(prompt) if !prompt.kind.anchored() && !prompt.kind.is_help() => {
                 // The directory the prompt is about, kept as context on the
                 // left when the field can spare the room.
                 chrome::prompt_row(&paint, layout.path, prompt, self.prompt_tail());
@@ -10544,11 +10659,33 @@ impl App {
         // covered its own input would be asking a question it hid the answer
         // box for.
         if let Some((rect, lines, total, help)) = &help_view {
-            chrome::help_overlay(&paint, area, *rect, lines, help, *total);
+            // The live field, drawn in the sheet's heading: `help_query` is
+            // what the sheet is narrowed by either way, and the caret is there
+            // only while the field is open.
+            chrome::help_overlay(
+                &paint,
+                area,
+                *rect,
+                lines,
+                help,
+                *total,
+                help::Filter {
+                    query: &self.help_query,
+                    caret: self
+                        .prompt
+                        .as_ref()
+                        .filter(|prompt| prompt.kind.is_help())
+                        .map(|prompt| prompt.caret()),
+                },
+            );
             chrome::hints(
                 &paint,
                 chrome::hint_rect(*rect),
-                &[("↑↓", "move"), ("type", "to filter"), ("Esc", "close")],
+                &[
+                    ("↑↓", "move"),
+                    ("PgUp PgDn", "page"),
+                    ("Esc", "clear / close"),
+                ],
             );
         }
 

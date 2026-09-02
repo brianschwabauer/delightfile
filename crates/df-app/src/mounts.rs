@@ -447,8 +447,22 @@ impl Card {
 
 // ── The card ────────────────────────────────────────────────────────────────
 
-/// One device's row. Two lines: the name and where it is, then the hardware.
-const ROW: f32 = 34.0;
+/// One device's row. Two lines: the name, then the hardware under it.
+///
+/// Tall enough for both of them and the air between. It was 34 — one line of
+/// [`FONT`] plus its padding — so the second line was drawn *through* the
+/// first: the name and the detail shared a baseline and the row read as one
+/// smudge.
+const ROW: f32 = 46.0;
+/// Where the name's centre sits in the row, and the detail's under it.
+const NAME_LINE: f32 = 15.0;
+const DETAIL_LINE: f32 = 31.0;
+/// The row's own left/right inset, inside the card's [`PAD`].
+const ROW_PAD: f32 = 10.0;
+/// The most of a row the right-hand status may take before it is ellipsised.
+/// A mount point is a path and paths are long; the name is what the row is
+/// *about*, so it keeps the majority.
+const STATUS_SHARE: f32 = 0.42;
 /// The card's inner padding — `chrome::CARD_PAD`, not a number of its own.
 ///
 /// The plate is [`crate::chrome::card`], whose radius is
@@ -458,6 +472,11 @@ const ROW: f32 = 34.0;
 /// mistake the basket tray made in the other direction.
 const PAD: f32 = crate::chrome::CARD_PAD;
 const TITLE: f32 = 20.0;
+/// The title row and the air under it. It used to be two title rows' worth,
+/// which was the space the keys were repeated in; with them gone to the hint
+/// strip the heading is one line, and the rows start under it rather than
+/// under a band of nothing.
+const HEADING: f32 = TITLE + 8.0;
 const MAX_WIDTH: f32 = 560.0;
 const FONT: f32 = 13.0;
 
@@ -479,7 +498,7 @@ impl Geometry {
 /// (`delightful-ui` §16).
 pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
     let visible = card.devices.len().saturating_sub(card.first).clamp(1, ROWS);
-    let height = PAD * 2.0 + TITLE * 2.0 + 6.0 + visible as f32 * ROW + crate::chrome::HINT_ROW;
+    let height = PAD * 2.0 + HEADING + visible as f32 * ROW + crate::chrome::HINT_ROW;
     let width = (area.width() - 40.0).clamp(0.0, MAX_WIDTH);
     let height = height.min((area.height() - 40.0).max(0.0));
     let top = area.top() + (area.height() - height).max(0.0) * crate::chrome::OPTICAL_CENTRE;
@@ -487,7 +506,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         egui::pos2(area.center().x - width / 2.0, top),
         egui::vec2(width, height),
     );
-    let body_top = rect.top() + PAD + TITLE * 2.0 + 6.0;
+    let body_top = rect.top() + PAD + HEADING;
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + PAD, body_top),
         egui::pos2(
@@ -536,18 +555,11 @@ pub fn paint(
         egui::FontId::proportional(FONT + 2.0),
         palette.text,
     );
-    // The keys, on the card rather than in a help sheet: this surface has three
-    // of them and they are not guessable from the rows.
-    painter.text(
-        egui::pos2(
-            geometry.card.right() - PAD,
-            geometry.card.top() + PAD + TITLE / 2.0,
-        ),
-        egui::Align2::RIGHT_CENTER,
-        "Enter mount / open · e eject · Esc close",
-        egui::FontId::proportional(FONT - 1.5),
-        palette.overlay0,
-    );
+    // The keys are *not* repeated here: they are on the hint strip along the
+    // bottom, where every other overlay puts them
+    // ([`crate::chrome::hint_rect`]). Saying them twice on one card taught the
+    // eye that the title row was a second place to look, and the two copies
+    // did not even agree — the strip knew about `u`, this line did not.
 
     if let Some(message) = card.empty_message() {
         painter.text(
@@ -605,30 +617,40 @@ pub fn paint(
         } else {
             palette.overlay1
         };
-        clipped.text(
-            egui::pos2(rect.left() + 10.0, rect.top() + 10.0),
-            egui::Align2::LEFT_TOP,
-            &device.label,
-            egui::FontId::proportional(FONT),
-            palette.text,
-        );
-        crate::chrome::truncated(
+        // The status first, because it is right-aligned and the two lines
+        // beside it are given whatever it leaves.
+        let status_width = right_aligned(
             &clipped,
-            egui::pos2(rect.left() + 10.0, rect.bottom() - 10.0),
-            &device.detail(),
-            palette.overlay0,
-            (rect.width() * 0.62).max(0.0),
-        );
-        crate::chrome::truncated(
-            &clipped,
-            egui::pos2(rect.left() + rect.width() * 0.64, rect.center().y),
+            egui::pos2(rect.right() - ROW_PAD, rect.center().y),
             &if busy {
                 "working…".to_string()
             } else {
                 device.status()
             },
             accent,
-            (rect.width() * 0.36 - 10.0).max(0.0),
+            (rect.width() * STATUS_SHARE - ROW_PAD).max(0.0),
+            egui::FontId::proportional(FONT - 1.0),
+        );
+        let left = rect.left() + ROW_PAD;
+        let text_width = (rect.right() - ROW_PAD - status_width - crate::ui::GAP - left).max(0.0);
+        crate::chrome::truncated_in(
+            &clipped,
+            egui::pos2(left, rect.top() + NAME_LINE),
+            &device.label,
+            palette.text,
+            text_width,
+            egui::FontId::proportional(FONT),
+        );
+        // The hardware line: dimmer *and* smaller, so it reads as a caption
+        // under the name rather than as a second name (`ui-anti-slop`:
+        // hierarchy by size, not by decoration).
+        crate::chrome::truncated_in(
+            &clipped,
+            egui::pos2(left, rect.top() + DETAIL_LINE),
+            &device.detail(),
+            palette.subtext0,
+            text_width,
+            egui::FontId::proportional(FONT - 1.5),
         );
     }
     if card.devices.len() > geometry.rows.len() {
@@ -643,6 +665,46 @@ pub fn paint(
             );
         }
     }
+}
+
+/// One ellipsised line, right-aligned on `right` and centred on its `y`,
+/// returning how wide it ended up.
+///
+/// [`crate::chrome::truncated`]'s twin. A left-aligned line can be drawn where
+/// it is told; a right-aligned one has to be laid out before it knows where it
+/// starts, and the caller wants that width anyway — it is what is left for the
+/// columns beside it.
+fn right_aligned(
+    painter: &egui::Painter,
+    right: egui::Pos2,
+    text: &str,
+    color: egui::Color32,
+    max_width: f32,
+    font: egui::FontId,
+) -> f32 {
+    use egui::text::{LayoutJob, TextFormat, TextWrapping};
+    let mut job = LayoutJob::single_section(
+        text.to_string(),
+        TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = TextWrapping {
+        max_width,
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = painter.layout_job(job);
+    let size = galley.size();
+    painter.galley(
+        egui::pos2(right.x - size.x, right.y - size.y / 2.0),
+        galley,
+        color,
+    );
+    size.x
 }
 
 #[cfg(test)]
@@ -927,6 +989,54 @@ mod tests {
         let g = geometry(area, &card);
         assert!(g.rows.is_empty());
         assert!(g.body.is_positive());
+    }
+
+    /// A row is two lines, and they do not sit on top of each other.
+    ///
+    /// They did: the name was drawn from the row's top and the detail centred
+    /// on its bottom edge, in a row one line tall, so the two overlapped by
+    /// most of their height and the card read as a column of smudges. The
+    /// check is the geometry rather than the pixels — the two baselines are a
+    /// line apart, and the row is tall enough to hold both with air left over.
+    #[test]
+    fn a_row_has_room_for_both_of_its_lines() {
+        // A line of text is about its point size plus its leading; the two
+        // faces here are FONT and FONT - 1.5.
+        let name = FONT * 1.3;
+        let detail = (FONT - 1.5) * 1.3;
+        assert!(
+            DETAIL_LINE - NAME_LINE >= (name + detail) / 2.0,
+            "the two lines overlap: {NAME_LINE} then {DETAIL_LINE}"
+        );
+        assert!(
+            NAME_LINE - name / 2.0 > 0.0,
+            "the name is cut off at the top"
+        );
+        assert!(
+            ROW - (DETAIL_LINE + detail / 2.0) > 0.0,
+            "the detail is cut off at the bottom"
+        );
+    }
+
+    /// …and the card is tall enough for the rows it draws, the heading over
+    /// them and the hint strip under them — the strip the keys now live in
+    /// alone, having been in the title row as well.
+    #[test]
+    fn the_card_is_as_tall_as_what_it_draws() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+        let mut card = Card::new();
+        card.update(devices_from(&objects()));
+        let g = geometry(area, &card);
+        assert_eq!(g.rows.len(), 2);
+        let last = g.rows.last().expect("two rows");
+        assert_eq!(last.height(), ROW);
+        assert!(
+            g.card.bottom() - last.bottom() >= crate::chrome::HINT_ROW + PAD,
+            "the hint strip would be drawn over the last row"
+        );
+        // The rows sit under the heading and never overlap each other.
+        assert!(g.rows[0].top() >= g.card.top() + PAD + TITLE);
+        assert!(g.rows[1].top() >= g.rows[0].bottom());
     }
 
     /// An empty reply is a normal machine, not a failure.

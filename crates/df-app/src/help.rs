@@ -285,6 +285,19 @@ pub fn context_title(context: Context) -> &'static str {
     }
 }
 
+/// What the sheet's heading says about the filter: the query it is narrowed by,
+/// and where the field's caret is in it while the field is open.
+///
+/// One struct rather than two arguments because the two are one thing — the
+/// query without the caret is a *committed* filter, the query with it is a
+/// field being typed into, and the heading draws them differently.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Filter<'a> {
+    pub query: &'a str,
+    /// The caret's byte offset into `query`, or `None` when the field is shut.
+    pub caret: Option<usize>,
+}
+
 /// The help overlay's own view state: where the cursor is and where the list
 /// has scrolled to. The scrolling itself is [`crate::viewport`]'s rule, the
 /// same one the file panes use.
@@ -297,6 +310,10 @@ pub struct Help {
 impl Help {
     /// Move the cursor by `delta` *selectable* lines, skipping the headings and
     /// clamping at both ends.
+    ///
+    /// The step is **saturating**, so `isize::MIN` and `isize::MAX` are the two
+    /// ends of the sheet — which is what `Home` and `End` pass, rather than a
+    /// count of lines the caller would have to ask for first.
     pub fn move_cursor(&mut self, lines: &[HelpLine], delta: isize) {
         let selectable: Vec<usize> = lines
             .iter()
@@ -315,7 +332,9 @@ impl Help {
             .iter()
             .position(|i| *i >= self.cursor)
             .unwrap_or(selectable.len() - 1) as isize;
-        let next = (at + delta).clamp(0, selectable.len() as isize - 1) as usize;
+        let next = at
+            .saturating_add(delta)
+            .clamp(0, selectable.len() as isize - 1) as usize;
         self.cursor = selectable[next];
     }
 
@@ -511,6 +530,29 @@ mod tests {
         assert_eq!(help.cursor, 5, "and it stops at the bottom");
         help.move_cursor(&lines, -10);
         assert_eq!(help.cursor, 1, "…and at the top");
+    }
+
+    /// `Home` and `End` are a saturating step, not a counted one: the caller
+    /// passes the two ends of `isize` and lands on the two ends of the sheet.
+    /// The step used to be a plain `+`, which overflowed on exactly that.
+    #[test]
+    fn the_ends_of_the_sheet_are_one_step_away() {
+        let lines = lines(&sample(), "");
+        let last = lines
+            .iter()
+            .rposition(HelpLine::selectable)
+            .expect("the sample has rows");
+        let mut help = Help::default();
+        help.reset(&lines);
+        help.move_cursor(&lines, isize::MAX);
+        assert_eq!(help.cursor, last, "End is the last binding");
+        help.move_cursor(&lines, isize::MIN);
+        assert_eq!(help.cursor, 1, "…and Home is the first, over its heading");
+        // A page is an ordinary step, and it stops at the ends like any other.
+        help.move_cursor(&lines, 2);
+        assert_eq!(help.cursor, 3);
+        help.move_cursor(&lines, 40);
+        assert_eq!(help.cursor, last);
     }
 
     /// An empty sheet — every binding filtered away — must not leave the cursor

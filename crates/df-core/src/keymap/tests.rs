@@ -524,6 +524,59 @@ fn the_help_browser_only_lists_what_is_reachable() {
     assert_eq!(bindings[0].context, Context::Tasks);
 }
 
+/// The help sheet takes the keyboard whole, so `[help]` has to have a row for
+/// every key that walks a list.
+///
+/// The sheet is dispatched against `[help]` **alone** (see `App::help_key`),
+/// which is what this asserts: matched in that context by itself, every
+/// list key resolves — and the browser's own keys, which used to be reached
+/// *through* the sheet, do not. A `PageDown` that fell through to `[files]`
+/// scrolled the pane behind the scrim, and the reader had no way of seeing
+/// what they had moved.
+#[test]
+fn the_help_sheet_binds_every_key_that_walks_a_list() {
+    let km = Registry::defaults();
+    let stack = ContextStack::with(&[Context::Help]);
+    for (keys, expected) in [
+        ("esc", Command::Escape),
+        ("ctrl+c", Command::OverlayClose),
+        ("f1", Command::OverlayClose),
+        ("up", Command::OverlayPrev),
+        ("down", Command::OverlayNext),
+        ("pageup", Command::HelpPageUp),
+        ("pagedown", Command::HelpPageDown),
+        ("ctrl+u", Command::HelpHalfPageUp),
+        ("ctrl+d", Command::HelpHalfPageDown),
+        ("home", Command::HelpTop),
+        ("end", Command::HelpBottom),
+        ("f", Command::HelpFilter),
+    ] {
+        assert_eq!(
+            press(&km, &stack, WhenFlags::NONE, keys),
+            Dispatch::Match(expected),
+            "{keys}"
+        );
+    }
+    // …and nothing else does. Every one of these is a `[files]` or `[global]`
+    // key that reached the listing from behind the sheet: `q` quit it, `j`
+    // moved its cursor, `g g` armed a chord in it.
+    for keys in [
+        "q", "j", "k", "g", "d", "space", "enter", "ctrl+b", "delete",
+    ] {
+        assert_eq!(
+            press(&km, &stack, WhenFlags::NONE, keys),
+            Dispatch::NoMatch,
+            "{keys} reaches the browser from inside the help sheet"
+        );
+    }
+    // No chord in `[help]`: the sheet is typed into, and a `g` that armed a
+    // sequence would be a `g` the filter never received.
+    assert!(km
+        .active_bindings(&stack, WhenFlags::NONE)
+        .iter()
+        .all(|b| b.seq.len() == 1));
+}
+
 /// PLAN §5's conflict dialog answers — overwrite / skip / rename /
 /// apply-to-all — dispatch from the Confirm context, so the help sheet and
 /// which-key can offer them instead of the user having to be told.
