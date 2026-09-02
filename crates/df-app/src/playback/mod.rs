@@ -856,6 +856,21 @@ impl Player {
         self.pb.step(frames);
     }
 
+    /// Seek to a fraction of the file — what a hand on the scrubber means.
+    ///
+    /// A file with no duration in its header has no fraction to seek to: a
+    /// scrubber on a track with no end is a control that cannot be aimed, and
+    /// guessing a target from a bar that means nothing would be worse than the
+    /// drag doing nothing at all.
+    pub fn seek_fraction(&mut self, fraction: f32, now: Instant) {
+        self.note_activity(now);
+        let duration = self.state().duration_us;
+        if duration <= 0 {
+            return;
+        }
+        self.seek_to((f64::from(fraction.clamp(0.0, 1.0)) * duration as f64) as i64);
+    }
+
     pub fn seek_to(&mut self, us: i64) {
         let dur = self.state().duration_us;
         self.await_frame();

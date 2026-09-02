@@ -122,6 +122,11 @@ const FOLDER_RESORT: Duration = Duration::from_millis(500);
 /// that a walk away from the desk does, which is the trade PLAN §1 asks for.
 const POINTER_PARKED: Duration = Duration::from_secs(30);
 
+/// How long the seek handle takes to spring back after a drag that ran off the
+/// end of the track. delightviewer's `SCRUB_SPRING`, so the same gesture on the
+/// same file settles at the same speed in both programs.
+const SCRUB_SPRING: Duration = Duration::from_millis(420);
+
 /// How often a window that reported itself occluded is probed anyway.
 ///
 /// Long, because it is not a retry: a covered window is expected to stay
@@ -814,6 +819,20 @@ pub struct App {
     /// after that (PLAN §4.3). `None` is the resting state of a session that
     /// has only ever looked at photographs: no cpal device, no decode thread.
     player: Option<Player>,
+    /// Where the position strip drew its controls last frame (PLAN §7.5).
+    ///
+    /// The strip lays itself out during the paint — the track's ends depend on
+    /// how wide the two timecodes came out — so the hit test reads the previous
+    /// frame's answer rather than guessing at the geometry a second time. One
+    /// frame of lag on a target that only moves when the window is resized.
+    transport_hits: Option<crate::playback::strip::Hits>,
+    /// A scrub in progress: the pointer went down on the track and everything
+    /// it does until it comes up is a seek, wherever it wanders.
+    scrubbing: bool,
+    /// The Range's rubber band while a drag is past the end of the track…
+    scrub_overshoot: f32,
+    /// …and the spring that puts it back on release, as `(from, when)`.
+    scrub_spring: Option<(f32, Instant)>,
     /// ffmpeg's answer about the hovered file, off the paint thread.
     prober: Prober,
     /// The last few probes, so arrowing back onto a clip does not re-open it.
@@ -1414,6 +1433,10 @@ impl App {
             watcher,
             preview,
             player: None,
+            transport_hits: None,
+            scrubbing: false,
+            scrub_overshoot: 0.0,
+            scrub_spring: None,
             prober,
             probes: Vec::new(),
             probing: None,
@@ -3742,6 +3765,127 @@ impl App {
     fn media_hovered(&self) -> bool {
         self.hovered_kind()
             .is_some_and(|(_, kind)| is_temporal(&kind))
+    }
+
+    /// **The pointer's half of the transport** (PLAN §7.5): the play/pause
+    /// button, and the scrubber on the position strip.
+    ///
+    /// Ported from delightviewer's `media_pointer`, including the two rules
+    /// that make it feel like a control rather than like a region that reacts:
+    ///
+    /// **The strip has to be *visible* to be pressable.** `strip_alpha` is
+    /// sampled before the activity note below wakes it, so the press that
+    /// brings a faded strip back is the press that brings it back and nothing
+    /// else — a blind seek landing wherever the hand happened to be over the
+    /// picture is the worst thing a scrubber can do.
+    ///
+    /// **A grab is captured.** Once the press has landed on the track, every
+    /// pointer position until the release is a seek, clamped into the track's
+    /// own x — so the drag can wander off the bar vertically, which every drag
+    /// does, without the seek letting go.
+    ///
+    /// Returns true when the press belonged to the strip, so nothing under it
+    /// acts on the same click.
+    fn media_pointer(&mut self, preview: egui::Rect, pointer: &Pointer, now: Instant) -> bool {
+        // A spent spring is dropped rather than kept at its target: `animating`
+        // reads the option, and an option that is never `None` is a window that
+        // never stops asking for frames (PLAN §1).
+        if self
+            .scrub_spring
+            .is_some_and(|(_, at)| now.saturating_duration_since(at) >= SCRUB_SPRING)
+        {
+            self.scrub_spring = None;
+        }
+        let alpha = match (self.transport().is_some(), &self.player) {
+            (true, Some(player)) => player.strip_alpha(now),
+            _ => {
+                self.scrubbing = false;
+                return false;
+            }
+        };
+        // **The wake comes before everything else**, including the geometry.
+        // A strip that has faded out reports no controls at all, so a pass that
+        // gave up on the missing geometry first would be a strip nothing but a
+        // transport key could ever bring back — the pointer would move over the
+        // pane and the controls would stay gone. Any pointer activity over the
+        // pane wakes it; `alpha` was read a line above, so the press that woke
+        // it is still a press on an invisible strip and lands on nothing.
+        let over_pane = pointer.at.is_some_and(|at| preview.contains(at));
+        if over_pane && (pointer.moved || pointer.down || pointer.pressed) {
+            if let Some(player) = self.player.as_mut() {
+                player.note_activity(now);
+            }
+        }
+        let Some(hits) = self.transport_hits else {
+            self.scrubbing = false;
+            return false;
+        };
+        let Some(at) = pointer.at else {
+            return self.scrubbing;
+        };
+        let live = alpha > 0.01;
+
+        if pointer.pressed {
+            self.scrub_spring = None;
+            // The play glyph is a button, not a scrubber. Tested first and
+            // returned from, so a press that lands in the two points where the
+            // button's expanded box meets the track is a press of the button —
+            // the thing under the finger, not the thing beside it.
+            if live && hits.glyph.expand(2.0).contains(at) {
+                if let Some(player) = self.player.as_mut() {
+                    player.play_pause(now);
+                }
+                self.scrubbing = false;
+                return true;
+            }
+            // Only the seek *bar* scrubs: the timecodes either side of it are
+            // text, and a click on a number is a click on the pane.
+            self.scrubbing = live && hits.bar.expand2(egui::vec2(4.0, 10.0)).contains(at);
+        }
+        if !self.scrubbing {
+            return false;
+        }
+        if pointer.down || pointer.pressed {
+            let fraction = ((at.x - hits.bar.left()) / hits.bar.width().max(1.0)).clamp(0.0, 1.0);
+            if let Some(player) = self.player.as_mut() {
+                player.seek_fraction(fraction, now);
+            }
+            // The Range's rubber band: past either end of the track the handle
+            // keeps following the pointer, but asymptotically — so the drag
+            // says "this is the end" by going elastic rather than by going
+            // dead.
+            self.scrub_overshoot = crate::playback::strip::overshoot_past(hits.bar, at.x);
+        }
+        if pointer.released {
+            self.scrubbing = false;
+            // Let go and it snaps back on `back-out`, the curve every other
+            // spring in the program settles on (`crate::motion`).
+            if self.scrub_overshoot != 0.0 {
+                self.scrub_spring = Some((self.scrub_overshoot, now));
+                self.scrub_overshoot = 0.0;
+            }
+        }
+        true
+    }
+
+    /// How far the seek handle is displaced right now: the live drag's rubber
+    /// band, or the tail of the spring that is putting it back.
+    fn scrub_overshoot_at(&self, now: Instant) -> f32 {
+        if self.scrubbing {
+            return self.scrub_overshoot;
+        }
+        match self.scrub_spring {
+            Some((from, at)) => {
+                let t =
+                    now.saturating_duration_since(at).as_secs_f32() / SCRUB_SPRING.as_secs_f32();
+                if t >= 1.0 {
+                    0.0
+                } else {
+                    from * (1.0 - crate::motion::Easing::BackOut.apply(t))
+                }
+            }
+            None => 0.0,
+        }
     }
 
     /// Keep the controller pointed at the hovered file (PLAN §10's mount /
@@ -9776,6 +9920,15 @@ impl App {
         // also changing what the keyboard means.
         let any_press = pointer.pressed || pointer.secondary || pointer.middle;
 
+        // ── The transport, before anything else reads the press ─────────────
+        // The position strip is the topmost thing over the preview pane, so it
+        // gets the first look at the pointer — and once a scrub has started it
+        // keeps the pointer until the release, wherever the drag wanders. Not
+        // while a modal or a menu owns the window: chrome that is *over* the
+        // strip owns what lands on it.
+        let scrubbing =
+            overlay.is_none() && !menu_live && self.media_pointer(layout.preview, &pointer, now);
+
         // A press anywhere but on the menu dismisses it, and the press is spent
         // doing so: a click that closed a menu *and* moved the cursor under it
         // would act on something the menu was covering.
@@ -9830,7 +9983,10 @@ impl App {
         // ── Drag: the band, and the seam the DnD phase takes ────────────────
         // Not while the menu owns the pointer: a drag that began *on* a menu
         // row is a slip of the hand, not a band select of the rows underneath.
-        if pointer.pressed && !dismissing && !menu_live {
+        // …and not while the press belongs to the transport: a drag that began
+        // on the scrubber is a seek, not a band select of the rows behind the
+        // preview pane.
+        if pointer.pressed && !dismissing && !menu_live && !scrubbing {
             self.press = pointer.at.map(|at| PressStart {
                 at,
                 on_row: matches!(over, Some((Control::Row(Column::List, _), _))),
@@ -10101,6 +10257,11 @@ impl App {
         self.preview.sync_doc(now);
         // The wheel's coast over the document, sampled once a frame (PLAN §7.5).
         self.preview.tick_fling(now);
+        // …and the animated image's playhead, by the same rule and in the same
+        // place: this frame is here because the pane asked for a wake-up at the
+        // moment the frame on screen ran out (`Pane::next_deadline`), not
+        // because anything is polling.
+        self.preview.tick_anim(now);
         // The transport follows the same cursor, one line later and by the same
         // rule: after the keys, so a held `↓` mounts what it stopped on.
         self.sync_playback(now);
@@ -10484,7 +10645,26 @@ impl App {
                     }
                 }
             }
-            crate::playback::strip::paint(&paint, content, state, strip_alpha);
+            // …and the strip over it, which reports back where its controls
+            // landed so the *next* frame's pointer pass can claim exactly the
+            // track and exactly the button.
+            self.transport_hits = crate::playback::strip::paint(
+                &paint,
+                content,
+                state,
+                strip_alpha,
+                pointer.at.filter(|at| layout.preview.contains(*at)),
+                crate::playback::strip::Grab {
+                    scrubbing: self.scrubbing,
+                    down: pointer.down,
+                    overshoot: self.scrub_overshoot_at(now),
+                },
+            );
+        } else {
+            // Nothing mounted: the controls are not on screen, so there is
+            // nothing for a press to land on. Left standing, last file's
+            // geometry would take a click over a photograph.
+            self.transport_hits = None;
         }
 
         // ── The chrome ──────────────────────────────────────────────────────
@@ -10804,6 +10984,10 @@ impl App {
             // does — which brings its own frame with it.
             ("targets", self.targets.animating()),
             ("spring", self.spring_back.is_some()),
+            // The seek handle's rubber band settling back onto the end of the
+            // track. It is dropped the moment it lands (`media_pointer`), so
+            // this cannot be stuck on.
+            ("scrub", self.scrub_spring.is_some()),
             (
                 "tasks",
                 self.panel.as_ref().is_some_and(|p| p.animating(now)),
