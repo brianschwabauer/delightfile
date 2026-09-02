@@ -34,6 +34,7 @@
 //! show_symlink = true
 //! scrolloff = 5
 //! folder_sizes = true      # recursive directory sizes in the size column
+//! folder_size_ttl = 600    # seconds a walked size is reused before re-walking
 //!
 //! [tasks]
 //! micro_workers = 10
@@ -108,6 +109,13 @@ pub const DEFAULT_RATIO: [u16; 3] = [1, 4, 3];
 /// Five is about a third of a short list — enough that the next few files are
 /// always visible, few enough that the cursor still reaches the bottom row.
 pub const DEFAULT_SCROLLOFF: usize = 5;
+
+/// Seconds a walked folder size is reused before the walk is run again.
+///
+/// Mirrors [`crate::du::DEFAULT_FOLDER_SIZE_TTL`], as a plain number because
+/// this is a config file and `600` is what somebody types. The essay on why ten
+/// minutes lives on the constant it mirrors.
+pub const DEFAULT_FOLDER_SIZE_TTL: u64 = 600;
 
 /// Workers for the small, latency-sensitive jobs (stat, mime, thumbnails) and
 /// for the big ones (copies, moves, deletes). 10/10 as configured: enough
@@ -444,6 +452,19 @@ pub struct MgrConfig {
     /// that person does not have to choose between the size column and their
     /// network.
     pub folder_sizes: bool,
+    /// How long a walked folder size is served before it is earned again, in
+    /// seconds (PLAN §7.3).
+    ///
+    /// The number that decides whether leaving a folder and coming back costs
+    /// anything. Inside it, a revisit draws the remembered totals and starts no
+    /// walk; outside it, the numbers are still drawn — wearing their `~` — and a
+    /// walk corrects them behind. Ten minutes is a browsing session's worth of
+    /// in-and-out.
+    ///
+    /// `0` turns the reuse off and makes every revisit a fresh walk, which is
+    /// the old behaviour and is only right on a directory somebody else is
+    /// writing to continuously.
+    pub folder_size_ttl: u64,
 }
 
 impl Default for MgrConfig {
@@ -459,6 +480,7 @@ impl Default for MgrConfig {
             show_symlink: true,
             scrolloff: DEFAULT_SCROLLOFF,
             folder_sizes: true,
+            folder_size_ttl: DEFAULT_FOLDER_SIZE_TTL,
         }
     }
 }
@@ -686,6 +708,12 @@ impl Config {
                     "show_symlink" => read_bool(value, &mut config.mgr.show_symlink),
                     "scrolloff" => read_usize(value, &mut config.mgr.scrolloff),
                     "folder_sizes" => read_bool(value, &mut config.mgr.folder_sizes),
+                    "folder_size_ttl" => {
+                        let mut seconds = config.mgr.folder_size_ttl as usize;
+                        let r = read_usize(value, &mut seconds);
+                        config.mgr.folder_size_ttl = seconds as u64;
+                        r
+                    }
                     _ => Err(format!("unknown key `{}` in [mgr]", entry.key)),
                 };
                 if let Err(message) = ok {

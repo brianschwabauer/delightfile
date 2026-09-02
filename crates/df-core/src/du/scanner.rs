@@ -32,18 +32,21 @@
 //! Two covers the real concurrency: the tree you are looking at, and the one you
 //! just left that has not noticed yet.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::fs::Notifier;
 use crate::{DfError, Result};
 
-use super::cache::{current_mtime, DuCache, DuRecord, HeavyHitter};
-use super::walk::{child_counts, walk, ChildCount, DuOptions, DuTotals, DuUpdate};
+use super::cache::{
+    count_names, current_mtime, ChildTotal, DirStamp, DuCache, DuRecord, HeavyHitter, Remembered,
+};
+use super::walk::{child_counts, walk_reusing, ChildCount, DuOptions, DuTotals, DuUpdate};
 
 /// Walk workers. See the module essay.
 pub const DU_WORKERS: usize = 2;
@@ -281,11 +284,37 @@ impl DuScanner {
         self.updates.try_iter().collect()
     }
 
-    /// A directory's remembered totals, if fresh. See [`DuCache::get`] — and
-    /// its warning that "fresh" means the directory's own `mtime`, not its
-    /// subtree's.
+    /// How long a walk's answer is served before it is re-earned.
+    pub fn ttl(&self) -> Duration {
+        lock(&self.cache).ttl()
+    }
+
+    /// Set that lifetime — `[mgr] folder_size_ttl`, in practice.
+    pub fn set_ttl(&self, ttl: Duration) {
+        lock(&self.cache).set_ttl(ttl);
+    }
+
+    /// A directory's remembered totals, if they were walked inside the TTL.
+    /// See [`DuCache::fresh`] — and the module essay's warning that recent is
+    /// not the same thing as true.
     pub fn cached(&self, dir: &Path) -> Option<DuRecord> {
-        lock(&self.cache).get(dir).cloned()
+        lock(&self.cache).fresh(dir, Instant::now()).cloned()
+    }
+
+    /// What is remembered about `dir` and whether it still needs a walk.
+    ///
+    /// The question the size column asks on entering a directory: a `fresh`
+    /// answer is drawn and nothing is started, a stale one is drawn wearing its
+    /// `~` while a walk corrects it behind it.
+    pub fn remembered(&self, dir: &Path) -> Option<Remembered> {
+        lock(&self.cache).remembered(dir, Instant::now())
+    }
+
+    /// Every immediate child of `dir` the cache can already put a number
+    /// against. See [`DuCache::remembered_children`] — this is what makes
+    /// stepping back up to a parent instant.
+    pub fn remembered_children(&self, dir: &Path) -> Vec<ChildTotal> {
+        lock(&self.cache).remembered_children(dir, Instant::now())
     }
 
     /// The "what's big" list for `dir`: children by disk usage, largest first,
@@ -298,7 +327,7 @@ impl DuScanner {
     /// fill it in. That second walk is nearly free: the metadata it needs is the
     /// metadata the first walk just pulled into the page cache.
     pub fn heavy_hitters(&self, dir: &Path) -> Vec<HeavyHitter> {
-        lock(&self.cache).heavy_hitters(dir)
+        lock(&self.cache).heavy_hitters(dir, Instant::now())
     }
 
     /// Fill in [`crate::fs::Entry::len`] for the directories in a listing from
@@ -311,7 +340,7 @@ impl DuScanner {
     /// at zero, which is the same "not known yet" they started as.
     pub fn fill_dir_sizes(&self, dir: &Path, entries: &mut [crate::fs::Entry]) -> usize {
         let mut cache = lock(&self.cache);
-        let Some(record) = cache.get(dir) else {
+        let Some(record) = cache.fresh(dir, Instant::now()) else {
             return 0;
         };
         let sizes: HashMap<&str, u64> = record
@@ -434,8 +463,38 @@ fn run_walk(
     // must invalidate the record, and stamping it with the mtime we saw first
     // is what makes that happen.
     let root_mtime = current_mtime(&root);
+    let started = Instant::now();
 
-    let mut tracked: HashMap<PathBuf, DuTotals> = HashMap::new();
+    // One snapshot of what the cache already knows about this tree, taken under
+    // the lock once instead of a lock per directory the walk meets. Empty when
+    // the caller asked for an exact count.
+    let reusable = if options.reuse_cache {
+        lock(cache).reusable_under(&root, started)
+    } else {
+        HashMap::new()
+    };
+    // Which of them the walk actually took. Their records must keep the
+    // `walked_at` they already have: re-stamping a subtree that was skipped
+    // rather than counted would let a tree stay "recent" forever by being
+    // walked past every few minutes, which is the one thing the TTL is for.
+    let reused: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
+    let known = |dir: &Path, mtime: Option<std::time::SystemTime>| -> Option<(DuTotals, u64)> {
+        let (stamp, totals) = reusable.get(dir)?;
+        // The `mtime` the walk already has, and one `read_dir` — which is the
+        // syscall descending would have cost anyway, so a hit is free and a
+        // miss costs the price of the check alone.
+        let live = DirStamp {
+            mtime,
+            entries: count_names(dir),
+        };
+        if !stamp.agrees_with(&live) {
+            return None;
+        }
+        lock(&reused).insert(dir.to_path_buf());
+        Some((*totals, stamp.entries.unwrap_or(0)))
+    };
+
+    let mut tracked: HashMap<PathBuf, (DuTotals, u64)> = HashMap::new();
     let mut tracking_complete = true;
     let mut channel_open = true;
 
@@ -456,7 +515,7 @@ fn run_walk(
                     }
                     continue;
                 }
-                tracked.insert(update.dir.clone(), update.totals());
+                tracked.insert(update.dir.clone(), (update.totals(), update.entries));
             }
             if channel_open {
                 channel_open = send(DuMessage::Progress {
@@ -467,15 +526,17 @@ fn run_walk(
             }
         };
 
-        match walk(&root, &options, &cancelled, &mut emit) {
+        match walk_reusing(&root, &options, &cancelled, &known, &mut emit) {
             Ok(totals) => {
                 stand_down(live, token);
                 store(
                     cache,
                     &root,
                     root_mtime,
+                    Instant::now(),
                     totals,
                     &tracked,
+                    &lock(&reused),
                     tracking_complete,
                 );
                 send(DuMessage::Done {
@@ -507,20 +568,32 @@ fn run_walk(
 /// per subdirectory that later makes its size column instant even though its own
 /// children were never counted.
 ///
+/// **That per-subdirectory record is what makes going up cheap.** Walking into
+/// `~/Work/delightfile` leaves one behind for it; stepping back out to `~/Work`
+/// finds the total already computed, and the walk of `~/Work` steps over the
+/// whole subtree rather than counting it again.
+///
+/// Directories in `reused` are left exactly as they are: their numbers came out
+/// of the cache in the first place, and rewriting them would move their
+/// `walked_at` forward without anything having been counted.
+///
 /// Only directories are children here. A big *file* is a heavy hitter too, but
 /// its size is already in the listing (`Entry::len` is honest for files), so
 /// making the walk carry file names as well would double the memory to
 /// re-derive something the caller has.
+#[allow(clippy::too_many_arguments)]
 fn store(
     cache: &Shared,
     root: &Path,
     root_mtime: Option<std::time::SystemTime>,
+    walked_at: Instant,
     totals: DuTotals,
-    tracked: &HashMap<PathBuf, DuTotals>,
+    tracked: &HashMap<PathBuf, (DuTotals, u64)>,
+    reused: &HashSet<PathBuf>,
     complete: bool,
 ) {
     let mut children: HashMap<&Path, Vec<(String, DuTotals)>> = HashMap::new();
-    for (dir, dir_totals) in tracked {
+    for (dir, (dir_totals, _)) in tracked {
         if dir == root {
             continue;
         }
@@ -534,20 +607,31 @@ fn store(
     }
 
     let mut cache = lock(cache);
-    for (dir, dir_totals) in tracked {
+    for (dir, (dir_totals, entries)) in tracked {
+        if reused.contains(dir) {
+            continue;
+        }
         let kids = children.remove(dir.as_path()).unwrap_or_default();
         let mtime = if dir == root {
             root_mtime
         } else {
             current_mtime(dir)
         };
-        cache.insert(dir, mtime, *dir_totals, kids, complete);
+        let stamp = DirStamp {
+            mtime,
+            entries: Some(*entries),
+        };
+        cache.insert(dir, stamp, walked_at, *dir_totals, kids, complete);
     }
     // A `depth_of_interest` of 0 emits nothing for the root's children, and a
     // root with no subdirectories tracks only itself; either way the root's own
     // totals must still land.
     if !tracked.contains_key(root) {
-        cache.insert(root, root_mtime, totals, Vec::new(), complete);
+        let stamp = DirStamp {
+            mtime: root_mtime,
+            entries: count_names(root),
+        };
+        cache.insert(root, stamp, walked_at, totals, Vec::new(), complete);
     }
 }
 

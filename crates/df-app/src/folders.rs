@@ -44,17 +44,28 @@
 //!
 //! ## Staleness, and why it is the right trade
 //!
-//! A remembered size is only as fresh as the directory's own `mtime`, which
-//! cannot see a file written three levels down — [`df_core::du::DuCache`] says
-//! so at length. So a revisited folder shows the number from last time, plainly,
-//! while the walk re-runs behind it and corrects it. Showing a slightly stale
-//! size instantly beats showing a dash for two seconds and then the same number.
+//! A remembered size is as fresh as the clock says and no fresher —
+//! [`df_core::du::DuCache`] makes the argument at length. Three things can
+//! happen on the way back into a folder:
+//!
+//! - the walk was recent and the directory still looks the same: the numbers go
+//!   up settled, and **nothing is walked at all**;
+//! - the walk was recent but a name has come or gone: the same numbers go up
+//!   wearing their `~`, and a walk corrects them behind;
+//! - the walk was a while ago: likewise, because a ten-minute-old size still
+//!   beats a dash for the two seconds a walk takes.
+//!
+//! Going *up* is the same story from the other end. Walking into a folder
+//! leaves a record for it and for everything it visited, so a parent listing is
+//! seeded from the totals its children already know
+//! ([`Folders::seed_children`]) and the walk of the parent steps over those
+//! subtrees rather than counting them twice.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use df_core::du::{ChildCount, DuRecord, DuToken, DuUpdate};
+use df_core::du::{ChildCount, ChildTotal, DuRecord, DuToken, DuUpdate};
 
 /// How long a directory has to hold still before its sizes are walked again.
 ///
@@ -205,6 +216,20 @@ impl Folders {
         self.token = None;
     }
 
+    /// Point this at a directory whose numbers came out of the cache with no
+    /// walk behind them.
+    ///
+    /// The revisit that costs nothing: the cache was walked inside its TTL and
+    /// the directory still looks the way it did, so there is an answer and
+    /// there is no work. Recorded as "this directory, measured, no token" so
+    /// the frame loop reads it as held rather than as owed — the watcher's
+    /// [`Folders::mark_stale`] is still what starts a fresh walk if the
+    /// directory changes under it.
+    pub fn begin_cached(&mut self, dir: PathBuf, tab: usize) {
+        self.begin(dir, tab, DuToken(0));
+        self.token = None;
+    }
+
     /// Stop measuring — leaving for a remote listing, turning the feature off,
     /// closing the last tab.
     pub fn clear(&mut self) {
@@ -292,22 +317,47 @@ impl Folders {
         self.token
     }
 
-    /// Fill in from a walk that has already run. Everything a cache record
-    /// holds is final by construction — it was written when a walk finished —
-    /// so these rows start settled and lose the `~` they never had.
-    pub fn seed(&mut self, record: &DuRecord) -> bool {
+    /// Fill in from a walk that has already run.
+    ///
+    /// `settled` is the caller saying whether a walk is coming behind these
+    /// numbers. A record inside the cache's TTL whose directory still looks the
+    /// same settles outright — nothing is counting, so a `~` would be a lie
+    /// about work that is not happening. A record that is being corrected keeps
+    /// its `~` until the walk lands.
+    pub fn seed(&mut self, record: &DuRecord, settled: bool) -> bool {
         let mut changed = false;
         for (name, totals) in &record.children {
-            let size = Size {
-                bytes: totals.total_bytes,
-                settled: true,
-            };
-            if self.sizes.get(name) != Some(&size) {
-                self.sizes.insert(name.clone(), size);
-                changed = true;
-            }
+            changed |= self.put(name, totals.total_bytes, settled);
         }
         changed
+    }
+
+    /// Fill in from the cache's memory of the individual child directories —
+    /// what makes stepping **up** to a parent instant.
+    ///
+    /// The parent's own record, if there is one, remembers what its children
+    /// weighed when *it* was walked. The children's records are newer whenever
+    /// one of them has been visited since, and they win: walking into
+    /// `delightfile` and stepping back out to `Work` should show the number
+    /// that was just computed, not the one from before.
+    ///
+    /// A child's own `fresh` decides its `~`, per row: one stale child in a
+    /// listing does not make the other nineteen look like they are counting.
+    pub fn seed_children(&mut self, children: &[ChildTotal]) -> bool {
+        let mut changed = false;
+        for child in children {
+            changed |= self.put(&child.name, child.totals.total_bytes, child.fresh);
+        }
+        changed
+    }
+
+    fn put(&mut self, name: &str, bytes: u64, settled: bool) -> bool {
+        let size = Size { bytes, settled };
+        if self.sizes.get(name) == Some(&size) {
+            return false;
+        }
+        self.sizes.insert(name.to_string(), size);
+        true
     }
 
     /// Take the cheap `read_dir` pass. Returns whether anything on screen
@@ -401,6 +451,7 @@ mod tests {
             files: 1,
             dirs: 1,
             done,
+            entries: 0,
         }
     }
 
@@ -464,26 +515,104 @@ mod tests {
         assert!(f.token().is_none());
     }
 
-    /// A cached record is a finished walk, so a revisit is instant and plain —
-    /// no `~`, because nothing is counting.
-    #[test]
-    fn a_seeded_row_is_settled() {
-        let mut f = folders();
-        let record = DuRecord {
-            mtime: None,
+    fn record(name: &str, bytes: u64) -> DuRecord {
+        DuRecord {
+            stamp: df_core::du::DirStamp::default(),
+            walked_at: Instant::now(),
             totals: DuTotals::default(),
             children: vec![(
-                "photos".to_string(),
+                name.to_string(),
                 DuTotals {
-                    total_bytes: 2048,
+                    total_bytes: bytes,
                     ..DuTotals::default()
                 },
             )],
             children_complete: true,
-        };
-        assert!(f.seed(&record));
+        }
+    }
+
+    /// A cached record served as fresh is a revisit that costs nothing: instant
+    /// and plain, with no `~`, because nothing is counting.
+    #[test]
+    fn a_seeded_row_is_settled_when_no_walk_is_coming() {
+        let mut f = folders();
+        let record = record("photos", 2048);
+        assert!(f.seed(&record, true));
         assert_eq!(f.label("photos").as_deref(), Some("2.0 KB"));
-        assert!(!f.seed(&record), "seeding the same record twice is a no-op");
+        assert!(
+            !f.seed(&record, true),
+            "seeding the same record twice is a no-op"
+        );
+    }
+
+    /// …and the same record served while a walk corrects it wears the `~` that
+    /// says so, then loses it when the walk lands.
+    #[test]
+    fn a_stale_seed_is_drawn_immediately_and_corrected_behind() {
+        let mut f = folders();
+        assert!(f.seed(&record("photos", 2048), false));
+        assert_eq!(
+            f.label("photos").as_deref(),
+            Some("~2.0 KB"),
+            "the last number, on screen at once, saying it is behind"
+        );
+        assert!(f.apply(&[update("photos", 1, 4096, true)]));
+        assert_eq!(f.label("photos").as_deref(), Some("4.0 KB"));
+    }
+
+    /// Stepping up to a parent: the child was walked a moment ago, so its row
+    /// in the parent's listing already has a number and never shows a dash.
+    #[test]
+    fn a_parent_row_is_seeded_from_the_child_that_was_walked() {
+        let mut f = Folders::default();
+        f.begin_cached(PathBuf::from("/home/brian/Work"), 0);
+        assert!(f.token().is_none(), "nothing is walking");
+        assert_eq!(f.label("delightfile"), None);
+
+        let children = vec![
+            ChildTotal {
+                name: "delightfile".to_string(),
+                totals: DuTotals {
+                    total_bytes: 8192,
+                    ..DuTotals::default()
+                },
+                fresh: true,
+            },
+            ChildTotal {
+                name: "old".to_string(),
+                totals: DuTotals {
+                    total_bytes: 1024,
+                    ..DuTotals::default()
+                },
+                fresh: false,
+            },
+        ];
+        assert!(f.seed_children(&children));
+        assert_eq!(f.label("delightfile").as_deref(), Some("8.0 KB"));
+        assert_eq!(
+            f.label("old").as_deref(),
+            Some("~1.0 KB"),
+            "one stale row does not make the others look like they are counting"
+        );
+        assert!(!f.seed_children(&children), "and it is idempotent");
+    }
+
+    /// The child's own walk is newer than whatever the parent's last walk
+    /// believed, so it wins — which is the seeding order the app uses.
+    #[test]
+    fn the_childs_own_answer_lands_on_top_of_the_parents() {
+        let mut f = Folders::default();
+        f.begin_cached(PathBuf::from("/home/brian/Work"), 0);
+        f.seed(&record("delightfile", 1024), true);
+        f.seed_children(&[ChildTotal {
+            name: "delightfile".to_string(),
+            totals: DuTotals {
+                total_bytes: 9000,
+                ..DuTotals::default()
+            },
+            fresh: true,
+        }]);
+        assert_eq!(f.size("delightfile").map(|s| s.bytes), Some(9000));
     }
 
     /// Moving to another directory forgets the last one's numbers outright —

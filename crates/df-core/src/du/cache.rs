@@ -5,23 +5,51 @@
 //! back is the difference between a mode that feels like ncdu and one that feels
 //! broken. So the totals a walk produces are kept, keyed by directory.
 //!
-//! ## The mtime key is advisory, and this is the honest part
+//! ## Time is the key, not `mtime`
 //!
-//! Each record remembers the directory's `mtime` at the moment it was walked,
-//! and a lookup with a different `mtime` misses. That catches the common
-//! staleness — a file added or removed *directly in that directory* bumps its
-//! `mtime`, so the record for it is correctly thrown away.
+//! The first version of this keyed freshness on the directory's own `mtime`
+//! alone: a different `mtime`, a miss, a re-walk. That is too strict in the
+//! direction that costs the most. Saving one file into `~/Downloads` bumps that
+//! directory's `mtime`, and the subtree totals under it move by a few kilobytes
+//! out of gigabytes — so the whole tree was walked again to redraw the same
+//! numbers. Leaving a folder and coming straight back did it every time.
 //!
-//! **It does not catch deep changes.** A directory's `mtime` says nothing about
-//! its grandchildren: `cargo build` can add 2 GB three levels down and the
-//! record for the root still looks fresh. There is no cheap fix — the only
-//! honest check is the walk itself, which is the thing being avoided. So the
-//! rule this cache is built on is: *a hit is a fast answer, not a true one*. The
-//! UI must show a cached figure as remembered rather than live, refreshing is
-//! always one keypress away, and [`DuCache::forget`] exists so that keypress
-//! costs nothing to implement. Pretending otherwise would put a wrong number on
-//! screen with no way for the user to know it was wrong, which is worse than
-//! being slow.
+//! It is also too *lax* in the other direction, and always was: a directory's
+//! `mtime` says nothing about its grandchildren, so `cargo build` can add 2 GB
+//! three levels down and an `mtime` check calls the record fresh. There is no
+//! cheap test that catches that; the only honest one is the walk itself, which
+//! is the thing being avoided.
+//!
+//! So freshness is a **clock**. A record walked within [`DuCache::ttl`] is
+//! served as it stands, and the two cheap facts — the directory's `mtime` and
+//! how many names `read_dir` returns for it — decide only whether a *background*
+//! re-walk is owed, not whether the numbers may be shown. Past the TTL the
+//! numbers are still shown, and a re-walk is always owed. That gives the three
+//! answers the UI actually wants:
+//!
+//! - **inside the TTL and unchanged** — draw it, walk nothing;
+//! - **inside the TTL but changed** — draw it wearing its `~`, re-walk behind it;
+//! - **past the TTL** — the same, because a number that is ten minutes old still
+//!   beats an em dash for the two seconds a walk takes.
+//!
+//! A hit remains *a fast answer, not a true one*, and [`DuCache::forget`] is
+//! still what "refresh this" is implemented with — but the cost of being
+//! approximately right is now paid once every TTL instead of on every keypress.
+//!
+//! ## Every directory the walk visited, not just the one asked about
+//!
+//! A walk of `~/Work/delightfile` counts `crates`, `target` and everything
+//! under them on the way, so a record is kept for each of them. That is what
+//! makes going **up** free as well as coming back in: the listing of `~/Work`
+//! is seeded from the records its children already have
+//! ([`DuCache::remembered_children`]), and the walk of `~/Work` is handed the
+//! same set ([`DuCache::reusable_under`]) so it folds those subtrees in whole
+//! instead of counting them a second time. A directory you have just come out
+//! of is the one the parent would otherwise spend all its time in.
+//!
+//! Reuse is an approximation on top of an approximation, and it is opted into
+//! rather than assumed — see [`super::walk::DuOptions::reuse_cache`] for what it
+//! costs and who declines it.
 //!
 //! ## Bounded three ways
 //!
@@ -32,7 +60,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use super::walk::DuTotals;
 
@@ -61,13 +89,87 @@ pub const MAX_CACHED_CHILDREN: usize = 4096;
 /// cache. Records are evicted oldest-touched-first until the total fits.
 pub const MAX_CACHE_CHILDREN: usize = 100_000;
 
+/// How long a walk's answer is served without a re-walk.
+///
+/// Ten minutes is the span of a browsing session's worth of "in here, out
+/// again, back in here": long enough that the round trip through a parent
+/// directory costs nothing, short enough that a build finishing while you are
+/// looking elsewhere is picked up the next time you glance at the folder. It is
+/// the default for `[mgr] folder_size_ttl`, which is there for the two people
+/// who want either extreme.
+pub const DEFAULT_FOLDER_SIZE_TTL: Duration = Duration::from_secs(600);
+
+/// How far the cheap re-check counts names before it stops caring.
+///
+/// The check is one `read_dir`, and a Maildir is half a million names. Past the
+/// cap both the stamp and the re-check saturate to the same number, so a
+/// directory that large is validated on its `mtime` alone — which is what it
+/// would have had before this cap existed, at a bounded cost.
+pub const MAX_STAMP_ENTRIES: u64 = 100_000;
+
+/// The cheap facts about a directory that a revisit re-reads.
+///
+/// One `stat` and one `read_dir` — microseconds — against a walk that is
+/// seconds. Neither can see a change three levels down (see the module essay),
+/// and together they are still the best answer available for the price: a file
+/// added, removed or renamed at the top level moves both, and a file *rewritten
+/// in place* moves only the `mtime`, which is the case worth not re-walking for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DirStamp {
+    /// The directory's own `mtime`. `None` if the platform would not say.
+    pub mtime: Option<SystemTime>,
+    /// Names `read_dir` returned, capped at [`MAX_STAMP_ENTRIES`]. `None` if
+    /// the directory could not be read.
+    pub entries: Option<u64>,
+}
+
+impl DirStamp {
+    /// Whether `self` and `other` describe the same directory contents, as far
+    /// as two cheap facts can tell. A missing half on either side is a `no`:
+    /// a stamp that could not be taken cannot agree with anything.
+    pub fn agrees_with(&self, other: &DirStamp) -> bool {
+        self.mtime.is_some()
+            && self.mtime == other.mtime
+            && self.entries.is_some()
+            && self.entries == other.entries
+    }
+}
+
+/// A record, and whether the directory still looks the way it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remembered {
+    /// The numbers, always. Even a stale record is worth drawing.
+    pub record: DuRecord,
+    /// `true` when the record is inside the TTL **and** the cheap re-check
+    /// agrees with it: nothing needs walking. `false` means draw these numbers
+    /// wearing a `~` and start a walk behind them.
+    pub fresh: bool,
+}
+
+/// One immediate child of a directory, as the cache remembers it.
+///
+/// What makes going *up* instant. A walk of `~/Work/delightfile` leaves a record
+/// for every directory it visited, so the listing of `~/Work` can be seeded from
+/// those records — the subtree total for `delightfile` is a number that was
+/// computed a moment ago, not one this listing has to earn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildTotal {
+    pub name: String,
+    pub totals: DuTotals,
+    /// Whether the record it came from is inside the TTL.
+    pub fresh: bool,
+}
+
 /// One directory's remembered totals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuRecord {
-    /// The directory's own `mtime` when it was walked. `None` if the platform
-    /// would not give one, in which case every lookup misses — a record that
-    /// cannot be invalidated is a record that must not be trusted.
-    pub mtime: Option<SystemTime>,
+    /// What the directory looked like at the moment it was walked. Compared
+    /// with a fresh stamp on revisit to decide whether a re-walk is owed — not
+    /// whether the numbers may be shown.
+    pub stamp: DirStamp,
+    /// When the walk that produced this finished. The clock freshness is
+    /// actually keyed on; see the module essay.
+    pub walked_at: Instant,
     /// The subtree's totals.
     pub totals: DuTotals,
     /// Immediate children, largest first, capped at [`MAX_CACHED_CHILDREN`].
@@ -97,16 +199,47 @@ pub struct HeavyHitter {
 }
 
 /// The bounded store.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct DuCache {
     records: HashMap<PathBuf, (DuRecord, u64)>,
     children_total: usize,
     clock: u64,
+    ttl: Duration,
+}
+
+impl Default for DuCache {
+    fn default() -> DuCache {
+        DuCache {
+            records: HashMap::new(),
+            children_total: 0,
+            clock: 0,
+            ttl: DEFAULT_FOLDER_SIZE_TTL,
+        }
+    }
 }
 
 impl DuCache {
     pub fn new() -> DuCache {
         DuCache::default()
+    }
+
+    /// A cache with a lifetime other than [`DEFAULT_FOLDER_SIZE_TTL`].
+    pub fn with_ttl(ttl: Duration) -> DuCache {
+        DuCache {
+            ttl,
+            ..DuCache::default()
+        }
+    }
+
+    /// How long a record is served without a re-walk. See the module essay.
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Set the lifetime. Existing records keep their `walked_at`, so shortening
+    /// it retires them immediately rather than at some future moment.
+    pub fn set_ttl(&mut self, ttl: Duration) {
+        self.ttl = ttl;
     }
 
     pub fn len(&self) -> usize {
@@ -129,10 +262,16 @@ impl DuCache {
     /// whoever built it. `children_complete` is the caller saying whether it
     /// tracked every child or gave up counting — see
     /// [`super::scanner::MAX_TRACKED_DIRS`].
+    ///
+    /// `walked_at` is passed in rather than read here because one walk produces
+    /// thousands of records and they all finished at the same moment; letting
+    /// each one stamp itself would spread one answer across a range of times
+    /// for no reason.
     pub fn insert(
         &mut self,
         dir: impl Into<PathBuf>,
-        mtime: Option<SystemTime>,
+        stamp: DirStamp,
+        walked_at: Instant,
         totals: DuTotals,
         mut children: Vec<(String, DuTotals)>,
         children_complete: bool,
@@ -143,7 +282,7 @@ impl DuCache {
         children.truncate(MAX_CACHED_CHILDREN);
 
         self.clock += 1;
-        let stamp = self.clock;
+        let touched = self.clock;
         if let Some((old, _)) = self.records.remove(&dir) {
             self.children_total = self.children_total.saturating_sub(old.children.len());
         }
@@ -152,41 +291,128 @@ impl DuCache {
             dir,
             (
                 DuRecord {
-                    mtime,
+                    stamp,
+                    walked_at,
                     totals,
                     children,
                     children_complete: complete,
                 },
-                stamp,
+                touched,
             ),
         );
         self.evict();
     }
 
-    /// The record for `dir`, if it is there **and** the directory's `mtime` is
-    /// unchanged since it was walked. Touches the record, so lookups keep a
-    /// working set alive.
-    ///
-    /// Read the module essay before trusting the answer: an unchanged `mtime`
-    /// does not mean an unchanged subtree.
-    pub fn get(&mut self, dir: &Path) -> Option<&DuRecord> {
-        let live = current_mtime(dir)?;
+    /// The record for `dir` if it was walked within the TTL. No syscalls: this
+    /// is the question "is there a recent answer", not "is it still true".
+    /// Touches the record, so lookups keep a working set alive.
+    pub fn fresh(&mut self, dir: &Path, now: Instant) -> Option<&DuRecord> {
+        let ttl = self.ttl;
         self.clock += 1;
-        let stamp = self.clock;
-        let (record, touched) = self.records.get_mut(dir)?;
-        if record.mtime != Some(live) {
+        let touched = self.clock;
+        let (record, stamp) = self.records.get_mut(dir)?;
+        if now.saturating_duration_since(record.walked_at) > ttl {
             return None;
         }
-        *touched = stamp;
+        *stamp = touched;
         Some(record)
     }
 
-    /// The record as stored, without the `mtime` check. For a caller that has
-    /// decided a remembered number is better than no number — the size column
-    /// on a directory that is being rewritten, say, where the alternative is a
-    /// blank that flickers.
+    /// What is remembered about `dir`, and whether it still needs walking.
+    ///
+    /// Always returns the record when there is one — a stale number is worth
+    /// drawing — and pays for one `stat` and one `read_dir` to fill in `fresh`.
+    /// A record past the TTL is never fresh and does not pay for the check.
+    pub fn remembered(&mut self, dir: &Path, now: Instant) -> Option<Remembered> {
+        let record = self.fresh(dir, now).cloned();
+        let Some(record) = record else {
+            // Past the TTL, or never walked. Only the first has anything to
+            // hand back, and it hands it back as stale.
+            let record = self.get_stale(dir)?.clone();
+            return Some(Remembered {
+                record,
+                fresh: false,
+            });
+        };
+        let fresh = record.stamp.agrees_with(&current_stamp(dir));
+        Some(Remembered { record, fresh })
+    }
+
+    /// The record as stored, without any freshness check at all. For a caller
+    /// that has decided a remembered number is better than no number — the size
+    /// column on a directory that is being rewritten, say, where the
+    /// alternative is a blank that flickers.
     pub fn get_stale(&self, dir: &Path) -> Option<&DuRecord> {
         self.records.get(dir).map(|(record, _)| record)
+    }
+
+    /// Every immediate child of `dir` the cache can name a size for.
+    ///
+    /// Two sources, merged: the children carried by `dir`'s own record, and the
+    /// records stored for the child directories themselves. **The later walk
+    /// wins**, which is what makes going up instant — walking into
+    /// `~/Work/delightfile` leaves a record for it that is newer than whatever
+    /// the last walk of `~/Work` believed, so stepping back out draws the number
+    /// that was just computed rather than the one from before.
+    ///
+    /// No syscalls, and no TTL filter: a child past the TTL comes back with
+    /// `fresh: false` so the caller can draw it and re-walk behind it.
+    pub fn remembered_children(&self, dir: &Path, now: Instant) -> Vec<ChildTotal> {
+        let mut merged: HashMap<&str, (Instant, DuTotals)> = HashMap::new();
+        if let Some((record, _)) = self.records.get(dir) {
+            for (name, totals) in &record.children {
+                merged.insert(name.as_str(), (record.walked_at, *totals));
+            }
+        }
+        for (path, (record, _)) in &self.records {
+            if path.parent() != Some(dir) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            match merged.get(name) {
+                Some((at, _)) if *at >= record.walked_at => {}
+                _ => {
+                    merged.insert(name, (record.walked_at, record.totals));
+                }
+            }
+        }
+        let mut out: Vec<ChildTotal> = merged
+            .into_iter()
+            .map(|(name, (at, totals))| ChildTotal {
+                name: name.to_string(),
+                totals,
+                fresh: now.saturating_duration_since(at) <= self.ttl,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.totals
+                .total_bytes
+                .cmp(&a.totals.total_bytes)
+                .then(a.name.cmp(&b.name))
+        });
+        out
+    }
+
+    /// Every record strictly below `root` that is inside the TTL, as a map a
+    /// walk can consult without touching this lock again.
+    ///
+    /// The walk asks about every directory it meets, once, on a worker thread —
+    /// so it gets one snapshot rather than a mutex acquisition per directory
+    /// contending with the UI thread. `root` itself is left out: a walk of a
+    /// directory is not allowed to answer itself from the cache.
+    pub fn reusable_under(
+        &self,
+        root: &Path,
+        now: Instant,
+    ) -> HashMap<PathBuf, (DirStamp, DuTotals)> {
+        self.records
+            .iter()
+            .filter(|(path, _)| path.as_path() != root && path.starts_with(root))
+            .filter(|(_, (record, _))| now.saturating_duration_since(record.walked_at) <= self.ttl)
+            .map(|(path, (record, _))| (path.clone(), (record.stamp, record.totals)))
+            .collect()
     }
 
     /// Drop one directory's record. What "refresh this" is implemented with.
@@ -208,12 +434,12 @@ impl DuCache {
     /// The "what's big" list for `dir`: children by disk usage, largest first,
     /// each with its share of the parent.
     ///
-    /// Empty when nothing is cached for `dir`, when the record is stale, or when
-    /// the walk that filled it ran with `depth_of_interest == 0` and so never
-    /// looked at the children. All three cases mean the same thing to the
+    /// Empty when nothing is cached for `dir`, when the record has aged out, or
+    /// when the walk that filled it ran with `depth_of_interest == 0` and so
+    /// never looked at the children. All three cases mean the same thing to the
     /// caller — ask for a walk — which is why they are not distinguished.
-    pub fn heavy_hitters(&mut self, dir: &Path) -> Vec<HeavyHitter> {
-        let Some(record) = self.get(dir) else {
+    pub fn heavy_hitters(&mut self, dir: &Path, now: Instant) -> Vec<HeavyHitter> {
+        let Some(record) = self.fresh(dir, now) else {
             return Vec::new();
         };
         let total = record.totals.total_bytes;
@@ -249,6 +475,33 @@ impl DuCache {
             }
         }
     }
+}
+
+/// The cheap facts about `dir`, read now. See [`DirStamp`].
+pub fn current_stamp(dir: &Path) -> DirStamp {
+    DirStamp {
+        mtime: current_mtime(dir),
+        entries: count_names(dir),
+    }
+}
+
+/// How many names `read_dir` returns for `dir`, capped at
+/// [`MAX_STAMP_ENTRIES`]. `None` when the directory cannot be read.
+///
+/// Names, not entries the walk would count: nothing here calls `stat`, because
+/// a check that costs a syscall per name is not a cheap check. Symlinks and
+/// entries on another filesystem are counted, and the stamp taken during the
+/// walk counts them too — the two only ever have to agree with each other.
+pub fn count_names(dir: &Path) -> Option<u64> {
+    let reader = std::fs::read_dir(dir).ok()?;
+    let mut names = 0u64;
+    for _ in reader {
+        names += 1;
+        if names >= MAX_STAMP_ENTRIES {
+            break;
+        }
+    }
+    Some(names)
 }
 
 /// A directory's modification time, or `None` if it is gone or refuses to say.

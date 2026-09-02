@@ -12,7 +12,7 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
 use crate::fs::no_notifier;
@@ -535,62 +535,299 @@ fn a_walk_fills_the_directory_sizes_in_a_listing() {
     );
 }
 
+/// A cached record is served on the way back in without a second walk, which is
+/// the whole point: a folder you left thirty seconds ago is not re-counted.
 #[test]
-fn a_cached_record_hits_until_the_directory_changes() {
+fn a_recent_record_is_served_without_a_re_walk() {
     let tree = known_tree();
     let du = DuScanner::start(no_notifier());
     let token = du.request(tree.path(), 1);
     wait_for_done(&du, token);
-    assert!(du.cached(tree.path()).is_some(), "walked, therefore cached");
 
-    // A directory's mtime has one-second granularity on some filesystems, so
-    // changing the contents is not enough on its own — set it explicitly to a
-    // time that cannot be the one recorded.
-    let long_ago = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-    let file = std::fs::File::open(tree.path()).unwrap();
-    file.set_times(std::fs::FileTimes::new().set_modified(long_ago))
+    let remembered = du
+        .remembered(tree.path())
+        .expect("walked, therefore cached");
+    assert!(remembered.fresh, "recent and unchanged: nothing to re-walk");
+    assert!(
+        remembered.record.totals.total_bytes > 0,
+        "and it carries the numbers"
+    );
+}
+
+/// The `mtime` alone no longer invalidates. Touching a directory's `mtime`
+/// without adding or removing a name is a file rewritten in place, and the
+/// subtree total barely moves — re-walking a home directory for that was the
+/// bug.
+#[test]
+fn a_touched_mtime_alone_is_still_fresh() {
+    let tree = known_tree();
+    let mut cache = DuCache::new();
+    let now = Instant::now();
+    let mut stamp = current_stamp(tree.path());
+    cache.insert(
+        tree.path(),
+        stamp,
+        now,
+        DuTotals::default(),
+        Vec::new(),
+        true,
+    );
+
+    let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    let dir = std::fs::File::open(tree.path()).unwrap();
+    dir.set_times(std::fs::FileTimes::new().set_modified(long_ago))
         .unwrap();
 
+    let hit = cache.remembered(tree.path(), now).expect("still there");
     assert!(
-        du.cached(tree.path()).is_none(),
-        "a changed mtime invalidates the record"
+        !hit.fresh,
+        "the stamp is two facts and one of them moved, so a re-walk is owed"
     );
+
+    // …and with the stamp taken *after* the touch, the same directory is fresh
+    // again: nothing about the names changed.
+    stamp = current_stamp(tree.path());
+    cache.insert(
+        tree.path(),
+        stamp,
+        now,
+        DuTotals::default(),
+        Vec::new(),
+        true,
+    );
+    assert!(cache.remembered(tree.path(), now).expect("there").fresh);
+}
+
+/// A name appearing at the top level is what the cheap re-check is for: the
+/// numbers are still served, and they are served marked as owing a walk.
+#[test]
+fn a_new_name_is_served_stale_rather_than_missed() {
+    let tree = known_tree();
+    let mut cache = DuCache::new();
+    let now = Instant::now();
+    cache.insert(
+        tree.path(),
+        current_stamp(tree.path()),
+        now,
+        DuTotals {
+            total_bytes: 4096,
+            ..DuTotals::default()
+        },
+        vec![("sub".to_string(), DuTotals::default())],
+        true,
+    );
+    tree.file("new.txt", b"hello");
+
+    let hit = cache.remembered(tree.path(), now).expect("still served");
+    assert!(!hit.fresh, "one more name, so a walk is owed");
+    assert_eq!(
+        hit.record.totals.total_bytes, 4096,
+        "but the last true number is still there to draw"
+    );
+}
+
+/// Past the TTL the numbers are still handed over — a ten-minute-old size beats
+/// an em dash — and they are never fresh.
+#[test]
+fn past_the_ttl_the_record_is_served_but_never_fresh() {
+    let tree = known_tree();
+    let mut cache = DuCache::with_ttl(Duration::from_secs(60));
+    let walked = Instant::now();
+    cache.insert(
+        tree.path(),
+        current_stamp(tree.path()),
+        walked,
+        DuTotals {
+            total_bytes: 4096,
+            ..DuTotals::default()
+        },
+        Vec::new(),
+        true,
+    );
+    assert!(cache.fresh(tree.path(), walked).is_some());
+    assert!(
+        cache
+            .fresh(tree.path(), walked + Duration::from_secs(61))
+            .is_none(),
+        "the clock, not the mtime, is what retires a record"
+    );
+    let hit = cache
+        .remembered(tree.path(), walked + Duration::from_secs(61))
+        .expect("still served");
+    assert!(!hit.fresh);
+    assert_eq!(hit.record.totals.total_bytes, 4096);
+}
+
+/// Walking a child leaves a record for it, and the parent's listing reads that
+/// record: stepping back up is instant even though nothing has walked the
+/// parent.
+#[test]
+fn a_child_walk_seeds_the_parent_listing() {
+    let tree = TempTree::new("du-rollup");
+    tree.file("work/project/big.bin", &vec![b'x'; 64 * 1024]);
+    tree.file("work/notes.txt", b"short");
+
+    let du = DuScanner::start(no_notifier());
+    let token = du.request(tree.join("work/project"), 1);
+    wait_for_done(&du, token);
+
+    // Nothing has ever walked `work` itself.
+    assert!(du.cached(&tree.join("work")).is_none());
+
+    let children = du.remembered_children(&tree.join("work"));
+    let project = children
+        .iter()
+        .find(|c| c.name == "project")
+        .expect("the child that was walked is already known");
+    assert!(project.fresh);
+    assert!(
+        project.totals.total_bytes >= 64 * 1024,
+        "and it knows what is in it: {project:?}"
+    );
+}
+
+/// A newer walk of the child beats what the parent's older walk believed about
+/// it — which is the case that matters, because the child is where you have
+/// just been.
+#[test]
+fn the_newer_of_the_two_answers_wins() {
+    let mut cache = DuCache::new();
+    let then = Instant::now();
+    let now = then + Duration::from_secs(1);
+    cache.insert(
+        "/synthetic/work",
+        DirStamp::default(),
+        then,
+        DuTotals::default(),
+        vec![(
+            "project".to_string(),
+            DuTotals {
+                total_bytes: 100,
+                ..DuTotals::default()
+            },
+        )],
+        true,
+    );
+    cache.insert(
+        "/synthetic/work/project",
+        DirStamp::default(),
+        now,
+        DuTotals {
+            total_bytes: 900,
+            ..DuTotals::default()
+        },
+        Vec::new(),
+        true,
+    );
+    let children = cache.remembered_children(Path::new("/synthetic/work"), now);
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].totals.total_bytes, 900);
+}
+
+/// The parent's walk steps over a subtree the cache already knows, and still
+/// reports it as though it had counted it — so the totals are the same and the
+/// listing cannot tell the difference.
+#[test]
+fn a_parent_walk_skips_a_subtree_that_is_already_counted() {
+    let tree = TempTree::new("du-skip");
+    tree.file("work/project/big.bin", &vec![b'x'; 64 * 1024]);
+    tree.file("work/other/small.bin", &vec![b'y'; 1024]);
+
+    let du = DuScanner::start(no_notifier());
+    let exact = wait_for_done(&du, du.request(tree.join("work"), 1));
+
+    // Now walk it again, allowed to reuse. Everything under it is in the cache
+    // and unchanged, so both children come back from the cache.
+    let options = DuOptions::at_depth(1).reusing_cache();
+    let token = du.request_with(tree.join("work"), options);
+    let reused = wait_for_done(&du, token);
+    assert_eq!(
+        reused, exact,
+        "reusing a subtree must not change what the tree weighs"
+    );
+
+    let hits = du.heavy_hitters(&tree.join("work"));
+    let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["project", "other"],
+        "and the reused children are still reported: {hits:#?}"
+    );
+}
+
+/// Reuse is opt-in, and `m u` does not opt in: a walk somebody asked for out
+/// loud counts everything.
+#[test]
+fn reuse_is_off_unless_asked_for() {
+    assert!(!DuOptions::default().reuse_cache);
+    assert!(!DuOptions::at_depth(1).reuse_cache);
+    assert!(DuOptions::at_depth(1).reusing_cache().reuse_cache);
+}
+
+/// The walk hands the cache the name count it got for free, and it is the same
+/// number a plain `read_dir` gives — the two only ever have to agree with each
+/// other.
+#[test]
+fn the_walk_counts_the_names_the_stamp_check_will_count() {
+    let tree = known_tree();
+    let (_, updates) = walk_collect(tree.path(), &DuOptions::at_depth(1));
+    let root = updates
+        .iter()
+        .find(|u| u.dir == tree.path() && u.done)
+        .expect("root");
+    assert_eq!(root.entries, count_names(tree.path()).unwrap());
+    assert_eq!(root.entries, 2, "a.txt and sub");
 }
 
 #[test]
 fn forget_drops_one_record_and_leaves_the_rest() {
     let mut cache = DuCache::new();
     let tree = known_tree();
-    let mtime = current_mtime(tree.path());
-    cache.insert(tree.path(), mtime, DuTotals::default(), Vec::new(), true);
-    assert!(cache.get(tree.path()).is_some());
+    let now = Instant::now();
+    cache.insert(
+        tree.path(),
+        current_stamp(tree.path()),
+        now,
+        DuTotals::default(),
+        Vec::new(),
+        true,
+    );
+    assert!(cache.fresh(tree.path(), now).is_some());
     assert!(cache.forget(tree.path()));
     assert!(!cache.forget(tree.path()), "twice is a no-op");
-    assert!(cache.get(tree.path()).is_none());
+    assert!(cache.fresh(tree.path(), now).is_none());
 }
 
+/// A record whose stamp could not be taken is still served — it is a number
+/// somebody earned — but it can never claim to be unchanged, because there is
+/// nothing to compare.
 #[test]
-fn a_record_without_an_mtime_never_hits() {
+fn a_record_without_a_stamp_is_never_fresh() {
     let mut cache = DuCache::new();
     let tree = known_tree();
-    cache.insert(tree.path(), None, DuTotals::default(), Vec::new(), true);
-    assert!(
-        cache.get(tree.path()).is_none(),
-        "a record that cannot be invalidated must not be trusted"
+    let now = Instant::now();
+    cache.insert(
+        tree.path(),
+        DirStamp::default(),
+        now,
+        DuTotals::default(),
+        Vec::new(),
+        true,
     );
-    assert!(
-        cache.get_stale(tree.path()).is_some(),
-        "but it is still there for a caller that asked for it anyway"
-    );
+    let hit = cache.remembered(tree.path(), now).expect("served");
+    assert!(!hit.fresh);
+    assert!(cache.get_stale(tree.path()).is_some());
 }
 
 #[test]
 fn the_cache_evicts_the_least_recently_touched() {
     let mut cache = DuCache::new();
+    let now = Instant::now();
     for i in 0..DU_CACHE_DIRS + 8 {
         cache.insert(
             format!("/synthetic/{i}"),
-            Some(std::time::SystemTime::UNIX_EPOCH),
+            DirStamp::default(),
+            now,
             DuTotals::default(),
             Vec::new(),
             true,
@@ -624,7 +861,8 @@ fn the_child_cap_keeps_the_big_ones() {
         .collect();
     cache.insert(
         "/synthetic/big",
-        Some(std::time::SystemTime::UNIX_EPOCH),
+        DirStamp::default(),
+        Instant::now(),
         DuTotals {
             total_bytes: 1_000_000,
             ..DuTotals::default()
@@ -647,17 +885,29 @@ fn the_child_cap_keeps_the_big_ones() {
 #[test]
 fn a_zero_byte_parent_gives_zero_shares_not_nan() {
     let mut cache = DuCache::new();
+    let now = Instant::now();
     let tree = TempTree::new("du-zero");
     cache.insert(
         tree.path(),
-        current_mtime(tree.path()),
+        current_stamp(tree.path()),
+        now,
         DuTotals::default(),
         vec![("child".to_string(), DuTotals::default())],
         true,
     );
-    let hits = cache.heavy_hitters(tree.path());
+    let hits = cache.heavy_hitters(tree.path(), now);
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].fraction, 0.0, "not NaN, which would panic a layout");
+}
+
+/// The config's default and the cache's are one number said twice; a drift
+/// between them would be a silent change of behaviour.
+#[test]
+fn the_two_defaults_agree() {
+    assert_eq!(
+        DEFAULT_FOLDER_SIZE_TTL,
+        Duration::from_secs(crate::config::DEFAULT_FOLDER_SIZE_TTL)
+    );
 }
 
 // ── the cheap child-count pass ──────────────────────────────────────────────

@@ -24,9 +24,11 @@
 //!   sparse VM image and a directory of tiny files break any single number.
 //! - **What is skipped**: symlinks always, other filesystems by default,
 //!   hardlinked content after the first sighting — also [`mod@walk`].
-//! - **The cache is advisory** — [`cache`]'s essay on why a directory's `mtime`
-//!   cannot detect a change three levels down, and why the honest response is to
-//!   say so rather than to fake a freshness check.
+//! - **The cache is advisory, and keyed on a clock** — [`cache`]'s essay on why
+//!   a directory's `mtime` can detect neither a change three levels down nor the
+//!   difference between a file being added and a file being rewritten, and why
+//!   the honest response is a time-to-live plus a `~` rather than a freshness
+//!   check that pretends.
 //! - **Supersede, cancellation and generation tokens** — [`scanner`], which is
 //!   `fs::scan`'s twin and says where it differs.
 //!
@@ -62,13 +64,14 @@ pub mod walk;
 mod tests;
 
 pub use cache::{
-    current_mtime, DuCache, DuRecord, HeavyHitter, DU_CACHE_DIRS, MAX_CACHED_CHILDREN,
-    MAX_CACHE_CHILDREN,
+    count_names, current_mtime, current_stamp, ChildTotal, DirStamp, DuCache, DuRecord,
+    HeavyHitter, Remembered, DEFAULT_FOLDER_SIZE_TTL, DU_CACHE_DIRS, MAX_CACHED_CHILDREN,
+    MAX_CACHE_CHILDREN, MAX_STAMP_ENTRIES,
 };
 pub use fstype::{is_remote, magic_of, REMOTE_FS_MAGIC};
 pub use scanner::{du_blocking, DuMessage, DuScanner, DuToken, DU_WORKERS, MAX_TRACKED_DIRS};
 pub use walk::{
-    child_counts, crosses_boundary, walk, walk_blocking, ChildCount, DuOptions, DuTotals, DuUpdate,
-    BLOCK_UNIT, CANCEL_CHECK_ENTRIES, COUNT_BATCH, DU_BATCH, MAX_COUNTED_CHILDREN,
-    MAX_COUNTED_ENTRIES, MAX_DEPTH, MAX_HARDLINK_ENTRIES, UPDATE_INTERVAL,
+    child_counts, crosses_boundary, walk, walk_blocking, walk_reusing, ChildCount, DuOptions,
+    DuTotals, DuUpdate, KnownSubtree, BLOCK_UNIT, CANCEL_CHECK_ENTRIES, COUNT_BATCH, DU_BATCH,
+    MAX_COUNTED_CHILDREN, MAX_COUNTED_ENTRIES, MAX_DEPTH, MAX_HARDLINK_ENTRIES, UPDATE_INTERVAL,
 };
