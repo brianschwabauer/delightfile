@@ -28,7 +28,7 @@ use crate::hover::{pressed_rect, Hovers};
 use crate::input::Prompt;
 use crate::ripple::Ripples;
 use crate::theme::mix;
-use crate::ui::{Control, Painting, CHROME_HEIGHT, GAP, ROW_RADIUS};
+use crate::ui::{Control, Painting, CHROME_HEIGHT, GAP, ROW_RADIUS, TOP_HEIGHT};
 
 /// The padding inside a card, and the inset its rows get on every adjacent
 /// side (`delightful-ui` §15's even insets).
@@ -82,9 +82,12 @@ fn icon_width(painter: &egui::Painter, glyph: &str, font: &egui::FontId) -> f32 
 /// A chip's inset inside the top row, on **every** adjacent side
 /// (`delightful-ui` §15's even insets).
 ///
-/// Three: the row is [`CHROME_HEIGHT`] tall and a chip has to keep enough of
-/// its own plate to read as a pill, so this is about as much as the row can
-/// give away and still have two distinguishable surfaces.
+/// Three: a chip has to keep enough of its own plate to read as a pill, so
+/// this is about as much as the row can give away and still have two
+/// distinguishable surfaces. It is a *fixed* inset rather than a fraction of
+/// the row, so a chip grows with the bar it sits in — at [`TOP_HEIGHT`] the
+/// chip is the same share of the row it was at [`CHROME_HEIGHT`], which is
+/// why the bar getting taller did not need a second number here.
 pub const CHIP_INSET: f32 = 3.0;
 
 /// A chip's corner radius: **the row's less its inset**, so the gap between a
@@ -1688,8 +1691,8 @@ pub fn prompt_row(
 
     // The row grew a second line for an error that would not fit beside the
     // query: the field keeps the first line and the error gets the second.
-    let error_line = (row.height() > CHROME_HEIGHT + 1.0).then(|| {
-        let split = row.top() + CHROME_HEIGHT;
+    let error_line = (row.height() > TOP_HEIGHT + 1.0).then(|| {
+        let split = row.top() + TOP_HEIGHT;
         let line = egui::Rect::from_min_max(
             egui::pos2(inner.left(), split),
             egui::pos2(inner.right(), row.bottom()),
@@ -2674,7 +2677,7 @@ mod tests {
                 rows: 0,
             };
             let wide =
-                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, CHROME_HEIGHT));
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
             assert!(
                 top_geometry(ui.painter(), wide, &path, "", &bare, false)
                     .ellipsis
@@ -2683,7 +2686,7 @@ mod tests {
             );
 
             let narrow =
-                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(120.0, CHROME_HEIGHT));
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(120.0, TOP_HEIGHT));
             let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
             let rect = geom.ellipsis.expect("a narrow row elides");
             assert!(narrow.contains(rect.center()));
@@ -2723,7 +2726,11 @@ mod tests {
             assert_eq!(tab_at(strip, &[120.0; 4], rect.center()), Some(index));
         }
         assert_eq!(
-            tab_at(strip, &[120.0; 4], egui::pos2(strip.right() - 1.0, strip.center().y)),
+            tab_at(
+                strip,
+                &[120.0; 4],
+                egui::pos2(strip.right() - 1.0, strip.center().y)
+            ),
             None
         );
         assert_eq!(tab_at(strip, &[120.0; 4], egui::pos2(-10.0, -10.0)), None);
@@ -2741,7 +2748,8 @@ mod tests {
         assert!((rects[2].width() - 100.0).abs() < 1e-3);
         assert!((rects[1].left() - rects[0].right() - TAB_GAP).abs() < 1e-3);
 
-        let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, CHROME_HEIGHT));
+        let narrow =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, CHROME_HEIGHT));
         let squeezed = tab_rects(narrow, &[100.0, 100.0, 100.0]);
         assert!((squeezed[2].right() - narrow.right()).abs() < 1e-3);
         let ratio = squeezed[0].width() / squeezed[1].width();
@@ -2821,7 +2829,10 @@ mod tests {
         let right = tab_carry(strip, &[120.0; 4], 1, grab_dx, strip.right() + 500.0);
         assert!((right.right() - strip.right()).abs() < 1e-3);
         // A tab that is no longer there is no rectangle at all.
-        assert_eq!(tab_carry(strip, &[120.0; 4], 9, grab_dx, 0.0), egui::Rect::NOTHING);
+        assert_eq!(
+            tab_carry(strip, &[120.0; 4], 9, grab_dx, 0.0),
+            egui::Rect::NOTHING
+        );
     }
 
     /// A chip over a slot drops into that slot, and the strip it leaves opens
@@ -2880,7 +2891,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             let bar =
-                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(700.0, CHROME_HEIGHT));
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(700.0, TOP_HEIGHT));
             let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile/crates"));
             let rects = crumb_rects(ui.painter(), bar, &path, 0.0);
             assert_eq!(rects.len(), path.len());
@@ -2895,7 +2906,7 @@ mod tests {
 
             // A narrow bar elides from the left and keeps the tail.
             let narrow =
-                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(150.0, CHROME_HEIGHT));
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(150.0, TOP_HEIGHT));
             let rects = crumb_rects(ui.painter(), narrow, &path, 0.0);
             assert_eq!(rects[0], egui::Rect::NOTHING, "the root should be elided");
             assert_ne!(
@@ -2934,7 +2945,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             let row =
-                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, CHROME_HEIGHT));
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
             let yanked = [std::path::PathBuf::from("/tmp/a")];
             let full = Cluster {
                 selected: 3,
@@ -3014,7 +3025,7 @@ mod tests {
     fn the_help_card_fits_the_window() {
         for size in [egui::vec2(1400.0, 900.0), egui::vec2(320.0, 200.0)] {
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size);
-            let rect = help_rect(area, area.top() + CHROME_HEIGHT + GAP, area.bottom() - GAP);
+            let rect = help_rect(area, area.top() + TOP_HEIGHT + GAP, area.bottom() - GAP);
             assert!(rect.width() > 0.0 && rect.width() <= HELP_MAX_WIDTH + 1e-3);
             assert!(rect.left() >= area.left() && rect.right() <= area.right() + 1e-3);
             assert!(rect.top() >= area.top());
@@ -3111,7 +3122,7 @@ mod tests {
             );
             let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile"));
             let path_rect =
-                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(1384.0, CHROME_HEIGHT));
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(1384.0, TOP_HEIGHT));
             let yanked = [
                 std::path::PathBuf::from("/tmp/one.txt"),
                 std::path::PathBuf::from("/tmp/two.txt"),
@@ -3155,7 +3166,7 @@ mod tests {
             }
             // …and the elided case, which draws its own leading ellipsis.
             let narrow =
-                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(90.0, CHROME_HEIGHT));
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(90.0, TOP_HEIGHT));
             let cluster = Cluster {
                 selected: 0,
                 visual: None,
@@ -3196,7 +3207,7 @@ mod tests {
             prompt.error = Some("that name is already taken by a directory".to_string());
             let tall = egui::Rect::from_min_size(
                 path_rect.min,
-                egui::vec2(220.0, CHROME_HEIGHT + crate::ui::PROMPT_ERROR_LINE),
+                egui::vec2(220.0, TOP_HEIGHT + crate::ui::PROMPT_ERROR_LINE),
             );
             assert_eq!(
                 prompt_lines(paint.painter, &prompt, 220.0, Some("delightfile")),
@@ -3234,7 +3245,7 @@ mod tests {
             let lines = crate::help::lines(&all, "");
             let mut help = Help::default();
             help.reset(&lines);
-            let rect = help_rect(area, area.top() + CHROME_HEIGHT + GAP, area.bottom() - GAP);
+            let rect = help_rect(area, area.top() + TOP_HEIGHT + GAP, area.bottom() - GAP);
             // Three headings: an empty field, a query with a caret in it, and
             // the placeholder that stands in for both.
             let filter = |query, caret| crate::help::Filter { query, caret };

@@ -241,15 +241,29 @@ pub(crate) const SELECT_BAR_INSET: f32 = 3.5;
 /// not a thing you are about to act on, so it says its piece more quietly.
 pub(crate) const CLIP_BAR_WIDTH: f32 = 2.0;
 
-/// Height of the tab strip and of the top row, in logical points.
+/// Height of one line of chrome — the tab strip, and the floor a floating
+/// card is held to — in logical points.
 ///
-/// One number for both: they are the same kind of thing — a single line of
-/// chrome above the panes — and giving them different heights would put a
-/// wobble in the window's vertical rhythm for no reason. 30 is [`ROW_HEIGHT`]
-/// plus eight: the four points that keep a chip's text off its own edge, and
-/// four more of air so the row reads as a bar rather than as one more row of
-/// the listing that happens to be on top.
+/// 30 is [`ROW_HEIGHT`] plus eight: the four points that keep a chip's text
+/// off its own edge, and four more of air so the row reads as a bar rather
+/// than as one more row of the listing that happens to be on top.
 pub const CHROME_HEIGHT: f32 = 30.0;
+
+/// Height of the top row — crumbs, prompt, status cluster — in logical points.
+///
+/// [`CHROME_HEIGHT`] **plus [`GAP`]**, and the extra eight points are not a
+/// second opinion about how tall a bar should be: they are the gap above the
+/// strip, claimed back.
+///
+/// The strip has no top edge of its own. Its inactive tabs are the window
+/// ground (see [`crate::chrome::tab_strip`]), so there is nothing to mark
+/// where the strip begins, and the block a reader sees as *the tab bar* runs
+/// from the window's edge down to the strip's foot — [`GAP`] plus
+/// [`CHROME_HEIGHT`]. The top row's plate, sized to the strip's own 30, was
+/// the same height and looked eight points shorter, because it was the only
+/// one of the two whose top edge you could see. Matching the *block* is what
+/// makes the two read as one rhythm. Derived, never picked.
+pub const TOP_HEIGHT: f32 = CHROME_HEIGHT + GAP;
 
 /// What a second line costs the top row, in logical points (see [`layout`]).
 ///
@@ -530,8 +544,8 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool, path_lines: us
     };
     // The second line is a *line*, not a second row: it is the same plate
     // carrying one more baseline, so it grows by the height of a line of text
-    // rather than by another CHROME_HEIGHT of padding.
-    let path_height = CHROME_HEIGHT + (path_lines.max(1) - 1) as f32 * PROMPT_ERROR_LINE;
+    // rather than by another TOP_HEIGHT of padding.
+    let path_height = TOP_HEIGHT + (path_lines.max(1) - 1) as f32 * PROMPT_ERROR_LINE;
     let path = egui::Rect::from_min_max(
         egui::pos2(outer.left(), top),
         // Clamped against the window's bottom *and* against its own top: a
@@ -977,8 +991,7 @@ impl Painting<'_> {
             // Hidden rows are muted the same step as gitignored ones: both are
             // things the listing shows you but the machine would rather you
             // looked past.
-            let ignored =
-                status == Some(df_core::git::FileStatus::Ignored) || entry.is_hidden;
+            let ignored = status == Some(df_core::git::FileStatus::Ignored) || entry.is_hidden;
 
             self.row(
                 &painter,
@@ -1191,7 +1204,6 @@ impl Painting<'_> {
                 mode_width + USAGE_BAR + USAGE_BAR_GAP
             }
         };
-
 
         // The dot sits between the name and the linemode column, so the two
         // right-hand facts read as one column of marks and one column of
@@ -1683,7 +1695,7 @@ mod tests {
         assert!((bare.list.bottom() - (area().bottom() - GAP)).abs() < 1e-3);
         // The top row is always there, and the panes start below it.
         assert!((bare.path.top() - GAP).abs() < 1e-3);
-        assert!((bare.path.height() - CHROME_HEIGHT).abs() < 1e-3);
+        assert!((bare.path.height() - TOP_HEIGHT).abs() < 1e-3);
         assert!((bare.list.top() - (bare.path.bottom() + GAP)).abs() < 1e-3);
 
         let with_strip = layout(area(), [1, 4, 3], true, 1);
