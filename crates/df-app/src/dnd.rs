@@ -125,7 +125,9 @@ impl Target {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Zones {
     pub strip: Option<egui::Rect>,
-    pub tabs: usize,
+    /// How wide each tab's chip is ([`crate::chrome::tab_widths`]), which is
+    /// what the strip's geometry is laid out from.
+    pub tabs: Vec<f32>,
     /// Owned rather than borrowed: an external drop arrives from the wayland
     /// thread *between* frames, and the geometry it must be resolved against is
     /// the one the last frame drew. A handful of rectangles copied once a frame
@@ -178,7 +180,7 @@ impl Zones {
                 .filter(|rect| rect.is_positive()),
             Target::Tab(index) => {
                 let strip = self.strip?;
-                crate::chrome::tab_rects(strip, self.tabs)
+                crate::chrome::tab_rects(strip, &self.tabs)
                     .get(index)
                     .copied()
             }
@@ -203,7 +205,7 @@ pub fn target_at(
     is_dir: impl Fn(Column, usize) -> bool,
 ) -> Option<Target> {
     if let Some(strip) = zones.strip {
-        if let Some(index) = crate::chrome::tab_at(strip, zones.tabs, pos) {
+        if let Some(index) = crate::chrome::tab_at(strip, &zones.tabs, pos) {
             return Some(Target::Tab(index));
         }
     }
@@ -706,7 +708,7 @@ mod tests {
             list_grid: None,
             scale: crate::ui::Scale::default(),
             strip: layout.strip,
-            tabs: 3,
+            tabs: vec![120.0; 3],
             crumbs: crumbs.to_vec(),
             list_pane: layout.list,
             list_content: crate::ui::content_rect(layout.list),
@@ -740,7 +742,7 @@ mod tests {
 
         // A tab chip.
         let strip = layout.strip.expect("a strip was asked for");
-        let tab = crate::chrome::tab_rects(strip, 3)[1];
+        let tab = crate::chrome::tab_rects(strip, &[120.0; 3])[1];
         assert_eq!(target_at(&z, tab.center(), dirs), Some(Target::Tab(1)));
         // A crumb.
         assert_eq!(

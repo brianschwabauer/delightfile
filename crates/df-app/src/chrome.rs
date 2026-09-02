@@ -65,6 +65,20 @@ pub const CARD_ROW: f32 = 20.0;
 /// Horizontal padding inside a bar or a chip.
 pub const PAD_X: f32 = 8.0;
 
+/// The space between a chip's icon and the word beside it, in logical points.
+///
+/// The icon is measured, not assumed: a patched-font glyph can be nearly two
+/// characters wide where the plain face's stand-in is one, and a word set a
+/// fixed em from the chip's edge butts into the wider one. Six points is a
+/// word space at this size — the gap between two words, which is what an icon
+/// and its label are.
+pub const ICON_GAP: f32 = 6.0;
+
+/// How wide an icon is, in the face it is set in, for laying a label after it.
+fn icon_width(painter: &egui::Painter, glyph: &str, font: &egui::FontId) -> f32 {
+    text_width(painter, glyph, font.clone())
+}
+
 /// A chip's inset inside the top row, on **every** adjacent side
 /// (`delightful-ui` §15's even insets).
 ///
@@ -98,26 +112,41 @@ const CHIP_TINT: f32 = 0.16;
 /// neighbour is wearing. Derived from [`TAB_PIGTAIL`], never picked.
 const TAB_GAP: f32 = TAB_PIGTAIL;
 
+/// The radius of a tab's top corners, and of its pigtails.
+///
+/// Its own number rather than [`ROW_RADIUS`]: a tab is the one surface in the
+/// window that is drawn as a *shape* — turning in at the top and out at the
+/// bottom — and at the rows' six points that shape was too tight to read as
+/// one. Eight is where the curve is a curve at strip height and the pigtail's
+/// flare is unmistakably a flare. The row the tab joins keeps its own radius
+/// on the corners that are its own.
+pub const TAB_RADIUS: u8 = 8;
+
+/// The narrowest a tab chip gets when it is sized to its title, in logical
+/// points: room for the numeral, a few letters, and the ellipsis a long name
+/// ends in. Narrower and the chip is a numeral with a smudge after it.
+pub const TAB_MIN_WIDTH: f32 = 64.0;
+
 /// The widest a tab chip gets, in logical points.
 ///
 /// Directory names are short and a strip of nine equal chips across a 1400 pt
 /// window would give each one 150 pt of mostly empty plate. Capping the width
 /// keeps two tabs looking like two tabs rather than like a segmented control
 /// that has taken over the top of the window.
-const TAB_MAX_WIDTH: f32 = 190.0;
+pub const TAB_MAX_WIDTH: f32 = 190.0;
 
 /// The active tab's pigtails: the concave quarter-circles at its bottom
 /// corners that flare out past its edges and run into the top row's ground,
 /// the way a browser tab's do.
 ///
-/// [`ROW_RADIUS`] — the *same* radius the tab's own top corners wear, so the
+/// [`TAB_RADIUS`] — the *same* radius the tab's own top corners wear, so the
 /// tab is one shape drawn with one curve: it turns in at the top and out at
 /// the bottom by the same amount, which is what makes it read as a folder tab
 /// rather than as a rectangle with something happening at its feet. It was
 /// [`CHIP_RADIUS`] (three points), on the reasoning that a pigtail must fit
 /// inside the gap; at that size it was invisible, and the honest fix is to
 /// size the gap off the pigtail rather than the pigtail off the gap.
-const TAB_PIGTAIL: f32 = ROW_RADIUS as f32;
+const TAB_PIGTAIL: f32 = TAB_RADIUS as f32;
 
 /// How far above and below the strip a tab drag still counts as a *reorder*
 /// rather than as a tab on its way out of the window.
@@ -159,31 +188,66 @@ const TAB_SEPARATOR_WIDTH: f32 = 1.0;
 /// pops at the end of the landing.
 const TAB_CARRY_TINT: f32 = 0.8;
 
-/// Where each tab's chip goes.
+/// How wide each tab's chip wants to be: its title's width plus the numeral
+/// and the padding, held between [`TAB_MIN_WIDTH`] and [`TAB_MAX_WIDTH`].
+///
+/// Measured once a frame in the same face the chip is drawn in, and then
+/// handed to everything that lays the strip out — the paint, the hit test, the
+/// drag — so they are all reading one set of numbers. A chip sized to its name
+/// says what it is without wasting a third of the strip on a name that is
+/// four letters long.
+pub fn tab_widths(painter: &egui::Painter, titles: &[String]) -> Vec<f32> {
+    titles
+        .iter()
+        .map(|title| {
+            let text = text_width(painter, title, egui::FontId::proportional(FONT));
+            (PAD_X + FONT + text + PAD_X).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH)
+        })
+        .collect()
+}
+
+/// Where each tab's chip goes, given how wide each one wants to be
+/// ([`tab_widths`]).
 ///
 /// Shared by the paint and the hit test, so a click lands on the chip it looks
 /// like it landed on — two functions computing this separately is how a strip
 /// grows a one-pixel lie at its edges.
-pub fn tab_rects(strip: egui::Rect, count: usize) -> Vec<egui::Rect> {
+///
+/// When the chips together are wider than the strip they are all squeezed by
+/// the same factor rather than the last ones being cut off: a tab you cannot
+/// see is a tab you cannot switch to with the pointer, and a strip that is
+/// tight everywhere is a strip that is honest about being full.
+pub fn tab_rects(strip: egui::Rect, widths: &[f32]) -> Vec<egui::Rect> {
+    let count = widths.len();
     if count == 0 {
         return Vec::new();
     }
     let total_gap = TAB_GAP * (count - 1) as f32;
-    let width = ((strip.width() - total_gap) / count as f32).min(TAB_MAX_WIDTH);
-    (0..count)
-        .map(|i| {
-            let left = strip.left() + i as f32 * (width + TAB_GAP);
-            egui::Rect::from_min_size(
+    let natural: f32 = widths.iter().map(|w| w.max(0.0)).sum();
+    let room = (strip.width() - total_gap).max(0.0);
+    let squeeze = if natural > room && natural > 0.0 {
+        room / natural
+    } else {
+        1.0
+    };
+    let mut left = strip.left();
+    widths
+        .iter()
+        .map(|width| {
+            let width = (width.max(0.0) * squeeze).max(0.0);
+            let rect = egui::Rect::from_min_size(
                 egui::pos2(left, strip.top()),
-                egui::vec2(width.max(0.0), strip.height()),
-            )
+                egui::vec2(width, strip.height()),
+            );
+            left += width + TAB_GAP;
+            rect
         })
         .collect()
 }
 
 /// Which tab chip a point is over, if any.
-pub fn tab_at(strip: egui::Rect, count: usize, pos: egui::Pos2) -> Option<usize> {
-    tab_rects(strip, count)
+pub fn tab_at(strip: egui::Rect, widths: &[f32], pos: egui::Pos2) -> Option<usize> {
+    tab_rects(strip, widths)
         .into_iter()
         .position(|rect| rect.contains(pos))
 }
@@ -215,12 +279,12 @@ pub fn reordering(strip: egui::Rect, at: egui::Pos2) -> bool {
 /// the end would be a chip in a slot that does not exist.
 pub fn tab_carry(
     strip: egui::Rect,
-    count: usize,
+    widths: &[f32],
     index: usize,
     grab_dx: f32,
     x: f32,
 ) -> egui::Rect {
-    let rects = tab_rects(strip, count);
+    let rects = tab_rects(strip, widths);
     let Some(home) = rects.get(index).copied() else {
         return egui::Rect::NOTHING;
     };
@@ -233,13 +297,14 @@ pub fn tab_carry(
 
 /// Which slot a carried chip would drop into, from where its middle is.
 ///
-/// The nearest slot's, rather than a division of the strip's width: the chip
-/// is the same size as a slot, so "which slot is this chip mostly over" and
-/// "which slot centre is it nearest" are the same question, and the nearest
-/// one cannot fall off the end when the chips are capped at
-/// [`TAB_MAX_WIDTH`] and the strip is wider than all of them together.
-pub fn tab_slot(strip: egui::Rect, count: usize, centre_x: f32) -> usize {
-    tab_rects(strip, count)
+/// The nearest slot's, rather than a division of the strip's width: "which
+/// slot is this chip mostly over" and "which slot centre is it nearest" are
+/// the same question, and the nearest one cannot fall off the end however the
+/// chips are sized. Measured against the tabs' *home* slots, which are the
+/// ones the hand can see the chip passing over — the shifted layout is what
+/// the strip is animating towards, not what it is showing.
+pub fn tab_slot(strip: egui::Rect, widths: &[f32], centre_x: f32) -> usize {
+    tab_rects(strip, widths)
         .iter()
         .enumerate()
         .min_by(|a, b| {
@@ -273,10 +338,20 @@ pub fn tab_order(count: usize, from: usize, to: usize) -> Vec<usize> {
 /// The carried tab's entry is its would-be resting place; the painter draws it
 /// at the pointer instead and uses this only as the target the landing
 /// animation aims at.
-pub fn tab_shifted(strip: egui::Rect, count: usize, from: usize, to: usize) -> Vec<egui::Rect> {
-    let rects = tab_rects(strip, count);
+///
+/// The slots are laid out again in the new order, with each tab's own width,
+/// rather than the tabs being dealt into the old slots: chips are sized to
+/// their titles, so a wide tab moved past a narrow one changes where every
+/// slot after them begins.
+pub fn tab_shifted(strip: egui::Rect, widths: &[f32], from: usize, to: usize) -> Vec<egui::Rect> {
+    let count = widths.len();
     let order = tab_order(count, from, to);
-    let mut shifted = rects.clone();
+    let reordered: Vec<f32> = order
+        .iter()
+        .map(|tab| widths.get(*tab).copied().unwrap_or(0.0))
+        .collect();
+    let rects = tab_rects(strip, &reordered);
+    let mut shifted = tab_rects(strip, widths);
     for (slot, tab) in order.into_iter().enumerate() {
         if let (Some(dest), Some(rect)) = (rects.get(slot), shifted.get_mut(tab)) {
             *rect = *dest;
@@ -336,13 +411,14 @@ pub fn tab_strip(
     titles: &[String],
     active: usize,
     filter: f32,
+    widths: &[f32],
     carry: Option<&Carry>,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
 ) {
     let palette = paint.palette;
     let count = titles.len();
-    let homes = tab_rects(strip, count);
+    let homes = tab_rects(strip, widths);
     // A carry naming a tab that is no longer there — a scan landed, a `}` went
     // past, the strip shrank — is no carry at all, rather than a panic or a
     // chip drawn for a tab that has gone.
@@ -478,12 +554,12 @@ fn tab_chip(
         // meets the row — a rounded bottom corner would be a gap between two
         // things that are touching. Off the ground it rounds all four ways:
         // nothing is under it to join.
-        let bottom = (ROW_RADIUS as f32 * (1.0 - settle)).round() as u8;
+        let bottom = (TAB_RADIUS as f32 * (1.0 - settle)).round() as u8;
         paint.painter.rect_filled(
             rect,
             egui::CornerRadius {
-                nw: ROW_RADIUS,
-                ne: ROW_RADIUS,
+                nw: TAB_RADIUS,
+                ne: TAB_RADIUS,
                 sw: bottom,
                 se: bottom,
             },
@@ -508,7 +584,7 @@ fn tab_chip(
         let plate = mix(palette.crust, palette.surface0, hover);
         let plate = mix(plate, palette.surface1, TAB_CARRY_TINT * (1.0 - settle));
         if hover > 0.0 || settle < 1.0 {
-            paint.painter.rect_filled(rect, ROW_RADIUS, plate);
+            paint.painter.rect_filled(rect, TAB_RADIUS, plate);
         }
     }
 
@@ -851,6 +927,7 @@ pub fn cluster_geometry(
     painter: &egui::Painter,
     row: egui::Rect,
     cluster: &Cluster<'_>,
+    nerd: bool,
 ) -> ClusterGeom {
     let font = egui::FontId::proportional(FONT);
     let inner = row.shrink2(egui::vec2(PAD_X, 0.0));
@@ -874,9 +951,12 @@ pub fn cluster_geometry(
     let mut git_text = None;
     let git = cluster.branch.map(|branch| {
         let label = branch_label(branch, cluster.dirty);
-        // The glyph's column plus its gap is the `FONT` the branch text is set
-        // in: one em is what a single-character ornament needs beside a word.
-        let width = text_width(painter, &label, font.clone()) + PAD_X * 2.0 + FONT;
+        // The glyph's own measured width, then a word space, then the text.
+        let glyph = crate::icons::glyph(nerd, GIT_ICON, GIT_GLYPH);
+        let width = text_width(painter, &label, font.clone())
+            + PAD_X * 2.0
+            + icon_width(painter, &glyph, &font)
+            + ICON_GAP;
         git_text = Some(label);
         chip_at(width, &mut right)
     });
@@ -953,6 +1033,8 @@ fn paint_cluster(
         mix(palette.overlay1, palette.text, counter_hover),
     );
     if let (Some(rect), Some(branch)) = (geom.git, geom.labels.git.as_deref()) {
+        let font = egui::FontId::proportional(FONT);
+        let glyph = crate::icons::glyph(paint.nerd, GIT_ICON, GIT_GLYPH);
         // The branch, in the palette's own git colour, on a plate of it — the
         // same chip treatment every count on this row gets. It lifts under the
         // pointer like the rest of them, but only far enough to say "there is
@@ -966,15 +1048,15 @@ fn paint_cluster(
         painter.text(
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            // A plain branch glyph, in the proportional face: the nerd-font
-            // icons need a patched font that may not be there, and the row must
-            // read the same either way.
-            "⑂",
+            &glyph,
             egui::FontId::proportional(FONT),
             palette.mauve,
         );
         painter.text(
-            egui::pos2(rect.left() + PAD_X + FONT, rect.center().y),
+            egui::pos2(
+                rect.left() + PAD_X + icon_width(painter, &glyph, &font) + ICON_GAP,
+                rect.center().y,
+            ),
             egui::Align2::LEFT_CENTER,
             branch,
             egui::FontId::proportional(FONT),
@@ -1112,7 +1194,7 @@ fn yank_tooltip(
 ///
 /// Pure, so the wording is a test rather than a repository.
 pub fn branch_tooltip(branch: &str, counts: Option<df_core::git::DirtyCounts>) -> Vec<String> {
-    let mut lines = vec![format!("⑂ {branch}")];
+    let mut lines = vec![branch.to_string()];
     match counts {
         // No scan has landed. Said out loud rather than left as a blank card:
         // "nothing here yet" and "nothing to report" are different answers.
@@ -1209,19 +1291,34 @@ pub struct TopGeom {
     pub cluster: ClusterGeom,
 }
 
-/// The glyph the filter chip wears: a search lens, in the proportional face for
-/// the reason the branch glyph is.
-const FILTER_GLYPH: &str = "⌕";
+/// The glyph the filter chip wears without the patched font: the key that
+/// opens the filter, so the chip teaches its own shortcut the way the tab
+/// numerals do. (The lens the plain face was asked for, `⌕`, is not in it.)
+const FILTER_GLYPH: &str = "f";
+
+/// …and with it: the funnel.
+const FILTER_ICON: char = '\u{f0b0}';
+
+/// The branch chip's glyph without the patched font: the plain face has no
+/// fork of its own (`⑂` came up as a blank box), so the column carries the
+/// nearest letter shape instead of nothing.
+const GIT_GLYPH: &str = "Y";
+
+/// …and with it: the branch.
+const GIT_ICON: char = '\u{f418}';
 
 /// How wide the filter chip is, so the crumbs can be measured against what is
 /// left. Zero when nothing is filtered.
-fn filter_width(painter: &egui::Painter, filter: &str) -> f32 {
+fn filter_width(painter: &egui::Painter, filter: &str, nerd: bool) -> f32 {
     if filter.is_empty() {
         return 0.0;
     }
-    text_width(painter, filter, egui::FontId::proportional(FONT))
+    let font = egui::FontId::proportional(FONT);
+    let glyph = crate::icons::glyph(nerd, FILTER_ICON, FILTER_GLYPH);
+    text_width(painter, filter, font.clone())
         + PAD_X * 2.0
-        + FONT
+        + icon_width(painter, &glyph, &font)
+        + ICON_GAP
         + CRUMB_SEPARATOR_WIDTH
 }
 
@@ -1232,9 +1329,10 @@ pub fn top_geometry(
     crumbs: &[Crumb],
     filter: &str,
     cluster: &Cluster<'_>,
+    nerd: bool,
 ) -> TopGeom {
-    let cluster_geom = cluster_geometry(painter, row, cluster);
-    let filter_w = filter_width(painter, filter);
+    let cluster_geom = cluster_geometry(painter, row, cluster, nerd);
+    let filter_w = filter_width(painter, filter, nerd);
     let reserved = cluster_geom.width + filter_w;
     let rects = crumb_rects(painter, row, crumbs, reserved);
     // After the last crumb that fitted, with a separator's worth of space
@@ -1350,16 +1448,13 @@ fn bar_ground(paint: &Painting<'_>, rect: egui::Rect, joined: bool, filter: f32)
 /// The top row's four corner radii.
 ///
 /// Three of them are always [`ROW_RADIUS`]. The fourth, the north-west, is
-/// **square whenever the strip is above the row**: the tab in the first slot
-/// has no left pigtail (its left edge is the row's own), so a rounded corner
-/// there would put a curve immediately beside a straight edge that is trying
-/// to continue it — the two would read as a misalignment rather than as one
-/// line. Squared, the row's left edge and the first tab's are the same edge,
-/// which is what they are.
-///
-/// This is deliberately about the *strip*, not about which tab is active: the
-/// corner would otherwise round and unround as tabs were switched, which is
-/// motion on the window's frame in answer to a keystroke about its contents.
+/// **square while the first tab is the active one**: that tab has no left
+/// pigtail (its left edge is the row's own) and its fill runs straight down
+/// into the row, so a rounded corner there would put a curve immediately
+/// beside a straight edge that is continuing it — a misalignment rather than
+/// one line. Squared, the row's left edge and the first tab's are the same
+/// edge, which is what they are. With any other tab active there is nothing
+/// joined to that corner but the ground, and it rounds like the other three.
 pub fn bar_corners(joined: bool) -> egui::CornerRadius {
     egui::CornerRadius {
         nw: if joined { 0 } else { ROW_RADIUS },
@@ -1443,11 +1538,12 @@ pub fn path_bar(
             // row, so the two read as one kind of ornament (PLAN §7.4, §7.6).
             plate(paint, rect, palette.sky, 1.0 + hover * 0.9);
         } else if hover > 0.0 {
-            painter.rect_filled(
-                rect,
-                CHIP_RADIUS,
-                mix(paint.palette.crust, palette.surface1, hover),
-            );
+            // Faded by *alpha*, not mixed up from the window ground: the row
+            // this sits on is `bar_fill`, a step lighter than `crust`, so a
+            // plate mixed from `crust` went *darker* than its ground on the
+            // way out — a black flash before it vanished. A translucent plate
+            // thins towards whatever is under it.
+            painter.rect_filled(rect, CHIP_RADIUS, fade(palette.surface1, hover));
         }
         let inside = painter.with_clip_rect(rect);
         for splash in ripples.splashes(key, paint.now) {
@@ -1508,15 +1604,19 @@ pub fn path_bar(
                 egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
             );
         }
+        let glyph = crate::icons::glyph(paint.nerd, FILTER_ICON, FILTER_GLYPH);
         inside.text(
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
-            FILTER_GLYPH,
+            &glyph,
             font.clone(),
             fade(palette.blue, alpha),
         );
         inside.text(
-            egui::pos2(rect.left() + PAD_X + FONT, rect.center().y),
+            egui::pos2(
+                rect.left() + PAD_X + icon_width(painter, &glyph, &font) + ICON_GAP,
+                rect.center().y,
+            ),
             egui::Align2::LEFT_CENTER,
             filter,
             font.clone(),
@@ -2313,17 +2413,7 @@ pub fn help_overlay(
                 legend_swatch(&painter, swatch, entry.swatch, palette);
                 let mark_left = swatch.right() + LEGEND_SWATCH_GAP;
                 let meaning_left = row.left() + PAD_X + HELP_KEYS_COLUMN;
-                // The tag wears its own type, because *that* is the mark: a
-                // row's `ignored` is two points smaller than the text beside it
-                // and a step quieter, and a legend that set it in the sheet's
-                // own face would be naming a different thing.
-                let (font, colour) = match entry.swatch {
-                    help::Swatch::Tag => (
-                        egui::FontId::proportional(crate::ui::TAG_SIZE),
-                        palette.overlay0,
-                    ),
-                    _ => (egui::FontId::proportional(FONT), palette.subtext1),
-                };
+                let (font, colour) = (egui::FontId::proportional(FONT), palette.subtext1);
                 truncated_in(
                     &painter,
                     egui::pos2(mark_left, row.center().y),
@@ -2374,8 +2464,7 @@ fn legend_swatch(
     palette: &crate::theme::Palette,
 ) {
     match swatch {
-        // The tag draws itself, as its own word (see the caller).
-        help::Swatch::None | help::Swatch::Tag => {}
+        help::Swatch::None => {}
         help::Swatch::Dot(status) => {
             if let Some(colour) = crate::ui::git_dot(status, palette) {
                 painter.circle_filled(rect.center(), crate::ui::GIT_DOT_RADIUS, colour);
@@ -2544,11 +2633,11 @@ mod tests {
         // No scan yet is not the same as clean, and the card says which.
         assert_eq!(
             branch_tooltip("main", None),
-            vec!["⑂ main".to_string(), "status not in yet".to_string()]
+            vec!["main".to_string(), "status not in yet".to_string()]
         );
         assert_eq!(
             branch_tooltip("main", Some(DirtyCounts::default())),
-            vec!["⑂ main".to_string(), "working tree clean".to_string()]
+            vec!["main".to_string(), "working tree clean".to_string()]
         );
         // Only the kinds that have something in them, in git's own order.
         assert_eq!(
@@ -2561,7 +2650,7 @@ mod tests {
                 })
             ),
             vec![
-                "⑂ main".to_string(),
+                "main".to_string(),
                 "2 staged".to_string(),
                 "1 untracked".to_string(),
             ]
@@ -2587,7 +2676,7 @@ mod tests {
             let wide =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, CHROME_HEIGHT));
             assert!(
-                top_geometry(ui.painter(), wide, &path, "", &bare)
+                top_geometry(ui.painter(), wide, &path, "", &bare, false)
                     .ellipsis
                     .is_none(),
                 "nothing was elided, so there is no ellipsis to point at"
@@ -2595,7 +2684,7 @@ mod tests {
 
             let narrow =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(120.0, CHROME_HEIGHT));
-            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare);
+            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
             let rect = geom.ellipsis.expect("a narrow row elides");
             assert!(narrow.contains(rect.center()));
             let first = geom
@@ -2615,13 +2704,13 @@ mod tests {
     /// growing past the cap rather than spreading over the whole window.
     #[test]
     fn the_tab_chips_are_laid_out_left_to_right() {
-        let rects = tab_rects(strip(), 3);
+        let rects = tab_rects(strip(), &[120.0; 3]);
         assert_eq!(rects.len(), 3);
         assert!((rects[0].left() - strip().left()).abs() < 1e-3);
         assert!((rects[1].left() - rects[0].right() - TAB_GAP).abs() < 1e-3);
         assert!(rects[0].width() <= TAB_MAX_WIDTH + 1e-3);
         assert!(rects.iter().all(|r| r.height() == CHROME_HEIGHT));
-        assert!(tab_rects(strip(), 0).is_empty());
+        assert!(tab_rects(strip(), &[]).is_empty());
     }
 
     /// A click lands on the chip it looks like it landed on, and on nothing in
@@ -2629,15 +2718,41 @@ mod tests {
     #[test]
     fn hit_testing_finds_the_chip_under_the_pointer() {
         let strip = strip();
-        let rects = tab_rects(strip, 4);
+        let rects = tab_rects(strip, &[120.0; 4]);
         for (index, rect) in rects.iter().enumerate() {
-            assert_eq!(tab_at(strip, 4, rect.center()), Some(index));
+            assert_eq!(tab_at(strip, &[120.0; 4], rect.center()), Some(index));
         }
         assert_eq!(
-            tab_at(strip, 4, egui::pos2(strip.right() - 1.0, strip.center().y)),
+            tab_at(strip, &[120.0; 4], egui::pos2(strip.right() - 1.0, strip.center().y)),
             None
         );
-        assert_eq!(tab_at(strip, 4, egui::pos2(-10.0, -10.0)), None);
+        assert_eq!(tab_at(strip, &[120.0; 4], egui::pos2(-10.0, -10.0)), None);
+    }
+
+    /// Chips sized to their titles: a short name gets the floor, a long one
+    /// the cap, and a strip too narrow for all of them squeezes every chip by
+    /// the same factor rather than losing the last one off the end.
+    #[test]
+    fn the_tab_chips_are_sized_to_their_titles() {
+        let widths = [TAB_MIN_WIDTH, TAB_MAX_WIDTH, 100.0];
+        let rects = tab_rects(strip(), &widths);
+        assert!((rects[0].width() - TAB_MIN_WIDTH).abs() < 1e-3);
+        assert!((rects[1].width() - TAB_MAX_WIDTH).abs() < 1e-3);
+        assert!((rects[2].width() - 100.0).abs() < 1e-3);
+        assert!((rects[1].left() - rects[0].right() - TAB_GAP).abs() < 1e-3);
+
+        let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, CHROME_HEIGHT));
+        let squeezed = tab_rects(narrow, &[100.0, 100.0, 100.0]);
+        assert!((squeezed[2].right() - narrow.right()).abs() < 1e-3);
+        let ratio = squeezed[0].width() / squeezed[1].width();
+        assert!((ratio - 1.0).abs() < 1e-3);
+        assert!(squeezed.iter().all(|r| r.width() < 100.0));
+
+        // A reorder lays the slots out again in the new order, so a wide tab
+        // carried past a narrow one moves where the slots after them start.
+        let shifted = tab_shifted(strip(), &widths, 1, 0);
+        assert!((shifted[1].left() - strip().left()).abs() < 1e-3);
+        assert!((shifted[0].left() - (strip().left() + TAB_MAX_WIDTH + TAB_GAP)).abs() < 1e-3);
     }
 
     /// The pigtail is a *visible* radius — the tab's own — and the gap is cut
@@ -2645,9 +2760,9 @@ mod tests {
     /// chips and stops at its neighbour's edge rather than carving into it.
     #[test]
     fn the_gap_is_exactly_one_pigtail_wide() {
-        assert_eq!(TAB_PIGTAIL, ROW_RADIUS as f32);
+        assert_eq!(TAB_PIGTAIL, TAB_RADIUS as f32);
         assert_eq!(TAB_GAP, TAB_PIGTAIL);
-        let rects = tab_rects(strip(), 3);
+        let rects = tab_rects(strip(), &[120.0; 3]);
         // The first tab's left edge is the row's own, which is why it has no
         // left pigtail and why the row squares that corner.
         assert!((rects[0].left() - strip().left()).abs() < 1e-3);
@@ -2694,19 +2809,19 @@ mod tests {
     #[test]
     fn a_carried_chip_follows_the_grab_and_stays_in_the_strip() {
         let strip = strip();
-        let rects = tab_rects(strip, 4);
+        let rects = tab_rects(strip, &[120.0; 4]);
         let grab_dx = 20.0;
         // Picked up where it stands: it does not move.
-        let still = tab_carry(strip, 4, 1, grab_dx, rects[1].left() + grab_dx);
+        let still = tab_carry(strip, &[120.0; 4], 1, grab_dx, rects[1].left() + grab_dx);
         assert!((still.left() - rects[1].left()).abs() < 1e-3);
         assert_eq!(still.size(), rects[1].size());
         // Dragged off either end: clamped, never outside.
-        let left = tab_carry(strip, 4, 1, grab_dx, strip.left() - 500.0);
+        let left = tab_carry(strip, &[120.0; 4], 1, grab_dx, strip.left() - 500.0);
         assert!((left.left() - strip.left()).abs() < 1e-3);
-        let right = tab_carry(strip, 4, 1, grab_dx, strip.right() + 500.0);
+        let right = tab_carry(strip, &[120.0; 4], 1, grab_dx, strip.right() + 500.0);
         assert!((right.right() - strip.right()).abs() < 1e-3);
         // A tab that is no longer there is no rectangle at all.
-        assert_eq!(tab_carry(strip, 4, 9, grab_dx, 0.0), egui::Rect::NOTHING);
+        assert_eq!(tab_carry(strip, &[120.0; 4], 9, grab_dx, 0.0), egui::Rect::NOTHING);
     }
 
     /// A chip over a slot drops into that slot, and the strip it leaves opens
@@ -2714,27 +2829,27 @@ mod tests {
     #[test]
     fn a_chip_drops_into_the_slot_it_is_over() {
         let strip = strip();
-        let rects = tab_rects(strip, 4);
+        let rects = tab_rects(strip, &[120.0; 4]);
         for (index, rect) in rects.iter().enumerate() {
-            assert_eq!(tab_slot(strip, 4, rect.center().x), index);
+            assert_eq!(tab_slot(strip, &[120.0; 4], rect.center().x), index);
         }
         // Off either end it saturates rather than wrapping or panicking.
-        assert_eq!(tab_slot(strip, 4, -1000.0), 0);
-        assert_eq!(tab_slot(strip, 4, 100_000.0), 3);
-        assert_eq!(tab_slot(strip, 0, 0.0), 0);
+        assert_eq!(tab_slot(strip, &[120.0; 4], -1000.0), 0);
+        assert_eq!(tab_slot(strip, &[120.0; 4], 100_000.0), 3);
+        assert_eq!(tab_slot(strip, &[], 0.0), 0);
 
         // Carrying tab 0 to slot 2 slides 1 and 2 left by one place and leaves
         // 3 where it was — the order a remove-then-insert gives.
         assert_eq!(tab_order(4, 0, 2), vec![1, 2, 0, 3]);
         assert_eq!(tab_order(4, 3, 0), vec![3, 0, 1, 2]);
         assert_eq!(tab_order(4, 2, 2), vec![0, 1, 2, 3]);
-        let shifted = tab_shifted(strip, 4, 0, 2);
+        let shifted = tab_shifted(strip, &[120.0; 4], 0, 2);
         assert_eq!(shifted[1], rects[0], "tab 1 has taken the first slot");
         assert_eq!(shifted[2], rects[1]);
         assert_eq!(shifted[0], rects[2], "the carried tab's would-be slot");
         assert_eq!(shifted[3], rects[3], "nothing past the move moved");
         // Dropping where it started moves nothing at all.
-        assert_eq!(tab_shifted(strip, 4, 1, 1), rects);
+        assert_eq!(tab_shifted(strip, &[120.0; 4], 1, 1), rects);
     }
 
     /// The path, as segments you can click: the root first, the directory you
@@ -2837,7 +2952,7 @@ mod tests {
                 position: 12,
                 rows: 340,
             };
-            let geom = cluster_geometry(ui.painter(), row, &full);
+            let geom = cluster_geometry(ui.painter(), row, &full, false);
             let chips = [
                 geom.counter,
                 geom.git.expect("a branch was given"),
@@ -2867,20 +2982,20 @@ mod tests {
                 position: 0,
                 rows: 0,
             };
-            let quiet = cluster_geometry(ui.painter(), row, &bare);
+            let quiet = cluster_geometry(ui.painter(), row, &bare, false);
             assert!(quiet.git.is_none() && quiet.yank.is_none());
             assert!(quiet.selected.is_none() && quiet.visual.is_none());
             assert!(quiet.width < geom.width);
 
             // The committed filter is a trailing crumb, after the last one.
             let path = crumbs(std::path::Path::new("/home/brian/Downloads"));
-            let top = top_geometry(ui.painter(), row, &path, "invoice", &bare);
+            let top = top_geometry(ui.painter(), row, &path, "invoice", &bare, false);
             let filter = top.filter.expect("a filter was given");
             let last = top.crumbs.last().copied().expect("a crumb was drawn");
             assert!(filter.left() > last.right());
             assert!(filter.right() <= row.right() - quiet.width + 1e-3);
             // …and nothing is drawn for it when nothing is filtered.
-            assert!(top_geometry(ui.painter(), row, &path, "", &bare)
+            assert!(top_geometry(ui.painter(), row, &path, "", &bare, false)
                 .filter
                 .is_none());
         });
@@ -2934,6 +3049,10 @@ mod tests {
                 .iter()
                 .map(|t| t.to_string())
                 .collect();
+            let widths = tab_widths(ui.painter(), &titles);
+            assert!(widths
+                .iter()
+                .all(|w| (TAB_MIN_WIDTH..=TAB_MAX_WIDTH).contains(w)));
             for active in 0..titles.len() {
                 tab_strip(
                     &paint,
@@ -2941,6 +3060,7 @@ mod tests {
                     &titles,
                     active,
                     if active == 1 { 1.0 } else { 0.0 },
+                    &widths,
                     None,
                     &Hovers::new(),
                     &Ripples::new(),
@@ -2950,19 +3070,20 @@ mod tests {
             // past its neighbour) and half-way down into a slot, which are the
             // two ends of the landing.
             for (tab, settle) in [(0usize, 0.0f32), (2, 0.5)] {
-                let slot = tab_slot(strip(), titles.len(), strip().center().x);
+                let slot = tab_slot(strip(), &widths, strip().center().x);
                 tab_strip(
                     &paint,
                     strip(),
                     &titles,
                     1,
                     0.0,
+                    &widths,
                     Some(&Carry {
                         tab,
-                        rect: tab_carry(strip(), titles.len(), tab, 20.0, strip().center().x),
-                        offsets: tab_shifted(strip(), titles.len(), tab, slot)
+                        rect: tab_carry(strip(), &widths, tab, 20.0, strip().center().x),
+                        offsets: tab_shifted(strip(), &widths, tab, slot)
                             .iter()
-                            .zip(tab_rects(strip(), titles.len()))
+                            .zip(tab_rects(strip(), &widths))
                             .map(|(to, home)| to.left() - home.left())
                             .collect(),
                         settle,
@@ -2978,6 +3099,7 @@ mod tests {
                 &titles,
                 0,
                 0.0,
+                &widths,
                 Some(&Carry {
                     tab: 9,
                     rect: strip(),
@@ -3016,7 +3138,7 @@ mod tests {
                     position: 12,
                     rows: 340,
                 };
-                let geom = top_geometry(paint.painter, path_rect, &path, filter, &cluster);
+                let geom = top_geometry(paint.painter, path_rect, &path, filter, &cluster, false);
                 path_bar(
                     &paint,
                     area,
@@ -3043,7 +3165,7 @@ mod tests {
                 position: 0,
                 rows: 0,
             };
-            let geom = top_geometry(paint.painter, narrow, &path, "", &cluster);
+            let geom = top_geometry(paint.painter, narrow, &path, "", &cluster, false);
             path_bar(
                 &paint,
                 area,

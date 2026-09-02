@@ -391,6 +391,22 @@ fn extension_glyph(name: &str, kind: FileKind) -> Option<char> {
 ///
 /// A basket holds whatever it holds; a ghost wearing the first file's icon
 /// would claim they are all that kind of thing.
+/// A chrome glyph: the patched font's icon when [`install`] found one, and a
+/// character the stock faces are known to carry otherwise.
+///
+/// The chrome used to reach for Unicode symbols (`⑂`, `⌕`, `▤`) on the theory
+/// that they need no patched font — but egui's own faces do not have them
+/// either, and what showed was the missing-glyph box. Every fallback here has
+/// to be a character those faces actually draw; `the_chrome_glyphs_all_render`
+/// holds them to it.
+pub fn glyph(nerd: bool, patched: char, plain: &'static str) -> String {
+    if nerd {
+        patched.to_string()
+    } else {
+        plain.to_string()
+    }
+}
+
 pub fn generic(palette: &Palette, nerd: bool) -> Icon {
     Icon {
         glyph: if nerd { GENERIC_FILE } else { ' ' },
@@ -845,5 +861,33 @@ mod tests {
         // `media_kind` is asked before the language table and before any of
         // this (`00001.ts`, above).
         assert_eq!(glyph(".2.ts"), kind_glyph(FileKind::Video));
+    }
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    /// Every glyph the chrome sets in the stock faces has to be a character
+    /// those faces draw, patched font or not: the missing-glyph box is what
+    /// `⑂` and `⌕` used to show, and this is the test that would have caught
+    /// them. The patched-font icons are checked too when a Nerd Font is on
+    /// the machine, and skipped when it is not.
+    #[test]
+    fn the_chrome_glyphs_all_render() {
+        let ctx = egui::Context::default();
+        let nerd = super::install(&ctx);
+        let _ = ctx.run_ui(Default::default(), |_| {});
+        let plain = ['Y', 'f', '⊞', '☰', '✓', '☐', '•', '◂', '▣', '▸', '›', '…', '×', '·', '→', '↑', '↓', '←', '⇧', '≈'];
+        let patched = ['\u{f418}', '\u{f0b0}', '\u{f01c}'];
+        let font = egui::FontId::proportional(14.0);
+        for c in plain.iter().chain(patched.iter().filter(|_| nerd)) {
+            assert!(
+                ctx.fonts_mut(|f| f.has_glyph(&font, *c)),
+                "no face draws {c:?} (U+{:04X})",
+                *c as u32
+            );
+        }
+        for c in [super::GENERIC_DIR, super::GENERIC_FILE].iter().filter(|_| nerd) {
+            assert!(ctx.fonts_mut(|f| f.has_glyph(&font, *c)), "{c:?}");
+        }
     }
 }

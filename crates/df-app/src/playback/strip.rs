@@ -185,7 +185,8 @@ pub fn rate_label(rate: f64, playing: bool) -> Option<String> {
         format!("{mag:.1}×")
     };
     Some(if rate < 0.0 {
-        format!("◀ {number}")
+        // `◂`, the small triangle: `◀` is not in the faces the strip is set in.
+        format!("◂ {number}")
     } else {
         number
     })
@@ -1143,7 +1144,7 @@ mod tests {
         assert_eq!(rate_label(8.0, false), None);
         assert_eq!(rate_label(8.0, true).as_deref(), Some("8×"));
         assert_eq!(rate_label(128.0, true).as_deref(), Some("128×"));
-        assert_eq!(rate_label(-4.0, true).as_deref(), Some("◀ 4×"));
+        assert_eq!(rate_label(-4.0, true).as_deref(), Some("◂ 4×"));
         assert_eq!(rate_label(0.5, true).as_deref(), Some("0.5×"));
     }
 }

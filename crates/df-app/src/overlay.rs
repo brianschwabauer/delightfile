@@ -238,7 +238,8 @@ pub fn paint_finder(
             Kind::Command => ("›", palette.overlay1),
             Kind::Place => ("/", palette.blue),
             Kind::Tab => ("▣", palette.teal),
-            Kind::View => ("▦", palette.mauve),
+            // `▦` is not in the stock faces; `⊞` is the same idea and is.
+            Kind::View => ("⊞", palette.mauve),
         };
         inside.text(
             egui::pos2(rect.left() + PAD_X, rect.center().y),

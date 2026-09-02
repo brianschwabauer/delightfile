@@ -631,7 +631,8 @@ struct Geom<'a> {
     basket: &'a crate::basket::Geometry,
     /// The toast, when one is up (PLAN §5): the plate, and the offer inside it.
     toast: Option<crate::toast::ToastGeom>,
-    tabs: usize,
+    /// How wide each tab's chip is this frame ([`chrome::tab_widths`]).
+    tabs: &'a [f32],
 }
 
 /// Which piece of a path `c c` / `c d` / `c f` / `c n` copy (PLAN §7.4).
@@ -900,6 +901,11 @@ pub struct App {
     /// the cursor — see [`crate::hover::Parking`], which is where the rule and
     /// its reasons live.
     row_hover: crate::hover::Parking,
+    /// How wide each tab's chip was the last time the strip was measured
+    /// ([`chrome::tab_widths`]), kept so the drag — which runs from pointer
+    /// events, off the frame that measured — lays its chips out from the same
+    /// numbers the paint did.
+    tab_widths: Vec<f32>,
     /// The top row's prompt, when something is being typed into it.
     prompt: Option<Prompt>,
     /// Visual mode (`v` / `V`), while it is on.
@@ -1622,6 +1628,7 @@ impl App {
             clipboard_ready: false,
             pointer_moved_at: None,
             row_hover: crate::hover::Parking::default(),
+            tab_widths: Vec::new(),
             prompt: None,
             visual: None,
             clicks: crate::mouse::Clicks::new(),
@@ -9142,7 +9149,7 @@ impl App {
         let Some(label) = self.tabs.iter().nth(index).map(Tab::title) else {
             return;
         };
-        let chip = chrome::tab_rects(strip, self.tabs.len())
+        let chip = chrome::tab_rects(strip, &self.tab_widths())
             .get(index)
             .copied()
             .unwrap_or(egui::Rect::from_center_size(from, egui::Vec2::ZERO));
@@ -9184,8 +9191,9 @@ impl App {
     /// is no longer there.
     fn tab_offsets(&self, drag: &TabDrag, strip: egui::Rect, now: Instant) -> Vec<f32> {
         let count = self.tabs.len();
-        let homes = chrome::tab_rects(strip, count);
-        let targets = chrome::tab_shifted(strip, count, drag.tab, drag.slot);
+        let widths = self.tab_widths();
+        let homes = chrome::tab_rects(strip, &widths);
+        let targets = chrome::tab_shifted(strip, &widths, drag.tab, drag.slot);
         let t = drag.slide.value(now);
         (0..count)
             .map(|index| {
@@ -9205,8 +9213,20 @@ impl App {
     /// One function because the painter draws them the same way — the only
     /// difference between a chip being carried and a chip landing is which
     /// number `settle` is at.
+    /// The chip widths the strip was last measured at, or a uniform guess
+    /// when the strip has changed under them (a tab opened or closed between
+    /// the measuring frame and this event): a drag laid out from a list one
+    /// entry short would put every chip after the gap in the wrong slot.
+    fn tab_widths(&self) -> Vec<f32> {
+        if self.tab_widths.len() == self.tabs.len() {
+            self.tab_widths.clone()
+        } else {
+            vec![chrome::TAB_MAX_WIDTH; self.tabs.len()]
+        }
+    }
+
     fn tab_carry(&self, strip: egui::Rect, now: Instant) -> Option<chrome::Carry> {
-        let count = self.tabs.len();
+        let widths = self.tab_widths();
         if let Some(drag) = self
             .tab_drag
             .as_ref()
@@ -9214,13 +9234,13 @@ impl App {
         {
             return Some(chrome::Carry {
                 tab: drag.tab,
-                rect: chrome::tab_carry(strip, count, drag.tab, drag.grab_dx, drag.at.x),
+                rect: chrome::tab_carry(strip, &widths, drag.tab, drag.grab_dx, drag.at.x),
                 offsets: self.tab_offsets(drag, strip, now),
                 settle: 0.0,
             });
         }
         let land = self.tab_land.as_ref()?;
-        let slot = chrome::tab_rects(strip, count).get(land.tab).copied()?;
+        let slot = chrome::tab_rects(strip, &widths).get(land.tab).copied()?;
         let t = land.tween.value(now);
         Some(chrome::Carry {
             tab: land.tab,
@@ -9240,7 +9260,6 @@ impl App {
     /// *decision* — reorder or detach — is re-asked every frame rather than
     /// held.
     fn carry_tab(&mut self, at: egui::Pos2, strip: Option<egui::Rect>, now: Instant) {
-        let count = self.tabs.len();
         let Some(strip) = strip else {
             if let Some(drag) = &mut self.tab_drag {
                 drag.at = at;
@@ -9257,10 +9276,11 @@ impl App {
         else {
             return;
         };
+        let widths = self.tab_widths();
         let carried = self
             .tab_drag
             .as_ref()
-            .map(|drag| chrome::tab_carry(strip, count, drag.tab, drag.grab_dx, at.x));
+            .map(|drag| chrome::tab_carry(strip, &widths, drag.tab, drag.grab_dx, at.x));
         let Some(drag) = &mut self.tab_drag else {
             return;
         };
@@ -9270,7 +9290,7 @@ impl App {
         // holding a slot open for a tab that is on its way to another window
         // would be the strip promising something the release will not do.
         let slot = match (chrome::reordering(strip, at), carried) {
-            (true, Some(rect)) => chrome::tab_slot(strip, count, rect.center().x),
+            (true, Some(rect)) => chrome::tab_slot(strip, &widths, rect.center().x),
             _ => drag.tab,
         };
         if slot != drag.slot {
@@ -9296,12 +9316,13 @@ impl App {
     /// touched, and the one under the cursor going dark.
     fn land_tab(&mut self, drag: &TabDrag, commit: bool, now: Instant) {
         let count = self.tabs.len();
-        let homes = chrome::tab_rects(drag.strip, count);
+        let widths = self.tab_widths();
+        let homes = chrome::tab_rects(drag.strip, &widths);
         // Where the strip actually is on the frame the button came up, which
         // is not necessarily where it was heading: a quick drag lands with a
         // slide still running.
         let was = self.tab_offsets(drag, drag.strip, now);
-        let rect = chrome::tab_carry(drag.strip, count, drag.tab, drag.grab_dx, drag.at.x);
+        let rect = chrome::tab_carry(drag.strip, &widths, drag.tab, drag.grab_dx, drag.at.x);
         // Old index → new index. The identity when nothing is committed, which
         // is what makes the cancel and the drop one piece of code.
         let mut moved: Vec<usize> = (0..count).collect();
@@ -10791,7 +10812,12 @@ impl App {
             .map(|parent| parent.scroll_rows(now))
             .unwrap_or(0.0);
         let parent_len = self.tab().parent.as_ref().map(|p| p.dir.len()).unwrap_or(0);
-        let tab_count = self.tabs.len();
+        // The chips are measured once, here, and every reading of the strip
+        // this frame — the hit test, the drag, the paint — is laid out from
+        // the same numbers, for the reason `tab_rects` gives.
+        let tab_titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
+        let tab_widths = chrome::tab_widths(ui.painter(), &tab_titles);
+        self.tab_widths = tab_widths.clone();
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
         let overlay = self.overlay_geometry(area, &layout, area.bottom() - ui::GAP);
@@ -10811,6 +10837,7 @@ impl App {
                 &self.path_bar.1,
                 self.filter_chip_text(),
                 &cluster,
+                self.nerd,
             )
         };
         // **Nothing on the top row is hit-testable while a prompt has taken
@@ -10902,7 +10929,7 @@ impl App {
             }
             let control = layout
                 .strip
-                .and_then(|strip| chrome::tab_at(strip, tab_count, p))
+                .and_then(|strip| chrome::tab_at(strip, &tab_widths, p))
                 .map(Control::Tab)
                 .or_else(|| {
                     crumb_rects
@@ -11074,7 +11101,7 @@ impl App {
             menu: &menu_geometry,
             basket: &basket_geometry,
             toast: toast_geom,
-            tabs: tab_count,
+            tabs: &tab_widths,
         };
 
         if pointer.secondary && !dismissing && overlay.is_none() && !menu_live {
@@ -11167,7 +11194,7 @@ impl App {
         // resolved against the frame the hand was aiming at.
         let zones = dnd::Zones {
             strip: layout.strip,
-            tabs: tab_count,
+            tabs: tab_widths.clone(),
             crumbs: crumb_rects.clone(),
             list_pane: layout.list,
             list_content,
@@ -11944,14 +11971,14 @@ impl App {
                 .unwrap_or(0.0),
         };
         if let Some(strip) = layout.strip {
-            let titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
             let carry = self.tab_carry(strip, now);
             chrome::tab_strip(
                 &paint,
                 strip,
-                &titles,
+                &tab_titles,
                 self.tabs.active_index(),
                 bar_filter,
+                &tab_widths,
                 carry.as_ref(),
                 &self.hovers,
                 &self.ripples,
@@ -11981,7 +12008,10 @@ impl App {
         // first tab was not the live one would be the window's frame moving in
         // answer to a keystroke about its contents. One flag, one place, if
         // that ever wants revisiting.
-        let joined = layout.strip.is_some();
+        // Square only while the *first* tab is the active one: that is the
+        // tab whose fill runs straight down into this corner. See
+        // [`chrome::bar_corners`].
+        let joined = layout.strip.is_some() && self.tabs.active_index() == 0;
         match &self.prompt {
             // …except the help filter, which belongs to the sheet drawn over
             // this row: a field painted here would be behind the sheet's own

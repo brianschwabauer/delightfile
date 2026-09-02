@@ -66,8 +66,6 @@ pub enum Swatch {
     Dot(df_core::git::FileStatus),
     /// One of the three row bars.
     Bar(Mark),
-    /// The `ignored` tag, set the way a row sets it.
-    Tag,
 }
 
 /// Which row bar a [`Swatch::Bar`] stands for.
@@ -102,12 +100,7 @@ pub const LEGEND: &[LegendRow] = &[
     LegendRow {
         mark: "dimmed row",
         swatch: Swatch::None,
-        meaning: "git is ignoring it, it has been cut, or it is in the parent column",
-    },
-    LegendRow {
-        mark: "ignored",
-        swatch: Swatch::Tag,
-        meaning: "the tag beside the size: git is ignoring this path",
+        meaning: "hidden, git is ignoring it, it has been cut, or it is in the parent column",
     },
     LegendRow {
         mark: "yellow bar, left",
@@ -396,7 +389,6 @@ mod tests {
     fn the_legend_explains_the_marks_the_pane_draws() {
         let marks: Vec<&str> = LEGEND.iter().map(|e| e.mark).collect();
         assert!(marks.contains(&"dimmed row"), "{marks:?}");
-        assert!(marks.contains(&"ignored"), "{marks:?}");
         assert!(
             marks.iter().any(|m| m.contains("yellow bar")),
             "the selection bar: {marks:?}"
@@ -416,9 +408,6 @@ mod tests {
             assert!(seen.insert(entry.mark), "{} appears twice", entry.mark);
             assert!(!entry.meaning.is_empty(), "{} explains nothing", entry.mark);
         }
-        // The word on the row's tag is the word in the legend.
-        assert!(LEGEND.iter().any(|e| e.mark == crate::ui::IGNORED_TAG));
-
         // …and the size column's two marks are quoted from the formatter
         // rather than paraphrased: a legend that spells `~ 4.2 MB` while the
         // column draws `~4.2 MB` is teaching a mark that does not exist.

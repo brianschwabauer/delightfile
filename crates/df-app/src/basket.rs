@@ -415,10 +415,10 @@ pub fn paint(
     inside.text(
         egui::pos2(chip.left() + 9.0, chip.center().y),
         egui::Align2::LEFT_CENTER,
-        // A plain glyph in the proportional face: the nerd-font icons need a
-        // patched font that may not be there, and the chip has to read the same
-        // either way.
-        "▤",
+        // The patched font's tray icon when there is one; the plain face has
+        // no `▤` (it came up as a blank box), so it carries a stack of lines
+        // instead, which is the same picture.
+        crate::icons::glyph(paint.nerd, '\u{f01c}', "☰"),
         egui::FontId::proportional(TRAY_FONT + 1.0),
         palette.teal,
     );

@@ -270,7 +270,9 @@ fn list_item(trimmed: &str) -> Option<(String, &str)> {
                     .strip_prefix("[x] ")
                     .or_else(|| text.strip_prefix("[X] "))
                 {
-                    return Some(("☑".to_string(), task));
+                    // `✓` rather than `☑`: the stock faces draw the empty
+                    // box but not the ticked one.
+                    return Some(("✓".to_string(), task));
                 }
                 return Some(("•".to_string(), text));
             }
@@ -655,7 +657,7 @@ mod tests {
             blocks[3],
             Block::Item {
                 depth: 0,
-                marker: "☑".into(),
+                marker: "✓".into(),
                 spans: plain("done")
             }
         );

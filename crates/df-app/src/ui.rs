@@ -98,9 +98,6 @@ pub struct Scale {
     pub icon: f32,
     /// How far the name is indented past the row's padding.
     pub icon_column: f32,
-    /// The `ignored` tag's face — a fixed two points under the name at every
-    /// step, so the register difference survives the scaling.
-    pub tag: f32,
 }
 
 impl Scale {
@@ -112,7 +109,6 @@ impl Scale {
             font: FONT_SIZE * factor,
             icon: ICON_SIZE * factor,
             icon_column: ICON_COLUMN * factor,
-            tag: FONT_SIZE * factor - 2.0,
         }
     }
 }
@@ -181,26 +177,11 @@ pub(crate) const GIT_DOT_COLUMN: f32 = GIT_DOT_RADIUS * 2.0 + 10.0;
 /// smudge you could not read the name of; a third is unmistakably quieter and
 /// still a name.
 ///
-/// The dim is also no longer the *only* signal — see [`IGNORED_TAG`]. A row
-/// that is greyer than its neighbours for a reason the user cannot see is a
-/// rendering bug as far as they are concerned.
+/// Hidden rows (a leading `.`) take the same step: the listing shows them, and
+/// says at the same time that they are the machine's business more than
+/// yours. The help sheet's legend names both reasons, so a row that is greyer
+/// than its neighbours is never grey for a reason the user cannot find.
 pub(crate) const IGNORED_DIM: f32 = 0.3;
-
-/// What an ignored row says for itself, next to the size column.
-///
-/// The word rather than a glyph: this is the answer to "why is that one grey",
-/// and the pane has no tooltips to put it in — every row here is painted, not a
-/// widget. One word of `overlay0` at [`TAG_SIZE`] is quieter than the size
-/// beside it and still a word you can read.
-pub(crate) const IGNORED_TAG: &str = "ignored";
-
-/// The tag's text size, in logical points. Two under the row's, which is the
-/// smallest step that reads as a different *register* rather than as a
-/// rendering accident, and still above `ui-anti-slop`'s 12 pt floor.
-pub(crate) const TAG_SIZE: f32 = FONT_SIZE - 2.0;
-
-/// The gap between the tag and whatever is to its right.
-const TAG_GAP: f32 = 8.0;
 
 /// How bright the parent column's marker is, against the list cursor's 1.
 ///
@@ -264,9 +245,11 @@ pub(crate) const CLIP_BAR_WIDTH: f32 = 2.0;
 ///
 /// One number for both: they are the same kind of thing — a single line of
 /// chrome above the panes — and giving them different heights would put a
-/// wobble in the window's vertical rhythm for no reason. 26 is [`ROW_HEIGHT`]
-/// plus the four points that keep a chip's text off its own edge.
-pub const CHROME_HEIGHT: f32 = 26.0;
+/// wobble in the window's vertical rhythm for no reason. 30 is [`ROW_HEIGHT`]
+/// plus eight: the four points that keep a chip's text off its own edge, and
+/// four more of air so the row reads as a bar rather than as one more row of
+/// the listing that happens to be on top.
+pub const CHROME_HEIGHT: f32 = 30.0;
 
 /// What a second line costs the top row, in logical points (see [`layout`]).
 ///
@@ -325,8 +308,8 @@ pub struct GhostFace<'a> {
 /// yet, so it should read as "nearly nothing" beside a real modification.
 ///
 /// [`df_core::git::FileStatus::Ignored`] gets no dot at all. It is said with
-/// [`IGNORED_DIM`] and [`IGNORED_TAG`] instead — a dot would be a mark drawing
-/// the eye to the one row in the pane that is asking for less of it.
+/// [`IGNORED_DIM`] instead — a dot would be a mark drawing the eye to the one
+/// row in the pane that is asking for less of it.
 /// The git decoration for one row.
 ///
 /// Two fields rather than one `Option`, because "this pane is in a repository"
@@ -338,15 +321,6 @@ pub struct GhostFace<'a> {
 pub(crate) struct GitMark {
     pub column: bool,
     pub status: Option<df_core::git::FileStatus>,
-    /// Whether this pane spells out *why* an ignored row is dim (see
-    /// [`IGNORED_TAG`]).
-    ///
-    /// The list pane does. The parent column does not, and neither does a
-    /// previewed listing: both of those are already uniformly dim for a reason
-    /// of their own, so a tag there would be explaining the wrong dimming — and
-    /// the parent column is one name wide, with no room for a second word
-    /// anyway.
-    pub explain: bool,
 }
 
 /// The widths the right-hand columns keep **whatever an individual row says**.
@@ -365,8 +339,6 @@ pub(crate) struct GitMark {
 pub(crate) struct RowColumns {
     /// The widest thing the size column can ever hold.
     pub size: f32,
-    /// The [`IGNORED_TAG`]'s own width, gap excluded.
-    pub tag: f32,
     /// How big this listing's rows are drawn ([`Scale`]).
     ///
     /// It rides along here rather than as a tenth argument to [`Painting::row`]
@@ -780,8 +752,6 @@ pub struct Painting<'a> {
 /// when the pointer stops on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowTip {
-    /// The `ignored` tag, which says why the row is grey but not who greyed it.
-    Ignored,
     /// A directory size still being walked — the `~` (PLAN §7.3).
     Counting,
 }
@@ -791,7 +761,6 @@ impl RowTip {
     /// pointed at for one missing word and not for a paragraph.
     pub fn text(self) -> &'static str {
         match self {
-            RowTip::Ignored => "git-ignored",
             RowTip::Counting => "still counting",
         }
     }
@@ -854,15 +823,7 @@ impl Painting<'_> {
                     .x
             })
             .fold(0.0, f32::max);
-        let tag = painter
-            .layout_no_wrap(
-                IGNORED_TAG.to_string(),
-                egui::FontId::proportional(scale.tag),
-                self.palette.overlay0,
-            )
-            .size()
-            .x;
-        RowColumns { size, tag, scale }
+        RowColumns { size, scale }
     }
 
     /// A directory listing's rows.
@@ -1013,7 +974,11 @@ impl Painting<'_> {
             // directories — a walk up the ancestors, so a pane of rows in a
             // clean repository costs one miss each.
             let status = git.and_then(|g| g.status_for(&entry.path));
-            let ignored = status == Some(df_core::git::FileStatus::Ignored);
+            // Hidden rows are muted the same step as gitignored ones: both are
+            // things the listing shows you but the machine would rather you
+            // looked past.
+            let ignored =
+                status == Some(df_core::git::FileStatus::Ignored) || entry.is_hidden;
 
             self.row(
                 &painter,
@@ -1033,8 +998,6 @@ impl Painting<'_> {
                 GitMark {
                     column: git.is_some(),
                     status,
-                    // Not in the parent column: see [`GitMark::explain`].
-                    explain: !dim,
                 },
                 usage.map(|usage| {
                     // A directory's weight comes from the walk; a file's is
@@ -1229,60 +1192,6 @@ impl Painting<'_> {
             }
         };
 
-        // `ignored`, between the git dot and the linemode column: the word that
-        // says why this row is grey. The right-hand end of the row is laid out
-        // right to left — linemode first, then this tag, then the dot, then
-        // whatever room is left goes to the name — so the tag sits immediately
-        // left of the *number*, with the dot on its far side. (The comment here
-        // used to say "left of the dot column", which is the one thing it is
-        // not.)
-        //
-        // Drawn at *half* the row's mute rather than at all of it — fading the
-        // explanation as hard as the thing it explains is how the reason ends
-        // up as unreadable as the problem.
-        //
-        // Its column is reserved on every row of a repository pane, dot-style:
-        // one row in a listing wearing the tag must not push its own name in
-        // while its neighbours keep theirs out, and a status landing on a row
-        // under the cursor must not reflow it.
-        let ignored = git.explain && git.status == Some(df_core::git::FileStatus::Ignored);
-        let tag_column = if git.explain && (git.column || ignored) {
-            columns.tag + TAG_GAP
-        } else {
-            0.0
-        };
-        if ignored {
-            // The mute goes into the *layout*, not into the `galley` call:
-            // `Painter::galley`'s colour argument only replaces
-            // `Color32::PLACEHOLDER`, so a galley laid out with a real colour
-            // keeps it and the fade was a no-op. Laying it out muted is the
-            // one place the colour is still open.
-            let colour = mix(self.palette.overlay0, ground, mute * 0.5);
-            let galley = painter.layout_no_wrap(
-                IGNORED_TAG.to_string(),
-                egui::FontId::proportional(scale.tag),
-                colour,
-            );
-            let width = galley.size().x;
-            let left = rect.right() - ROW_PAD_X - mode_width - width;
-            painter.galley(
-                egui::pos2(left, rect.center().y - galley.size().y / 2.0),
-                galley,
-                colour,
-            );
-            // The tag says the row is ignored; the tooltip says by *what*, which
-            // is the half of it the one word cannot carry.
-            if let Some(tips) = self.tips {
-                tips.note(
-                    RowTip::Ignored,
-                    egui::Rect::from_min_max(
-                        egui::pos2(left, rect.top()),
-                        egui::pos2(left + width, rect.bottom()),
-                    ),
-                );
-            }
-        }
-        let mode_width = mode_width + tag_column;
 
         // The dot sits between the name and the linemode column, so the two
         // right-hand facts read as one column of marks and one column of
@@ -1704,19 +1613,19 @@ mod tests {
         let size = egui::Rect::from_min_size(egui::pos2(150.0, 10.0), egui::vec2(40.0, 20.0));
 
         let tips = RowTips::new(size.center());
-        tips.note(RowTip::Ignored, tag);
+        tips.note(RowTip::Counting, tag);
         tips.note(RowTip::Counting, size);
         assert_eq!(tips.found(), Some((RowTip::Counting, size)));
 
         // A second mark under the pointer cannot displace the first — two
         // marks on one row never overlap, so the first is the answer.
         let tips = RowTips::new(tag.center());
-        tips.note(RowTip::Ignored, tag);
         tips.note(RowTip::Counting, tag);
-        assert_eq!(tips.found(), Some((RowTip::Ignored, tag)));
+        tips.note(RowTip::Counting, tag);
+        assert_eq!(tips.found(), Some((RowTip::Counting, tag)));
 
         let tips = RowTips::new(egui::pos2(0.0, 0.0));
-        tips.note(RowTip::Ignored, tag);
+        tips.note(RowTip::Counting, tag);
         tips.note(RowTip::Counting, size);
         assert_eq!(tips.found(), None);
     }
@@ -2014,7 +1923,6 @@ mod tests {
         let with = GitMark {
             column: true,
             status: None,
-            explain: true,
         };
         let without = GitMark::default();
         assert!(with.column && with.status.is_none());
