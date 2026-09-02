@@ -145,18 +145,21 @@ pub fn row(entry: &ArchiveEntry, archive: &Path) -> Entry {
         archive.join(&entry.path)
     };
     let mime = df_core::fs::mime::hint_for_name(&entry.name);
+    let kind = if entry.is_dir { Kind::Dir } else { Kind::File };
+    let mode = if entry.is_dir { 0o040_755 } else { 0o100_644 };
     Entry {
         is_hidden: entry.name.starts_with('.'),
         name: entry.name.clone(),
         path,
-        kind: if entry.is_dir { Kind::Dir } else { Kind::File },
+        kind,
         len: if entry.is_dir { 0 } else { entry.len },
         mtime: entry.mtime.and_then(unix_time),
         btime: None,
-        mode: if entry.is_dir { 0o040_755 } else { 0o100_644 },
+        mode,
         uid: 0,
         gid: 0,
         mime,
+        file_kind: df_core::fs::classify(kind, &entry.name, mime, mode),
     }
 }
 

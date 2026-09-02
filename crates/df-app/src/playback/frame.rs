@@ -53,7 +53,10 @@ pub struct FrameTex {
 pub struct FrameConverter {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
+    /// Two, chosen per frame by the picture's own size. Smooth for a video,
+    /// crisp for the tiny ones — see [`sampler_for`].
+    sampler_linear: wgpu::Sampler,
+    sampler_nearest: wgpu::Sampler,
     /// One 96-byte uniform buffer for the life of the converter — the packing
     /// is fixed size, so a new frame is a `write_buffer`, never an allocation.
     uniforms: wgpu::Buffer,
@@ -141,12 +144,21 @@ impl FrameConverter {
             multiview_mask: None,
             cache: None,
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("df-frame-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let sampler = |label, filter| {
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some(label),
+                mag_filter: filter,
+                min_filter: filter,
+                ..Default::default()
+            })
+        };
+        let sampler_linear = sampler("df-frame-sampler-linear", wgpu::FilterMode::Linear);
+        // The chroma planes are half resolution, so this sampler is doing an
+        // upsample even at 1:1 — and for the pixel-art sources
+        // [`crate::preview::paint::nearest_for`] is about, a smooth chroma
+        // upsample is exactly the bleed between two flat colours that the
+        // nearest-neighbour magnification downstream was chosen to avoid.
+        let sampler_nearest = sampler("df-frame-sampler-nearest", wgpu::FilterMode::Nearest);
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("df-frame-uniforms"),
             // Asked of the packing itself, so the size cannot drift from it.
@@ -157,11 +169,27 @@ impl FrameConverter {
         FrameConverter {
             pipeline,
             layout,
-            sampler,
+            sampler_linear,
+            sampler_nearest,
             uniforms,
             bind: None,
             target: None,
             current: None,
+        }
+    }
+
+    /// Which sampler a source of `size` physical pixels is read through.
+    ///
+    /// The still-image rule, applied to moving pictures: below
+    /// the still path's 128-pixel line a picture is an icon or pixel art
+    /// and "crisp" is what it means, above it "smooth" is. Asked of the plain
+    /// size rather than `preview::oriented_size`: a quarter turn swaps the two
+    /// axes, which cannot change which of them is longer.
+    fn sampler_for(&self, size: (u32, u32)) -> &wgpu::Sampler {
+        if crate::preview::nearest_for(size) {
+            &self.sampler_nearest
+        } else {
+            &self.sampler_linear
         }
     }
 
@@ -235,7 +263,9 @@ impl FrameConverter {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        resource: wgpu::BindingResource::Sampler(
+                            self.sampler_for((frame.width, frame.height)),
+                        ),
                     },
                 ],
             });
@@ -323,7 +353,16 @@ impl FrameConverter {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let id = renderer.register_native_texture(device, &view, wgpu::FilterMode::Linear);
+        // …and the same rule again for the magnification egui itself does when
+        // the fitted rectangle is bigger than the source (`paint::fit_rect`,
+        // up to its cap). A 32-pixel animation blown up eight times through a
+        // bilinear filter is a blur where the file's own pixels are the point.
+        let filter = if crate::preview::nearest_for((width, height)) {
+            wgpu::FilterMode::Nearest
+        } else {
+            wgpu::FilterMode::Linear
+        };
+        let id = renderer.register_native_texture(device, &view, filter);
         self.target = Some(Target {
             _texture: texture,
             view,

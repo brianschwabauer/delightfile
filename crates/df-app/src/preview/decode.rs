@@ -612,9 +612,10 @@ mod tests {
     #[test]
     fn fitting_never_enlarges() {
         // Smaller than the pane: left exactly as it is. The *pane* does draw a
-        // 16×16 icon at 400 points now (`paint::fit_rect`); what it must never
-        // do is spend 400 points of memory on 16 points of picture, so the
-        // enlargement is a rectangle and never a resample.
+        // 16×16 icon at 128 points now (`paint::fit_rect`, up to its
+        // magnification cap); what it must never do is spend that much memory
+        // on 16 points of picture, so the enlargement is a rectangle and never
+        // a resample.
         assert_eq!(fit(16, 16, (400, 600)), (16, 16));
         assert_eq!(fit(400, 600, (400, 600)), (400, 600));
     }

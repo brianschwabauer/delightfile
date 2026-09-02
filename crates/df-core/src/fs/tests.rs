@@ -68,6 +68,7 @@ fn entry(name: &str, kind: Kind, len: u64, mtime: Option<SystemTime>) -> Entry {
         gid: 1000,
         is_hidden: name.starts_with('.'),
         mime: mime::hint_for_name(name),
+        file_kind: crate::fs::classify(kind, name, mime::hint_for_name(name), 0o644),
     }
 }
 

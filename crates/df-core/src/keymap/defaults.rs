@@ -378,7 +378,7 @@ pub(super) fn build() -> Registry {
         (Help, "ctrl+c", C::OverlayClose, "Close the help",             Always),
         (Help, "up",     C::OverlayPrev,  "Previous line",              Always),
         (Help, "down",   C::OverlayNext,  "Next line",                  Always),
-        (Help, "f",      C::HelpFilter,   "Filter the help (or type)",  Always),
+        (Help, "f",      C::HelpFilter,   "Filter — or just type",      Always),
 
         // ── Palette (`Ctrl+p`, §4.4) ────────────────────────────────────────
         (Palette, "esc",    C::OverlayClose,  "Close the palette", Always),

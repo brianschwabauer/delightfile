@@ -762,6 +762,12 @@ mod tests {
             uid: 0,
             gid: 0,
             mime,
+            file_kind: df_core::fs::classify(
+                if is_dir { Kind::Dir } else { Kind::File },
+                name,
+                mime,
+                0o100_644,
+            ),
         }
     }
 

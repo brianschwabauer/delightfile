@@ -51,11 +51,40 @@ pub struct HelpRow {
     pub id: String,
 }
 
+/// The mark itself, so the legend can *draw* what it is naming.
+///
+/// A sheet that says "yellow bar" in the same grey as every other line asks the
+/// reader to take its word for the colour, which is the one thing they came
+/// here unsure about. Every variant is painted by [`crate::chrome::help`] out
+/// of the palette and the constants the row painter itself uses, so a swatch
+/// cannot drift from the mark it stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Swatch {
+    /// Nothing to draw: the row is about text, and the words are the mark.
+    None,
+    /// A git dot, in that status's own colour.
+    Dot(df_core::git::FileStatus),
+    /// One of the three row bars.
+    Bar(Mark),
+    /// The `ignored` tag, set the way a row sets it.
+    Tag,
+}
+
+/// Which row bar a [`Swatch::Bar`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    Selected,
+    Yanked,
+    Cut,
+}
+
 /// One entry in the legend: a mark, and what it means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegendRow {
-    /// What you see on a row — `dimmed`, `yellow bar`, `~ 4.2 MB`.
+    /// What you see on a row — `dimmed`, `yellow bar`, `~4.2 MB`.
     pub mark: &'static str,
+    /// The mark itself, drawn beside the word.
+    pub swatch: Swatch,
     pub meaning: &'static str,
 }
 
@@ -72,66 +101,85 @@ pub struct LegendRow {
 pub const LEGEND: &[LegendRow] = &[
     LegendRow {
         mark: "dimmed row",
+        swatch: Swatch::None,
         meaning: "git is ignoring it, it has been cut, or it is in the parent column",
     },
     LegendRow {
         mark: "ignored",
+        swatch: Swatch::Tag,
         meaning: "the tag beside the size: git is ignoring this path",
     },
     LegendRow {
         mark: "yellow bar, left",
+        swatch: Swatch::Bar(Mark::Selected),
         meaning: "selected — what the next operation acts on",
     },
     LegendRow {
         mark: "teal bar, right",
+        swatch: Swatch::Bar(Mark::Yanked),
         meaning: "yanked: copied to the clipboard, still where it was",
     },
     LegendRow {
         mark: "peach bar, right",
+        swatch: Swatch::Bar(Mark::Cut),
         meaning: "cut: it moves when you paste",
     },
     LegendRow {
         mark: "green dot",
+        swatch: Swatch::Dot(df_core::git::FileStatus::Added),
         meaning: "added to the index",
     },
     LegendRow {
         mark: "faint green dot",
+        swatch: Swatch::Dot(df_core::git::FileStatus::Untracked),
         meaning: "untracked: git has never seen it",
     },
     LegendRow {
         mark: "peach dot",
+        swatch: Swatch::Dot(df_core::git::FileStatus::Modified),
         meaning: "modified since the last commit",
     },
     LegendRow {
         mark: "maroon dot",
+        swatch: Swatch::Dot(df_core::git::FileStatus::Deleted),
         meaning: "deleted",
     },
     LegendRow {
         mark: "blue dot",
+        swatch: Swatch::Dot(df_core::git::FileStatus::Renamed),
         meaning: "renamed",
     },
     LegendRow {
         mark: "yellow dot",
+        swatch: Swatch::Dot(df_core::git::FileStatus::Typechange),
         meaning: "type changed — a file became a link, or the other way round",
     },
     LegendRow {
         mark: "red dot",
+        swatch: Swatch::Dot(df_core::git::FileStatus::Conflict),
         meaning: "conflicted: a merge left it for you",
     },
     LegendRow {
         mark: "green name",
+        swatch: Swatch::None,
         meaning: "you can run it",
     },
     LegendRow {
         mark: "grey name",
+        swatch: Swatch::None,
         meaning: "configuration or a lockfile — there, and rarely what you want",
     },
+    // Spelled exactly as the column spells it (`crate::format::human_size` with
+    // `folder_size_text`'s tilde), so the sheet and the row are quotable
+    // against each other. The test below pins the pair.
     LegendRow {
-        mark: "~ 4.2 MB",
+        mark: "~4.2 MB",
+        swatch: Swatch::None,
         meaning: "a folder still being measured; the number only goes up",
     },
     LegendRow {
         mark: "12 items",
+        swatch: Swatch::None,
         meaning: "a folder counted but not yet measured",
     },
 ];
@@ -351,6 +399,41 @@ mod tests {
         }
         // The word on the row's tag is the word in the legend.
         assert!(LEGEND.iter().any(|e| e.mark == crate::ui::IGNORED_TAG));
+
+        // …and the size column's two marks are quoted from the formatter
+        // rather than paraphrased: a legend that spells `~ 4.2 MB` while the
+        // column draws `~4.2 MB` is teaching a mark that does not exist.
+        let bytes = 4 * 1024 * 1024 + 205 * 1024;
+        let running = crate::format::folder_size_text(
+            Some(crate::folders::Size {
+                bytes,
+                settled: false,
+            }),
+            None,
+        )
+        .expect("a size formats");
+        assert!(marks.contains(&running.as_str()), "{running}: {marks:?}");
+        let counted = crate::format::folder_size_text(None, Some(12)).expect("a count formats");
+        assert!(marks.contains(&counted.as_str()), "{counted}: {marks:?}");
+
+        // Every mark that names a drawn thing carries the thing itself, so the
+        // sheet is readable in a monochrome screenshot of it.
+        for entry in LEGEND {
+            if entry.mark.ends_with("dot") {
+                assert!(
+                    matches!(entry.swatch, Swatch::Dot(_)),
+                    "{} has no dot to draw",
+                    entry.mark
+                );
+            }
+            if entry.mark.contains("bar") {
+                assert!(
+                    matches!(entry.swatch, Swatch::Bar(_)),
+                    "{} has no bar to draw",
+                    entry.mark
+                );
+            }
+        }
     }
 
     /// …and it narrows with everything else, so the sheet does not turn into a

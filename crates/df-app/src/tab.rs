@@ -1126,6 +1126,11 @@ mod tests {
             uid: 0,
             gid: 0,
             mime: "text/plain",
+            file_kind: if is_dir {
+                df_core::fs::FileKind::Directory
+            } else {
+                df_core::fs::FileKind::Text
+            },
         }
     }
 

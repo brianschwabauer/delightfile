@@ -1191,6 +1191,7 @@ fn remote_entry(dir: &VfsPath, entry: &wire::NameEntry, resolved: Option<&Option
         uid: shown.uid.unwrap_or(0),
         gid: shown.gid.unwrap_or(0),
         mime,
+        file_kind: crate::fs::classify(kind, &name, mime, shown.permissions.unwrap_or(0)),
         name,
     }
 }

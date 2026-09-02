@@ -799,18 +799,26 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
                     egui::epaint::RectShape::filled(
                         fitted,
                         THUMB_RADIUS,
-                        // The tint a texture is drawn through, so the same
-                        // mute that greys a glyph greys a photograph.
-                        crate::chrome::fade(
-                            mute(egui::Color32::WHITE, ground, lifted || cut, ignored),
-                            alpha,
-                        ),
+                        // The tint a texture is drawn through, carrying the
+                        // FLIP fade and nothing else: white is "the picture as
+                        // it is".
+                        crate::chrome::fade(egui::Color32::WHITE, alpha),
                     )
                     .with_texture(
                         texture.id(),
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     ),
                 );
+                // …and the mute as a veil over it rather than as a multiply
+                // through it — see [`dim_amount`].
+                let veil = dim_amount(lifted || cut, ignored) * alpha;
+                if veil > 0.0 {
+                    painter.add(egui::epaint::RectShape::filled(
+                        fitted,
+                        THUMB_RADIUS,
+                        ground.gamma_multiply(veil),
+                    ));
+                }
             }
             None => {
                 let icon = crate::icons::icon_for(entry, paint.theme, palette, paint.nerd);
@@ -902,13 +910,27 @@ fn mute(
     leaving: bool,
     ignored: bool,
 ) -> egui::Color32 {
-    use crate::theme::mix;
+    crate::theme::mix(colour, ground, dim_amount(leaving, ignored))
+}
+
+/// The mute as a *number*, for the one thing that cannot be muted by mixing:
+/// a photograph.
+///
+/// A texture is drawn through a tint, and a tint multiplies. Handing the
+/// thumbnail `mix(WHITE, ground, dim)` therefore does not move the picture
+/// towards the pane the way it moves a glyph — it multiplies every pixel by a
+/// dark colour, so a dark photograph in a dimmed tile goes black while a bright
+/// one merely dulls, and the same amount of dim reads as two different amounts
+/// of dim. The tile draws the picture at full strength and lays a veil of the
+/// pane's own colour over it at this amount instead, which is the gesture
+/// [`crate::preview::paint`]'s crossfade makes for the same reason.
+fn dim_amount(leaving: bool, ignored: bool) -> f32 {
     if leaving {
-        mix(colour, ground, crate::ui::PARENT_DIM)
+        crate::ui::PARENT_DIM
     } else if ignored {
-        mix(colour, ground, crate::ui::IGNORED_DIM)
+        crate::ui::IGNORED_DIM
     } else {
-        colour
+        0.0
     }
 }
 

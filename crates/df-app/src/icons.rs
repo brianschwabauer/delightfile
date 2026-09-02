@@ -351,16 +351,17 @@ const EXTENSION_GLYPHS: &[(&str, char)] = &[
 ];
 
 /// The glyph an extension asks for, or `None` to use the kind's.
+///
+/// A leading dot is the hidden marker, not an extension — df-core's rule,
+/// followed here so `.ts` and `.gitignore` mean what they mean everywhere else
+/// in the program. The comparison is case-insensitive against the slice rather
+/// than against a lowercased copy: this is asked for every visible row on every
+/// frame, and a `String` per row per frame is a `String` per row per frame.
 fn extension_glyph(name: &str) -> Option<char> {
-    let lower = name.to_ascii_lowercase();
-    // A leading dot is the hidden marker, not an extension — df-core's rule,
-    // followed here so `.ts` and `.gitignore` mean what they mean everywhere
-    // else in the program.
-    let stem = lower.strip_prefix('.').unwrap_or(&lower);
-    let (_, ext) = stem.rsplit_once('.')?;
+    let ext = df_core::fs::extension_of(name)?;
     EXTENSION_GLYPHS
         .iter()
-        .find(|(e, _)| *e == ext)
+        .find(|(e, _)| e.eq_ignore_ascii_case(ext))
         .map(|(_, glyph)| *glyph)
 }
 
@@ -407,7 +408,10 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
     let broken = entry.is_broken_symlink();
     let link = entry.is_symlink();
     let dir = entry.is_dir();
-    let kind = df_core::fs::kind_of(entry);
+    // Read, not computed: the scan settled it (see [`Entry::file_kind`]), so
+    // the icon column and the name colour no longer classify the same row twice
+    // on every frame.
+    let kind = entry.file_kind;
 
     // A themed directory icon outranks the generic ones — including for a
     // symlink *to* a directory, because `~/Work` being a link does not make it
@@ -491,7 +495,7 @@ pub fn name_color(entry: &Entry, palette: &Palette) -> egui::Color32 {
     if entry.is_dir() {
         return palette.blue;
     }
-    match df_core::fs::kind_of(entry) {
+    match entry.file_kind {
         // A socket, fifo or device node: real, listed, and not openable. Given
         // its own colour so `→` on one is visibly not going to do anything.
         FileKind::Special => palette.overlay2,
@@ -523,6 +527,12 @@ mod tests {
             gid: 0,
             is_hidden: name.starts_with('.'),
             mime: df_core::fs::mime::hint_for_name(name),
+            file_kind: df_core::fs::classify(
+                kind,
+                name,
+                df_core::fs::mime::hint_for_name(name),
+                0o644,
+            ),
         }
     }
 

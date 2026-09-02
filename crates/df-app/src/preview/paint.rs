@@ -699,6 +699,7 @@ fn directory_body(
     let rows = (rows_area.height() / ROW_HEIGHT).floor().max(1.0) as usize;
     let first = scroll.min(entries.len());
     let ground = paint.palette.mantle;
+    let columns = paint.row_columns(painter);
 
     for (row, index) in (first..(first + rows).min(entries.len())).enumerate() {
         let Some(entry) = entries.get(index) else {
@@ -734,6 +735,7 @@ fn directory_body(
             // …and nobody is measuring a directory nobody is in: the walk is
             // for the pane you are standing in (PLAN §1).
             None,
+            columns,
         );
         if alpha < 1.0 {
             // The crossfade, done by veiling rather than by re-tinting every
@@ -906,6 +908,12 @@ fn hex_body(
 /// nearest-neighbour (see [`nearest_for`]), so it comes out crisp rather than
 /// as the blurry lie a bilinear upscale would be.
 ///
+/// The enlargement is **capped at [`MAX_MAGNIFICATION`]**, though. Filling a
+/// 900-point pane with a 2×2 favicon is not showing you the file, it is showing
+/// you four enormous squares; past a point the honest thing to draw is a small
+/// picture, centred, that you can see all of at once. Shrinking is never
+/// capped — a picture too big for the pane has to come down to it.
+///
 /// The decode is still capped at the pane (`decode::fit` never enlarges
 /// either): what grows is the rectangle, never the memory.
 ///
@@ -917,9 +925,19 @@ pub fn fit_rect(area: egui::Rect, size: (u32, u32), ppp: f32) -> egui::Rect {
     if natural.x <= 0.0 || natural.y <= 0.0 {
         return egui::Rect::from_center_size(area.center(), egui::Vec2::ZERO);
     }
-    let k = (area.width() / natural.x).min(area.height() / natural.y);
+    let k = (area.width() / natural.x)
+        .min(area.height() / natural.y)
+        .min(MAX_MAGNIFICATION);
     egui::Rect::from_center_size(area.center(), natural * k)
 }
+
+/// The most [`fit_rect`] will enlarge a picture by.
+///
+/// Eight: a 16-point favicon comes out at 128, which is a readable icon rather
+/// than a wall of pixels, and a 128-point sprite sheet still fills a normal
+/// pane. Chosen as a power of two so a nearest-neighbour upscale lands on whole
+/// source pixels and the result is crisp instead of unevenly blocky.
+pub const MAX_MAGNIFICATION: f32 = 8.0;
 
 /// The long edge, in source pixels, at or below which a picture is drawn with
 /// nearest-neighbour sampling.
@@ -1393,15 +1411,32 @@ mod tests {
         assert!((rect.height() - 400.0).abs() < 1e-3);
     }
 
-    /// The rule that changed: a picture smaller than the pane is *enlarged* to
-    /// it, because a pane exists to show the file (PLAN §6). What keeps that
-    /// honest is [`nearest_for`], not a scale cap.
+    /// The rule that changed: a picture smaller than the pane is *enlarged*
+    /// towards it, because a pane exists to show the file (PLAN §6). What keeps
+    /// that honest is [`nearest_for`] and [`MAX_MAGNIFICATION`].
     #[test]
     fn a_small_picture_fills_the_pane() {
-        let rect = fit_rect(area(), (32, 32), 1.0);
+        // 64 points into a 400×600 pane is 6¼×, under the cap, so this is the
+        // plain fit-to-pane rule.
+        let rect = fit_rect(area(), (64, 64), 1.0);
         assert!((rect.width() - 400.0).abs() < 1e-3, "{rect:?}");
         assert!((rect.height() - 400.0).abs() < 1e-3);
         assert!((rect.center() - area().center()).length() < 1e-3);
+    }
+
+    /// …and past 8× it stops, so a favicon is a favicon and not four hundred
+    /// points of one pixel.
+    #[test]
+    fn a_tiny_picture_stops_at_the_magnification_cap() {
+        let rect = fit_rect(area(), (2, 2), 1.0);
+        assert!((rect.width() - 16.0).abs() < 1e-3, "{rect:?}");
+        assert!((rect.height() - 16.0).abs() < 1e-3);
+        assert!((rect.center() - area().center()).length() < 1e-3);
+
+        // The cap is on magnification, not on the rectangle: a 32-point icon
+        // still reaches 256, and one big enough to fill the pane still does.
+        let rect = fit_rect(area(), (32, 32), 1.0);
+        assert!((rect.width() - 256.0).abs() < 1e-3, "{rect:?}");
     }
 
     #[test]
@@ -1504,6 +1539,7 @@ mod tests {
             gid: 0,
             is_hidden: false,
             mime: "text/plain",
+            file_kind: df_core::fs::classify(kind, name, "text/plain", 0o644),
         };
         let entries = vec![
             entry("a", Kind::Dir),
@@ -1540,6 +1576,7 @@ mod tests {
             gid: 0,
             is_hidden: false,
             mime: "text/plain",
+            file_kind: df_core::fs::classify(kind, name, "text/plain", 0o644),
         };
         let source = "/* open\nfn main() {\n\tlet s = \"héllo\";\n}\n";
         let lines: Vec<String> = source.split('\n').map(str::to_string).collect();

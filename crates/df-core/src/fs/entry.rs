@@ -85,6 +85,16 @@ pub struct Entry {
     /// every entry in a 200k directory; replaced by real sniffing for the rows
     /// a preview actually opens.
     pub mime: &'static str,
+    /// What sort of thing this is (see [`super::kind`]), settled here rather
+    /// than asked per paint.
+    ///
+    /// Every input it is derived from — the name, the kind, the mime hint, the
+    /// mode — is final by the time an entry exists, and the two painters that
+    /// want it (the icon glyph and the name colour) ask for every visible row
+    /// on every frame. Classifying there meant two walks of three tables and
+    /// three lowercase `String`s per row per frame; a `Copy` byte on the row
+    /// costs the scan one table walk it was already doing for the mime hint.
+    pub file_kind: super::FileKind,
 }
 
 impl Entry {
@@ -151,6 +161,7 @@ impl Entry {
         } else {
             mime::hint_for_name(&name)
         };
+        let file_kind = super::kind::classify(kind, &name, mime, meta.mode());
 
         Entry {
             name,
@@ -164,6 +175,7 @@ impl Entry {
             gid: meta.gid(),
             is_hidden,
             mime,
+            file_kind,
         }
     }
 

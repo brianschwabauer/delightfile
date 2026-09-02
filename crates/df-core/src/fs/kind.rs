@@ -298,33 +298,50 @@ const CONFIG_NAMES: &[&str] = &[
 
 /// The kind of one listed row.
 ///
-/// Takes the whole [`Entry`] because three of the six steps need something that
-/// is not the name: the filesystem kind, the mime the sniffer may have replaced
-/// the hint with, and the permission bits.
+/// A field read, not a computation: [`classify`] answered this once when the
+/// entry was built, because the icon column and the name colour both ask it for
+/// every visible row on every frame and the answer cannot change without the
+/// row being scanned again.
 pub fn kind_of(entry: &Entry) -> FileKind {
-    if entry.is_dir() || entry.mime == DIR_MIME {
+    entry.file_kind
+}
+
+/// Classify from the four facts a scan has in hand, before there is an
+/// [`Entry`] to hang the answer on.
+///
+/// Takes all four because three of the six steps need something that is not the
+/// name: the filesystem kind, the mime the scanner attached, and the permission
+/// bits.
+pub fn classify(kind: Kind, name: &str, mime: &str, mode: u32) -> FileKind {
+    let is_dir = matches!(
+        kind,
+        Kind::Dir
+            | Kind::Symlink {
+                target: Some(LinkTarget::Dir)
+            }
+    );
+    if is_dir || mime == DIR_MIME {
         return FileKind::Directory;
     }
-    match entry.kind {
+    match kind {
         Kind::Symlink { target: None } => return FileKind::BrokenLink,
         Kind::Symlink {
             target: Some(LinkTarget::Other),
         } => return FileKind::Special,
         _ => {}
     }
-    if entry.mime == BROKEN_LINK_MIME {
+    if mime == BROKEN_LINK_MIME {
         return FileKind::BrokenLink;
     }
-    kind_for_name(&entry.name, entry.mime, entry.mode)
+    kind_for_name(name, mime, mode)
 }
 
 /// The name-and-type half of [`kind_of`], so the table can be tested without
 /// building an [`Entry`] per row. See the module header for why the order of
 /// the checks is the specification.
 pub fn kind_for_name(name: &str, mime: &str, mode: u32) -> FileKind {
-    let lower = name.to_ascii_lowercase();
-    let kind = named_kind(&lower)
-        .or_else(|| extension_kind(&lower))
+    let kind = named_kind(name)
+        .or_else(|| extension_kind(name))
         .or_else(|| media_kind(mime, name))
         .or_else(|| language_kind(name))
         .unwrap_or_else(|| from_preview(kind_for_mime(mime, name)));
@@ -349,29 +366,44 @@ pub fn kind_for_name(name: &str, mime: &str, mode: u32) -> FileKind {
     kind
 }
 
-fn named_kind(lower: &str) -> Option<FileKind> {
+/// The whole names, matched without regard to case and **without lowercasing
+/// the name to do it**: this runs once per entry in a directory that may hold
+/// two hundred thousand of them, and a `String` per row to answer a table
+/// lookup is a table lookup that allocates.
+fn named_kind(name: &str) -> Option<FileKind> {
     CONFIG_NAMES
-        .contains(&lower)
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(name))
         .then_some(FileKind::Config)
         .or_else(|| {
             // `README`, `LICENSE`, `CHANGELOG` with no extension at all.
-            matches!(
-                lower,
-                "readme" | "license" | "licence" | "copying" | "authors"
-            )
-            .then_some(FileKind::Text)
+            PROSE_NAMES
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(name))
+                .then_some(FileKind::Text)
         })
 }
 
-fn extension_kind(lower: &str) -> Option<FileKind> {
-    // A leading dot is the hidden marker, not an extension — the rule
-    // [`crate::fs::mime::hint_for_name`] follows, for the same reason.
-    let stem = lower.strip_prefix('.').unwrap_or(lower);
-    let (_, ext) = stem.rsplit_once('.')?;
+/// The names that are prose whatever their case: `README`, `readme`, `ReadMe`.
+const PROSE_NAMES: &[&str] = &["readme", "license", "licence", "copying", "authors"];
+
+fn extension_kind(name: &str) -> Option<FileKind> {
+    let ext = extension_of(name)?;
     EXTENSIONS
         .iter()
-        .find(|(e, _)| *e == ext)
+        .find(|(e, _)| e.eq_ignore_ascii_case(ext))
         .map(|(_, kind)| *kind)
+}
+
+/// The part after the last dot, or `None` for a name that has no extension.
+///
+/// A leading dot is the hidden marker, not an extension — the rule
+/// [`crate::fs::mime::hint_for_name`] follows, for the same reason. Returns a
+/// slice of `name` rather than an owned lowercase copy; the callers compare
+/// case-insensitively instead.
+pub fn extension_of(name: &str) -> Option<&str> {
+    let stem = name.strip_prefix('.').unwrap_or(name);
+    stem.rsplit_once('.').map(|(_, ext)| ext)
 }
 
 /// Media, when the *type* says so — checked ahead of the language table
@@ -452,6 +484,7 @@ mod tests {
             gid: 1000,
             is_hidden: name.starts_with('.'),
             mime,
+            file_kind: classify(k, name, mime, 0o644),
         }
     }
 
