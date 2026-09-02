@@ -13,24 +13,6 @@
 //! generated from the variant name at runtime; they are written out, so
 //! renaming a variant cannot silently break a user's config.
 
-/// Which vi-style mode the shared line editor is in (PLAN §4.2).
-///
-/// The editor's buffer logic lands in a later phase; this enum exists now
-/// because the Input context's bindings are written against it and the router
-/// has to be able to name the mode a binding switches into.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum InputMode {
-    /// Motions and operators — where `i`, `a`, `v`, `r` are doors, not text.
-    Normal,
-    /// Typing. Bindings other than `Esc` do not apply.
-    #[default]
-    Insert,
-    /// A selection is live; operators act on it.
-    Visual,
-    /// The next keystroke replaces one character and returns to Normal.
-    Replace,
-}
-
 macro_rules! commands {
     ($($variant:ident => $id:literal),* $(,)?) => {
         /// One thing delightfile can do.
@@ -283,41 +265,28 @@ commands! {
     SpotCopyCell => "spot-copy-cell",
     HelpFilter => "help-filter",
 
-    // ── Input: the shared vi line editor (PLAN §4.2) ──────────────────────
-    InputInsert => "input-insert",
-    InputInsertBol => "input-insert-bol",
-    InputAppend => "input-append",
-    InputAppendEol => "input-append-eol",
-    InputVisual => "input-visual",
-    InputVisualLine => "input-visual-line",
-    InputReplace => "input-replace",
+    // ── Input: the shared line editor (PLAN §4.2) ─────────────────────────
+    // Plain-editor commands only. The modal half — `input-insert`,
+    // `input-visual`, `input-cut`, the operators — is gone with the modes
+    // themselves: in a prompt with no Normal mode, `d` types a `d`.
     InputMoveLeft => "input-move-left",
     InputMoveRight => "input-move-right",
     InputMoveBol => "input-move-bol",
     InputMoveEol => "input-move-eol",
-    InputMoveFirstChar => "input-move-first-char",
     InputWordForward => "input-word-forward",
-    InputWordForwardFar => "input-word-forward-far",
     InputWordBackward => "input-word-backward",
-    InputWordBackwardFar => "input-word-backward-far",
-    InputWordEnd => "input-word-end",
-    InputWordEndFar => "input-word-end-far",
+    InputSelectLeft => "input-select-left",
+    InputSelectRight => "input-select-right",
+    InputSelectBol => "input-select-bol",
+    InputSelectEol => "input-select-eol",
+    InputSelectWordForward => "input-select-word-forward",
+    InputSelectWordBackward => "input-select-word-backward",
     InputBackspace => "input-backspace",
     InputDeleteUnder => "input-delete-under",
     InputKillBol => "input-kill-bol",
     InputKillEol => "input-kill-eol",
     InputKillWordBackward => "input-kill-word-backward",
     InputKillWordForward => "input-kill-word-forward",
-    InputCut => "input-cut",
-    InputCutEol => "input-cut-eol",
-    InputChange => "input-change",
-    InputChangeEol => "input-change-eol",
-    InputSubstitute => "input-substitute",
-    InputSubstituteLine => "input-substitute-line",
-    InputCutChar => "input-cut-char",
-    InputYank => "input-yank",
-    InputPaste => "input-paste",
-    InputPasteBefore => "input-paste-before",
     InputUndo => "input-undo",
     InputRedo => "input-redo",
 }

@@ -106,6 +106,25 @@ const TAB_MAX_WIDTH: f32 = 190.0;
 /// nearly the ground itself.
 const TAB_INACTIVE_LIFT: f32 = 0.5;
 
+/// How far an inactive tab sits below the active one's top edge, in points.
+///
+/// The whole difference between "raised" and "recessed" in a strip this short.
+/// Two: enough that the step is unmistakable along the top edge, little enough
+/// that the titles still share a baseline and the strip does not read as two
+/// rows of different things.
+const TAB_DROP: f32 = 2.0;
+
+/// The active tab's pigtails: the concave quarter-circles at its bottom
+/// corners that flare out past its edges and run into the top row's ground,
+/// the way a browser tab's do.
+///
+/// [`CHIP_RADIUS`], which is the top row's own radius less the inset every
+/// chip on it keeps — the same number, so the tab's outward curve and the
+/// row's inward one are the same size, and the joint between them reads as one
+/// drawn shape rather than two. It also has to fit *inside* [`TAB_GAP`], or a
+/// pigtail would carve into the tab next door.
+const TAB_PIGTAIL: f32 = CHIP_RADIUS as f32;
+
 /// Where each tab's chip goes.
 ///
 /// Shared by the paint and the hit test, so a click lands on the chip it looks
@@ -137,47 +156,93 @@ pub fn tab_at(strip: egui::Rect, count: usize, pos: egui::Pos2) -> Option<usize>
 
 /// Draw the strip. Only called with two or more tabs (PLAN §2).
 ///
-/// The chips sit on the window's own ground rather than inside a plate of
-/// their own, so `delightful-ui` §15's concentric rule has nothing to be
-/// concentric *with* here: a chip is [`ROW_RADIUS`], the same as a row in a
-/// pane, because it is the same kind of thing at the same size. The nested
-/// case is the top row, where the chips do sit inside a rounded container —
-/// see [`CHIP_RADIUS`].
+/// The strip sits **flush** on the top row, with no gap, and the active tab is
+/// drawn as a folder tab joined to it: rounded at the top like every other
+/// surface in the window, flared at the bottom into two concave
+/// [`TAB_PIGTAIL`] arcs that run out past its own edges and into the row's
+/// ground, and filled with that same ground. The two are one shape, which is
+/// the only honest way to draw "this tab is the path below it" — and it is why
+/// the strip is drawn *before* the top row rather than beside it.
+///
+/// The inactive tabs are a quieter plate dropped [`TAB_DROP`] below the active
+/// one's top edge, with their own corners rounded concentrically against that
+/// drop (`delightful-ui` §15) — so the active one reads as raised out of a row
+/// of others rather than as merely a different colour.
+///
+/// `filter` is the committed filter's fade, passed through to [`bar_fill`] so
+/// the active tab is tinted by exactly as much as the row it joins.
 pub fn tab_strip(
     paint: &Painting<'_>,
     strip: egui::Rect,
     titles: &[String],
     active: usize,
+    filter: f32,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
 ) {
     let palette = paint.palette;
-    for (index, (rect, title)) in tab_rects(strip, titles.len())
-        .into_iter()
-        .zip(titles)
-        .enumerate()
-    {
+    let rects = tab_rects(strip, titles.len());
+    // The active tab last, so its pigtails are drawn over its neighbours
+    // rather than under them. They fit inside [`TAB_GAP`] and should never
+    // reach a neighbour's plate, but the order is free and the alternative
+    // would be a hairline that only appears at one window width.
+    let order = (0..rects.len())
+        .filter(|i| *i != active)
+        .chain(std::iter::once(active).filter(|i| *i < rects.len()));
+    for index in order {
+        let (rect, title) = (rects[index], &titles[index]);
         let key = Control::Tab(index);
         let is_active = index == active;
         let hover = hovers.hover(key);
         let ground = mix(palette.crust, palette.surface0, TAB_INACTIVE_LIFT);
         let fill = if is_active {
-            // The active chip is the *pane's* ground, so the tab and the column
-            // it belongs to are visibly one surface.
-            mix(palette.base, palette.blue, 0.10)
+            // The top row's own ground: the tab and the path it is about are
+            // one surface, and this is the expression that says so.
+            bar_fill(palette, filter)
         } else {
             mix(ground, palette.surface1, hover)
         };
-        let rect = pressed_rect(rect, hovers.press(key));
-        paint.painter.rect_filled(rect, ROW_RADIUS, fill);
+        // An inactive tab is dropped, and rounds against that drop: its radius
+        // is the active tab's less the step, so the gap along the shoulder
+        // between them stays a constant width as it turns (`delightful-ui`
+        // §15). It also takes the press inset; the active tab does not, because
+        // shrinking it would open a seam between it and the row it is joined
+        // to — and pressing the tab you are already on does nothing anyway.
+        let rect = if is_active {
+            rect
+        } else {
+            let rect = pressed_rect(rect, hovers.press(key));
+            egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + TAB_DROP), rect.max)
+        };
+        let radius = if is_active {
+            ROW_RADIUS
+        } else {
+            ROW_RADIUS - TAB_DROP as u8
+        };
+        // Square at the bottom, both ways: every tab meets the top row there,
+        // and a rounded bottom corner would be a gap between two things that
+        // are touching.
+        paint.painter.rect_filled(
+            rect,
+            egui::CornerRadius {
+                nw: radius,
+                ne: radius,
+                sw: 0,
+                se: 0,
+            },
+            fill,
+        );
         if is_active {
-            // A 2 pt accent rule on the top edge — the chrome's one mark for
-            // "this is the live one", used here and on the prompt row.
-            let rule = egui::Rect::from_min_max(
-                egui::pos2(rect.left() + ROW_RADIUS as f32, rect.top()),
-                egui::pos2(rect.right() - ROW_RADIUS as f32, rect.top() + 2.0),
-            );
-            paint.painter.rect_filled(rule, 1, palette.blue);
+            // The left pigtail is skipped on the first tab: there is nothing
+            // to its left but the window, and a flare out over the ground
+            // would hang off the end of the row it is supposed to join. Same
+            // at the other end, for a tab whose right edge is the row's.
+            if rect.left() > strip.left() + 0.5 {
+                pigtail(paint, rect, fill, false);
+            }
+            if rect.right() < strip.right() - 0.5 {
+                pigtail(paint, rect, fill, true);
+            }
         }
 
         let inside = paint.painter.with_clip_rect(rect);
@@ -211,6 +276,40 @@ pub fn tab_strip(
             (rect.right() - PAD_X - text_left).max(0.0),
         );
     }
+}
+
+/// One of the active tab's pigtails: the concave quarter-circle that carries
+/// its bottom corner outwards and down into the top row's ground.
+///
+/// Drawn as a filled square of the tab's own colour with a disc of the window
+/// ground bitten out of its *outer* corner, rather than as a path: egui fills a
+/// closed path by fanning from its first point, which is only correct for a
+/// convex outline — and a pigtail is concave by definition. Two primitives and
+/// a clip rectangle give the exact shape with no tessellation to get wrong.
+fn pigtail(paint: &Painting<'_>, tab: egui::Rect, fill: egui::Color32, right: bool) {
+    let square = if right {
+        egui::Rect::from_min_max(
+            egui::pos2(tab.right(), tab.bottom() - TAB_PIGTAIL),
+            egui::pos2(tab.right() + TAB_PIGTAIL, tab.bottom()),
+        )
+    } else {
+        egui::Rect::from_min_max(
+            egui::pos2(tab.left() - TAB_PIGTAIL, tab.bottom() - TAB_PIGTAIL),
+            egui::pos2(tab.left(), tab.bottom()),
+        )
+    };
+    paint.painter.rect_filled(square, 0, fill);
+    // The bite: centred on the corner furthest from the tab, so what is left
+    // of the square is the quarter that curves away from it. Clipped to the
+    // square, because the rest of the disc would eat the tab.
+    let centre = egui::pos2(
+        if right { square.right() } else { square.left() },
+        square.top(),
+    );
+    paint
+        .painter
+        .with_clip_rect(square)
+        .circle_filled(centre, TAB_PIGTAIL, paint.palette.crust);
 }
 
 // ── The breadcrumb path bar (PLAN §2) ───────────────────────────────────────
@@ -807,15 +906,40 @@ pub fn top_geometry(
     }
 }
 
+/// How far the top row's ground is tinted towards the filter's blue while a
+/// committed filter is on.
+///
+/// A tenth: enough that the row reads as *changed* out of the corner of the
+/// eye — the listing below it is not the whole directory — and far too little
+/// to read as a highlight. The chip beside the crumbs is what says which query
+/// is on; this only says that one is.
+const BAR_FILTER_TINT: f32 = 0.10;
+
 /// The top row's ground: the window's own, so it reads as part of the frame
 /// rather than as a fourth pane.
-fn bar_ground(paint: &Painting<'_>, rect: egui::Rect) -> egui::Rect {
-    paint.painter.rect_filled(
-        rect,
-        ROW_RADIUS,
-        mix(paint.palette.crust, paint.palette.base, 0.5),
-    );
+///
+/// `filter` is the committed filter's fade, 0 when there is none — it rides
+/// the same eased way out the chip does, so the row settles back to its own
+/// colour rather than snapping.
+fn bar_ground(paint: &Painting<'_>, rect: egui::Rect, filter: f32) -> egui::Rect {
+    paint
+        .painter
+        .rect_filled(rect, ROW_RADIUS, bar_fill(paint.palette, filter));
     rect.shrink2(egui::vec2(PAD_X, 0.0))
+}
+
+/// The colour [`bar_ground`] paints, on its own.
+///
+/// Public because the tab strip needs it: the active tab is drawn *in* it, so
+/// the two read as one surface, and a second copy of this expression is how
+/// the tab and the row it hangs off drift apart.
+pub fn bar_fill(palette: &crate::theme::Palette, filter: f32) -> egui::Color32 {
+    let ground = mix(palette.crust, palette.base, 0.5);
+    mix(
+        ground,
+        palette.blue,
+        BAR_FILTER_TINT * filter.clamp(0.0, 1.0),
+    )
 }
 
 /// Draw the top row in browse mode: the crumbs, the filter chip, and the
@@ -838,7 +962,7 @@ pub fn path_bar(
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    bar_ground(paint, bar);
+    bar_ground(paint, bar, filter_alpha);
     let font = egui::FontId::proportional(FONT);
     let rects = &geom.crumbs;
 
@@ -972,17 +1096,11 @@ pub fn path_bar(
 /// (`delightful-ui` §8's spatial stability).
 pub fn prompt_row(paint: &Painting<'_>, row: egui::Rect, prompt: &Prompt, tail: Option<&str>) {
     let palette = paint.palette;
-    let mut inner = bar_ground(paint, row);
-    // The accent rule says the keyboard is *here* and not in the list — the
-    // same 2 pt mark the active tab wears, for the same reason.
-    paint.painter.rect_filled(
-        egui::Rect::from_min_max(
-            egui::pos2(row.left() + ROW_RADIUS as f32, row.top()),
-            egui::pos2(row.right() - ROW_RADIUS as f32, row.top() + 2.0),
-        ),
-        1,
-        palette.blue,
-    );
+    // No rule along the top edge: the prompt *is* the indication. A row that
+    // has swapped its breadcrumbs for a titled field with a caret in it has
+    // already said the keyboard is here, and a second mark saying the same
+    // thing is a mark that only ever gets in the way.
+    let mut inner = bar_ground(paint, row, 0.0);
 
     // The row grew a second line for an error that would not fit beside the
     // query: the field keeps the first line and the error gets the second.
@@ -1054,9 +1172,7 @@ pub fn prompt_lines(
         + text_width(painter, prompt.query(), font.clone())
         + PAD_X
         + text_width(painter, error, font.clone())
-        + PAD_X
-        + text_width(painter, prompt.mode_label(), key_font(FONT - 1.5))
-        + 10.0;
+        + PAD_X;
     let inner = width - PAD_X * 2.0;
     let tail_width = tail
         .map(|tail| text_width(painter, tail, font) + CRUMB_SEPARATOR_WIDTH)
@@ -1164,33 +1280,9 @@ fn prompt_field(
     );
 
     // ── The right-hand furniture, measured first so the text knows its room ──
-    // The mode chip is the outermost thing on the line: it is the answer to
-    // "why did that letter not type", and it must be findable in the same place
-    // every time (`delightful-ui` §8).
-    let mode = prompt.mode_label();
-    let mode_color = match mode {
-        "INSERT" => palette.green,
-        "VISUAL" => palette.mauve,
-        "REPLACE" => palette.peach,
-        _ => palette.blue,
-    };
-    let mode_galley = painter.layout_no_wrap(mode.to_string(), key_font(FONT - 1.5), mode_color);
-    let chip_width = mode_galley.size().x + 10.0;
-    let chip_rect = egui::Rect::from_min_size(
-        egui::pos2(
-            inner.right() - chip_width,
-            inner.center().y - (mode_galley.size().y + 4.0) / 2.0,
-        ),
-        egui::vec2(chip_width, mode_galley.size().y + 4.0),
-    );
-    painter.rect_filled(chip_rect, 4, mix(paint.palette.crust, mode_color, 0.18));
-    painter.galley(
-        egui::pos2(chip_rect.left() + 5.0, chip_rect.top() + 2.0),
-        mode_galley,
-        mode_color,
-    );
-
-    let mut right = chip_rect.left() - PAD_X;
+    // There is no mode chip: the editor has no modes to report, and the field
+    // itself is the only thing on this line that says the keyboard is here.
+    let mut right = inner.right();
     if let (Some(error), Some(line)) = (&prompt.error, error_line) {
         // The row grew for this: the error gets a line of its own, under the
         // query it is about, rather than being squeezed into three characters
@@ -1263,7 +1355,7 @@ fn prompt_field(
     };
 
     if let Some(range) = prompt.selection() {
-        // A visual run is a *region*, so it is drawn as one rather than as
+        // A selected run is a *region*, so it is drawn as one rather than as
         // differently coloured letters.
         let (from, to) = (
             text_left + width_of(range.start),
@@ -1287,55 +1379,19 @@ fn prompt_field(
         palette.text,
     );
 
-    // The caret. **Never blinking** — PLAN §4.2 says no blink, and a blink is
-    // an animation that never stops asking for frames (PLAN §1). A block in
-    // Normal, where the caret sits *on* a character; a bar in Insert, where it
-    // sits between two.
-    let caret = prompt.caret();
-    let caret_x = text_left + width_of(caret);
-    let caret_width = if prompt.block_caret() {
-        let next = query[caret.min(query.len())..]
-            .chars()
-            .next()
-            .map(char::len_utf8)
-            .unwrap_or(0);
-        if next == 0 {
-            CARET_WIDTH * 4.0
-        } else {
-            (width_of(caret + next) - width_of(caret)).max(CARET_WIDTH)
-        }
-    } else {
-        CARET_WIDTH
-    };
+    // The caret. Always a bar, because the caret always sits *between* two
+    // characters now — there is no mode in which it stands on one. **Never
+    // blinking**: PLAN §4.2 says no blink, and a blink is an animation that
+    // never stops asking for frames (PLAN §1).
+    let caret_x = text_left + width_of(prompt.caret());
     painter.rect_filled(
         egui::Rect::from_min_max(
             egui::pos2(caret_x, inner.top() + 5.0),
-            egui::pos2(caret_x + caret_width, inner.bottom() - 5.0),
+            egui::pos2(caret_x + CARET_WIDTH, inner.bottom() - 5.0),
         ),
         0,
-        // A block caret is drawn *behind* nothing — egui has no blend mode for
-        // "invert" — so it is the accent at a weight that leaves the glyph
-        // readable through it.
-        if prompt.block_caret() {
-            mix(paint.palette.crust, palette.blue, 0.55)
-        } else {
-            palette.blue
-        },
+        palette.blue,
     );
-    if prompt.block_caret() {
-        // …and the character is redrawn over the block, so the caret never eats
-        // the letter it is standing on.
-        let under: String = query[caret.min(query.len())..].chars().take(1).collect();
-        if !under.is_empty() {
-            painter.text(
-                egui::pos2(caret_x, inner.center().y),
-                egui::Align2::LEFT_CENTER,
-                under,
-                font,
-                palette.crust,
-            );
-        }
-    }
 }
 
 /// The insert caret's width, in points. One-and-a-half rather than one: a
@@ -2155,6 +2211,18 @@ mod tests {
                 strip(),
                 &["work".to_string(), "downloads".to_string()],
                 1,
+                1.0,
+                &Hovers::new(),
+                &Ripples::new(),
+            );
+            // …and with the *first* tab active, which is the one case where a
+            // pigtail would hang off the end of the row and is skipped.
+            tab_strip(
+                &paint,
+                strip(),
+                &["work".to_string(), "downloads".to_string()],
+                0,
+                0.0,
                 &Hovers::new(),
                 &Ripples::new(),
             );

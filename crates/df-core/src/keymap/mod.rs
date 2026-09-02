@@ -77,7 +77,7 @@ mod key;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub use command::{Command, InputMode};
+pub use command::Command;
 pub use key::{label_sequence, parse_chord, parse_sequence, Chord, Key, KeymapError, Mods};
 
 use crate::toml::{ConfigWarning, Value};

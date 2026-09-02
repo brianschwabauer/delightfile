@@ -113,6 +113,36 @@ impl Default for Palette {
 /// neighbouring values on one catppuccin ramp, which share a hue — so there is
 /// no hue to be lost on the way and a gamma-correct mix would land in visibly
 /// the same place.
+/// How far the two lit row surfaces are pulled off the grey ramp, towards the
+/// palette's `lavender`.
+///
+/// The ramp's `surface0`/`surface1` are a true neutral, and a neutral grey
+/// sitting between catppuccin's tinted `base` and its coloured file names is
+/// the one surface in the window that looks like it came from a different
+/// palette. Eighteen percent of the way to `lavender` is still read as grey —
+/// it is a step up the ramp, not a highlight colour — but it belongs to the
+/// same family as everything around it. Lavender rather than `blue` because
+/// blue is the *directory* colour and the accent this program marks live
+/// things with; a cursor bar the same hue as the accent would look like a
+/// selection.
+const ROW_TINT: f32 = 0.18;
+
+/// What the cursor row is lifted towards: the palette's `surface1`, warmed.
+///
+/// One function for the list and the grid so a row and its tile cannot drift
+/// apart — the grid's promise is that toggling the view changes the geometry
+/// and nothing else.
+pub fn cursor_fill(palette: &Palette) -> egui::Color32 {
+    mix(palette.surface1, palette.lavender, ROW_TINT)
+}
+
+/// What a row under the pointer is lifted towards: the step below
+/// [`cursor_fill`] on the same ramp, warmed by the same amount, so a hover
+/// that lands on the cursor row composes with it instead of greying it out.
+pub fn hover_fill(palette: &Palette) -> egui::Color32 {
+    mix(palette.surface0, palette.lavender, ROW_TINT)
+}
+
 pub fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;

@@ -701,7 +701,8 @@ pub struct GridView<'a> {
 /// Draw a directory as a wall of tiles.
 ///
 /// Every state a row can be in, a tile is in too, and wearing the same colour:
-/// the cursor is a lift towards `surface1`, a selection is the yellow tint plus
+/// the cursor is a lift towards [`crate::theme::cursor_fill`], a selection is
+/// the yellow tint plus
 /// its hard bar, a yank is the teal chip and a cut is the peach one. That is
 /// not decoration — it is the promise this view makes, that toggling it changes
 /// the geometry and nothing else.
@@ -776,8 +777,12 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         // Instant, both ways: the keyboard cursor is not a pointer and does
         // not leave a trail (see the note above `crate::ui::ListView`).
         let glow = f32::from(index == dir.cursor()) * cursor_alpha;
-        let base = mix(ground_here, palette.surface1, glow);
-        let fill = mix(base, palette.surface0, hover * crate::ui::HOVER_LIFT);
+        let base = mix(ground_here, crate::theme::cursor_fill(palette), glow);
+        let fill = mix(
+            base,
+            crate::theme::hover_fill(palette),
+            hover * crate::ui::HOVER_LIFT,
+        );
         let rect = crate::hover::pressed_rect(rect, hovers.press(key));
         if fill != ground {
             painter.rect_filled(rect, TILE_RADIUS, fill);

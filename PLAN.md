@@ -207,12 +207,21 @@ ordering preserves declaration order, not alphabetical.
 `[tasks]`, `[pick]`, `[confirm]`, `[cmp]`, `[help]`, `[spot]` contexts: port yazi's
 defaults verbatim (spot: `h`/`l` swipe prev/next file, `c c` copy cell, etc.).
 
-### 4.2 Input context — full vi line editor
+### 4.2 Input context — one plain line editor
 
-Port yazi's `[input]` behavior: `i I a A v r` modes, `w W b B e E 0 $ ^ _` motion,
-`d c s x y p u Ctrl+r` edit/undo, `Ctrl+u/k/w`, Alt-word ops. One implementation used by
-rename, filter, create, cd, search, shell. Custom prompt titles and popup geometry as in
-yazi.toml (rename anchored to the hovered row; others top-center). No cursor blink.
+**Nothing modal.** No Normal mode, no `INSERT` chip, no block caret, no
+`[input] vi_mode`: every unmodified key types itself, and `Esc` cancels the
+prompt on the first press, everywhere. A config that still sets `vi_mode` gets a
+warning saying so.
+
+Readline's map is what is left, and it is all the editing anybody reached the
+modes for: `Ctrl+a`/`Ctrl+e`/`Home`/`End`, `Ctrl+b`/`Ctrl+f` and the arrows,
+`Alt+b`/`Alt+f` and `Ctrl+arrow` by the word, `Ctrl+u`/`Ctrl+k`/`Ctrl+w`/`Alt+d`
+to kill, `Ctrl+h`/`Ctrl+d`/`Backspace`/`Delete`, `Ctrl+z`/`Ctrl+y` to undo and
+redo, and `Shift` on any motion to extend a selection that typing or deleting
+then replaces. One implementation used by rename, filter, create, cd, search,
+shell. Custom prompt titles and popup geometry as in yazi.toml (rename anchored
+to the hovered row; others top-center). No cursor blink.
 
 ### 4.3 Transport — delightviewer semantics, global
 
