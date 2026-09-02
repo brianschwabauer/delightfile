@@ -747,21 +747,35 @@ pub fn top_geometry(
     // enough to elide entirely is exactly the case where the filter is the only
     // thing on the row worth reading, and hanging the chip off a crumb that is
     // not there made it the one thing that disappeared.
-    let filter_rect = (filter_w > 0.0).then(|| {
-        let left = rects
-            .iter()
-            .rev()
-            .find(|r| **r != egui::Rect::NOTHING)
-            .map(|last| last.right() + CRUMB_SEPARATOR_WIDTH)
-            .unwrap_or(row.left() + PAD_X);
-        egui::Rect::from_min_max(
-            egui::pos2(left, row.top() + CHIP_INSET),
-            egui::pos2(
-                left + filter_w - CRUMB_SEPARATOR_WIDTH,
-                row.bottom() - CHIP_INSET,
-            ),
-        )
-    });
+    //
+    // …and clipped to the same band the crumbs are, for the same reason. The
+    // chip hangs off the last crumb's *measured* right edge, and that edge can
+    // be past the room the row had: the elision loop stops with one segment
+    // left, so a narrow window leaves a last crumb wider than the band and the
+    // chip was placed beyond the end of it — drawn over the counter and the
+    // right-hand chips, and winning the hit test there. A chip that cannot fit
+    // whole is not shown at all rather than shown cut in half: half a filter is
+    // a filter you would misread. The band-left fallback still applies when no
+    // crumb fitted, and that placement always fits, because the band is at
+    // least as wide as the chip or the chip would not have been measured.
+    let band_right = row.right() - PAD_X - cluster_geom.width;
+    let filter_rect = (filter_w > 0.0)
+        .then(|| {
+            let left = rects
+                .iter()
+                .rev()
+                .find(|r| **r != egui::Rect::NOTHING)
+                .map(|last| last.right() + CRUMB_SEPARATOR_WIDTH)
+                .unwrap_or(row.left() + PAD_X);
+            egui::Rect::from_min_max(
+                egui::pos2(left, row.top() + CHIP_INSET),
+                egui::pos2(
+                    left + filter_w - CRUMB_SEPARATOR_WIDTH,
+                    row.bottom() - CHIP_INSET,
+                ),
+            )
+        })
+        .filter(|rect| rect.right() <= band_right);
     // …and only *then* are the crumbs clipped to the band they were measured
     // in. The elision loop stops when one segment is left, so on a narrow row
     // the last crumb can be wider than the room it was given and reach under
@@ -773,7 +787,7 @@ pub fn top_geometry(
     // Done after the filter chip is placed, because that chip hangs off the
     // last crumb's *measured* right edge and must not move when the rect it is
     // measured from is trimmed.
-    let band_right = row.right() - PAD_X - reserved;
+    let band_right = band_right - filter_w;
     let rects = rects
         .into_iter()
         .map(|rect| {

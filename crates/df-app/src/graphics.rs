@@ -42,12 +42,28 @@ pub enum Presented {
     /// The surface was not available and the swapchain has been reconfigured.
     /// The caller backs off and asks for another frame.
     Retry,
-    /// The window is not visible. There is nothing to retry: a covered window
-    /// does not start answering because it was asked again, and probing it
-    /// costs an acquire — which can block for up to a second — for as long as
-    /// it stays covered. The next frame comes from an event: winit's
-    /// `WindowEvent::Occluded(false)`, a key, or anything else that asks for a
-    /// redraw.
+    /// The window is not visible.
+    ///
+    /// **Dead on this platform, and kept anyway.** wgpu only ever returns
+    /// `Occluded` from the Metal backend, and winit does not emit
+    /// `WindowEvent::Occluded` on Wayland at all — so on the platform this
+    /// program targets neither half of the pair fires, and a covered window
+    /// simply goes on presenting frames the compositor throws away. The arm
+    /// stays because the code is correct where it *is* reached (an X11 or macOS
+    /// build, a future wgpu that reports it here), and deleting it would mean
+    /// re-deriving it the day it starts arriving.
+    ///
+    /// Almost nothing is retried: a covered window does not start answering
+    /// because it was asked again, and probing it costs an acquire — which can
+    /// block for up to a second — for as long as it stays covered. The next
+    /// frame normally comes from an event: `WindowEvent::Occluded(false)`, a
+    /// key, or anything else that asks for a redraw. But because the *uncover*
+    /// event is the half that is missing on Wayland, the caller also schedules
+    /// one slow probe (see [`crate::app::OCCLUDED_PROBE`]) rather than none at
+    /// all — a platform that reports occlusion and never reports the end of it
+    /// would otherwise leave the window deaf for the rest of the session, and
+    /// one acquire every couple of seconds is a price worth paying to make that
+    /// impossible.
     Occluded,
 }
 
@@ -252,6 +268,15 @@ impl Gfx {
                 for id in &full_output.textures_delta.free {
                     self.renderer.free_texture(id);
                 }
+                // …and "stand" has to mean *submitted*. `write_texture` stages
+                // into the queue's own buffer and nothing reaches the GPU until
+                // a submit, which on the success path is the render pass below.
+                // On this path there is no pass — so through a run of failed
+                // acquires the deltas were applied, egui forgot them (they are
+                // one-shot), and every one of them sat unsubmitted. An empty
+                // submit is the flush: it costs no command buffer and it is the
+                // documented way to push staged writes through.
+                self.queue.submit(std::iter::empty());
                 return outcome;
             }
         };

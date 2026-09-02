@@ -18,6 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -108,6 +109,43 @@ const LOADING_DELAY: Duration = Duration::from_millis(150);
 /// sorting by size with the walk on — and between reorders there is time to
 /// read a row and put a hand on it. See [`App::apply_folder_sizes`].
 const FOLDER_RESORT: Duration = Duration::from_millis(500);
+
+/// How long a pointer can lie still and still count as somebody looking.
+///
+/// The 3D preview's turntable turns while the pointer is over the pane, and it
+/// drives itself: each rendered angle rings the wake bell, which brings a
+/// paint, which asks for the next one. The switch used to be egui's remembered
+/// hover position, which a cursor parked over the pane holds true forever — so
+/// a model left on screen turned for the rest of the session, off-screen and
+/// behind other windows included, at a frame apiece. Thirty seconds is long
+/// enough that reading a model's own metadata never stops it and short enough
+/// that a walk away from the desk does, which is the trade PLAN §1 asks for.
+const POINTER_PARKED: Duration = Duration::from_secs(30);
+
+/// How often a window that reported itself occluded is probed anyway.
+///
+/// Long, because it is not a retry: a covered window is expected to stay
+/// covered, and the frame is meant to come back on an uncover event. This is
+/// the belt to that braces — the event does not exist on Wayland (winit) and
+/// the occlusion answer does not exist there either (wgpu), so on the one
+/// platform this program targets the pair is dead code and on any platform
+/// where only *half* of it works the app would go deaf. Two seconds costs one
+/// acquire, which the compositor answers or does not, and cannot compound.
+const OCCLUDED_PROBE: Duration = Duration::from_secs(2);
+
+/// How long a clipboard round trip has before it is called a failure.
+///
+/// A native copy or paste is a message to the wayland thread and an answer back
+/// from it, and both halves can go missing for reasons this side cannot see: an
+/// application that took the selection and then stopped writing into the pipe,
+/// a compositor that never answers `set_selection`, or the thread itself dying
+/// between the send being accepted and its next drain. Every one of those used
+/// to be silent — a toast that never appeared, a `p` that did nothing — which
+/// is the worst way for a clipboard to break, because the user has no way to
+/// tell it from having pressed the wrong key. Ten seconds is far longer than
+/// any real handover (the wayland thread's own pipe read gives up at five) and
+/// short enough that nobody is left wondering.
+const CLIPBOARD_ANSWER: Duration = Duration::from_secs(10);
 
 /// How many probed files are remembered (see [`App::probes`]).
 ///
@@ -508,6 +546,14 @@ struct PressStart {
 /// button is down.
 struct Pointer {
     at: Option<egui::Pos2>,
+    /// Whether egui has a pointer *this frame* at all — false once it has left
+    /// the window. Not the same question as `at`, which is a remembered
+    /// position and outlives the hand that put it there.
+    present: bool,
+    /// Whether the pointer did anything this frame: moved, clicked, or turned
+    /// the wheel. The signal that separates somebody looking at the window from
+    /// a cursor left lying on it (see [`POINTER_PARKED`]).
+    moved: bool,
     down: bool,
     pressed: bool,
     released: bool,
@@ -698,6 +744,23 @@ pub struct App {
     /// animation driven from a worker simply stopped. The deadline is carried
     /// across here instead, and `about_to_wait` folds it in.
     off_thread_repaint: Arc<Mutex<Option<Instant>>>,
+    /// How many of the bells outstanding on the loop's queue were rung by a
+    /// *delayed* off-thread repaint request and by nothing else.
+    ///
+    /// `Wake` carries no payload, so `user_event` cannot ask who rang — and it
+    /// used to answer every ring with an immediate frame, including the rings
+    /// that meant "a frame in 300 ms please". That turned every delayed request
+    /// into a frame now *and* a frame then: an off-thread animation ran at the
+    /// loop's full speed instead of at the rate it asked for, which is PLAN
+    /// §1's idle rule broken by the one mechanism that exists to keep it.
+    ///
+    /// A count rather than a flag, because several requests can be outstanding
+    /// at once, and consumed one per `user_event` so the arithmetic comes out
+    /// whatever order the rings arrive in: `K` delayed rings and `M` other
+    /// rings still produce `M` immediate frames. The deadline itself is never
+    /// lost — it is in `off_thread_repaint`, which `about_to_wait` folds in on
+    /// the very pass that skipped the frame.
+    delayed_repaints: Arc<AtomicUsize>,
     /// Consecutive frames the surface refused (`Gfx::present` answered
     /// `Retry`). Drives the retry back-off in `redraw`, and is reset by the
     /// first frame that lands. An *occluded* window is not counted: it is not a
@@ -766,6 +829,21 @@ pub struct App {
     /// is however many rows are on screen — and that is only known mid-frame.
     pending_keys: Vec<Press>,
     modifiers: ModifiersState,
+    /// Whether this window has the keyboard focus, from
+    /// `WindowEvent::Focused`. Starts true: a window that has just been mapped
+    /// is the one being looked at, and winit does not always send a `Focused`
+    /// for it.
+    window_focused: bool,
+    /// What [`crate::wayland::DataDevice::ready`] said last frame.
+    ///
+    /// Only the *transition* matters. A thread that dies takes every copy and
+    /// paste in flight with it, and nothing else notices: the send was accepted
+    /// into a channel whose reader has gone, so no answer is ever sent and the
+    /// window waits on it forever. See [`App::clipboard_thread_gone`].
+    clipboard_ready: bool,
+    /// When the pointer last did anything — moved, clicked, or turned the
+    /// wheel. `None` until it does. See [`POINTER_PARKED`].
+    pointer_moved_at: Option<Instant>,
     /// The top row's prompt, when something is being typed into it.
     prompt: Option<Prompt>,
     /// Visual mode (`v` / `V`), while it is on.
@@ -1154,6 +1232,8 @@ struct PendingPaste {
     /// dropped if either moved.
     tab: crate::tab::TabId,
     dir: PathBuf,
+    /// When `p` was pressed. See [`CLIPBOARD_ANSWER`].
+    asked: Instant,
 }
 
 /// A copy waiting for the compositor to say whether it took the selection.
@@ -1165,6 +1245,10 @@ struct PendingCopy {
     message: String,
     mime: Option<String>,
     bytes: Vec<u8>,
+    /// When the command went into the wayland thread's channel. See
+    /// [`CLIPBOARD_ANSWER`]: an answer that never comes must not leave a toast
+    /// waiting for the rest of the session.
+    asked: Instant,
 }
 
 /// A drag from another application, over our window.
@@ -1276,6 +1360,7 @@ impl App {
             waker,
             repaint_at: None,
             off_thread_repaint: Arc::new(Mutex::new(None)),
+            delayed_repaints: Arc::new(AtomicUsize::new(0)),
             present_failures: 0,
             frame_interval: None,
             watchdog: crate::watchdog::Watchdog::start(),
@@ -1338,6 +1423,9 @@ impl App {
             path_lines: 1,
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
+            window_focused: true,
+            clipboard_ready: false,
+            pointer_moved_at: None,
             prompt: None,
             visual: None,
             clicks: crate::mouse::Clicks::new(),
@@ -1442,6 +1530,7 @@ impl App {
         let waker = self.waker.named("egui");
         let ui_thread = std::thread::current().id();
         let deadline = Arc::clone(&self.off_thread_repaint);
+        let delayed = Arc::clone(&self.delayed_repaints);
         gfx.egui_ctx.set_request_repaint_callback(move |info| {
             if std::thread::current().id() == ui_thread {
                 return;
@@ -1456,6 +1545,10 @@ impl App {
                         *slot = Some(due);
                     }
                 }
+                // Counted *before* the bell, or `user_event` could run on
+                // another thread and find nothing to consume — which would
+                // spend a frame on a request that asked for one later.
+                delayed.fetch_add(1, Ordering::Relaxed);
             }
             waker.wake();
         });
@@ -1588,7 +1681,7 @@ impl App {
         // hand any more (PLAN §2.1), so a scan update always gets to place it.
         if changed {
             for tab in self.tabs.iter_mut() {
-                tab.sync_parent_cursor();
+                tab.sync_parent_marker();
             }
         }
 
@@ -2508,12 +2601,23 @@ impl App {
             let had = self.remote_preview.is_some() || self.remote_hover.is_some();
             self.remote_preview = None;
             self.remote_hover = None;
+            // …and the read that was going to fill it is retired, the way the
+            // archive card's is (see `sync_archive_preview`). The drain checks
+            // the url before applying, so a late body was never *wrong* — it
+            // was a worker reading a file for a card that has gone, which is
+            // work nobody asked for (PLAN §1).
+            if had {
+                self.bodies.cancel(crate::preview::body::Which::Remote);
+            }
             return had;
         }
         let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
             let had = self.remote_preview.is_some();
             self.remote_preview = None;
             self.remote_hover = None;
+            if had {
+                self.bodies.cancel(crate::preview::body::Which::Remote);
+            }
             return had;
         };
         let url = entry.path.to_string_lossy().into_owned();
@@ -2525,6 +2629,9 @@ impl App {
         // facts and the reason there is nothing under them.
         if !crate::remote::previewable(&entry) {
             self.remote_hover = None;
+            // The cursor moved onto a row with nothing to fetch, so whatever was
+            // being fetched for the last one is nobody's now.
+            self.bodies.cancel(crate::preview::body::Which::Remote);
             self.remote_preview = Some(RemotePreview {
                 url,
                 body: None,
@@ -5241,6 +5348,7 @@ impl App {
             // The cursor follows the first file that moved, so the card closes
             // onto the change it made rather than onto wherever the list
             // happens to sort it (`delightful-ui` §8).
+            self.attach_view();
             self.tabs.active_mut().cwd.dir.cursor_to_name(&name);
         }
     }
@@ -5275,6 +5383,10 @@ impl App {
             PromptKind::Filter => self.dir().set_filter(query),
             PromptKind::FindNext | PromptKind::FindPrev => {
                 let direction = find_direction(kind);
+                // Find-as-you-type is a cursor command made one letter at a
+                // time, so each letter ends a scroll — the same rule every
+                // other cursor command follows (see [`crate::tab::Listing`]).
+                self.attach_view();
                 let dir = self.dir();
                 // From the origin every time, not from the last match: typing a
                 // second letter must narrow the search, never walk it forward
@@ -5402,6 +5514,7 @@ impl App {
         );
         let cwd = self.cwd();
         self.rescan(&cwd, now);
+        self.attach_view();
         self.dir().cursor_to_name(&name);
         Ok(())
     }
@@ -5436,6 +5549,7 @@ impl App {
         self.toasts.undo(format!("Renamed to {name}"), now);
         let cwd = self.cwd();
         self.rescan(&cwd, now);
+        self.attach_view();
         self.dir().cursor_to_name(&name);
         Ok(())
     }
@@ -5496,6 +5610,9 @@ impl App {
     /// `Space`: toggle the row under the cursor, then advance — the advance is
     /// the binding's decision, not the model's, which is why it is here.
     fn toggle_select(&mut self) {
+        // `Space` advances the cursor, and every path that sends the cursor
+        // somewhere takes the view back with it.
+        self.attach_view();
         let dir = self.dir();
         let at = dir.cursor();
         dir.toggle_selected(at);
@@ -6252,7 +6369,7 @@ impl App {
                 if let Some(parent) = &mut tab.parent {
                     parent.dir.set_show_hidden(show);
                 }
-                tab.sync_parent_cursor();
+                tab.sync_parent_marker();
             }
             C::LinemodeSize => self.mgr.linemode = LineMode::Size,
             C::LinemodePermissions => self.mgr.linemode = LineMode::Permissions,
@@ -6466,7 +6583,7 @@ impl App {
         if let Some(parent) = &mut tab.parent {
             parent.dir.set_sort(sort);
         }
-        tab.sync_parent_cursor();
+        tab.sync_parent_marker();
     }
 
     // ── "What's big" mode (PLAN §7.3) ───────────────────────────────────────
@@ -6491,12 +6608,28 @@ impl App {
         self.mgr.folder_sizes
             && self.mgr.linemode == LineMode::Size
             && self.tab().virtual_kind().is_none()
-            // Not while the listing itself is still arriving. The walker is two
-            // threads and a queue, and starting them during the cold-start path
-            // would spend PLAN §6's first-frame budget on a number the user
-            // cannot see yet — there are no rows to put it in.
-            && self.tab().cwd.dir.state() != df_core::fs::LoadState::Loading
             && scannable(&self.cwd())
+    }
+
+    /// Whether a walk may be *started* this frame.
+    ///
+    /// Not while the listing itself is still arriving. The walker is two
+    /// threads and a queue, and starting them during the cold-start path would
+    /// spend PLAN §6's first-frame budget on a number the user cannot see yet —
+    /// there are no rows to put it in.
+    ///
+    /// Deliberately **not** part of [`App::folder_sizes_wanted`]. It was, and
+    /// that made every rescan of the directory on screen tear the numbers down:
+    /// [`App::rescan`] marks the sizes stale and calls `begin_scan`, which puts
+    /// the pane back into `Loading` — so the next frame read "not wanted",
+    /// cleared [`crate::folders::Folders`] outright, and the walk that
+    /// [`crate::folders::RESTALE_QUIET`] exists to debounce started again from
+    /// nothing the moment the scan landed. The debounce never once ran. Now the
+    /// two questions are asked separately: *wanted* decides whether the state
+    /// lives at all, *ready* decides whether a walk starts now, and a rescan of
+    /// the same directory is only the second one saying "not yet".
+    fn folder_sizes_ready(&self) -> bool {
+        self.tab().cwd.dir.state() != df_core::fs::LoadState::Loading
     }
 
     /// Keep the folder-size walk pointed at the directory on screen, and take
@@ -6508,42 +6641,76 @@ impl App {
     /// per frame is cheaper than remembering to call something from all of
     /// them.
     fn poll_folders(&mut self, now: Instant) -> bool {
-        if !self.folder_sizes_wanted() {
-            // Leaving for a remote listing, or turning the column off: stop
-            // paying for an answer nothing will draw.
-            if self.folders.token().is_some() || !self.folders.is_empty() {
-                self.stop_folder_sizes();
-                return true;
-            }
-            return false;
-        }
+        use crate::folders::Step;
 
         // The "what's big" mode owns the walker while it is on. Checked before
         // anything is requested, not after: `DuScanner::request` cancels any
         // walk of the same root, so starting one here would quietly kill the
         // drill-down the user is watching. Leaving the mode clears this state,
         // and the next frame starts again from the cache the mode just filled.
+        //
+        // Ahead of the teardown as well as ahead of the request: the mode has
+        // taken the walk over, and the numbers it is filling in are the ones
+        // this pane will read when the mode ends.
         if self.usage.is_some() {
             return false;
         }
 
         let cwd = self.cwd();
         let tab = self.tabs.active_index();
+        // The five facts, and then one function that decides from them. See
+        // [`crate::folders::step`] for why the decision lives there and not in
+        // a chain of `else if`s here: it is the part that was wrong, and it is
+        // the part a test can reach.
+        let step = crate::folders::step(
+            self.folder_sizes_wanted(),
+            self.folder_sizes_ready(),
+            self.folders.token().is_some() || !self.folders.is_empty(),
+            self.folders.is_about(&cwd, tab),
+            self.folders.due(now),
+        );
         let mut changed = false;
-        if !self.folders.is_about(&cwd, tab) {
-            changed = self.begin_folder_sizes(cwd.clone(), now);
-        } else if self.folders.due(now) {
-            // The directory has been quiet since the last watcher event, so the
-            // numbers on screen can be corrected. The cache is forgotten *here*
-            // — once per quiet period rather than once per event — because its
-            // freshness check cannot see a file written three levels down.
-            if let Some(du) = &self.du {
-                du.forget(&cwd);
+        match step {
+            Step::Idle | Step::Keep => {}
+            Step::Stop => {
+                self.stop_folder_sizes();
+                changed = true;
             }
-            let options = df_core::du::DuOptions::at_depth(1).counting_children();
-            let token = self.du().request_with(cwd.clone(), options);
-            self.folders.restart(token);
-            changed = true;
+            Step::Begin => changed = self.begin_folder_sizes(cwd.clone(), now),
+            Step::Rewalk => {
+                // The directory has been quiet since the last watcher event, so
+                // the numbers on screen can be corrected. The cache is
+                // forgotten *here* — once per quiet period rather than once per
+                // event — because its freshness check cannot see a file written
+                // three levels down.
+                //
+                // Through the same network-mount refusal `begin_folder_sizes`
+                // makes: a re-walk is a walk, and a directory that has had an
+                // NFS mount appear under it since the first one must not be
+                // walked just because the first walk was allowed.
+                if df_core::du::is_remote(&cwd) {
+                    log::debug!(
+                        "folder sizes: {} became a network mount; not re-walking",
+                        cwd.display()
+                    );
+                    self.stop_folder_sizes();
+                    self.folders.decline(cwd.clone(), tab);
+                    return true;
+                }
+                if let Some(du) = &self.du {
+                    du.forget(&cwd);
+                }
+                let options = df_core::du::DuOptions::at_depth(1).counting_children();
+                let token = self.du().request_with(cwd.clone(), options);
+                self.folders.restart(token);
+                changed = true;
+            }
+        }
+        // Nothing more to do when there is no walk and nothing held — and
+        // nothing to drain either, because the channel belongs to the scanner
+        // and the scanner has not been started.
+        if matches!(step, Step::Idle) {
+            return changed;
         }
         // Drained unconditionally, even with no walk of our own in flight: the
         // channel is shared with every other `request`, and a frame that
@@ -6652,15 +6819,34 @@ impl App {
     /// because the size column was switched off would be the rows moving for a
     /// reason nobody could see.
     fn restore_stat_sizes(&mut self) {
-        // Only for the listing the numbers were written into. The sizes are
-        // keyed by name, and a directory called `photos` in the folder you have
-        // just walked into is not the `photos` the last walk measured.
-        if !self.folders.watches(&self.cwd()) {
+        // Only the listing the numbers were written into. The sizes are keyed
+        // by name, and a directory called `photos` in the folder you have just
+        // walked into is not the `photos` the last walk measured.
+        //
+        // Named explicitly — the recorded tab *and* the recorded directory —
+        // rather than asked as `watches(&self.cwd())`. That guard was read
+        // against wherever the cursor is *now*, so the one case this function
+        // exists for, navigating away with a walk in flight, was the case it
+        // refused: by the time `stop_folder_sizes` ran, `cwd()` was the new
+        // directory, `watches` said no, and the walked totals stayed in the old
+        // listing's `Entry::len` for as long as the tab held it in history.
+        let (dir, tab) = (self.folders.dir().to_path_buf(), self.folders.tab());
+        if dir.as_os_str().is_empty() {
             return;
         }
-        let restore: HashMap<String, u64> = self
-            .tab()
-            .cwd
+        // The tab may have been closed or dragged into another window since,
+        // and the index is a position in the strip rather than an identity — so
+        // the path is checked as well, which is what makes the pair a name.
+        let Some(pane) = self
+            .tabs
+            .iter()
+            .nth(tab)
+            .map(|t| &t.cwd)
+            .filter(|pane| pane.path() == dir)
+        else {
+            return;
+        };
+        let restore: HashMap<String, u64> = pane
             .dir
             .entries()
             .iter()
@@ -6674,18 +6860,17 @@ impl App {
         if restore.is_empty() {
             return;
         }
-        self.tabs
-            .active_mut()
-            .cwd
-            .dir
-            .revise_entries_in_place(|entries| {
-                for entry in entries.iter_mut() {
-                    if let Some(len) = restore.get(&entry.name) {
-                        entry.len = *len;
-                    }
+        let Some(pane) = self.tabs.iter_mut().nth(tab) else {
+            return;
+        };
+        pane.cwd.dir.revise_entries_in_place(|entries| {
+            for entry in entries.iter_mut() {
+                if let Some(len) = restore.get(&entry.name) {
+                    entry.len = *len;
                 }
-                true
-            });
+            }
+            true
+        });
     }
 
     /// Push the walk's numbers into the rows, so the size *sort* sees them.
@@ -7422,9 +7607,16 @@ impl App {
         // has not happened yet, waiting on the row it is about; left standing,
         // the batch that brings the row would move the cursor and drag the view
         // back with it, seconds into a scroll nobody had finished.
+        //
+        // **Only when the wheel actually moved something.** A wheel at the top
+        // of a short listing, or against the end of one, does nothing at all —
+        // and cancelling an aim on it threw away a `cursor_to_name` still
+        // waiting for its row because of a gesture that had no effect. The aim
+        // is cancelled by a scroll, not by the wheel being turned.
         let cwd = &mut self.tabs.active_mut().cwd;
-        cwd.dir.cancel_aim();
-        cwd.wheel(rows, page, columns, now);
+        if cwd.wheel(rows, page, columns, now) {
+            cwd.dir.cancel_aim();
+        }
     }
 
     /// A primary click on something. Returns where it landed, for the ripple.
@@ -8354,18 +8546,23 @@ impl App {
         pages: (usize, usize),
         now: Instant,
     ) {
+        // The same rule the wheel follows, and for the same reason: a drag held
+        // at the edge of a listing that has nowhere left to go must not quietly
+        // cancel an aim (see [`App::wheel`]). A drag *that scrolls* is a scroll.
         let list = dnd::autoscroll(zones.list_content, at) * dt;
         if list != 0.0 {
             let columns = self.columns;
-            self.tabs
-                .active_mut()
-                .cwd
-                .wheel(list, pages.0, columns, now);
+            let cwd = &mut self.tabs.active_mut().cwd;
+            if cwd.wheel(list, pages.0, columns, now) {
+                cwd.dir.cancel_aim();
+            }
         }
         let parent = dnd::autoscroll(zones.parent_content, at) * dt;
         if parent != 0.0 {
             if let Some(pane) = &mut self.tabs.active_mut().parent {
-                pane.wheel(parent, pages.1, 1, now);
+                if pane.wheel(parent, pages.1, 1, now) {
+                    pane.dir.cancel_aim();
+                }
             }
         }
     }
@@ -8480,6 +8677,7 @@ impl App {
         let Some(device) = &self.data_device else {
             return;
         };
+        let ready = device.ready();
         for event in device.poll() {
             match event {
                 crate::wayland::Event::Enter { at, ours } => {
@@ -8531,6 +8729,86 @@ impl App {
                     }
                 }
             }
+        }
+        // The thread stopped between one frame and the next. Everything that
+        // was waiting on it is now waiting on nothing.
+        if self.clipboard_ready && !ready {
+            self.clipboard_thread_gone(now);
+        }
+        self.clipboard_ready = ready;
+        self.expire_clipboard(now);
+    }
+
+    /// The wayland thread has gone. Answer everything it was holding.
+    ///
+    /// Out loud and, where it can be, *usefully*: a copy still has its bytes,
+    /// so it goes back out through `wl-copy` and the toast the user was
+    /// promised still arrives; a paste has only a mime, so it is re-asked
+    /// through `wl-paste`, which is the same fallback a session that never had
+    /// a data device uses. What must not happen is what used to: silence, a
+    /// `pending_copy` entry nothing will ever pop, and a clipboard that has
+    /// stopped working without saying so.
+    fn clipboard_thread_gone(&mut self, now: Instant) {
+        let waiting = self.pending_copy.len() + usize::from(self.pending_paste.is_some());
+        if waiting == 0 {
+            return;
+        }
+        log::info!("clipboard: the wayland thread stopped with {waiting} request(s) in flight");
+        let stranded: Vec<PendingCopy> = self.pending_copy.drain(..).collect();
+        for copy in stranded {
+            self.copy_via_wl_copy(copy.mime.as_deref(), &copy.bytes, &copy.message, now);
+        }
+        if let Some(pending) = self.pending_paste.take() {
+            self.paste_via_wl_paste(pending, now);
+        }
+    }
+
+    /// A copy or paste the compositor never answered. See [`CLIPBOARD_ANSWER`].
+    ///
+    /// One per frame at most, and the oldest first: `pending_copy` is a queue
+    /// answered in order, so the one that has been waiting longest is the one
+    /// at the front and nothing behind it can have expired first.
+    fn expire_clipboard(&mut self, now: Instant) {
+        if self
+            .pending_copy
+            .front()
+            .is_some_and(|copy| now.saturating_duration_since(copy.asked) >= CLIPBOARD_ANSWER)
+        {
+            // Popped through the ordinary "the compositor said no" path, which
+            // is what a silence of ten seconds amounts to: it falls back to
+            // `wl-copy` and the user still gets their toast.
+            log::info!("clipboard: no answer to the copy in {CLIPBOARD_ANSWER:?}; trying wl-copy");
+            self.copy_answered(false, now);
+        }
+        if self
+            .pending_paste
+            .as_ref()
+            .is_some_and(|paste| now.saturating_duration_since(paste.asked) >= CLIPBOARD_ANSWER)
+        {
+            let Some(pending) = self.pending_paste.take() else {
+                return;
+            };
+            log::info!(
+                "clipboard: no answer to the paste in {CLIPBOARD_ANSWER:?}; trying wl-paste"
+            );
+            self.paste_via_wl_paste(pending, now);
+        }
+    }
+
+    /// Re-ask for a paste through `wl-paste`, for a native one that never came
+    /// back. The same shell-out [`App::paste_system`] falls back to when there
+    /// is no data device at all.
+    fn paste_via_wl_paste(&mut self, pending: PendingPaste, now: Instant) {
+        let mime = pending.offer.mime().to_string();
+        match crate::clipboard::paste(&mime) {
+            Ok(bytes) => {
+                log::info!(
+                    "clipboard: pasted {mime} via wl-paste ({} bytes)",
+                    bytes.len()
+                );
+                self.take_pasted(pending, bytes, now);
+            }
+            Err(error) => self.clip_failed(error, now),
         }
     }
 
@@ -8727,6 +9005,7 @@ impl App {
                 message,
                 mime: mime.map(str::to_string),
                 bytes: bytes.to_vec(),
+                asked: now,
             });
             return;
         }
@@ -8866,6 +9145,7 @@ impl App {
                 force,
                 tab: self.tab().id,
                 dir: self.cwd(),
+                asked: now,
             };
             // The send has to be accepted before the paste is recorded as
             // pending: a thread that has exited between the `ready()` above and
@@ -8901,6 +9181,7 @@ impl App {
             force,
             tab: self.tab().id,
             dir: self.cwd(),
+            asked: now,
         };
         match crate::clipboard::paste(&mime) {
             Ok(bytes) => {
@@ -8917,35 +9198,58 @@ impl App {
     /// The bytes the clipboard finally handed over, whichever path fetched
     /// them, and what the paste that asked for them meant to do.
     ///
-    /// **The destination is checked before anything happens.** See
-    /// [`PendingPaste::tab`]: this can be a frame or several after the key was
-    /// pressed, and every one of the three branches below writes into "the
-    /// current directory". If that is no longer the directory the paste was
-    /// aimed at, the paste is dropped and said so — the alternative is files
-    /// appearing somewhere the user did not ask for them, with no gesture that
-    /// undoes it because none was made.
+    /// **The destination is decided when the key is pressed, not here.** See
+    /// [`PendingPaste::tab`]: this can be a frame or several after `p`, and the
+    /// cursor can have moved on in the meantime.
+    ///
+    /// So the paste is *retargeted* rather than thrown away — it goes into
+    /// [`PendingPaste::dir`], which is the directory the user aimed it at,
+    /// whatever is on screen now. The old rule dropped it and asked for the key
+    /// again, which meant a round trip through another application's pipe was
+    /// spent for nothing every time somebody pressed `p` and kept browsing;
+    /// bytes that have already been fetched are the one thing there is no
+    /// reason to discard. A paste that lands somewhere other than the current
+    /// view says where it went, because otherwise it would be a write nobody
+    /// saw.
+    ///
+    /// The one case that is still dropped: the tab is gone *and* the directory
+    /// is gone with it. There is nothing left to aim at.
     fn take_pasted(&mut self, pending: PendingPaste, bytes: Vec<u8>, now: Instant) {
-        if self.tab().id != pending.tab || self.cwd() != pending.dir {
-            self.toasts.notice(
-                format!(
-                    "That paste was for {} — press p again here",
-                    file_name(&pending.dir)
-                ),
+        let dir_there = pending.dir.is_dir();
+        let tab_there = self.tabs.iter().any(|tab| tab.id == pending.tab);
+        if !dir_there && !tab_there {
+            self.toasts.error(
+                format!("{} is gone — nothing pasted", file_name(&pending.dir)),
                 now,
             );
             return;
         }
+        // Said before the paste rather than after it: the file operations below
+        // put up toasts of their own, and the one that says *where* has to be
+        // the one underneath them rather than the last word.
+        if self.cwd() != pending.dir {
+            self.toasts.notice(
+                format!(
+                    "Pasted into {}, where p was pressed",
+                    file_name(&pending.dir)
+                ),
+                now,
+            );
+        }
+        let dest = pending.dir;
         match pending.offer {
-            crate::clipboard::Offer::Files => self.paste_clipboard_files(bytes, pending.force, now),
+            crate::clipboard::Offer::Files => {
+                self.paste_clipboard_files(bytes, dest, pending.force, now)
+            }
             crate::clipboard::Offer::Image(mime) => {
                 let extension = crate::clipboard::image_extension(&mime);
-                self.save_clipboard(bytes, extension, now);
+                self.save_clipboard(bytes, extension, dest, now);
             }
-            crate::clipboard::Offer::Text(_) => self.save_clipboard(bytes, "txt", now),
+            crate::clipboard::Offer::Text(_) => self.save_clipboard(bytes, "txt", dest, now),
         }
     }
 
-    fn paste_clipboard_files(&mut self, bytes: Vec<u8>, force: bool, now: Instant) {
+    fn paste_clipboard_files(&mut self, bytes: Vec<u8>, dest: PathBuf, force: bool, now: Instant) {
         let text = String::from_utf8_lossy(&bytes);
         let offered = crate::clipboard::parse_uri_list(&text);
         let count = offered.len();
@@ -8974,7 +9278,9 @@ impl App {
             );
         }
         let clipboard = Clipboard::yank(paths);
-        self.paste_from(&clipboard, force, now);
+        // `paste_into` rather than `paste_from`: the destination is the one the
+        // key was aimed at, which is not necessarily the one on screen.
+        self.paste_into(&clipboard, dest, force, now);
     }
 
     /// Save what the clipboard is holding as a file in this directory.
@@ -8983,8 +9289,7 @@ impl App {
     /// image on the system clipboard lands a file with `std::fs::write`, so
     /// unlike the file paste (which reads its meaning off both ends and can
     /// become an upload) it needs the pane to be a directory on this machine.
-    fn save_clipboard(&mut self, bytes: Vec<u8>, extension: &str, now: Instant) {
-        let cwd = self.cwd();
+    fn save_clipboard(&mut self, bytes: Vec<u8>, extension: &str, cwd: PathBuf, now: Instant) {
         if !scannable(&cwd) {
             self.toasts
                 .notice("The clipboard can only be saved into a local folder", now);
@@ -9022,9 +9327,14 @@ impl App {
             ),
             now,
         );
-        let cwd = self.cwd();
         self.rescan(&cwd, now);
-        self.dir().cursor_to_name(&name);
+        // The cursor only follows when the file landed where you are looking.
+        // Aiming it at a name that is not in this listing would move it to
+        // wherever `cursor_to_name` gave up.
+        if self.cwd() == cwd {
+            self.attach_view();
+            self.dir().cursor_to_name(&name);
+        }
     }
 
     // ── The frame ───────────────────────────────────────────────────────────
@@ -9089,6 +9399,15 @@ impl App {
         // ── Pointer (PLAN §7.5) ─────────────────────────────────────────────
         let pointer = ui.input(|i| Pointer {
             at: i.pointer.interact_pos(),
+            present: i.pointer.has_pointer(),
+            moved: i.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::PointerMoved(_)
+                        | egui::Event::PointerButton { .. }
+                        | egui::Event::MouseWheel { .. }
+                )
+            }),
             down: i.pointer.primary_down(),
             pressed: i.pointer.primary_pressed(),
             released: i.pointer.primary_released(),
@@ -9111,6 +9430,9 @@ impl App {
             toggle: i.modifiers.command || i.modifiers.ctrl,
             alt: i.modifiers.alt,
         });
+        if pointer.moved {
+            self.pointer_moved_at = Some(now);
+        }
         let scroll_rows = self.tab().cwd.scroll_rows(now);
         let parent_content = ui::content_rect(layout.parent);
         let parent_page = crate::viewport::visible_rows(parent_content.height(), ui::ROW_HEIGHT);
@@ -9229,30 +9551,37 @@ impl App {
                     if prompting {
                         return None;
                     }
-                    // …and not while *this* chip is fading out either: there is
-                    // no filter left to re-open a prompt on.
-                    let filter_live = self
-                        .filter_chip
+                    // **The right cluster is asked first.** It is drawn last
+                    // and therefore on top, and the filter chip is placed from
+                    // the crumb band on the left — so where the two rects meet,
+                    // the one the eye sees is the cluster's. Asking the filter
+                    // first meant a click on the yank chip re-opened the filter
+                    // prompt on a narrow row.
+                    //
+                    // …but not while the chip is fading out: it is pixels then,
+                    // not a control, and `X` on an empty clipboard means
+                    // something else entirely (it empties the basket — see
+                    // [`App::unyank`]).
+                    let yank_live = self
+                        .yank
                         .as_ref()
                         .is_some_and(|chip| chip.leaving.is_none());
                     top_geom
-                        .filter
-                        .is_some_and(|rect| filter_live && rect.contains(p))
-                        .then_some(Control::FilterChip)
+                        .cluster
+                        .yank
+                        .filter(|rect| yank_live && rect.contains(p))
+                        .map(|_| Control::YankChip)
                         .or_else(|| {
-                            // …but not while the chip is fading out: it is
-                            // pixels then, not a control, and `X` on an empty
-                            // clipboard means something else entirely (it
-                            // empties the basket — see [`App::unyank`]).
-                            let live = self
-                                .yank
+                            // …and not while *this* chip is fading out either:
+                            // there is no filter left to re-open a prompt on.
+                            let filter_live = self
+                                .filter_chip
                                 .as_ref()
                                 .is_some_and(|chip| chip.leaving.is_none());
                             top_geom
-                                .cluster
-                                .yank
-                                .filter(|rect| live && rect.contains(p))
-                                .map(|_| Control::YankChip)
+                                .filter
+                                .is_some_and(|rect| filter_live && rect.contains(p))
+                                .then_some(Control::FilterChip)
                         })
                 })
                 .or_else(|| {
@@ -9616,8 +9945,25 @@ impl App {
         // looking at it and stops the moment they look away.
         self.preview
             .set_ink(crate::preview::doc::Ink::from_palette(&self.palette));
+        // **A parked pointer is not somebody looking.** `pointer.at` is egui's
+        // *remembered* position, so a cursor left over the preview pane — and
+        // the window switched away from, or the screen locked, or the mouse
+        // simply not touched since lunch — kept the model turning forever, one
+        // render and one frame at a time, which is the exact opposite of PLAN
+        // §1. Three things now have to be true at once: the window has the
+        // focus, egui has a pointer this frame rather than a memory of one, and
+        // that pointer has done something within [`POINTER_PARKED`]. Any of
+        // them going false retires the turntable, and with nothing asking for
+        // the next angle the frame loop reaches zero.
+        let looking = self.window_focused
+            && pointer.present
+            && self
+                .pointer_moved_at
+                .is_some_and(|at| now.saturating_duration_since(at) < POINTER_PARKED);
         self.preview.set_pointer_over(
-            overlay.is_none() && pointer.at.is_some_and(|at| layout.preview.contains(at)),
+            overlay.is_none()
+                && looking
+                && pointer.at.is_some_and(|at| layout.preview.contains(at)),
         );
         self.preview.sync_doc(now);
         // The wheel's coast over the document, sampled once a frame (PLAN §7.5).
@@ -10392,6 +10738,25 @@ impl App {
         // instant known in advance, so both are a `WaitUntil` and neither is a
         // poll.
         let state = self.state_due.deadline(now);
+        // …and the folder-size re-walk's. A directory that churned and then
+        // went quiet is owed a fresh walk at a known instant, and without it
+        // here the `~` on those rows stays until something unrelated woke the
+        // window — which on an idle desktop is nothing at all.
+        let folders = self
+            .folders
+            .due_at()
+            .map(|at| at.saturating_duration_since(now));
+        // …and the clipboard's patience. A native copy or paste that is never
+        // answered has to fail *out loud*, and it cannot do that on a frame
+        // nothing asked for (see [`CLIPBOARD_ANSWER`]).
+        let clipboard = self
+            .pending_copy
+            .front()
+            .map(|copy| copy.asked)
+            .into_iter()
+            .chain(self.pending_paste.as_ref().map(|paste| paste.asked))
+            .min()
+            .map(|at| (at + CLIPBOARD_ANSWER).saturating_duration_since(now));
         [
             self.loading_deadline(now),
             self.remote_preview_deadline(now),
@@ -10403,6 +10768,8 @@ impl App {
             spring,
             search,
             state,
+            folders,
+            clipboard,
         ]
         .into_iter()
         .flatten()
@@ -10486,17 +10853,25 @@ impl App {
 
         match gfx.present(full_output) {
             crate::graphics::Presented::Shown => {}
-            // A window nobody can see is not a failure and is not something to
-            // probe: the retry below would cost an acquire every couple of
-            // seconds for as long as it stayed covered, forever. No deadline at
-            // all, so the loop sleeps on events — and the frame comes back with
-            // `WindowEvent::Occluded(false)`, a key, or any other redraw
-            // request.
+            // A window nobody can see is not a failure, and it is not worth
+            // the retry backoff below — that would cost an acquire every
+            // hundred milliseconds for as long as it stayed covered. The frame
+            // normally comes back on an event: `WindowEvent::Occluded(false)`,
+            // a key, or any other redraw request.
+            //
+            // **But not on Wayland, where neither this nor that event exists**
+            // (see `graphics::Presented::Occluded`). So there is one slow probe
+            // instead of no deadline at all: if some platform ever answers
+            // `Occluded` and then never says the window came back, the app
+            // would be deaf until it was quit. `OCCLUDED_PROBE` makes that
+            // impossible for the price of one acquire every couple of seconds,
+            // and there is no warning with it — a covered window is a normal
+            // thing, not a fault to report per probe.
             crate::graphics::Presented::Occluded => {
                 if frame_log_enabled() {
                     log::info!("present-occluded");
                 }
-                self.repaint_at = None;
+                self.repaint_at = Some(Instant::now() + OCCLUDED_PROBE);
                 return;
             }
             // Not an immediate re-request: a failed acquire has just cost up
@@ -11058,10 +11433,23 @@ impl ApplicationHandler<crate::Wake> for App {
             WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.frame_interval = None;
             }
-            // Uncovered. `Gfx::present` stopped asking for frames while the
-            // window was hidden (see `graphics::Presented::Occluded`), so this
-            // is what starts them again — nothing else would.
+            // Uncovered. `Gfx::present` backs right off while the window is
+            // hidden (see `graphics::Presented::Occluded`), and this is what
+            // brings it back at once rather than at the next slow probe.
+            //
+            // **Never delivered on Wayland**: winit does not emit `Occluded`
+            // there. Kept for the platforms that do, and paired with
+            // [`OCCLUDED_PROBE`] so that nothing depends on it arriving.
             WindowEvent::Occluded(false) => {
+                wants_frame = true;
+            }
+            // Whether this window has the keyboard. Read by the turntable: a
+            // model must not go on turning under a pointer that was parked over
+            // it before the user alt-tabbed away, and there is no pointer event
+            // coming to say so. A frame is asked for either way, so the change
+            // is acted on rather than waited on.
+            WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
                 wants_frame = true;
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
@@ -11109,8 +11497,23 @@ impl ApplicationHandler<crate::Wake> for App {
     /// finished while it was being asked for. Several wakes that coalesce into
     /// one frame now cost one drain instead of one each.
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: crate::Wake) {
+        // …with one exception, and it is the only thing that rings this bell
+        // *without* wanting a frame now: egui asking, off-thread, for a frame
+        // at a stated time. See [`App::delayed_repaints`]. The bell still has
+        // to ring — the loop is asleep on `Wait` and has to wake far enough to
+        // read the deadline — but answering it with a frame is answering a
+        // question nobody asked. `about_to_wait` runs on this same pass and
+        // folds the deadline into `repaint_at`, so the frame that *was* asked
+        // for still happens, at the time it was asked for.
+        let delayed_only = self
+            .delayed_repaints
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok();
         if frame_log_enabled() {
-            log::info!("wake");
+            log::info!("wake{}", if delayed_only { " (delayed)" } else { "" });
+        }
+        if delayed_only {
+            return;
         }
         self.ask_redraw();
     }

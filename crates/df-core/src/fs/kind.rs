@@ -371,9 +371,24 @@ pub fn kind_for_name(name: &str, mime: &str, mode: u32) -> FileKind {
     // `.zshrc` and a `.gitconfig` are exactly the rows the eye should skip.
     // Only the buckets that mean "we could not say" are demoted — a hidden
     // `.wallpaper.png` is still a picture.
-    let kind = if name.starts_with('.')
-        && matches!(kind, FileKind::Binary | FileKind::Text | FileKind::Code)
-    {
+    //
+    // **`Code` is only demoted when the name has no extension**, which is the
+    // shape the rule was written for: `.zshrc` and `.gitconfig` are recognised
+    // as shell and INI by the highlighter's table and are still configuration
+    // to a person reading a listing. `.eslintrc.js` is not that shape. It has
+    // an extension, that extension is the whole reason anything knows what the
+    // file is, and demoting it threw the answer away — after which df-app's
+    // icon table, which vetoes a glyph whose kind disagrees with the
+    // classifier, refused to draw the JavaScript logo and put a cog on it. Two
+    // rules that are each right on their own, meeting on a file that says what
+    // it is in its own name.
+    let unnamed = match kind {
+        FileKind::Binary | FileKind::Text => true,
+        // Its extension named a language: keep it.
+        FileKind::Code => extension_of(name).is_none(),
+        _ => false,
+    };
+    let kind = if name.starts_with('.') && unnamed {
         FileKind::Config
     } else {
         kind

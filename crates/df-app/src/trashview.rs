@@ -135,23 +135,81 @@ pub fn rows(items: &[TrashedItem]) -> Vec<Entry> {
 /// still gets a row, because a row you can see and fail to restore beats an
 /// item that silently is not listed.
 pub fn row(item: &TrashedItem) -> Entry {
-    let meta = std::fs::symlink_metadata(item.files_path()).ok();
-    row_from(item, meta.as_ref())
+    let path = item.files_path();
+    let meta = std::fs::symlink_metadata(&path).ok();
+    // The *second* stat, following the link. Only asked for when there is a
+    // link to follow, so an ordinary trash listing is one `lstat` a row as it
+    // always was.
+    let target = meta
+        .as_ref()
+        .is_some_and(|m| m.file_type().is_symlink())
+        .then(|| std::fs::metadata(&path).ok())
+        .flatten();
+    row_from(item, meta.as_ref(), target.as_ref())
+}
+
+/// What a trashed symlink resolves to, from the stat that followed it. `None`
+/// is a broken link, which in a trash is the common case: the target usually
+/// went into the trash with it, under a different name.
+fn link_target(target: Option<&std::fs::Metadata>) -> Option<df_core::fs::LinkTarget> {
+    use df_core::fs::LinkTarget;
+    let target = target?;
+    Some(if target.is_dir() {
+        LinkTarget::Dir
+    } else if target.is_file() {
+        LinkTarget::File
+    } else {
+        LinkTarget::Other
+    })
 }
 
 /// The pure half, so the mapping is a table test rather than something you have
 /// to delete a file to check.
-pub fn row_from(item: &TrashedItem, meta: Option<&std::fs::Metadata>) -> Entry {
+///
+/// `meta` is the `lstat` — the link itself — and `target` the stat through it,
+/// when there is one.
+pub fn row_from(
+    item: &TrashedItem,
+    meta: Option<&std::fs::Metadata>,
+    target: Option<&std::fs::Metadata>,
+) -> Entry {
     use std::os::unix::fs::MetadataExt;
     let name = item.name.to_string_lossy().into_owned();
-    let is_dir = meta.is_some_and(|m| m.is_dir());
     let original_name = item
         .original
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| name.clone());
-    let kind = if is_dir { Kind::Dir } else { Kind::File };
-    let mode = meta
+    // **A trashed symlink is a symlink, and its facts are the target's.**
+    // `meta` is an `lstat`: its mode carries `S_IFLNK` and its `len` is the
+    // length of the path the link holds. Handing those to `classify` alongside
+    // `Kind::File` made every trashed link a `Special`, drawn with the
+    // socket-or-device glyph — the file-type bits are exactly what that check
+    // reads. Both halves are stated properly instead, which is the rule an
+    // ordinary listing already follows (`df_core::fs::Entry::from_parts`): the
+    // kind says what the link resolved to, and the stat the row is built from
+    // is the one taken *through* it.
+    let is_link = meta.is_some_and(|m| m.file_type().is_symlink());
+    let kind = if is_link {
+        Kind::Symlink {
+            target: link_target(target),
+        }
+    } else if meta.is_some_and(|m| m.is_dir()) {
+        Kind::Dir
+    } else {
+        Kind::File
+    };
+    // A broken link keeps its own metadata: its mtime is when the link was
+    // made, which is the only true thing left to show.
+    let facts = if is_link { target.or(meta) } else { meta };
+    let is_dir = matches!(
+        kind,
+        Kind::Dir
+            | Kind::Symlink {
+                target: Some(df_core::fs::LinkTarget::Dir)
+            }
+    );
+    let mode = facts
         .map(|m| m.mode())
         .unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 });
     // Sniffed from the *original* name, so a `notes_1.txt` in the trash still
@@ -171,7 +229,7 @@ pub fn row_from(item: &TrashedItem, meta: Option<&std::fs::Metadata>) -> Entry {
         len: if is_dir {
             0
         } else {
-            meta.map(|m| m.len()).unwrap_or(0)
+            facts.map(|m| m.len()).unwrap_or(0)
         },
         // **The deletion date, not the file's own mtime.** It is the date the
         // trash is read for, and putting it here means `, m` sorts by it and
@@ -179,8 +237,8 @@ pub fn row_from(item: &TrashedItem, meta: Option<&std::fs::Metadata>) -> Entry {
         mtime: deleted_at(&item.deleted_at),
         btime: None,
         mode,
-        uid: meta.map(|m| m.uid()).unwrap_or(0),
-        gid: meta.map(|m| m.gid()).unwrap_or(0),
+        uid: facts.map(|m| m.uid()).unwrap_or(0),
+        gid: facts.map(|m| m.gid()).unwrap_or(0),
         mime,
         // …and the kind follows the original name for the same reason.
         file_kind: df_core::fs::classify(kind, &original_name, mime, mode),
@@ -357,7 +415,7 @@ mod tests {
             "/home/brian/Work/notes.txt",
             "2026-08-30T09:15:00",
         );
-        let row = row_from(&i, None);
+        let row = row_from(&i, None, None);
         assert_eq!(row.name, "notes_1.txt");
         assert_eq!(
             row.path,
@@ -374,6 +432,52 @@ mod tests {
         assert!(row.mtime.is_some());
     }
 
+    /// A trashed symlink is a symlink, not a device node.
+    ///
+    /// The row is built from an `lstat`, whose mode carries `S_IFLNK` — and
+    /// `classify` reads the file-type bits to tell a socket from a file. Handed
+    /// those bits with `Kind::File`, it called every trashed link `Special` and
+    /// the icon column drew the device glyph for a shortcut to a text file.
+    #[test]
+    fn a_trashed_symlink_is_a_symlink_and_not_a_special_file() {
+        use df_core::fs::{FileKind, Kind, LinkTarget};
+
+        let tree = df_core::test_support::TempTree::new("trashview-symlink");
+        let target = tree.path().join("notes.txt");
+        std::fs::write(&target, b"hello").expect("target");
+        let link = tree.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let i = item("link", "/home/brian/Work/link", "2026-08-30T09:15:00");
+        let lstat = std::fs::symlink_metadata(&link).expect("lstat");
+        let stat = std::fs::metadata(&link).expect("stat");
+
+        let row = row_from(&i, Some(&lstat), Some(&stat));
+        assert_eq!(
+            row.kind,
+            Kind::Symlink {
+                target: Some(LinkTarget::File)
+            }
+        );
+        assert_ne!(row.file_kind, FileKind::Special, "the bug this pins");
+        assert!(row.is_symlink() && !row.is_dir());
+
+        // A link whose target went into the trash under another name is broken,
+        // and says so rather than becoming a device node by a different route.
+        let broken = row_from(&i, Some(&lstat), None);
+        assert_eq!(broken.kind, Kind::Symlink { target: None });
+        assert_eq!(broken.file_kind, FileKind::BrokenLink);
+
+        // …and a link to a directory reads as one, the same as it does in an
+        // ordinary listing.
+        let dir = tree.path().join("sub");
+        std::fs::create_dir(&dir).expect("dir");
+        let dir_stat = std::fs::metadata(&dir).expect("stat");
+        let to_dir = row_from(&i, Some(&lstat), Some(&dir_stat));
+        assert_eq!(to_dir.file_kind, FileKind::Directory);
+        assert!(to_dir.is_dir());
+    }
+
     /// A dotfile stays hidden in the trash, judged by the name it had — the
     /// in-trash name of `.bashrc` deleted twice is still `.bashrc_1`, but the
     /// rule must not depend on that.
@@ -382,6 +486,7 @@ mod tests {
         assert!(
             row_from(
                 &item("x", "/home/brian/.bashrc", "2026-08-30T09:15:00"),
+                None,
                 None
             )
             .is_hidden
@@ -389,6 +494,7 @@ mod tests {
         assert!(
             !row_from(
                 &item("x", "/home/brian/notes.txt", "2026-08-30T09:15:00"),
+                None,
                 None
             )
             .is_hidden

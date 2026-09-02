@@ -66,6 +66,73 @@ use df_core::du::{ChildCount, DuRecord, DuToken, DuUpdate};
 /// `~` means: still counting, and only going to change.
 pub const RESTALE_QUIET: Duration = Duration::from_secs(2);
 
+/// What one frame owes the folder-size walk.
+///
+/// The whole of [`crate::app::App::poll_folders`]'s decision, lifted out of it
+/// so it can be *read* — and tested, which it could not be while it lived
+/// inside a method that needs a window, a GPU and a scanner thread to call.
+///
+/// It exists because of one bug. The old shape asked a single question, "are
+/// folder sizes wanted here", and folded "is the listing still loading" into
+/// it — so a rescan of the directory on screen, which puts the pane back into
+/// `Loading` for a frame or two, answered *no*, and the frame after a rescan
+/// tore [`Folders`] down: sizes, child counts, remembered stat lengths and the
+/// staleness clock all gone. The walk then started again from nothing when the
+/// scan landed. [`RESTALE_QUIET`] exists to stop exactly that, and it had never
+/// once run. Separating the two questions is the fix, and this enum is what
+/// makes the separation something you can see rather than something you have to
+/// re-derive from a chain of `else if`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Nothing wanted, nothing held: no work at all. The resting state, and the
+    /// one that has to stay free (PLAN §1).
+    Idle,
+    /// Put the stat sizes back and forget everything. Leaving for a remote
+    /// listing, turning the column off, walking into another directory.
+    Stop,
+    /// Point a fresh walk at the directory on screen.
+    Begin,
+    /// Correct the numbers of the directory already being measured — it has
+    /// been quiet for [`RESTALE_QUIET`] since the last watcher event.
+    Rewalk,
+    /// Hold. The numbers stand, `~` and all, and nothing is started.
+    Keep,
+}
+
+/// What this frame owes, from the five facts that decide it.
+///
+/// - `wanted`: the feature is on, the linemode is the size column, and the
+///   listing is a real local directory.
+/// - `ready`: the listing has finished arriving, so a walk may *start*.
+///   Deliberately not part of `wanted` — see [`Step`].
+/// - `holding`: there is a walk in flight or numbers on screen.
+/// - `about`: what is held is about the directory and tab on screen.
+/// - `due`: the directory has been quiet long enough to re-walk.
+pub fn step(wanted: bool, ready: bool, holding: bool, about: bool, due: bool) -> Step {
+    if !wanted {
+        return if holding { Step::Stop } else { Step::Idle };
+    }
+    if about {
+        // A rescan of this very directory. The numbers stay: they are the last
+        // true thing known about it, they are already wearing the `~` that says
+        // they are behind, and `due` will correct them once the churn stops.
+        if !ready {
+            return Step::Keep;
+        }
+        return if due { Step::Rewalk } else { Step::Keep };
+    }
+    if ready {
+        return Step::Begin;
+    }
+    // Somewhere else, and still arriving. *These* numbers really are about a
+    // directory you have left.
+    if holding {
+        Step::Stop
+    } else {
+        Step::Idle
+    }
+}
+
 /// One directory's recursive size, and whether it is final.
 ///
 /// Deliberately the same shape as [`crate::usage::Weight`] and deliberately not
@@ -149,6 +216,17 @@ impl Folders {
         self.stale_since = None;
     }
 
+    /// The directory being measured, empty when nothing is.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Which tab's listing the numbers were written into. Only meaningful
+    /// alongside a non-empty [`Folders::dir`].
+    pub fn tab(&self) -> usize {
+        self.tab
+    }
+
     pub fn is_about(&self, dir: &Path, tab: usize) -> bool {
         !self.dir.as_os_str().is_empty() && self.dir == dir && self.tab == tab
     }
@@ -178,8 +256,17 @@ impl Folders {
 
     /// Whether the directory has been quiet long enough to be walked again.
     pub fn due(&self, now: Instant) -> bool {
-        self.stale_since
-            .is_some_and(|since| now.saturating_duration_since(since) >= RESTALE_QUIET)
+        self.due_at().is_some_and(|at| now >= at)
+    }
+
+    /// The instant [`Folders::due`] turns true, when a re-walk is owed.
+    ///
+    /// A single instant known in advance, so the frame loop can sleep on it
+    /// rather than discover it on whatever unrelated frame comes next — a
+    /// directory that goes quiet and is never touched again would otherwise
+    /// keep its `~` until something else woke the window (PLAN §1).
+    pub fn due_at(&self) -> Option<Instant> {
+        self.stale_since.map(|since| since + RESTALE_QUIET)
     }
 
     /// Point the existing numbers at a fresh walk, keeping them on screen.
@@ -459,6 +546,71 @@ mod tests {
             !f.due(t0 + RESTALE_QUIET * 10),
             "a restart is not still due"
         );
+    }
+
+    /// The bug [`Step`] exists for, driven in the order the frame loop drives
+    /// it: a rescan of the directory on screen must not tear the numbers down.
+    ///
+    /// `App::rescan` marks the sizes stale and calls `begin_scan`, which puts
+    /// the pane into `Loading`. The next frame used to read that as "folder
+    /// sizes are not wanted", clear everything, and — when the scan landed —
+    /// start a whole fresh walk. On a directory being written to, which is when
+    /// somebody is watching the column, that happened dozens of times a second
+    /// and no walk ever finished.
+    #[test]
+    fn a_rescan_of_the_directory_on_screen_keeps_its_numbers() {
+        let t0 = Instant::now();
+        let mut f = folders();
+        f.apply(&[update("photos", 1, 1024, true)]);
+
+        // The frame before: measuring, settled, nothing owed.
+        assert_eq!(step(true, true, true, true, false), Step::Keep);
+
+        // `rescan`: the watcher fired, so the sizes go back to `~` and the
+        // listing starts loading again.
+        assert!(f.watches(Path::new("/home/brian/Downloads")));
+        f.mark_stale(t0);
+        assert_eq!(f.label("photos").as_deref(), Some("~1.0 KB"));
+
+        // The frame after — the one that used to call `stop_folder_sizes`.
+        assert_eq!(
+            step(true, false, true, true, false),
+            Step::Keep,
+            "a listing that is merely reloading is not a listing you have left"
+        );
+        assert_eq!(
+            f.label("photos").as_deref(),
+            Some("~1.0 KB"),
+            "and the number is still on screen while it reloads"
+        );
+
+        // The scan lands. Still inside the quiet period, so still nothing to do
+        // — which is the debounce finally getting to run.
+        assert!(!f.due(t0 + RESTALE_QUIET / 2));
+        assert_eq!(step(true, true, true, true, false), Step::Keep);
+
+        // …and out the other side of it, one re-walk.
+        assert!(f.due(t0 + RESTALE_QUIET));
+        assert_eq!(step(true, true, true, true, true), Step::Rewalk);
+        f.restart(DuToken(2));
+        assert!(!f.due(t0 + RESTALE_QUIET * 10));
+        assert_eq!(step(true, true, true, true, false), Step::Keep);
+    }
+
+    /// The cases that *do* tear it down, so `Keep` is not simply "never stop".
+    #[test]
+    fn leaving_or_turning_the_column_off_gives_the_numbers_back() {
+        // The column goes off, or the pane becomes a remote listing.
+        assert_eq!(step(false, true, true, true, false), Step::Stop);
+        assert_eq!(step(false, false, true, true, true), Step::Stop);
+        // …and with nothing held there is nothing to give back.
+        assert_eq!(step(false, true, false, false, false), Step::Idle);
+
+        // Another directory, arrived: measure it.
+        assert_eq!(step(true, true, true, false, false), Step::Begin);
+        // Another directory, still arriving: these numbers are not about it.
+        assert_eq!(step(true, false, true, false, false), Step::Stop);
+        assert_eq!(step(true, false, false, false, false), Step::Idle);
     }
 
     /// The stat size a walk overwrites is remembered once, so it can be put

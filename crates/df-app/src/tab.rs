@@ -648,7 +648,7 @@ impl Tab {
     /// `file_name()` — and the `file_name()` of `sftp://host/srv` is `srv`
     /// only by accident of the URL happening to look like a path. Asking the
     /// [`df_core::vfs::VfsPath`] is the honest question.
-    fn sync_remote_parent_cursor(&mut self, at: &df_core::vfs::VfsPath) {
+    pub(crate) fn sync_remote_parent_cursor(&mut self, at: &df_core::vfs::VfsPath) {
         if at.parent().is_none() {
             return;
         }
@@ -823,6 +823,21 @@ impl Tab {
     /// Put the parent pane's cursor on the directory we are inside, so the
     /// column reads as a path rather than as a second listing. Called after
     /// every scan update, because the row may only just have arrived.
+    /// The same, whichever kind of listing this tab is showing.
+    ///
+    /// The dispatch is the point. [`Tab::sync_parent_cursor`] reads the cwd's
+    /// `file_name()`, which for `sftp://host/srv` is `srv` only by accident of
+    /// a URL looking like a path — and by accident it stops being one the
+    /// moment the URL has a trailing slash or a port in it. Every caller that
+    /// runs over *every* tab has to come through here, because a remote tab is
+    /// exactly the one it will otherwise get wrong.
+    pub fn sync_parent_marker(&mut self) {
+        match self.remote.as_ref().map(|session| session.at.clone()) {
+            Some(at) => self.sync_remote_parent_cursor(&at),
+            None => self.sync_parent_cursor(),
+        }
+    }
+
     pub fn sync_parent_cursor(&mut self) {
         let Some(name) = self
             .cwd

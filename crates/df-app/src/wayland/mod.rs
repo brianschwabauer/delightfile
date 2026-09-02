@@ -551,6 +551,16 @@ fn run(
     let bell_fd = bell.as_raw_fd();
     loop {
         for command in commands.try_iter() {
+            // **`Exit` ends the drain, it does not merely note it.** A
+            // `Receive` queued behind it goes through `take_paste`, which can
+            // sit on a pipe for `RECEIVE_TIMEOUT` waiting for an application
+            // that is also shutting down — so a quit with two pastes still in
+            // the channel took ten seconds to be honoured, with the window
+            // already gone. Nothing queued after a quit has anywhere to go: the
+            // window that asked for it is not there to be told the answer.
+            if state.exit {
+                break;
+            }
             match command {
                 Command::Exit => state.exit = true,
                 Command::Drag {
@@ -608,6 +618,15 @@ fn run(
             waker.wake();
         }
     }
+    // **Before the tail, not with the guard at the end of it.** The tail below
+    // destroys the selection and flushes, and the window is running frames the
+    // whole time — so for as long as it took, `ready()` went on saying "the
+    // clipboard is native" about a thread that had already stopped reading its
+    // channel, and a `y` landing in that window sent a copy into a queue with
+    // nobody behind it. The guard stays for every other way out of this
+    // function; this is the ordinary one, made honest at the first instruction
+    // after the loop.
+    ready.store(false, Ordering::Relaxed);
     // Whatever is still in flight is cancelled by the objects going away, and
     // the compositor treats a destroyed source as a cancelled drag. The
     // selection goes the same way, and deliberately: a source whose thread has

@@ -827,5 +827,23 @@ mod tests {
         // A lockfile is configuration whatever it is written in.
         assert_eq!(glyph("package-lock.json"), kind_glyph(FileKind::Config));
         assert_eq!(glyph("tsconfig.json"), '\u{e60b}');
+
+        // …and the hidden-file case, which is where the two rules meet.
+        // df-core demotes an unrecognised dotfile to `Config`, and that
+        // demotion used to catch `Code` as well — so `.eslintrc.js` classified
+        // as configuration, the `("js", …, Code)` row of `EXTENSION_GLYPHS`
+        // refused to match a `Config`, and the icon column drew a cog on a file
+        // whose whole name says JavaScript. A dotfile with a known *code*
+        // extension keeps its language.
+        assert_eq!(glyph(".eslintrc.js"), '\u{e781}');
+        assert_eq!(glyph(".babelrc.ts"), '\u{e628}');
+        // A dotfile with nothing to go on is still configuration — the rule
+        // that demotion exists for, and the one this must not undo.
+        assert_eq!(glyph(".zshrc"), kind_glyph(FileKind::Config));
+        assert_eq!(glyph(".gitconfig"), kind_glyph(FileKind::Config));
+        // …and the all-digit stem stays a transport stream, hidden or not:
+        // `media_kind` is asked before the language table and before any of
+        // this (`00001.ts`, above).
+        assert_eq!(glyph(".2.ts"), kind_glyph(FileKind::Video));
     }
 }

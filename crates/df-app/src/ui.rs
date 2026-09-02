@@ -318,14 +318,41 @@ pub(crate) struct RowColumns {
     pub tag: f32,
 }
 
-/// The two size-column strings that fight for widest, so the constant is
-/// derived from the formats rather than guessed at.
+/// The size-column strings that fight for widest, **produced by the same
+/// function that fills the column** rather than written out by hand.
 ///
-/// `999.9 GB` is the longest a human size gets before petabytes, which is not a
-/// directory anyone is browsing; `999 items` is the longest a child count gets
-/// before it is superseded by a size anyway. The tilde on a running size is
-/// narrower than the digit it would displace, so neither needs a variant.
-const SIZE_COLUMN_WIDEST: [&str; 2] = ["999 items", "999.9 GB"];
+/// The hand-written pair used to be `["999 items", "999.9 GB"]`, and it was
+/// wrong at both ends. A count that hits [`df_core::du::MAX_COUNTED_ENTRIES`]
+/// says `10000+ items`, which is three characters longer than any `999 items`;
+/// and the tilde on a running size is *not* narrower than nothing at all — a
+/// proportional font gives `~999.9 GB` more width than `999.9 GB`, and the
+/// column that had been measured without it reflowed the name beside it the
+/// first time a big folder started counting.
+///
+/// Derived, so the answer cannot drift from the formats again: change
+/// [`crate::format::folder_size_text`] and this follows.
+fn size_column_widest() -> [String; 4] {
+    use df_core::du::{ChildCount, MAX_COUNTED_ENTRIES};
+
+    let size = |bytes: u64, settled: bool| crate::folders::Size { bytes, settled };
+    let count = |entries: u64, capped: bool| ChildCount { entries, capped };
+    let text = |size, count| crate::format::folder_size_text(size, count).unwrap_or_default();
+    [
+        text(None, Some(count(999, false))),
+        text(None, Some(count(MAX_COUNTED_ENTRIES, true))),
+        text(Some(size(WIDEST_DIRECTORY_BYTES, true)), None),
+        text(Some(size(WIDEST_DIRECTORY_BYTES, false)), None),
+    ]
+}
+
+/// The largest total [`crate::format::human_size`] prints without reaching
+/// petabytes: `1023.9 TB`, one carry short of `1.0 PB`.
+///
+/// The judgement the old constant made and the only part of it worth keeping —
+/// the column is measured for a directory somebody is browsing, and reserving
+/// room for the exabyte a `u64` can technically hold would push every name in
+/// every listing in for a number no filesystem will ever produce.
+const WIDEST_DIRECTORY_BYTES: u64 = 1_125_789_955_679_846;
 
 pub(crate) fn git_dot(
     status: df_core::git::FileStatus,
@@ -661,11 +688,11 @@ impl Painting<'_> {
     /// [`RowColumns`].
     pub(crate) fn row_columns(&self, painter: &egui::Painter) -> RowColumns {
         let font = egui::FontId::proportional(FONT_SIZE);
-        let size = SIZE_COLUMN_WIDEST
-            .iter()
+        let size = size_column_widest()
+            .into_iter()
             .map(|text| {
                 painter
-                    .layout_no_wrap((*text).to_string(), font.clone(), self.palette.overlay1)
+                    .layout_no_wrap(text, font.clone(), self.palette.overlay1)
                     .size()
                     .x
             })
@@ -1020,10 +1047,17 @@ impl Painting<'_> {
             }
         };
 
-        // `ignored`, left of the dot column: the word that says why this row is
-        // grey. Drawn at *half* the row's mute rather than at all of it —
-        // fading the explanation as hard as the thing it explains is how the
-        // reason ends up as unreadable as the problem.
+        // `ignored`, between the git dot and the linemode column: the word that
+        // says why this row is grey. The right-hand end of the row is laid out
+        // right to left — linemode first, then this tag, then the dot, then
+        // whatever room is left goes to the name — so the tag sits immediately
+        // left of the *number*, with the dot on its far side. (The comment here
+        // used to say "left of the dot column", which is the one thing it is
+        // not.)
+        //
+        // Drawn at *half* the row's mute rather than at all of it — fading the
+        // explanation as hard as the thing it explains is how the reason ends
+        // up as unreadable as the problem.
         //
         // Its column is reserved on every row of a repository pane, dot-style:
         // one row in a listing wearing the tag must not push its own name in
@@ -1722,6 +1756,54 @@ mod tests {
         // The reserved width has to be wider than the disc it holds, or the dot
         // would touch the name beside it.
         const { assert!(GIT_DOT_COLUMN > GIT_DOT_RADIUS * 2.0) };
+    }
+
+    /// The size column is measured once per listing against a fixed set of
+    /// candidates, so the widest thing the column can ever *say* has to be one
+    /// of them. Both extremes the hand-written pair used to miss are checked by
+    /// name: the capped child count, and a running size wearing its tilde.
+    #[test]
+    fn the_widest_size_column_strings_cover_the_extremes() {
+        let widest = size_column_widest();
+        let has = |text: &str| widest.iter().any(|w| w == text);
+
+        // A directory the counting pass gave up on.
+        assert_eq!(
+            crate::format::folder_size_text(
+                None,
+                Some(df_core::du::ChildCount {
+                    entries: df_core::du::MAX_COUNTED_ENTRIES,
+                    capped: true,
+                }),
+            )
+            .as_deref(),
+            Some("10000+ items")
+        );
+        assert!(has("10000+ items"), "{widest:?}");
+
+        // …and the widest a size gets, still counting.
+        let running = crate::format::folder_size_text(
+            Some(crate::folders::Size {
+                bytes: WIDEST_DIRECTORY_BYTES,
+                settled: false,
+            }),
+            None,
+        );
+        assert_eq!(running.as_deref(), Some("~1023.9 TB"));
+        assert!(has("~1023.9 TB"), "{widest:?}");
+
+        let settled = crate::format::folder_size_text(
+            Some(crate::folders::Size {
+                bytes: WIDEST_DIRECTORY_BYTES,
+                settled: true,
+            }),
+            None,
+        );
+        assert!(has(settled.as_deref().unwrap_or_default()));
+        assert!(
+            running.unwrap_or_default().len() > settled.unwrap_or_default().len(),
+            "the tilde is width, not a free rider on the digit beside it"
+        );
     }
 
     #[test]
