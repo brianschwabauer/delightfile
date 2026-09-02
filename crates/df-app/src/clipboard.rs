@@ -456,6 +456,22 @@ impl Offer {
     }
 }
 
+/// The type to ask for when what is wanted is **text** — a prompt's `Ctrl+v`.
+///
+/// A different question from [`choose_offer`]'s, and it has to be: a caret
+/// takes characters, so a screenshot's `image/png` is nothing it can use and
+/// there is no sense in writing a file out to answer a keystroke in a filter
+/// box. `text/plain` first, then anything else in the `text/` family — which
+/// includes `text/uri-list`, and a path *is* text worth typing into a rename.
+pub fn text_offer(types: &[String]) -> Option<String> {
+    types
+        .iter()
+        .find(|t| t.starts_with("text/plain"))
+        .or_else(|| types.iter().find(|t| t.starts_with("text/")))
+        .or_else(|| types.iter().find(|t| is_text_like(t)))
+        .cloned()
+}
+
 /// Pick the best offer out of `wl-paste --list-types`.
 ///
 /// Files first, because a file manager asked: a screenshot tool that offers

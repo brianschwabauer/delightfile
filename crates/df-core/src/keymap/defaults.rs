@@ -285,6 +285,13 @@ pub(super) fn build() -> Registry {
         // Readline's map, and nothing modal: there is no Normal mode to reach,
         // so every unmodified key types itself and only the modified chords are
         // commands. That is why no bare letter appears in this table.
+        //
+        // **This table is dispatched, not merely listed.** A prompt resolves
+        // every chord against it before the editor's own built-in map (see the
+        // app's `prompt_action`), so an `[input]` line in `keymap.toml` really
+        // does move an editing key — and a chord with no row here falls back to
+        // [`crate::input::InputBuffer::binding`], which is where the readline
+        // vocabulary and "a printable key is text" live.
         (Input, "ctrl+c",      C::OverlayClose,          "Cancel input",                       Always),
         (Input, "enter",       C::OverlaySubmit,         "Submit",                             Always),
         (Input, "esc",         C::Escape,                "Cancel",                             Always),
@@ -316,6 +323,12 @@ pub(super) fn build() -> Registry {
         (Input, "alt+d",       C::InputKillWordForward,  "Kill the word after",                Always),
         (Input, "ctrl+z",      C::InputUndo,             "Undo",                               Always),
         (Input, "ctrl+y",      C::InputRedo,             "Redo",                               Always),
+        // The two the editor has always answered to and the table never said
+        // out loud. The sheet lists this table, so a row that is missing here
+        // is a key nobody can find.
+        (Input, "ctrl+shift+z", C::InputRedo,            "Redo",                               Always),
+        (Input, "ctrl+[",      C::Escape,                "Cancel",                             Always),
+        (Input, "ctrl+v",      C::InputPaste,            "Paste from the clipboard",           Always),
 
         // ── Confirm ─────────────────────────────────────────────────────────
         (Confirm, "esc",    C::OverlayClose,  "Cancel",        Always),

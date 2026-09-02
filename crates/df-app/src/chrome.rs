@@ -1902,7 +1902,15 @@ pub fn help_overlay(
         );
     }
     if let Some(at) = caret {
-        let before = &query[..at.min(query.len())];
+        // Floored to a char boundary rather than trusted. The caret is a byte
+        // offset into the buffer it was measured on, and a slice that lands
+        // inside a multibyte character is a panic — in a *filter box*, where
+        // the character before the caret is as likely to be `é` as `e`.
+        let mut at = at.min(query.len());
+        while at > 0 && !query.is_char_boundary(at) {
+            at -= 1;
+        }
+        let before = &query[..at];
         let x = filter_left + text_width(painter, before, font);
         // A line's half-height, and the palette's caret colour: the field is
         // the same field it was in the top row, so it keeps the same caret.

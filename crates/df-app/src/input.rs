@@ -12,7 +12,7 @@
 //! two sets of Unicode edge cases, and the one in df-core is the one with the
 //! word motions, the selection and the tests.
 
-use df_core::input::{InputBuffer, InputEvent};
+use df_core::input::{InputAction, InputBuffer, InputEvent};
 use df_core::keymap::Chord;
 
 /// What the prompt is being typed into, which is also what its title says.
@@ -132,6 +132,27 @@ impl Prompt {
     /// text as it stood, and it does not stand any more.
     pub fn feed(&mut self, chord: Chord) -> InputEvent {
         let event = self.buffer.feed(chord);
+        if matches!(event, InputEvent::Consumed) {
+            self.error = None;
+        }
+        event
+    }
+
+    /// One resolved action — what the keymap's `[input]` table asked for. The
+    /// same error rule as [`Prompt::feed`]: an edit takes a stale message down,
+    /// a submit or a cancel leaves it.
+    pub fn act(&mut self, action: InputAction) -> InputEvent {
+        let event = self.buffer.act(action);
+        if matches!(event, InputEvent::Consumed) {
+            self.error = None;
+        }
+        event
+    }
+
+    /// Already-composed text at the caret: an IME commit, or the clipboard's
+    /// answer to `Ctrl+v`. See [`InputBuffer::insert_text`].
+    pub fn insert_text(&mut self, text: &str) -> InputEvent {
+        let event = self.buffer.insert_text(text);
         if matches!(event, InputEvent::Consumed) {
             self.error = None;
         }

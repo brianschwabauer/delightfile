@@ -22,7 +22,12 @@
 //! # The bindings
 //!
 //! Readline's, because that is the vocabulary every text field on a unix desktop
-//! already answers to and the one a shell user has in their fingers:
+//! already answers to and the one a shell user has in their fingers. They live
+//! here as the **fallback** map ([`InputBuffer::binding`]): the keymap's
+//! `[input]` table is consulted first by whoever owns the prompt, and what it
+//! names arrives as an [`InputOp`] through [`InputBuffer::apply`]. Both roads
+//! lead to the same verbs, which is the point — there is one editor, and the
+//! table decides only which key reaches which part of it.
 //!
 //! * `Ctrl+a` / `Home` and `Ctrl+e` / `End` — the ends of the line.
 //! * `Ctrl+b` / `Ctrl+f` and the arrows — one character.
@@ -50,10 +55,50 @@
 //! is one word and `日本語` is one word — the multibyte case is handled by
 //! asking the character what it is, never by counting bytes.
 
-use crate::keymap::{Chord, Key, Mods};
+use crate::keymap::{Chord, Command, Key, Mods};
 
 #[cfg(test)]
 mod tests;
+
+/// The action a keymap command asks the prompt for, if it asks for one.
+///
+/// This is what makes the `[input]` table real rather than decorative: the app
+/// resolves a chord against the registry's `Input` context, brings the
+/// [`Command`] here, and runs the answer. A command the prompt has no verb for
+/// — anything somebody puts in an `[input]` table that is not an editing key —
+/// answers `None`, and the chord falls through to the built-in readline map
+/// where it is either text or nothing.
+pub fn action_of(command: Command) -> Option<InputAction> {
+    use Command as C;
+    use InputAction::{Cancel, Edit, Submit};
+    use InputOp as O;
+    let action = match command {
+        C::Escape | C::OverlayClose => Cancel,
+        C::OverlaySubmit => Submit,
+        C::InputMoveLeft => Edit(O::MoveLeft),
+        C::InputMoveRight => Edit(O::MoveRight),
+        C::InputMoveBol => Edit(O::MoveBol),
+        C::InputMoveEol => Edit(O::MoveEol),
+        C::InputWordForward => Edit(O::WordForward),
+        C::InputWordBackward => Edit(O::WordBackward),
+        C::InputSelectLeft => Edit(O::SelectLeft),
+        C::InputSelectRight => Edit(O::SelectRight),
+        C::InputSelectBol => Edit(O::SelectBol),
+        C::InputSelectEol => Edit(O::SelectEol),
+        C::InputSelectWordForward => Edit(O::SelectWordForward),
+        C::InputSelectWordBackward => Edit(O::SelectWordBackward),
+        C::InputBackspace => Edit(O::Backspace),
+        C::InputDeleteUnder => Edit(O::DeleteUnder),
+        C::InputKillBol => Edit(O::KillBol),
+        C::InputKillEol => Edit(O::KillEol),
+        C::InputKillWordBackward => Edit(O::KillWordBackward),
+        C::InputKillWordForward => Edit(O::KillWordForward),
+        C::InputUndo => Edit(O::Undo),
+        C::InputRedo => Edit(O::Redo),
+        _ => return None,
+    };
+    Some(action)
+}
 
 /// How many undo steps a prompt keeps.
 ///
@@ -76,6 +121,51 @@ pub enum InputEvent {
     /// `Enter`: the user is done. Carries the final text.
     Submit(String),
     /// `Esc` or `Ctrl+c`. Throw the prompt away.
+    Cancel,
+}
+
+/// One editing verb, named apart from the key that runs it.
+///
+/// The keymap's `[input]` table names these — `input-kill-bol` and the rest —
+/// and so does the built-in readline map below. Splitting the verb from the
+/// chord is what lets a `keymap.toml` line rebind an editing key at all: the
+/// app resolves the chord against the registry first and hands the answer
+/// here, and only a chord the table has no row for falls back to
+/// [`InputBuffer::binding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputOp {
+    MoveLeft,
+    MoveRight,
+    MoveBol,
+    MoveEol,
+    WordForward,
+    WordBackward,
+    SelectLeft,
+    SelectRight,
+    SelectBol,
+    SelectEol,
+    SelectWordForward,
+    SelectWordBackward,
+    Backspace,
+    DeleteUnder,
+    KillBol,
+    KillEol,
+    KillWordBackward,
+    KillWordForward,
+    Undo,
+    Redo,
+}
+
+/// What one chord means to the editor: an edit, or one of the two answers that
+/// end the prompt.
+///
+/// `None` from [`InputBuffer::binding`] is "the editor has no opinion", which
+/// is what makes a printable key text and what lets the help sheet keep the
+/// keys its filter does not want (see the app's `help_key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputAction {
+    Edit(InputOp),
+    Submit,
     Cancel,
 }
 
@@ -262,70 +352,127 @@ impl InputBuffer {
         InputEvent::Consumed
     }
 
-    /// The keymap, transcribed.
-    fn command(&mut self, chord: Chord) -> InputEvent {
+    /// The keymap, transcribed — the **fallback** map, for a chord the
+    /// registry's `[input]` table has no row for.
+    ///
+    /// Pure and associated rather than a method, so a caller can ask what a
+    /// chord *would* do without a buffer to do it to. The help sheet asks
+    /// exactly that: while its filter is open, a chord this answers for belongs
+    /// to the field and must not also page the list behind it.
+    pub fn binding(chord: Chord) -> Option<InputAction> {
         let m = chord.mods;
         let plain = m.is_none();
         let shift = m == Mods::SHIFT;
         let ctrl = m == Mods::CTRL;
         let ctrl_shift = m.ctrl && m.shift && !m.alt && !m.super_key;
         let alt = m == Mods::ALT;
-        // A motion extends the selection when Shift is down and drops it
-        // otherwise — the rule every other text field on the desktop shares.
-        let extend = m.shift;
+        use InputAction::{Cancel, Edit, Submit};
+        use InputOp as O;
 
-        match chord.key {
+        let action = match chord.key {
             // ── Close ───────────────────────────────────────────────────────
-            Key::Char('c') if ctrl => return InputEvent::Cancel,
-            Key::Enter if plain => return InputEvent::Submit(self.text.clone()),
+            Key::Char('c') if ctrl => Cancel,
+            Key::Enter if plain => Submit,
             // `Esc` means "close this" here and in every other dialog in the
             // program, on the first press. `<C-[>` is the same keystroke on a
             // terminal and stays the same command here.
-            Key::Escape if plain => return InputEvent::Cancel,
-            Key::Char('[') if ctrl => return InputEvent::Cancel,
+            Key::Escape if plain => Cancel,
+            Key::Char('[') if ctrl => Cancel,
 
             // ── Word-wise movement ──────────────────────────────────────────
             // Before the character arrows, because `Ctrl+Left` is a word and
             // the bare arrow's arm would otherwise have to exclude it.
-            Key::ArrowLeft if ctrl || ctrl_shift => self.move_to(self.backward(), extend),
-            Key::ArrowRight if ctrl || ctrl_shift => self.move_to(self.forward(), extend),
-            Key::Char('b') if alt => self.move_to(self.backward(), false),
-            Key::Char('f') if alt => self.move_to(self.forward(), false),
+            Key::ArrowLeft if ctrl_shift => Edit(O::SelectWordBackward),
+            Key::ArrowRight if ctrl_shift => Edit(O::SelectWordForward),
+            Key::ArrowLeft if ctrl => Edit(O::WordBackward),
+            Key::ArrowRight if ctrl => Edit(O::WordForward),
+            Key::Char('b') if alt => Edit(O::WordBackward),
+            Key::Char('f') if alt => Edit(O::WordForward),
 
             // ── Character-wise movement ─────────────────────────────────────
-            Key::ArrowLeft if plain || shift => self.move_to(self.left(extend), extend),
-            Key::ArrowRight if plain || shift => self.move_to(self.right(extend), extend),
-            Key::Char('b') if ctrl => self.move_to(self.left(false), false),
-            Key::Char('f') if ctrl => self.move_to(self.right(false), false),
+            Key::ArrowLeft if shift => Edit(O::SelectLeft),
+            Key::ArrowRight if shift => Edit(O::SelectRight),
+            Key::ArrowLeft if plain => Edit(O::MoveLeft),
+            Key::ArrowRight if plain => Edit(O::MoveRight),
+            Key::Char('b') if ctrl => Edit(O::MoveLeft),
+            Key::Char('f') if ctrl => Edit(O::MoveRight),
 
             // ── Line-wise movement ──────────────────────────────────────────
-            Key::Home if plain || shift => self.move_to(0, extend),
-            Key::End if plain || shift => self.move_to(self.len(), extend),
-            Key::Char('a') if ctrl => self.move_to(0, false),
-            Key::Char('e') if ctrl => self.move_to(self.len(), false),
+            Key::Home if shift => Edit(O::SelectBol),
+            Key::End if shift => Edit(O::SelectEol),
+            Key::Home if plain => Edit(O::MoveBol),
+            Key::End if plain => Edit(O::MoveEol),
+            Key::Char('a') if ctrl => Edit(O::MoveBol),
+            Key::Char('e') if ctrl => Edit(O::MoveEol),
 
             // ── Delete ──────────────────────────────────────────────────────
-            Key::Backspace if plain => self.backspace(false),
-            Key::Delete if plain => self.backspace(true),
-            Key::Char('h') if ctrl => self.backspace(false),
-            Key::Char('d') if ctrl => self.backspace(true),
+            Key::Backspace if plain => Edit(O::Backspace),
+            Key::Delete if plain => Edit(O::DeleteUnder),
+            Key::Char('h') if ctrl => Edit(O::Backspace),
+            Key::Char('d') if ctrl => Edit(O::DeleteUnder),
 
             // ── Kill ────────────────────────────────────────────────────────
-            Key::Char('u') if ctrl => self.kill(0),
-            Key::Char('k') if ctrl => self.kill(self.len()),
-            Key::Char('w') if ctrl => self.kill(self.backward()),
-            Key::Char('d') if alt => self.kill(self.forward()),
+            Key::Char('u') if ctrl => Edit(O::KillBol),
+            Key::Char('k') if ctrl => Edit(O::KillEol),
+            Key::Char('w') if ctrl => Edit(O::KillWordBackward),
+            Key::Char('d') if alt => Edit(O::KillWordForward),
 
             // ── Undo / redo ─────────────────────────────────────────────────
-            Key::Char('z') if ctrl => self.undo(),
-            Key::Char('z') if ctrl_shift => self.redo(),
-            Key::Char('y') if ctrl => self.redo(),
+            Key::Char('z') if ctrl => Edit(O::Undo),
+            Key::Char('z') if ctrl_shift => Edit(O::Redo),
+            Key::Char('y') if ctrl => Edit(O::Redo),
 
-            // Anything else is swallowed rather than leaked: a key with no
-            // meaning in a prompt must not reach the file list behind it.
-            _ => {}
+            _ => return None,
+        };
+        Some(action)
+    }
+
+    /// Run one editing verb. The door the keymap's `[input]` rows come in
+    /// through.
+    pub fn apply(&mut self, op: InputOp) -> InputEvent {
+        use InputOp as O;
+        match op {
+            O::MoveLeft => self.move_to(self.left(false), false),
+            O::MoveRight => self.move_to(self.right(false), false),
+            O::MoveBol => self.move_to(0, false),
+            O::MoveEol => self.move_to(self.len(), false),
+            O::WordBackward => self.move_to(self.backward(), false),
+            O::WordForward => self.move_to(self.forward(), false),
+            O::SelectLeft => self.move_to(self.left(true), true),
+            O::SelectRight => self.move_to(self.right(true), true),
+            O::SelectBol => self.move_to(0, true),
+            O::SelectEol => self.move_to(self.len(), true),
+            O::SelectWordBackward => self.move_to(self.backward(), true),
+            O::SelectWordForward => self.move_to(self.forward(), true),
+            O::Backspace => self.backspace(false),
+            O::DeleteUnder => self.backspace(true),
+            O::KillBol => self.kill(0),
+            O::KillEol => self.kill(self.len()),
+            O::KillWordBackward => self.kill(self.backward()),
+            O::KillWordForward => self.kill(self.forward()),
+            O::Undo => self.undo(),
+            O::Redo => self.redo(),
         }
         InputEvent::Consumed
+    }
+
+    /// Run one resolved action — an edit, or the answer that ends the prompt.
+    pub fn act(&mut self, action: InputAction) -> InputEvent {
+        match action {
+            InputAction::Edit(op) => self.apply(op),
+            InputAction::Submit => InputEvent::Submit(self.text.clone()),
+            InputAction::Cancel => InputEvent::Cancel,
+        }
+    }
+
+    /// The built-in map, run.
+    fn command(&mut self, chord: Chord) -> InputEvent {
+        match InputBuffer::binding(chord) {
+            Some(action) => self.act(action),
+            // Anything else is swallowed rather than leaked: a key with no
+            // meaning in a prompt must not reach the file list behind it.
+            None => InputEvent::Consumed,
+        }
     }
 
     // ── Commands ────────────────────────────────────────────────────────────

@@ -234,7 +234,13 @@ impl Anim {
     /// When the pane is owed its next frame. `None` while there is nothing to
     /// animate — a single frame is a still, and a still asks for nothing.
     fn next_deadline(&self, now: Instant) -> Option<Duration> {
-        (self.frames.len() >= 2).then(|| self.due.saturating_duration_since(now))
+        // Zero filtered out like the pane's other three deadlines: a frame that
+        // is already due is a frame [`Anim::tick`] takes on this pass, and
+        // asking for a repaint in no time at all is a busy loop spelled as a
+        // timer.
+        (self.frames.len() >= 2)
+            .then(|| self.due.saturating_duration_since(now))
+            .filter(|d| !d.is_zero())
     }
 }
 
@@ -522,6 +528,17 @@ pub struct Pane {
     /// stops the moment they look away, which is the same idle bargain
     /// (PLAN §1) struck against a signal that still exists.
     pointer_over: bool,
+    /// Whether this pane is on screen and being looked at: no modal surface or
+    /// help sheet over it, and the window itself focused.
+    ///
+    /// The animated image's switch, and the same bargain the turntable strikes
+    /// one field up. A GIF behind a scrim is a GIF nobody can see, and stepping
+    /// it costs a wake-up ten times a second for a picture the help sheet is
+    /// covering — which is exactly the idle cost PLAN §1 is about. Nothing is
+    /// lost by stopping: [`Anim::tick`] resynchronises to `now` when the pane
+    /// comes back, so the loop resumes where the clock says rather than
+    /// replaying the minutes it was hidden for.
+    visible: bool,
 }
 
 impl Pane {
@@ -536,6 +553,7 @@ impl Pane {
             decoder: decode::Decoder::start(notify),
             ink: doc::Ink::test(),
             pointer_over: false,
+            visible: true,
             wanted: None,
             token: None,
             requested_target: (0, 0),
@@ -735,6 +753,12 @@ impl Pane {
     /// the *deadline* in [`Pane::next_deadline`] that brings the frame this
     /// runs in. Nothing here asks for a repaint.
     pub fn tick_anim(&mut self, now: Instant) {
+        // …and only while somebody is looking at it. A loop under a scrim is a
+        // loop nobody sees, and stepping it is a wake-up a second bought for
+        // nothing (PLAN §1). See [`Pane::visible`] for why resuming is safe.
+        if !self.visible {
+            return;
+        }
         if let Some(anim) = self.anim_mut() {
             anim.tick(now);
         }
@@ -907,6 +931,11 @@ impl Pane {
     /// both live on the paint side and are needed on the worker side.
     pub fn set_ink(&mut self, ink: doc::Ink) {
         self.ink = ink;
+    }
+
+    /// Whether anybody can see this pane. See [`Pane::visible`].
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
     }
 
     pub fn set_pointer_over(&mut self, pointer_over: bool) {
@@ -1332,7 +1361,13 @@ impl Pane {
         // second, and saying "still moving" would buy it sixty — six times the
         // frames for the same picture, which is exactly the idle cost PLAN §1
         // is about.
-        let anim = self.anim().and_then(|anim| anim.next_deadline(now));
+        // …and nothing at all while the pane is covered: a deadline is a
+        // wake-up, and a wake-up for a frame nobody can see is the idle cost
+        // this whole function exists to keep down.
+        let anim = self
+            .anim()
+            .filter(|_| self.visible)
+            .and_then(|anim| anim.next_deadline(now));
         [loading, bar, chip, anim].into_iter().flatten().min()
     }
 

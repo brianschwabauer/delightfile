@@ -746,13 +746,105 @@ fn a_parent_walk_skips_a_subtree_that_is_already_counted() {
         "reusing a subtree must not change what the tree weighs"
     );
 
-    let hits = du.heavy_hitters(&tree.join("work"));
-    let names: Vec<&str> = hits.iter().map(|h| h.name.as_str()).collect();
+    // The children are still reported — the listing cannot tell the difference
+    // — but the record they came from now says out loud that it was not
+    // counted, and "what's big" refuses it on that basis (see
+    // `an_approximate_record_is_never_reused_and_never_a_heavy_hitter`).
+    let remembered = du
+        .remembered(&tree.join("work"))
+        .expect("the size column is still served");
+    assert!(
+        remembered.record.approximate,
+        "a walk that reused a subtree did not count it"
+    );
+    let names: Vec<&str> = remembered
+        .record
+        .children
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
     assert_eq!(
         names,
         ["project", "other"],
-        "and the reused children are still reported: {hits:#?}"
+        "and the reused children are still reported: {remembered:#?}"
     );
+}
+
+/// The estimate a reusing walk leaves behind is good enough to draw in the size
+/// column and not good enough to build on — so the two callers that must have a
+/// counted number refuse it, and the walk that follows counts the tree for
+/// real.
+#[test]
+fn an_approximate_record_is_never_reused_and_never_a_heavy_hitter() {
+    let now = Instant::now();
+    let mut cache = DuCache::new();
+    let children = vec![(
+        "project".to_string(),
+        DuTotals {
+            total_bytes: 900,
+            ..DuTotals::default()
+        },
+    )];
+    cache.insert_approximate(
+        "/synthetic/work",
+        DirStamp::default(),
+        now,
+        DuTotals {
+            total_bytes: 900,
+            ..DuTotals::default()
+        },
+        children.clone(),
+        true,
+    );
+
+    // The size column still gets its number, marked for what it is.
+    let remembered = cache
+        .remembered(Path::new("/synthetic/work"), now)
+        .expect("a remembered number beats a blank");
+    assert!(remembered.record.approximate);
+    assert_eq!(remembered.record.totals.total_bytes, 900);
+
+    // "What's big" does not: a number somebody asked for out loud has to be
+    // counted, so the mode is told to walk.
+    assert!(
+        cache
+            .heavy_hitters(Path::new("/synthetic/work"), now)
+            .is_empty(),
+        "an estimate must not be drawn as a drill-down"
+    );
+    // …and a walk of the parent will not fold it in, so the error cannot
+    // compound one level at a time.
+    assert!(
+        cache
+            .reusable_under(Path::new("/synthetic"), now)
+            .is_empty(),
+        "an estimate is not something to build the next estimate on"
+    );
+
+    // The same record, counted, is both.
+    cache.insert(
+        "/synthetic/work",
+        DirStamp::default(),
+        now,
+        DuTotals {
+            total_bytes: 900,
+            ..DuTotals::default()
+        },
+        children,
+        true,
+    );
+    assert!(
+        !cache
+            .remembered(Path::new("/synthetic/work"), now)
+            .expect("there")
+            .record
+            .approximate
+    );
+    assert_eq!(
+        cache.heavy_hitters(Path::new("/synthetic/work"), now).len(),
+        1
+    );
+    assert_eq!(cache.reusable_under(Path::new("/synthetic"), now).len(), 1);
 }
 
 /// Reuse is opt-in, and `m u` does not opt in: a walk somebody asked for out

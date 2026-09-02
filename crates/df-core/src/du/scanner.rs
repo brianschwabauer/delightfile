@@ -529,6 +529,15 @@ fn run_walk(
         match walk_reusing(&root, &options, &cancelled, &known, &mut emit) {
             Ok(totals) => {
                 stand_down(live, token);
+                let reused = lock(&reused);
+                // **What this walk leaves behind is only as good as what it
+                // took.** A walk that folded in even one cached subtree
+                // produced totals it did not count, and every record it writes
+                // may sit above that subtree — so they all go in marked, and
+                // the callers that need a counted number ask for their own
+                // walk. A reusing walk that found nothing to reuse counted
+                // everything and is exact.
+                let approximate = !reused.is_empty();
                 store(
                     cache,
                     &root,
@@ -536,8 +545,9 @@ fn run_walk(
                     Instant::now(),
                     totals,
                     &tracked,
-                    &lock(&reused),
+                    &reused,
                     tracking_complete,
+                    approximate,
                 );
                 send(DuMessage::Done {
                     token,
@@ -577,6 +587,9 @@ fn run_walk(
 /// of the cache in the first place, and rewriting them would move their
 /// `walked_at` forward without anything having been counted.
 ///
+/// `approximate` says whether this walk reused anything at all, and every
+/// record it writes carries it — see [`DuRecord::approximate`].
+///
 /// Only directories are children here. A big *file* is a heavy hitter too, but
 /// its size is already in the listing (`Entry::len` is honest for files), so
 /// making the walk carry file names as well would double the memory to
@@ -591,6 +604,7 @@ fn store(
     tracked: &HashMap<PathBuf, (DuTotals, u64)>,
     reused: &HashSet<PathBuf>,
     complete: bool,
+    approximate: bool,
 ) {
     let mut children: HashMap<&Path, Vec<(String, DuTotals)>> = HashMap::new();
     for (dir, (dir_totals, _)) in tracked {
@@ -621,7 +635,16 @@ fn store(
             mtime,
             entries: Some(*entries),
         };
-        cache.insert(dir, stamp, walked_at, *dir_totals, kids, complete);
+        insert(
+            &mut cache,
+            dir,
+            stamp,
+            walked_at,
+            *dir_totals,
+            kids,
+            complete,
+            approximate,
+        );
     }
     // A `depth_of_interest` of 0 emits nothing for the root's children, and a
     // root with no subdirectories tracks only itself; either way the root's own
@@ -631,7 +654,35 @@ fn store(
             mtime: root_mtime,
             entries: count_names(root),
         };
-        cache.insert(root, stamp, walked_at, totals, Vec::new(), complete);
+        insert(
+            &mut cache,
+            root,
+            stamp,
+            walked_at,
+            totals,
+            Vec::new(),
+            complete,
+            approximate,
+        );
+    }
+}
+
+/// One record, through whichever of the cache's two doors this walk earned.
+#[allow(clippy::too_many_arguments)]
+fn insert(
+    cache: &mut DuCache,
+    dir: impl Into<PathBuf>,
+    stamp: DirStamp,
+    walked_at: Instant,
+    totals: DuTotals,
+    children: Vec<(String, DuTotals)>,
+    complete: bool,
+    approximate: bool,
+) {
+    if approximate {
+        cache.insert_approximate(dir, stamp, walked_at, totals, children, complete);
+    } else {
+        cache.insert(dir, stamp, walked_at, totals, children, complete);
     }
 }
 

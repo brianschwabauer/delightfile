@@ -179,6 +179,22 @@ pub struct DuRecord {
     /// Whether `children` is every child. `false` when the walk saw more than
     /// it was willing to track; see [`DuCache::insert`].
     pub children_complete: bool,
+    /// Whether these numbers were **counted** or partly **remembered**.
+    ///
+    /// A walk with [`super::walk::DuOptions::reuse_cache`] folds in whole
+    /// subtrees from records it did not verify below their top directory, so
+    /// what it produces is an estimate: a file written three levels down is
+    /// invisible to the freshness check, and a file hardlinked between a reused
+    /// subtree and a walked one is counted twice.
+    ///
+    /// That is a fine answer for the size column and a **bad** one to store
+    /// where an exact walk reads from, which is what used to happen: the
+    /// approximation went into the same cache the next walk reused, so each
+    /// reuse compounded the last and "what's big" could be handed an estimate
+    /// of an estimate under a mode whose whole promise is a real number. So the
+    /// flag travels with the record, and the two callers that must not have one
+    /// — [`DuCache::reusable_under`] and [`DuCache::heavy_hitters`] — refuse it.
+    pub approximate: bool,
 }
 
 /// One row of the "what's big" list.
@@ -273,8 +289,54 @@ impl DuCache {
         stamp: DirStamp,
         walked_at: Instant,
         totals: DuTotals,
+        children: Vec<(String, DuTotals)>,
+        children_complete: bool,
+    ) {
+        self.store(
+            dir,
+            stamp,
+            walked_at,
+            totals,
+            children,
+            children_complete,
+            false,
+        );
+    }
+
+    /// [`DuCache::insert`] for a walk that took subtrees out of the cache
+    /// rather than counting them. See [`DuRecord::approximate`] for what the
+    /// difference costs and who refuses the result.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_approximate(
+        &mut self,
+        dir: impl Into<PathBuf>,
+        stamp: DirStamp,
+        walked_at: Instant,
+        totals: DuTotals,
+        children: Vec<(String, DuTotals)>,
+        children_complete: bool,
+    ) {
+        self.store(
+            dir,
+            stamp,
+            walked_at,
+            totals,
+            children,
+            children_complete,
+            true,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn store(
+        &mut self,
+        dir: impl Into<PathBuf>,
+        stamp: DirStamp,
+        walked_at: Instant,
+        totals: DuTotals,
         mut children: Vec<(String, DuTotals)>,
         children_complete: bool,
+        approximate: bool,
     ) {
         let dir = dir.into();
         children.sort_by(|a, b| b.1.total_bytes.cmp(&a.1.total_bytes).then(a.0.cmp(&b.0)));
@@ -296,6 +358,7 @@ impl DuCache {
                     totals,
                     children,
                     children_complete: complete,
+                    approximate,
                 },
                 touched,
             ),
@@ -321,7 +384,10 @@ impl DuCache {
     /// What is remembered about `dir`, and whether it still needs walking.
     ///
     /// Always returns the record when there is one — a stale number is worth
-    /// drawing — and pays for one `stat` and one `read_dir` to fill in `fresh`.
+    /// drawing, and so is an approximate one: this is the size column's
+    /// question, and the column's job is to say roughly how big a folder is
+    /// (the record says which it got, in [`DuRecord::approximate`]). It pays
+    /// for one `stat` and one `read_dir` to fill in `fresh`.
     /// A record past the TTL is never fresh and does not pay for the check.
     pub fn remembered(&mut self, dir: &Path, now: Instant) -> Option<Remembered> {
         let record = self.fresh(dir, now).cloned();
@@ -411,6 +477,14 @@ impl DuCache {
             .iter()
             .filter(|(path, _)| path.as_path() != root && path.starts_with(root))
             .filter(|(_, (record, _))| now.saturating_duration_since(record.walked_at) <= self.ttl)
+            // **An estimate is not something to build the next estimate on.**
+            // A record produced by a reusing walk was itself part-remembered,
+            // and reusing it would compound the error every time somebody
+            // walked up a level — the drift growing with each round trip and
+            // nothing ever recounting it. Walking such a subtree costs the
+            // syscalls the reuse was meant to save; paying them once is what
+            // makes the number come back true.
+            .filter(|(_, (record, _))| !record.approximate)
             .map(|(path, (record, _))| (path.clone(), (record.stamp, record.totals)))
             .collect()
     }
@@ -442,6 +516,14 @@ impl DuCache {
         let Some(record) = self.fresh(dir, now) else {
             return Vec::new();
         };
+        // A fourth case, and it means the same thing to the caller as the other
+        // three: **a number somebody asked for out loud has to be the real
+        // one** (see [`super::walk::DuOptions::reuse_cache`]). An approximate
+        // record is refused here so the mode asks for its own exact walk rather
+        // than drawing bars from an estimate the size column left behind.
+        if record.approximate {
+            return Vec::new();
+        }
         let total = record.totals.total_bytes;
         record
             .children

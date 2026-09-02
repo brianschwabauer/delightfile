@@ -1,4 +1,12 @@
-//! Symlinks and hardlinks — yazi's `-`, `_` and `Ctrl+-`.
+//! Symlinks and hardlinks — `symlink-absolute`, `symlink-relative` and
+//! `hardlink`, which ship **unbound**.
+//!
+//! yazi put them on `-`, `_` and `Ctrl+-`; delightfile spends all three of those
+//! keys on the view-scale ladder and the preview's zoom instead (see
+//! [`crate::keymap::defaults`]), because a step of the ladder is something
+//! anybody does a hundred times a day and a hardlink is something somebody does
+//! once a month. The commands are still commands: a `keymap.toml` line puts any
+//! of them on any key.
 //!
 //! Absolute links are trivial. Relative ones are the interesting half: the link
 //! text has to be computed *between two arbitrary paths*, which means walking
@@ -13,13 +21,13 @@ use crate::{DfError, Result};
 
 use super::{exists, normalize};
 
-/// Which flavour of link `-` / `_` make.
+/// Which flavour of link is being made.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {
-    /// `-`: the link text is the target's absolute path.
+    /// `symlink-absolute`: the link text is the target's absolute path.
     Absolute,
-    /// `_`: the link text is the target relative to the link's own directory,
-    /// so moving the pair together keeps it valid.
+    /// `symlink-relative`: the link text is the target relative to the link's
+    /// own directory, so moving the pair together keeps it valid.
     Relative,
 }
 

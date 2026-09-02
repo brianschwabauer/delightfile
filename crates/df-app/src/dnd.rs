@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::motion::{Easing, Tween};
-use crate::ui::{Column, ROW_HEIGHT};
+use crate::ui::Column;
 
 /// What a drop will do, and the word the chip beside the ghost says.
 ///
@@ -280,8 +280,21 @@ pub fn valid_dest(dest: &Path, dragged: &[PathBuf], verb: Verb) -> bool {
 /// the longest file name would cover the targets it is being carried towards.
 pub const GHOST_WIDTH: f32 = 176.0;
 
-/// Its height — one row plus the padding that lifts it off the rows behind it.
-pub const GHOST_HEIGHT: f32 = ROW_HEIGHT + 4.0;
+/// The padding that lifts the card off the rows behind it, above and below the
+/// line of text it holds.
+pub const GHOST_PAD: f32 = 4.0;
+
+/// Its height — one row of the listing it came out of, plus [`GHOST_PAD`].
+///
+/// A *function* of the row height rather than a constant, because the row
+/// height is not one: PLAN §4.1's view-scale ladder draws the list at four
+/// steps, and a ghost fixed at the smallest of them was a card the text
+/// overflowed the moment somebody dragged out of a comfortable listing. The
+/// argument is [`crate::ui::Scale::row_height`] — the same number the rows the
+/// card came off were drawn at.
+pub fn ghost_height(row_height: f32) -> f32 {
+    row_height + GHOST_PAD
+}
 
 /// The card's corner radius, and the badge's.
 pub const GHOST_RADIUS: u8 = 7;
@@ -310,7 +323,9 @@ pub const GHOST_TILT: f32 = 0.030;
 /// Near its left edge and vertically centred, so the card hangs off to the
 /// right of the cursor and never covers the row the cursor is over — the whole
 /// difficulty with a ghost is that it obscures the thing you are aiming at.
-pub const GHOST_GRAB: egui::Vec2 = egui::vec2(16.0, GHOST_HEIGHT / 2.0);
+pub fn ghost_grab(row_height: f32) -> egui::Vec2 {
+    egui::vec2(16.0, ghost_height(row_height) / 2.0)
+}
 
 /// How far the top card is lifted, as a scale. delightstack's mirror scale, to
 /// the digit: enough that the card reads as being *above* the window.
@@ -325,13 +340,16 @@ pub struct Card {
     pub alpha: f32,
 }
 
-/// The stack for a drag of `count` items, with the pointer at `at`.
+/// The stack for a drag of `count` items, with the pointer at `at`, sized for a
+/// listing whose rows are `row_height` tall.
 ///
 /// Back to front, so a painter can draw the returned slice in order and the top
 /// card — the one with the icon and the name on it — is always last.
-pub fn ghost_cards(at: egui::Pos2, count: usize) -> Vec<Card> {
+pub fn ghost_cards(at: egui::Pos2, count: usize, row_height: f32) -> Vec<Card> {
     let behind = count.saturating_sub(1).min(GHOST_STACK);
-    let top = egui::Rect::from_min_size(at - GHOST_GRAB, egui::vec2(GHOST_WIDTH, GHOST_HEIGHT));
+    let height = ghost_height(row_height);
+    let top =
+        egui::Rect::from_min_size(at - ghost_grab(row_height), egui::vec2(GHOST_WIDTH, height));
     let mut cards = Vec::with_capacity(behind + 1);
     for depth in (1..=behind).rev() {
         cards.push(Card {
@@ -354,7 +372,7 @@ pub fn ghost_cards(at: egui::Pos2, count: usize) -> Vec<Card> {
     cards.push(Card {
         rect: top.expand2(egui::vec2(
             GHOST_WIDTH * (GHOST_LIFT - 1.0) / 2.0,
-            GHOST_HEIGHT * (GHOST_LIFT - 1.0) / 2.0,
+            height * (GHOST_LIFT - 1.0) / 2.0,
         )),
         tilt: 0.0,
         alpha: 1.0,
@@ -808,13 +826,23 @@ mod tests {
     #[test]
     fn the_ghost_stacks_up_to_three_cards_behind_the_top_one() {
         let at = egui::pos2(400.0, 300.0);
-        assert_eq!(ghost_cards(at, 1).len(), 1);
-        assert_eq!(ghost_cards(at, 2).len(), 2);
-        assert_eq!(ghost_cards(at, 4).len(), 1 + GHOST_STACK);
+        let row = crate::ui::Scale::default().row_height;
+        assert_eq!(ghost_cards(at, 1, row).len(), 1);
+        assert_eq!(ghost_cards(at, 2, row).len(), 2);
+        assert_eq!(ghost_cards(at, 4, row).len(), 1 + GHOST_STACK);
         // A hundred files is still four cards and a number.
-        assert_eq!(ghost_cards(at, 100).len(), 1 + GHOST_STACK);
+        assert_eq!(ghost_cards(at, 100, row).len(), 1 + GHOST_STACK);
 
-        let cards = ghost_cards(at, 4);
+        // The card is one row of whatever step the list is drawn at, so a
+        // dragged-out row of a big listing gets a big card.
+        let big = crate::ui::Scale::new(df_core::config::ViewScale::Roomy).row_height;
+        assert!(big > row, "the ladder has more than one step");
+        assert!(
+            ghost_cards(at, 1, big)[0].rect.height() > ghost_cards(at, 1, row)[0].rect.height(),
+            "the ghost follows the row height it was dragged off"
+        );
+
+        let cards = ghost_cards(at, 4, row);
         let top = cards.last().expect("a stack has a top card");
         // The top card is last, upright, opaque and lifted.
         assert_eq!(top.tilt, 0.0);

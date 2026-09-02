@@ -327,8 +327,20 @@ impl Toasts {
 
     /// Take the current toast down, whatever it was. The pointer's way of
     /// waiting for the clock.
-    pub fn dismiss(&mut self) {
-        self.current = None;
+    ///
+    /// **Through the leaving slot, not straight to `None`.** A click on the
+    /// plate used to delete it between one frame and the next, so the one
+    /// acknowledgement the press had — the ripple the click router spawns for
+    /// it — was drawn on a surface that no longer existed, and the message
+    /// vanished with no sign that the click was what did it. It sinks and fades
+    /// over [`REPLACE_FADE`] instead, which is the same going-away a replaced
+    /// message gets and is over inside an eighth of a second: long enough to
+    /// read as "that press did this", too short to be in the way of whatever
+    /// the hand is doing next.
+    pub fn dismiss(&mut self, now: Instant) {
+        if let Some(toast) = self.current.take() {
+            self.leaving = Some((toast, now));
+        }
     }
 
     /// Draw the toast, bottom-centred above `bottom`.
@@ -599,11 +611,24 @@ mod tests {
             assert!(offered.rect.contains(action.center()));
             assert!(action.right() <= offered.rect.right() + 1e-3);
 
-            // …and a dismissed toast is gone for the pointer as well as the eye.
-            toasts.dismiss();
+            // …and a dismissed toast is gone for the pointer at once, even
+            // though the plate is still fading out under it: what is leaving is
+            // pixels on their way out and takes no clicks (see
+            // [`Toasts::geometry`]).
+            toasts.dismiss(settled);
+            assert!(toasts.current().is_none());
             assert!(toasts
                 .geometry(ui.painter(), area, area.bottom(), settled)
                 .is_none());
+            assert!(
+                toasts.animating(settled),
+                "the plate sinks away rather than cutting, so the click is acknowledged"
+            );
+            toasts.tick(settled + REPLACE_FADE);
+            assert!(
+                !toasts.animating(settled + REPLACE_FADE),
+                "and then it rests"
+            );
         });
     }
 

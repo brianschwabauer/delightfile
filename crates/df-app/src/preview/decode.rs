@@ -65,6 +65,7 @@
 //! dependency and therefore a decision for its own commit. Until then an SVG
 //! reports "no decoder", which is honest and is not a crash.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -362,29 +363,48 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
     if !live(state, token) {
         return;
     }
-    let mut budget = ANIM_BUDGET_BYTES;
-    let mut sent = 0usize;
-    let mut stopped = false;
-    let mut emit = |delay_ms: u32, image: Rgba| -> bool {
-        let cost = image.pixels.len();
-        if sent >= ANIM_MAX_FRAMES || cost > budget {
+    // **The budget is spent before the frame is decoded, not after.** Every
+    // frame is scaled to the pane, so what the next one will cost is known
+    // without decoding it: `target` pixels, four bytes each. Asking afterwards
+    // meant the frame that broke the bound was decoded, scaled and thrown away
+    // — the one allocation the bound exists to prevent, paid for in full at the
+    // exact moment the loop was declared too big.
+    let budget = Cell::new(ANIM_BUDGET_BYTES);
+    let sent = Cell::new(0usize);
+    let stopped = Cell::new(false);
+    let projected = target.0 as usize * target.1 as usize * 4;
+    // Cells rather than captured `mut`, because the two closures are live at
+    // once: one is asked whether to decode, the other is handed what was
+    // decoded, and they share one purse.
+    let mut room = || {
+        if sent.get() >= ANIM_MAX_FRAMES || projected > budget.get() {
             // Out of room. What has already been sent *is* the loop — a
             // shorter loop of the right picture, which is the honest answer
             // and needs nothing said in the pane to be one.
-            stopped = true;
+            stopped.set(true);
             return false;
         }
-        budget -= cost;
+        true
+    };
+    let mut emit = |delay_ms: u32, image: Rgba| -> bool {
+        let cost = image.pixels.len();
+        // A frame bigger than the projection — a decoder that ignored the
+        // scale — still cannot overdraw the purse.
+        if cost > budget.get() {
+            stopped.set(true);
+            return false;
+        }
+        budget.set(budget.get() - cost);
         let Ok(color) = to_color(&image) else {
             return false;
         };
-        sent += 1;
+        sent.set(sent.get() + 1);
         send(Stage::Frame { delay_ms }, Ok(color))
     };
-    match stream_animation(&path, &bytes, target, route, &mut emit) {
+    match stream_animation(&path, &bytes, target, route, &mut room, &mut emit) {
         Ok(0) => {}
         Ok(frames) => {
-            if stopped {
+            if stopped.get() {
                 log::debug!(
                     "{}: {frames} frames is as much of the loop as {} holds",
                     path.display(),
@@ -436,22 +456,31 @@ fn animated_route(bytes: &[u8]) -> Option<Route> {
 ///
 /// `avis` is animated AVIF's major brand (a still is `avif`); `msf1` is HEIF's
 /// image-sequence brand. Either can appear in the compatible-brand list rather
-/// than in the major slot, so the whole box is scanned. Pure, and four bytes at
-/// a time, so it is a unit test rather than a thing observed on somebody's
-/// phone.
+/// than in the major slot, so both are looked at. Pure, and four bytes at a
+/// time, so it is a unit test rather than a thing observed on somebody's phone.
+///
+/// **The box's shape is respected rather than swept.** `ftyp` is a length, the
+/// tag, the major brand, a four-byte `minor_version` **number**, and then the
+/// compatible brands — and the number is not a brand. Scanning from byte 8 in
+/// four-byte steps read it as one, so a file whose minor version happened to
+/// spell `avis` would have been sent down the ffmpeg path for frames it does
+/// not have.
 fn iso_sequence(bytes: &[u8]) -> bool {
-    // `ftyp` is the first box in the file: a big-endian length, the tag, the
-    // major brand, a version, and then the compatible brands.
     if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
         return false;
     }
     let Ok(length) = bytes[0..4].try_into().map(u32::from_be_bytes) else {
         return false;
     };
+    let sequence = |brand: &[u8]| matches!(brand, b"avis" | b"msf1");
+    if sequence(&bytes[8..12]) {
+        return true;
+    }
+    // Byte 16, past the minor version. The box's own length bounds the scan,
+    // clamped into what is actually here and to a header nobody sane writes
+    // more of.
     let end = (length as usize).clamp(16, bytes.len().min(4096));
-    bytes[8..end]
-        .chunks_exact(4)
-        .any(|brand| matches!(brand, b"avis" | b"msf1"))
+    bytes[16..end].chunks_exact(4).any(sequence)
 }
 
 /// The delay a frame is held for, in milliseconds, as every browser reads it.
@@ -478,17 +507,18 @@ fn stream_animation(
     bytes: &[u8],
     target: (u32, u32),
     route: Route,
+    room: &mut impl FnMut() -> bool,
     emit: &mut impl FnMut(u32, Rgba) -> bool,
 ) -> Result<usize, String> {
     use image::AnimationDecoder;
     let cursor = || std::io::Cursor::new(bytes);
     match route {
-        Route::Ffmpeg => ffmpeg_frames(path, target, ANIM_MAX_FRAMES, emit),
+        Route::Ffmpeg => ffmpeg_frames(path, target, ANIM_MAX_FRAMES, room, emit),
         Route::Frames => match image::guess_format(bytes).map_err(|e| e.to_string())? {
             image::ImageFormat::Gif => {
                 let decoder =
                     image::codecs::gif::GifDecoder::new(cursor()).map_err(|e| e.to_string())?;
-                Ok(pump(decoder.into_frames(), target, emit))
+                Ok(pump(decoder.into_frames(), target, room, emit))
             }
             image::ImageFormat::WebP => {
                 let decoder =
@@ -496,7 +526,7 @@ fn stream_animation(
                 if !decoder.has_animation() {
                     return Ok(0);
                 }
-                Ok(pump(decoder.into_frames(), target, emit))
+                Ok(pump(decoder.into_frames(), target, room, emit))
             }
             image::ImageFormat::Png => {
                 let decoder =
@@ -505,7 +535,7 @@ fn stream_animation(
                     return Ok(0);
                 }
                 let apng = decoder.apng().map_err(|e| e.to_string())?;
-                Ok(pump(apng.into_frames(), target, emit))
+                Ok(pump(apng.into_frames(), target, room, emit))
             }
             other => Err(format!("{other:?} has no frames")),
         },
@@ -520,10 +550,15 @@ fn stream_animation(
 fn pump(
     frames: image::Frames<'_>,
     target: (u32, u32),
+    room: &mut impl FnMut() -> bool,
     emit: &mut impl FnMut(u32, Rgba) -> bool,
 ) -> usize {
     let mut sent = 0usize;
-    for frame in frames {
+    let mut frames = frames;
+    // `room()` before `next()`, because `next()` *is* the decode: an iterator
+    // that has already handed a frame over has already paid for it.
+    while room() {
+        let Some(frame) = frames.next() else { break };
         let frame = match frame {
             Ok(frame) => frame,
             // A truncated GIF is a GIF up to the truncation: what decoded is
@@ -644,7 +679,9 @@ fn scale_dynamic(image: image::DynamicImage, target: (u32, u32)) -> Rgba {
 /// clipped answer swscale gives is the right amount of effort for now.
 fn ffmpeg_still(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
     let mut still = None;
-    ffmpeg_frames(path, target, 1, &mut |_, image| {
+    // A still is one frame and the budget is a loop's: `room` says yes once,
+    // which is all the `limit` of one will ask it.
+    ffmpeg_frames(path, target, 1, &mut || true, &mut |_, image| {
         still = Some(image);
         false
     })?;
@@ -668,6 +705,7 @@ fn ffmpeg_frames(
     path: &Path,
     target: (u32, u32),
     limit: usize,
+    room: &mut impl FnMut() -> bool,
     emit: &mut impl FnMut(u32, Rgba) -> bool,
 ) -> Result<usize, String> {
     use dv_media::ffmpeg;
@@ -787,6 +825,11 @@ fn ffmpeg_frames(
         decoder.send_packet(&packet).map_err(|e| e.to_string())?;
         let mut frame = VideoFrame::empty();
         while decoder.receive_frame(&mut frame).is_ok() {
+            // Before the scale, which is where the frame-sized allocation is.
+            if !room() {
+                wanted = false;
+                break 'packets;
+            }
             let pts = frame.timestamp().or_else(|| frame.pts()).unwrap_or(0);
             let image = scale(&frame, &mut scaler)?;
             wanted = offer(pts, image, &mut pending, &mut sent, &mut last_delay);
@@ -801,6 +844,10 @@ fn ffmpeg_frames(
         decoder.send_eof().map_err(|e| e.to_string())?;
         let mut frame = VideoFrame::empty();
         while decoder.receive_frame(&mut frame).is_ok() {
+            if !room() {
+                wanted = false;
+                break;
+            }
             let pts = frame.timestamp().or_else(|| frame.pts()).unwrap_or(0);
             let image = scale(&frame, &mut scaler)?;
             wanted = offer(pts, image, &mut pending, &mut sent, &mut last_delay);
@@ -1016,10 +1063,17 @@ mod tests {
         let route = animated_route(&bytes).expect("a GIF has frames");
         assert!(matches!(route, Route::Frames));
         let mut got: Vec<(u32, u32, u32)> = Vec::new();
-        let sent = stream_animation(&path, &bytes, (30, 30), route, &mut |delay, image| {
-            got.push((delay, image.width, image.height));
-            true
-        })
+        let sent = stream_animation(
+            &path,
+            &bytes,
+            (30, 30),
+            route,
+            &mut || true,
+            &mut |delay, image| {
+                got.push((delay, image.width, image.height));
+                true
+            },
+        )
         .expect("stream");
         assert_eq!(sent, 3);
         assert_eq!(got, vec![(120, 30, 20); 3], "delays and the pane's fit");
@@ -1029,12 +1083,39 @@ mod tests {
         // decoded past it.
         let mut count = 0;
         let route = animated_route(&bytes).expect("a GIF has frames");
-        let sent = stream_animation(&path, &bytes, (30, 30), route, &mut |_, _| {
+        let sent = stream_animation(&path, &bytes, (30, 30), route, &mut || true, &mut |_, _| {
             count += 1;
             count < 2
         })
         .expect("stream");
         assert_eq!((sent, count), (2, 2));
+
+        // …and **the budget stops it a frame earlier still**: a `room` that
+        // says no is asked before the decoder is pulled, so the frame that
+        // would not have fitted is never decoded and never scaled.
+        let mut decoded = 0;
+        let mut allowed = 2;
+        let route = animated_route(&bytes).expect("a GIF has frames");
+        let sent = stream_animation(
+            &path,
+            &bytes,
+            (30, 30),
+            route,
+            &mut || {
+                allowed -= 1;
+                allowed > 0
+            },
+            &mut |_, _| {
+                decoded += 1;
+                true
+            },
+        )
+        .expect("stream");
+        assert_eq!(
+            (sent, decoded),
+            (1, 1),
+            "one frame decoded, and the refusal costs no decode of its own"
+        );
 
         // A still PNG goes down the same route and comes back with nothing:
         // "can hold an animation" is not "does".
@@ -1049,7 +1130,10 @@ mod tests {
         let bytes = std::fs::read(&png).expect("read back");
         let route = animated_route(&bytes).expect("PNG can be an APNG");
         assert_eq!(
-            stream_animation(&png, &bytes, (30, 30), route, &mut |_, _| true).expect("stream"),
+            stream_animation(&png, &bytes, (30, 30), route, &mut || true, &mut |_, _| {
+                true
+            })
+            .expect("stream"),
             0,
             "a still PNG is not an APNG"
         );
@@ -1067,24 +1151,38 @@ mod tests {
         assert!(animated_route(b"GIF89a...........").is_some());
         assert!(animated_route(b"").is_none(), "and neither has nothing");
 
-        // ISOBMFF: a still AVIF is left alone, a sequence is not.
-        let iso = |brands: &[&[u8; 4]]| {
+        // ISOBMFF: a still AVIF is left alone, a sequence is not. Built the
+        // way the box really is — major brand, then the four-byte minor
+        // *version*, then the compatible brands.
+        let iso = |major: &[u8; 4], minor: u32, compatible: &[&[u8; 4]]| {
             let mut bytes = Vec::new();
-            let length = 8 + brands.len() * 4;
+            let length = 16 + compatible.len() * 4;
             bytes.extend_from_slice(&(length as u32).to_be_bytes());
             bytes.extend_from_slice(b"ftyp");
-            for brand in brands {
+            bytes.extend_from_slice(major);
+            bytes.extend_from_slice(&minor.to_be_bytes());
+            for brand in compatible {
                 bytes.extend_from_slice(*brand);
             }
             // Enough tail that the 16-byte floor is met on the short cases.
             bytes.resize(bytes.len().max(32), 0);
             bytes
         };
-        assert!(!iso_sequence(&iso(&[b"avif", b"mif1"])), "a still AVIF");
-        assert!(iso_sequence(&iso(&[b"avis", b"avif"])), "the major brand");
+        assert!(!iso_sequence(&iso(b"avif", 0, &[b"mif1"])), "a still AVIF");
         assert!(
-            iso_sequence(&iso(&[b"mif1", b"msf1"])),
+            iso_sequence(&iso(b"avis", 0, &[b"avif"])),
+            "the major brand"
+        );
+        assert!(
+            iso_sequence(&iso(b"mif1", 0, &[b"msf1"])),
             "a compatible brand"
+        );
+        // The minor version is a number, not a brand: a still whose version
+        // spells one must not be read as a sequence.
+        let spelled = u32::from_be_bytes(*b"avis");
+        assert!(
+            !iso_sequence(&iso(b"avif", spelled, &[b"mif1"])),
+            "the minor version is not a brand"
         );
         assert!(!iso_sequence(b"not an iso file at all, honestly"));
         assert!(!iso_sequence(b"short"), "a truncated header is not a panic");

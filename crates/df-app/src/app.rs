@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use df_core::config::{Config, LineMode, MgrConfig, SortBy, Theme, ViewScale};
 use df_core::fs::{random_seed, FindDirection, Scanner, SortOptions, WatchEvent, Watcher};
-use df_core::input::{InputBuffer, InputEvent};
+use df_core::input::{InputAction, InputBuffer, InputEvent};
 use df_core::keymap::{
     Chord, Command, Context, ContextStack, Dispatch, Key, KeymapState, Registry, WhenFlags,
 };
@@ -1159,11 +1159,21 @@ pub struct App {
     pending_copy: std::collections::VecDeque<PendingCopy>,
     /// What a paste will do with the bytes it asked the clipboard for.
     pending_paste: Option<PendingPaste>,
+    /// `Ctrl+v` in a prompt, waiting for the same pipe. See
+    /// [`PendingTextPaste`].
+    pending_text_paste: Option<PendingTextPaste>,
     /// The `wl-copy --foreground` currently serving the fallback selection, and
     /// the toast it has not earned yet. See [`WlCopy`].
     wl_copy: Option<WlCopy>,
-    /// The number the next [`PendingPaste`] carries. See that type.
+    /// The number the next [`PendingPaste`] or [`PendingTextPaste`] carries —
+    /// one counter for both, so no answer can ever be mistaken for the other's.
+    /// See [`PendingPaste::seq`].
     paste_seq: u64,
+    /// How many prompts this window has opened. Stamped into a
+    /// [`PendingTextPaste`] so that bytes which arrive after the field they
+    /// were asked for closed are dropped rather than typed into whatever
+    /// replaced it.
+    prompt_opened: u64,
     /// The files in the hand, while there are any.
     drag: Option<Drag>,
     /// A tab chip being pulled out of the strip (PLAN §2's "drag a tab out to
@@ -1291,6 +1301,27 @@ struct PendingPaste {
     tab: crate::tab::TabId,
     dir: PathBuf,
     /// When `p` was pressed. See [`CLIPBOARD_ANSWER`].
+    asked: Instant,
+}
+
+/// A `Ctrl+v` in a prompt that has asked the clipboard for text and is waiting
+/// for it.
+///
+/// The same round trip [`PendingPaste`] makes and for the same reason — the
+/// bytes come down a pipe another application fills — but what they are for is
+/// different enough to be its own slot: nothing is written to disk, no
+/// directory is involved, and the thing that has to still be there when they
+/// land is the *field*, not a tab.
+struct PendingTextPaste {
+    /// Echoed back on [`crate::wayland::Event::Pasted`], drawn from the same
+    /// counter [`PendingPaste::seq`] is.
+    seq: u64,
+    /// Which prompt asked. Both halves are checked on arrival: a field that has
+    /// closed and re-opened is a different field, and text typed into it would
+    /// be text appearing in a box nobody pasted into.
+    kind: PromptKind,
+    opened: u64,
+    /// When `Ctrl+v` was pressed. See [`CLIPBOARD_ANSWER`].
     asked: Instant,
 }
 
@@ -1548,8 +1579,10 @@ impl App {
             clipboard_seen: false,
             pending_copy: std::collections::VecDeque::new(),
             pending_paste: None,
+            pending_text_paste: None,
             wl_copy: None,
             paste_seq: 0,
+            prompt_opened: 0,
             drag: None,
             tab_drag: None,
             windows: crate::window::Windows::default(),
@@ -4035,6 +4068,18 @@ impl App {
                 media_hovered: self.media_hovered(),
             };
             self.key_repeat = press.repeat;
+            // A *commit* is text, not a keystroke. A dead-key sequence, an IME
+            // conversion or a compositor's own paste arrives on winit's text
+            // channel as a whole string with no chord behind it, and the first
+            // character of `私は` is not what was typed. It goes into the open
+            // prompt whole, through the door
+            // [`df_core::input::InputBuffer::insert_text`] exists to be.
+            if press.chord.is_none() && self.prompt.is_some() {
+                if let Some(text) = press.text.as_deref().filter(|t| t.chars().count() > 1) {
+                    self.prompt_text(text);
+                    continue;
+                }
+            }
             // The chord is the binding; the text is the fallback for a key the
             // chord table cannot name — a composed character, a layout's own
             // letter — which still has to be typeable into a prompt.
@@ -5423,6 +5468,7 @@ impl App {
 
     fn open_prompt_with(&mut self, kind: PromptKind, buffer: InputBuffer) {
         let origin = self.tab().cwd.dir.cursor();
+        self.prompt_opened += 1;
         self.prompt = Some(Prompt::with(kind, origin, buffer));
         self.sync_context();
         self.prompt_changed();
@@ -5633,16 +5679,35 @@ impl App {
         }
     }
 
+    /// This window's keymap, asked [`prompt_action`]'s question.
+    fn prompt_action(&self, chord: Chord) -> Option<InputAction> {
+        prompt_action(&self.keymap, chord)
+    }
+
     /// One keystroke into the open prompt.
     ///
     /// The buffer takes **every** key — that is what df-core's editor is for,
     /// and it is why a stray `q` in a rename types a `q` instead of quitting.
     fn prompt_key(&mut self, chord: Chord, now: Instant) {
+        // The one `[input]` row the buffer cannot serve: the text has to be
+        // fetched from another application first, and that is a round trip
+        // rather than a keystroke (see [`App::paste_into_prompt`]). Checked
+        // here rather than mapped into an [`InputAction`], because there is no
+        // editing verb for "wait for a pipe".
+        if self.keymap.lookup(Context::Input, chord) == Some(Command::InputPaste) {
+            self.paste_into_prompt(now);
+            return;
+        }
+        let action = self.prompt_action(chord);
         let Some(prompt) = &mut self.prompt else {
             return;
         };
         let live = prompt.kind.is_live();
-        match prompt.feed(chord) {
+        let event = match action {
+            Some(action) => prompt.act(action),
+            None => prompt.feed(chord),
+        };
+        match event {
             InputEvent::Consumed => {
                 if live {
                     self.prompt_changed();
@@ -5650,6 +5715,19 @@ impl App {
             }
             InputEvent::Submit(text) => self.submit_prompt(text, now),
             InputEvent::Cancel => self.cancel_prompt(),
+        }
+    }
+
+    /// Already-composed text into the open prompt: an IME commit, a dead-key
+    /// sequence, or the clipboard's answer to `Ctrl+v`.
+    fn prompt_text(&mut self, text: &str) {
+        let Some(prompt) = &mut self.prompt else {
+            return;
+        };
+        let live = prompt.kind.is_live();
+        prompt.insert_text(text);
+        if live {
+            self.prompt_changed();
         }
     }
 
@@ -6056,6 +6134,19 @@ impl App {
             && !mods.super_key
             && matches!(chord.key, Key::Char(_) | Key::Space);
         if typing && text {
+            self.prompt_key(chord, now);
+            return;
+        }
+        // **And the field's own editing keys are the field's.** `Ctrl+u`,
+        // `Ctrl+d`, `Home` and `End` are in both tables — the sheet pages by
+        // half a screen with them, the editor kills a line and walks to an end
+        // with them — and the sheet was winning, so `Ctrl+u` in a half-typed
+        // query scrolled the list instead of clearing what was typed. While
+        // the field is open the editor is asked first and only the keys it has
+        // no verb for reach `[help]`: `PgUp`/`PgDn`, `↑`/`↓`, `Esc`, `F1`. The
+        // question is asked of [`App::prompt_action`], so an `[input]` line in
+        // `keymap.toml` moves this boundary with it.
+        if typing && matches!(self.prompt_action(chord), Some(InputAction::Edit(_))) {
             self.prompt_key(chord, now);
             return;
         }
@@ -8200,7 +8291,7 @@ impl App {
             // this is the same two verbs for the hand that is already on the
             // mouse.
             Control::Toast => {
-                self.toasts.dismiss();
+                self.toasts.dismiss(now);
                 geom.toast.map(|g| g.rect).unwrap_or(egui::Rect::ZERO)
             }
             Control::ToastAction => {
@@ -9241,6 +9332,26 @@ impl App {
                 }
                 crate::wayland::Event::Copied { ok } => self.copy_answered(ok, now),
                 crate::wayland::Event::Pasted { seq, bytes } => {
+                    // A prompt's `Ctrl+v` first: it draws its sequence numbers
+                    // from the same counter, so at most one of the two slots
+                    // can be waiting on any given answer.
+                    if self
+                        .pending_text_paste
+                        .as_ref()
+                        .is_some_and(|p| p.seq == seq)
+                    {
+                        let Some(pending) = self.pending_text_paste.take() else {
+                            continue;
+                        };
+                        match bytes {
+                            Ok(bytes) => self.take_pasted_text(pending, bytes),
+                            Err(failure) => {
+                                log::warn!("clipboard: the paste came back incomplete: {failure}");
+                                self.toasts.error(failure.to_string(), now);
+                            }
+                        }
+                        continue;
+                    }
                     // Only the paste that is still outstanding. An answer to a
                     // request the user has already superseded is dropped where
                     // it arrives rather than applied with somebody else's
@@ -9285,7 +9396,9 @@ impl App {
     /// `pending_copy` entry nothing will ever pop, and a clipboard that has
     /// stopped working without saying so.
     fn clipboard_thread_gone(&mut self, now: Instant) {
-        let waiting = self.pending_copy.len() + usize::from(self.pending_paste.is_some());
+        let waiting = self.pending_copy.len()
+            + usize::from(self.pending_paste.is_some())
+            + usize::from(self.pending_text_paste.is_some());
         if waiting == 0 {
             return;
         }
@@ -9296,6 +9409,14 @@ impl App {
         }
         if let Some(pending) = self.pending_paste.take() {
             self.paste_via_wl_paste(pending, now);
+        }
+        if self.pending_text_paste.take().is_some() {
+            // A prompt's paste has no bytes of its own to re-send and nothing
+            // to undo — it is one keystroke, and the cheapest honest answer is
+            // to say so rather than to make a second round trip on behalf of a
+            // field that may not be open any more.
+            self.toasts
+                .notice("The clipboard stopped answering — press Ctrl+v again", now);
         }
     }
 
@@ -9328,6 +9449,28 @@ impl App {
                 "clipboard: no answer to the paste in {CLIPBOARD_ANSWER:?}; trying wl-paste"
             );
             self.paste_via_wl_paste(pending, now);
+        }
+        // The prompt's, by the same clock and through the same fallback: the
+        // field is usually still open, and the keystroke it answers is one the
+        // user has already made.
+        if self
+            .pending_text_paste
+            .as_ref()
+            .is_some_and(|paste| now.saturating_duration_since(paste.asked) >= CLIPBOARD_ANSWER)
+        {
+            let Some(pending) = self.pending_text_paste.take() else {
+                return;
+            };
+            log::info!(
+                "clipboard: no answer to the prompt's paste in {CLIPBOARD_ANSWER:?}; trying wl-paste"
+            );
+            match crate::clipboard::text_offer(&self.clipboard_types)
+                .map(|mime| crate::clipboard::paste(&mime))
+            {
+                Some(Ok(bytes)) => self.take_pasted_text(pending, bytes),
+                Some(Err(error)) => self.clip_failed(error, now),
+                None => {}
+            }
         }
     }
 
@@ -9816,6 +9959,110 @@ impl App {
             }
             Err(error) => self.clip_failed(error, now),
         }
+    }
+
+    /// `Ctrl+v` in a prompt: the system clipboard's **text**, typed into the
+    /// field.
+    ///
+    /// The same two paths `p` takes and for the same reasons — the native data
+    /// device when there is one, `wl-paste` when there is not — because the
+    /// bytes come down a pipe another application fills, and waiting for it on
+    /// the event loop would park the paint loop for as long as that application
+    /// felt like taking. What is different is what is asked for and what
+    /// becomes of it: text only (see [`crate::clipboard::text_offer`]), and it
+    /// is inserted at the caret rather than written anywhere.
+    fn paste_into_prompt(&mut self, now: Instant) {
+        let Some(kind) = self.prompt.as_ref().map(|p| p.kind) else {
+            return;
+        };
+        let native = self.clipboard_seen && self.data_device.as_ref().is_some_and(|d| d.ready());
+        if native {
+            let Some(mime) = crate::clipboard::text_offer(&self.clipboard_types) else {
+                self.toasts.notice("Nothing on the clipboard to type", now);
+                return;
+            };
+            self.paste_seq += 1;
+            let seq = self.paste_seq;
+            // Recorded only once the send is accepted, exactly as
+            // [`App::paste_system`] does it: a thread that has gone between the
+            // `ready()` above and this line would leave the field waiting for a
+            // `Pasted` that is never sent.
+            let asked = self
+                .data_device
+                .as_ref()
+                .is_some_and(|device| device.receive(seq, mime.clone()));
+            if asked {
+                log::info!("clipboard: pasting {mime} into the prompt via wl_data_device");
+                self.pending_text_paste = Some(PendingTextPaste {
+                    seq,
+                    kind,
+                    opened: self.prompt_opened,
+                    asked: now,
+                });
+                return;
+            }
+            log::info!("clipboard: the data device is gone; pasting via wl-paste");
+        }
+        let types = match crate::clipboard::offered_types() {
+            Ok(types) => types,
+            Err(error) => {
+                self.clip_failed(error, now);
+                return;
+            }
+        };
+        let Some(mime) = crate::clipboard::text_offer(&types) else {
+            self.toasts.notice("Nothing on the clipboard to type", now);
+            return;
+        };
+        match crate::clipboard::paste(&mime) {
+            Ok(bytes) => self.type_pasted(&bytes),
+            Err(error) => self.clip_failed(error, now),
+        }
+    }
+
+    /// The clipboard's answer to a `Ctrl+v`, arriving a frame or several later.
+    ///
+    /// Dropped unless the field that asked is still the field on screen: a
+    /// prompt that has closed and re-opened is a *different* prompt, and text
+    /// appearing in it would be a paste nobody made into a box nobody pasted
+    /// into.
+    fn take_pasted_text(&mut self, pending: PendingTextPaste, bytes: Vec<u8>) {
+        let still_open = self
+            .prompt
+            .as_ref()
+            .is_some_and(|p| p.kind == pending.kind && self.prompt_opened == pending.opened);
+        if !still_open {
+            log::debug!("clipboard: the prompt the paste was for is gone");
+            return;
+        }
+        self.type_pasted(&bytes);
+    }
+
+    /// Clipboard bytes, as one line of text at the caret.
+    ///
+    /// **One line**, because a prompt is one line: a multi-line clipboard
+    /// becomes spaces rather than a name with a newline in it, which is a name
+    /// no filesystem should be asked to hold and a filter nothing would match.
+    /// Every other control character is dropped for the reason [`Press`] drops
+    /// them — an escape character in a query is a query that stops matching for
+    /// no visible reason.
+    fn type_pasted(&mut self, bytes: &[u8]) {
+        let text: String = String::from_utf8_lossy(bytes)
+            .trim_end_matches(['\n', '\r'])
+            .chars()
+            .map(|c| {
+                if c == '\n' || c == '\r' || c == '\t' {
+                    ' '
+                } else {
+                    c
+                }
+            })
+            .filter(|c| !c.is_control())
+            .collect();
+        if text.is_empty() {
+            return;
+        }
+        self.prompt_text(&text);
     }
 
     /// The bytes the clipboard finally handed over, whichever path fetched
@@ -10329,8 +10576,19 @@ impl App {
         // keeps the pointer until the release, wherever the drag wanders. Not
         // while a modal or a menu owns the window: chrome that is *over* the
         // strip owns what lands on it.
-        let scrubbing =
-            overlay.is_none() && !menu_live && self.media_pointer(layout.preview, &pointer, now);
+        let scrubbing = if overlay.is_none() && !menu_live {
+            self.media_pointer(layout.preview, &pointer, now)
+        } else {
+            // **Chrome over the strip ends the drag it is covering.** A card or
+            // a menu opening mid-scrub takes the pointer away from
+            // `media_pointer` entirely, so the flag it latched would still be
+            // set when the card closed — and the next click anywhere over the
+            // pane would land as the continuation of a drag the hand let go of
+            // minutes ago.
+            self.scrubbing = false;
+            self.scrub_overshoot = 0.0;
+            false
+        };
 
         // A press anywhere but on the menu dismisses it, and the press is spent
         // doing so: a click that closed a menu *and* moved the cursor under it
@@ -10685,6 +10943,14 @@ impl App {
                 && looking
                 && pointer.at.is_some_and(|at| layout.preview.contains(at)),
         );
+        // …and whether anybody can see the pane at all, which is the animated
+        // image's switch (see [`crate::preview::Pane::visible`]). A modal
+        // surface and the help sheet both cover the preview whole, and an
+        // unfocused window is one nobody is watching — the same three facts the
+        // turntable is retired by, minus the pointer, because a GIF plays
+        // whether or not the mouse is over it.
+        self.preview
+            .set_visible(self.window_focused && overlay.is_none() && self.help.is_none());
         self.preview.sync_doc(now);
         // The wheel's coast over the document, sampled once a frame (PLAN §7.5).
         self.preview.tick_fling(now);
@@ -11204,25 +11470,25 @@ impl App {
         // covered its own input would be asking a question it hid the answer
         // box for.
         if let Some((rect, lines, total, help)) = &help_view {
-            // The live field, drawn in the sheet's heading: `help_query` is
-            // what the sheet is narrowed by either way, and the caret is there
-            // only while the field is open.
-            chrome::help_overlay(
-                &paint,
-                area,
-                *rect,
-                lines,
-                help,
-                *total,
-                help::Filter {
-                    query: &self.help_query,
-                    caret: self
-                        .prompt
-                        .as_ref()
-                        .filter(|prompt| prompt.kind.is_help())
-                        .map(|prompt| prompt.caret()),
+            // The live field, drawn in the sheet's heading. **Query and caret
+            // come from one source**: the caret is a byte offset into the
+            // *buffer*, and measuring it against `help_query` — the copy the
+            // buffer last published — is measuring one string with a ruler cut
+            // for another. They agree while nothing is in flight and disagree
+            // exactly when the field has been typed into, which is the whole
+            // time anybody is looking at it. With the field closed there is no
+            // caret and the published query is all there is.
+            let filter = match self.prompt.as_ref().filter(|p| p.kind.is_help()) {
+                Some(prompt) => help::Filter {
+                    query: prompt.query(),
+                    caret: Some(prompt.caret()),
                 },
-            );
+                None => help::Filter {
+                    query: &self.help_query,
+                    caret: None,
+                },
+            };
+            chrome::help_overlay(&paint, area, *rect, lines, help, *total, filter);
             chrome::hints(
                 &paint,
                 chrome::hint_rect(*rect),
@@ -11347,8 +11613,13 @@ impl App {
                 paint.drop_target(rect, radius, amount, filling);
             }
         }
+        // One row of the listing the drag came off — `self.scale` is what
+        // `dnd::Zones` is handed and what the rows themselves were drawn at, so
+        // the card is the size of the thing in the hand at every step of the
+        // view-scale ladder (PLAN §4.1).
+        let ghost_row = self.scale.row_height;
         if let (Some(frame), Some(drag)) = (&dragging, &self.drag) {
-            let cards = dnd::ghost_cards(frame.at, drag.paths.len());
+            let cards = dnd::ghost_cards(frame.at, drag.paths.len(), ghost_row);
             paint.ghost(
                 &cards,
                 &ui::GhostFace {
@@ -11367,7 +11638,7 @@ impl App {
         // gesture lying about itself.
         if let (Some(drag), Some(strip)) = (&self.tab_drag, layout.strip) {
             let armed = crate::window::armed(drag.from, drag.at, strip);
-            let cards = dnd::ghost_cards(drag.at, 1);
+            let cards = dnd::ghost_cards(drag.at, 1, ghost_row);
             paint.ghost(
                 &cards,
                 &ui::GhostFace {
@@ -11381,7 +11652,7 @@ impl App {
         }
         // …and the cancelled one on its way home, which outlives the drag.
         if let Some(home) = &self.spring_back {
-            let cards = dnd::ghost_cards(home.spring.at(now), home.spring.count());
+            let cards = dnd::ghost_cards(home.spring.at(now), home.spring.count(), ghost_row);
             paint.ghost(
                 &cards,
                 &ui::GhostFace {
@@ -12416,9 +12687,131 @@ impl ApplicationHandler<crate::Wake> for App {
     }
 }
 
+/// What an open prompt does with `chord`, the keymap's `[input]` table first.
+///
+/// The table used to be decorative: every key went straight to
+/// [`df_core::input::InputBuffer::feed`], so an `[input]` line in `keymap.toml`
+/// moved a row in the help sheet and nothing else. It is consulted here
+/// instead, and only a chord it has no row for falls back to the editor's own
+/// readline map — which is where a printable key becomes text, because no table
+/// names a bare letter.
+///
+/// `None` is "the editor has no opinion". That is also the question the help
+/// sheet asks before it pages a list behind an open filter field: a chord this
+/// answers `Edit` for belongs to the field, and everything else is the sheet's.
+///
+/// Free rather than a method so it can be tested against a registry alone —
+/// there is no `App` to build without a window.
+fn prompt_action(keymap: &Registry, chord: Chord) -> Option<InputAction> {
+    match keymap.lookup(Context::Input, chord) {
+        // A row naming something that is not an editing verb — a browser
+        // command somebody put in an `[input]` table — is not a thing a line of
+        // text can do. It falls through rather than being obeyed somewhere it
+        // would mean nothing.
+        Some(command) => df_core::input::action_of(command),
+        None => InputBuffer::binding(chord),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use df_core::input::InputOp;
+    use df_core::keymap::{Key, Mods};
+
+    /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
+    /// half a screen with it, the line editor kills back to the start of the
+    /// line with it — and the sheet was matched first, so `Ctrl+u` in a
+    /// half-typed help query scrolled a list instead of clearing what was
+    /// typed. `Ctrl+d`, `Home` and `End` were the same three ways of being
+    /// wrong.
+    #[test]
+    fn ctrl_u_in_the_help_filter_clears_the_query_rather_than_paging_the_sheet() {
+        let keymap = Registry::defaults();
+        let ctrl_u = Chord::new(Mods::CTRL, Key::Char('u'));
+        // Both tables really do claim it — that is the whole conflict.
+        assert_eq!(
+            keymap.lookup(Context::Help, ctrl_u),
+            Some(Command::HelpHalfPageUp)
+        );
+        let action = prompt_action(&keymap, ctrl_u).expect("the editor claims Ctrl+u");
+        assert_eq!(action, InputAction::Edit(InputOp::KillBol));
+
+        // …and with the field open, that is what the key does to it.
+        let mut prompt = Prompt::with(PromptKind::HelpFilter, 0, InputBuffer::new("copy", 4));
+        prompt.act(action);
+        assert_eq!(
+            prompt.query(),
+            "",
+            "the query goes, not the scroll position"
+        );
+
+        // The other three the sheet was stealing.
+        for chord in [
+            Chord::new(Mods::CTRL, Key::Char('d')),
+            Chord::plain(Key::Home),
+            Chord::plain(Key::End),
+        ] {
+            assert!(
+                matches!(prompt_action(&keymap, chord), Some(InputAction::Edit(_))),
+                "{} belongs to the field while it is open",
+                chord.label()
+            );
+        }
+
+        // …and the keys the sheet keeps: no editing verb, so the paging rows
+        // still reach it.
+        for (chord, command) in [
+            (Chord::plain(Key::PageUp), Command::HelpPageUp),
+            (Chord::plain(Key::PageDown), Command::HelpPageDown),
+            (Chord::plain(Key::ArrowUp), Command::OverlayPrev),
+            (Chord::plain(Key::ArrowDown), Command::OverlayNext),
+        ] {
+            assert_eq!(prompt_action(&keymap, chord), None, "{}", chord.label());
+            assert_eq!(keymap.lookup(Context::Help, chord), Some(command));
+        }
+    }
+
+    /// The `[input]` table is not decoration: a line in `keymap.toml` moves an
+    /// editing key, and the prompt obeys it.
+    #[test]
+    fn an_input_override_rebinds_the_line_editor() {
+        let mut keymap = Registry::defaults();
+        let warnings = keymap.apply_overrides(
+            r#"
+            [input]
+            "ctrl+g" = "input-kill-eol"
+            "ctrl+k" = ""
+            "#,
+            Path::new("keymap.toml"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let mut prompt = Prompt::with(PromptKind::Rename, 0, InputBuffer::new("photo.jpg", 5));
+        let ctrl_g = Chord::new(Mods::CTRL, Key::Char('g'));
+        let action = prompt_action(&keymap, ctrl_g).expect("the override is live");
+        assert_eq!(action, InputAction::Edit(InputOp::KillEol));
+        prompt.act(action);
+        assert_eq!(prompt.query(), "photo");
+
+        // The unbound default falls back to the editor's own readline map,
+        // which is the fallback the table sits in front of rather than
+        // replaces — `Ctrl+k` is still `Ctrl+k` in every other text field on
+        // the desktop, and a prompt that answered nothing at all would be a
+        // key that silently does nothing.
+        let ctrl_k = Chord::new(Mods::CTRL, Key::Char('k'));
+        assert_eq!(
+            prompt_action(&keymap, ctrl_k),
+            Some(InputAction::Edit(InputOp::KillEol))
+        );
+
+        // A bare letter is named by no table and is therefore text.
+        assert_eq!(
+            prompt_action(&keymap, Chord::from_char('a').expect("a")),
+            None
+        );
+    }
 
     /// The temporary leg of a swap is an implementation detail of running the
     /// renames one at a time, and the journal must not see it: `u` has to put

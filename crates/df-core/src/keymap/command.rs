@@ -313,6 +313,10 @@ commands! {
     InputKillWordForward => "input-kill-word-forward",
     InputUndo => "input-undo",
     InputRedo => "input-redo",
+    // The one input command the buffer cannot serve on its own: the text has to
+    // be fetched from the system clipboard first, which is a round trip the app
+    // makes and the editor knows nothing about.
+    InputPaste => "input-paste",
 }
 
 #[cfg(test)]

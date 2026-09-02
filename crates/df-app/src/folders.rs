@@ -528,6 +528,7 @@ mod tests {
                 },
             )],
             children_complete: true,
+            approximate: false,
         }
     }
 

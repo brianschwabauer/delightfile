@@ -499,6 +499,21 @@ impl Registry {
             .map(Binding::label)
     }
 
+    /// What one chord runs in `context` on its own — no pending sequence, no
+    /// stack, no `when` flags.
+    ///
+    /// The prompt's door. A line editor has no chords to hold and no context
+    /// under it: every key it takes is one key, and a two-key row in an
+    /// `[input]` table would be a keystroke swallowed waiting for a second one
+    /// that types itself instead. So this looks at single-chord rows only, and
+    /// [`Registry::dispatch`]'s state machine stays out of the prompt.
+    pub fn lookup(&self, context: Context, chord: Chord) -> Option<Command> {
+        self.bindings
+            .iter()
+            .find(|b| b.context == context && b.seq.len() == 1 && b.seq[0] == chord)
+            .map(|b| b.command)
+    }
+
     /// Feed one keystroke in. See the module header for how the context stack
     /// decides.
     pub fn dispatch(

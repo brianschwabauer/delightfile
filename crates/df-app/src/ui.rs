@@ -1910,7 +1910,11 @@ mod tests {
                 color: palette.blue,
             };
             for count in [1usize, 2, 4, 137] {
-                let cards = crate::dnd::ghost_cards(egui::pos2(600.0, 380.0), count);
+                let cards = crate::dnd::ghost_cards(
+                    egui::pos2(600.0, 380.0),
+                    count,
+                    Scale::default().row_height,
+                );
                 paint.ghost(
                     &cards,
                     &GhostFace {
@@ -1923,7 +1927,8 @@ mod tests {
                 );
             }
             // The spring-back's ghost: no name, no verb, half faded.
-            let cards = crate::dnd::ghost_cards(egui::pos2(60.0, 60.0), 3);
+            let cards =
+                crate::dnd::ghost_cards(egui::pos2(60.0, 60.0), 3, Scale::default().row_height);
             paint.ghost(
                 &cards,
                 &GhostFace {
