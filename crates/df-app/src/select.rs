@@ -64,6 +64,16 @@ pub struct Visual {
     /// wherever that file went is not the run anybody was drawing. Holding the
     /// position means the anchor stays where it looks like it is.
     pub anchor: usize,
+    /// The file that position held when the mode opened.
+    ///
+    /// The position is what the run is drawn from, and it is right for the
+    /// changes a *person* makes — a sort, a filter. It is wrong for the ones
+    /// that arrive on their own: a scan batch, or the folder-size walk pushing
+    /// a new number into a listing sorted by size, reorders the rows under a
+    /// run nobody was touching, and the anchor then points at a different file
+    /// than the one `v` was pressed on. So the name rides along and
+    /// [`Visual::reanchored`] notices when the two have come apart.
+    pub anchor_name: Option<String>,
     /// The run currently applied to the selection, if any.
     pub applied: Option<(usize, usize)>,
     /// Per row this mode has touched: its name, and whether it was selected
@@ -72,13 +82,27 @@ pub struct Visual {
 }
 
 impl Visual {
-    pub fn new(selecting: bool, anchor: usize) -> Visual {
+    pub fn new(selecting: bool, anchor: usize, anchor_name: Option<String>) -> Visual {
         Visual {
             selecting,
             anchor,
+            anchor_name,
             applied: None,
             prior: Vec::new(),
         }
+    }
+
+    /// Where the anchor's file has got to, when the listing has moved it.
+    ///
+    /// `None` when nothing moved — which is every frame of an ordinary run, so
+    /// the caller's fast path is "no". `Some` means the rows were reordered
+    /// under the run and the whole thing has to be laid down again from the
+    /// file's new position; see the caller for why that is an undo-and-redo
+    /// rather than a nudge.
+    pub fn reanchored(&self, position_of: impl Fn(&str) -> Option<usize>) -> Option<usize> {
+        let name = self.anchor_name.as_deref()?;
+        let at = position_of(name)?;
+        (at != self.anchor).then_some(at)
     }
 
     /// Remember a row's state before visual mode changes it — the first answer
@@ -202,7 +226,7 @@ mod tests {
     /// rather than clearing it.
     #[test]
     fn the_first_remembered_answer_is_the_one_that_survives() {
-        let mut v = Visual::new(true, 0);
+        let mut v = Visual::new(true, 0, None);
         v.remember("kept.txt", true);
         v.remember("kept.txt", false);
         assert_eq!(v.was_selected("kept.txt"), Some(true));

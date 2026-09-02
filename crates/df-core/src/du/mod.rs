@@ -54,6 +54,7 @@
 //! ```
 
 pub mod cache;
+pub mod fstype;
 pub mod scanner;
 pub mod walk;
 
@@ -64,9 +65,10 @@ pub use cache::{
     current_mtime, DuCache, DuRecord, HeavyHitter, DU_CACHE_DIRS, MAX_CACHED_CHILDREN,
     MAX_CACHE_CHILDREN,
 };
+pub use fstype::{is_remote, magic_of, REMOTE_FS_MAGIC};
 pub use scanner::{du_blocking, DuMessage, DuScanner, DuToken, DU_WORKERS, MAX_TRACKED_DIRS};
 pub use walk::{
-    child_counts, crosses_boundary, walk, walk_blocking, DuOptions, DuTotals, DuUpdate, BLOCK_UNIT,
-    CANCEL_CHECK_ENTRIES, DU_BATCH, MAX_COUNTED_CHILDREN, MAX_DEPTH, MAX_HARDLINK_ENTRIES,
-    UPDATE_INTERVAL,
+    child_counts, crosses_boundary, walk, walk_blocking, ChildCount, DuOptions, DuTotals, DuUpdate,
+    BLOCK_UNIT, CANCEL_CHECK_ENTRIES, COUNT_BATCH, DU_BATCH, MAX_COUNTED_CHILDREN,
+    MAX_COUNTED_ENTRIES, MAX_DEPTH, MAX_HARDLINK_ENTRIES, UPDATE_INTERVAL,
 };

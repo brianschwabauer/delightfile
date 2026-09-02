@@ -53,17 +53,31 @@ pub struct Listing {
     /// would round to zero rows and the list would not move at all. See
     /// [`crate::mouse::Fling`], which does the same thing for the preview.
     wheel_carry: f32,
-    /// The cursor the view was left behind by, while the view is **detached**.
+    /// Whether the view has been scrolled away from the cursor, and how many
+    /// columns the pane had when it happened.
     ///
     /// A wheel roll (or a drag hanging over the edge) scrolls the *view* and
     /// leaves the cursor exactly where it was — the active row, its preview and
     /// the position counter all stay put even when the row scrolls off screen,
     /// which is what makes the wheel a way to *look* somewhere rather than a
     /// second way to move. That only works if the scrolloff rule stops deriving
-    /// the view from the cursor for as long as it lasts, so this holds the
-    /// cursor as it was when the gesture started: the next cursor move — any
-    /// key, or a click — makes it stale, and [`Listing::follow_cursor`] takes
-    /// the view back and re-anchors it around wherever the cursor went.
+    /// the view from the cursor for as long as it lasts.
+    ///
+    /// **State, not an inference.** This used to hold the cursor position the
+    /// wheel left behind and call itself detached for as long as the cursor was
+    /// still on it, which got two cases backwards. A `g g` from row 0, or a `G`
+    /// on the last row, or an `↑` that wrapped back to where it started, is a
+    /// cursor *command* that lands on the same index — and could not take the
+    /// view back, because the index had not changed. And a background rescan
+    /// that inserted one file above the cursor moved the index without anybody
+    /// touching the keyboard, which silently re-attached and snapped the view
+    /// out from under a scroll. So detachment is now cleared by the commands
+    /// that move the cursor ([`Listing::attach`]) and by nothing else: a
+    /// rebuild that keeps the cursor on its file leaves it exactly as it was.
+    ///
+    /// The column count rides along because [`Listing::first`] counts *rows of
+    /// the pane*, and a grid that reflows on a resize changes what a row is —
+    /// see [`Listing::reflow`].
     detached: Option<usize>,
     /// Nothing has been drawn yet, so the first scroll position is a *jump*.
     ///
@@ -192,13 +206,49 @@ impl Listing {
             return false;
         }
         self.set_first_over(target, crate::mouse::WHEEL_GLIDE, now);
-        self.detached = Some(self.dir.cursor());
+        self.detached = Some(columns);
         true
     }
 
     /// Whether the view has been scrolled away from the cursor.
     pub fn is_detached(&self) -> bool {
-        self.detached.is_some_and(|at| at == self.dir.cursor())
+        self.detached.is_some()
+    }
+
+    /// Take the view back: the next [`Listing::follow_cursor`] re-anchors it
+    /// around wherever the cursor is.
+    ///
+    /// Called from every path that *sends* the cursor somewhere — each keyboard
+    /// cursor command, a click, a find, the start-up placement — including the
+    /// ones that discover the cursor was already there. "The cursor did not
+    /// move" is not the same fact as "the user did not ask it to", and it is
+    /// the asking that ends a scroll.
+    pub fn attach(&mut self) {
+        self.detached = None;
+    }
+
+    /// Re-derive the view for a pane that has changed shape under it.
+    ///
+    /// [`Listing::first`] is a row of the pane, and in the grid a row is
+    /// `columns` entries — so a window resize that reflows three columns into
+    /// four leaves `first` meaning something it did not mean a frame ago, and a
+    /// detached view (which is the one nothing else will correct) ends up
+    /// somewhere unrelated to what was on screen. Re-derived through the entry
+    /// that was at the top, which is the thing the eye was actually looking at.
+    ///
+    /// A no-op while attached: the scrolloff rule puts that view where the
+    /// cursor says, every frame, in whatever geometry the pane now has.
+    pub fn reflow(&mut self, columns: usize, now: Instant) {
+        let columns = columns.max(1);
+        let Some(was) = self.detached else { return };
+        if was == columns {
+            return;
+        }
+        let top_entry = self.first.saturating_mul(was);
+        self.detached = Some(columns);
+        // A resize is not a scroll, so this is a jump rather than a slide: the
+        // rows have already moved to their new places this frame.
+        self.set_first_over(top_entry / columns, Duration::ZERO, now);
     }
 
     /// Put the view where the cursor says it should be, this frame.
@@ -207,9 +257,8 @@ impl Listing {
     /// *target* row, so the maths never chases its own animation — with the one
     /// exception a mouse earns: while the view is detached the cursor is left
     /// off screen on purpose, and all this does is keep the position legal for
-    /// a listing that has since got shorter. The first cursor move of any kind
-    /// re-attaches, which is why the check is "is the cursor still where the
-    /// wheel left it" rather than a flag somebody has to remember to clear.
+    /// a listing that has since got shorter. [`Listing::attach`] is what ends
+    /// that, and only a cursor command calls it.
     ///
     /// `cursor_row`, `rows` and `visible` are all counted in *rows of the
     /// pane*: one entry per row in the list, a whole row of tiles in the grid.
@@ -228,7 +277,6 @@ impl Listing {
             }
             return;
         }
-        self.detached = None;
         let first =
             crate::viewport::first_visible(self.first, cursor_row, rows, visible, scrolloff);
         self.set_first(first, now);
@@ -903,6 +951,7 @@ mod tests {
         // `↓`: the cursor moves from row 1, not from the top of the window the
         // wheel left behind…
         l.dir.move_cursor(1);
+        l.attach();
         assert_eq!(l.dir.cursor(), 2);
         assert!(!l.is_detached());
         // …and the view comes back to a position that shows it.
@@ -928,10 +977,71 @@ mod tests {
         // The row under the pointer, which is a row of the *scrolled* window.
         let clicked = l.first() + 1;
         l.dir.set_cursor(clicked);
+        l.attach();
         assert!(!l.is_detached());
         l.follow_cursor(l.dir.cursor(), rows, visible, 1, t0);
         assert_eq!(l.dir.cursor(), clicked);
         assert!(l.first() <= clicked && clicked < l.first() + visible);
+    }
+
+    /// The two cases the old index comparison got wrong: a cursor command that
+    /// lands where the cursor already was still takes the view back, and a
+    /// rebuild that moves the cursor's index does not.
+    #[test]
+    fn detachment_is_state_rather_than_an_index_comparison() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        let rows = l.dir.len();
+        let visible = 5.min(rows.saturating_sub(1));
+        assert!(visible >= 2);
+
+        // `g g` on row 0: the cursor does not move, and the view must still
+        // come back to it.
+        assert!(l.wheel(3.0, visible, 1, t0));
+        assert!(l.is_detached());
+        assert_eq!(l.dir.cursor(), 0);
+        l.dir.set_cursor(0);
+        l.attach();
+        assert!(!l.is_detached());
+        l.follow_cursor(l.dir.cursor(), rows, visible, 1, t0);
+        assert_eq!(l.first(), 0, "`g g` re-anchors even from row 0");
+
+        // …and the other way round: a rescan that shifted the cursor's index
+        // under a scroll leaves the scroll where it is.
+        assert!(l.wheel(3.0, visible, 1, t0));
+        let parked = l.first();
+        l.dir.set_cursor(2); // as a rebuild would, without a key being pressed
+        assert!(l.is_detached());
+        l.follow_cursor(l.dir.cursor(), rows, visible, 1, t0);
+        assert_eq!(l.first(), parked);
+    }
+
+    /// A grid that reflows on a resize keeps looking at the same entry, rather
+    /// than reading its old row number against a new column count.
+    #[test]
+    fn a_reflow_re_derives_a_detached_view() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        let entries = l.dir.len();
+        // Three columns, a pane four rows deep, scrolled two rows down: the
+        // top-left tile is entry 6.
+        let visible = 4;
+        assert!(entries.div_ceil(3) > visible, "`/` is big enough");
+        assert!(l.wheel(2.0, visible, 3, t0));
+        assert_eq!(l.first(), 2);
+
+        // Widen to four columns: entry 6 is now on row 1.
+        l.reflow(4, t0);
+        assert_eq!(l.first(), 1);
+        // …and a second call with the same count is not a second jump.
+        l.reflow(4, t0);
+        assert_eq!(l.first(), 1);
+
+        // An attached view is derived from the cursor every frame, so it has
+        // nothing to re-derive.
+        l.attach();
+        l.reflow(2, t0);
+        assert_eq!(l.first(), 1);
     }
 
     /// A detached view must stay legal when the listing shrinks under it —

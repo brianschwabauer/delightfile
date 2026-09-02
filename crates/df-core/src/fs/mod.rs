@@ -290,6 +290,11 @@ impl DirState {
         // `rem_euclid` rather than `%`: the remainder of a negative number is
         // negative in Rust, and `↑` on the first row is exactly that case.
         self.cursor = (self.cursor as isize + delta).rem_euclid(len) as usize;
+        // A person who has moved the cursor themselves has answered the
+        // question the aim was asking, and a later batch must not yank the
+        // cursor off the row they chose — the same rule the other cursor
+        // movers obey, and the one this arrow key used to be missing.
+        self.wanted_cursor = None;
         self.remember_cursor();
     }
 
@@ -321,6 +326,18 @@ impl DirState {
             return;
         }
         self.wanted_cursor = Some(name);
+    }
+
+    /// Give up on an aimed name without moving the cursor.
+    ///
+    /// What a *mouse* gesture does. A wheel roll leaves the cursor alone on
+    /// purpose, so it cannot cancel the aim the way a key press does — and an
+    /// aim that outlives the gesture is a scan batch, arriving a second later,
+    /// dragging the view off whatever the wheel had scrolled to. The gesture
+    /// says "I am looking somewhere else now", which is an answer to the aim
+    /// even though it is not an answer to the cursor.
+    pub fn cancel_aim(&mut self) {
+        self.wanted_cursor = None;
     }
 
     /// The view position of a named file, if it is visible.
@@ -524,6 +541,10 @@ impl DirState {
                 self.entries.clear();
                 self.state = LoadState::Failed;
                 self.error = Some(error.to_string());
+                // A directory that could not be read has no row to aim at, now
+                // or ever. Left standing, the name would be honoured by the
+                // *next* listing this state is filled from.
+                self.wanted_cursor = None;
                 self.rebuild();
             }
         }
@@ -600,6 +621,8 @@ impl DirState {
         self.entries.clear();
         self.state = LoadState::Failed;
         self.error = Some(error.into());
+        // Same rule as a failed scan: there is no row to aim at any more.
+        self.wanted_cursor = None;
         self.rebuild();
     }
 
@@ -622,6 +645,22 @@ impl DirState {
         }
         self.rebuild();
         true
+    }
+
+    /// The same, **without** reordering the rows.
+    ///
+    /// The size column's numbers arrive in a stream, batch after batch, and
+    /// every batch that reordered the listing would be the rows moving under a
+    /// hand that is reading them — and under a visual run, which is anchored to
+    /// a *position*. So a caller that is not sorting by the field it is writing
+    /// (or that has a run open) writes the numbers where the column reads them
+    /// and leaves the order alone; the reorder, when it is wanted at all, is a
+    /// deliberate [`DirState::revise_entries`] on a timer.
+    ///
+    /// The view is untouched, so the cursor, the selection and the generation
+    /// all stay exactly as they were.
+    pub fn revise_entries_in_place(&mut self, revise: impl FnOnce(&mut [Entry]) -> bool) -> bool {
+        revise(&mut self.entries)
     }
 
     /// Load synchronously. For startup's parent pane and for tests; everything

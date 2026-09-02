@@ -268,29 +268,70 @@ impl DuOptions {
 /// must not turn "enter a folder" into 200,000 syscalls.
 pub const MAX_COUNTED_CHILDREN: usize = 4_096;
 
-/// How many immediate entries each of `root`'s subdirectories holds.
+/// How far one subdirectory's own entries are counted before the answer
+/// becomes "at least this many".
+///
+/// `read_dir(…).count()` walks the whole directory, and a `node_modules` or a
+/// Maildir holds hundreds of thousands of names. Nobody reads "384,102 items"
+/// as anything other than "a lot", so the pass stops at ten thousand and says
+/// `10,000+` — which is the same information at a bounded cost, and keeps one
+/// pathological row from delaying every other row's count behind it.
+pub const MAX_COUNTED_ENTRIES: u64 = 10_000;
+
+/// Subdirectories per batch of counts.
+///
+/// The counts exist to put a number on screen *before* the walk has added up a
+/// byte, so they must not queue up behind the slowest directory in the listing:
+/// 16 rows is most of a screenful, and emitting at that granularity means the
+/// first rows appear while the rest are still being counted.
+pub const COUNT_BATCH: usize = 16;
+
+/// One subdirectory's entry count, and whether the counting stopped early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildCount {
+    /// Names seen, up to [`MAX_COUNTED_ENTRIES`].
+    pub entries: u64,
+    /// The cap was hit, so `entries` is a floor rather than the answer.
+    pub capped: bool,
+}
+
+/// How many immediate entries each of `root`'s subdirectories holds, streamed
+/// to `emit` in batches of [`COUNT_BATCH`].
 ///
 /// **The number that is on screen before the walk has counted a byte.** A
 /// recursive size takes seconds on a big tree; `read_dir` of one directory
 /// takes microseconds, and "12 items" is a true, useful thing to say in the
 /// meantime — where an em dash says nothing and a `0 B` would be a lie.
 ///
-/// Deliberately *not* recursive and deliberately not stat'ing anything: this
-/// counts names, which is all `read_dir` hands over and all the answer claims.
-/// Symlinks to directories are skipped for the same reason [`walk`] skips them
-/// — the listing shows them as links, and following one here would count a tree
-/// that is somewhere else.
+/// Deliberately *not* recursive and deliberately not stat'ing anything beyond
+/// what the boundary check needs: this counts names, which is all `read_dir`
+/// hands over and all the answer claims. Symlinks to directories are skipped
+/// for the same reason [`walk`] skips them — the listing shows them as links,
+/// and following one here would count a tree that is somewhere else — and a
+/// subdirectory on another filesystem is skipped for the same reason the walk
+/// will not descend into it, unless [`DuOptions::cross_filesystems`] says
+/// otherwise: a `read_dir` of an NFS mount is not a cheap pass.
 ///
-/// Returns pairs in `read_dir` order. A subdirectory that could not be read is
+/// Batches arrive in `read_dir` order. A subdirectory that could not be read is
 /// simply absent: an unreadable folder has no honest count, and inventing a
 /// zero would be worse than the dash it replaces.
-pub fn child_counts(root: &Path, cancelled: &dyn Fn() -> bool) -> Vec<(PathBuf, u64)> {
-    let Ok(reader) = std::fs::read_dir(root) else {
-        return Vec::new();
+pub fn child_counts(
+    root: &Path,
+    options: &DuOptions,
+    cancelled: &dyn Fn() -> bool,
+    emit: &mut dyn FnMut(Vec<(PathBuf, ChildCount)>),
+) {
+    let Ok(root_meta) = std::fs::symlink_metadata(root) else {
+        return;
     };
-    let mut out = Vec::new();
+    let root_dev = root_meta.dev();
+    let Ok(reader) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut batch: Vec<(PathBuf, ChildCount)> = Vec::new();
+    let mut visited = 0usize;
     for item in reader.flatten() {
-        if out.len() >= MAX_COUNTED_CHILDREN || cancelled() {
+        if visited >= MAX_COUNTED_CHILDREN || cancelled() {
             break;
         }
         // `file_type` on a `DirEntry` comes from the `d_type` the kernel
@@ -299,13 +340,43 @@ pub fn child_counts(root: &Path, cancelled: &dyn Fn() -> bool) -> Vec<(PathBuf, 
         if !item.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
+        // The boundary check the walk makes, made here too: without it the
+        // cheap pass is the one thing in the mode that wanders onto the backup
+        // drive under `/mnt`, and it does so *before* the walk has started.
+        if let Ok(meta) = item.metadata() {
+            if crosses_boundary(root_dev, meta.dev(), options.cross_filesystems) {
+                continue;
+            }
+        }
+        visited += 1;
         let path = item.path();
         let Ok(children) = std::fs::read_dir(&path) else {
             continue;
         };
-        out.push((path, children.count() as u64));
+        let mut entries = 0u64;
+        let mut capped = false;
+        for _ in children {
+            // Checked per name, not per directory: one `read_dir` of a
+            // Maildir is millions of names, and a pass that only looked
+            // between directories would hold a cancelled walk open for all of
+            // them.
+            if cancelled() {
+                return;
+            }
+            entries += 1;
+            if entries >= MAX_COUNTED_ENTRIES {
+                capped = true;
+                break;
+            }
+        }
+        batch.push((path, ChildCount { entries, capped }));
+        if batch.len() >= COUNT_BATCH {
+            emit(std::mem::take(&mut batch));
+        }
     }
-    out
+    if !batch.is_empty() {
+        emit(batch);
+    }
 }
 
 /// Whether an entry on device `child_dev` is off-limits for a walk rooted on

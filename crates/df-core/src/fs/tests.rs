@@ -521,6 +521,100 @@ fn an_aimed_cursor_gives_up_when_it_is_overruled_or_never_arrives() {
     );
 }
 
+/// The three ways an aim is cancelled that it used to survive.
+///
+/// Each one is the same bug from a different door: a name still being waited
+/// for is a cursor move that has not happened yet, and a later rebuild
+/// honouring it drags the view somewhere the user stopped asking for seconds
+/// ago.
+#[test]
+fn an_aim_is_cancelled_by_the_arrow_keys_by_the_mouse_and_by_a_failure() {
+    let token = ScanToken(11);
+
+    // `↑`/`↓` wrap rather than clamping, and went through their own path that
+    // forgot to clear the aim.
+    let mut state = loaded_state(files(&["a.txt", "b.txt"]));
+    state.token = Some(token);
+    state.aim_cursor("gone.txt");
+    state.wrap_cursor(1);
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: PathBuf::from("/fixture"),
+        entries: files(&["gone.txt"]),
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("b.txt"));
+
+    // A wheel roll leaves the cursor alone on purpose, so it cannot cancel the
+    // aim the way a key press does — it says so itself.
+    let mut state = loaded_state(files(&["a.txt", "b.txt"]));
+    state.token = Some(token);
+    state.aim_cursor("gone.txt");
+    state.cancel_aim();
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: PathBuf::from("/fixture"),
+        entries: files(&["gone.txt"]),
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("a.txt"));
+
+    // A directory that could not be read has no row to aim at — now or in the
+    // listing this state is filled from next.
+    let mut state = loaded_state(files(&["a.txt", "b.txt"]));
+    state.token = Some(token);
+    state.aim_cursor("gone.txt");
+    state.apply(&ScanUpdate::Failed {
+        token,
+        dir: PathBuf::from("/fixture"),
+        error: DfError::io(
+            PathBuf::from("/fixture"),
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+        ),
+    });
+    assert_eq!(state.state(), LoadState::Failed);
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: PathBuf::from("/fixture"),
+        entries: files(&["a.txt", "gone.txt"]),
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("a.txt"));
+}
+
+/// Writing a number into a row is not a reason for the rows to move.
+#[test]
+fn revising_entries_in_place_leaves_the_view_alone() {
+    let mut state = loaded_state(files(&["a.txt", "b.txt", "c.txt"]));
+    // Biggest first, which is what the size sort means (see `sort.rs`).
+    state.set_sort(SortOptions {
+        by: SortBy::Size,
+        ..SortOptions::default()
+    });
+    state.set_cursor(0);
+    let before = state.generation();
+    let first = state.row(0).map(|e| e.name.clone());
+
+    let changed = state.revise_entries_in_place(|entries| {
+        for entry in entries.iter_mut() {
+            if entry.name == "c.txt" {
+                entry.len = u64::MAX;
+            }
+        }
+        true
+    });
+    assert!(changed);
+    assert_eq!(
+        state.generation(),
+        before,
+        "no rebuild, so no new generation"
+    );
+    assert_eq!(state.row(0).map(|e| e.name.clone()), first, "nothing moved");
+    assert_eq!(state.cursor(), 0);
+
+    // …and the ordinary door still reorders, which is what the timer in the
+    // app calls when it is time.
+    assert!(state.revise_entries(|_| true));
+    assert_eq!(state.row(0).map(|e| e.name.as_str()), Some("c.txt"));
+}
+
 // ── Recent ──────────────────────────────────────────────────────────────────
 
 #[test]

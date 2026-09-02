@@ -52,8 +52,19 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use df_core::du::{DuRecord, DuToken, DuUpdate};
+use df_core::du::{ChildCount, DuRecord, DuToken, DuUpdate};
+
+/// How long a directory has to hold still before its sizes are walked again.
+///
+/// A build, an `rsync`, an unpack: the watcher fires dozens of times a second
+/// and each event says "these numbers are stale". Re-walking on each one meant
+/// a churning directory was walked from scratch forever and never showed a
+/// number at all. Two seconds of quiet is the debounce, and the previous sizes
+/// stay on screen wearing their `~` in the meantime — which is exactly what the
+/// `~` means: still counting, and only going to change.
+pub const RESTALE_QUIET: Duration = Duration::from_secs(2);
 
 /// One directory's recursive size, and whether it is final.
 ///
@@ -78,20 +89,53 @@ pub struct Folders {
     /// that has been superseded — by another folder, or by the "what's big"
     /// mode taking the same root for itself.
     token: Option<DuToken>,
+    /// Which tab this is about.
+    ///
+    /// Two tabs open on the same directory are two listings, and one of them
+    /// scrolling or sorting is not the other's business — a path alone made
+    /// `is_about` say yes to whichever tab asked, so switching between them
+    /// left the second one reading the first one's walk.
+    tab: usize,
     /// Per immediate child, by name: a name is what a listing row has and a
     /// path is what the walker sends.
     sizes: HashMap<String, Size>,
-    counts: HashMap<String, u64>,
+    counts: HashMap<String, ChildCount>,
+    /// What each directory row's `Entry::len` said before a walk overwrote it.
+    ///
+    /// The walked size is pushed into `Entry::len` because that is the field
+    /// the size *sort* reads — but `len` for a directory is otherwise the stat
+    /// value, and everything else that asks a row how big it is gets the walk's
+    /// answer whether or not the walk is still running. So the number that was
+    /// there first is kept, and [`Folders::stat_len`] hands it back when the
+    /// column is turned off, the linemode changes, or the walk is stopped.
+    stat_len: HashMap<String, u64>,
+    /// When the last watcher event said these numbers were stale. See
+    /// [`RESTALE_QUIET`].
+    stale_since: Option<Instant>,
 }
 
 impl Folders {
     /// Point this at a new directory, forgetting the last one. `token` is the
     /// walk that will fill it in.
-    pub fn begin(&mut self, dir: PathBuf, token: DuToken) {
+    pub fn begin(&mut self, dir: PathBuf, tab: usize, token: DuToken) {
         self.dir = dir;
+        self.tab = tab;
         self.token = Some(token);
         self.sizes.clear();
         self.counts.clear();
+        self.stat_len.clear();
+        self.stale_since = None;
+    }
+
+    /// Point this at a directory that will **not** be measured, so nothing
+    /// asks again.
+    ///
+    /// A network mount (see [`df_core::du::fstype`]). Without this the frame
+    /// loop would `statfs` it once per frame forever, because "is this the
+    /// directory being measured" would keep answering no.
+    pub fn decline(&mut self, dir: PathBuf, tab: usize) {
+        self.begin(dir, tab, DuToken(0));
+        self.token = None;
     }
 
     /// Stop measuring — leaving for a remote listing, turning the feature off,
@@ -101,10 +145,60 @@ impl Folders {
         self.token = None;
         self.sizes.clear();
         self.counts.clear();
+        self.stat_len.clear();
+        self.stale_since = None;
     }
 
-    pub fn is_about(&self, dir: &Path) -> bool {
+    pub fn is_about(&self, dir: &Path, tab: usize) -> bool {
+        !self.dir.as_os_str().is_empty() && self.dir == dir && self.tab == tab
+    }
+
+    /// Whether this is measuring `dir` at all, whichever tab asked.
+    ///
+    /// What the *watcher* wants to know: a directory that changed on disk
+    /// changed for every tab looking at it.
+    pub fn watches(&self, dir: &Path) -> bool {
         !self.dir.as_os_str().is_empty() && self.dir == dir
+    }
+
+    /// The directory changed under the walk: the numbers on screen are stale,
+    /// and a fresh walk is due once it stops changing.
+    ///
+    /// The sizes are **kept** and put back to `~`. Dropping them would blank
+    /// the column for the whole of a build, which is precisely when somebody is
+    /// watching it; a slightly-behind number that says it is behind is the
+    /// better half of that trade.
+    pub fn mark_stale(&mut self, now: Instant) {
+        self.token = None;
+        self.stale_since = Some(now);
+        for size in self.sizes.values_mut() {
+            size.settled = false;
+        }
+    }
+
+    /// Whether the directory has been quiet long enough to be walked again.
+    pub fn due(&self, now: Instant) -> bool {
+        self.stale_since
+            .is_some_and(|since| now.saturating_duration_since(since) >= RESTALE_QUIET)
+    }
+
+    /// Point the existing numbers at a fresh walk, keeping them on screen.
+    pub fn restart(&mut self, token: DuToken) {
+        self.token = Some(token);
+        self.stale_since = None;
+    }
+
+    /// Remember what a row's `Entry::len` was before the walk wrote to it. The
+    /// first answer wins — a second walk must not record the first one's.
+    pub fn remember_stat(&mut self, name: &str, len: u64) {
+        if !self.stat_len.contains_key(name) {
+            self.stat_len.insert(name.to_string(), len);
+        }
+    }
+
+    /// What a row's `Entry::len` said before the walk, if the walk changed it.
+    pub fn stat_len(&self, name: &str) -> Option<u64> {
+        self.stat_len.get(name).copied()
     }
 
     pub fn token(&self) -> Option<DuToken> {
@@ -131,7 +225,7 @@ impl Folders {
 
     /// Take the cheap `read_dir` pass. Returns whether anything on screen
     /// changed.
-    pub fn apply_counts(&mut self, counts: &[(PathBuf, u64)]) -> bool {
+    pub fn apply_counts(&mut self, counts: &[(PathBuf, ChildCount)]) -> bool {
         let mut changed = false;
         for (path, count) in counts {
             let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
@@ -189,7 +283,7 @@ impl Folders {
 
     /// How many entries that row's directory holds, when the cheap pass has
     /// been that far.
-    pub fn count(&self, name: &str) -> Option<u64> {
+    pub fn count(&self, name: &str) -> Option<ChildCount> {
         self.counts.get(name).copied()
     }
 
@@ -225,8 +319,15 @@ mod tests {
 
     fn folders() -> Folders {
         let mut f = Folders::default();
-        f.begin(PathBuf::from("/home/brian/Downloads"), DuToken(1));
+        f.begin(PathBuf::from("/home/brian/Downloads"), 0, DuToken(1));
         f
+    }
+
+    fn count(entries: u64) -> ChildCount {
+        ChildCount {
+            entries,
+            capped: false,
+        }
     }
 
     /// The three states one row passes through, in order.
@@ -235,7 +336,7 @@ mod tests {
         let mut f = folders();
         assert_eq!(f.label("photos"), None);
 
-        assert!(f.apply_counts(&[(PathBuf::from("/home/brian/Downloads/photos"), 12)]));
+        assert!(f.apply_counts(&[(PathBuf::from("/home/brian/Downloads/photos"), count(12))]));
         assert_eq!(f.label("photos").as_deref(), Some("12 items"));
 
         assert!(f.apply(&[update("photos", 1, 4 * 1024 * 1024, false)]));
@@ -305,16 +406,75 @@ mod tests {
     fn beginning_elsewhere_forgets_everything() {
         let mut f = folders();
         f.apply(&[update("photos", 1, 1024, true)]);
-        assert!(f.is_about(Path::new("/home/brian/Downloads")));
+        assert!(f.is_about(Path::new("/home/brian/Downloads"), 0));
 
-        f.begin(PathBuf::from("/home/brian/Work"), DuToken(2));
+        f.begin(PathBuf::from("/home/brian/Work"), 0, DuToken(2));
         assert!(f.is_empty());
         assert_eq!(f.label("photos"), None);
-        assert!(!f.is_about(Path::new("/home/brian/Downloads")));
+        assert!(!f.is_about(Path::new("/home/brian/Downloads"), 0));
 
         f.clear();
-        assert!(!f.is_about(Path::new("/home/brian/Work")));
+        assert!(!f.is_about(Path::new("/home/brian/Work"), 0));
         // An empty path must never match an empty path.
-        assert!(!f.is_about(Path::new("")));
+        assert!(!f.is_about(Path::new(""), 0));
+    }
+
+    /// Two tabs on the same directory are two listings, and the walk belongs to
+    /// the one that asked for it.
+    #[test]
+    fn the_same_path_in_another_tab_is_another_question() {
+        let f = folders();
+        assert!(f.is_about(Path::new("/home/brian/Downloads"), 0));
+        assert!(!f.is_about(Path::new("/home/brian/Downloads"), 1));
+        // …but the watcher's question is about the directory, not the tab.
+        assert!(f.watches(Path::new("/home/brian/Downloads")));
+    }
+
+    /// A churning directory keeps its numbers, wearing the `~` that says they
+    /// are behind, and is re-walked only once it has been quiet.
+    #[test]
+    fn a_churning_directory_keeps_its_numbers_and_waits_for_quiet() {
+        let t0 = Instant::now();
+        let mut f = folders();
+        f.apply(&[update("photos", 1, 1024, true)]);
+        assert_eq!(f.label("photos").as_deref(), Some("1.0 KB"));
+
+        f.mark_stale(t0);
+        assert_eq!(
+            f.label("photos").as_deref(),
+            Some("~1.0 KB"),
+            "the last number stands, and says it is still counting"
+        );
+        assert!(f.token().is_none());
+        assert!(!f.due(t0));
+        assert!(!f.due(t0 + RESTALE_QUIET / 2));
+        // A second event during the burst pushes the deadline out again.
+        f.mark_stale(t0 + RESTALE_QUIET / 2);
+        assert!(!f.due(t0 + RESTALE_QUIET));
+        assert!(f.due(t0 + RESTALE_QUIET + RESTALE_QUIET / 2));
+
+        f.restart(DuToken(9));
+        assert_eq!(f.token(), Some(DuToken(9)));
+        assert!(
+            !f.due(t0 + RESTALE_QUIET * 10),
+            "a restart is not still due"
+        );
+    }
+
+    /// The stat size a walk overwrites is remembered once, so it can be put
+    /// back when the walk stops.
+    #[test]
+    fn the_stat_size_is_remembered_before_the_walk_overwrites_it() {
+        let mut f = folders();
+        assert_eq!(f.stat_len("photos"), None);
+        f.remember_stat("photos", 4096);
+        f.remember_stat("photos", 4_200_000_000);
+        assert_eq!(
+            f.stat_len("photos"),
+            Some(4096),
+            "the first answer is the honest one"
+        );
+        f.clear();
+        assert_eq!(f.stat_len("photos"), None);
     }
 }
