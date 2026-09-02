@@ -1079,6 +1079,7 @@ mod tests {
                 nerd: false,
                 show_symlink: true,
                 now: Instant::now(),
+                tips: None,
             };
             let state = TransportState {
                 position_us: 12_300_000,
