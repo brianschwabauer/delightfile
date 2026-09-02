@@ -226,6 +226,7 @@ mod tests {
             cli::Outcome::Run(cli::Args {
                 start: Some(PathBuf::from("/home/brian/src")),
                 cwd_file: None,
+                chooser_file: None,
             })
         );
         // The `--` is why this one is a directory and not a parse error.
@@ -234,15 +235,24 @@ mod tests {
             cli::Outcome::Run(cli::Args {
                 start: Some(PathBuf::from("--cwd-file=/tmp/x")),
                 cwd_file: None,
+                chooser_file: None,
             })
         );
     }
 
     /// The cwd-file policy, in the one line that states it: a window opened
-    /// from another window never writes the shell's directory.
+    /// from another window never writes the shell's directory — and, for the
+    /// same reason doubled, never the picker's answer either. Two processes
+    /// racing to write one chooser file is not a dialog anybody can cancel.
     #[test]
     fn a_spawned_window_never_inherits_the_cwd_file() {
         let args = spawn_args(Path::new("/tmp"));
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.to_string_lossy().contains("chooser-file")),
+            "{args:?}"
+        );
         assert!(
             !args
                 .iter()

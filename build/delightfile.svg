@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The app icon, hand-authored. Installed to
+  …/icons/hicolor/scalable/apps/delightfile.svg, where the app_id `delightfile`
+  finds it.
+
+  A dark squircle card — the same card delightviewer wears, because the two are
+  the same program's two halves — with a folder on it and one warm dot: the
+  mark the listing puts on a row that has something to say. Drawn on a 48-unit
+  grid and checked at 48px: nothing is thinner than 2.5 units, and the card is
+  opaque so the icon reads the same on a light shelf and a dark one. Colours
+  are plain hex rather than oklch on purpose: this file is rendered by whatever
+  the icon theme uses, not by a browser.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48">
+  <title>Delight File</title>
+
+  <!-- The card. Same geometry as delightviewer's: rx generous enough that the
+       corners read as squircle-ish at any size, and the frame is the whole
+       icon rather than an outline inside it. -->
+  <rect x="3" y="3" width="42" height="42" rx="12" fill="#242833"/>
+
+  <!-- The folder, in one path: the tab rises on the left, steps across, and
+       the body carries it to the right edge. One shape rather than a tab laid
+       over a box — at 48px a seam between two blues is a grey line. -->
+  <path d="M10 17.5
+           a3.5 3.5 0 0 1 3.5-3.5
+           h5.4
+           a2.4 2.4 0 0 1 1.95 1
+           l1.7 2.35
+           a2.4 2.4 0 0 0 1.95 1
+           H34.5
+           a3.5 3.5 0 0 1 3.5 3.5
+           v11.65
+           a3.5 3.5 0 0 1 -3.5 3.5
+           H13.5
+           a3.5 3.5 0 0 1 -3.5-3.5
+           z"
+        fill="#63a4ff"/>
+
+  <!-- The mark. The one warm thing in the icon, and the same dot the listing
+       draws beside a row that is dirty in git — sat on the folder's face,
+       where the eye lands after the shape has been read. -->
+  <circle cx="31.5" cy="28.5" r="3.2" fill="#ffb454"/>
+</svg>

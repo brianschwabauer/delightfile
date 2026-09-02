@@ -80,6 +80,18 @@ const WINDOW_SIZE: (f64, f64) = (1400.0, 900.0);
 /// writes, so it must never change casually.
 const APP_ID: &str = "delightfile";
 
+/// The window's title while it is somebody else's file dialog
+/// (`--chooser-file`).
+///
+/// Not decoration — Wayland compositors here draw no titlebar — but the
+/// *handle a window rule grabs*. A picker wants to be a floating, centred,
+/// pinned sheet and a file manager wants to be a tiled window, and the `app_id`
+/// cannot say which this process is because it is both on different runs. The
+/// title can, and it is the string the existing rule already matches (see
+/// `config/hypr/lua/apps/file-picker.lua` in the system repo), which is why it
+/// is this exact spelling and not a prettier one.
+const PICKER_TITLE: &str = "file-picker";
+
 /// Ignore an egui repaint deadline further out than this and just go to sleep.
 /// egui signals "no repaint needed" as a duration near `Duration::MAX`; any
 /// real animation is milliseconds away, so anything past an hour is that
@@ -752,13 +764,19 @@ fn plural_verb(n: usize) -> &'static str {
     }
 }
 
-/// How a session ended, and therefore whether the cwd-file is written.
+/// How a session ended, and therefore what gets written on the way out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Quit {
     /// `q`, or closing the window: the shell wrapper follows you here.
     WriteCwd,
     /// `Q`: leave the shell where it was (PLAN §4.1).
     Silent,
+    /// `Enter` in a `--chooser-file` session: the picked paths go out, and the
+    /// cwd-file deliberately does not. The two flags are handed to the same
+    /// process by the portal's wrapper in its *directory* mode, and a pick
+    /// that also wrote the cwd would answer a question nobody asked with the
+    /// directory the picked file happened to be in.
+    Chosen,
 }
 
 /// The whole application.
@@ -874,6 +892,15 @@ pub struct App {
     tabs: Tabs,
     /// `--cwd-file`, written on a `q` quit (PLAN §3).
     cwd_file: Option<PathBuf>,
+    /// `--chooser-file`. `Some` is what makes this session a *picker*: the
+    /// system file dialog, standing where GTK's would (see [`crate::cli`]).
+    chooser_file: Option<PathBuf>,
+    /// What `Enter` picked, held until `finish` writes it.
+    ///
+    /// Carried rather than written where it is chosen, so the one place a
+    /// session can end is the one place anything is written — the same reason
+    /// `Quit` exists at all.
+    chosen: Vec<PathBuf>,
     quit: Option<Quit>,
 
     // ── Input ───────────────────────────────────────────────────────────────
@@ -1582,6 +1609,8 @@ impl App {
             key_repeat: false,
             tabs: Tabs::new(tab),
             cwd_file: args.cwd_file,
+            chooser_file: args.chooser_file,
+            chosen: Vec::new(),
             quit: None,
             engine,
             task_events,
@@ -1700,8 +1729,12 @@ impl App {
     fn init_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<(), GfxError> {
         use winit::platform::wayland::WindowAttributesExtWayland;
 
+        let title = match self.chooser_file {
+            Some(_) => PICKER_TITLE,
+            None => APP_ID,
+        };
         let attrs = Window::default_attributes()
-            .with_title("delightfile")
+            .with_title(title)
             .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_SIZE.0, WINDOW_SIZE.1))
             .with_name(APP_ID, APP_ID);
         let window = Arc::new(
@@ -3792,6 +3825,36 @@ impl App {
             return;
         };
         self.launch(&choice, self.targets(), now);
+    }
+
+    /// `Enter` in a `--chooser-file` session: hand these paths back to
+    /// whatever opened the dialog, and end.
+    ///
+    /// Refused inside a virtual listing. An archive member, a remote file and
+    /// a trashed file all have paths that read perfectly well in this window
+    /// and mean nothing to the program on the other end of the pipe — it will
+    /// try to `open(2)` them. Saying so is the only honest answer; silently
+    /// handing over a path that does not exist would surface as the *browser*
+    /// failing to upload, three programs away from the mistake.
+    fn choose(&mut self, now: Instant) {
+        if let Some(kind) = self.tab().virtual_kind() {
+            let where_ = match kind {
+                crate::tab::Virtual::Archive => "inside an archive",
+                crate::tab::Virtual::Remote => "on a remote service",
+                crate::tab::Virtual::Trash => "in the trash",
+            };
+            self.toasts.error(
+                format!("Nothing {where_} can be picked — it has no path on this machine"),
+                now,
+            );
+            return;
+        }
+        let picked = self.targets();
+        if picked.is_empty() {
+            return;
+        }
+        self.chosen = picked;
+        self.quit = Some(Quit::Chosen);
     }
 
     /// `O` / `Shift+Enter`: the picker, anchored to the row it is about.
@@ -7102,6 +7165,28 @@ impl App {
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
             C::Open => {
+                // A picker session answers `Enter` with the pick, before any
+                // of the openers below get a look in — the whole point of the
+                // mode is that this keystroke ends the dialog rather than
+                // launching something. A directory is still *entered*, which
+                // is the only way to walk to the file you came for; a
+                // selection wins over the row under the cursor even when that
+                // row is a folder, exactly as [`Self::targets`] has it.
+                if self.chooser_file.is_some() {
+                    let into = self
+                        .tab()
+                        .cwd
+                        .dir
+                        .cursor_entry()
+                        .filter(|entry| entry.is_dir())
+                        .filter(|_| self.tab().cwd.dir.selected_count() == 0)
+                        .map(|entry| entry.path.clone());
+                    match into {
+                        Some(path) => self.navigate(path, now),
+                        None => self.choose(now),
+                    }
+                    return;
+                }
                 // Inside an archive `Enter` has no opener to reach for — the
                 // file is not on the disk. On a directory it walks in, which is
                 // what `Enter` on a folder already means; on anything else it
@@ -12601,6 +12686,16 @@ impl App {
                 gfx.surface_config.width,
                 gfx.surface_config.height
             );
+            // A picker session says so on the frame it appears. Not because
+            // the keys have changed — `Enter` on a file is still "the one you
+            // meant" — but because *quitting* has: this window was opened by
+            // some other program's dialog, and the difference between picking
+            // and cancelling is the difference between an upload happening and
+            // not. One line, on the way in, where a person is already looking.
+            if self.chooser_file.is_some() {
+                self.toasts
+                    .notice("Picking a file — Enter chooses, q cancels", Instant::now());
+            }
         }
         if !self.logged_first_listing {
             let rows = self.tabs.active().cwd.dir.len();
@@ -12667,8 +12762,11 @@ impl App {
         interval
     }
 
-    /// Write the cwd-file if this quit calls for one, and say goodbye.
+    /// Write whatever this quit calls for, and say goodbye.
     fn finish(&mut self, event_loop: &ActiveEventLoop) {
+        if let (Some(Quit::Chosen), Some(path)) = (self.quit, self.chooser_file.as_deref()) {
+            crate::cli::write_chooser_file(path, &self.chosen);
+        }
         if let (Some(Quit::WriteCwd), Some(path)) = (self.quit, self.cwd_file.as_deref()) {
             // Never a URL: the file is `cd`'d into by a shell function, and
             // quitting out of a remote service or the trash has to leave the

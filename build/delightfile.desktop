@@ -1,0 +1,33 @@
+[Desktop Entry]
+Type=Application
+Version=1.4
+Name=Delight File
+GenericName=File Manager
+Comment=Keyboard-first file manager for Wayland
+# The basename of this file has to stay `delightfile.desktop`: it is the
+# Wayland app_id the window sets (APP_ID in crates/df-app/src/app.rs), and
+# that match is what lets a compositor find the icon below.
+Icon=delightfile
+# One path. The binary opens a single directory — or a single file, whose
+# directory it opens with the cursor on it — and rejects a list, so %f, never
+# %F.
+Exec=delightfile %f
+Terminal=false
+StartupNotify=false
+StartupWMClass=delightfile
+Categories=System;FileTools;FileManager;
+Keywords=file;manager;browser;folder;directory;explorer;files;
+# A directory, and nothing else.
+#
+# Deliberately **not** `x-scheme-handler/file`: that scheme is how some
+# programs ask "open this file", not "show me this folder", and claiming it
+# would put a file manager in front of every PDF and image opened by URI. And
+# deliberately not `x-directory/normal` either — the pre-shared-mime-info
+# spelling of the same thing, which `desktop-file-validate` now warns about.
+MimeType=inode/directory;
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=Open a new window
+Icon=delightfile
+Exec=delightfile
