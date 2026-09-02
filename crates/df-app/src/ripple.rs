@@ -162,6 +162,16 @@ impl<K: Key> Ripples<K> {
         });
     }
 
+    /// Rewrite every key through `f`, for the reason
+    /// [`crate::hover::Hovers::remap`] gives: a key is a position, and a list
+    /// that has reordered would otherwise leave its splashes behind on
+    /// whatever inherited their index.
+    pub fn remap(&mut self, f: impl Fn(K) -> K) {
+        for live in &mut self.items {
+            live.key = f(live.key);
+        }
+    }
+
     /// Drop the ripples that have finished. Separate from drawing so the prune
     /// happens exactly once a frame whether or not the control that owns a
     /// ripple is still on screen — a row scrolled out of view must not leave

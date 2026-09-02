@@ -544,8 +544,11 @@ struct PressStart {
     /// The press landed on a row of the list — reserved for DnD.
     on_row: bool,
     /// The press landed on the basket's chip, which drags the whole basket
-    /// (PLAN §7.1).
-    on_basket: bool,
+    /// (PLAN §7.1) — and the chip's rectangle, because that is where the
+    /// ghost flies home to if the drag is called off. Measured at press time
+    /// rather than at cancel time: the tray can be closed mid-drag, and a
+    /// ghost has to land somewhere it can be seen landing.
+    on_basket: Option<egui::Rect>,
     /// The press landed on a tab chip, which drags the tab out into a window
     /// (PLAN §2).
     on_tab: Option<usize>,
@@ -1187,6 +1190,9 @@ pub struct App {
     /// home — is shared by using the same painter and the same
     /// [`dnd::SpringBack`].
     tab_drag: Option<TabDrag>,
+    /// A chip on its last few points into the slot it was dropped in. Outlives
+    /// the drag it belongs to, exactly as [`SpringHome`] does.
+    tab_land: Option<TabLanding>,
     /// Windows this one has opened, so none of them becomes a zombie. See
     /// [`crate::window`] for why a window is a process.
     windows: crate::window::Windows,
@@ -1226,7 +1232,9 @@ struct Drag {
     label: String,
     /// The glyph and colour beside it, from the same table the rows use.
     icon: crate::icons::Icon,
-    /// Where the ghost springs back to — the middle of the row it came off.
+    /// Where the ghost springs back to: the middle of the *thing* it came off
+    /// — the row, or the basket's chip. Not a pointer position; see
+    /// [`dnd::ghost_home`], which is what turns it into one.
     home: egui::Pos2,
     at: egui::Pos2,
     /// The hold-to-open timer, aimed at whatever the drag is over.
@@ -1246,6 +1254,15 @@ struct Drag {
 /// what the ghost advertises and what letting go does are the same three facts
 /// — a ghost that says "new window" and a release that springs back would be
 /// the drag lying about itself.
+/// A tab chip in the hand (PLAN §2).
+///
+/// **Two gestures, one state.** Inside [`chrome::tab_band`] the chip is being
+/// *reordered*: it slides along the strip and the other tabs open a slot for
+/// it. Outside it, it is on its way out of the window and wears the ghost
+/// card, armed or not by [`crate::window::armed`]. Which one is live is asked
+/// of the pointer every frame rather than latched, so a hand that wanders out
+/// of the band and back finds the gesture it left — there is no mode to get
+/// stuck in, and nothing to reset.
 struct TabDrag {
     /// Which tab, by index. Re-read at the moment of the detach rather than
     /// held as a `Tab`, because the strip can change under a drag (a scan
@@ -1255,11 +1272,54 @@ struct TabDrag {
     /// Where the button went down — the threshold is measured from here.
     from: egui::Pos2,
     at: egui::Pos2,
-    /// The middle of the chip, which is where the ghost flies home to.
+    /// The middle of the chip, which is what the ghost flies home *onto*
+    /// ([`dnd::ghost_home`]).
     home: egui::Pos2,
+    /// The strip the gesture is happening on, refreshed every frame it moves.
+    ///
+    /// Held rather than passed, because `Esc` has to decide between the two
+    /// gestures and the escape ladder has no layout in its hands — and the
+    /// alternative, threading the whole layout down to it, would be a great
+    /// deal of plumbing for one rectangle.
+    strip: egui::Rect,
+    /// Where inside the chip the button went down, from the chip's left edge.
+    /// The chip travels with the point the hand took hold of; without this it
+    /// would jump its own centre under the cursor the moment it was picked up.
+    grab_dx: f32,
+    /// The slot it would drop into. Equal to `tab` whenever the pointer is out
+    /// of the band, so the strip closes back up while the chip is being
+    /// carried away from it.
+    slot: usize,
+    /// How far each tab had slid from its own slot at the instant `slot` last
+    /// changed, by tab index — the "first" of a FLIP, so a chip dragged
+    /// quickly past three tabs does not restart their slide from nothing.
+    slide_from: Vec<f32>,
+    /// That slide's clock.
+    slide: crate::motion::Tween,
     /// The tab's title, on the face of the ghost.
     label: String,
     icon: crate::icons::Icon,
+}
+
+/// A tab chip settling into a slot: a reorder that has just been committed, or
+/// one `Esc` has just called off.
+///
+/// Not a [`dnd::SpringBack`]: what is landing is a *chip*, in a strip, on a
+/// slot that exists — so it lands as itself rather than as a ghost card that
+/// disappears. `settle` also brings back the bottom corners and the pigtails
+/// over the same tween, which is what stops the chip snapping from a floating
+/// plate into a folder tab at the end of the flight.
+struct TabLanding {
+    /// Which tab is landing — its index **after** the reorder.
+    tab: usize,
+    /// Where the chip was when it was let go.
+    from: egui::Rect,
+    /// What is left of the other tabs' displacement at the moment of the drop,
+    /// by tab index — the slide they were still in the middle of when the
+    /// order changed under them. It runs out over the same tween, so a chip
+    /// dropped mid-slide does not jerk the strip straight.
+    offsets: Vec<f32>,
+    tween: crate::motion::Tween,
 }
 
 /// A cancelled drag on its way back to the row it came off.
@@ -1590,6 +1650,7 @@ impl App {
             prompt_opened: 0,
             drag: None,
             tab_drag: None,
+            tab_land: None,
             windows: crate::window::Windows::default(),
             spring_back: None,
             targets: Hovers::new(),
@@ -6345,8 +6406,16 @@ impl App {
         // A tab in the hand is the same kind of thing and gets the same rung
         // (PLAN §2): `Esc` puts the chip back, and nothing is opened or closed.
         if let Some(drag) = self.tab_drag.take() {
-            let at = drag.at;
-            self.spring_tab_home(drag, at, Instant::now());
+            let now = Instant::now();
+            // Whichever gesture was live is the one being cancelled, and each
+            // has its own way of putting the chip back: a reorder lets it down
+            // into the slot it started in, and a detach flies its ghost home.
+            if chrome::reordering(drag.strip, drag.at) {
+                self.land_tab(&drag, false, now);
+            } else {
+                let at = drag.at;
+                self.spring_tab_home(drag, at, now);
+            }
             self.press = None;
             return;
         }
@@ -8722,8 +8791,8 @@ impl App {
         };
         // A tab in the hand owns the gesture: the pointer is carrying a chip,
         // not drawing a band and not holding files.
-        if let Some(tab_drag) = &mut self.tab_drag {
-            tab_drag.at = at;
+        if self.tab_drag.is_some() {
+            self.carry_tab(at, strip, now);
             return;
         }
         if !press.dragging {
@@ -8737,16 +8806,16 @@ impl App {
                 // PLAN §2: "drag a tab out to spawn a window". The chip is
                 // picked up here and the decision is made on release, by
                 // [`crate::window::release`].
-                self.begin_tab_drag(index, press.at, at, strip);
+                self.begin_tab_drag(index, press.at, at, strip, now);
                 return;
             }
-            if press.on_basket {
+            if let Some(chip) = press.on_basket {
                 // PLAN §7.1: "drag the whole basket as one payload". The same
                 // drag machinery, given a different set of paths — so the
                 // ghost, the target highlighting, the modifier badges, the
                 // spring-back and the Wayland hand-off are all the ones that
                 // already work.
-                self.drag_basket(press.at, at, now);
+                self.drag_basket(chip, at, now);
                 return;
             }
             if press.on_row {
@@ -8840,7 +8909,7 @@ impl App {
     /// geometry, the index, the "is the grabbed row in the selection" rule) has
     /// no meaning here. What they share is the `Drag` they build, which is the
     /// part that matters.
-    fn drag_basket(&mut self, from: egui::Pos2, at: egui::Pos2, now: Instant) {
+    fn drag_basket(&mut self, chip: egui::Rect, at: egui::Pos2, now: Instant) {
         let paths = self.basket.paths().to_vec();
         if paths.is_empty() {
             return;
@@ -8857,7 +8926,11 @@ impl App {
             // card wearing the first file's icon would claim they are all that
             // kind.
             icon: crate::icons::generic(&self.palette, self.nerd),
-            home: from,
+            // The chip's middle, like every other `home` in this file: what
+            // the ghost lands *on* is the thing it was picked up from, and
+            // [`dnd::ghost_home`] is what turns that into the pointer
+            // position that puts the card there.
+            home: chip.center(),
             at,
             spring: dnd::SpringOpen::default(),
             last: now,
@@ -8986,33 +9059,232 @@ impl App {
         from: egui::Pos2,
         at: egui::Pos2,
         strip: egui::Rect,
+        now: Instant,
     ) {
         let Some(label) = self.tabs.iter().nth(index).map(Tab::title) else {
             return;
         };
-        let home = chrome::tab_rects(strip, self.tabs.len())
+        let chip = chrome::tab_rects(strip, self.tabs.len())
             .get(index)
-            .map(egui::Rect::center)
-            .unwrap_or(from);
+            .copied()
+            .unwrap_or(egui::Rect::from_center_size(from, egui::Vec2::ZERO));
         self.tab_drag = Some(TabDrag {
             tab: index,
             from,
             at,
-            home,
+            home: chip.center(),
+            strip,
+            grab_dx: from.x - chip.left(),
+            // It has not gone anywhere yet, so the slot it would drop into is
+            // its own and nothing has slid. A finished tween is the honest
+            // way to say "no slide is running".
+            slot: index,
+            slide_from: vec![0.0; self.tabs.len()],
+            slide: crate::motion::Tween::new(
+                0.0,
+                1.0,
+                chrome::TAB_SLIDE,
+                crate::motion::Easing::OutQuint,
+                now,
+            ),
             label,
             icon: crate::icons::folder(&self.palette, self.nerd),
         });
         // A gesture that starts is one the cancel of an older one has nothing
-        // to say about.
+        // to say about — the ghost's flight home, and a chip still settling
+        // into the slot a previous drag left it in.
         self.spring_back = None;
+        self.tab_land = None;
     }
 
-    // VERIFY-LIVE: with two tabs open, press a chip and pull it downwards. The
-    // ghost should appear within a few pixels of travel, pick up the "New
-    // window" chip as it clears the strip, and on release open a window on that
-    // tab's directory and leave one fewer chip behind. Let go inside the strip,
-    // or press `Esc` mid-gesture, and the ghost should fly back to its chip
-    // with nothing opened and nothing closed.
+    /// How far each tab has slid from its own slot this frame, by tab index.
+    ///
+    /// A FLIP between two slot layouts: `slide_from` is where they were when
+    /// the target changed, [`chrome::tab_shifted`] is where they are going,
+    /// and the tween is the journey. Computed rather than stored, so a window
+    /// resized mid-drag re-measures instead of animating towards a strip that
+    /// is no longer there.
+    fn tab_offsets(&self, drag: &TabDrag, strip: egui::Rect, now: Instant) -> Vec<f32> {
+        let count = self.tabs.len();
+        let homes = chrome::tab_rects(strip, count);
+        let targets = chrome::tab_shifted(strip, count, drag.tab, drag.slot);
+        let t = drag.slide.value(now);
+        (0..count)
+            .map(|index| {
+                let to = match (homes.get(index), targets.get(index)) {
+                    (Some(home), Some(target)) => target.left() - home.left(),
+                    _ => 0.0,
+                };
+                let from = drag.slide_from.get(index).copied().unwrap_or(0.0);
+                from + (to - from) * t
+            })
+            .collect()
+    }
+
+    /// The chip that is off the ground this frame, if any: one in the hand
+    /// being reordered, or one settling into the slot it was dropped in.
+    ///
+    /// One function because the painter draws them the same way — the only
+    /// difference between a chip being carried and a chip landing is which
+    /// number `settle` is at.
+    fn tab_carry(&self, strip: egui::Rect, now: Instant) -> Option<chrome::Carry> {
+        let count = self.tabs.len();
+        if let Some(drag) = self
+            .tab_drag
+            .as_ref()
+            .filter(|drag| chrome::reordering(strip, drag.at))
+        {
+            return Some(chrome::Carry {
+                tab: drag.tab,
+                rect: chrome::tab_carry(strip, count, drag.tab, drag.grab_dx, drag.at.x),
+                offsets: self.tab_offsets(drag, strip, now),
+                settle: 0.0,
+            });
+        }
+        let land = self.tab_land.as_ref()?;
+        let slot = chrome::tab_rects(strip, count).get(land.tab).copied()?;
+        let t = land.tween.value(now);
+        Some(chrome::Carry {
+            tab: land.tab,
+            rect: egui::Rect::from_min_size(
+                land.from.min + (slot.min - land.from.min) * t,
+                slot.size(),
+            ),
+            offsets: land.offsets.iter().map(|dx| dx * (1.0 - t)).collect(),
+            settle: t,
+        })
+    }
+
+    /// The pointer has moved with a tab chip in the hand.
+    ///
+    /// All this does is keep the target slot honest: the chip's own position
+    /// is read straight off the pointer by [`App::tab_carry`], and the
+    /// *decision* — reorder or detach — is re-asked every frame rather than
+    /// held.
+    fn carry_tab(&mut self, at: egui::Pos2, strip: Option<egui::Rect>, now: Instant) {
+        let count = self.tabs.len();
+        let Some(strip) = strip else {
+            if let Some(drag) = &mut self.tab_drag {
+                drag.at = at;
+            }
+            return;
+        };
+        // Measured against the *old* slot, before it is changed: this is the
+        // "first" half of the FLIP, and reading it afterwards would be reading
+        // where the tabs are going rather than where they are.
+        let Some(offsets) = self
+            .tab_drag
+            .as_ref()
+            .map(|drag| self.tab_offsets(drag, strip, now))
+        else {
+            return;
+        };
+        let carried = self
+            .tab_drag
+            .as_ref()
+            .map(|drag| chrome::tab_carry(strip, count, drag.tab, drag.grab_dx, at.x));
+        let Some(drag) = &mut self.tab_drag else {
+            return;
+        };
+        drag.at = at;
+        drag.strip = strip;
+        // Out of the band the strip closes back up: the chip is leaving, and
+        // holding a slot open for a tab that is on its way to another window
+        // would be the strip promising something the release will not do.
+        let slot = match (chrome::reordering(strip, at), carried) {
+            (true, Some(rect)) => chrome::tab_slot(strip, count, rect.center().x),
+            _ => drag.tab,
+        };
+        if slot != drag.slot {
+            drag.slot = slot;
+            drag.slide_from = offsets;
+            drag.slide = crate::motion::Tween::new(
+                0.0,
+                1.0,
+                chrome::TAB_SLIDE,
+                crate::motion::Easing::OutQuint,
+                now,
+            );
+        }
+    }
+
+    /// Let a carried chip down into a slot, committing the new order if it is
+    /// a new one.
+    ///
+    /// The remap is the part that is easy to leave out: every hover and ripple
+    /// in the strip is keyed by [`Control::Tab`]'s *index*, so a reorder that
+    /// moved only the tabs would leave the pointer's own highlight sitting on
+    /// whichever tab inherited the number — a chip lighting up that nothing
+    /// touched, and the one under the cursor going dark.
+    fn land_tab(&mut self, drag: &TabDrag, commit: bool, now: Instant) {
+        let count = self.tabs.len();
+        let homes = chrome::tab_rects(drag.strip, count);
+        // Where the strip actually is on the frame the button came up, which
+        // is not necessarily where it was heading: a quick drag lands with a
+        // slide still running.
+        let was = self.tab_offsets(drag, drag.strip, now);
+        let rect = chrome::tab_carry(drag.strip, count, drag.tab, drag.grab_dx, drag.at.x);
+        // Old index → new index. The identity when nothing is committed, which
+        // is what makes the cancel and the drop one piece of code.
+        let mut moved: Vec<usize> = (0..count).collect();
+        let mut landing = drag.tab;
+        if commit && self.tabs.reorder(drag.tab, drag.slot) {
+            landing = drag.slot;
+            for (slot, tab) in chrome::tab_order(count, drag.tab, drag.slot)
+                .into_iter()
+                .enumerate()
+            {
+                moved[tab] = slot;
+            }
+            // Every hover and ripple in the strip is keyed by
+            // [`Control::Tab`]'s *index*, so a reorder that moved only the
+            // tabs would leave the pointer's own highlight on whichever tab
+            // inherited the number — a chip lighting up that nothing touched,
+            // and the one under the cursor going dark.
+            let remap = |control: Control| match control {
+                Control::Tab(index) if index < count => Control::Tab(moved[index]),
+                other => other,
+            };
+            self.hovers.remap(&remap);
+            self.ripples.remap(&remap);
+        }
+        // The reorder moved the tabs to exactly where the slide was carrying
+        // them, so what is left to animate out is only the distance the slide
+        // had not covered yet.
+        let mut offsets = vec![0.0; count];
+        for (old, new) in moved.into_iter().enumerate() {
+            let (Some(from), Some(to)) = (homes.get(old), homes.get(new)) else {
+                continue;
+            };
+            offsets[new] = from.left() + was.get(old).copied().unwrap_or(0.0) - to.left();
+        }
+        self.tab_land = Some(TabLanding {
+            tab: landing,
+            from: rect,
+            offsets,
+            tween: crate::motion::Tween::new(
+                0.0,
+                1.0,
+                chrome::TAB_SLIDE,
+                crate::motion::Easing::OutQuint,
+                now,
+            ),
+        });
+    }
+
+    // VERIFY-LIVE: with three tabs open, press a chip and pull it *sideways*.
+    // The chip should come off the ground and follow the pointer along the
+    // strip while the other two slide aside to open a slot for it; letting go
+    // drops it into that slot, and the tab on screen is still the tab that was
+    // on screen. `Esc` mid-slide puts it back where it started.
+    //
+    // Then pull one *downwards* instead. Past a dozen points it should stop
+    // reordering and become a ghost card, pick up the "New window" chip as it
+    // clears [`crate::window::DETACH_THRESHOLD`], and on release open a window
+    // on that tab's directory and leave one fewer chip behind. Let go short of
+    // the threshold, or press `Esc`, and the ghost should fly home and land
+    // **centred on the chip it came from** — the landing this file used to get
+    // most of a card's width wrong (see [`dnd::ghost_home`]).
     /// Letting go of a tab chip (PLAN §2).
     ///
     /// Detaching the **last** tab is a notice rather than an action: with one
@@ -9024,6 +9296,13 @@ impl App {
         let Some(drag) = self.tab_drag.take() else {
             return;
         };
+        // Let go inside the band and the gesture was a reorder all along: the
+        // chip drops into the slot the strip has been holding open for it,
+        // which may well be the one it came from.
+        if chrome::reordering(strip, at) {
+            self.land_tab(&drag, true, now);
+            return;
+        }
         if crate::window::release(drag.from, at, strip) == crate::window::Release::SpringBack {
             self.spring_tab_home(drag, at, now);
             return;
@@ -9050,7 +9329,14 @@ impl App {
     /// arm. The same spring the file ghost uses (`delightful-ui` §6).
     fn spring_tab_home(&mut self, drag: TabDrag, at: egui::Pos2, now: Instant) {
         self.spring_back = Some(SpringHome {
-            spring: dnd::SpringBack::new(at, drag.home, 1, now),
+            // [`dnd::ghost_home`], not `drag.home` itself: the tween moves the
+            // *pointer*, and the card hangs off to the right of it.
+            spring: dnd::SpringBack::new(
+                at,
+                dnd::ghost_home(drag.home, self.scale.row_height),
+                1,
+                now,
+            ),
             label: drag.label,
             icon: drag.icon,
         });
@@ -9295,7 +9581,17 @@ impl App {
     /// happens.
     fn spring_home(&mut self, drag: Drag, now: Instant) {
         self.spring_back = Some(SpringHome {
-            spring: dnd::SpringBack::new(drag.at, drag.home, drag.paths.len(), now),
+            // `drag.home` is the middle of the row the drag came off (or, for
+            // the basket, the point the chip was taken hold of); the tween
+            // moves the *pointer*, which sits near the card's left edge. See
+            // [`dnd::ghost_home`] — without it the card lands most of its own
+            // width to the right of where it was picked up.
+            spring: dnd::SpringBack::new(
+                drag.at,
+                dnd::ghost_home(drag.home, self.scale.row_height),
+                drag.paths.len(),
+                now,
+            ),
             label: drag.label,
             icon: drag.icon,
         });
@@ -10723,7 +11019,8 @@ impl App {
             self.press = pointer.at.map(|at| PressStart {
                 at,
                 on_row: matches!(over, Some((Control::Row(Column::List, _), _))),
-                on_basket: matches!(over, Some((Control::BasketChip, _))),
+                on_basket: matches!(over, Some((Control::BasketChip, _)))
+                    .then_some(basket_geometry.chip),
                 on_tab: match over {
                     Some((Control::Tab(index), _)) => Some(index),
                     _ => None,
@@ -10830,6 +11127,14 @@ impl App {
             .is_some_and(|home| home.spring.finished(now))
         {
             self.spring_back = None;
+        }
+        // …and a chip that has settled into its slot is simply a tab again.
+        if self
+            .tab_land
+            .as_ref()
+            .is_some_and(|land| land.tween.finished(now))
+        {
+            self.tab_land = None;
         }
         // The rows in the hand are dimmed while they are in it — the same
         // treatment a cut row gets, and for the same reason: it is on its way
@@ -11497,12 +11802,14 @@ impl App {
         };
         if let Some(strip) = layout.strip {
             let titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
+            let carry = self.tab_carry(strip, now);
             chrome::tab_strip(
                 &paint,
                 strip,
                 &titles,
                 self.tabs.active_index(),
                 bar_filter,
+                carry.as_ref(),
                 &self.hovers,
                 &self.ripples,
             );
@@ -11521,6 +11828,17 @@ impl App {
         // keyboard is in one place at a time, and a prompt that opened a line
         // of its own would move every row in the window to say so
         // (`delightful-ui` §8).
+        // Whether the strip is above the top row, and therefore whether the
+        // row squares its north-west corner so its left edge and the first
+        // tab's are one straight line ([`chrome::bar_corners`]).
+        //
+        // Deliberately about the *strip*, not about which tab is active: with
+        // no plate on the inactive tabs the corner is only ever beside a
+        // straight edge or beside nothing, and rounding it back whenever the
+        // first tab was not the live one would be the window's frame moving in
+        // answer to a keystroke about its contents. One flag, one place, if
+        // that ever wants revisiting.
+        let joined = layout.strip.is_some();
         match &self.prompt {
             // …except the help filter, which belongs to the sheet drawn over
             // this row: a field painted here would be behind the sheet's own
@@ -11529,7 +11847,7 @@ impl App {
             Some(prompt) if !prompt.kind.anchored() && !prompt.kind.is_help() => {
                 // The directory the prompt is about, kept as context on the
                 // left when the field can spare the room.
-                chrome::prompt_row(&paint, layout.path, prompt, self.prompt_tail());
+                chrome::prompt_row(&paint, layout.path, prompt, self.prompt_tail(), joined);
             }
             _ => {
                 let cluster = self.cluster(now);
@@ -11540,6 +11858,7 @@ impl App {
                     &self.path_bar.1,
                     self.filter_chip_text(),
                     bar_filter,
+                    joined,
                     &cluster,
                     &top_geom,
                     &self.hovers,
@@ -11719,19 +12038,24 @@ impl App {
         // it is empty until the gesture has actually armed — a ghost that
         // promised a window before the threshold was crossed would be the
         // gesture lying about itself.
+        // …and only while it is *leaving*: inside the band the chip itself is
+        // in the strip under the pointer, and a second copy of it on a card
+        // would be the drag showing the same tab twice.
         if let (Some(drag), Some(strip)) = (&self.tab_drag, layout.strip) {
-            let armed = crate::window::armed(drag.from, drag.at, strip);
-            let cards = dnd::ghost_cards(drag.at, 1, ghost_row);
-            paint.ghost(
-                &cards,
-                &ui::GhostFace {
-                    icon: drag.icon,
-                    name: &drag.label,
-                    count: None,
-                    verb: if armed { "New window" } else { "" },
-                },
-                1.0,
-            );
+            if !chrome::reordering(strip, drag.at) {
+                let armed = crate::window::armed(drag.from, drag.at, strip);
+                let cards = dnd::ghost_cards(drag.at, 1, ghost_row);
+                paint.ghost(
+                    &cards,
+                    &ui::GhostFace {
+                        icon: drag.icon,
+                        name: &drag.label,
+                        count: None,
+                        verb: if armed { "New window" } else { "" },
+                    },
+                    1.0,
+                );
+            }
         }
         // …and the cancelled one on its way home, which outlives the drag.
         if let Some(home) = &self.spring_back {
@@ -11841,6 +12165,17 @@ impl App {
             // does — which brings its own frame with it.
             ("targets", self.targets.animating()),
             ("spring", self.spring_back.is_some()),
+            // The strip opening a slot for a chip being carried along it, and
+            // the chip's own last few points into that slot. Both are dropped
+            // the moment they finish, so neither can stick on.
+            (
+                "tabslide",
+                self.tab_land.is_some()
+                    || self
+                        .tab_drag
+                        .as_ref()
+                        .is_some_and(|drag| !drag.slide.finished(now)),
+            ),
             // The seek handle's rubber band settling back onto the end of the
             // track. It is dropped the moment it lands (`media_pointer`), so
             // this cannot be stuck on.

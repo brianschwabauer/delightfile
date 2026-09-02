@@ -327,6 +327,21 @@ pub fn ghost_grab(row_height: f32) -> egui::Vec2 {
     egui::vec2(16.0, ghost_height(row_height) / 2.0)
 }
 
+/// The pointer position that puts the ghost's top card **centred on**
+/// `centre` — the middle of the row, or the chip, the drag came off.
+///
+/// This is the conversion the spring-back was missing, and it is worth being
+/// explicit about why it is needed. The card is drawn at
+/// `at - `[`ghost_grab`], so the pointer sits near its *left edge*: springing
+/// the pointer itself back to the middle of a row lands the grab point there
+/// and leaves the card hanging most of its own width to the right — about 72
+/// points off, which on a row is a card that visibly misses and on a tab chip
+/// is a card that lands on the next tab along. Springing to this instead lands
+/// the card where it was picked up.
+pub fn ghost_home(centre: egui::Pos2, row_height: f32) -> egui::Pos2 {
+    centre + ghost_grab(row_height) - egui::vec2(GHOST_WIDTH, ghost_height(row_height)) / 2.0
+}
+
 /// How far the top card is lifted, as a scale. delightstack's mirror scale, to
 /// the digit: enough that the card reads as being *above* the window.
 pub const GHOST_LIFT: f32 = 1.025;
@@ -820,6 +835,27 @@ mod tests {
         assert!(valid_dest(Path::new("/tmp"), &dragged, Verb::Move));
         // Nothing in hand is nothing to drop.
         assert!(!valid_dest(Path::new("/tmp"), &[], Verb::Move));
+    }
+
+    /// A cancelled drag lands the *card* on the thing it came off, not the
+    /// pointer — which is the whole of the spring-back bug: the card hangs to
+    /// the right of the cursor, so springing the cursor to a row's middle left
+    /// the card most of its own width past it.
+    #[test]
+    fn the_ghost_lands_centred_on_what_it_came_off() {
+        let row = crate::ui::Scale::default().row_height;
+        for centre in [egui::pos2(400.0, 300.0), egui::pos2(12.5, 19.0)] {
+            for count in [1usize, 5] {
+                let cards = ghost_cards(ghost_home(centre, row), count, row);
+                let top = cards.last().expect("a stack has a top card");
+                assert!((top.rect.center() - centre).length() < 1e-3);
+            }
+        }
+        // …and springing the raw centre, which is what it used to do, misses
+        // by most of the card's width.
+        let missed = ghost_cards(egui::pos2(400.0, 300.0), 1, row);
+        let off = missed[0].rect.center().x - 400.0;
+        assert!(off > GHOST_WIDTH / 3.0, "the old landing was {off} pt out");
     }
 
     /// The stack: back to front, capped, and hung off the pointer.

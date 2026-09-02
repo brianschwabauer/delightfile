@@ -125,6 +125,24 @@ impl<K: Key> Hovers<K> {
             .retain(|(_, hover, press)| *hover > EPSILON || *press > EPSILON);
     }
 
+    /// Rewrite every key through `f` — what a strip that has reordered under
+    /// the pointer owes the fades it is carrying.
+    ///
+    /// A key here is a *position* ([`crate::ui::Control::Tab`] is an index),
+    /// so a reorder silently moves every warm amount onto whichever control
+    /// has inherited its number: the tab the pointer is over goes cold and its
+    /// neighbour lights up, having been touched by nothing. Moving the amounts
+    /// with the things they belong to is the fix, and it has to be done by the
+    /// code that knows the permutation — hence a callback rather than a method
+    /// per kind of reorder.
+    pub fn remap(&mut self, f: impl Fn(K) -> K) {
+        for (key, _, _) in &mut self.items {
+            *key = f(*key);
+        }
+        self.hot = self.hot.map(&f);
+        self.pressed = self.pressed.map(&f);
+    }
+
     pub fn hover(&self, hit: K) -> f32 {
         self.amount(hit).0
     }
