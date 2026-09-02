@@ -41,6 +41,16 @@ fi
 # the same gesture as opening, aimed at a name the portal has already created.
 : "$multiple" "$save"
 
+# The portal resolves `$path` from open_mode/save_mode and should always send
+# one. An empty argument would be read as a directory named "", so it is
+# dropped here and delightfile's own default — the directory the process starts
+# in — answers instead of a warning in the log.
+if [ -n "$path" ]; then
+    set -- "$path"
+else
+    set --
+fi
+
 if [ "$directory" = 1 ]; then
     # There is no "pick this folder" key, and there does not need to be: the
     # way you choose a directory in a file manager is to be *in* it. So the
@@ -48,12 +58,12 @@ if [ "$directory" = 1 ]; then
     # the fallback at the bottom promotes that to the answer when nothing was
     # picked outright. (`Enter` still works — on a file, for the caller that
     # asked for a directory but would accept the one a file is in.)
-    delightfile --chooser-file="$out" --cwd-file="$out.1" "$path" || true
+    delightfile --chooser-file="$out" --cwd-file="$out.1" "$@" || true
 else
     # Open and save both land here. In a save the portal has already created
     # `$path` (with instructions in it, unless create_help_file=0), so the file
     # to pick is sitting under the cursor the moment the window appears.
-    delightfile --chooser-file="$out" "$path" || true
+    delightfile --chooser-file="$out" "$@" || true
 fi
 
 # `|| true` above, and no `set -e` anywhere: a picker that crashed still has
