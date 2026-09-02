@@ -5,7 +5,29 @@
 //! scrim, because the thing behind it is an arbitrary frame of video and white
 //! text on an arbitrary frame is unreadable.
 //!
-//! Three things here are load-bearing and none of them is decoration.
+//! **It is delightviewer's transport strip**, ported rather than approximated:
+//! the same 30-point line, the same 12-point proportional type with the elapsed
+//! time at the playhead's end of the track and the duration at the other, the
+//! same scrim curve to the constant, the same drawn mute and loop badges, and
+//! the same Range for a position bar — two rounded track segments with a notch
+//! either side of a pill handle that grows under the pointer, grows a halo while
+//! it is dragged, and stretches on a rubber band past either end of the track.
+//! delightviewer keeps all of that in its own binary crate (`dlv-app::ui::
+//! transport`), tangled with its edit document and its chapter list, so there
+//! was nothing to vendor the way the `dv-*` crates were vendored; what is here
+//! is the module ported to this program's palette, its `Painting`, and its
+//! preview pane's geometry.
+//!
+//! Four things here are load-bearing and none of them is decoration.
+//!
+//! **The position bar is a control.** It reported a position and nothing else
+//! until this commit. Now a press on the track seeks, the drag stays captured
+//! until the release wherever it wanders, the hover shows the time the click
+//! would land on, and the play glyph is a button that toggles playback. The
+//! *geometry* of all three is reported back from [`paint`] as [`Hits`], because
+//! the strip lays itself out against the width its own timecodes came out —
+//! a hit test that computed that a second time is the second answer to a
+//! question with one right answer.
 //!
 //! **The scrim is a raised cosine, not a linear ramp** (`delightful-ui` §14,
 //! PLAN §8). A straight interpolation from opaque to clear has a corner at each
@@ -47,27 +69,39 @@ pub const LINGER: Duration = Duration::from_millis(2500);
 pub const FADE: Duration = Duration::from_millis(500);
 
 /// The strip's height, in logical points: one line of type with room over and
-/// under it.
-const HEIGHT: f32 = 26.0;
+/// under it, and — now that the position bar is a control — with room for a
+/// handle standing across it. delightviewer's `HEIGHT`.
+const HEIGHT: f32 = 30.0;
 
-/// The position bar's thickness. Thin — it reports a position and (for now) is
-/// not a control; pointer scrubbing lands with the rest of the mouse work in
-/// Phase 4.
+/// The position bar's thickness at rest. The played side runs thicker and both
+/// sides grow under the pointer; see the Range in [`paint`].
 const BAR_HEIGHT: f32 = 3.0;
 
 /// The gap between the strip's pieces.
 const GAP: f32 = 10.0;
 
+/// How far the strip is inset from the pane's content box at either end.
+///
+/// delightviewer's `MARGIN` is 16, measured against a whole window; the pane
+/// here is a third of one and already inset from its own frame, so the inset
+/// that reads the same is the strip's own gap.
+const MARGIN: f32 = GAP;
+
 /// The strip's type size. A shade under the row font: a timecode is a readout,
-/// not content.
+/// not content. delightviewer's `FONT_SIZE`, and — like it — **proportional**:
+/// a monospace timecode in a line of proportional chrome reads as a different
+/// program's widget, and the digits do not need the column anyway when the
+/// number they are in is pinned to one end of the strip.
 const FONT: f32 = 12.0;
 
 /// How far past the strip the scrim keeps fading, in points.
 ///
 /// Long on purpose: a gentle curve needs further to get to nothing, and the
 /// last quarter of this is under three units of alpha. delightviewer's
-/// `SCRIM_FADE`, scaled down for a pane a third of the window wide.
-const SCRIM_FADE: f32 = 96.0;
+/// `SCRIM_FADE` exactly — this used to be scaled down "for a pane a third of
+/// the window wide", which shortened the one curve the two programs were
+/// supposed to share and put back a hint of the corner it exists to remove.
+const SCRIM_FADE: f32 = 132.0;
 
 /// Bias on the falloff. 1 is a plain raised cosine; higher pulls the darkness
 /// toward the edge, so the ramp can be long without washing out the picture.
@@ -75,11 +109,30 @@ const SCRIM_BIAS: f32 = 2.5;
 
 /// How many quads the ramp is built from. Each interpolates linearly between
 /// its two ends, so this is how finely the curve is sampled — high enough that
-/// the per-band corners are far below one step of alpha.
-const SCRIM_BANDS: usize = 32;
+/// the per-band corners are far below one step of alpha. delightviewer's count.
+const SCRIM_BANDS: usize = 40;
 
-/// The scrim's darkest alpha, under the text itself.
-const SCRIM_PEAK: f32 = 0.72;
+/// The scrim's darkest alpha, under the text itself. delightviewer's `0.8`.
+const SCRIM_PEAK: f32 = 0.8;
+
+/// The side of the box the two state badges are drawn in.
+///
+/// Sized to the strip's type rather than to the strip: these sit in the row the
+/// timecode is in, and a glyph taller than the digits beside it reads as a
+/// button rather than as a state. 13 px against a 12 px font is the optical
+/// match, not the geometric one — outlines read smaller than letters do.
+const BADGE: f32 = 13.0;
+
+/// The Range's edge rubber band: `24 · tanh(overflow / 100)`, verbatim from
+/// delightstack's `Range.svelte`. Past the end of the track the handle keeps
+/// following the pointer, but less and less — which is what says "this is as
+/// far as it goes" without the handle simply sticking.
+pub const MAX_OVERSHOOT: f32 = 24.0;
+
+/// Slack left at each end of the track so the rubber band has somewhere to
+/// stretch into — [`MAX_OVERSHOOT`] would otherwise push the handle over the
+/// timecode beside it.
+const OVERSHOOT_ROOM: f32 = 18.0;
 
 /// How visible a piece of linger-then-leave chrome is at `now`: 1 while it is
 /// held, then eased to 0 over [`FADE`].
@@ -201,18 +254,25 @@ fn scrim(painter: &egui::Painter, content: egui::Rect, hold: f32, peak: f32) {
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// The play/pause glyph, drawn rather than typed.
+/// The play/pause **button**, drawn rather than typed.
 ///
-/// It wears the icon of **what the state is**, not of what pressing `k` would
-/// do: this is a readout on a preview, not a button you aim at, and a paused
-/// clip showing a play triangle would be claiming to be playing.
+/// It wears the icon of what pressing it *does*, not of what the player is
+/// currently doing — a paused clip offers a play triangle, a playing one offers
+/// the pause bars. That is what every video player people already use does, and
+/// the state is legible from the picture moving anyway.
 ///
-/// The triangle is nudged left of geometric centre (`delightful-ui` §17): its
-/// mass sits on its flat edge, so a bounding-box centring reads as shoved
-/// right.
-fn state_glyph(painter: &egui::Painter, centre: egui::Pos2, playing: bool, color: egui::Color32) {
-    let r = 5.0;
+/// `k` scales the glyph, which is how the press reads: the delightstack Video's
+/// `.btn:active { scale: 0.88 }`, painted.
+fn state_glyph(
+    painter: &egui::Painter,
+    centre: egui::Pos2,
+    playing: bool,
+    color: egui::Color32,
+    k: f32,
+) {
+    let r = 5.0 * k;
     if playing {
+        // Pause: two bars — "press to stop".
         for dx in [-r * 0.65, r * 0.15] {
             painter.rect_filled(
                 egui::Rect::from_min_size(
@@ -224,11 +284,14 @@ fn state_glyph(painter: &egui::Painter, centre: egui::Pos2, playing: bool, color
             );
         }
     } else {
+        // Play: the triangle — "press to go". Nudged left of geometric centre
+        // (`delightful-ui` §17): its mass sits on its flat edge, so a
+        // bounding-box centring reads as shoved right.
         painter.add(egui::Shape::convex_polygon(
             vec![
-                egui::pos2(centre.x - r * 0.75, centre.y - r),
-                egui::pos2(centre.x + r * 0.75, centre.y),
-                egui::pos2(centre.x - r * 0.75, centre.y + r),
+                egui::pos2(centre.x - r * 0.7, centre.y - r),
+                egui::pos2(centre.x + r * 0.8, centre.y),
+                egui::pos2(centre.x - r * 0.7, centre.y + r),
             ],
             color,
             egui::Stroke::NONE,
@@ -236,13 +299,240 @@ fn state_glyph(painter: &egui::Painter, centre: egui::Pos2, playing: bool, color
     }
 }
 
-/// Draw the strip across the bottom of `content`.
+/// A pen for one badge glyph: its box, optically scaled, and a stroke sized to
+/// it. Coordinates run 0…1 in both axes.
+///
+/// delightviewer's `ui::editbar::Nib`, cut down to the four calls the two
+/// badges here make. Ported rather than reinvented so the mute and the loop are
+/// drawn at the same weight in both programs — a glyph is a drawing, and two
+/// sets of helpers is two stroke weights.
+struct Nib<'a> {
+    painter: &'a egui::Painter,
+    rect: egui::Rect,
+    stroke: egui::Stroke,
+    ink: egui::Color32,
+}
+
+impl<'a> Nib<'a> {
+    /// `weight` is the optical correction — 1.0 fills the box, less shrinks it
+    /// about its centre.
+    fn new(
+        painter: &'a egui::Painter,
+        box_: egui::Rect,
+        weight: f32,
+        ink: egui::Color32,
+    ) -> Nib<'a> {
+        let rect = egui::Rect::from_center_size(box_.center(), box_.size() * weight);
+        Nib {
+            painter,
+            rect,
+            // Scaled with the box, floored where a hairline would disappear.
+            stroke: egui::Stroke::new((rect.width() / 11.0).max(1.1), ink),
+            ink,
+        }
+    }
+
+    fn at(&self, x: f32, y: f32) -> egui::Pos2 {
+        egui::pos2(
+            self.rect.left() + x * self.rect.width(),
+            self.rect.top() + y * self.rect.height(),
+        )
+    }
+
+    fn line(&self, a: (f32, f32), b: (f32, f32)) {
+        self.painter
+            .line_segment([self.at(a.0, a.1), self.at(b.0, b.1)], self.stroke);
+    }
+
+    /// An open path through every point.
+    fn path(&self, points: &[(f32, f32)]) {
+        let points: Vec<egui::Pos2> = points.iter().map(|(x, y)| self.at(*x, *y)).collect();
+        self.painter.add(egui::Shape::line(points, self.stroke));
+    }
+
+    /// A solid convex shape.
+    fn poly(&self, points: &[(f32, f32)]) {
+        let points: Vec<egui::Pos2> = points.iter().map(|(x, y)| self.at(*x, *y)).collect();
+        self.painter.add(egui::Shape::convex_polygon(
+            points,
+            self.ink,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    fn rect(&self, a: (f32, f32), b: (f32, f32)) {
+        let rect = egui::Rect::from_two_pos(self.at(a.0, a.1), self.at(b.0, b.1));
+        self.painter
+            .rect_filled(rect, egui::CornerRadius::same(1), self.ink);
+    }
+
+    /// An arc, as a polyline, `from`→`to` radians about `c`.
+    fn arc(&self, c: (f32, f32), radius: f32, from: f32, to: f32) -> Vec<(f32, f32)> {
+        (0..=16)
+            .map(|i| {
+                let t = from + (to - from) * (i as f32 / 16.0);
+                (c.0 + radius * t.cos(), c.1 + radius * t.sin())
+            })
+            .collect()
+    }
+}
+
+/// A badge's box, right-aligned at `right` and centred on the strip's line —
+/// the glyph's answer to `Align2::RIGHT_CENTER`.
+fn badge_box(right: f32, mid: f32) -> egui::Rect {
+    egui::Rect::from_center_size(
+        egui::pos2(right - BADGE / 2.0, mid),
+        egui::vec2(BADGE, BADGE),
+    )
+}
+
+/// **Muted**: a speaker with a cross beside it, drawn rather than spelled.
+///
+/// The word `muted` was four times the width of the fact, in the one strip
+/// where width is the position bar's to spend — and a crossed speaker is the
+/// picture every player on the machine already uses for it.
+///
+/// A cross **beside** the cone rather than a slash **through** it: the cone is
+/// filled, and a stroke of the same ink laid over a filled shape is a stroke
+/// you cannot see. Struck-through mute glyphs draw their slash in the
+/// background's colour, and the background here is an arbitrary frame of video
+/// under a scrim.
+fn mute_glyph(painter: &egui::Painter, box_: egui::Rect, ink: egui::Color32) {
+    let n = Nib::new(painter, box_, 0.92, ink);
+    // The cone, filled: a box and a trapezoid rather than one concave outline,
+    // so the shape reads solid at 13 px the way the play triangle does — and so
+    // both halves are convex, which is all `poly` can fill.
+    n.rect((0.0, 0.34), (0.20, 0.66));
+    n.poly(&[(0.18, 0.34), (0.18, 0.66), (0.46, 0.94), (0.46, 0.06)]);
+    // …and the cross, which is the whole message. Set in from the cone so the
+    // two read as a glyph and its mark, not as one tangle.
+    n.line((0.60, 0.30), (0.98, 0.70));
+    n.line((0.98, 0.30), (0.60, 0.70));
+}
+
+/// **Loop**: a circular arrow — the arc that comes back to where it started,
+/// which is what the state means.
+fn loop_glyph(painter: &egui::Painter, box_: egui::Rect, ink: egui::Color32) {
+    let n = Nib::new(painter, box_, 1.0, ink);
+    // Nearly closed: the gap is what the arrowhead sits in, and a full circle
+    // with a head on it reads as a circle with a nick in it.
+    const R: f32 = 0.40;
+    const END: f32 = 4.5;
+    let arc = n.arc((0.5, 0.5), R, -1.0, END);
+    n.path(&arc);
+    // The head points *along* the travel, not at the centre: the barbs come
+    // back from the tip against the tangent, which at the top of the circle is
+    // rightwards. A head aimed anywhere else turns the arrow into a tick.
+    if let Some(&(hx, hy)) = arc.last() {
+        let (tx, ty) = (-END.sin(), END.cos());
+        for side in [-1.0, 1.0] {
+            n.line(
+                (hx, hy),
+                (
+                    hx - 0.17 * tx + side * 0.11 * ty,
+                    hy - 0.17 * ty - side * 0.11 * tx,
+                ),
+            );
+        }
+    }
+}
+
+/// How the position bar is being handled this frame — the delightstack
+/// `Range`'s three states, plus the elastic overshoot it gives you when a drag
+/// runs off the end of the track.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Grab {
+    /// A drag is in progress on the handle.
+    pub scrubbing: bool,
+    /// The primary button is down (anywhere) — what makes the play button read
+    /// as pressed while it is held.
+    pub down: bool,
+    /// Signed pixels the handle is displaced by, past the end of the track.
+    /// Live while dragging, springing back to zero on release.
+    pub overshoot: f32,
+}
+
+/// The rubber band itself, as a function of how far past the end the pointer is.
+pub fn overshoot_for(overflow_px: f32) -> f32 {
+    MAX_OVERSHOOT * (overflow_px / 100.0).tanh()
+}
+
+/// The same band, measured from a track and a pointer.
+pub fn overshoot_past(bar: egui::Rect, x: f32) -> f32 {
+    let overflow = if x < bar.left() {
+        x - bar.left()
+    } else if x > bar.right() {
+        x - bar.right()
+    } else {
+        0.0
+    };
+    overshoot_for(overflow)
+}
+
+/// Where the strip's controls landed, so the pointer layer can claim exactly
+/// the bar as a scrubber and exactly the glyph as a button.
+///
+/// Read on the *next* frame's pointer pass, which is the frame after the one
+/// that drew them: the strip lays itself out during the paint, and a hit test
+/// that guessed the geometry instead is the second answer to a question with
+/// one right answer.
+#[derive(Debug, Clone, Copy)]
+pub struct Hits {
+    /// `Rect::NOTHING` when the pane is too narrow to lay a track out — the
+    /// button is still a button then, which is the difference between a
+    /// cramped strip and no strip.
+    pub bar: egui::Rect,
+    pub glyph: egui::Rect,
+}
+
+/// How far through the file the playhead is, 0..=1.
+pub fn progress(state: &TransportState) -> f32 {
+    if state.duration_us <= 0 {
+        return 0.0;
+    }
+    (state.position_us as f64 / state.duration_us as f64).clamp(0.0, 1.0) as f32
+}
+
+/// Measure a line of text without drawing it — the strip lays itself out by
+/// hand, so it needs this before it knows where the bar's ends are.
+fn text_width(painter: &egui::Painter, text: &str, font: &egui::FontId) -> f32 {
+    painter
+        .layout_no_wrap(text.to_string(), font.clone(), egui::Color32::WHITE)
+        .rect
+        .width()
+}
+
+/// The strip's own rect inside `content`, so the hit test and the drawing
+/// cannot disagree about where it is.
+pub fn rect(content: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(content.left() + MARGIN, content.bottom() - HEIGHT),
+        egui::pos2(content.right() - MARGIN, content.bottom()),
+    )
+}
+
+/// Draw the strip across the bottom of `content`, and report where its controls
+/// landed.
 ///
 /// `alpha` is the linger-fade, already multiplied by whatever crossfade the
-/// pane is in.
-pub fn paint(paint: &Painting<'_>, content: egui::Rect, state: &TransportState, alpha: f32) {
+/// pane is in. `pointer` is where the hand is, in the same points — the Range
+/// grows under it and the seek tooltip follows it — and `grab` is what the hand
+/// is *doing*, which the pointer layer decided a frame ago.
+///
+/// The look is delightviewer's transport, which is the delightstack Video's
+/// control bar: a scrim gradient under the controls, and the position bar is
+/// its Range — two rounded track segments with a notch either side of a pill
+/// handle that grows under the pointer and grows a halo while scrubbing.
+pub fn paint(
+    paint: &Painting<'_>,
+    content: egui::Rect,
+    state: &TransportState,
+    alpha: f32,
+    pointer: Option<egui::Pos2>,
+    grab: Grab,
+) -> Option<Hits> {
     if alpha <= 0.004 || content.width() <= 0.0 || content.height() <= 0.0 {
-        return;
+        return None;
     }
     let painter = paint.painter.with_clip_rect(content);
     // Only over a picture: an audio card is drawn on the pane's own ground and
@@ -251,109 +541,213 @@ pub fn paint(paint: &Painting<'_>, content: egui::Rect, state: &TransportState, 
         scrim(&painter, content, HEIGHT + GAP, SCRIM_PEAK * alpha);
     }
 
-    let ink = paint.palette.text.gamma_multiply(alpha);
-    let dim = paint.palette.subtext0.gamma_multiply(alpha);
-    let row = egui::Rect::from_min_max(
-        egui::pos2(content.left(), content.bottom() - HEIGHT),
-        egui::pos2(content.right(), content.bottom()),
-    );
-    let mid = row.center().y;
+    let a = |color: egui::Color32, mul: f32| color.gamma_multiply(alpha.clamp(0.0, 1.0) * mul);
+    let text = paint.palette.text;
+    let dim = paint.palette.subtext0;
+    let accent = paint.palette.blue;
 
-    state_glyph(
-        &painter,
-        egui::pos2(row.left() + 6.0, mid),
-        state.playing,
-        ink,
-    );
+    let strip = rect(content);
+    let font = egui::FontId::proportional(FONT);
+    let mid = strip.center().y;
 
-    // `position / duration`, left of the bar: one readout, not two, because the
-    // question is always "how far through".
-    let label = if state.duration_us > 0 {
-        format!(
-            "{} / {}",
-            timecode(state.position_us),
-            timecode(state.duration_us)
-        )
-    } else {
-        timecode(state.position_us)
-    };
-    let galley = painter.layout_no_wrap(label, egui::FontId::monospace(FONT), dim);
-    let text_left = row.left() + 6.0 + 8.0 + GAP;
-    painter.galley(
-        egui::pos2(text_left, mid - galley.size().y / 2.0),
-        galley.clone(),
-        dim,
-    );
-
-    // The right end carries the states that are *unusual* — a rate that is not
-    // 1×, a mute, a loop — so the strip says nothing at all when there is
-    // nothing unusual to say.
-    let mut right = row.right() - 6.0;
-    let mut chip = |text: String, color: egui::Color32, painter: &egui::Painter| {
-        let g = painter.layout_no_wrap(text, egui::FontId::monospace(FONT), color);
-        let width = g.size().x;
-        right -= width;
-        painter.galley(egui::pos2(right, mid - g.size().y / 2.0), g, color);
-        right -= GAP;
-    };
-    if state.muted {
-        chip(
-            "muted".into(),
-            paint.palette.peach.gamma_multiply(alpha),
-            &painter,
-        );
-    } else if (state.volume - 1.0).abs() > 0.01 {
-        chip(
-            format!("{}%", (state.volume * 100.0).round() as i32),
-            dim,
-            &painter,
-        );
-    }
-    if state.looping {
-        chip(
-            "loop".into(),
-            paint.palette.teal.gamma_multiply(alpha),
-            &painter,
-        );
-    }
-    if let Some(rate) = rate_label(state.rate, state.playing) {
-        // The rate badge is the loudest thing on the strip because it is the
-        // one piece of state a hand is actively driving.
-        chip(rate, paint.palette.blue.gamma_multiply(alpha), &painter);
-    }
-
-    // The bar fills what is left between the timecode and the chips, so it
-    // never runs under either.
-    let bar_left = text_left + galley.size().x + GAP;
-    let bar_right = right;
-    if bar_right - bar_left < 24.0 {
-        return;
-    }
-    let track = egui::Rect::from_min_max(
-        egui::pos2(bar_left, mid - BAR_HEIGHT / 2.0),
-        egui::pos2(bar_right, mid + BAR_HEIGHT / 2.0),
-    );
-    painter.rect_filled(
-        track,
-        BAR_HEIGHT / 2.0,
-        paint.palette.surface1.gamma_multiply(alpha * 0.9),
-    );
-    let fraction = if state.duration_us > 0 {
-        (state.position_us as f64 / state.duration_us as f64).clamp(0.0, 1.0) as f32
-    } else {
-        0.0
-    };
-    if fraction > 0.0 {
-        let filled = egui::Rect::from_min_max(
-            track.min,
-            egui::pos2(track.left() + track.width() * fraction, track.bottom()),
-        );
+    // ── The play/pause button ───────────────────────────────────────────────
+    // A button-sized target with a soft backdrop under the pointer, exactly
+    // like the Video's `.btn:hover`.
+    let glyph_centre = egui::pos2(strip.left() + 8.0, mid);
+    let glyph_rect = egui::Rect::from_center_size(glyph_centre, egui::vec2(26.0, 26.0));
+    let glyph_hover = pointer.is_some_and(|p| glyph_rect.contains(p));
+    // `.btn:active` — the whole button, backdrop and glyph together, shrinks
+    // under the finger. Held, not toggled: it springs back on release because
+    // the pointer is no longer down, which is what makes it feel physical.
+    let press = if glyph_hover && grab.down { 0.88 } else { 1.0 };
+    if glyph_hover {
         painter.rect_filled(
-            filled,
-            BAR_HEIGHT / 2.0,
-            paint.palette.blue.gamma_multiply(alpha),
+            egui::Rect::from_center_size(glyph_centre, glyph_rect.size() * press),
+            egui::CornerRadius::same(6),
+            a(text, if press < 1.0 { 0.22 } else { 0.14 }),
         );
     }
+    // Painted, not typed: egui's default font has no ▶ or ❙❙ and draws tofu.
+    state_glyph(&painter, glyph_centre, state.playing, a(text, 1.0), press);
+
+    // ── The two timecodes, one at each end of the track ─────────────────────
+    // Not `position / duration` in one lump on the left, which is what this
+    // was: the elapsed time is *where the playhead is*, so it belongs at the
+    // playhead's end of the bar, and the duration is where the bar stops.
+    let elapsed = timecode(state.position_us);
+    let total = timecode(state.duration_us);
+    let left_x = strip.left() + 22.0;
+    painter.text(
+        egui::pos2(left_x, mid),
+        egui::Align2::LEFT_CENTER,
+        &elapsed,
+        font.clone(),
+        a(text, 1.0),
+    );
+    let elapsed_w = text_width(&painter, &elapsed, &font);
+
+    // The right end carries the states that are *unusual* — a mute, a loop, a
+    // volume that is not 100% — so the strip says nothing at all when there is
+    // nothing unusual to say. Glyphs rather than words, because width here is
+    // the position bar's to spend.
+    let mut right = strip.right();
+    if state.looping {
+        loop_glyph(&painter, badge_box(right, mid), a(accent, 1.0));
+        right -= BADGE + GAP;
+    }
+    let boosted = state.volume > 1.001;
+    if state.muted {
+        // Muted outranks the level: a level is what you would hear, and while
+        // it is muted you would hear none of it.
+        mute_glyph(&painter, badge_box(right, mid), a(accent, 1.0));
+        right -= BADGE + GAP;
+    } else if state.volume < 0.999 || boosted {
+        // A *number* is still a number — a percentage has no picture. A boost
+        // takes the accent because it is the app adding something that is not
+        // in the file; a quiet level is merely quiet.
+        let label = format!("vol {}%", (state.volume * 100.0).round() as i32);
+        let width = text_width(&painter, &label, &font);
+        painter.text(
+            egui::pos2(right, mid),
+            egui::Align2::RIGHT_CENTER,
+            &label,
+            font.clone(),
+            a(if boosted { accent } else { dim }, 1.0),
+        );
+        right -= width + GAP;
+    }
+
+    // The shuttle rate **replaces** the duration rather than sitting beside it,
+    // and the slot keeps the duration's width either way. It used to be an
+    // extra chip, which meant every shuttle key shoved the whole position bar
+    // sideways — the one part of the strip that must never move, since the hand
+    // is on it.
+    let total_w = text_width(&painter, &total, &font);
+    let (label, ink) = match rate_label(state.rate, state.playing) {
+        Some(rate) => (rate, accent),
+        None => (total, dim),
+    };
+    let label_w = text_width(&painter, &label, &font);
+    painter.text(
+        egui::pos2(right, mid),
+        egui::Align2::RIGHT_CENTER,
+        &label,
+        font.clone(),
+        a(ink, 1.0),
+    );
+    right -= total_w.max(label_w) + GAP;
+
+    // ── The Range, painted (delightstack `Range.svelte`) ────────────────────
+    // The track fills whatever is left between the two label groups, minus the
+    // room the rubber band needs to stretch into at either end without shoving
+    // the handle through a label.
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(
+            left_x + elapsed_w + GAP + OVERSHOOT_ROOM,
+            mid - BAR_HEIGHT / 2.0,
+        ),
+        egui::pos2(right - OVERSHOOT_ROOM, mid + BAR_HEIGHT / 2.0),
+    );
+    if bar.width() < 20.0 {
+        // No room for a track — but the button is still a button. delightviewer
+        // gives up on the whole strip here; a pane a third of a window wide
+        // reaches this width often enough that losing play/pause with it would
+        // be a control that comes and goes with the splitter.
+        return Some(Hits {
+            bar: egui::Rect::NOTHING,
+            glyph: glyph_rect,
+        });
+    }
+    let hits = Hits {
+        bar,
+        glyph: glyph_rect,
+    };
+
+    let hovered =
+        grab.scrubbing || pointer.is_some_and(|p| bar.expand2(egui::vec2(4.0, 10.0)).contains(p));
+    // The handle's *visual* position: the value's position plus the rubber band
+    // when a drag has run off the end of the track. The track segments ride the
+    // same offset — `Range.svelte`'s `lower_visual_offset`, applied to the fill
+    // and the handle alike — and that is what makes the overshoot read as the
+    // whole control stretching rather than as the handle coming loose from it.
+    let fx = bar.left() + bar.width() * progress(state) + grab.overshoot;
+    // Track heights: the played (active) segment runs thicker than the rest,
+    // and both grow 2 px under the pointer.
+    let grow = if hovered { 2.0 } else { 0.0 };
+    let active_h = 5.0 + grow;
+    let inactive_h = 3.0 + grow;
+    // The notch: a gap either side of the handle, so it sits *in* the track
+    // rather than on it.
+    let notch = 6.0;
+    if fx - notch > bar.left() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(bar.left(), mid - active_h / 2.0),
+                egui::pos2(fx - notch, mid + active_h / 2.0),
+            ),
+            egui::CornerRadius::same((active_h / 2.0) as u8),
+            a(text, 1.0),
+        );
+    }
+    if fx + notch < bar.right() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(fx + notch, mid - inactive_h / 2.0),
+                egui::pos2(bar.right(), mid + inactive_h / 2.0),
+            ),
+            egui::CornerRadius::same((inactive_h / 2.0) as u8),
+            a(text, 0.26),
+        );
+    }
+
+    // The handle: a pill that widens under the pointer and squashes slightly
+    // while held, with a halo saying how engaged it is.
+    let (hw, hh, halo, halo_a) = if grab.scrubbing {
+        (7.5, 16.0, 15.0, 0.18)
+    } else if hovered {
+        (7.5, 18.0, 13.0, 0.12)
+    } else {
+        (5.0, 14.0, 0.0, 0.0)
+    };
+    if halo > 0.0 {
+        painter.circle_filled(egui::pos2(fx, mid), halo, a(text, halo_a));
+    }
+    painter.rect_filled(
+        egui::Rect::from_center_size(egui::pos2(fx, mid), egui::vec2(hw, hh)),
+        egui::CornerRadius::same((hw / 2.0) as u8),
+        a(text, 1.0),
+    );
+
+    // The hover timecode, floating above the bar like the Video's seek tooltip
+    // — where the click would land, not where the playhead is.
+    if hovered && state.duration_us > 0 {
+        if let Some(p) = pointer {
+            let hover_f = ((p.x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0);
+            let label = timecode((hover_f as f64 * state.duration_us as f64) as i64);
+            let width = text_width(&painter, &label, &font);
+            let cx = p.x.clamp(
+                content.left() + width / 2.0 + 8.0,
+                content.right() - width / 2.0 - 8.0,
+            );
+            let tip = egui::Rect::from_center_size(
+                egui::pos2(cx, bar.top() - 18.0),
+                egui::vec2(width + 12.0, 20.0),
+            );
+            painter.rect_filled(
+                tip,
+                egui::CornerRadius::same(4),
+                a(paint.palette.crust, 0.92),
+            );
+            painter.text(
+                tip.center(),
+                egui::Align2::CENTER_CENTER,
+                &label,
+                font,
+                a(text, 1.0),
+            );
+        }
+    }
+    Some(hits)
 }
 
 /// The audio card: what an audio file looks like while it plays.
@@ -519,30 +913,61 @@ mod tests {
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(90.0, 120.0)),
                 egui::Rect::NOTHING,
             ] {
-                paint_state(&paint, content, &base, 1.0);
-                paint_state(
-                    &paint,
-                    content,
-                    &TransportState {
-                        playing: true,
-                        rate: -128.0,
-                        muted: true,
-                        looping: true,
-                        volume: 1.8,
-                        ..base
-                    },
-                    0.4,
-                );
-                paint_state(
-                    &paint,
-                    content,
-                    &TransportState {
-                        duration_us: 0,
-                        has_video: false,
-                        ..base
-                    },
-                    1.0,
-                );
+                // Every pointer state the Range has, on every strip: at rest,
+                // hovering the button, hovering the track, and mid-drag past
+                // the end of it.
+                let hands = [
+                    (None, Grab::default()),
+                    (
+                        Some(egui::pos2(content.left() + 18.0, content.bottom() - 15.0)),
+                        Grab {
+                            down: true,
+                            ..Grab::default()
+                        },
+                    ),
+                    (
+                        Some(content.center_bottom() - egui::vec2(0.0, 15.0)),
+                        Grab::default(),
+                    ),
+                    (
+                        Some(egui::pos2(content.right() + 400.0, content.bottom())),
+                        Grab {
+                            scrubbing: true,
+                            down: true,
+                            overshoot: MAX_OVERSHOOT,
+                        },
+                    ),
+                ];
+                for (pointer, grab) in hands {
+                    paint_state(&paint, content, &base, 1.0, pointer, grab);
+                    paint_state(
+                        &paint,
+                        content,
+                        &TransportState {
+                            playing: true,
+                            rate: -128.0,
+                            muted: true,
+                            looping: true,
+                            volume: 1.8,
+                            ..base
+                        },
+                        0.4,
+                        pointer,
+                        grab,
+                    );
+                    paint_state(
+                        &paint,
+                        content,
+                        &TransportState {
+                            duration_us: 0,
+                            has_video: false,
+                            ..base
+                        },
+                        1.0,
+                        pointer,
+                        grab,
+                    );
+                }
                 audio_card(
                     &paint,
                     content,
@@ -578,6 +1003,122 @@ mod tests {
                     1.0,
                 );
             }
+        });
+    }
+
+    /// The Range's rubber band: it follows the pointer past the end of the
+    /// track, but less and less, and it never runs away.
+    #[test]
+    fn the_overshoot_is_elastic_and_bounded() {
+        assert_eq!(overshoot_for(0.0), 0.0);
+        // Symmetric, and signed the way the overflow is.
+        assert!((overshoot_for(-40.0) + overshoot_for(40.0)).abs() < 1e-6);
+        assert!(overshoot_for(-40.0) < 0.0);
+        // Monotonic, with diminishing returns: 20 px more of drag past the end
+        // buys less the further out you already are.
+        let (a, b, c) = (
+            overshoot_for(20.0),
+            overshoot_for(40.0),
+            overshoot_for(60.0),
+        );
+        assert!(a < b && b < c);
+        assert!(b - a > c - b, "{a} {b} {c}");
+        // …and it stops, however hard the drag pulls.
+        assert!(overshoot_for(100_000.0) <= MAX_OVERSHOOT);
+        assert!(overshoot_for(100_000.0) > MAX_OVERSHOOT * 0.99);
+        // The track leaves room at each end for the handle to stretch into,
+        // rather than pushing it over the timecode beside it.
+        const { assert!(OVERSHOOT_ROOM + 7.5 / 2.0 >= MAX_OVERSHOOT * 0.8) };
+    }
+
+    /// The band, measured from a track and a pointer — inside the track it is
+    /// nothing at all, which is what keeps an ordinary drag rigid.
+    #[test]
+    fn the_band_is_measured_from_the_track_and_the_pointer() {
+        let bar = egui::Rect::from_min_max(egui::pos2(100.0, 0.0), egui::pos2(500.0, 4.0));
+        assert_eq!(overshoot_past(bar, 300.0), 0.0, "inside the track");
+        assert_eq!(overshoot_past(bar, 100.0), 0.0);
+        assert!(overshoot_past(bar, 540.0) > 0.0);
+        assert!(overshoot_past(bar, 60.0) < 0.0);
+        assert_eq!(overshoot_past(bar, 540.0), overshoot_for(40.0));
+        assert!(overshoot_past(bar, 100_000.0) <= MAX_OVERSHOOT);
+    }
+
+    #[test]
+    fn progress_is_clamped_and_safe_on_an_unknown_duration() {
+        let mut state = TransportState {
+            position_us: 500,
+            duration_us: 1000,
+            playing: true,
+            rate: 1.0,
+            muted: false,
+            volume: 1.0,
+            looping: false,
+            has_video: true,
+        };
+        assert!((progress(&state) - 0.5).abs() < 1e-6);
+        state.duration_us = 0;
+        assert_eq!(progress(&state), 0.0, "no duration is no fraction");
+        state.duration_us = 100;
+        assert_eq!(progress(&state), 1.0);
+    }
+
+    /// **What the pointer layer is allowed to claim.** The button and the track
+    /// come back from the paint, they do not overlap, and both are inside the
+    /// strip — a hit box that reached past it would take a click on the picture.
+    #[test]
+    fn the_strip_reports_a_button_and_a_track_that_do_not_overlap() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let palette = crate::theme::Palette::default();
+            let theme = df_core::config::Theme::default();
+            let paint = Painting {
+                painter: ui.painter(),
+                palette: &palette,
+                theme: &theme,
+                nerd: false,
+                show_symlink: true,
+                now: Instant::now(),
+            };
+            let state = TransportState {
+                position_us: 12_300_000,
+                duration_us: 225_000_000,
+                playing: true,
+                rate: 1.0,
+                muted: true,
+                volume: 1.0,
+                looping: true,
+                has_video: true,
+            };
+            let content = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(520.0, 880.0));
+            let hits = paint_state(&paint, content, &state, 1.0, None, Grab::default())
+                .expect("the strip lays out at 520 points");
+            let strip = rect(content);
+            assert!(strip.contains_rect(hits.bar), "{:?}", hits.bar);
+            assert!(
+                hits.glyph.expand(2.0).right() < hits.bar.left(),
+                "the button and the track share a press"
+            );
+            // Even with both badges up there is a track left, and it stops
+            // short of them.
+            assert!(hits.bar.right() < strip.right() - BADGE);
+
+            // A pane too narrow for a track still has a button: the play/pause
+            // must not come and go with the splitter.
+            let cramped = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(90.0, 120.0));
+            let hits = paint_state(&paint, cramped, &state, 1.0, None, Grab::default())
+                .expect("a cramped strip still has a button");
+            assert!(!hits.bar.is_positive(), "{:?}", hits.bar);
+            assert!(hits.glyph.is_positive());
+            // …and `Rect::NOTHING` takes no press, which is what makes that safe.
+            assert!(!hits
+                .bar
+                .expand2(egui::vec2(4.0, 10.0))
+                .contains(cramped.center()));
+
+            // An invisible strip reports nothing at all, so a press on a faded
+            // one is a press on the picture.
+            assert!(paint_state(&paint, content, &state, 0.0, None, Grab::default()).is_none());
         });
     }
 

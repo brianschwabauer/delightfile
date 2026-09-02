@@ -163,6 +163,81 @@ struct Texture {
     size: (u32, u32),
 }
 
+/// An animated image, playing (PLAN §6): a GIF, an animated WebP, an APNG, an
+/// AVIF sequence.
+///
+/// **Clock-driven, not frame-driven.** The frame on screen has a moment it is
+/// due to be replaced, and that moment is a repaint deadline — one scheduled
+/// wake-up per frame of the animation, never a poll, and never a `request_
+/// repaint` that would hold the window at sixty frames a second to show a
+/// picture that changes ten times (PLAN §1's idle rule).
+///
+/// The frames arrive from the decode worker one at a time, so a long loop plays
+/// from its first frame while its last is still being decoded, and `index`
+/// wraps over however many have landed. That is also what makes the memory cap
+/// harmless: a loop cut short by the budget is a short loop, and this plays it.
+struct Anim {
+    /// Every frame that has landed, in order, with how long each is held.
+    frames: Vec<(Texture, Duration)>,
+    /// Which one is on screen.
+    index: usize,
+    /// …and when it stops being.
+    due: Instant,
+}
+
+impl Anim {
+    fn new(now: Instant) -> Anim {
+        Anim {
+            frames: Vec::new(),
+            index: 0,
+            due: now,
+        }
+    }
+
+    /// A frame off the worker. The first one starts the clock.
+    fn push(&mut self, texture: Texture, delay: Duration, now: Instant) {
+        if self.frames.is_empty() {
+            self.due = now + delay;
+        }
+        self.frames.push((texture, delay));
+    }
+
+    /// Advance to the frame `now` is in.
+    ///
+    /// **Bounded by one pass round the loop**, and then resynchronised to
+    /// `now`: a window that was occluded for ten minutes comes back owing six
+    /// thousand ten-millisecond steps, and walking them one at a time would be
+    /// a visible stall on the frame that restored it. Where the animation
+    /// resumes after a gap that long is not a question anybody can answer
+    /// wrongly.
+    fn tick(&mut self, now: Instant) {
+        if self.frames.len() < 2 {
+            return;
+        }
+        for _ in 0..self.frames.len() {
+            if now < self.due {
+                return;
+            }
+            self.index = (self.index + 1) % self.frames.len();
+            self.due += self.frames[self.index].1;
+        }
+        if now >= self.due {
+            self.due = now + self.frames[self.index].1;
+        }
+    }
+
+    /// The frame to draw, if any has landed.
+    fn texture(&self) -> Option<&Texture> {
+        self.frames.get(self.index).map(|(texture, _)| texture)
+    }
+
+    /// When the pane is owed its next frame. `None` while there is nothing to
+    /// animate — a single frame is a still, and a still asks for nothing.
+    fn next_deadline(&self, now: Instant) -> Option<Duration> {
+        (self.frames.len() >= 2).then(|| self.due.saturating_duration_since(now))
+    }
+}
+
 /// An image-shaped preview, mid-crossfade or arrived.
 struct Media {
     kind: PreviewKind,
@@ -172,6 +247,11 @@ struct Media {
     full: Option<Texture>,
     /// When [`Media::full`] landed — the start of the placeholder crossfade.
     swapped_at: Option<Instant>,
+    /// The loop, for the picture formats that have one. Drawn over
+    /// [`Media::full`], whose first frame it starts life identical to, so the
+    /// still is what a GIF looks like until the second frame lands and nothing
+    /// flashes when it does.
+    anim: Option<Anim>,
     /// Set when the decode failed, and printed instead of the picture.
     error: Option<String>,
     /// A decode is still running, so "nothing on screen" is not "nothing to
@@ -649,6 +729,31 @@ impl Pane {
     }
 
     /// Sample the coast and put the pane where it says. Called once a frame.
+    /// Step the animated image, if there is one, to the frame `now` is in.
+    ///
+    /// Called once a frame beside [`Pane::tick_fling`], and — like it — it is
+    /// the *deadline* in [`Pane::next_deadline`] that brings the frame this
+    /// runs in. Nothing here asks for a repaint.
+    pub fn tick_anim(&mut self, now: Instant) {
+        if let Some(anim) = self.anim_mut() {
+            anim.tick(now);
+        }
+    }
+
+    fn anim(&self) -> Option<&Anim> {
+        match self.shown.as_ref().map(|shown| &shown.body) {
+            Some(Body::Media(media)) => media.anim.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn anim_mut(&mut self) -> Option<&mut Anim> {
+        match self.shown.as_mut().map(|shown| &mut shown.body) {
+            Some(Body::Media(media)) => media.anim.as_mut(),
+            _ => None,
+        }
+    }
+
     pub fn tick_fling(&mut self, now: Instant) {
         let Some(fling) = &self.fling else { return };
         let at = fling.value(now).round().max(0.0) as usize;
@@ -1085,6 +1190,7 @@ impl Pane {
                     thumb: None,
                     full: None,
                     swapped_at: None,
+                    anim: None,
                     error: None,
                     decoding,
                     // The first render is asked for by `sync_doc` on the next
@@ -1135,6 +1241,19 @@ impl Pane {
                 media.swapped_at = Some(now);
                 media.decoding = false;
             }
+            (decode::Stage::Frame { delay_ms }, Ok(image)) => {
+                // A texture apiece rather than one re-uploaded per frame: the
+                // worker has already capped the set at 64 MiB of pane-sized
+                // pixels, and a preloaded loop costs nothing per frame where a
+                // re-upload costs a copy of the picture ten times a second for
+                // as long as the cursor sits on the file.
+                if let Some(texture) = upload_color(ctx, "df-preview-frame", image) {
+                    let anim = media.anim.get_or_insert_with(|| Anim::new(now));
+                    anim.push(texture, Duration::from_millis(delay_ms.max(1).into()), now);
+                }
+            }
+            // Logged on the worker; the still is on screen either way.
+            (decode::Stage::Frame { .. }, Err(_)) => {}
             (decode::Stage::Full, Err(message)) => {
                 media.error = Some(message);
                 media.decoding = false;
@@ -1208,7 +1327,13 @@ impl Pane {
             .and_then(|view| view.chip_at)
             .map(|at| (at + CHIP_LINGER).saturating_duration_since(now))
             .filter(|d| !d.is_zero());
-        [loading, bar, chip].into_iter().flatten().min()
+        // The animated image's next frame. **This and not `animating`**: a GIF
+        // holding each frame for a tenth of a second wants ten wake-ups a
+        // second, and saying "still moving" would buy it sixty — six times the
+        // frames for the same picture, which is exactly the idle cost PLAN §1
+        // is about.
+        let anim = self.anim().and_then(|anim| anim.next_deadline(now));
+        [loading, bar, chip, anim].into_iter().flatten().min()
     }
 
     /// How visible the scrollbar is, 0–1: held for [`SCROLLBAR_LINGER`] after
@@ -1325,6 +1450,60 @@ fn readable(error: &str, path: &Path) -> String {
 mod tests {
     use super::*;
 
+    /// A three-frame loop, played by the clock: it holds each frame for its own
+    /// delay, wraps at the end, and asks for exactly one wake-up at a time.
+    #[test]
+    fn an_animation_holds_each_frame_for_its_delay_and_then_wraps() {
+        let ctx = egui::Context::default();
+        let texture = |name: &str| Texture {
+            handle: ctx.load_texture(
+                name,
+                egui::ColorImage::filled([2, 2], egui::Color32::WHITE),
+                egui::TextureOptions::NEAREST,
+            ),
+            size: (2, 2),
+        };
+        let t0 = Instant::now();
+        let mut anim = Anim::new(t0);
+        // One frame is a still: nothing moves and nothing is asked for.
+        anim.push(texture("a"), Duration::from_millis(100), t0);
+        assert!(anim.texture().is_some());
+        assert_eq!(anim.next_deadline(t0), None, "one frame is a still");
+        anim.tick(t0 + Duration::from_secs(5));
+        assert_eq!(anim.index, 0);
+
+        anim.push(texture("b"), Duration::from_millis(200), t0);
+        anim.push(texture("c"), Duration::from_millis(300), t0);
+        // The clock started with the first frame, so the second is due 100 ms in.
+        assert_eq!(
+            anim.next_deadline(t0),
+            Some(Duration::from_millis(100)),
+            "the wake-up is the frame's own delay, not a poll"
+        );
+        anim.tick(t0 + Duration::from_millis(99));
+        assert_eq!(anim.index, 0, "held for its full delay");
+        anim.tick(t0 + Duration::from_millis(100));
+        assert_eq!(anim.index, 1);
+        assert_eq!(
+            anim.next_deadline(t0 + Duration::from_millis(100)),
+            Some(Duration::from_millis(200))
+        );
+        anim.tick(t0 + Duration::from_millis(300));
+        assert_eq!(anim.index, 2);
+        // …and round it goes.
+        anim.tick(t0 + Duration::from_millis(600));
+        assert_eq!(anim.index, 0, "the loop wraps");
+
+        // **A window that was hidden for ten minutes** owes six thousand steps.
+        // The catch-up is bounded by one pass round the loop and then resyncs,
+        // so the frame that restores the window is not the frame that walks
+        // them — and the animation is running again from `now`.
+        let late = t0 + Duration::from_secs(600);
+        anim.tick(late);
+        assert!(anim.due > late, "the clock is resynchronised, not chased");
+        assert!(anim.due <= late + Duration::from_millis(300));
+    }
+
     #[test]
     fn a_crossfade_starts_at_nothing_and_ends_at_everything() {
         let t0 = Instant::now();
@@ -1397,6 +1576,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: None,
+                anim: None,
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(view)),
@@ -1433,6 +1613,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: None,
+                anim: None,
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(view)),

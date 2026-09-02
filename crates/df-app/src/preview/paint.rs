@@ -24,7 +24,7 @@ use df_core::preview::PreviewKind;
 use crate::theme::mix;
 use crate::ui::{content_rect, Painting, ROW_HEIGHT};
 
-use super::{fade, highlight, markdown, Body, Media, Pane, Texture};
+use super::{fade, highlight, markdown, Anim, Body, Media, Pane, Texture};
 
 /// Monospace size for code, hexdumps and inline code, in logical points.
 ///
@@ -1102,6 +1102,14 @@ fn media_body(
         if let Some(full) = &media.full {
             draw_texture(painter, content, full, ppp, alpha * swap);
         }
+        // The loop goes over the still it started life as a copy of, at the
+        // same fit and the same upscale limit every other picture in this pane
+        // gets — a GIF is a picture that moves, not a different kind of thing.
+        // Over rather than instead, so the frames arriving one at a time never
+        // leave a hole where the picture was.
+        if let Some(texture) = media.anim.as_ref().and_then(Anim::texture) {
+            draw_texture(painter, content, texture, ppp, alpha);
+        }
     }
 
     // A document's own pixels go over the cached thumbnail that stood in for
@@ -1622,6 +1630,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: None,
+                anim: None,
                 error: None,
                 decoding: false,
                 doc: None,
@@ -1631,6 +1640,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: None,
+                anim: None,
                 error: Some("no decoder for this format".to_string()),
                 decoding: false,
                 doc: None,
@@ -1643,6 +1653,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: None,
+                anim: None,
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(doc_fixture(42, crate::preview::doc::Counter::Page, false))),
@@ -1652,6 +1663,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: None,
+                anim: None,
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(doc_fixture(1, crate::preview::doc::Counter::Page, true))),
@@ -1661,6 +1673,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: None,
+                anim: None,
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(doc_fixture(312, crate::preview::doc::Counter::Layer, false))),
@@ -1829,6 +1842,7 @@ mod tests {
                 thumb: None,
                 full: None,
                 swapped_at: media.swapped_at,
+                anim: None,
                 error: media.error.clone(),
                 decoding: media.decoding,
                 doc: media.doc.as_deref().map(|view| {

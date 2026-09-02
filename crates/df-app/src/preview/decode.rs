@@ -40,6 +40,25 @@
 //! hermetic fixture for it because the fixture would be a system ffmpeg; the
 //! `image`-crate branch has one, in this module's tests.
 //!
+//! ## …and then the loop
+//!
+//! A GIF is a picture that moves, and a preview pane that showed the first
+//! frame of one was showing a still of a thing whose whole content is the
+//! motion. So after the still goes out, the formats that can hold an animation
+//! are asked for their frames and those are **streamed** — one message apiece,
+//! in order, each carrying how long it is held — so a long loop starts playing
+//! from its first frame while its last is still being decoded.
+//!
+//! GIF, animated WebP and APNG come from the `image` crate's own
+//! [`image::AnimationDecoder`], which composites each frame's disposal and blend
+//! for us. Animated AVIF and HEIF have no decoder in the `image` crate at all,
+//! so they come through the same ffmpeg path the stills do, with the delays
+//! worked out from the stream's timestamps.
+//!
+//! Two bounds, because a decode worker is not a place to find out how long a
+//! GIF somebody downloaded is: [`ANIM_BUDGET_BYTES`] of decoded pixels and
+//! [`ANIM_MAX_FRAMES`] frames. Past either, what has been sent *is* the loop.
+//!
 //! **SVG is the known gap.** df-core routes `image/svg+xml` to the image
 //! previewer (a picture is what the user means by it) but neither decoder
 //! rasterises vectors; delightviewer does it with `resvg`, which is a real
@@ -76,6 +95,31 @@ const THUMB_MAX_SIDE: u32 = 900;
 /// cache should not have two programs writing it at two qualities.
 const THUMB_QUALITY: u8 = 80;
 
+/// How much decoded animation one preview may hold, in bytes.
+///
+/// Frames are decoded at the *pane's* size rather than the file's, so 64 MiB is
+/// a hundred-odd frames of a pane-filling loop and several hundred of a small
+/// one. It is a bound on damage, not a target: past it the loop is the frames
+/// that fitted, which is a short loop of the right picture rather than a
+/// gigabyte spent on a four-thousand-frame GIF somebody left in a folder.
+const ANIM_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+/// …and a frame count past which even a tiny animation stops. A texture apiece
+/// is the cost there, not bytes, and nothing reads a loop this long as a loop.
+const ANIM_MAX_FRAMES: usize = 512;
+
+/// What a delay of nothing means.
+///
+/// GIFs written for browsers say `0` or `10 ms` for "as fast as you can", and
+/// every browser answers the same way: a tenth of a second. Matching them is
+/// what makes a GIF run here at the speed it runs everywhere else, rather than
+/// at whatever the repaint loop can manage.
+const ANIM_ZERO_DELAY_MS: u32 = 100;
+
+/// The delay the ffmpeg path falls back to when the container has no timing to
+/// read — the same tenth of a second, for the same reason.
+const ANIM_DEFAULT_DELAY_MS: u32 = 100;
+
 /// A decoded picture, ready to become a texture.
 pub struct Rgba {
     pub width: u32,
@@ -91,6 +135,16 @@ pub enum Stage {
     Thumb,
     /// The real pixels.
     Full,
+    /// One frame of an animated image, in order from the first, with how long
+    /// it is held on screen.
+    ///
+    /// They arrive **after** the [`Stage::Full`] still, which is frame zero
+    /// decoded on its own: a GIF is a picture before it is a loop, and the
+    /// picture is on screen while the rest of the frames are still coming.
+    /// Frame zero is therefore sent twice — once as the still and once as the
+    /// head of the loop — which is one extra upload of one frame and the price
+    /// of not making the still path wait for the animation's.
+    Frame { delay_ms: u32 },
 }
 
 /// One finished decode.
@@ -258,7 +312,18 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
         return;
     }
 
-    match decode_file(&path, target) {
+    // Read once and decoded twice at most: the still comes out of these bytes,
+    // and so — for the handful of formats that have one — does the loop.
+    let bytes = match read_source(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::debug!("{}: {e}", path.display());
+            send(Stage::Full, Err(e));
+            return;
+        }
+    };
+
+    match decode_bytes(&path, &bytes, target) {
         Ok(image) => {
             let store_from = store.then(|| (image.width, image.height, image.pixels.clone()));
             let color = match to_color(&image) {
@@ -281,8 +346,203 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
         Err(e) => {
             log::debug!("{}: {e}", path.display());
             send(Stage::Full, Err(e));
+            return;
         }
     }
+
+    // ── …and then the loop, if the file has one ─────────────────────────────
+    //
+    // Streamed frame by frame rather than gathered up and sent in one piece: a
+    // long GIF plays from its first frame while its last is still being
+    // decoded, which is what a browser does and the only version that reads as
+    // the file opening rather than as the file loading.
+    let Some(route) = animated_route(&bytes) else {
+        return;
+    };
+    if !live(state, token) {
+        return;
+    }
+    let mut budget = ANIM_BUDGET_BYTES;
+    let mut sent = 0usize;
+    let mut stopped = false;
+    let mut emit = |delay_ms: u32, image: Rgba| -> bool {
+        let cost = image.pixels.len();
+        if sent >= ANIM_MAX_FRAMES || cost > budget {
+            // Out of room. What has already been sent *is* the loop — a
+            // shorter loop of the right picture, which is the honest answer
+            // and needs nothing said in the pane to be one.
+            stopped = true;
+            return false;
+        }
+        budget -= cost;
+        let Ok(color) = to_color(&image) else {
+            return false;
+        };
+        sent += 1;
+        send(Stage::Frame { delay_ms }, Ok(color))
+    };
+    match stream_animation(&path, &bytes, target, route, &mut emit) {
+        Ok(0) => {}
+        Ok(frames) => {
+            if stopped {
+                log::debug!(
+                    "{}: {frames} frames is as much of the loop as {} holds",
+                    path.display(),
+                    crate::format::human_size(ANIM_BUDGET_BYTES as u64),
+                );
+            }
+        }
+        // A file that decoded a still and then would not decode its frames is
+        // a still, and the still is already on screen. Nothing to report.
+        Err(e) => log::debug!("{}: no animation: {e}", path.display()),
+    }
+}
+
+/// Which decoder can hand back this file's frames, if any.
+enum Route {
+    /// The `image` crate's own [`image::AnimationDecoder`] — GIF, animated
+    /// WebP, APNG.
+    Frames,
+    /// ffmpeg, for the ISOBMFF image sequences the `image` crate has no
+    /// decoder for at all: animated AVIF and HEIF.
+    Ffmpeg,
+}
+
+/// Is this file worth asking for frames from?
+///
+/// Deliberately narrow. Every still that reaches here would otherwise pay for
+/// the question — a second full ffmpeg decode of every HEIC photograph, on the
+/// path a held arrow key retries — so the ffmpeg route is taken only when the
+/// container's own brands say the file is a *sequence*, and the `image` route
+/// only for the three formats that can hold one.
+fn animated_route(bytes: &[u8]) -> Option<Route> {
+    match image::guess_format(bytes) {
+        // The decoders themselves answer whether these are animated: ruling a
+        // still PNG or WebP out costs a header parse, which is nothing beside
+        // the decode that has already happened.
+        Ok(image::ImageFormat::Gif | image::ImageFormat::WebP | image::ImageFormat::Png) => {
+            Some(Route::Frames)
+        }
+        // AVIF is a format the `image` crate names but the workspace builds no
+        // decoder for, and HEIF it does not name at all — both arrive here as
+        // an ISOBMFF file, and both say in their brands whether there is more
+        // than one picture inside.
+        Ok(image::ImageFormat::Avif) | Err(_) => iso_sequence(bytes).then_some(Route::Ffmpeg),
+        Ok(_) => None,
+    }
+}
+
+/// Do an ISOBMFF file's `ftyp` brands claim an image **sequence**?
+///
+/// `avis` is animated AVIF's major brand (a still is `avif`); `msf1` is HEIF's
+/// image-sequence brand. Either can appear in the compatible-brand list rather
+/// than in the major slot, so the whole box is scanned. Pure, and four bytes at
+/// a time, so it is a unit test rather than a thing observed on somebody's
+/// phone.
+fn iso_sequence(bytes: &[u8]) -> bool {
+    // `ftyp` is the first box in the file: a big-endian length, the tag, the
+    // major brand, a version, and then the compatible brands.
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let Ok(length) = bytes[0..4].try_into().map(u32::from_be_bytes) else {
+        return false;
+    };
+    let end = (length as usize).clamp(16, bytes.len().min(4096));
+    bytes[8..end]
+        .chunks_exact(4)
+        .any(|brand| matches!(brand, b"avis" | b"msf1"))
+}
+
+/// The delay a frame is held for, in milliseconds, as every browser reads it.
+///
+/// A GIF asking for `0` or `10 ms` is asking for "as fast as you can", which no
+/// program has honoured since the nineties; the agreed answer is a tenth of a
+/// second, and a loop that ran at the repaint rate instead would be a different
+/// animation from the one every other program on the machine shows.
+pub fn frame_delay_ms(raw: u32) -> u32 {
+    if raw <= 10 {
+        ANIM_ZERO_DELAY_MS
+    } else {
+        raw
+    }
+}
+
+/// Hand every frame of an animated `path` to `emit`, scaled to `target`.
+///
+/// Returns how many frames were sent. **One is not an animation** — a still
+/// WebP and a single-picture AVIF both come back as one — and the pane reads it
+/// that way.
+fn stream_animation(
+    path: &Path,
+    bytes: &[u8],
+    target: (u32, u32),
+    route: Route,
+    emit: &mut impl FnMut(u32, Rgba) -> bool,
+) -> Result<usize, String> {
+    use image::AnimationDecoder;
+    let cursor = || std::io::Cursor::new(bytes);
+    match route {
+        Route::Ffmpeg => ffmpeg_frames(path, target, ANIM_MAX_FRAMES, emit),
+        Route::Frames => match image::guess_format(bytes).map_err(|e| e.to_string())? {
+            image::ImageFormat::Gif => {
+                let decoder =
+                    image::codecs::gif::GifDecoder::new(cursor()).map_err(|e| e.to_string())?;
+                Ok(pump(decoder.into_frames(), target, emit))
+            }
+            image::ImageFormat::WebP => {
+                let decoder =
+                    image::codecs::webp::WebPDecoder::new(cursor()).map_err(|e| e.to_string())?;
+                if !decoder.has_animation() {
+                    return Ok(0);
+                }
+                Ok(pump(decoder.into_frames(), target, emit))
+            }
+            image::ImageFormat::Png => {
+                let decoder =
+                    image::codecs::png::PngDecoder::new(cursor()).map_err(|e| e.to_string())?;
+                if !decoder.is_apng().map_err(|e| e.to_string())? {
+                    return Ok(0);
+                }
+                let apng = decoder.apng().map_err(|e| e.to_string())?;
+                Ok(pump(apng.into_frames(), target, emit))
+            }
+            other => Err(format!("{other:?} has no frames")),
+        },
+    }
+}
+
+/// Drain an [`image::Frames`] into `emit`, scaling each frame to the pane.
+///
+/// The frames arrive already composited — the `image` crate's decoders apply a
+/// GIF's disposal method and an APNG's blend op for us — so what goes out is a
+/// full canvas per frame and the pane has nothing to compose.
+fn pump(
+    frames: image::Frames<'_>,
+    target: (u32, u32),
+    emit: &mut impl FnMut(u32, Rgba) -> bool,
+) -> usize {
+    let mut sent = 0usize;
+    for frame in frames {
+        let frame = match frame {
+            Ok(frame) => frame,
+            // A truncated GIF is a GIF up to the truncation: what decoded is
+            // still a loop, and it is the only honest one available.
+            Err(e) => {
+                log::debug!("animation frame {sent}: {e}");
+                break;
+            }
+        };
+        // Read before the buffer is taken: `into_buffer` consumes the frame.
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        let ms = numer.checked_div(denom).unwrap_or(0);
+        let image = scale_dynamic(image::DynamicImage::ImageRgba8(frame.into_buffer()), target);
+        sent += 1;
+        if !emit(frame_delay_ms(ms), image) {
+            break;
+        }
+    }
+    sent
 }
 
 /// Pack decoded pixels into the shape egui uploads from, **on this thread**.
@@ -308,6 +568,15 @@ pub fn to_color(image: &Rgba) -> Result<egui::ColorImage, String> {
 /// full-resolution buffer that ever exists is the one the decoder had to
 /// produce anyway.
 pub(crate) fn decode_file(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
+    let bytes = read_source(path)?;
+    decode_bytes(path, &bytes, target)
+}
+
+/// Read a file the decoders are allowed to open.
+///
+/// Split out from [`decode_file`] so the worker can read once and decode twice
+/// — the still, and then the animation's frames out of the same bytes.
+fn read_source(path: &Path) -> Result<Vec<u8>, String> {
     let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if meta.len() > MAX_SOURCE_BYTES {
         return Err(format!(
@@ -315,8 +584,12 @@ pub(crate) fn decode_file(path: &Path, target: (u32, u32)) -> Result<Rgba, Strin
             crate::format::human_size(meta.len())
         ));
     }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    match image::load_from_memory(&bytes) {
+    std::fs::read(path).map_err(|e| e.to_string())
+}
+
+/// The still, out of bytes already read.
+fn decode_bytes(path: &Path, bytes: &[u8], target: (u32, u32)) -> Result<Rgba, String> {
+    match image::load_from_memory(bytes) {
         Ok(image) => Ok(scale_dynamic(image, target)),
         // Not a format the `image` crate was built with — which is the AVIF and
         // HEIC path, and the one PLAN §6 cares about most.
@@ -370,6 +643,33 @@ fn scale_dynamic(image: image::DynamicImage, target: (u32, u32)) -> Rgba {
 /// mapping — an EXR in a file manager's preview pane is rare enough that the
 /// clipped answer swscale gives is the right amount of effort for now.
 fn ffmpeg_still(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
+    let mut still = None;
+    ffmpeg_frames(path, target, 1, &mut |_, image| {
+        still = Some(image);
+        false
+    })?;
+    still.ok_or_else(|| "decoded no frames".to_string())
+}
+
+/// Every frame ffmpeg can get out of `path`, in order, up to `limit`.
+///
+/// The still above is this with a limit of one, so a HEIC photograph and an
+/// animated AVIF go through exactly the same decoder, scaler and display
+/// matrix — two paths here would be two answers to "which way up is it".
+///
+/// **Each frame is held back one decode**, because a frame's delay is the
+/// distance to the *next* one's timestamp and nothing else in the container
+/// says it. The last frame out gets the delay the one before it had, which is
+/// what a sequence with a constant frame rate means by it anyway. A limit of
+/// one skips the hold-back entirely: a still has no delay to work out, and
+/// decoding a second frame to learn it would be a second frame decoded for
+/// nothing on the path a held arrow key retries.
+fn ffmpeg_frames(
+    path: &Path,
+    target: (u32, u32),
+    limit: usize,
+    emit: &mut impl FnMut(u32, Rgba) -> bool,
+) -> Result<usize, String> {
     use dv_media::ffmpeg;
     use ffmpeg::software::scaling::{Context as Scaler, Flags as ScaleFlags};
     use ffmpeg::util::frame::video::Video as VideoFrame;
@@ -383,6 +683,13 @@ fn ffmpeg_still(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
         .best(ffmpeg::media::Type::Video)
         .ok_or_else(|| "no decoder for this format".to_string())?;
     let index = stream.index();
+    // The stream's clock, for turning two timestamps into a delay.
+    let time_base = stream.time_base();
+    let seconds_per_tick = if time_base.denominator() == 0 {
+        0.0
+    } else {
+        f64::from(time_base.numerator()) / f64::from(time_base.denominator())
+    };
     // The container's display matrix, read by the same code `dv_media::probe`
     // reads it with. A poster that ignores it is a portrait clip lying on its
     // side, and — worse — a poster the *player's* frame cannot line up with.
@@ -391,61 +698,128 @@ fn ffmpeg_still(path: &Path, target: (u32, u32)) -> Result<Rgba, String> {
         .map_err(|e| e.to_string())?;
     let mut decoder = context.decoder().video().map_err(|e| e.to_string())?;
 
-    let mut frame = VideoFrame::empty();
-    let mut got = false;
-    for (s, packet) in input.packets() {
+    // Built on the first frame, when its pixel format and coded size are known,
+    // and then reused: a sequence's frames all have the same shape, and
+    // rebuilding swscale per frame is the one avoidable cost in this loop.
+    let mut scaler: Option<(Scaler, u32, u32)> = None;
+    let scale =
+        |frame: &VideoFrame, scaler: &mut Option<(Scaler, u32, u32)>| -> Result<Rgba, String> {
+            let (w, h) = (frame.width().max(1), frame.height().max(1));
+            if scaler.is_none() {
+                // Fit the *upright* picture to the pane, then ask swscale for that
+                // size back in coded orientation — so a portrait clip is scaled to
+                // the pane's height rather than to the height of the landscape it
+                // is stored as.
+                let quarter = matches!(rotation % 360, 90 | 270);
+                let (ow, oh) = if quarter { (h, w) } else { (w, h) };
+                let (ow, oh) = fit(ow, oh, target);
+                let (tw, th) = if quarter { (oh, ow) } else { (ow, oh) };
+                let built = Scaler::get(
+                    frame.format(),
+                    w,
+                    h,
+                    ffmpeg::format::Pixel::RGBA,
+                    tw,
+                    th,
+                    // Bilinear on a downscale of this ratio is indistinguishable
+                    // from anything slower, and this runs on the path a held arrow
+                    // key retries.
+                    ScaleFlags::BILINEAR,
+                )
+                .map_err(|e| e.to_string())?;
+                *scaler = Some((built, tw, th));
+            }
+            let Some((scaler, tw, th)) = scaler.as_mut() else {
+                return Err("no scaler".to_string());
+            };
+            let (tw, th) = (*tw, *th);
+            let mut rgba = VideoFrame::empty();
+            scaler.run(frame, &mut rgba).map_err(|e| e.to_string())?;
+            Ok(rotate_rgba(
+                Rgba {
+                    width: tw,
+                    height: th,
+                    pixels: pack(rgba.data(0), rgba.stride(0), tw, th),
+                },
+                rotation,
+                mirrored,
+            ))
+        };
+
+    // The frame waiting for the next timestamp to tell it how long it lasts,
+    // and the delay the one before it was given.
+    let mut pending: Option<(i64, Rgba)> = None;
+    let mut last_delay = ANIM_DEFAULT_DELAY_MS;
+    let mut sent = 0usize;
+    let mut wanted = true;
+
+    // Every decoded frame passes through here: it either goes straight out (a
+    // still, which has nothing to wait for) or displaces the one held back.
+    let mut offer = |pts: i64,
+                     image: Rgba,
+                     pending: &mut Option<(i64, Rgba)>,
+                     sent: &mut usize,
+                     last_delay: &mut u32|
+     -> bool {
+        if limit <= 1 {
+            *sent += 1;
+            return emit(ANIM_DEFAULT_DELAY_MS, image);
+        }
+        let Some((held_pts, held)) = pending.replace((pts, image)) else {
+            return true;
+        };
+        let ticks = (pts - held_pts).max(0) as f64;
+        let ms = (ticks * seconds_per_tick * 1000.0).round();
+        let delay = if ms > 0.0 && ms < f64::from(u32::MAX) {
+            frame_delay_ms(ms as u32)
+        } else {
+            *last_delay
+        };
+        *last_delay = delay;
+        *sent += 1;
+        emit(delay, held)
+    };
+
+    'packets: for (s, packet) in input.packets() {
         if s.index() != index {
             continue;
         }
         decoder.send_packet(&packet).map_err(|e| e.to_string())?;
-        if decoder.receive_frame(&mut frame).is_ok() {
-            got = true;
-            break;
+        let mut frame = VideoFrame::empty();
+        while decoder.receive_frame(&mut frame).is_ok() {
+            let pts = frame.timestamp().or_else(|| frame.pts()).unwrap_or(0);
+            let image = scale(&frame, &mut scaler)?;
+            wanted = offer(pts, image, &mut pending, &mut sent, &mut last_delay);
+            if !wanted || sent >= limit {
+                break 'packets;
+            }
         }
     }
-    if !got {
-        // Some single-frame formats hand nothing back until the decoder is
-        // told the file is over.
+    if wanted && sent < limit {
+        // Some single-frame formats hand nothing back until the decoder is told
+        // the file is over — and a sequence's tail sits in the same queue.
         decoder.send_eof().map_err(|e| e.to_string())?;
-        got = decoder.receive_frame(&mut frame).is_ok();
+        let mut frame = VideoFrame::empty();
+        while decoder.receive_frame(&mut frame).is_ok() {
+            let pts = frame.timestamp().or_else(|| frame.pts()).unwrap_or(0);
+            let image = scale(&frame, &mut scaler)?;
+            wanted = offer(pts, image, &mut pending, &mut sent, &mut last_delay);
+            if !wanted || sent >= limit {
+                break;
+            }
+        }
     }
-    if !got {
+    // The one still held back, with the delay its predecessor had.
+    if wanted && sent < limit {
+        if let Some((_, held)) = pending.take() {
+            sent += 1;
+            emit(last_delay, held);
+        }
+    }
+    if sent == 0 {
         return Err("decoded no frames".to_string());
     }
-
-    let (w, h) = (frame.width().max(1), frame.height().max(1));
-    // Fit the *upright* picture to the pane, then ask swscale for that size
-    // back in coded orientation — so a portrait clip is scaled to the pane's
-    // height rather than to the height of the landscape it is stored as.
-    let quarter = matches!(rotation % 360, 90 | 270);
-    let (ow, oh) = if quarter { (h, w) } else { (w, h) };
-    let (ow, oh) = fit(ow, oh, target);
-    let (tw, th) = if quarter { (oh, ow) } else { (ow, oh) };
-    let mut scaler = Scaler::get(
-        frame.format(),
-        w,
-        h,
-        ffmpeg::format::Pixel::RGBA,
-        tw,
-        th,
-        // Bilinear on a downscale of this ratio is indistinguishable from
-        // anything slower, and this runs on the path a held arrow key retries.
-        ScaleFlags::BILINEAR,
-    )
-    .map_err(|e| e.to_string())?;
-    let mut rgba = VideoFrame::empty();
-    scaler.run(&frame, &mut rgba).map_err(|e| e.to_string())?;
-
-    let pixels = pack(rgba.data(0), rgba.stride(0), tw, th);
-    Ok(rotate_rgba(
-        Rgba {
-            width: tw,
-            height: th,
-            pixels,
-        },
-        rotation,
-        mirrored,
-    ))
+    Ok(sent)
 }
 
 /// Apply a container's display matrix to decoded pixels: `rotation` degrees
@@ -607,6 +981,122 @@ mod tests {
         assert!(decode_file(&bad, (200, 200)).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A GIF is a picture that moves**, end to end: a real three-frame file,
+    /// through the route chooser, the animation decoder and the pane-sized
+    /// scale, with each frame's delay coming out the other side.
+    #[test]
+    fn a_gif_streams_its_frames_with_their_delays() {
+        let dir = std::env::temp_dir().join(format!("df-anim-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("spin.gif");
+
+        // Three 60×40 frames, each a flat colour, at 120 ms apiece — long
+        // enough not to trip the browsers' "as fast as you can" clamp.
+        let frames: Vec<image::Frame> = [0u8, 128, 255]
+            .into_iter()
+            .map(|value| {
+                let buffer = image::RgbaImage::from_pixel(60, 40, image::Rgba([value, 0, 0, 255]));
+                image::Frame::from_parts(buffer, 0, 0, image::Delay::from_numer_denom_ms(120, 1))
+            })
+            .collect();
+        {
+            let file = std::fs::File::create(&path).expect("write the fixture");
+            let mut encoder = image::codecs::gif::GifEncoder::new(file);
+            encoder.encode_frames(frames).expect("encode the fixture");
+        }
+        let bytes = std::fs::read(&path).expect("read back");
+
+        // The still comes out first and unchanged — a GIF is a picture before
+        // it is a loop.
+        let still = decode_bytes(&path, &bytes, (30, 30)).expect("the still");
+        assert_eq!((still.width, still.height), (30, 20));
+
+        let route = animated_route(&bytes).expect("a GIF has frames");
+        assert!(matches!(route, Route::Frames));
+        let mut got: Vec<(u32, u32, u32)> = Vec::new();
+        let sent = stream_animation(&path, &bytes, (30, 30), route, &mut |delay, image| {
+            got.push((delay, image.width, image.height));
+            true
+        })
+        .expect("stream");
+        assert_eq!(sent, 3);
+        assert_eq!(got, vec![(120, 30, 20); 3], "delays and the pane's fit");
+
+        // **The emitter's `false` stops it**, which is how the memory cap is
+        // enforced: what has been handed over is the loop, and nothing is
+        // decoded past it.
+        let mut count = 0;
+        let route = animated_route(&bytes).expect("a GIF has frames");
+        let sent = stream_animation(&path, &bytes, (30, 30), route, &mut |_, _| {
+            count += 1;
+            count < 2
+        })
+        .expect("stream");
+        assert_eq!((sent, count), (2, 2));
+
+        // A still PNG goes down the same route and comes back with nothing:
+        // "can hold an animation" is not "does".
+        let png = dir.join("flat.png");
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .save(&png)
+        .expect("write");
+        let bytes = std::fs::read(&png).expect("read back");
+        let route = animated_route(&bytes).expect("PNG can be an APNG");
+        assert_eq!(
+            stream_animation(&png, &bytes, (30, 30), route, &mut |_, _| true).expect("stream"),
+            0,
+            "a still PNG is not an APNG"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A JPEG must not pay for the question.** The route chooser is what
+    /// keeps a second full decode off every photograph in a folder, so which
+    /// formats it says yes to is the test.
+    #[test]
+    fn only_the_formats_that_can_animate_are_asked_for_frames() {
+        let jpeg = [0xff, 0xd8, 0xff, 0xdb, 0, 0, 0, 0];
+        assert!(animated_route(&jpeg).is_none(), "a JPEG has no frames");
+        assert!(animated_route(b"GIF89a...........").is_some());
+        assert!(animated_route(b"").is_none(), "and neither has nothing");
+
+        // ISOBMFF: a still AVIF is left alone, a sequence is not.
+        let iso = |brands: &[&[u8; 4]]| {
+            let mut bytes = Vec::new();
+            let length = 8 + brands.len() * 4;
+            bytes.extend_from_slice(&(length as u32).to_be_bytes());
+            bytes.extend_from_slice(b"ftyp");
+            for brand in brands {
+                bytes.extend_from_slice(*brand);
+            }
+            // Enough tail that the 16-byte floor is met on the short cases.
+            bytes.resize(bytes.len().max(32), 0);
+            bytes
+        };
+        assert!(!iso_sequence(&iso(&[b"avif", b"mif1"])), "a still AVIF");
+        assert!(iso_sequence(&iso(&[b"avis", b"avif"])), "the major brand");
+        assert!(
+            iso_sequence(&iso(&[b"mif1", b"msf1"])),
+            "a compatible brand"
+        );
+        assert!(!iso_sequence(b"not an iso file at all, honestly"));
+        assert!(!iso_sequence(b"short"), "a truncated header is not a panic");
+    }
+
+    /// Every browser's reading of a delay that says "as fast as you can".
+    #[test]
+    fn a_delay_of_nothing_is_a_tenth_of_a_second() {
+        assert_eq!(frame_delay_ms(0), ANIM_ZERO_DELAY_MS);
+        assert_eq!(frame_delay_ms(10), ANIM_ZERO_DELAY_MS);
+        assert_eq!(frame_delay_ms(20), 20, "a real delay is left alone");
+        assert_eq!(frame_delay_ms(1000), 1000);
     }
 
     #[test]
