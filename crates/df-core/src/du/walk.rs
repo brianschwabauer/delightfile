@@ -54,7 +54,7 @@
 //! are folded into its parent's the moment it pops.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use std::collections::HashSet;
 use std::os::unix::fs::MetadataExt;
@@ -171,10 +171,19 @@ pub struct DuUpdate {
     /// Whether the subtree is finished. A `false` update is a running total:
     /// correct as far as it has counted, and only ever growing.
     pub done: bool,
+    /// Names `read_dir` returned for **this directory alone**, capped at
+    /// [`super::cache::MAX_STAMP_ENTRIES`] — not a recursive figure and not the
+    /// same thing as `files`, which counts non-directories all the way down.
+    ///
+    /// It rides along because the walk gets it for free and the cache needs it:
+    /// it is half of the cheap re-check that decides, on the way back into this
+    /// directory, whether the remembered numbers are worth re-earning. Only a
+    /// `done: true` update carries the finished count.
+    pub entries: u64,
 }
 
 impl DuUpdate {
-    fn new(dir: &Path, depth: usize, totals: &DuTotals, done: bool) -> DuUpdate {
+    fn new(dir: &Path, depth: usize, totals: &DuTotals, entries: u64, done: bool) -> DuUpdate {
         DuUpdate {
             dir: dir.to_path_buf(),
             depth,
@@ -183,6 +192,7 @@ impl DuUpdate {
             files: totals.files,
             dirs: totals.dirs,
             done,
+            entries,
         }
     }
 
@@ -223,6 +233,19 @@ pub struct DuOptions {
     /// Count each immediate subdirectory's entries and report them *before* the
     /// walk starts. See [`child_counts`].
     pub count_children: bool,
+    /// Take a subtree's total from the cache instead of descending into it,
+    /// when the cache has a recent one and the directory still looks the same.
+    ///
+    /// **Off by default, and that is the safe direction.** This is what makes
+    /// walking back up to a parent nearly free — the children were counted a
+    /// moment ago and their answers are still sitting there — but it is an
+    /// approximation twice over: the freshness test cannot see a change three
+    /// levels down (see [`super::cache`]), and a file hardlinked between a
+    /// reused subtree and a walked one is counted in both, because the reused
+    /// side's inodes were never seen. The size column asks for it; "what's big"
+    /// mode ([`crate::du`]'s drill-down) does not, because a number somebody
+    /// asked for out loud has to be the real one.
+    pub reuse_cache: bool,
 }
 
 impl Default for DuOptions {
@@ -235,6 +258,7 @@ impl Default for DuOptions {
             batch: DU_BATCH,
             update_interval: UPDATE_INTERVAL,
             count_children: false,
+            reuse_cache: false,
         }
     }
 }
@@ -254,6 +278,15 @@ impl DuOptions {
     pub fn counting_children(self) -> DuOptions {
         DuOptions {
             count_children: true,
+            ..self
+        }
+    }
+
+    /// The same, allowed to take fresh subtrees from the cache rather than
+    /// re-counting them. See [`DuOptions::reuse_cache`].
+    pub fn reusing_cache(self) -> DuOptions {
+        DuOptions {
+            reuse_cache: true,
             ..self
         }
     }
@@ -399,6 +432,24 @@ struct Frame {
     depth: usize,
     reader: std::fs::ReadDir,
     totals: DuTotals,
+    /// Names this directory's own `read_dir` has handed over, capped. Counted
+    /// before any filtering, so it means the same thing as
+    /// [`super::cache::count_names`] — the two only have to agree with each
+    /// other.
+    entries: u64,
+}
+
+/// What a walk may take from the cache instead of descending.
+///
+/// Asked once per directory, with the `mtime` the walk has already `stat`ed so
+/// the answer costs no extra syscall on a miss. A `Some` is the subtree's
+/// totals and the name count they were stamped with; the walk folds the totals
+/// into the parent and steps over the whole tree.
+pub type KnownSubtree<'a> = dyn Fn(&Path, Option<SystemTime>) -> Option<(DuTotals, u64)> + 'a;
+
+/// Nothing is known: what [`walk`] passes for callers that want an exact count.
+fn nothing_known(_: &Path, _: Option<SystemTime>) -> Option<(DuTotals, u64)> {
+    None
 }
 
 fn flush(pending: &mut Vec<DuUpdate>, emit: &mut dyn FnMut(Vec<DuUpdate>)) {
@@ -411,7 +462,13 @@ fn flush(pending: &mut Vec<DuUpdate>, emit: &mut dyn FnMut(Vec<DuUpdate>)) {
 /// interest. At most `depth_of_interest + 1` updates, however deep the walk is.
 fn push_partials(stack: &[Frame], depth_of_interest: usize, pending: &mut Vec<DuUpdate>) {
     for frame in stack.iter().take(depth_of_interest + 1) {
-        pending.push(DuUpdate::new(&frame.dir, frame.depth, &frame.totals, false));
+        pending.push(DuUpdate::new(
+            &frame.dir,
+            frame.depth,
+            &frame.totals,
+            frame.entries,
+            false,
+        ));
     }
 }
 
@@ -429,6 +486,29 @@ pub fn walk(
     root: &Path,
     options: &DuOptions,
     cancelled: &dyn Fn() -> bool,
+    emit: &mut dyn FnMut(Vec<DuUpdate>),
+) -> Result<DuTotals> {
+    walk_reusing(root, options, cancelled, &nothing_known, emit)
+}
+
+/// [`walk`], with a cache to lean on.
+///
+/// `known` is consulted for every directory the walk is about to descend into,
+/// and only when [`DuOptions::reuse_cache`] is set. When it answers, that
+/// subtree is folded in whole and never opened: the walk of a parent you have
+/// just come up from is then a `read_dir` of one level plus a handful of
+/// hashmap lookups, which is the difference between "the numbers are there" and
+/// "the numbers arrive in four seconds".
+///
+/// A reused directory is still *reported* — one `done: true` update at its
+/// depth, carrying the remembered totals — so a consumer cannot tell the
+/// difference and the caller's cache-writing path sees the same shape it always
+/// did.
+pub fn walk_reusing(
+    root: &Path,
+    options: &DuOptions,
+    cancelled: &dyn Fn() -> bool,
+    known: &KnownSubtree<'_>,
     emit: &mut dyn FnMut(Vec<DuUpdate>),
 ) -> Result<DuTotals> {
     let root_meta = std::fs::symlink_metadata(root).map_err(|e| DfError::io(root, e))?;
@@ -452,6 +532,7 @@ pub fn walk(
             files: 0,
             dirs: 1,
         },
+        entries: 0,
     }];
 
     let mut seen_links: HashSet<(u64, u64)> = HashSet::new();
@@ -481,6 +562,15 @@ pub fn walk(
             None => break,
         };
 
+        // Counted before anything is filtered — a symlink and a file on another
+        // filesystem are both names `read_dir` returned, and the stamp this
+        // feeds is compared against a plain `read_dir` count.
+        if let Some(frame) = stack.last_mut() {
+            if next.is_some() && frame.entries < super::cache::MAX_STAMP_ENTRIES {
+                frame.entries += 1;
+            }
+        }
+
         let item = match next {
             Some(Ok(item)) => item,
             // One entry that vanished mid-walk, or a `readdir` that failed
@@ -490,7 +580,13 @@ pub fn walk(
                 // The directory is finished: fold it into its parent and say so.
                 let Some(frame) = stack.pop() else { break };
                 if frame.depth <= options.depth_of_interest {
-                    pending.push(DuUpdate::new(&frame.dir, frame.depth, &frame.totals, true));
+                    pending.push(DuUpdate::new(
+                        &frame.dir,
+                        frame.depth,
+                        &frame.totals,
+                        frame.entries,
+                        true,
+                    ));
                     if pending.len() >= options.batch {
                         flush(&mut pending, emit);
                     }
@@ -527,6 +623,23 @@ pub fn walk(
                 files: 0,
                 dirs: 1,
             };
+            // The cache, before the `read_dir`. A subtree somebody walked a
+            // minute ago and has not touched since is added in one line here
+            // instead of a hundred thousand `stat`s below.
+            if options.reuse_cache {
+                if let Some((totals, entries)) = known(&path, meta.modified().ok()) {
+                    if let Some(parent) = stack.last_mut() {
+                        parent.totals.add(&totals);
+                    }
+                    if depth <= options.depth_of_interest {
+                        pending.push(DuUpdate::new(&path, depth, &totals, entries, true));
+                        if pending.len() >= options.batch {
+                            flush(&mut pending, emit);
+                        }
+                    }
+                    continue;
+                }
+            }
             if depth > options.max_depth {
                 if !depth_cap_hit {
                     depth_cap_hit = true;
@@ -547,6 +660,7 @@ pub fn walk(
                     depth,
                     reader,
                     totals: own,
+                    entries: 0,
                 }),
                 Err(e) => {
                     // Unreadable, not absent: it exists and occupies an inode,

@@ -6626,10 +6626,18 @@ impl App {
     // ── "What's big" mode (PLAN §7.3) ───────────────────────────────────────
 
     /// The recursive-size walker, started the first time it is asked for.
+    ///
+    /// The cache's lifetime is set here, once, because that is the one place
+    /// the scanner is built: the config is read at startup and there is nothing
+    /// that changes `[mgr] folder_size_ttl` while the program runs.
     fn du(&mut self) -> &df_core::du::DuScanner {
         let waker = self.waker.named("du");
-        self.du
-            .get_or_insert_with(|| df_core::du::DuScanner::start(Arc::new(move || waker.wake())))
+        let ttl = Duration::from_secs(self.mgr.folder_size_ttl);
+        self.du.get_or_insert_with(|| {
+            let du = df_core::du::DuScanner::start(Arc::new(move || waker.wake()));
+            du.set_ttl(ttl);
+            du
+        })
     }
 
     // ── Folder sizes (PLAN §7.3) ────────────────────────────────────────────
@@ -6737,7 +6745,14 @@ impl App {
                 if let Some(du) = &self.du {
                     du.forget(&cwd);
                 }
-                let options = df_core::du::DuOptions::at_depth(1).counting_children();
+                // Still allowed to reuse the subtrees below it: the watcher
+                // that marked this stale watches *this* directory, so what
+                // changed is a name at this level, and re-counting every
+                // subtree to find out that one of them is new is the work this
+                // whole file exists to avoid.
+                let options = df_core::du::DuOptions::at_depth(1)
+                    .counting_children()
+                    .reusing_cache();
                 let token = self.du().request_with(cwd.clone(), options);
                 self.folders.restart(token);
                 changed = true;
@@ -6791,8 +6806,24 @@ impl App {
         changed
     }
 
-    /// Point the walk at `dir`, seeding whatever the cache already knows so a
-    /// revisit is instant.
+    /// Point the walk at `dir`, seeding whatever the cache already knows — and
+    /// not walking at all when what it knows is recent enough.
+    ///
+    /// Three outcomes, in the order they are cheap:
+    ///
+    /// 1. **The cache has a recent answer and the directory still looks the
+    ///    same.** The numbers go up settled and no walk is started. This is the
+    ///    round trip — into a folder, back out to its parent, back in — that
+    ///    used to cost a full re-walk each way.
+    /// 2. **The cache has something older or the directory has changed.** The
+    ///    numbers still go up, wearing their `~`, and a walk runs behind them.
+    /// 3. **Nothing is remembered.** The walk, and the cheap `12 items` pass in
+    ///    front of it.
+    ///
+    /// In cases 2 and 3 the walk is allowed to reuse fresh subtrees
+    /// ([`df_core::du::DuOptions::reusing_cache`]), which is what makes the
+    /// walk of a *parent* nearly free: the child you have just come up from was
+    /// counted a moment ago and is folded in whole rather than counted again.
     fn begin_folder_sizes(&mut self, dir: PathBuf, now: Instant) -> bool {
         // The walk this replaces is cancelled first. `DuScanner::request`
         // supersedes by *root*, so arrowing from one directory into another
@@ -6806,7 +6837,9 @@ impl App {
         // Depth 1 and the cheap child-count pass: the column is about this
         // directory's own rows, and everything below them is counted *into*
         // them rather than reported.
-        let options = df_core::du::DuOptions::at_depth(1).counting_children();
+        let options = df_core::du::DuOptions::at_depth(1)
+            .counting_children()
+            .reusing_cache();
         let tab = self.tabs.active_index();
         // **Not on a network mount.** `cross_filesystems` keeps a walk from
         // *wandering* onto one, but it cannot see that the root itself is one:
@@ -6824,11 +6857,33 @@ impl App {
             self.folders.decline(dir, tab);
             return true;
         }
-        let token = self.du().request_with(dir.clone(), options);
-        let cached = self.du().cached(&dir);
-        self.folders.begin(dir, tab, token);
-        if let Some(record) = cached {
-            self.folders.seed(&record);
+        let remembered = self.du().remembered(&dir);
+        let children = self.du().remembered_children(&dir);
+        // Recent, unchanged, and complete enough to stand on its own. The last
+        // clause is what stops a record that gave up counting children — see
+        // `MAX_TRACKED_DIRS` — from being served as the whole answer, and what
+        // stops a directory whose children were never reported (a walk at depth
+        // 0) from showing an empty column forever. `dirs <= 1` is a directory
+        // with no subdirectories at all, whose empty child list is the truth.
+        let settled = remembered.as_ref().is_some_and(|r| {
+            r.fresh
+                && r.record.children_complete
+                && (!children.is_empty() || r.record.totals.dirs <= 1)
+        });
+        if settled {
+            self.folders.begin_cached(dir, tab);
+        } else {
+            let token = self.du().request_with(dir.clone(), options);
+            self.folders.begin(dir, tab, token);
+        }
+        let mut seeded = false;
+        if let Some(remembered) = &remembered {
+            seeded |= self.folders.seed(&remembered.record, settled);
+        }
+        // After the record, so a child's own — newer — walk wins over what the
+        // parent's last walk believed about it.
+        seeded |= self.folders.seed_children(&children);
+        if seeded {
             self.apply_folder_sizes(now);
         }
         true

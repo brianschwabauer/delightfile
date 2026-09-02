@@ -244,6 +244,7 @@ mod tests {
             files: 1,
             dirs: 0,
             done,
+            entries: 0,
         }
     }
 
