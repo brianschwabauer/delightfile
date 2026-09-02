@@ -94,6 +94,13 @@ const SYNTAX: &[(&str, &str)] = &[
     ("svelte", "Svelte"),
     ("vue", "Vue"),
     ("css", "CSS"),
+    // The preprocessors. A grammar for these may not be installed, in which
+    // case they degrade to plain text like anything else here — but leaving
+    // them out entirely made a `.scss` an unrecognised *blob*, which is a
+    // different and wronger answer.
+    ("scss", "SCSS"),
+    ("sass", "Sass"),
+    ("less", "Less"),
     ("md", "Markdown"),
     ("markdown", "Markdown"),
     ("mdx", "Markdown"),

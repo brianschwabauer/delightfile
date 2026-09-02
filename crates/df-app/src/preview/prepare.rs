@@ -131,13 +131,39 @@ impl Preparer {
     }
 
     /// Queue a preparation, retiring whatever was in flight.
-    pub fn request(&self, job: Job) {
+    ///
+    /// `None` means the worker took it and the answer will arrive through
+    /// [`Preparer::drain`]. `Some` means there was no worker to take it — the
+    /// thread did not spawn, or the channel is closed — and the work was done
+    /// **here, in the frame**, so the caller can put the body up immediately.
+    ///
+    /// That fallback is the whole reason this returns anything. A failed spawn
+    /// used to leave every text and markdown preview queued into a channel
+    /// nobody was reading, which is not "no highlighting" but *no preview at
+    /// all*: the pane went on showing the last file forever. A parse inside a
+    /// frame is the jank this module exists to remove — and it is still the
+    /// right answer when the alternative is a pane that never updates again.
+    #[must_use]
+    pub fn request(&self, job: Job) -> Option<Prepared> {
         self.live.store(job.token.0, Ordering::Relaxed);
         if let Some(jobs) = &self.jobs {
-            if jobs.send(job).is_err() {
-                log::debug!("the prepare worker is gone");
+            match jobs.send(job) {
+                Ok(()) => return None,
+                Err(returned) => {
+                    log::debug!("the prepare worker is gone; preparing in the frame");
+                    let Job { token, source } = returned.into_inner();
+                    return Some(Prepared {
+                        token,
+                        ready: prepare(source),
+                    });
+                }
             }
         }
+        let Job { token, source } = job;
+        Some(Prepared {
+            token,
+            ready: prepare(source),
+        })
     }
 
     /// Stop caring about whatever is in flight.
@@ -251,7 +277,9 @@ mod tests {
     fn the_newest_request_is_the_only_one_that_lands() {
         let preparer = Preparer::start(Arc::new(|| {}));
         for n in 1..=8u64 {
-            preparer.request(Job {
+            // `None` every time here: the worker started, so nothing falls
+            // back to preparing in the caller.
+            let took_it = preparer.request(Job {
                 token: PreviewToken(n),
                 source: Source::Text {
                     lines: vec![format!("line {n}")],
@@ -259,6 +287,7 @@ mod tests {
                     truncated: false,
                 },
             });
+            assert!(took_it.is_none(), "the worker should have taken job {n}");
         }
         // Drain until the last one has been seen, then assert nothing that
         // came out claims to be anything else.

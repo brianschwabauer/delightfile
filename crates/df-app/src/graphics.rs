@@ -141,14 +141,37 @@ impl Gfx {
 
     /// Tessellate and present one egui frame. Returns false when the surface
     /// was unavailable and the caller should just ask for another redraw.
+    ///
+    /// ## Why the texture deltas come first
+    ///
+    /// `textures_delta` is **one-shot**: egui hands over the glyphs and images
+    /// that changed *this* frame and then forgets them, on the understanding
+    /// that the backend has taken them. Returning early on a failed acquire —
+    /// a lost swapchain, a compositor that did not answer in time — used to
+    /// drop that set on the floor, so the next frame drew from an atlas the
+    /// renderer had never been given: blank glyphs and missing thumbnails until
+    /// something forced a full atlas rebuild. The matching `free` list leaked
+    /// the same way, in the other direction.
+    ///
+    /// Uploads do not need a swapchain image; only the render pass does. So the
+    /// deltas are applied unconditionally and it is the *drawing* that is
+    /// skipped.
     pub fn present(&mut self, full_output: egui::FullOutput) -> bool {
         use wgpu::CurrentSurfaceTexture as Cst;
-        let frame = match self.surface.get_current_texture() {
-            Cst::Success(f) | Cst::Suboptimal(f) => f,
+
+        for (id, delta) in &full_output.textures_delta.set {
+            self.renderer
+                .update_texture(&self.device, &self.queue, *id, delta);
+        }
+        // The acquire is folded into an `Option` rather than returning from
+        // each arm, so all five failures leave by the one path that still frees
+        // what egui has stopped believing in.
+        let acquired = match self.surface.get_current_texture() {
+            Cst::Success(f) | Cst::Suboptimal(f) => Some(f),
             Cst::Lost | Cst::Outdated => {
                 log::warn!("surface lost or outdated; reconfiguring");
                 self.surface.configure(&self.device, &self.surface_config);
-                return false;
+                None
             }
             // A timed-out acquire is the swapchain waiting on a compositor
             // that is not answering (see the present-mode note in `new`).
@@ -160,17 +183,25 @@ impl Gfx {
             Cst::Timeout => {
                 log::warn!("surface acquire timed out; reconfiguring");
                 self.surface.configure(&self.device, &self.surface_config);
-                return false;
+                None
             }
             Cst::Occluded => {
                 log::warn!("surface occluded; reconfiguring");
                 self.surface.configure(&self.device, &self.surface_config);
-                return false;
+                None
             }
             Cst::Validation => {
                 log::warn!("surface frame unavailable (validation); skipping");
-                return false;
+                None
             }
+        };
+        let Some(frame) = acquired else {
+            // The uploads above stand; the shapes are dropped, because the
+            // caller is about to ask for a frame that will build them again.
+            for id in &full_output.textures_delta.free {
+                self.renderer.free_texture(id);
+            }
+            return false;
         };
         let view = frame
             .texture
@@ -185,10 +216,6 @@ impl Gfx {
             pixels_per_point,
         };
 
-        for (id, delta) in &full_output.textures_delta.set {
-            self.renderer
-                .update_texture(&self.device, &self.queue, *id, delta);
-        }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {

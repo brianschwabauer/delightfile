@@ -18,7 +18,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use df_core::config::{Config, LineMode, MgrConfig, SortBy, Theme};
@@ -653,6 +653,16 @@ pub struct App {
     /// When the next frame is owed, if one is. `None` means "asleep until
     /// something happens" — the resting state.
     repaint_at: Option<Instant>,
+    /// The earliest *delayed* repaint egui has asked for from a thread that is
+    /// not the UI thread, waiting to be folded into `repaint_at`.
+    ///
+    /// An immediate off-thread request is a bell-ring and nothing else (see
+    /// `init_gfx`). A delayed one used to be dropped on the floor by the same
+    /// gate: the loop was asleep on `Wait`, so nothing would re-derive
+    /// `repaint_delay` until some *other* event caused a frame, and an
+    /// animation driven from a worker simply stopped. The deadline is carried
+    /// across here instead, and `about_to_wait` folds it in.
+    off_thread_repaint: Arc<Mutex<Option<Instant>>>,
     /// Consecutive frames the surface refused (`Gfx::present` returned false).
     /// Drives the retry back-off in `redraw`, and is reset by the first frame
     /// that lands.
@@ -971,11 +981,19 @@ pub struct App {
     /// mirror being empty means "we have not been told", not "the clipboard is
     /// empty" — and a paste guesses wrong either way, so it shells out instead.
     clipboard_seen: bool,
-    /// The toast a copy will show *if* the compositor takes the selection. A
-    /// copy is not a copy until it has (see [`crate::wayland`]).
-    pending_copy: Option<String>,
+    /// Copies waiting on the compositor's answer, oldest first. A copy is not
+    /// a copy until it has answered (see [`crate::wayland`]).
+    ///
+    /// A queue and not one slot: `c c` twice in quick succession sends two
+    /// `SetSelection`s and gets two `Copied`s back, and a single slot meant the
+    /// second request overwrote the first's message before its answer arrived —
+    /// one toast for two copies, and the wrong one. The wayland thread reads
+    /// commands and answers them in order, so first-in-first-out is the pairing.
+    pending_copy: std::collections::VecDeque<PendingCopy>,
     /// What a paste will do with the bytes it asked the clipboard for.
     pending_paste: Option<PendingPaste>,
+    /// The number the next [`PendingPaste`] carries. See that type.
+    paste_seq: u64,
     /// The files in the hand, while there are any.
     drag: Option<Drag>,
     /// A tab chip being pulled out of the strip (PLAN §2's "drag a tab out to
@@ -1078,9 +1096,41 @@ struct SpringHome {
 /// *what this paste is* is made when `p` is pressed and acted on a frame or two
 /// later when the bytes arrive.
 struct PendingPaste {
+    /// Which request this is, echoed back on [`crate::wayland::Event::Pasted`].
+    ///
+    /// `p` and then `P` inside one round trip send two `Receive`s; the window
+    /// is waiting for the second, and the first answer to come back would
+    /// otherwise be acted on with the second's `force`. A paste that asks
+    /// before overwriting must not become one that does not because a key was
+    /// pressed twice.
+    seq: u64,
     offer: crate::clipboard::Offer,
     /// Whether the paste overwrites without asking — `P` rather than `p`.
     force: bool,
+    /// The tab the paste was aimed at, and the directory that tab was in.
+    ///
+    /// **The destination is decided when the key is pressed, not when the bytes
+    /// arrive.** The read happens on another thread over a pipe some other
+    /// application fills at its own pace, and in the meantime the cursor can
+    /// have entered a directory, the tab can have been switched, closed, or
+    /// dragged into another window. Re-reading `self.cwd()` on arrival meant
+    /// the files landed wherever you happened to be looking — which is a paste
+    /// into a directory nobody asked about, and for the image and text cases a
+    /// *file written* there. Both are checked on arrival and the paste is
+    /// dropped if either moved.
+    tab: crate::tab::TabId,
+    dir: PathBuf,
+}
+
+/// A copy waiting for the compositor to say whether it took the selection.
+///
+/// Carries the payload as well as the message, because a refusal is not the
+/// end: [`App::copy_answered`] retries through `wl-copy`, and it needs the
+/// bytes to retry with. They are held for one round trip and then dropped.
+struct PendingCopy {
+    message: String,
+    mime: Option<String>,
+    bytes: Vec<u8>,
 }
 
 /// A drag from another application, over our window.
@@ -1192,6 +1242,7 @@ impl App {
             gfx: None,
             waker,
             repaint_at: None,
+            off_thread_repaint: Arc::new(Mutex::new(None)),
             present_failures: 0,
             watchdog: crate::watchdog::Watchdog::start(),
             logged_first_frame: false,
@@ -1286,8 +1337,9 @@ impl App {
             data_device: None,
             clipboard_types: Vec::new(),
             clipboard_seen: false,
-            pending_copy: None,
+            pending_copy: std::collections::VecDeque::new(),
             pending_paste: None,
+            paste_seq: 0,
             drag: None,
             tab_drag: None,
             windows: crate::window::Windows::default(),
@@ -1335,23 +1387,43 @@ impl App {
         // a loading spinner, an animation driven by a background value. Without
         // a callback here that request lands nowhere, because nothing is
         // polling the context. Routing it through the same bell keeps one
-        // wakeup path (PLAN §1). Only immediate requests ring it: a *delayed*
-        // one is already carried by `repaint_delay` in `redraw`, and waking now
-        // for a frame wanted later is how a wait turns into a poll.
+        // wakeup path (PLAN §1).
         //
-        // And only requests from *other* threads: egui also runs this callback
-        // for every `request_repaint` made on this thread inside the frame,
-        // and those are the same requests `repaint_delay` reports at the end
-        // of it. Ringing the bell for them too would request the next frame
-        // the instant this one is submitted, ahead of the paced deadline
-        // `redraw` sets — under a Mailbox swapchain that measured ~1700 fps
-        // during a cursor glow.
+        // **Only requests from other threads.** egui also runs this callback
+        // for every `request_repaint` made on this thread inside the frame, and
+        // those are the same requests `repaint_delay` reports at the end of it.
+        // Ringing the bell for them too would request the next frame the
+        // instant this one is submitted, ahead of the paced deadline `redraw`
+        // sets — under a Mailbox swapchain that measured ~1700 fps during a
+        // cursor glow.
+        //
+        // **A delay is a deadline, not a reason to drop the request.** This
+        // used to ring only for `delay.is_zero()`, on the reasoning that
+        // `repaint_delay` already carries the rest — which is true only if a
+        // frame happens. Off-thread, none is coming: the loop is asleep on
+        // `Wait` and the request that would have woken it is the one being
+        // ignored. So the deadline is written down for `about_to_wait` to fold
+        // in, and the bell rings — because the loop has to wake far enough to
+        // read it.
         let waker = self.waker.named("egui");
         let ui_thread = std::thread::current().id();
+        let deadline = Arc::clone(&self.off_thread_repaint);
         gfx.egui_ctx.set_request_repaint_callback(move |info| {
-            if info.delay.is_zero() && std::thread::current().id() != ui_thread {
-                waker.wake();
+            if std::thread::current().id() == ui_thread {
+                return;
             }
+            if !info.delay.is_zero() {
+                let due = Instant::now() + info.delay;
+                // The earliest wins: two workers asking for different times
+                // both have to be answered, and the later one will still be
+                // owed a frame when the earlier one lands.
+                if let Ok(mut slot) = deadline.lock() {
+                    if slot.is_none_or(|at| due < at) {
+                        *slot = Some(due);
+                    }
+                }
+            }
+            waker.wake();
         });
 
         // The data device needs the window's own surface, so it cannot be
@@ -2059,7 +2131,7 @@ impl App {
                 limit: crate::archive::PREVIEW_LIMIT,
             });
         } else {
-            self.bodies.cancel();
+            self.bodies.cancel(crate::preview::body::Which::Archive);
         }
         self.archive_preview = Some((archive, inner, None));
         true
@@ -4042,7 +4114,7 @@ impl App {
     /// tabs.
     fn open_palette(&mut self) {
         let rows = self.palette_rows();
-        self.finder = Some(Finder::new(Source::Commands, rows));
+        self.finder = Some(Finder::new(Source::Commands, rows).vi_mode(self.config.input.vi_mode));
         self.sync_context();
     }
 
@@ -4131,7 +4203,7 @@ impl App {
     /// `z` and `Z`.
     fn open_jump(&mut self, source: Source) {
         let rows = self.jump_rows(source, "");
-        self.finder = Some(Finder::new(source, rows));
+        self.finder = Some(Finder::new(source, rows).vi_mode(self.config.input.vi_mode));
         self.sync_context();
     }
 
@@ -4480,12 +4552,15 @@ impl App {
             let waker = self.waker.named("search");
             Arc::new(move || waker.wake())
         };
-        self.search = Some(Search::new(
-            mode,
-            self.tab().cwd.path().to_path_buf(),
-            self.mgr.show_hidden,
-            notify,
-        ));
+        self.search = Some(
+            Search::new(
+                mode,
+                self.tab().cwd.path().to_path_buf(),
+                self.mgr.show_hidden,
+                notify,
+            )
+            .vi_mode(self.config.input.vi_mode),
+        );
         self.sync_context();
     }
 
@@ -4928,11 +5003,20 @@ impl App {
         self.open_prompt_with(kind, InputBuffer::new(existing, cursor));
     }
 
+    /// Stamp `[input] vi_mode` on a field the user is about to type into.
+    ///
+    /// Off — the shipped default — `Esc` closes the field on the first press
+    /// instead of dropping it into Normal mode with a block caret. Every
+    /// [`InputBuffer`] this program hands to the keyboard goes through here or
+    /// through the `vi_mode` builder on the card that owns it: the setting is
+    /// one answer about how `Esc` behaves, and a bulk-rename row that ignored
+    /// it was the same key doing two things in one session.
+    fn input_buffer(&self, buffer: InputBuffer) -> InputBuffer {
+        buffer.vi_mode(self.config.input.vi_mode)
+    }
+
     fn open_prompt_with(&mut self, kind: PromptKind, buffer: InputBuffer) {
-        // The one place the `[input] vi_mode` answer is stamped on a prompt.
-        // Off — the shipped default — `Esc` closes the prompt on the first
-        // press instead of dropping it into Normal mode with a block caret.
-        let buffer = buffer.vi_mode(self.config.input.vi_mode);
+        let buffer = self.input_buffer(buffer);
         let origin = self.tab().cwd.dir.cursor();
         self.prompt = Some(Prompt::with(kind, origin, buffer));
         self.sync_context();
@@ -4994,6 +5078,7 @@ impl App {
         // works, and a card of them is not implemented).
         match crate::bulk::Bulk::new(dir, names, &siblings) {
             Ok(card) => {
+                let card = card.vi_mode(self.config.input.vi_mode);
                 self.dialog = Some(Dialog::Bulk(Box::new(card)));
                 self.sync_context();
             }
@@ -8098,16 +8183,6 @@ impl App {
         drag.handed_off = true;
         let paths = drag.paths.clone();
         let count = paths.len();
-        let Some(device) = &self.data_device else {
-            // No protocol, so there is nowhere for the drag to go. It is not
-            // an error and it is not silence either: the ghost springs home,
-            // which is what "that did not happen" looks like everywhere else
-            // in this gesture.
-            if let Some(drag) = self.drag.take() {
-                self.spring_home(drag, now);
-            }
-            return;
-        };
         let scale = self
             .gfx
             .as_ref()
@@ -8115,13 +8190,27 @@ impl App {
             .unwrap_or(1);
         let rgba =
             |color: egui::Color32| crate::wayland::Rgba(color.r(), color.g(), color.b(), color.a());
-        device.drag(
-            dnd::offer(&paths),
-            count,
-            rgba(self.palette.surface1),
-            rgba(self.palette.text),
-            scale,
-        );
+        // Two ways this can fail, and both mean the same thing to the gesture:
+        // no protocol at all, or a thread that has since exited so the command
+        // goes nowhere. It is not an error and it is not silence either — the
+        // ghost springs home, which is what "that did not happen" looks like
+        // everywhere else in this gesture. Without this the second case left
+        // `self.drag` set with `handed_off` true, so the files stayed in a hand
+        // the compositor was never given and no `DragEnded` was ever coming.
+        let handed = self.data_device.as_ref().is_some_and(|device| {
+            device.drag(
+                dnd::offer(&paths),
+                count,
+                rgba(self.palette.surface1),
+                rgba(self.palette.text),
+                scale,
+            )
+        });
+        if !handed {
+            if let Some(drag) = self.drag.take() {
+                self.spring_home(drag, now);
+            }
+        }
     }
 
     /// What [`crate::wayland`] has to say, once a frame.
@@ -8158,20 +8247,15 @@ impl App {
                     self.clipboard_types = mimes;
                     self.clipboard_seen = true;
                 }
-                crate::wayland::Event::Copied { ok } => {
-                    let Some(message) = self.pending_copy.take() else {
+                crate::wayland::Event::Copied { ok } => self.copy_answered(ok, now),
+                crate::wayland::Event::Pasted { seq, bytes } => {
+                    // Only the paste that is still outstanding. An answer to a
+                    // request the user has already superseded is dropped where
+                    // it arrives rather than applied with somebody else's
+                    // meaning — see [`PendingPaste::seq`].
+                    if self.pending_paste.as_ref().is_none_or(|p| p.seq != seq) {
                         continue;
-                    };
-                    if ok {
-                        log::info!("clipboard: copied via wl_data_device");
-                        self.toasts.notice(message, now);
-                    } else {
-                        // The one thing worse than a copy that fails is a copy
-                        // that fails and says "Copied".
-                        self.toasts.error("The compositor refused the copy", now);
                     }
-                }
-                crate::wayland::Event::Pasted { bytes } => {
                     let Some(pending) = self.pending_paste.take() else {
                         continue;
                     };
@@ -8368,23 +8452,77 @@ impl App {
     /// taken anything. The message waits in [`App::pending_copy`] for
     /// [`crate::wayland::Event::Copied`].
     fn offer(&mut self, mime: Option<&str>, bytes: &[u8], message: String, now: Instant) {
-        if self.data_device.as_ref().is_some_and(|d| d.ready()) {
-            let mimes = crate::clipboard::offer_mimes(mime);
-            if let Some(device) = &self.data_device {
-                device.set_selection(mimes, bytes.to_vec());
-            }
-            self.pending_copy = Some(message);
+        // `ready()` *and* the send being accepted. The flag is cleared when the
+        // wayland thread exits, but a thread that exits between the two lines
+        // would leave a copy sitting in a channel with nobody to read it and a
+        // toast waiting forever on an answer that is not coming.
+        let taken = self.data_device.as_ref().is_some_and(|device| {
+            device.ready()
+                && device.set_selection(crate::clipboard::offer_mimes(mime), bytes.to_vec())
+        });
+        if taken {
+            self.pending_copy.push_back(PendingCopy {
+                message,
+                mime: mime.map(str::to_string),
+                bytes: bytes.to_vec(),
+            });
             return;
         }
-        // No data device: an X11 session, or a compositor without the
-        // protocol. `wl-copy` is the fallback and its failures are failures.
+        // No data device: an X11 session, a compositor without the protocol, or
+        // a thread that has stopped. `wl-copy` is the fallback and its failures
+        // are failures.
+        self.copy_via_wl_copy(mime, bytes, &message, now);
+    }
+
+    /// The `wl-copy` half of a copy, used both when there was never a data
+    /// device and when there was one and it said no.
+    fn copy_via_wl_copy(
+        &mut self,
+        mime: Option<&str>,
+        bytes: &[u8],
+        message: &str,
+        now: Instant,
+    ) -> bool {
         match crate::clipboard::copy(mime, bytes) {
             Ok(()) => {
                 log::info!("clipboard: copied via wl-copy ({} bytes)", bytes.len());
-                self.toasts.notice(message, now);
+                self.toasts.notice(message.to_string(), now);
+                true
             }
-            Err(error) => self.clip_failed(error, now),
+            Err(error) => {
+                self.clip_failed(error, now);
+                false
+            }
         }
+    }
+
+    /// The compositor's answer to the oldest outstanding `set_selection`.
+    ///
+    /// A refusal is not the end of the copy. `set_selection` needs an input
+    /// serial and a compositor that will take it, and the one refusal that
+    /// happens in practice — a window that has been clicked into but never
+    /// typed in, so the seat has handed out no serial this thread has seen — is
+    /// exactly the case `wl-copy` handles, because it is a separate client with
+    /// a seat of its own. So the fallback runs once, here, and the red toast is
+    /// kept for the copy that failed *both* ways: a "the compositor refused the
+    /// copy" on a machine where the text did reach the clipboard is a lie the
+    /// user has no way to check.
+    fn copy_answered(&mut self, ok: bool, now: Instant) {
+        let Some(pending) = self.pending_copy.pop_front() else {
+            return;
+        };
+        if ok {
+            log::info!("clipboard: copied via wl_data_device");
+            self.toasts.notice(pending.message, now);
+            return;
+        }
+        log::info!("clipboard: the compositor refused the selection; trying wl-copy");
+        self.copy_via_wl_copy(
+            pending.mime.as_deref(),
+            &pending.bytes,
+            &pending.message,
+            now,
+        );
     }
 
     fn clip_failed(&mut self, error: crate::clipboard::ClipError, now: Instant) {
@@ -8458,12 +8596,29 @@ impl App {
                 return;
             };
             let mime = offer.mime().to_string();
-            log::info!("clipboard: pasting {mime} via wl_data_device");
-            self.pending_paste = Some(PendingPaste { offer, force });
-            if let Some(device) = &self.data_device {
-                device.receive(mime);
+            self.paste_seq += 1;
+            let seq = self.paste_seq;
+            let pending = PendingPaste {
+                seq,
+                offer,
+                force,
+                tab: self.tab().id,
+                dir: self.cwd(),
+            };
+            // The send has to be accepted before the paste is recorded as
+            // pending: a thread that has exited between the `ready()` above and
+            // this line would leave the window waiting for a `Pasted` that is
+            // never sent, and `p` would do nothing for the rest of the session.
+            let asked = self
+                .data_device
+                .as_ref()
+                .is_some_and(|device| device.receive(seq, mime.clone()));
+            if asked {
+                log::info!("clipboard: pasting {mime} via wl_data_device");
+                self.pending_paste = Some(pending);
+                return;
             }
-            return;
+            log::info!("clipboard: the data device is gone; pasting via wl-paste");
         }
         let types = match crate::clipboard::offered_types() {
             Ok(types) => types,
@@ -8477,13 +8632,21 @@ impl App {
             return;
         };
         let mime = offer.mime().to_string();
+        self.paste_seq += 1;
+        let pending = PendingPaste {
+            seq: self.paste_seq,
+            offer,
+            force,
+            tab: self.tab().id,
+            dir: self.cwd(),
+        };
         match crate::clipboard::paste(&mime) {
             Ok(bytes) => {
                 log::info!(
                     "clipboard: pasted {mime} via wl-paste ({} bytes)",
                     bytes.len()
                 );
-                self.take_pasted(PendingPaste { offer, force }, bytes, now);
+                self.take_pasted(pending, bytes, now);
             }
             Err(error) => self.clip_failed(error, now),
         }
@@ -8491,7 +8654,25 @@ impl App {
 
     /// The bytes the clipboard finally handed over, whichever path fetched
     /// them, and what the paste that asked for them meant to do.
+    ///
+    /// **The destination is checked before anything happens.** See
+    /// [`PendingPaste::tab`]: this can be a frame or several after the key was
+    /// pressed, and every one of the three branches below writes into "the
+    /// current directory". If that is no longer the directory the paste was
+    /// aimed at, the paste is dropped and said so — the alternative is files
+    /// appearing somewhere the user did not ask for them, with no gesture that
+    /// undoes it because none was made.
     fn take_pasted(&mut self, pending: PendingPaste, bytes: Vec<u8>, now: Instant) {
+        if self.tab().id != pending.tab || self.cwd() != pending.dir {
+            self.toasts.notice(
+                format!(
+                    "That paste was for {} — press p again here",
+                    file_name(&pending.dir)
+                ),
+                now,
+            );
+            return;
+        }
         match pending.offer {
             crate::clipboard::Offer::Files => self.paste_clipboard_files(bytes, pending.force, now),
             crate::clipboard::Offer::Image(mime) => {
@@ -9956,6 +10137,38 @@ impl App {
             .min()
     }
 
+    /// Ask winit for a frame, and start the watchdog's clock on it.
+    ///
+    /// **Every** `request_redraw` in this file goes through here. The watchdog's
+    /// second clock — "a redraw was asked for and no frame started" — is the
+    /// only thing that can notice a loop which has stopped delivering
+    /// `RedrawRequested` at all, and it can only notice the requests it was
+    /// told about. Two of the five call sites used to arm it, so a resize or a
+    /// keystroke that vanished into a wedged loop looked, from the terminal,
+    /// exactly like an idle window.
+    fn ask_redraw(&self) {
+        let Some(gfx) = &self.gfx else { return };
+        self.watchdog.redraw_requested();
+        gfx.window.request_redraw();
+    }
+
+    /// Fold a delayed repaint asked for from a worker thread into the loop's
+    /// own deadline, earliest wins. See the callback in `init_gfx`.
+    fn take_off_thread_repaint(&mut self) {
+        let Some(due) = self
+            .off_thread_repaint
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        else {
+            return;
+        };
+        self.repaint_at = Some(match self.repaint_at {
+            Some(at) => at.min(due),
+            None => due,
+        });
+    }
+
     fn redraw(&mut self) {
         self.watchdog.frame_started();
         self.redraw_inner();
@@ -10533,12 +10746,12 @@ impl ApplicationHandler<crate::Wake> for App {
         // After a redraw, the *next* frame is decided by `redraw()`'s own
         // policy (animating / deadline / egui's repaint_delay), never by the
         // event that delivered this one.
-        if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
-            if frame_log_enabled() {
-                log::info!("event-repaint: {event:?}");
-            }
-            self.watchdog.redraw_requested();
-            gfx.window.request_redraw();
+        // Asked for here and made at the bottom, so every path leaves through
+        // the one `ask_redraw` that arms the watchdog — see its own comment for
+        // why this must not be a bare `request_redraw`.
+        let mut wants_frame = response.repaint && !matches!(event, WindowEvent::RedrawRequested);
+        if wants_frame && frame_log_enabled() {
+            log::info!("event-repaint: {event:?}");
         }
         match event {
             // Closing the window is a `q`, not a `Q`: the wrapper script should
@@ -10549,7 +10762,7 @@ impl ApplicationHandler<crate::Wake> for App {
             }
             WindowEvent::Resized(size) => {
                 gfx.resize(size.width, size.height);
-                gfx.window.request_redraw();
+                wants_frame = true;
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
@@ -10563,7 +10776,7 @@ impl ApplicationHandler<crate::Wake> for App {
                         chord,
                         text,
                     });
-                    gfx.window.request_redraw();
+                    wants_frame = true;
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -10573,6 +10786,9 @@ impl ApplicationHandler<crate::Wake> for App {
                 }
             }
             _ => {}
+        }
+        if wants_frame {
+            self.ask_redraw();
         }
     }
 
@@ -10596,13 +10812,11 @@ impl ApplicationHandler<crate::Wake> for App {
         if frame_log_enabled() {
             log::info!("wake");
         }
-        if let Some(gfx) = &self.gfx {
-            self.watchdog.redraw_requested();
-            gfx.window.request_redraw();
-        }
+        self.ask_redraw();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.take_off_thread_repaint();
         let now = Instant::now();
         match self.repaint_at {
             Some(at) if at <= now => {
@@ -10610,9 +10824,7 @@ impl ApplicationHandler<crate::Wake> for App {
                 if frame_log_enabled() {
                     log::info!("deadline-fire");
                 }
-                if let Some(gfx) = &self.gfx {
-                    gfx.window.request_redraw();
-                }
+                self.ask_redraw();
             }
             Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
             // The resting state, and the one that has to stay reachable: no

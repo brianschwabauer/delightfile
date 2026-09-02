@@ -315,7 +315,28 @@ pub fn kind_of(entry: &Entry) -> FileKind {
     if entry.mime == BROKEN_LINK_MIME {
         return FileKind::BrokenLink;
     }
+    // A socket, fifo or device node reached directly rather than through a
+    // link. `Kind::File` is everything that is not a directory and not a
+    // symlink, so the file-type bits of the mode are the only place the
+    // distinction survives — and a fifo named `photo.png` is a fifo (step 1).
+    if is_special_mode(entry.mode) {
+        return FileKind::Special;
+    }
     kind_for_name(&entry.name, entry.mime, entry.mode)
+}
+
+/// The `S_IFMT` bits of an `st_mode`, when they are there to read.
+///
+/// Rows that never came from a `stat` — an archive's tree, a remote listing
+/// that answered with permissions only — carry a mode with no type bits at
+/// all, and "0" means *not known*, not "not a regular file".
+const S_IFMT: u32 = 0o170_000;
+const S_IFREG: u32 = 0o100_000;
+
+/// Is this mode a stat'd non-regular file? False for an unknown mode.
+fn is_special_mode(mode: u32) -> bool {
+    let file_type = mode & S_IFMT;
+    file_type != 0 && file_type != S_IFREG
 }
 
 /// The name-and-type half of [`kind_of`], so the table can be tested without
@@ -342,8 +363,11 @@ pub fn kind_for_name(name: &str, mime: &str, mode: u32) -> FileKind {
     };
 
     // Last, because it is the weakest signal: the bit says a blob can be run,
-    // and says nothing at all about a `.png` that someone chmod'd.
-    if kind == FileKind::Binary && mode & 0o111 != 0 {
+    // and says nothing at all about a `.png` that someone chmod'd. It says
+    // nothing about a socket either — every socket on the machine is 0755, and
+    // reading that as "you can run this" was the bug — so the rule only applies
+    // to a file the mode says is regular, or to a mode with no type bits to ask.
+    if kind == FileKind::Binary && mode & 0o111 != 0 && !is_special_mode(mode) {
         return FileKind::Executable;
     }
     kind
@@ -598,6 +622,55 @@ mod tests {
             "image/png",
         );
         assert_eq!(kind_of(&link), FileKind::Image);
+    }
+
+    /// Sockets, fifos and device nodes reached *directly* — no symlink in the
+    /// way, so `Kind::File` is all the scanner can say and the mode's type bits
+    /// are the whole signal.
+    #[test]
+    fn a_socket_is_special_and_not_executable() {
+        let mut sock = entry("S.gpg-agent", Kind::File, "application/octet-stream");
+        // Every socket on the machine: 0755, and the exec bit used to win.
+        sock.mode = 0o140_000 | 0o755;
+        assert_eq!(kind_of(&sock), FileKind::Special);
+
+        let mut fifo = entry("photo.png", Kind::File, "image/png");
+        fifo.mode = 0o010_000 | 0o644;
+        assert_eq!(kind_of(&fifo), FileKind::Special);
+
+        let mut device = entry("null", Kind::File, "application/octet-stream");
+        device.mode = 0o020_000 | 0o666;
+        assert_eq!(kind_of(&device), FileKind::Special);
+
+        let mut block = entry("sda", Kind::File, "application/octet-stream");
+        block.mode = 0o060_000 | 0o660;
+        assert_eq!(kind_of(&block), FileKind::Special);
+
+        // A regular file with the same bits is still what it was.
+        let mut script = entry("run", Kind::File, "application/octet-stream");
+        script.mode = 0o100_000 | 0o755;
+        assert_eq!(kind_of(&script), FileKind::Executable);
+
+        let mut photo = entry("holiday.jpg", Kind::File, "image/jpeg");
+        photo.mode = 0o100_000 | 0o644;
+        assert_eq!(kind_of(&photo), FileKind::Image);
+    }
+
+    /// A row that never came from a `stat` — an archive's tree, a remote
+    /// listing — has no type bits, and "0" must not read as "not a file".
+    #[test]
+    fn a_mode_with_no_type_bits_classifies_as_before() {
+        assert_eq!(
+            kind_for_name("holiday.jpg", "image/jpeg", 0o644),
+            FileKind::Image
+        );
+        assert_eq!(
+            kind_for_name("run", "application/octet-stream", 0o755),
+            FileKind::Executable
+        );
+        let entry = entry("run", Kind::File, "application/octet-stream");
+        assert_eq!(entry.mode & 0o170_000, 0);
+        assert_eq!(kind_of(&entry), FileKind::Binary);
     }
 
     /// The `.ts` ambiguity survives: the mime hint disambiguates it and this

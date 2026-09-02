@@ -1006,13 +1006,18 @@ impl Painting<'_> {
         // fading the explanation as hard as the thing it explains is how the
         // reason ends up as unreadable as the problem.
         let mode_width = if git.explain && git.status == Some(df_core::git::FileStatus::Ignored) {
+            // The mute goes into the *layout*, not into the `galley` call:
+            // `Painter::galley`'s colour argument only replaces
+            // `Color32::PLACEHOLDER`, so a galley laid out with a real colour
+            // keeps it and the fade was a no-op. Laying it out muted is the
+            // one place the colour is still open.
+            let colour = mix(self.palette.overlay0, ground, mute * 0.5);
             let galley = painter.layout_no_wrap(
                 IGNORED_TAG.to_string(),
                 egui::FontId::proportional(TAG_SIZE),
-                self.palette.overlay0,
+                colour,
             );
             let width = galley.size().x;
-            let colour = mix(self.palette.overlay0, ground, mute * 0.5);
             painter.galley(
                 egui::pos2(
                     rect.right() - ROW_PAD_X - mode_width - width,
