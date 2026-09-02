@@ -88,10 +88,15 @@ const CHIP_TINT: f32 = 0.16;
 
 // ── Tab strip (PLAN §2) ─────────────────────────────────────────────────────
 
-/// The gap between two tab chips. Half the window's [`GAP`]: the chips are one
-/// group and should read as one, so they sit closer to each other than the
-/// strip does to the panes below it.
-const TAB_GAP: f32 = 4.0;
+/// The gap between two tab chips: **exactly one pigtail wide**.
+///
+/// It used to be half the window's [`GAP`], which was a number picked for how
+/// close two plates should sit. There are no two plates any more — an inactive
+/// tab is the window ground (see [`tab_strip`]) — so the only thing this space
+/// has to hold is the active tab's flare, and holding it *exactly* is what
+/// keeps the flare off its neighbour's text and off any hover plate the
+/// neighbour is wearing. Derived from [`TAB_PIGTAIL`], never picked.
+const TAB_GAP: f32 = TAB_PIGTAIL;
 
 /// The widest a tab chip gets, in logical points.
 ///
@@ -101,29 +106,58 @@ const TAB_GAP: f32 = 4.0;
 /// that has taken over the top of the window.
 const TAB_MAX_WIDTH: f32 = 190.0;
 
-/// How far an inactive chip's plate is lifted off the window ground. Small:
-/// the strip's job is to show *which* tab is active, so the inactive ones are
-/// nearly the ground itself.
-const TAB_INACTIVE_LIFT: f32 = 0.5;
-
-/// How far an inactive tab sits below the active one's top edge, in points.
-///
-/// The whole difference between "raised" and "recessed" in a strip this short.
-/// Two: enough that the step is unmistakable along the top edge, little enough
-/// that the titles still share a baseline and the strip does not read as two
-/// rows of different things.
-const TAB_DROP: f32 = 2.0;
-
 /// The active tab's pigtails: the concave quarter-circles at its bottom
 /// corners that flare out past its edges and run into the top row's ground,
 /// the way a browser tab's do.
 ///
-/// [`CHIP_RADIUS`], which is the top row's own radius less the inset every
-/// chip on it keeps — the same number, so the tab's outward curve and the
-/// row's inward one are the same size, and the joint between them reads as one
-/// drawn shape rather than two. It also has to fit *inside* [`TAB_GAP`], or a
-/// pigtail would carve into the tab next door.
-const TAB_PIGTAIL: f32 = CHIP_RADIUS as f32;
+/// [`ROW_RADIUS`] — the *same* radius the tab's own top corners wear, so the
+/// tab is one shape drawn with one curve: it turns in at the top and out at
+/// the bottom by the same amount, which is what makes it read as a folder tab
+/// rather than as a rectangle with something happening at its feet. It was
+/// [`CHIP_RADIUS`] (three points), on the reasoning that a pigtail must fit
+/// inside the gap; at that size it was invisible, and the honest fix is to
+/// size the gap off the pigtail rather than the pigtail off the gap.
+const TAB_PIGTAIL: f32 = ROW_RADIUS as f32;
+
+/// How far above and below the strip a tab drag still counts as a *reorder*
+/// rather than as a tab on its way out of the window.
+///
+/// Twelve, a little under half [`CHROME_HEIGHT`]: far enough that sliding a
+/// chip along a 26 pt strip with a normal hand does not fall out of the
+/// gesture, near enough that it is well inside
+/// [`crate::window::DETACH_THRESHOLD`]'s 40 pt — so the two gestures cannot
+/// both be true, and the band a hand has to cross to get from one to the other
+/// is wide enough to be a decision.
+pub const TAB_REORDER_BAND: f32 = 12.0;
+
+/// How long the tabs take to slide aside for a chip being carried past them.
+///
+/// `delightful-ui` §5's reflow: the same order as [`crate::flip::TRAVEL`], and
+/// on the same curve, because it is the same event — a list that has changed
+/// order under the pointer and is showing the reader where the rows went.
+pub const TAB_SLIDE: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The hairline between two adjacent inactive tabs, as a fraction of the
+/// strip's height.
+///
+/// Short of full height on purpose: a rule that ran the whole way down would
+/// draw a grid, and what is wanted is the *hint* of a division between two
+/// titles that share a ground. Three fifths is delightstack's separator
+/// proportion inside a menu, which is the same problem.
+const TAB_SEPARATOR_HEIGHT: f32 = 0.6;
+
+/// How wide that hairline is. One point — a *hair*, not a rule: it is there to
+/// be found by an eye already looking for the join between two titles, and
+/// anything thicker would compete with the active tab's edge.
+const TAB_SEPARATOR_WIDTH: f32 = 1.0;
+
+/// How far a chip in the hand is tinted off the ground while it is carried.
+///
+/// An inactive tab has no plate at rest; one being dragged needs to look
+/// picked up, and this is the plate it borrows for as long as it is off the
+/// ground. It fades back out as the chip settles into its slot, so nothing
+/// pops at the end of the landing.
+const TAB_CARRY_TINT: f32 = 0.8;
 
 /// Where each tab's chip goes.
 ///
@@ -154,128 +188,360 @@ pub fn tab_at(strip: egui::Rect, count: usize, pos: egui::Pos2) -> Option<usize>
         .position(|rect| rect.contains(pos))
 }
 
+/// The band a tab drag has to stay inside to be a *reorder*.
+///
+/// The strip, grown [`TAB_REORDER_BAND`] above and below it and not one point
+/// sideways: the strip already spans the window, and a hand that has run off
+/// its end is still sliding a chip along it.
+pub fn tab_band(strip: egui::Rect) -> egui::Rect {
+    strip.expand2(egui::vec2(0.0, TAB_REORDER_BAND))
+}
+
+/// Whether a tab drag at `at` is reordering rather than leaving.
+///
+/// The one question that decides which gesture is live, asked from the pointer
+/// alone so that a hand can cross back and forth between the two and the
+/// answer changes with it — there is no mode to get stuck in.
+pub fn reordering(strip: egui::Rect, at: egui::Pos2) -> bool {
+    tab_band(strip).contains(at)
+}
+
+/// Where the chip being carried is drawn: its own size, at the pointer, held
+/// inside the strip.
+///
+/// `grab_dx` is where in the chip the button went down, so the chip travels
+/// with the point the hand took hold of rather than jumping its centre under
+/// the cursor. Clamped to the strip because a chip that could be dragged off
+/// the end would be a chip in a slot that does not exist.
+pub fn tab_carry(
+    strip: egui::Rect,
+    count: usize,
+    index: usize,
+    grab_dx: f32,
+    x: f32,
+) -> egui::Rect {
+    let rects = tab_rects(strip, count);
+    let Some(home) = rects.get(index).copied() else {
+        return egui::Rect::NOTHING;
+    };
+    let left = (x - grab_dx).clamp(
+        strip.left(),
+        (strip.right() - home.width()).max(strip.left()),
+    );
+    egui::Rect::from_min_size(egui::pos2(left, home.top()), home.size())
+}
+
+/// Which slot a carried chip would drop into, from where its middle is.
+///
+/// The nearest slot's, rather than a division of the strip's width: the chip
+/// is the same size as a slot, so "which slot is this chip mostly over" and
+/// "which slot centre is it nearest" are the same question, and the nearest
+/// one cannot fall off the end when the chips are capped at
+/// [`TAB_MAX_WIDTH`] and the strip is wider than all of them together.
+pub fn tab_slot(strip: egui::Rect, count: usize, centre_x: f32) -> usize {
+    tab_rects(strip, count)
+        .iter()
+        .enumerate()
+        .min_by(|a, b| {
+            (a.1.center().x - centre_x)
+                .abs()
+                .total_cmp(&(b.1.center().x - centre_x).abs())
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+/// The tab index sitting in each slot while the tab at `from` is being carried
+/// to slot `to` — the order the strip would have if the chip were let go now.
+///
+/// Remove-then-insert, which is what the drop itself does
+/// ([`crate::tabs::Tabs::reorder`]): the two must agree, or the tabs would
+/// slide one way during the drag and land another.
+pub fn tab_order(count: usize, from: usize, to: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).collect();
+    if from >= count {
+        return order;
+    }
+    let tab = order.remove(from);
+    order.insert(to.min(order.len()), tab);
+    order
+}
+
+/// Where every tab sits while the tab at `from` is carried to slot `to`,
+/// indexed **by tab**, not by slot.
+///
+/// The carried tab's entry is its would-be resting place; the painter draws it
+/// at the pointer instead and uses this only as the target the landing
+/// animation aims at.
+pub fn tab_shifted(strip: egui::Rect, count: usize, from: usize, to: usize) -> Vec<egui::Rect> {
+    let rects = tab_rects(strip, count);
+    let order = tab_order(count, from, to);
+    let mut shifted = rects.clone();
+    for (slot, tab) in order.into_iter().enumerate() {
+        if let (Some(dest), Some(rect)) = (rects.get(slot), shifted.get_mut(tab)) {
+            *rect = *dest;
+        }
+    }
+    shifted
+}
+
+/// A tab chip that is not where its slot is: one in the hand, or one on its
+/// way back down into a slot.
+///
+/// It carries the other tabs' displacement with it because the two are one
+/// motion — the chip goes somewhere and the strip opens to receive it — and a
+/// painter given only the chip would have to work the rest out again.
+#[derive(Debug, Clone)]
+pub struct Carry {
+    /// Which tab is off the ground.
+    pub tab: usize,
+    /// Where its chip is drawn this frame.
+    pub rect: egui::Rect,
+    /// How far each tab has slid from its own slot, by tab index. Empty means
+    /// nothing has moved.
+    pub offsets: Vec<f32>,
+    /// 0 while the chip is in the hand, 1 once it has settled into a slot.
+    /// The bottom corners and the pigtails come back over this, so a chip that
+    /// has landed does not snap from *floating plate* to *folder tab*.
+    pub settle: f32,
+}
+
 /// Draw the strip. Only called with two or more tabs (PLAN §2).
 ///
-/// The strip sits **flush** on the top row, with no gap, and the active tab is
-/// drawn as a folder tab joined to it: rounded at the top like every other
-/// surface in the window, flared at the bottom into two concave
-/// [`TAB_PIGTAIL`] arcs that run out past its own edges and into the row's
-/// ground, and filled with that same ground. The two are one shape, which is
-/// the only honest way to draw "this tab is the path below it" — and it is why
-/// the strip is drawn *before* the top row rather than beside it.
+/// The strip sits **flush** on the top row, and there is exactly one plate on
+/// it: the active tab's, which is the top row's own ground carried up over the
+/// chip and flared back down into it through two concave [`TAB_PIGTAIL`] arcs.
+/// The two are one shape, which is the only honest way to draw "this tab is
+/// the path below it" — and it is why the strip is drawn *before* the top row
+/// rather than beside it.
 ///
-/// The inactive tabs are a quieter plate dropped [`TAB_DROP`] below the active
-/// one's top edge, with their own corners rounded concentrically against that
-/// drop (`delightful-ui` §15) — so the active one reads as raised out of a row
-/// of others rather than as merely a different colour.
+/// **The inactive tabs have no plate at all.** They used to have a quieter one,
+/// lifted slightly off the ground and dropped a couple of points below the
+/// active tab's top edge, and it read backwards: a lighter plate beside a
+/// darker one says the *lighter* one is on top, so the tab you were looking at
+/// was the one that looked recessed. Now they are simply the window ground
+/// with a title on it, divided by a hairline where two of them meet, and the
+/// active tab is unmistakable because it is the only tab that is a surface.
 ///
 /// `filter` is the committed filter's fade, passed through to [`bar_fill`] so
 /// the active tab is tinted by exactly as much as the row it joins.
+///
+/// `carry` is the chip that is off the ground — one being dragged along the
+/// strip, or one settling into the slot it was dropped in — and the sideways
+/// displacement the rest of the strip is wearing to make room for it.
+#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn tab_strip(
     paint: &Painting<'_>,
     strip: egui::Rect,
     titles: &[String],
     active: usize,
     filter: f32,
+    carry: Option<&Carry>,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
 ) {
     let palette = paint.palette;
-    let rects = tab_rects(strip, titles.len());
-    // The active tab last, so its pigtails are drawn over its neighbours
-    // rather than under them. They fit inside [`TAB_GAP`] and should never
-    // reach a neighbour's plate, but the order is free and the alternative
-    // would be a hairline that only appears at one window width.
-    let order = (0..rects.len())
-        .filter(|i| *i != active)
-        .chain(std::iter::once(active).filter(|i| *i < rects.len()));
+    let count = titles.len();
+    let homes = tab_rects(strip, count);
+    // A carry naming a tab that is no longer there — a scan landed, a `}` went
+    // past, the strip shrank — is no carry at all, rather than a panic or a
+    // chip drawn for a tab that has gone.
+    let carry = carry.filter(|carry| carry.tab < count);
+    let rects: Vec<egui::Rect> = homes
+        .iter()
+        .enumerate()
+        .map(|(index, home)| {
+            let dx = carry
+                .and_then(|carry| carry.offsets.get(index).copied())
+                .unwrap_or(0.0);
+            home.translate(egui::vec2(dx, 0.0))
+        })
+        .collect();
+
+    // The hairlines, under everything: they divide two grounds, and the moment
+    // either side of one is a *surface* — the active tab, or a chip in the
+    // hand — the surface's own edge is already doing the dividing.
+    let quiet = |index: usize| index != active && carry.is_none_or(|carry| carry.tab != index);
+    for index in 0..count.saturating_sub(1) {
+        if !(quiet(index) && quiet(index + 1)) {
+            continue;
+        }
+        let (left, right) = (rects[index], rects[index + 1]);
+        let x = (left.right() + right.left()) / 2.0;
+        let half = strip.height() * TAB_SEPARATOR_HEIGHT / 2.0;
+        paint.painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(x - TAB_SEPARATOR_WIDTH / 2.0, strip.center().y - half),
+                egui::pos2(x + TAB_SEPARATOR_WIDTH / 2.0, strip.center().y + half),
+            ),
+            0,
+            palette.surface1,
+        );
+    }
+
+    // The active tab after the quiet ones, so its pigtails are drawn over the
+    // ground beside it rather than under whatever is there; the carried chip
+    // after everything, because it is the thing in the hand.
+    let seated = (0..count).filter(|index| Some(*index) != carry.map(|c| c.tab));
+    let order = seated
+        .clone()
+        .filter(|index| *index != active)
+        .chain(seated.filter(|index| *index == active));
+    // A chip actually in the hand takes the hover with it: the hit test is
+    // still measuring the *slots*, which the tabs have slid out of, so a
+    // highlight left switched on would land on whichever tab the pointer's
+    // old slot now belongs to. A chip merely settling into a slot is past
+    // that — the pointer is free again and the strip has stopped moving.
+    let in_hand = carry.is_some_and(|carry| carry.settle <= 0.0);
+    let warm = |index: usize| {
+        if in_hand {
+            (0.0, 0.0)
+        } else {
+            let key = Control::Tab(index);
+            (hovers.hover(key), hovers.press(key))
+        }
+    };
     for index in order {
-        let (rect, title) = (rects[index], &titles[index]);
-        let key = Control::Tab(index);
-        let is_active = index == active;
-        let hover = hovers.hover(key);
-        let ground = mix(palette.crust, palette.surface0, TAB_INACTIVE_LIFT);
-        let fill = if is_active {
-            // The top row's own ground: the tab and the path it is about are
-            // one surface, and this is the expression that says so.
-            bar_fill(palette, filter)
-        } else {
-            mix(ground, palette.surface1, hover)
-        };
-        // An inactive tab is dropped, and rounds against that drop: its radius
-        // is the active tab's less the step, so the gap along the shoulder
-        // between them stays a constant width as it turns (`delightful-ui`
-        // §15). It also takes the press inset; the active tab does not, because
-        // shrinking it would open a seam between it and the row it is joined
-        // to — and pressing the tab you are already on does nothing anyway.
-        let rect = if is_active {
-            rect
-        } else {
-            let rect = pressed_rect(rect, hovers.press(key));
-            egui::Rect::from_min_max(egui::pos2(rect.left(), rect.top() + TAB_DROP), rect.max)
-        };
-        let radius = if is_active {
-            ROW_RADIUS
-        } else {
-            ROW_RADIUS - TAB_DROP as u8
-        };
-        // Square at the bottom, both ways: every tab meets the top row there,
-        // and a rounded bottom corner would be a gap between two things that
-        // are touching.
+        let (hover, press) = warm(index);
+        tab_chip(
+            paint,
+            strip,
+            rects[index],
+            index,
+            &titles[index],
+            index == active,
+            1.0,
+            filter,
+            (hover, press),
+            ripples,
+        );
+    }
+    if let Some(carry) = carry {
+        tab_chip(
+            paint,
+            strip,
+            carry.rect,
+            carry.tab,
+            &titles[carry.tab],
+            carry.tab == active,
+            carry.settle,
+            filter,
+            // A chip off the ground wears its own plate, and a hover under it
+            // would be a second one saying the same thing more faintly.
+            (0.0, 0.0),
+            ripples,
+        );
+    }
+}
+
+/// One chip of the strip: its plate if it has one, its ripples, its number and
+/// its title.
+///
+/// `settle` is 1 for a chip in its slot and 0 for one in the hand, and every
+/// difference between the two rides on it — the active tab's bottom corners
+/// and pigtails come back over it, and the plate a carried inactive chip
+/// borrows fades out over it — so a chip landing in a slot arrives as the tab
+/// that lives there instead of snapping into it.
+#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
+fn tab_chip(
+    paint: &Painting<'_>,
+    strip: egui::Rect,
+    rect: egui::Rect,
+    index: usize,
+    title: &str,
+    is_active: bool,
+    settle: f32,
+    filter: f32,
+    // The hover and press amounts, passed in rather than read: the strip
+    // decides whether they apply at all (see [`tab_strip`]), and a chip that
+    // read them itself could not be told to ignore them.
+    (hover, press): (f32, f32),
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let key = Control::Tab(index);
+    let settle = settle.clamp(0.0, 1.0);
+    // The press inset is the inactive tabs' alone: shrinking the active one
+    // would open a seam between it and the row it is joined to, and pressing
+    // the tab you are already on does nothing anyway. A chip in the hand does
+    // not take it either — it is already off the ground.
+    let rect = if is_active || settle < 1.0 {
+        rect
+    } else {
+        pressed_rect(rect, press)
+    };
+    if is_active {
+        // The top row's own ground: the tab and the path it is about are one
+        // surface, and this is the expression that says so.
+        let fill = bar_fill(palette, filter);
+        // Square at the bottom once it is seated, because that is where it
+        // meets the row — a rounded bottom corner would be a gap between two
+        // things that are touching. Off the ground it rounds all four ways:
+        // nothing is under it to join.
+        let bottom = (ROW_RADIUS as f32 * (1.0 - settle)).round() as u8;
         paint.painter.rect_filled(
             rect,
             egui::CornerRadius {
-                nw: radius,
-                ne: radius,
-                sw: 0,
-                se: 0,
+                nw: ROW_RADIUS,
+                ne: ROW_RADIUS,
+                sw: bottom,
+                se: bottom,
             },
             fill,
         );
-        if is_active {
-            // The left pigtail is skipped on the first tab: there is nothing
-            // to its left but the window, and a flare out over the ground
-            // would hang off the end of the row it is supposed to join. Same
-            // at the other end, for a tab whose right edge is the row's.
-            if rect.left() > strip.left() + 0.5 {
-                pigtail(paint, rect, fill, false);
-            }
-            if rect.right() < strip.right() - 0.5 {
-                pigtail(paint, rect, fill, true);
-            }
+        // The left pigtail is skipped on the tab in the first slot: its left
+        // edge lines up with the top row's, and a flare out over the ground
+        // there would hang off the end of the row it is supposed to join —
+        // which is also why the row squares that corner (see [`bar_ground`]).
+        // Same at the other end, for a tab whose right edge is the row's.
+        let radius = TAB_PIGTAIL * settle;
+        if rect.left() > strip.left() + 0.5 {
+            pigtail(paint, rect, fill, radius, false);
         }
+        if rect.right() < strip.right() - 0.5 {
+            pigtail(paint, rect, fill, radius, true);
+        }
+    } else {
+        // No plate at rest — the ground *is* the inactive tab. What is drawn
+        // here is the hover, and the plate a chip borrows while it is in the
+        // hand, which fades back into the ground as the chip settles.
+        let plate = mix(palette.crust, palette.surface0, hover);
+        let plate = mix(plate, palette.surface1, TAB_CARRY_TINT * (1.0 - settle));
+        if hover > 0.0 || settle < 1.0 {
+            paint.painter.rect_filled(rect, ROW_RADIUS, plate);
+        }
+    }
 
-        let inside = paint.painter.with_clip_rect(rect);
-        for splash in ripples.splashes(key, paint.now) {
-            inside.circle_filled(
-                splash.center,
-                splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
-            );
-        }
-        let color = if is_active {
-            palette.text
-        } else {
-            palette.overlay1
-        };
-        // The number is what `1`–`9` press, so it is on the chip rather than in
-        // the help sheet: the strip teaches its own shortcut.
-        inside.text(
-            egui::pos2(rect.left() + PAD_X, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            format!("{}", index + 1),
-            key_font(FONT - 1.0),
-            palette.overlay0,
-        );
-        let text_left = rect.left() + PAD_X + FONT;
-        truncated(
-            &inside,
-            egui::pos2(text_left, rect.center().y),
-            title,
-            color,
-            (rect.right() - PAD_X - text_left).max(0.0),
+    let inside = paint.painter.with_clip_rect(rect);
+    for splash in ripples.splashes(key, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
         );
     }
+    let color = if is_active {
+        palette.text
+    } else {
+        palette.overlay1
+    };
+    // The number is what `1`–`9` press, so it is on the chip rather than in
+    // the help sheet: the strip teaches its own shortcut.
+    inside.text(
+        egui::pos2(rect.left() + PAD_X, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        format!("{}", index + 1),
+        key_font(FONT - 1.0),
+        palette.overlay0,
+    );
+    let text_left = rect.left() + PAD_X + FONT;
+    truncated(
+        &inside,
+        egui::pos2(text_left, rect.center().y),
+        title,
+        color,
+        (rect.right() - PAD_X - text_left).max(0.0),
+    );
 }
 
 /// One of the active tab's pigtails: the concave quarter-circle that carries
@@ -286,15 +552,23 @@ pub fn tab_strip(
 /// closed path by fanning from its first point, which is only correct for a
 /// convex outline — and a pigtail is concave by definition. Two primitives and
 /// a clip rectangle give the exact shape with no tessellation to get wrong.
-fn pigtail(paint: &Painting<'_>, tab: egui::Rect, fill: egui::Color32, right: bool) {
+///
+/// The bite is [`crate::theme::Palette::crust`], the window's own ground, and
+/// it can be that unconditionally because the square it is taken out of sits
+/// inside [`TAB_GAP`] — which is exactly one pigtail wide, so a neighbour's
+/// hover plate can never be underneath it.
+fn pigtail(paint: &Painting<'_>, tab: egui::Rect, fill: egui::Color32, radius: f32, right: bool) {
+    if radius <= 0.0 {
+        return;
+    }
     let square = if right {
         egui::Rect::from_min_max(
-            egui::pos2(tab.right(), tab.bottom() - TAB_PIGTAIL),
-            egui::pos2(tab.right() + TAB_PIGTAIL, tab.bottom()),
+            egui::pos2(tab.right(), tab.bottom() - radius),
+            egui::pos2(tab.right() + radius, tab.bottom()),
         )
     } else {
         egui::Rect::from_min_max(
-            egui::pos2(tab.left() - TAB_PIGTAIL, tab.bottom() - TAB_PIGTAIL),
+            egui::pos2(tab.left() - radius, tab.bottom() - radius),
             egui::pos2(tab.left(), tab.bottom()),
         )
     };
@@ -309,7 +583,7 @@ fn pigtail(paint: &Painting<'_>, tab: egui::Rect, fill: egui::Color32, right: bo
     paint
         .painter
         .with_clip_rect(square)
-        .circle_filled(centre, TAB_PIGTAIL, paint.palette.crust);
+        .circle_filled(centre, radius, paint.palette.crust);
 }
 
 // ── The breadcrumb path bar (PLAN §2) ───────────────────────────────────────
@@ -1063,11 +1337,36 @@ const BAR_FILTER_TINT: f32 = 0.10;
 /// `filter` is the committed filter's fade, 0 when there is none — it rides
 /// the same eased way out the chip does, so the row settles back to its own
 /// colour rather than snapping.
-fn bar_ground(paint: &Painting<'_>, rect: egui::Rect, filter: f32) -> egui::Rect {
+///
+/// `joined` is whether the tab strip is sitting on top of this row, and the
+/// only thing it changes is the north-west corner — see [`bar_corners`].
+fn bar_ground(paint: &Painting<'_>, rect: egui::Rect, joined: bool, filter: f32) -> egui::Rect {
     paint
         .painter
-        .rect_filled(rect, ROW_RADIUS, bar_fill(paint.palette, filter));
+        .rect_filled(rect, bar_corners(joined), bar_fill(paint.palette, filter));
     rect.shrink2(egui::vec2(PAD_X, 0.0))
+}
+
+/// The top row's four corner radii.
+///
+/// Three of them are always [`ROW_RADIUS`]. The fourth, the north-west, is
+/// **square whenever the strip is above the row**: the tab in the first slot
+/// has no left pigtail (its left edge is the row's own), so a rounded corner
+/// there would put a curve immediately beside a straight edge that is trying
+/// to continue it — the two would read as a misalignment rather than as one
+/// line. Squared, the row's left edge and the first tab's are the same edge,
+/// which is what they are.
+///
+/// This is deliberately about the *strip*, not about which tab is active: the
+/// corner would otherwise round and unround as tabs were switched, which is
+/// motion on the window's frame in answer to a keystroke about its contents.
+pub fn bar_corners(joined: bool) -> egui::CornerRadius {
+    egui::CornerRadius {
+        nw: if joined { 0 } else { ROW_RADIUS },
+        ne: ROW_RADIUS,
+        sw: ROW_RADIUS,
+        se: ROW_RADIUS,
+    }
 }
 
 /// The colour [`bar_ground`] paints, on its own.
@@ -1097,6 +1396,10 @@ pub fn path_bar(
     // way out after it is cleared — the same instant-in/eased-out the yank chip
     // an inch to its right rides (PLAN §8).
     filter_alpha: f32,
+    // Whether the tab strip is sitting on this row, which squares its
+    // north-west corner so the row's left edge and the first tab's are one
+    // straight line ([`bar_corners`]).
+    joined: bool,
     cluster: &Cluster<'_>,
     geom: &TopGeom,
     hovers: &Hovers<Control>,
@@ -1104,7 +1407,7 @@ pub fn path_bar(
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    bar_ground(paint, bar, filter_alpha);
+    bar_ground(paint, bar, joined, filter_alpha);
     let font = egui::FontId::proportional(FONT);
     let rects = &geom.crumbs;
 
@@ -1265,13 +1568,23 @@ pub fn path_bar(
 /// the keyboard is in one place at a time, and a row that grew under the panes
 /// every time a query was typed would move rows under the pointer
 /// (`delightful-ui` §8's spatial stability).
-pub fn prompt_row(paint: &Painting<'_>, row: egui::Rect, prompt: &Prompt, tail: Option<&str>) {
+///
+/// `joined` is the strip above it, exactly as in [`path_bar`]: the strip is
+/// drawn whether or not a prompt has taken the row under it, so the corner it
+/// squares has to be squared here too.
+pub fn prompt_row(
+    paint: &Painting<'_>,
+    row: egui::Rect,
+    prompt: &Prompt,
+    tail: Option<&str>,
+    joined: bool,
+) {
     let palette = paint.palette;
     // No rule along the top edge: the prompt *is* the indication. A row that
     // has swapped its breadcrumbs for a titled field with a caret in it has
     // already said the keyboard is here, and a second mark saying the same
     // thing is a mark that only ever gets in the way.
-    let mut inner = bar_ground(paint, row, 0.0);
+    let mut inner = bar_ground(paint, row, joined, 0.0);
 
     // The row grew a second line for an error that would not fit beside the
     // query: the field keeps the first line and the error gets the second.
@@ -2327,6 +2640,103 @@ mod tests {
         assert_eq!(tab_at(strip, 4, egui::pos2(-10.0, -10.0)), None);
     }
 
+    /// The pigtail is a *visible* radius — the tab's own — and the gap is cut
+    /// to fit it, so the active tab's flare lands in the space between two
+    /// chips and stops at its neighbour's edge rather than carving into it.
+    #[test]
+    fn the_gap_is_exactly_one_pigtail_wide() {
+        assert_eq!(TAB_PIGTAIL, ROW_RADIUS as f32);
+        assert_eq!(TAB_GAP, TAB_PIGTAIL);
+        let rects = tab_rects(strip(), 3);
+        // The first tab's left edge is the row's own, which is why it has no
+        // left pigtail and why the row squares that corner.
+        assert!((rects[0].left() - strip().left()).abs() < 1e-3);
+        // …and the flare off the second tab's left edge reaches the first
+        // tab's right edge and no further.
+        assert!((rects[1].left() - TAB_PIGTAIL - rects[0].right()).abs() < 1e-3);
+    }
+
+    /// The strip squares the top row's north-west corner and nothing else.
+    #[test]
+    fn the_strip_squares_the_corner_it_sits_on() {
+        let joined = bar_corners(true);
+        assert_eq!(joined.nw, 0);
+        assert_eq!(
+            (joined.ne, joined.sw, joined.se),
+            (ROW_RADIUS, ROW_RADIUS, ROW_RADIUS)
+        );
+        // With no strip it is the plain rounded row it has always been.
+        assert_eq!(bar_corners(false), egui::CornerRadius::same(ROW_RADIUS));
+    }
+
+    /// The reorder band is wide enough to slide a chip along and well inside
+    /// the travel a detach asks for, so the two gestures cannot both be true.
+    #[test]
+    fn the_reorder_band_stops_short_of_the_detach() {
+        let strip = strip();
+        assert!(reordering(strip, strip.center()));
+        assert!(reordering(
+            strip,
+            egui::pos2(strip.center().x, strip.bottom() + TAB_REORDER_BAND - 1.0)
+        ));
+        assert!(!reordering(
+            strip,
+            egui::pos2(strip.center().x, strip.bottom() + TAB_REORDER_BAND + 1.0)
+        ));
+        // Sideways it is the strip itself: a hand that has run off the end of
+        // the row is still sliding a chip along it, until it drops below.
+        assert!(reordering(strip, egui::pos2(strip.left(), strip.top())));
+        const { assert!(TAB_REORDER_BAND < crate::window::DETACH_THRESHOLD) };
+    }
+
+    /// The carried chip travels with the point the hand took hold of, and
+    /// cannot be dragged out of the strip it belongs to.
+    #[test]
+    fn a_carried_chip_follows_the_grab_and_stays_in_the_strip() {
+        let strip = strip();
+        let rects = tab_rects(strip, 4);
+        let grab_dx = 20.0;
+        // Picked up where it stands: it does not move.
+        let still = tab_carry(strip, 4, 1, grab_dx, rects[1].left() + grab_dx);
+        assert!((still.left() - rects[1].left()).abs() < 1e-3);
+        assert_eq!(still.size(), rects[1].size());
+        // Dragged off either end: clamped, never outside.
+        let left = tab_carry(strip, 4, 1, grab_dx, strip.left() - 500.0);
+        assert!((left.left() - strip.left()).abs() < 1e-3);
+        let right = tab_carry(strip, 4, 1, grab_dx, strip.right() + 500.0);
+        assert!((right.right() - strip.right()).abs() < 1e-3);
+        // A tab that is no longer there is no rectangle at all.
+        assert_eq!(tab_carry(strip, 4, 9, grab_dx, 0.0), egui::Rect::NOTHING);
+    }
+
+    /// A chip over a slot drops into that slot, and the strip it leaves opens
+    /// in the right place.
+    #[test]
+    fn a_chip_drops_into_the_slot_it_is_over() {
+        let strip = strip();
+        let rects = tab_rects(strip, 4);
+        for (index, rect) in rects.iter().enumerate() {
+            assert_eq!(tab_slot(strip, 4, rect.center().x), index);
+        }
+        // Off either end it saturates rather than wrapping or panicking.
+        assert_eq!(tab_slot(strip, 4, -1000.0), 0);
+        assert_eq!(tab_slot(strip, 4, 100_000.0), 3);
+        assert_eq!(tab_slot(strip, 0, 0.0), 0);
+
+        // Carrying tab 0 to slot 2 slides 1 and 2 left by one place and leaves
+        // 3 where it was — the order a remove-then-insert gives.
+        assert_eq!(tab_order(4, 0, 2), vec![1, 2, 0, 3]);
+        assert_eq!(tab_order(4, 3, 0), vec![3, 0, 1, 2]);
+        assert_eq!(tab_order(4, 2, 2), vec![0, 1, 2, 3]);
+        let shifted = tab_shifted(strip, 4, 0, 2);
+        assert_eq!(shifted[1], rects[0], "tab 1 has taken the first slot");
+        assert_eq!(shifted[2], rects[1]);
+        assert_eq!(shifted[0], rects[2], "the carried tab's would-be slot");
+        assert_eq!(shifted[3], rects[3], "nothing past the move moved");
+        // Dropping where it started moves nothing at all.
+        assert_eq!(tab_shifted(strip, 4, 1, 1), rects);
+    }
+
     /// The path, as segments you can click: the root first, the directory you
     /// are in last, and each one addressing where it points.
     #[test]
@@ -2516,23 +2926,64 @@ mod tests {
             };
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
 
+            // Every tab in turn is the active one, because each position
+            // draws a different shape: the first has no left pigtail (its edge
+            // is the row's), the middle has both, and the last has both only
+            // because the chips are capped short of the row's right edge.
+            let titles: Vec<String> = ["work", "downloads", "src"]
+                .iter()
+                .map(|t| t.to_string())
+                .collect();
+            for active in 0..titles.len() {
+                tab_strip(
+                    &paint,
+                    strip(),
+                    &titles,
+                    active,
+                    if active == 1 { 1.0 } else { 0.0 },
+                    None,
+                    &Hovers::new(),
+                    &Ripples::new(),
+                );
+            }
+            // …and with a chip off the ground: in the hand (settled 0, carried
+            // past its neighbour) and half-way down into a slot, which are the
+            // two ends of the landing.
+            for (tab, settle) in [(0usize, 0.0f32), (2, 0.5)] {
+                let slot = tab_slot(strip(), titles.len(), strip().center().x);
+                tab_strip(
+                    &paint,
+                    strip(),
+                    &titles,
+                    1,
+                    0.0,
+                    Some(&Carry {
+                        tab,
+                        rect: tab_carry(strip(), titles.len(), tab, 20.0, strip().center().x),
+                        offsets: tab_shifted(strip(), titles.len(), tab, slot)
+                            .iter()
+                            .zip(tab_rects(strip(), titles.len()))
+                            .map(|(to, home)| to.left() - home.left())
+                            .collect(),
+                        settle,
+                    }),
+                    &Hovers::new(),
+                    &Ripples::new(),
+                );
+            }
+            // A carry naming a tab that has gone is no carry at all.
             tab_strip(
                 &paint,
                 strip(),
-                &["work".to_string(), "downloads".to_string()],
-                1,
-                1.0,
-                &Hovers::new(),
-                &Ripples::new(),
-            );
-            // …and with the *first* tab active, which is the one case where a
-            // pigtail would hang off the end of the row and is skipped.
-            tab_strip(
-                &paint,
-                strip(),
-                &["work".to_string(), "downloads".to_string()],
+                &titles,
                 0,
                 0.0,
+                Some(&Carry {
+                    tab: 9,
+                    rect: strip(),
+                    offsets: Vec::new(),
+                    settle: 0.0,
+                }),
                 &Hovers::new(),
                 &Ripples::new(),
             );
@@ -2573,6 +3024,7 @@ mod tests {
                     &path,
                     filter,
                     1.0,
+                    true,
                     &cluster,
                     &geom,
                     &Hovers::new(),
@@ -2599,6 +3051,7 @@ mod tests {
                 &path,
                 "",
                 0.0,
+                false,
                 &cluster,
                 &geom,
                 &Hovers::new(),
@@ -2610,12 +3063,12 @@ mod tests {
                 0,
                 df_core::input::InputBuffer::new("READ", 2),
             );
-            prompt_row(&paint, path_rect, &prompt, Some("delightfile"));
+            prompt_row(&paint, path_rect, &prompt, Some("delightfile"), true);
             // …and every mode of it, since each one draws a different caret.
             prompt.feed(df_core::keymap::Chord::plain(df_core::keymap::Key::Escape));
-            prompt_row(&paint, path_rect, &prompt, None);
+            prompt_row(&paint, path_rect, &prompt, None, false);
             prompt.feed(df_core::keymap::Chord::from_char('v').expect("v"));
-            prompt_row(&paint, path_rect, &prompt, Some("delightfile"));
+            prompt_row(&paint, path_rect, &prompt, Some("delightfile"), false);
             // …and the two-line form, which an error too long for the line
             // asks the layout for.
             prompt.error = Some("that name is already taken by a directory".to_string());
@@ -2627,7 +3080,7 @@ mod tests {
                 prompt_lines(paint.painter, &prompt, 220.0, Some("delightfile")),
                 2
             );
-            prompt_row(&paint, tall, &prompt, Some("delightfile"));
+            prompt_row(&paint, tall, &prompt, Some("delightfile"), true);
             prompt.error = None;
             let mut rename = Prompt::with(
                 PromptKind::Rename,

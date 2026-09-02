@@ -79,6 +79,29 @@ pub fn active_after_close(len: usize, closing: usize, active: usize) -> usize {
     }
 }
 
+/// Which tab is active after the tab at `from` has been carried to slot `to`
+/// (a chip dragged along the strip, [`crate::chrome::tab_slot`]).
+///
+/// Reordering never changes *which* tab is on screen — only where its chip is
+/// — so this is the index the same tab now has. Three cases, and the two that
+/// are easy to get backwards are the ones where the active tab did not move
+/// itself: it shifts down when the carried tab was to its left and has landed
+/// to its right, and up in the mirror case.
+pub fn reordered_active(from: usize, to: usize, active: usize) -> usize {
+    if active == from {
+        return to;
+    }
+    // Remove, then insert: the same two steps the vector takes, applied to one
+    // index. Anything at or after the hole slides down; anything at or after
+    // the landing slot slides back up.
+    let removed = if active > from { active - 1 } else { active };
+    if removed >= to {
+        removed + 1
+    } else {
+        removed
+    }
+}
+
 /// Where a new tab goes: immediately after the active one.
 ///
 /// Not at the end. `t` opens a tab on the directory you are in, and the tab you
@@ -180,6 +203,28 @@ impl Tabs {
         true
     }
 
+    /// Carry the tab at `from` to slot `to` — a chip dragged along the strip
+    /// (PLAN §2).
+    ///
+    /// Remove-then-insert rather than a swap, because that is the gesture: a
+    /// chip dragged three places to the right passes over three tabs and each
+    /// of them slides back one, which is not what swapping the two ends would
+    /// do. [`Tabs::swap`] stays as it is — `{` and `}` move a tab one place at
+    /// a time, where the two are the same thing.
+    ///
+    /// **The tab on screen does not change.** Returns whether anything moved,
+    /// so a drop back into the slot it came from costs nothing.
+    pub fn reorder(&mut self, from: usize, to: usize) -> bool {
+        let to = to.min(self.tabs.len().saturating_sub(1));
+        if from >= self.tabs.len() || from == to {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = reordered_active(from, to, self.active);
+        true
+    }
+
     /// `Ctrl+c`. Returns whether a tab is still open — `false` means this was
     /// the last one and the app should quit (PLAN §4.1).
     pub fn close_active(&mut self) -> bool {
@@ -274,6 +319,33 @@ mod tests {
         order.remove(1);
         assert_eq!(order, vec!['b']);
         assert_eq!(order[active], 'b');
+    }
+
+    /// A chip dragged along the strip lands in the slot it was dropped on,
+    /// every other tab closes up behind it, and the tab on screen is still the
+    /// tab on screen.
+    #[test]
+    fn reordering_moves_one_tab_and_keeps_the_view_where_it_was() {
+        // Every source and destination in a four-tab strip, with every tab in
+        // turn the one being looked at: the index arithmetic and the vector
+        // must agree in all of them, and the cases that used to be wrong are
+        // the ones where the active tab did not move itself.
+        for from in 0..4 {
+            for to in 0..4 {
+                for active in 0..4 {
+                    let mut order = vec!['a', 'b', 'c', 'd'];
+                    let watching = order[active];
+                    let tab = order.remove(from);
+                    order.insert(to, tab);
+                    let moved = reordered_active(from, to, active);
+                    assert_eq!(
+                        order[moved], watching,
+                        "carrying {from} to {to} while looking at {active}"
+                    );
+                    assert_eq!(order[to], (b'a' + from as u8) as char);
+                }
+            }
+        }
     }
 
     /// A new tab lands beside the one it was spawned from, so `Alt+[` is the
