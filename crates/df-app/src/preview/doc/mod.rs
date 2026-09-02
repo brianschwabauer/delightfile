@@ -190,14 +190,14 @@ pub const ZOOM_MAX: f32 = 8.0;
 /// keeps working and simply stops getting sharper.
 pub const MAX_PAGE_SIDE: u32 = 4096;
 
-/// `+`: the next step up, clamped.
+/// The next rung up, clamped.
+///
+/// There is no `zoom_out` twin any more: `+`, `-` and the wheel all move
+/// [`crate::preview::gesture::View`] now, and this is only what turns the scale
+/// it settles on into a *rasterisation* resolution — which `Pane::sync_doc_zoom`
+/// finds by walking up from fit, never down from where it is.
 pub fn zoom_in(zoom: f32) -> f32 {
     (zoom * ZOOM_STEP).min(ZOOM_MAX)
-}
-
-/// `-`: the next step down, clamped. Never below fit.
-pub fn zoom_out(zoom: f32) -> f32 {
-    (zoom / ZOOM_STEP).max(ZOOM_MIN)
 }
 
 /// How many pixels a page of `page` points should be rasterised at, to fill
@@ -684,19 +684,14 @@ mod tests {
         // Two presses double, which is the step every document viewer uses.
         let twice = zoom_in(zoom_in(1.0));
         assert!((twice - 2.0).abs() < 1e-4, "got {twice}");
-        // `-` never goes below fit: there is nothing under fit worth seeing.
-        assert_eq!(zoom_out(1.0), ZOOM_MIN);
-        assert_eq!(zoom_out(0.1), ZOOM_MIN);
-        // …and `+` stops rather than running away.
+        // …and it stops rather than running away, which is what makes walking
+        // up from fit to find a rung terminate.
         let mut zoom = 1.0;
         for _ in 0..40 {
             zoom = zoom_in(zoom);
         }
         assert_eq!(zoom, ZOOM_MAX);
-        // The two are inverses in the middle of the range, so `+ -` is a
-        // round trip and not a slow drift.
-        let there_and_back = zoom_out(zoom_in(2.0));
-        assert!((there_and_back - 2.0).abs() < 1e-4, "got {there_and_back}");
+        assert_eq!(ZOOM_MIN, 1.0, "the walk starts at fit");
     }
 
     #[test]

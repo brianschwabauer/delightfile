@@ -579,6 +579,21 @@ struct Pointer {
     middle: bool,
     /// The wheel this frame, in logical points.
     wheel: f32,
+    /// The same wheel events in their own units, sign-flipped into the DOM's
+    /// convention (positive = scrolling down).
+    ///
+    /// The preview's zoom needs the raw ticks, not a distance: it turns one
+    /// notch into a *ratio* through its own `normalize_wheel`, and a delta
+    /// already converted into "rows of a list" has thrown that away
+    /// (`preview::gesture`).
+    wheel_raw: Vec<(crate::mouse::WheelUnit, egui::Vec2)>,
+    /// How far the pointer moved this frame, and how fast it is going in points
+    /// per *millisecond* — egui reports points per second, and the Carousel's
+    /// momentum constants are in milliseconds.
+    delta: egui::Vec2,
+    velocity: egui::Vec2,
+    /// egui's normalized pinch factor, which it synthesizes from `Ctrl`+wheel.
+    zoom_delta: f32,
     shift: bool,
     /// `Ctrl` (or the platform's command key): toggle one row's selection.
     toggle: bool,
@@ -3927,6 +3942,64 @@ impl App {
             }
         }
         true
+    }
+
+    /// Zoom and pan over whatever the preview pane is showing (PLAN §7.5),
+    /// and the click that plays or pauses a clip.
+    ///
+    /// **Run late in the frame, unlike every other pointer handler**, because
+    /// the one thing it needs is the size the picture is drawn at — and for a
+    /// video that is the decoded frame's, which is not known until the frame
+    /// has been converted into a texture a few lines above the call.
+    ///
+    /// `allowed` is false while a modal, a menu or the seek bar owns the
+    /// pointer. Once a drag *has* started it keeps the pointer until the
+    /// release wherever it wanders, which is the same capture the scrubber
+    /// takes and for the same reason: a pan that let go the moment the hand
+    /// left the pane would be a pan you cannot finish.
+    fn preview_gesture(&mut self, pointer: &Pointer, allowed: bool, now: Instant) {
+        let Some((content, fitted)) = self.preview.picture_geometry() else {
+            return;
+        };
+        let live = self.preview.gesture_live();
+        let over = allowed && pointer.at.is_some_and(|at| content.contains(at));
+        let mut input = crate::preview::gesture::Input::still(content.size(), fitted, now);
+        if over || live {
+            let centre = content.center();
+            // Pane-centre-relative, which is the coordinate system the whole
+            // gesture layer works in (see its header).
+            input.pointer = pointer.at.map(|at| at - centre);
+            input.pointer_down = pointer.down;
+            // A press that landed somewhere else does not start a gesture here;
+            // its *release* is still fed, so a machine that somehow latched
+            // cannot stay latched.
+            input.pointer_pressed = pointer.pressed && over;
+            input.pointer_released = pointer.released;
+            input.pointer_delta = pointer.delta;
+            input.velocity = pointer.velocity;
+            input.ctrl = pointer.toggle;
+            input.zoom_delta = pointer.zoom_delta;
+        }
+        if over {
+            input.wheel = pointer.wheel_raw.clone();
+        }
+        let Some(_double) = self.preview.gesture(&input, now) else {
+            return;
+        };
+        // **A click on the picture plays or pauses it** — delightviewer's rule,
+        // and the reason a clip does not make you find the little glyph on a
+        // strip that has faded out.
+        //
+        // The second click of a double-click toggles it *back*, which is why
+        // nothing here reads `_double`: the pair leaves the clip exactly as it
+        // found it and the double-click's zoom is all that happened. Toggling
+        // on the first click and undoing it on the second is what every video
+        // player on the web does, and it is the only arrangement that keeps a
+        // single click instant — the alternative is holding every play/pause
+        // for the 300 ms it takes to know a second click is not coming.
+        if let Some(player) = self.transport() {
+            player.play_pause(now);
+        }
     }
 
     /// How far the seek handle is displaced right now: the live drag's rubber
@@ -8126,9 +8199,14 @@ impl App {
             return;
         }
         if layout.preview.contains(at) {
-            // A document scrolls by lines with the same coast; a *rendered*
-            // document turns pages instead (see `Pane::wheel`).
-            self.preview.wheel(rows, now);
+            // A text body scrolls by lines with the same coast. Every *picture*
+            // takes the wheel as a zoom instead, and that pass runs later in
+            // the frame (`App::preview_gesture`) — where the video frame's own
+            // size is finally known, which is the one thing this early in the
+            // frame cannot answer. `Pane::wheel` declines it either way.
+            if !self.preview.is_picture() {
+                self.preview.wheel(rows, now);
+            }
             return;
         }
         if layout.parent.contains(at) {
@@ -10314,6 +10392,23 @@ impl App {
                     _ => None,
                 })
                 .sum::<f32>(),
+            wheel_raw: i
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    // egui's wheel sign is winit's (positive = scroll up); the
+                    // gesture physics keeps the Carousel's DOM convention
+                    // (positive deltaY = scroll down), so the delta flips here
+                    // and nowhere else.
+                    egui::Event::MouseWheel { unit, delta, .. } => {
+                        Some((wheel_unit(*unit), -*delta))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            delta: i.pointer.delta(),
+            velocity: i.pointer.velocity() / 1000.0,
+            zoom_delta: i.zoom_delta(),
             shift: i.modifiers.shift,
             toggle: i.modifiers.command || i.modifiers.ctrl,
             alt: i.modifiers.alt,
@@ -10789,6 +10884,21 @@ impl App {
         // the hand is holding files, not pointing at a link.
         if dragging.is_some() || self.tab_drag.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if self.preview.is_zoomed()
+            && overlay.is_none()
+            && !menu_live
+            && pointer.at.is_some_and(|at| layout.preview.contains(at))
+        {
+            // A zoomed picture can be dragged, so it says so — and says it
+            // harder while it is being dragged (`delightful-ui` §2). Only while
+            // it is *zoomed*: at fit there is nothing to move, and a grab
+            // cursor over a fitted photograph would promise a pan that never
+            // happens.
+            ui.ctx().set_cursor_icon(if pointer.down {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
         } else if let Some((control, _)) = over {
             ui.ctx().set_cursor_icon(match control {
                 // A tab chip is draggable as well as clickable — it is how a
@@ -10951,7 +11061,6 @@ impl App {
         // whether or not the mouse is over it.
         self.preview
             .set_visible(self.window_focused && overlay.is_none() && self.help.is_none());
-        self.preview.sync_doc(now);
         // The wheel's coast over the document, sampled once a frame (PLAN §7.5).
         self.preview.tick_fling(now);
         // …and the animated image's playhead, by the same rule and in the same
@@ -10993,6 +11102,7 @@ impl App {
         // two are the same picture, and a rotated clip makes that visible by
         // drawing them at different sizes (`Pane::set_media_frame`).
         self.preview.set_media_frame(frame_tex.is_some());
+
         let strip_alpha = self
             .player
             .as_ref()
@@ -11004,6 +11114,33 @@ impl App {
             .as_ref()
             .filter(|_| mounted)
             .and_then(|player| player.info().cloned());
+        // ── The preview's zoom and pan (PLAN §7.5) ──────────────────────────
+        // Where the picture is drawn at fit, which is the one fact the gesture
+        // layer cannot work out for itself: the *video* frame belongs to the
+        // player and is only sized a few lines above, and the pane's own
+        // pictures are fitted by two different rules (a photograph is never
+        // enlarged past 8×, a page is enlarged to fill).
+        let picture = match (&frame_tex, &media_info) {
+            (Some(tex), info) => {
+                let rotation = info.as_ref().map(|i| i.rotation).unwrap_or(0);
+                let size = crate::preview::oriented_size((tex.width, tex.height), rotation);
+                Some(crate::preview::fit_rect(preview_content, size, ppp))
+            }
+            (None, _) => self.preview.fitted_rect(preview_content, ppp),
+        };
+        self.preview
+            .set_picture(picture.map(|rect| (preview_content, rect.size())));
+        // Not while a modal, a menu or the seek bar owns the pointer — the same
+        // three things that take the press away from everything else over this
+        // pane.
+        let gesture_allowed = overlay.is_none() && !menu_live && !scrubbing && !dismissing;
+        self.preview_gesture(&pointer, gesture_allowed, now);
+        // …and *then* the document worker is asked for a page, because the
+        // gesture is what decides how many pixels that page wants: a settled
+        // zoom writes the rasterisation rung, and asking before it settled
+        // would render the page at the resolution it had a frame ago and never
+        // ask again (`Pane::sync_doc_zoom`).
+        self.preview.sync_doc(now);
 
         // ── The help sheet, and where it has scrolled to ─────────────────────
         // Built before the painter exists, because building it needs `&mut
@@ -11356,7 +11493,13 @@ impl App {
                         .map(|info| (info.rotation, info.mirrored))
                         .unwrap_or((0, false));
                     let size = crate::preview::oriented_size((tex.width, tex.height), rotation);
-                    let rect = crate::preview::fit_rect(content, size, ppp);
+                    // …and then the pane's zoom and pan, which a clip keeps
+                    // while it plays: the frames land inside a transform, not
+                    // beside one (`preview::gesture`).
+                    let rect = self
+                        .preview
+                        .view()
+                        .apply(crate::preview::fit_rect(content, size, ppp));
                     clipped.add(egui::Shape::mesh(crate::preview::oriented_mesh(
                         tex.id,
                         rect,
@@ -11725,6 +11868,11 @@ impl App {
             ),
             ("tab", self.tab().animating(now)),
             ("preview", self.preview.animating(now)),
+            // The picture's zoom and pan: a wheel blend, a double-click, a
+            // fling, the spring back to fit. Named apart from "preview" so
+            // `DF_FRAME_LOG` says *which* half of the pane is holding the frame
+            // rate up (PLAN §1's audit).
+            ("preview-zoom", self.preview.gesture_animating()),
             // The usage bars' grow-in, which stops asking the moment the sweep
             // has landed — and a walk that is still streaming does not ask
             // either, because a new number wakes the loop through the notifier

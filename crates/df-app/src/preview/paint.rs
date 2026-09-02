@@ -24,7 +24,7 @@ use df_core::preview::PreviewKind;
 use crate::theme::mix;
 use crate::ui::{content_rect, Painting, ROW_HEIGHT};
 
-use super::{fade, highlight, markdown, Anim, Body, Media, Pane, Texture};
+use super::{fade, gesture, highlight, markdown, Anim, Body, Media, Pane, Texture};
 
 /// Monospace size for code, hexdumps and inline code, in logical points.
 ///
@@ -110,10 +110,14 @@ pub fn preview(
     // because every drawing helper below takes the pane's alpha rather than
     // deciding one for itself.
     let alpha: f32 = 1.0;
+    // **The clip is what makes the zoom safe.** A picture at 6× is several
+    // panes wide, and without this it would be drawn across the list and the
+    // chrome (`preview::gesture`).
     let painter = paint.painter.with_clip_rect(content);
-    // How far a rendered page overflows the pane, in points — reported back to
-    // the pane below, because only the paint knows how tall the page came out.
-    let mut doc_pan: Option<f32> = None;
+    // Where zoom and pan have put the picture. One transform for every picture
+    // shape the pane draws — a photograph, a loop, a poster, a page — so they
+    // all answer the wheel the same way.
+    let view = pane.gestures.view();
     let max_scroll = match &shown.body {
         Body::Empty => {
             quiet(paint, content, "empty", alpha);
@@ -171,24 +175,22 @@ pub fn preview(
             alpha,
         ),
         Body::Media(media) => {
-            doc_pan = Some(media_body(
+            media_body(
                 paint,
                 &painter,
                 content,
                 media,
+                view,
                 ppp,
                 alpha,
                 now,
                 pane.media_mounted,
                 pane.media_frame,
-            ));
+            );
             0
         }
     };
 
-    if let Some(pan) = doc_pan {
-        pane.set_max_pan(pan);
-    }
     // The paint is the only thing that knows how tall the content came out, so
     // it is the thing that tells `seek` how far it may go.
     pane.max_scroll = max_scroll;
@@ -1021,54 +1023,34 @@ pub fn oriented_mesh(
     mesh
 }
 
-/// Where a rendered document page goes inside the pane.
+/// Where a rendered document page sits inside the pane **at fit**.
 ///
-/// **Fit, then zoom, then pan.** The page is fitted to the pane by aspect (a
-/// PDF page smaller than the pane *is* enlarged — that is what fit-to-pane
-/// means and what every document viewer does, unlike a photograph, which would
-/// only get blurrier), the fit is multiplied by the zoom, and the result is
-/// centred horizontally and scrolled vertically. Deriving the rect from the
-/// pane rather than from the texture's own pixel count means a page that hit
-/// the rasteriser's size cap is drawn at the right *size* and merely softer,
-/// instead of shrinking.
-///
-/// Returns the rect and how far it overflows the pane, which is how far `↑`/`↓`
-/// may scroll it.
-pub fn doc_rect(content: egui::Rect, size: (u32, u32), zoom: f32, pan: f32) -> (egui::Rect, f32) {
+/// The page is fitted to the pane by aspect, and a page smaller than the pane
+/// *is* enlarged — that is what fit-to-pane means and what every document
+/// viewer does, unlike a photograph ([`fit_rect`]), which would only get
+/// blurrier. Deriving the rect from the pane rather than from the texture's own
+/// pixel count means a page that hit the rasteriser's size cap is drawn at the
+/// right *size* and merely softer, instead of shrinking — and it is also why
+/// the zoom does not appear here: [`super::DocView::zoom`] buys the page more
+/// *pixels*, and where those pixels go is [`gesture::View`]'s answer, the same
+/// one a photograph and a video frame get.
+pub fn doc_fit_rect(content: egui::Rect, size: (u32, u32)) -> egui::Rect {
     let (w, h) = (size.0 as f32, size.1 as f32);
     if w <= 0.0 || h <= 0.0 || content.width() <= 0.0 || content.height() <= 0.0 {
-        return (
-            egui::Rect::from_center_size(content.center(), egui::Vec2::ZERO),
-            0.0,
-        );
+        return egui::Rect::from_center_size(content.center(), egui::Vec2::ZERO);
     }
-    let zoom = if zoom.is_finite() {
-        zoom.max(0.01)
-    } else {
-        1.0
-    };
-    let k = (content.width() / w).min(content.height() / h) * zoom;
-    let drawn = egui::vec2(w * k, h * k);
-    let overflow = (drawn.y - content.height()).max(0.0);
-    let pan = pan.clamp(0.0, overflow);
-    let top = if overflow > 0.0 {
-        content.top() - pan
-    } else {
-        content.center().y - drawn.y / 2.0
-    };
-    let rect =
-        egui::Rect::from_min_size(egui::pos2(content.center().x - drawn.x / 2.0, top), drawn);
-    (rect, overflow)
+    let k = (content.width() / w).min(content.height() / h);
+    egui::Rect::from_center_size(content.center(), egui::vec2(w * k, h * k))
 }
 
-/// Draw a picture-shaped body, and return how far a rendered page overflows the
-/// pane (zero for everything that is not a document).
+/// Draw a picture-shaped body under the pane's zoom and pan.
 #[allow(clippy::too_many_arguments)]
 fn media_body(
     paint: &Painting<'_>,
     painter: &egui::Painter,
     content: egui::Rect,
     media: &Media,
+    view: gesture::View,
     ppp: f32,
     alpha: f32,
     now: Instant,
@@ -1079,7 +1061,7 @@ fn media_body(
     // `frame`: the player has a *decoded* frame over this pane, so the poster
     // it stood in for is done — see `Pane::set_media_frame`.
     frame: bool,
-) -> f32 {
+) {
     // The placeholder is at full strength the moment it decodes; the real
     // pixels fade in over it. That is delightviewer's trick and the reason a
     // photograph appears to be there instantly (PLAN §6).
@@ -1101,10 +1083,10 @@ fn media_body(
     // they read as a rendering bug.
     if !frame {
         if let Some(thumb) = &media.thumb {
-            draw_texture(painter, content, thumb, ppp, alpha);
+            draw_texture(painter, content, thumb, view, ppp, alpha);
         }
         if let Some(full) = &media.full {
-            draw_texture(painter, content, full, ppp, alpha * swap);
+            draw_texture(painter, content, full, view, ppp, alpha * swap);
         }
         // The loop goes over the still it started life as a copy of, at the
         // same fit and the same upscale limit every other picture in this pane
@@ -1112,15 +1094,15 @@ fn media_body(
         // Over rather than instead, so the frames arriving one at a time never
         // leave a hole where the picture was.
         if let Some(texture) = media.anim.as_ref().and_then(Anim::texture) {
-            draw_texture(painter, content, texture, ppp, alpha);
+            draw_texture(painter, content, texture, view, ppp, alpha);
         }
     }
 
     // A document's own pixels go over the cached thumbnail that stood in for
     // them, on the same crossfade every other arrival gets.
-    if let Some(view) = &media.doc {
-        let overflow = doc_body(paint, painter, content, view, media, alpha, now);
-        return overflow;
+    if let Some(doc) = &media.doc {
+        doc_body(paint, painter, content, doc, media, view, alpha, now);
+        return;
     }
 
     if media.full.is_none() && media.thumb.is_none() {
@@ -1138,7 +1120,7 @@ fn media_body(
         } else {
             quiet(paint, content, "no decoder for this format", alpha);
         }
-        return 0.0;
+        return;
     }
 
     // A kind badge in the corner for everything that is not a still image —
@@ -1155,58 +1137,58 @@ fn media_body(
             alpha,
         );
     }
-    0.0
 }
 
 /// A rendered document page, its summary and its page indicator.
-///
-/// Returns how far the page overflows the pane, which is how far `↑`/`↓` may
-/// scroll it.
+#[allow(clippy::too_many_arguments)]
 fn doc_body(
     paint: &Painting<'_>,
     painter: &egui::Painter,
     content: egui::Rect,
-    view: &super::DocView,
+    doc: &super::DocView,
     media: &Media,
+    view: gesture::View,
     alpha: f32,
     now: Instant,
-) -> f32 {
-    let swap = view
+) {
+    let swap = doc
         .swapped_at
         .map(|at| {
-            if view.previous.is_some() {
+            if doc.previous.is_some() {
                 fade(at, now)
             } else {
                 1.0
             }
         })
         .unwrap_or(0.0);
-    let mut overflow = 0.0;
 
     // The outgoing page underneath, at full strength, with the incoming one
     // fading in over it: the same trick the thumbnail-to-photograph swap uses,
-    // so a page turn reads as a page turn and not as a blink.
-    if let Some(previous) = &view.previous {
-        let (rect, _) = doc_rect(content, previous.size, view.zoom, view.pan);
-        draw_at(painter, rect, previous, alpha);
-    }
-    if let Some(current) = &view.current {
-        let (rect, over) = doc_rect(content, current.size, view.zoom, view.pan);
-        overflow = over;
+    // so a page turn reads as a page turn and not as a blink. Both go through
+    // the same transform, so a page turned while zoomed does not jump.
+    if let Some(previous) = &doc.previous {
         draw_at(
             painter,
-            rect,
+            view.apply(doc_fit_rect(content, previous.size)),
+            previous,
+            alpha,
+        );
+    }
+    if let Some(current) = &doc.current {
+        draw_at(
+            painter,
+            view.apply(doc_fit_rect(content, current.size)),
             current,
-            alpha * swap.max(f32::from(view.previous.is_none())),
+            alpha * swap.max(f32::from(doc.previous.is_none())),
         );
     }
 
-    let nothing_yet = view.current.is_none() && media.thumb.is_none() && media.full.is_none();
-    if let Some(message) = &view.error {
+    let nothing_yet = doc.current.is_none() && media.thumb.is_none() && media.full.is_none();
+    if let Some(message) = &doc.error {
         if nothing_yet {
             quiet(paint, content, message, alpha);
         }
-    } else if view.unavailable {
+    } else if doc.unavailable {
         // The library is missing, which is a missing *feature*: the cached
         // thumbnail and the kind badge are the answer, exactly as before
         // pdfium was here at all (PLAN §6).
@@ -1229,9 +1211,9 @@ fn doc_body(
 
     // The two chips, on the same linger-then-leave the playback strip uses:
     // what the document *is* on the left, where you are in it on the right.
-    let chip_alpha = view.chip_alpha(now) * alpha;
+    let chip_alpha = doc.chip_alpha(now) * alpha;
     if chip_alpha > 0.0 {
-        if let Some(meta) = &view.meta {
+        if let Some(meta) = &doc.meta {
             if !meta.summary.is_empty() {
                 chip(
                     paint,
@@ -1243,7 +1225,7 @@ fn doc_body(
                 );
             }
         }
-        if let Some(counter) = view.counter() {
+        if let Some(counter) = doc.counter() {
             chip(
                 paint,
                 painter,
@@ -1254,19 +1236,19 @@ fn doc_body(
             );
         }
     }
-    overflow
 }
 
 fn draw_texture(
     painter: &egui::Painter,
     content: egui::Rect,
     texture: &Texture,
+    view: gesture::View,
     ppp: f32,
     alpha: f32,
 ) {
     draw_at(
         painter,
-        fit_rect(content, texture.size, ppp),
+        view.apply(fit_rect(content, texture.size, ppp)),
         texture,
         alpha,
     );
@@ -1755,60 +1737,53 @@ mod tests {
     /// what fit-to-pane means for a document and is the opposite of what a
     /// photograph gets.
     #[test]
-    fn a_page_fits_the_pane_and_zooms_from_there() {
+    fn a_page_fits_the_pane_and_is_centred() {
         let content = area();
         // US Letter in a 400×600 pane: the *width* binds, the aspect ratio
         // survives, and what is left over is space above and below.
-        let (rect, over) = doc_rect(content, (612, 792), 1.0, 0.0);
+        let rect = doc_fit_rect(content, (612, 792));
         assert!((rect.width() - 400.0).abs() < 1e-3, "{rect:?}");
         assert!(
             (rect.height() - 400.0 * 792.0 / 612.0).abs() < 1e-2,
             "{rect:?}"
         );
-        assert_eq!(over, 0.0, "a fitted page has nothing to scroll");
         assert!((rect.center().x - content.center().x).abs() < 1e-3);
         assert!(
             (rect.center().y - content.center().y).abs() < 1e-3,
             "{rect:?}"
         );
 
-        // A tiny page is *enlarged* to fit — a document viewer's rule.
-        let (small, _) = doc_rect(content, (60, 80), 1.0, 0.0);
+        // A tiny page is *enlarged* to fit — a document viewer's rule, and the
+        // opposite of the 8× cap `fit_rect` puts on a photograph.
+        let small = doc_fit_rect(content, (60, 80));
         assert!(small.height() > 100.0, "{small:?}");
+    }
 
-        // Zoomed, it overflows and can be scrolled by exactly the overflow.
-        let (zoomed, over) = doc_rect(content, (612, 792), 2.0, 0.0);
+    /// The zoom no longer lives in the page's fit: it is the shared
+    /// [`gesture::View`], applied to the fitted rect exactly as it is to a
+    /// photograph.
+    #[test]
+    fn a_zoomed_page_grows_about_the_pane_centre() {
+        let content = area();
+        let fit = doc_fit_rect(content, (612, 792));
+        let zoomed = gesture::View {
+            scale: 2.0,
+            pan: egui::Vec2::ZERO,
+        }
+        .apply(fit);
         assert!((zoomed.width() - 800.0).abs() < 1e-2, "{zoomed:?}");
-        assert!(
-            (over - (zoomed.height() - 600.0)).abs() < 1e-3,
-            "got {over}"
-        );
-        assert!(
-            over > 400.0,
-            "a doubled letter page overflows a 600 pt pane"
-        );
-        assert!(
-            (zoomed.top() - content.top()).abs() < 1e-3,
-            "a zoomed page starts at its top"
-        );
-        let (panned, _) = doc_rect(content, (612, 792), 2.0, 1000.0);
-        assert!(
-            (panned.top() - (content.top() - over)).abs() < 1e-2,
-            "the pan was not clamped to the overflow"
-        );
+        assert!((zoomed.center() - content.center()).length() < 1e-3);
     }
 
     #[test]
     fn a_degenerate_page_does_not_produce_a_nan() {
         for size in [(0u32, 0u32), (100, 0), (0, 100)] {
-            let (rect, over) = doc_rect(area(), size, 1.0, 0.0);
-            assert!(rect.width().is_finite() && over.is_finite(), "{size:?}");
+            let rect = doc_fit_rect(area(), size);
+            assert!(rect.width().is_finite(), "{size:?}");
         }
-        let (rect, _) = doc_rect(area(), (100, 100), f32::NAN, f32::NAN);
-        assert!(rect.width().is_finite() && rect.width() > 0.0);
         let empty = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::Vec2::ZERO);
-        let (rect, over) = doc_rect(empty, (100, 100), 1.0, 0.0);
-        assert!(rect.width().is_finite() && over == 0.0);
+        let rect = doc_fit_rect(empty, (100, 100));
+        assert!(rect.width().is_finite());
     }
 
     /// `Body` holds a texture handle and so cannot derive `Clone`; the test
@@ -1854,7 +1829,6 @@ mod tests {
                     copy.meta = view.meta.clone();
                     copy.page = view.page;
                     copy.zoom = view.zoom;
-                    copy.pan = view.pan;
                     copy.unavailable = view.unavailable;
                     copy.error = view.error.clone();
                     copy.chip_at = view.chip_at;
