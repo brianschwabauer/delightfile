@@ -1240,6 +1240,7 @@ mod tests {
             let palette = crate::theme::Palette::default();
             let theme = df_core::config::Theme::default();
             let painting = crate::ui::Painting {
+                tips: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

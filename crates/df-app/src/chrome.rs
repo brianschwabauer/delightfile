@@ -381,8 +381,14 @@ pub struct Cluster<'a> {
     pub visual: Option<bool>,
     /// What `y` / `x` is holding (PLAN §4.1), if anything.
     pub yank: Option<Yank<'a>>,
-    /// The branch chip's text, when git has an answer (PLAN §7.3).
+    /// The branch, as git spells it, when there is one (PLAN §7.3). The chip's
+    /// own text is [`branch_label`] of this and the counts below — the raw fact
+    /// travels, and the formatting happens where it is drawn.
     pub branch: Option<&'a str>,
+    /// The four numbers behind the chip's one, for its tooltip. `None` until a
+    /// status lands, which is a different answer from "clean" and is said as
+    /// one (see [`branch_tooltip`]).
+    pub dirty: Option<df_core::git::DirtyCounts>,
     /// Where the cursor is, 1-based, and how many rows there are.
     pub position: usize,
     pub rows: usize,
@@ -440,6 +446,8 @@ pub struct ClusterLabels {
     pub yank: Option<String>,
     /// `4 selected`, when there is a selection.
     pub selected: Option<String>,
+    /// `main ·3`, when the directory is in a repository.
+    pub git: Option<String>,
 }
 
 /// `12 / 340`, or `0 / 0` for an empty directory.
@@ -490,10 +498,13 @@ pub fn cluster_geometry(
         *right = rect.left();
         rect
     };
+    let mut git_text = None;
     let git = cluster.branch.map(|branch| {
+        let label = branch_label(branch, cluster.dirty);
         // The glyph's column plus its gap is the `FONT` the branch text is set
         // in: one em is what a single-character ornament needs beside a word.
-        let width = text_width(painter, branch, font.clone()) + PAD_X * 2.0 + FONT;
+        let width = text_width(painter, &label, font.clone()) + PAD_X * 2.0 + FONT;
+        git_text = Some(label);
         chip_at(width, &mut right)
     });
     let mut yank_text = None;
@@ -532,6 +543,7 @@ pub fn cluster_geometry(
             counter: counter_label,
             yank: yank_text,
             selected: selected_text,
+            git: git_text,
         },
     }
 }
@@ -555,18 +567,29 @@ fn paint_cluster(
     let palette = paint.palette;
     let painter = paint.painter;
     // `12 / 340`, right-aligned: the one number that is always true, in the one
-    // place it can be found without reading.
+    // place it can be found without reading. It brightens under the pointer
+    // rather than growing a plate — it is a number, not a chip, and giving it
+    // one would make the row read as four chips and no counter — but it does
+    // answer a click, with `/` (`delightful-ui` §2).
+    let counter_hover = hovers.hover(Control::Counter);
     painter.text(
         egui::pos2(geom.counter.right(), geom.counter.center().y),
         egui::Align2::RIGHT_CENTER,
         &geom.labels.counter,
         egui::FontId::proportional(FONT),
-        palette.overlay1,
+        mix(palette.overlay1, palette.text, counter_hover),
     );
-    if let (Some(rect), Some(branch)) = (geom.git, cluster.branch) {
+    if let (Some(rect), Some(branch)) = (geom.git, geom.labels.git.as_deref()) {
         // The branch, in the palette's own git colour, on a plate of it — the
-        // same chip treatment every count on this row gets.
-        plate(paint, rect, palette.mauve, 1.0);
+        // same chip treatment every count on this row gets. It lifts under the
+        // pointer like the rest of them, but only far enough to say "there is
+        // something here": what is here is a tooltip, not a verb.
+        plate(
+            paint,
+            rect,
+            palette.mauve,
+            1.0 + hovers.hover(Control::GitChip) * 0.4,
+        );
         painter.text(
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
@@ -612,19 +635,65 @@ fn paint_cluster(
     if let Some(rect) = geom.selected {
         // The count is in the selection's own colour, on a plate of it: the
         // badge and the yellow bars down the column are visibly the same fact,
-        // said twice, in the two places the eye looks.
-        chip(
+        // said twice, in the two places the eye looks. Clicking it clears the
+        // selection — the pointer's `Esc`, the same as the yank chip is the
+        // pointer's `X`.
+        action_chip(
             paint,
             rect,
             geom.labels.selected.as_deref().unwrap_or(""),
             palette.yellow,
+            Control::SelectedChip,
+            hovers,
+            ripples,
         );
     }
     if let (Some(rect), Some(selecting)) = (geom.visual, cluster.visual) {
         // Visual mode is the browser's one piece of modal state, and a mode you
-        // cannot see is a mode you get caught in.
-        chip(paint, rect, visual_label(selecting), palette.sky);
+        // cannot see is a mode you get caught in — so the chip that says you
+        // are in it is also the way out of it.
+        action_chip(
+            paint,
+            rect,
+            visual_label(selecting),
+            palette.sky,
+            Control::VisualChip,
+            hovers,
+            ripples,
+        );
     }
+}
+
+/// A chip that answers a click: the lift, the press, the ripple and the label,
+/// in the one place so every one of them behaves the same.
+#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
+fn action_chip(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    label: &str,
+    accent: egui::Color32,
+    key: Control,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let hover = hovers.hover(key);
+    let rect = pressed_rect(rect, hovers.press(key));
+    plate(paint, rect, accent, 1.0 + hover * 0.6);
+    let inside = paint.painter.with_clip_rect(rect);
+    for splash in ripples.splashes(key, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+        );
+    }
+    inside.text(
+        egui::pos2(rect.left() + PAD_X, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(FONT),
+        accent,
+    );
 }
 
 /// The yank chip's tooltip: what is actually on the clipboard.
@@ -642,8 +711,6 @@ fn yank_tooltip(
     if warm <= 0.0 || yank.paths.is_empty() {
         return;
     }
-    let painter = paint.painter;
-    let palette = paint.palette;
     let mut lines: Vec<String> = yank
         .paths
         .iter()
@@ -660,19 +727,75 @@ fn yank_tooltip(
             yank.paths.len() - YANK_TOOLTIP_NAMES
         ));
     }
+    tip(paint, area, rect, &lines, YANK_TOOLTIP_NAMES, warm);
+}
+
+/// The git chip's tooltip: the branch, spelled out, and git's four numbers.
+///
+/// The chip itself carries **one** number on purpose (see [`branch_label`]) —
+/// it is read at a glance. The breakdown is the thing you have to stop and look
+/// at, so it lives where stopping and looking is what you did: under the
+/// pointer.
+///
+/// Pure, so the wording is a test rather than a repository.
+pub fn branch_tooltip(branch: &str, counts: Option<df_core::git::DirtyCounts>) -> Vec<String> {
+    let mut lines = vec![format!("⑂ {branch}")];
+    match counts {
+        // No scan has landed. Said out loud rather than left as a blank card:
+        // "nothing here yet" and "nothing to report" are different answers.
+        None => lines.push("status not in yet".to_string()),
+        Some(counts) if counts.is_clean() => lines.push("working tree clean".to_string()),
+        Some(counts) => {
+            for (n, what) in [
+                (counts.staged, "staged"),
+                (counts.unstaged, "unstaged"),
+                (counts.untracked, "untracked"),
+                (counts.conflicted, "conflicted"),
+            ] {
+                if n > 0 {
+                    lines.push(format!("{n} {what}"));
+                }
+            }
+        }
+    }
+    lines
+}
+
+/// The shape every tooltip on the chrome takes: a small card of lines, hung off
+/// the thing it is about.
+///
+/// Lines from `dim_from` on are drawn a shade quieter — the yank card's "and 4
+/// more" is a footnote about the list, not another name in it.
+pub fn tip(
+    paint: &Painting<'_>,
+    area: egui::Rect,
+    rect: egui::Rect,
+    lines: &[String],
+    dim_from: usize,
+    warm: f32,
+) {
+    if warm <= 0.0 || lines.is_empty() {
+        return;
+    }
+    let painter = paint.painter;
+    let palette = paint.palette;
     let font = egui::FontId::proportional(FONT);
     let width = lines.iter().fold(0.0f32, |m, line| {
         m.max(text_width(painter, line, font.clone()))
     }) + CARD_PAD * 2.0;
     let height = lines.len() as f32 * CARD_ROW + CARD_PAD * 2.0;
-    // Under the chip and right-aligned with it: the row is at the top of the
-    // window, so there is no room above, and hanging the card off the chip's
-    // own edge keeps it pointing at what it is about.
+    // Right-aligned with what it explains, and under it — hanging the card off
+    // the thing's own edge is what keeps it pointing at it. Above instead when
+    // there is no room below, which is the only case a mark low in the list
+    // ever hits; the top row never does.
     let left = (rect.right() - width).max(area.left() + CARD_MARGIN);
-    let card_rect = egui::Rect::from_min_size(
-        egui::pos2(left, rect.bottom() + CHIP_INSET),
-        egui::vec2(width, height),
-    );
+    let below = rect.bottom() + CHIP_INSET;
+    let top = if below + height <= area.bottom() - CARD_MARGIN {
+        below
+    } else {
+        rect.top() - CHIP_INSET - height
+    };
+    let card_rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height));
     card(paint, card_rect, warm);
     for (i, line) in lines.iter().enumerate() {
         painter.text(
@@ -684,7 +807,7 @@ fn yank_tooltip(
             line,
             font.clone(),
             fade(
-                if i < YANK_TOOLTIP_NAMES {
+                if i < dim_from {
                     palette.subtext0
                 } else {
                     palette.overlay0
@@ -705,6 +828,9 @@ fn yank_tooltip(
 /// how a row grows a one-pixel lie at its edges.
 pub struct TopGeom {
     pub crumbs: Vec<egui::Rect>,
+    /// The leading `…`, when the path did not fit. It is not a crumb — it
+    /// stands for several — so it is not in the vector above.
+    pub ellipsis: Option<egui::Rect>,
     /// The committed `f` filter's trailing chip, when there is one.
     pub filter: Option<egui::Rect>,
     pub cluster: ClusterGeom,
@@ -788,7 +914,7 @@ pub fn top_geometry(
     // last crumb's *measured* right edge and must not move when the rect it is
     // measured from is trimmed.
     let band_right = band_right - filter_w;
-    let rects = rects
+    let rects: Vec<egui::Rect> = rects
         .into_iter()
         .map(|rect| {
             if rect == egui::Rect::NOTHING || rect.left() >= band_right {
@@ -800,8 +926,24 @@ pub fn top_geometry(
             )
         })
         .collect();
+    // The leading `…`, when anything was elided. Measured here because it is
+    // the only handle the pointer has on the part of the path that is not on
+    // the row — [`crumb_rects`] gives an elided segment `Rect::NOTHING`, which
+    // by design contains no point.
+    let elided = rects
+        .iter()
+        .position(|rect| *rect != egui::Rect::NOTHING)
+        .unwrap_or(crumbs.len());
+    let ellipsis = (elided > 0 && !crumbs.is_empty()).then(|| {
+        let width = text_width(painter, CRUMB_ELLIPSIS, egui::FontId::proportional(FONT));
+        egui::Rect::from_min_max(
+            egui::pos2(row.left() + PAD_X, row.top() + CHIP_INSET),
+            egui::pos2(row.left() + PAD_X + width, row.bottom() - CHIP_INSET),
+        )
+    });
     TopGeom {
         crumbs: rects,
+        ellipsis,
         filter: filter_rect,
         cluster: cluster_geom,
     }
@@ -842,7 +984,9 @@ pub fn path_bar(
     let font = egui::FontId::proportional(FONT);
     let rects = &geom.crumbs;
 
-    // The leading ellipsis, when the path did not fit.
+    // The leading ellipsis, when the path did not fit. It brightens under the
+    // pointer because it answers one — with the segments it is standing in for,
+    // which are otherwise nowhere on screen.
     let elided = rects.iter().position(|r| *r != egui::Rect::NOTHING);
     if elided.unwrap_or(0) > 0 {
         painter.text(
@@ -850,7 +994,11 @@ pub fn path_bar(
             egui::Align2::LEFT_CENTER,
             CRUMB_ELLIPSIS,
             font.clone(),
-            palette.overlay0,
+            mix(
+                palette.overlay0,
+                palette.text,
+                hovers.hover(Control::CrumbEllipsis),
+            ),
         );
     }
 
@@ -950,6 +1098,29 @@ pub fn path_bar(
     }
 
     paint_cluster(paint, cluster, &geom.cluster, hovers, ripples);
+    // The hidden half of the path, under the `…` that is standing for it. The
+    // segments themselves, one per line, rather than the joined path: what the
+    // reader lost was the *steps*, and each of them is a place they could have
+    // clicked if the row had been wider.
+    if let (Some(rect), Some(first)) = (geom.ellipsis, elided) {
+        let lines: Vec<String> = crumbs
+            .iter()
+            .take(first)
+            .map(|crumb| crumb.label.clone())
+            .collect();
+        tip(
+            paint,
+            area,
+            rect,
+            &lines,
+            lines.len(),
+            hovers.hover(Control::CrumbEllipsis),
+        );
+    }
+    if let Some((rect, branch)) = geom.cluster.git.zip(cluster.branch) {
+        let lines = branch_tooltip(branch, cluster.dirty);
+        tip(paint, area, rect, &lines, 1, hovers.hover(Control::GitChip));
+    }
     if let (Some(rect), Some(yank)) = (geom.cluster.yank, &cluster.yank) {
         // …and the card leaves with the chip it hangs off, rather than
         // outliving the fact it is explaining.
@@ -1073,18 +1244,6 @@ pub fn prompt_lines(
     } else {
         1
     }
-}
-
-/// One labelled pill, in the rectangle the geometry gave it.
-fn chip(paint: &Painting<'_>, rect: egui::Rect, text: &str, accent: egui::Color32) {
-    plate(paint, rect, accent, 1.0);
-    paint.painter.text(
-        egui::pos2(rect.left() + PAD_X, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        text,
-        egui::FontId::proportional(FONT),
-        accent,
-    );
 }
 
 /// A chip's plate: the window's darkest ground tinted towards the chip's own
@@ -1938,6 +2097,81 @@ mod tests {
         assert_eq!(branch_label("a1b2c3d", None), "a1b2c3d");
     }
 
+    /// The chip carries one number; the card under it carries git's four, and
+    /// says the two "nothing to report" answers apart.
+    #[test]
+    fn the_branch_tooltip_breaks_the_one_number_back_down() {
+        use df_core::git::DirtyCounts;
+        // No scan yet is not the same as clean, and the card says which.
+        assert_eq!(
+            branch_tooltip("main", None),
+            vec!["⑂ main".to_string(), "status not in yet".to_string()]
+        );
+        assert_eq!(
+            branch_tooltip("main", Some(DirtyCounts::default())),
+            vec!["⑂ main".to_string(), "working tree clean".to_string()]
+        );
+        // Only the kinds that have something in them, in git's own order.
+        assert_eq!(
+            branch_tooltip(
+                "main",
+                Some(DirtyCounts {
+                    staged: 2,
+                    untracked: 1,
+                    ..Default::default()
+                })
+            ),
+            vec![
+                "⑂ main".to_string(),
+                "2 staged".to_string(),
+                "1 untracked".to_string(),
+            ]
+        );
+    }
+
+    /// The `…` is a pointer target only when there is something behind it, and
+    /// it never sits on top of a crumb that *did* fit.
+    #[test]
+    fn the_leading_ellipsis_is_hit_testable_only_when_the_path_elides() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile/crates"));
+            let bare = Cluster {
+                selected: 0,
+                visual: None,
+                yank: None,
+                branch: None,
+                dirty: None,
+                position: 0,
+                rows: 0,
+            };
+            let wide =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, CHROME_HEIGHT));
+            assert!(
+                top_geometry(ui.painter(), wide, &path, "", &bare)
+                    .ellipsis
+                    .is_none(),
+                "nothing was elided, so there is no ellipsis to point at"
+            );
+
+            let narrow =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(120.0, CHROME_HEIGHT));
+            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare);
+            let rect = geom.ellipsis.expect("a narrow row elides");
+            assert!(narrow.contains(rect.center()));
+            let first = geom
+                .crumbs
+                .iter()
+                .find(|r| **r != egui::Rect::NOTHING)
+                .copied()
+                .expect("one crumb always survives");
+            assert!(
+                rect.right() <= first.left() + 1e-3,
+                "the ellipsis sits before the first crumb that fitted"
+            );
+        });
+    }
+
     /// The chips tile the strip left to right with one gap between, and stop
     /// growing past the cap rather than spreading over the whole window.
     #[test]
@@ -2059,7 +2293,11 @@ mod tests {
                     cut: true,
                     alpha: 1.0,
                 }),
-                branch: Some("main ·3"),
+                branch: Some("main"),
+                dirty: Some(df_core::git::DirtyCounts {
+                    unstaged: 3,
+                    ..Default::default()
+                }),
                 position: 12,
                 rows: 340,
             };
@@ -2089,6 +2327,7 @@ mod tests {
                 visual: None,
                 yank: None,
                 branch: None,
+                dirty: None,
                 position: 0,
                 rows: 0,
             };
@@ -2141,6 +2380,7 @@ mod tests {
             let palette = crate::theme::Palette::default();
             let theme = df_core::config::Theme::default();
             let paint = Painting {
+                tips: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
@@ -2169,7 +2409,7 @@ mod tests {
             for (branch, filter, yank) in [
                 (None, "", None),
                 (
-                    Some("main ·3"),
+                    Some("main"),
                     "invoice",
                     Some(Yank {
                         paths: &yanked,
@@ -2183,6 +2423,7 @@ mod tests {
                     visual: Some(true),
                     yank,
                     branch,
+                    dirty: None,
                     position: 12,
                     rows: 340,
                 };
@@ -2208,6 +2449,7 @@ mod tests {
                 visual: None,
                 yank: None,
                 branch: None,
+                dirty: None,
                 position: 0,
                 rows: 0,
             };

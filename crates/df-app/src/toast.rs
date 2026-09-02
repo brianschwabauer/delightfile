@@ -16,9 +16,10 @@
 
 use std::time::{Duration, Instant};
 
+use crate::hover::Hovers;
 use crate::motion::Easing;
 use crate::theme::mix;
-use crate::ui::Painting;
+use crate::ui::{Control, Painting};
 
 /// A plain "that happened" — the yank, the shell that exited 0. There is
 /// nothing to decide, so it leaves quickly (delightviewer's number, kept).
@@ -294,23 +295,86 @@ impl Toasts {
             .map(|at| at.saturating_duration_since(now))
     }
 
+    /// Where the live toast is, for the hit test.
+    ///
+    /// The one that is *leaving* is not offered. It is pixels on their way out
+    /// of the picture, and a click landing on a message that has already been
+    /// replaced would act on something nobody is reading any more — the same
+    /// rule the yank chip's fade follows in the top row's hit test.
+    pub fn geometry(
+        &self,
+        painter: &egui::Painter,
+        area: egui::Rect,
+        bottom: f32,
+        now: Instant,
+    ) -> Option<ToastGeom> {
+        let toast = self.current.as_ref()?;
+        // Nothing invisible takes a click. The hit test runs before
+        // [`Toasts::tick`] retires what has run out, so without this an expired
+        // toast would be clickable for the one frame between the two — and on
+        // an undo toast that frame would take an offer that had just closed.
+        if toast.alpha(now) <= 0.0 {
+            return None;
+        }
+        Some(measure(
+            painter,
+            area,
+            bottom,
+            toast,
+            toast.rise_offset(now),
+        ))
+    }
+
+    /// Take the current toast down, whatever it was. The pointer's way of
+    /// waiting for the clock.
+    pub fn dismiss(&mut self) {
+        self.current = None;
+    }
+
     /// Draw the toast, bottom-centred above `bottom`.
     ///
     /// `hint` is the keystroke line an undo toast carries ("u — undo"), drawn
     /// as a chip on the right so the offer is a key you can see rather than a
     /// sentence you have to finish reading.
-    pub fn paint(&self, paint: &Painting<'_>, area: egui::Rect, bottom: f32, now: Instant) {
+    ///
+    /// `hovers` is the window's, so the plate can say it takes a click — it
+    /// does: one dismisses it, and on an undo toast one on the chip takes the
+    /// offer (PLAN §5, §7.5). A toast that is *leaving* is drawn cold, because
+    /// it is not hit-tested and a lit plate under a pointer that cannot press
+    /// it would be a lie.
+    pub fn paint(
+        &self,
+        paint: &Painting<'_>,
+        area: egui::Rect,
+        bottom: f32,
+        hovers: &Hovers<Control>,
+        now: Instant,
+    ) {
         if let Some((toast, at)) = &self.leaving {
             let t = now.saturating_duration_since(*at).as_secs_f32() / REPLACE_FADE.as_secs_f32();
             // Quad ease-in on the way out (`delightful-ui` §5), and it sinks
             // back down the way it came in.
             let alpha = (1.0 - t.clamp(0.0, 1.0)).powi(2);
-            self.plate(paint, area, bottom, toast, alpha, RISE_DISTANCE * t, now);
+            self.plate(
+                paint,
+                area,
+                bottom,
+                toast,
+                alpha,
+                RISE_DISTANCE * t,
+                (0.0, 0.0),
+            );
         }
         if let Some(toast) = &self.current {
             let alpha = toast.alpha(now);
             let offset = toast.rise_offset(now);
-            self.plate(paint, area, bottom, toast, alpha, offset, now);
+            let warm = (
+                hovers
+                    .hover(Control::Toast)
+                    .max(hovers.hover(Control::ToastAction)),
+                hovers.hover(Control::ToastAction),
+            );
+            self.plate(paint, area, bottom, toast, alpha, offset, warm);
         }
     }
 
@@ -323,7 +387,8 @@ impl Toasts {
         toast: &Toast,
         alpha: f32,
         drop: f32,
-        _now: Instant,
+        // How lit the plate is, and how lit its offer chip is.
+        (warm, action_warm): (f32, f32),
     ) {
         if alpha <= 0.0 {
             return;
@@ -337,7 +402,7 @@ impl Toasts {
             ToastKind::Sticky => palette.sky,
             ToastKind::Notice => palette.blue,
         };
-        let hint = matches!(toast.kind, ToastKind::Undo).then_some(("u", "undo"));
+        let hint = hint_of(toast);
 
         let fade = |c: egui::Color32| {
             egui::Color32::from_rgba_unmultiplied(
@@ -353,29 +418,18 @@ impl Toasts {
             egui::FontId::proportional(FONT),
             palette.text,
         );
-        let hint_width = hint
-            .map(|(key, what)| {
-                text_width(painter, key, egui::FontId::monospace(FONT))
-                    + 6.0
-                    + text_width(painter, what, egui::FontId::proportional(FONT))
-                    + PAD
-            })
-            .unwrap_or(0.0);
-        let width = (message.size().x + hint_width + PAD * 2.0 + RULE_WIDTH)
-            .min(area.width() - MARGIN * 2.0);
-        let rect = egui::Rect::from_center_size(
-            egui::pos2(area.center().x, bottom - MARGIN - HEIGHT / 2.0 + drop),
-            egui::vec2(width, HEIGHT),
-        );
+        let rect = measure(painter, area, bottom, toast, drop).rect;
 
         // The same plate the which-key card and the help sheet use, so every
-        // floating thing in delightfile is visibly one surface.
-        let plate = palette.crust;
+        // floating thing in delightfile is visibly one surface. Under the
+        // pointer it lifts towards its own accent — the plate is a button, and
+        // the one thing it must not look like is a label.
+        let plate = mix(palette.crust, palette.surface0, warm);
         painter.rect_filled(rect, TOAST_RADIUS, fade(plate));
         painter.rect_stroke(
             rect,
             TOAST_RADIUS,
-            egui::Stroke::new(1.0, fade(mix(palette.surface1, accent, 0.35))),
+            egui::Stroke::new(1.0, fade(mix(palette.surface1, accent, 0.35 + warm * 0.4))),
             egui::StrokeKind::Inside,
         );
         // The leading rule, inset to the corner radius so it stops where the
@@ -408,13 +462,15 @@ impl Toasts {
         );
         if let Some((key, what)) = hint {
             let what_w = text_width(&inside, what, egui::FontId::proportional(FONT));
+            // The offer, lit on its own when the pointer is on it rather than
+            // merely on the plate: two targets, said apart.
             let what_x = rect.right() - PAD - what_w;
             inside.text(
                 egui::pos2(what_x, rect.center().y),
                 egui::Align2::LEFT_CENTER,
                 what,
                 egui::FontId::proportional(FONT),
-                fade(palette.overlay1),
+                fade(mix(palette.overlay1, palette.text, action_warm)),
             );
             inside.text(
                 egui::pos2(what_x - 6.0, rect.center().y),
@@ -425,6 +481,59 @@ impl Toasts {
             );
         }
     }
+}
+
+/// Where a toast is on screen, and where the offer inside it is.
+///
+/// Measured by one function and read by two — the painter and the hit test —
+/// for the reason the breadcrumb's rects are: a click has to land on the thing
+/// it looks like it landed on, and two copies of this arithmetic is how that
+/// stops being true.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToastGeom {
+    pub rect: egui::Rect,
+    /// The `u undo` chip at the trailing edge, on the kind of toast that has
+    /// one. Clicking it takes the offer.
+    pub action: Option<egui::Rect>,
+}
+
+/// The offer an undo toast carries, as a key and the word for what it does.
+fn hint_of(toast: &Toast) -> Option<(&'static str, &'static str)> {
+    matches!(toast.kind, ToastKind::Undo).then_some(("u", "undo"))
+}
+
+fn measure(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    bottom: f32,
+    toast: &Toast,
+    drop: f32,
+) -> ToastGeom {
+    let hint = hint_of(toast);
+    let message = text_width(painter, &toast.message, egui::FontId::proportional(FONT));
+    let hint_width = hint
+        .map(|(key, what)| {
+            text_width(painter, key, egui::FontId::monospace(FONT))
+                + 6.0
+                + text_width(painter, what, egui::FontId::proportional(FONT))
+                + PAD
+        })
+        .unwrap_or(0.0);
+    let width = (message + hint_width + PAD * 2.0 + RULE_WIDTH).min(area.width() - MARGIN * 2.0);
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(area.center().x, bottom - MARGIN - HEIGHT / 2.0 + drop),
+        egui::vec2(width, HEIGHT),
+    );
+    // The chip is the two words at the trailing edge and the padding around
+    // them — a target the size of what is drawn, not a hairline around the
+    // glyphs.
+    let action = hint.map(|_| {
+        egui::Rect::from_min_max(
+            egui::pos2(rect.right() - hint_width - PAD / 2.0, rect.top()),
+            egui::pos2(rect.right(), rect.bottom()),
+        )
+    });
+    ToastGeom { rect, action }
 }
 
 /// The plate's radius — [`crate::chrome::CARD_RADIUS`], the same as every
@@ -448,6 +557,55 @@ fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plate the pointer is offered is the plate that was drawn, and the
+    /// offer chip is inside it — only on the kind of toast that makes one.
+    #[test]
+    fn the_toast_offers_the_pointer_the_plate_it_draws() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+            let t0 = Instant::now();
+            let mut toasts = Toasts::new();
+            assert!(
+                toasts
+                    .geometry(ui.painter(), area, area.bottom(), t0)
+                    .is_none(),
+                "nothing up, nothing to point at"
+            );
+
+            toasts.notice("Yanked 3 items", t0);
+            assert!(
+                toasts
+                    .geometry(ui.painter(), area, area.bottom(), t0)
+                    .is_none(),
+                "the first instant is fully transparent, so it takes no click"
+            );
+            // Past the rise, so the plate is at rest and the geometry is the
+            // resting one rather than a frame of the slide.
+            let settled = t0 + RISE;
+            let plain = toasts
+                .geometry(ui.painter(), area, area.bottom(), settled)
+                .expect("a toast is up");
+            assert!(plain.action.is_none(), "a notice has nothing to offer");
+            assert!(area.contains(plain.rect.center()));
+            assert!(plain.rect.bottom() <= area.bottom());
+
+            toasts.undo("Copied 3 items", t0);
+            let offered = toasts
+                .geometry(ui.painter(), area, area.bottom(), settled)
+                .expect("a toast is up");
+            let action = offered.action.expect("an undo toast offers `u`");
+            assert!(offered.rect.contains(action.center()));
+            assert!(action.right() <= offered.rect.right() + 1e-3);
+
+            // …and a dismissed toast is gone for the pointer as well as the eye.
+            toasts.dismiss();
+            assert!(toasts
+                .geometry(ui.painter(), area, area.bottom(), settled)
+                .is_none());
+        });
+    }
 
     #[test]
     fn one_toast_at_a_time_and_the_newest_wins() {
@@ -568,6 +726,7 @@ mod tests {
             let palette = crate::theme::Palette::default();
             let theme = df_core::config::Theme::default();
             let paint = Painting {
+                tips: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
@@ -576,10 +735,22 @@ mod tests {
                 now,
             };
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
-            toasts.paint(&paint, area, 860.0, now + Duration::from_millis(120));
+            toasts.paint(
+                &paint,
+                area,
+                860.0,
+                &Hovers::new(),
+                now + Duration::from_millis(120),
+            );
             // …and a very narrow window, where the plate has to be clamped.
             let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, 200.0));
-            toasts.paint(&paint, narrow, 180.0, now + Duration::from_millis(120));
+            toasts.paint(
+                &paint,
+                narrow,
+                180.0,
+                &Hovers::new(),
+                now + Duration::from_millis(120),
+            );
         });
     }
 }

@@ -780,6 +780,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             let paint = crate::ui::Painting {
+                tips: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

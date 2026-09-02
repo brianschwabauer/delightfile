@@ -1676,6 +1676,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let now = Instant::now();
             let paint = Painting {
+                tips: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

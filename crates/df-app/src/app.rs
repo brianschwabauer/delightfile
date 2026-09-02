@@ -606,6 +606,8 @@ struct Geom<'a> {
     menu: &'a Option<menu::Geometry>,
     /// The selection basket's tray (PLAN §7.1).
     basket: &'a crate::basket::Geometry,
+    /// The toast, when one is up (PLAN §5): the plate, and the offer inside it.
+    toast: Option<crate::toast::ToastGeom>,
     tabs: usize,
 }
 
@@ -1041,6 +1043,15 @@ pub struct App {
     /// (`df_core::git::repo`, which never spawns anything), but both are pure
     /// waste on the sixty frames a scroll costs.
     path_bar: (PathBuf, Vec<chrome::Crumb>, Option<String>),
+    /// What git last said about the repository the top row's chip names, for
+    /// that chip's tooltip. Refreshed beside the chip itself, so the number on
+    /// the chip and the breakdown under it are always the same status.
+    repo_counts: Option<df_core::git::DirtyCounts>,
+    /// The little marks inside a row that are worth a word — the `ignored` tag,
+    /// a size still being walked. The rect comes from the row painter (see
+    /// [`ui::RowTips`]); the fade is the window's own instant-in/eased-out.
+    tips: crate::hover::Hovers<ui::RowTip>,
+    tip: Option<(ui::RowTip, egui::Rect)>,
 
     /// The which-key card's timing (PLAN §4).
     which: WhichKey,
@@ -1454,6 +1465,9 @@ impl App {
             basket_first: 0,
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
+            repo_counts: None,
+            tips: crate::hover::Hovers::new(),
+            tip: None,
             yank: None,
             filter_chip: None,
             path_lines: 1,
@@ -7224,7 +7238,7 @@ impl App {
     /// A click on a surface. Pressing a button *is* choosing it — the pointer
     /// does not get a two-step "select, then confirm" the keyboard does not
     /// have.
-    fn overlay_click(&mut self, control: Control, page: usize, now: Instant) {
+    fn overlay_click(&mut self, control: Control, double: bool, page: usize, now: Instant) {
         // The two overlays with a list of results: a click is "this one", the
         // same as arrowing to it and pressing Enter.
         if self.finder.is_some() || self.search.is_some() {
@@ -7301,7 +7315,14 @@ impl App {
                 | Control::SubmenuItem(_)
                 | Control::BasketChip
                 | Control::BasketRow(_)
-                | Control::BasketRemove(_) => {}
+                | Control::BasketRemove(_)
+                | Control::CrumbEllipsis
+                | Control::Counter
+                | Control::GitChip
+                | Control::SelectedChip
+                | Control::VisualChip
+                | Control::Toast
+                | Control::ToastAction => {}
             }
             return;
         }
@@ -7348,6 +7369,15 @@ impl App {
                 if let Some(panel) = &mut self.panel {
                     panel.select(index, rows.len());
                 }
+                // A second click is `p` on the row the first click selected:
+                // pause, or resume, whichever the row already says it will do.
+                // **Not `x`.** Cancelling is the panel's one destructive key
+                // and it has no confirmation; a slipped double click that threw
+                // away a copy half way through would be the pointer doing
+                // something the keyboard makes you spell out.
+                if double {
+                    self.pause_selected_task(now);
+                }
             }
             Control::Row(..)
             | Control::Tab(_)
@@ -7358,7 +7388,14 @@ impl App {
             | Control::SubmenuItem(_)
             | Control::BasketChip
             | Control::BasketRow(_)
-            | Control::BasketRemove(_) => {}
+            | Control::BasketRemove(_)
+            | Control::CrumbEllipsis
+            | Control::Counter
+            | Control::GitChip
+            | Control::SelectedChip
+            | Control::VisualChip
+            | Control::Toast
+            | Control::ToastAction => {}
         }
     }
 
@@ -7458,6 +7495,7 @@ impl App {
                 alpha: chip.alpha(now),
             }),
             branch: self.path_bar.2.as_deref(),
+            dirty: self.repo_counts,
             position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
             rows: dir.len(),
         }
@@ -7518,6 +7556,7 @@ impl App {
                 self.path_bar = (cwd, crate::remote::crumbs(&at), None);
             }
             self.path_bar.2 = None;
+            self.repo_counts = None;
             return;
         }
         if self.tab().trash.is_some() {
@@ -7526,6 +7565,7 @@ impl App {
                 self.path_bar = (cwd, crate::trashview::crumbs(), None);
             }
             self.path_bar.2 = None;
+            self.repo_counts = None;
             return;
         }
         if self.path_bar.0 != cwd || self.path_bar.1.is_empty() {
@@ -7544,6 +7584,9 @@ impl App {
             }
         }
         self.path_bar.2 = self.branch_chip();
+        if self.path_bar.2.is_none() {
+            self.repo_counts = None;
+        }
     }
 
     /// The git front end, started the first time a repository is entered.
@@ -7573,18 +7616,22 @@ impl App {
     }
 
     /// The breadcrumb's branch chip, or nothing outside a repository.
+    ///
+    /// The **branch**, not the chip's text: the counts travel beside it in
+    /// [`App::repo_counts`] and the chip's `main ·3` is formatted where it is
+    /// drawn. That is what lets the tooltip under it break the one number back
+    /// down into git's four without parsing the label it just built.
     fn branch_chip(&mut self) -> Option<String> {
         let root = self.repo.clone()?;
         let status = self.repo_status();
-        let counts = status.as_ref().map(|s| s.counts());
+        self.repo_counts = status.as_ref().map(|s| s.counts());
         // The porcelain's spelling when there is one, and `HEAD`'s otherwise —
         // a 41-byte read that answers before the worker does, so the chip is
         // there on the first frame in a directory rather than a second later.
-        let branch = match status.as_ref().and_then(|s| s.branch()) {
-            Some(name) => name.to_string(),
-            None => self.git().branch(&root)?,
-        };
-        Some(chrome::branch_label(&branch, counts))
+        match status.as_ref().and_then(|s| s.branch()) {
+            Some(name) => Some(name.to_string()),
+            None => self.git().branch(&root),
+        }
     }
 
     /// Tell git something under `dir` moved.
@@ -7734,6 +7781,58 @@ impl App {
                 self.unyank(now);
                 rect
             }
+            // `4 selected` is the pointer's `Esc`: it clears the selection, and
+            // like `Esc` it says so by the chip and the yellow bars going away
+            // rather than by a toast about it. A message announcing that a
+            // thing you can see has stopped being there is a message nobody
+            // reads (PLAN §5).
+            Control::SelectedChip => {
+                let rect = geom.top.cluster.selected.unwrap_or(egui::Rect::ZERO);
+                self.dir().clear_selection();
+                rect
+            }
+            // …and the visual chip is the `Esc` one rung above that: it leaves
+            // the run, exactly as [`App::escape`] does.
+            Control::VisualChip => {
+                let rect = geom.top.cluster.visual.unwrap_or(egui::Rect::ZERO);
+                self.visual = None;
+                rect
+            }
+            // The counter says where in the listing you are. `/` is how you go
+            // somewhere else in it, so that is what clicking the number opens —
+            // the pointer's route to the one verb the number is about.
+            Control::Counter => {
+                self.open_prompt(PromptKind::FindNext);
+                geom.top.cluster.counter
+            }
+            // The branch chip has a tooltip and no verb. There is no status
+            // view in delightfile to open — the breakdown *is* the answer, and
+            // it is already under the pointer by the time a click could happen
+            // — so the press does nothing rather than doing something arbitrary
+            // with the one chip that is a statement of fact. Its rect is
+            // returned so the ripple has somewhere to be, but the press router
+            // never gets this far: see the guard at the call site.
+            Control::GitChip => geom.top.cluster.git.unwrap_or(egui::Rect::ZERO),
+            // The `…` stands for segments that are not on the row. Its tooltip
+            // lists them; clicking it would have to pick one, and there is no
+            // honest way to choose.
+            Control::CrumbEllipsis => geom.top.ellipsis.unwrap_or(egui::Rect::ZERO),
+            // A toast is dismissed by clicking it, and an undo toast's offer is
+            // taken by clicking the offer (PLAN §5). The `u` key is still there;
+            // this is the same two verbs for the hand that is already on the
+            // mouse.
+            Control::Toast => {
+                self.toasts.dismiss();
+                geom.toast.map(|g| g.rect).unwrap_or(egui::Rect::ZERO)
+            }
+            Control::ToastAction => {
+                let rect = geom
+                    .toast
+                    .and_then(|g| g.action)
+                    .unwrap_or(egui::Rect::ZERO);
+                self.undo(now);
+                rect
+            }
             Control::Tab(index) => {
                 if self.tabs.switch_to(index, now) {
                     self.tab_changed(now);
@@ -7759,7 +7858,7 @@ impl App {
                     .as_ref()
                     .and_then(|o| o.rect_of(control))
                     .unwrap_or(egui::Rect::ZERO);
-                self.overlay_click(control, geom.page, now);
+                self.overlay_click(control, double, geom.page, now);
                 rect
             }
             // The basket tray (PLAN §7.1): the chip opens and closes it, a row
@@ -7863,7 +7962,24 @@ impl App {
     // ── The context menu (PLAN §7.5) ────────────────────────────────────────
 
     /// Right click: the menu, about whatever row it landed on.
-    fn right_click(&mut self, at: egui::Pos2, over: Option<Control>, layout: &ui::Layout) {
+    fn right_click(
+        &mut self,
+        at: egui::Pos2,
+        over: Option<Control>,
+        layout: &ui::Layout,
+        now: Instant,
+    ) {
+        // A crumb's right click is the one verb a path segment has that its
+        // left click is not: left goes there, right copies it. No menu for one
+        // item — the card would be a card with a single row in it, and the
+        // toast already says what happened.
+        if let Some(Control::Crumb(index)) = over {
+            if let Some(crumb) = self.path_bar.1.get(index) {
+                let text = crumb.path.to_string_lossy().into_owned();
+                self.offer(None, text.as_bytes(), "Copied path".to_string(), now);
+            }
+            return;
+        }
         // Only the list pane has a menu. The parent column's one verb is "go
         // there" and the preview's belong to the file it is showing, and a menu
         // that offered "Move to trash" from either would be a menu about a row
@@ -9623,6 +9739,11 @@ impl App {
         let basket_geometry =
             crate::basket::geometry(area, &self.basket, self.basket_open, self.basket_first);
 
+        // The toast, measured where it will be painted (PLAN §5). It floats over
+        // the panes and over a modal card — everything except the menu, which
+        // is drawn after it — so it is hit-tested in that same order.
+        let toast_geom = self.toasts.geometry(&painter, area, area.bottom(), now);
+
         let over = pointer.at.and_then(|p| {
             // The menu is over everything, a modal card included: it is the
             // most recent thing the user asked for.
@@ -9631,6 +9752,20 @@ impl App {
                     .as_ref()
                     .and_then(|g| g.hit(p))
                     .map(|control| (control, p));
+            }
+            // The toast is next, because it is drawn over everything below it.
+            // A click on it dismisses it, which is a click the surface behind
+            // must not also get: the toast was covering that surface, and
+            // acting on something you could not see is the mistake the whole
+            // hit-test order exists to prevent.
+            if let Some(geom) = &toast_geom {
+                if geom.rect.contains(p) {
+                    let control = match geom.action {
+                        Some(action) if action.contains(p) => Control::ToastAction,
+                        _ => Control::Toast,
+                    };
+                    return Some((control, p));
+                }
             }
             // A modal surface takes the pointer with the keyboard: nothing
             // behind the scrim is hoverable, so a stray click cannot move the
@@ -9694,11 +9829,20 @@ impl App {
                         .yank
                         .as_ref()
                         .is_some_and(|chip| chip.leaving.is_none());
-                    top_geom
-                        .cluster
-                        .yank
-                        .filter(|rect| yank_live && rect.contains(p))
-                        .map(|_| Control::YankChip)
+                    let cluster = &top_geom.cluster;
+                    let hit = |rect: Option<egui::Rect>, control: Control| {
+                        rect.filter(|rect| rect.contains(p)).map(|_| control)
+                    };
+                    hit(cluster.yank.filter(|_| yank_live), Control::YankChip)
+                        // The three chips that were only ever labels until now.
+                        // Order does not matter between them — the cluster is
+                        // laid out left to right with no overlap — so they are
+                        // listed in the order they are drawn in.
+                        .or_else(|| hit(cluster.selected, Control::SelectedChip))
+                        .or_else(|| hit(cluster.visual, Control::VisualChip))
+                        .or_else(|| hit(cluster.git, Control::GitChip))
+                        .or_else(|| hit(Some(cluster.counter), Control::Counter))
+                        .or_else(|| hit(top_geom.ellipsis, Control::CrumbEllipsis))
                         .or_else(|| {
                             // …and not while *this* chip is fading out either:
                             // there is no filter left to re-open a prompt on.
@@ -9706,10 +9850,7 @@ impl App {
                                 .filter_chip
                                 .as_ref()
                                 .is_some_and(|chip| chip.leaving.is_none());
-                            top_geom
-                                .filter
-                                .is_some_and(|rect| filter_live && rect.contains(p))
-                                .then_some(Control::FilterChip)
+                            hit(top_geom.filter.filter(|_| filter_live), Control::FilterChip)
                         })
                 })
                 .or_else(|| {
@@ -9802,16 +9943,22 @@ impl App {
             top: &top_geom,
             menu: &menu_geometry,
             basket: &basket_geometry,
+            toast: toast_geom,
             tabs: tab_count,
         };
 
         if pointer.secondary && !dismissing && overlay.is_none() && !menu_live {
             if let Some(position) = pointer.at {
-                self.right_click(position, over.map(|(control, _)| control), &layout);
+                self.right_click(position, over.map(|(control, _)| control), &layout, now);
             }
         }
 
-        if let Some((control, position)) = over.filter(|_| pointer.pressed && !dismissing) {
+        // The two controls that only ever *say* something take no press at all:
+        // no ripple, no double-click history, nothing. A splash under a pointer
+        // that changed nothing is the interface claiming to have acted.
+        let inert = matches!(over, Some((Control::GitChip | Control::CrumbEllipsis, _)));
+        if let Some((control, position)) = over.filter(|_| pointer.pressed && !dismissing && !inert)
+        {
             // Everything happens on mouse-*down*, with the ripple: waiting for
             // the release would put the acknowledgement after the thing it is
             // acknowledging.
@@ -9839,7 +9986,12 @@ impl App {
                     Some((Control::Tab(index), _)) => Some(index),
                     _ => None,
                 },
-                in_list: layout.list.contains(at) && overlay.is_none(),
+                // …and not through the toast, which floats over the list: a
+                // press that dismissed a message must not also start dragging
+                // a rectangle across the rows it was covering.
+                in_list: layout.list.contains(at)
+                    && overlay.is_none()
+                    && !matches!(over, Some((Control::Toast | Control::ToastAction, _))),
                 dragging: false,
             });
         }
@@ -9966,10 +10118,20 @@ impl App {
                 // tab becomes a window (PLAN §2) — so it wears the hand that
                 // says so (`delightful-ui` §2), like the basket's chip.
                 Control::Tab(_) | Control::BasketChip => egui::CursorIcon::Grab,
+                // Two things take the pointer without answering it: the
+                // branch chip and the `…`. Both exist to *say* something on
+                // hover, and a hand over either would promise a click that
+                // never happens (`delightful-ui` §2).
+                Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
                 Control::Row(..)
                 | Control::Crumb(_)
                 | Control::FilterChip
                 | Control::YankChip
+                | Control::Counter
+                | Control::SelectedChip
+                | Control::VisualChip
+                | Control::Toast
+                | Control::ToastAction
                 | Control::Action(_)
                 | Control::PanelRow(_)
                 | Control::MenuItem(_)
@@ -10243,6 +10405,14 @@ impl App {
         let cwd_now = self.cwd();
 
         // ── Paint ───────────────────────────────────────────────────────────
+        // The row painter is offered the pointer so it can say which of a row's
+        // small right-hand marks it is inside (see [`ui::RowTips`]). Only over
+        // the list: the parent column wears neither mark, and the preview's
+        // directory body is a picture of a listing rather than one you point at.
+        let row_tips = pointer
+            .at
+            .filter(|at| list_content.contains(*at) && overlay.is_none() && !menu_live)
+            .map(ui::RowTips::new);
         let paint = ui::Painting {
             painter: &painter,
             palette: &self.palette,
@@ -10250,6 +10420,7 @@ impl App {
             nerd: self.nerd,
             show_symlink: self.mgr.show_symlink,
             now,
+            tips: row_tips.as_ref(),
         };
 
         // The three panes, all painted alike. There used to be a 2 pt accent
@@ -10366,6 +10537,26 @@ impl App {
             // workers would not start — which is a directory drawn as a list
             // rather than a directory drawn as nothing.
             _ => paint.listing(list_view),
+        }
+        // What the pointer turned out to be on, now that the rows have been
+        // drawn. The fade is the window's own instant-in/eased-out, so the card
+        // arrives with the pointer and lingers a moment behind it; the rect is
+        // remembered with it, because a mark on its way out has to be drawn
+        // somewhere and the row it belonged to may already have scrolled.
+        let found = row_tips.as_ref().and_then(ui::RowTips::found);
+        self.tips.tick(found.map(|(tip, _)| tip), None, now);
+        if found.is_some() {
+            self.tip = found;
+        }
+        if let Some((tip, rect)) = self.tip {
+            chrome::tip(
+                &paint,
+                area,
+                rect,
+                &[tip.text().to_string()],
+                1,
+                self.tips.hover(tip),
+            );
         }
         // The band, over the rows it is selecting (PLAN §7.5). A wash and a
         // hairline: it has to be unmistakable without hiding the names it is
@@ -10720,7 +10911,8 @@ impl App {
         // now. Centred rather than in the corner because the corner is the
         // selection basket's (PLAN §7.1), and two transient surfaces stacking
         // in one place is how a notice ends up under a tray.
-        self.toasts.paint(&paint, area, area.bottom(), now);
+        self.toasts
+            .paint(&paint, area, area.bottom(), &self.hovers, now);
 
         // The menu is over everything below it — it is the most recent thing
         // the user asked for — and under the which-key card, which is an answer
@@ -10752,6 +10944,7 @@ impl App {
         // frame, and `animating()` says so — idle costs zero frames.
         let animating = [
             ("hovers", self.hovers.animating()),
+            ("row tips", self.tips.animating()),
             ("ripples", self.ripples.animating(now)),
             // The clipboard chip's way off the top row. Instant in, so only
             // the leaving half ever asks for a frame (PLAN §1, §8).

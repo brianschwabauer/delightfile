@@ -420,6 +420,25 @@ pub enum Control {
     BasketChip,
     BasketRow(usize),
     BasketRemove(usize),
+    /// The leading `…` the breadcrumb wears when the path did not fit. Nothing
+    /// happens when it is clicked — there is no one segment it stands for — but
+    /// it is the only place the hidden part of the path can be asked for, so it
+    /// takes the pointer in order to answer.
+    CrumbEllipsis,
+    /// The `112 / 197` at the right-hand end of the top row, which opens `/`
+    /// (PLAN §7.2): the number says where in the listing you are, and `/` is
+    /// how you go somewhere else in it.
+    Counter,
+    /// The branch chip. Hover-only — see [`crate::app`]'s click routing.
+    GitChip,
+    /// `4 selected`, which clears the selection: the pointer's `Esc`.
+    SelectedChip,
+    /// `visual` / `visual unset`, which leaves the run.
+    VisualChip,
+    /// The toast itself, which a click dismisses, and the offer chip on an undo
+    /// toast, which a click takes (PLAN §5).
+    Toast,
+    ToastAction,
 }
 
 /// Where the panes and the chrome go.
@@ -671,6 +690,64 @@ pub struct Painting<'a> {
     pub nerd: bool,
     pub show_symlink: bool,
     pub now: Instant,
+    /// Where the pointer is, and somewhere to leave what it turned out to be
+    /// over inside a row. `None` everywhere the answer is not wanted — the
+    /// preview's directory body, the tests.
+    pub tips: Option<&'a RowTips>,
+}
+
+/// One of the small marks at the right-hand end of a row that is worth a word
+/// when the pointer stops on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowTip {
+    /// The `ignored` tag, which says why the row is grey but not who greyed it.
+    Ignored,
+    /// A directory size still being walked — the `~` (PLAN §7.3).
+    Counting,
+}
+
+impl RowTip {
+    /// The whole tooltip: one short line, because a mark this small is being
+    /// pointed at for one missing word and not for a paragraph.
+    pub fn text(self) -> &'static str {
+        match self {
+            RowTip::Ignored => "git-ignored",
+            RowTip::Counting => "still counting",
+        }
+    }
+}
+
+/// The pointer, offered to the row painter so it can say what is under it.
+///
+/// The marks at the right-hand end of a row are laid out as the painter goes,
+/// right to left, off widths it measures on the spot. Working out where they
+/// landed a second time in the hit test would be that arithmetic written twice,
+/// and the second copy is the one that drifts. So the painter is asked instead:
+/// it is handed the pointer and leaves behind whichever mark contained it.
+pub struct RowTips {
+    at: egui::Pos2,
+    found: std::cell::Cell<Option<(RowTip, egui::Rect)>>,
+}
+
+impl RowTips {
+    pub fn new(at: egui::Pos2) -> RowTips {
+        RowTips {
+            at,
+            found: std::cell::Cell::new(None),
+        }
+    }
+
+    /// A mark was drawn here. Kept only if the pointer is inside it — and only
+    /// the first, since two marks on one row never overlap.
+    pub(crate) fn note(&self, tip: RowTip, rect: egui::Rect) {
+        if self.found.get().is_none() && rect.contains(self.at) {
+            self.found.set(Some((tip, rect)));
+        }
+    }
+
+    pub fn found(&self) -> Option<(RowTip, egui::Rect)> {
+        self.found.get()
+    }
 }
 
 impl Painting<'_> {
@@ -1015,6 +1092,26 @@ impl Painting<'_> {
                 galley,
                 fade(self.palette.overlay1),
             );
+            // A number that is still moving is worth a word: `~` is the mark
+            // and "still counting" is what it means, and the mark is the only
+            // place in the window the question can be asked.
+            let counting = usage.as_ref().is_some_and(|usage| usage.estimate)
+                || (usage.is_none()
+                    && note.is_none()
+                    && linemode == LineMode::Size
+                    && entry.is_dir()
+                    && folders
+                        .and_then(|folders| folders.size(&entry.name))
+                        .is_some_and(|size| !size.settled));
+            if let (Some(tips), true) = (self.tips, counting) {
+                tips.note(
+                    RowTip::Counting,
+                    egui::Rect::from_min_max(
+                        egui::pos2(rect.right() - ROW_PAD_X - width, rect.top()),
+                        egui::pos2(rect.right() - ROW_PAD_X, rect.bottom()),
+                    ),
+                );
+            }
             width.max(reserved) + LINEMODE_GAP
         };
 
@@ -1082,14 +1179,23 @@ impl Painting<'_> {
                 colour,
             );
             let width = galley.size().x;
+            let left = rect.right() - ROW_PAD_X - mode_width - width;
             painter.galley(
-                egui::pos2(
-                    rect.right() - ROW_PAD_X - mode_width - width,
-                    rect.center().y - galley.size().y / 2.0,
-                ),
+                egui::pos2(left, rect.center().y - galley.size().y / 2.0),
                 galley,
                 colour,
             );
+            // The tag says the row is ignored; the tooltip says by *what*, which
+            // is the half of it the one word cannot carry.
+            if let Some(tips) = self.tips {
+                tips.note(
+                    RowTip::Ignored,
+                    egui::Rect::from_min_max(
+                        egui::pos2(left, rect.top()),
+                        egui::pos2(left + width, rect.bottom()),
+                    ),
+                );
+            }
         }
         let mode_width = mode_width + tag_column;
 
@@ -1500,6 +1606,31 @@ fn readable_error(error: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The sink keeps the first mark the pointer was actually inside, and
+    /// nothing when it was inside none of them.
+    #[test]
+    fn the_row_tip_sink_keeps_the_mark_under_the_pointer() {
+        let tag = egui::Rect::from_min_size(egui::pos2(100.0, 10.0), egui::vec2(40.0, 20.0));
+        let size = egui::Rect::from_min_size(egui::pos2(150.0, 10.0), egui::vec2(40.0, 20.0));
+
+        let tips = RowTips::new(size.center());
+        tips.note(RowTip::Ignored, tag);
+        tips.note(RowTip::Counting, size);
+        assert_eq!(tips.found(), Some((RowTip::Counting, size)));
+
+        // A second mark under the pointer cannot displace the first — two
+        // marks on one row never overlap, so the first is the answer.
+        let tips = RowTips::new(tag.center());
+        tips.note(RowTip::Ignored, tag);
+        tips.note(RowTip::Counting, tag);
+        assert_eq!(tips.found(), Some((RowTip::Ignored, tag)));
+
+        let tips = RowTips::new(egui::pos2(0.0, 0.0));
+        tips.note(RowTip::Ignored, tag);
+        tips.note(RowTip::Counting, size);
+        assert_eq!(tips.found(), None);
+    }
+
     fn area() -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1408.0, 908.0))
     }
@@ -1622,6 +1753,7 @@ mod tests {
             let palette = Palette::default();
             let theme = Theme::default();
             let paint = Painting {
+                tips: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
