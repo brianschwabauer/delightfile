@@ -99,6 +99,16 @@ const PRESENT_RETRY: Duration = Duration::from_millis(250);
 /// looking empty and wrong.
 const LOADING_DELAY: Duration = Duration::from_millis(150);
 
+/// How often a running folder-size walk is allowed to re-order the listing.
+///
+/// The walk streams ten batches a second, and a size sort applied to each of
+/// them is a listing that shuffles continuously for as long as a big directory
+/// takes to count. Half a second is the compromise: the biggest thing still
+/// visibly floats to the top while the walk runs — which is the whole point of
+/// sorting by size with the walk on — and between reorders there is time to
+/// read a row and put a hand on it. See [`App::apply_folder_sizes`].
+const FOLDER_RESORT: Duration = Duration::from_millis(500);
+
 /// How many probed files are remembered (see [`App::probes`]).
 ///
 /// Four: a `↓ ↑`, and a step back up out of a directory onto the clip you were
@@ -736,15 +746,6 @@ pub struct App {
     /// beside the press rather than threaded through every command's signature.
     key_repeat: bool,
     tabs: Tabs,
-    /// The file named on the command line, and the directory it is in, until
-    /// the scan that will contain it has landed and the cursor is on it.
-    ///
-    /// `delightfile /path/to/file.txt` opens the *directory* and points at the
-    /// file, and the directory read is asynchronous — so the name has to
-    /// outlive the moment it was asked for. Cleared the instant it lands, or
-    /// when the scan finishes without it (a file that was deleted between the
-    /// shell and here).
-    start_cursor: Option<(PathBuf, String)>,
     /// `--cwd-file`, written on a `q` quit (PLAN §3).
     cwd_file: Option<PathBuf>,
     quit: Option<Quit>,
@@ -854,6 +855,12 @@ pub struct App {
     /// (PLAN §7.3). Always present and usually empty; see
     /// [`crate::folders`].
     folders: crate::folders::Folders,
+    /// When the size sort was last re-applied to the walk's numbers.
+    ///
+    /// The coalescing clock for [`App::apply_folder_sizes`]: the numbers land
+    /// on every batch, the *order* changes at most once every
+    /// [`FOLDER_RESORT`].
+    folders_sorted: Option<Instant>,
     /// The udisks2 worker, started the first time `M` is pressed. `None` is the
     /// resting state of a session that never asked about disks: no thread, no
     /// system-bus connection.
@@ -1202,17 +1209,16 @@ impl App {
         let (start, focus) = start_directory(args.start.as_deref());
         let mut tab = Tab::open(start, &mgr, sort, &scanner, now);
         // **Opening on a file puts the cursor on it once its row arrives.**
-        // Trying only here was the bug: `Tab::open` *queues* the scan, so at
-        // this line the listing is empty and `cursor_to_name` has nothing to
-        // find — `delightfile /path/to/file.txt` left the cursor on row 0 and
-        // looked like it had ignored the argument. The name is remembered
-        // instead and retried as each batch lands (see
-        // [`App::place_start_cursor`]). The attempt is still made now as well,
-        // in case some future path has the entries in hand already.
-        let start_cursor = focus.and_then(|name| {
-            place_start_cursor(&mut tab.cwd.dir, &name)
-                .then(|| (tab.cwd.path().to_path_buf(), name))
-        });
+        // `Tab::open` *queues* the scan, so at this line the listing is empty
+        // and there is nothing to point at — the name is *aimed* instead, and
+        // the batch that contains it moves the cursor (see
+        // [`df_core::fs::DirState::aim_cursor`]). That mechanism is also the
+        // one with the cancel rule this needs: a person who arrows away while
+        // the scan is still arriving keeps the row they chose, where a
+        // placement retried from the frame loop had nothing to stop it.
+        if let Some(name) = focus {
+            tab.cwd.dir.aim_cursor(name);
+        }
         watcher.watch(tab.watched());
 
         App {
@@ -1241,7 +1247,6 @@ impl App {
             probing: None,
             key_repeat: false,
             tabs: Tabs::new(tab),
-            start_cursor,
             cwd_file: args.cwd_file,
             quit: None,
             engine,
@@ -1269,6 +1274,7 @@ impl App {
             du: None,
             usage: None,
             folders: crate::folders::Folders::default(),
+            folders_sorted: None,
             udisks: None,
             mounts: None,
             basket: crate::basket::Basket::default(),
@@ -1505,13 +1511,6 @@ impl App {
                 changed = true;
             }
         }
-        // The file named on the command line, whose row may only just have
-        // arrived. Same shape as the parent's marker below, and for the same
-        // reason: a cursor that has to land on a name cannot land before the
-        // name is in the listing.
-        if changed {
-            self.place_start_cursor();
-        }
         // The parent's marker follows the path, and the row it belongs on may
         // only just have arrived in a batch. Nothing steers that marker by
         // hand any more (PLAN §2.1), so a scan update always gets to place it.
@@ -1555,7 +1554,7 @@ impl App {
             changed = true;
         }
         // The size column's recursive directory sizes, counting up (PLAN §7.3).
-        if self.poll_folders() {
+        if self.poll_folders(now) {
             changed = true;
         }
         if self.poll_usage(now) {
@@ -1587,25 +1586,6 @@ impl App {
         changed
     }
 
-    /// Retry the start-up cursor against whatever has arrived.
-    ///
-    /// Gives up for good the moment the user has navigated somewhere else —
-    /// a cursor placement asked for at startup must never fight a person who
-    /// has already moved on.
-    fn place_start_cursor(&mut self) {
-        let Some((dir, name)) = self.start_cursor.clone() else {
-            return;
-        };
-        let tab = self.tabs.active_mut();
-        if tab.cwd.path() != dir {
-            self.start_cursor = None;
-            return;
-        }
-        if !place_start_cursor(&mut tab.cwd.dir, &name) {
-            self.start_cursor = None;
-        }
-    }
-
     fn rescan(&mut self, dir: &Path, now: Instant) {
         // **A listing is only ever re-read from a real directory.** `dir` comes
         // from watcher events, from an operation's touched paths and from a
@@ -1625,14 +1605,22 @@ impl App {
         // A directory whose contents changed has a size that changed, and the
         // du cache cannot see it — its freshness check is the directory's own
         // `mtime`, which says nothing about a file written three levels down
-        // (`df_core::du::cache`). Dropping the state here is what makes the
-        // next frame ask again; `request` supersedes, so a burst of watcher
-        // events costs one walk rather than one each.
-        if self.folders.is_about(dir) {
-            self.stop_folder_sizes();
-            if let Some(du) = &self.du {
-                du.forget(dir);
+        // (`df_core::du::cache`).
+        //
+        // **Marked stale rather than thrown away.** Forgetting the cache and
+        // stopping the walk on every event meant a directory being written to —
+        // a build, an unpack, an `rsync`, which is exactly when somebody is
+        // watching the column — cancelled and restarted its walk dozens of
+        // times a second and never finished one, showing an em dash throughout.
+        // The numbers stay on screen wearing their `~`, and
+        // [`App::poll_folders`] re-walks once the directory has held still for
+        // [`crate::folders::RESTALE_QUIET`]. The cache is dropped there too, at
+        // the same once-per-quiet-period rate.
+        if self.folders.watches(dir) {
+            if let (Some(du), Some(token)) = (&self.du, self.folders.token()) {
+                du.cancel(token);
             }
+            self.folders.mark_stale(now);
         }
         let scanner = &self.scanner;
         let tab = self.tabs.active_mut();
@@ -4478,11 +4466,11 @@ impl App {
         if parent != self.cwd() {
             self.navigate(parent.clone(), now);
         }
-        // The scan may not have landed yet, so this is the same deferred
-        // placement `--cwd-file` uses.
-        if !self.tabs.active_mut().cwd.dir.cursor_to_name(&name) {
-            self.start_cursor = Some((parent, name));
-        }
+        // The scan may not have landed yet, so this is the same aim
+        // `delightfile <file>` uses — it puts the cursor on the row now if the
+        // row is here, and on the batch that brings it if it is not.
+        self.tabs.active_mut().cwd.dir.aim_cursor(name);
+        self.attach_view();
     }
 
     /// Go to a directory a jump overlay named.
@@ -4539,7 +4527,8 @@ impl App {
             // The scan is asynchronous, so the cursor cannot land yet — the
             // same problem `delightfile <file>` has on the command line, and
             // the same answer.
-            self.start_cursor = Some((path, name));
+            self.tabs.active_mut().cwd.dir.aim_cursor(name);
+            self.attach_view();
         } else if !self.dir().cursor_to_name(&name) {
             self.toasts
                 .error(format!("{name} is not in this folder any more"), now);
@@ -5410,6 +5399,7 @@ impl App {
             return;
         };
         let direction = if reverse { flip(direction) } else { direction };
+        self.attach_view();
         if !self.dir().find(&query, direction) {
             log::debug!("`{query}` matches nothing here");
         }
@@ -5436,7 +5426,8 @@ impl App {
             return;
         }
         let anchor = self.tab().cwd.dir.cursor();
-        self.visual = Some(Visual::new(selecting, anchor));
+        let anchor_name = self.tab().cwd.dir.cursor_entry().map(|e| e.name.clone());
+        self.visual = Some(Visual::new(selecting, anchor, anchor_name));
         // The anchor row is in the run from the moment the mode opens: `v` then
         // `Esc` with nothing selected would be a mode that did nothing.
         self.apply_visual();
@@ -5454,6 +5445,25 @@ impl App {
         let dir = &mut self.tabs.active_mut().cwd.dir;
         if dir.is_empty() {
             return;
+        }
+        // **The listing may have been reordered under the run.** A scan batch
+        // or the folder-size walk can move the anchor's file while nobody is
+        // touching the keyboard, and a position-anchored run would then be
+        // drawn from whatever file landed on that index instead.
+        //
+        // Put right by undoing the run and laying it down again from where the
+        // anchor's file actually is — every row this mode touched goes back to
+        // what it was before it did, which is exactly what `prior` is for.
+        // Nudging the anchor alone would leave `applied` describing positions
+        // in the old order, and the next delta would unselect rows at random.
+        if let Some(moved) = visual.reanchored(|name| dir.position_of(name)) {
+            for (name, was) in std::mem::take(&mut visual.prior) {
+                if let Some(position) = dir.position_of(&name) {
+                    dir.select_range(position, position, was);
+                }
+            }
+            visual.anchor = moved;
+            visual.applied = None;
         }
         let last = dir.len() - 1;
         let wanted = select::range(visual.anchor.min(last), dir.cursor().min(last));
@@ -5788,8 +5798,17 @@ impl App {
             C::HalfPageDown => self.page_cursor(half),
             C::PageUp => self.page_cursor(-full),
             C::PageDown => self.page_cursor(full),
-            C::CursorTop => self.dir().set_cursor(0),
-            C::CursorBottom => self.dir().set_cursor(usize::MAX),
+            // `g g` and `G`. The re-attach is unconditional for the reason
+            // `step_cursor`'s is: `g g` pressed while already on row 0 is a
+            // request to be looking at row 0, not a no-op.
+            C::CursorTop => {
+                self.attach_view();
+                self.dir().set_cursor(0);
+            }
+            C::CursorBottom => {
+                self.attach_view();
+                self.dir().set_cursor(usize::MAX);
+            }
 
             // ── Moving between directories ──────────────────────────────────
             C::Leave => {
@@ -6291,6 +6310,11 @@ impl App {
     /// so they never fall through to anything.
     fn step_cursor(&mut self, step: grid::Step) -> bool {
         let columns = self.columns;
+        // Before the early return, not after it: an arrow key that lands where
+        // the cursor already was — `↑` on row 0 of a one-row listing, `→` on
+        // the last tile — is still the user asking to be taken back to the
+        // cursor, and a wheel scroll must end there (see `Listing::attach`).
+        self.attach_view();
         let dir = self.dir();
         let (before, count) = (dir.cursor(), dir.len());
         let after = grid::step(before, count, columns, step);
@@ -6301,10 +6325,21 @@ impl App {
         true
     }
 
+    /// Take the view back to the cursor, on behalf of a command that has just
+    /// sent it somewhere.
+    ///
+    /// One line, named, because the alternative is `self.tabs.active_mut()
+    /// .cwd.attach()` spelled out in a dozen command arms — which is how the
+    /// thirteenth gets forgotten.
+    fn attach_view(&mut self) {
+        self.tabs.active_mut().cwd.attach();
+    }
+
     /// A page of the pane, up or down — a page of *rows*, which in a grid is
     /// that many rows of tiles.
     fn page_cursor(&mut self, pages: isize) {
         let columns = self.columns.max(1) as isize;
+        self.attach_view();
         self.dir().move_cursor(pages * columns);
     }
 
@@ -6387,7 +6422,7 @@ impl App {
     /// breadcrumb, a tab switch, an undo that moved you — and one comparison
     /// per frame is cheaper than remembering to call something from all of
     /// them.
-    fn poll_folders(&mut self) -> bool {
+    fn poll_folders(&mut self, now: Instant) -> bool {
         if !self.folder_sizes_wanted() {
             // Leaving for a remote listing, or turning the column off: stop
             // paying for an answer nothing will draw.
@@ -6408,19 +6443,34 @@ impl App {
         }
 
         let cwd = self.cwd();
+        let tab = self.tabs.active_index();
         let mut changed = false;
-        if !self.folders.is_about(&cwd) {
-            changed = self.begin_folder_sizes(cwd.clone());
+        if !self.folders.is_about(&cwd, tab) {
+            changed = self.begin_folder_sizes(cwd.clone(), now);
+        } else if self.folders.due(now) {
+            // The directory has been quiet since the last watcher event, so the
+            // numbers on screen can be corrected. The cache is forgotten *here*
+            // — once per quiet period rather than once per event — because its
+            // freshness check cannot see a file written three levels down.
+            if let Some(du) = &self.du {
+                du.forget(&cwd);
+            }
+            let options = df_core::du::DuOptions::at_depth(1).counting_children();
+            let token = self.du().request_with(cwd.clone(), options);
+            self.folders.restart(token);
+            changed = true;
         }
-        let Some(token) = self.folders.token() else {
-            return changed;
-        };
+        // Drained unconditionally, even with no walk of our own in flight: the
+        // channel is shared with every other `request`, and a frame that
+        // returned without emptying it would leave the messages of a cancelled
+        // walk sitting in front of the ones this pane is waiting for.
         let messages = match &self.du {
             Some(du) => du.drain(),
             None => return changed,
         };
+        let token = self.folders.token();
         for message in messages {
-            if message.token() != token {
+            if Some(message.token()) != token {
                 continue;
             }
             match message {
@@ -6447,24 +6497,50 @@ impl App {
             }
         }
         if changed {
-            self.apply_folder_sizes();
+            self.apply_folder_sizes(now);
         }
         changed
     }
 
     /// Point the walk at `dir`, seeding whatever the cache already knows so a
     /// revisit is instant.
-    fn begin_folder_sizes(&mut self, dir: PathBuf) -> bool {
+    fn begin_folder_sizes(&mut self, dir: PathBuf, now: Instant) -> bool {
+        // The walk this replaces is cancelled first. `DuScanner::request`
+        // supersedes by *root*, so arrowing from one directory into another
+        // left the first walk running with nobody reading it — two threads
+        // stat'ing a tree that is no longer on screen, which is precisely the
+        // work PLAN §1 says must not happen.
+        self.stop_folder_sizes();
+        // A new directory's first numbers are worth ordering straight away
+        // rather than waiting out a clock the last one started.
+        self.folders_sorted = None;
         // Depth 1 and the cheap child-count pass: the column is about this
         // directory's own rows, and everything below them is counted *into*
         // them rather than reported.
         let options = df_core::du::DuOptions::at_depth(1).counting_children();
+        let tab = self.tabs.active_index();
+        // **Not on a network mount.** `cross_filesystems` keeps a walk from
+        // *wandering* onto one, but it cannot see that the root itself is one:
+        // an sshfs or NFS mount browsed as an ordinary path is an ordinary path
+        // as far as `st_dev` goes, and a walk of somebody's NFS home is minutes
+        // of round trips nobody asked for, holding the mount busy while they
+        // are trying to browse it. Asked once per directory rather than per
+        // frame, which is what recording the refusal here buys: the pane is
+        // "measured by nobody" and the next frame does not ask again.
+        //
+        // `m u` is untouched — a walk somebody typed goes wherever they pointed
+        // it (see [`df_core::du::fstype`]).
+        if df_core::du::is_remote(&dir) {
+            log::debug!("folder sizes: {} is a network mount", dir.display());
+            self.folders.decline(dir, tab);
+            return true;
+        }
         let token = self.du().request_with(dir.clone(), options);
         let cached = self.du().cached(&dir);
-        self.folders.begin(dir, token);
+        self.folders.begin(dir, tab, token);
         if let Some(record) = cached {
             self.folders.seed(&record);
-            self.apply_folder_sizes();
+            self.apply_folder_sizes(now);
         }
         true
     }
@@ -6473,7 +6549,58 @@ impl App {
         if let (Some(du), Some(token)) = (&self.du, self.folders.token()) {
             du.cancel(token);
         }
+        self.restore_stat_sizes();
         self.folders.clear();
+    }
+
+    /// Put every directory row's `Entry::len` back to what `stat` said.
+    ///
+    /// The walk writes its answer into `Entry::len` because that is the field
+    /// the size sort reads — and then nothing used to write it back, so a
+    /// listing kept the walked number after the column was turned off, after
+    /// the linemode changed, and after the walk was stopped. Everything else
+    /// that asks a row how big it is (the spot panel, a dialog, a future
+    /// column) then read a recursive total from a field documented as the stat
+    /// size, with no way to tell which it had.
+    ///
+    /// No rebuild: this is not a reorder, and a listing that resorted itself
+    /// because the size column was switched off would be the rows moving for a
+    /// reason nobody could see.
+    fn restore_stat_sizes(&mut self) {
+        // Only for the listing the numbers were written into. The sizes are
+        // keyed by name, and a directory called `photos` in the folder you have
+        // just walked into is not the `photos` the last walk measured.
+        if !self.folders.watches(&self.cwd()) {
+            return;
+        }
+        let restore: HashMap<String, u64> = self
+            .tab()
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir())
+            .filter_map(|entry| {
+                self.folders
+                    .stat_len(&entry.name)
+                    .map(|len| (entry.name.clone(), len))
+            })
+            .collect();
+        if restore.is_empty() {
+            return;
+        }
+        self.tabs
+            .active_mut()
+            .cwd
+            .dir
+            .revise_entries_in_place(|entries| {
+                for entry in entries.iter_mut() {
+                    if let Some(len) = restore.get(&entry.name) {
+                        entry.len = *len;
+                    }
+                }
+                true
+            });
     }
 
     /// Push the walk's numbers into the rows, so the size *sort* sees them.
@@ -6482,16 +6609,45 @@ impl App {
     /// the field the sort reads, so writing it there is what makes `, s` order
     /// directories by what is in them. The `~` and the `12 items` cannot live
     /// in a `u64` and stay in [`crate::folders::Folders`].
-    fn apply_folder_sizes(&mut self) {
-        // Lent out and given back rather than copied into a `HashMap` keyed by
-        // an owned `String` per directory row. This runs about ten times a
-        // second while a walk streams, and the map existed only to end the
-        // borrow of `self.folders` before `self.tabs` is taken mutably; taking
-        // the whole thing for the duration says the same thing and allocates
-        // nothing. `Folders::default()` is empty, so the borrow checker's
-        // stand-in is also the honest value if a panic unwound past here.
-        let folders = std::mem::take(&mut self.folders);
-        self.tabs.active_mut().cwd.dir.revise_entries(|entries| {
+    ///
+    /// ## Why the rows do not move on every batch
+    ///
+    /// The walk streams: ten batches a second, each one a few directories'
+    /// running totals. Re-sorting the listing on each of them was the rows
+    /// shuffling continuously for as long as a big directory took to count —
+    /// unreadable on its own, and worse than that for a **visual run**, whose
+    /// anchor is a position in the listing: every reorder moved a different
+    /// file under a run somebody was drawing.
+    ///
+    /// So the write and the reorder are separated. The numbers always land,
+    /// because the column reads them; the *order* changes only when it is what
+    /// the user asked for (the sort is by size), nobody is mid-run, and at most
+    /// once every [`FOLDER_RESORT`] — enough that the biggest thing still
+    /// floats to the top while the walk runs, slow enough to read.
+    ///
+    /// `Folders` is lent out and given back rather than copied into a map keyed
+    /// by an owned `String` per directory row: this runs about ten times a
+    /// second while a walk streams, and a map existed only to end the borrow
+    /// of `self.folders` before `self.tabs` is taken mutably. `Folders::default()`
+    /// is empty, so the borrow checker's stand-in is also the honest value if a
+    /// panic unwound past here.
+    fn apply_folder_sizes(&mut self, now: Instant) {
+        let mut folders = std::mem::take(&mut self.folders);
+        // What each row said before the walk reached it, so the number can be
+        // put back when the column goes away (see [`App::restore_stat_sizes`]).
+        for entry in self.tab().cwd.dir.entries().iter() {
+            if !entry.is_dir() {
+                continue;
+            }
+            if folders
+                .size(&entry.name)
+                .is_some_and(|size| size.bytes != entry.len)
+            {
+                folders.remember_stat(&entry.name, entry.len);
+            }
+        }
+
+        let write = |entries: &mut [df_core::fs::Entry]| {
             let mut changed = false;
             for entry in entries.iter_mut() {
                 if !entry.is_dir() {
@@ -6505,7 +6661,23 @@ impl App {
                 }
             }
             changed
-        });
+        };
+
+        let reorder = self.mgr.sort_by == SortBy::Size
+            && self.visual.is_none()
+            && self
+                .folders_sorted
+                .is_none_or(|at| now.saturating_duration_since(at) >= FOLDER_RESORT);
+        let dir = &mut self.tabs.active_mut().cwd.dir;
+        if reorder {
+            // The cursor keeps its *name* through the rebuild, so the row being
+            // read stays the row being read however far it travels.
+            if dir.revise_entries(write) {
+                self.folders_sorted = Some(now);
+            }
+        } else {
+            dir.revise_entries_in_place(write);
+        }
         self.folders = folders;
     }
 
@@ -6545,14 +6717,20 @@ impl App {
         }
         self.flip_before = Some(self.last_layout.clone());
         self.sort_by(usage.previous_sort.by, usage.previous_sort.reverse, None);
-        // Re-read, so the directory rows go back to the honest zero they
-        // started as rather than keeping numbers nothing is maintaining.
-        self.rescan(&usage.dir.clone(), now);
         // The mode's own walk superseded the size column's — same root, so
         // `request` cancelled it — and the cache it filled is exactly what the
         // column wants. Dropping this makes the next frame ask again, and the
         // answer is already sitting in the cache.
+        //
+        // **Before the rescan, not after.** `rescan` looks at this state to
+        // decide whether the directory it is re-reading is one being measured;
+        // clearing it afterwards meant `rescan` saw the record it was about to
+        // throw away, marked it stale, and the next frame started from nothing
+        // instead of from the cache the mode had just filled.
         self.folders.clear();
+        // Re-read, so the directory rows go back to the honest zero they
+        // started as rather than keeping numbers nothing is maintaining.
+        self.rescan(&usage.dir.clone(), now);
     }
 
     /// Take whatever the walk has said since the last frame.
@@ -6995,10 +7173,20 @@ impl App {
                     painter,
                     prompt,
                     area.width() - ui::GAP * 2.0,
+                    self.prompt_tail(),
                 ))
                 .max(1),
             _ => 1,
         };
+    }
+
+    /// The directory a non-anchored prompt is about, as the row shows it.
+    ///
+    /// One function because two callers have to agree: the paint spends this
+    /// much of the row on it, and [`App::path_lines`] decides how tall the row
+    /// is from what is left.
+    fn prompt_tail(&self) -> Option<&str> {
+        self.path_bar.1.last().map(|crumb| crumb.label.as_str())
     }
 
     /// Rebuild the breadcrumb when the directory has changed under it.
@@ -7133,6 +7321,7 @@ impl App {
         }
         if layout.parent.contains(at) {
             if let Some(parent) = &mut self.tabs.active_mut().parent {
+                parent.dir.cancel_aim();
                 parent.wheel(rows, parent_page, 1, now);
             }
             return;
@@ -7143,7 +7332,14 @@ impl App {
         // Scrolling moves the view and leaves the cursor — and with it the
         // preview, the counter and any visual run — exactly where it was, so
         // there is nothing to re-apply here (see `Listing::wheel`).
-        self.tabs.active_mut().cwd.wheel(rows, page, columns, now);
+        //
+        // It does cancel a *pending* one, though. An aim is a cursor move that
+        // has not happened yet, waiting on the row it is about; left standing,
+        // the batch that brings the row would move the cursor and drag the view
+        // back with it, seconds into a scroll nobody had finished.
+        let cwd = &mut self.tabs.active_mut().cwd;
+        cwd.dir.cancel_aim();
+        cwd.wheel(rows, page, columns, now);
     }
 
     /// A primary click on something. Returns where it landed, for the ripple.
@@ -7158,6 +7354,9 @@ impl App {
         match control {
             Control::Row(Column::List, index) => {
                 let rect = grid::pane_rect(geom.list, geom.grid.as_ref(), geom.list_scroll, index);
+                // A click is a cursor command made with the hand that scrolled:
+                // it ends the scroll and the view comes back to the row.
+                self.attach_view();
                 if pointer.shift {
                     // Shift-click: the run from the cursor to here, the way
                     // every list in every program extends a selection.
@@ -7337,10 +7536,11 @@ impl App {
             return;
         }
         if let Some(name) = name {
-            // The scan is in flight, so the cursor is placed the way `--cwd`
-            // places it: remembered and retried as each batch lands.
-            self.start_cursor = Some((self.cwd(), name.clone()));
-            self.dir().cursor_to_name(&name);
+            // The scan is in flight, so the cursor is placed the way
+            // `delightfile <file>` places it: aimed, and moved by the batch
+            // that brings the row.
+            self.dir().aim_cursor(name);
+            self.attach_view();
         }
         self.visual = None;
         self.rewatch();
@@ -7988,6 +8188,11 @@ impl App {
         // The release is the drop.
         if pointer.released {
             let drag = self.drag.take();
+            // The autoscroll scrolled through `Listing::wheel`, which detaches
+            // — right for the duration of the gesture, wrong the moment it
+            // ends. A drag is over when the hand lets go, and the view belongs
+            // to the cursor again from then on.
+            self.reattach_panes();
             self.targets.tick(None, None, now);
             match (drag, dest.filter(|_| valid)) {
                 (Some(_), Some(dest)) => self.drop_here(&paths, &dest, verb, now),
@@ -8030,6 +8235,21 @@ impl App {
                 .iter()
                 .nth(index)
                 .map(|tab| tab.cwd.path().to_path_buf()),
+        }
+    }
+
+    /// Give both panes' views back to their cursors.
+    ///
+    /// The end of a drag. [`App::autoscroll`] moves a view with the same call
+    /// the wheel uses and leaves it detached for the same reason, but a drag
+    /// has a *finish* the wheel does not — and a listing still parked where the
+    /// pointer happened to let go, with the cursor off screen, is not a state
+    /// anybody asked for.
+    fn reattach_panes(&mut self) {
+        let tab = self.tabs.active_mut();
+        tab.cwd.attach();
+        if let Some(parent) = &mut tab.parent {
+            parent.attach();
         }
     }
 
@@ -8743,7 +8963,22 @@ impl App {
                 &cluster,
             )
         };
-        let crumb_rects = top_geom.crumbs.clone();
+        // **Nothing on the top row is hit-testable while a prompt has taken
+        // it.** The crumbs are not drawn then — the prompt is where they were —
+        // and a click or a drop landing on a segment nobody can see is the
+        // pointer acting on a memory. Emptied here rather than guarded at each
+        // of the three readers (the hit test, the hover geometry and the drop
+        // zones), which is how the third one gets forgotten; the chips have
+        // their own guard in the hit test below for the same reason.
+        let prompting = self
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| !prompt.kind.anchored());
+        let crumb_rects = if prompting {
+            Vec::new()
+        } else {
+            top_geom.crumbs.clone()
+        };
         let menu_geometry = self
             .menu
             .as_ref()
@@ -8772,6 +9007,15 @@ impl App {
             if let Some(overlay) = &overlay {
                 return overlay.hit(p).map(|control| (control, p));
             }
+            // The help sheet is a surface like any other: it has nothing
+            // clickable in it, and everything it covers is therefore inert
+            // while it is up. Without this the pointer reached straight through
+            // the card and moved the cursor in the listing behind it. The top
+            // row is the exception the sheet is deliberately drawn under —
+            // that is where its filter is typed.
+            if self.help.is_some() && !layout.path.contains(p) {
+                return None;
+            }
             // The tray floats over the panes, so it is hit-tested before them:
             // a click on the chip must not also land on the row underneath it.
             if basket_geometry.contains(p) {
@@ -8798,14 +9042,9 @@ impl App {
                         .map(Control::Crumb)
                 })
                 // The two chips on the top row that do something when clicked.
-                // Not hit-tested while a prompt has taken the row: the crumbs
-                // and the chips are not drawn then, and a click landing on a
-                // control nobody can see is the pointer acting on a memory.
+                // Not hit-tested while a prompt has taken the row, for the
+                // reason the crumbs above it are emptied: they are not drawn.
                 .or_else(|| {
-                    let prompting = self
-                        .prompt
-                        .as_ref()
-                        .is_some_and(|prompt| !prompt.kind.anchored());
                     if prompting {
                         return None;
                     }
@@ -8886,7 +9125,7 @@ impl App {
         // is aimed with the hand, and scrolling the pane the keyboard happens
         // to be in would be the one control in the program that ignores where
         // it was pointed.
-        if pointer.wheel != 0.0 {
+        if pointer.wheel != 0.0 && self.help.is_none() {
             if let Some(at) = pointer.at {
                 self.wheel(pointer.wheel, at, &layout, page, parent_page, now);
             }
@@ -9110,6 +9349,10 @@ impl App {
             Some(metrics) => metrics.rows(tab.cwd.dir.len()),
             None => tab.cwd.dir.len(),
         };
+        // A window resize reflows the grid, and `first` is a row of the pane —
+        // so before the rule below reads it, it is re-derived against the
+        // column count it is about to be read in.
+        tab.cwd.reflow(columns, now);
         // …and the view follows the cursor unless the mouse has scrolled away
         // from it, which `follow_cursor` is the one place that decides.
         tab.cwd.follow_cursor(
@@ -9249,7 +9492,16 @@ impl App {
         // self` and the painter holds the palette.
         let help_view = match self.help {
             Some(mut help) => {
-                let rect = chrome::help_rect(area, area.bottom() - ui::GAP);
+                // From the bottom of the top row, not from the window's
+                // edge: the sheet is drawn under that row, so a card that
+                // started above it would paint its own heading behind the
+                // crumbs — and behind two lines of them when the prompt has an
+                // error to show.
+                let rect = chrome::help_rect(
+                    area,
+                    layout.path.bottom() + ui::GAP,
+                    area.bottom() - ui::GAP,
+                );
                 let lines = self.help_lines();
                 let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE).len();
                 // The same scrolloff rule the panes use, on the same numbers:
@@ -9423,7 +9675,7 @@ impl App {
             notes: self.tab().trash.is_some().then_some(&self.trash_notes),
             folders: self
                 .folders
-                .is_about(&cwd_now)
+                .is_about(&cwd_now, self.tabs.active_index())
                 .then_some(&self.folders)
                 .filter(|f| !f.is_empty()),
         };
@@ -9605,8 +9857,7 @@ impl App {
             Some(prompt) if !prompt.kind.anchored() => {
                 // The directory the prompt is about, kept as context on the
                 // left when the field can spare the room.
-                let tail = self.path_bar.1.last().map(|crumb| crumb.label.as_str());
-                chrome::prompt_row(&paint, layout.path, prompt, tail);
+                chrome::prompt_row(&paint, layout.path, prompt, self.prompt_tail());
             }
             _ => {
                 let cluster = self.cluster(now);
@@ -10476,29 +10727,6 @@ fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>) {
     }
 }
 
-/// Put the start-up cursor on `name` if it is there yet, and say whether it is
-/// still worth trying again.
-///
-/// The whole point is the second half. A directory read is asynchronous, so the
-/// name a person typed on the command line arrives *before* the row it belongs
-/// on; a placement attempted once, at startup, always fails, and the cursor
-/// sits on row 0 as though the argument had been ignored. Retrying on every
-/// batch fixes it, and the retries have to stop somewhere — which is when the
-/// scan finishes without the file, because it was deleted between the shell and
-/// here, or is hidden and `.` is off.
-///
-/// Pure, so both halves of that are a test rather than something you find out
-/// by opening a file from a shell.
-fn place_start_cursor(dir: &mut df_core::fs::DirState, name: &str) -> bool {
-    if dir.cursor_to_name(name) {
-        return false;
-    }
-    matches!(
-        dir.state(),
-        df_core::fs::LoadState::Idle | df_core::fs::LoadState::Loading
-    )
-}
-
 /// Collapse a chain of renames into where each file started and ended.
 ///
 /// A swap runs as three moves — `a`→`tmp`, `b`→`a`, `tmp`→`b` — and the
@@ -10880,8 +11108,8 @@ mod tests {
 
     /// **The bug this fixes**: `Tab::open` queues the directory read, so at the
     /// moment `App::new` runs there is nothing in the listing to point at and a
-    /// single `cursor_to_name` finds nothing. The name has to be remembered and
-    /// retried as the batches land.
+    /// single `cursor_to_name` finds nothing. The name has to be *aimed*, and
+    /// the batch that brings the row is what moves the cursor.
     ///
     /// Driven against a real scanner and a real directory, because the failure
     /// is entirely about *ordering* — a mocked listing that already had the rows
@@ -10905,40 +11133,42 @@ mod tests {
         let sort = sort_options(&mgr, 0);
         let mut tab = Tab::open(tree.clone(), &mgr, sort, &scanner, now);
 
-        // Before anything has arrived: the placement fails, and it says so by
-        // asking to be tried again. This is exactly the state `App::new` is in.
-        assert!(
-            place_start_cursor(&mut tab.cwd.dir, "c.txt"),
-            "an empty listing must ask to be retried, not give up"
-        );
+        // Before anything has arrived, which is exactly the state `App::new` is
+        // in: the aim is taken and the cursor has nowhere to go yet.
+        tab.cwd.dir.aim_cursor("c.txt");
         assert_eq!(tab.cwd.dir.cursor(), 0);
 
-        // Now let the scan land, retrying on each update the way `poll_workers`
-        // does.
-        let mut waiting = true;
         let deadline = Instant::now() + Duration::from_secs(5);
-        while waiting && Instant::now() < deadline {
+        while tab.cwd.dir.state() != LoadState::Loaded && Instant::now() < deadline {
             for update in scanner.drain() {
                 tab.apply(&update);
-                if waiting {
-                    waiting = place_start_cursor(&mut tab.cwd.dir, "c.txt");
-                }
             }
-            if waiting {
-                std::thread::sleep(Duration::from_millis(2));
-            }
+            std::thread::sleep(Duration::from_millis(2));
         }
-        assert!(!waiting, "the scan never landed");
-        assert_eq!(tab.cwd.dir.state(), LoadState::Loaded);
+        assert_eq!(
+            tab.cwd.dir.state(),
+            LoadState::Loaded,
+            "the scan never landed"
+        );
         let name = tab.cwd.dir.cursor_entry().map(|e| e.name.clone());
         assert_eq!(name.as_deref(), Some("c.txt"), "the cursor did not follow");
 
-        // …and a name that is not in the directory gives up once the scan is
-        // over rather than retrying for the life of the process.
-        assert!(
-            !place_start_cursor(&mut tab.cwd.dir, "nope.txt"),
-            "a finished scan without the file must stop the retries"
-        );
+        // …and the cancel rule that routing through the aim buys: a person who
+        // moves the cursor themselves keeps the row they chose, however late
+        // the aimed one arrives.
+        tab.cwd.dir.aim_cursor("nope.txt");
+        tab.cwd.dir.set_cursor(0);
+        std::fs::write(tree.join("nope.txt"), b"x").expect("write the fixture");
+        tab.cwd.begin_scan(&scanner, now);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while tab.cwd.dir.state() != LoadState::Loaded && Instant::now() < deadline {
+            for update in scanner.drain() {
+                tab.apply(&update);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let name = tab.cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_eq!(name.as_deref(), Some("a.txt"), "a cancelled aim came back");
 
         let _ = std::fs::remove_dir_all(&tree);
     }

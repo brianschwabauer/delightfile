@@ -413,7 +413,14 @@ mod tests {
         )
         .expect("a size formats");
         assert!(marks.contains(&running.as_str()), "{running}: {marks:?}");
-        let counted = crate::format::folder_size_text(None, Some(12)).expect("a count formats");
+        let counted = crate::format::folder_size_text(
+            None,
+            Some(df_core::du::ChildCount {
+                entries: 12,
+                capped: false,
+            }),
+        )
+        .expect("a count formats");
         assert!(marks.contains(&counted.as_str()), "{counted}: {marks:?}");
 
         // Every mark that names a drawn thing carries the thing itself, so the

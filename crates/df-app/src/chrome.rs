@@ -736,7 +736,8 @@ pub fn top_geometry(
 ) -> TopGeom {
     let cluster_geom = cluster_geometry(painter, row, cluster);
     let filter_w = filter_width(painter, filter);
-    let rects = crumb_rects(painter, row, crumbs, cluster_geom.width + filter_w);
+    let reserved = cluster_geom.width + filter_w;
+    let rects = crumb_rects(painter, row, crumbs, reserved);
     // After the last crumb that fitted, with a separator's worth of space
     // before it: the committed filter reads as one more step down the path,
     // because that is what it is — `Downloads › ⌕ invoice` is the directory
@@ -761,6 +762,30 @@ pub fn top_geometry(
             ),
         )
     });
+    // …and only *then* are the crumbs clipped to the band they were measured
+    // in. The elision loop stops when one segment is left, so on a narrow row
+    // the last crumb can be wider than the room it was given and reach under
+    // the counter and the chips painted on top of it — where it would win the
+    // hit test, because the crumb is asked first. Clipping is right rather than
+    // reordering the hit test: a rect that extends under something opaque is
+    // wrong wherever it is read, and the drop zones read the same vector.
+    //
+    // Done after the filter chip is placed, because that chip hangs off the
+    // last crumb's *measured* right edge and must not move when the rect it is
+    // measured from is trimmed.
+    let band_right = row.right() - PAD_X - reserved;
+    let rects = rects
+        .into_iter()
+        .map(|rect| {
+            if rect == egui::Rect::NOTHING || rect.left() >= band_right {
+                return egui::Rect::NOTHING;
+            }
+            egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.right().min(band_right), rect.max.y),
+            )
+        })
+        .collect();
     TopGeom {
         crumbs: rects,
         filter: filter_rect,
@@ -994,7 +1019,18 @@ pub fn prompt_row(paint: &Painting<'_>, row: egui::Rect, prompt: &Prompt, tail: 
 /// an inline error that has been squeezed to three characters is not an error
 /// message, and a row that is always two lines tall would cost the panes a
 /// line for a state they are usually not in.
-pub fn prompt_lines(painter: &egui::Painter, prompt: &Prompt, width: f32) -> usize {
+///
+/// `tail` is the directory chip [`prompt_row`] puts at the far left, and it is
+/// passed here for one reason: this function decides how tall the row is and
+/// that one paints it, so anything one of them spends and the other does not is
+/// a row that grows a second line it does not need — or, worse, does not grow
+/// one it does. The condition below is [`prompt_row`]'s, to the constant.
+pub fn prompt_lines(
+    painter: &egui::Painter,
+    prompt: &Prompt,
+    width: f32,
+    tail: Option<&str>,
+) -> usize {
     let Some(error) = &prompt.error else {
         return 1;
     };
@@ -1003,11 +1039,22 @@ pub fn prompt_lines(painter: &egui::Painter, prompt: &Prompt, width: f32) -> usi
         + PAD_X
         + text_width(painter, prompt.query(), font.clone())
         + PAD_X
-        + text_width(painter, error, font)
+        + text_width(painter, error, font.clone())
         + PAD_X
         + text_width(painter, prompt.mode_label(), key_font(FONT - 1.5))
         + 10.0;
-    if wanted > width - PAD_X * 2.0 {
+    let inner = width - PAD_X * 2.0;
+    let tail_width = tail
+        .map(|tail| text_width(painter, tail, font) + CRUMB_SEPARATOR_WIDTH)
+        .unwrap_or(0.0);
+    // The tail is dropped rather than squeezing the field below its minimum —
+    // so on a narrow window it costs nothing, exactly as it is drawn.
+    let spent = if inner - tail_width >= PROMPT_MIN_WIDTH {
+        tail_width
+    } else {
+        0.0
+    };
+    if wanted > inner - spent {
         2
     } else {
         1
@@ -1144,8 +1191,21 @@ fn prompt_field(
     } else if let Some(error) = &prompt.error {
         // The error takes the place the case indicator would have had: it is
         // the more urgent thing to say about what has been typed.
-        let galley = painter.layout_no_wrap(error.clone(), font.clone(), palette.red);
-        let width = galley.size().x.min((right - inner.left()).max(0.0));
+        //
+        // Laid out **to the room it has**, with an ellipsis, rather than laid
+        // out full width and then drawn from a left edge computed backwards
+        // from a clamped width. That older arithmetic moved the text left
+        // without making it shorter, so in an anchored popup — which has no
+        // second line to grow and passes `error_line: None` — a long message
+        // ran back over the title and out through the side of the card.
+        let room = (right - inner.left()).max(0.0);
+        let mut job = egui::text::LayoutJob::single_section(
+            error.clone(),
+            egui::TextFormat::simple(font.clone(), palette.red),
+        );
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+        let galley = painter.layout_job(job);
+        let width = galley.size().x.min(room);
         painter.galley(
             egui::pos2(right - width, inner.center().y - galley.size().y / 2.0),
             galley,
@@ -1494,14 +1554,22 @@ pub const OPTICAL_CENTRE: f32 = 0.4;
 /// having drifted towards the top rather than as being centred well.
 pub const OPTICAL_BASELINE: f32 = 0.42;
 
-/// Where the help card goes: most of the window, down to `bottom`.
-pub fn help_rect(area: egui::Rect, bottom: f32) -> egui::Rect {
+/// Where the help card goes: most of the window, from `top` down to `bottom`.
+///
+/// `top` is the bottom of the row above it rather than the window's own edge.
+/// The sheet is drawn *under* the top row on purpose — its filter is typed
+/// there, and an overlay that covered its own input would be hiding the answer
+/// to the question it is asking — so a card that started at the window edge
+/// spent its first thirty points painting behind that row, and grew a second
+/// hidden strip whenever an error made the row two lines tall.
+pub fn help_rect(area: egui::Rect, top: f32, bottom: f32) -> egui::Rect {
     let width = (area.width() - CARD_MARGIN * 2.0).min(HELP_MAX_WIDTH);
+    let top = top.max(area.top() + CARD_MARGIN);
     egui::Rect::from_min_max(
-        egui::pos2(area.center().x - width / 2.0, area.top() + CARD_MARGIN),
+        egui::pos2(area.center().x - width / 2.0, top),
         egui::pos2(
             area.center().x + width / 2.0,
-            bottom.max(area.top() + CARD_MARGIN + CHROME_HEIGHT),
+            bottom.max(top + CHROME_HEIGHT),
         ),
     )
 }
@@ -2042,7 +2110,7 @@ mod tests {
     fn the_help_card_fits_the_window() {
         for size in [egui::vec2(1400.0, 900.0), egui::vec2(320.0, 200.0)] {
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size);
-            let rect = help_rect(area, area.bottom() - GAP);
+            let rect = help_rect(area, area.top() + CHROME_HEIGHT + GAP, area.bottom() - GAP);
             assert!(rect.width() > 0.0 && rect.width() <= HELP_MAX_WIDTH + 1e-3);
             assert!(rect.left() >= area.left() && rect.right() <= area.right() + 1e-3);
             assert!(rect.top() >= area.top());
@@ -2161,7 +2229,10 @@ mod tests {
                 path_rect.min,
                 egui::vec2(220.0, CHROME_HEIGHT + crate::ui::PROMPT_ERROR_LINE),
             );
-            assert_eq!(prompt_lines(paint.painter, &prompt, 220.0), 2);
+            assert_eq!(
+                prompt_lines(paint.painter, &prompt, 220.0, Some("delightfile")),
+                2
+            );
             prompt_row(&paint, tall, &prompt, Some("delightfile"));
             prompt.error = None;
             let mut rename = Prompt::with(
@@ -2194,7 +2265,7 @@ mod tests {
             let lines = crate::help::lines(&all, "");
             let mut help = Help::default();
             help.reset(&lines);
-            let rect = help_rect(area, area.bottom() - GAP);
+            let rect = help_rect(area, area.top() + CHROME_HEIGHT + GAP, area.bottom() - GAP);
             help_overlay(&paint, area, rect, &lines, &help, all.len());
             help_overlay(&paint, area, rect, &[], &help, all.len());
         });

@@ -34,7 +34,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -43,7 +43,7 @@ use crate::fs::Notifier;
 use crate::{DfError, Result};
 
 use super::cache::{current_mtime, DuCache, DuRecord, HeavyHitter};
-use super::walk::{child_counts, walk, DuOptions, DuTotals, DuUpdate};
+use super::walk::{child_counts, walk, ChildCount, DuOptions, DuTotals, DuUpdate};
 
 /// Walk workers. See the module essay.
 pub const DU_WORKERS: usize = 2;
@@ -75,13 +75,17 @@ pub enum DuMessage {
     /// drill-down at the moment it knows one is coming.
     Started { token: DuToken, root: PathBuf },
     /// How many entries each immediate subdirectory holds, from the cheap
-    /// `read_dir` pass — sent once, before the walk, when
+    /// `read_dir` pass — sent in batches, before the walk, when
     /// [`DuOptions::count_children`] asked for it. The size column's first
     /// honest answer; see [`fn@super::walk::child_counts`].
+    ///
+    /// Batched rather than sent once at the end of the pass: one directory of
+    /// a hundred thousand names must not hold every other row's number behind
+    /// it.
     Counts {
         token: DuToken,
         root: PathBuf,
-        counts: Vec<(PathBuf, u64)>,
+        counts: Vec<(PathBuf, ChildCount)>,
     },
     /// Per-directory totals. Some are running (`done: false`) and some final;
     /// a consumer keyed by [`DuUpdate::dir`] just overwrites.
@@ -133,7 +137,16 @@ struct Request {
     options: DuOptions,
 }
 
-type Live = Arc<Mutex<HashMap<DuToken, PathBuf>>>;
+/// One walk's cancel switch: `false` the moment it is superseded, cancelled
+/// or finished.
+///
+/// A flag per token rather than a `contains_key` on the map, because the walk
+/// asks this question **once per directory entry** — millions of times on a
+/// home directory — and a mutex on the path there is a lock every worker and
+/// the UI thread contend for. An atomic load is a load.
+type Alive = Arc<AtomicBool>;
+
+type Live = Arc<Mutex<HashMap<DuToken, (PathBuf, Alive)>>>;
 type Shared = Arc<Mutex<DuCache>>;
 
 /// The pool. Dropping it cancels everything in flight, closes the request
@@ -213,8 +226,17 @@ impl DuScanner {
         let token = DuToken(self.next_token.fetch_add(1, Ordering::Relaxed));
         {
             let mut live = lock(&self.live);
-            live.retain(|_, r| *r != root);
-            live.insert(token, root.clone());
+            // Superseding is cancelling: the flag has to be lowered, not just
+            // the entry dropped, or the walk it belonged to reads a flag
+            // nobody can reach any more and runs to completion.
+            live.retain(|_, (r, alive)| {
+                if *r == root {
+                    alive.store(false, Ordering::Relaxed);
+                    return false;
+                }
+                true
+            });
+            live.insert(token, (root.clone(), Arc::new(AtomicBool::new(true))));
         }
         if let Some(requests) = &self.requests {
             let request = Request {
@@ -225,7 +247,7 @@ impl DuScanner {
             // Unbounded channel with receivers that only die with the pool, so
             // a send failure means the pool is already gone.
             if requests.send(request).is_err() {
-                lock(&self.live).remove(&token);
+                stand_down(&self.live, token);
             }
         }
         token
@@ -234,12 +256,14 @@ impl DuScanner {
     /// Stop a walk. Messages already in the channel may still arrive; the
     /// consumer drops them by token.
     pub fn cancel(&self, token: DuToken) {
-        lock(&self.live).remove(&token);
+        stand_down(&self.live, token);
     }
 
     /// Stop everything in flight (leaving the mode, closing the tab, quitting).
     pub fn cancel_all(&self) {
-        lock(&self.live).clear();
+        for (_, (_, alive)) in lock(&self.live).drain() {
+            alive.store(false, Ordering::Relaxed);
+        }
     }
 
     pub fn is_live(&self, token: DuToken) -> bool {
@@ -345,6 +369,13 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Drop one walk from the live map and lower its flag, in that order.
+fn stand_down(live: &Live, token: DuToken) {
+    if let Some((_, alive)) = lock(live).remove(&token) {
+        alive.store(false, Ordering::Relaxed);
+    }
+}
+
 fn run_walk(
     request: Request,
     updates: &Sender<DuMessage>,
@@ -359,9 +390,10 @@ fn run_walk(
     } = request;
     // Cancelled before a worker picked it up — the common case when moving
     // through directories faster than a walk can finish.
-    if !lock(live).contains_key(&token) {
+    let Some(alive) = lock(live).get(&token).map(|(_, alive)| Arc::clone(alive)) else {
         return;
-    }
+    };
+    let cancelled = || !alive.load(Ordering::Relaxed);
 
     let send = |message: DuMessage| -> bool {
         let ok = updates.send(message).is_ok();
@@ -382,15 +414,18 @@ fn run_walk(
     // has something true to say within a frame or two of entering a directory
     // rather than after the whole subtree has been added up.
     if options.count_children {
-        let cancelled = || !lock(live).contains_key(&token);
-        let counts = child_counts(&root, &cancelled);
-        if !counts.is_empty()
-            && !send(DuMessage::Counts {
-                token,
-                root: root.clone(),
-                counts,
-            })
-        {
+        let mut open = true;
+        let mut emit = |counts: Vec<(PathBuf, ChildCount)>| {
+            if open {
+                open = send(DuMessage::Counts {
+                    token,
+                    root: root.clone(),
+                    counts,
+                });
+            }
+        };
+        child_counts(&root, &options, &cancelled, &mut emit);
+        if !open {
             return;
         }
     }
@@ -405,7 +440,6 @@ fn run_walk(
     let mut channel_open = true;
 
     {
-        let cancelled = || !lock(live).contains_key(&token);
         let mut emit = |batch: Vec<DuUpdate>| {
             for update in &batch {
                 if !update.done {
@@ -435,7 +469,7 @@ fn run_walk(
 
         match walk(&root, &options, &cancelled, &mut emit) {
             Ok(totals) => {
-                lock(live).remove(&token);
+                stand_down(live, token);
                 store(
                     cache,
                     &root,
@@ -454,7 +488,7 @@ fn run_walk(
             // caller who could care has already stopped listening.
             Err(DfError::Cancelled) => {}
             Err(error) => {
-                lock(live).remove(&token);
+                stand_down(live, token);
                 send(DuMessage::Failed {
                     token,
                     root: root.clone(),

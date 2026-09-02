@@ -66,8 +66,13 @@ fn size_text(entry: &Entry) -> String {
 ///   rather than as a footnote per row;
 /// - a child count — `12 items`, which is not a size and does not look like
 ///   one. The unit word is the whole point: a bare `12` in a column of `4.2 MB`
-///   would read as twelve bytes.
-pub fn folder_size_text(size: Option<crate::folders::Size>, count: Option<u64>) -> Option<String> {
+///   would read as twelve bytes. A count that hit the counting cap says
+///   `10000+ items`: the pass stopped there, and rounding "a lot" up to a
+///   precise-looking number would be a figure nobody could reproduce.
+pub fn folder_size_text(
+    size: Option<crate::folders::Size>,
+    count: Option<df_core::du::ChildCount>,
+) -> Option<String> {
     if let Some(size) = size {
         let bytes = human_size(size.bytes);
         return Some(if size.settled {
@@ -77,9 +82,15 @@ pub fn folder_size_text(size: Option<crate::folders::Size>, count: Option<u64>) 
         });
     }
     let count = count?;
+    let plus = if count.capped { "+" } else { "" };
     Some(format!(
-        "{count} {}",
-        if count == 1 { "item" } else { "items" }
+        "{}{plus} {}",
+        count.entries,
+        if count.entries == 1 && !count.capped {
+            "item"
+        } else {
+            "items"
+        }
     ))
 }
 
@@ -249,24 +260,42 @@ mod tests {
                 settled: false,
             })
         };
+        let count = |entries| {
+            Some(df_core::du::ChildCount {
+                entries,
+                capped: false,
+            })
+        };
+        let capped = |entries| {
+            Some(df_core::du::ChildCount {
+                entries,
+                capped: true,
+            })
+        };
 
         assert_eq!(folder_size_text(None, None), None, "the em dash stands");
         assert_eq!(
-            folder_size_text(None, Some(12)).as_deref(),
+            folder_size_text(None, count(12)).as_deref(),
             Some("12 items")
         );
         // A count is a count, not a size: singular reads as English and an
         // empty folder says so rather than showing a dash.
-        assert_eq!(folder_size_text(None, Some(1)).as_deref(), Some("1 item"));
-        assert_eq!(folder_size_text(None, Some(0)).as_deref(), Some("0 items"));
+        assert_eq!(folder_size_text(None, count(1)).as_deref(), Some("1 item"));
+        assert_eq!(folder_size_text(None, count(0)).as_deref(), Some("0 items"));
+        // A count that stopped at the cap says so rather than claiming to be
+        // the answer.
+        assert_eq!(
+            folder_size_text(None, capped(10_000)).as_deref(),
+            Some("10000+ items")
+        );
 
         // A size outranks a count the moment there is one, tilde and all.
         assert_eq!(
-            folder_size_text(counting(1536), Some(12)).as_deref(),
+            folder_size_text(counting(1536), count(12)).as_deref(),
             Some("~1.5 KB")
         );
         assert_eq!(
-            folder_size_text(settled(1536), Some(12)).as_deref(),
+            folder_size_text(settled(1536), count(12)).as_deref(),
             Some("1.5 KB")
         );
         // A settled empty directory is `0 B`, which is true — the dash was

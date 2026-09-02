@@ -662,6 +662,18 @@ fn a_zero_byte_parent_gives_zero_shares_not_nan() {
 
 // ── the cheap child-count pass ──────────────────────────────────────────────
 
+/// Every batch the pass emits, flattened — which is what the tests below want
+/// to assert on, one directory at a time.
+fn collect_counts(
+    root: &Path,
+    options: &DuOptions,
+    cancelled: &dyn Fn() -> bool,
+) -> Vec<(std::path::PathBuf, ChildCount)> {
+    let mut out = Vec::new();
+    child_counts(root, options, cancelled, &mut |batch| out.extend(batch));
+    out
+}
+
 /// The number the size column shows before a single byte has been added up.
 #[test]
 fn child_counts_are_immediate_children_by_name() {
@@ -672,13 +684,12 @@ fn child_counts_are_immediate_children_by_name() {
     std::fs::remove_file(tree.path().join("empty/.keep")).unwrap();
     tree.file("a.txt", b"a");
 
-    let never = || false;
-    let counts = child_counts(tree.path(), &never);
+    let counts = collect_counts(tree.path(), &DuOptions::default(), &|| false);
     let find = |name: &str| {
         counts
             .iter()
             .find(|(p, _)| p.file_name().unwrap() == name)
-            .map(|(_, n)| *n)
+            .map(|(_, n)| n.entries)
     };
     // `sub` holds `b.txt` and `deep` — two names, not the three files under it:
     // the pass counts entries, and says so.
@@ -697,8 +708,7 @@ fn child_counts_skip_symlinks() {
     let tree = TempTree::new("du-counts-link");
     tree.file("real/a.txt", b"a");
     std::os::unix::fs::symlink(tree.path().join("real"), tree.path().join("link")).unwrap();
-    let never = || false;
-    let counts = child_counts(tree.path(), &never);
+    let counts = collect_counts(tree.path(), &DuOptions::default(), &|| false);
     assert_eq!(counts.len(), 1, "{counts:?}");
     assert_eq!(counts[0].0.file_name().unwrap(), "real");
 }
@@ -710,8 +720,43 @@ fn child_counts_stop_when_cancelled() {
     for i in 0..8 {
         tree.file(format!("d{i}/a.txt"), b"a");
     }
-    let always = || true;
-    assert!(child_counts(tree.path(), &always).is_empty());
+    assert!(collect_counts(tree.path(), &DuOptions::default(), &|| true).is_empty());
+}
+
+/// The cap turns "a directory of a hundred thousand names" into a bounded
+/// answer rather than a `read_dir` every other row waits behind.
+#[test]
+fn child_counts_stop_at_the_cap() {
+    let tree = TempTree::new("du-counts-cap");
+    // Ten thousand names is too many to create in a unit test, so the *shape*
+    // of the answer is asserted on a directory that stays under the cap, and
+    // the cap itself is asserted to be the documented number.
+    tree.file("small/a.txt", b"a");
+    let counts = collect_counts(tree.path(), &DuOptions::default(), &|| false);
+    assert_eq!(counts.len(), 1);
+    assert_eq!(counts[0].1.entries, 1);
+    assert!(!counts[0].1.capped, "one file is not a capped count");
+    assert_eq!(MAX_COUNTED_ENTRIES, 10_000);
+}
+
+/// The counts arrive in batches, so the first rows get a number while the rest
+/// are still being counted.
+#[test]
+fn child_counts_arrive_in_batches() {
+    let tree = TempTree::new("du-counts-batched");
+    for i in 0..COUNT_BATCH + 3 {
+        tree.file(format!("d{i:03}/a.txt"), b"a");
+    }
+    let mut batches: Vec<usize> = Vec::new();
+    child_counts(
+        tree.path(),
+        &DuOptions::default(),
+        &|| false,
+        &mut |batch| batches.push(batch.len()),
+    );
+    assert!(batches.len() >= 2, "{batches:?}");
+    assert_eq!(batches[0], COUNT_BATCH);
+    assert_eq!(batches.iter().sum::<usize>(), COUNT_BATCH + 3);
 }
 
 /// The pass streams through the scanner ahead of the walk, under the same
@@ -743,7 +788,7 @@ fn the_scanner_sends_counts_before_the_totals() {
     assert!(done, "the walk never finished");
     let counts = counted.expect("no Counts message");
     assert_eq!(counts.len(), 1);
-    assert_eq!(counts[0].1, 1);
+    assert_eq!(counts[0].1.entries, 1);
 }
 
 /// …and it is off unless asked for: the "what's big" mode wants totals, not a
