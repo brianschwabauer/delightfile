@@ -105,6 +105,11 @@ commands! {
     HistoryForward => "history-forward",
     GotoGitRoot => "goto-git-root",
     GotoInteractive => "goto-interactive",
+    // `Ctrl+l`: the `Go to:` prompt the last breadcrumb opens on a click,
+    // seeded with where you are. The keyboard's door to it, because a file
+    // manager that is keyboard-first cannot have a path field only the mouse
+    // can reach.
+    GotoPath => "goto-path",
     FollowSymlink => "follow-symlink",
     FuzzyJump => "fuzzy-jump",
     ZoxideJump => "zoxide-jump",

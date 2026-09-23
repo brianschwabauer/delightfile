@@ -142,6 +142,10 @@ pub(super) fn build() -> Registry {
         (Files, "right",          C::EnterDirectory, "Enter directory",                   Always),
         (Files, "alt+left",       C::HistoryBack,    "Back to previous directory",        Always),
         (Files, "alt+right",      C::HistoryForward, "Forward to next directory",         Always),
+        // No yazi ancestor. `Ctrl+l` is the location bar in every browser and
+        // in the GTK and KDE file dialogs, so it is the key a hand already
+        // reaches for when it wants to type where to go.
+        (Files, "ctrl+l",         C::GotoPath,       "Type a path to go to",              Always),
 
         // ── Files: selection ────────────────────────────────────────────────
         (Files, "space",  C::ToggleSelect,    "Toggle selection and advance", Always),

@@ -52,7 +52,7 @@ use crate::graphics::{Gfx, GfxError};
 use crate::grid::{self, GridView, Thumbs};
 use crate::help::{self, Help};
 use crate::hover::Hovers;
-use crate::input::{Prompt, PromptKind};
+use crate::input::{click_outside_action, ClickOutside, Prompt, PromptKind};
 use crate::menu::{self, Menu};
 use crate::open::{self, Picker};
 use crate::overlay::{self, FinderGeom, SearchGeom};
@@ -626,8 +626,9 @@ struct PressStart {
     /// space and clipped to the list before it is read as rows.
     ///
     /// Never through something floating over the panes — a toast, the basket,
-    /// a modal card, the help sheet: a press that landed on one of those must
-    /// not also start dragging a rectangle across the rows it was covering.
+    /// a modal card, the help sheet, the rename card: a press that landed on
+    /// one of those must not also start dragging a rectangle across the rows
+    /// it was covering.
     band_origin: bool,
     /// The press landed in the text of the prompt on the top row.
     ///
@@ -1598,7 +1599,30 @@ impl App {
                 log::warn!("{warning}");
             }
         }
+        // Read before the window, like every other startup read: the very
+        // first frame has to know whether the directory it is opening is a
+        // grid, or it would draw a list and then swap under the eye.
+        let state = StateStore::load();
 
+        App::assemble(waker, args, config, theme, keymap, state)
+    }
+
+    /// Everything [`App::new`] does after reading this machine's config,
+    /// keymap and state file: start the workers and build the model.
+    ///
+    /// Apart so that the four things read from the user's directories arrive
+    /// as arguments. A test builds its `App` through here with defaults and a
+    /// state file of its own, and then nothing it asserts depends on what
+    /// happens to be in `~/.config` or `~/.local/state` on the machine running
+    /// it.
+    fn assemble(
+        waker: Waker,
+        args: crate::cli::Args,
+        config: Config,
+        theme: Theme,
+        keymap: Registry,
+        state: StateStore,
+    ) -> App {
         // One bell, four ropes: the handles differ only in the name they log
         // under `DF_FRAME_LOG` (see [`Waker::named`]), because "who woke us at
         // rest?" is the only question the idle-cost audit cannot answer from
@@ -1776,10 +1800,7 @@ impl App {
             hovers: Hovers::new(),
             ripples: Ripples::new(),
             nerd: false,
-            // Read before the window, like every other startup read: the very
-            // first frame has to know whether the directory it is opening is a
-            // grid, or it would draw a list and then swap under the eye.
-            state: StateStore::load(),
+            state,
             state_due: WriteBehind::default(),
             thumbs: None,
             columns: 1,
@@ -6842,6 +6863,30 @@ impl App {
         self.sync_context();
     }
 
+    /// A press has landed somewhere that is not the open prompt: settle the
+    /// prompt first, so the press is handled as though it had never been
+    /// open. Which way it settles is [`click_outside_action`]'s table.
+    ///
+    /// A commit goes through [`App::submit_prompt`] with the text as it
+    /// stands, exactly as `Enter` would, so `n` repeats a find that was
+    /// clicked away from and the filter chip takes over from the field.
+    /// Both roads end in [`App::sync_context`], so the keyboard is back in
+    /// the list before the press that closed the prompt is dispatched.
+    fn resolve_prompt_for_click(&mut self, now: Instant) {
+        let Some((kind, text)) = self
+            .prompt
+            .as_ref()
+            .map(|prompt| (prompt.kind, prompt.query().to_string()))
+        else {
+            return;
+        };
+        match click_outside_action(kind) {
+            ClickOutside::Cancel => self.cancel_prompt(),
+            ClickOutside::Commit => self.submit_prompt(text, now),
+            ClickOutside::Keep => {}
+        }
+    }
+
     /// `a`. A trailing `/` means a directory, and missing parents are made
     /// (df-core's `create`, which records what it had to make so `u` can peel
     /// them off again).
@@ -7620,6 +7665,18 @@ impl App {
                 {
                     self.visual = None;
                     self.rewatch();
+                }
+            }
+            // `Ctrl+l`: the prompt a click on the last crumb opens, behind the
+            // same gate. An archive's interior, a server and the trash have
+            // paths `Enter` could not resolve on this disk — but where the
+            // click has a crumb that simply does not offer it, a key has no
+            // such cue, so it says why rather than doing nothing.
+            C::GotoPath => {
+                if self.tab().virtual_kind().is_none() {
+                    self.open_path_prompt();
+                } else {
+                    self.toasts.notice("Type a path in a local folder", now);
                 }
             }
             C::Goto(slot) => self.goto(slot, now),
@@ -11985,6 +12042,28 @@ impl App {
         if let (Some(field), Some(prompt)) = (&prompt_field, self.prompt.as_mut()) {
             prompt.scroll = field.scroll;
         }
+        // The rename card, where the last frame drew it: anchored to the
+        // cursor's row, as [`chrome::prompt_popup`] anchors it when no dialog
+        // is up. `cursor_rect` is measured again further down this frame, so
+        // here it is still the row the card on screen sits on. The conflict
+        // dialog's rename is drawn on that dialog's card instead, and the
+        // card's own hit test answers for it.
+        let rename_card = self
+            .prompt
+            .as_ref()
+            .filter(|prompt| prompt.kind.anchored() && overlay.is_none())
+            .map(|_| chrome::prompt_rect(area, self.cursor_rect));
+        // Everywhere the open prompt is drawn, which is everywhere a press
+        // leaves it open. For a prompt that has taken the top row that is the
+        // whole row: [`chrome::prompt_row`] draws the directory, the title,
+        // the field and the error or case indicator there, all of them the
+        // prompt's, and nothing else is on the row while it is up. For a
+        // rename it is the card.
+        let prompt_area = match &self.prompt {
+            Some(prompt) if prompt.kind.anchored() => rename_card,
+            Some(_) => Some(layout.path),
+            None => None,
+        };
         let menu_geometry = self
             .menu
             .as_ref()
@@ -12039,6 +12118,14 @@ impl App {
             // row is the exception the sheet is deliberately drawn under —
             // that is where its filter is typed.
             if self.help.is_some() && !layout.path.contains(p) {
+                return None;
+            }
+            // The rename card floats over the row it renames and over part of
+            // its neighbours, and what it covers is not clickable through it.
+            // A press that reached the row underneath would move the cursor
+            // off the file whose name is being typed, and `Enter` renames
+            // whatever the cursor is on.
+            if rename_card.is_some_and(|card| card.contains(p)) {
                 return None;
             }
             // The tray floats over the panes, so it is hit-tested before them:
@@ -12152,6 +12239,33 @@ impl App {
         // hit test's answer rather than by each thing that reads `over`.
         let over = select::gesture_filter(self.gesture(), over);
 
+        // ── A press outside the open prompt (PLAN §4.2) ─────────────────────
+        // Any button. The prompt is settled first, by
+        // [`App::resolve_prompt_for_click`], and the press goes on to do what
+        // it would have done with no prompt open: the row is clicked, the tab
+        // switches, the transport plays, a right click opens its menu, and
+        // every one of them lands in the list's keyboard context, not the
+        // prompt's. Settled here, before anything below reads the press,
+        // rather than at the `click` call: the transport and the right click
+        // read it first.
+        //
+        // `over` was measured with the prompt still open, and that is the
+        // geometry the hand was aiming at. Settling it changes no row the
+        // press could land on: a cancel restores nothing a click can reach,
+        // and a commit keeps the rows the live prompt was already showing.
+        //
+        // Only a press. A wheel is looking, not leaving, and scrolls under the
+        // prompt as it always has. And not while the menu is up: every press
+        // is the menu's then, and one outside it is spent closing it.
+        let any_press = pointer.pressed || pointer.secondary || pointer.middle;
+        let on_prompt = pointer
+            .at
+            .zip(prompt_area)
+            .is_some_and(|(at, area)| area.contains(at));
+        if any_press && pointer.at.is_some() && !on_prompt && !menu_live {
+            self.resolve_prompt_for_click(now);
+        }
+
         // The menu follows the pointer: hovering a row makes it the keyboard's
         // row too (one cursor, not two), and hovering the chevron flies the
         // submenu out — which is what a menu does everywhere and the reason
@@ -12194,8 +12308,8 @@ impl App {
         // **A press moves no focus** (PLAN §2.1): there is none to move. A
         // click in the preview still works the transport and the scrubber, and
         // a click on a parent row still goes there — they simply do it without
-        // also changing what the keyboard means.
-        let any_press = pointer.pressed || pointer.secondary || pointer.middle;
+        // also changing what the keyboard means. (`any_press` is measured
+        // above, where a press outside an open prompt settles it.)
 
         // ── The transport, before anything else reads the press ─────────────
         // The position strip is the topmost thing over the preview pane, so it
@@ -12248,7 +12362,10 @@ impl App {
             prompt: prompt_field.as_ref(),
         };
 
-        if pointer.secondary && !dismissing && overlay.is_none() && !menu_live {
+        // A right click on the prompt itself opens nothing: the rename card
+        // sits over the list, and a menu about the row under it would be a
+        // menu about a row the card is covering.
+        if pointer.secondary && !dismissing && overlay.is_none() && !menu_live && !on_prompt {
             if let Some(position) = pointer.at {
                 self.right_click(position, over.map(|(control, _)| control), &layout, now);
             }
@@ -12315,12 +12432,15 @@ impl App {
                     Some((Control::Tab(index), _)) => Some(index),
                     _ => None,
                 },
-                band_origin: self.band_origin(
-                    at,
-                    over.map(|(control, _)| control),
-                    &geom,
-                    pointer.toggle,
-                ),
+                // Never from the prompt: the rename card is over the list,
+                // and a drag that begins in it is the hand in the field.
+                band_origin: !on_prompt
+                    && self.band_origin(
+                        at,
+                        over.map(|(control, _)| control),
+                        &geom,
+                        pointer.toggle,
+                    ),
                 in_prompt: field_clicks.map(|clicks| FieldPress {
                     clicks,
                     ticked: now,
@@ -15680,5 +15800,295 @@ mod tests {
         let exe = std::env::current_exe().expect("test binary path");
         let parent = exe.parent().expect("a parent").to_path_buf();
         assert_eq!(nearest_existing(&exe.join("gone")), parent);
+    }
+
+    // ── The pointer and an open prompt, through real frames ─────────────────
+    //
+    // Driven through `App::frame` with a headless egui context rather than by
+    // calling the pieces, because what is under test is an *ordering* inside
+    // the frame: the hit test, then the prompt settled, then the press
+    // dispatched. A test that called `resolve_prompt_for_click` and then set
+    // the cursor itself would pass with the resolution in the wrong place.
+
+    /// The window the frames below are drawn into.
+    fn screen() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))
+    }
+
+    impl App {
+        /// An `App` that reads nothing from this machine: `config` in place
+        /// of the user's files, the default keymap and theme, and a state
+        /// store at `state` in place of `~/.local/state`. Opened on `dir`,
+        /// with no window, and a bell that rings nothing because there is no
+        /// event loop to wake.
+        fn for_test(config: Config, dir: PathBuf, state: PathBuf) -> App {
+            let waker = Waker {
+                ring: Arc::new(|| {}),
+                source: "test",
+            };
+            let args = crate::cli::Args {
+                start: Some(dir),
+                ..Default::default()
+            };
+            App::assemble(
+                waker,
+                args,
+                config,
+                Theme::default(),
+                Registry::defaults(),
+                StateStore::load_from(state),
+            )
+        }
+    }
+
+    /// A directory of the fixture's own under `$TMPDIR`, removed with it.
+    ///
+    /// Everything the `App` is handed lives in here: the directory it opens on
+    /// (`files/`) and its state file (`state/state`). The watcher follows the
+    /// listing and its parent, which are `files/` and this directory, so it is
+    /// aimed at nothing outside it either.
+    struct Sandbox(PathBuf);
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An `App` for one test, built by [`App::for_test`] on a sandbox of its
+    /// own with the default config, its listing landed.
+    ///
+    /// The files are text and the list is at the default config's compact
+    /// step, so nothing reaches the thumbnail cache: the preview only looks
+    /// there for pictures and clips, and the grid's workers only start in a
+    /// grid. That cache belongs to df-core's preview module, is shared with
+    /// yazi under `$TMPDIR`, and has no path to hand in, so a fixture stays
+    /// out of it instead, and checks that it did when it is dropped.
+    struct Fixture {
+        /// First, so it is dropped first: the workers let go of the sandbox
+        /// before it is removed.
+        app: App,
+        /// The directory the app opened on.
+        files: PathBuf,
+        _sandbox: Sandbox,
+    }
+
+    impl Fixture {
+        fn new(name: &str, names: &[&str]) -> Fixture {
+            let root =
+                std::env::temp_dir().join(format!("df-fixture-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let sandbox = Sandbox(root.clone());
+            let files = root.join("files");
+            std::fs::create_dir_all(&files).expect("make the fixture directory");
+            for name in names {
+                assert!(name.ends_with(".txt"), "{name}: text only (see Fixture)");
+                std::fs::write(files.join(name), b"x").expect("write the fixture");
+            }
+            let state = root.join("state").join("state");
+            let mut app = App::for_test(Config::default(), files.clone(), state);
+            settle(app.tabs.active_mut(), &app.scanner);
+            Fixture {
+                app,
+                files,
+                _sandbox: sandbox,
+            }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Not while a test is already failing: a panic inside a drop that
+            // runs during unwinding aborts the run and loses the first message.
+            if !std::thread::panicking() {
+                assert!(
+                    self.app.thumbs.is_none(),
+                    "the grid's thumbnail workers started, and they write outside the sandbox"
+                );
+            }
+        }
+    }
+
+    impl std::ops::Deref for Fixture {
+        type Target = App;
+        fn deref(&self) -> &App {
+            &self.app
+        }
+    }
+
+    impl std::ops::DerefMut for Fixture {
+        fn deref_mut(&mut self) -> &mut App {
+            &mut self.app
+        }
+    }
+
+    /// One frame, with `events` as everything the window reported since the
+    /// last one.
+    fn run_frame(app: &mut App, ctx: &egui::Context, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(screen()),
+            events,
+            focused: true,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| app.frame(ui));
+    }
+
+    /// A primary click at `at`: the button goes down on one frame and comes
+    /// up on the next, which is how the window reports one.
+    fn click_at(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(app, ctx, vec![egui::Event::PointerMoved(at), button(true)]);
+        run_frame(app, ctx, vec![button(false)]);
+    }
+
+    /// The layout the frame draws in, from the frame's own inputs.
+    fn layout_of(app: &App) -> ui::Layout {
+        ui::layout(screen(), app.mgr.ratio, app.tabs.len() > 1, app.path_lines)
+    }
+
+    /// Where list row `index` is drawn, by the geometry the frame uses.
+    fn row_rect(app: &App, index: usize) -> egui::Rect {
+        let content = ui::content_rect(layout_of(app).list);
+        let metrics = (app.view_of(app.tab().cwd.path()) == View::Grid)
+            .then(|| grid::metrics(content.width()));
+        let scroll = app.tab().cwd.scroll_rows(Instant::now());
+        grid::pane_rect(content, metrics.as_ref(), scroll, index, app.scale)
+    }
+
+    fn row_centre(app: &App, index: usize) -> egui::Pos2 {
+        row_rect(app, index).center()
+    }
+
+    /// **The rule**: a click outside an open prompt closes it *and* lands.
+    /// `Go to:` is cancelled, so the path typed into it goes nowhere, and the
+    /// row the click was aimed at gets the cursor in the same frame, with the
+    /// keyboard back in the list. A press on the prompt's own row does
+    /// neither.
+    #[test]
+    fn a_click_on_a_row_closes_the_path_prompt_and_moves_the_cursor_there() {
+        let mut app = Fixture::new("path", &["a.txt", "b.txt", "c.txt", "d.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+
+        // `Ctrl+l`'s command, the way the key reaches it.
+        app.run(Command::GotoPath, 10, Instant::now());
+        let opened = app.prompt.as_ref().map(|p| (p.kind, p.query().to_string()));
+        let here = app.files.to_string_lossy().into_owned();
+        assert_eq!(opened, Some((PromptKind::Path, here)), "seeded with here");
+        assert!(app.context.contains(Context::Input));
+        // Somewhere `Enter` would go: the parent.
+        app.prompt_text("/..");
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.tab().cwd.dir.cursor(), 0);
+
+        // The prompt's own row, both the field and the title before it: the
+        // prompt stays, and nothing behind it moves.
+        let row = layout_of(&app).path;
+        for at in [row.center(), row.left_center() + egui::vec2(12.0, 0.0)] {
+            click_at(&mut app, &ctx, at);
+            assert!(app.prompt.is_some(), "a press on the prompt closed it");
+        }
+        // Nor does the wheel over the list: scrolling is not leaving.
+        let over_list = row_centre(&app, 1);
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -1.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(over_list), wheel],
+        );
+        assert!(app.prompt.is_some(), "the wheel closed the prompt");
+
+        let at = row_centre(&app, 2);
+        click_at(&mut app, &ctx, at);
+        assert!(app.prompt.is_none(), "the prompt is still open");
+        let hovered = app.tab().cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_eq!(hovered.as_deref(), Some("c.txt"), "the click did not land");
+        assert_eq!(app.cwd(), app.files, "a cancelled Go to: went somewhere");
+        assert!(
+            !app.context.contains(Context::Input),
+            "the keyboard is still in the prompt"
+        );
+    }
+
+    /// A live prompt is *committed* by a click away: the filter the listing is
+    /// already showing stays applied, exactly as `Enter` leaves it, and the
+    /// click lands on the narrowed rows it was aimed at.
+    #[test]
+    fn a_click_away_from_the_filter_keeps_the_filter() {
+        let names = ["apple.txt", "apricot.txt", "banana.txt", "cherry.txt"];
+        let mut app = Fixture::new("filter", &names);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+
+        app.run(Command::Filter, 10, Instant::now());
+        app.prompt_text("ap");
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.tab().cwd.dir.len(), 2, "the filter is live");
+
+        let at = row_centre(&app, 1);
+        click_at(&mut app, &ctx, at);
+        assert!(app.prompt.is_none(), "the prompt is still open");
+        assert_eq!(app.tab().cwd.dir.filter(), "ap", "the filter was undone");
+        assert_eq!(app.tab().cwd.dir.len(), 2);
+        let hovered = app.tab().cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_eq!(
+            hovered.as_deref(),
+            Some("apricot.txt"),
+            "the click did not land"
+        );
+    }
+
+    /// The rename card floats over the cursor's row and over the edges of the
+    /// rows either side. A press on it is a press on the prompt, so it neither
+    /// closes the rename nor reaches the row underneath, even where that row
+    /// is not the one being renamed; a press on a row clear of the card
+    /// cancels the rename (nothing is renamed) and moves the cursor there.
+    #[test]
+    fn the_rename_card_keeps_its_press_and_a_row_beyond_it_cancels() {
+        let names = [
+            "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt",
+        ];
+        let mut app = Fixture::new("rename", &names);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+
+        app.dir().set_cursor(3);
+        app.run(Command::Rename, 10, Instant::now());
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::Rename)
+        );
+        app.prompt_text("renamed");
+        // One frame so the card is drawn where the next press can find it.
+        run_frame(&mut app, &ctx, Vec::new());
+
+        // Where the card hangs over the next row down: the row is under the
+        // pointer, but the card is in front of it.
+        let card = chrome::prompt_rect(screen(), app.cursor_rect);
+        let overlap = card.intersect(row_rect(&app, 4));
+        assert!(overlap.height() > 0.0, "the card covers none of row 4");
+        click_at(&mut app, &ctx, overlap.center());
+        assert!(app.prompt.is_some(), "a press on the card closed it");
+        assert_eq!(app.tab().cwd.dir.cursor(), 3, "the press reached row 4");
+
+        let at = row_centre(&app, 6);
+        assert!(!card.contains(at), "row 6 is under the card");
+        click_at(&mut app, &ctx, at);
+        assert!(app.prompt.is_none(), "the prompt is still open");
+        assert_eq!(app.tab().cwd.dir.cursor(), 6, "the click did not land");
+        for name in names {
+            assert!(app.files.join(name).exists(), "{name} was renamed");
+        }
     }
 }

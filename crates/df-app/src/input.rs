@@ -42,8 +42,9 @@ pub enum PromptKind {
     ShellBlock,
     /// The conflict dialog's "keep both, under this name".
     ConflictRename,
-    /// A click on the breadcrumb's last segment: the directory you are in,
-    /// as a whole path you can edit, paste over, and `Enter` to go to.
+    /// `Ctrl+l`, or a click on the breadcrumb's last segment: the directory
+    /// you are in, as a whole path you can edit, paste over, and `Enter` to go
+    /// to.
     Path,
     /// `c` in the mount manager: a server address for `gio mount`.
     Connect,
@@ -100,6 +101,46 @@ impl PromptKind {
             self,
             PromptKind::Rename | PromptKind::RenameEmptyStem | PromptKind::ConflictRename
         )
+    }
+}
+
+/// What a press somewhere else in the window does to an open prompt, before
+/// the press itself is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClickOutside {
+    /// Close it the way `Esc` does: nothing typed is applied.
+    Cancel,
+    /// Close it the way `Enter` does: what it is already showing stays.
+    Commit,
+    /// Leave it open. The surface it lives in owns the pointer.
+    Keep,
+}
+
+/// How a click outside `kind` resolves it.
+///
+/// The split is [`PromptKind::is_live`]'s. A live prompt has been showing its
+/// effect since the first letter, the listing narrowed or the cursor on the
+/// match, so clicking away keeps what is on screen: undoing a filter the
+/// reader was looking at, because they reached for the mouse to use it, would
+/// take away the thing they had just made. Every other prompt does nothing
+/// until `Enter`, and a click elsewhere is not an `Enter`: a half-typed shell
+/// line or a name for `a` is dropped, never run.
+///
+/// Two stay open whatever is clicked. The conflict dialog's rename is a field
+/// inside a modal card whose scrim already takes every press, and the help
+/// filter belongs to the help sheet, which goes (and takes its filter with it)
+/// on the sheet's own terms.
+pub fn click_outside_action(kind: PromptKind) -> ClickOutside {
+    match kind {
+        PromptKind::Path
+        | PromptKind::Create
+        | PromptKind::Rename
+        | PromptKind::RenameEmptyStem
+        | PromptKind::Shell
+        | PromptKind::ShellBlock
+        | PromptKind::Connect => ClickOutside::Cancel,
+        PromptKind::Filter | PromptKind::FindNext | PromptKind::FindPrev => ClickOutside::Commit,
+        PromptKind::ConflictRename | PromptKind::HelpFilter => ClickOutside::Keep,
     }
 }
 
@@ -279,6 +320,35 @@ mod tests {
         );
         assert!(PromptKind::Rename.anchored());
         assert!(!PromptKind::Create.anchored());
+    }
+
+    /// A click away keeps what a live prompt is already showing and drops what
+    /// a quiet one has not done yet. The two that live inside another surface
+    /// are left to it.
+    #[test]
+    fn a_click_outside_keeps_only_what_is_already_on_screen() {
+        use ClickOutside::{Cancel, Commit, Keep};
+        for (kind, expected) in [
+            (PromptKind::Filter, Commit),
+            (PromptKind::FindNext, Commit),
+            (PromptKind::FindPrev, Commit),
+            (PromptKind::HelpFilter, Keep),
+            (PromptKind::Create, Cancel),
+            (PromptKind::Rename, Cancel),
+            (PromptKind::RenameEmptyStem, Cancel),
+            (PromptKind::Shell, Cancel),
+            (PromptKind::ShellBlock, Cancel),
+            (PromptKind::ConflictRename, Keep),
+            (PromptKind::Path, Cancel),
+            (PromptKind::Connect, Cancel),
+        ] {
+            assert_eq!(click_outside_action(kind), expected, "{kind:?}");
+            // The rule the table is written from: a prompt that waits for
+            // `Enter` is never run by a click that was aimed somewhere else.
+            if !kind.is_live() {
+                assert_ne!(expected, Commit, "{kind:?} would act on a click");
+            }
+        }
     }
 
     /// The prompt is the df-core editor: motions, kills and all, with the app

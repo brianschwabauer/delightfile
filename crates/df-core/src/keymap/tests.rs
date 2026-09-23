@@ -57,6 +57,8 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("right", Command::EnterDirectory),
         ("alt+left", Command::HistoryBack),
         ("alt+right", Command::HistoryForward),
+        // The location bar's key everywhere else: the `Go to:` prompt.
+        ("ctrl+l", Command::GotoPath),
         ("space", Command::ToggleSelect),
         ("ctrl+a", Command::SelectAll),
         ("ctrl+r", Command::InvertSelection),

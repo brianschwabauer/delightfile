@@ -143,6 +143,7 @@ it without leaving the list.
 | `g g` `G` | top, bottom |
 | `Ctrl+u` `Ctrl+d` | half page |
 | `Alt+←` `Alt+→` | history back, forward |
+| `Ctrl+l` | type a path to go to |
 | `Enter` `o` | open. `O` picks the opener |
 | `Space` `v` `Ctrl+a` | select, visual mode, all |
 | `y` `x` `p` `P` | yank, cut, paste, paste over |
