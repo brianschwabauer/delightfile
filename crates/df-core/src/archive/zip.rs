@@ -69,6 +69,11 @@ const CENTRAL_FIXED: usize = 46;
 const ZIP64_MARK32: u32 = 0xFFFF_FFFF;
 const ZIP64_MARK16: u16 = 0xFFFF;
 
+/// General purpose bit 0: the member is encrypted.
+const FLAG_ENCRYPTED: u16 = 1 << 0;
+/// General purpose bit 11: the name is UTF-8.
+const FLAG_UTF8: u16 = 1 << 11;
+
 fn malformed(message: impl Into<String>) -> ArchiveError {
     ArchiveError::Malformed {
         format: "zip",
@@ -84,6 +89,25 @@ pub fn list<R: Read + Seek>(
     reader: &mut R,
     len: u64,
 ) -> Result<(Vec<RawEntry>, bool), ArchiveError> {
+    let (records, truncated) = central(reader, len)?;
+    Ok((records.into_iter().map(|r| r.entry).collect(), truncated))
+}
+
+/// One central-directory record: the row the listing shows, and where the
+/// member's bytes are.
+struct Record {
+    entry: RawEntry,
+    /// The absolute offset of the member's local header — the one thing a
+    /// local header is still read for (see the extraction essay below).
+    local_at: u64,
+}
+
+/// Read the central directory: every member, in the directory's order.
+///
+/// The one parse of the index, shared by listing, extraction and previews, so
+/// a member's name, sizes and flags are the same numbers whichever of the
+/// three is asking.
+fn central<R: Read + Seek>(reader: &mut R, len: u64) -> Result<(Vec<Record>, bool), ArchiveError> {
     if len < 22 {
         return Err(malformed("shorter than an end-of-central-directory record"));
     }
@@ -161,6 +185,7 @@ pub fn list<R: Read + Seek>(
         let extra_len = read_u16(h, 30)? as usize;
         let comment_len = read_u16(h, 32)? as usize;
         let external = read_u32(h, 38)?;
+        let mut local_at = read_u32(h, 42)? as u64;
 
         let name_at = at + CENTRAL_FIXED;
         let extra_at = name_at + name_len;
@@ -172,7 +197,7 @@ pub fn list<R: Read + Seek>(
         let name_bytes = &central[name_at..extra_at];
         let extra = &central[extra_at..extra_at + extra_len];
 
-        let utf8_flag = flags & 0x0800 != 0;
+        let utf8_flag = flags & FLAG_UTF8 != 0;
         let name = decode_name(name_bytes, utf8_flag);
         let mut mtime = dos_datetime(dos_date, dos_time);
 
@@ -181,10 +206,11 @@ pub fn list<R: Read + Seek>(
             // approximation whenever a writer bothered to include one.
             mtime = Some(unix);
         }
-        if uncompressed == ZIP64_MARK32 as u64 || compressed == ZIP64_MARK32 as u64 {
-            if let Some((u, c)) = zip64_sizes(extra, uncompressed, compressed) {
+        if [uncompressed, compressed, local_at].contains(&(ZIP64_MARK32 as u64)) {
+            if let Some((u, c, l)) = zip64_extra(extra, uncompressed, compressed, local_at) {
                 uncompressed = u;
                 compressed = c;
+                local_at = l;
             }
         }
 
@@ -197,17 +223,21 @@ pub fn list<R: Read + Seek>(
             || external & 0x10 != 0
             || unix_mode & 0xF000 == 0x4000;
 
-        entries.push(RawEntry {
-            name,
-            len: uncompressed,
-            compressed,
-            mtime,
-            is_dir,
-            method: Method::from_zip(method),
-            // Bit 0 is "this entry is encrypted". Listing still works: names and
-            // sizes live in the central directory, which is never encrypted.
-            encrypted: flags & 0x0001 != 0,
-            link_target: None,
+        entries.push(Record {
+            entry: RawEntry {
+                name,
+                len: uncompressed,
+                compressed,
+                mtime,
+                is_dir,
+                method: Method::from_zip(method),
+                // Bit 0 is "this entry is encrypted". Listing still works:
+                // names and sizes live in the central directory, which is
+                // never encrypted.
+                encrypted: flags & FLAG_ENCRYPTED != 0,
+                link_target: None,
+            },
+            local_at,
         });
 
         at = end;
@@ -286,27 +316,40 @@ fn read_zip64<R: Read + Seek>(
     )))
 }
 
-/// Walk the extra-field list looking for the zip64 sizes (header id 0x0001).
+/// Walk the extra-field list for the zip64 values (header id 0x0001):
+/// `(uncompressed, compressed, local header offset)`.
 ///
 /// The zip64 extra is positional and *only contains the fields that saturated*,
 /// in a fixed order: uncompressed, compressed, local header offset, disk. So
 /// which 8 bytes to read depends on which 32-bit fields were all-ones.
-fn zip64_sizes(extra: &[u8], uncompressed: u64, compressed: u64) -> Option<(u64, u64)> {
+fn zip64_extra(
+    extra: &[u8],
+    uncompressed: u64,
+    compressed: u64,
+    local_at: u64,
+) -> Option<(u64, u64, u64)> {
     for (id, data) in ExtraFields(extra) {
         if id != 0x0001 {
             continue;
         }
         let mut at = 0usize;
-        let mut u = uncompressed;
-        let mut c = compressed;
-        if uncompressed == ZIP64_MARK32 as u64 {
-            u = read_u64(data, at).ok()?;
+        // Each field in turn: its own value when it did not saturate, the next
+        // eight bytes of the extra when it did.
+        let mut next = |value: u64| -> Option<u64> {
+            if value != ZIP64_MARK32 as u64 {
+                return Some(value);
+            }
+            let wide = read_u64(data, at).ok()?;
             at += 8;
-        }
-        if compressed == ZIP64_MARK32 as u64 {
-            c = read_u64(data, at).ok()?;
-        }
-        return Some((u, c));
+            Some(wide)
+        };
+        let u = next(uncompressed)?;
+        let c = next(compressed)?;
+        // A short extra still has good sizes in it for the listing; the
+        // offset it failed to carry stays saturated, and the reader finds no
+        // header there and refuses that one member.
+        let l = next(local_at).unwrap_or(local_at);
+        return Some((u, c, l));
     }
     None
 }
@@ -464,82 +507,96 @@ fn read_u64(b: &[u8], at: usize) -> Result<u64, ArchiveError> {
 
 // ── Extraction ──────────────────────────────────────────────────────────────
 //
-// Listing reads the index at the back; extracting walks the *members* at the
-// front. It has to: the central directory carries a local-header offset per
-// entry, but the listing that produced [`super::tree::ArchiveTree`] threw it
-// away, and re-parsing the index to get it back would be the whole reader run
-// twice. Walking local headers front to back reads each member's bytes exactly
-// once, in the order they are on disk, which is also the order that makes a
-// spinning disk happy.
+// Extraction reads the same index the listing does. The central directory
+// carries, for every member, the real compressed and uncompressed sizes and
+// the offset of its local header — so a member is found by seeking to that
+// header, stepping over it, and reading exactly the compressed length the
+// index declared. A member's size is never taken from its local header.
 //
-// The module essay's warning still applies — a local header is allowed to lie
-// about its sizes — and it is handled rather than trusted:
+// This used to be a walk over the local headers from byte zero, which meant
+// believing them. A writer that streams — a web app zipping files on the fly
+// into a download, macOS's Archive Utility — does not know a member's size when
+// it writes the header, so it writes zeroes, sets general-purpose bit 3 and
+// puts the real sizes in a data descriptor *after* the payload. A deflated
+// member survives that, because the deflate stream says where it ends; a
+// *stored* one does not, because nothing in its bytes does, and the walk had
+// to refuse the whole archive. Every such zip still ends in a central
+// directory with the right numbers in it — written last, when the sizes were
+// known — and that directory is what every other zip tool believes. So it is
+// what this believes.
 //
-// - Sizes of `0xFFFF_FFFF` mean zip64, and the real values are in the extra
-//   field, exactly as they are in the central directory.
-// - General-purpose bit 3 means "the sizes are in a data descriptor *after* the
-//   payload", i.e. this header does not know how long the member is. For a
-//   deflated member that is fine, because the deflate stream says where it ends
-//   and `miniz_oxide` reports how many bytes it consumed getting there. For a
-//   *stored* member it is unrecoverable — there is nothing in the bytes that
-//   says where the data stops — so the walk refuses that entry and stops,
-//   rather than guessing and writing whatever came next into somebody's file.
+// The local header is read for two things only:
 //
-// And, once more, because it is the property the whole feature rests on: the
-// name in a local header is used **only** as a key into the destinations the
-// plan already settled. Nothing here joins it onto a path.
+// - Its own name and extra-field lengths, which are what say where the payload
+//   starts. They need not match the central copy's (writers routinely put a
+//   different extra field in each), and only the local ones describe the bytes
+//   that are actually there.
+// - Its encryption bit, as a second opinion: a member the index calls plain but
+//   whose own header says encrypted is refused, not written out as ciphertext.
+//
+// And, once more, because it is the property the whole feature rests on: a
+// member's name is used **only** as a key into the destinations the plan
+// already settled. Nothing here joins it onto a path.
 
 /// The local file header signature, `PK\x03\x04`.
 const LOCAL_SIG: &[u8] = b"PK\x03\x04";
-/// The optional data descriptor signature, `PK\x07\x08`.
-const DESCRIPTOR_SIG: u32 = 0x0807_4b50;
 /// The fixed part of a local file header, before the name.
 const LOCAL_FIXED: usize = 30;
-
-/// General purpose bit 0: the member is encrypted.
-const FLAG_ENCRYPTED: u16 = 1 << 0;
-/// General purpose bit 3: the sizes are in a trailing data descriptor.
-const FLAG_STREAMED: u16 = 1 << 3;
-/// General purpose bit 11: the name is UTF-8.
-const FLAG_UTF8: u16 = 1 << 11;
 
 /// How much compressed data is read at a time while inflating.
 const IN_BUF: usize = 64 * 1024;
 
-/// Walk the members and write the ones the plan asked for.
+/// Write the members the plan asked for.
 pub(crate) fn extract_into<R: Read + Seek>(
     reader: &mut R,
     sink: &mut super::unpack::Sink<'_>,
 ) -> crate::Result<()> {
-    walk_members(reader, &mut |member, reader, csize| {
+    let (members, len) = members(reader)?;
+    for member in &members {
         sink.checkpoint()?;
-        if member.is_dir {
-            // Directories were created from the plan before the walk started.
-            return Ok(Consume::Skip);
+        let entry = &member.entry;
+        if entry.is_dir {
+            // Directories were created from the plan before this started.
+            continue;
         }
-        if !sink.wants(&member.name) {
-            return Ok(Consume::Skip);
+        if !sink.wants(&entry.name) {
+            continue;
         }
-        if member.encrypted {
-            // The plan already refused these; this is the belt to its braces,
-            // for an archive whose central directory and local header disagree.
-            sink.refuse(&member.name, "encrypted");
-            return Ok(Consume::Skip);
+        if entry.encrypted {
+            // The plan already refused these; this is the belt to its braces.
+            sink.refuse(&entry.name, "encrypted");
+            continue;
         }
-        let Some(method) = supported(member.method) else {
+        let Some(method) = supported(entry.method) else {
             sink.refuse(
-                &member.name,
-                format!("{} compression is not supported", member.method.label()),
+                &entry.name,
+                format!("{} compression is not supported", entry.method.label()),
             );
-            return Ok(Consume::Skip);
+            continue;
         };
-        if !sink.open(&member.name, member.len) {
-            return Ok(Consume::Skip);
+        let Some(local) = local_header(reader, member.local_at, len)? else {
+            sink.refuse(
+                &entry.name,
+                "the archive's index points at a member that is not there",
+            );
+            continue;
+        };
+        if local.encrypted {
+            sink.refuse(&entry.name, "encrypted");
+            continue;
         }
-        let result = payload(reader, method, csize, &mut |chunk| {
-            sink.write(chunk)?;
-            Ok(())
-        });
+        // The central directory's length is the one the bomb guard holds the
+        // entry to — see the essay in `unpack`.
+        if !sink.open(&entry.name, entry.len) {
+            continue;
+        }
+        let result = payload(
+            reader,
+            method,
+            local.data_at,
+            entry.compressed,
+            &mut |chunk| sink.write(chunk),
+        );
         // Only a payload that ran to its end is a finished file. An error here
         // is a cancel or a corrupt stream, and closing on it would count the
         // half-written entry as extracted *and* leave it on disk — `finish` has
@@ -547,67 +604,83 @@ pub(crate) fn extract_into<R: Read + Seek>(
         if result.is_ok() {
             sink.close();
         }
-        result.map(Consume::Read)
-    })
+        result?;
+    }
+    Ok(())
 }
 
 /// Find one member and hand its bytes back whole (the preview path).
+///
+/// What a preview costs is the central directory plus the one member: the
+/// index says where the member is, so nothing before it is read.
 pub(crate) fn read_one<R: Read + Seek>(
     reader: &mut R,
     buffer: &mut super::unpack::Buffer<'_>,
 ) -> crate::Result<()> {
-    walk_members(reader, &mut |member, reader, csize| {
+    let (members, len) = members(reader)?;
+    for member in &members {
         if buffer.done() {
-            // The member is found; the rest of the file is not this function's
-            // business. Stopping here is what makes a preview of the first
-            // entry in a 2 GiB zip cost the first entry.
-            return Ok(Consume::Stop);
+            break;
         }
-        if member.is_dir || member.encrypted || !buffer.wants(&member.name) {
-            return Ok(Consume::Skip);
+        let entry = &member.entry;
+        if entry.is_dir || entry.encrypted || !buffer.wants(&entry.name) {
+            continue;
         }
-        let Some(method) = supported(member.method) else {
-            return Ok(Consume::Skip);
+        let Some(method) = supported(entry.method) else {
+            continue;
         };
-        if member.len > buffer.limit() as u64 {
-            return Ok(Consume::Skip);
+        if entry.len > buffer.limit() as u64 {
+            continue;
         }
-        let mut out = Vec::with_capacity(member.len as usize);
-        let limit = buffer.limit();
-        let used = payload(reader, method, csize, &mut |chunk| {
-            // Never grow past the cap even if the header lied about the length.
-            if out.len() + chunk.len() <= limit {
+        let Some(local) = local_header(reader, member.local_at, len)? else {
+            continue;
+        };
+        if local.encrypted {
+            continue;
+        }
+        // Held to the declared length, the same rule the extractor's bomb
+        // guard applies: a member that inflates past what the index said it
+        // weighs is not the member the listing described, and the preview of
+        // it is no preview at all.
+        let declared = entry.len as usize;
+        let mut out = Vec::with_capacity(declared);
+        let mut overran = false;
+        payload(
+            reader,
+            method,
+            local.data_at,
+            entry.compressed,
+            &mut |chunk| {
+                if out.len() + chunk.len() > declared {
+                    overran = true;
+                    return Ok(false);
+                }
                 out.extend_from_slice(chunk);
-            }
-            Ok(())
-        })?;
-        buffer.take(out);
-        Ok(Consume::Read(used))
-    })
+                Ok(true)
+            },
+        )?;
+        if !overran {
+            buffer.take(out);
+        }
+    }
+    Ok(())
 }
 
-/// What one member's header said, minus everything an extractor must not trust.
-struct Member {
-    /// The archive's own spelling. A **key**, never a path.
-    name: String,
-    /// The uncompressed length, when the header knew it. Zero for a streamed
-    /// member, which is also a legitimate length — the bomb guard treats an
-    /// overrun of zero the same way it treats any other overrun, so a streamed
-    /// member is refused rather than written unbounded.
-    len: u64,
-    is_dir: bool,
-    encrypted: bool,
-    method: Method,
-}
-
-/// What the caller did with a member's payload.
-enum Consume {
-    /// Nothing; seek past it.
-    Skip,
-    /// This many compressed bytes were read.
-    Read(u64),
-    /// Stop the walk.
-    Stop,
+/// Every member in the central directory, in the order their bytes sit in the
+/// file, and the file's length.
+///
+/// The index's order and the file's are almost always the same; sorting makes
+/// it always, so a big extraction reads the archive front to back, which is
+/// the order a spinning disk wants.
+fn members<R: Read + Seek>(reader: &mut R) -> crate::Result<(Vec<Record>, u64)> {
+    let len = reader
+        .seek(SeekFrom::End(0))
+        .map_err(|e| crate::DfError::Op(format!("zip: {e}")))?;
+    // `truncated` is not consulted: the plan was made from a listing that hit
+    // the same cap, so nothing past it was asked for.
+    let (mut records, _truncated) = central(reader, len)?;
+    records.sort_by_key(|record| record.local_at);
+    Ok((records, len))
 }
 
 /// The deflate methods this build can actually decompress.
@@ -615,148 +688,71 @@ fn supported(method: Method) -> Option<Method> {
     matches!(method, Method::Store | Method::Deflate).then_some(method)
 }
 
-/// What [`walk_members`] hands each member to: the header, the stream
-/// positioned at the payload, and the compressed length when the header knew it.
-type Visit<'a, R> = &'a mut dyn FnMut(&Member, &mut R, Option<u64>) -> crate::Result<Consume>;
-
-/// Walk local file headers from the front, handing each to `visit`.
-fn walk_members<R: Read + Seek>(reader: &mut R, visit: Visit<'_, R>) -> crate::Result<()> {
-    let mut at = 0u64;
-    let mut seen = 0usize;
-    loop {
-        if seen >= MAX_ENTRIES {
-            return Ok(());
-        }
-        reader
-            .seek(SeekFrom::Start(at))
-            .map_err(|e| crate::DfError::Op(format!("zip: seek to {at}: {e}")))?;
-        let mut fixed = [0u8; LOCAL_FIXED];
-        let got = super::unpack::read_full(reader, &mut fixed)
-            .map_err(|e| crate::DfError::Op(format!("zip: {e}")))?;
-        if got < LOCAL_FIXED || fixed[..4] != *LOCAL_SIG {
-            // The central directory, or the end of the file. Either way there
-            // are no more members in front of us.
-            return Ok(());
-        }
-        seen += 1;
-
-        let flags = u16::from_le_bytes([fixed[6], fixed[7]]);
-        let method = Method::from_zip(u16::from_le_bytes([fixed[8], fixed[9]]));
-        let mut csize = u32::from_le_bytes([fixed[18], fixed[19], fixed[20], fixed[21]]) as u64;
-        let mut len = u32::from_le_bytes([fixed[22], fixed[23], fixed[24], fixed[25]]) as u64;
-        let name_len = u16::from_le_bytes([fixed[26], fixed[27]]) as usize;
-        let extra_len = u16::from_le_bytes([fixed[28], fixed[29]]) as usize;
-        if name_len > MAX_NAME_BYTES {
-            return Err(crate::DfError::Op(format!(
-                "zip: a member name of {name_len} bytes is longer than the {MAX_NAME_BYTES}-byte cap"
-            )));
-        }
-
-        let mut name_bytes = vec![0u8; name_len];
-        super::unpack::read_full(reader, &mut name_bytes)
-            .map_err(|e| crate::DfError::Op(format!("zip: {e}")))?;
-        let mut extra = vec![0u8; extra_len];
-        super::unpack::read_full(reader, &mut extra)
-            .map_err(|e| crate::DfError::Op(format!("zip: {e}")))?;
-        if let Some((u, c)) = zip64_sizes(&extra, len, csize) {
-            len = u;
-            csize = c;
-        }
-
-        let name = decode_name(&name_bytes, flags & FLAG_UTF8 != 0);
-        let streamed = flags & FLAG_STREAMED != 0 && csize == 0 && len == 0;
-        let member = Member {
-            is_dir: name.ends_with('/'),
-            len,
-            encrypted: flags & FLAG_ENCRYPTED != 0,
-            method,
-            name,
-        };
-
-        let data_at = at + LOCAL_FIXED as u64 + name_len as u64 + extra_len as u64;
-        reader
-            .seek(SeekFrom::Start(data_at))
-            .map_err(|e| crate::DfError::Op(format!("zip: seek to {data_at}: {e}")))?;
-
-        // A streamed *stored* member is the one shape nothing can recover from:
-        // no length in the header, and no signature in the payload to look for.
-        if streamed && !matches!(method, Method::Deflate) && !member.is_dir {
-            return Err(crate::DfError::Op(
-                "zip: a member was written without its size and cannot be read back".to_string(),
-            ));
-        }
-        let declared = (!streamed).then_some(csize);
-
-        let used = match visit(&member, reader, declared)? {
-            Consume::Stop => return Ok(()),
-            Consume::Read(used) => used,
-            Consume::Skip => match declared {
-                Some(csize) => csize,
-                // Streamed and unwanted: the only way past it is through it, so
-                // the deflate stream is run with the output thrown away.
-                None => {
-                    reader
-                        .seek(SeekFrom::Start(data_at))
-                        .map_err(|e| crate::DfError::Op(format!("zip: seek: {e}")))?;
-                    payload(reader, Method::Deflate, None, &mut |_| Ok(()))?
-                }
-            },
-        };
-
-        // `used` is the header's own compressed length whenever the payload was
-        // skipped, and a zip64 extra field can spell that as sixteen exabytes.
-        // Adding it unchecked is an overflow panic on a file anyone can mail.
-        let Some(next) = data_at.checked_add(used) else {
-            return Err(crate::DfError::Op(
-                "zip: a member declares a length that runs past the end of the file".to_string(),
-            ));
-        };
-        at = next;
-        if streamed {
-            at = at.saturating_add(descriptor_len(reader, at)?);
-        }
-    }
+/// What a member's own local header adds to the central directory's record.
+struct Local {
+    /// Where the payload starts: after the header and the header's *own* name
+    /// and extra field.
+    data_at: u64,
+    encrypted: bool,
 }
 
-/// How long the data descriptor at `at` is: 16 bytes with its optional
-/// signature, 12 without.
-///
-/// Zip64 descriptors carry 8-byte sizes, which would make it 24 — but a zip64
-/// member has zip64 extra fields, which means it was not streamed with zeroed
-/// sizes, which means this function was not called. The narrow case is the only
-/// one that reaches here.
-fn descriptor_len<R: Read + Seek>(reader: &mut R, at: u64) -> crate::Result<u64> {
+/// Read the local header the central directory points at, or `None` when
+/// there is not one there.
+fn local_header<R: Read + Seek>(reader: &mut R, at: u64, len: u64) -> crate::Result<Option<Local>> {
+    // The offset is a number in the file — up to sixteen exabytes through a
+    // zip64 extra — so it is checked against the file before it is sought to,
+    // and checked with a checked add, because the bounds check is exactly where
+    // an archive gets to overflow.
+    if at
+        .checked_add(LOCAL_FIXED as u64)
+        .is_none_or(|end| end > len)
+    {
+        return Ok(None);
+    }
     reader
         .seek(SeekFrom::Start(at))
         .map_err(|e| crate::DfError::Op(format!("zip: seek to {at}: {e}")))?;
-    let mut sig = [0u8; 4];
-    let got = super::unpack::read_full(reader, &mut sig)
+    let mut fixed = [0u8; LOCAL_FIXED];
+    let got = super::unpack::read_full(reader, &mut fixed)
         .map_err(|e| crate::DfError::Op(format!("zip: {e}")))?;
-    if got == 4 && u32::from_le_bytes(sig) == DESCRIPTOR_SIG {
-        Ok(16)
-    } else {
-        Ok(12)
+    if got < LOCAL_FIXED || fixed[..4] != *LOCAL_SIG {
+        return Ok(None);
     }
+    let flags = u16::from_le_bytes([fixed[6], fixed[7]]);
+    let name_len = u16::from_le_bytes([fixed[26], fixed[27]]) as u64;
+    let extra_len = u16::from_le_bytes([fixed[28], fixed[29]]) as u64;
+    // Cannot overflow: `at + 30` is at most the file's length, and a file's
+    // length leaves far more than two `u16`s of headroom in a `u64`.
+    let data_at = at + LOCAL_FIXED as u64 + name_len + extra_len;
+    Ok(Some(Local {
+        data_at,
+        encrypted: flags & FLAG_ENCRYPTED != 0,
+    }))
 }
 
-/// Read one member's payload, decompressing it, handing whole chunks to `emit`.
+/// Read one member's payload from `at`, decompressing it, handing whole chunks
+/// to `emit`.
 ///
-/// `limit` is the compressed length when the header knew it; `None` means "run
-/// the deflate stream until it says it is done", which is the streamed case.
-/// Returns how many **compressed** bytes were consumed, which is what the walk
-/// needs to find the next header.
-fn payload<R: Read>(
+/// Reads at most `compressed` bytes — the central directory's number. Stops
+/// early when `emit` answers `false` (the entry overran its declared length,
+/// or its file could not be written: going on would only inflate bytes nobody
+/// keeps), when a deflate stream ends, and when the file does; a member cut
+/// short keeps what it had, and the caller's length check says it is short.
+fn payload<R: Read + Seek>(
     reader: &mut R,
     method: Method,
-    limit: Option<u64>,
-    emit: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
-) -> crate::Result<u64> {
+    at: u64,
+    compressed: u64,
+    emit: &mut dyn FnMut(&[u8]) -> crate::Result<bool>,
+) -> crate::Result<()> {
+    reader
+        .seek(SeekFrom::Start(at))
+        .map_err(|e| crate::DfError::Op(format!("zip: seek to {at}: {e}")))?;
+    let mut left = compressed;
+
     if matches!(method, Method::Store) {
-        // Stored: the payload *is* the contents. `limit` is always `Some` here —
-        // `walk_members` refuses a streamed stored member before this is called.
-        let mut left = limit.unwrap_or(0);
+        // Stored: the payload *is* the contents.
         let mut buf = vec![0u8; IN_BUF];
-        let mut used = 0u64;
         while left > 0 {
             let want = (buf.len() as u64).min(left) as usize;
             let got = super::unpack::read_full(reader, &mut buf[..want])
@@ -764,15 +760,16 @@ fn payload<R: Read>(
             if got == 0 {
                 break;
             }
-            emit(&buf[..got])?;
-            used += got as u64;
             left -= got as u64;
+            if !emit(&buf[..got])? {
+                break;
+            }
         }
-        return Ok(used);
+        return Ok(());
     }
 
     use miniz_oxide::inflate::stream::{inflate, InflateState};
-    use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+    use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
 
     // `Raw`: a zip member is a bare deflate stream with no zlib header and no
     // adler32 after it. Boxed because the state is a 32 KiB window plus the
@@ -780,38 +777,34 @@ fn payload<R: Read>(
     let mut state = InflateState::new_boxed(DataFormat::Raw);
     let mut input = vec![0u8; IN_BUF];
     let mut output = vec![0u8; super::unpack::EXTRACT_BUF];
-    let mut used = 0u64;
     let mut filled = 0usize;
-    let mut at = 0usize;
+    let mut used = 0usize;
 
     loop {
-        if at == filled {
-            let want = match limit {
-                Some(limit) => (input.len() as u64).min(limit - used.min(limit)) as usize,
-                None => input.len(),
-            };
-            filled = if want == 0 {
-                0
-            } else {
-                super::unpack::read_full(reader, &mut input[..want])
-                    .map_err(|e| crate::DfError::Op(format!("zip: {e}")))?
-            };
-            at = 0;
-            if filled == 0 {
-                // Out of input with the stream unfinished: a truncated member.
-                // What was decompressed stands; the sink records the shortfall.
-                return Ok(used);
-            }
+        if used == filled && left > 0 {
+            let want = (input.len() as u64).min(left) as usize;
+            filled = super::unpack::read_full(reader, &mut input[..want])
+                .map_err(|e| crate::DfError::Op(format!("zip: {e}")))?;
+            used = 0;
+            // A file that ends before the index said it would ends the input.
+            left = if filled == 0 { 0 } else { left - filled as u64 };
         }
-        let result = inflate(&mut state, &input[at..filled], &mut output, MZFlush::None);
-        at += result.bytes_consumed;
-        used += result.bytes_consumed as u64;
-        if result.bytes_written > 0 {
-            emit(&output[..result.bytes_written])?;
+        // Called even with nothing left to give it: the inflater keeps up to a
+        // window's worth of output it had no room for, and only another call
+        // hands that over. Stopping when the input ran out would cut the tail
+        // off any member whose last chunk decompressed into a full buffer.
+        let exhausted = used == filled;
+        let result = inflate(&mut state, &input[used..filled], &mut output, MZFlush::None);
+        used += result.bytes_consumed;
+        if result.bytes_written > 0 && !emit(&output[..result.bytes_written])? {
+            return Ok(());
         }
         match result.status {
-            Ok(MZStatus::StreamEnd) => return Ok(used),
+            Ok(MZStatus::StreamEnd) => return Ok(()),
             Ok(_) => {}
+            // It wants more and there is no more: a truncated member. What was
+            // decompressed stands; the caller records the shortfall.
+            Err(MZError::Buf) if exhausted => return Ok(()),
             Err(e) => {
                 return Err(crate::DfError::Op(format!(
                     "zip: the compressed data is corrupt ({e:?})"
@@ -820,7 +813,7 @@ fn payload<R: Read>(
         }
         if result.bytes_consumed == 0 && result.bytes_written == 0 {
             // No progress and no error: nothing more will come of it.
-            return Ok(used);
+            return Ok(());
         }
     }
 }

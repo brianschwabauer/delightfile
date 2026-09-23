@@ -33,6 +33,10 @@ struct ZipMember {
     external: u32,
     flags: u16,
     method: u16,
+    /// `(compressed, uncompressed)` for the *local* header, when it is not to
+    /// agree with the central directory. Set by [`ZipMember::streamed`] and
+    /// [`ZipMember::local_sizes`].
+    local_sizes: Option<(u32, u32)>,
 }
 
 impl ZipMember {
@@ -44,6 +48,7 @@ impl ZipMember {
             external: 0,
             flags: 0,
             method: 0,
+            local_sizes: None,
         }
     }
 
@@ -55,6 +60,7 @@ impl ZipMember {
             external: 0,
             flags: 0,
             method: 0,
+            local_sizes: None,
         }
     }
 
@@ -66,7 +72,24 @@ impl ZipMember {
             external: 0x10,
             flags: 0,
             method: 0,
+            local_sizes: None,
         }
+    }
+
+    /// Written the way a streaming zipper writes it: general-purpose bit 3,
+    /// zeroes in the local header, and the real sizes only in a data
+    /// descriptor after the payload and in the central directory.
+    fn streamed(mut self) -> ZipMember {
+        self.flags |= 0x0008;
+        self.local_sizes = Some((0, 0));
+        self
+    }
+
+    /// A local header that states sizes of its own, disagreeing with the
+    /// central directory's.
+    fn local_sizes(mut self, compressed: u32, uncompressed: u32) -> ZipMember {
+        self.local_sizes = Some((compressed, uncompressed));
+        self
     }
 
     fn encrypted(mut self) -> ZipMember {
@@ -107,12 +130,23 @@ fn build_zip(members: &[ZipMember], comment: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0x0021u16.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes()); // crc, unread by a listing
-        out.extend_from_slice(&(m.wire().len() as u32).to_le_bytes());
-        out.extend_from_slice(&(m.data.len() as u32).to_le_bytes());
+        let (local_compressed, local_len) = m
+            .local_sizes
+            .unwrap_or((m.wire().len() as u32, m.data.len() as u32));
+        out.extend_from_slice(&local_compressed.to_le_bytes());
+        out.extend_from_slice(&local_len.to_le_bytes());
         out.extend_from_slice(&(m.name.len() as u16).to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&m.name);
         out.extend_from_slice(m.wire());
+        if m.flags & 0x0008 != 0 {
+            // The data descriptor, with its optional signature, as Info-ZIP
+            // and Python both write it.
+            out.extend_from_slice(b"PK\x07\x08");
+            out.extend_from_slice(&0u32.to_le_bytes()); // crc
+            out.extend_from_slice(&(m.wire().len() as u32).to_le_bytes());
+            out.extend_from_slice(&(m.data.len() as u32).to_le_bytes());
+        }
 
         central.extend_from_slice(b"PK\x01\x02");
         central.extend_from_slice(&20u16.to_le_bytes());
@@ -1050,6 +1084,110 @@ fn a_zip_extracts_stored_and_deflated_members_alike() {
     assert_eq!(report.bytes, 5 + 12 + big.len() as u64);
 }
 
+/// The zip a streaming writer makes (a web app zipping files into a download,
+/// macOS's Archive Utility): members written without their sizes, which live
+/// only in a data descriptor after each payload and in the central directory
+/// at the end. A *stored* member of that shape used to refuse the whole
+/// archive — nothing in its bytes says where it stops — and the central
+/// directory has said so all along.
+#[test]
+fn a_streamed_zip_extracts_by_its_central_directory() {
+    let t = TempTree::new("archive-extract-streamed");
+    let big = "a streamed member, deflated as it went\n".repeat(3000);
+    let bytes = build_zip(
+        &[
+            ZipMember::file("stored.txt", b"stored, sizes nowhere up front").streamed(),
+            ZipMember::file("deflated.txt", big.as_bytes())
+                .really_deflated()
+                .streamed(),
+            ZipMember::file("plain.txt", b"an ordinary member"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "streamed.zip", &bytes);
+
+    let (raws, _) = zip::list(&mut Cursor::new(&bytes), bytes.len() as u64).unwrap();
+    let sizes: Vec<(&str, u64)> = raws.iter().map(|r| (r.name.as_str(), r.len)).collect();
+    assert_eq!(
+        sizes,
+        [
+            ("stored.txt", 30),
+            ("deflated.txt", big.len() as u64),
+            ("plain.txt", 18),
+        ]
+    );
+
+    let (report, dest) = extract_all(&t, &archive, "out");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.files, 3);
+    assert_eq!(
+        read(&dest.join("stored.txt")),
+        "stored, sizes nowhere up front"
+    );
+    assert_eq!(read(&dest.join("deflated.txt")), big);
+    assert_eq!(read(&dest.join("plain.txt")), "an ordinary member");
+
+    for (inner, want) in [
+        ("stored.txt", &b"stored, sizes nowhere up front"[..]),
+        ("deflated.txt", big.as_bytes()),
+        ("plain.txt", &b"an ordinary member"[..]),
+    ] {
+        assert_eq!(
+            unpack::read_entry(&archive, inner, 1 << 20)
+                .unwrap()
+                .as_deref(),
+            Some(want),
+            "{inner}"
+        );
+    }
+}
+
+/// A local header that states sizes of its own is overruled by the index.
+/// A reader that believed it would stop the first member two bytes in, and
+/// then look for the second member's header in the middle of the first one's
+/// data.
+#[test]
+fn a_local_header_that_disagrees_with_the_index_is_overruled() {
+    let t = TempTree::new("archive-extract-local-lies");
+    let bytes = build_zip(
+        &[
+            ZipMember::file("first.txt", b"all of the first").local_sizes(2, 2),
+            ZipMember::file("second.txt", b"and the second"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "lies.zip", &bytes);
+    let (report, dest) = extract_all(&t, &archive, "out");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(read(&dest.join("first.txt")), "all of the first");
+    assert_eq!(read(&dest.join("second.txt")), "and the second");
+}
+
+/// The inflater holds on to output it had no room for, and only hands it
+/// over when it is called again — so a member is not finished when its input
+/// runs out, but when the stream says it has ended. These are lengths the
+/// reader used to cut short, by a few kilobytes each: the last read of the
+/// compressed stream decompressed into more than the output buffer had left.
+#[test]
+fn a_deflated_member_comes_back_whole_whatever_its_length() {
+    let t = TempTree::new("archive-extract-inflate-tail");
+    for (len, alphabet) in [
+        (408_031usize, 3u8),
+        (629_763, 7),
+        (685_196, 3),
+        (796_062, 7),
+    ] {
+        // Compressible enough to inflate by several times, noisy enough that
+        // the compressed stream spans more than one input read.
+        let data: Vec<u8> = noise(len).iter().map(|b| b % alphabet + b'a').collect();
+        let bytes = build_zip(&[ZipMember::file("m.bin", &data).really_deflated()], b"");
+        let archive = write(&t, &format!("m{len}.zip"), &bytes);
+        let (report, dest) = extract_all(&t, &archive, &format!("out{len}"));
+        assert!(report.errors.is_empty(), "{len}: {:?}", report.errors);
+        assert_eq!(std::fs::read(dest.join("m.bin")).unwrap(), data, "{len}");
+    }
+}
+
 #[test]
 fn a_tar_extracts_its_members() {
     let t = TempTree::new("archive-extract-tar");
@@ -1312,13 +1450,14 @@ fn a_cancel_mid_entry_removes_the_file_it_was_writing() {
     }
 }
 
-/// A local header may declare a zip64 compressed size of anything at all, and
-/// the walk's "skip to the next member" arithmetic has to survive it rather
-/// than overflow.
+/// The central directory may declare a zip64 compressed length, or a zip64
+/// local header offset, of anything at all — and the arithmetic that turns
+/// those into a seek and a read has to survive both rather than overflow.
 #[test]
-fn a_member_claiming_a_sixteen_exabyte_length_does_not_overflow_the_walk() {
+fn a_member_claiming_a_sixteen_exabyte_length_or_offset_does_not_overflow() {
     let t = TempTree::new("archive-zip64-lie");
     let mut z = Vec::new();
+    // One real member, one byte long.
     z.extend_from_slice(b"PK\x03\x04");
     z.extend_from_slice(&20u16.to_le_bytes());
     z.extend_from_slice(&0u16.to_le_bytes()); // flags
@@ -1326,24 +1465,69 @@ fn a_member_claiming_a_sixteen_exabyte_length_does_not_overflow_the_walk() {
     z.extend_from_slice(&0u16.to_le_bytes());
     z.extend_from_slice(&0x0021u16.to_le_bytes());
     z.extend_from_slice(&0u32.to_le_bytes()); // crc
-    z.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // compressed: see the extra
+    z.extend_from_slice(&1u32.to_le_bytes()); // compressed
     z.extend_from_slice(&1u32.to_le_bytes()); // uncompressed
     z.extend_from_slice(&5u16.to_le_bytes()); // name length
-    z.extend_from_slice(&12u16.to_le_bytes()); // extra length
+    z.extend_from_slice(&0u16.to_le_bytes()); // extra length
     z.extend_from_slice(b"x.txt");
-    z.extend_from_slice(&0x0001u16.to_le_bytes()); // zip64 extra
-    z.extend_from_slice(&8u16.to_le_bytes());
-    z.extend_from_slice(&u64::MAX.to_le_bytes());
     z.push(b'x');
-    // An empty central directory: the walk under test reads local headers.
+
+    // Two index records: `x.txt` at the real header but sixteen exabytes
+    // long, and `y.txt` one byte long but sixteen exabytes into the file.
+    let cd_offset = z.len() as u32;
+    let mut central = Vec::new();
+    for (name, compressed, local_at) in [
+        (b"x.txt", ZIP64_SATURATED, 0u32),
+        (b"y.txt", 1u32, ZIP64_SATURATED),
+    ] {
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central.extend_from_slice(&0u16.to_le_bytes()); // stored
+        central.extend_from_slice(&0u16.to_le_bytes());
+        central.extend_from_slice(&0x0021u16.to_le_bytes());
+        central.extend_from_slice(&0u32.to_le_bytes()); // crc
+        central.extend_from_slice(&compressed.to_le_bytes());
+        central.extend_from_slice(&1u32.to_le_bytes()); // uncompressed
+        central.extend_from_slice(&5u16.to_le_bytes()); // name length
+        central.extend_from_slice(&12u16.to_le_bytes()); // extra length
+        central.extend_from_slice(&[0u8; 6]); // comment length, disk, internal attrs
+        central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        central.extend_from_slice(&local_at.to_le_bytes());
+        central.extend_from_slice(name);
+        // The zip64 extra holds only the field that saturated.
+        central.extend_from_slice(&0x0001u16.to_le_bytes());
+        central.extend_from_slice(&8u16.to_le_bytes());
+        central.extend_from_slice(&u64::MAX.to_le_bytes());
+    }
+    let cd_size = central.len() as u32;
+    z.extend_from_slice(&central);
     z.extend_from_slice(b"PK\x05\x06");
-    z.extend_from_slice(&[0u8; 16]);
+    z.extend_from_slice(&[0u8; 4]); // disk numbers
+    z.extend_from_slice(&2u16.to_le_bytes());
+    z.extend_from_slice(&2u16.to_le_bytes());
+    z.extend_from_slice(&cd_size.to_le_bytes());
+    z.extend_from_slice(&cd_offset.to_le_bytes());
     z.extend_from_slice(&0u16.to_le_bytes());
 
     let path = write(&t, "lie.zip", &z);
-    // Whatever this answers, it must answer — not panic on an overflowing add.
-    let _ = unpack::read_entry(&path, "nope.txt", 1024);
+    let (raws, _) = zip::list(&mut Cursor::new(&z), z.len() as u64).unwrap();
+    assert_eq!(raws[0].compressed, u64::MAX);
+
+    // The first reads on past its one byte and is refused for outgrowing it;
+    // the second has nothing where it claims to be.
+    assert_eq!(unpack::read_entry(&path, "x.txt", 1024).unwrap(), None);
+    assert_eq!(unpack::read_entry(&path, "y.txt", 1024).unwrap(), None);
+    let (report, dest) = extract_all(&t, &path, "out");
+    assert_eq!(report.files, 0);
+    assert!(!dest.join("x.txt").exists());
+    assert!(!dest.join("y.txt").exists());
+    assert_eq!(report.errors.len(), 2, "{:?}", report.errors);
 }
+
+/// `0xFFFF_FFFF`: a 32-bit zip field whose real value is in the zip64 extra.
+const ZIP64_SATURATED: u32 = 0xFFFF_FFFF;
 
 /// The zip64 locator carries an absolute file offset, and the bounds check on
 /// it must not be the thing that overflows.

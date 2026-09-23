@@ -18,7 +18,7 @@
 //!
 //! `super::zip::extract_into` and `super::tar::extract_into` are next to the
 //! listing code for their formats, because they are the same parse: a zip's
-//! local file headers and a tar's 512-byte blocks. What is *here* is everything
+//! central directory and a tar's 512-byte blocks. What is *here* is everything
 //! that is not format-specific — the destination map, the collision suffixes,
 //! the progress ticks, the partial file that a cancel has to remove — expressed
 //! once, as a `Sink` the walkers can only push bytes at.

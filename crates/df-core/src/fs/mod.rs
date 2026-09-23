@@ -130,6 +130,16 @@ pub struct DirState {
     /// The name under the cursor, so a reload can put it back on the same file
     /// even though its index changed.
     cursor_name: Option<String>,
+    /// Where the cursor was when its file went missing from a listing that is
+    /// still arriving.
+    ///
+    /// A partial listing is not allowed to decide the file is gone (see
+    /// [`DirState::rebuild`]), but the cursor has to stand on *some* row while
+    /// it waits, and a short first batch clamps it far from where it was. If
+    /// the scan then ends without the file, it really was deleted, and the
+    /// cursor goes back to this position — the one it had before any batch
+    /// clamped it — rather than to wherever the clamping left it.
+    missing_at: Option<usize>,
     /// A name the cursor has been *aimed* at that is not in the listing yet.
     ///
     /// A directory read is asynchronous, so every caller that knows where the
@@ -164,6 +174,7 @@ impl DirState {
             spans: Vec::new(),
             cursor: 0,
             cursor_name: None,
+            missing_at: None,
             wanted_cursor: None,
             selected: BTreeSet::new(),
             sort: SortOptions::from_config(mgr),
@@ -347,7 +358,11 @@ impl DirState {
             .position(|i| self.entries.get(*i).is_some_and(|e| e.name == name))
     }
 
+    /// Settle which file the cursor is on. Every cursor command ends here, and
+    /// so does a rebuild that found the file, so this is also where a wait for
+    /// a missing one ends.
     fn remember_cursor(&mut self) {
+        self.missing_at = None;
         self.cursor_name = self.row(self.cursor).map(|e| e.name.clone());
     }
 
@@ -708,6 +723,19 @@ impl DirState {
     /// "the cursor did not move" means to a person watching a directory change
     /// under them; position as the fallback because when the file you were on
     /// is deleted, the sensible place to be is where it was.
+    ///
+    /// **Only a listing that has finished arriving can say the file is gone.**
+    /// A rescan drops the old rows at its start and brings them back a batch at
+    /// a time in `readdir` order, which has nothing to do with the sort — and
+    /// on btrfs is creation order, so the file made a moment ago (the folder
+    /// `a` just created, the paste that just landed, the download that just
+    /// finished, each with the cursor put on it) comes back in the *last*
+    /// batch of the rescan the watcher runs for that very change. Deciding at
+    /// the first batch took whichever row stood at the cursor's position in
+    /// the partial listing and remembered *its* name, which moved the cursor
+    /// to an unrelated file for good, and the view with it. So while the scan
+    /// is still running, a name that has not arrived is kept, and the cursor
+    /// waits on a legal row for it (see [`DirState::missing_at`]).
     fn rebuild(&mut self) {
         let order = sort_order(&self.entries, &self.sort);
         let matched = filter::filter_indices(&self.entries, &order, &self.filter, self.show_hidden);
@@ -732,14 +760,25 @@ impl DirState {
             self.remember_cursor();
             return;
         }
-        let restored = self
+        if let Some(position) = self
             .cursor_name
             .as_deref()
-            .and_then(|name| self.position_of(name));
-        self.cursor = match restored {
-            Some(position) => position,
-            None => self.cursor.min(self.view.len() - 1),
-        };
+            .and_then(|name| self.position_of(name))
+        {
+            self.cursor = position;
+            self.remember_cursor();
+            return;
+        }
+        let position = *self.missing_at.get_or_insert(self.cursor);
+        self.cursor = position.min(self.view.len() - 1);
+        if self.state == LoadState::Loading {
+            log::trace!(
+                "cursor's file not among the {} rows so far; waiting at row {}",
+                self.view.len(),
+                self.cursor
+            );
+            return;
+        }
         self.remember_cursor();
     }
 }

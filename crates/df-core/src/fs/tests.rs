@@ -661,6 +661,93 @@ fn a_memory_recalls_what_it_was_told_and_forgets_the_oldest_first() {
     assert_eq!(none.recall(Path::new("/dir/a")), None);
 }
 
+/// A rescan the way the scanner delivers one: `Started` drops the old rows,
+/// each batch brings some back, `Done` closes it. `between` runs after the
+/// first batch, while the listing is still partial.
+fn rescan_in_two(
+    state: &mut DirState,
+    token: ScanToken,
+    first: Vec<Entry>,
+    rest: Vec<Entry>,
+    between: impl FnOnce(&mut DirState),
+) {
+    let dir = PathBuf::from("/fixture");
+    state.token = Some(token);
+    state.apply(&ScanUpdate::Started {
+        token,
+        dir: dir.clone(),
+    });
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: dir.clone(),
+        entries: first,
+    });
+    between(state);
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: dir.clone(),
+        entries: rest,
+    });
+    let total = state.total();
+    state.apply(&ScanUpdate::Done { token, dir, total });
+}
+
+/// A rescan brings a directory back a batch at a time in `readdir` order,
+/// which on btrfs is creation order — so the folder `a` made a moment ago,
+/// with the cursor put on it, arrives in the *last* batch of the watcher's
+/// rescan, which has already dropped the old rows. The first, partial batch
+/// is not evidence that it is gone, and whatever row stands at the cursor's
+/// position in it is not where the cursor was.
+#[test]
+fn the_cursor_keeps_its_file_through_a_rescan_that_brings_it_last() {
+    let mut entries = vec![dir("alpha"), dir("beta"), dir("gamma")];
+    entries.extend(files(&["a.txt", "b.txt", "c.txt", "d.txt"]));
+    // The newest entry, so the last `readdir` hands back.
+    entries.push(dir("test2"));
+    let mut state = loaded_state(entries.clone());
+    assert!(state.cursor_to_name("test2"));
+    let at = state.cursor();
+
+    let (first, rest) = (entries[..7].to_vec(), entries[7..].to_vec());
+    rescan_in_two(&mut state, ScanToken(2), first, rest, |state| {
+        // Mid-scan the cursor waits on a row that exists.
+        assert!(state.cursor() < state.len());
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("test2"));
+    assert_eq!(state.cursor(), at);
+
+    // A person who moves the cursor while the rows are still arriving has
+    // chosen a row, and the file still to come does not take it back.
+    let (first, rest) = (entries[..7].to_vec(), entries[7..].to_vec());
+    rescan_in_two(&mut state, ScanToken(3), first, rest, |state| {
+        state.set_cursor(0);
+    });
+    assert_eq!(state.cursor_entry().map(|e| e.name.as_str()), Some("alpha"));
+}
+
+/// …and a scan that finishes without the file means it is gone, and the
+/// cursor takes the position it had — the rule a reload has always had — not
+/// the one a short first batch clamped it to.
+#[test]
+fn a_file_gone_after_a_rescan_in_batches_leaves_the_cursor_where_it_was() {
+    let names: Vec<String> = (0..20).map(|i| format!("f{i:02}.txt")).collect();
+    let all: Vec<Entry> = names.iter().map(|n| file(n)).collect();
+    let mut state = loaded_state(all.clone());
+    assert!(state.cursor_to_name("f15.txt"));
+
+    let rest: Vec<Entry> = all[5..]
+        .iter()
+        .filter(|e| e.name != "f15.txt")
+        .cloned()
+        .collect();
+    rescan_in_two(&mut state, ScanToken(2), all[..5].to_vec(), rest, |_| {});
+    assert_eq!(state.cursor(), 15);
+    assert_eq!(
+        state.cursor_entry().map(|e| e.name.as_str()),
+        Some("f16.txt")
+    );
+}
+
 #[test]
 fn the_cursor_stays_on_the_same_file_across_a_reload() {
     let mut state = loaded_state(files(&["a.txt", "m.txt", "z.txt"]));
