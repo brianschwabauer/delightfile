@@ -210,6 +210,28 @@ impl Listing {
         true
     }
 
+    /// Whether a scroll towards `direction` (negative is up) has anywhere left
+    /// to go, counted the way [`Listing::wheel`] counts.
+    ///
+    /// Asked by a band hanging over the pane's edge, which keeps the frames
+    /// coming for as long as it is scrolling — and has to stop the moment the
+    /// listing is pinned against its end, or a band held off the bottom of a
+    /// finished scroll would run the window at the refresh rate to move nothing
+    /// (PLAN §1).
+    pub fn can_scroll(&self, direction: f32, visible: usize, columns: usize) -> bool {
+        let rows = self.dir.len().div_ceil(columns.max(1));
+        if visible == 0 || rows <= visible {
+            return false;
+        }
+        if direction < 0.0 {
+            self.first > 0
+        } else if direction > 0.0 {
+            self.first < rows - visible
+        } else {
+            false
+        }
+    }
+
     /// Whether the view has been scrolled away from the cursor.
     pub fn is_detached(&self) -> bool {
         self.detached.is_some()
@@ -965,6 +987,31 @@ mod tests {
             l.wheel(5.0, visible, 1, at);
         }
         assert_eq!(l.first(), rows - visible);
+    }
+
+    /// A band hanging over the edge asks whether there is anywhere left to
+    /// scroll, and the answer is "no" at each end, towards that end — which is
+    /// what lets it stop asking for frames there.
+    #[test]
+    fn a_listing_knows_when_a_scroll_has_nowhere_to_go() {
+        let t0 = Instant::now();
+        let mut l = listing(t0);
+        let rows = l.dir.len();
+        let visible = 5.min(rows.saturating_sub(1));
+        assert!(visible >= 2);
+        // At the top: down has room, up does not, and still has none.
+        assert!(l.can_scroll(1.0, visible, 1));
+        assert!(!l.can_scroll(-1.0, visible, 1));
+        assert!(!l.can_scroll(0.0, visible, 1));
+        // At the bottom, the other way round.
+        for _ in 0..400 {
+            l.wheel(5.0, visible, 1, t0);
+        }
+        assert!(!l.can_scroll(1.0, visible, 1));
+        assert!(l.can_scroll(-1.0, visible, 1));
+        // A listing that fits has nowhere to go at all.
+        assert!(!l.can_scroll(1.0, rows, 1));
+        assert!(!l.can_scroll(-1.0, rows + 3, 1));
     }
 
     /// The other half of the rule: the next key takes the view back, moving the

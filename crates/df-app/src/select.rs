@@ -21,6 +21,8 @@
 //! it touched it — and the two pure functions below are the whole of the range
 //! arithmetic, tested without a directory.
 
+use std::time::Instant;
+
 /// The inclusive run between the anchor and the cursor, low end first.
 pub fn range(anchor: usize, cursor: usize) -> (usize, usize) {
     if anchor <= cursor {
@@ -134,12 +136,37 @@ impl Visual {
 /// started, not clear it.
 ///
 /// What is different is only where the run comes from: a rectangle over the
-/// pane rather than an anchor row and a cursor.
+/// panes rather than an anchor row and a cursor.
+///
+/// ## The origin is pinned to the listing, not to the glass
+///
+/// A band hanging over the list pane's edge scrolls the list (PLAN §7.5), and
+/// the rows it has already taken have to *stay* taken while it does. If the
+/// origin stayed put on screen, every row the scroll carried past it would
+/// leave the rectangle and be handed back — the selection would be a window a
+/// screenful tall sliding down the listing, and a band could never hold more
+/// than fits on screen, which is the one thing the scroll is there for. So the
+/// origin rides with the rows: it is remembered together with the list's
+/// scroll position at the press, and moved by however far the list has
+/// scrolled since — [`crate::mouse::band_span`] for which rows are in the band,
+/// [`Band::origin_at`] for where the rectangle is painted. Only its height
+/// moves — the list scrolls vertically — so a band started in the preview pane
+/// keeps its corner in the preview pane, level with the row it started beside.
 #[derive(Debug, Clone)]
 pub struct Band {
-    /// Where the drag began, in window points. The rectangle is this and
-    /// wherever the pointer is now.
+    /// Where the drag began, in window points, *as the list was scrolled then*.
+    /// The rectangle is [`Band::origin_at`] and wherever the pointer is now.
     pub origin: egui::Pos2,
+    /// The list's scroll position when the press landed, in rows of the pane.
+    pub scroll: f32,
+    /// When the band last scrolled the list (or would have), so the next frame
+    /// scrolls by how long it has been ([`crate::mouse::band_scroll_rows`]).
+    pub ticked: Instant,
+    /// Whether the band is hanging over the list's edge with somewhere left to
+    /// scroll to — the one thing a band asks animation frames for. A band held
+    /// still inside the pane is the same pixels next frame, and so is one
+    /// pressed against the end of the listing.
+    pub scrolling: bool,
     /// The run currently applied, if any.
     pub applied: Option<(usize, usize)>,
     /// Per row the band has touched: its name, and whether it was selected
@@ -148,12 +175,21 @@ pub struct Band {
 }
 
 impl Band {
-    pub fn new(origin: egui::Pos2) -> Band {
+    pub fn new(origin: egui::Pos2, scroll: f32, now: Instant) -> Band {
         Band {
             origin,
+            scroll,
+            ticked: now,
+            scrolling: false,
             applied: None,
             prior: Vec::new(),
         }
+    }
+
+    /// Where the origin is on screen with the list scrolled to `scroll_rows`,
+    /// `step` points to a row of the pane (a row of tiles, in the grid).
+    pub fn origin_at(&self, scroll_rows: f32, step: f32) -> egui::Pos2 {
+        self.origin + egui::vec2(0.0, (self.scroll - scroll_rows) * step)
     }
 
     /// The first answer wins — see [`Visual::remember`].
@@ -219,6 +255,20 @@ mod tests {
         let (leaving, entering) = range_delta(Some((5, 8)), (2, 5));
         assert_eq!(leaving, vec![6, 7, 8]);
         assert_eq!(entering, vec![2, 3, 4]);
+    }
+
+    /// The band's origin travels with the rows: scroll the list down three
+    /// rows and the corner it was drawn from is three rows higher on screen,
+    /// still level with the row it started beside. Only its height moves.
+    #[test]
+    fn a_band_origin_rides_with_the_scroll() {
+        let at = egui::pos2(900.0, 300.0);
+        let band = Band::new(at, 2.0, Instant::now());
+        assert_eq!(band.origin_at(2.0, 22.0), at);
+        assert_eq!(band.origin_at(5.0, 22.0), egui::pos2(900.0, 300.0 - 66.0));
+        assert_eq!(band.origin_at(0.0, 22.0), egui::pos2(900.0, 300.0 + 44.0));
+        // A grid scrolls in rows of tiles, and the origin moves by the same.
+        assert_eq!(band.origin_at(3.0, 200.0), egui::pos2(900.0, 100.0));
     }
 
     /// The prior state is a row's state *before* visual mode, and it is written

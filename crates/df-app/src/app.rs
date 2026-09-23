@@ -551,15 +551,37 @@ impl OverlayGeom {
 ///
 /// Held for two reasons, and they pull in opposite directions: a drag that
 /// begins on **empty pane space** is a band select, and a drag that begins **on
-/// a row** is a file drag (the next phase's internal DnD). Which of the two a
+/// a row** is a file drag (PLAN §7.1's internal DnD). Which of the two a
 /// gesture is has to be decided at *press* time — by the time the pointer has
 /// moved [`crate::mouse::DRAG_THRESHOLD`] it is over some other row and the
-/// question can no longer be asked.
+/// question can no longer be asked. The same goes for the modifiers: the hand
+/// that held `Ctrl` to say "band, not drag" may have let go of it by the time
+/// the drag begins, and the gesture is what it was pressed as.
 #[derive(Debug, Clone, Copy)]
 struct PressStart {
     at: egui::Pos2,
-    /// The press landed on a row of the list — reserved for DnD.
+    /// The press landed on a row of the list — a file drag, unless
+    /// [`PressStart::band_on_row`] says otherwise.
     on_row: bool,
+    /// The press landed on a row of the list with `Ctrl` or `Shift` held, which
+    /// makes a drag from it a band select instead of a file drag.
+    ///
+    /// The row click itself still happens on mouse-down, exactly as it would
+    /// without the drag (`Ctrl` toggles that row, `Shift` takes the run to it),
+    /// and the band starts from the press point once the pointer passes the
+    /// threshold. A plain drag from a row is still a file drag: that seam is
+    /// how every file manager moves files, and a band that took it over would
+    /// make a full folder — where every press is on a row — impossible to drag
+    /// anything out of. The modifier is the explicit "I am selecting" that
+    /// the rows need, since there is no empty space between them to say it.
+    band_on_row: bool,
+    /// The list's scroll position at the press, in rows of the pane.
+    ///
+    /// The band's origin is pinned to the rows rather than to the screen (see
+    /// [`select::Band`]), and it has to be pinned to where they were when the
+    /// hand went down: a `Ctrl`-click near the pane's edge moves the cursor and
+    /// the scrolloff rule slides the view before the drag has even begun.
+    list_scroll: f32,
     /// The press landed on the basket's chip, which drags the whole basket
     /// (PLAN §7.1) — and the chip's rectangle, because that is where the
     /// ghost flies home to if the drag is called off. Measured at press time
@@ -569,9 +591,22 @@ struct PressStart {
     /// The press landed on a tab chip, which drags the tab out into a window
     /// (PLAN §2).
     on_tab: Option<usize>,
-    /// The press landed inside the list pane, which is the only pane a band
-    /// can be drawn in.
-    in_list: bool,
+    /// The press landed on empty space a band select may start from (PLAN
+    /// §7.5) — decided by [`App::band_origin`], which holds the rules.
+    ///
+    /// In short: anywhere in the three panes that nothing else answers. The
+    /// list pane's empty space, as always. The parent column **below its
+    /// rows** only, because its rows are clicked to go somewhere and do it on
+    /// mouse-down. And the preview pane, except for its transport strip, and
+    /// except for a picture that is zoomed past fit or pressed with `Ctrl` —
+    /// that drag is the pan or the zoom (`preview::gesture`). Wherever it
+    /// starts, the band selects *list* rows: the rectangle is drawn in window
+    /// space and clipped to the list before it is read as rows.
+    ///
+    /// Never through something floating over the panes — a toast, the basket,
+    /// a modal card, the help sheet: a press that landed on one of those must
+    /// not also start dragging a rectangle across the rows it was covering.
+    band_origin: bool,
     /// Whether the drag threshold has already been crossed, so the decision is
     /// made once rather than re-made every frame.
     dragging: bool,
@@ -9098,23 +9133,87 @@ impl App {
 
     // ── Band select (PLAN §7.5) ─────────────────────────────────────────────
 
+    /// Whether a press at `at` may start a band select: the rules
+    /// [`PressStart::band_origin`] records, in one place.
+    ///
+    /// `over` is what the hit test found under the press, and `toggle` is
+    /// whether `Ctrl` was held.
+    fn band_origin(
+        &self,
+        at: egui::Pos2,
+        over: Option<Control>,
+        geom: &Geom<'_>,
+        toggle: bool,
+    ) -> bool {
+        // Anything the hit test answers is a control, and a press on a control
+        // is that control's — including the list's own rows, whose drag is a
+        // file drag (or, with a modifier, a band that `band_on_row` starts).
+        // A modal card and the help sheet make everything behind them inert,
+        // and a band drawn under one would be selecting rows nobody can see.
+        if over.is_some() || geom.overlay.is_some() || self.help.is_some() {
+            return false;
+        }
+        let layout = geom.layout;
+        if layout.list.contains(at) {
+            return true;
+        }
+        if layout.parent.contains(at) {
+            // **Below the parent's rows only.** A row there is clicked to go
+            // somewhere, on mouse-down, so a drag cannot start from one — and
+            // the thin margins beside a row are too close to it to be a place
+            // anybody aims a band from on purpose.
+            let rows = self.tab().parent.as_ref().map_or(0, |p| p.dir.len());
+            let below = match rows {
+                0 => geom.parent.top(),
+                rows => ui::row_rect(
+                    geom.parent,
+                    geom.parent_scroll,
+                    rows - 1,
+                    self.scale.row_height,
+                )
+                .bottom(),
+            };
+            return at.y >= below;
+        }
+        if layout.preview.contains(at) {
+            // The transport strip, while it is up. The press site has already
+            // given the scrubber and the button to `media_pointer`; the rest of
+            // the strip (its timecodes) is still the strip, and a band that
+            // started on the controls' own plate would read as a mis-aimed
+            // seek.
+            let content = ui::content_rect(layout.preview);
+            if self.transport_hits.is_some() && crate::playback::strip::rect(content).contains(at) {
+                return false;
+            }
+            // A picture zoomed past fit is dragged to pan it, and `Ctrl`+drag
+            // on any picture is the zoom (`preview::gesture`'s pinch stand-in):
+            // either way the drag is already the picture's. At fit, with no
+            // modifier, the gesture has nothing to do with a drag — it commits
+            // to `Inert` — so the band may have it.
+            let on_picture = self
+                .preview
+                .picture_geometry()
+                .is_some_and(|(content, _)| content.contains(at));
+            return !(on_picture && (self.preview.is_zoomed() || toggle));
+        }
+        false
+    }
+
     /// The pointer has moved with the button down.
-    fn drag(
-        &mut self,
-        at: Option<egui::Pos2>,
-        list: egui::Rect,
-        strip: Option<egui::Rect>,
-        scroll_rows: f32,
-        metrics: Option<grid::Metrics>,
-        now: Instant,
-    ) {
+    fn drag(&mut self, at: Option<egui::Pos2>, geom: &Geom<'_>, now: Instant) {
         let (Some(at), Some(press)) = (at, self.press) else {
+            // No pointer to aim a band with this frame, so nothing for it to
+            // scroll towards: it must not go on asking for frames it will not
+            // use (see [`select::Band::scrolling`]).
+            if let Some(band) = &mut self.band {
+                band.scrolling = false;
+            }
             return;
         };
         // A tab in the hand owns the gesture: the pointer is carrying a chip,
         // not drawing a band and not holding files.
         if self.tab_drag.is_some() {
-            self.carry_tab(at, strip, now);
+            self.carry_tab(at, geom.layout.strip, now);
             return;
         }
         if !press.dragging {
@@ -9124,7 +9223,7 @@ impl App {
             if let Some(press) = &mut self.press {
                 press.dragging = true;
             }
-            if let (Some(index), Some(strip)) = (press.on_tab, strip) {
+            if let (Some(index), Some(strip)) = (press.on_tab, geom.layout.strip) {
                 // PLAN §2: "drag a tab out to spawn a window". The chip is
                 // picked up here and the decision is made on release, by
                 // [`crate::window::release`].
@@ -9140,26 +9239,95 @@ impl App {
                 self.drag_basket(chip, at, now);
                 return;
             }
-            if press.on_row {
-                // **The seam.** A drag that began on a row is a *file* drag,
-                // never a band select: a drag from a row is how every file
-                // manager moves files.
-                self.begin_drag(press.at, at, list, scroll_rows, metrics.as_ref(), now);
+            if press.on_row && !press.band_on_row {
+                // **The seam.** A plain drag that began on a row is a *file*
+                // drag, never a band select: a drag from a row is how every
+                // file manager moves files. Only a modifier held at the press
+                // turns it into a band (see [`PressStart::band_on_row`]).
+                self.begin_drag(
+                    press.at,
+                    at,
+                    geom.list,
+                    geom.list_scroll,
+                    geom.grid.as_ref(),
+                    now,
+                );
                 return;
             }
-            if !press.in_list {
+            if !press.band_origin && !press.band_on_row {
                 return;
             }
-            self.band = Some(select::Band::new(press.at));
+            self.band = Some(select::Band::new(press.at, press.list_scroll, now));
         }
-        let Some(origin) = self.band.as_ref().map(|band| band.origin) else {
+        self.tick_band(at, geom, now);
+    }
+
+    /// One frame of a live band: scroll the list if the band is hanging over
+    /// its edge, then select the rows the rectangle covers.
+    ///
+    /// The scroll goes through [`crate::tab::Listing::wheel`], like the file
+    /// drag's (see [`App::autoscroll`]): it carries the sub-row remainder,
+    /// eases the rows over the wheel's glide rather than jumping them, and
+    /// detaches the view so the scrolloff rule does not drag it straight back
+    /// to the cursor. The view is left where the band took it when the band
+    /// ends, as it is after the wheel — the rows just selected are the rows
+    /// being looked at.
+    ///
+    /// The rows are read at this frame's drawn scroll position, the one the
+    /// paint uses, so what is selected is always what the rectangle is seen to
+    /// cover; the travel this frame asks for shows up in the next.
+    fn tick_band(&mut self, at: egui::Pos2, geom: &Geom<'_>, now: Instant) {
+        let columns = geom.grid.map_or(1, |metrics| metrics.columns);
+        let row_height = self.scale.row_height;
+        let focused = self.window_focused;
+        let Some(band) = self.band.as_mut() else {
             return;
         };
-        let rows = self.tab().cwd.dir.len();
-        let band = crate::mouse::band(origin, at);
-        let run = match &metrics {
-            Some(metrics) => grid::band_items(list, metrics, scroll_rows, rows, band),
-            None => crate::mouse::band_rows(list, scroll_rows, rows, self.scale.row_height, band),
+
+        // Hanging over the top or bottom edge of the list pane, wherever along
+        // the panes the pointer is: the list scrolls towards it, faster the
+        // further out it is (`mouse::band_scroll`). Frames are asked for only
+        // while that has somewhere to go, and never for a window that has lost
+        // the keyboard — a band whose release went to another window would
+        // otherwise hold this one at the refresh rate indefinitely (PLAN §1).
+        let rate = crate::mouse::band_scroll(geom.layout.list, at.y);
+        let travel =
+            crate::mouse::band_scroll_rows(rate, now.saturating_duration_since(band.ticked));
+        band.ticked = now;
+        let cwd = &mut self.tabs.active_mut().cwd;
+        band.scrolling = focused && rate != 0.0 && cwd.can_scroll(rate, geom.page, columns);
+        // The same rule the wheel follows: a scroll that actually moved the
+        // view cancels a pending aim, and one that moved nothing does not.
+        if band.scrolling && cwd.wheel(travel, geom.page, columns, now) {
+            cwd.dir.cancel_aim();
+        }
+
+        // The rectangle is window space, from the origin to the pointer. Each
+        // corner is clipped to the list as it was when it was placed and the
+        // origin is carried along with the rows the list has scrolled since
+        // the press (`mouse::band_span`): that is what lets a band start in
+        // another pane, and what keeps the rows it scrolled past in it.
+        let origin = crate::mouse::Corner {
+            at: band.origin,
+            scroll: band.scroll,
+        };
+        let pointer = crate::mouse::Corner {
+            at,
+            scroll: geom.list_scroll,
+        };
+        let count = cwd.dir.len();
+        let run = match &geom.grid {
+            Some(metrics) => {
+                grid::band_items(geom.list, metrics, geom.list_scroll, count, origin, pointer)
+            }
+            None => crate::mouse::band_rows(
+                geom.list,
+                geom.list_scroll,
+                count,
+                row_height,
+                origin,
+                pointer,
+            ),
         };
         self.apply_band(run);
     }
@@ -11372,24 +11540,28 @@ impl App {
         // Not while the menu owns the pointer: a drag that began *on* a menu
         // row is a slip of the hand, not a band select of the rows underneath.
         // …and not while the press belongs to the transport: a drag that began
-        // on the scrubber is a seek, not a band select of the rows behind the
-        // preview pane.
+        // on the scrubber or the play button is a seek or a click, not a band
+        // select of the rows beside the preview pane.
         if pointer.pressed && !dismissing && !menu_live && !scrubbing {
+            let on_row = matches!(over, Some((Control::Row(Column::List, _), _)));
             self.press = pointer.at.map(|at| PressStart {
                 at,
-                on_row: matches!(over, Some((Control::Row(Column::List, _), _))),
+                on_row,
+                // Read *now*, with the press, and never again: see the field.
+                band_on_row: on_row && (pointer.shift || pointer.toggle),
+                list_scroll: scroll_rows,
                 on_basket: matches!(over, Some((Control::BasketChip, _)))
                     .then_some(basket_geometry.chip),
                 on_tab: match over {
                     Some((Control::Tab(index), _)) => Some(index),
                     _ => None,
                 },
-                // …and not through the toast, which floats over the list: a
-                // press that dismissed a message must not also start dragging
-                // a rectangle across the rows it was covering.
-                in_list: layout.list.contains(at)
-                    && overlay.is_none()
-                    && !matches!(over, Some((Control::Toast | Control::ToastAction, _))),
+                band_origin: self.band_origin(
+                    at,
+                    over.map(|(control, _)| control),
+                    &geom,
+                    pointer.toggle,
+                ),
                 dragging: false,
             });
         }
@@ -11415,14 +11587,7 @@ impl App {
             self.band = None;
         }
         if pointer.down {
-            self.drag(
-                pointer.at,
-                list_content,
-                layout.strip,
-                scroll_rows,
-                metrics,
-                now,
-            );
+            self.drag(pointer.at, &geom, now);
         }
 
         // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────
@@ -12047,25 +12212,6 @@ impl App {
                 self.tips.hover(tip),
             );
         }
-        // The band, over the rows it is selecting (PLAN §7.5). A wash and a
-        // hairline: it has to be unmistakable without hiding the names it is
-        // being drawn across, so the fill is barely there and the *edge* is
-        // what makes it a rectangle.
-        if let (Some(band), Some(at)) = (&self.band, pointer.at) {
-            let rect = crate::mouse::band(band.origin, at).intersect(list_content);
-            let clipped = painter.with_clip_rect(list_content);
-            clipped.rect_filled(
-                rect,
-                ui::ROW_RADIUS,
-                chrome::fade(self.palette.blue, BAND_FILL),
-            );
-            clipped.rect_stroke(
-                rect,
-                ui::ROW_RADIUS,
-                egui::Stroke::new(1.0, chrome::fade(self.palette.blue, BAND_EDGE)),
-                egui::StrokeKind::Inside,
-            );
-        }
         // Inside an archive the preview pane is the entry's facts card
         // (PLAN §7.3), because there is no file on the disk for the preview
         // pipeline to open.
@@ -12190,6 +12336,40 @@ impl App {
             // nothing for a press to land on. Left standing, last file's
             // geometry would take a click over a photograph.
             self.transport_hits = None;
+        }
+
+        // The band, over the rows it is selecting (PLAN §7.5). A wash and a
+        // hairline: it has to be unmistakable without hiding the names it is
+        // being drawn across, so the fill is barely there and the *edge* is
+        // what makes it a rectangle.
+        //
+        // Painted here, after all three panes, and clipped to the panes as a
+        // whole rather than to the list: a band can start in the parent column
+        // or the preview pane, and the rectangle has to be where the pointer
+        // is — a band visible only once it reached the list would be a drag
+        // with nothing under the hand. Under the chrome, the tray and every
+        // card, which are all drawn after it.
+        if let (Some(band), Some(at)) = (&self.band, pointer.at) {
+            let panes = layout.parent.union(layout.list).union(layout.preview);
+            let step = grid::pane_step(metrics.as_ref(), self.scale);
+            let rect = crate::mouse::band(band.origin_at(scroll_rows, step), at).intersect(panes);
+            // Both corners can be off the panes at once — the origin carried
+            // away by the scroll and the pointer past the window's edge — and
+            // then there is nothing on screen to draw.
+            if !rect.is_negative() {
+                let clipped = painter.with_clip_rect(panes);
+                clipped.rect_filled(
+                    rect,
+                    ui::ROW_RADIUS,
+                    chrome::fade(self.palette.blue, BAND_FILL),
+                );
+                clipped.rect_stroke(
+                    rect,
+                    ui::ROW_RADIUS,
+                    egui::Stroke::new(1.0, chrome::fade(self.palette.blue, BAND_EDGE)),
+                    egui::StrokeKind::Inside,
+                );
+            }
         }
 
         // ── The chrome ──────────────────────────────────────────────────────
@@ -12595,6 +12775,17 @@ impl App {
             // track. It is dropped the moment it lands (`media_pointer`), so
             // this cannot be stuck on.
             ("scrub", self.scrub_spring.is_some()),
+            // A band hanging over the list pane's edge, scrolling it towards
+            // the pointer. Only while there is somewhere left to scroll and the
+            // window has the keyboard (`App::tick_band`): a band held still
+            // inside the pane asks for nothing, because the pointer brings its
+            // own frame when it moves, and neither does one pressed against the
+            // end of the listing. The glide the scroll starts is the "tab"
+            // row's, and it settles on its own.
+            (
+                "band-scroll",
+                self.band.as_ref().is_some_and(|band| band.scrolling),
+            ),
             (
                 "tasks",
                 self.panel.as_ref().is_some_and(|p| p.animating(now)),

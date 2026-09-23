@@ -115,39 +115,175 @@ pub fn band(from: egui::Pos2, to: egui::Pos2) -> egui::Rect {
     egui::Rect::from_two_pos(from, to)
 }
 
+/// One corner of a band select: where it is, in window points, and how far the
+/// list was scrolled (in rows of the pane) when it was put there.
+///
+/// The scroll rides along because a band's two corners are placed at different
+/// times. The pointer's is placed this frame; the origin's was placed at the
+/// press, and a band hanging over the pane's edge scrolls the list in between.
+/// The origin belongs to the rows it was put down beside, not to a spot on the
+/// glass (see [`crate::select::Band`]), so where it is *now* depends on how far
+/// those rows have moved since.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Corner {
+    pub at: egui::Pos2,
+    pub scroll: f32,
+}
+
+/// What a band covers of the list pane, as a rectangle in window points with
+/// the list drawn at `scroll_rows` — or `None` when it covers nothing.
+///
+/// Each corner is clipped to the content box **as the list was when that
+/// corner was placed**, and then carried along by however far the list has
+/// scrolled since (`step` points to a row of the pane). For the pointer's
+/// corner those are the same moment, so a pointer far outside the pane holds
+/// the band to the pane's edge: a drag that leaves the window at speed selects
+/// to the edge of the listing and stops, rather than resolving to row four
+/// thousand. For the origin they are not: an origin put down beside row 5
+/// stays beside row 5 when the band has scrolled the list to row 100, and
+/// every row in between is in the band — which is the only way a band can hold
+/// more than a screenful. With no scroll in between, all this is simply the
+/// band clipped to the content box.
+///
+/// Horizontally the band is clipped to the content box too, and that is what
+/// lets it start in another pane: one drawn from the parent column or the
+/// preview pane covers nothing until its rectangle reaches the list, because a
+/// row is a strip across the list's content box and nothing either side of it.
+///
+/// The result is zero pixels tall only for a band dragged straight across the
+/// rows inside the pane, which still covers the row it is on. Two corners
+/// clipped to the same edge — a band drawn entirely below the last row on
+/// screen — are `None`, not a sliver lying on that edge.
+pub fn band_span(
+    content: egui::Rect,
+    step: f32,
+    scroll_rows: f32,
+    from: Corner,
+    to: Corner,
+) -> Option<egui::Rect> {
+    if content.height() <= 0.0 {
+        return None;
+    }
+    let left = from.at.x.min(to.at.x).max(content.left());
+    let right = from.at.x.max(to.at.x).min(content.right());
+    if right < left {
+        return None;
+    }
+    let place = |corner: Corner| {
+        let y = corner.at.y.clamp(content.top(), content.bottom());
+        (y + (corner.scroll - scroll_rows) * step, y != corner.at.y)
+    };
+    let (a, a_clipped) = place(from);
+    let (b, b_clipped) = place(to);
+    if a == b && (a_clipped || b_clipped) {
+        return None;
+    }
+    Some(egui::Rect::from_min_max(
+        egui::pos2(left, a.min(b)),
+        egui::pos2(right, a.max(b)),
+    ))
+}
+
 /// Which rows a band encloses, as an inclusive `(first, last)` — or `None` when
 /// it encloses none.
 ///
 /// A row counts as enclosed when the band overlaps its strip at all, which is
 /// what makes the selection follow the pointer *as it moves* rather than only
-/// once a whole row is covered. The band is clipped to the pane's content box
-/// first, so a drag that leaves the window at speed selects to the edge of the
-/// listing and stops, rather than resolving to row four thousand.
+/// once a whole row is covered. What the band is, after clipping and scrolling,
+/// is [`band_span`]'s answer.
+///
+/// The band's bottom edge is **exclusive**: a row that starts exactly where
+/// the band ends is not in it. A band whose far corner is outside the pane is
+/// clipped to exactly the pane's edge, and at a whole-row scroll that edge is
+/// also the top of the first row *below* the pane — counting the row the clip
+/// only touches would select a file nobody saw the band reach.
 pub fn band_rows(
     content: egui::Rect,
     scroll_rows: f32,
     rows: usize,
     row_height: f32,
-    band: egui::Rect,
+    from: Corner,
+    to: Corner,
 ) -> Option<(usize, usize)> {
     if rows == 0 || row_height <= 0.0 {
         return None;
     }
-    let top = band.top().max(content.top());
-    let bottom = band.bottom().min(content.bottom());
-    if bottom < top {
-        return None;
-    }
+    let span = band_span(content, row_height, scroll_rows, from, to)?;
     // The band's edges in *row* coordinates: how many rows down the listing
     // each one falls, counting from the row the view is scrolled to.
-    let first = ((top - content.top()) / row_height + scroll_rows).floor();
-    let last = ((bottom - content.top()) / row_height + scroll_rows).floor();
+    let row = |y: f32| (y - content.top()) / row_height + scroll_rows;
+    let first = row(span.top()).floor();
+    let last = if span.height() > 0.0 {
+        row(span.bottom()).ceil() - 1.0
+    } else {
+        first
+    };
     if last < 0.0 || first > (rows - 1) as f32 {
         return None;
     }
     let first = first.max(0.0) as usize;
     let last = (last.max(0.0) as usize).min(rows - 1);
     Some((first, last.max(first)))
+}
+
+/// How far past the list pane's edge a band has to hang for the listing to
+/// scroll one row per frame, in logical points.
+///
+/// The rate is proportional to the overshoot, so the hand sets the speed: just
+/// over the edge creeps a row at a time, which is how a band is *aimed* at the
+/// row it wants to stop on, and a long pull races. Twenty points buys a row a
+/// frame — a bit less than a row's own height, so "one row further" is about
+/// one row's travel of the hand.
+pub const BAND_SCROLL_OVERSHOOT: f32 = 20.0;
+
+/// The fastest a band scrolls the listing, in rows per frame.
+///
+/// Six, which is [`WHEEL_MAX_ROWS`] and for the same reason: past it the names
+/// going by stop being something the eye can follow, and a band that has
+/// overshot its target by a screenful has to be dragged back through it.
+pub const BAND_SCROLL_MAX: f32 = 6.0;
+
+/// The frame those rates are counted in, in seconds: sixty to the second.
+///
+/// The app runs its animation frames at the monitor's refresh, and a rate
+/// counted in *actual* frames would scroll a 144 Hz display more than twice as
+/// fast as a 60 Hz one. So the rate is per reference frame and each real frame
+/// takes its share by how long it lasted ([`band_scroll_rows`]).
+pub const BAND_SCROLL_FRAME: f32 = 1.0 / 60.0;
+
+/// The longest one frame's worth of band scroll may be, in seconds.
+///
+/// Three reference frames. The first frame of an autoscroll can arrive long
+/// after the frame before it — the pointer rested inside the pane, the loop
+/// went idle, and then the hand moved past the edge — and without a cap that
+/// whole rest would be paid out as one jump.
+const BAND_SCROLL_MAX_DT: f32 = BAND_SCROLL_FRAME * 3.0;
+
+/// How fast a band hanging over the list pane's edge scrolls it, in rows per
+/// reference frame ([`BAND_SCROLL_FRAME`]) — negative for up, zero while the
+/// pointer is level with the pane.
+///
+/// Only the pointer's *height* is read. The list, parent and preview panes
+/// share a top and a bottom, so "above the list pane" is "above the panes",
+/// wherever along them the band was started — a band drawn from the preview
+/// pane that is pulled off the bottom of the window scrolls the list exactly
+/// as one drawn inside it does.
+pub fn band_scroll(pane: egui::Rect, y: f32) -> f32 {
+    let overshoot = if y < pane.top() {
+        y - pane.top()
+    } else if y > pane.bottom() {
+        y - pane.bottom()
+    } else {
+        0.0
+    };
+    (overshoot / BAND_SCROLL_OVERSHOOT).clamp(-BAND_SCROLL_MAX, BAND_SCROLL_MAX)
+}
+
+/// This frame's share of a band scroll `rate` ([`band_scroll`]), given how long
+/// the frame lasted: rows, fractional, for [`crate::tab::Listing::wheel`] to
+/// carry.
+pub fn band_scroll_rows(rate: f32, dt: Duration) -> f32 {
+    rate * dt.as_secs_f32().min(BAND_SCROLL_MAX_DT) / BAND_SCROLL_FRAME
 }
 
 /// What a wheel event's delta is measured in — egui's `MouseWheelUnit`,
@@ -280,6 +416,18 @@ mod tests {
         egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(400.0, 220.0))
     }
 
+    /// A band drawn with the list held still: both corners placed at `scroll`.
+    fn still(
+        c: egui::Rect,
+        scroll: f32,
+        rows: usize,
+        from: egui::Pos2,
+        to: egui::Pos2,
+    ) -> Option<(usize, usize)> {
+        let corner = |at| Corner { at, scroll };
+        band_rows(c, scroll, rows, H, corner(from), corner(to))
+    }
+
     /// The timing window, both sides of it.
     #[test]
     fn two_quick_clicks_on_one_row_are_a_double_click() {
@@ -339,12 +487,19 @@ mod tests {
         // Rows 0..9 are at 100, 122, 144 … A band over the middle of rows 2–4.
         let from = egui::pos2(20.0, c.top() + 2.0 * H + 5.0);
         let to = egui::pos2(200.0, c.top() + 4.0 * H + 5.0);
-        assert_eq!(band_rows(c, 0.0, 40, H, band(from, to)), Some((2, 4)));
+        assert_eq!(still(c, 0.0, 40, from, to), Some((2, 4)));
         // Dragging upwards is the same band.
-        assert_eq!(band_rows(c, 0.0, 40, H, band(to, from)), Some((2, 4)));
-        // A band that has not left its row yet is a run of one.
-        let tiny = band(from, from + egui::vec2(1.0, 1.0));
-        assert_eq!(band_rows(c, 0.0, 40, H, tiny), Some((2, 2)));
+        assert_eq!(still(c, 0.0, 40, to, from), Some((2, 4)));
+        // A band that has not left its row yet is a run of one…
+        let tiny = from + egui::vec2(1.0, 1.0);
+        assert_eq!(still(c, 0.0, 40, from, tiny), Some((2, 2)));
+        // …and so is one dragged straight across it, with no height at all.
+        let across = from + egui::vec2(120.0, 0.0);
+        assert_eq!(still(c, 0.0, 40, from, across), Some((2, 2)));
+        // The bottom edge is exclusive: a band ending exactly on the top of
+        // row 5 has not reached it.
+        let edge = egui::pos2(200.0, c.top() + 5.0 * H);
+        assert_eq!(still(c, 0.0, 40, from, edge), Some((2, 4)));
     }
 
     /// Scrolling moves which rows a band at a fixed place on screen encloses.
@@ -353,8 +508,8 @@ mod tests {
         let c = content();
         let from = egui::pos2(20.0, c.top() + 1.0);
         let to = egui::pos2(20.0, c.top() + 2.0 * H + 1.0);
-        assert_eq!(band_rows(c, 0.0, 40, H, band(from, to)), Some((0, 2)));
-        assert_eq!(band_rows(c, 7.0, 40, H, band(from, to)), Some((7, 9)));
+        assert_eq!(still(c, 0.0, 40, from, to), Some((0, 2)));
+        assert_eq!(still(c, 7.0, 40, from, to), Some((7, 9)));
     }
 
     /// A drag that leaves the pane selects to the end of the listing and stops
@@ -362,24 +517,177 @@ mod tests {
     #[test]
     fn a_band_is_clipped_to_the_pane_and_to_the_listing() {
         let c = content();
-        let miles = band(
+        let miles = (
             egui::pos2(20.0, c.top() - 5_000.0),
             egui::pos2(20.0, c.bottom() + 5_000.0),
         );
-        assert_eq!(band_rows(c, 0.0, 4, H, miles), Some((0, 3)));
+        assert_eq!(still(c, 0.0, 4, miles.0, miles.1), Some((0, 3)));
         // A short listing under a band that is entirely below it: nothing.
-        let below = band(
+        let below = (
             egui::pos2(20.0, c.top() + 8.0 * H),
             egui::pos2(20.0, c.top() + 9.0 * H),
         );
-        assert_eq!(band_rows(c, 0.0, 3, H, below), None);
+        assert_eq!(still(c, 0.0, 3, below.0, below.1), None);
         // …and one entirely above the pane.
-        let above = band(
+        let above = (
             egui::pos2(20.0, c.top() - 90.0),
             egui::pos2(20.0, c.top() - 50.0),
         );
-        assert_eq!(band_rows(c, 0.0, 30, H, above), None);
-        assert_eq!(band_rows(c, 0.0, 0, H, miles), None);
+        assert_eq!(still(c, 0.0, 30, above.0, above.1), None);
+        assert_eq!(still(c, 0.0, 0, miles.0, miles.1), None);
+    }
+
+    /// **The origin rides with the rows.** A band started beside row 2 and
+    /// pulled off the bottom of the pane scrolls the list; thirty rows later
+    /// the origin is far above the pane, and every row from 2 down to the last
+    /// one on screen is in the band — not just the screenful that is visible.
+    #[test]
+    fn a_band_that_scrolled_keeps_the_rows_it_scrolled_past() {
+        let c = content();
+        let origin = Corner {
+            at: egui::pos2(20.0, c.top() + 2.0 * H + 5.0),
+            scroll: 0.0,
+        };
+        let pointer = |scroll| Corner {
+            at: egui::pos2(20.0, c.bottom() + 40.0),
+            scroll,
+        };
+        assert_eq!(
+            band_rows(c, 0.0, 100, H, origin, pointer(0.0)),
+            Some((2, 9))
+        );
+        // Thirty rows on: rows 30–39 on screen, and 2–39 in the band.
+        assert_eq!(
+            band_rows(c, 30.0, 100, H, origin, pointer(30.0)),
+            Some((2, 39))
+        );
+        // …and back up past the origin, the band is the other side of it:
+        // from the first row on screen down to the origin's row.
+        let up = Corner {
+            at: egui::pos2(20.0, c.top() - 40.0),
+            scroll: 0.0,
+        };
+        let from_below = Corner {
+            at: origin.at,
+            scroll: 6.0,
+        };
+        assert_eq!(band_rows(c, 0.0, 100, H, from_below, up), Some((0, 8)));
+    }
+
+    /// An origin clipped to the pane's edge at the press stays on that row
+    /// boundary as the list scrolls — a band from the space under a short
+    /// parent column, pulled off the bottom, takes exactly the rows that
+    /// scroll up into view, and nothing before the scroll starts.
+    #[test]
+    fn an_origin_below_the_list_takes_the_rows_that_scroll_into_view() {
+        let c = content();
+        let origin = Corner {
+            at: egui::pos2(c.left() - 60.0, c.bottom() + 4.0),
+            scroll: 0.0,
+        };
+        let pointer = |scroll| Corner {
+            at: egui::pos2(c.left() + 100.0, c.bottom() + 30.0),
+            scroll,
+        };
+        assert_eq!(band_rows(c, 0.0, 100, H, origin, pointer(0.0)), None);
+        // Three rows scrolled: rows 10–12 came up from under the pane.
+        assert_eq!(
+            band_rows(c, 3.0, 100, H, origin, pointer(3.0)),
+            Some((10, 12))
+        );
+    }
+
+    /// A band started in the parent column, to the left of the list, takes
+    /// nothing until its rectangle reaches the list — and then the rows it
+    /// spans, exactly as if it had started at the list's edge.
+    #[test]
+    fn a_band_from_left_of_the_list_takes_rows_once_it_reaches_them() {
+        let c = content();
+        let from = egui::pos2(c.left() - 150.0, c.top() + H + 5.0);
+        // Still inside the parent column: no row, however many it spans.
+        let short = egui::pos2(c.left() - 20.0, c.top() + 3.0 * H + 5.0);
+        assert_eq!(still(c, 0.0, 40, from, short), None);
+        // Into the list: rows 1–3.
+        let into = egui::pos2(c.left() + 50.0, c.top() + 3.0 * H + 5.0);
+        assert_eq!(still(c, 0.0, 40, from, into), Some((1, 3)));
+        // …and it reads through the scroll like any other band.
+        assert_eq!(still(c, 5.0, 40, from, into), Some((6, 8)));
+    }
+
+    /// A band started below the list's content — the empty space under a short
+    /// parent column is level with it — is clipped to the pane's bottom edge,
+    /// and takes the rows from the pointer down to the last one on screen. Not
+    /// the row after it, whose top the clip only touches.
+    #[test]
+    fn a_band_from_below_the_list_stops_at_the_last_row_on_screen() {
+        let c = content();
+        // 220 points of 22-point rows: rows 0–9 on screen, row 10 just under.
+        let from = egui::pos2(c.left() - 60.0, c.bottom() + 30.0);
+        let to = egui::pos2(c.left() + 200.0, c.top() + 7.0 * H + 5.0);
+        assert_eq!(still(c, 0.0, 40, from, to), Some((7, 9)));
+        // Half a row scrolled, row 10 *is* partly on screen, and is taken.
+        let to = egui::pos2(c.left() + 200.0, c.top() + 6.5 * H + 5.0);
+        assert_eq!(still(c, 0.5, 40, from, to), Some((7, 10)));
+        // A band that stays below the list takes nothing.
+        let under = egui::pos2(c.left() + 200.0, c.bottom() + 5.0);
+        assert_eq!(still(c, 0.0, 40, from, under), None);
+        // …and the same clip at the top: a band from above the pane stops at
+        // the first row on screen, not the one scrolled off above it.
+        let above = egui::pos2(c.left() + 20.0, c.top() - 40.0);
+        let to = egui::pos2(c.left() + 20.0, c.top() + 2.0 * H + 5.0);
+        assert_eq!(still(c, 3.0, 40, above, to), Some((3, 5)));
+    }
+
+    /// A band started in the preview pane, to the right of the list, is the
+    /// mirror of one from the parent column.
+    #[test]
+    fn a_band_from_the_preview_pane_takes_rows_once_it_reaches_them() {
+        let c = content();
+        let from = egui::pos2(c.right() + 200.0, c.top() + 3.0 * H + 5.0);
+        let still_right = egui::pos2(c.right() + 10.0, c.top() + 6.0 * H + 5.0);
+        assert_eq!(still(c, 0.0, 40, from, still_right), None);
+        let into = egui::pos2(c.right() - 20.0, c.top() + 6.0 * H + 5.0);
+        assert_eq!(still(c, 0.0, 40, from, into), Some((3, 6)));
+        // Dragged up past the pane's top and back into the list horizontally:
+        // everything from the first row on screen down to the origin's row.
+        let up = egui::pos2(c.right() - 20.0, c.top() - 90.0);
+        assert_eq!(still(c, 0.0, 40, from, up), Some((0, 3)));
+    }
+
+    /// Level with the pane, no scroll; past its edges, a rate proportional to
+    /// the overshoot and signed towards the pointer; and a ceiling.
+    #[test]
+    fn a_band_over_the_edge_scrolls_in_proportion_to_the_overshoot() {
+        let pane = content();
+        for y in [pane.top(), pane.center().y, pane.bottom()] {
+            assert_eq!(band_scroll(pane, y), 0.0, "at {y}");
+        }
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        // One row a frame at twenty points out, either way.
+        assert!(near(band_scroll(pane, pane.bottom() + 20.0), 1.0));
+        assert!(near(band_scroll(pane, pane.top() - 20.0), -1.0));
+        // Proportional, not stepped: half the overshoot, half the rate.
+        assert!(near(band_scroll(pane, pane.bottom() + 10.0), 0.5));
+        assert!(near(band_scroll(pane, pane.bottom() + 60.0), 3.0));
+        // …up to the ceiling, however far the hand goes.
+        assert_eq!(band_scroll(pane, pane.bottom() + 5_000.0), BAND_SCROLL_MAX);
+        assert_eq!(band_scroll(pane, pane.top() - 5_000.0), -BAND_SCROLL_MAX);
+    }
+
+    /// The rate is per *reference* frame: a real frame takes its share by how
+    /// long it lasted, and a frame after a long rest is not paid the rest.
+    #[test]
+    fn a_band_scroll_is_paced_by_the_frame_not_the_refresh_rate() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let frame = Duration::from_secs_f32(BAND_SCROLL_FRAME);
+        assert!(near(band_scroll_rows(1.0, frame), 1.0));
+        assert!(near(band_scroll_rows(-2.0, frame), -2.0));
+        // A 144 Hz frame is a smaller step, so a second of it travels the same.
+        let fast = Duration::from_secs_f32(1.0 / 144.0);
+        assert!(near(band_scroll_rows(1.0, fast) * 144.0, 60.0));
+        // The first frame after the loop went idle is capped at three frames.
+        assert!(near(band_scroll_rows(1.0, Duration::from_secs(2)), 3.0));
+        assert_eq!(band_scroll_rows(0.0, frame), 0.0);
     }
 
     /// The wheel's sign and its clamp.

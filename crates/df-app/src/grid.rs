@@ -704,18 +704,39 @@ pub fn pane_step(metrics: Option<&Metrics>, scale: crate::ui::Scale) -> f32 {
 /// the last, which is what
 /// [`select_range`](df_core::fs::DirState::select_range) can express and what
 /// dragging over a grid visibly *means*: everything from here to there.
+///
+/// What the band covers is [`crate::mouse::band_span`]'s answer, in rows of
+/// tiles: clipped to the content box so a band started in the parent column or
+/// the preview pane takes no tile until it reaches the grid, with the pointer's
+/// corner held to the pane's edge, and with the origin carried along by the
+/// scroll so the tiles a band has scrolled past stay in it. Its bottom edge is
+/// exclusive, for the reason [`crate::mouse::band_rows`] gives: the row of
+/// tiles whose top only *touches* the bottom of the pane is not on screen, and
+/// a band clipped to that edge has not reached it.
 pub fn band_items(
     content: egui::Rect,
     metrics: &Metrics,
     scroll_rows: f32,
     count: usize,
-    band: egui::Rect,
+    from: crate::mouse::Corner,
+    to: crate::mouse::Corner,
 ) -> Option<(usize, usize)> {
+    let span = crate::mouse::band_span(content, metrics.step.y, scroll_rows, from, to)?;
+    let covers = |tile: egui::Rect| {
+        let across = tile.left() <= span.right() && tile.right() >= span.left();
+        // A band dragged straight across has no height, and covers the tiles
+        // it passes through rather than none of them.
+        let down = if span.height() > 0.0 {
+            tile.top() < span.bottom() && tile.bottom() > span.top()
+        } else {
+            tile.top() <= span.top() && span.top() < tile.bottom()
+        };
+        across && down
+    };
     let mut first = None;
     let mut last = None;
     for index in 0..count {
-        let rect = tile_rect(content, metrics, scroll_rows, index);
-        if !rect.intersects(band) || !rect.intersects(content) {
+        if !covers(tile_rect(content, metrics, scroll_rows, index)) {
             continue;
         }
         first.get_or_insert(index);
@@ -1100,6 +1121,7 @@ const LABEL_FONT: f32 = 12.5;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mouse::Corner;
 
     /// The columns divide the width exactly, never leaving a ragged strip, and
     /// there is always at least one of them.
@@ -1293,11 +1315,103 @@ mod tests {
         // A band over tiles 1 and 4 (one above the other) covers 1..=4.
         let one = tile_rect(content, &m, 0.0, 1);
         let four = tile_rect(content, &m, 0.0, 4);
-        let band = one.union(four);
-        assert_eq!(band_items(content, &m, 0.0, 7, band), Some((1, 4)));
+        let band = still(content, &m, 0.0, 7, one.min, four.max);
+        assert_eq!(band, Some((1, 4)));
         // A band over nothing is nothing, not a panic and not `(0, 0)`.
-        let empty = egui::Rect::from_min_size(egui::pos2(-500.0, -500.0), egui::vec2(1.0, 1.0));
-        assert_eq!(band_items(content, &m, 0.0, 7, empty), None);
+        let (far, farther) = (egui::pos2(-500.0, -500.0), egui::pos2(-499.0, -499.0));
+        assert_eq!(still(content, &m, 0.0, 7, far, farther), None);
+        // Dragged straight across the first row, with no height at all: the
+        // tiles it passes through.
+        let zero = tile_rect(content, &m, 0.0, 0);
+        let across = egui::pos2(one.center().x, zero.center().y);
+        assert_eq!(
+            still(content, &m, 0.0, 7, zero.center(), across),
+            Some((0, 1))
+        );
+    }
+
+    /// A band from the parent column, left of the grid: nothing until it
+    /// reaches the tiles, then the run it covers.
+    #[test]
+    fn a_band_from_left_of_the_grid_takes_tiles_once_it_reaches_them() {
+        let (content, m) = (content(), three_wide());
+        let zero = tile_rect(content, &m, 0.0, 0);
+        let four = tile_rect(content, &m, 0.0, 4);
+        let from = egui::pos2(content.left() - 100.0, zero.center().y);
+        let short = egui::pos2(content.left() - 10.0, four.center().y);
+        assert_eq!(still(content, &m, 0.0, 9, from, short), None);
+        // Over the first two columns of two rows: 0, 1, 3, 4.
+        let band = still(content, &m, 0.0, 9, from, four.center());
+        assert_eq!(band, Some((0, 4)));
+    }
+
+    /// A band from below the grid is clipped to the pane's bottom edge — which,
+    /// in this fixture, is exactly the top of the third row of tiles. That row
+    /// is off screen, and the band only touching it must not take it.
+    #[test]
+    fn a_band_from_below_the_grid_stops_at_the_tiles_on_screen() {
+        let (content, m) = (content(), three_wide());
+        let hidden = tile_rect(content, &m, 0.0, 7);
+        assert_eq!(hidden.top(), content.bottom(), "the fixture's premise");
+        let one = tile_rect(content, &m, 0.0, 1);
+        let from = egui::pos2(one.center().x, content.bottom() + 40.0);
+        // Tiles 1 and 4 — not 7, under the pane.
+        let band = still(content, &m, 0.0, 9, from, one.center());
+        assert_eq!(band, Some((1, 4)));
+        // Half a row scrolled, the third row is partly on screen and is taken.
+        let one = tile_rect(content, &m, 0.5, 1);
+        let band = still(content, &m, 0.5, 9, from, one.center());
+        assert_eq!(band, Some((1, 7)));
+    }
+
+    /// A band from the preview pane, right of the grid: the mirror image.
+    #[test]
+    fn a_band_from_the_preview_pane_takes_tiles_once_it_reaches_them() {
+        let (content, m) = (content(), three_wide());
+        let two = tile_rect(content, &m, 0.0, 2);
+        let five = tile_rect(content, &m, 0.0, 5);
+        let from = egui::pos2(content.right() + 150.0, two.center().y);
+        let short = egui::pos2(content.right() + 20.0, five.center().y);
+        assert_eq!(still(content, &m, 0.0, 9, from, short), None);
+        // Into the last column only: 2 and 5.
+        let band = still(content, &m, 0.0, 9, from, five.center());
+        assert_eq!(band, Some((2, 5)));
+    }
+
+    /// A band that scrolled the grid keeps the tiles it scrolled past: the
+    /// origin rides with the rows of tiles (see `mouse::band_span`).
+    #[test]
+    fn a_grid_band_that_scrolled_keeps_the_tiles_it_scrolled_past() {
+        let (content, m) = (content(), three_wide());
+        let one = tile_rect(content, &m, 0.0, 1);
+        let origin = Corner {
+            at: one.center(),
+            scroll: 0.0,
+        };
+        // Pulled off the bottom and scrolled three rows of tiles: rows 3 and
+        // 4 are on screen, and the band runs from tile 1 to the end of row 4
+        // — the last column is under the pointer, which is right of it.
+        let pointer = Corner {
+            at: egui::pos2(content.right() - 5.0, content.bottom() + 30.0),
+            scroll: 3.0,
+        };
+        assert_eq!(
+            band_items(content, &m, 3.0, 30, origin, pointer),
+            Some((1, 14))
+        );
+    }
+
+    /// A band drawn with the grid held still: both corners placed at `scroll`.
+    fn still(
+        content: egui::Rect,
+        m: &Metrics,
+        scroll: f32,
+        count: usize,
+        from: egui::Pos2,
+        to: egui::Pos2,
+    ) -> Option<(usize, usize)> {
+        let corner = |at| Corner { at, scroll };
+        band_items(content, m, scroll, count, corner(from), corner(to))
     }
 
     /// The whole grid lays out and paints — with a cursor, a selection, a
