@@ -16950,8 +16950,12 @@ mod tests {
         assert_eq!(menu.items.last().map(|i| i.label.as_str()), Some("Quit"));
 
         app.close_menu(Instant::now());
-        let chosen = app.files.join("chosen");
-        app.chooser_file = Some(chosen);
+        app.chooser = Some(crate::cli::Chooser {
+            out: app.files.join("chosen"),
+            multiple: false,
+            directory: false,
+            save: false,
+        });
         app.run(Command::AppMenu, 10, Instant::now());
         let menu = app.menu.as_ref().expect("up");
         assert_eq!(menu.items.last().map(|i| i.label.as_str()), Some("Cancel"));
@@ -17009,7 +17013,11 @@ mod tests {
         app.run(Command::ViewScaleGrid, 10, now);
         assert_eq!(app.scale_here(), ViewScale::Grid);
         assert!(app.is_grid());
-        assert_eq!(app.tab().list_scale, ViewScale::Roomy, "the step to come back to");
+        assert_eq!(
+            app.tab().list_scale,
+            ViewScale::Roomy,
+            "the step to come back to"
+        );
 
         app.run(Command::ViewScaleComfortable, 10, now);
         assert_eq!(app.scale_here(), ViewScale::Comfortable);

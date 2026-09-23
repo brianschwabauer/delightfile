@@ -3622,6 +3622,7 @@ mod tests {
                 dirty: None,
                 position: 0,
                 rows: 0,
+                pick: None,
             };
             let geom = top_geometry(ui.painter(), row, &path, "", &bare, false);
             assert_eq!(geom.menu, button);
