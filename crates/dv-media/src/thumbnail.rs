@@ -50,6 +50,9 @@ pub fn generate_thumbnails(path: &Path, out_dir: &Path, opts: ThumbnailOpts) -> 
     fs::create_dir_all(out_dir)?;
 
     let mut ictx = ffmpeg::format::input(&path)?;
+    // Plain `best(Video)` on purpose, unlike probe/decode/keyframe: cover art
+    // *is* the right thumbnail for a song, so an `ATTACHED_PIC` stream is
+    // exactly what this one wants when it is all the file has.
     let stream = ictx
         .streams()
         .best(ffmpeg::media::Type::Video)

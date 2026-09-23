@@ -25,6 +25,7 @@ use std::sync::Once;
 use thiserror::Error;
 
 pub mod cache;
+pub mod cover;
 pub mod decode;
 pub mod keyframe;
 pub mod probe;
@@ -37,6 +38,7 @@ pub mod transcribe;
 pub mod waveform;
 
 pub use cache::CacheDir;
+pub use cover::{cover_art, CoverArt};
 pub use decode::{
     AudioChunk, AudioDecoder, ColorMatrix, DecodePath, HwDevice, Nv12Frame, VideoDecoder,
     AUDIO_CHANNELS, AUDIO_RATE,
@@ -142,6 +144,39 @@ pub(crate) fn open_input(
     } else {
         ffmpeg::format::input(&path)
     }
+}
+
+/// The best *real* video stream: the picture a player would show, never a
+/// song's cover art.
+///
+/// An MP3/FLAC/M4A with embedded artwork carries it as a one-frame video
+/// stream flagged `ATTACHED_PIC`. `av_find_best_stream` happily returns it —
+/// it is, after all, the only video in the file — and every caller that takes
+/// "has a video stream" to mean "is a video" then opens a decoder that hits
+/// end-of-stream on its first packet. So every such caller asks here instead.
+///
+/// `streams().best()` takes no predicate, so this is the two-step dance: trust
+/// `best` when what it picked is not an attached picture (it knows more than we
+/// do about which of several real video streams to prefer), and otherwise walk
+/// the streams in order for the first video that isn't one. A file whose only
+/// video is its cover art comes back `None`, which is the whole point.
+pub(crate) fn best_video_stream(
+    ictx: &ffmpeg::format::context::Input,
+) -> Option<ffmpeg::format::stream::Stream<'_>> {
+    if let Some(stream) = ictx.streams().best(ffmpeg::media::Type::Video) {
+        if !is_attached_pic(&stream) {
+            return Some(stream);
+        }
+    }
+    ictx.streams()
+        .find(|s| s.parameters().medium() == ffmpeg::media::Type::Video && !is_attached_pic(s))
+}
+
+/// Is this stream a container's embedded artwork rather than moving pictures?
+pub(crate) fn is_attached_pic(stream: &ffmpeg::format::stream::Stream) -> bool {
+    stream
+        .disposition()
+        .contains(ffmpeg::format::stream::Disposition::ATTACHED_PIC)
 }
 
 static FFMPEG_INIT: Once = Once::new();

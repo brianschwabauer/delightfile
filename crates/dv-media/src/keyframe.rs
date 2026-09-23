@@ -72,9 +72,9 @@ impl KeyframeIndex {
     pub fn build(path: &Path) -> Result<KeyframeIndex> {
         ensure_ffmpeg();
         let mut ictx = ffmpeg::format::input(&path)?;
-        let stream = ictx
-            .streams()
-            .best(ffmpeg::media::Type::Video)
+        // Cover art is skipped, not indexed: a one-packet `ATTACHED_PIC`
+        // stream would otherwise hand back a one-entry "index" for a song.
+        let stream = crate::best_video_stream(&ictx)
             .ok_or_else(|| MediaError::NoVideo(path.display().to_string()))?;
         let vindex = stream.index();
         let tb = stream.time_base();

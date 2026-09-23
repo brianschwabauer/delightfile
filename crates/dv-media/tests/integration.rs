@@ -5,15 +5,16 @@
 //!
 //! Fixtures are produced by `build/test-assets.sh` (generate-if-missing). The
 //! script already emits everything these tests need: `basic.mp4` (video+audio),
-//! `longgop.mp4` (g=300), `tone.m4a` (audio-only), `still.png` (image).
+//! `longgop.mp4` (g=300), `tone.m4a` (audio-only), `still.png` (image),
+//! `cover.mp3` (audio with embedded art).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use dv_core::model::MediaKind;
 use dv_media::{
-    generate_proxy, generate_thumbnails, generate_waveform, probe, sync_offset, KeyframeIndex,
-    ProxyOpts, ThumbnailOpts, Waveform,
+    cover_art, generate_proxy, generate_thumbnails, generate_waveform, probe, sync_offset,
+    KeyframeIndex, ProxyOpts, ThumbnailOpts, Waveform,
 };
 
 /// Repo root = two levels up from this crate's manifest dir.
@@ -102,6 +103,75 @@ fn probe_audio_only_fixture() {
     assert!(info.audio_codec.is_some());
     assert!(info.width.is_none());
     assert!(info.sample_rate.unwrap_or(0) > 0);
+}
+
+/// The bug this whole path exists for: a song with embedded artwork reports a
+/// video stream, and everything downstream used to believe it — classify said
+/// "video", the player opened a decoder on a one-frame stream, and playback
+/// ended before it started. The art is announced by `has_cover_art` and nowhere
+/// else.
+#[test]
+fn probe_sees_a_tagged_song_as_audio_not_as_its_cover() {
+    let assets = skip_unless_fixtures!();
+    let info = probe(&assets.join("cover.mp3")).expect("probe cover.mp3");
+    assert_eq!(info.kind, MediaKind::Audio);
+    assert!(info.has_audio);
+    assert!(
+        info.video_codec.is_none(),
+        "cover art is not a video codec, got {:?}",
+        info.video_codec
+    );
+    assert!(info.width.is_none(), "got {:?}", info.width);
+    assert!(info.height.is_none(), "got {:?}", info.height);
+    assert!(info.has_cover_art, "the fixture has an attached picture");
+    // Nothing else in the fixture set carries art, so the flag has to be able
+    // to say no as well as yes.
+    let plain = probe(&assets.join("tone.m4a")).expect("probe tone.m4a");
+    assert!(!plain.has_cover_art);
+}
+
+#[test]
+fn cover_art_decodes_the_attached_picture() {
+    let assets = skip_unless_fixtures!();
+    let art = cover_art(&assets.join("cover.mp3"), None)
+        .expect("cover_art cover.mp3")
+        .expect("the fixture has art");
+    assert_eq!((art.width, art.height), (300, 300));
+    assert_eq!(art.rgba.len(), 300 * 300 * 4);
+    // Orange, give or take JPEG: red high, blue low, alpha opaque. Sampled
+    // mid-picture so a botched stride shows up as the wrong pixel entirely.
+    let mid = ((150 * 300) + 150) * 4;
+    let (r, _g, b, a) = (
+        art.rgba[mid],
+        art.rgba[mid + 1],
+        art.rgba[mid + 2],
+        art.rgba[mid + 3],
+    );
+    assert!(r > 180 && b < 80, "expected orange, got r={r} b={b}");
+    assert_eq!(a, 255);
+
+    // The cap shrinks the long side; a file with no art says so rather than
+    // erroring.
+    let small = cover_art(&assets.join("cover.mp3"), Some(64))
+        .expect("capped cover_art")
+        .expect("art");
+    assert_eq!((small.width, small.height), (64, 64));
+    assert_eq!(small.rgba.len(), 64 * 64 * 4);
+    assert!(cover_art(&assets.join("tone.m4a"), None)
+        .expect("cover_art tone.m4a")
+        .is_none());
+}
+
+#[test]
+fn video_decoder_refuses_a_song_whose_only_picture_is_its_cover() {
+    let assets = skip_unless_fixtures!();
+    let err = dv_media::VideoDecoder::open(&assets.join("cover.mp3"))
+        .err()
+        .expect("opening a video decoder on a song must fail");
+    assert!(
+        matches!(err, dv_media::MediaError::NoVideo(_)),
+        "expected NoVideo, got {err:?}"
+    );
 }
 
 #[test]

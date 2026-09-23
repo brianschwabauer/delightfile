@@ -38,6 +38,12 @@ pub struct ProbeInfo {
     /// Audio sample rate in Hz, when an audio stream exists.
     pub sample_rate: Option<u32>,
     pub has_audio: bool,
+    /// The file carries embedded artwork — a cover picture riding along as an
+    /// `ATTACHED_PIC` stream, as every tagged song does. Deliberately *not*
+    /// reflected in [`video_codec`](Self::video_codec) or the dimensions: a
+    /// song with a sleeve is still audio, and the art is a picture to show
+    /// beside the waveform, not a picture to play.
+    pub has_cover_art: bool,
     /// Container chapters in source order, empty when the file has none.
     pub chapters: Vec<Chapter>,
 }
@@ -99,6 +105,7 @@ fn probe_image(path: &Path) -> Result<Option<ProbeInfo>> {
         fps_den: None,
         sample_rate: None,
         has_audio: false,
+        has_cover_art: false,
         chapters: Vec::new(),
     }))
 }
@@ -113,9 +120,13 @@ fn probe_av(path: &Path) -> Result<ProbeInfo> {
         ))
     })?;
 
-    // Best streams of each medium, if any.
-    let video = ictx.streams().best(ffmpeg::media::Type::Video);
+    // Best streams of each medium, if any. The video side goes through
+    // `best_video_stream` so a song's cover art — a one-frame `ATTACHED_PIC`
+    // stream — does not classify the file as a video and send the player off
+    // to decode a picture.
+    let video = crate::best_video_stream(&ictx);
     let audio = ictx.streams().best(ffmpeg::media::Type::Audio);
+    let has_cover_art = ictx.streams().any(|s| crate::is_attached_pic(&s));
 
     // Resolve a decodable video stream → (codec name, w, h, fps).
     let mut video_codec = None;
@@ -186,6 +197,7 @@ fn probe_av(path: &Path) -> Result<ProbeInfo> {
         fps_den,
         sample_rate,
         has_audio,
+        has_cover_art,
         chapters,
     })
 }

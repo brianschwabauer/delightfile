@@ -37,6 +37,40 @@ gen tone.m4a \
 gen still.png \
     -f lavfi -i "testsrc2=size=640x360:rate=1:duration=1" -frames:v 1
 
+# A tagged song: audio plus a still riding along as an ATTACHED_PIC stream,
+# which is what every music player's "album art" actually is. The point of the
+# fixture is that probe must call this Audio even though the container reports
+# a video stream — see `best_video_stream`.
+#
+# Three passes rather than one `gen`, for the same reason chapters.mkv needs
+# its own block: a single command with `-frames:v 1` on a lavfi source ends the
+# *whole* encode at one frame's worth of time, and the tone comes out 26 ms
+# long. The sleeve is baked first and then muxed in, which is also the order a
+# real tagger does it. id3v2 v3 because that is what taggers in the wild write.
+#
+# The scratch files are `$$`-tagged and the result is moved into place, because
+# `cargo test` runs one copy of this script per test thread: shared scratch
+# names would have one run deleting an intermediate out from under another, and
+# a half-written `cover.mp3` would be worse — the `-f` skip above would then
+# hand every later run a corrupt fixture.
+if [[ -f cover.mp3 ]]; then
+    echo "skip  cover.mp3"
+else
+    echo "make  cover.mp3"
+    art="cover-art-$$.png"
+    tone="cover-tone-$$.mp3"
+    out="cover-$$.mp3"
+    ffmpeg -v error -y -f lavfi -i "color=c=orange:size=300x300:duration=1" \
+        -frames:v 1 "$art"
+    ffmpeg -v error -y -f lavfi -i "sine=frequency=330:duration=2" \
+        -c:a libmp3lame -b:a 64k "$tone"
+    ffmpeg -v error -y -i "$tone" -i "$art" \
+        -map 0:a -map 1:v -c:a copy -c:v mjpeg \
+        -disposition:v attached_pic -id3v2_version 3 "$out"
+    mv -f "$out" cover.mp3
+    rm -f "$art" "$tone"
+fi
+
 # A file with silence gaps for the silence-detection tests (§1).
 gen gappy.wav \
     -f lavfi -i "sine=frequency=440:duration=1" \

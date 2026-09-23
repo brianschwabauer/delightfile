@@ -147,9 +147,11 @@ impl VideoDecoder {
 
     fn open_inner(path: &Path, hw: Option<&HwDevice>) -> Result<VideoDecoder> {
         let ictx = crate::open_input(path)?;
-        let stream = ictx
-            .streams()
-            .best(ffmpeg::media::Type::Video)
+        // Not `best(Video)`: a tagged song's cover art is a video stream by the
+        // letter of the container, and opening a decoder on it gets you one
+        // frame and then end-of-stream. `NoVideo` is the honest answer for a
+        // file whose only picture is its sleeve.
+        let stream = crate::best_video_stream(&ictx)
             .ok_or_else(|| MediaError::NoVideo(path.display().to_string()))?;
         let stream_index = stream.index();
         let tb = stream.time_base();
