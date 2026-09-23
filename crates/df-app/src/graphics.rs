@@ -75,17 +75,44 @@ pub const BG: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x1e, 0x2e);
 
 impl Gfx {
     pub fn new(window: Arc<Window>) -> Result<Gfx, GfxError> {
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|e| GfxError(format!("create surface: {e}")))?;
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .map_err(|e| GfxError(format!("no suitable adapter: {e}")))?;
+        // **Vulkan only, unless `WGPU_BACKEND` says otherwise.** With every
+        // backend enabled, wgpu brings GL up beside Vulkan and `request_adapter`
+        // enumerates both, and GL is never the one picked while Vulkan works.
+        // Measured on Hyprland + RTX 2070, release build: creating the EGL
+        // instance took 44 ms and probing the GL adapter's extensions another
+        // 45 ms, for a backend nothing draws with. Without it, exec to "window
+        // mapped" went from 235 ms to 172 ms (medians of eight interleaved
+        // runs). What is left is the Vulkan driver loading (about 60 ms) and
+        // `request_device` (about 40 ms), which no descriptor makes cheaper.
+        //
+        // The override goes in *before* `with_env`, so `WGPU_BACKEND=gl` still
+        // gets GL, and the flag variables (`WGPU_VALIDATION` and the rest) read
+        // the environment exactly as they did.
+        let pinned = wgpu::Backends::from_env().is_some();
+        let vulkan = wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        }
+        .with_env();
+        let (surface, adapter) = match find_adapter(&window, vulkan) {
+            Ok(found) => found,
+            // No Vulkan: one more attempt with every backend, which is what
+            // every launch used to do, so a machine without Vulkan ends up
+            // where it did before. On Wayland that is still an error — "gl not
+            // compatible with provided surface", because this instance has no
+            // display handle to give EGL — and it was the same error before
+            // the narrowing (both checked with `VK_DRIVER_FILES=/nonexistent`).
+            // Not when `WGPU_BACKEND` chose the set: that was the user's
+            // choice, and the error should say it failed.
+            Err(e) if !pinned => {
+                log::warn!("Vulkan only: {e}; retrying with every backend");
+                find_adapter(
+                    &window,
+                    wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+                )?
+            }
+            Err(e) => return Err(e),
+        };
         let info = adapter.get_info();
         log::info!(
             "adapter: {} ({:?}, {:?})",
@@ -336,6 +363,29 @@ impl Gfx {
         frame.present();
         Presented::Shown
     }
+}
+
+/// An instance built from `desc`, the window's surface on it, and an adapter
+/// that can present to that surface.
+///
+/// The instance itself is dropped here: the surface and the adapter keep what
+/// they need of it alive, and a failed attempt must take its surface down with
+/// it before the next attempt makes another one on the same window.
+fn find_adapter(
+    window: &Arc<Window>,
+    desc: wgpu::InstanceDescriptor,
+) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), GfxError> {
+    let instance = wgpu::Instance::new(desc);
+    let surface = instance
+        .create_surface(window.clone())
+        .map_err(|e| GfxError(format!("create surface: {e}")))?;
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::default(),
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+    }))
+    .map_err(|e| GfxError(format!("no suitable adapter: {e}")))?;
+    Ok((surface, adapter))
 }
 
 /// Graphics init failed — fatal, and there is nothing useful to do but say so.

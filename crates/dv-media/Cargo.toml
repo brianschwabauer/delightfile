@@ -10,14 +10,27 @@ repository.workspace = true
 
 # ffmpeg-next 9.0 pairs with system ffmpeg 9 / libavcodec 63 (§2 pins the
 # crate × system-ffmpeg major; verified building against this machine's 9.0.1).
-# Default features give us codec/format/software-scaling/software-resampling —
-# exactly the demux/decode/swscale/swresample surface M1 needs.
+# Only codec/format/software-scaling/software-resampling — the demux/decode/
+# swscale/swresample surface this crate, dv-playback and df-app use. The
+# defaults also turn on `device` and `filter`, which nothing here calls, and
+# `device` costs every launch: `ffmpeg::init` then calls
+# `avdevice_register_all`, so libavdevice lands in df-app's NEEDED list and
+# brings libavfilter, libplacebo, glslang, shaderc, SPIRV-Tools, pulse, jack,
+# v4l2, vmaf and rubberband with it — 41 of the 164 libraries the dynamic
+# linker mapped before `main` ran. Dropping them took `delightfile --version`
+# from 45 ms to 27 ms and exec to first frame from 172 ms to 154 ms (medians
+# of eight runs, release build).
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
 log.workspace = true
 dv-core = { path = "../dv-core" }
-ffmpeg-next = "9.0"
+ffmpeg-next = { version = "9.0", default-features = false, features = [
+    "codec",
+    "format",
+    "software-resampling",
+    "software-scaling",
+] }
 # Only the still-image codecs we accept (§9) + JPEG for thumbnail encode (§4.3).
 image = { version = "0.25", default-features = false, features = [
     "jpeg",
