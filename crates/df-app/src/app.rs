@@ -43,6 +43,7 @@ use winit::window::{Window, WindowId};
 
 use crate::archive::ExtractMode;
 use crate::chrome;
+use crate::cli::PickMode;
 use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
 use crate::dnd;
 use crate::finder::{self, Choice, Finder, Source};
@@ -865,14 +866,28 @@ fn plural_verb(n: usize) -> &'static str {
 enum Quit {
     /// `q`, or closing the window: the shell wrapper follows you here.
     WriteCwd,
-    /// `Q`: leave the shell where it was (PLAN §4.1).
+    /// `Q`: leave the shell where it was (PLAN §4.1). Also a picker's
+    /// `Cancel`, and its `Esc` with nothing left to dismiss: the dialog closes
+    /// having picked nothing.
     Silent,
-    /// `Enter` in a `--chooser-file` session: the picked paths go out, and the
-    /// cwd-file deliberately does not. The two flags are handed to the same
-    /// process by the portal's wrapper in its *directory* mode, and a pick
-    /// that also wrote the cwd would answer a question nobody asked with the
-    /// directory the picked file happened to be in.
+    /// A pick in a `--chooser-file` session: the picked paths go out, and the
+    /// cwd-file deliberately does not. A pick that also wrote the cwd would
+    /// answer a question nobody asked with the directory the picked file
+    /// happened to be in.
     Chosen,
+}
+
+/// How a `Save as:` name was answered (see [`App::save_as`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveAs {
+    /// Picked, or handed to the replace confirm: the prompt closes.
+    Done,
+    /// Not a name at all — empty, or a path. The prompt stays open with this
+    /// beside the field, where the text it is about is.
+    Refused(String),
+    /// A name, but a folder's. A toast has said so, and the prompt stays open
+    /// as typed.
+    Kept,
 }
 
 /// The whole application.
@@ -988,10 +1003,20 @@ pub struct App {
     tabs: Tabs,
     /// `--cwd-file`, written on a `q` quit (PLAN §3).
     cwd_file: Option<PathBuf>,
-    /// `--chooser-file`. `Some` is what makes this session a *picker*: the
-    /// system file dialog, standing where GTK's would (see [`crate::cli`]).
-    chooser_file: Option<PathBuf>,
-    /// What `Enter` picked, held until `finish` writes it.
+    /// `--chooser-file` and its switches. `Some` is what makes this session a
+    /// *picker*: the system file dialog, standing where GTK's would (see
+    /// [`crate::cli`]). Not to be confused with `picker`, which is `O`'s
+    /// opener card.
+    chooser: Option<crate::cli::Chooser>,
+    /// The file a save dialog suggested, when the portal handed us one — the
+    /// path it created before launching us (see `build/delightfile-wrapper.sh`).
+    ///
+    /// Held because it is the one existing file a save may land on without
+    /// being asked about: nobody's work is in it, and asking "Replace
+    /// photo.jpg?" about the name the dialog itself offered a second ago would
+    /// be a question with only one sensible answer.
+    suggested: Option<PathBuf>,
+    /// What a pick picked, held until `finish` writes it.
     ///
     /// Carried rather than written where it is chosen, so the one place a
     /// session can end is the one place anything is written — the same reason
@@ -1689,6 +1714,16 @@ impl App {
         preview.set_sort(sort);
         let now = Instant::now();
         let (start, focus) = start_directory(args.start.as_deref());
+        // A save dialog's start path is the file the portal just created for
+        // it; that is the suggestion, spelled the way the listing will spell
+        // its row (the start directory joined with the name), so the two
+        // compare equal when the cursor lands on it.
+        let suggested = args
+            .chooser
+            .as_ref()
+            .filter(|chooser| chooser.save)
+            .and(focus.as_deref())
+            .map(|name| start.join(name));
         let mut tab = Tab::open(start, &mgr, sort, &scanner, now);
         // **Opening on a file puts the cursor on it once its row arrives.**
         // `Tab::open` *queues* the scan, so at this line the listing is empty
@@ -1736,7 +1771,8 @@ impl App {
             key_repeat: false,
             tabs: Tabs::new(tab),
             cwd_file: args.cwd_file,
-            chooser_file: args.chooser_file,
+            chooser: args.chooser,
+            suggested,
             chosen: Vec::new(),
             quit: None,
             engine,
@@ -1855,7 +1891,7 @@ impl App {
     fn init_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<(), GfxError> {
         use winit::platform::wayland::WindowAttributesExtWayland;
 
-        let title = match self.chooser_file {
+        let title = match self.chooser {
             Some(_) => PICKER_TITLE,
             None => APP_ID,
         };
@@ -4161,6 +4197,12 @@ impl App {
                 self.remote_delete(confirm.paths, now);
                 return;
             }
+            // A save's "Replace" is not an operation here at all: the program
+            // that asked for the name does the writing. The yes is the pick.
+            ConfirmKind::Replace => {
+                self.pick(confirm.paths);
+                return;
+            }
             // Both resolve the items from `confirm.paths` — the list the dialog
             // rendered and the user assented to — rather than re-deriving them
             // from the selection now. A watcher event while the dialog is up
@@ -4303,6 +4345,14 @@ impl App {
             self.navigate(path, now);
             return;
         }
+        // **A picker never launches anything.** This is also where a
+        // double-click and the menu's "Open" arrive, and in somebody else's
+        // file dialog both mean "this one": the row that was opened, alone —
+        // not the selection, which a double-click did not point at.
+        if self.chooser.is_some() {
+            self.pick_row(&entry.path, now);
+            return;
+        }
         // PLAN §7.6's download-on-open: a remote file has no local path for an
         // opener to take, so it is fetched first and the opener runs on the
         // temp file (which the session's ledger removes on quit).
@@ -4322,31 +4372,287 @@ impl App {
     /// `Enter` in a `--chooser-file` session: hand these paths back to
     /// whatever opened the dialog, and end.
     ///
-    /// Refused inside a virtual listing. An archive member, a remote file and
-    /// a trashed file all have paths that read perfectly well in this window
-    /// and mean nothing to the program on the other end of the pipe — it will
-    /// try to `open(2)` them. Saying so is the only honest answer; silently
-    /// handing over a path that does not exist would surface as the *browser*
-    /// failing to upload, three programs away from the mistake.
+    /// Refused inside a virtual listing — see [`App::refuse_virtual_pick`].
+    /// Refused too when a one-file dialog has somehow been handed several: the
+    /// selection is held to one row in that mode, but a band drawn over the
+    /// list is still a way to mark more, and the dialog on the other end would
+    /// take the first line and drop the rest without a word.
     fn choose(&mut self, now: Instant) {
-        if let Some(kind) = self.tab().virtual_kind() {
-            let where_ = match kind {
-                crate::tab::Virtual::Archive => "inside an archive",
-                crate::tab::Virtual::Remote => "on a remote service",
-                crate::tab::Virtual::Trash => "in the trash",
-            };
-            self.toasts.error(
-                format!("Nothing {where_} can be picked — it has no path on this machine"),
-                now,
-            );
+        if self.refuse_virtual_pick(now) {
             return;
         }
         let picked = self.targets();
         if picked.is_empty() {
             return;
         }
-        self.chosen = picked;
+        if picked.len() > 1 && self.single_pick() {
+            self.toasts.notice(self.one_only(), now);
+            return;
+        }
+        self.pick(picked);
+    }
+
+    /// The pick itself: remember what was picked and end the session, which
+    /// is where `finish` writes it.
+    fn pick(&mut self, paths: Vec<PathBuf>) {
+        self.chosen = paths;
         self.quit = Some(Quit::Chosen);
+    }
+
+    /// Whether the listing on screen is one no pick can come from, saying so
+    /// when it is.
+    ///
+    /// An archive member, a remote file and a trashed file all have paths
+    /// that read perfectly well in this window and mean nothing to the program
+    /// on the other end of the pipe — it will try to `open(2)` them. Saying so
+    /// is the only honest answer; silently handing over a path that does not
+    /// exist would surface as the *browser* failing to upload, three programs
+    /// away from the mistake.
+    fn refuse_virtual_pick(&mut self, now: Instant) -> bool {
+        let Some(kind) = self.tab().virtual_kind() else {
+            return false;
+        };
+        let where_ = match kind {
+            crate::tab::Virtual::Archive => "inside an archive",
+            crate::tab::Virtual::Remote => "on a remote service",
+            crate::tab::Virtual::Trash => "in the trash",
+        };
+        self.toasts.error(
+            format!("Nothing {where_} can be picked — it has no path on this machine"),
+            now,
+        );
+        true
+    }
+
+    /// Which dialog this is, when it is one.
+    fn pick_mode(&self) -> Option<PickMode> {
+        self.chooser.as_ref().map(crate::cli::Chooser::mode)
+    }
+
+    /// Whether this is a dialog that takes one path, and so holds the
+    /// selection to one row.
+    fn single_pick(&self) -> bool {
+        self.chooser
+            .as_ref()
+            .is_some_and(|chooser| !chooser.multiple)
+    }
+
+    /// The refusal a one-path dialog gives a second one, in the noun the
+    /// dialog is asking for.
+    fn one_only(&self) -> &'static str {
+        match self.pick_mode() {
+            Some(PickMode::Folder) => "This dialog takes one folder",
+            _ => "This dialog takes one file",
+        }
+    }
+
+    /// A selection command a one-path dialog has no use for — `Ctrl+a`,
+    /// `Ctrl+r`, `v` — refused with a word rather than quietly marking rows
+    /// the pick would then turn down. Returns whether it was refused.
+    fn refuse_many(&mut self, now: Instant) -> bool {
+        if !self.single_pick() {
+            return false;
+        }
+        self.toasts.notice(self.one_only(), now);
+        true
+    }
+
+    /// `Enter` in a picker session, by dialog.
+    ///
+    /// A directory is still *entered*, which is the only way to walk to what
+    /// you came for — except in a folder dialog with something selected, and
+    /// a file dialog with something selected, where the selection wins over
+    /// the row under the cursor exactly as [`Self::targets`] has it. A save
+    /// ignores the selection: it takes one name, the row the cursor is on.
+    fn picker_enter(&mut self, now: Instant) {
+        let Some(mode) = self.pick_mode() else {
+            return;
+        };
+        let dir = &self.tab().cwd.dir;
+        let cursor = dir
+            .cursor_entry()
+            .map(|entry| (entry.path.clone(), entry.is_dir()));
+        let selecting = dir.selected_count() > 0 && mode != PickMode::Save;
+        match cursor {
+            Some((path, true)) if !selecting => self.navigate(path, now),
+            _ => match mode {
+                PickMode::File | PickMode::Files => self.choose(now),
+                PickMode::Folder => self.choose_folder(now),
+                PickMode::Save => {
+                    if let Some((path, _)) = cursor {
+                        self.pick_row(&path, now);
+                    }
+                }
+            },
+        }
+    }
+
+    /// One row, picked on its own — a double-click, the menu's "Open", or
+    /// `Enter` in a save — by the rules of the dialog it was picked in.
+    ///
+    /// A file dialog takes the file. A folder dialog takes the folder the
+    /// file is *in*: the row is how you said which directory you meant, and
+    /// the directory is what the dialog can use. A save aims at that file,
+    /// asking first if it is not the one the dialog suggested.
+    fn pick_row(&mut self, path: &Path, now: Instant) {
+        let Some(mode) = self.pick_mode() else {
+            return;
+        };
+        if self.refuse_virtual_pick(now) {
+            return;
+        }
+        match mode {
+            PickMode::File | PickMode::Files => self.pick(vec![path.to_path_buf()]),
+            PickMode::Folder => {
+                let cwd = self.cwd();
+                self.pick(vec![cwd]);
+            }
+            PickMode::Save => self.save_to(path.to_path_buf(), now),
+        }
+    }
+
+    /// A folder dialog's "Choose folder": the selected folders when any are
+    /// selected, the folder on screen when none are.
+    ///
+    /// Selected *files* do not count. A folder dialog's selection can only
+    /// usefully hold folders, and a selection of three photos standing in for
+    /// "the folder they are in" would be a guess at what was meant; with no
+    /// folder among them the answer is the one with nothing to guess, the
+    /// directory you are in.
+    fn choose_folder(&mut self, now: Instant) {
+        if self.refuse_virtual_pick(now) {
+            return;
+        }
+        let dir = &self.tab().cwd.dir;
+        let mut folders: Vec<PathBuf> = dir
+            .entries()
+            .iter()
+            .filter(|entry| entry.is_dir() && dir.is_selected(&entry.name))
+            .map(|entry| entry.path.clone())
+            .collect();
+        if folders.is_empty() {
+            folders.push(self.cwd());
+        }
+        if folders.len() > 1 && self.single_pick() {
+            self.toasts.notice(self.one_only(), now);
+            return;
+        }
+        self.pick(folders);
+    }
+
+    /// A save aimed at `target`: picked outright when it is new or is the
+    /// name the dialog suggested, and asked about first when it is somebody's
+    /// existing file.
+    ///
+    /// `symlink_metadata` rather than `exists`: a link whose target has gone
+    /// is still a name that is taken, and saving over it replaces the link.
+    fn save_to(&mut self, target: PathBuf, now: Instant) {
+        if self.refuse_virtual_pick(now) {
+            return;
+        }
+        let taken = target.symlink_metadata().is_ok();
+        if taken && self.suggested.as_deref() != Some(target.as_path()) {
+            self.dialog = Some(Dialog::Confirm(Confirm::new(
+                ConfirmKind::Replace,
+                vec![target],
+            )));
+            self.sync_context();
+            return;
+        }
+        self.pick(vec![target]);
+    }
+
+    /// A save dialog's Save button: `Save as:`, prefilled with the name the
+    /// dialog suggested — or, when it suggested none, the file under the
+    /// cursor, since saving next to a file under a name like it is the common
+    /// case — with the stem selected, so typing replaces the name and keeps
+    /// the extension, the way every save dialog opens.
+    fn open_save_as(&mut self, now: Instant) {
+        if self.refuse_virtual_pick(now) {
+            return;
+        }
+        let name = self
+            .suggested
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+            .or_else(|| {
+                self.tab()
+                    .cwd
+                    .dir
+                    .cursor_entry()
+                    .filter(|entry| !entry.is_dir())
+                    .map(|entry| entry.name.clone())
+            })
+            .unwrap_or_default();
+        // `Rename`'s preset puts the caret before the extension; the stem
+        // behind it is then selected, which is that preset plus the one thing
+        // a save does differently — the name is usually replaced, not edited.
+        let mut buffer = InputBuffer::for_rename_stem(&name);
+        let stem_end = buffer.cursor();
+        buffer.set_selection(0, stem_end);
+        self.open_prompt_with(PromptKind::SaveAs, buffer);
+    }
+
+    /// `Enter` on `Save as:`. An empty name or a path keeps the field open
+    /// with the reason beside it; a folder's name is refused with a toast and
+    /// the field stays as typed; anything else is a save to that name in the
+    /// directory on screen.
+    fn save_as(&mut self, text: &str, now: Instant) -> SaveAs {
+        let target = match save_target(&self.cwd(), text) {
+            Ok(target) => target,
+            Err(message) => return SaveAs::Refused(message),
+        };
+        if target.is_dir() {
+            let name = file_name(&target);
+            self.toasts.error(
+                format!("{name} is a folder — a save needs a file name"),
+                now,
+            );
+            return SaveAs::Kept;
+        }
+        self.save_to(target, now);
+        SaveAs::Done
+    }
+
+    /// What the top row's picker buttons say this frame, in a picker session.
+    fn pick_button(&self) -> Option<chrome::Pick> {
+        let mode = self.pick_mode()?;
+        let dir = &self.tab().cwd.dir;
+        let selected = dir.selected_count();
+        let label = match mode {
+            PickMode::File | PickMode::Files if selected > 1 => format!("Select {selected}"),
+            PickMode::File | PickMode::Files => "Select".to_string(),
+            PickMode::Folder => "Choose folder".to_string(),
+            PickMode::Save => "Save".to_string(),
+        };
+        // Nothing in an archive, a server or the trash can be picked at all.
+        // A file dialog needs a selection or a file under the cursor; a
+        // folder always has the folder on screen, and a save always has a
+        // name to be typed.
+        let enabled = self.tab().virtual_kind().is_none()
+            && match mode {
+                PickMode::File | PickMode::Files => {
+                    selected > 0 || dir.cursor_entry().is_some_and(|entry| !entry.is_dir())
+                }
+                PickMode::Folder | PickMode::Save => true,
+            };
+        Some(chrome::Pick { label, enabled })
+    }
+
+    /// The primary button, pressed: the same pick the dialog's `Enter` makes,
+    /// minus the walking into folders — a button labelled "Select" is not a
+    /// way to change directory.
+    fn press_pick(&mut self, now: Instant) {
+        if !self.pick_button().is_some_and(|pick| pick.enabled) {
+            return;
+        }
+        match self.pick_mode() {
+            Some(PickMode::File | PickMode::Files) => self.choose(now),
+            Some(PickMode::Folder) => self.choose_folder(now),
+            Some(PickMode::Save) => self.open_save_as(now),
+            None => {}
+        }
     }
 
     /// `O` / `Shift+Enter`: the picker, anchored to the row it is about.
@@ -6846,6 +7152,13 @@ impl App {
                 }
                 Err(message) => Some(message),
             },
+            PromptKind::SaveAs => match self.save_as(&text, now) {
+                SaveAs::Done => None,
+                SaveAs::Refused(message) => Some(message),
+                // A toast has said why; the field stays exactly as typed,
+                // because the fix is a different name and it is one edit away.
+                SaveAs::Kept => return,
+            },
         };
         match error {
             Some(message) => {
@@ -7070,10 +7383,27 @@ impl App {
         // `Space` advances the cursor, and every path that sends the cursor
         // somewhere takes the view back with it.
         self.attach_view();
+        let at = self.tab().cwd.dir.cursor();
+        self.toggle_row(at);
+        self.dir().move_cursor(1);
+    }
+
+    /// Toggle one row — `Space` and Ctrl-click both come here.
+    ///
+    /// In a dialog that takes one path, marking a row *moves* the mark rather
+    /// than adding one: the selection is cleared first, so there is never a
+    /// second row selected for the pick to refuse. Unmarking the marked row
+    /// is still an unmark.
+    fn toggle_row(&mut self, index: usize) {
+        let single = self.single_pick();
         let dir = self.dir();
-        let at = dir.cursor();
-        dir.toggle_selected(at);
-        dir.move_cursor(1);
+        let Some(marked) = dir.row(index).map(|entry| dir.is_selected(&entry.name)) else {
+            return;
+        };
+        if single && !marked {
+            dir.clear_selection();
+        }
+        dir.toggle_selected(index);
     }
 
     /// `v` and `V`. Pressing the same key again leaves the mode, keeping
@@ -7452,7 +7782,16 @@ impl App {
             // …and there is no rung under that one. The keyboard is already in
             // the list — it never left (PLAN §2.1) — so an `Esc` with nothing
             // open and nothing marked does nothing, visibly and on purpose.
-            EscapeRung::Nothing => {}
+            //
+            // Except in somebody else's file dialog, where `Esc` with nothing
+            // left to dismiss is what it is in every dialog: cancel. It is the
+            // *bottom* rung, so a press that closed a prompt or cleared a
+            // selection never also closes the window.
+            EscapeRung::Nothing => {
+                if self.chooser.is_some() {
+                    self.quit = Some(Quit::Silent);
+                }
+            }
         }
     }
 
@@ -7844,9 +8183,27 @@ impl App {
 
             // ── Selection ───────────────────────────────────────────────────
             C::ToggleSelect => self.toggle_select(),
-            C::SelectAll => self.dir().select_all(),
-            C::InvertSelection => self.dir().invert_selection(),
-            C::VisualMode => self.begin_visual(true),
+            // The three that mark many rows at once. A one-file dialog holds
+            // the selection to one row, so they are refused there with a word
+            // (see [`Self::refuse_many`]). `V` is not among them: it only ever
+            // unmarks.
+            C::SelectAll => {
+                if !self.refuse_many(now) {
+                    self.dir().select_all();
+                }
+            }
+            C::InvertSelection => {
+                if !self.refuse_many(now) {
+                    self.dir().invert_selection();
+                }
+            }
+            // …but `v` in a run `V` started is a way *out* of visual mode,
+            // and that is never refused.
+            C::VisualMode => {
+                if self.visual.is_some() || !self.refuse_many(now) {
+                    self.begin_visual(true);
+                }
+            }
             C::VisualUnset => self.begin_visual(false),
 
             // ── Filter and find ─────────────────────────────────────────────
@@ -8042,23 +8399,10 @@ impl App {
                 // A picker session answers `Enter` with the pick, before any
                 // of the openers below get a look in — the whole point of the
                 // mode is that this keystroke ends the dialog rather than
-                // launching something. A directory is still *entered*, which
-                // is the only way to walk to the file you came for; a
-                // selection wins over the row under the cursor even when that
-                // row is a folder, exactly as [`Self::targets`] has it.
-                if self.chooser_file.is_some() {
-                    let into = self
-                        .tab()
-                        .cwd
-                        .dir
-                        .cursor_entry()
-                        .filter(|entry| entry.is_dir())
-                        .filter(|_| self.tab().cwd.dir.selected_count() == 0)
-                        .map(|entry| entry.path.clone());
-                    match into {
-                        Some(path) => self.navigate(path, now),
-                        None => self.choose(now),
-                    }
+                // launching something. See [`Self::picker_enter`] for what
+                // "the pick" is in each of the four dialogs.
+                if self.chooser.is_some() {
+                    self.picker_enter(now);
                     return;
                 }
                 // Inside an archive `Enter` has no opener to reach for — the
@@ -8946,6 +9290,8 @@ impl App {
                 | Control::GitChip
                 | Control::SelectedChip
                 | Control::VisualChip
+                | Control::PickButton
+                | Control::CancelButton
                 | Control::Toast
                 | Control::ToastAction
                 | Control::PromptField => {}
@@ -9021,6 +9367,8 @@ impl App {
             | Control::GitChip
             | Control::SelectedChip
             | Control::VisualChip
+            | Control::PickButton
+            | Control::CancelButton
             | Control::Toast
             | Control::ToastAction
             | Control::PromptField => {}
@@ -9126,6 +9474,7 @@ impl App {
             dirty: self.repo_counts,
             position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
             rows: dir.len(),
+            pick: self.pick_button(),
         }
     }
 
@@ -9374,17 +9723,19 @@ impl App {
                     self.click_range(index);
                 } else if pointer.toggle {
                     // Ctrl-click: this row alone, on or off, leaving the rest
-                    // of the selection exactly as it is.
-                    let dir = self.dir();
-                    dir.toggle_selected(index);
-                    dir.set_cursor(index);
+                    // of the selection exactly as it is — or, in a one-file
+                    // dialog, moving the one mark there (see `toggle_row`).
+                    self.toggle_row(index);
+                    self.dir().set_cursor(index);
                 } else {
                     self.dir().set_cursor(index);
                     self.apply_visual();
                     if double {
                         // The second click *opens*, and opening is the openers
                         // path — the same one `Enter` takes, so a directory is
-                        // entered and a file is launched by its rule.
+                        // entered and a file is launched by its rule. In a
+                        // picker a file is *picked* instead, on its own: see
+                        // [`App::open_hovered`].
                         self.open_hovered(now);
                     }
                 }
@@ -9476,6 +9827,20 @@ impl App {
             // returned so the ripple has somewhere to be, but the press router
             // never gets this far: see the guard at the call site.
             Control::GitChip => geom.top.cluster.git.unwrap_or(egui::Rect::ZERO),
+            // A picker's two answers. A disabled pick never gets this far —
+            // the press site treats it as inert — but `press_pick` asks again,
+            // because a button that is only guarded by where it was clicked
+            // is one refactor away from picking nothing.
+            Control::PickButton => {
+                let rect = geom.top.cluster.pick.unwrap_or(egui::Rect::ZERO);
+                self.press_pick(now);
+                rect
+            }
+            Control::CancelButton => {
+                let rect = geom.top.cluster.cancel.unwrap_or(egui::Rect::ZERO);
+                self.quit = Some(Quit::Silent);
+                rect
+            }
             // The `…` stands for segments that are not on the row. Its tooltip
             // lists them; clicking it would have to pick one, and there is no
             // honest way to choose.
@@ -9575,6 +9940,13 @@ impl App {
     /// extends from where you just were rather than from where you started —
     /// which is what makes shift-click-shift-click walk a selection down a list.
     fn click_range(&mut self, index: usize) {
+        // A dialog that takes one path has no run to extend, so a Shift-click
+        // there is a plain click: the cursor moves, and nothing is marked.
+        if self.single_pick() {
+            self.dir().set_cursor(index);
+            self.apply_visual();
+            return;
+        }
         let dir = self.dir();
         let (from, to) = select::range(dir.cursor(), index);
         dir.select_range(from, to, true);
@@ -9716,7 +10088,7 @@ impl App {
     /// its ticks and greys were true.
     fn open_app_menu(&mut self) {
         let facts = menu::AppFacts {
-            picker: self.chooser_file.is_some(),
+            picker: self.chooser.is_some(),
             // `GotoPath`'s own refusal, in `run`.
             local: self.tab().virtual_kind().is_none(),
             targets: self.targets().len(),
@@ -12293,7 +12665,11 @@ impl App {
                     let hit = |rect: Option<egui::Rect>, control: Control| {
                         rect.filter(|rect| rect.contains(p)).map(|_| control)
                     };
-                    hit(cluster.yank.filter(|_| yank_live), Control::YankChip)
+                    // The picker's buttons first: they are the row's far end,
+                    // and nothing else is ever laid out over them.
+                    hit(cluster.pick, Control::PickButton)
+                        .or_else(|| hit(cluster.cancel, Control::CancelButton))
+                        .or_else(|| hit(cluster.yank.filter(|_| yank_live), Control::YankChip))
                         // The app menu's button, at the other end of the row
                         // from the cluster: nothing is laid over it.
                         .or_else(|| hit(Some(top_geom.menu), Control::MenuButton))
@@ -12482,7 +12858,15 @@ impl App {
         // The two controls that only ever *say* something take no press at all:
         // no ripple, no double-click history, nothing. A splash under a pointer
         // that changed nothing is the interface claiming to have acted.
-        let inert = matches!(over, Some((Control::GitChip | Control::CrumbEllipsis, _)));
+        //
+        // A disabled pick button is the third: it is drawn, but there is
+        // nothing it could pick, and a splash on it would say otherwise.
+        let pick_live = self.pick_button().is_some_and(|pick| pick.enabled);
+        let inert = match over {
+            Some((Control::GitChip | Control::CrumbEllipsis, _)) => true,
+            Some((Control::PickButton, _)) => !pick_live,
+            _ => false,
+        };
         // The prompt's text is not a button, so it takes its press apart from
         // them: no ripple (a field acknowledges a click with the caret, which
         // is already under the pointer), and a click *count* rather than a
@@ -12745,6 +13129,9 @@ impl App {
                 // hover, and a hand over either would promise a click that
                 // never happens (`delightful-ui` §2).
                 Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
+                // …and a pick button with nothing to pick is a third, for the
+                // same reason.
+                Control::PickButton if !pick_live => egui::CursorIcon::Default,
                 // Text is pointed at with the text cursor: it says "the caret
                 // goes here", which is exactly what a click will do.
                 Control::PromptField => egui::CursorIcon::Text,
@@ -12755,6 +13142,8 @@ impl App {
                 | Control::Counter
                 | Control::SelectedChip
                 | Control::VisualChip
+                | Control::PickButton
+                | Control::CancelButton
                 | Control::Toast
                 | Control::ToastAction
                 | Control::Action(_)
@@ -14079,15 +14468,10 @@ impl App {
                 gfx.surface_config.width,
                 gfx.surface_config.height
             );
-            // A picker session says so on the frame it appears. Not because
-            // the keys have changed — `Enter` on a file is still "the one you
-            // meant" — but because *quitting* has: this window was opened by
-            // some other program's dialog, and the difference between picking
-            // and cancelling is the difference between an upload happening and
-            // not. One line, on the way in, where a person is already looking.
-            if self.chooser_file.is_some() {
-                self.toasts
-                    .notice("Picking a file — Enter chooses, q cancels", Instant::now());
+            // A picker session says so on the frame it appears — see
+            // [`picker_greeting`].
+            if let Some(mode) = self.pick_mode() {
+                self.toasts.notice(picker_greeting(mode), Instant::now());
             }
         }
         if !self.logged_first_listing {
@@ -14157,8 +14541,8 @@ impl App {
 
     /// Write whatever this quit calls for, and say goodbye.
     fn finish(&mut self, event_loop: &ActiveEventLoop) {
-        if let (Some(Quit::Chosen), Some(path)) = (self.quit, self.chooser_file.as_deref()) {
-            crate::cli::write_chooser_file(path, &self.chosen);
+        if let (Some(Quit::Chosen), Some(chooser)) = (self.quit, self.chooser.as_ref()) {
+            crate::cli::write_chooser_file(&chooser.out, &self.chosen);
         }
         if let (Some(Quit::WriteCwd), Some(path)) = (self.quit, self.cwd_file.as_deref()) {
             // Never a URL: the file is `cd`'d into by a shell function, and
@@ -14505,6 +14889,39 @@ fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>) {
             log::warn!("{}: {e}; opening the current directory", path.display());
             (fallback(), None)
         }
+    }
+}
+
+/// The file a `Save as:` name stands for in `dir`, or why it stands for none.
+///
+/// Trimmed, as `a` and `r` trim: a leading or trailing space on a file name
+/// is almost always a slip of the thumb, and a file saved under one is a file
+/// nobody can find by typing its name. A `/` is refused rather than followed —
+/// the dialog saves *here*, in the directory on screen, and a name that
+/// wandered off into another one would be a save to somewhere nobody was
+/// looking.
+fn save_target(dir: &Path, text: &str) -> Result<PathBuf, String> {
+    let name = text.trim();
+    if name.is_empty() {
+        return Err("no name given".to_string());
+    }
+    if name.contains('/') {
+        return Err("a file name, not a path — no /".to_string());
+    }
+    Ok(dir.join(name))
+}
+
+/// The line a picker session opens with, one per dialog: what is being
+/// picked, and the keys that pick and cancel it. This window was opened by
+/// some other program's dialog, and the difference between picking and
+/// cancelling is the difference between an upload happening and not — so it
+/// is said once, on the way in, where a person is already looking.
+fn picker_greeting(mode: PickMode) -> &'static str {
+    match mode {
+        PickMode::File => "Pick a file — Enter or Select chooses, Esc cancels",
+        PickMode::Files => "Pick files — Space or Ctrl-click selects, Enter or Select chooses",
+        PickMode::Folder => "Choose a folder — Enter walks in, Choose folder picks it",
+        PickMode::Save => "Enter on a file replaces it, Save names a new one",
     }
 }
 
@@ -15999,6 +16416,12 @@ mod tests {
 
     impl Fixture {
         fn new(name: &str, names: &[&str]) -> Fixture {
+            Fixture::with_folders(name, names, &[])
+        }
+
+        /// The same, with empty folders beside the files. A folder's preview
+        /// is a listing, so it keeps out of the thumbnail cache as well.
+        fn with_folders(name: &str, names: &[&str], folders: &[&str]) -> Fixture {
             let root =
                 std::env::temp_dir().join(format!("df-fixture-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
@@ -16008,6 +16431,9 @@ mod tests {
             for name in names {
                 assert!(name.ends_with(".txt"), "{name}: text only (see Fixture)");
                 std::fs::write(files.join(name), b"x").expect("write the fixture");
+            }
+            for folder in folders {
+                std::fs::create_dir_all(files.join(folder)).expect("make a fixture folder");
             }
             let state = root.join("state").join("state");
             let mut app = App::for_test(Config::default(), files.clone(), state);
@@ -16581,5 +17007,413 @@ mod tests {
         app.toasts.clear();
         app.run(Command::ViewScaleCompact, 10, now);
         assert!(app.toasts.current().is_none());
+    }
+
+    // ── The picker (`--chooser-file` and its switches) ──────────────────────
+
+    /// A fixture that is somebody's file dialog: `files` (text) and empty
+    /// `folders`, opened the way the portal's wrapper opens one. Folders sort
+    /// first, as the default config has it.
+    fn picker(
+        name: &str,
+        files: &[&str],
+        folders: &[&str],
+        (multiple, directory, save): (bool, bool, bool),
+    ) -> Fixture {
+        let mut app = Fixture::with_folders(name, files, folders);
+        let out = app.files.join("..").join("out");
+        app.chooser = Some(crate::cli::Chooser {
+            out,
+            multiple,
+            directory,
+            save,
+        });
+        app
+    }
+
+    const FILE: (bool, bool, bool) = (false, false, false);
+    const FILES: (bool, bool, bool) = (true, false, false);
+    const FOLDER: (bool, bool, bool) = (false, true, false);
+    const SAVE: (bool, bool, bool) = (false, false, true);
+
+    /// Put the cursor on the row called `name`.
+    fn cursor_to(app: &mut App, name: &str) {
+        let at = app
+            .tab()
+            .cwd
+            .dir
+            .position_of(name)
+            .expect("a row by that name");
+        app.dir().set_cursor(at);
+    }
+
+    fn selected(app: &App) -> Vec<String> {
+        let dir = &app.tab().cwd.dir;
+        let mut names: Vec<String> = dir
+            .entries()
+            .iter()
+            .filter(|entry| dir.is_selected(&entry.name))
+            .map(|entry| entry.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn toast(app: &App) -> Option<String> {
+        app.toasts.current().map(|toast| toast.message.clone())
+    }
+
+    /// A one-file dialog holds the selection to one row: marking another row
+    /// moves the mark, Shift-click is a plain click, the three many-row
+    /// selectors say why they do nothing, and a pick of two — which a band can
+    /// still make — is refused rather than half-delivered.
+    #[test]
+    fn a_one_file_dialog_holds_one_mark() {
+        let mut app = picker("pick-one", &["a.txt", "b.txt", "c.txt"], &[], FILE);
+        let now = Instant::now();
+        app.run(Command::ToggleSelect, 10, now);
+        assert_eq!(selected(&app), ["a.txt"]);
+        // `Space` moved the cursor on to b.txt; marking it moves the mark.
+        app.run(Command::ToggleSelect, 10, now);
+        assert_eq!(selected(&app), ["b.txt"]);
+        // Ctrl-click, on another row and then on the marked one.
+        app.toggle_row(2);
+        assert_eq!(selected(&app), ["c.txt"]);
+        app.toggle_row(2);
+        assert!(selected(&app).is_empty(), "a marked row unmarks");
+        // Shift-click: the cursor goes there, nothing is marked.
+        app.dir().set_cursor(0);
+        app.click_range(2);
+        assert!(selected(&app).is_empty());
+        assert_eq!(app.tab().cwd.dir.cursor(), 2);
+
+        for command in [
+            Command::SelectAll,
+            Command::InvertSelection,
+            Command::VisualMode,
+        ] {
+            app.toasts.clear();
+            app.run(command, 10, now);
+            assert!(selected(&app).is_empty(), "{command:?} marked rows");
+            assert!(app.visual.is_none(), "{command:?} started a run");
+            assert_eq!(
+                toast(&app).as_deref(),
+                Some("This dialog takes one file"),
+                "{command:?}"
+            );
+        }
+
+        // Two marked the only way left — a band — and `Enter` refuses them.
+        app.toasts.clear();
+        app.dir().select_range(0, 1, true);
+        app.run(Command::Open, 10, now);
+        assert_eq!(app.quit, None, "a one-file dialog was handed two");
+        assert_eq!(toast(&app).as_deref(), Some("This dialog takes one file"));
+    }
+
+    /// A dialog that takes several keeps every way of marking them.
+    #[test]
+    fn a_many_file_dialog_selects_as_the_browser_does() {
+        let mut app = picker("pick-many", &["a.txt", "b.txt", "c.txt"], &[], FILES);
+        let now = Instant::now();
+        app.run(Command::ToggleSelect, 10, now);
+        app.run(Command::ToggleSelect, 10, now);
+        assert_eq!(selected(&app), ["a.txt", "b.txt"]);
+        app.click_range(2);
+        assert_eq!(selected(&app), ["a.txt", "b.txt", "c.txt"]);
+        app.dir().clear_selection();
+        app.run(Command::SelectAll, 10, now);
+        assert_eq!(selected(&app).len(), 3);
+        assert!(toast(&app).is_none());
+
+        app.run(Command::Open, 10, now);
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        let mut chosen = app.chosen.clone();
+        chosen.sort();
+        let files = app.files.clone();
+        assert_eq!(
+            chosen,
+            ["a.txt", "b.txt", "c.txt"].map(|name| files.join(name))
+        );
+    }
+
+    /// A double-click picks the row it landed on — alone, whatever else is
+    /// selected — and never reaches an opener. On a folder it walks in.
+    #[test]
+    fn a_double_click_picks_that_row_alone() {
+        let mut app = picker(
+            "pick-double",
+            &["a.txt", "b.txt", "c.txt"],
+            &["docs"],
+            FILES,
+        );
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let (a, b) = (
+            app.tab().cwd.dir.position_of("a.txt").expect("a.txt"),
+            app.tab().cwd.dir.position_of("b.txt").expect("b.txt"),
+        );
+        app.toggle_row(a);
+        app.toggle_row(b);
+
+        let at = row_centre(&app, app.tab().cwd.dir.position_of("c.txt").expect("c.txt"));
+        click_at(&mut app, &ctx, at);
+        assert_eq!(app.quit, None, "one click picked");
+        click_at(&mut app, &ctx, at);
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("c.txt")]);
+
+        let mut app = picker("pick-double-dir", &["a.txt"], &["docs"], FILE);
+        run_frame(&mut app, &ctx, Vec::new());
+        let at = row_centre(&app, app.tab().cwd.dir.position_of("docs").expect("docs"));
+        click_at(&mut app, &ctx, at);
+        click_at(&mut app, &ctx, at);
+        assert_eq!(app.quit, None, "a folder was picked");
+        assert_eq!(
+            app.cwd(),
+            app.files.join("docs"),
+            "the folder was not entered"
+        );
+    }
+
+    /// The primary button's word is the dialog's verb, and it is lit only when
+    /// pressing it would pick something.
+    #[test]
+    fn the_pick_button_says_what_it_would_do() {
+        let pick = |app: &App| app.pick_button().map(|pick| (pick.label, pick.enabled));
+
+        let mut app = picker("button-file", &["a.txt", "b.txt"], &["docs"], FILE);
+        // The cursor opens on the folder, and a file dialog cannot pick that.
+        assert_eq!(pick(&app), Some(("Select".to_string(), false)));
+        cursor_to(&mut app, "a.txt");
+        assert_eq!(pick(&app), Some(("Select".to_string(), true)));
+        // A selection lights it wherever the cursor is.
+        let a = app.tab().cwd.dir.cursor();
+        app.toggle_row(a);
+        cursor_to(&mut app, "docs");
+        assert_eq!(pick(&app), Some(("Select".to_string(), true)));
+
+        let mut app = picker("button-files", &["a.txt", "b.txt", "c.txt"], &[], FILES);
+        app.dir().select_all();
+        assert_eq!(pick(&app), Some(("Select 3".to_string(), true)));
+
+        let app = picker("button-folder", &["a.txt"], &["docs"], FOLDER);
+        assert_eq!(pick(&app), Some(("Choose folder".to_string(), true)));
+        let app = picker("button-save", &["a.txt"], &[], SAVE);
+        assert_eq!(pick(&app), Some(("Save".to_string(), true)));
+
+        // …and a file manager has no such button at all.
+        let app = Fixture::new("button-none", &["a.txt"]);
+        assert_eq!(pick(&app), None);
+    }
+
+    /// Where the frame draws the picker's two buttons, measured the way the
+    /// frame measures them.
+    fn picker_buttons(app: &App) -> (egui::Rect, egui::Rect) {
+        let measure = egui::Context::default();
+        let mut rects = None;
+        let _ = measure.run_ui(Default::default(), |ui| {
+            let cluster = app.cluster(Instant::now());
+            let geom =
+                chrome::cluster_geometry(ui.painter(), layout_of(app).path, &cluster, app.nerd);
+            rects = geom.pick.zip(geom.cancel);
+        });
+        rects.expect("a picker draws its buttons")
+    }
+
+    /// The buttons, clicked: `Select` picks, a dimmed `Select` does nothing,
+    /// and `Cancel` closes the dialog having written nothing.
+    #[test]
+    fn the_picker_buttons_pick_and_cancel() {
+        let ctx = egui::Context::default();
+        let mut app = picker("click-pick", &["a.txt", "b.txt"], &["docs"], FILE);
+        run_frame(&mut app, &ctx, Vec::new());
+        // On the folder: dimmed, and a click on it is nothing.
+        let (pick, _) = picker_buttons(&app);
+        click_at(&mut app, &ctx, pick.center());
+        assert_eq!(app.quit, None, "a disabled Select picked");
+
+        cursor_to(&mut app, "b.txt");
+        run_frame(&mut app, &ctx, Vec::new());
+        let (pick, _) = picker_buttons(&app);
+        click_at(&mut app, &ctx, pick.center());
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("b.txt")]);
+
+        let mut app = picker("click-cancel", &["a.txt"], &[], FILE);
+        run_frame(&mut app, &ctx, Vec::new());
+        let (_, cancel) = picker_buttons(&app);
+        click_at(&mut app, &ctx, cancel.center());
+        assert_eq!(app.quit, Some(Quit::Silent));
+        assert!(app.chosen.is_empty());
+    }
+
+    /// A folder dialog: `Enter` walks into a folder, `Enter` on a file picks
+    /// the folder it is in, and Choose folder picks the selected folder — or,
+    /// with none selected, the one on screen.
+    #[test]
+    fn a_folder_dialog_picks_folders() {
+        let now = Instant::now();
+        let mut app = picker("folder-enter", &["a.txt"], &["docs", "music"], FOLDER);
+        app.run(Command::Open, 10, now);
+        assert_eq!(app.quit, None);
+        assert_eq!(
+            app.cwd(),
+            app.files.join("docs"),
+            "Enter on a folder enters it"
+        );
+
+        let mut app = picker("folder-file", &["a.txt"], &["docs", "music"], FOLDER);
+        cursor_to(&mut app, "a.txt");
+        app.run(Command::Open, 10, now);
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(
+            app.chosen,
+            [app.files.clone()],
+            "the file's folder, not the file"
+        );
+
+        let mut app = picker("folder-selected", &["a.txt"], &["docs", "music"], FOLDER);
+        let music = app.tab().cwd.dir.position_of("music").expect("music");
+        app.toggle_row(music);
+        app.press_pick(now);
+        assert_eq!(app.chosen, [app.files.join("music")]);
+
+        let mut app = picker("folder-here", &["a.txt"], &["docs"], FOLDER);
+        app.press_pick(now);
+        assert_eq!(app.chosen, [app.files.clone()], "nothing selected is here");
+    }
+
+    /// `Esc` climbs its ladder as ever, and only a press with nothing left to
+    /// dismiss cancels the dialog. A file manager's bottom rung stays a no-op.
+    #[test]
+    fn escape_cancels_a_dialog_only_from_the_bottom_rung() {
+        let now = Instant::now();
+        let mut app = picker("escape", &["a.txt", "b.txt"], &[], FILE);
+        app.run(Command::ToggleSelect, 10, now);
+        app.run(Command::Escape, 10, now);
+        assert!(selected(&app).is_empty(), "the first Esc clears the mark");
+        assert_eq!(app.quit, None, "…and only that");
+        app.run(Command::Escape, 10, now);
+        assert_eq!(app.quit, Some(Quit::Silent));
+        assert!(app.chosen.is_empty());
+
+        let mut app = Fixture::new("escape-browser", &["a.txt"]);
+        app.run(Command::Escape, 10, now);
+        assert_eq!(app.quit, None);
+    }
+
+    /// What `Save as:` accepts: a bare name, trimmed, in the directory given.
+    #[test]
+    fn a_save_name_is_a_name() {
+        let dir = Path::new("/home/brian/Downloads");
+        assert_eq!(save_target(dir, " report.pdf "), Ok(dir.join("report.pdf")));
+        assert_eq!(save_target(dir, ".bashrc"), Ok(dir.join(".bashrc")));
+        for bad in ["", "   ", "a/b.txt", "/etc/passwd", "../x"] {
+            assert!(save_target(dir, bad).is_err(), "{bad:?} was taken");
+        }
+    }
+
+    /// A save aimed at the name the dialog suggested is picked outright; aimed
+    /// at anybody else's file it asks first, and the yes is the pick.
+    #[test]
+    fn a_save_asks_before_replacing_a_file_it_did_not_suggest() {
+        let now = Instant::now();
+        let names = ["suggested.txt", "other.txt"];
+        let mut app = picker("save-suggested", &names, &[], SAVE);
+        app.suggested = Some(app.files.join("suggested.txt"));
+        cursor_to(&mut app, "suggested.txt");
+        app.run(Command::Open, 10, now);
+        assert!(app.dialog.is_none(), "asked about the suggested name");
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("suggested.txt")]);
+
+        let mut app = picker("save-other", &names, &[], SAVE);
+        app.suggested = Some(app.files.join("suggested.txt"));
+        cursor_to(&mut app, "other.txt");
+        app.run(Command::Open, 10, now);
+        assert_eq!(app.quit, None, "replaced without asking");
+        let title = match &app.dialog {
+            Some(Dialog::Confirm(confirm)) => confirm.title(),
+            _ => panic!("no confirm"),
+        };
+        assert_eq!(title, "Replace other.txt?");
+        app.submit_overlay(10, now);
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("other.txt")]);
+    }
+
+    /// Save opens `Save as:` on the suggested name with its stem selected;
+    /// what it accepts is a new name here, and what it refuses stays in the
+    /// field.
+    #[test]
+    fn save_as_names_a_new_file() {
+        let now = Instant::now();
+        let mut app = picker("save-as", &["suggested.txt", "other.txt"], &["docs"], SAVE);
+        app.suggested = Some(app.files.join("suggested.txt"));
+        app.press_pick(now);
+        let prompt = app.prompt.as_ref().expect("Save opened a prompt");
+        assert_eq!(prompt.kind, PromptKind::SaveAs);
+        assert_eq!(prompt.query(), "suggested.txt");
+        assert_eq!(
+            prompt.buffer.selection(),
+            Some(0..9),
+            "the stem is selected"
+        );
+
+        // Not a name: the reason sits beside the field.
+        for bad in ["", "sub/name.txt"] {
+            app.submit_prompt(bad.to_string(), now);
+            let error = app.prompt.as_ref().and_then(|p| p.error.clone());
+            assert!(error.is_some(), "{bad:?} was not refused inline");
+        }
+        // A folder's name: a toast, and the field stays as typed.
+        app.submit_prompt("docs".to_string(), now);
+        assert!(app.prompt.is_some(), "the prompt closed on a folder");
+        assert!(
+            toast(&app).is_some_and(|t| t.contains("folder")),
+            "{:?}",
+            toast(&app)
+        );
+        assert_eq!(app.quit, None);
+
+        app.submit_prompt("fresh.txt".to_string(), now);
+        assert!(app.prompt.is_none());
+        assert!(app.dialog.is_none(), "a new name asked about replacing");
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("fresh.txt")]);
+
+        // With no suggestion the cursor's file is the starting name, and
+        // saving over it is asked about.
+        let mut app = picker("save-as-cursor", &["other.txt"], &[], SAVE);
+        app.press_pick(now);
+        assert_eq!(app.prompt.as_ref().map(|p| p.query()), Some("other.txt"));
+        app.submit_prompt("other.txt".to_string(), now);
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Confirm(c)) if c.kind == ConfirmKind::Replace),
+            "an existing file was replaced without asking"
+        );
+        assert_eq!(app.quit, None);
+    }
+
+    /// The line each dialog opens with.
+    #[test]
+    fn each_dialog_says_how_it_is_answered() {
+        assert_eq!(
+            picker_greeting(PickMode::File),
+            "Pick a file — Enter or Select chooses, Esc cancels"
+        );
+        assert_eq!(
+            picker_greeting(PickMode::Files),
+            "Pick files — Space or Ctrl-click selects, Enter or Select chooses"
+        );
+        assert_eq!(
+            picker_greeting(PickMode::Folder),
+            "Choose a folder — Enter walks in, Choose folder picks it"
+        );
+        assert_eq!(
+            picker_greeting(PickMode::Save),
+            "Enter on a file replaces it, Save names a new one"
+        );
     }
 }

@@ -1,9 +1,10 @@
 //! The command line: `delightfile [path]`, `--cwd-file=<path>`,
-//! `--chooser-file=<path>` (PLAN §3).
+//! `--chooser-file=<path>` and the three `--chooser-*` switches that say what
+//! kind of dialog it is standing in for (PLAN §3).
 //!
 //! Hand-rolled rather than clap, for the same reason the TOML parser is
-//! hand-rolled: there are four flags, and a dependency that parses them would
-//! be larger than the program's whole config layer.
+//! hand-rolled: there are a handful of flags, and a dependency that parses them
+//! would be larger than the program's whole config layer.
 //!
 //! The one flag that matters is `--cwd-file`. Brian's Hyprland `Super+F` runs
 //! yazi with it and `cd`s the shell to whatever came back, so swapping `yazi`
@@ -17,6 +18,14 @@
 //! back. The flag is spelled and behaves exactly as yazi's does, because the
 //! portal's wrapper contract is written against yazi and a picker that needs
 //! its own wrapper is a picker nobody can drop in.
+//!
+//! The three switches beside it are delightfile's own. yazi is told nothing
+//! about the dialog and gets away with it because it is a terminal program the
+//! wrapper can drive around the edges — a folder dialog there is a cwd-file
+//! promoted to the answer after the fact, which is also why `q` in yazi can
+//! never cancel one. A window that draws its own "Select" button has to know
+//! what the button is selecting, so the wrapper passes the portal's
+//! `multiple`, `directory` and `save` straight through.
 
 use std::path::PathBuf;
 
@@ -27,11 +36,61 @@ pub struct Args {
     pub start: Option<PathBuf>,
     /// Where to write the final directory on a `q` quit.
     pub cwd_file: Option<PathBuf>,
-    /// Where to write the chosen paths, one per line, when `Enter` picks
-    /// something. `Some` is what puts the session in *chooser* mode at all:
-    /// `Enter` on a file stops meaning "open it with the opener rules" and
-    /// starts meaning "this is the one" (see `App::choose`).
-    pub chooser_file: Option<PathBuf>,
+    /// The dialog this session is standing in for. `Some` is what puts the
+    /// session in *chooser* mode at all: `Enter` on a file stops meaning "open
+    /// it with the opener rules" and starts meaning "this is the one" (see
+    /// `App::choose`).
+    pub chooser: Option<Chooser>,
+}
+
+/// A file dialog, as the portal described it (`--chooser-file` and its three
+/// switches).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chooser {
+    /// Where to write the chosen paths, one per line, when something is
+    /// picked. Written only then: see [`write_chooser_file`].
+    pub out: PathBuf,
+    /// `--chooser-multiple`: the dialog takes more than one path. Without it
+    /// the selection is held to one row.
+    pub multiple: bool,
+    /// `--chooser-directory`: the answer is a folder, not a file.
+    pub directory: bool,
+    /// `--chooser-save`: the answer is a name to save *to*, which need not
+    /// exist yet.
+    pub save: bool,
+}
+
+/// What a [`Chooser`] is choosing, read off its switches in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickMode {
+    /// One existing file.
+    File,
+    /// One or more existing files.
+    Files,
+    /// A folder (or several, with `--chooser-multiple`).
+    Folder,
+    /// A name to save to.
+    Save,
+}
+
+impl Chooser {
+    /// Which of the four dialogs this is.
+    ///
+    /// `save` outranks `directory`, the order every shipped wrapper tests them
+    /// in. The portal never sends both — it implements `SaveFile` and refuses a
+    /// directory as its answer — so the order only has to be *an* order, and
+    /// the one the other wrappers already use is the least surprising.
+    pub fn mode(&self) -> PickMode {
+        if self.save {
+            PickMode::Save
+        } else if self.directory {
+            PickMode::Folder
+        } else if self.multiple {
+            PickMode::Files
+        } else {
+            PickMode::File
+        }
+    }
 }
 
 /// What `main` should do next.
@@ -55,9 +114,16 @@ usage: delightfile [path] [options]
                          a file opens its directory with the cursor on it
   --cwd-file=<path>      write the final directory here when quitting with `q`
                          (`Q` quits without writing it)
-  --chooser-file=<path>  pick rather than open: `Enter` writes the selected
-                         paths here, one per line, and quits. Quitting any
-                         other way writes nothing, which is a cancel.
+  --chooser-file=<path>  pick rather than open: `Enter` or the Select button
+                         writes the picked paths here, one per line, and
+                         quits. Quitting any other way writes nothing, which
+                         is a cancel.
+  --chooser-multiple     the dialog takes several files (default: one)
+  --chooser-directory    the dialog wants a folder: Choose folder picks the
+                         selected folders, or the one you are in
+  --chooser-save         the dialog is a save: pick a file to replace, or
+                         Save to type a new name
+                         (the three above need --chooser-file)
   -h, --help             show this
   -V, --version          show the version
 ";
@@ -66,6 +132,11 @@ usage: delightfile [path] [options]
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
     let mut out = Args::default();
     let mut rest_are_paths = false;
+    // The switches are collected on their own and folded into a `Chooser`
+    // at the end, because they may come before `--chooser-file` as well as
+    // after it — the order a person types flags in is not a meaning.
+    let mut chooser_file: Option<PathBuf> = None;
+    let (mut multiple, mut directory, mut save) = (false, false, false);
     for arg in args {
         if rest_are_paths || !arg.starts_with('-') {
             if out.start.is_some() {
@@ -82,11 +153,14 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
             "-V" | "--version" => {
                 return Outcome::Print(format!("delightfile {}\n", env!("CARGO_PKG_VERSION")))
             }
+            "--chooser-multiple" => multiple = true,
+            "--chooser-directory" => directory = true,
+            "--chooser-save" => save = true,
             _ => match flag(&arg, "--cwd-file") {
                 Flag::Value(path) => out.cwd_file = Some(PathBuf::from(path)),
                 Flag::Empty => return Outcome::Fail("--cwd-file needs a path".to_string()),
                 Flag::Absent => match flag(&arg, "--chooser-file") {
-                    Flag::Value(path) => out.chooser_file = Some(PathBuf::from(path)),
+                    Flag::Value(path) => chooser_file = Some(PathBuf::from(path)),
                     Flag::Empty => return Outcome::Fail("--chooser-file needs a path".to_string()),
                     Flag::Absent => {
                         return Outcome::Fail(format!("unknown option `{arg}`\n\n{USAGE}"))
@@ -94,6 +168,34 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
                 },
             },
         }
+    }
+    match chooser_file {
+        Some(out_path) => {
+            out.chooser = Some(Chooser {
+                out: out_path,
+                multiple,
+                directory,
+                save,
+            })
+        }
+        // A switch with nothing to write its answer to is a wrapper that has
+        // lost an argument. Refused rather than ignored: the window would open
+        // as a plain file manager, and the dialog behind it would wait on a
+        // pick that has nowhere to go.
+        None if multiple || directory || save => {
+            let which = [
+                (multiple, "--chooser-multiple"),
+                (directory, "--chooser-directory"),
+                (save, "--chooser-save"),
+            ]
+            .iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(", ");
+            return Outcome::Fail(format!("{which}: only meaningful with --chooser-file"));
+        }
+        None => {}
     }
     Outcome::Run(out)
 }
@@ -167,7 +269,7 @@ mod tests {
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/tmp")),
                 cwd_file: None,
-                chooser_file: None,
+                chooser: None,
             })
         );
     }
@@ -180,7 +282,7 @@ mod tests {
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
                 cwd_file: Some(PathBuf::from("/tmp/yazi-cwd")),
-                chooser_file: None,
+                chooser: None,
             })
         );
     }
@@ -199,10 +301,19 @@ mod tests {
         assert!(matches!(parse_str(&["/tmp", "/var"]), Outcome::Fail(_)));
     }
 
-    /// The shape `xdg-desktop-portal-termfilechooser`'s wrapper invokes, in
-    /// all three of the modes it has: pick a file, pick several, pick a
-    /// directory (which needs the cwd-file as well), and save (which is a pick
-    /// aimed at a suggested name the portal has already created).
+    /// A chooser writing to `/tmp/out`, with the three switches as given.
+    fn chooser(multiple: bool, directory: bool, save: bool) -> Option<Chooser> {
+        Some(Chooser {
+            out: PathBuf::from("/tmp/out"),
+            multiple,
+            directory,
+            save,
+        })
+    }
+
+    /// The shapes `build/delightfile-wrapper.sh` invokes, one per dialog the
+    /// portal has: pick a file, pick several, pick a folder, and save (which
+    /// is aimed at a suggested name the portal has already created).
     #[test]
     fn the_portal_invocations_parse() {
         assert_eq!(
@@ -210,31 +321,107 @@ mod tests {
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
                 cwd_file: None,
-                chooser_file: Some(PathBuf::from("/tmp/out")),
+                chooser: chooser(false, false, false),
             })
         );
         assert_eq!(
             parse_str(&[
                 "--chooser-file=/tmp/out",
-                "--cwd-file=/tmp/out.1",
-                "/home/brian",
+                "--chooser-multiple",
+                "/home/brian"
             ]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
-                cwd_file: Some(PathBuf::from("/tmp/out.1")),
-                chooser_file: Some(PathBuf::from("/tmp/out")),
+                cwd_file: None,
+                chooser: chooser(true, false, false),
+            })
+        );
+        // A folder dialog no longer needs a cwd-file: the pick is written by
+        // the window, so `q` can cancel it like any other.
+        assert_eq!(
+            parse_str(&[
+                "--chooser-file=/tmp/out",
+                "--chooser-directory",
+                "/home/brian"
+            ]),
+            Outcome::Run(Args {
+                start: Some(PathBuf::from("/home/brian")),
+                cwd_file: None,
+                chooser: chooser(false, true, false),
             })
         );
         // Save: the suggested destination is a *file*, and `start_directory`
         // in `app.rs` is what turns it into "its directory, cursor on it".
         assert_eq!(
-            parse_str(&["--chooser-file=/tmp/out", "/home/brian/Downloads/photo.jpg"]),
+            parse_str(&[
+                "--chooser-file=/tmp/out",
+                "--chooser-save",
+                "/home/brian/Downloads/photo.jpg",
+            ]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian/Downloads/photo.jpg")),
                 cwd_file: None,
-                chooser_file: Some(PathBuf::from("/tmp/out")),
+                chooser: chooser(false, false, true),
             })
         );
+    }
+
+    /// The switches are switches wherever they stand: before the file they
+    /// qualify, after it, or all at once.
+    #[test]
+    fn the_chooser_switches_parse_in_any_order() {
+        assert_eq!(
+            parse_str(&[
+                "--chooser-save",
+                "--chooser-directory",
+                "/home/brian",
+                "--chooser-multiple",
+                "--chooser-file=/tmp/out",
+            ]),
+            Outcome::Run(Args {
+                start: Some(PathBuf::from("/home/brian")),
+                cwd_file: None,
+                chooser: chooser(true, true, true),
+            })
+        );
+    }
+
+    /// A switch without `--chooser-file` has nowhere to send its answer, and
+    /// says which switch it was rather than guessing at a mode.
+    #[test]
+    fn a_chooser_switch_needs_a_chooser_file() {
+        for switch in [
+            "--chooser-multiple",
+            "--chooser-directory",
+            "--chooser-save",
+        ] {
+            match parse_str(&[switch, "/home/brian"]) {
+                Outcome::Fail(message) => assert!(message.contains(switch), "{message}"),
+                other => panic!("{switch} alone parsed as {other:?}"),
+            }
+        }
+        // A value is not how a switch is spelled.
+        assert!(matches!(
+            parse_str(&["--chooser-file=/tmp/out", "--chooser-save=1"]),
+            Outcome::Fail(_)
+        ));
+    }
+
+    /// Which dialog the switches describe, in the order the shipped wrappers
+    /// test them: save before directory before multiple.
+    #[test]
+    fn the_switches_name_one_dialog() {
+        let mode = |multiple, directory, save| {
+            chooser(multiple, directory, save)
+                .map(|c| c.mode())
+                .expect("a chooser")
+        };
+        assert_eq!(mode(false, false, false), PickMode::File);
+        assert_eq!(mode(true, false, false), PickMode::Files);
+        assert_eq!(mode(false, true, false), PickMode::Folder);
+        assert_eq!(mode(true, true, false), PickMode::Folder);
+        assert_eq!(mode(false, false, true), PickMode::Save);
+        assert_eq!(mode(false, true, true), PickMode::Save);
     }
 
     /// Nothing is written unless something was picked: an empty file is how
@@ -270,7 +457,7 @@ mod tests {
             Outcome::Run(Args {
                 start: Some(PathBuf::from("--help")),
                 cwd_file: None,
-                chooser_file: None,
+                chooser: None,
             })
         );
     }

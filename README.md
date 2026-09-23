@@ -123,11 +123,21 @@ org.freedesktop.impl.portal.FileChooser=termfilechooser
 
 Then `systemctl --user restart xdg-desktop-portal`.
 
-In a picker session `Enter` picks the selection and quits, a directory still opens on
-`Enter`, and `q` cancels. The mechanism underneath is one flag:
+In a picker session the top row ends with `Cancel` and a button that answers the dialog:
+`Select` for files, `Choose folder` for a folder, `Save` for a save. `Enter` picks the
+selection (or the file under the cursor) and quits, a directory still opens on `Enter`, a
+double-click picks the row it lands on, and `q`, `Esc` or `Cancel` cancels. A dialog that
+takes one file holds the selection to one row. In a save, `Enter` on a file replaces it
+(asking first unless it is the name the dialog suggested) and `Save` types a new name.
+
+The mechanism underneath is one flag, plus three switches the wrapper passes through from
+the portal:
 
 ```sh
 delightfile --chooser-file=/tmp/picked ~/Downloads
+delightfile --chooser-file=/tmp/picked --chooser-multiple ~/Downloads
+delightfile --chooser-file=/tmp/picked --chooser-directory ~/Downloads
+delightfile --chooser-file=/tmp/picked --chooser-save ~/Downloads/photo.jpg
 ```
 
 Whatever was picked is written to that file, one absolute path per line. Nothing is written

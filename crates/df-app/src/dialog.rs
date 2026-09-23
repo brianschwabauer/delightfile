@@ -92,6 +92,12 @@ pub enum ConfirmKind {
     Purge,
     /// "Empty trash", from the palette or the context menu. The scary one.
     EmptyTrash,
+    /// A save dialog aimed at a file that is already there (`--chooser-save`).
+    /// Nothing is overwritten *here* — the program that asked does that after
+    /// the pick — but the pick is the last moment anybody can say no, so this
+    /// is where it is asked. Never for the name the dialog itself suggested:
+    /// the portal made that file a moment ago, and it is nobody's work.
+    Replace,
 }
 
 /// A yes/no card over the panes.
@@ -140,6 +146,21 @@ impl Confirm {
             ConfirmKind::RemoteDelete => format!("Delete {n} remote {noun} permanently?"),
             ConfirmKind::Purge => format!("Destroy {n} trashed {noun}?"),
             ConfirmKind::EmptyTrash => format!("Empty the trash — all {n} {noun}?"),
+            // One file, by name: the question is about *that* file, and a
+            // count of one would be the card not saying which.
+            ConfirmKind::Replace => format!("Replace {}?", self.body().join(", ")),
+        }
+    }
+
+    /// How many names the card lists under its title.
+    ///
+    /// None for a replace, whose title already *is* the name — the same word
+    /// twice, once as the question and once underneath it, would read as two
+    /// files.
+    fn lines(&self) -> usize {
+        match self.kind {
+            ConfirmKind::Replace => 0,
+            _ => self.paths.len().min(BODY_VISIBLE),
         }
     }
 
@@ -543,7 +564,7 @@ fn title_font() -> egui::FontId {
 /// the gap between them is the same width all the way round the curve
 /// (`delightful-ui` §15).
 pub fn confirm_geometry(painter: &egui::Painter, area: egui::Rect, confirm: &Confirm) -> Geometry {
-    let lines = confirm.paths.len().min(BODY_VISIBLE);
+    let lines = confirm.lines();
     let title = painter
         .layout_no_wrap(confirm.title(), title_font(), egui::Color32::WHITE)
         .size();
@@ -597,6 +618,7 @@ pub fn confirm_verb(kind: ConfirmKind) -> &'static str {
         ConfirmKind::RemoteDelete => "Delete",
         ConfirmKind::Purge => "Destroy",
         ConfirmKind::EmptyTrash => "Empty",
+        ConfirmKind::Replace => "Replace",
     }
 }
 
@@ -1466,6 +1488,15 @@ mod tests {
             assert_eq!(confirm.title(), title);
             assert!(confirm.danger(), "{kind:?} is red");
         }
+
+        // A save's replace names its one file in the question, and lists
+        // nothing under it: the name once, where it is being asked about.
+        let replace = Confirm::new(ConfirmKind::Replace, vec![PathBuf::from("/tmp/report.pdf")]);
+        assert_eq!(replace.title(), "Replace report.pdf?");
+        assert_eq!(confirm_verb(replace.kind), "Replace");
+        assert!(replace.danger(), "a replace loses a file");
+        assert_eq!(replace.lines(), 0);
+        assert_eq!(one.lines(), 1);
     }
 
     /// The body scrolls and stops — `↑` at the top and `↓` at the bottom are

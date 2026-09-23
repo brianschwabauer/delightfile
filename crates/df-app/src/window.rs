@@ -230,7 +230,7 @@ mod tests {
             cli::Outcome::Run(cli::Args {
                 start: Some(PathBuf::from("/home/brian/src")),
                 cwd_file: None,
-                chooser_file: None,
+                chooser: None,
             })
         );
         // The `--` is why this one is a directory and not a parse error.
@@ -239,7 +239,7 @@ mod tests {
             cli::Outcome::Run(cli::Args {
                 start: Some(PathBuf::from("--cwd-file=/tmp/x")),
                 cwd_file: None,
-                chooser_file: None,
+                chooser: None,
             })
         );
     }

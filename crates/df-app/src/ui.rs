@@ -483,6 +483,12 @@ pub enum Control {
     SelectedChip,
     /// `visual` / `visual unset`, which leaves the run.
     VisualChip,
+    /// A picker session's primary button at the far right of the top row —
+    /// `Select`, `Choose folder` or `Save` — which answers the dialog.
+    PickButton,
+    /// …and the quiet `Cancel` beside it, which closes the dialog having
+    /// picked nothing.
+    CancelButton,
     /// The toast itself, which a click dismisses, and the offer chip on an undo
     /// toast, which a click takes (PLAN §5).
     Toast,

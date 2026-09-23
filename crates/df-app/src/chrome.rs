@@ -886,7 +886,36 @@ pub struct Cluster<'a> {
     /// Where the cursor is, 1-based, and how many rows there are.
     pub position: usize,
     pub rows: usize,
+    /// The picker's two buttons, when this window is somebody's file dialog
+    /// (`--chooser-file`); `None` in a file manager.
+    pub pick: Option<Pick>,
 }
+
+/// What a picker session's primary button says, and whether it can be
+/// pressed. The quiet `Cancel` beside it has neither to decide: its word
+/// never changes, and closing a dialog is always possible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pick {
+    /// `Select`, `Select 3`, `Choose folder`, `Save`.
+    pub label: String,
+    /// Whether there is anything the button could pick. A disabled button is
+    /// dimmed and takes no hover and no press — a plate that lit up under the
+    /// pointer would be promising a click that does nothing.
+    pub enabled: bool,
+}
+
+/// The quiet button's word.
+const CANCEL_LABEL: &str = "Cancel";
+
+/// How far the primary button's accent is lifted towards the palette's text
+/// under the pointer: enough to read as *lit* against a plate that is already
+/// the brightest thing on the row, not so much that it stops being the accent.
+const PICK_HOVER_LIFT: f32 = 0.25;
+
+/// How strong a disabled primary button's accent plate is, as an opacity over
+/// the row: still recognisably the button that will light up, visibly not
+/// ready to be pressed.
+const PICK_DISABLED_ALPHA: f32 = 0.28;
 
 /// The clipboard, as the top row sees it.
 ///
@@ -924,6 +953,10 @@ pub struct ClusterGeom {
     pub yank: Option<egui::Rect>,
     pub selected: Option<egui::Rect>,
     pub visual: Option<egui::Rect>,
+    /// The picker's primary button, at the row's far right, and the `Cancel`
+    /// before it. `None` outside a picker session.
+    pub pick: Option<egui::Rect>,
+    pub cancel: Option<egui::Rect>,
     /// The three strings the measuring already built, kept rather than built a
     /// second time by the painter a few lines later. Measuring text means
     /// laying it out, which means having the string; formatting each of them
@@ -976,11 +1009,35 @@ pub fn cluster_geometry(
 ) -> ClusterGeom {
     let font = egui::FontId::proportional(FONT);
     let inner = row.shrink2(egui::vec2(PAD_X, 0.0));
+    // A picker's two buttons end the row, the primary one last: it is the
+    // answer to the dialog, and the far right is where every dialog puts
+    // that. The primary sits in the row's corner, so it is inset from the
+    // right edge by exactly what it is inset from the top and bottom, and
+    // its radius is the row's less that inset — the gap around its corner
+    // is one width all the way round (`delightful-ui` §15).
+    let (pick, cancel, end) = match &cluster.pick {
+        Some(buttons) => {
+            let (top, bottom) = (row.top() + CHIP_INSET, row.bottom() - CHIP_INSET);
+            let pick_w = text_width(painter, &buttons.label, font.clone()) + PAD_X * 2.0;
+            let pick = egui::Rect::from_min_max(
+                egui::pos2(row.right() - CHIP_INSET - pick_w, top),
+                egui::pos2(row.right() - CHIP_INSET, bottom),
+            );
+            let cancel_w = text_width(painter, CANCEL_LABEL, font.clone()) + PAD_X * 2.0;
+            let cancel = egui::Rect::from_min_max(
+                egui::pos2(pick.left() - GAP - cancel_w, top),
+                egui::pos2(pick.left() - GAP, bottom),
+            );
+            // The counter keeps the chips' spacing from the first button.
+            (Some(pick), Some(cancel), cancel.left() - GAP)
+        }
+        None => (None, None, inner.right()),
+    };
     let counter_label = counter_text(cluster);
     let counter_w = text_width(painter, &counter_label, font.clone());
     let counter = egui::Rect::from_min_max(
-        egui::pos2(inner.right() - counter_w, inner.top()),
-        egui::pos2(inner.right(), inner.bottom()),
+        egui::pos2(end - counter_w, inner.top()),
+        egui::pos2(end, inner.bottom()),
     );
     let mut right = counter.left();
     // A chip is inset from the row on every adjacent side and rounded
@@ -1037,6 +1094,8 @@ pub fn cluster_geometry(
         yank,
         selected,
         visual,
+        pick,
+        cancel,
         labels: ClusterLabels {
             counter: counter_label,
             yank: yank_text,
@@ -1162,6 +1221,101 @@ fn paint_cluster(
             ripples,
         );
     }
+    if let Some(rect) = geom.cancel {
+        cancel_button(paint, rect, hovers, ripples);
+    }
+    if let (Some(rect), Some(pick)) = (geom.pick, &cluster.pick) {
+        pick_button(paint, rect, pick, hovers, ripples);
+    }
+}
+
+/// The picker's primary button: the accent, filled, with its word in the
+/// ground's colour so it reads at a glance as *the* way out of the dialog.
+///
+/// Drawn the moment the window is — no fade in. It is part of the window a
+/// dialog opens as, not something that arrived later.
+fn pick_button(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    pick: &Pick,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let key = Control::PickButton;
+    if !pick.enabled {
+        // Dimmed, and deaf to the pointer: no lift, no press, no splash.
+        paint
+            .painter
+            .rect_filled(rect, CHIP_RADIUS, fade(palette.blue, PICK_DISABLED_ALPHA));
+        paint.painter.text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            &pick.label,
+            egui::FontId::proportional(FONT),
+            palette.overlay1,
+        );
+        return;
+    }
+    let hover = hovers.hover(key);
+    let rect = pressed_rect(rect, hovers.press(key));
+    paint.painter.rect_filled(
+        rect,
+        CHIP_RADIUS,
+        mix(palette.blue, palette.text, hover * PICK_HOVER_LIFT),
+    );
+    let inside = paint.painter.with_clip_rect(rect);
+    for splash in ripples.splashes(key, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+        );
+    }
+    inside.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        &pick.label,
+        egui::FontId::proportional(FONT),
+        palette.crust,
+    );
+}
+
+/// The picker's `Cancel`: a word, with the plate a crumb wears under the
+/// pointer and nothing at rest. Quiet on purpose — it sits beside the one
+/// button that answers the dialog and must not compete with it.
+fn cancel_button(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let key = Control::CancelButton;
+    let hover = hovers.hover(key);
+    let rect = pressed_rect(rect, hovers.press(key));
+    if hover > 0.0 {
+        // Faded by alpha over the row, for the reason a crumb's plate is (see
+        // [`path_bar`]).
+        paint
+            .painter
+            .rect_filled(rect, CHIP_RADIUS, fade(palette.surface1, hover));
+    }
+    let inside = paint.painter.with_clip_rect(rect);
+    for splash in ripples.splashes(key, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+        );
+    }
+    inside.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        CANCEL_LABEL,
+        egui::FontId::proportional(FONT),
+        mix(palette.subtext0, palette.text, hover),
+    );
 }
 
 /// A chip that answers a click: the lift, the press, the ripple and the label,
@@ -3189,6 +3343,7 @@ mod tests {
                 dirty: None,
                 position: 0,
                 rows: 0,
+                pick: None,
             };
             let wide =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
@@ -3523,6 +3678,7 @@ mod tests {
                 }),
                 position: 12,
                 rows: 340,
+                pick: None,
             };
             let geom = cluster_geometry(ui.painter(), row, &full, false);
             let chips = [
@@ -3553,6 +3709,7 @@ mod tests {
                 dirty: None,
                 position: 0,
                 rows: 0,
+                pick: None,
             };
             let quiet = cluster_geometry(ui.painter(), row, &bare, false);
             assert!(quiet.git.is_none() && quiet.yank.is_none());
@@ -3570,6 +3727,90 @@ mod tests {
             assert!(top_geometry(ui.painter(), row, &path, "", &bare, false)
                 .filter
                 .is_none());
+        });
+    }
+
+    /// A picker's buttons end the row: the primary one in the corner, inset
+    /// from the right edge by what it is inset from the top and bottom, the
+    /// `Cancel` before it, the counter before that — and all of it reserved,
+    /// so the crumbs elide against the buttons rather than running under
+    /// them.
+    #[test]
+    fn the_picker_buttons_end_the_row_and_are_reserved() {
+        /// `delightful-ui` §1's smallest target a pointer should have to hit.
+        const MIN_TARGET: f32 = 24.0;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let row =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
+            let bare = Cluster {
+                selected: 0,
+                visual: None,
+                yank: None,
+                branch: None,
+                dirty: None,
+                position: 1,
+                rows: 4,
+                pick: None,
+            };
+            let picking = Cluster {
+                selected: 0,
+                visual: None,
+                yank: None,
+                branch: None,
+                dirty: None,
+                position: 1,
+                rows: 4,
+                pick: Some(Pick {
+                    label: "Choose folder".to_string(),
+                    enabled: true,
+                }),
+            };
+            let plain = cluster_geometry(ui.painter(), row, &bare, false);
+            assert!(plain.pick.is_none() && plain.cancel.is_none());
+
+            let geom = cluster_geometry(ui.painter(), row, &picking, false);
+            let pick = geom.pick.expect("a picker has its button");
+            let cancel = geom.cancel.expect("…and its cancel");
+            // Even insets on every side the button shares with the row, so
+            // its radius can be the row's less that inset (§15).
+            assert!((row.right() - pick.right() - CHIP_INSET).abs() < 1e-3);
+            assert!((pick.top() - row.top() - CHIP_INSET).abs() < 1e-3);
+            assert!((row.bottom() - pick.bottom() - CHIP_INSET).abs() < 1e-3);
+            assert_eq!(CHIP_RADIUS as f32 + CHIP_INSET, ROW_RADIUS as f32);
+            for button in [pick, cancel] {
+                assert!(button.height() >= MIN_TARGET, "{button:?} is too short");
+                assert!(row.contains(button.center()));
+            }
+            // Right to left: the pick, then Cancel, then the counter.
+            assert!(cancel.right() <= pick.left() + 1e-3);
+            assert!(geom.counter.right() <= cancel.left() + 1e-3);
+            // Reserved: the crumbs are told to keep clear of all of it.
+            assert!(geom.width >= row.right() - geom.counter.left());
+            assert!(geom.width > plain.width + pick.width() + cancel.width() - 1e-3);
+
+            // …which is what makes a long path elide sooner with them there.
+            let path = crumbs(std::path::Path::new(
+                "/home/brian/Work/delightfile/crates/df-app/src/preview/listing",
+            ));
+            let narrow =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(420.0, TOP_HEIGHT));
+            let with = top_geometry(ui.painter(), narrow, &path, "", &picking, false);
+            let cluster_left = narrow.right() - with.cluster.width;
+            for crumb in with.crumbs.iter().filter(|r| **r != egui::Rect::NOTHING) {
+                assert!(
+                    crumb.right() <= cluster_left + 1e-3,
+                    "a crumb runs under the buttons"
+                );
+            }
+            let shown = |geom: &TopGeom| {
+                geom.crumbs
+                    .iter()
+                    .filter(|r| **r != egui::Rect::NOTHING)
+                    .count()
+            };
+            let without = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
+            assert!(shown(&with) < shown(&without), "the buttons took no room");
         });
     }
 
@@ -3886,6 +4127,12 @@ mod tests {
                     dirty: None,
                     position: 12,
                     rows: 340,
+                    // The picker's buttons, drawn in the fuller of the two
+                    // states — enabled, on the same row as every chip.
+                    pick: branch.map(|_| Pick {
+                        label: "Select 3".to_string(),
+                        enabled: true,
+                    }),
                 };
                 let geom = top_geometry(paint.painter, path_rect, &path, filter, &cluster, false);
                 path_bar(
@@ -3914,6 +4161,11 @@ mod tests {
                 dirty: None,
                 position: 0,
                 rows: 0,
+                // …and a disabled one, which paints by a path of its own.
+                pick: Some(Pick {
+                    label: "Select".to_string(),
+                    enabled: false,
+                }),
             };
             let geom = top_geometry(paint.painter, narrow, &path, "", &cluster, false);
             path_bar(

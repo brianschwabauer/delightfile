@@ -48,6 +48,9 @@ pub enum PromptKind {
     Path,
     /// `c` in the mount manager: a server address for `gio mount`.
     Connect,
+    /// A save dialog's Save button: the name to save under, in the directory
+    /// on screen.
+    SaveAs,
 }
 
 impl PromptKind {
@@ -64,6 +67,7 @@ impl PromptKind {
             PromptKind::ConflictRename => "New name:",
             PromptKind::Path => "Go to:",
             PromptKind::Connect => "Connect to:",
+            PromptKind::SaveAs => "Save as:",
         }
     }
 
@@ -138,7 +142,8 @@ pub fn click_outside_action(kind: PromptKind) -> ClickOutside {
         | PromptKind::RenameEmptyStem
         | PromptKind::Shell
         | PromptKind::ShellBlock
-        | PromptKind::Connect => ClickOutside::Cancel,
+        | PromptKind::Connect
+        | PromptKind::SaveAs => ClickOutside::Cancel,
         PromptKind::Filter | PromptKind::FindNext | PromptKind::FindPrev => ClickOutside::Commit,
         PromptKind::ConflictRename | PromptKind::HelpFilter => ClickOutside::Keep,
     }
@@ -299,9 +304,14 @@ mod tests {
             PromptKind::ConflictRename,
             PromptKind::Path,
             PromptKind::Connect,
+            PromptKind::SaveAs,
         ] {
             assert!(kind.title().ends_with(':'), "{kind:?}");
         }
+        assert!(
+            !PromptKind::SaveAs.is_live() && !PromptKind::SaveAs.anchored(),
+            "a save name picks nothing until Enter, and it is typed in the bar"
+        );
         assert!(
             !PromptKind::Path.shows_directory(),
             "the field already holds the whole path"
@@ -341,6 +351,7 @@ mod tests {
             (PromptKind::ConflictRename, Keep),
             (PromptKind::Path, Cancel),
             (PromptKind::Connect, Cancel),
+            (PromptKind::SaveAs, Cancel),
         ] {
             assert_eq!(click_outside_action(kind), expected, "{kind:?}");
             // The rule the table is written from: a prompt that waits for
