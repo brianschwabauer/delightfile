@@ -1,9 +1,14 @@
-//! The right-click context menu (PLAN §7.5): "mirroring opener rules +
-//! operations, with shortcuts rendered inline".
+//! The two menus: the right-click context menu (PLAN §7.5), "mirroring opener
+//! rules + operations, with shortcuts rendered inline", and the app menu that
+//! drops out of the button at the top row's leading end.
 //!
-//! It is the same floating card the which-key hint and the opener picker are
-//! ([`crate::chrome::card`]) at a third size, for the reason that file's header
-//! gives: one card style is what makes six surfaces read as one program.
+//! Both are the same floating card the which-key hint and the opener picker
+//! are ([`crate::chrome::card`]) at a third size, for the reason that file's
+//! header gives: one card style is what makes six surfaces read as one
+//! program. And both are one model — a list of [`Item`]s, any of which may
+//! fly a list of its own out — so a submenu, a check mark or a separator
+//! behaves the same in either, and there is one keyboard, one hit test and one
+//! painter to keep right.
 //!
 //! ## What it is *not*
 //!
@@ -11,7 +16,9 @@
 //! exists, and the key is drawn on the row — right-aligned and dim, the way a
 //! menu has taught its own shortcuts since 1984. A menu item with no keyboard
 //! equivalent would be a feature only the mouse could reach, which is the
-//! opposite of what this program is.
+//! opposite of what this program is. The app menu reads its keys out of the
+//! registry ([`Registry::binding_label`]) rather than spelling them, so a key
+//! somebody moved in `keymap.toml` is taught where they moved it.
 //!
 //! ## Motion
 //!
@@ -22,7 +29,12 @@
 
 use std::time::{Duration, Instant};
 
-use crate::chrome::{card, fade as fade_color, key_font, CARD_PAD, CARD_ROW_RADIUS, FONT, PAD_X};
+use df_core::config::{LineMode, SortBy, ViewScale};
+use df_core::keymap::{Command, Registry};
+
+use crate::chrome::{
+    card, fade as fade_color, key_font, CARD_PAD, CARD_ROW_RADIUS, FONT, ICON_GAP, PAD_X,
+};
 use crate::hover::{pressed_rect, Hovers};
 use crate::ripple::Ripples;
 use crate::theme::mix;
@@ -54,6 +66,11 @@ const KEY_GAP: f32 = 28.0;
 /// margin every other floating surface keeps.
 const MARGIN: f32 = 6.0;
 
+/// How far under the control it hangs from a [`Anchor::Below`] card sits, in
+/// logical points: enough air that the card reads as having come *out of* the
+/// button rather than as a second plate glued to it.
+const BELOW_GAP: f32 = 4.0;
+
 /// How long the menu takes to fade once it is dismissed.
 ///
 /// 120 ms — PLAN §8's state-fade duration. The menu is *gone* the instant it is
@@ -68,6 +85,19 @@ pub const FADE: Duration = Duration::from_millis(120);
 /// parent row to the submenu, and a gap between the two cards is a corridor the
 /// pointer falls out of — the classic menu bug.
 const SUBMENU_OVERLAP: f32 = 4.0;
+
+/// The room a check mark gets in front of the label: the glyph and a word
+/// space ([`ICON_GAP`]) after it.
+///
+/// Fixed rather than measured per row, and reserved on an unticked row of the
+/// group too ([`Item::checked`]'s `Some(false)`), so the labels of a radio
+/// group start in one column whichever of them is ticked — a label that
+/// stepped sideways as the tick moved would be the menu moving under the eye.
+const CHECK_COLUMN: f32 = 12.0 + ICON_GAP;
+
+/// The tick, with the patched font (nf-fa-check) and without it.
+const CHECK_ICON: char = '\u{f00c}';
+const CHECK_GLYPH: &str = "✓";
 
 /// What a menu row does. The identity only — the doing is [`crate::app`]'s,
 /// exactly as with [`df_core::keymap::Command`].
@@ -99,15 +129,24 @@ pub enum Action {
     Purge,
     /// …and destroy all of them.
     EmptyTrash,
+    /// An app-menu row: the command it *is*, run through the one door its key
+    /// goes through, so the row cannot behave differently from the key.
+    Run(Command),
+    /// A row that does nothing itself: the app menu's "View" and "Sort", which
+    /// are only the lists they fly out, and "Reverse" while the sort has no
+    /// direction to reverse.
+    Nothing,
 }
 
 /// One row.
 #[derive(Debug, Clone)]
 pub struct Item {
     pub label: String,
-    /// The keyboard equivalent, drawn right-aligned and dim. Never empty — a
-    /// row with no key does not belong in this menu (see the header).
-    pub keys: &'static str,
+    /// The keyboard equivalent, drawn right-aligned and dim. Empty only for a
+    /// row the keyboard reaches some other way — the opener submenu's rows are
+    /// all `O`, which their parent already says, and "Empty trash" is the
+    /// palette's — or for a command nobody has bound.
+    pub keys: String,
     pub action: Action,
     /// Dimmed and inert. A disabled row is *shown*, not hidden: a menu whose
     /// rows move about depending on what is selected is a menu you cannot aim
@@ -115,16 +154,26 @@ pub struct Item {
     pub enabled: bool,
     /// Draw a separator above this row.
     pub gap_before: bool,
+    /// A check or radio row: `Some(true)` draws the tick in its column in front
+    /// of the label, `Some(false)` keeps the column empty so the labels of a
+    /// group still start in one place, and `None` is an ordinary row with no
+    /// column at all.
+    pub checked: Option<bool>,
+    /// The rows this one flies out, when it is a parent. One level: a submenu's
+    /// own rows are leaves.
+    pub submenu: Option<Vec<Item>>,
 }
 
 impl Item {
-    fn new(label: &str, keys: &'static str, action: Action, enabled: bool) -> Item {
+    fn new(label: &str, keys: &str, action: Action, enabled: bool) -> Item {
         Item {
             label: label.to_string(),
-            keys,
+            keys: keys.to_string(),
             action,
             enabled,
             gap_before: false,
+            checked: None,
+            submenu: None,
         }
     }
 
@@ -133,11 +182,23 @@ impl Item {
         self
     }
 
+    fn check(mut self, on: bool) -> Item {
+        self.checked = Some(on);
+        self
+    }
+
+    fn with_submenu(mut self, rows: Vec<Item>) -> Item {
+        self.submenu = Some(rows);
+        self
+    }
+
     /// Does this row fly a submenu out?
-    pub fn submenu(&self) -> bool {
-        self.action == Action::OpenWithMenu
+    pub fn has_submenu(&self) -> bool {
+        self.submenu.is_some()
     }
 }
+
+// ── The context menu ────────────────────────────────────────────────────────
 
 /// What the menu needs to know about the world to decide its rows.
 ///
@@ -161,8 +222,6 @@ pub struct Facts {
     /// put a process spawn in the path of opening a menu. So the row reports
     /// what this program is carrying, and the fallback is a thing `p` does.
     pub clipboard: bool,
-    /// How many opener rules match the hovered file.
-    pub openers: usize,
     /// Whether the cursor row is an archive something on this machine can
     /// extract (PLAN §7.3) — by the reader here, or by 7-Zip or `bsdtar`.
     ///
@@ -190,7 +249,10 @@ pub struct Facts {
 }
 
 /// The rows, in order, with their enablement.
-pub fn items(facts: Facts) -> Vec<Item> {
+///
+/// `openers` are the names of the opener rules that match the hovered file, in
+/// the order the `O` picker offers them: they are the "Open with" submenu.
+pub fn items(facts: Facts, openers: &[String]) -> Vec<Item> {
     let acts = facts.targets > 0;
     if facts.trash {
         return vec![
@@ -204,6 +266,13 @@ pub fn items(facts: Facts) -> Vec<Item> {
             Item::new("Empty trash", "", Action::EmptyTrash, facts.trashed > 0).after_gap(),
         ];
     }
+    // The submenu's rows carry no key of their own: every one of them is `O`,
+    // and the parent row already says so.
+    let open_with = openers
+        .iter()
+        .enumerate()
+        .map(|(index, name)| Item::new(name, "", Action::OpenWith(index), true))
+        .collect();
     let mut items = vec![
         Item::new(
             if facts.is_dir { "Open folder" } else { "Open" },
@@ -215,8 +284,9 @@ pub fn items(facts: Facts) -> Vec<Item> {
             "Open with",
             "O",
             Action::OpenWithMenu,
-            facts.has_row && facts.openers > 0,
-        ),
+            facts.has_row && !openers.is_empty(),
+        )
+        .with_submenu(open_with),
         Item::new("Copy", "y", Action::Yank, acts).after_gap(),
         Item::new("Cut", "x", Action::Cut, acts),
         Item::new("Paste", "p", Action::Paste, facts.clipboard),
@@ -255,38 +325,239 @@ pub fn items(facts: Facts) -> Vec<Item> {
     // A menu that opened on empty pane space with everything grey would be a
     // menu about nothing; Paste is the one row that still makes sense there,
     // and `items` already says so.
-    items.retain(|item| item.action != Action::OpenWithMenu || facts.openers > 0);
+    items.retain(|item| item.action != Action::OpenWithMenu || !openers.is_empty());
     items
+}
+
+// ── The app menu ────────────────────────────────────────────────────────────
+
+/// What the app menu needs to know to decide its rows: [`Facts`]' counterpart,
+/// and a plain struct for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppFacts {
+    /// A `--chooser-file` session: this window is some other program's file
+    /// dialog, where `q` cancels the dialog rather than quitting a file
+    /// manager — so the last row says what it will actually do.
+    pub picker: bool,
+    /// How many files an operation would act on: the selection, or the cursor
+    /// row.
+    pub targets: usize,
+    /// Is there anything on the internal clipboard? The same question, and the
+    /// same deliberately narrow answer, as [`Facts::clipboard`].
+    pub clipboard: bool,
+    /// Where this directory is on the view-scale ladder (PLAN §4.1).
+    pub scale: ViewScale,
+    pub hidden: bool,
+    pub linemode: LineMode,
+    pub sort: SortBy,
+    pub reverse: bool,
+}
+
+/// The sort command that orders by `by`, in the direction `reverse` says — or
+/// `None` for the one order that has no command (`none`, which only the config
+/// can ask for).
+///
+/// A shuffle has no direction, so both directions of `Random` are `, r`.
+fn sort_command(by: SortBy, reverse: bool) -> Option<Command> {
+    use Command as C;
+    Some(match (by, reverse) {
+        (SortBy::Alphabetical, false) => C::SortAlphabetical,
+        (SortBy::Alphabetical, true) => C::SortAlphabeticalReverse,
+        (SortBy::Natural, false) => C::SortNatural,
+        (SortBy::Natural, true) => C::SortNaturalReverse,
+        (SortBy::Mtime, false) => C::SortMtime,
+        (SortBy::Mtime, true) => C::SortMtimeReverse,
+        (SortBy::Btime, false) => C::SortBtime,
+        (SortBy::Btime, true) => C::SortBtimeReverse,
+        (SortBy::Extension, false) => C::SortExtension,
+        (SortBy::Extension, true) => C::SortExtensionReverse,
+        (SortBy::Size, false) => C::SortSize,
+        (SortBy::Size, true) => C::SortSizeReverse,
+        (SortBy::Random, _) => C::SortRandom,
+        (SortBy::None, _) => return None,
+    })
+}
+
+/// The app menu's rows, in order, with their enablement, ticks and submenus.
+///
+/// Every leaf is a [`Command`] ([`Action::Run`]) and its key is whatever the
+/// registry advertises for it, or nothing when it is unbound. `refused` is the
+/// question [`crate::app`]'s gate asks before a verb runs where the list pane
+/// is showing an archive, a remote service or the trash: a row it would refuse
+/// is greyed here rather than left live to toast "not here" when clicked.
+pub fn app_items(
+    facts: AppFacts,
+    keymap: &Registry,
+    refused: impl Fn(Command) -> bool,
+) -> Vec<Item> {
+    use Command as C;
+    let acts = facts.targets > 0;
+    let run = |label: &str, command: Command, enabled: bool| {
+        Item::new(
+            label,
+            &keymap.binding_label(command).unwrap_or_default(),
+            Action::Run(command),
+            enabled && !refused(command),
+        )
+    };
+
+    let scales = [
+        ("Compact", ViewScale::Compact, C::ViewScaleCompact),
+        (
+            "Comfortable",
+            ViewScale::Comfortable,
+            C::ViewScaleComfortable,
+        ),
+        ("Roomy", ViewScale::Roomy, C::ViewScaleRoomy),
+        ("Grid", ViewScale::Grid, C::ViewScaleGrid),
+    ];
+    let linemodes = [
+        ("Size", LineMode::Size, C::LinemodeSize),
+        ("Permissions", LineMode::Permissions, C::LinemodePermissions),
+        ("Created", LineMode::Btime, C::LinemodeBtime),
+        ("Modified", LineMode::Mtime, C::LinemodeMtime),
+        ("Owner", LineMode::Owner, C::LinemodeOwner),
+        ("None", LineMode::None, C::LinemodeNone),
+    ];
+    let mut view: Vec<Item> = scales
+        .iter()
+        .map(|(label, step, command)| run(label, *command, true).check(facts.scale == *step))
+        .collect();
+    view.push(
+        run("Show hidden files", C::ToggleHidden, true)
+            .check(facts.hidden)
+            .after_gap(),
+    );
+    for (index, (label, mode, command)) in linemodes.iter().enumerate() {
+        let item = run(label, *command, true).check(facts.linemode == *mode);
+        view.push(if index == 0 { item.after_gap() } else { item });
+    }
+
+    // Each key keeps the direction the listing is in now, so picking a key is
+    // "order by this" and never also "and flip it" — the direction is the
+    // Reverse row's business. Each row is the command for exactly that, so
+    // the key it teaches is the key that does what the click does.
+    let sorts = [
+        ("Alphabetical", SortBy::Alphabetical),
+        ("Natural", SortBy::Natural),
+        ("Modified", SortBy::Mtime),
+        ("Created", SortBy::Btime),
+        ("Extension", SortBy::Extension),
+        ("Size", SortBy::Size),
+        ("Random", SortBy::Random),
+    ];
+    let mut sort: Vec<Item> = sorts
+        .iter()
+        .filter_map(|(label, by)| {
+            let command = sort_command(*by, facts.reverse)?;
+            Some(run(label, command, true).check(facts.sort == *by))
+        })
+        .collect();
+    // Reverse is the current key again, the other way round. A shuffle has no
+    // other way round, so the row greys rather than reshuffling under a name
+    // that promised something else.
+    let flip = sort_command(facts.sort, !facts.reverse).filter(|_| facts.sort != SortBy::Random);
+    sort.push(
+        match flip {
+            Some(command) => run("Reverse", command, true),
+            None => Item::new("Reverse", "", Action::Nothing, false),
+        }
+        .check(facts.reverse)
+        .after_gap(),
+    );
+
+    vec![
+        run("New tab", C::TabCreate, true),
+        run("New window", C::NewWindow, true),
+        run("Go to path…", C::GotoPath, true).after_gap(),
+        run("Jump to…", C::FuzzyJump, true),
+        run("Search by name…", C::SearchName, true),
+        run("Search contents…", C::SearchContent, true),
+        run("Filter…", C::Filter, true),
+        run("Select all", C::SelectAll, true).after_gap(),
+        run("Invert selection", C::InvertSelection, true),
+        run("Copy", C::Yank, acts).after_gap(),
+        run("Cut", C::YankCut, acts),
+        run("Paste", C::Paste, facts.clipboard),
+        run("Rename", C::Rename, acts),
+        run("New file or folder…", C::Create, true),
+        run("Move to trash", C::Trash, acts),
+        run("Undo", C::Undo, true),
+        // Always live: a parent row only opens a list, and a grey one would
+        // hide the rows under it that *can* act.
+        Item::new("View", "", Action::Nothing, true)
+            .with_submenu(view)
+            .after_gap(),
+        Item::new("Sort", "", Action::Nothing, true).with_submenu(sort),
+        run("Mounts…", C::MountManager, true).after_gap(),
+        run("Trash", C::OpenTrash, true),
+        run("Tasks", C::TasksShow, true),
+        run("Selection basket", C::BasketShow, true),
+        run("Disk usage", C::DiskUsage, true),
+        run("Command palette…", C::CommandPalette, true).after_gap(),
+        run("Keyboard shortcuts", C::Help, true),
+        run(if facts.picker { "Cancel" } else { "Quit" }, C::Quit, true).after_gap(),
+    ]
+}
+
+// ── The menu, while it is up ────────────────────────────────────────────────
+
+/// Which of the two menus this is. They share everything but where they come
+/// from and what closes them: the app menu's own key toggles it, and its
+/// button draws pressed while it is out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Context,
+    App,
+}
+
+/// What the card is placed from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Anchor {
+    /// Where the pointer was. The card is placed *from* this, never centred on
+    /// it: a menu whose first row is under the pointer is a menu you can
+    /// activate by twitching.
+    Point(egui::Pos2),
+    /// Under a control — the app menu's button — dropping out of its
+    /// bottom-left corner, [`BELOW_GAP`] down.
+    Below(egui::Rect),
 }
 
 /// The menu, while it is up.
 pub struct Menu {
-    /// Where the pointer was. The card is placed *from* this, never centred on
-    /// it: a menu whose first row is under the pointer is a menu you can
-    /// activate by twitching.
-    pub anchor: egui::Pos2,
+    pub kind: Kind,
+    pub anchor: Anchor,
     pub items: Vec<Item>,
-    /// The opener submenu's rows, by name.
-    pub openers: Vec<String>,
     /// The keyboard's row, once `↑`/`↓` has been pressed. `None` until then —
     /// a menu opened by the pointer must not pre-select anything, or `Enter`
     /// would do something nobody aimed at.
     pub cursor: Option<usize>,
-    /// Whether the opener submenu is out, and where its own cursor is.
-    pub submenu: bool,
+    /// Which row's submenu is out, by its index in `items`, and where the
+    /// submenu's own cursor is.
+    pub submenu: Option<usize>,
     pub sub_cursor: Option<usize>,
     /// Set when the menu is dismissed; it is drawn fading until [`FADE`] is up.
     pub closing: Option<Instant>,
 }
 
 impl Menu {
-    pub fn new(anchor: egui::Pos2, items: Vec<Item>, openers: Vec<String>) -> Menu {
+    /// The right-click menu, placed from where the pointer was.
+    pub fn context(at: egui::Pos2, items: Vec<Item>) -> Menu {
+        Menu::new(Kind::Context, Anchor::Point(at), items)
+    }
+
+    /// The app menu, hanging from its button.
+    pub fn app(button: egui::Rect, items: Vec<Item>) -> Menu {
+        Menu::new(Kind::App, Anchor::Below(button), items)
+    }
+
+    fn new(kind: Kind, anchor: Anchor, items: Vec<Item>) -> Menu {
         Menu {
+            kind,
             anchor,
             items,
-            openers,
             cursor: None,
-            submenu: false,
+            submenu: None,
             sub_cursor: None,
             closing: None,
         }
@@ -313,71 +584,95 @@ impl Menu {
             .is_some_and(|at| now.saturating_duration_since(at) >= FADE)
     }
 
+    /// The rows of the submenu that is out, if one is.
+    pub fn sub_items(&self) -> Option<&[Item]> {
+        self.items.get(self.submenu?)?.submenu.as_deref()
+    }
+
     /// `↑`/`↓`, in whichever list is live. Skips disabled rows: a keyboard that
     /// stopped on a grey row would be offering something it cannot do.
     pub fn move_cursor(&mut self, delta: isize) {
-        if self.submenu {
-            let len = self.openers.len();
-            if len == 0 {
-                return;
+        if let Some(rows) = self.sub_items() {
+            if let Some(next) = step(rows, self.sub_cursor, delta) {
+                self.sub_cursor = Some(next);
             }
-            let next = match self.sub_cursor {
-                Some(at) => wrap(at as isize + delta, len),
-                None if delta < 0 => len - 1,
-                None => 0,
-            };
-            self.sub_cursor = Some(next);
             return;
         }
-        let len = self.items.len();
-        if len == 0 {
-            return;
-        }
-        let mut at = match self.cursor {
-            Some(at) => at as isize,
-            None if delta < 0 => len as isize,
-            None => -1,
-        };
-        for _ in 0..len {
-            at = wrap(at + delta, len) as isize;
-            if self.items[at as usize].enabled {
-                self.cursor = Some(at as usize);
-                return;
-            }
+        if let Some(next) = step(&self.items, self.cursor, delta) {
+            self.cursor = Some(next);
         }
     }
 
     /// What `Enter` would do, or `None` when nothing is picked.
     pub fn activate(&self) -> Option<Action> {
-        if self.submenu {
-            return self.sub_cursor.map(Action::OpenWith);
-        }
-        let item = self.items.get(self.cursor?)?;
+        let item = match self.sub_items() {
+            Some(rows) => rows.get(self.sub_cursor?)?,
+            None => self.items.get(self.cursor?)?,
+        };
         item.enabled.then_some(item.action)
     }
 
-    /// `→`, or hovering the parent row: fly the submenu out.
+    /// `→`, or hovering a parent row: fly its submenu out.
+    ///
+    /// The cursor's row — or, before the keyboard has picked a row at all, the
+    /// first row that has one, so `→` straight after a right click still opens
+    /// "Open with" as it always has. A disabled parent or an empty list opens
+    /// nothing: a card that flew out with nothing in it would be a dead end.
     pub fn open_submenu(&mut self) -> bool {
-        let Some(index) = self.items.iter().position(Item::submenu) else {
+        let index = match self.cursor {
+            Some(index) => index,
+            None => match self.items.iter().position(Item::has_submenu) {
+                Some(index) => index,
+                None => return false,
+            },
+        };
+        let Some(item) = self.items.get(index) else {
             return false;
         };
-        if self.openers.is_empty() || !self.items[index].enabled {
+        if !item.enabled || item.submenu.as_ref().is_none_or(Vec::is_empty) {
             return false;
         }
         self.cursor = Some(index);
-        self.submenu = true;
+        // A different parent is a different list, and a cursor carried across
+        // from the last one would be pointing at a row it never chose.
+        if self.submenu != Some(index) {
+            self.submenu = Some(index);
+            self.sub_cursor = None;
+        }
         true
     }
 
     /// `←`: back to the parent list, keeping the row the submenu belongs to.
     pub fn close_submenu(&mut self) -> bool {
-        if !self.submenu {
+        if self.submenu.is_none() {
             return false;
         }
-        self.submenu = false;
+        self.submenu = None;
         self.sub_cursor = None;
         true
     }
+}
+
+/// One `↑`/`↓` through `items` from `from`, wrapping and stepping over the
+/// disabled rows. From nothing, `↓` lands on the first live row and `↑` on
+/// the last. `None` when no row is live at all.
+fn step(items: &[Item], from: Option<usize>, delta: isize) -> Option<usize> {
+    let len = items.len();
+    if len == 0 {
+        return None;
+    }
+    let mut at = match from {
+        Some(at) => at as isize,
+        None if delta < 0 => len as isize,
+        None => -1,
+    };
+    for _ in 0..len {
+        at = wrap(at + delta, len) as isize;
+        if items[at as usize].enabled {
+            return Some(at as usize);
+        }
+    }
+    None
 }
 
 fn wrap(at: isize, len: usize) -> usize {
@@ -428,26 +723,51 @@ impl Geometry {
     }
 }
 
-/// A card of `size` placed at `anchor`, kept inside `area`.
+/// A card of `size` placed from `anchor`, kept inside `area`.
 ///
 /// The rule every menu on every platform uses, and the reason it is a named
-/// function with a test: the card grows down and to the right of the pointer,
-/// **flips** to the other side when there is not room, and only slides as a
-/// last resort. Flipping is what keeps the pointer on a corner of the card
-/// rather than in the middle of it, which is what makes the first row still be
-/// one flick away near an edge.
-pub fn place(area: egui::Rect, anchor: egui::Pos2, size: egui::Vec2) -> egui::Rect {
-    let fits_right = anchor.x + size.x <= area.right() - MARGIN;
-    let fits_below = anchor.y + size.y <= area.bottom() - MARGIN;
-    let left = if fits_right {
-        anchor.x
-    } else {
-        anchor.x - size.x
-    };
-    let top = if fits_below {
-        anchor.y
-    } else {
-        anchor.y - size.y
+/// function with a test: the card grows away from its anchor, **flips** to the
+/// other side when there is not room, and only slides as a last resort.
+///
+/// From a point, it grows down and to the right of the pointer, and flipping is
+/// what keeps the pointer on a corner of the card rather than in the middle of
+/// it, which is what makes the first row still be one flick away near an edge.
+///
+/// From under a control, it drops out of the control's bottom-left corner, and
+/// flips to hang its right edge from the control's right edge, or to stand on
+/// the control's top edge, when that side has no room. It stays below if
+/// neither side can hold it whole and slides up only as far as it must: a menu
+/// that jumped over its own button to be cut off at the top instead would have
+/// travelled for nothing.
+pub fn place(area: egui::Rect, anchor: Anchor, size: egui::Vec2) -> egui::Rect {
+    let (left, top) = match anchor {
+        Anchor::Point(at) => {
+            let fits_right = at.x + size.x <= area.right() - MARGIN;
+            let fits_below = at.y + size.y <= area.bottom() - MARGIN;
+            (
+                if fits_right { at.x } else { at.x - size.x },
+                if fits_below { at.y } else { at.y - size.y },
+            )
+        }
+        Anchor::Below(control) => {
+            let below = control.bottom() + BELOW_GAP;
+            let above = control.top() - BELOW_GAP - size.y;
+            let fits_right = control.left() + size.x <= area.right() - MARGIN;
+            let fits_below = below + size.y <= area.bottom() - MARGIN;
+            let fits_above = above >= area.top() + MARGIN;
+            (
+                if fits_right {
+                    control.left()
+                } else {
+                    control.right() - size.x
+                },
+                if fits_below || !fits_above {
+                    below
+                } else {
+                    above
+                },
+            )
+        }
     };
     // The slide: a window too small for the card either way. Clamped rather
     // than allowed off screen, because a menu with rows past the edge is a menu
@@ -469,31 +789,41 @@ pub fn height(items: &[Item]) -> f32 {
     items.len() as f32 * ROW + gaps * SEPARATOR + CARD_PAD * 2.0
 }
 
-/// Lay the menu out. Needs a painter because the width is measured from the
-/// text — a menu sized by a guess is a menu with a ragged key column.
-pub fn geometry(area: egui::Rect, menu: &Menu, painter: &egui::Painter) -> Geometry {
+/// How wide a card for `items` has to be, measured from the text.
+///
+/// A top-level list reserves the key column and the chevron's on every row, so
+/// the key column does not step sideways on the one row that has a chevron. A
+/// submenu has no chevrons of its own, and gives a key column only to the rows
+/// that have a key — the opener list is names alone, and a card padded out for
+/// keys it does not have would be a card with a hole down its right side.
+fn width(items: &[Item], painter: &egui::Painter, top_level: bool) -> f32 {
     let label_font = egui::FontId::proportional(FONT);
-    let width = menu
-        .items
+    items
         .iter()
         .map(|item| {
+            let check = if item.checked.is_some() {
+                CHECK_COLUMN
+            } else {
+                0.0
+            };
             let label = crate::chrome::text_width(painter, &item.label, label_font.clone());
-            let keys = crate::chrome::text_width(painter, item.keys, key_font(FONT - 1.0));
-            // The chevron's column is reserved on *every* row, so the key
-            // column does not step sideways on the one row that has one.
-            label + KEY_GAP + keys + CHEVRON_COLUMN
+            let keys = if top_level || !item.keys.is_empty() {
+                KEY_GAP + crate::chrome::text_width(painter, &item.keys, key_font(FONT - 1.0))
+            } else {
+                0.0
+            };
+            let chevron = if top_level { CHEVRON_COLUMN } else { 0.0 };
+            check + label + keys + chevron
         })
         .fold(MIN_WIDTH, f32::max)
-        + CARD_PAD * 2.0;
-    let size = egui::vec2(
-        width.min((area.width() - MARGIN * 2.0).max(MIN_WIDTH)),
-        height(&menu.items),
-    );
-    let card = place(area, menu.anchor, size);
+        + CARD_PAD * 2.0
+}
 
-    let mut rows = Vec::with_capacity(menu.items.len());
+/// The rows of `items` stacked down `card`, separators opening their gaps.
+fn stack(card: egui::Rect, items: &[Item]) -> Vec<egui::Rect> {
+    let mut rows = Vec::with_capacity(items.len());
     let mut y = card.top() + CARD_PAD;
-    for item in &menu.items {
+    for item in items {
         if item.gap_before {
             y += SEPARATOR;
         }
@@ -503,49 +833,40 @@ pub fn geometry(area: egui::Rect, menu: &Menu, painter: &egui::Painter) -> Geome
         ));
         y += ROW;
     }
+    rows
+}
 
-    let sub = menu.submenu.then(|| {
-        let parent = menu
-            .items
-            .iter()
-            .position(Item::submenu)
-            .and_then(|i| rows.get(i).copied())
-            .unwrap_or(card);
-        let sub_width = menu
-            .openers
-            .iter()
-            .map(|name| crate::chrome::text_width(painter, name, label_font.clone()))
-            .fold(MIN_WIDTH, f32::max)
-            + CARD_PAD * 2.0;
+/// Lay the menu out. Needs a painter because the width is measured from the
+/// text — a menu sized by a guess is a menu with a ragged key column.
+pub fn geometry(area: egui::Rect, menu: &Menu, painter: &egui::Painter) -> Geometry {
+    let size = egui::vec2(
+        width(&menu.items, painter, true).min((area.width() - MARGIN * 2.0).max(MIN_WIDTH)),
+        height(&menu.items),
+    );
+    let card = place(area, menu.anchor, size);
+    let rows = stack(card, &menu.items);
+
+    let sub = menu.submenu.and_then(|parent| {
+        let items = menu.sub_items()?;
+        let parent = rows.get(parent).copied().unwrap_or(card);
         let sub_size = egui::vec2(
-            sub_width.min((area.width() - MARGIN * 2.0).max(MIN_WIDTH)),
-            menu.openers.len() as f32 * ROW + CARD_PAD * 2.0,
+            width(items, painter, false).min((area.width() - MARGIN * 2.0).max(MIN_WIDTH)),
+            height(items),
         );
         // Anchored at the parent row's outer corner, so `place` flips it to the
         // *left* of the card near the right edge of the window — which is where
         // every submenu on every platform goes.
         let anchor = egui::pos2(card.right() - SUBMENU_OVERLAP, parent.top() - CARD_PAD);
         let sub_card = if anchor.x + sub_size.x <= area.right() - MARGIN {
-            place(area, anchor, sub_size)
+            place(area, Anchor::Point(anchor), sub_size)
         } else {
             place(
                 area,
-                egui::pos2(card.left() + SUBMENU_OVERLAP, anchor.y),
+                Anchor::Point(egui::pos2(card.left() + SUBMENU_OVERLAP, anchor.y)),
                 sub_size,
             )
         };
-        let sub_rows = (0..menu.openers.len())
-            .map(|i| {
-                egui::Rect::from_min_size(
-                    egui::pos2(
-                        sub_card.left() + CARD_PAD,
-                        sub_card.top() + CARD_PAD + i as f32 * ROW,
-                    ),
-                    egui::vec2(sub_card.width() - CARD_PAD * 2.0, ROW),
-                )
-            })
-            .collect();
-        (sub_card, sub_rows)
+        Some((sub_card, stack(sub_card, items)))
     });
 
     Geometry { card, rows, sub }
@@ -570,7 +891,47 @@ pub fn paint(
         return;
     }
     card(paint, geometry.card, alpha);
-    for (index, (item, rect)) in menu.items.iter().zip(&geometry.rows).enumerate() {
+    let selected = menu.cursor.filter(|_| menu.submenu.is_none());
+    list(
+        paint,
+        &menu.items,
+        &geometry.rows,
+        Control::MenuItem,
+        selected,
+        (hovers, ripples),
+        alpha,
+        now,
+    );
+
+    let (Some((sub_card, sub_rows)), Some(items)) = (&geometry.sub, menu.sub_items()) else {
+        return;
+    };
+    card(paint, *sub_card, alpha);
+    list(
+        paint,
+        items,
+        sub_rows,
+        Control::SubmenuItem,
+        menu.sub_cursor,
+        (hovers, ripples),
+        alpha,
+        now,
+    );
+}
+
+/// One card's rows and the separators between them.
+#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
+fn list(
+    paint: &Painting<'_>,
+    items: &[Item],
+    rects: &[egui::Rect],
+    control: fn(usize) -> Control,
+    selected: Option<usize>,
+    (hovers, ripples): (&Hovers<Control>, &Ripples<Control>),
+    alpha: f32,
+    now: Instant,
+) {
+    for (index, (item, rect)) in items.iter().zip(rects).enumerate() {
         if item.gap_before {
             // The hairline in the middle of the gap it opened. Inset to the
             // card's text column so it reads as separating rows rather than as
@@ -585,38 +946,12 @@ pub fn paint(
                 fade_color(paint.palette.surface1, alpha),
             );
         }
-        let key = Control::MenuItem(index);
-        let selected = menu.cursor == Some(index) && !menu.submenu;
         row(
             paint,
             *rect,
-            &item.label,
-            item.keys,
-            item.enabled,
-            selected,
-            item.submenu(),
-            key,
-            hovers,
-            ripples,
-            alpha,
-            now,
-        );
-    }
-
-    let Some((sub_card, sub_rows)) = &geometry.sub else {
-        return;
-    };
-    card(paint, *sub_card, alpha);
-    for (index, (name, rect)) in menu.openers.iter().zip(sub_rows).enumerate() {
-        row(
-            paint,
-            *rect,
-            name,
-            "",
-            true,
-            menu.sub_cursor == Some(index),
-            false,
-            Control::SubmenuItem(index),
+            item,
+            selected == Some(index),
+            control(index),
             hovers,
             ripples,
             alpha,
@@ -630,11 +965,8 @@ pub fn paint(
 fn row(
     paint: &Painting<'_>,
     rect: egui::Rect,
-    label: &str,
-    keys: &str,
-    enabled: bool,
+    item: &Item,
     selected: bool,
-    chevron: bool,
     key: Control,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
@@ -642,6 +974,8 @@ fn row(
     now: Instant,
 ) {
     let palette = paint.palette;
+    let enabled = item.enabled;
+    let chevron = item.has_submenu();
     // A disabled row takes no hover and no press: the pointer must not be able
     // to make something inert look live.
     let hover = if enabled { hovers.hover(key) } else { 0.0 };
@@ -671,10 +1005,10 @@ fn row(
         fade_color(palette.overlay0, alpha)
     };
     let key_color = fade_color(palette.overlay0, alpha);
-    let keys_width = if keys.is_empty() {
+    let keys_width = if item.keys.is_empty() {
         0.0
     } else {
-        let galley = inside.layout_no_wrap(keys.to_string(), key_font(FONT - 1.0), key_color);
+        let galley = inside.layout_no_wrap(item.keys.clone(), key_font(FONT - 1.0), key_color);
         let width = galley.size().x;
         inside.galley(
             egui::pos2(
@@ -696,13 +1030,34 @@ fn row(
             text_color,
         );
     }
+    // The tick, in the column [`CHECK_COLUMN`] keeps for it — and that column
+    // kept empty on the unticked rows of the group.
+    let check = match item.checked {
+        Some(on) => {
+            if on {
+                inside.text(
+                    egui::pos2(rect.left() + PAD_X, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    crate::icons::glyph(paint.nerd, CHECK_ICON, CHECK_GLYPH),
+                    egui::FontId::proportional(FONT),
+                    text_color,
+                );
+            }
+            CHECK_COLUMN
+        }
+        None => 0.0,
+    };
     crate::chrome::truncated(
         &inside,
-        egui::pos2(rect.left() + PAD_X, rect.center().y),
-        label,
+        egui::pos2(rect.left() + PAD_X + check, rect.center().y),
+        &item.label,
         text_color,
-        (rect.width() - PAD_X * 2.0 - keys_width - if chevron { CHEVRON_COLUMN } else { 0.0 })
-            .max(0.0),
+        (rect.width()
+            - PAD_X * 2.0
+            - check
+            - keys_width
+            - if chevron { CHEVRON_COLUMN } else { 0.0 })
+        .max(0.0),
     );
 }
 
@@ -716,7 +1071,6 @@ mod tests {
             is_dir: false,
             targets: 1,
             clipboard: true,
-            openers: 2,
             archive: false,
             archives: 0,
             trash: false,
@@ -724,19 +1078,72 @@ mod tests {
         }
     }
 
+    /// The two opener rules the tests' hovered file matches.
+    fn openers() -> Vec<String> {
+        vec!["Zed".to_string(), "Firefox".to_string()]
+    }
+
     /// Every row carries a key, because every row *is* one.
     #[test]
     fn every_menu_row_teaches_its_own_shortcut() {
-        for item in items(facts()) {
+        for item in items(facts(), &openers()) {
             assert!(!item.keys.is_empty(), "{} has no key", item.label);
         }
+    }
+
+    /// The context menu, row for row, as it was before the app menu shared its
+    /// model: the same labels, keys, verbs, gaps and enablement, no ticks, and
+    /// "Open with" flying out the opener rules by name with no keys of their
+    /// own.
+    #[test]
+    fn the_context_menu_rows_are_unchanged() {
+        let rows = items(facts(), &openers());
+        let got: Vec<(&str, &str, Action, bool)> = rows
+            .iter()
+            .map(|i| (i.label.as_str(), i.keys.as_str(), i.action, i.gap_before))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Open", "Enter", Action::Open, false),
+                ("Open with", "O", Action::OpenWithMenu, false),
+                ("Copy", "y", Action::Yank, true),
+                ("Cut", "x", Action::Cut, false),
+                ("Paste", "p", Action::Paste, false),
+                ("Rename", "r", Action::Rename, false),
+                ("Move to trash", "d", Action::Trash, false),
+                ("Copy path", "c c", Action::CopyPath, true),
+                ("Copy name", "c f", Action::CopyName, false),
+                ("Properties", "Tab", Action::Properties, true),
+            ]
+        );
+        assert!(rows.iter().all(|i| i.enabled && i.checked.is_none()));
+        // Only "Open with" is a parent, and its list is the openers, in order.
+        let parents: Vec<&str> = rows
+            .iter()
+            .filter(|i| i.has_submenu())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(parents, vec!["Open with"]);
+        let sub = rows[1].submenu.as_ref().expect("the opener list");
+        let sub: Vec<(&str, &str, Action, bool)> = sub
+            .iter()
+            .map(|i| (i.label.as_str(), i.keys.as_str(), i.action, i.enabled))
+            .collect();
+        assert_eq!(
+            sub,
+            vec![
+                ("Zed", "", Action::OpenWith(0), true),
+                ("Firefox", "", Action::OpenWith(1), true),
+            ]
+        );
     }
 
     /// Enablement, one clause at a time.
     #[test]
     fn the_rows_are_enabled_by_what_is_actually_there() {
-        let enabled = |facts: Facts, action: Action| {
-            items(facts)
+        let enabled = |facts: Facts, openers: &[String], action: Action| {
+            items(facts, openers)
                 .into_iter()
                 .find(|i| i.action == action)
                 .map(|i| i.enabled)
@@ -749,32 +1156,36 @@ mod tests {
             is_dir: false,
             targets: 0,
             clipboard: true,
-            openers: 0,
             archive: false,
             archives: 0,
             trash: false,
             trashed: 0,
         };
-        assert_eq!(enabled(empty, Action::Open), Some(false));
-        assert_eq!(enabled(empty, Action::Yank), Some(false));
-        assert_eq!(enabled(empty, Action::Trash), Some(false));
-        assert_eq!(enabled(empty, Action::Paste), Some(true));
-        assert_eq!(enabled(empty, Action::Properties), Some(false));
+        assert_eq!(enabled(empty, &[], Action::Open), Some(false));
+        assert_eq!(enabled(empty, &[], Action::Yank), Some(false));
+        assert_eq!(enabled(empty, &[], Action::Trash), Some(false));
+        assert_eq!(enabled(empty, &[], Action::Paste), Some(true));
+        assert_eq!(enabled(empty, &[], Action::Properties), Some(false));
         // An empty clipboard greys exactly one row.
         let nothing_yanked = Facts {
             clipboard: false,
             ..facts()
         };
-        assert_eq!(enabled(nothing_yanked, Action::Paste), Some(false));
-        assert_eq!(enabled(nothing_yanked, Action::Yank), Some(true));
+        assert_eq!(
+            enabled(nothing_yanked, &openers(), Action::Paste),
+            Some(false)
+        );
+        assert_eq!(
+            enabled(nothing_yanked, &openers(), Action::Yank),
+            Some(true)
+        );
         // A file no opener rule matches loses the submenu row entirely: a
         // "Open with ▸" that flew out an empty card would be a dead end.
-        let unopenable = Facts {
-            openers: 0,
-            ..facts()
-        };
-        assert_eq!(enabled(unopenable, Action::OpenWithMenu), None);
-        assert_eq!(enabled(facts(), Action::OpenWithMenu), Some(true));
+        assert_eq!(enabled(facts(), &[], Action::OpenWithMenu), None);
+        assert_eq!(
+            enabled(facts(), &openers(), Action::OpenWithMenu),
+            Some(true)
+        );
     }
 
     /// A folder's first row says so — the same distinction `Enter` makes.
@@ -784,8 +1195,8 @@ mod tests {
             is_dir: true,
             ..facts()
         };
-        assert_eq!(items(dir)[0].label, "Open folder");
-        assert_eq!(items(facts())[0].label, "Open");
+        assert_eq!(items(dir, &openers())[0].label, "Open folder");
+        assert_eq!(items(facts(), &openers())[0].label, "Open");
     }
 
     fn area() -> egui::Rect {
@@ -797,18 +1208,19 @@ mod tests {
     #[test]
     fn the_card_flips_rather_than_hanging_off_the_edge() {
         let size = egui::vec2(200.0, 300.0);
+        let at = |x: f32, y: f32| Anchor::Point(egui::pos2(x, y));
         // Room both ways: down and to the right of the pointer.
-        let a = place(area(), egui::pos2(100.0, 100.0), size);
+        let a = place(area(), at(100.0, 100.0), size);
         assert_eq!(a.min, egui::pos2(100.0, 100.0));
         // Near the right edge: flipped left, so the pointer is on its right
         // corner rather than past its edge.
-        let b = place(area(), egui::pos2(1380.0, 100.0), size);
+        let b = place(area(), at(1380.0, 100.0), size);
         assert!((b.right() - 1380.0).abs() < 1e-3, "{b:?}");
         // Near the bottom: flipped up.
-        let c = place(area(), egui::pos2(100.0, 880.0), size);
+        let c = place(area(), at(100.0, 880.0), size);
         assert!((c.bottom() - 880.0).abs() < 1e-3, "{c:?}");
         // Both at once.
-        let d = place(area(), egui::pos2(1380.0, 880.0), size);
+        let d = place(area(), at(1380.0, 880.0), size);
         assert!((d.right() - 1380.0).abs() < 1e-3);
         assert!((d.bottom() - 880.0).abs() < 1e-3);
         for rect in [a, b, c, d] {
@@ -822,9 +1234,50 @@ mod tests {
     #[test]
     fn a_card_too_big_for_the_window_is_slid_in() {
         let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, 100.0));
-        let rect = place(tiny, egui::pos2(110.0, 90.0), egui::vec2(200.0, 300.0));
+        let rect = place(
+            tiny,
+            Anchor::Point(egui::pos2(110.0, 90.0)),
+            egui::vec2(200.0, 300.0),
+        );
         assert!((rect.left() - (tiny.left() + MARGIN)).abs() < 1e-3);
         assert!((rect.top() - (tiny.top() + MARGIN)).abs() < 1e-3);
+    }
+
+    /// The app menu drops out of its button: top-left at the button's
+    /// bottom-left, a gap down. Out of room to the right it hangs from the
+    /// button's right edge instead; out of room below it stands on the
+    /// button's top edge; with room on neither side it stays below and slides
+    /// up only as far as the window makes it.
+    #[test]
+    fn a_card_below_a_control_drops_out_of_its_corner() {
+        let size = egui::vec2(200.0, 300.0);
+        let button = egui::Rect::from_min_size(egui::pos2(10.0, 40.0), egui::vec2(28.0, 28.0));
+        let a = place(area(), Anchor::Below(button), size);
+        assert_eq!(a.min, egui::pos2(10.0, 68.0 + BELOW_GAP));
+        assert_eq!(a.size(), size);
+
+        let right = egui::Rect::from_min_size(egui::pos2(1350.0, 40.0), egui::vec2(28.0, 28.0));
+        let b = place(area(), Anchor::Below(right), size);
+        assert!((b.right() - right.right()).abs() < 1e-3, "{b:?}");
+        assert!((b.top() - (right.bottom() + BELOW_GAP)).abs() < 1e-3);
+
+        let low = egui::Rect::from_min_size(egui::pos2(10.0, 800.0), egui::vec2(28.0, 28.0));
+        let c = place(area(), Anchor::Below(low), size);
+        assert!((c.bottom() - (low.top() - BELOW_GAP)).abs() < 1e-3, "{c:?}");
+        assert_eq!(c.left(), low.left());
+
+        // Taller than the room on either side: below, slid up to fit.
+        let short = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 400.0));
+        let mid = egui::Rect::from_min_size(egui::pos2(10.0, 150.0), egui::vec2(28.0, 28.0));
+        let d = place(short, Anchor::Below(mid), size);
+        assert!(
+            (d.bottom() - (short.bottom() - MARGIN)).abs() < 1e-3,
+            "{d:?}"
+        );
+        for (rect, within) in [(a, area()), (b, area()), (c, area()), (d, short)] {
+            assert!(rect.left() >= within.left() && rect.right() <= within.right() + 1e-3);
+            assert!(rect.top() >= within.top() && rect.bottom() <= within.bottom() + 1e-3);
+        }
     }
 
     /// The extract rows appear only for an archive, and they land where the
@@ -833,14 +1286,17 @@ mod tests {
     /// are several archives to put into one.
     #[test]
     fn extract_rows_appear_only_on_an_archive() {
-        let plain = items(facts());
+        let plain = items(facts(), &openers());
         assert!(plain.iter().all(|i| i.action != Action::ExtractHere));
 
-        let rows = items(Facts {
-            archive: true,
-            archives: 1,
-            ..facts()
-        });
+        let rows = items(
+            Facts {
+                archive: true,
+                archives: 1,
+                ..facts()
+            },
+            &openers(),
+        );
         let at = |action: Action| rows.iter().position(|i| i.action == action);
         let sub = at(Action::ExtractSubfolder).expect("extract to folder");
         let here = at(Action::ExtractHere).expect("extract here");
@@ -858,12 +1314,15 @@ mod tests {
             "one archive has nothing to merge"
         );
 
-        let rows = items(Facts {
-            archive: true,
-            archives: 3,
-            targets: 3,
-            ..facts()
-        });
+        let rows = items(
+            Facts {
+                archive: true,
+                archives: 3,
+                targets: 3,
+                ..facts()
+            },
+            &openers(),
+        );
         let at = |action: Action| rows.iter().position(|i| i.action == action);
         let merged = at(Action::ExtractMerged).expect("extract all into one folder");
         assert_eq!(merged, at(Action::ExtractHere).expect("here") + 1);
@@ -879,7 +1338,7 @@ mod tests {
             trashed: 4,
             ..facts()
         };
-        let rows = items(in_trash);
+        let rows = items(in_trash, &openers());
         let actions: Vec<Action> = rows.iter().map(|item| item.action).collect();
         assert_eq!(
             actions,
@@ -911,7 +1370,7 @@ mod tests {
             ..facts()
         };
         let enabled = |action: Action| {
-            items(empty)
+            items(empty, &[])
                 .into_iter()
                 .find(|i| i.action == action)
                 .map(|i| i.enabled)
@@ -928,13 +1387,12 @@ mod tests {
             is_dir: false,
             targets: 0,
             clipboard: true,
-            openers: 0,
             archive: false,
             archives: 0,
             trash: false,
             trashed: 0,
         };
-        let mut menu = Menu::new(egui::pos2(0.0, 0.0), items(sparse), Vec::new());
+        let mut menu = Menu::context(egui::pos2(0.0, 0.0), items(sparse, &[]));
         assert_eq!(menu.cursor, None, "an unaimed menu picks nothing");
         assert_eq!(menu.activate(), None);
         menu.move_cursor(1);
@@ -946,7 +1404,7 @@ mod tests {
         assert_eq!(menu.activate(), Some(Action::Paste));
 
         // …and with everything live, `↑` from nothing lands on the last row.
-        let mut menu = Menu::new(egui::pos2(0.0, 0.0), items(facts()), Vec::new());
+        let mut menu = Menu::context(egui::pos2(0.0, 0.0), items(facts(), &openers()));
         menu.move_cursor(-1);
         assert_eq!(menu.activate(), Some(Action::Properties));
         menu.move_cursor(1);
@@ -956,8 +1414,7 @@ mod tests {
     /// The submenu takes the arrows while it is out, and gives them back.
     #[test]
     fn the_submenu_owns_the_keyboard_while_it_is_out() {
-        let openers = vec!["Zed".to_string(), "Firefox".to_string()];
-        let mut menu = Menu::new(egui::pos2(0.0, 0.0), items(facts()), openers);
+        let mut menu = Menu::context(egui::pos2(0.0, 0.0), items(facts(), &openers()));
         assert!(menu.open_submenu());
         menu.move_cursor(1);
         assert_eq!(menu.activate(), Some(Action::OpenWith(0)));
@@ -973,7 +1430,7 @@ mod tests {
     #[test]
     fn a_dismissed_menu_fades_and_then_is_spent() {
         let t0 = Instant::now();
-        let mut menu = Menu::new(egui::pos2(0.0, 0.0), items(facts()), Vec::new());
+        let mut menu = Menu::context(egui::pos2(0.0, 0.0), items(facts(), &openers()));
         assert_eq!(menu.alpha(t0), 1.0);
         assert!(menu.live() && !menu.spent(t0));
         menu.closing = Some(t0);
@@ -990,7 +1447,7 @@ mod tests {
     fn the_rows_are_laid_out_and_hit_tested_the_same_way() {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
-            let menu = Menu::new(egui::pos2(200.0, 200.0), items(facts()), Vec::new());
+            let menu = Menu::context(egui::pos2(200.0, 200.0), items(facts(), &openers()));
             let g = geometry(area(), &menu, ui.painter());
             assert_eq!(g.rows.len(), menu.items.len());
             assert!((g.card.height() - height(&menu.items)).abs() < 1e-3);
@@ -1003,10 +1460,9 @@ mod tests {
             assert!(!g.contains(egui::pos2(0.0, 0.0)));
 
             // The submenu is beside the card, not on top of it.
-            let mut menu = Menu::new(
+            let mut menu = Menu::context(
                 egui::pos2(200.0, 200.0),
-                items(facts()),
-                vec!["Zed".to_string(), "mpv".to_string()],
+                items(facts(), &["Zed".to_string(), "mpv".to_string()]),
             );
             menu.open_submenu();
             let g = geometry(area(), &menu, ui.painter());
@@ -1015,5 +1471,372 @@ mod tests {
             assert!(sub.left() > g.card.left());
             assert_eq!(g.hit(rows[1].center()), Some(Control::SubmenuItem(1)));
         });
+    }
+
+    // ── The app menu ────────────────────────────────────────────────────────
+
+    fn app_facts() -> AppFacts {
+        AppFacts {
+            picker: false,
+            targets: 1,
+            clipboard: true,
+            scale: ViewScale::Compact,
+            hidden: false,
+            linemode: LineMode::Size,
+            sort: SortBy::Alphabetical,
+            reverse: false,
+        }
+    }
+
+    fn app(facts: AppFacts) -> Vec<Item> {
+        app_items(facts, &Registry::defaults(), |_| false)
+    }
+
+    fn row<'a>(rows: &'a [Item], label: &str) -> &'a Item {
+        rows.iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("no row {label:?}"))
+    }
+
+    fn ticked(rows: &[Item]) -> Vec<&str> {
+        rows.iter()
+            .filter(|i| i.checked == Some(true))
+            .map(|i| i.label.as_str())
+            .collect()
+    }
+
+    /// The whole menu, top to bottom: every row, where the separators fall,
+    /// and the key each one teaches — read out of the default registry, not
+    /// spelled here a second time.
+    #[test]
+    fn the_app_menu_rows_are_in_their_groups() {
+        let rows = app(app_facts());
+        let got: Vec<(&str, &str, bool)> = rows
+            .iter()
+            .map(|i| (i.label.as_str(), i.keys.as_str(), i.gap_before))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("New tab", "t", false),
+                ("New window", "Ctrl+n", false),
+                ("Go to path…", "Ctrl+l", true),
+                ("Jump to…", "z", false),
+                ("Search by name…", "s", false),
+                ("Search contents…", "S", false),
+                ("Filter…", "f", false),
+                ("Select all", "Ctrl+a", true),
+                ("Invert selection", "Ctrl+r", false),
+                ("Copy", "y", true),
+                ("Cut", "x", false),
+                ("Paste", "p", false),
+                ("Rename", "r", false),
+                ("New file or folder…", "a", false),
+                ("Move to trash", "d", false),
+                ("Undo", "u", false),
+                ("View", "", true),
+                ("Sort", "", false),
+                ("Mounts…", "M", true),
+                ("Trash", "g t", false),
+                ("Tasks", "w", false),
+                ("Selection basket", "B", false),
+                ("Disk usage", "m u", false),
+                ("Command palette…", "Ctrl+p", true),
+                ("Keyboard shortcuts", "F1", false),
+                ("Quit", "q", true),
+            ]
+        );
+        // Every leaf is the command its key runs, so it cannot drift from it.
+        use Command as C;
+        let command = |label: &str| match row(&rows, label).action {
+            Action::Run(command) => command,
+            other => panic!("{label} is {other:?}"),
+        };
+        assert_eq!(command("New tab"), C::TabCreate);
+        assert_eq!(command("Go to path…"), C::GotoPath);
+        assert_eq!(command("Copy"), C::Yank);
+        assert_eq!(command("Cut"), C::YankCut);
+        assert_eq!(command("New file or folder…"), C::Create);
+        assert_eq!(command("Trash"), C::OpenTrash);
+        assert_eq!(command("Keyboard shortcuts"), C::Help);
+        assert_eq!(command("Quit"), C::Quit);
+        // Only the two parents fly anything out, and nothing on the top level
+        // is a tick.
+        let parents: Vec<&str> = rows
+            .iter()
+            .filter(|i| i.has_submenu())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(parents, vec!["View", "Sort"]);
+        assert!(rows.iter().all(|i| i.checked.is_none()));
+        assert!(rows.iter().all(|i| i.enabled), "everything can act here");
+    }
+
+    /// A rebound key is taught where it was moved to, and an unbound command
+    /// teaches nothing rather than a key that does not run it.
+    #[test]
+    fn the_app_menu_teaches_the_keys_the_registry_has() {
+        let mut keymap = Registry::defaults();
+        let t = df_core::keymap::parse_sequence("t").expect("parses");
+        keymap.unbind(df_core::keymap::Context::Files, &t);
+        let rows = app_items(app_facts(), &keymap, |_| false);
+        assert_eq!(row(&rows, "New tab").keys, "");
+        keymap
+            .register(
+                df_core::keymap::Context::Files,
+                df_core::keymap::parse_sequence("alt+t").expect("parses"),
+                Command::TabCreate,
+                "New tab",
+                df_core::keymap::When::Always,
+            )
+            .expect("free");
+        let rows = app_items(app_facts(), &keymap, |_| false);
+        assert_eq!(row(&rows, "New tab").keys, "Alt+t");
+    }
+
+    /// Greyed by what is there: nothing yanked greys Paste, nothing under the
+    /// cursor greys the four verbs that need a file — and the parents never
+    /// grey, because a grey "View" would hide rows that can still act.
+    #[test]
+    fn the_app_menu_greys_what_cannot_act_here() {
+        let enabled = |facts: AppFacts, label: &str| row(&app(facts), label).enabled;
+        let empty = AppFacts {
+            targets: 0,
+            clipboard: false,
+            ..app_facts()
+        };
+        for label in ["Copy", "Cut", "Rename", "Move to trash", "Paste"] {
+            assert!(
+                !enabled(empty, label),
+                "{label} is live with nothing to act on"
+            );
+            assert!(enabled(app_facts(), label), "{label} is grey with a file");
+        }
+        for label in [
+            "New tab",
+            "New file or folder…",
+            "Select all",
+            "Undo",
+            "View",
+            "Sort",
+            "Quit",
+        ] {
+            assert!(enabled(empty, label), "{label} greyed for no reason");
+        }
+    }
+
+    /// The gate's own answer greys the row: whatever `refused` would turn away
+    /// with a toast is grey instead — and a parent stays live even when every
+    /// row it could be refused for is.
+    #[test]
+    fn the_app_menu_greys_what_the_gate_would_refuse() {
+        use Command as C;
+        let trash_like = |command: Command| {
+            matches!(
+                command,
+                C::Yank | C::YankCut | C::Paste | C::Trash | C::Create | C::OpenTrash
+            )
+        };
+        let rows = app_items(app_facts(), &Registry::defaults(), trash_like);
+        for label in [
+            "Copy",
+            "Cut",
+            "Paste",
+            "Move to trash",
+            "New file or folder…",
+            "Trash",
+        ] {
+            assert!(!row(&rows, label).enabled, "{label} would be refused");
+        }
+        for label in ["Rename", "Undo", "Select all", "View", "Sort", "Quit"] {
+            assert!(row(&rows, label).enabled, "{label} is not refused");
+        }
+        let everything = app_items(app_facts(), &Registry::defaults(), |_| true);
+        assert!(row(&everything, "View").enabled && row(&everything, "Sort").enabled);
+    }
+
+    /// A picker session's last row is the dialog's Cancel, not a file
+    /// manager's Quit — the same `q`, named for what it does here.
+    #[test]
+    fn a_picker_session_cancels_rather_than_quits() {
+        let rows = app(AppFacts {
+            picker: true,
+            ..app_facts()
+        });
+        let last = rows.last().expect("a row");
+        assert_eq!(last.label, "Cancel");
+        assert_eq!(last.action, Action::Run(Command::Quit));
+        assert_eq!(last.keys, "q");
+    }
+
+    /// The View list: the ladder's four steps as one radio group, hidden files
+    /// as a check, and the linemodes as a second radio group — separated, every
+    /// row in the check column, and the tick on whatever is true now.
+    #[test]
+    fn the_view_submenu_ticks_what_is_on() {
+        let rows = app(AppFacts {
+            scale: ViewScale::Roomy,
+            hidden: true,
+            linemode: LineMode::Mtime,
+            ..app_facts()
+        });
+        let view = row(&rows, "View").submenu.as_ref().expect("a list");
+        let labels: Vec<(&str, bool)> = view
+            .iter()
+            .map(|i| (i.label.as_str(), i.gap_before))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                ("Compact", false),
+                ("Comfortable", false),
+                ("Roomy", false),
+                ("Grid", false),
+                ("Show hidden files", true),
+                ("Size", true),
+                ("Permissions", false),
+                ("Created", false),
+                ("Modified", false),
+                ("Owner", false),
+                ("None", false),
+            ]
+        );
+        assert!(view.iter().all(|i| i.checked.is_some() && i.enabled));
+        assert_eq!(ticked(view), vec!["Roomy", "Show hidden files", "Modified"]);
+        use Command as C;
+        assert_eq!(row(view, "Grid").action, Action::Run(C::ViewScaleGrid));
+        assert_eq!(
+            row(view, "Grid").keys,
+            "",
+            "the steps are unbound by default"
+        );
+        assert_eq!(row(view, "Show hidden files").keys, ".");
+        assert_eq!(row(view, "Created").action, Action::Run(C::LinemodeBtime));
+        assert_eq!(row(view, "Created").keys, "m b");
+
+        let rows = app(app_facts());
+        let view = row(&rows, "View").submenu.as_ref().expect("a list");
+        assert_eq!(ticked(view), vec!["Compact", "Size"]);
+    }
+
+    /// The Sort list: the keys as a radio group that keeps the direction the
+    /// listing is in, and Reverse as the current key the other way round —
+    /// grey for a shuffle, which has no other way round.
+    #[test]
+    fn the_sort_submenu_keeps_the_direction_and_reverses_the_key() {
+        use Command as C;
+        let sort = |facts: AppFacts| -> Vec<Item> {
+            let rows = app(facts);
+            row(&rows, "Sort").submenu.clone().expect("a list")
+        };
+        let forward = sort(AppFacts {
+            sort: SortBy::Size,
+            ..app_facts()
+        });
+        let labels: Vec<&str> = forward.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Alphabetical",
+                "Natural",
+                "Modified",
+                "Created",
+                "Extension",
+                "Size",
+                "Random",
+                "Reverse",
+            ]
+        );
+        assert!(row(&forward, "Reverse").gap_before);
+        assert!(forward.iter().all(|i| i.checked.is_some()));
+        assert_eq!(ticked(&forward), vec!["Size"]);
+        assert_eq!(row(&forward, "Modified").action, Action::Run(C::SortMtime));
+        assert_eq!(row(&forward, "Modified").keys, ", m");
+        assert_eq!(
+            row(&forward, "Reverse").action,
+            Action::Run(C::SortSizeReverse)
+        );
+        assert_eq!(row(&forward, "Reverse").keys, ", S");
+        assert!(row(&forward, "Reverse").enabled);
+
+        let reversed = sort(AppFacts {
+            sort: SortBy::Size,
+            reverse: true,
+            ..app_facts()
+        });
+        assert_eq!(ticked(&reversed), vec!["Size", "Reverse"]);
+        assert_eq!(
+            row(&reversed, "Modified").action,
+            Action::Run(C::SortMtimeReverse)
+        );
+        assert_eq!(row(&reversed, "Reverse").action, Action::Run(C::SortSize));
+        // A shuffle is a shuffle both ways round.
+        assert_eq!(row(&reversed, "Random").action, Action::Run(C::SortRandom));
+
+        let shuffled = sort(AppFacts {
+            sort: SortBy::Random,
+            ..app_facts()
+        });
+        assert_eq!(ticked(&shuffled), vec!["Random"]);
+        let reverse = row(&shuffled, "Reverse");
+        assert!(!reverse.enabled, "a shuffle has no direction to reverse");
+        assert_eq!(reverse.checked, Some(false));
+    }
+
+    /// A submenu with separators and ticks is laid out and hit-tested like the
+    /// main list, and the keyboard walks it past its grey rows.
+    #[test]
+    fn a_submenu_with_groups_is_laid_out_like_the_main_list() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let button = egui::Rect::from_min_size(egui::pos2(10.0, 40.0), egui::vec2(28.0, 28.0));
+            let mut menu = Menu::app(button, app(app_facts()));
+            assert_eq!(menu.kind, Kind::App);
+            let view = menu
+                .items
+                .iter()
+                .position(|i| i.label == "View")
+                .expect("a View row");
+            menu.cursor = Some(view);
+            assert!(menu.open_submenu());
+            let g = geometry(area(), &menu, ui.painter());
+            assert_eq!(g.card.min, egui::pos2(10.0, 68.0 + BELOW_GAP));
+            let (sub, rows) = g.sub.as_ref().expect("the View list is out");
+            let items = menu.sub_items().expect("the View list");
+            assert_eq!(rows.len(), items.len());
+            assert!((sub.height() - height(items)).abs() < 1e-3);
+            assert!(sub.left() > g.card.left());
+            for (index, rect) in rows.iter().enumerate() {
+                assert_eq!(g.hit(rect.center()), Some(Control::SubmenuItem(index)));
+            }
+            // Two separators: the gaps are real space, not overlapping rows.
+            assert!(rows[4].top() - rows[3].bottom() > 1.0);
+
+            // `↓` walks it, and Enter runs the row it is on.
+            menu.move_cursor(1);
+            assert_eq!(
+                menu.activate(),
+                Some(Action::Run(Command::ViewScaleCompact))
+            );
+            // Moving to the other parent is a fresh list with no cursor in it.
+            let sort = view + 1;
+            menu.cursor = Some(sort);
+            assert!(menu.open_submenu());
+            assert_eq!(menu.sub_cursor, None);
+            assert_eq!(menu.activate(), None);
+        });
+
+        // Reverse is grey under a shuffle, so the keyboard steps over it.
+        let mut menu = Menu::app(
+            egui::Rect::NOTHING,
+            app(AppFacts {
+                sort: SortBy::Random,
+                ..app_facts()
+            }),
+        );
+        menu.cursor = menu.items.iter().position(|i| i.label == "Sort");
+        assert!(menu.open_submenu());
+        menu.move_cursor(-1);
+        assert_eq!(menu.activate(), Some(Action::Run(Command::SortRandom)));
     }
 }

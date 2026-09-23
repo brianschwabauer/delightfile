@@ -741,6 +741,42 @@ pub fn crumbs(path: &std::path::Path) -> Vec<Crumb> {
     out
 }
 
+/// The app menu's button, at the top row's leading end: a square as tall as a
+/// chip, inset from the row's corner by [`CHIP_INSET`] on both sides it
+/// shares with the row.
+///
+/// Even insets and [`CHIP_RADIUS`] are the same pair every chip on the row
+/// wears (`delightful-ui` §15): the gap between the button and the row's own
+/// rounded corner stays one width all the way round the turn. Square, because
+/// it is one glyph and a hit target; the row's own height less the insets,
+/// because that is the size every other plate on the row already is.
+///
+/// A function of the row alone, so the hit test, the paint, the crumbs laid
+/// out after it and the menu that drops out of it all read one rect.
+pub fn menu_button_rect(row: egui::Rect) -> egui::Rect {
+    let side = (row.height() - CHIP_INSET * 2.0).max(0.0);
+    egui::Rect::from_min_size(
+        egui::pos2(row.left() + CHIP_INSET, row.top() + CHIP_INSET),
+        egui::vec2(side, side),
+    )
+}
+
+/// Where the path starts on the row: after the menu button and a word space.
+///
+/// [`ICON_GAP`] rather than a crumb separator's width: the button is not a
+/// step of the path, and a chevron's worth of space before the root would read
+/// as a step that had gone missing.
+fn crumbs_left(row: egui::Rect) -> f32 {
+    menu_button_rect(row).right() + ICON_GAP
+}
+
+/// The menu button's glyph with the patched font (nf-fa-bars)…
+const MENU_ICON: char = '\u{f0c9}';
+
+/// …and without it: the identity sign, the nearest thing to three bars the
+/// stock faces draw.
+const MENU_GLYPH: &str = "≡";
+
 /// Where each crumb goes, sharing the measurement with the paint so a click
 /// lands on the segment it looks like it landed on.
 ///
@@ -758,7 +794,10 @@ pub fn crumb_rects(
         .iter()
         .map(|crumb| text_width(painter, &crumb.label, font.clone()) + PAD_X * 2.0)
         .collect();
-    let room = (bar.width() - PAD_X * 2.0 - reserved_right).max(0.0);
+    // The menu button holds the row's leading end, so the path is measured
+    // against what is left after it.
+    let start = crumbs_left(bar);
+    let room = (bar.right() - PAD_X - reserved_right - start).max(0.0);
     // Elide from the *left*: the segment you are in and the ones just above it
     // are what a person is reading, and the root is the part they can guess.
     let mut first = 0;
@@ -777,7 +816,7 @@ pub fn crumb_rects(
     }
 
     let mut rects = vec![egui::Rect::NOTHING; crumbs.len()];
-    let mut x = bar.left() + PAD_X;
+    let mut x = start;
     if first > 0 {
         x += text_width(painter, CRUMB_ELLIPSIS, font.clone()) + CRUMB_SEPARATOR_WIDTH;
     }
@@ -1288,6 +1327,8 @@ pub fn tip(
 /// reason [`tab_rects`] is shared: two functions computing this separately is
 /// how a row grows a one-pixel lie at its edges.
 pub struct TopGeom {
+    /// The app menu's button, at the row's leading end ([`menu_button_rect`]).
+    pub menu: egui::Rect,
     pub crumbs: Vec<egui::Rect>,
     /// The leading `…`, when the path did not fit. It is not a crumb — it
     /// stands for several — so it is not in the vector above.
@@ -1369,7 +1410,7 @@ pub fn top_geometry(
                 .rev()
                 .find(|r| **r != egui::Rect::NOTHING)
                 .map(|last| last.right() + CRUMB_SEPARATOR_WIDTH)
-                .unwrap_or(row.left() + PAD_X);
+                .unwrap_or(crumbs_left(row));
             egui::Rect::from_min_max(
                 egui::pos2(left, row.top() + CHIP_INSET),
                 egui::pos2(
@@ -1413,12 +1454,14 @@ pub fn top_geometry(
         .unwrap_or(crumbs.len());
     let ellipsis = (elided > 0 && !crumbs.is_empty()).then(|| {
         let width = text_width(painter, CRUMB_ELLIPSIS, egui::FontId::proportional(FONT));
+        let left = crumbs_left(row);
         egui::Rect::from_min_max(
-            egui::pos2(row.left() + PAD_X, row.top() + CHIP_INSET),
-            egui::pos2(row.left() + PAD_X + width, row.bottom() - CHIP_INSET),
+            egui::pos2(left, row.top() + CHIP_INSET),
+            egui::pos2(left + width, row.bottom() - CHIP_INSET),
         )
     });
     TopGeom {
+        menu: menu_button_rect(row),
         crumbs: rects,
         ellipsis,
         filter: filter_rect,
@@ -1491,8 +1534,53 @@ pub fn bar_fill(palette: &crate::theme::Palette, filter: f32) -> egui::Color32 {
     )
 }
 
-/// Draw the top row in browse mode: the crumbs, the filter chip, and the
-/// cluster (PLAN §2, §7.2, §7.3).
+/// The app menu's button: the three bars, on a plate that lights under the
+/// pointer, sinks under the press and ripples, like every chip on the row.
+///
+/// `open` holds it pressed while its menu is out. The press is also fed to
+/// the hover map for as long as the menu is up (see the app's frame), so when
+/// the menu goes the button springs back over the press's own release rather
+/// than snapping up.
+fn menu_button(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    open: bool,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let key = Control::MenuButton;
+    let press = hovers.press(key).max(f32::from(open));
+    // A held button keeps its plate even with the pointer gone down into the
+    // menu: the plate is what says which control the card belongs to.
+    let lit = hovers.hover(key).max(press);
+    let rect = pressed_rect(rect, press);
+    if lit > 0.0 {
+        // Faded by alpha rather than mixed up from `crust`, for the reason the
+        // crumbs' plate is: the row under it is lighter than `crust`.
+        paint
+            .painter
+            .rect_filled(rect, CHIP_RADIUS, fade(palette.surface1, lit));
+    }
+    let inside = paint.painter.with_clip_rect(rect);
+    for splash in ripples.splashes(key, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+        );
+    }
+    inside.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        crate::icons::glyph(paint.nerd, MENU_ICON, MENU_GLYPH),
+        egui::FontId::proportional(FONT),
+        mix(palette.overlay1, palette.text, lit),
+    );
+}
+
+/// Draw the top row in browse mode: the menu button, the crumbs, the filter
+/// chip, and the cluster (PLAN §2, §7.2, §7.3).
 #[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn path_bar(
     paint: &Painting<'_>,
@@ -1510,6 +1598,9 @@ pub fn path_bar(
     joined: bool,
     cluster: &Cluster<'_>,
     geom: &TopGeom,
+    // Whether the app menu is out. Its button stays down for as long as it is,
+    // so the card below it has a visible thing it came out of.
+    menu_open: bool,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
 ) {
@@ -1519,13 +1610,15 @@ pub fn path_bar(
     let font = egui::FontId::proportional(FONT);
     let rects = &geom.crumbs;
 
+    menu_button(paint, geom.menu, menu_open, hovers, ripples);
+
     // The leading ellipsis, when the path did not fit. It brightens under the
     // pointer because it answers one — with the segments it is standing in for,
     // which are otherwise nowhere on screen.
     let elided = rects.iter().position(|r| *r != egui::Rect::NOTHING);
-    if elided.unwrap_or(0) > 0 {
+    if let Some(rect) = geom.ellipsis {
         painter.text(
-            egui::pos2(bar.left() + PAD_X, bar.center().y),
+            egui::pos2(rect.left(), bar.center().y),
             egui::Align2::LEFT_CENTER,
             CRUMB_ELLIPSIS,
             font.clone(),
@@ -3349,6 +3442,53 @@ mod tests {
         });
     }
 
+    /// The menu button leads the row: a square chip at the row's corner, the
+    /// same inset on the two sides it shares with the row and on the one
+    /// below, and the path laid out after it — crumbs, or the `…` standing in
+    /// for them — never under it.
+    #[test]
+    fn the_menu_button_leads_the_row() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let row =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(900.0, TOP_HEIGHT));
+            let button = menu_button_rect(row);
+            assert!((button.width() - button.height()).abs() < 1e-3, "square");
+            assert!((button.left() - row.left() - CHIP_INSET).abs() < 1e-3);
+            assert!((button.top() - row.top() - CHIP_INSET).abs() < 1e-3);
+            assert!((row.bottom() - button.bottom() - CHIP_INSET).abs() < 1e-3);
+
+            let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile/crates"));
+            let bare = Cluster {
+                selected: 0,
+                visual: None,
+                yank: None,
+                branch: None,
+                dirty: None,
+                position: 0,
+                rows: 0,
+            };
+            let geom = top_geometry(ui.painter(), row, &path, "", &bare, false);
+            assert_eq!(geom.menu, button);
+            let first = geom.crumbs[0];
+            assert!(
+                (first.left() - (button.right() + ICON_GAP)).abs() < 1e-3,
+                "{first:?} after {button:?}"
+            );
+
+            // Narrow enough to elide: the `…` takes the first crumb's place,
+            // still after the button.
+            let narrow =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(200.0, TOP_HEIGHT));
+            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
+            let ellipsis = geom.ellipsis.expect("a narrow row elides");
+            assert!((ellipsis.left() - (geom.menu.right() + ICON_GAP)).abs() < 1e-3);
+            for rect in geom.crumbs.iter().filter(|r| **r != egui::Rect::NOTHING) {
+                assert!(rect.left() > geom.menu.right(), "{rect:?} under the button");
+            }
+        });
+    }
+
     /// `delightful-ui` §15: a row inside a card is inset by the padding and its
     /// radius is the card's less that inset, so the gap stays constant round the
     /// corner. The same rule holds for a chip inside the top row.
@@ -3758,6 +3898,7 @@ mod tests {
                     true,
                     &cluster,
                     &geom,
+                    filter.is_empty(),
                     &Hovers::new(),
                     &Ripples::new(),
                 );
@@ -3785,6 +3926,7 @@ mod tests {
                 false,
                 &cluster,
                 &geom,
+                false,
                 &Hovers::new(),
                 &Ripples::new(),
             );

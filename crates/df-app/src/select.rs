@@ -281,6 +281,7 @@ mod tests {
             Control::Tab(0),
             Control::GitChip,
             Control::FilterChip,
+            Control::MenuButton,
             Control::Counter,
             Control::BasketChip,
             Control::Toast,

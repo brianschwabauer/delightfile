@@ -129,6 +129,9 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("w", Command::TasksShow),
         ("u", Command::Undo),
         ("ctrl+p", Command::CommandPalette),
+        // The menu key on every desktop: the app menu under the top row's
+        // button.
+        ("f10", Command::AppMenu),
         ("~", Command::Help),
         ("f1", Command::Help),
         // `?` is help, not find-backwards: the key that means "what can I

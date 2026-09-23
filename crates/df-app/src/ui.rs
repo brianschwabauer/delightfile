@@ -455,10 +455,14 @@ pub enum Control {
     /// The clipboard chip on the top row, which clears it — the pointer's `X`
     /// (PLAN §4.1).
     YankChip,
-    /// A row of the right-click menu, and a row of its opener submenu
-    /// (PLAN §7.5).
+    /// A row of the open menu — the right-click one or the app menu — and a
+    /// row of the submenu it has flown out (PLAN §7.5).
     MenuItem(usize),
     SubmenuItem(usize),
+    /// The three bars at the top row's leading end, which drop the app menu
+    /// out: every command a person might not know the key for, where the
+    /// pointer can find it.
+    MenuButton,
     /// The selection basket's chip, and the rows of the tray it opens
     /// (PLAN §7.1).
     BasketChip,

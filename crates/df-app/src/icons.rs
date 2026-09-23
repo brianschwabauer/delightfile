@@ -901,9 +901,18 @@ mod glyph_tests {
         let _ = ctx.run_ui(Default::default(), |_| {});
         let plain = [
             'Y', 'f', '⊞', '☰', '✓', '☐', '•', '◂', '▣', '▸', '›', '…', '×', '·', '→', '↑', '↓',
-            '←', '⇧', '≈', '🗝',
+            '←', '⇧', '≈', '🗝', '≡',
         ];
-        let patched = ['\u{f418}', '\u{f0b0}', '\u{f01c}', super::LOCK, '\u{f1c6}'];
+        let patched = [
+            '\u{f418}',
+            '\u{f0b0}',
+            '\u{f01c}',
+            super::LOCK,
+            '\u{f1c6}',
+            // The app menu's button and its ticks.
+            '\u{f0c9}',
+            '\u{f00c}',
+        ];
         let font = egui::FontId::proportional(14.0);
         for c in plain.iter().chain(patched.iter().filter(|_| nerd)) {
             assert!(

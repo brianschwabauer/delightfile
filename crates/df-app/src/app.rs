@@ -1038,8 +1038,13 @@ pub struct App {
     clicks: crate::mouse::Clicks<Control>,
     press: Option<PressStart>,
     band: Option<select::Band>,
-    /// The right-click menu, while it is up — or fading (see [`menu::Menu`]).
+    /// The menu that is up — the right-click one or the app menu, one at a
+    /// time — or fading (see [`menu::Menu`]).
     menu: Option<menu::Menu>,
+    /// Where the app menu's button is on the top row ([`chrome::menu_button_rect`]):
+    /// what the menu hangs from when `F10` opens it rather than a click, which
+    /// has no geometry of its own to hand over.
+    menu_button: egui::Rect,
     /// The last `/` or `?`, so `n` and `N` have something to repeat.
     last_find: Option<(String, FindDirection)>,
 
@@ -1787,6 +1792,7 @@ impl App {
             press: None,
             band: None,
             menu: None,
+            menu_button: egui::Rect::NOTHING,
             last_find: None,
             help: None,
             help_query: String::new(),
@@ -4837,7 +4843,7 @@ impl App {
             // recent thing they asked for. See [`App::menu_key`] for why its
             // keys are matched literally.
             if self.menu.as_ref().is_some_and(Menu::live) {
-                self.menu_key(chord, now);
+                self.menu_key(chord, page, now);
                 continue;
             }
             // The help sheet is a modal surface like any other, and it is
@@ -6058,6 +6064,35 @@ impl App {
         };
         self.set_scale(next, now);
         self.toasts.notice(Self::scale_notice(next), now);
+    }
+
+    /// The app menu's View radios: straight to `next` on the ladder rather than
+    /// a step along it (PLAN §4.1).
+    ///
+    /// [`App::step_scale`]'s path with the destination given instead of found:
+    /// the same record, the same jump when the move crosses into or out of the
+    /// grid, and the same silence when there is nowhere to go — picking the
+    /// step you are already at writes nothing and says nothing.
+    fn set_scale_step(&mut self, next: ViewScale, now: Instant) {
+        let path = self.tab().cwd.path().to_path_buf();
+        let at = self.scale_of(&path);
+        if at == next {
+            return;
+        }
+        if at.is_grid() != next.is_grid() {
+            self.tabs
+                .active_mut()
+                .cwd
+                .set_first_over(0, Duration::ZERO, now);
+        }
+        self.set_scale(path, next, now);
+        self.toasts.notice(Self::scale_notice(next), now);
+    }
+
+    /// Where the directory on screen is on the ladder: what the View radios
+    /// tick.
+    fn scale_here(&self) -> ViewScale {
+        self.scale_of(self.tab().cwd.path())
     }
 
     /// The one line a step of the ladder says for itself.
@@ -7465,39 +7500,43 @@ impl App {
     /// [`menu_command`]), and it used to reach them with only a hand-written
     /// branch for `d` standing between a remote row and a local trash job.
     fn refuse_where_we_are(&mut self, command: Command, now: Instant) -> bool {
+        match self.refusal(command) {
+            Some(notice) => {
+                self.toasts.notice(notice.to_string(), now);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether [`App::refuse_where_we_are`] would turn `command` away here,
+    /// and the sentence it would say — asked without saying it.
+    ///
+    /// The app menu asks this for every row as it opens, and greys the ones
+    /// with an answer: a row that is live only to toast "not here" when it is
+    /// clicked is a row that lied about being clickable.
+    fn refusal(&self, command: Command) -> Option<&'static str> {
         // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
         // the commands that would write into one are inert *out loud*. A key
         // that silently does nothing is a key the user presses twice — and the
         // notice names the way out, which is the whole point of saying it.
         if self.tab().archive.is_some() && crate::archive::inert_in_archive(command) {
-            self.toasts.notice(
-                "Archives are read-only — press e to extract".to_string(),
-                now,
-            );
-            return true;
+            return Some("Archives are read-only — press e to extract");
         }
         // PLAN §7.6: the same rule for a remote service, with a different list
         // and a different sentence. What is missing is missing for a reason the
         // notice names, so the key is not simply dead.
         if self.tab().remote.is_some() && crate::remote::inert_remotely(command) {
-            self.toasts.notice(
-                "Not over the link — press y then p in a local folder to bring it here".to_string(),
-                now,
-            );
-            return true;
+            return Some("Not over the link — press y then p in a local folder to bring it here");
         }
         // PLAN §7.4: the trash is a listing of things that have already been
         // deleted. Everything that would act on them *as files where they are*
         // is inert, and the three verbs that are not are Enter/r, D and the
         // palette's "Empty trash".
         if self.tab().trash.is_some() && inert_in_trash(command) {
-            self.toasts.notice(
-                "Not in the trash — Enter restores, D destroys".to_string(),
-                now,
-            );
-            return true;
+            return Some("Not in the trash — Enter restores, D destroys");
         }
-        false
+        None
     }
 
     fn run(&mut self, command: Command, page: usize, now: Instant) {
@@ -8001,6 +8040,10 @@ impl App {
             C::ToggleView => self.toggle_view(now),
             C::ViewScaleUp => self.step_scale(true, now),
             C::ViewScaleDown => self.step_scale(false, now),
+            C::ViewScaleCompact => self.set_scale_step(ViewScale::Compact, now),
+            C::ViewScaleComfortable => self.set_scale_step(ViewScale::Comfortable, now),
+            C::ViewScaleRoomy => self.set_scale_step(ViewScale::Roomy, now),
+            C::ViewScaleGrid => self.set_scale_step(ViewScale::Grid, now),
             C::Spot => self.toggle_spot(),
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
@@ -8061,6 +8104,9 @@ impl App {
 
             // ── The palette and the jumps (PLAN §4.4, §7.2) ─────────────────
             C::CommandPalette => self.open_palette(),
+            // `F10`, or the palette's row for it: the menu the button drops,
+            // hanging from the button, as if it had been clicked.
+            C::AppMenu => self.open_app_menu(),
             C::FuzzyJump => self.open_jump(Source::Jump),
             C::ZoxideJump => self.open_jump(Source::Zoxide),
             C::SearchName => self.open_search(search::Mode::Names),
@@ -8900,6 +8946,7 @@ impl App {
                 | Control::YankChip
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
+                | Control::MenuButton
                 | Control::BasketChip
                 | Control::BasketRow(_)
                 | Control::BasketRemove(_)
@@ -8974,6 +9021,7 @@ impl App {
             | Control::YankChip
             | Control::MenuItem(_)
             | Control::SubmenuItem(_)
+            | Control::MenuButton
             | Control::BasketChip
             | Control::BasketRow(_)
             | Control::BasketRemove(_)
@@ -9473,8 +9521,15 @@ impl App {
                     .as_ref()
                     .and_then(|g| g.rect_of(control))
                     .unwrap_or(egui::Rect::ZERO);
-                self.menu_click(control, now);
+                self.menu_click(control, geom.page, now);
                 rect
+            }
+            // Only ever reached with no menu up: while one is, the hit test
+            // answers for the menu alone, so a second press on the button is
+            // spent closing its menu rather than opening it again.
+            Control::MenuButton => {
+                self.open_app_menu();
+                geom.top.menu
             }
             Control::Action(_) | Control::PanelRow(_) => {
                 let rect = geom
@@ -9586,7 +9641,7 @@ impl App {
         self.rewatch();
     }
 
-    // ── The context menu (PLAN §7.5) ────────────────────────────────────────
+    // ── The menus: right-click and the app menu (PLAN §7.5) ─────────────────
 
     /// Right click: the menu, about whatever row it landed on.
     fn right_click(
@@ -9644,7 +9699,6 @@ impl App {
             is_dir: entry.as_ref().is_some_and(|entry| entry.is_dir()),
             targets: self.targets().len(),
             clipboard: !self.clipboard.is_empty(),
-            openers: openers.len(),
             trash: self.tab().trash.is_some(),
             trashed: self
                 .tab()
@@ -9655,10 +9709,36 @@ impl App {
             archive,
             archives,
         };
-        let names = openers.iter().map(|choice| choice.name.clone()).collect();
-        self.menu = Some(Menu::new(at, menu::items(facts), names));
+        let names: Vec<String> = openers.iter().map(|choice| choice.name.clone()).collect();
+        // One menu at a time: this replaces an app menu that was up.
+        self.menu = Some(Menu::context(at, menu::items(facts, &names)));
         // The click that opened the menu is not half of a double click on
         // whatever is underneath it.
+        self.clicks.reset();
+    }
+
+    /// The button, `F10`, or the palette: the app menu, hanging from the
+    /// button.
+    ///
+    /// Built from the state it opens on, and not kept in step with it: every
+    /// row closes the menu as it runs, so the menu never outlives the moment
+    /// its ticks and greys were true.
+    fn open_app_menu(&mut self) {
+        let facts = menu::AppFacts {
+            picker: self.chooser_file.is_some(),
+            targets: self.targets().len(),
+            clipboard: !self.clipboard.is_empty(),
+            scale: self.scale_here(),
+            hidden: self.mgr.show_hidden,
+            linemode: self.mgr.linemode,
+            sort: self.mgr.sort_by,
+            reverse: self.mgr.sort_reverse,
+        };
+        let items = menu::app_items(facts, &self.keymap, |command| {
+            self.refusal(command).is_some()
+        });
+        // One menu at a time: this replaces a context menu that was up.
+        self.menu = Some(Menu::app(self.menu_button, items));
         self.clicks.reset();
     }
 
@@ -9672,32 +9752,37 @@ impl App {
     }
 
     /// A click on a menu row.
-    fn menu_click(&mut self, control: Control, now: Instant) {
+    fn menu_click(&mut self, control: Control, page: usize, now: Instant) {
+        let Some(menu) = &mut self.menu else { return };
         let action = match control {
-            Control::MenuItem(index) => match self.menu.as_ref().and_then(|m| m.items.get(index)) {
+            Control::MenuItem(index) => match menu.items.get(index) {
                 Some(item) if !item.enabled => return,
-                Some(item) if item.submenu() => {
-                    // The chevron row does not *do* anything; it flies the
+                Some(item) if item.has_submenu() => {
+                    // The chevron row does not *do* anything; it flies its
                     // submenu out, and clicking it again puts it away.
-                    if let Some(menu) = &mut self.menu {
-                        if menu.submenu {
-                            menu.close_submenu();
-                        } else {
-                            menu.open_submenu();
-                        }
+                    if menu.submenu == Some(index) {
+                        menu.close_submenu();
+                    } else {
+                        menu.cursor = Some(index);
+                        menu.open_submenu();
                     }
                     return;
                 }
                 Some(item) => item.action,
                 None => return,
             },
-            Control::SubmenuItem(index) => menu::Action::OpenWith(index),
+            Control::SubmenuItem(index) => {
+                match menu.sub_items().and_then(|rows| rows.get(index)) {
+                    Some(item) if item.enabled => item.action,
+                    _ => return,
+                }
+            }
             _ => return,
         };
         // Closed *before* the action runs: an action that opens a dialog must
         // not open it behind the menu that asked for it.
         self.close_menu(now);
-        self.menu_action(action, now);
+        self.menu_action(action, page, now);
     }
 
     /// The menu's own keys.
@@ -9711,7 +9796,27 @@ impl App {
     /// [`App::overlay_literal`]) — and they are the five keys every menu
     /// everywhere already has, so there is nothing to configure yet. When
     /// `[cmenu]` lands, this is the one function that changes.
-    fn menu_key(&mut self, chord: Chord, now: Instant) {
+    ///
+    /// The one key that is *not* literal is the app menu's own, read out of
+    /// the registry so a rebound one still works: it puts the app menu away,
+    /// and over the context menu it swaps one for the other — one menu at a
+    /// time.
+    fn menu_key(&mut self, chord: Chord, page: usize, now: Instant) {
+        let opens_app_menu = [Context::Global, Context::Files]
+            .into_iter()
+            .any(|context| self.keymap.lookup(context, chord) == Some(Command::AppMenu));
+        if opens_app_menu {
+            if self
+                .menu
+                .as_ref()
+                .is_some_and(|m| m.kind == menu::Kind::App)
+            {
+                self.close_menu(now);
+            } else {
+                self.open_app_menu();
+            }
+            return;
+        }
         let plain = chord.mods.is_none();
         let action = {
             let Some(menu) = &mut self.menu else { return };
@@ -9734,16 +9839,21 @@ impl App {
                     }
                     None
                 }
-                Key::Enter if plain => match menu.activate() {
-                    // `Enter` on the chevron row opens the submenu rather than
-                    // doing nothing, which is what `→` does and what a hand
-                    // expects from the row it is sitting on.
-                    Some(menu::Action::OpenWithMenu) => {
-                        menu.open_submenu();
-                        None
-                    }
-                    other => other,
-                },
+                // `Enter` on a chevron row opens its submenu rather than doing
+                // nothing, which is what `→` does and what a hand expects from
+                // the row it is sitting on.
+                Key::Enter
+                    if plain
+                        && menu.submenu.is_none()
+                        && menu
+                            .cursor
+                            .and_then(|at| menu.items.get(at))
+                            .is_some_and(|item| item.enabled && item.has_submenu()) =>
+                {
+                    menu.open_submenu();
+                    None
+                }
+                Key::Enter if plain => menu.activate(),
                 Key::Escape => {
                     // One rung of its own: the submenu goes first, then the
                     // menu — the same "one rung at a time" the `Esc` ladder is.
@@ -9757,13 +9867,20 @@ impl App {
         };
         if let Some(action) = action {
             self.close_menu(now);
-            self.menu_action(action, now);
+            self.menu_action(action, page, now);
         }
     }
 
     /// Do what a menu row says. Every arm is a key that already exists.
-    fn menu_action(&mut self, action: menu::Action, now: Instant) {
+    fn menu_action(&mut self, action: menu::Action, page: usize, now: Instant) {
         use menu::Action as A;
+        // An app-menu row *is* a command, and goes through the door its key
+        // goes through: `run` asks the gate below itself, captures a FLIP for
+        // a sort, and has the only implementation there is.
+        if let A::Run(command) = action {
+            self.run(command, page, now);
+            return;
+        }
         // The menu is a **second dispatch** over the same verbs, and it used to
         // walk straight past the gates the keyboard goes through — so "Open
         // with…" on a remote row launched a viewer on the string
@@ -9777,7 +9894,7 @@ impl App {
         }
         match action {
             A::Open => self.open_hovered(now),
-            A::OpenWithMenu => {}
+            A::OpenWithMenu | A::Nothing | A::Run(_) => {}
             A::OpenWith(index) => {
                 let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
                     return;
@@ -11844,6 +11961,8 @@ impl App {
         self.pane_step = grid::pane_step(first_metrics.as_ref(), self.scale);
         let page =
             crate::viewport::visible_rows(ui::content_rect(layout.list).height(), self.pane_step);
+        // …and where the app menu's button is, for an `F10` among them.
+        self.menu_button = chrome::menu_button_rect(layout.path);
         // How many lines the help sheet is showing, measured before the keys
         // are routed and off the same rect the paint uses: its `PageDown` is a
         // page of the sheet, not of the pane behind it.
@@ -12182,6 +12301,9 @@ impl App {
                         rect.filter(|rect| rect.contains(p)).map(|_| control)
                     };
                     hit(cluster.yank.filter(|_| yank_live), Control::YankChip)
+                        // The app menu's button, at the other end of the row
+                        // from the cluster: nothing is laid over it.
+                        .or_else(|| hit(Some(top_geom.menu), Control::MenuButton))
                         // The three chips that were only ever labels until now.
                         // Order does not matter between them — the cluster is
                         // laid out left to right with no overlap — so they are
@@ -12270,7 +12392,7 @@ impl App {
                     .as_ref()
                     .and_then(|menu| menu.items.get(index))
                     .filter(|item| item.enabled)
-                    .map(|item| item.submenu());
+                    .map(|item| item.has_submenu());
                 if let (Some(submenu), Some(menu)) = (submenu, &mut self.menu) {
                     menu.cursor = Some(index);
                     if submenu {
@@ -12571,12 +12693,22 @@ impl App {
         // The prompt's text is left out altogether. It draws no hover and no
         // press, so warming it would only be a fade nobody can see asking for
         // frames on its way back down (PLAN §1).
+        //
+        // With the app menu up and nothing else held, the press is the menu's
+        // button: it stays down for as long as the menu is out, and springs
+        // back over the press's own release when the menu goes (see
+        // [`chrome::path_bar`], which also holds it down outright).
         let hot = over
             .map(|(control, _)| control)
             .filter(|control| *control != Control::PromptField);
+        let app_menu = self
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.live() && menu.kind == menu::Kind::App);
         self.hovers.tick(
             hot.filter(|control| !(self.row_hover.parked() && matches!(control, Control::Row(..)))),
-            hot.filter(|_| pointer.down && self.gesture().is_none()),
+            hot.filter(|_| pointer.down && self.gesture().is_none())
+                .or(app_menu.then_some(Control::MenuButton)),
             now,
         );
         self.ripples.tick(now);
@@ -12636,6 +12768,7 @@ impl App {
                 | Control::PanelRow(_)
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
+                | Control::MenuButton
                 | Control::BasketRow(_)
                 | Control::BasketRemove(_) => egui::CursorIcon::PointingHand,
             });
@@ -13363,6 +13496,9 @@ impl App {
                     joined,
                     &cluster,
                     &top_geom,
+                    self.menu
+                        .as_ref()
+                        .is_some_and(|menu| menu.live() && menu.kind == menu::Kind::App),
                     &self.hovers,
                     &self.ripples,
                 );
@@ -14241,7 +14377,8 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         A::CopyName => C::CopyFilename,
         A::Properties => C::Spot,
         A::Purge => C::DeletePermanently,
-        A::Restore | A::EmptyTrash => return None,
+        A::Run(command) => command,
+        A::Restore | A::EmptyTrash | A::Nothing => return None,
     })
 }
 
@@ -16216,5 +16353,241 @@ mod tests {
         for name in names {
             assert!(app.files.join(name).exists(), "{name} was renamed");
         }
+    }
+
+    // ── The app menu, through real frames ───────────────────────────────────
+
+    /// A key, the way the window reports one: queued, and routed by the next
+    /// frame.
+    fn press_key(app: &mut App, ctx: &egui::Context, key: Key) {
+        app.pending_keys.push(Press {
+            repeat: false,
+            chord: Some(Chord::plain(key)),
+            text: None,
+        });
+        run_frame(app, ctx, Vec::new());
+    }
+
+    /// Which menu is up and taking input — a fading one is only pixels.
+    fn live_menu(app: &App) -> Option<menu::Kind> {
+        app.menu.as_ref().filter(|m| m.live()).map(|m| m.kind)
+    }
+
+    /// Where the open menu is, by the layout the frame uses.
+    fn menu_geometry(app: &App, ctx: &egui::Context) -> menu::Geometry {
+        let mut out = None;
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let menu = app.menu.as_ref().expect("a menu is up");
+            out = Some(menu::geometry(screen(), menu, ui.painter()));
+        });
+        out.expect("measured")
+    }
+
+    fn row_labelled(app: &App, label: &str) -> usize {
+        let menu = app.menu.as_ref().expect("a menu is up");
+        menu.items
+            .iter()
+            .position(|item| item.label == label)
+            .unwrap_or_else(|| panic!("no {label:?} row"))
+    }
+
+    /// The button drops the app menu out of its own corner, stays down while
+    /// the menu is out, and a second press on it is spent putting the menu
+    /// away — not opening it again.
+    #[test]
+    fn the_menu_button_opens_the_app_menu_under_itself_and_puts_it_away() {
+        let mut app = Fixture::new("menu-button", &["a.txt", "b.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+
+        let button = chrome::menu_button_rect(layout_of(&app).path);
+        assert!(layout_of(&app).path.contains(button.center()));
+        click_at(&mut app, &ctx, button.center());
+        assert_eq!(live_menu(&app), Some(menu::Kind::App));
+        assert_eq!(
+            app.menu.as_ref().map(|m| m.anchor),
+            Some(menu::Anchor::Below(button))
+        );
+        let g = menu_geometry(&app, &ctx);
+        assert_eq!(g.card.left(), button.left(), "hung from the button's edge");
+        assert!(
+            (g.card.top() - (button.bottom() + 4.0)).abs() < 1e-3,
+            "{:?} under {button:?}",
+            g.card
+        );
+        // Held down while it is out, with the pointer gone from it.
+        let away = g.rows[0].center();
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(away)]);
+        assert_eq!(app.hovers.press(Control::MenuButton), 1.0);
+
+        click_at(&mut app, &ctx, button.center());
+        assert_eq!(live_menu(&app), None, "the second press opened it again");
+        // …and it springs back rather than staying down.
+        run_frame(&mut app, &ctx, Vec::new());
+        assert!(app.hovers.press(Control::MenuButton) < 1.0);
+    }
+
+    /// `F10` opens it and puts it away; over the right-click menu it swaps
+    /// one for the other, so there is only ever one menu; `Esc` closes it.
+    #[test]
+    fn f10_toggles_the_app_menu_and_there_is_one_menu_at_a_time() {
+        let mut app = Fixture::new("menu-f10", &["a.txt", "b.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+
+        press_key(&mut app, &ctx, Key::F(10));
+        assert_eq!(live_menu(&app), Some(menu::Kind::App));
+        let button = chrome::menu_button_rect(layout_of(&app).path);
+        assert_eq!(
+            app.menu.as_ref().map(|m| m.anchor),
+            Some(menu::Anchor::Below(button)),
+            "the key hangs it where the click would"
+        );
+        press_key(&mut app, &ctx, Key::F(10));
+        assert_eq!(live_menu(&app), None);
+
+        // A right click on a row: the context menu.
+        let at = row_centre(&app, 1);
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(at), secondary(true)],
+        );
+        run_frame(&mut app, &ctx, vec![secondary(false)]);
+        assert_eq!(live_menu(&app), Some(menu::Kind::Context));
+
+        press_key(&mut app, &ctx, Key::F(10));
+        assert_eq!(live_menu(&app), Some(menu::Kind::App), "swapped");
+        press_key(&mut app, &ctx, Key::Escape);
+        assert_eq!(live_menu(&app), None);
+    }
+
+    /// The rows are the app's state as it opens: the ticks are the view and
+    /// the sort on screen, the greys are what cannot act, the keys are the
+    /// registry's, and a picker session's last row cancels the dialog.
+    #[test]
+    fn the_app_menu_reads_the_state_it_opens_on() {
+        let mut app = Fixture::new("menu-state", &["a.txt", "b.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        // `, S` switches the linemode to size, so the linemode comes after.
+        app.run(Command::SortSizeReverse, 10, Instant::now());
+        app.run(Command::LinemodeMtime, 10, Instant::now());
+        app.run(Command::AppMenu, 10, Instant::now());
+        assert_eq!(live_menu(&app), Some(menu::Kind::App));
+
+        let menu = app.menu.as_ref().expect("up");
+        let ticked = |label: &str| -> Vec<String> {
+            let parent = menu
+                .items
+                .iter()
+                .find(|i| i.label == label)
+                .expect("a parent");
+            parent
+                .submenu
+                .as_ref()
+                .expect("a list")
+                .iter()
+                .filter(|i| i.checked == Some(true))
+                .map(|i| i.label.clone())
+                .collect()
+        };
+        assert_eq!(ticked("View"), vec!["Compact", "Modified"]);
+        assert_eq!(ticked("Sort"), vec!["Size", "Reverse"]);
+        let row = |label: &str| {
+            menu.items
+                .iter()
+                .find(|i| i.label == label)
+                .unwrap_or_else(|| panic!("no {label:?} row"))
+        };
+        assert!(!row("Paste").enabled, "nothing is yanked");
+        assert!(row("Copy").enabled && row("Rename").enabled);
+        assert_eq!(
+            row("New tab").keys,
+            app.keymap.binding_label(Command::TabCreate).expect("bound")
+        );
+        assert_eq!(menu.items.last().map(|i| i.label.as_str()), Some("Quit"));
+
+        app.close_menu(Instant::now());
+        let chosen = app.files.join("chosen");
+        app.chooser_file = Some(chosen);
+        app.run(Command::AppMenu, 10, Instant::now());
+        let menu = app.menu.as_ref().expect("up");
+        assert_eq!(menu.items.last().map(|i| i.label.as_str()), Some("Cancel"));
+    }
+
+    /// A row does what its key does: a click on "Select all" selects all,
+    /// hovering "View" flies its list out, and a radio in it goes straight to
+    /// that step of the ladder. The menu is gone before the command runs.
+    #[test]
+    fn an_app_menu_row_runs_its_command() {
+        let names = ["a.txt", "b.txt", "c.txt"];
+        let mut app = Fixture::new("menu-run", &names);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+
+        app.run(Command::AppMenu, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let at = menu_geometry(&app, &ctx).rows[row_labelled(&app, "Select all")].center();
+        click_at(&mut app, &ctx, at);
+        assert_eq!(live_menu(&app), None);
+        assert_eq!(app.tab().cwd.dir.selected_count(), names.len());
+
+        app.run(Command::AppMenu, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let view = row_labelled(&app, "View");
+        let at = menu_geometry(&app, &ctx).rows[view].center();
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(app.menu.as_ref().and_then(|m| m.submenu), Some(view));
+        let roomy = app
+            .menu
+            .as_ref()
+            .and_then(|m| m.sub_items())
+            .and_then(|rows| rows.iter().position(|i| i.label == "Roomy"))
+            .expect("a Roomy row");
+        let g = menu_geometry(&app, &ctx);
+        let at = g.sub.as_ref().expect("the View list is out").1[roomy].center();
+        click_at(&mut app, &ctx, at);
+        assert_eq!(live_menu(&app), None);
+        assert_eq!(app.scale_here(), ViewScale::Roomy);
+    }
+
+    /// The View radios go straight to their step, with `-`/`=`'s bookkeeping:
+    /// the grid is recorded as a view, a list step as a scale, the config's
+    /// own step as no preference at all — and the step you are already at is
+    /// no change.
+    #[test]
+    fn a_view_radio_goes_straight_to_its_step() {
+        let mut app = Fixture::new("menu-scale", &["a.txt"]);
+        let now = Instant::now();
+        let dir = app.files.clone();
+        assert_eq!(app.scale_here(), ViewScale::Compact);
+
+        app.run(Command::ViewScaleRoomy, 10, now);
+        assert_eq!(app.scale_here(), ViewScale::Roomy);
+        assert_eq!(app.state.scale(&dir), Some(ViewScale::Roomy));
+
+        app.run(Command::ViewScaleGrid, 10, now);
+        assert_eq!(app.scale_here(), ViewScale::Grid);
+        assert_eq!(app.state.view(&dir), Some(View::Grid));
+
+        app.run(Command::ViewScaleComfortable, 10, now);
+        assert_eq!(app.scale_here(), ViewScale::Comfortable);
+        assert_eq!(app.state.view(&dir), None, "out of the grid");
+
+        app.run(Command::ViewScaleCompact, 10, now);
+        assert_eq!(app.scale_here(), ViewScale::Compact);
+        assert_eq!(app.state.scale(&dir), None, "the default is no preference");
+
+        // Nowhere to go: no write armed.
+        app.flush_state();
+        app.run(Command::ViewScaleCompact, 10, now);
+        assert!(!app.state.is_dirty());
     }
 }

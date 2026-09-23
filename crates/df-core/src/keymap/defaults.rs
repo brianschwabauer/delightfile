@@ -67,6 +67,9 @@ pub(super) fn build() -> Registry {
         (Global, "~",            C::Help,           "Help / keymap browser", Always),
         (Global, "f1",           C::Help,           "Help / keymap browser", Always),
         (Global, "ctrl+n",       C::NewWindow,      "New window",            Always),
+        // The key that opens a program's menu in GTK, Qt and Windows alike —
+        // and one no file-manager habit has a claim on.
+        (Global, "f10",          C::AppMenu,        "Open the app menu",     Always),
         (Global, "ctrl+shift+z", C::Undo,           "Undo last operation",   Always),
 
         // ── Transport, on the hovered media file, from anywhere (§4.3) ──────

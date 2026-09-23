@@ -83,6 +83,11 @@ commands! {
     NewWindow => "new-window",
     CommandPalette => "command-palette",
     Help => "help",
+    // `F10`: the menu under the button at the top row's leading end — every
+    // command a person might not know the key for, in one place the pointer
+    // can reach (and F10, because it is the key that opens a program's menu
+    // on every desktop this runs on).
+    AppMenu => "app-menu",
     Undo => "undo",
     Redo => "redo",
 
@@ -176,6 +181,15 @@ commands! {
     // at, which is the thing a toggle is good for and a ladder is not.
     ViewScaleUp => "view-scale-up",
     ViewScaleDown => "view-scale-down",
+    // Straight to one step of the ladder rather than one step along it: the
+    // app menu's View radios. **Unbound by default** — four more keys for
+    // what `-` and `=` already reach would be four keys to learn for nothing —
+    // but commands all the same, so a `keymap.toml` can put a favourite step
+    // on a key of its own.
+    ViewScaleCompact => "view-scale-compact",
+    ViewScaleComfortable => "view-scale-comfortable",
+    ViewScaleRoomy => "view-scale-roomy",
+    ViewScaleGrid => "view-scale-grid",
 
     // ── Copy the path, in its four useful shapes, plus the contents ───────
     CopyPath => "copy-path",

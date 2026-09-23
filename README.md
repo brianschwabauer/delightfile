@@ -163,6 +163,7 @@ it without leaving the list.
 | `Ctrl+←` `Ctrl+→` | frame step or page turn in the preview |
 | `M` `w` `g t` | mounts, tasks, trash |
 | `Ctrl+p` | command palette |
+| `F10` | app menu, also the `≡` button at the left of the path |
 | `?` | help |
 | `q` `Q` | quit. `Q` skips the cwd-file |
 
