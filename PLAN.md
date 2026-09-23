@@ -84,6 +84,12 @@ Yazi's miller columns at Brian's ratio `[1, 4, 3]`: **parent | list | preview**.
   the two panes stay in line. `Ctrl+g` still jumps straight between the grid and the
   last list step. Remembered per directory in a small state db
   (`~/.local/state/delightfile/`), with `[mgr] view_scale` as the default list step.
+  **Changed 2026-09-23: per tab, per session.** The step belongs to the tab and is not
+  written to the state db. Every new tab, and every new window (a new process), starts at
+  `[mgr] view_scale`; `-`, `=` and `Ctrl+g` move only the tab they are pressed in, and the
+  tab keeps its step as it changes directory. `Ctrl+g` returns to that tab's last list
+  step. A state file from before still has `view=`/`scale=` on its lines; they are
+  ignored on load and left out of the next save.
   Sort changes animate rows/tiles to their new positions (FLIP-style) rather than
   teleporting.
 - **Multi-window**: `Ctrl+N` new window; drag a tab out to spawn a window; drag files
@@ -478,7 +484,7 @@ Work top to bottom; tick boxes in the same commit as the work.
 ### Phase 5 — power
 - [x] Command palette `Ctrl+p` from the registry
 - [x] `s`/`S` fd/rg streaming overlays with live preview; `z`/`Z` zoxide db + fuzzy jump
-- [x] Grid/thumbnail view with per-dir memory; FLIP animated re-sorts
+- [x] Grid/thumbnail view with per-dir memory (per tab and per session instead since 2026-09-23); FLIP animated re-sorts
 - [x] Git status dots, ignored dimming, branch breadcrumb
 - [x] Archives as read-only directories + extract with progress
 - [x] "What's big" du mode

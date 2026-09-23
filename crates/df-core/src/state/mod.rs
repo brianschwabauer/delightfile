@@ -1,13 +1,15 @@
 //! What this directory looked like last time (PLAN §2).
 //!
-//! Grid view is per-directory: `~/Pictures` and the plex mount want thumbnails,
-//! `~/src` wants a list, and being asked which one every single time would be
-//! the kind of friction the whole program exists to remove. PLAN §2 calls for "a
-//! small state db (`~/.local/state/delightfile/`)", and this is it — plus the
-//! three other per-directory overrides that belong in the same file for the same
-//! reason (a sort you chose *here*, a linemode you chose *here*, hidden files
-//! you turned on *here*), plus the tab list, so session restore later has
-//! somewhere to read from.
+//! PLAN §2 calls for "a small state db (`~/.local/state/delightfile/`)", and
+//! this is it: the per-directory overrides — a sort you chose *here*, a
+//! linemode you chose *here*, hidden files you turned on *here* — plus the tab
+//! list, so session restore later has somewhere to read from.
+//!
+//! **The view scale is not in here** (the list steps and the grid). It was, as
+//! `view=` and `scale=` on a directory's line, until 2026-09-23; since then it
+//! belongs to the tab and lasts the session (see `df-app`'s `Tab::scale`). A
+//! file written before that still carries the two keys. They are dropped on
+//! load without a word, and the next save leaves them out.
 //!
 //! It is a preferences file, not a database. Losing it costs a shrug.
 //!
@@ -17,7 +19,7 @@
 //!
 //! ```text
 //! # delightfile state v1
-//! /home/brian/Pictures\tview=grid\tscale=roomy\tlinemode=none\tt=1756598400
+//! /home/brian/Pictures\tlinemode=none\thidden=1\tt=1756598400
 //! /home/brian/src\tsort=mtime\tsort_reverse=1\tt=1756598000
 //! !tabs\t0=/home/brian\t1=/tmp\tactive=1\tt=1756598400
 //! ```
@@ -42,8 +44,8 @@
 //!
 //! ## Why not the TOML parser this crate already has
 //!
-//! Because this file is *written*, constantly — every grid toggle, every sort
-//! change, every directory entered — and it is written by a program, read by a
+//! Because this file is *written*, constantly — every sort change, every
+//! directory entered — and it is written by a program, read by a
 //! program, and only glanced at by a human debugging something. TOML's value is
 //! that people author it by hand; there is nothing to author here. Round-tripping
 //! through a document model would mean formatting decisions, comment
@@ -70,7 +72,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::{LineMode, SortBy, ViewScale};
+use crate::config::{LineMode, SortBy};
 use crate::{DfError, Result};
 
 #[cfg(test)]
@@ -78,16 +80,16 @@ mod tests;
 
 /// How many directories are remembered.
 ///
-/// Each record is a path and four small fields — call it 150 bytes on the heap
+/// Each record is a path and three small fields — call it 150 bytes on the heap
 /// and a similar line on disk — so 2,000 of them is ~300 KB in memory and a
 /// file that loads in a millisecond. It is also far more directories than
-/// anyone deliberately customises: the ones that get a grid view are the media
-/// ones, and there are a dozen. The cap exists because the *touch* is automatic
+/// anyone deliberately customises: the ones that get a sort or a linemode of
+/// their own are a dozen. The cap exists because the *touch* is automatic
 /// — entering a directory can record it — so without a bound the file would
 /// grow for the life of the installation.
 ///
 /// Eviction is least-recently-touched, which for this data is exactly right: the
-/// directory you have not opened in six months is the one whose grid preference
+/// directory you have not opened in six months is the one whose preferences
 /// you will not miss.
 pub const MAX_STATE_ENTRIES: usize = 2000;
 
@@ -106,7 +108,12 @@ pub const HEADER: &str = "# delightfile state v1";
 /// what keeps the namespace unambiguous without a section syntax.
 pub const TABS_KEY: &str = "!tabs";
 
-/// How a directory is drawn (PLAN §2).
+/// How a tab draws its directory (PLAN §2): the question
+/// [`ViewScale::is_grid`](crate::config::ViewScale::is_grid) answers, as a name.
+///
+/// No longer stored here — the tab owns it now (see the module essay) — but it
+/// is the same two geometries it always was, and the app still asks which one
+/// it is drawing in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
     /// Miller-column rows.
@@ -155,19 +162,9 @@ pub struct SortOverride {
 /// Everything remembered about one directory. Every field is optional and
 /// `None` means "no override — use the config", which is why this is not just
 /// `MgrConfig` with defaults filled in: the store has to be able to tell "you
-/// chose list here" from "you have never said".
+/// chose size order here" from "you have never said".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ViewState {
-    pub view: Option<View>,
-    /// The *list* step chosen here (see [`ViewScale`]), or `None` for "whatever
-    /// `[mgr] view_scale` says".
-    ///
-    /// A list step only: whether this directory is a grid is [`ViewState::view`]'s
-    /// answer and has been since v1 of this file, so storing the grid in both
-    /// places would be two records free to disagree. What this field is *for*
-    /// while a directory is a grid is the step to come back to — the list size
-    /// the grid toggle returns to.
-    pub scale: Option<ViewScale>,
     pub sort: Option<SortOverride>,
     pub linemode: Option<LineMode>,
     pub show_hidden: Option<bool>,
@@ -175,13 +172,9 @@ pub struct ViewState {
 
 impl ViewState {
     /// Whether anything is set. An empty state is not stored — see
-    /// [`StateStore::set_view`] and friends.
+    /// [`StateStore::set_sort`] and friends.
     pub fn is_empty(&self) -> bool {
-        self.view.is_none()
-            && self.scale.is_none()
-            && self.sort.is_none()
-            && self.linemode.is_none()
-            && self.show_hidden.is_none()
+        self.sort.is_none() && self.linemode.is_none() && self.show_hidden.is_none()
     }
 }
 
@@ -303,17 +296,6 @@ impl StateStore {
         self.dirs.get(dir).map(|r| r.state)
     }
 
-    /// This directory's view, or `None` to mean "whatever the config says".
-    pub fn view(&self, dir: &Path) -> Option<View> {
-        self.dirs.get(dir).and_then(|r| r.state.view)
-    }
-
-    /// This directory's list step, or `None` to mean "whatever the config
-    /// says". Never [`ViewScale::Grid`] — see [`ViewState::scale`].
-    pub fn scale(&self, dir: &Path) -> Option<ViewScale> {
-        self.dirs.get(dir).and_then(|r| r.state.scale)
-    }
-
     pub fn sort(&self, dir: &Path) -> Option<SortOverride> {
         self.dirs.get(dir).and_then(|r| r.state.sort)
     }
@@ -340,21 +322,10 @@ impl StateStore {
 
     // ── writing ─────────────────────────────────────────────────────────────
 
-    /// Set or clear the view override. `None` clears it; a record left with no
-    /// overrides at all is removed entirely, so turning grid off does not leave
-    /// a line behind holding an LRU slot.
-    pub fn set_view(&mut self, dir: impl Into<PathBuf>, view: Option<View>) {
-        self.update(dir, |state| state.view = view);
-    }
-
-    /// Set or clear the list step. The grid is not a list step and is dropped
-    /// rather than stored, so the two records cannot disagree about which
-    /// geometry this directory is drawn in.
-    pub fn set_scale(&mut self, dir: impl Into<PathBuf>, scale: Option<ViewScale>) {
-        let scale = scale.filter(|s| !s.is_grid());
-        self.update(dir, |state| state.scale = scale);
-    }
-
+    /// Set or clear the sort override. `None` clears it; a record left with no
+    /// overrides at all is removed entirely, so going back to the config's sort
+    /// does not leave a line behind holding an LRU slot. The same goes for the
+    /// setters below.
     pub fn set_sort(&mut self, dir: impl Into<PathBuf>, sort: Option<SortOverride>) {
         self.update(dir, |state| state.sort = sort);
     }
@@ -499,12 +470,6 @@ impl StateStore {
             };
             out.extend_from_slice(&escape(path_bytes(key)));
             let state = &record.state;
-            if let Some(view) = state.view {
-                push_field(&mut out, "view", view.name().as_bytes());
-            }
-            if let Some(scale) = state.scale {
-                push_field(&mut out, "scale", scale.name().as_bytes());
-            }
             if let Some(sort) = state.sort {
                 push_field(&mut out, "sort", sort_name(sort.by).as_bytes());
                 push_field(&mut out, "sort_reverse", bool_bytes(sort.reverse));
@@ -571,13 +536,11 @@ impl StateStore {
                     break;
                 };
                 match name.as_slice() {
-                    b"view" => state.view = View::from_name(&text(&value)),
-                    // `scale=grid` is not something this ever writes, and a
-                    // hand edit that says it is asking for the geometry `view`
-                    // already owns; drop it rather than keep a second opinion.
-                    b"scale" => {
-                        state.scale = ViewScale::from_name(&text(&value)).filter(|s| !s.is_grid())
-                    }
+                    // The view scale, from a file written before it moved to
+                    // the tab (see the module essay). Expected rather than
+                    // unknown, so not even a debug line: every directory
+                    // anyone ever put in a grid has one.
+                    b"view" | b"scale" => {}
                     b"sort" => sort_by = SortBy::from_name(&text(&value)),
                     b"sort_reverse" => sort_reverse = value.as_slice() == b"1".as_slice(),
                     b"linemode" => state.linemode = LineMode::from_name(&text(&value)),
@@ -772,7 +735,7 @@ fn path_from(bytes: &[u8]) -> PathBuf {
 }
 
 /// Bytes as text for the fields that are ASCII by construction — enum names,
-/// numbers, flags. Lossy on purpose: a garbled `view=gr?d` becomes an unknown
+/// numbers, flags. Lossy on purpose: a garbled `sort=si?e` becomes an unknown
 /// name and the override is dropped, which is the same outcome as any other
 /// unrecognised value.
 fn text(bytes: &[u8]) -> String {

@@ -11,6 +11,8 @@ that behaves like one.
 ![The list view, with two tabs and an image preview](docs/screenshot-list.png)
 
 `=` steps up a ladder of four densities. At the top, the same directory is a thumbnail grid.
+Each tab keeps its own step as it moves between folders, and a new tab starts at
+`[mgr] view_scale`.
 
 ![The grid view](docs/screenshot-grid.png)
 
@@ -156,7 +158,7 @@ it without leaving the list.
 | `z` `Z` | fuzzy jump, zoxide jump |
 | `t` `1`–`9` `Alt+[` `Alt+]` | new tab, switch, previous, next |
 | `Tab` | the spot panel: metadata, EXIF, checksum |
-| `-` `=` | walk the density ladder: Compact, Comfortable, Roomy, Grid |
+| `-` `=` | walk this tab's density ladder: Compact, Comfortable, Roomy, Grid |
 | `j` `k` `l` | video shuttle, anywhere |
 | `Ctrl+←` `Ctrl+→` | frame step or page turn in the preview |
 | `M` `w` `g t` | mounts, tasks, trash |

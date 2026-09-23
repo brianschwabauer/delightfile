@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use df_core::config::MgrConfig;
+use df_core::config::{MgrConfig, ViewScale};
 use df_core::fs::{CursorMemory, DirState, History, ScanUpdate, Scanner, SortOptions};
 
 use crate::motion::{Easing, Tween};
@@ -371,6 +371,37 @@ pub struct Tab {
     pub remote: Option<crate::remote::Session>,
     /// The trash, while this tab is browsing it (PLAN §7.4).
     pub trash: Option<crate::trashview::View>,
+    /// Where this tab sits on the view-scale ladder ([`ViewScale`]), grid
+    /// included.
+    ///
+    /// Per tab and per session, not per directory: a tab is a browsing
+    /// session, and the size you chose to read at is a statement about what
+    /// you are doing in it, which does not change because you stepped into a
+    /// subfolder. So navigating keeps it, a new tab (and a new window, which
+    /// is a new process) starts at `[mgr] view_scale`, and nothing writes it
+    /// to the state file.
+    pub scale: ViewScale,
+    /// The list step `Ctrl+g` comes back to out of the grid: the last one this
+    /// tab was at. Never [`ViewScale::Grid`]. While [`Tab::scale`] is a list
+    /// step the two are equal.
+    pub list_scale: ViewScale,
+}
+
+/// Where a new tab starts on the ladder: `(scale, list_scale)`.
+///
+/// Both from `[mgr] view_scale`. The config refuses `grid` as that default,
+/// but [`MgrConfig`] is a plain struct anybody can fill in, and a tab handed
+/// the grid anyway still needs a list step for `Ctrl+g` to return to — the
+/// bottom of the ladder, which is where the program starts when nobody has
+/// said anything.
+fn starting_scale(mgr: &MgrConfig) -> (ViewScale, ViewScale) {
+    let scale = mgr.view_scale;
+    let list = if scale.is_grid() {
+        ViewScale::Compact
+    } else {
+        scale
+    };
+    (scale, list)
 }
 
 /// Which virtual listing a tab is in, if any.
@@ -397,6 +428,7 @@ impl Tab {
         now: Instant,
     ) -> Tab {
         let path = path.into();
+        let (scale, list_scale) = starting_scale(mgr);
         let mut tab = Tab {
             id: TabId::next(),
             cwd: Listing::new(path.clone(), mgr, sort, now),
@@ -406,6 +438,8 @@ impl Tab {
             archive: None,
             remote: None,
             trash: None,
+            scale,
+            list_scale,
         };
         tab.rescan_all(mgr, sort, scanner, now);
         tab
@@ -1180,6 +1214,7 @@ mod tests {
         use df_core::vfs::VfsPath;
         let t0 = Instant::now();
         let (mgr, sort) = (MgrConfig::default(), SortOptions::default());
+        let (scale, list_scale) = starting_scale(&mgr);
         let mut tab = Tab {
             id: TabId::next(),
             cwd: Listing::new("/tmp", &mgr, sort, t0),
@@ -1189,6 +1224,8 @@ mod tests {
             archive: None,
             remote: None,
             trash: None,
+            scale,
+            list_scale,
         };
 
         let root = VfsPath::new("showandtour1", "");
@@ -1262,6 +1299,7 @@ mod tests {
     fn the_trash_is_a_listing_you_can_walk_back_out_of() {
         let t0 = Instant::now();
         let (mgr, sort) = (MgrConfig::default(), SortOptions::default());
+        let (scale, list_scale) = starting_scale(&mgr);
         let mut tab = Tab {
             id: TabId::next(),
             cwd: Listing::new("/tmp", &mgr, sort, t0),
@@ -1271,6 +1309,8 @@ mod tests {
             archive: None,
             remote: None,
             trash: None,
+            scale,
+            list_scale,
         };
         let view = crate::trashview::View {
             items: vec![df_core::ops::TrashedItem {

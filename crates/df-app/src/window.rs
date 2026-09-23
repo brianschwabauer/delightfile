@@ -68,14 +68,18 @@
 //!
 //! Every process loads [`StateStore`](df_core::state::StateStore) at startup and
 //! rewrites the whole file behind the app's debounce. So it is **last writer
-//! wins**: two windows that both toggle a grid in the same second agree on
-//! whichever wrote second, and the `!tabs` record is the last-quitting window's
-//! tab list. That is the right trade for what this file *is* — a preferences
-//! file whose loss costs a shrug (`df_core::state`'s own words) — and the write
-//! is atomic (temp file, then `rename`), so the failure mode is a forgotten
-//! grid toggle, never a corrupt file. Reconciling per-record would mean a
-//! re-read-and-merge on every flush and a mtime check, which is a lock protocol
-//! for the benefit of a memo about which folders look nice as thumbnails.
+//! wins**: two windows that both change a folder's setting in the same second
+//! agree on whichever wrote second, and the `!tabs` record is the
+//! last-quitting window's tab list. That is the right trade for what this file
+//! *is* — a preferences file whose loss costs a shrug (`df_core::state`'s own
+//! words) — and the write is atomic (temp file, then `rename`), so the failure
+//! mode is a forgotten preference, never a corrupt file. Reconciling per-record
+//! would mean a re-read-and-merge on every flush and a mtime check, which is a
+//! lock protocol for the benefit of a memo about how some folders are sorted.
+//!
+//! The view scale is not in that file (since 2026-09-23): it is per tab, so a
+//! new window starts at `[mgr] view_scale` rather than at the step of the tab
+//! it was dragged out of.
 //!
 //! # The cwd-file, with several processes
 //!

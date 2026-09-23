@@ -35,7 +35,7 @@
 //! show_hidden = false
 //! show_symlink = true
 //! scrolloff = 5
-//! view_scale = "compact"     # compact comfortable roomy — how big list rows start
+//! view_scale = "compact"     # compact comfortable roomy — the step every tab starts at
 //! folder_sizes = true      # recursive directory sizes in the size column
 //! folder_size_ttl = 600    # seconds a walked size is reused before re-walking
 //!
@@ -622,14 +622,16 @@ pub struct MgrConfig {
     pub show_hidden: bool,
     pub show_symlink: bool,
     pub scrolloff: usize,
-    /// How big a directory draws itself before anyone has said otherwise here
-    /// (see [`ViewScale`]).
+    /// The step on the [`ViewScale`] ladder every tab starts at.
     ///
-    /// A *list* step only. `grid` parses as a name but is rejected as a
-    /// default, because "every directory is a grid until you say otherwise" is
-    /// a different setting from "this is how big rows are" — the grid is a
-    /// per-directory choice with a per-directory memory behind it, and a global
-    /// default would fight it on every first visit.
+    /// Every new tab, and every new window — which is a new process — opens at
+    /// this step. From there `-`, `=` and `Ctrl+g` move only the tab they were
+    /// pressed in, and it keeps its step wherever it goes for the rest of the
+    /// session; nothing about it is remembered per directory or across a
+    /// restart (it was until 2026-09-23).
+    ///
+    /// A *list* step only: `grid` parses as a name but is refused as this
+    /// default, with a warning, as it has been since the ladder was added.
     pub view_scale: ViewScale,
     /// Whether directories get a recursive size in the size column (PLAN §7.3).
     ///
@@ -896,9 +898,9 @@ impl Config {
                     "show_symlink" => read_bool(value, &mut config.mgr.show_symlink),
                     "scrolloff" => read_usize(value, &mut config.mgr.scrolloff),
                     // `grid` is a step of the ladder but not a legal default —
-                    // see [`MgrConfig::view_scale`]. Named in the message
-                    // rather than silently dropped, so somebody who tried it
-                    // learns where the setting actually lives.
+                    // see [`MgrConfig::view_scale`]. Warned about rather than
+                    // silently dropped, so somebody who tried it learns that
+                    // it did not take.
                     "view_scale" => read_enum(
                         value,
                         |name| ViewScale::from_name(name).filter(|s| !s.is_grid()),
@@ -1772,8 +1774,8 @@ mod tests {
         assert!(ViewScale::Roomy.row_factor() > ViewScale::Comfortable.row_factor());
     }
 
-    /// Every step round-trips through its name, which is what the state file
-    /// and the config both store.
+    /// Every step round-trips through its name, which is what the config
+    /// stores.
     #[test]
     fn view_scale_names_round_trip() {
         for scale in VIEW_SCALES {
@@ -1783,7 +1785,7 @@ mod tests {
     }
 
     /// `[mgr] view_scale` names a list step. `grid` is a step of the ladder and
-    /// still not a legal default — the grid is remembered per directory.
+    /// still not a legal default — see [`MgrConfig::view_scale`].
     #[test]
     fn the_view_scale_default_is_a_list_step() {
         assert_eq!(Config::default().mgr.view_scale, ViewScale::Compact);

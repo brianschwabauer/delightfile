@@ -45,10 +45,10 @@ fn a_broken_escape_is_refused_rather_than_guessed() {
 fn unicode_stays_readable_in_the_file() {
     let tree = TempTree::new("state-unicode");
     let mut store = store_at(&tree);
-    store.set_view("/tmp/ünïcödé — 日本語 🎬", Some(View::Grid));
+    store.set_hidden("/tmp/ünïcödé — 日本語 🎬", Some(true));
     let rendered = text_of(&store);
     assert!(
-        rendered.contains("/tmp/ünïcödé — 日本語 🎬\tview=grid"),
+        rendered.contains("/tmp/ünïcödé — 日本語 🎬\thidden=1"),
         "no reason to hex-escape UTF-8: {rendered}"
     );
 }
@@ -80,41 +80,80 @@ fn gnarly_paths_survive_a_save_and_a_load() {
 
     let mut store = store_at(&tree);
     for (i, path) in paths.iter().enumerate() {
-        store.set_view(path, Some(if i % 2 == 0 { View::Grid } else { View::List }));
+        store.set_hidden(path, Some(i % 2 == 0));
     }
     store.flush().unwrap();
 
     let reloaded = store_at(&tree);
     assert_eq!(reloaded.len(), paths.len());
     for (i, path) in paths.iter().enumerate() {
-        let expected = if i % 2 == 0 { View::Grid } else { View::List };
         assert_eq!(
-            reloaded.view(path),
-            Some(expected),
+            reloaded.show_hidden(path),
+            Some(i % 2 == 0),
             "{} came back wrong",
             path.display()
         );
     }
 }
 
-/// The grid lives in `view`, and only there. A `scale=grid` — from a hand edit
-/// or from a caller that got confused — is dropped rather than kept as a second
-/// opinion about which geometry the directory is in.
+/// A file written while the view scale was still per directory — Brian has
+/// one — loads without it: the `view=` and `scale=` keys are dropped, a line
+/// that held nothing else is not a record at all, and the next save writes the
+/// rest of each line back without them.
 #[test]
-fn the_grid_is_never_stored_as_a_list_scale() {
-    let tree = TempTree::new("state-scale-grid");
-    let dir = Path::new("/tmp/pictures");
-    let mut store = store_at(&tree);
-    store.set_scale(dir, Some(ViewScale::Grid));
-    assert_eq!(store.scale(dir), None);
-    // A record with nothing left in it does not survive at all.
-    assert_eq!(store.get(dir), None);
+fn a_file_from_before_the_view_scale_moved_to_the_tab_loads_without_it() {
+    let tree = TempTree::new("state-old-view");
+    let body = concat!(
+        "# delightfile state v1\n",
+        "/tmp/pictures\tview=grid\tscale=roomy\tlinemode=none\tt=100\n",
+        "/tmp/only-grid\tview=grid\tt=200\n",
+        "/tmp/only-scale\tscale=comfortable\tt=300\n",
+        "/tmp/listed\tview=list\tsort=size\tsort_reverse=1\tt=400\n",
+    );
+    std::fs::write(tree.join("state"), body).unwrap();
 
-    store.set_scale(dir, Some(ViewScale::Comfortable));
+    let mut store = store_at(&tree);
+    let pictures = Path::new("/tmp/pictures");
+    assert_eq!(
+        store.get(pictures),
+        Some(ViewState {
+            linemode: Some(LineMode::None),
+            ..ViewState::default()
+        }),
+        "the rest of the line still loads"
+    );
+    assert_eq!(
+        store.sort(Path::new("/tmp/listed")),
+        Some(SortOverride {
+            by: SortBy::Size,
+            reverse: true
+        })
+    );
+    assert_eq!(store.get(Path::new("/tmp/only-grid")), None);
+    assert_eq!(store.get(Path::new("/tmp/only-scale")), None);
+    assert_eq!(store.len(), 2, "pictures and listed");
+    assert!(!store.is_dirty(), "reading an old file is not a change");
+
+    let rendered = text_of(&store);
+    assert!(!rendered.contains("view="), "{rendered}");
+    assert!(!rendered.contains("scale="), "{rendered}");
+
+    // Something else changes, the file is rewritten, and the keys are gone
+    // from the disk as well as from memory.
+    store.set_hidden("/tmp/elsewhere", Some(true));
     store.flush().unwrap();
-    let text = std::fs::read_to_string(tree.join("state")).unwrap();
-    assert!(text.contains("scale=comfortable"), "{text}");
-    assert!(!text.contains("scale=grid"), "{text}");
+    let written = std::fs::read_to_string(tree.join("state")).unwrap();
+    assert!(!written.contains("view="), "{written}");
+    assert!(!written.contains("scale="), "{written}");
+    assert!(
+        written.contains("/tmp/pictures\tlinemode=none\tt=100\n"),
+        "{written}"
+    );
+
+    let reloaded = store_at(&tree);
+    assert_eq!(reloaded.get(pictures), store.get(pictures));
+    assert_eq!(reloaded.len(), 3);
+    assert_eq!(text_of(&reloaded), text_of(&store), "and it round-trips");
 }
 
 #[test]
@@ -122,7 +161,6 @@ fn every_override_round_trips() {
     let tree = TempTree::new("state-overrides");
     let dir = Path::new("/tmp/everything");
     let mut store = store_at(&tree);
-    store.set_view(dir, Some(View::Grid));
     store.set_sort(
         dir,
         Some(SortOverride {
@@ -130,14 +168,11 @@ fn every_override_round_trips() {
             reverse: true,
         }),
     );
-    store.set_scale(dir, Some(ViewScale::Roomy));
     store.set_linemode(dir, Some(LineMode::Owner));
     store.set_hidden(dir, Some(true));
     store.flush().unwrap();
 
     let reloaded = store_at(&tree);
-    assert_eq!(reloaded.view(dir), Some(View::Grid));
-    assert_eq!(reloaded.scale(dir), Some(ViewScale::Roomy));
     assert_eq!(
         reloaded.sort(dir),
         Some(SortOverride {
@@ -244,7 +279,7 @@ fn the_rendered_file_is_stable_between_saves() {
     let tree = TempTree::new("state-stable");
     let mut store = store_at(&tree);
     for i in 0..20 {
-        store.set_view(format!("/tmp/dir{i}"), Some(View::Grid));
+        store.set_hidden(format!("/tmp/dir{i}"), Some(true));
     }
     let once = store.render();
     let twice = store.render();
@@ -263,12 +298,12 @@ fn clearing_the_last_override_removes_the_record() {
     let dir = Path::new("/tmp/toggled");
     let mut store = store_at(&tree);
 
-    store.set_view(dir, Some(View::Grid));
+    store.set_hidden(dir, Some(true));
     store.set_linemode(dir, Some(LineMode::None));
     assert_eq!(store.len(), 1);
 
-    store.set_view(dir, None);
-    assert_eq!(store.view(dir), None, "the override is gone");
+    store.set_hidden(dir, None);
+    assert_eq!(store.show_hidden(dir), None, "the override is gone");
     assert_eq!(store.len(), 1, "but the record still holds the linemode");
 
     store.set_linemode(dir, None);
@@ -281,10 +316,10 @@ fn clear_forgets_a_directory_outright() {
     let tree = TempTree::new("state-forget");
     let dir = Path::new("/tmp/gone");
     let mut store = store_at(&tree);
-    store.set_view(dir, Some(View::Grid));
+    store.set_hidden(dir, Some(true));
     assert!(store.clear(dir));
     assert!(!store.clear(dir), "twice is a no-op");
-    assert_eq!(store.view(dir), None);
+    assert_eq!(store.show_hidden(dir), None);
 }
 
 #[test]
@@ -292,7 +327,13 @@ fn set_replaces_the_whole_record() {
     let tree = TempTree::new("state-set");
     let dir = Path::new("/tmp/whole");
     let mut store = store_at(&tree);
-    store.set_view(dir, Some(View::Grid));
+    store.set_sort(
+        dir,
+        Some(SortOverride {
+            by: SortBy::Size,
+            reverse: false,
+        }),
+    );
     store.set_hidden(dir, Some(true));
     store.set(
         dir,
@@ -301,7 +342,7 @@ fn set_replaces_the_whole_record() {
             ..ViewState::default()
         },
     );
-    assert_eq!(store.view(dir), None);
+    assert_eq!(store.sort(dir), None);
     assert_eq!(store.show_hidden(dir), None);
     assert_eq!(store.linemode(dir), Some(LineMode::Btime));
 }
@@ -320,7 +361,7 @@ fn the_dirty_flag_tracks_real_changes() {
     let tree = TempTree::new("state-dirty");
     let mut store = store_at(&tree);
     assert!(!store.is_dirty(), "a fresh load owes nothing");
-    store.set_view("/tmp/a", Some(View::Grid));
+    store.set_hidden("/tmp/a", Some(true));
     assert!(store.is_dirty());
     store.flush().unwrap();
     assert!(!store.is_dirty(), "a flush settles the debt");
@@ -337,20 +378,20 @@ fn the_least_recently_touched_directory_is_the_one_evicted() {
     // Written straight into the map with explicit timestamps: a test cannot
     // wait out a second per record, and the ordering is what is under test.
     for i in 0..MAX_STATE_ENTRIES {
-        store.set_view(format!("/tmp/d{i:05}"), Some(View::Grid));
+        store.set_hidden(format!("/tmp/d{i:05}"), Some(true));
     }
     assert_eq!(store.len(), MAX_STATE_ENTRIES);
 
-    store.set_view("/tmp/newcomer", Some(View::Grid));
+    store.set_hidden("/tmp/newcomer", Some(true));
     assert_eq!(store.len(), MAX_STATE_ENTRIES, "the cap holds");
     assert_eq!(
-        store.view(Path::new("/tmp/newcomer")),
-        Some(View::Grid),
+        store.show_hidden(Path::new("/tmp/newcomer")),
+        Some(true),
         "the newest survives"
     );
     // Same-second timestamps break the tie by path, so the lowest-sorting of
     // the originals is the one that went.
-    assert_eq!(store.view(Path::new("/tmp/d00000")), None);
+    assert_eq!(store.show_hidden(Path::new("/tmp/d00000")), None);
 }
 
 #[test]
@@ -359,19 +400,19 @@ fn an_oversized_file_is_trimmed_on_load() {
     let mut body = String::from(HEADER);
     body.push('\n');
     for i in 0..MAX_STATE_ENTRIES + 20 {
-        body.push_str(&format!("/tmp/d{i:05}\tview=grid\tt={}\n", 1000 + i));
+        body.push_str(&format!("/tmp/d{i:05}\thidden=1\tt={}\n", 1000 + i));
     }
     std::fs::write(tree.join("state"), body).unwrap();
 
     let store = store_at(&tree);
     assert_eq!(store.len(), MAX_STATE_ENTRIES);
     assert_eq!(
-        store.view(Path::new("/tmp/d00000")),
+        store.show_hidden(Path::new("/tmp/d00000")),
         None,
         "the oldest timestamps lost"
     );
     let newest = format!("/tmp/d{:05}", MAX_STATE_ENTRIES + 19);
-    assert_eq!(store.view(Path::new(&newest)), Some(View::Grid));
+    assert_eq!(store.show_hidden(Path::new(&newest)), Some(true));
 }
 
 #[test]
@@ -379,8 +420,8 @@ fn touch_moves_a_record_up_the_queue() {
     let tree = TempTree::new("state-touch-lru");
     let mut body = String::from(HEADER);
     body.push('\n');
-    body.push_str("/tmp/old\tview=grid\tt=1\n");
-    body.push_str("/tmp/older\tview=grid\tt=0\n");
+    body.push_str("/tmp/old\thidden=1\tt=1\n");
+    body.push_str("/tmp/older\thidden=1\tt=0\n");
     std::fs::write(tree.join("state"), body).unwrap();
 
     let mut store = store_at(&tree);
@@ -406,19 +447,19 @@ fn corrupt_lines_are_skipped_and_the_good_ones_load() {
         "# delightfile state v1\n",
         "\n",
         "# a comment in the middle\n",
-        "/tmp/good\tview=grid\tt=100\n",
-        "relative/path\tview=grid\n",
-        "/tmp/bad-escape\\q\tview=grid\n",
-        "/tmp/no-equals\tviewgrid\n",
-        "/tmp/unknown-key\tview=list\tfuture_setting=7\n",
-        "/tmp/unknown-value\tview=hologram\n",
+        "/tmp/good\thidden=1\tt=100\n",
+        "relative/path\thidden=1\n",
+        "/tmp/bad-escape\\q\thidden=1\n",
+        "/tmp/no-equals\thidden1\n",
+        "/tmp/unknown-key\tlinemode=owner\tfuture_setting=7\n",
+        "/tmp/unknown-value\tlinemode=hologram\n",
         "\u{0}garbage\u{1}\u{2}\n",
         "/tmp/also-good\tsort=size\tsort_reverse=1\tt=200\n",
     );
     std::fs::write(tree.join("state"), body).unwrap();
 
     let store = store_at(&tree);
-    assert_eq!(store.view(Path::new("/tmp/good")), Some(View::Grid));
+    assert_eq!(store.show_hidden(Path::new("/tmp/good")), Some(true));
     assert_eq!(
         store.sort(Path::new("/tmp/also-good")),
         Some(SortOverride {
@@ -428,16 +469,16 @@ fn corrupt_lines_are_skipped_and_the_good_ones_load() {
         "a good line after the bad ones still loads"
     );
     assert_eq!(
-        store.view(Path::new("/tmp/unknown-key")),
-        Some(View::List),
+        store.linemode(Path::new("/tmp/unknown-key")),
+        Some(LineMode::Owner),
         "an unknown key does not cost the line"
     );
     assert_eq!(
-        store.view(Path::new("relative/path")),
+        store.get(Path::new("relative/path")),
         None,
         "keys must be absolute"
     );
-    assert_eq!(store.view(Path::new("/tmp/no-equals")), None);
+    assert_eq!(store.get(Path::new("/tmp/no-equals")), None);
     assert_eq!(
         store.get(Path::new("/tmp/unknown-value")),
         None,
@@ -451,12 +492,12 @@ fn a_corrupt_file_is_repaired_by_the_next_flush() {
     let tree = TempTree::new("state-repair");
     std::fs::write(
         tree.join("state"),
-        "garbage\n/tmp/good\tview=grid\tt=1\nmore garbage\\q\n",
+        "garbage\n/tmp/good\thidden=1\tt=1\nmore garbage\\q\n",
     )
     .unwrap();
 
     let mut store = store_at(&tree);
-    store.set_view("/tmp/second", Some(View::List));
+    store.set_hidden("/tmp/second", Some(false));
     store.flush().unwrap();
 
     let written = std::fs::read_to_string(tree.join("state")).unwrap();
@@ -464,8 +505,8 @@ fn a_corrupt_file_is_repaired_by_the_next_flush() {
     assert!(written.starts_with(HEADER));
 
     let reloaded = store_at(&tree);
-    assert_eq!(reloaded.view(Path::new("/tmp/good")), Some(View::Grid));
-    assert_eq!(reloaded.view(Path::new("/tmp/second")), Some(View::List));
+    assert_eq!(reloaded.show_hidden(Path::new("/tmp/good")), Some(true));
+    assert_eq!(reloaded.show_hidden(Path::new("/tmp/second")), Some(false));
 }
 
 #[test]
@@ -496,7 +537,7 @@ fn the_save_is_atomic_and_leaves_no_temp_file_behind() {
     let tree = TempTree::new("state-atomic");
     let dir = tree.dir("nested/deeper");
     let mut store = StateStore::load_from(dir.join("state"));
-    store.set_view("/tmp/a", Some(View::Grid));
+    store.set_hidden("/tmp/a", Some(true));
     store.flush().unwrap();
 
     let leftovers: Vec<String> = std::fs::read_dir(&dir)
@@ -517,7 +558,7 @@ fn flush_creates_the_directory_it_needs() {
     let tree = TempTree::new("state-mkdir");
     let path = tree.join("a/b/c/state");
     let mut store = StateStore::load_from(&path);
-    store.set_view("/tmp/a", Some(View::Grid));
+    store.set_hidden("/tmp/a", Some(true));
     store.flush().unwrap();
     assert!(path.is_file(), "the whole chain was created");
 }
@@ -525,8 +566,8 @@ fn flush_creates_the_directory_it_needs() {
 #[test]
 fn a_pathless_store_works_for_the_session_and_saves_nothing() {
     let mut store = StateStore::load_from(PathBuf::new());
-    store.set_view("/tmp/a", Some(View::Grid));
-    assert_eq!(store.view(Path::new("/tmp/a")), Some(View::Grid));
+    store.set_hidden("/tmp/a", Some(true));
+    assert_eq!(store.show_hidden(Path::new("/tmp/a")), Some(true));
     store.flush().unwrap();
     assert!(!store.is_dirty(), "nowhere to write is not a failure");
     assert_eq!(store.path(), Path::new(""));

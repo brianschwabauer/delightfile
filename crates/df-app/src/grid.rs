@@ -1,4 +1,5 @@
-//! The thumbnail grid: PLAN §2's per-directory alternative to the list.
+//! The thumbnail grid: PLAN §2's alternative to the list, the top step of a
+//! tab's view-scale ladder.
 //!
 //! `~/Pictures` and a plex mount are not lists of names, they are walls of
 //! pictures, and a file manager that can only draw one row per file is a file

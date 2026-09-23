@@ -107,7 +107,7 @@ pub enum Choice {
     Cd(PathBuf),
     /// Switch to tab *n*, 0-based.
     Tab(usize),
-    /// Flip this directory between the list and the grid.
+    /// Flip this tab between the list and the grid.
     ///
     /// Not a [`Command`] because df-core's enum has no variant for it (see this
     /// module's note in the Phase 5 report): the keymap cannot bind a view

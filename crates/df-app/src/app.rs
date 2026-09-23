@@ -1242,9 +1242,10 @@ pub struct App {
     ripples: Ripples<Control>,
     /// Whether a patched font was found and the real icons can be drawn.
     nerd: bool,
-    /// Which directories are drawn as grids, and the rest of the per-directory
-    /// memory (PLAN §2). Loaded at startup, written back on a debounce — the
-    /// store tracks *what* changed and this file owns *when* it is written.
+    /// The per-directory memory (PLAN §2). Loaded at startup, written back on
+    /// a debounce — the store tracks *what* changed and this file owns *when*
+    /// it is written. Not where the grid is: the view scale belongs to the tab
+    /// (see [`Tab::scale`]).
     state: StateStore,
     /// When the state file is due to be written. See [`WriteBehind`].
     state_due: WriteBehind,
@@ -1599,9 +1600,9 @@ impl App {
                 log::warn!("{warning}");
             }
         }
-        // Read before the window, like every other startup read: the very
-        // first frame has to know whether the directory it is opening is a
-        // grid, or it would draw a list and then swap under the eye.
+        // Read here with the config and the keymap, so that everything
+        // `assemble` takes from the user's directories arrives as an argument
+        // (see below).
         let state = StateStore::load();
 
         App::assemble(waker, args, config, theme, keymap, state)
@@ -5347,9 +5348,9 @@ impl App {
         // `Choice::ToggleView`.
         rows.push(finder::Row {
             label: if self.is_grid() {
-                "Show this folder as a list".to_string()
+                "Show this tab as a list".to_string()
             } else {
-                "Show this folder as a grid".to_string()
+                "Show this tab as a grid".to_string()
             },
             detail: String::new(),
             kind: finder::Kind::View,
@@ -5994,71 +5995,68 @@ impl App {
         }
     }
 
-    // ── The grid, and the state file it is remembered in (PLAN §2) ──────────
+    // ── The grid and the rest of the view-scale ladder, per tab (PLAN §2) ───
 
-    /// How this directory is drawn. The config has no grid setting, so a
-    /// directory nobody has toggled is a list.
-    fn view_of(&self, dir: &Path) -> View {
-        self.state.view(dir).unwrap_or(View::List)
+    /// How the active tab draws its directory: the grid when its step is the
+    /// top of the ladder, the list otherwise.
+    fn view_of(&self) -> View {
+        if self.tab().scale.is_grid() {
+            View::Grid
+        } else {
+            View::List
+        }
     }
 
     fn is_grid(&self) -> bool {
-        self.view_of(self.tab().cwd.path()) == View::Grid
+        self.view_of() == View::Grid
     }
 
-    /// Where this directory sits on PLAN §4.1's view-scale ladder.
+    /// Where the active tab sits on PLAN §4.1's view-scale ladder.
     ///
-    /// Composed rather than stored whole: the grid is `view`'s answer and has
-    /// been since the state file's first version, and the list step is a
-    /// second, quieter record that survives a trip through the grid — so
-    /// `Ctrl+g` comes back to the size you were reading at rather than to a
-    /// default.
-    fn scale_of(&self, dir: &Path) -> ViewScale {
-        if self.view_of(dir) == View::Grid {
-            return ViewScale::Grid;
+    /// The tab's, not the directory's: the step goes where the tab goes, a
+    /// new tab starts at `[mgr] view_scale`, and nothing is read from or
+    /// written to the state file (see [`Tab::scale`]).
+    fn scale_of(&self) -> ViewScale {
+        self.tab().scale
+    }
+
+    /// Put the active tab at `next` on the ladder.
+    ///
+    /// The one door every change of step goes through — `-`/`=`, `Ctrl+g`,
+    /// and anything else that names a step outright — so the two things that
+    /// have to move with it cannot be forgotten by a new caller. A list step
+    /// is also the step `Ctrl+g` comes back to out of the grid. And crossing
+    /// into or out of the grid changes what the scroll position is *counted
+    /// in* — list rows one side, rows of tiles the other — so the view jumps
+    /// rather than slides: animating a number from one unit to the other would
+    /// draw a travel that means nothing, and the scrolloff rule puts it where
+    /// the cursor says, this frame. A step within the list keeps its place;
+    /// the rows only got taller.
+    ///
+    /// Says nothing: what a change is called depends on how it was asked for,
+    /// so the toast is the caller's.
+    fn set_scale(&mut self, next: ViewScale, now: Instant) {
+        let tab = self.tabs.active_mut();
+        if tab.scale.is_grid() != next.is_grid() {
+            tab.cwd.set_first_over(0, Duration::ZERO, now);
         }
-        self.state.scale(dir).unwrap_or(self.mgr.view_scale)
-    }
-
-    /// Put this directory at `next` on the ladder, and remember it.
-    ///
-    /// Both halves of the record move together, which is what keeps them from
-    /// disagreeing: the grid is written to `view`, the list step to `scale`,
-    /// and a step that matches the config's default is stored as "no
-    /// preference" so a directory somebody stepped up and back down again does
-    /// not hold an LRU slot for ever (the same rule [`App::toggle_view`] uses).
-    fn set_scale(&mut self, dir: PathBuf, next: ViewScale, now: Instant) {
-        self.state
-            .set_view(dir.clone(), next.is_grid().then_some(View::Grid));
+        tab.scale = next;
         if !next.is_grid() {
-            self.state
-                .set_scale(dir, (next != self.mgr.view_scale).then_some(next));
+            tab.list_scale = next;
         }
-        self.state_changed(now);
     }
 
     /// `-` and `=`: one step down or up the ladder (PLAN §4.1).
     ///
-    /// A step that would fall off either end does nothing at all — no write, no
-    /// toast. A key that reports "Compact" every time you press it at the
+    /// A step that would fall off either end does nothing at all — no change,
+    /// no toast. A key that reports "Compact" every time you press it at the
     /// bottom is a key claiming to have done something it did not.
     fn step_scale(&mut self, larger: bool, now: Instant) {
-        let path = self.tab().cwd.path().to_path_buf();
-        let at = self.scale_of(&path);
+        let at = self.scale_of();
         let Some(next) = (if larger { at.larger() } else { at.smaller() }) else {
             return;
         };
-        // Crossing into or out of the grid changes what the scroll position is
-        // *counted in* — list rows one side, rows of tiles the other — so the
-        // view jumps rather than slides, exactly as the explicit toggle does.
-        // A step within the list keeps its place: the rows only got taller.
-        if at.is_grid() != next.is_grid() {
-            self.tabs
-                .active_mut()
-                .cwd
-                .set_first_over(0, Duration::ZERO, now);
-        }
-        self.set_scale(path, next, now);
+        self.set_scale(next, now);
         self.toasts.notice(Self::scale_notice(next), now);
     }
 
@@ -6076,34 +6074,18 @@ impl App {
         }
     }
 
-    /// Flip this directory between the list and the grid, and remember it.
+    /// `Ctrl+g`: flip the active tab between the grid and the list step it
+    /// was last at — the jump a toggle is good for and a ladder is not.
     fn toggle_view(&mut self, now: Instant) {
-        let path = self.tab().cwd.path().to_path_buf();
-        let next = self.view_of(&path).toggled();
-        // `List` is the default, so it is stored as "no preference" rather than
-        // as a record — otherwise every directory anyone ever glanced at in a
-        // grid and switched back would live in the state file for ever.
-        self.state.set_view(
-            path,
-            match next {
-                View::Grid => Some(View::Grid),
-                View::List => None,
-            },
-        );
-        self.state_changed(now);
-        // The two geometries count their scroll in different units — list rows
-        // one side, rows of tiles the other — so the view *jumps* rather than
-        // slides: animating a number from one unit to the other would draw a
-        // travel that means nothing. The scrolloff rule puts it where the
-        // cursor says, this frame.
-        self.tabs
-            .active_mut()
-            .cwd
-            .set_first_over(0, Duration::ZERO, now);
+        let next = match self.view_of() {
+            View::Grid => self.tab().list_scale,
+            View::List => ViewScale::Grid,
+        };
+        self.set_scale(next, now);
         self.toasts.notice(
             match next {
-                View::Grid => "Grid view",
-                View::List => "List view",
+                ViewScale::Grid => "Grid view",
+                _ => "List view",
             },
             now,
         );
@@ -6116,6 +6098,13 @@ impl App {
     /// `,` chord; a write only at quit would lose everything to a crash. The
     /// debounce is the middle, and it is one scheduled wake-up rather than a
     /// poll.
+    ///
+    /// Called by nothing since the view scale moved to the tab (2026-09-23):
+    /// it was the only thing the app wrote to the store. Kept, with the
+    /// debounce it arms, for the next thing that does — the store's sort,
+    /// linemode and hidden-file overrides have setters and no caller yet — so
+    /// that write goes through the debounce rather than around it.
+    #[allow(dead_code)]
     fn state_changed(&mut self, now: Instant) {
         self.state_due.touch(self.state.is_dirty(), now);
     }
@@ -6131,9 +6120,9 @@ impl App {
     fn flush_state(&mut self) {
         self.state_due.disarm();
         if let Err(e) = self.state.flush() {
-            // A state file that will not write costs the memory of which
-            // folders are grids and nothing else, so it is a log line rather
-            // than a toast in the user's face on the way out.
+            // A state file that will not write costs some per-directory
+            // preferences and nothing else, so it is a log line rather than a
+            // toast in the user's face on the way out.
             log::warn!("could not write the state file: {e}");
         }
     }
@@ -11844,13 +11833,14 @@ impl App {
         let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1, self.path_lines);
         // How the list pane is drawn, published to the two things that run
         // *before* the pane is measured: the cursor commands and the wheel.
-        let first_metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
+        let first_metrics = self
+            .is_grid()
             .then(|| grid::metrics(ui::content_rect(layout.list).width()));
         self.columns = first_metrics.as_ref().map(|m| m.columns).unwrap_or(1);
-        // The step this directory is at, published before anything measures a
-        // row: the parent column and the list pane both draw at it, and beside
-        // a grid it is the largest list step (see [`ui::Scale`]).
-        self.scale = ui::Scale::new(self.scale_of(self.tab().cwd.path()));
+        // The step this tab is at, published before anything measures a row:
+        // the parent column and the list pane both draw at it, and beside a
+        // grid it is the largest list step (see [`ui::Scale`]).
+        self.scale = ui::Scale::new(self.scale_of());
         self.pane_step = grid::pane_step(first_metrics.as_ref(), self.scale);
         let page =
             crate::viewport::visible_rows(ui::content_rect(layout.list).height(), self.pane_step);
@@ -11883,14 +11873,14 @@ impl App {
 
         let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1, self.path_lines);
         let list_content = ui::content_rect(layout.list);
-        // Which geometry this directory is drawn in, decided once and threaded
-        // everywhere through `grid::pane_*` (PLAN §2). `None` is the list.
-        let metrics = (self.view_of(self.tab().cwd.path()) == View::Grid)
-            .then(|| grid::metrics(list_content.width()));
+        // Which geometry this tab draws its directory in, decided once and
+        // threaded everywhere through `grid::pane_*` (PLAN §2). `None` is the
+        // list.
+        let metrics = self.is_grid().then(|| grid::metrics(list_content.width()));
         // Re-read for the same reason the layout is: `-`/`=` and `Ctrl+g` have
         // just run, and painting this frame at the pre-keystroke row height
         // would leave the rows a frame behind the key that resized them.
-        self.scale = ui::Scale::new(self.scale_of(self.tab().cwd.path()));
+        self.scale = ui::Scale::new(self.scale_of());
         // A "page" is a *row* of the pane either way — for a grid that is a
         // whole row of tiles, so `Ctrl+d` moves the same distance down the
         // window in both views.
@@ -15006,11 +14996,11 @@ mod tests {
         assert!(!timer.ready(t0 + STATE_FLUSH * 4));
     }
 
-    /// And the store it drives really does round-trip a directory's view, so
-    /// the debounce is protecting something that works (PLAN §2's per-directory
-    /// memory).
+    /// And the store it drives really does round-trip a directory's setting,
+    /// so the debounce is protecting something that works (PLAN §2's
+    /// per-directory memory).
     #[test]
-    fn a_grid_toggle_survives_a_write_and_a_reload() {
+    fn a_directory_setting_survives_a_write_and_a_reload() {
         // A throwaway path under `$TMPDIR`. df-core's own `TempTree` is
         // `#[cfg(test)]` and does not cross the crate boundary; one file needs
         // one path, so this is it.
@@ -15021,21 +15011,22 @@ mod tests {
         let path = std::env::temp_dir().join(format!("df-app-state-{nanos}"));
         let _cleanup = scopeguard(&path);
         let mut store = StateStore::load_from(&path);
-        assert_eq!(store.view(Path::new("/pictures")), None, "list by default");
-        store.set_view("/pictures", Some(View::Grid));
+        let dotfiles = Path::new("/dotfiles");
+        assert_eq!(store.show_hidden(dotfiles), None, "the config's by default");
+        store.set_hidden(dotfiles, Some(true));
         assert!(store.is_dirty());
         store.flush().expect("the state file writes");
         assert!(!store.is_dirty(), "flushing clears the dirt");
 
         let reloaded = StateStore::load_from(&path);
-        assert_eq!(reloaded.view(Path::new("/pictures")), Some(View::Grid));
-        assert_eq!(reloaded.view(Path::new("/elsewhere")), None);
+        assert_eq!(reloaded.show_hidden(dotfiles), Some(true));
+        assert_eq!(reloaded.show_hidden(Path::new("/elsewhere")), None);
 
         // Back to the default is stored as *no preference* rather than as a
-        // record, so a folder glanced at in a grid and switched back does not
-        // live in the file for ever.
+        // record, so a folder somebody changed and changed back does not live
+        // in the file for ever.
         let mut store = StateStore::load_from(&path);
-        store.set_view("/pictures", None);
+        store.set_hidden(dotfiles, None);
         store.flush().expect("the state file writes");
         assert!(StateStore::load_from(&path).is_empty());
     }
@@ -15958,14 +15949,146 @@ mod tests {
     /// Where list row `index` is drawn, by the geometry the frame uses.
     fn row_rect(app: &App, index: usize) -> egui::Rect {
         let content = ui::content_rect(layout_of(app).list);
-        let metrics = (app.view_of(app.tab().cwd.path()) == View::Grid)
-            .then(|| grid::metrics(content.width()));
+        let metrics = app.is_grid().then(|| grid::metrics(content.width()));
         let scroll = app.tab().cwd.scroll_rows(Instant::now());
         grid::pane_rect(content, metrics.as_ref(), scroll, index, app.scale)
     }
 
     fn row_centre(app: &App, index: usize) -> egui::Pos2 {
         row_rect(app, index).center()
+    }
+
+    /// What the toast is saying, for the tests that check a key said the
+    /// right thing.
+    fn toast_text(app: &App) -> Option<&str> {
+        app.toasts.current().map(|toast| toast.message.as_str())
+    }
+
+    /// **The view scale is the tab's.** `=` in one tab moves that tab and
+    /// leaves the other where it was, and a tab keeps its step when it
+    /// changes directory. No frame is drawn while a tab is a grid, so the
+    /// fixture's thumbnail workers are never started.
+    #[test]
+    fn a_step_of_the_ladder_moves_only_the_tab_it_was_pressed_in() {
+        let mut app = Fixture::new("scale-tabs", &["a.txt", "b.txt"]);
+        let now = Instant::now();
+        assert_eq!(app.scale_of(), ViewScale::Compact, "the config's step");
+
+        app.run(Command::TabCreate, 10, now);
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs.active_index(), 1, "the new tab is on screen");
+        app.run(Command::ViewScaleUp, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable);
+        assert_eq!(toast_text(&app), Some("Comfortable rows"));
+        app.run(Command::ViewScaleUp, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Roomy);
+
+        app.run(Command::TabSwitch(0), 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Compact, "the first tab moved");
+        assert!(!app.is_grid());
+        app.run(Command::ViewScaleDown, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Compact, "the bottom holds");
+
+        app.run(Command::TabSwitch(1), 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Roomy, "the second tab kept it");
+
+        // Into a folder and back out: the step goes with the tab, whichever
+        // directory it is showing. The folder is inside the sandbox, so the
+        // watcher and the scans stay in it too.
+        let sub = app.files.join("sub");
+        std::fs::create_dir(&sub).expect("make the subfolder");
+        app.navigate(sub.clone(), now);
+        assert_eq!(app.cwd(), sub);
+        assert_eq!(app.scale_of(), ViewScale::Roomy, "navigating reset it");
+        let files = app.files.clone();
+        app.navigate(files, now);
+        assert_eq!(app.scale_of(), ViewScale::Roomy);
+
+        // And into the grid, at the top, which is this tab's alone too.
+        app.run(Command::ViewScaleUp, 10, now);
+        assert!(app.is_grid());
+        assert_eq!(toast_text(&app), Some("Grid view"));
+        app.run(Command::TabSwitch(0), 10, now);
+        assert!(!app.is_grid(), "the grid leaked into the other tab");
+    }
+
+    /// Every new tab starts at `[mgr] view_scale`, not at the step of the tab
+    /// it was opened from.
+    #[test]
+    fn a_new_tab_starts_at_the_config_step() {
+        let root = std::env::temp_dir().join(format!("df-scale-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _sandbox = Sandbox(root.clone());
+        let files = root.join("files");
+        std::fs::create_dir_all(&files).expect("make the fixture directory");
+        let mut config = Config::default();
+        config.mgr.view_scale = ViewScale::Comfortable;
+        let mut app = App::for_test(config, files, root.join("state").join("state"));
+        let now = Instant::now();
+
+        assert_eq!(app.scale_of(), ViewScale::Comfortable, "the first tab");
+        app.run(Command::ViewScaleUp, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Roomy);
+
+        app.run(Command::TabCreate, 10, now);
+        assert_eq!(app.tabs.active_index(), 1);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable, "the config's step");
+        assert_eq!(app.tab().list_scale, ViewScale::Comfortable);
+        assert!(app.thumbs.is_none());
+    }
+
+    /// `Ctrl+g` goes between the grid and the list step this tab was last at,
+    /// whether the grid was reached by `Ctrl+g` or by `=`, and `-` out of the
+    /// grid lands on the largest list step, which is then the one remembered.
+    #[test]
+    fn the_grid_toggle_returns_to_the_tab_s_last_list_step() {
+        let mut app = Fixture::new("scale-toggle", &["a.txt"]);
+        let now = Instant::now();
+
+        app.run(Command::ViewScaleUp, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable);
+        app.run(Command::ToggleView, 10, now);
+        assert!(app.is_grid());
+        assert_eq!(toast_text(&app), Some("Grid view"));
+        app.run(Command::ToggleView, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable, "not a default");
+        assert_eq!(toast_text(&app), Some("List view"));
+
+        app.run(Command::ViewScaleUp, 10, now);
+        app.run(Command::ViewScaleUp, 10, now);
+        assert!(app.is_grid(), "`=` climbs into the grid");
+        app.run(Command::ToggleView, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Roomy, "the step `=` left from");
+
+        app.run(Command::ToggleView, 10, now);
+        app.run(Command::ViewScaleDown, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Roomy);
+        app.run(Command::ViewScaleDown, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable);
+        app.run(Command::ToggleView, 10, now);
+        app.run(Command::ToggleView, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable);
+
+        // A step names itself outright through the same door, and remembers
+        // its list step the same way.
+        app.set_scale(ViewScale::Compact, now);
+        app.run(Command::ToggleView, 10, now);
+        app.run(Command::ToggleView, 10, now);
+        assert_eq!(app.scale_of(), ViewScale::Compact);
+    }
+
+    /// Nothing about the view scale reaches the state file: stepping and
+    /// toggling leave the store clean, so no write is armed for it.
+    #[test]
+    fn the_view_scale_is_not_written_to_the_state_file() {
+        let mut app = Fixture::new("scale-state", &["a.txt"]);
+        let now = Instant::now();
+        app.run(Command::ViewScaleUp, 10, now);
+        app.run(Command::ToggleView, 10, now);
+        app.run(Command::ToggleView, 10, now);
+        assert!(!app.state.is_dirty());
+        assert!(app.state.is_empty());
+        assert_eq!(app.state_due.deadline(now), None, "a write was armed");
     }
 
     /// **The rule**: a click outside an open prompt closes it *and* lands.
