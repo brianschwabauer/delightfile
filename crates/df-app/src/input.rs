@@ -12,7 +12,7 @@
 //! two sets of Unicode edge cases, and the one in df-core is the one with the
 //! word motions, the selection and the tests.
 
-use df_core::input::{InputAction, InputBuffer, InputEvent};
+use df_core::input::{is_word_char, segment_at, InputAction, InputBuffer, InputEvent};
 use df_core::keymap::Chord;
 
 /// What the prompt is being typed into, which is also what its title says.
@@ -120,6 +120,13 @@ pub struct Prompt {
     /// beside the field rather than raised as a toast, because it is about the
     /// text under the caret and belongs where that text is (PLAN §5).
     pub error: Option<String>,
+    /// How far the field's text is scrolled to the left, in points, as it
+    /// was last drawn: what [`crate::chrome::caret_scroll`] starts from, so the
+    /// text holds still while the caret moves inside the field and scrolls
+    /// only when the caret would leave it. A drag past the field's edge moves
+    /// it too. View state rather than editing state, kept here because it
+    /// belongs to this prompt and goes when the prompt does.
+    pub scroll: f32,
 }
 
 impl Prompt {
@@ -131,6 +138,7 @@ impl Prompt {
             buffer,
             origin,
             error: None,
+            scroll: 0.0,
         }
     }
 
@@ -174,9 +182,55 @@ impl Prompt {
         event
     }
 
-    /// The selection, in bytes.
-    pub fn selection(&self) -> Option<std::ops::Range<usize>> {
-        self.buffer.selection_bytes()
+    /// A press in the field (PLAN §7.5).
+    ///
+    /// `at` is the character boundary nearest the pointer and `under` the
+    /// character it is on — the caller measured both against the layout the
+    /// field is drawn from ([`crate::chrome::FieldGeom`]). `clicks` is how far
+    /// the run of quick presses has got ([`crate::mouse::Clicks::count`]):
+    ///
+    /// * one puts the caret at `at`, or with `shift` held grows the selection
+    ///   from its anchor — the caret, if nothing was selected — to `at`, as in
+    ///   every text field;
+    /// * two selects the segment around `under` ([`Prompt::segment_at`]);
+    /// * three selects the whole line.
+    ///
+    /// A stale error is left standing. It is about the text, and a click
+    /// changes where the caret is, not what the text says.
+    pub fn click(&mut self, at: usize, under: usize, clicks: u8, shift: bool) {
+        match clicks {
+            2 => {
+                let run = self.segment_at(under);
+                self.buffer.set_selection(run.start, run.end);
+            }
+            3.. => {
+                let len = self.buffer.text().chars().count();
+                self.buffer.set_selection(0, len);
+            }
+            _ => self.buffer.move_to(at, shift),
+        }
+    }
+
+    /// A drag from a single press in the field has reached boundary `at`: the
+    /// selection runs from where the press left the anchor — the press point,
+    /// or the old anchor for a Shift+press — to here.
+    pub fn drag_to(&mut self, at: usize) {
+        self.buffer.move_to(at, true);
+    }
+
+    /// The run a double click on character `at` selects.
+    ///
+    /// In `Go to:` the run is a path segment, between `/`s: the thing a person
+    /// double-clicks in a path is a directory name, and the word motions would
+    /// stop inside `delight-file` or `v1.2`. Everywhere else it is a word, by
+    /// the classes `Ctrl+←/→` step over, so the pointer and the keys agree on
+    /// what a word is.
+    pub fn segment_at(&self, at: usize) -> std::ops::Range<usize> {
+        let text = self.buffer.text();
+        match self.kind {
+            PromptKind::Path => segment_at(text, at, |c| c == '/'),
+            _ => segment_at(text, at, |c| !is_word_char(c)),
+        }
     }
 }
 
@@ -282,6 +336,69 @@ mod tests {
         );
         assert_eq!(prompt.query(), ".jpg");
         assert_eq!(prompt.caret(), 0);
+    }
+
+    /// The pointer in `Go to:`: a click is a caret, a drag a selection from the
+    /// press point, two clicks a path segment, three the line — and Shift grows
+    /// what is there.
+    #[test]
+    fn the_pointer_selects_a_path_by_segment() {
+        let path = "/home/brian/Downloads";
+        let mut prompt = Prompt::with(PromptKind::Path, 0, InputBuffer::new(path, 21));
+
+        prompt.click(7, 7, 1, false);
+        assert_eq!(prompt.buffer.cursor(), 7);
+        assert_eq!(prompt.buffer.selection(), None);
+        prompt.drag_to(15);
+        assert_eq!(prompt.buffer.selection(), Some(7..15));
+        prompt.drag_to(3);
+        assert_eq!(prompt.buffer.selection(), Some(3..7), "back past the press");
+
+        // Two clicks: the segment the pointer is on, caret at its end.
+        prompt.click(8, 7, 2, false);
+        assert_eq!(prompt.buffer.selection(), Some(6..11), "brian");
+        assert_eq!(prompt.buffer.cursor(), 11);
+        // …on the `/` itself: the segment it introduces.
+        prompt.click(11, 11, 2, false);
+        assert_eq!(prompt.buffer.selection(), Some(12..21), "Downloads");
+
+        // Three: everything.
+        prompt.click(8, 7, 3, false);
+        assert_eq!(prompt.buffer.selection(), Some(0..21));
+
+        // Shift+click grows the selection from the caret it had.
+        prompt.click(6, 6, 1, false);
+        prompt.click(11, 10, 1, true);
+        assert_eq!(prompt.buffer.selection(), Some(6..11));
+        prompt.click(1, 1, 1, true);
+        assert_eq!(
+            prompt.buffer.selection(),
+            Some(1..6),
+            "from the same anchor"
+        );
+    }
+
+    /// Every other prompt double-clicks by word, the way `Ctrl+←/→` reads one.
+    #[test]
+    fn the_pointer_selects_a_query_by_word() {
+        let mut prompt = Prompt::with(
+            PromptKind::Shell,
+            0,
+            InputBuffer::new("cp notes.txt /tmp/old-notes", 0),
+        );
+        prompt.click(5, 4, 2, false);
+        assert_eq!(
+            prompt.buffer.selection(),
+            Some(3..8),
+            "notes, not notes.txt"
+        );
+        prompt.click(20, 20, 2, false);
+        assert_eq!(prompt.buffer.selection(), Some(18..21), "old");
+
+        // A click is not an edit: the error it lands beside still stands.
+        prompt.error = Some("no such command".to_string());
+        prompt.click(0, 0, 1, false);
+        assert!(prompt.error.is_some());
     }
 
     /// An error is about the text as it stands, so editing the text takes it

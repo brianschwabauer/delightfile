@@ -629,9 +629,39 @@ struct PressStart {
     /// a modal card, the help sheet: a press that landed on one of those must
     /// not also start dragging a rectangle across the rows it was covering.
     band_origin: bool,
+    /// The press landed in the text of the prompt on the top row.
+    ///
+    /// A drag from there is text selection — never a band, never a tab drag —
+    /// and it starts with the first point of travel rather than after
+    /// [`crate::mouse::DRAG_THRESHOLD`]: a hand that has not left the
+    /// character it pressed on has selected nothing yet, so there is no slip to
+    /// forgive. Only a single press drags a selection out. A double or triple
+    /// click has already selected what it meant to, and a button held a point
+    /// off where it went down must not trade that for the character under it.
+    ///
+    /// While it is set, nothing but the field answers the pointer
+    /// ([`select::Gesture::Text`]).
+    in_prompt: Option<FieldPress>,
     /// Whether the drag threshold has already been crossed, so the decision is
     /// made once rather than re-made every frame.
     dragging: bool,
+}
+
+/// A press in the top-bar prompt's text, carried by [`PressStart::in_prompt`]
+/// for the drag that may follow it.
+#[derive(Debug, Clone, Copy)]
+struct FieldPress {
+    /// How many clicks of a quick run the press made: 1, 2 or 3
+    /// ([`crate::mouse::Clicks::count`]).
+    clicks: u8,
+    /// When the drag last scrolled the field, or would have, so the next
+    /// frame scrolls by how long it has been ([`crate::mouse::field_scroll`]).
+    ticked: Instant,
+    /// Whether the drag is hanging past the field's edge with text left to
+    /// scroll to: the one thing a text selection asks animation frames for,
+    /// as [`select::Band::scrolling`] is for a band. A selection held still
+    /// inside the field is the same pixels next frame.
+    scrolling: bool,
 }
 
 /// One frame's worth of pointer state, read out of egui in a single pass.
@@ -707,6 +737,9 @@ struct Geom<'a> {
     toast: Option<crate::toast::ToastGeom>,
     /// How wide each tab's chip is this frame ([`chrome::tab_widths`]).
     tabs: &'a [f32],
+    /// The text of the prompt on the top row, when one has taken it
+    /// ([`chrome::prompt_field_geometry`]).
+    prompt: Option<&'a chrome::FieldGeom>,
 }
 
 /// Which piece of a path `c c` / `c d` / `c f` / `c n` copy (PLAN §7.4).
@@ -4475,7 +4508,13 @@ impl App {
         // pane and the controls would stay gone. Any pointer activity over the
         // pane wakes it; `alpha` was read a line above, so the press that woke
         // it is still a press on an invisible strip and lands on nothing.
-        let over_pane = pointer.at.is_some_and(|at| preview.contains(at));
+        //
+        // …except a band's corner or a text selection passing over the pane on
+        // its way somewhere: that is the hand drawing a rectangle or selecting
+        // text, and a strip that faded in under it would be the transport
+        // answering a gesture aimed elsewhere (see [`select::gesture_filter`]).
+        let over_pane =
+            self.gesture().is_none() && pointer.at.is_some_and(|at| preview.contains(at));
         if over_pane && (pointer.moved || pointer.down || pointer.pressed) {
             if let Some(player) = self.player.as_mut() {
                 player.note_activity(now);
@@ -8821,7 +8860,8 @@ impl App {
                 | Control::SelectedChip
                 | Control::VisualChip
                 | Control::Toast
-                | Control::ToastAction => {}
+                | Control::ToastAction
+                | Control::PromptField => {}
             }
             return;
         }
@@ -8894,7 +8934,8 @@ impl App {
             | Control::SelectedChip
             | Control::VisualChip
             | Control::Toast
-            | Control::ToastAction => {}
+            | Control::ToastAction
+            | Control::PromptField => {}
         }
     }
 
@@ -9427,6 +9468,9 @@ impl App {
                 }
                 rect
             }
+            // The prompt's text takes its press at the press site, with a click
+            // count rather than a double flag, and is never routed here.
+            Control::PromptField => geom.prompt.map_or(egui::Rect::ZERO, |field| field.rect),
         }
     }
 
@@ -9720,6 +9764,63 @@ impl App {
         }
     }
 
+    /// One frame of a text selection dragged from a press in the prompt's
+    /// text: the selection runs from where the press left the anchor to the
+    /// character the pointer has reached.
+    ///
+    /// Held past either edge of the field, the text scrolls that way at a pace
+    /// set by how far out the hand is ([`crate::mouse::field_scroll`]), and the
+    /// selection ends at the character that has come to the edge — so the
+    /// selection grows as the line goes by, and the caret stays in view. The
+    /// pointer's *x* alone is read: a drag that wanders down over the listing
+    /// is still selecting along the line.
+    fn drag_text(&mut self, at: egui::Pos2, geom: &Geom<'_>, now: Instant) {
+        let focused = self.window_focused;
+        let press = self
+            .press
+            .as_mut()
+            .and_then(|press| press.in_prompt.as_mut());
+        let (Some(field), Some(prompt), Some(press)) = (geom.prompt, self.prompt.as_mut(), press)
+        else {
+            return;
+        };
+        let travel = crate::mouse::field_scroll(
+            field.rect,
+            at.x,
+            now.saturating_duration_since(press.ticked),
+        );
+        press.ticked = now;
+        let scrolled = field.scrolled(field.scroll + travel);
+        // Frames only while there is line left to bring in on the side the
+        // hand is on, and only for a window that has the keyboard — the
+        // band's rule, for the band's reason.
+        let room = if at.x > field.rect.right() {
+            field.scroll < field.most_scroll()
+        } else if at.x < field.rect.left() {
+            field.scroll > 0.0
+        } else {
+            false
+        };
+        press.scrolling = focused && room;
+        prompt.scroll = scrolled.scroll;
+        let x = at.x.clamp(field.rect.left(), field.rect.right());
+        prompt.drag_to(scrolled.boundary_at(x));
+    }
+
+    /// The drag that owns the pointer until the button comes up, if one does:
+    /// a band select, or a text selection from the prompt. While one does,
+    /// nothing but its own target answers the pointer
+    /// ([`select::gesture_filter`]).
+    fn gesture(&self) -> Option<select::Gesture> {
+        if self.band.is_some() {
+            Some(select::Gesture::Band)
+        } else if self.press.is_some_and(|press| press.in_prompt.is_some()) {
+            Some(select::Gesture::Text)
+        } else {
+            None
+        }
+    }
+
     // ── Band select (PLAN §7.5) ─────────────────────────────────────────────
 
     /// Whether a press at `at` may start a band select: the rules
@@ -9797,12 +9898,24 @@ impl App {
             if let Some(band) = &mut self.band {
                 band.scrolling = false;
             }
+            // …and the same for a text selection.
+            if let Some(field) = self.press.as_mut().and_then(|p| p.in_prompt.as_mut()) {
+                field.scrolling = false;
+            }
             return;
         };
         // A tab in the hand owns the gesture: the pointer is carrying a chip,
         // not drawing a band and not holding files.
         if self.tab_drag.is_some() {
             self.carry_tab(at, geom.layout.strip, now);
+            return;
+        }
+        // A press in the prompt's text owns it too (see
+        // [`PressStart::in_prompt`]).
+        if let Some(field) = press.in_prompt {
+            if field.clicks == 1 {
+                self.drag_text(at, geom, now);
+            }
             return;
         }
         if !press.dragging {
@@ -9847,6 +9960,10 @@ impl App {
                 return;
             }
             self.band = Some(select::Band::new(press.at, press.list_scroll, now));
+            // A band is not a click. The press that began it — a `Ctrl`-press
+            // on a row, say — must not stand as the first half of a double
+            // click with whatever the hand does after letting go.
+            self.clicks.reset();
         }
         self.tick_band(at, geom, now);
     }
@@ -11850,6 +11967,24 @@ impl App {
         } else {
             top_geom.crumbs.clone()
         };
+        // …and what *is* there instead: the prompt's text, laid out by the
+        // function the row's paint goes through, from the same arguments, so a
+        // click puts the caret between the two characters it is seen to fall
+        // between ([`chrome::FieldGeom`]). Not for the help filter, which the
+        // sheet draws in its own heading rather than on this row.
+        let prompt_field = self
+            .prompt
+            .as_ref()
+            .filter(|prompt| !prompt.kind.anchored() && !prompt.kind.is_help())
+            .map(|prompt| {
+                chrome::prompt_field_geometry(&painter, layout.path, prompt, self.prompt_tail())
+            });
+        // The scroll that measure settled on is the prompt's from here: the
+        // text holds still until the caret next needs it to move, and a drag
+        // past the field's edge scrolls on from it.
+        if let (Some(field), Some(prompt)) = (&prompt_field, self.prompt.as_mut()) {
+            prompt.scroll = field.scroll;
+        }
         let menu_geometry = self
             .menu
             .as_ref()
@@ -11931,6 +12066,15 @@ impl App {
                         .position(|rect| rect.contains(p))
                         .map(Control::Crumb)
                 })
+                // The prompt's text, where the crumbs were. Only its own strip:
+                // the title before it and the error or case indicator after it
+                // are words about the field, not the field.
+                .or_else(|| {
+                    prompt_field
+                        .as_ref()
+                        .filter(|field| field.rect.contains(p))
+                        .map(|_| Control::PromptField)
+                })
                 // The two chips on the top row that do something when clicked.
                 // Not hit-tested while a prompt has taken the row, for the
                 // reason the crumbs above it are emptied: they are not drawn.
@@ -12002,6 +12146,11 @@ impl App {
                 })?;
             Some((control, p))
         });
+        // While a band is live only the list's rows answer the pointer, and
+        // while a text selection is being dragged only the prompt's text — see
+        // [`select::gesture_filter`] for why, and for why it is applied to the
+        // hit test's answer rather than by each thing that reads `over`.
+        let over = select::gesture_filter(self.gesture(), over);
 
         // The menu follows the pointer: hovering a row makes it the keyboard's
         // row too (one cursor, not two), and hovering the chevron flies the
@@ -12096,6 +12245,7 @@ impl App {
             basket: &basket_geometry,
             toast: toast_geom,
             tabs: &tab_widths,
+            prompt: prompt_field.as_ref(),
         };
 
         if pointer.secondary && !dismissing && overlay.is_none() && !menu_live {
@@ -12108,7 +12258,27 @@ impl App {
         // no ripple, no double-click history, nothing. A splash under a pointer
         // that changed nothing is the interface claiming to have acted.
         let inert = matches!(over, Some((Control::GitChip | Control::CrumbEllipsis, _)));
-        if let Some((control, position)) = over.filter(|_| pointer.pressed && !dismissing && !inert)
+        // The prompt's text is not a button, so it takes its press apart from
+        // them: no ripple (a field acknowledges a click with the caret, which
+        // is already under the pointer), and a click *count* rather than a
+        // double-or-not, because two and three clicks are two different verbs
+        // in a text field. Recorded for the drag, below.
+        let mut field_clicks = None;
+        if let Some((Control::PromptField, position)) =
+            over.filter(|_| pointer.pressed && !dismissing)
+        {
+            let clicks = self.clicks.count(Control::PromptField, position, now);
+            if let (Some(field), Some(prompt)) = (&prompt_field, self.prompt.as_mut()) {
+                prompt.click(
+                    field.boundary_at(position.x),
+                    field.char_under(position.x),
+                    clicks,
+                    pointer.shift,
+                );
+            }
+            field_clicks = Some(clicks);
+        } else if let Some((control, position)) =
+            over.filter(|_| pointer.pressed && !dismissing && !inert)
         {
             // Everything happens on mouse-*down*, with the ripple: waiting for
             // the release would put the acknowledgement after the thing it is
@@ -12151,6 +12321,11 @@ impl App {
                     &geom,
                     pointer.toggle,
                 ),
+                in_prompt: field_clicks.map(|clicks| FieldPress {
+                    clicks,
+                    ticked: now,
+                    scrolling: false,
+                }),
                 dragging: false,
             });
         }
@@ -12178,6 +12353,13 @@ impl App {
         if pointer.down {
             self.drag(pointer.at, &geom, now);
         }
+        // …and once more now that the drag has run, because a band *begins*
+        // inside it, on the frame the pointer crosses the threshold — after the
+        // hit test above was filtered. Without this that first frame lit
+        // whatever the corner happened to be over, and its fade trailed the
+        // band for a quarter of a second. (A text selection is live from its
+        // press, which is recorded above.)
+        let over = select::gesture_filter(self.gesture(), over);
 
         // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────
         // The geometry is built whether or not anything is being dragged: a
@@ -12266,10 +12448,22 @@ impl App {
         // for the same reason in reverse: a button going down is a deliberate
         // act aimed at the row under the pointer, and it moves the cursor there
         // anyway — a depress with nothing behind it is the honest picture.
-        let hot = over.map(|(control, _)| control);
+        //
+        // The press is the button held over the control — but not mid-band,
+        // nor mid text selection. The button is down then because it is
+        // drawing the rectangle or dragging the selection, and the rows a band
+        // crosses are being *selected*, not pushed: they keep their hover,
+        // which is the band saying it has reached them, and nothing sinks.
+        //
+        // The prompt's text is left out altogether. It draws no hover and no
+        // press, so warming it would only be a fade nobody can see asking for
+        // frames on its way back down (PLAN §1).
+        let hot = over
+            .map(|(control, _)| control)
+            .filter(|control| *control != Control::PromptField);
         self.hovers.tick(
             hot.filter(|control| !(self.row_hover.parked() && matches!(control, Control::Row(..)))),
-            hot.filter(|_| pointer.down),
+            hot.filter(|_| pointer.down && self.gesture().is_none()),
             now,
         );
         self.ripples.tick(now);
@@ -12282,6 +12476,11 @@ impl App {
         // the hand is holding files, not pointing at a link.
         if dragging.is_some() || self.tab_drag.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if pointer.down && self.press.is_some_and(|press| press.in_prompt.is_some()) {
+            // A selection being dragged out of the prompt keeps the text
+            // cursor wherever the hand takes it, as it does in every field:
+            // the gesture is still about the text.
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         } else if self.preview.is_zoomed()
             && overlay.is_none()
             && !menu_live
@@ -12308,6 +12507,9 @@ impl App {
                 // hover, and a hand over either would promise a click that
                 // never happens (`delightful-ui` §2).
                 Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
+                // Text is pointed at with the text cursor: it says "the caret
+                // goes here", which is exactly what a click will do.
+                Control::PromptField => egui::CursorIcon::Text,
                 Control::Row(..)
                 | Control::Crumb(_)
                 | Control::FilterChip
@@ -12914,7 +13116,14 @@ impl App {
                 content,
                 state,
                 strip_alpha,
-                pointer.at.filter(|at| layout.preview.contains(*at)),
+                // Not mid-band or mid text selection: a drag crossing the
+                // strip is not a hand reaching for its button (see
+                // [`select::gesture_filter`], which does the same for
+                // everything the hit test answers — the strip keeps its own
+                // pointer).
+                pointer
+                    .at
+                    .filter(|at| self.gesture().is_none() && layout.preview.contains(*at)),
                 crate::playback::strip::Grab {
                     scrubbing: self.scrubbing,
                     down: pointer.down,
@@ -13375,6 +13584,15 @@ impl App {
             (
                 "band-scroll",
                 self.band.as_ref().is_some_and(|band| band.scrolling),
+            ),
+            // A text selection held past the prompt field's edge, scrolling the
+            // line towards the pointer — by the band's rules, for the band's
+            // reasons (`App::drag_text`).
+            (
+                "field-scroll",
+                self.press
+                    .and_then(|press| press.in_prompt)
+                    .is_some_and(|field| field.scrolling),
             ),
             (
                 "tasks",

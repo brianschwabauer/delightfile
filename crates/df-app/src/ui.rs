@@ -483,6 +483,12 @@ pub enum Control {
     /// toast, which a click takes (PLAN §5).
     Toast,
     ToastAction,
+    /// The text of the prompt that has taken the top row: a click puts the
+    /// caret there, a drag selects, two clicks take a segment and three the
+    /// line ([`crate::chrome::FieldGeom`]). Not a button — it has no hover or
+    /// press of its own to draw, and no ripple — but it is under the pointer
+    /// like one, and the click counter keys on it.
+    PromptField,
 }
 
 /// Where the panes and the chrome go.

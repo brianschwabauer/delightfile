@@ -21,6 +21,8 @@
 //! inset, so the gap around a highlighted row stays a constant width as it turns
 //! the card's corner.
 
+use std::sync::Arc;
+
 use df_core::fs::is_case_sensitive;
 
 use crate::help::{self, Help, HelpLine};
@@ -1446,7 +1448,14 @@ fn bar_ground(paint: &Painting<'_>, rect: egui::Rect, joined: bool, filter: f32)
     paint
         .painter
         .rect_filled(rect, bar_corners(joined), bar_fill(paint.palette, filter));
-    rect.shrink2(egui::vec2(PAD_X, 0.0))
+    bar_inner(rect)
+}
+
+/// The top row's content box: the row less its padding either side. The one
+/// definition, so the prompt's hit test ([`prompt_field_geometry`]) and the
+/// ground it is drawn on cannot disagree about where the row's text starts.
+fn bar_inner(row: egui::Rect) -> egui::Rect {
+    row.shrink2(egui::vec2(PAD_X, 0.0))
 }
 
 /// The top row's four corner radii.
@@ -1688,49 +1697,332 @@ pub fn prompt_row(
     // has swapped its breadcrumbs for a titled field with a caret in it has
     // already said the keyboard is here, and a second mark saying the same
     // thing is a mark that only ever gets in the way.
-    let mut inner = bar_ground(paint, row, joined, 0.0);
-
-    // The row grew a second line for an error that would not fit beside the
-    // query: the field keeps the first line and the error gets the second.
-    let error_line = (row.height() > TOP_HEIGHT + 1.0).then(|| {
-        let split = row.top() + TOP_HEIGHT;
-        let line = egui::Rect::from_min_max(
-            egui::pos2(inner.left(), split),
-            egui::pos2(inner.right(), row.bottom()),
-        );
-        inner = egui::Rect::from_min_max(inner.min, egui::pos2(inner.right(), split));
-        line
-    });
+    bar_ground(paint, row, joined, 0.0);
+    let boxes = prompt_boxes(paint.painter, row, tail);
 
     // The directory the prompt is about, kept at the far left as context when
     // there is room for it: a filter with no idea what it is filtering is a
     // text field floating in a window.
-    if let Some(tail) = tail {
+    if let Some(tail) = tail.filter(|_| boxes.tail) {
         let font = egui::FontId::proportional(FONT);
-        let width = text_width(paint.painter, tail, font.clone()) + CRUMB_SEPARATOR_WIDTH;
-        if inner.width() - width >= PROMPT_MIN_WIDTH {
-            paint.painter.text(
-                egui::pos2(inner.left(), inner.center().y),
-                egui::Align2::LEFT_CENTER,
-                tail,
-                font.clone(),
-                palette.overlay0,
-            );
-            paint.painter.text(
-                egui::pos2(
-                    inner.left() + width - CRUMB_SEPARATOR_WIDTH / 2.0,
-                    inner.center().y,
-                ),
-                egui::Align2::CENTER_CENTER,
-                CRUMB_SEPARATOR,
-                font,
-                palette.overlay0,
-            );
-            inner =
-                egui::Rect::from_min_max(egui::pos2(inner.left() + width, inner.top()), inner.max);
+        let line = boxes.line;
+        paint.painter.text(
+            egui::pos2(line.left(), line.center().y),
+            egui::Align2::LEFT_CENTER,
+            tail,
+            font.clone(),
+            palette.overlay0,
+        );
+        paint.painter.text(
+            egui::pos2(
+                boxes.field.left() - CRUMB_SEPARATOR_WIDTH / 2.0,
+                line.center().y,
+            ),
+            egui::Align2::CENTER_CENTER,
+            CRUMB_SEPARATOR,
+            font,
+            palette.overlay0,
+        );
+    }
+    prompt_field(paint, boxes.field, prompt, boxes.error);
+}
+
+/// How a prompt row is divided up: the line the field is on, the part of that
+/// line the field is handed once the directory tail has had its share, and the
+/// error's own line when the row grew one.
+///
+/// Measured apart from the paint so that [`prompt_field_geometry`] can ask
+/// the same question the paint does and get the same answer.
+struct PromptBoxes {
+    /// The first line, inside the row's padding.
+    line: egui::Rect,
+    /// `line` less the directory tail, when the tail is shown.
+    field: egui::Rect,
+    /// Whether the tail is shown.
+    tail: bool,
+    /// The second line, when an error too long for the first asked for one.
+    error: Option<egui::Rect>,
+}
+
+fn prompt_boxes(painter: &egui::Painter, row: egui::Rect, tail: Option<&str>) -> PromptBoxes {
+    let mut line = bar_inner(row);
+    // The row grew a second line for an error that would not fit beside the
+    // query: the field keeps the first line and the error gets the second.
+    let error = (row.height() > TOP_HEIGHT + 1.0).then(|| {
+        let split = row.top() + TOP_HEIGHT;
+        let second = egui::Rect::from_min_max(
+            egui::pos2(line.left(), split),
+            egui::pos2(line.right(), row.bottom()),
+        );
+        line = egui::Rect::from_min_max(line.min, egui::pos2(line.right(), split));
+        second
+    });
+    // The tail is dropped rather than squeezing the field below its minimum,
+    // which is the condition [`prompt_lines`] repeats to the constant.
+    let tail = tail
+        .map(|tail| {
+            text_width(painter, tail, egui::FontId::proportional(FONT)) + CRUMB_SEPARATOR_WIDTH
+        })
+        .filter(|width| line.width() - width >= PROMPT_MIN_WIDTH);
+    let field = match tail {
+        Some(width) => {
+            egui::Rect::from_min_max(egui::pos2(line.left() + width, line.top()), line.max)
+        }
+        None => line,
+    };
+    PromptBoxes {
+        line,
+        field,
+        tail: tail.is_some(),
+        error,
+    }
+}
+
+/// Where the text of the prompt on the top row is, laid out as it will be
+/// drawn: what the pointer is hit-tested against.
+///
+/// The same arguments [`prompt_row`] is given, run through the same two
+/// functions its paint runs through ([`prompt_boxes`], then [`field_layout`]),
+/// so a click lands on the character it is seen to land on. The precedent is
+/// [`prompt_rect`], which the floating prompt shares with its hit test for the
+/// same reason.
+pub fn prompt_field_geometry(
+    painter: &egui::Painter,
+    row: egui::Rect,
+    prompt: &Prompt,
+    tail: Option<&str>,
+) -> FieldGeom {
+    let boxes = prompt_boxes(painter, row, tail);
+    field_layout(painter, boxes.field, prompt, boxes.error.is_some()).field
+}
+
+/// How far a prompt's text is scrolled to the left, in points, so that the
+/// caret is inside a field `width` points wide.
+///
+/// `caret` and `text` are measured from the text's own start: where the caret
+/// is along the line, and how long the line is. `previous` is the scroll the
+/// field had, which is the whole reason this takes four numbers rather than
+/// three. A scroll worked out from the caret alone would move the text every
+/// time the caret moved — a click in the middle of a long path would slide
+/// the path out from under the pointer that clicked it, and a drag would chase
+/// its own tail. So the text holds still while the caret is in view, and moves
+/// only as far as it must when the caret would leave it:
+///
+/// * past the right edge, the caret is put **at** the right edge. That is the
+///   `Go to:` case: the prompt opens on a whole absolute path with the caret
+///   at its end, and what shows is the end of the path with the caret against
+///   the field's right edge, the rest cut off at the left;
+/// * past the left edge, it is put at the left edge;
+/// * and never so far that there is empty field after the end of the line.
+///   A line that fits is not scrolled at all.
+///
+/// The caret bar's own [`CARET_WIDTH`] counts as part of the line, so a caret
+/// at the end of it is drawn whole rather than clipped to a sliver.
+pub fn caret_scroll(width: f32, caret: f32, text: f32, previous: f32) -> f32 {
+    let most = (text + CARET_WIDTH - width).max(0.0);
+    let mut scroll = previous.clamp(0.0, most);
+    if caret + CARET_WIDTH - scroll > width {
+        scroll = caret + CARET_WIDTH - width;
+    }
+    if caret < scroll {
+        scroll = caret;
+    }
+    scroll.clamp(0.0, most)
+}
+
+/// Where a prompt's text is, and the text itself, laid out.
+///
+/// Shared by the paint and the pointer for the reason [`TopGeom`] is, and
+/// more so: a click has to put the caret between the two characters it is
+/// *seen* to fall between, and the only way to promise that is for both sides
+/// to read one layout. The paint draws [`FieldGeom::galley`] at
+/// [`FieldGeom::origin`] and puts the caret and the selection where
+/// [`FieldGeom::x_of`] says a boundary is; the hit test asks the same galley,
+/// through [`FieldGeom::boundary_at`], which boundary is nearest the pointer.
+#[derive(Clone)]
+pub struct FieldGeom {
+    /// The strip the text is drawn in and clipped to: from the end of the
+    /// title to the start of whatever sits at the line's right end — the
+    /// inline error, or the case indicator. A press inside it is a press in
+    /// the field. The title and that furniture are not the field.
+    pub rect: egui::Rect,
+    /// How far the text is scrolled left to keep the caret in view
+    /// ([`caret_scroll`]): 0 while the line fits.
+    pub scroll: f32,
+    /// The x of the first character's left edge: `rect.left()` less
+    /// [`FieldGeom::scroll`]. Off the field to the left when the text is
+    /// scrolled — the clip is what hides the part that is not in view.
+    pub origin: f32,
+    /// The line, laid out in the field's font. Uncoloured
+    /// ([`egui::Color32::PLACEHOLDER`]): the ink is the paint's business.
+    pub galley: Arc<egui::text::Galley>,
+}
+
+impl FieldGeom {
+    /// The furthest the text can scroll: its end, caret and all, against the
+    /// field's right edge. Zero for a line that fits.
+    pub fn most_scroll(&self) -> f32 {
+        (self.galley.size().x + CARET_WIDTH - self.rect.width()).max(0.0)
+    }
+
+    /// The same field with its text scrolled to `scroll` (clamped to what the
+    /// line allows) — what a drag past the field's edge moves the text to
+    /// before it asks which character is at that edge now.
+    pub fn scrolled(&self, scroll: f32) -> FieldGeom {
+        let scroll = scroll.clamp(0.0, self.most_scroll());
+        FieldGeom {
+            rect: self.rect,
+            scroll,
+            origin: self.rect.left() - scroll,
+            galley: self.galley.clone(),
         }
     }
-    prompt_field(paint, inner, prompt, error_line);
+
+    /// The character boundary nearest `x`: where a click puts the caret, and
+    /// how far a drag has reached. Left of the text is 0 and right of it is the
+    /// end. Measured along the whole line, not just the part the field shows:
+    /// a line too long for the field goes on past its right edge, and so does
+    /// a drag that follows it there.
+    pub fn boundary_at(&self, x: f32) -> usize {
+        // Asked at the line's own height, whatever the pointer's. The galley
+        // reads a point above or below its rows as the start or the end of the
+        // text, which is right for a paragraph and wrong for one line: a drag
+        // that strayed a few points off the row would snap the selection to
+        // one end of it.
+        let y = self.galley.size().y / 2.0;
+        let cursor = self.galley.cursor_from_pos(egui::vec2(x - self.origin, y));
+        cursor.index.0.min(self.len())
+    }
+
+    /// The character under `x`, for a double click — the one whose box `x` is
+    /// in, not the boundary nearest it: a click on the right half of a letter
+    /// is still on that letter. Past the end of the text is the text's length.
+    pub fn char_under(&self, x: f32) -> usize {
+        let at = self.boundary_at(x);
+        if at > 0 && x < self.x_of(at) {
+            at - 1
+        } else {
+            at
+        }
+    }
+
+    /// The x of boundary `index`: where the caret is drawn, and where a
+    /// selection starts or ends.
+    pub fn x_of(&self, index: usize) -> f32 {
+        let cursor = egui::text::CCursor::new(index.min(self.len()));
+        self.origin + self.galley.pos_from_cursor(cursor).min.x
+    }
+
+    fn len(&self) -> usize {
+        self.galley.text().chars().count()
+    }
+}
+
+/// Everything on a prompt's line, measured: the title, the furniture at the
+/// line's right end, and the field between them.
+///
+/// The one place those widths are decided. [`prompt_field`] paints from it and
+/// [`prompt_field_geometry`] hands its field to the hit test, so the two cannot
+/// drift a pixel apart the way two copies of this arithmetic would. Laid out
+/// uncoloured, because which ink the paint uses is not geometry.
+struct FieldLayout {
+    title: Arc<egui::text::Galley>,
+    /// What sits at the line's right end, and the x it starts at.
+    furniture: Option<(Furniture, f32)>,
+    field: FieldGeom,
+}
+
+/// The one thing that may sit at the right end of a prompt's line.
+enum Furniture {
+    /// The inline error, laid out to the room it has.
+    Error(Arc<egui::text::Galley>),
+    /// The smart-case indicator on a live prompt, and whether it is lit.
+    Case(Arc<egui::text::Galley>, bool),
+}
+
+fn field_layout(
+    painter: &egui::Painter,
+    inner: egui::Rect,
+    prompt: &Prompt,
+    error_line: bool,
+) -> FieldLayout {
+    let font = egui::FontId::proportional(FONT);
+    let blank = egui::Color32::PLACEHOLDER;
+    let title = painter.layout_no_wrap(prompt.kind.title().to_string(), font.clone(), blank);
+
+    // ── The right-hand furniture, measured first so the text knows its room ──
+    // There is no mode chip: the editor has no modes to report, and the field
+    // itself is the only thing on this line that says the keyboard is here.
+    let mut right = inner.right();
+    let furniture = match &prompt.error {
+        // The row grew for this: the error has a line of its own, under the
+        // query it is about, and this line keeps its whole width for the text.
+        Some(_) if error_line => None,
+        Some(error) => {
+            // The error takes the place the case indicator would have had: it
+            // is the more urgent thing to say about what has been typed.
+            //
+            // Laid out **to the room it has**, with an ellipsis, rather than
+            // laid out full width and then drawn from a left edge computed
+            // backwards from a clamped width. That older arithmetic moved the
+            // text left without making it shorter, so in an anchored popup —
+            // which has no second line to grow and passes `error_line: None` —
+            // a long message ran back over the title and out through the side
+            // of the card.
+            let room = (right - inner.left()).max(0.0);
+            let mut job = egui::text::LayoutJob::single_section(
+                error.clone(),
+                egui::TextFormat::simple(font.clone(), blank),
+            );
+            job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+            let galley = painter.layout_job(job);
+            right -= galley.size().x.min(room);
+            Some((Furniture::Error(galley), right))
+        }
+        None if prompt.kind.is_live() => {
+            // The smart-case indicator: lit when the query has a capital in it
+            // and is therefore case-*sensitive* (df-core's rule, PLAN §7.2).
+            // Dim the rest of the time — it reports a mode nobody chose, so it
+            // must not shout.
+            let lit = is_case_sensitive(prompt.query());
+            let text = if lit { "Aa" } else { "aa" };
+            let galley = painter.layout_no_wrap(text.to_string(), key_font(FONT - 0.5), blank);
+            right -= galley.size().x;
+            Some((Furniture::Case(galley, lit), right))
+        }
+        None => None,
+    };
+    if furniture.is_some() {
+        right -= PAD_X;
+    }
+
+    let text_left = inner.left() + title.size().x + PAD_X;
+    let room = (right - text_left).max(0.0);
+    let galley = painter.layout_no_wrap(prompt.query().to_string(), font, blank);
+    // Scrolled so the caret is in view, from wherever the prompt was scrolled
+    // to last ([`crate::input::Prompt::scroll`]). The hit test and the paint
+    // both come through here with the same prompt, so they agree on it.
+    let caret = galley
+        .pos_from_cursor(egui::text::CCursor::new(
+            prompt.buffer.cursor().min(galley.text().chars().count()),
+        ))
+        .min
+        .x;
+    let scroll = caret_scroll(room, caret, galley.size().x, prompt.scroll);
+    let field = FieldGeom {
+        rect: egui::Rect::from_min_max(
+            egui::pos2(text_left, inner.top()),
+            egui::pos2(text_left + room, inner.bottom()),
+        ),
+        scroll,
+        origin: text_left - scroll,
+        galley,
+    };
+    FieldLayout {
+        title,
+        furniture,
+        field,
+    }
 }
 
 /// How many lines the top row needs while `prompt` is open.
@@ -1831,12 +2123,15 @@ pub fn prompt_rect(area: egui::Rect, anchor: egui::Rect) -> egui::Rect {
     egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width.max(0.0), height))
 }
 
-/// The prompt itself, in whatever box it has been given: title, mode chip, the
-/// text with its selection, the caret, and the inline error.
+/// The prompt itself, in whatever box it has been given: title, the text with
+/// its selection, the caret, and the inline error.
 ///
 /// `error_line` is the second line the top row grew when the error would not
 /// fit beside the query; with `None` the error keeps its place on the line, as
 /// it does in an anchored popup.
+///
+/// Everything is placed by [`field_layout`], the measure the top row's hit
+/// test is given too ([`prompt_field_geometry`]).
 fn prompt_field(
     paint: &Painting<'_>,
     inner: egui::Rect,
@@ -1845,20 +2140,15 @@ fn prompt_field(
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    let font = egui::FontId::proportional(FONT);
+    let layout = field_layout(painter, inner, prompt, error_line.is_some());
+    let top = |galley: &egui::text::Galley| inner.center().y - galley.size().y / 2.0;
 
-    let title_galley =
-        painter.layout_no_wrap(prompt.kind.title().to_string(), font.clone(), palette.blue);
     painter.galley(
-        egui::pos2(inner.left(), inner.center().y - title_galley.size().y / 2.0),
-        title_galley.clone(),
+        egui::pos2(inner.left(), top(&layout.title)),
+        layout.title.clone(),
         palette.blue,
     );
 
-    // ── The right-hand furniture, measured first so the text knows its room ──
-    // There is no mode chip: the editor has no modes to report, and the field
-    // itself is the only thing on this line that says the keyboard is here.
-    let mut right = inner.right();
     if let (Some(error), Some(line)) = (&prompt.error, error_line) {
         // The row grew for this: the error gets a line of its own, under the
         // query it is about, rather than being squeezed into three characters
@@ -1867,76 +2157,34 @@ fn prompt_field(
             egui::pos2(line.left(), line.center().y),
             egui::Align2::LEFT_CENTER,
             error,
-            font.clone(),
+            egui::FontId::proportional(FONT),
             palette.red,
         );
-    } else if let Some(error) = &prompt.error {
-        // The error takes the place the case indicator would have had: it is
-        // the more urgent thing to say about what has been typed.
-        //
-        // Laid out **to the room it has**, with an ellipsis, rather than laid
-        // out full width and then drawn from a left edge computed backwards
-        // from a clamped width. That older arithmetic moved the text left
-        // without making it shorter, so in an anchored popup — which has no
-        // second line to grow and passes `error_line: None` — a long message
-        // ran back over the title and out through the side of the card.
-        let room = (right - inner.left()).max(0.0);
-        let mut job = egui::text::LayoutJob::single_section(
-            error.clone(),
-            egui::TextFormat::simple(font.clone(), palette.red),
-        );
-        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-        let galley = painter.layout_job(job);
-        let width = galley.size().x.min(room);
-        painter.galley(
-            egui::pos2(right - width, inner.center().y - galley.size().y / 2.0),
-            galley,
-            palette.red,
-        );
-        right -= width + PAD_X;
-    } else if prompt.kind.is_live() {
-        // The smart-case indicator: lit when the query has a capital in it and
-        // is therefore case-*sensitive* (df-core's rule, PLAN §7.2). Dim the
-        // rest of the time — it reports a mode nobody chose, so it must not
-        // shout.
-        let (color, text) = if is_case_sensitive(prompt.query()) {
-            (palette.yellow, "Aa")
-        } else {
-            (palette.overlay0, "aa")
-        };
-        let galley = painter.layout_no_wrap(text.to_string(), key_font(FONT - 0.5), color);
-        let width = galley.size().x;
-        painter.galley(
-            egui::pos2(right - width, inner.center().y - galley.size().y / 2.0),
-            galley,
-            color,
-        );
-        right -= width + PAD_X;
+    }
+    match &layout.furniture {
+        Some((Furniture::Error(galley), left)) => {
+            painter.galley(egui::pos2(*left, top(galley)), galley.clone(), palette.red);
+        }
+        Some((Furniture::Case(galley, lit), left)) => {
+            let color = if *lit {
+                palette.yellow
+            } else {
+                palette.overlay0
+            };
+            painter.galley(egui::pos2(*left, top(galley)), galley.clone(), color);
+        }
+        None => {}
     }
 
     // ── The line ────────────────────────────────────────────────────────────
-    let text_left = inner.left() + title_galley.size().x + PAD_X;
-    let room = (right - text_left).max(0.0);
-    let painter = painter.with_clip_rect(egui::Rect::from_min_max(
-        egui::pos2(text_left, inner.top()),
-        egui::pos2(text_left + room, inner.bottom()),
-    ));
-    let query = prompt.query();
-    let width_of = |upto: usize| -> f32 {
-        let upto = upto.min(query.len());
-        painter
-            .layout_no_wrap(query[..upto].to_string(), font.clone(), palette.text)
-            .size()
-            .x
-    };
+    let field = &layout.field;
+    let painter = painter.with_clip_rect(field.rect);
 
-    if let Some(range) = prompt.selection() {
+    if let Some(range) = prompt.buffer.selection() {
         // A selected run is a *region*, so it is drawn as one rather than as
-        // differently coloured letters.
-        let (from, to) = (
-            text_left + width_of(range.start),
-            text_left + width_of(range.end),
-        );
+        // differently coloured letters — and drawn the same whichever hand made
+        // it, Shift and an arrow or a drag across the field.
+        let (from, to) = (field.x_of(range.start), field.x_of(range.end));
         painter.rect_filled(
             egui::Rect::from_min_max(
                 egui::pos2(from, inner.top() + 4.0),
@@ -1947,11 +2195,9 @@ fn prompt_field(
         );
     }
 
-    painter.text(
-        egui::pos2(text_left, inner.center().y),
-        egui::Align2::LEFT_CENTER,
-        query,
-        font.clone(),
+    painter.galley(
+        egui::pos2(field.origin, top(&field.galley)),
+        field.galley.clone(),
         palette.text,
     );
 
@@ -1959,7 +2205,7 @@ fn prompt_field(
     // characters now — there is no mode in which it stands on one. **Never
     // blinking**: PLAN §4.2 says no blink, and a blink is an animation that
     // never stops asking for frames (PLAN §1).
-    let caret_x = text_left + width_of(prompt.caret());
+    let caret_x = field.x_of(prompt.buffer.cursor());
     painter.rect_filled(
         egui::Rect::from_min_max(
             egui::pos2(caret_x, inner.top() + 5.0),
@@ -3033,6 +3279,183 @@ mod tests {
         }
     }
 
+    /// The pointer and the paint read one layout: the boundary the paint puts
+    /// a caret at is the boundary a click there finds, a click on either half
+    /// of a letter is *on* that letter, and the field is only the text's own
+    /// strip — after the title and the directory, before the case indicator.
+    #[test]
+    fn a_click_in_the_prompt_lands_on_the_boundary_it_is_drawn_at() {
+        use crate::input::{Prompt, PromptKind};
+        use df_core::input::InputBuffer;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter();
+            let row =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(900.0, TOP_HEIGHT));
+            let path = "/home/brian/Downloads";
+            let len = path.chars().count();
+            let prompt = Prompt::with(PromptKind::Path, 0, InputBuffer::new(path, len));
+            let field = prompt_field_geometry(painter, row, &prompt, None);
+
+            let title = text_width(painter, "Go to:", egui::FontId::proportional(FONT));
+            assert!(field.rect.left() >= row.left() + PAD_X + title);
+            assert!(row.contains_rect(field.rect));
+            assert_eq!(field.scroll, 0.0, "a line that fits is not scrolled");
+            assert_eq!(field.origin, field.rect.left());
+
+            for i in 0..=len {
+                let x = field.x_of(i);
+                assert_eq!(field.boundary_at(x), i, "the caret's own x, {i}");
+                if i < len {
+                    let next = field.x_of(i + 1);
+                    assert!(next > x, "{i}");
+                    let (near, far) = (x + (next - x) * 0.25, x + (next - x) * 0.75);
+                    assert_eq!(field.boundary_at(near), i, "the left half, {i}");
+                    assert_eq!(field.boundary_at(far), i + 1, "the right half, {i}");
+                    assert_eq!(field.char_under(near), i, "{i}");
+                    assert_eq!(field.char_under(far), i, "still the same letter, {i}");
+                }
+            }
+            // Off either end of the text is that end.
+            assert_eq!(field.boundary_at(row.left() - 50.0), 0);
+            assert_eq!(field.boundary_at(row.right() + 50.0), len);
+            assert_eq!(field.char_under(row.right() + 50.0), len);
+
+            // The double click the brief names: the right half of the `r` in
+            // `brian` is still the `r`, and the segment it is in is `brian`.
+            let r = field.x_of(7) + (field.x_of(8) - field.x_of(7)) * 0.9;
+            assert_eq!(prompt.segment_at(field.char_under(r)), 6..11);
+
+            // The directory tail pushes the field right, and a live prompt's
+            // case indicator is at the line's end, outside the field.
+            let filter = Prompt::with(PromptKind::Filter, 0, InputBuffer::new("invoice", 7));
+            let bare = prompt_field_geometry(painter, row, &filter, None);
+            let tailed = prompt_field_geometry(painter, row, &filter, Some("delightfile"));
+            assert!(tailed.rect.left() > bare.rect.left());
+            assert!(bare.rect.right() < row.right() - PAD_X * 2.0);
+            assert_eq!(tailed.rect.right(), bare.rect.right());
+
+            // An error too long for the line has a line of its own, and the
+            // field keeps the first one, whole.
+            let mut refused = Prompt::with(PromptKind::Create, 0, InputBuffer::new("notes", 5));
+            let one = prompt_field_geometry(painter, row, &refused, None);
+            refused.error = Some("that name is already taken by a directory".to_string());
+            let tall = egui::Rect::from_min_size(
+                row.min,
+                egui::vec2(row.width(), TOP_HEIGHT + crate::ui::PROMPT_ERROR_LINE),
+            );
+            let two = prompt_field_geometry(painter, tall, &refused, None);
+            assert_eq!(two.rect, one.rect);
+            // …and one that fits beside the text takes its room from the field.
+            let inline = prompt_field_geometry(painter, row, &refused, None);
+            assert!(inline.rect.right() < one.rect.right());
+        });
+    }
+
+    /// The offset the prompt's text is scrolled by: none while the line fits,
+    /// the caret against the right edge when it runs off that way, against the
+    /// left when it runs off that way — and otherwise wherever it was, so a
+    /// caret moving inside the field moves nothing else.
+    #[test]
+    fn the_prompt_scrolls_only_as_far_as_the_caret_needs() {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        let width = 200.0;
+
+        // A line that fits never scrolls, wherever the caret or the last
+        // scroll was.
+        assert_eq!(caret_scroll(width, 150.0, 180.0, 0.0), 0.0);
+        assert_eq!(caret_scroll(width, 0.0, 180.0, 40.0), 0.0);
+
+        // `Go to:` opening on a long path, caret at the end: the end of the
+        // path shows, caret whole against the right edge.
+        let text = 600.0;
+        let end = caret_scroll(width, text, text, 0.0);
+        assert!(near(end, text + CARET_WIDTH - width));
+        assert!(near(text + CARET_WIDTH - end, width), "caret at the edge");
+
+        // The caret walking left inside the field moves nothing…
+        assert_eq!(caret_scroll(width, 500.0, text, end), end);
+        assert_eq!(caret_scroll(width, end, text, end), end);
+        // …until it passes the left edge, where it is held.
+        assert!(near(caret_scroll(width, 300.0, text, end), 300.0));
+        // `Home`: all the way back.
+        assert_eq!(caret_scroll(width, 0.0, text, end), 0.0);
+        // Walking right again from the start moves nothing until the edge…
+        assert_eq!(caret_scroll(width, 150.0, text, 0.0), 0.0);
+        // …and then keeps the caret against it.
+        assert!(near(
+            caret_scroll(width, 250.0, text, 0.0),
+            250.0 + CARET_WIDTH - width
+        ));
+
+        // A line that got shorter under a scroll gives the room back rather
+        // than leaving empty field after its end.
+        assert!(near(
+            caret_scroll(width, 250.0, 300.0, 380.0),
+            300.0 + CARET_WIDTH - width
+        ));
+    }
+
+    /// A long line in the field: the caret is in view, the hit test still
+    /// lands on the boundary the paint draws at, and a drag past the edge that
+    /// scrolls the text asks the scrolled layout what is at the edge now.
+    #[test]
+    fn a_long_line_scrolls_its_caret_into_view_and_is_hit_where_it_is_drawn() {
+        use crate::input::{Prompt, PromptKind};
+        use df_core::input::InputBuffer;
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter();
+            let row =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(260.0, TOP_HEIGHT));
+            let path = "/home/brian/Work/delightfile/crates/df-app/src/chrome.rs";
+            let len = path.chars().count();
+            let mut prompt = Prompt::with(PromptKind::Path, 0, InputBuffer::new(path, len));
+            let field = prompt_field_geometry(painter, row, &prompt, None);
+
+            assert!(
+                field.galley.size().x > field.rect.width(),
+                "the test needs a long line"
+            );
+            assert!(field.scroll > 0.0);
+            let caret = field.x_of(len);
+            assert!(
+                (caret + CARET_WIDTH - field.rect.right()).abs() < 1e-3,
+                "at the right edge"
+            );
+            // Every boundary in view is hit where it is drawn. Not always *that*
+            // boundary: the shaper sets `fi` in `delightfile` as one ligature
+            // and gives the `i` a zero-width glyph at its far edge, so the
+            // boundary between the two letters is drawn where the one after
+            // them is — the same caret egui's own text fields draw there — and
+            // a click at that x finds the one after. What must hold is that a
+            // click lands on a boundary drawn exactly where it clicked.
+            for i in 0..=len {
+                let x = field.x_of(i);
+                if field.rect.contains(egui::pos2(x, field.rect.center().y)) {
+                    let hit = field.boundary_at(x);
+                    assert!((field.x_of(hit) - x).abs() < 1e-3, "{i} hit {hit}");
+                }
+            }
+
+            // The prompt remembers the scroll, and a caret moved inside the
+            // field leaves it where it was.
+            prompt.scroll = field.scroll;
+            let inside = field.boundary_at(field.rect.center().x);
+            prompt.buffer.move_to(inside, false);
+            let again = prompt_field_geometry(painter, row, &prompt, None);
+            assert_eq!(again.scroll, field.scroll, "a click does not move the text");
+
+            // Scrolled back by a drag past the left edge: the character at
+            // that edge is an earlier one than it was.
+            let left = field.boundary_at(field.rect.left());
+            let back = field.scrolled(field.scroll - 60.0);
+            assert!(back.boundary_at(back.rect.left()) < left);
+            assert_eq!(field.scrolled(-5.0).scroll, 0.0);
+            assert_eq!(field.scrolled(1e6).scroll, field.most_scroll());
+        });
+    }
+
     /// Everything draws, including the states that are easy to forget: an empty
     /// help sheet, a one-column card, a prompt with a caret mid-string.
     #[test]
@@ -3203,6 +3626,10 @@ mod tests {
             prompt_row(&paint, path_rect, &prompt, None, false);
             prompt.feed(df_core::keymap::Chord::from_char('v').expect("v"));
             prompt_row(&paint, path_rect, &prompt, Some("delightfile"), false);
+            // …and with a selection the pointer made, which is drawn from the
+            // same layout as the caret.
+            prompt.buffer.set_selection(1, 3);
+            prompt_row(&paint, path_rect, &prompt, None, false);
             // …and the two-line form, which an error too long for the line
             // asks the layout for.
             prompt.error = Some("that name is already taken by a directory".to_string());

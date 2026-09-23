@@ -470,3 +470,126 @@ fn the_caret_may_sit_after_the_last_character() {
     run(&mut buf, "c");
     assert_eq!(buf.text(), "abc");
 }
+
+// ── The pointer ─────────────────────────────────────────────────────────────
+
+/// A click is a caret move with nothing extended, and a drag from it is the
+/// same move with the selection grown from where the click put the caret —
+/// back over the press point and out the other side, as a drag does.
+#[test]
+fn a_click_places_the_caret_and_a_drag_grows_from_it() {
+    let mut buf = at(2);
+    run(&mut buf, "<shift+right>");
+    buf.move_to(9, false);
+    assert_eq!(buf.cursor(), 9);
+    assert_eq!(
+        buf.selection(),
+        None,
+        "a click drops the selection it lands on"
+    );
+
+    // The drag: every frame the pointer is somewhere, extended.
+    buf.move_to(11, true);
+    assert_eq!(buf.selection(), Some(9..11));
+    buf.move_to(9, true);
+    assert_eq!(buf.selection(), None, "back on the press point is nothing");
+    buf.move_to(6, true);
+    assert_eq!(buf.selection(), Some(6..9), "past it, the other way");
+    assert_eq!(buf.cursor(), 6);
+
+    // Out of the line's reach is its end, not a panic.
+    buf.move_to(999, true);
+    assert_eq!(buf.selection(), Some(9..FIXTURE_LEN));
+}
+
+/// Shift+click grows the selection that is already there rather than starting
+/// a new one at the caret — a keyboard selection extended by the pointer keeps
+/// its anchor.
+#[test]
+fn a_shift_click_extends_from_the_anchor_a_selection_already_has() {
+    let mut buf = at(6);
+    run(&mut buf, "<shift+right><shift+right>");
+    assert_eq!(buf.selection(), Some(6..8));
+    buf.move_to(12, true);
+    assert_eq!(buf.selection(), Some(6..12));
+    buf.move_to(2, true);
+    assert_eq!(buf.selection(), Some(2..6));
+
+    // …and with nothing selected it grows from the caret.
+    let mut buf = at(4);
+    buf.move_to(1, true);
+    assert_eq!(buf.selection(), Some(1..4));
+}
+
+/// A double or triple click says where the whole run is, not where to grow to.
+#[test]
+fn set_selection_takes_both_ends_and_clamps_them() {
+    let mut buf = at(0);
+    buf.set_selection(6, 11);
+    assert_eq!(buf.selection(), Some(6..11));
+    assert_eq!(buf.cursor(), 11, "the caret is at the end it was given");
+
+    buf.set_selection(0, 999);
+    assert_eq!(buf.selection(), Some(0..FIXTURE_LEN));
+    assert_eq!(buf.cursor(), FIXTURE_LEN);
+
+    buf.set_selection(5, 5);
+    assert_eq!(buf.selection(), None, "an empty run is no selection");
+    assert_eq!(buf.cursor(), 5);
+
+    // A pointer selection is a selection like any other: typing replaces it.
+    let mut buf = InputBuffer::new("photo.jpg", 0);
+    buf.set_selection(0, 5);
+    run(&mut buf, "cat");
+    assert_eq!(buf.text(), "cat.jpg");
+}
+
+/// The double click's run: between separators, a separator selecting the
+/// segment to its right, and past the end the last segment.
+#[test]
+fn a_segment_is_the_run_between_separators_around_the_click() {
+    let path = "/home/brian/Downloads";
+    let slash = |c: char| c == '/';
+    assert_eq!(segment_at(path, 7, slash), 6..11, "brian");
+    assert_eq!(segment_at(path, 6, slash), 6..11, "its first letter");
+    assert_eq!(segment_at(path, 10, slash), 6..11, "its last letter");
+    assert_eq!(segment_at(path, 5, slash), 6..11, "the `/` before it");
+    assert_eq!(
+        segment_at(path, 0, slash),
+        1..5,
+        "the leading `/` is home's"
+    );
+    assert_eq!(segment_at(path, 11, slash), 12..21, "Downloads");
+    assert_eq!(segment_at(path, 21, slash), 12..21, "past the end");
+    assert_eq!(segment_at(path, 99, slash), 12..21);
+
+    // Nothing to the right of a trailing separator: the segment to its left.
+    assert_eq!(segment_at("/home/brian/", 11, slash), 6..11);
+    assert_eq!(segment_at("/home/brian/", 12, slash), 6..11);
+    // A run of separators is stepped over, not selected as an empty segment.
+    assert_eq!(segment_at("a//b", 1, slash), 3..4);
+    // Nothing but separators, or nothing at all, is nothing to select.
+    assert_eq!(segment_at("///", 1, slash), 1..1);
+    assert_eq!(segment_at("", 0, slash), 0..0);
+    assert_eq!(segment_at("", 3, slash), 0..0);
+}
+
+/// With the word motions' own classes as the separator test, a double click
+/// selects the word `Ctrl+←/→` would step over — multibyte and all.
+#[test]
+fn a_segment_by_word_is_the_word_the_motions_step_over() {
+    let not_word = |c: char| !is_word_char(c);
+    assert_eq!(segment_at(FIXTURE, 7, not_word), 6..11, "wörld");
+    assert_eq!(segment_at(FIXTURE, 18, not_word), 17..20, "日本語");
+    assert_eq!(segment_at(FIXTURE, 11, not_word), 12..15, "`.` takes foo");
+    assert_eq!(
+        segment_at(FIXTURE, 5, not_word),
+        6..11,
+        "a space takes wörld"
+    );
+    assert_eq!(
+        segment_at("naïve_café", 3, not_word),
+        0..10,
+        "`_` is a word"
+    );
+}

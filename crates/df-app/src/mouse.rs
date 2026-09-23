@@ -68,14 +68,21 @@ pub const WHEEL_GLIDE: Duration = Duration::from_millis(300);
 pub const WHEEL_MAX_ROWS: f32 = 6.0;
 
 /// The last press, so the next one can be told whether it is the second half of
-/// a double click.
+/// a double click — or, for a text field, the third of a triple.
 ///
 /// Keyed by control rather than by position alone: two clicks 4 px apart that
 /// happen to straddle a row boundary are two clicks on two rows, and opening
 /// the second one because the first was nearby would be the pointer acting on
 /// something the user never pressed.
+///
+/// What is kept is the length of the **run** the last press ended: how many
+/// presses in a row have landed on the same control, each inside
+/// [`DOUBLE_CLICK_WINDOW`] and [`DOUBLE_CLICK_SLOP`] of the one before. The two
+/// questions asked of it are both read off that one number, so a control that
+/// asks "double?" ([`Clicks::press`]) and the prompt that asks "how many?"
+/// ([`Clicks::count`]) cannot disagree about what the hand did.
 pub struct Clicks<K: Key> {
-    last: Option<(K, egui::Pos2, Instant)>,
+    last: Option<(K, egui::Pos2, Instant, u32)>,
 }
 
 impl<K: Key> Default for Clicks<K> {
@@ -91,16 +98,40 @@ impl<K: Key> Clicks<K> {
 
     /// Record a press and answer whether it completes a double click.
     ///
-    /// A double click **consumes** its history, so a third click starts a fresh
-    /// pair rather than firing "open" again on every click of a drum roll.
+    /// Presses **pair off**: a double click is the second of a pair, so a
+    /// third quick click is a single again and a fourth another double, rather
+    /// than "open" firing on every click of a drum roll. That is the even
+    /// presses of a run.
     pub fn press(&mut self, key: K, at: egui::Pos2, now: Instant) -> bool {
-        let double = self.last.is_some_and(|(last_key, last_at, when)| {
-            last_key == key
-                && (at - last_at).length() <= DOUBLE_CLICK_SLOP
-                && now.saturating_duration_since(when) <= DOUBLE_CLICK_WINDOW
-        });
-        self.last = if double { None } else { Some((key, at, now)) };
-        double
+        self.record(key, at, now).is_multiple_of(2)
+    }
+
+    /// Record a press and answer how many clicks it makes: 1, 2 or 3.
+    ///
+    /// For a text field, where the three are three different verbs — place
+    /// the caret, take the word, take the line. A run longer than three
+    /// **stays** at three rather than wrapping round to one: the fourth click
+    /// of a quick run leaves the whole line selected instead of dropping it
+    /// for a caret the hand did not aim.
+    pub fn count(&mut self, key: K, at: egui::Pos2, now: Instant) -> u8 {
+        self.record(key, at, now).min(3) as u8
+    }
+
+    /// Record a press and answer how long the run it belongs to is: 1 for a
+    /// press on its own, one more than the last for a press that continues it.
+    fn record(&mut self, key: K, at: egui::Pos2, now: Instant) -> u32 {
+        let run = match self.last {
+            Some((last_key, last_at, when, run))
+                if last_key == key
+                    && (at - last_at).length() <= DOUBLE_CLICK_SLOP
+                    && now.saturating_duration_since(when) <= DOUBLE_CLICK_WINDOW =>
+            {
+                run.saturating_add(1)
+            }
+            _ => 1,
+        };
+        self.last = Some((key, at, now, run));
+        run
     }
 
     /// Forget the history — a click somewhere else, a menu opening, anything
@@ -286,6 +317,42 @@ pub fn band_scroll_rows(rate: f32, dt: Duration) -> f32 {
     rate * dt.as_secs_f32().min(BAND_SCROLL_MAX_DT) / BAND_SCROLL_FRAME
 }
 
+/// How far past the prompt field's edge a text selection has to be dragged for
+/// the text to scroll one point per reference frame ([`BAND_SCROLL_FRAME`]),
+/// in logical points.
+///
+/// Ten: a hand just over the edge creeps the text along at about eight
+/// characters a second, slow enough to stop on the one it wants, and pulling
+/// further out goes faster, as the band does over the list.
+pub const FIELD_SCROLL_OVERSHOOT: f32 = 10.0;
+
+/// The fastest a text selection scrolls the field, in points per reference
+/// frame: about fifty characters a second, reached sixty points past the edge.
+/// A field is one line, and a path read at that speed is still a path being
+/// read.
+pub const FIELD_SCROLL_MAX: f32 = 6.0;
+
+/// How far a text selection dragged past the prompt field's edge scrolls the
+/// field this frame, in points — negative towards the start of the line, zero
+/// while the pointer is level with the field.
+///
+/// The band's arithmetic turned on its side: only the pointer's *x* is read,
+/// the rate is proportional to the overshoot up to a ceiling, and a frame
+/// takes its share of it by how long it lasted ([`band_scroll_rows`]), so a
+/// fast display scrolls no faster than a slow one and the first frame after
+/// a rest is not paid the rest.
+pub fn field_scroll(field: egui::Rect, x: f32, dt: Duration) -> f32 {
+    let overshoot = if x < field.left() {
+        x - field.left()
+    } else if x > field.right() {
+        x - field.right()
+    } else {
+        0.0
+    };
+    let rate = (overshoot / FIELD_SCROLL_OVERSHOOT).clamp(-FIELD_SCROLL_MAX, FIELD_SCROLL_MAX);
+    band_scroll_rows(rate, dt)
+}
+
 /// What a wheel event's delta is measured in — egui's `MouseWheelUnit`,
 /// mirrored so the arithmetic here stays testable without one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,6 +475,8 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Ctl {
         Row(usize),
+        /// A text field, which counts to three.
+        Field,
     }
 
     const H: f32 = 22.0;
@@ -447,7 +516,7 @@ mod tests {
         ));
     }
 
-    /// A double click consumes its history: three clicks are one open, not two.
+    /// Presses pair off: three clicks are one open, not two.
     #[test]
     fn a_third_click_starts_a_new_pair() {
         let mut clicks = Clicks::new();
@@ -457,6 +526,49 @@ mod tests {
         assert!(clicks.press(Ctl::Row(1), at, t0 + Duration::from_millis(80)));
         assert!(!clicks.press(Ctl::Row(1), at, t0 + Duration::from_millis(160)));
         assert!(clicks.press(Ctl::Row(1), at, t0 + Duration::from_millis(240)));
+        // …and a pair is still timed from its own first click: a fifth press
+        // that comes too late after the fourth is a single, and the one after
+        // it the double.
+        let late = t0 + Duration::from_millis(240) + DOUBLE_CLICK_WINDOW;
+        assert!(!clicks.press(Ctl::Row(1), at, late + Duration::from_millis(1)));
+        assert!(clicks.press(Ctl::Row(1), at, late + Duration::from_millis(80)));
+    }
+
+    /// The text field's count: one, two, three, and then three again — a run
+    /// that goes on keeps the line rather than wrapping back to a caret.
+    #[test]
+    fn a_text_field_counts_up_to_a_triple_click() {
+        let mut clicks = Clicks::new();
+        let t0 = Instant::now();
+        let at = egui::pos2(40.0, 10.0);
+        let step = |n: u64| t0 + Duration::from_millis(n * 100);
+        assert_eq!(clicks.count(Ctl::Field, at, step(0)), 1);
+        assert_eq!(clicks.count(Ctl::Field, at, step(1)), 2);
+        assert_eq!(clicks.count(Ctl::Field, at, step(2)), 3);
+        assert_eq!(clicks.count(Ctl::Field, at, step(3)), 3);
+
+        // A pause, a drift past the slop or another control each start over.
+        let mut clicks = Clicks::new();
+        assert_eq!(clicks.count(Ctl::Field, at, t0), 1);
+        assert_eq!(clicks.count(Ctl::Field, at, step(1)), 2);
+        let slow = step(1) + DOUBLE_CLICK_WINDOW + Duration::from_millis(1);
+        assert_eq!(clicks.count(Ctl::Field, at, slow), 1);
+        let away = at + egui::vec2(DOUBLE_CLICK_SLOP + 1.0, 0.0);
+        assert_eq!(
+            clicks.count(Ctl::Field, away, slow + Duration::from_millis(50)),
+            1
+        );
+        assert_eq!(
+            clicks.count(Ctl::Row(0), away, slow + Duration::from_millis(100)),
+            1
+        );
+
+        // …and the two readings share one history: a double click on a row
+        // followed by a count on it is the third of the run.
+        let mut clicks = Clicks::new();
+        assert!(!clicks.press(Ctl::Row(2), at, t0));
+        assert!(clicks.press(Ctl::Row(2), at, step(1)));
+        assert_eq!(clicks.count(Ctl::Row(2), at, step(2)), 3);
     }
 
     /// Two clicks on two different rows are two clicks, however fast.
@@ -672,6 +784,35 @@ mod tests {
         // …up to the ceiling, however far the hand goes.
         assert_eq!(band_scroll(pane, pane.bottom() + 5_000.0), BAND_SCROLL_MAX);
         assert_eq!(band_scroll(pane, pane.top() - 5_000.0), -BAND_SCROLL_MAX);
+    }
+
+    /// A text selection dragged past the field's edge scrolls it that way, in
+    /// proportion to how far out the hand is, up to a ceiling, paced by the
+    /// frame; level with the field it does not scroll at all.
+    #[test]
+    fn a_text_drag_past_the_field_scrolls_it_towards_the_pointer() {
+        let field = egui::Rect::from_min_max(egui::pos2(100.0, 10.0), egui::pos2(300.0, 30.0));
+        let frame = Duration::from_secs_f32(BAND_SCROLL_FRAME);
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        for x in [field.left(), field.center().x, field.right()] {
+            assert_eq!(field_scroll(field, x, frame), 0.0, "at {x}");
+        }
+        assert!(near(field_scroll(field, field.right() + 10.0, frame), 1.0));
+        assert!(near(field_scroll(field, field.left() - 10.0, frame), -1.0));
+        assert!(near(field_scroll(field, field.right() + 30.0, frame), 3.0));
+        assert!(near(
+            field_scroll(field, field.right() + 5_000.0, frame),
+            FIELD_SCROLL_MAX
+        ));
+        // Two frames' time is two frames' travel; a long rest is capped.
+        assert!(near(
+            field_scroll(field, field.right() + 10.0, frame * 2),
+            2.0
+        ));
+        assert!(near(
+            field_scroll(field, field.right() + 10.0, Duration::from_secs(3)),
+            3.0
+        ));
     }
 
     /// The rate is per *reference* frame: a real frame takes its share by how

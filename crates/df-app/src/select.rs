@@ -23,6 +23,8 @@
 
 use std::time::Instant;
 
+use crate::ui::{Column, Control};
+
 /// The inclusive run between the anchor and the cursor, low end first.
 pub fn range(anchor: usize, cursor: usize) -> (usize, usize) {
     if anchor <= cursor {
@@ -208,9 +210,98 @@ impl Band {
     }
 }
 
+/// A drag that owns the pointer until the button comes up, for
+/// [`gesture_filter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gesture {
+    /// A band select, drawing a rectangle over the listing.
+    Band,
+    /// A selection being dragged out of the top-bar prompt's text.
+    Text,
+}
+
+/// What the pointer is over, as far as anything is allowed to answer it while
+/// `gesture` has it: a list row during a band, the prompt's text during a text
+/// selection, or nothing.
+///
+/// A drag is the hand doing one thing, not pointing at the things it crosses
+/// on the way. A parent row, a crumb, a chip or a tab that lit up — or sank
+/// under a button that is down for another reason — as a band's corner or a
+/// text selection swept over it would be the window answering a question
+/// nobody asked it. A band keeps the list's own rows, because their highlight
+/// is the feedback that the band has reached them; a text selection keeps only
+/// the field it is selecting in, so a drag that runs off the field and down
+/// over the listing lights no row and sinks none. Everything else gets `None`,
+/// including the space outside every pane.
+///
+/// Applied where the hit test hands its answer out, so every reader of it —
+/// the hover, the press, the cursor shape — is filtered together rather than
+/// each remembering to ask; and once more after the frame's drag has run,
+/// because that is where a band begins. With no gesture it is the identity,
+/// which is how the ordinary rules come back the frame after the release. The
+/// media transport keeps a pointer of its own outside the hit test, and is
+/// handed none while a gesture is live for the same reason.
+pub fn gesture_filter(
+    gesture: Option<Gesture>,
+    over: Option<(Control, egui::Pos2)>,
+) -> Option<(Control, egui::Pos2)> {
+    over.filter(|(control, _)| match gesture {
+        None => true,
+        Some(Gesture::Band) => matches!(control, Control::Row(Column::List, _)),
+        Some(Gesture::Text) => matches!(control, Control::PromptField),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mid-band only a list row answers the pointer, mid-selection only the
+    /// prompt's text; with no gesture, everything does exactly as it did.
+    #[test]
+    fn a_live_gesture_leaves_only_its_own_target_hoverable() {
+        let at = egui::pos2(10.0, 10.0);
+        let row = Some((Control::Row(Column::List, 4), at));
+        let field = Some((Control::PromptField, at));
+        assert_eq!(
+            gesture_filter(Some(Gesture::Band), row),
+            row,
+            "the band's own feedback"
+        );
+        assert_eq!(gesture_filter(Some(Gesture::Band), field), None);
+        assert_eq!(gesture_filter(Some(Gesture::Text), field), field);
+        assert_eq!(
+            gesture_filter(Some(Gesture::Text), row),
+            None,
+            "a text drag that runs over the listing lights no row"
+        );
+        for control in [
+            Control::Row(Column::Parent, 2),
+            Control::Crumb(1),
+            Control::Tab(0),
+            Control::GitChip,
+            Control::FilterChip,
+            Control::Counter,
+            Control::BasketChip,
+            Control::Toast,
+        ] {
+            for gesture in [Gesture::Band, Gesture::Text] {
+                assert_eq!(
+                    gesture_filter(Some(gesture), Some((control, at))),
+                    None,
+                    "{control:?} during {gesture:?}"
+                );
+            }
+            assert_eq!(
+                gesture_filter(None, Some((control, at))),
+                Some((control, at)),
+                "{control:?} answers again once the gesture is let go"
+            );
+        }
+        // Outside every pane there was nothing to begin with.
+        assert_eq!(gesture_filter(Some(Gesture::Band), None), None);
+        assert_eq!(gesture_filter(Some(Gesture::Text), None), None);
+    }
 
     #[test]
     fn a_run_reads_the_same_in_both_directions() {

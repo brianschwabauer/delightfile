@@ -54,6 +54,16 @@
 //! Word motions are class-based over `char::is_alphanumeric`, so `naïve_café`
 //! is one word and `日本語` is one word — the multibyte case is handled by
 //! asking the character what it is, never by counting bytes.
+//!
+//! # The pointer
+//!
+//! A click, a drag and a double click land here as the same verbs the keys
+//! use, with the geometry already done by whoever drew the line: the caller
+//! turns a pixel into a char index and hands over the index. A click is
+//! [`InputBuffer::move_to`], a drag or a Shift+click is the same motion with
+//! the selection extended, and a double or triple click is an explicit
+//! [`InputBuffer::set_selection`] over the run [`segment_at`] finds. Nothing
+//! here knows what a pixel is, which is what keeps it testable.
 
 use crate::keymap::{Chord, Command, Key, Mods};
 
@@ -188,11 +198,75 @@ enum CharKind {
 fn kind(c: char) -> CharKind {
     if c.is_whitespace() {
         CharKind::Space
-    } else if c.is_alphanumeric() || c == '_' {
+    } else if is_word_char(c) {
         CharKind::Word
     } else {
         CharKind::Punct
     }
+}
+
+/// Whether `c` is part of a word, as the word motions (`Ctrl+←/→`, `Alt+b/f`,
+/// `Ctrl+w`) read one: a letter or a digit in any script, or `_`.
+///
+/// Public so that a double click can select exactly the run those keys step
+/// over: a caller hands `|c| !is_word_char(c)` to [`segment_at`] as its
+/// separator test, and the word under the pointer is the word under the
+/// caret.
+pub fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// The run of non-separator characters around char index `at`: what a double
+/// click on `at` selects.
+///
+/// `at` is the character the pointer is *on*, not a caret position between
+/// two of them — a click on the right half of the `n` in `brian` is on the
+/// `n`, and asking for the boundary after it would select whatever follows
+/// the `/`. An index at or past the end is the last character, so a double
+/// click beyond the end of the line takes its last segment rather than
+/// nothing.
+///
+/// A separator is not a segment of its own: a double click on one selects the
+/// segment to its **right**, which is the one a path's `/` introduces. With
+/// nothing but separators to the right (`/home/brian/`, clicked on the last
+/// `/`), the segment to the left is taken instead, so the gesture always
+/// selects something while there is anything to select. A line of nothing
+/// but separators — or no line at all — answers the empty range at `at`.
+///
+/// ```text
+/// / h o m e / b r i a n / D o w n l o a d s
+/// 0 1 2 3 4 5 6 7 8 9 10 11 …
+/// segment_at(_, 7, |c| c == '/') == 6..11   // "brian"
+/// segment_at(_, 5, |c| c == '/') == 6..11   // the `/` before it
+/// ```
+pub fn segment_at(
+    text: &str,
+    at: usize,
+    is_separator: impl Fn(char) -> bool,
+) -> std::ops::Range<usize> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return 0..0;
+    }
+    let mut i = at.min(n - 1);
+    if is_separator(chars[i]) {
+        let right = (i..n).find(|&j| !is_separator(chars[j]));
+        let left = || (0..i).rev().find(|&j| !is_separator(chars[j]));
+        match right.or_else(left) {
+            Some(j) => i = j,
+            None => {
+                let at = at.min(n);
+                return at..at;
+            }
+        }
+    }
+    let start = (0..i)
+        .rev()
+        .find(|&j| is_separator(chars[j]))
+        .map_or(0, |j| j + 1);
+    let end = (i..n).find(|&j| is_separator(chars[j])).unwrap_or(n);
+    start..end
 }
 
 /// One line of text being edited.
@@ -535,7 +609,15 @@ impl InputBuffer {
 
     /// A motion landed on `target`: move there, extending the selection or
     /// dropping it.
-    fn move_to(&mut self, target: usize, extend: bool) {
+    ///
+    /// Every key motion ends here, and so does the pointer: a click is this
+    /// with `extend` false, and a Shift+click or a drag from a press is this
+    /// with `extend` true. An extended motion keeps the anchor a selection
+    /// already has, or drops one at the caret if there is none — so a drag
+    /// that began with a click is anchored where the click put the caret, and
+    /// a Shift+click after a keyboard selection grows that selection rather
+    /// than starting another. `target` is clamped to the line.
+    pub fn move_to(&mut self, target: usize, extend: bool) {
         let target = target.min(self.len());
         self.anchor = if extend {
             self.anchor.or(Some(self.cursor)).filter(|a| *a != target)
@@ -543,6 +625,19 @@ impl InputBuffer {
             None
         };
         self.cursor = target;
+    }
+
+    /// Select from `anchor` to `cursor`, caret at `cursor` — what a double or
+    /// a triple click does, where the run is decided by what was clicked
+    /// rather than grown from where the caret was.
+    ///
+    /// Both ends are clamped to the line, and an empty range is no selection
+    /// with the caret at `cursor`, by the same rule as [`InputBuffer::selection`].
+    pub fn set_selection(&mut self, anchor: usize, cursor: usize) {
+        let len = self.len();
+        let (anchor, cursor) = (anchor.min(len), cursor.min(len));
+        self.anchor = (anchor != cursor).then_some(anchor);
+        self.cursor = cursor;
     }
 
     /// One character left — or, with a selection live and no Shift held, the
