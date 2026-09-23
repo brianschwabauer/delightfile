@@ -41,6 +41,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
+use crate::archive::ExtractMode;
 use crate::chrome;
 use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
 use crate::dnd;
@@ -297,6 +298,11 @@ struct PendingOp {
     /// the job lands (see [`App::land_on`]). Empty for a job whose results
     /// are not rows anybody should land on — a trash, a delete, a shell line.
     focus: Vec<PathBuf>,
+    /// Jobs spawned together for one request — "Extract to folder" on three
+    /// archives is three jobs — share the id of the first. They land once,
+    /// when the last of them does, rather than dragging the cursor about as
+    /// each one finishes.
+    group: Option<TaskId>,
 }
 
 /// An `archive::list` running on the pool, and what its result is for.
@@ -2234,6 +2240,7 @@ impl App {
             Ok(mut slot) => slot.take(),
             Err(poisoned) => poisoned.into_inner().take(),
         };
+        let mut made = Vec::new();
         if let Some(mut outcome) = outcome {
             for (path, error) in &outcome.errors {
                 log::warn!("{}: {error}", path.display());
@@ -2243,13 +2250,16 @@ impl App {
                 self.journal.record(record);
             }
             self.toasts.show(message, kind, now);
+            made = std::mem::take(&mut outcome.made);
         }
         for dir in &op.dirs {
             self.rescan(dir, now);
         }
         // After the rescans, so the aim is waiting for the scan that will
         // bring the rows rather than for one that started before they existed.
-        self.land_on(&op.focus);
+        if let Some(focus) = landing(op.focus, made, op.group, &self.ops) {
+            self.land_on(&focus);
+        }
     }
 
     /// Queue a job and remember where to look for its result.
@@ -2266,6 +2276,7 @@ impl App {
             slot,
             dirs,
             focus,
+            group: None,
         });
     }
 
@@ -2414,32 +2425,281 @@ impl App {
         }
     }
 
-    /// `e` / `E`, and the context menu's two extract rows.
-    fn extract(&mut self, subfolder: bool, now: Instant) {
-        // Inside an archive the tree is already in hand and the subject is the
-        // selection; outside, the subject is the archive under the cursor and
-        // the tree has to be read first.
+    /// `e` / `E`, and the context menu's extract rows: the targets — the
+    /// selection, or the row under the cursor.
+    fn extract(&mut self, mode: ExtractMode, now: Instant) {
+        let targets = self.targets();
+        self.extract_paths(mode, targets, now);
+    }
+
+    /// Extract `paths` — the one door `e`, `E`, the context menu and the three
+    /// `builtin:extract…` openers all come through.
+    ///
+    /// Inside an archive the tree is already in hand and the subject is the
+    /// selection within it. Outside, the paths are folded into archives and
+    /// multi-part sets ([`crate::archive::units`]), and each takes the road it
+    /// can:
+    ///
+    /// - **One archive the reader lists** goes the way it always has: listed
+    ///   first, planned, and its plan is what the cursor lands on.
+    /// - **Anything else** — 7z, rar, a set, or several at once — is a
+    ///   [`df_core::archive::Unpack`] on the pool, whose outcome says what it
+    ///   made. "Extract to folder" is one job per archive, each into its own
+    ///   folder; "Extract here" and "Extract all into one folder" are one job
+    ///   for all of them, in listing order, so which file wins a collision is
+    ///   the listing's order and not a race.
+    fn extract_paths(&mut self, mode: ExtractMode, paths: Vec<PathBuf>, now: Instant) {
         if self.tab().archive.is_some() {
-            self.extract_selection(subfolder, now);
+            self.extract_selection(mode != ExtractMode::Here, now);
             return;
         }
-        let Some(entry) = self.tab().cwd.dir.cursor_entry() else {
+        if paths.is_empty() {
             self.toasts.notice("Nothing here to extract", now);
             return;
-        };
-        if !crate::archive::looks_like_archive(entry) {
-            self.toasts.notice("Not an archive", now);
+        }
+        let folded = self.archive_units(&paths);
+        let units = folded.units;
+        if units.is_empty() {
+            let message = match folded.orphans.first() {
+                Some(name) => {
+                    format!(
+                        "{name} is one part of a multi-part archive whose first part is not here"
+                    )
+                }
+                None => "Not an archive".to_string(),
+            };
+            self.toasts.notice(message, now);
             return;
         }
-        let path = entry.path.clone();
-        self.ask_archive(
-            path,
-            if subfolder {
-                ArchiveIntent::ExtractSubfolder
+        // Settled before anything is made, so a missing 7-Zip is one toast
+        // rather than a folder that appears and a job that fails in it.
+        let extractor = units
+            .iter()
+            .any(|unit| !unit.listable)
+            .then(df_core::archive::external_extractor)
+            .flatten();
+        let unreadable = units.iter().find(|unit| {
+            !unit.listable
+                && !extractor
+                    .as_ref()
+                    .is_some_and(|e| unit.volumes.is_none() || e.reads_volumes())
+        });
+        if let Some(unit) = unreadable {
+            self.toasts.error(
+                format!("Install 7-Zip to extract {}", unit.whole().format_label()),
+                now,
+            );
+            return;
+        }
+
+        let into = units[0]
+            .head
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.cwd());
+        // "All into one folder" of one archive is its own folder.
+        let mode = if units.len() == 1 && mode == ExtractMode::Merged {
+            ExtractMode::Folder
+        } else {
+            mode
+        };
+        match (mode, units.as_slice()) {
+            (ExtractMode::Folder | ExtractMode::Here, [unit]) if unit.listable => {
+                let intent = if mode == ExtractMode::Here {
+                    ArchiveIntent::ExtractHere
+                } else {
+                    ArchiveIntent::ExtractSubfolder
+                };
+                self.ask_archive(unit.head.clone(), intent);
+            }
+            (ExtractMode::Folder, _) => {
+                let mut jobs = Vec::new();
+                for unit in &units {
+                    let parent = unit
+                        .head
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| into.clone());
+                    let Some(folder) = self.extract_dest(&unit.head, parent.clone(), true, now)
+                    else {
+                        continue;
+                    };
+                    let job = df_core::archive::Unpack {
+                        items: vec![unit.whole()],
+                        dest: folder,
+                        overwrite: false,
+                        fresh: true,
+                    };
+                    jobs.push((job, parent));
+                }
+                // Every job lands on every folder, the first taking the
+                // cursor — but only once, when the last of them is done.
+                let folders: Vec<PathBuf> = jobs.iter().map(|(job, _)| job.dest.clone()).collect();
+                let ids: Vec<TaskId> = jobs
+                    .into_iter()
+                    .map(|(job, parent)| {
+                        self.spawn_unpack(job, extractor.clone(), &parent, folders.clone())
+                    })
+                    .collect();
+                if let (Some(first), true) = (ids.first().copied(), ids.len() > 1) {
+                    // Nothing can have finished yet: task events are handled
+                    // on this thread, after this returns.
+                    for op in self.ops.iter_mut().filter(|op| ids.contains(&op.id)) {
+                        op.group = Some(first);
+                    }
+                }
+            }
+            (ExtractMode::Here, _) => {
+                let job = df_core::archive::Unpack {
+                    items: units.iter().map(crate::archive::Unit::whole).collect(),
+                    dest: into.clone(),
+                    // One archive keeps the never-overwrite rule; several
+                    // spilled into one place are a merge, last one wins.
+                    overwrite: units.len() > 1,
+                    fresh: false,
+                };
+                self.spawn_unpack(job, extractor, &into, Vec::new());
+            }
+            (ExtractMode::Merged, _) => {
+                let names: Vec<String> = units
+                    .iter()
+                    .filter_map(|unit| unit.head.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .collect();
+                let name = df_core::archive::merged_folder_name(&names);
+                let Some(folder) = self.make_folder(&into, &name, now) else {
+                    return;
+                };
+                let job = df_core::archive::Unpack {
+                    items: units.iter().map(crate::archive::Unit::whole).collect(),
+                    dest: folder.clone(),
+                    overwrite: true,
+                    fresh: true,
+                };
+                self.spawn_unpack(job, extractor, &into, vec![folder]);
+            }
+        }
+    }
+
+    /// The archives among `paths`, each multi-part set folded into one, in
+    /// the order the listing shows them.
+    ///
+    /// The pieces of a set are found by looking at the whole directory, not
+    /// only at the paths: the directory on screen is already in memory, and
+    /// any other one (a path handed over from elsewhere) is read once.
+    fn archive_units(&self, paths: &[PathBuf]) -> crate::archive::Units {
+        let cwd = self.cwd();
+        let dir = &self.tab().cwd.dir;
+        let here: HashMap<&str, &df_core::fs::Entry> = dir
+            .entries()
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry))
+            .collect();
+        let mut out = crate::archive::Units::default();
+        let mut parents: Vec<PathBuf> = paths
+            .iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect();
+        parents.sort();
+        parents.dedup();
+        for parent in parents {
+            let in_view = parent == cwd;
+            let listing: Vec<String> = if in_view {
+                here.keys().map(|name| (*name).to_string()).collect()
             } else {
-                ArchiveIntent::ExtractHere
-            },
-        );
+                std::fs::read_dir(&parent)
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let candidates: Vec<crate::archive::Candidate> = paths
+                .iter()
+                .filter(|path| path.parent() == Some(parent.as_path()))
+                .filter_map(|path| {
+                    let name = path.file_name()?.to_string_lossy().into_owned();
+                    let read;
+                    let entry = match here.get(name.as_str()).filter(|_| in_view) {
+                        Some(entry) => *entry,
+                        None => {
+                            read = df_core::fs::Entry::read(path.clone()).ok()?;
+                            &read
+                        }
+                    };
+                    Some(crate::archive::Candidate {
+                        path: path.clone(),
+                        is_dir: entry.is_dir(),
+                        listable: crate::archive::looks_like_archive(entry),
+                        archive: crate::archive::extractable(entry),
+                    })
+                })
+                .collect();
+            let folded = crate::archive::units(&candidates, &listing);
+            out.units.extend(folded.units);
+            out.orphans.extend(folded.orphans);
+        }
+        // The listing's order, which is the order a merge writes in — so the
+        // archive lower in the list is the one whose file survives.
+        let position = |unit: &crate::archive::Unit| {
+            unit.head
+                .file_name()
+                .and_then(|name| dir.position_of(&name.to_string_lossy()))
+                .unwrap_or(usize::MAX)
+        };
+        out.units.sort_by_key(position);
+        out
+    }
+
+    /// Whether the row called `name` in this listing is a piece of a
+    /// multi-part set.
+    fn in_volume_set(&self, name: &str) -> bool {
+        if df_core::archive::volume_of(name).is_none() {
+            return false;
+        }
+        let listing: Vec<String> = self
+            .tab()
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        df_core::archive::volume_sets(&listing)
+            .iter()
+            .any(|set| set.contains(name))
+    }
+
+    /// Queue a whole-archive extraction and remember what it is for.
+    ///
+    /// `into` is the directory it was started from, re-read when it lands;
+    /// `focus` the rows it will make there, when those are known now (the
+    /// folders it extracts into). Empty `focus` means the outcome says.
+    fn spawn_unpack(
+        &mut self,
+        job: df_core::archive::Unpack,
+        extractor: Option<df_core::archive::Extractor>,
+        into: &Path,
+        focus: Vec<PathBuf>,
+    ) -> TaskId {
+        let slot: Outcome = Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&slot);
+        let mut dirs = vec![into.to_path_buf(), job.dest.clone()];
+        dirs.dedup();
+        let name = job.name();
+        let run = FnJob::new(name, Lane::Macro, move |ctx: &TaskCtx| {
+            let outcome = job.run(extractor.as_ref(), ctx);
+            match sink.lock() {
+                Ok(mut guard) => *guard = Some(outcome),
+                Err(poisoned) => *poisoned.into_inner() = Some(outcome),
+            }
+            Ok(())
+        });
+        let id = self.engine.spawn(run);
+        self.track_focus(id, slot, dirs, focus);
+        id
     }
 
     /// Extract what is selected inside the archive being browsed.
@@ -2477,10 +2737,6 @@ impl App {
 
     /// Where an extraction lands: the directory itself, or a fresh folder named
     /// after the archive.
-    ///
-    /// The subfolder is claimed through the same `name_1` ladder a paste uses,
-    /// so "Extract to subfolder" twice gives `src` and `src_1` rather than
-    /// merging the second one into the first.
     fn extract_dest(
         &mut self,
         archive: &Path,
@@ -2492,7 +2748,16 @@ impl App {
             return Some(into);
         }
         let name = crate::archive::subfolder_name(archive);
-        match df_core::ops::paste::unique_name(&into, std::ffi::OsStr::new(&name), &[]) {
+        self.make_folder(&into, &name, now)
+    }
+
+    /// Make a fresh folder called `name` in `into` for an extraction to fill.
+    ///
+    /// Claimed through the same `name_1` ladder a paste uses, so "Extract to
+    /// folder" twice gives `src` and `src_1` rather than merging the second one
+    /// into the first. A failure is toasted here and is `None`.
+    fn make_folder(&mut self, into: &Path, name: &str, now: Instant) -> Option<PathBuf> {
+        match df_core::ops::paste::unique_name(into, std::ffi::OsStr::new(name), &[]) {
             Ok(dest) => match std::fs::create_dir_all(&dest) {
                 Ok(()) => Some(dest),
                 Err(e) => {
@@ -4025,7 +4290,7 @@ impl App {
         let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
             return;
         };
-        let choices = open::choices_for(&self.config, &entry);
+        let choices = self.choices(&entry);
         if choices.is_empty() {
             self.toasts
                 .notice(format!("No opener rule matches {}", entry.name), now);
@@ -4036,17 +4301,42 @@ impl App {
         self.sync_context();
     }
 
+    /// The openers for `entry` as the picker and the menu offer them: every
+    /// rule that matches, less "Extract all into one folder" unless the targets
+    /// hold several archives to put into one.
+    ///
+    /// The one place both ask, so the menu's opener submenu and the `O` picker
+    /// cannot disagree about which row is which.
+    fn choices(&self, entry: &df_core::fs::Entry) -> Vec<open::Choice> {
+        let choices = open::choices_for(&self.config, entry);
+        if !choices
+            .iter()
+            .any(|choice| choice.builtin() == Some(open::MERGED_BUILTIN))
+        {
+            return choices;
+        }
+        let archives = self.archive_units(&self.targets()).units.len();
+        open::for_archives(choices, archives)
+    }
+
     /// Run one opener over `paths`.
     fn launch(&mut self, choice: &open::Choice, paths: Vec<PathBuf>, now: Instant) {
         if let Some(builtin) = choice.builtin() {
-            // The one built-in the shipped rules name. Archive walking is
-            // Phase 5; saying so is better than a rule that silently does
-            // nothing (PLAN §6's "fix the yazi gap").
-            log::info!("builtin opener `{builtin}` is not implemented yet");
-            self.toasts.notice(
-                "This opener cannot extract yet — press o to open the archive",
-                now,
-            );
+            // The shipped built-ins are the three extracts (PLAN §6's "fix the
+            // yazi gap"), and they are the same verb `e` and `E` are — through
+            // the same door and the same gates, so an opener cannot extract
+            // somewhere a key would have refused to.
+            match ExtractMode::of_builtin(builtin) {
+                Some(mode) => {
+                    if !self.refuse_where_we_are(Command::ArchiveExtractSubfolder, now) {
+                        self.extract_paths(mode, paths, now);
+                    }
+                }
+                None => self.toasts.error(
+                    format!("`builtin:{builtin}` is not something delightfile can do"),
+                    now,
+                ),
+            }
             return;
         }
         if choice.block {
@@ -7251,10 +7541,25 @@ impl App {
                             // URL, and the archive reader takes a file on this
                             // machine. `o` downloads it.
                             .filter(|_| self.tab().remote.is_none())
-                            .filter(|entry| crate::archive::looks_like_archive(entry))
-                            .map(|entry| entry.path.clone());
-                        if let Some(path) = archive {
-                            self.ask_archive(path, ArchiveIntent::Browse);
+                            .filter(|entry| crate::archive::extractable(entry))
+                            .map(|entry| {
+                                (
+                                    entry.path.clone(),
+                                    entry.name.clone(),
+                                    crate::archive::looks_like_archive(entry),
+                                )
+                            });
+                        match archive {
+                            // A piece of a multi-part archive has no listing
+                            // of its own — not even the `.zip` of a split,
+                            // whose directory names members on other pieces.
+                            // Only the whole set means anything, and the
+                            // whole set is extracted, not walked into.
+                            Some((_, name, _)) if self.in_volume_set(&name) => {
+                                self.toasts.notice("A multi-part archive — extract it", now);
+                            }
+                            Some((path, _, true)) => self.ask_archive(path, ArchiveIntent::Browse),
+                            _ => {}
                         }
                     }
                     Rightward::Nothing => {}
@@ -7662,8 +7967,8 @@ impl App {
                 }
                 self.open_hovered(now)
             }
-            C::ArchiveExtractHere => self.extract(false, now),
-            C::ArchiveExtractSubfolder => self.extract(true, now),
+            C::ArchiveExtractHere => self.extract(ExtractMode::Here, now),
+            C::ArchiveExtractSubfolder => self.extract(ExtractMode::Folder, now),
             C::OpenInteractive => self.open_picker(now),
 
             // ── The palette and the jumps (PLAN §4.4, §7.2) ─────────────────
@@ -9229,17 +9534,24 @@ impl App {
         let entry = self.tab().cwd.dir.cursor_entry().cloned();
         let openers = entry
             .as_ref()
-            .map(|entry| open::choices_for(&self.config, entry))
+            .map(|entry| self.choices(entry))
             .unwrap_or_default();
+        // Only in a real directory: an archive nested inside one has to come
+        // out before it can be opened, so offering "Extract here" on it would
+        // offer something that cannot be done.
+        let archive = self.tab().virtual_kind().is_none()
+            && entry.as_ref().is_some_and(crate::archive::extractable);
+        let archives = if archive {
+            self.archive_units(&self.targets()).units.len()
+        } else {
+            0
+        };
         let facts = menu::Facts {
             has_row: entry.is_some(),
             is_dir: entry.as_ref().is_some_and(|entry| entry.is_dir()),
             targets: self.targets().len(),
             clipboard: !self.clipboard.is_empty(),
             openers: openers.len(),
-            // Only in a real directory: an archive nested inside one has to
-            // come out before it can be opened, so offering "Extract here" on
-            // it would offer something that cannot be done.
             trash: self.tab().trash.is_some(),
             trashed: self
                 .tab()
@@ -9247,10 +9559,8 @@ impl App {
                 .as_ref()
                 .map(|v| v.items.len())
                 .unwrap_or(0),
-            archive: self.tab().virtual_kind().is_none()
-                && entry
-                    .as_ref()
-                    .is_some_and(crate::archive::looks_like_archive),
+            archive,
+            archives,
         };
         let names = openers.iter().map(|choice| choice.name.clone()).collect();
         self.menu = Some(Menu::new(at, menu::items(facts), names));
@@ -9379,16 +9689,17 @@ impl App {
                 let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
                     return;
                 };
-                // Re-derived rather than carried: `choices_for` is a pure
-                // function of the config and the entry, and holding a copy in
-                // the menu would be a second place for it to be wrong.
-                let choices = open::choices_for(&self.config, &entry);
+                // Re-derived rather than carried: `choices` is a pure function
+                // of the config, the entry and the targets, and holding a copy
+                // in the menu would be a second place for it to be wrong.
+                let choices = self.choices(&entry);
                 if let Some(choice) = choices.get(index).cloned() {
                     self.launch(&choice, self.targets(), now);
                 }
             }
-            A::ExtractHere => self.extract(false, now),
-            A::ExtractSubfolder => self.extract(true, now),
+            A::ExtractHere => self.extract(ExtractMode::Here, now),
+            A::ExtractSubfolder => self.extract(ExtractMode::Folder, now),
+            A::ExtractMerged => self.extract(ExtractMode::Merged, now),
             A::Yank => self.set_clipboard(false, now),
             A::Cut => self.set_clipboard(true, now),
             A::Paste => self.paste(false, now),
@@ -13592,7 +13903,9 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         A::Rename => C::Rename,
         A::Trash => C::Trash,
         A::ExtractHere => C::ArchiveExtractHere,
-        A::ExtractSubfolder => C::ArchiveExtractSubfolder,
+        // "All into one folder" is the same verb as "to folder", behind the
+        // same gates.
+        A::ExtractSubfolder | A::ExtractMerged => C::ArchiveExtractSubfolder,
         A::CopyPath => C::CopyPath,
         A::CopyName => C::CopyFilename,
         A::Properties => C::Spot,
@@ -13889,6 +14202,30 @@ fn first_under(dir: &Path, path: &Path) -> Option<PathBuf> {
         Component::Normal(name) => Some(dir.join(name)),
         _ => None,
     }
+}
+
+/// Where a finished job's cursor goes — or `None`, while other jobs started
+/// with it are still running.
+///
+/// `focus` is what the job was spawned to make; `made` is what its outcome
+/// says it made, which is the answer only when nobody could say up front (an
+/// extractor spilling into a directory). One of several jobs started together
+/// lands when the last of them does, on everything they were all making, so
+/// three extractions do not drag the cursor about three times. And only what
+/// is actually there: a folder made for an extraction that then failed has been
+/// taken away again, and an aim at it would wait for a row that never comes.
+fn landing(
+    focus: Vec<PathBuf>,
+    made: Vec<PathBuf>,
+    group: Option<TaskId>,
+    pending: &[PendingOp],
+) -> Option<Vec<PathBuf>> {
+    if group.is_some_and(|group| pending.iter().any(|other| other.group == Some(group))) {
+        return None;
+    }
+    let mut focus = if focus.is_empty() { made } else { focus };
+    focus.retain(|path| path.symlink_metadata().is_ok());
+    Some(focus)
 }
 
 /// What an extraction adds to `into`, the directory it was started from: one
@@ -14536,6 +14873,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tree);
     }
 
+    /// Several jobs spawned for one request land once, when the last does; a
+    /// job spawned knowing nothing takes its outcome's word; and nothing that
+    /// has gone again is aimed at.
+    #[test]
+    fn several_jobs_started_together_land_once_on_everything() {
+        let dir = std::env::temp_dir().join(format!("df-landing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).expect("a");
+        std::fs::create_dir_all(&b).expect("b");
+        let op = |id: TaskId, group: Option<TaskId>| PendingOp {
+            id,
+            slot: Arc::new(Mutex::new(None)),
+            dirs: Vec::new(),
+            focus: Vec::new(),
+            group,
+        };
+        let folders = vec![a.clone(), b.clone()];
+
+        // The first of two finishes while the second is still running.
+        assert_eq!(
+            landing(folders.clone(), Vec::new(), Some(1), &[op(2, Some(1))]),
+            None
+        );
+        // The last of them lands, on every folder.
+        assert_eq!(
+            landing(folders.clone(), Vec::new(), Some(1), &[op(9, None)]),
+            Some(folders.clone())
+        );
+        // Spawned with nothing to aim at: what the outcome says it made.
+        assert_eq!(
+            landing(Vec::new(), vec![b.clone()], None, &[]),
+            Some(vec![b.clone()])
+        );
+        // What was aimed at up front wins over what the outcome says.
+        assert_eq!(
+            landing(vec![a.clone()], vec![b.clone()], None, &[]),
+            Some(vec![a.clone()])
+        );
+        // A folder taken away again after a failed extraction is left out.
+        std::fs::remove_dir(&b).expect("remove b");
+        assert_eq!(landing(folders, Vec::new(), None, &[]), Some(vec![a]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `e` on a 7z, the whole of it after the key: 7-Zip spills the archive
+    /// into this directory, the outcome says what appeared, and the cursor
+    /// lands on the first of it with all of it selected — through the scan
+    /// that brings the rows, as `finish_op` drives it.
+    #[test]
+    fn an_extraction_here_lands_on_what_the_extractor_made() {
+        use df_core::archive::{ExtractorKind, Unpack};
+        use df_core::fs::no_notifier;
+
+        let Some(seven) =
+            df_core::archive::external_extractor().filter(|e| e.kind == ExtractorKind::SevenZip)
+        else {
+            eprintln!("skipping: needs 7z");
+            return;
+        };
+        let root = std::env::temp_dir().join(format!("df-extract-here-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (src, tree) = (root.join("src"), root.join("here"));
+        std::fs::create_dir_all(src.join("docs")).expect("src");
+        std::fs::create_dir_all(&tree).expect("tree");
+        std::fs::write(src.join("docs/guide.md"), b"guide").expect("guide");
+        std::fs::write(src.join("readme.txt"), b"readme").expect("readme");
+        std::fs::write(tree.join("keep.txt"), b"keep").expect("keep");
+        let archive = tree.join("pack.7z");
+        let packed = std::process::Command::new(&seven.program)
+            .arg("a")
+            .arg(&archive)
+            .args(["docs", "readme.txt"])
+            .current_dir(&src)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(packed, "7z could not make the fixture");
+
+        let scanner = Scanner::start(no_notifier());
+        let now = Instant::now();
+        let mgr = MgrConfig::default();
+        let mut tab = Tab::open(tree.clone(), &mgr, sort_options(&mgr, 0), &scanner, now);
+        settle(&mut tab, &scanner);
+
+        // The rows the extraction is asked about, folded as `e` folds them.
+        let entry = tab
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .find(|e| e.name == "pack.7z")
+            .cloned()
+            .expect("the archive is listed");
+        let candidate = crate::archive::Candidate {
+            path: entry.path.clone(),
+            is_dir: false,
+            listable: crate::archive::looks_like_archive(&entry),
+            archive: crate::archive::extractable(&entry),
+        };
+        let listing: Vec<String> = tab
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .map(|e| e.name.clone())
+            .collect();
+        let units = crate::archive::units(&[candidate], &listing).units;
+        assert_eq!(units.len(), 1);
+        assert!(!units[0].listable, "a 7z is the extractor's");
+
+        let outcome = Unpack {
+            items: vec![units[0].whole()],
+            dest: tree.clone(),
+            overwrite: false,
+            fresh: false,
+        }
+        .run(Some(&seven), &TaskCtx::detached());
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        assert_eq!(outcome.message, "Extracted pack.7z");
+
+        let focus = landing(Vec::new(), outcome.made, None, &[]).expect("not grouped");
+        assert_eq!(focus, vec![tree.join("docs"), tree.join("readme.txt")]);
+        tab.cwd.begin_scan(&scanner, now);
+        land(
+            &mut tab.cwd.dir,
+            focus_names(&tree, &focus).expect("in this listing"),
+        );
+        settle(&mut tab, &scanner);
+        let name = tab.cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_eq!(name.as_deref(), Some("docs"), "the cursor did not follow");
+        assert_eq!(tab.cwd.dir.selected_paths(), focus);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Which row an operation lands on, as pure functions of its paths.
     #[test]
     fn an_operation_lands_on_the_row_it_made_in_this_listing() {
@@ -14961,10 +15435,13 @@ mod tests {
             );
         }
         // Extraction from the menu is still live inside an archive, which is
-        // the one place it is most wanted.
-        for action in [A::ExtractHere, A::ExtractSubfolder] {
+        // the one place it is most wanted — and, like `e`, refused over the
+        // link and in the trash, "all into one folder" included.
+        for action in [A::ExtractHere, A::ExtractSubfolder, A::ExtractMerged] {
             let command = menu_command(action).expect("a verb");
             assert!(!crate::archive::inert_in_archive(command));
+            assert!(crate::remote::inert_remotely(command), "{action:?}");
+            assert!(inert_in_trash(command), "{action:?}");
         }
     }
 

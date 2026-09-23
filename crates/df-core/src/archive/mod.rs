@@ -49,28 +49,32 @@
 //! every read is bounds-checked, every length is `checked_`, and the tests
 //! include truncated files for each format.
 //!
+//! ## Extraction
+//!
+//! [`extract::plan_extract`] settles what an extraction would do —
+//! destinations, conflicts, byte totals, and the refusal of unsafe names —
+//! because that is the part with the security-relevant decisions in it and it
+//! is pure. [`unpack`] carries the plan out. [`whole`] is the layer the UI
+//! calls for a file in a real directory: it takes the reader's road when it
+//! can and hands the rest to [`external`], and [`volumes`] is how several files
+//! in a listing are recognised as one multi-part archive.
+//!
 //! ## What is not here
 //!
-//! - **Extraction.** [`extract::plan_extract`] settles what an extraction would
-//!   do — destinations, conflicts, byte totals, and the refusal of unsafe names —
-//!   because that is the part with the security-relevant decisions in it and it
-//!   is pure. Running the plan is not: a zip member is deflate, which this crate
-//!   cannot decode, so executing means either an inflate implementation or
-//!   shelling out to `unzip`/`bsdtar` and inheriting *their* path handling.
-//!   That is a decision to make deliberately rather than to fall into, and it is
-//!   Phase 5's UI half, so the job lives there and takes this plan.
-//! - **7z, rar, bzip2.** Listed as [`ArchiveError::Unsupported`] with the format
-//!   named. 7z and rar are genuinely complicated containers and neither is worth
-//!   a hand-rolled parser for v1; bzip2-compressed tar works the moment a
-//!   `bzip2` line is added to [`ArchiveFormat::decompressor`] and is left out
-//!   only because nothing produces `.tar.bz2` any more.
-//! - **Decompressing to preview a file inside.** The preview pane sees archives
-//!   as directories, and a file inside one previews once extraction exists.
+//! - **Listing 7z, rar, bzip2, and multi-part sets.** Listed as
+//!   [`ArchiveError::Unsupported`] with the format named. 7z and rar are
+//!   genuinely complicated containers and neither is worth a hand-rolled parser;
+//!   they, and every set split across files, are *extracted* by 7-Zip or
+//!   `bsdtar` ([`external`]) but cannot be browsed. bzip2-compressed tar would
+//!   list the moment a `bzip2` line is added to [`ArchiveFormat::decompressor`].
 
+pub mod external;
 pub mod extract;
 pub mod tar;
 pub mod tree;
 pub mod unpack;
+pub mod volumes;
+pub mod whole;
 pub mod zip;
 
 #[cfg(test)]
@@ -81,15 +85,20 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+pub use external::{external_extractor, Extractor, ExtractorKind};
 pub use extract::{destination_for, plan_extract, ExtractItem, ExtractPlan, SkipReason};
 pub use tree::{
     build, name_is_unsafe, normalize, ArchiveEntry, ArchiveTree, Method, RawEntry, MAX_ENTRIES,
     MAX_NAME_BYTES,
 };
 pub use unpack::{
-    destinations, extract, plan_record, read_entry, Destinations, ExtractReport,
+    destinations, extract, plan_record, read_entry, skip_note, Destinations, ExtractReport,
     CANCEL_CHECK_BYTES, EXTRACT_BUF,
 };
+pub use volumes::{
+    archive_stem, merged_folder_name, volume_of, volume_sets, Volume, VolumeKind, VolumeSet,
+};
+pub use whole::{extract_whole, format_label, Unpack, Whole, WholeReport};
 
 use crate::preview::sniff;
 

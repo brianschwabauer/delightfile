@@ -200,8 +200,8 @@ pub(super) fn build() -> Registry {
         (Files, "M",      C::MountManager,      "Mount manager",                       Always),
         (Files, "b",      C::BasketToggle,      "Toss into / out of the basket",       Always),
         (Files, "B",      C::BasketShow,        "Show the selection basket",           Always),
-        (Files, "e",      C::ArchiveExtractHere,      "Extract the archive here",      Always),
-        (Files, "E",      C::ArchiveExtractSubfolder, "Extract into a new folder",     Always),
+        (Files, "e",      C::ArchiveExtractHere,      "Extract here",                  Always),
+        (Files, "E",      C::ArchiveExtractSubfolder, "Extract to folder",             Always),
 
         // ── Files: what is shown ────────────────────────────────────────────
         (Files, ".",   C::ToggleHidden,        "Toggle hidden files",   Always),

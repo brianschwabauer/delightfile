@@ -185,12 +185,38 @@ impl Choice {
 
 /// Every opener that matches `entry`, in picker order — the first is what plain
 /// `o` runs.
+///
+/// A piece of a multi-part archive is matched as the archive it is a piece of:
+/// `backup.7z.002` has no extension a rule could name and no bytes a sniffer
+/// could recognise, but `o` on it should extract `backup.7z` like `o` on the
+/// first piece does, so the rules are asked about `backup.7z`.
 pub fn choices_for(config: &Config, entry: &Entry) -> Vec<Choice> {
+    let whole = (!entry.is_dir())
+        .then(|| df_core::archive::volume_of(&entry.name))
+        .flatten()
+        .map(|volume| volume.whole_name());
     config
-        .openers_for(&entry.name, entry.mime, entry.is_dir())
+        .openers_for(
+            whole.as_deref().unwrap_or(&entry.name),
+            entry.mime,
+            entry.is_dir(),
+        )
         .into_iter()
         .map(Choice::from)
         .collect()
+}
+
+/// The built-in that only makes sense for several archives at once.
+pub const MERGED_BUILTIN: &str = "extract-merged";
+
+/// The choices worth offering when the targets hold `archives` archives:
+/// "Extract all into one folder" of a single archive is "Extract to folder"
+/// with a worse name, so it is dropped below two.
+pub fn for_archives(mut choices: Vec<Choice>, archives: usize) -> Vec<Choice> {
+    if archives < 2 {
+        choices.retain(|choice| choice.builtin() != Some(MERGED_BUILTIN));
+    }
+    choices
 }
 
 // ── The `O` picker (`[pick]` context) ───────────────────────────────────────
@@ -460,6 +486,53 @@ mod tests {
             config.opener("extract").and_then(Opener::builtin),
             Some("extract"),
             "…and it is a built-in, not a shell command"
+        );
+    }
+
+    fn file(name: &str) -> Entry {
+        use df_core::fs::Kind;
+        let mime = df_core::fs::mime::hint_for_name(name);
+        Entry {
+            name: name.to_string(),
+            path: PathBuf::from("/dl").join(name),
+            kind: Kind::File,
+            len: 10,
+            mtime: None,
+            btime: None,
+            mode: 0o644,
+            uid: 0,
+            gid: 0,
+            is_hidden: false,
+            mime,
+            file_kind: df_core::fs::classify(Kind::File, name, mime, 0o644),
+        }
+    }
+
+    /// Every archive gets the three extract built-ins, a middle piece of a set
+    /// included, and the merged one only when there is something to merge.
+    #[test]
+    fn archives_offer_the_extract_builtins_and_merging_needs_two() {
+        let config = Config::default();
+        let ids = |choices: &[Choice]| -> Vec<String> {
+            choices.iter().map(|c| c.name.clone()).collect()
+        };
+        let all = vec!["extract", "extract-here", "extract-merged", "open"];
+        assert_eq!(ids(&choices_for(&config, &file("photos.zip"))), all);
+        assert_eq!(ids(&choices_for(&config, &file("a.7z"))), all);
+        // No extension a rule names and no mime: matched as `backup.7z`.
+        assert_eq!(ids(&choices_for(&config, &file("backup.7z.002"))), all);
+        assert_eq!(ids(&choices_for(&config, &file("photos.z01"))), all);
+        assert_eq!(ids(&choices_for(&config, &file("bundle.tar.gz.003"))), all);
+
+        let choices = choices_for(&config, &file("photos-1.zip"));
+        assert_eq!(
+            ids(&for_archives(choices.clone(), 1)),
+            vec!["extract", "extract-here", "open"]
+        );
+        assert_eq!(ids(&for_archives(choices, 2)), all);
+        assert_eq!(
+            choices_for(&config, &file("photos.zip"))[0].builtin(),
+            Some("extract")
         );
     }
 

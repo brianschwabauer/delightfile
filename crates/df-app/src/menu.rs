@@ -88,6 +88,8 @@ pub enum Action {
     ExtractHere,
     /// …or into a new folder named after it.
     ExtractSubfolder,
+    /// …or, with several archives selected, all of them into one new folder.
+    ExtractMerged,
     CopyPath,
     CopyName,
     Properties,
@@ -161,15 +163,20 @@ pub struct Facts {
     pub clipboard: bool,
     /// How many opener rules match the hovered file.
     pub openers: usize,
-    /// Whether the cursor row is an archive this build can read (PLAN §7.3).
+    /// Whether the cursor row is an archive something on this machine can
+    /// extract (PLAN §7.3) — by the reader here, or by 7-Zip or `bsdtar`.
     ///
-    /// The two extract rows are **hidden**, not disabled, when it is not — the
+    /// The extract rows are **hidden**, not disabled, when it is not — the
     /// menu's general rule is that a row stays put and greys out, so the shape
     /// is aimable from memory, and that rule is about rows that *sometimes*
     /// apply to the thing under the pointer. "Extract" never applies to a text
     /// file, and two permanently grey rows on every right-click in a source
     /// directory would be two rows of noise to read past.
     pub archive: bool,
+    /// How many archives the targets come to, a multi-part set counting once.
+    /// Two or more adds "Extract all into one folder"; one would make it
+    /// "Extract to folder" under a longer name.
+    pub archives: usize,
     /// Whether the list pane is showing the trash (PLAN §7.4).
     ///
     /// A *different menu*, not the ordinary one with rows greyed out. The
@@ -227,14 +234,23 @@ pub fn items(facts: Facts) -> Vec<Item> {
             .position(|item| item.action == Action::OpenWithMenu)
             .map(|i| i + 1)
             .unwrap_or(1);
-        items.insert(
-            at,
+        // In the opener rule's order: the folder first, because it is what `o`
+        // does and the one that cannot make a mess of the directory.
+        let mut extract = vec![
+            Item::new("Extract to folder", "E", Action::ExtractSubfolder, true),
             Item::new("Extract here", "e", Action::ExtractHere, true),
-        );
-        items.insert(
-            at + 1,
-            Item::new("Extract to subfolder", "E", Action::ExtractSubfolder, true),
-        );
+        ];
+        if facts.archives > 1 {
+            // No key of its own: the keyboard reaches it through `O`, where
+            // the opener picker offers it under the same name.
+            extract.push(Item::new(
+                "Extract all into one folder",
+                "O",
+                Action::ExtractMerged,
+                true,
+            ));
+        }
+        items.splice(at..at, extract);
     }
     // A menu that opened on empty pane space with everything grey would be a
     // menu about nothing; Paste is the one row that still makes sense there,
@@ -702,6 +718,7 @@ mod tests {
             clipboard: true,
             openers: 2,
             archive: false,
+            archives: 0,
             trash: false,
             trashed: 0,
         }
@@ -734,6 +751,7 @@ mod tests {
             clipboard: true,
             openers: 0,
             archive: false,
+            archives: 0,
             trash: false,
             trashed: 0,
         };
@@ -809,8 +827,10 @@ mod tests {
         assert!((rect.top() - (tiny.top() + MARGIN)).abs() < 1e-3);
     }
 
-    /// The two extract rows appear only for an archive, and they land where
-    /// the eye already is — next to "Open with", not at the bottom.
+    /// The extract rows appear only for an archive, and they land where the
+    /// eye already is — next to "Open with", not at the bottom — in the
+    /// opener rule's order: the folder, here, and all-into-one only when there
+    /// are several archives to put into one.
     #[test]
     fn extract_rows_appear_only_on_an_archive() {
         let plain = items(facts());
@@ -818,17 +838,36 @@ mod tests {
 
         let rows = items(Facts {
             archive: true,
+            archives: 1,
             ..facts()
         });
         let at = |action: Action| rows.iter().position(|i| i.action == action);
+        let sub = at(Action::ExtractSubfolder).expect("extract to folder");
         let here = at(Action::ExtractHere).expect("extract here");
-        let sub = at(Action::ExtractSubfolder).expect("extract to subfolder");
-        assert_eq!(sub, here + 1, "the two extract rows are adjacent");
-        assert!(here > at(Action::Open).expect("open"));
+        assert_eq!(here, sub + 1, "the extract rows are adjacent");
+        assert!(sub > at(Action::Open).expect("open"));
         assert!(here < at(Action::Yank).expect("copy"));
         assert!(rows[here].enabled && rows[sub].enabled);
-        assert_eq!(rows[here].keys, "e");
+        assert_eq!(rows[sub].label, "Extract to folder");
         assert_eq!(rows[sub].keys, "E");
+        assert_eq!(rows[here].label, "Extract here");
+        assert_eq!(rows[here].keys, "e");
+        assert_eq!(
+            at(Action::ExtractMerged),
+            None,
+            "one archive has nothing to merge"
+        );
+
+        let rows = items(Facts {
+            archive: true,
+            archives: 3,
+            targets: 3,
+            ..facts()
+        });
+        let at = |action: Action| rows.iter().position(|i| i.action == action);
+        let merged = at(Action::ExtractMerged).expect("extract all into one folder");
+        assert_eq!(merged, at(Action::ExtractHere).expect("here") + 1);
+        assert_eq!(rows[merged].label, "Extract all into one folder");
     }
 
     /// The trash gets a menu of its own — three verbs, not the ordinary ten
@@ -891,6 +930,7 @@ mod tests {
             clipboard: true,
             openers: 0,
             archive: false,
+            archives: 0,
             trash: false,
             trashed: 0,
         };

@@ -183,9 +183,12 @@ pub const DEFAULT_BOOKMARKS: &[(&str, &str, &str)] = &[
 /// else here is.
 ///
 /// `builtin:` is not a shell command: it names a job delightfile does itself.
-/// `builtin:extract` fills the gap PLAN §6 calls out — yazi shells out to a
-/// plugin for this, and archives get no extract rule at all in the config being
-/// ported, which is the one thing the rules were missing.
+/// The three `builtin:extract…` openers fill the gap PLAN §6 calls out — yazi
+/// shells out to a plugin for this, and archives get no extract rule at all in
+/// the config being ported, which is the one thing the rules were missing.
+/// `extract` makes a folder named after the archive, `extract-here` spills it
+/// into the directory it is in, and `extract-merged` puts several archives into
+/// one folder (the picker only offers it when several are selected).
 pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
     (
         "edit",
@@ -263,7 +266,19 @@ pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
     ),
     ("open", r#"xdg-open "$1""#, false, "Open"),
     ("play", r#"mpv --force-window "$@""#, false, "Play in mpv"),
-    ("extract", "builtin:extract", false, "Extract here"),
+    ("extract", "builtin:extract", false, "Extract to folder"),
+    (
+        "extract-here",
+        "builtin:extract-here",
+        false,
+        "Extract here",
+    ),
+    (
+        "extract-merged",
+        "builtin:extract-merged",
+        false,
+        "Extract all into one folder",
+    ),
 ];
 
 /// Opener rules, matched top-down. Transcribed from `yazi.toml`'s
@@ -308,12 +323,12 @@ const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
     (
         "glob",
         "*.{zip,tar,tgz,gz,bz2,xz,zst,7z,rar,cbz,cbr}",
-        &["extract", "open"],
+        &["extract", "extract-here", "extract-merged", "open"],
     ),
     (
         "mime",
         "application/{zip,x-tar,gzip,x-bzip2,x-xz,zstd,x-7z-compressed,vnd.rar}",
-        &["extract", "open"],
+        &["extract", "extract-here", "extract-merged", "open"],
     ),
     (
         "mime",
@@ -1890,11 +1905,18 @@ mod tests {
         }
         // The archive rule PLAN §6 asks for, which yazi's config was missing.
         let extract = c.openers_for("backup.tar.gz", "application/gzip", false);
-        assert_eq!(names(extract), vec!["extract", "open"]);
         assert_eq!(
-            c.opener("extract").and_then(Opener::builtin),
-            Some("extract")
+            names(extract),
+            vec!["extract", "extract-here", "extract-merged", "open"]
         );
+        // A 7z's mime is enough on its own, whatever it is called.
+        assert_eq!(
+            names(c.openers_for("backup", "application/x-7z-compressed", false))[0],
+            "extract"
+        );
+        for id in ["extract", "extract-here", "extract-merged"] {
+            assert_eq!(c.opener(id).and_then(Opener::builtin), Some(id));
+        }
         // Directories match `*/`, whatever their mime.
         assert_eq!(
             names(c.openers_for("Work", "inode/directory", true)),

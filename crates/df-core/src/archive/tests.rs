@@ -162,7 +162,12 @@ fn tar_header(name: &str, size: u64, type_flag: u8, ustar: bool, prefix: &str) -
     let mut h = vec![0u8; TAR_BLOCK];
     let n = name.as_bytes();
     h[..n.len().min(100)].copy_from_slice(&n[..n.len().min(100)]);
-    octal(&mut h[100..108], 0o644);
+    // A directory needs its search bit, or an extractor that honours modes
+    // (`bsdtar`) makes one nobody can walk into.
+    octal(
+        &mut h[100..108],
+        if type_flag == b'5' { 0o755 } else { 0o644 },
+    );
     octal(&mut h[108..116], 0);
     octal(&mut h[116..124], 0);
     octal(&mut h[124..136], size);
@@ -1441,4 +1446,667 @@ fn destinations_merge_directories_and_ladder_files() {
     assert_eq!(dests.fresh, vec![dest.join("top.txt")]);
     // Something merged, so there is no honest inverse to record.
     assert!(unpack::plan_record(&dests).is_none());
+}
+
+// ── overwrite, for archives merged into one place ───────────────────────────
+
+/// Cancels the task the moment any bytes have gone by, so "cancel with a file
+/// open" is deterministic rather than a sleep.
+struct CancelOnFirstBytes {
+    flags: std::sync::Arc<crate::tasks::TaskFlags>,
+}
+
+impl crate::tasks::ProgressSink for CancelOnFirstBytes {
+    fn set_total(&self, _bytes: u64, _files: u64) {}
+    fn advance(&self, bytes: u64, _files: u64) {
+        if bytes > 0 {
+            self.flags.cancel();
+        }
+    }
+}
+
+/// Every `.partial` temporary an overwrite might have left in `dir`.
+fn partials(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".partial"))
+        .collect()
+}
+
+/// The policy is in the destination map: laddered by default, exact under
+/// `overwrite`, and directories merge either way.
+#[test]
+fn destinations_overwrite_maps_a_file_to_its_own_name() {
+    let t = TempTree::new("archive-destinations-overwrite");
+    let bytes = build_zip(
+        &[
+            ZipMember::dir("pkg"),
+            ZipMember::file("pkg/a.txt", b"a"),
+            ZipMember::file("top.txt", b"t"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "d.zip", &bytes);
+    let dest = t.path().join("out");
+    std::fs::create_dir_all(dest.join("pkg")).unwrap();
+    std::fs::write(dest.join("pkg/a.txt"), b"mine").unwrap();
+
+    let tree = list(&archive).unwrap();
+    let mut plan = plan_extract(&tree, &[], &dest);
+    assert!(!plan.overwrite, "one archive never overwrites unless asked");
+    assert_eq!(
+        unpack::destinations(&plan).unwrap().files["pkg/a.txt"],
+        dest.join("pkg/a_1.txt")
+    );
+
+    plan.overwrite = true;
+    let dests = unpack::destinations(&plan).unwrap();
+    assert_eq!(dests.files["pkg/a.txt"], dest.join("pkg/a.txt"));
+    assert_eq!(dests.files["top.txt"], dest.join("top.txt"));
+    assert_eq!(dests.dirs, vec![dest.join("pkg")]);
+    assert!(dests.merged);
+}
+
+#[test]
+fn an_overwrite_replaces_the_bytes_and_a_plain_extraction_still_suffixes() {
+    let t = TempTree::new("archive-extract-overwrite");
+    let bytes = build_zip(
+        &[ZipMember::file("notes.txt", b"from the archive").really_deflated()],
+        b"",
+    );
+    let archive = write(&t, "n.zip", &bytes);
+    let dest = t.dir("out");
+    // Longer than the archive's, so a write that truncated nothing would show.
+    let mine = b"mine, and a good deal longer than the archive's copy";
+    std::fs::write(dest.join("notes.txt"), mine).unwrap();
+    let tree = list(&archive).unwrap();
+
+    let plain = plan_extract(&tree, &[], &dest);
+    let report = unpack::extract(&plain, &TaskCtx::detached()).unwrap();
+    assert_eq!(report.files, 1);
+    assert_eq!(std::fs::read(dest.join("notes.txt")).unwrap(), mine);
+    assert_eq!(read(&dest.join("notes_1.txt")), "from the archive");
+
+    std::fs::remove_file(dest.join("notes_1.txt")).unwrap();
+    let mut merged = plan_extract(&tree, &[], &dest);
+    merged.overwrite = true;
+    let report = unpack::extract(&merged, &TaskCtx::detached()).unwrap();
+    assert_eq!(report.files, 1, "{:?}", report.errors);
+    assert_eq!(read(&dest.join("notes.txt")), "from the archive");
+    assert!(
+        !dest.join("notes_1.txt").exists(),
+        "an overwrite has no ladder"
+    );
+    assert_eq!(report.written, vec![dest.join("notes.txt")]);
+    assert!(partials(&dest).is_empty(), "{:?}", partials(&dest));
+}
+
+/// The reason an overwrite goes through a temporary: a cancel mid-entry leaves
+/// the file that was there, whole, rather than half of the new one.
+#[test]
+fn a_cancelled_overwrite_leaves_the_old_file_whole() {
+    use std::sync::Arc;
+    let t = TempTree::new("archive-extract-overwrite-cancel");
+    let big = vec![b'x'; unpack::EXTRACT_BUF * 8];
+    let bytes = build_zip(&[ZipMember::file("big.bin", &big)], b"");
+    let archive = write(&t, "big.zip", &bytes);
+    let dest = t.dir("out");
+    std::fs::write(dest.join("big.bin"), b"old and whole").unwrap();
+
+    let tree = list(&archive).unwrap();
+    let mut plan = plan_extract(&tree, &[], &dest);
+    plan.overwrite = true;
+    let flags = Arc::new(crate::tasks::TaskFlags::new());
+    let ctx = TaskCtx::with_sink(
+        Arc::clone(&flags),
+        Arc::new(CancelOnFirstBytes {
+            flags: Arc::clone(&flags),
+        }),
+    );
+    let report = unpack::extract(&plan, &ctx).unwrap();
+
+    assert!(report.cancelled);
+    assert_eq!(report.files, 0);
+    assert_eq!(read(&dest.join("big.bin")), "old and whole");
+    assert!(partials(&dest).is_empty(), "{:?}", partials(&dest));
+}
+
+// ── whole archives: the reader, an extractor, and several at once ───────────
+
+/// 7-Zip, when it is installed. The tests that need it skip without it.
+fn seven_zip() -> Option<Extractor> {
+    external_extractor().filter(|e| e.kind == ExtractorKind::SevenZip)
+}
+
+/// `bsdtar`, when it is installed — found on its own even when 7-Zip is too,
+/// which is the case where it would otherwise never run.
+fn bsdtar() -> Option<Extractor> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("bsdtar"))
+        .find(|program| program.is_file())
+        .map(|program| Extractor {
+            kind: ExtractorKind::Bsdtar,
+            program,
+        })
+}
+
+/// Bytes that do not compress, so a split archive really splits.
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+/// The tree every real-archiver fixture packs: a folder, a nested file, and a
+/// file at the top.
+fn payload(t: &TempTree) -> std::path::PathBuf {
+    let src = t.dir("src");
+    std::fs::create_dir_all(src.join("photos/sub")).unwrap();
+    std::fs::write(src.join("photos/a.bin"), noise(200 * 1024)).unwrap();
+    std::fs::write(src.join("photos/sub/b.txt"), b"hello").unwrap();
+    std::fs::write(src.join("top.txt"), b"top").unwrap();
+    src
+}
+
+fn assert_payload(dest: &Path) {
+    assert_eq!(
+        std::fs::read(dest.join("photos/a.bin")).unwrap(),
+        noise(200 * 1024)
+    );
+    assert_eq!(read(&dest.join("photos/sub/b.txt")), "hello");
+    assert_eq!(read(&dest.join("top.txt")), "top");
+}
+
+fn no_scratch_left(dest: &Path) {
+    let left: Vec<String> = std::fs::read_dir(dest)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".delightfile-unpack-") || n.ends_with(".partial"))
+        .collect();
+    assert!(left.is_empty(), "scratch left behind: {left:?}");
+}
+
+/// Run `program` in `dir`; whether it worked.
+fn run_in(dir: &Path, program: &Path, args: &[&str]) -> bool {
+    Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// The listing of `dir`, as `volume_sets` is given it.
+fn names_of(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_zip_split_by_zip_extracts_whole_from_its_head() {
+    let (Some(seven), true) = (seven_zip(), have_binary("zip")) else {
+        eprintln!("skipping: needs 7z and zip");
+        return;
+    };
+    let t = TempTree::new("whole-zip-split");
+    let src = payload(&t);
+    let parts = t.dir("parts");
+    let head = parts.join("photos.zip");
+    assert!(run_in(
+        &src,
+        Path::new("zip"),
+        &[
+            "-q",
+            "-r",
+            "-s",
+            "64k",
+            head.to_str().unwrap(),
+            "photos",
+            "top.txt"
+        ]
+    ));
+
+    let sets = volume_sets(&names_of(&parts));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].head, "photos.zip");
+    assert_eq!(sets[0].kind, VolumeKind::ZipSplit);
+    assert!(sets[0].parts.len() >= 3, "{:?}", sets[0].parts);
+    assert_eq!(archive_stem(&sets[0].head), "photos");
+
+    let dest = t.dir("out");
+    let whole = Whole {
+        head,
+        volumes: Some(VolumeKind::ZipSplit),
+    };
+    let report = extract_whole(&whole, &dest, false, Some(&seven), &TaskCtx::detached());
+    assert!(report.succeeded(), "{:?}", report.errors);
+    assert_payload(&dest);
+    assert_eq!(report.tops, vec![dest.join("photos"), dest.join("top.txt")]);
+}
+
+#[test]
+fn seven_zip_volumes_extract_from_the_first() {
+    let Some(seven) = seven_zip() else {
+        eprintln!("skipping: needs 7z");
+        return;
+    };
+    let t = TempTree::new("whole-7z-volumes");
+    let src = payload(&t);
+    let parts = t.dir("parts");
+    let archive = parts.join("backup.7z");
+    assert!(run_in(
+        &src,
+        &seven.program,
+        &["a", "-v64k", archive.to_str().unwrap(), "photos", "top.txt"]
+    ));
+
+    let sets = volume_sets(&names_of(&parts));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].head, "backup.7z.001");
+    assert_eq!(sets[0].base, "backup");
+    assert!(sets[0].parts.len() >= 3);
+
+    let dest = t.dir("out");
+    let whole = Whole {
+        head: parts.join(&sets[0].head),
+        volumes: Some(sets[0].kind.clone()),
+    };
+    let report = extract_whole(&whole, &dest, false, Some(&seven), &TaskCtx::detached());
+    assert!(report.succeeded(), "{:?}", report.errors);
+    assert_payload(&dest);
+
+    // bsdtar reads one stream, so a set is not something it can be handed.
+    if let Some(tar) = bsdtar() {
+        let dest = t.dir("out-bsdtar");
+        let report = extract_whole(&whole, &dest, false, Some(&tar), &TaskCtx::detached());
+        assert_eq!(
+            report.errors[0].1, "Install 7-Zip to extract multi-part 7z",
+            "{:?}",
+            report.errors
+        );
+    }
+}
+
+/// A `.tar.gz` cut into byte pieces: joined by 7-Zip into a scratch
+/// directory, then read by *this* crate's tar reader, and the scratch gone.
+#[test]
+fn a_byte_split_tar_gz_is_joined_and_then_read_here() {
+    let (Some(seven), true) = (seven_zip(), have_binary("gzip")) else {
+        eprintln!("skipping: needs 7z and gzip");
+        return;
+    };
+    let t = TempTree::new("whole-split-tgz");
+    let plain = write(&t, "bundle.tar", &sample_tar_bytes());
+    let gz = t.join("bundle.tar.gz");
+    assert!(compress("gzip", &["-c"], &plain, &gz));
+    let bytes = std::fs::read(&gz).unwrap();
+    let parts = t.dir("parts");
+    let third = bytes.len() / 3 + 1;
+    for (i, piece) in bytes.chunks(third).enumerate() {
+        std::fs::write(parts.join(format!("bundle.tar.gz.{:03}", i + 1)), piece).unwrap();
+    }
+    let sets = volume_sets(&names_of(&parts));
+    assert_eq!(sets.len(), 1);
+    assert_eq!(sets[0].base, "bundle");
+    assert_eq!(
+        sets[0].kind,
+        VolumeKind::Split {
+            ext: "tar.gz".to_string()
+        }
+    );
+
+    let dest = t.dir("out");
+    let whole = Whole {
+        head: parts.join(&sets[0].head),
+        volumes: Some(sets[0].kind.clone()),
+    };
+    let report = extract_whole(&whole, &dest, false, Some(&seven), &TaskCtx::detached());
+    assert!(report.succeeded(), "{:?}", report.errors);
+    assert!(
+        report.internal.is_some(),
+        "the second stage is the reader's"
+    );
+    assert_eq!(read(&dest.join("pkg/a.txt")), "alpha");
+    assert_eq!(report.tops, vec![dest.join("pkg")]);
+    assert!(
+        !dest.join("bundle.tar.gz").exists(),
+        "the join is temporary"
+    );
+    no_scratch_left(&dest);
+}
+
+/// 7-Zip unwraps a `.tar.bz2` one layer and stops at `bundle.tar`; the
+/// extraction does not stop there with it. `bsdtar` does it in one go.
+#[test]
+fn a_tar_bz2_comes_out_as_its_contents_not_as_a_tar() {
+    if !have_binary("bzip2") {
+        eprintln!("skipping: needs bzip2");
+        return;
+    }
+    let t = TempTree::new("whole-tar-bz2");
+    let plain = write(&t, "bundle.tar", &sample_tar_bytes());
+    let bz = t.join("bundle.tar.bz2");
+    assert!(compress("bzip2", &["-c"], &plain, &bz));
+    let whole = Whole {
+        head: bz,
+        volumes: None,
+    };
+    for (label, extractor) in [("7z", seven_zip()), ("bsdtar", bsdtar())] {
+        let Some(extractor) = extractor else {
+            eprintln!("skipping {label}: not installed");
+            continue;
+        };
+        let dest = t.dir(format!("out-{label}"));
+        let report = extract_whole(&whole, &dest, false, Some(&extractor), &TaskCtx::detached());
+        assert!(report.succeeded(), "{label}: {:?}", report.errors);
+        assert_eq!(read(&dest.join("pkg/a.txt")), "alpha", "{label}");
+        assert!(
+            !dest.join("bundle.tar").exists(),
+            "{label}: stopped at the tar"
+        );
+        assert_eq!(report.tops, vec![dest.join("pkg")], "{label}");
+        no_scratch_left(&dest);
+    }
+}
+
+/// A 7z signature and nothing behind it.
+fn fake_7z(t: &TempTree, name: &str) -> std::path::PathBuf {
+    let mut bytes = b"7z\xBC\xAF\x27\x1C".to_vec();
+    bytes.extend_from_slice(&[0u8; 64]);
+    write(t, name, &bytes)
+}
+
+#[test]
+fn with_nothing_to_extract_it_the_answer_is_what_to_install() {
+    let t = TempTree::new("whole-no-extractor");
+    let dest = t.dir("out");
+    let archive = fake_7z(&t, "x.7z");
+    let report = extract_whole(
+        &Whole {
+            head: archive.clone(),
+            volumes: None,
+        },
+        &dest,
+        false,
+        None,
+        &TaskCtx::detached(),
+    );
+    assert_eq!(
+        report.errors,
+        vec![(archive, "Install 7-Zip to extract 7z".to_string())]
+    );
+
+    // bsdtar is an extractor, but not of sets — and is never run to find out.
+    let not_run = Extractor {
+        kind: ExtractorKind::Bsdtar,
+        program: t.join("no-such-bsdtar"),
+    };
+    let report = extract_whole(
+        &Whole {
+            head: t.join("photos.zip"),
+            volumes: Some(VolumeKind::ZipSplit),
+        },
+        &dest,
+        false,
+        Some(&not_run),
+        &TaskCtx::detached(),
+    );
+    assert_eq!(
+        report.errors[0].1,
+        "Install 7-Zip to extract multi-part zip"
+    );
+}
+
+#[test]
+fn an_extractor_failure_is_one_line_against_the_archive() {
+    let Some(seven) = seven_zip() else {
+        eprintln!("skipping: needs 7z");
+        return;
+    };
+    let t = TempTree::new("whole-7z-junk");
+    let dest = t.dir("out");
+    let archive = fake_7z(&t, "junk.7z");
+    let report = extract_whole(
+        &Whole {
+            head: archive.clone(),
+            volumes: None,
+        },
+        &dest,
+        false,
+        Some(&seven),
+        &TaskCtx::detached(),
+    );
+    assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    let (path, line) = &report.errors[0];
+    assert_eq!(path, &archive);
+    assert!(!line.is_empty() && !line.contains('\n'), "{line:?}");
+    assert!(
+        !line.starts_with("ERROR: /"),
+        "the heading, not the sentence: {line}"
+    );
+}
+
+fn two_zips(t: &TempTree) -> (std::path::PathBuf, std::path::PathBuf) {
+    let one = build_zip(
+        &[
+            ZipMember::file("shared.txt", b"from one"),
+            ZipMember::file("only-one.txt", b"1"),
+        ],
+        b"",
+    );
+    let two = build_zip(
+        &[
+            ZipMember::file("shared.txt", b"from two, which is longer").really_deflated(),
+            ZipMember::file("only-two.txt", b"2"),
+        ],
+        b"",
+    );
+    (
+        write(t, "photos-1.zip", &one),
+        write(t, "photos-2.zip", &two),
+    )
+}
+
+fn wholes(paths: &[&std::path::PathBuf]) -> Vec<Whole> {
+    paths
+        .iter()
+        .map(|p| Whole {
+            head: (*p).clone(),
+            volumes: None,
+        })
+        .collect()
+}
+
+/// "Extract all into one folder": one folder, directories merged, the later
+/// archive's file wins, and the whole folder is one undo.
+#[test]
+fn several_archives_merge_into_one_folder_last_write_wins() {
+    let t = TempTree::new("whole-merged");
+    let (one, two) = two_zips(&t);
+    let name = merged_folder_name(&["photos-1.zip", "photos-2.zip"]);
+    assert_eq!(name, "photos");
+    let dest = t.dir(&name);
+    let job = Unpack {
+        items: wholes(&[&one, &two]),
+        dest: dest.clone(),
+        overwrite: true,
+        fresh: true,
+    };
+    assert_eq!(
+        job.name(),
+        format!("Extract 2 archives → {}", dest.display())
+    );
+    let outcome = job.run(None, &TaskCtx::detached());
+
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert_eq!(outcome.message, "Extracted 2 archives into photos");
+    assert_eq!(read(&dest.join("shared.txt")), "from two, which is longer");
+    assert_eq!(read(&dest.join("only-one.txt")), "1");
+    assert_eq!(read(&dest.join("only-two.txt")), "2");
+    assert!(
+        outcome.made.is_empty(),
+        "the caller already knows the folder"
+    );
+    assert!(partials(&dest).is_empty());
+
+    let record = outcome.record.expect("a fresh folder is undoable");
+    crate::ops::journal::undo_record(&record, &TaskCtx::detached()).unwrap();
+    assert!(!dest.exists(), "undo takes the folder back whole");
+
+    // The same two in the other order: the other one wins.
+    let dest = t.dir("photos-again");
+    Unpack {
+        items: wholes(&[&two, &one]),
+        dest: dest.clone(),
+        overwrite: true,
+        fresh: true,
+    }
+    .run(None, &TaskCtx::detached());
+    assert_eq!(read(&dest.join("shared.txt")), "from one");
+}
+
+/// "Extract here" on several: into the directory itself, undoable only when
+/// everything they wrote is new there.
+#[test]
+fn several_archives_here_are_undoable_only_onto_fresh_ground() {
+    let t = TempTree::new("whole-here");
+    let (one, two) = two_zips(&t);
+    let dest = t.dir("here");
+    std::fs::write(dest.join("keep.txt"), b"keep").unwrap();
+
+    let outcome = Unpack {
+        items: wholes(&[&one, &two]),
+        dest: dest.clone(),
+        overwrite: true,
+        fresh: false,
+    }
+    .run(None, &TaskCtx::detached());
+    assert_eq!(outcome.message, "Extracted 2 archives into here");
+    assert_eq!(read(&dest.join("shared.txt")), "from two, which is longer");
+    assert_eq!(
+        outcome.made,
+        vec![
+            dest.join("shared.txt"),
+            dest.join("only-one.txt"),
+            dest.join("only-two.txt")
+        ]
+    );
+    let record = outcome.record.expect("everything they wrote was new here");
+    crate::ops::journal::undo_record(&record, &TaskCtx::detached()).unwrap();
+    assert!(!dest.join("shared.txt").exists());
+    assert!(!dest.join("only-two.txt").exists());
+    assert_eq!(read(&dest.join("keep.txt")), "keep");
+
+    // A file of the user's in the way: overwritten, and not undoable.
+    std::fs::write(dest.join("shared.txt"), b"the user's").unwrap();
+    let outcome = Unpack {
+        items: wholes(&[&one, &two]),
+        dest: dest.clone(),
+        overwrite: true,
+        fresh: false,
+    }
+    .run(None, &TaskCtx::detached());
+    assert_eq!(read(&dest.join("shared.txt")), "from two, which is longer");
+    assert!(
+        outcome.record.is_none(),
+        "an overwrite of the user's file has no inverse"
+    );
+}
+
+/// A fresh folder an extraction put nothing in is litter, and goes.
+#[test]
+fn a_fresh_folder_that_gets_nothing_is_removed() {
+    let t = TempTree::new("whole-fresh-empty");
+    let archive = fake_7z(&t, "x.7z");
+    let dest = t.dir("x");
+    let outcome = Unpack {
+        items: wholes(&[&archive]),
+        dest: dest.clone(),
+        overwrite: false,
+        fresh: true,
+    }
+    .run(None, &TaskCtx::detached());
+    assert!(!dest.exists());
+    assert!(outcome.record.is_none());
+    assert_eq!(outcome.message, "x.7z: Install 7-Zip to extract 7z");
+    assert_eq!(outcome.errors.len(), 1);
+}
+
+/// 7z into a fresh folder: undoable whole. 7z straight into a directory: what
+/// appeared is what the cursor lands on, existing files are kept unless the
+/// merge asked for last-write-wins, and there is no undo.
+#[test]
+fn an_extractor_into_a_folder_and_into_a_directory() {
+    let Some(seven) = seven_zip() else {
+        eprintln!("skipping: needs 7z");
+        return;
+    };
+    let t = TempTree::new("whole-7z");
+    let src = payload(&t);
+    let archive = t.join("pack.7z");
+    assert!(run_in(
+        &src,
+        &seven.program,
+        &["a", archive.to_str().unwrap(), "photos", "top.txt"]
+    ));
+    let items = wholes(&[&archive]);
+
+    let folder = t.dir("pack");
+    let outcome = Unpack {
+        items: items.clone(),
+        dest: folder.clone(),
+        overwrite: false,
+        fresh: true,
+    }
+    .run(Some(&seven), &TaskCtx::detached());
+    assert_eq!(outcome.message, "Extracted pack.7z");
+    assert_payload(&folder);
+    let record = outcome.record.expect("the folder is the extraction's");
+    crate::ops::journal::undo_record(&record, &TaskCtx::detached()).unwrap();
+    assert!(!folder.exists());
+
+    let here = t.dir("here");
+    std::fs::write(here.join("top.txt"), b"mine").unwrap();
+    let outcome = Unpack {
+        items: items.clone(),
+        dest: here.clone(),
+        overwrite: false,
+        fresh: false,
+    }
+    .run(Some(&seven), &TaskCtx::detached());
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert_eq!(
+        read(&here.join("top.txt")),
+        "mine",
+        "-aos keeps what was there"
+    );
+    assert_eq!(outcome.made, vec![here.join("photos")]);
+    assert!(outcome.record.is_none());
+
+    let outcome = Unpack {
+        items,
+        dest: here.clone(),
+        overwrite: true,
+        fresh: false,
+    }
+    .run(Some(&seven), &TaskCtx::detached());
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    assert_eq!(read(&here.join("top.txt")), "top", "-aoa replaces it");
 }

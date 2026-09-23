@@ -29,6 +29,12 @@ pub struct OpOutcome {
     pub message: String,
     pub errors: Vec<(PathBuf, String)>,
     pub cancelled: bool,
+    /// What the job made that nobody could name before it ran — an external
+    /// extractor's top-level entries, found by looking at the destination
+    /// afterwards. Most jobs know their results when they are spawned and
+    /// leave this empty; the UI lands its cursor on these only when it was
+    /// given nothing better.
+    pub made: Vec<PathBuf>,
 }
 
 /// The shared slot a job writes its outcome into.
@@ -109,6 +115,7 @@ impl Job for PasteJob {
                 message: format!("{verb} {}", plural(done, "item", "items")),
                 errors: report.errors,
                 cancelled: report.cancelled,
+                made: Vec::new(),
             },
         );
         Ok(())
@@ -180,6 +187,7 @@ impl Job for TrashJob {
                 message,
                 errors,
                 cancelled,
+                made: Vec::new(),
             },
         );
         Ok(())
@@ -257,6 +265,7 @@ impl Job for DeleteJob {
                 message: format!("Deleted {}", plural(deleted, "item", "items")),
                 errors,
                 cancelled,
+                made: Vec::new(),
             },
         );
         Ok(())
@@ -264,7 +273,10 @@ impl Job for DeleteJob {
 }
 
 /// Unpack an archive (PLAN §7.3). The runner behind "Extract here" and
-/// "Extract to subfolder", and behind `Enter` on a selection inside an archive.
+/// "Extract to folder" on one archive the reader can list, and behind `Enter`
+/// on a selection inside an archive. Everything else — several archives at
+/// once, 7z and rar, multi-part sets — is [`crate::archive::Unpack`], run by
+/// the UI in a job of its own.
 ///
 /// Lives here with the other jobs rather than beside the extractor because this
 /// file is the one place `ops` and `tasks` know about each other, and an
@@ -325,6 +337,7 @@ impl Job for ExtractJob {
                     .map(|(inner, message)| (self.plan.dest_dir.join(inner), message))
                     .collect(),
                 cancelled: report.cancelled,
+                made: Vec::new(),
             },
         );
         Ok(())

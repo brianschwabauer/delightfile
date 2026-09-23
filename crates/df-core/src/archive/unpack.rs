@@ -107,35 +107,41 @@ impl ExtractReport {
     /// wrongness the plan's essay refuses.
     pub fn message(&self) -> String {
         let files = plural(self.files, "file", "files");
-        let mut out = if self.cancelled {
+        let out = if self.cancelled {
             format!("Cancelled — extracted {files}")
         } else {
             format!("Extracted {files}")
         };
-        let unsafe_names = self
-            .skipped
-            .iter()
-            .filter(|(_, r)| *r == SkipReason::UnsafeName)
-            .count();
-        let encrypted = self
-            .skipped
-            .iter()
-            .filter(|(_, r)| *r == SkipReason::Encrypted)
-            .count();
-        if unsafe_names > 0 {
-            out.push_str(&format!(
-                ", skipped {} with unsafe paths",
-                plural(unsafe_names, "entry", "entries")
-            ));
-        }
-        if encrypted > 0 {
-            out.push_str(&format!(
-                ", skipped {}",
-                plural(encrypted, "encrypted entry", "encrypted entries")
-            ));
-        }
-        out
+        out + &skip_note(&self.skipped)
     }
+}
+
+/// The part of a summary that names what was refused — `, skipped 3 entries
+/// with unsafe paths` — or nothing. Shared with the summary of several
+/// archives extracted together, which owes the same honesty.
+pub fn skip_note(skipped: &[(String, SkipReason)]) -> String {
+    let mut out = String::new();
+    let unsafe_names = skipped
+        .iter()
+        .filter(|(_, r)| *r == SkipReason::UnsafeName)
+        .count();
+    let encrypted = skipped
+        .iter()
+        .filter(|(_, r)| *r == SkipReason::Encrypted)
+        .count();
+    if unsafe_names > 0 {
+        out.push_str(&format!(
+            ", skipped {} with unsafe paths",
+            plural(unsafe_names, "entry", "entries")
+        ));
+    }
+    if encrypted > 0 {
+        out.push_str(&format!(
+            ", skipped {}",
+            plural(encrypted, "encrypted entry", "encrypted entries")
+        ));
+    }
+    out
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -159,9 +165,13 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 ///   the tree the listing showed unrecognisable.
 /// - **Files auto-suffix**, through [`crate::ops::paste::unique_name`] — the
 ///   same `name_1`, `name_2` ladder a paste uses, so a collision looks the same
-///   however the file arrived. Nothing on disk is ever overwritten by an
-///   extraction: an archive is untrusted content, and "replace" is a decision
-///   for a person.
+///   however the file arrived. Nothing on disk is overwritten by an extraction
+///   of one archive: an archive is untrusted content, and "replace" is a
+///   decision for a person.
+/// - **…unless the plan says [`ExtractPlan::overwrite`]**, which is that
+///   person's decision already made: several archives merged into one place,
+///   last write wins. Then a file maps to its exact path, and the writer
+///   replaces what is there (see `Sink::open` for how, safely).
 #[derive(Debug, Default)]
 pub struct Destinations {
     /// Inner path → where it lands. Files only; directories are created from
@@ -202,6 +212,10 @@ pub fn destinations(plan: &ExtractPlan) -> Result<Destinations> {
         let Some(parent) = item.dest.parent() else {
             continue;
         };
+        if plan.overwrite {
+            out.files.insert(item.inner.clone(), item.dest.clone());
+            continue;
+        }
         // A file inside a directory this same extraction is about to create
         // cannot collide with anything, but `unique_name` has to be asked
         // anyway — the directory may already exist with a file of that name in
@@ -215,7 +229,7 @@ pub fn destinations(plan: &ExtractPlan) -> Result<Destinations> {
 }
 
 /// The first path component of `dest` below `dest_dir`.
-fn top_level(dest_dir: &Path, dest: &Path) -> Option<PathBuf> {
+pub(crate) fn top_level(dest_dir: &Path, dest: &Path) -> Option<PathBuf> {
     let rest = dest.strip_prefix(dest_dir).ok()?;
     let first = rest.components().next()?;
     Some(dest_dir.join(first.as_os_str()))
@@ -264,6 +278,9 @@ pub fn plan_record(dests: &Destinations) -> Option<OpRecord> {
 pub(crate) struct Sink<'a> {
     ctx: &'a TaskCtx,
     dests: &'a HashMap<String, PathBuf>,
+    /// [`ExtractPlan::overwrite`]: write beside the destination and rename
+    /// over it, rather than creating it fresh.
+    overwrite: bool,
     /// The file being written right now, and how much of it is left before the
     /// declared length is exceeded.
     open: Option<Open>,
@@ -273,7 +290,11 @@ pub(crate) struct Sink<'a> {
 
 struct Open {
     inner: String,
+    /// Where the entry lands when it is whole.
     path: PathBuf,
+    /// Where its bytes are going meanwhile, when that is not `path`: the
+    /// temporary an overwrite writes before renaming it into place.
+    temp: Option<PathBuf>,
     file: File,
     /// What the central directory said this entry weighs. Writing past it is
     /// refused — see the module essay's bomb guard.
@@ -281,11 +302,24 @@ struct Open {
     wrote: u64,
 }
 
+impl Open {
+    /// The file on disk that holds the partial bytes — the one to remove if
+    /// the entry does not finish.
+    fn partial(&self) -> &Path {
+        self.temp.as_deref().unwrap_or(&self.path)
+    }
+}
+
 impl<'a> Sink<'a> {
-    pub(crate) fn new(ctx: &'a TaskCtx, dests: &'a HashMap<String, PathBuf>) -> Sink<'a> {
+    pub(crate) fn new(
+        ctx: &'a TaskCtx,
+        dests: &'a HashMap<String, PathBuf>,
+        overwrite: bool,
+    ) -> Sink<'a> {
         Sink {
             ctx,
             dests,
+            overwrite,
             open: None,
             report: ExtractReport::default(),
             since_check: 0,
@@ -319,17 +353,28 @@ impl<'a> Sink<'a> {
                 return false;
             }
         }
-        // `create_new`, not `create`: nothing on disk is overwritten by an
-        // extraction. `destinations` has already suffixed past anything that
-        // existed when the plan was resolved, so a failure here means something
-        // appeared in the last few milliseconds — a race, and the safe end of
-        // it is to refuse.
-        let file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(dest)
-        {
-            Ok(f) => f,
+        // An overwrite is written *beside* its destination and renamed over it
+        // when whole. Truncating the file in place would mean a cancel, a
+        // corrupt member or a full disk leaves a half-written file where a
+        // whole one was — the one outcome worse than not extracting at all.
+        // The rename is atomic within the directory, so the destination is
+        // always either the old file or the new one.
+        let opened = if self.overwrite {
+            create_beside(dest).map(|(temp, file)| (Some(temp), file))
+        } else {
+            // `create_new`, not `create`: nothing on disk is overwritten by an
+            // extraction of one archive. `destinations` has already suffixed
+            // past anything that existed when the plan was resolved, so a
+            // failure here means something appeared in the last few
+            // milliseconds — a race, and the safe end of it is to refuse.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dest)
+                .map(|file| (None, file))
+        };
+        let (temp, file) = match opened {
+            Ok(opened) => opened,
             Err(e) => {
                 self.report
                     .errors
@@ -340,6 +385,7 @@ impl<'a> Sink<'a> {
         self.open = Some(Open {
             inner: key,
             path: dest.clone(),
+            temp,
             file,
             remaining: declared,
             wrote: 0,
@@ -369,7 +415,7 @@ impl<'a> Sink<'a> {
             return Ok(false);
         }
         if let Err(e) = open.file.write_all(bytes) {
-            let (inner, path) = (open.inner.clone(), open.path.clone());
+            let (inner, path) = (open.inner.clone(), open.partial().to_path_buf());
             self.fail(inner, DfError::io(path, e).to_string());
             return Ok(false);
         }
@@ -393,6 +439,15 @@ impl<'a> Sink<'a> {
             ));
         }
         drop(open.file);
+        if let Some(temp) = &open.temp {
+            if let Err(e) = std::fs::rename(temp, &open.path) {
+                let _ = std::fs::remove_file(temp);
+                self.report
+                    .errors
+                    .push((open.inner, DfError::io(&open.path, e).to_string()));
+                return;
+            }
+        }
         self.report.written.push(open.path);
         self.report.files += 1;
         self.ctx.advance(0, 1);
@@ -401,8 +456,9 @@ impl<'a> Sink<'a> {
     /// Record an entry's failure and remove the partial file it left.
     fn fail(&mut self, inner: String, message: String) {
         if let Some(open) = self.open.take() {
+            let partial = open.partial().to_path_buf();
             drop(open.file);
-            let _ = std::fs::remove_file(&open.path);
+            let _ = std::fs::remove_file(partial);
         }
         self.report.errors.push((inner, message));
     }
@@ -433,20 +489,52 @@ impl<'a> Sink<'a> {
         // and the file that was mid-flight when the button was pressed is not
         // left behind as a truncated copy of something.
         if let Some(open) = self.open.take() {
+            let partial = open.partial().to_path_buf();
             drop(open.file);
-            let _ = std::fs::remove_file(&open.path);
+            let _ = std::fs::remove_file(partial);
         }
         self.report.cancelled = cancelled;
         self.report
     }
 }
 
+/// Open a fresh temporary file in `dest`'s directory, for an overwrite to
+/// write into before renaming it over `dest`.
+///
+/// The same directory, not `$TMPDIR`: a rename is only atomic within one
+/// filesystem. A dot name so a listing that shows the directory mid-extraction
+/// does not offer it as a file, and `create_new` over a short ladder so two
+/// extractions — or a user's own file of that name — can never share one.
+fn create_beside(dest: &Path) -> std::io::Result<(PathBuf, File)> {
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let name = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut last = std::io::Error::other("no free temporary name");
+    for n in 0..64u32 {
+        let temp = parent.join(format!(".{name}.{}-{n}.partial", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => return Ok((temp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = e,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
+}
+
 /// Carry out a settled plan.
 ///
 /// Blocking, cancellable, and safe to run twice: a retry re-walks the archive
 /// and every destination it already made is refused by `create_new`, so the
-/// second run produces errors rather than duplicates. In practice a retry is
-/// rare, because per-entry failures are collected rather than returned.
+/// second run produces errors rather than duplicates — or, under
+/// [`ExtractPlan::overwrite`], is replaced by the same bytes again. In practice
+/// a retry is rare, because per-entry failures are collected rather than
+/// returned.
 pub fn extract(plan: &ExtractPlan, ctx: &TaskCtx) -> Result<ExtractReport> {
     let format = super::detect(&plan.archive)?;
     let dests = destinations(plan)?;
@@ -463,7 +551,7 @@ pub fn extract(plan: &ExtractPlan, ctx: &TaskCtx) -> Result<ExtractReport> {
         }
     }
 
-    let mut sink = Sink::new(ctx, &dests.files);
+    let mut sink = Sink::new(ctx, &dests.files, plan.overwrite);
     let outcome = match format {
         ArchiveFormat::Zip => {
             let mut file = File::open(&plan.archive).map_err(|e| DfError::io(&plan.archive, e))?;

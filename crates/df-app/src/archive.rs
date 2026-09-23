@@ -38,9 +38,18 @@
 //! does nothing is a key the user presses twice.
 //!
 //! The way out is [`crate::app::App::extract`] — "Extract here", "Extract to
-//! subfolder", or `Enter` on a selection, all of which go through
+//! folder", or `Enter` on a selection, all of which go through
 //! [`df_core::archive::plan_extract`] and the ops job, and therefore land in the
 //! journal like every other operation.
+//!
+//! ## Extracting what cannot be browsed
+//!
+//! 7z, rar and every multi-part set have no reader here, so they cannot be
+//! walked into — but they can be extracted, by 7-Zip or `bsdtar`
+//! ([`df_core::archive::external`]). [`units`] is the step that turns a
+//! selection into the things to extract: it folds the pieces of a set into
+//! one, found by looking at the whole directory rather than only at what was
+//! selected.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -218,7 +227,8 @@ impl Badge {
 /// The formats are the ones [`df_core::archive`] can actually list. `.7z`,
 /// `.rar` and `.bz2` are left out on purpose: they have no reader here, and a
 /// row that walked into a spinner and then said "unsupported" would be worse
-/// than one that opens with the system's archiver.
+/// than one that opens with the system's archiver. They can still be
+/// *extracted* — see [`looks_like_archive_name`] — just not browsed.
 pub fn looks_like_archive(entry: &Entry) -> bool {
     !entry.is_dir()
         && matches!(
@@ -233,26 +243,152 @@ pub fn looks_like_archive(entry: &Entry) -> bool {
         )
 }
 
-/// The name of the folder "Extract to subfolder" makes: the archive's name with
-/// its extension taken off.
+/// Whether a row's *name* says it is something an extractor can open — the
+/// half of "is this an archive" that [`looks_like_archive`] leaves out.
 ///
-/// `src.tar.gz` → `src`, not `src.tar`, because the `.tar` is half of one
-/// compound extension and a folder called `src.tar` full of source would read as
-/// a mistake. A name that is *only* an extension (`.zip`) keeps it, since the
-/// alternative is a folder with no name at all.
+/// Every extension the shipped opener rule for archives names, plus every
+/// piece of a multi-part set (`.z01`, `.r00`, `.7z.001`, `.tar.gz.002`),
+/// whose middle pieces have no mime a sniffer could find. Used with
+/// [`looks_like_archive`], never instead of it: that one decides what can be
+/// *browsed*, and this one widens what can be *extracted* to the formats only
+/// 7-Zip or `bsdtar` read.
+pub fn looks_like_archive_name(name: &str) -> bool {
+    const EXTENSIONS: &[&str] = &[
+        "zip", "tar", "tgz", "gz", "bz2", "xz", "zst", "7z", "rar", "cbz", "cbr",
+    ];
+    let extension = name
+        .rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    extension.is_some_and(|ext| EXTENSIONS.contains(&ext.as_str()))
+        || df_core::archive::volume_of(name).is_some()
+}
+
+/// Whether "Extract" applies to this row at all: a file, and an archive by its
+/// mime or by its name.
+pub fn extractable(entry: &Entry) -> bool {
+    !entry.is_dir() && (looks_like_archive(entry) || looks_like_archive_name(&entry.name))
+}
+
+/// The name of the folder "Extract to folder" makes: the archive's name with
+/// its extension taken off, and a multi-part set's pieces all naming the same
+/// folder. The rule is [`df_core::archive::archive_stem`]'s.
 pub fn subfolder_name(archive: &Path) -> String {
-    let name = archive
+    archive
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "extracted".to_string());
-    let stem = match name.rsplit_once('.') {
-        Some((stem, _)) if !stem.is_empty() => stem,
-        _ => return name,
-    };
-    match stem.rsplit_once('.') {
-        Some((head, "tar")) if !head.is_empty() => head.to_string(),
-        _ => stem.to_string(),
+        .map(|n| df_core::archive::archive_stem(&n.to_string_lossy()))
+        .unwrap_or_else(|| "extracted".to_string())
+}
+
+/// The three ways to extract a file in a real directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtractMode {
+    /// `E`, `o`: a new folder per archive, named after it.
+    Folder,
+    /// `e`: into the directory the archive is in; several are merged there.
+    Here,
+    /// Several archives into one new folder named for what they share.
+    Merged,
+}
+
+impl ExtractMode {
+    /// The `builtin:` opener that asks for this. The names are the shipped
+    /// opener ids, and a rule in `delightfile.toml` can use them the same way.
+    pub fn of_builtin(builtin: &str) -> Option<ExtractMode> {
+        match builtin {
+            "extract" => Some(ExtractMode::Folder),
+            "extract-here" => Some(ExtractMode::Here),
+            "extract-merged" => Some(ExtractMode::Merged),
+            _ => None,
+        }
     }
+}
+
+/// One thing an extraction extracts: an archive, or a whole multi-part set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unit {
+    /// The file the extraction is pointed at: the archive, or the set's head.
+    pub head: PathBuf,
+    /// The set's scheme, when this is a set.
+    pub volumes: Option<df_core::archive::VolumeKind>,
+    /// The reader here can list it, so it can take the browse-then-plan road.
+    /// Never true of a set.
+    pub listable: bool,
+}
+
+impl Unit {
+    pub fn whole(&self) -> df_core::archive::Whole {
+        df_core::archive::Whole {
+            head: self.head.clone(),
+            volumes: self.volumes.clone(),
+        }
+    }
+}
+
+/// A target, as [`units`] needs to know it.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub path: PathBuf,
+    pub is_dir: bool,
+    /// [`looks_like_archive`]: the reader here can list it.
+    pub listable: bool,
+    /// [`extractable`]: something can extract it.
+    pub archive: bool,
+}
+
+/// What a request to extract some targets comes to.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Units {
+    /// In the order the targets were given, each set once.
+    pub units: Vec<Unit>,
+    /// Pieces of a set whose head is not in the directory — nothing can
+    /// extract them, and the toast says why.
+    pub orphans: Vec<String>,
+}
+
+/// Fold targets into the things to extract.
+///
+/// `listing` is every name in the targets' directory, because the pieces of a
+/// set are found by looking at their neighbours: selecting `photos.z02` alone
+/// still extracts the whole of `photos.zip` + `.z01` + `.z02`, once, from its
+/// head. Folders and files that are not archives drop out.
+pub fn units(candidates: &[Candidate], listing: &[String]) -> Units {
+    let sets = df_core::archive::volume_sets(listing);
+    let mut out = Units::default();
+    for candidate in candidates {
+        if candidate.is_dir {
+            continue;
+        }
+        let name = candidate
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(set) = sets.iter().find(|set| set.contains(&name)) {
+            let head = candidate.path.with_file_name(&set.head);
+            if !out.units.iter().any(|unit| unit.head == head) {
+                out.units.push(Unit {
+                    head,
+                    volumes: Some(set.kind.clone()),
+                    listable: false,
+                });
+            }
+            continue;
+        }
+        // A numbered piece with no set around it: its head is missing.
+        if df_core::archive::volume_of(&name).is_some_and(|v| v.index != v.kind.head_index()) {
+            out.orphans.push(name);
+            continue;
+        }
+        if candidate.archive && !out.units.iter().any(|unit| unit.head == candidate.path) {
+            out.units.push(Unit {
+                head: candidate.path.clone(),
+                volumes: None,
+                listable: candidate.listable,
+            });
+        }
+    }
+    out
 }
 
 /// Whether this entry is worth trying to show the contents of.
@@ -655,6 +791,112 @@ mod tests {
         // All extension and no name: keep it, rather than making a folder with
         // no name at all.
         assert_eq!(subfolder_name(Path::new("/dl/.zip")), ".zip");
+        // A set is named by its base, from any of its pieces.
+        assert_eq!(subfolder_name(Path::new("/dl/photos.z01")), "photos");
+        assert_eq!(subfolder_name(Path::new("/dl/backup.7z.001")), "backup");
+        assert_eq!(subfolder_name(Path::new("/dl/movie.part01.rar")), "movie");
+        assert_eq!(subfolder_name(Path::new("/dl/bundle.tar.gz.002")), "bundle");
+    }
+
+    /// What the name alone admits for extraction: the archive rule's
+    /// extensions and every piece of a set, and nothing that only has digits.
+    #[test]
+    fn a_name_can_say_archive_when_the_mime_cannot() {
+        for name in [
+            "a.7z",
+            "a.RAR",
+            "a.tar.bz2",
+            "comic.cbr",
+            "photos.z01",
+            "backup.7z.002",
+            "bundle.tar.gz.001",
+            "movie.r00",
+        ] {
+            assert!(looks_like_archive_name(name), "{name}");
+        }
+        for name in ["notes.txt", "report.2024.pdf", "a.001.txt", ".zip", "zip"] {
+            assert!(!looks_like_archive_name(name), "{name}");
+        }
+        assert_eq!(
+            ExtractMode::of_builtin("extract"),
+            Some(ExtractMode::Folder)
+        );
+        assert_eq!(
+            ExtractMode::of_builtin("extract-here"),
+            Some(ExtractMode::Here)
+        );
+        assert_eq!(
+            ExtractMode::of_builtin("extract-merged"),
+            Some(ExtractMode::Merged)
+        );
+        assert_eq!(ExtractMode::of_builtin("reveal"), None);
+    }
+
+    fn candidate(path: &str, listable: bool) -> Candidate {
+        let name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Candidate {
+            path: PathBuf::from(path),
+            is_dir: false,
+            listable,
+            archive: looks_like_archive_name(&name),
+        }
+    }
+
+    /// Any piece of a set extracts the whole set, once, from its head —
+    /// however many of its pieces were selected.
+    #[test]
+    fn a_selection_folds_into_archives_and_sets() {
+        let listing: Vec<String> = [
+            "photos.zip",
+            "photos.z01",
+            "photos.z02",
+            "backup.7z.001",
+            "backup.7z.002",
+            "notes.txt",
+            "plain.zip",
+            "orphan.z01",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let picked = [
+            candidate("/dl/photos.z02", false),
+            candidate("/dl/plain.zip", true),
+            candidate("/dl/photos.zip", true),
+            candidate("/dl/notes.txt", false),
+            candidate("/dl/backup.7z.002", false),
+            candidate("/dl/backup.7z.001", false),
+            candidate("/dl/orphan.z01", false),
+            Candidate {
+                is_dir: true,
+                ..candidate("/dl/folder.zip", false)
+            },
+        ];
+        let folded = units(&picked, &listing);
+        assert_eq!(
+            folded.units,
+            vec![
+                Unit {
+                    head: PathBuf::from("/dl/photos.zip"),
+                    volumes: Some(df_core::archive::VolumeKind::ZipSplit),
+                    listable: false,
+                },
+                Unit {
+                    head: PathBuf::from("/dl/plain.zip"),
+                    volumes: None,
+                    listable: true,
+                },
+                Unit {
+                    head: PathBuf::from("/dl/backup.7z.001"),
+                    volumes: Some(df_core::archive::VolumeKind::SevenZip),
+                    listable: false,
+                },
+            ]
+        );
+        assert_eq!(folded.orphans, vec!["orphan.z01".to_string()]);
     }
 
     /// The formats the reader actually has. A `.7z` is not offered a door it

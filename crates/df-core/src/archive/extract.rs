@@ -22,12 +22,10 @@
 //! flag by construction — and it is exactly the kind of redundancy worth having
 //! in the one function whose bug is a remote write to `~/.ssh`.
 //!
-//! ## What is deliberately not here (yet)
+//! ## What is deliberately not here
 //!
-//! The execution. See [`super`]'s essay: decompressing a zip member means an
-//! inflate implementation this crate does not have, and the alternative — shelling
-//! out to `unzip` — is a design decision about trusting a second tool's path
-//! handling rather than our own. The plan is the part that is ready.
+//! The execution, which is [`super::unpack`]'s: this file decides, that one
+//! writes.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -82,6 +80,16 @@ pub struct ExtractPlan {
     /// Uncompressed bytes across every file in the plan. The progress total.
     pub total_len: u64,
     pub conflicts: usize,
+    /// Replace files that are already there instead of laddering past them.
+    ///
+    /// Off for every extraction of one archive: an archive is untrusted
+    /// content, and replacing a file with its bytes is a decision for a
+    /// person. On only when a person has asked for several archives to be
+    /// *merged* — "Extract here" on a selection of them, or "Extract all into
+    /// one folder" — where the later archive overwriting the earlier one is the
+    /// request, and a folder full of `readme_1.txt`, `readme_2.txt` would be
+    /// the bug. See [`super::unpack::destinations`].
+    pub overwrite: bool,
 }
 
 impl ExtractPlan {
@@ -156,6 +164,7 @@ pub fn plan_extract(tree: &ArchiveTree, selection: &[&str], dest_dir: &Path) -> 
         skipped,
         total_len,
         conflicts,
+        overwrite: false,
     }
 }
 
