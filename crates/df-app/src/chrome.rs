@@ -2830,9 +2830,183 @@ pub fn truncated_in(
     );
 }
 
+/// A `/`-separated path shortened to fit `max_width` in `font`, keeping the
+/// part that tells one path from its neighbours: the end.
+///
+/// The measured half of [`elide_segments`], which makes the decision; this
+/// only splits the text and measures the candidates. A trailing `/` (a folder)
+/// stays on the last component, so it survives every step of the elision.
+pub fn elide_path(
+    painter: &egui::Painter,
+    text: &str,
+    font: egui::FontId,
+    max_width: f32,
+) -> String {
+    let (body, dir) = match text.strip_suffix('/') {
+        Some(body) if !body.is_empty() => (body, true),
+        _ => (text, false),
+    };
+    let mut segments: Vec<String> = body.split('/').map(str::to_string).collect();
+    if dir {
+        if let Some(last) = segments.last_mut() {
+            last.push('/');
+        }
+    }
+    let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+    elide_segments(&segments, |candidate| {
+        text_width(painter, candidate, font.clone()) <= max_width
+    })
+}
+
+/// Which shortening of a path fits, as `fits` measures it.
+///
+/// A listing of paths is a column of shared prefixes — `project/src/preview/`
+/// on every other row — and cutting each one at its end, the way a file name
+/// is cut, leaves a column of identical beginnings with the names that tell
+/// them apart gone. So the path is shortened from the *front*, a whole
+/// directory at a time:
+///
+/// 1. the whole path, if it fits;
+/// 2. otherwise leading directories are dropped, one at a time, and `…/`
+///    stands for what went (`…/src/preview/paint.rs`, `…/preview/paint.rs`,
+///    `…/paint.rs`);
+/// 3. only when `…/` and the last component alone still do not fit is the
+///    last component itself cut at its end with `…`.
+///
+/// A last component ending in `/` is a folder: its slash is kept through step
+/// 3 too (`…/very-long-fold…/`), so a folder row still reads as one. Pure,
+/// and `fits` is the only thing that knows about fonts, so the ladder is a
+/// test rather than something checked by eye in a narrow window.
+pub fn elide_segments(segments: &[&str], fits: impl Fn(&str) -> bool) -> String {
+    let full = segments.join("/");
+    if fits(&full) {
+        return full;
+    }
+    for drop in 1..segments.len() {
+        let candidate = format!("…/{}", segments[drop..].join("/"));
+        if fits(&candidate) {
+            return candidate;
+        }
+    }
+    let last = segments.last().copied().unwrap_or_default();
+    let prefix = if segments.len() > 1 { "…/" } else { "" };
+    let (name, suffix) = match last.strip_suffix('/') {
+        Some(name) => (name, "…/"),
+        None => (last, "…"),
+    };
+    // The longest front of the name that fits, found by bisection: `fits` is
+    // a text layout apiece, and a sixty-character name would otherwise be
+    // sixty of them per row per frame.
+    let ends: Vec<usize> = name
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(name.len()))
+        .collect();
+    let candidate = |keep: usize| format!("{prefix}{}{suffix}", &name[..ends[keep]]);
+    let (mut low, mut high) = (0usize, ends.len() - 1);
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if fits(&candidate(mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    candidate(low)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ladder, measured in characters: the whole path, then leading
+    /// directories dropped one at a time behind `…/`, and only then the name
+    /// itself cut at its end.
+    #[test]
+    fn a_path_is_shortened_from_the_front_a_directory_at_a_time() {
+        let path = ["delightfile-demo", "src", "preview", "paint.rs"];
+        let at = |width: usize| elide_segments(&path, |s| s.chars().count() <= width);
+        assert_eq!(at(100), "delightfile-demo/src/preview/paint.rs");
+        assert_eq!(at(36), "…/src/preview/paint.rs");
+        assert_eq!(at(22), "…/src/preview/paint.rs");
+        assert_eq!(at(21), "…/preview/paint.rs");
+        assert_eq!(at(18), "…/preview/paint.rs");
+        assert_eq!(at(17), "…/paint.rs");
+        assert_eq!(at(10), "…/paint.rs");
+        // …and only now is the name itself cut, at its end.
+        assert_eq!(at(9), "…/paint.…");
+        assert_eq!(at(8), "…/paint…");
+        assert_eq!(at(4), "…/p…");
+        // Nothing fits at all: the shortest mark there is, for the clip.
+        assert_eq!(at(0), "…/…");
+
+        // Two rows that differ only in their last component still differ at
+        // every width that has room for `…/` and the names.
+        let other = ["delightfile-demo", "src", "preview", "mod.rs"];
+        for width in 8..40 {
+            assert_ne!(
+                at(width),
+                elide_segments(&other, |s| s.chars().count() <= width),
+                "at {width}"
+            );
+        }
+    }
+
+    /// A folder keeps its trailing slash through every step, the cut
+    /// included, so a folder row still reads as a folder.
+    #[test]
+    fn a_folder_keeps_its_slash_while_it_is_shortened() {
+        let path = ["project", "assets", "very-long-folder-name/"];
+        let at = |width: usize| elide_segments(&path, |s| s.chars().count() <= width);
+        assert_eq!(at(100), "project/assets/very-long-folder-name/");
+        assert_eq!(at(31), "…/assets/very-long-folder-name/");
+        assert_eq!(at(30), "…/very-long-folder-name/");
+        assert_eq!(at(24), "…/very-long-folder-name/");
+        assert_eq!(at(12), "…/very-lon…/");
+    }
+
+    /// A bare name has no directories to drop, so it goes straight to the
+    /// cut — with no `…/` in front of a path that never had one.
+    #[test]
+    fn a_bare_name_is_cut_at_its_end() {
+        let at = |width: usize| elide_segments(&["README.md"], |s| s.chars().count() <= width);
+        assert_eq!(at(9), "README.md");
+        assert_eq!(at(7), "README…");
+        assert_eq!(at(0), "…");
+        // Multi-byte characters are cut on a character, never inside one.
+        assert_eq!(
+            elide_segments(&["héllo-wörld"], |s| s.chars().count() <= 6),
+            "héllo…"
+        );
+    }
+
+    /// The measured wrapper: whatever it answers fits the width it was given,
+    /// keeps the last component when there is room for it, and splits a
+    /// folder's slash onto its last component.
+    #[test]
+    fn the_measured_path_fits_and_keeps_its_end() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter();
+            let font = egui::FontId::proportional(13.5);
+            let path = "delightfile-demo/src/preview/paint.rs";
+            let whole = text_width(painter, path, font.clone());
+            assert_eq!(elide_path(painter, path, font.clone(), whole + 1.0), path);
+            for width in [whole * 0.8, whole * 0.5, whole * 0.35] {
+                let out = elide_path(painter, path, font.clone(), width);
+                assert!(
+                    text_width(painter, &out, font.clone()) <= width,
+                    "{out:?} is wider than {width}"
+                );
+                assert!(out.ends_with("paint.rs"), "{out:?} lost the name");
+                assert!(out.starts_with("…/"), "{out:?}");
+            }
+            let folder = "alpha/beta/c/";
+            assert_eq!(elide_path(painter, folder, font.clone(), 1000.0), folder);
+            let narrow = text_width(painter, "…/c/", font.clone());
+            assert_eq!(elide_path(painter, folder, font.clone(), narrow), "…/c/");
+        });
+    }
 
     fn strip() -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(1384.0, CHROME_HEIGHT))

@@ -927,6 +927,52 @@ fn an_uncompressed_tar_lists_from_disk() {
     assert_sample_tree(&list(&path).unwrap());
 }
 
+/// A listing told to stop stops: between two reads of the tar, plain or
+/// through a decompressor, as an error rather than as a short listing that
+/// could be mistaken for the archive. A zip, whose index is one bounded read,
+/// lists whatever `stop` says.
+#[test]
+fn a_stopped_listing_is_an_error_not_a_short_listing() {
+    use std::cell::Cell;
+    let t = TempTree::new("archive-stop");
+    let plain = write(&t, "s.tar", &sample_tar_bytes());
+    assert!(matches!(
+        list_until(&plain, &|| true),
+        Err(ArchiveError::Read(_))
+    ));
+
+    // Partway: the first few reads go through, then the listing is retired.
+    let reads = Cell::new(0);
+    let stop = || {
+        reads.set(reads.get() + 1);
+        reads.get() > 2
+    };
+    assert!(matches!(
+        list_until(&plain, &stop),
+        Err(ArchiveError::Read(_))
+    ));
+    assert_sample_tree(&list_until(&plain, &|| false).unwrap());
+
+    if have_binary("gzip") {
+        let gz = t.join("s.tar.gz");
+        assert!(compress("gzip", &["-c"], &plain, &gz));
+        assert!(matches!(
+            list_until(&gz, &|| true),
+            Err(ArchiveError::Read(_))
+        ));
+    }
+
+    let zip = write(
+        &t,
+        "a.zip",
+        &build_zip(&[ZipMember::file("a.txt", b"alpha")], b""),
+    );
+    assert_eq!(
+        names(&list_until(&zip, &|| true).unwrap().entries("")),
+        vec!["a.txt"]
+    );
+}
+
 #[test]
 fn compressed_tars_stream_through_the_system_decompressors() {
     let t = TempTree::new("archive-compressed");

@@ -7,7 +7,8 @@
 //!                        │
 //!                        ├─ Text / Markdown ──▶ prepare::Preparer ──▶ paint
 //!                        ├─ Directory / Hex ──▶ paint
-//!                        └─ NeedsDecode ──▶ decode::Decoder ──▶ texture ──▶ paint
+//!                        ├─ NeedsDecode ──▶ decode::Decoder ──▶ texture ──▶ paint
+//!                        └─ …an archive ──▶ body::Bodies ──▶ listing ──▶ paint
 //! ```
 //!
 //! Three rules hold the whole thing together.
@@ -62,12 +63,21 @@
 //! they share one shape — a document with a current page, a zoom and an
 //! indicator — even though a specimen sheet has one page and a mesh does not
 //! really have pages at all.
+//!
+//! **Archives are [`listing`]'s.** df-core answers an archive through the same
+//! seam, with nothing to decode, so the kind badge goes up on the first frame
+//! exactly as it did before the archive had a previewer — and the listing,
+//! read on [`body`]'s worker, replaces it when it lands ([`Body::Archive`]).
+//! When nothing on the machine can list the file, the badge stays and says why
+//! on a line under it. An archive *inside* an archive never gets here: the tab
+//! browsing one hands this pane nothing, and draws the entry's card instead.
 
 pub mod body;
 pub mod decode;
 pub mod doc;
 pub mod gesture;
 pub mod highlight;
+pub mod listing;
 pub mod markdown;
 mod paint;
 pub mod prepare;
@@ -296,6 +306,9 @@ struct Media {
     /// Boxed: a [`DocView`] is much the largest thing in [`Body`], and an
     /// unboxed one would make every text preview in the program pay its size.
     doc: Option<Box<DocView>>,
+    /// One line drawn under the kind badge: why an archive that nothing could
+    /// list is still only a badge (`Install 7-Zip to list this archive`).
+    note: Option<String>,
 }
 
 impl Media {
@@ -451,6 +464,32 @@ enum Body {
         truncated: bool,
     },
     Media(Media),
+    /// An archive's members, under a header that says it is one
+    /// ([`listing`]). Built by [`body_from_listing`].
+    Archive {
+        /// `ZIP`, `TAR.GZ`, `7Z` — already in capitals, which is how the
+        /// header draws it.
+        format: String,
+        /// The first [`listing::PREVIEW_ENTRIES`] members, in the archive's
+        /// own order.
+        entries: Vec<listing::ArchiveRow>,
+        /// `entries.len()`.
+        shown: usize,
+        /// Every member the listing found, folders included.
+        total: usize,
+        /// …of which files: the header's count.
+        files: usize,
+        /// Uncompressed bytes, across every file whose size is known.
+        total_len: u64,
+        /// There is more to the archive than `entries`, so the rows end in a
+        /// footer that says how much.
+        truncated: bool,
+        /// Whether the listing reached the archive's end. When it did not,
+        /// `total` is a floor and the counts say so.
+        complete: bool,
+        /// Any member needs a password.
+        encrypted: bool,
+    },
     /// There is nothing honest to draw; the opener rules are the answer.
     Unsupported {
         kind: PreviewKind,
@@ -493,6 +532,10 @@ pub struct Pane {
     /// [`prepare`]). df-core hands back lines; this is what turns them into a
     /// [`Body`], and it is not cheap enough to do inside a frame.
     preparer: prepare::Preparer,
+    /// The archive lister ([`body`]'s worker, running [`listing`]). The
+    /// pane's own instance, not the card bodies': a `.tar.zst` being read to
+    /// its end must not hold up the card of an entry inside another archive.
+    listings: body::Bodies,
     /// The path the live request is for, or `None` when nothing is wanted
     /// (an empty directory).
     wanted: Option<PathBuf>,
@@ -546,6 +589,13 @@ pub struct Pane {
     /// for: the body — and with it the page count — arrives from a worker
     /// several frames later.
     resume_page: usize,
+    /// The line an archive's listing should open at, from [`Pane::places`].
+    ///
+    /// Held for the same reason as [`Pane::resume_page`]: the badge an archive
+    /// shows while its listing is read has nothing to scroll, so its paint
+    /// clamps [`Pane::scroll`] to zero, and the listing that lands a moment
+    /// later would open at the top of a file somebody had scrolled.
+    resume_scroll: usize,
     /// Whether the pointer is over this pane. The turntable's whole switch:
     /// with nobody looking, a model is a still picture and asks for nothing.
     ///
@@ -590,6 +640,7 @@ impl Pane {
             previewer: Previewer::start(std::sync::Arc::clone(&notify)),
             docs: doc::Docs::start(std::sync::Arc::clone(&notify)),
             preparer: prepare::Preparer::start(std::sync::Arc::clone(&notify)),
+            listings: body::Bodies::named("df-listing", std::sync::Arc::clone(&notify)),
             decoder: decode::Decoder::start(notify),
             ink: doc::Ink::test(),
             gestures: gesture::Gestures::new(),
@@ -608,6 +659,7 @@ impl Pane {
             media_mounted: false,
             places: Recent::new(PLACES),
             resume_page: 0,
+            resume_scroll: 0,
             media_frame: false,
         }
     }
@@ -661,11 +713,13 @@ impl Pane {
             self.decoder.cancel();
             self.preparer.cancel();
             self.docs.cancel();
+            self.listings.cancel(body::Which::Archive);
             // …and back to wherever this file was last read to. The scroll is
             // clamped by the first paint, which is the only thing that knows
             // how tall the content came out.
             let spot = self.places.recall(path).copied().unwrap_or_default();
             self.scroll = spot.scroll;
+            self.resume_scroll = spot.scroll;
             self.resume_page = spot.page;
         }
         self.wanted = Some(path.to_path_buf());
@@ -687,6 +741,7 @@ impl Pane {
         self.decoder.cancel();
         self.preparer.cancel();
         self.docs.cancel();
+        self.listings.cancel(body::Which::Archive);
         self.wanted = None;
         self.token = None;
         self.shown = None;
@@ -697,6 +752,7 @@ impl Pane {
         self.gestures.reset_for_new_item();
         self.picture = None;
         self.resume_page = 0;
+        self.resume_scroll = 0;
     }
 
     /// Record how far into the file on screen the reader had got.
@@ -951,7 +1007,46 @@ impl Pane {
             changed = true;
             self.apply_doc(update, ctx, now);
         }
+        // The worker's own token has already dropped a listing for an archive
+        // the cursor left; the path check in `apply_listing` catches whatever
+        // won the race.
+        for listed in self.listings.drain() {
+            if let body::Body::Archive { path, listing } = listed {
+                changed |= self.apply_listing(&path, listing);
+            }
+        }
         changed
+    }
+
+    /// An archive's listing, in place of the badge that stood for it.
+    ///
+    /// Only onto that badge: a listing for a file the pane has moved off, or
+    /// one that arrives after the body was replaced for some other reason, is
+    /// dropped. A failure keeps the badge and adds the reason under it.
+    fn apply_listing(&mut self, path: &Path, listing: Result<listing::Listing, String>) -> bool {
+        if self.wanted.as_deref() != Some(path) {
+            return false;
+        }
+        let Some(shown) = &mut self.shown else {
+            return false;
+        };
+        let Body::Media(media) = &mut shown.body else {
+            return false;
+        };
+        if media.kind != PreviewKind::Archive {
+            return false;
+        }
+        match listing {
+            Ok(listing) => {
+                shown.body = body_from_listing(listing);
+                // The badge's paint clamped the scroll to its own nothing; the
+                // place this archive was last read to is the one to open at,
+                // and the listing's first paint clamps it to what exists.
+                self.scroll = self.resume_scroll;
+            }
+            Err(reason) => media.note = Some(reason),
+        }
+        true
     }
 
     fn apply_doc(&mut self, update: doc::Update, ctx: Option<&egui::Context>, now: Instant) {
@@ -1430,6 +1525,16 @@ impl Pane {
                         | PreviewKind::Model3d
                         | PreviewKind::Gcode
                 );
+                // An archive has nothing to decode, and its badge goes up now
+                // as it always has; the listing that replaces it is read on
+                // the listing worker. This answer has already waited out
+                // df-core's debounce, and the worker waits once more before it
+                // opens the file (`body::Which::settle`), so an archive a held
+                // `↓` only passed over is never read.
+                if kind == PreviewKind::Archive {
+                    self.listings
+                        .request(body::Job::Archive { path: path.clone() });
+                }
                 self.decoder.request(decode::Job {
                     token,
                     path,
@@ -1457,6 +1562,7 @@ impl Pane {
                         view.page = self.resume_page;
                         view
                     }),
+                    note: None,
                 })
             }
         };
@@ -1526,8 +1632,17 @@ impl Pane {
         }
     }
 
+    /// Is the body a picture decoded to the pane's size — the one kind of body
+    /// a bigger pane is worth asking for again?
+    ///
+    /// Not an archive's badge: nothing in it depends on the size, and asking
+    /// again would put the badge back up and list the archive a second time
+    /// for a window that was only dragged wider.
     fn is_media(&self) -> bool {
-        matches!(self.shown.as_ref().map(|s| &s.body), Some(Body::Media(_)))
+        matches!(
+            self.shown.as_ref().map(|s| &s.body),
+            Some(Body::Media(media)) if media.kind != PreviewKind::Archive
+        )
     }
 
     /// Is anything still moving? The `animating()` half of PLAN §1's idle-cost
@@ -1659,6 +1774,28 @@ fn body_from_ready(ready: prepare::Ready) -> Body {
             states,
         },
         prepare::Ready::Markdown { blocks, truncated } => Body::Markdown { blocks, truncated },
+    }
+}
+
+/// What [`listing`] found, as the body the pane draws.
+///
+/// `truncated` is the one judgement in it: the rows stop before the archive
+/// does, either because the preview kept only its first
+/// [`listing::PREVIEW_ENTRIES`] or because the listing itself was cut short —
+/// and either way the rows end in a footer rather than looking like the whole
+/// archive.
+fn body_from_listing(listing: listing::Listing) -> Body {
+    let shown = listing.rows.len();
+    Body::Archive {
+        format: listing.format.to_ascii_uppercase(),
+        shown,
+        total: listing.total,
+        files: listing.files,
+        total_len: listing.total_len,
+        truncated: listing.total > shown || !listing.complete,
+        complete: listing.complete,
+        encrypted: listing.encrypted,
+        entries: listing.rows,
     }
 }
 
@@ -1854,6 +1991,7 @@ mod tests {
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(view)),
+                note: None,
             }),
         });
         pane.sync(Some(b), target, now);
@@ -1899,6 +2037,7 @@ mod tests {
                     error: None,
                     decoding,
                     doc: None,
+                    note: None,
                 }),
             });
         };
@@ -1954,6 +2093,7 @@ mod tests {
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(view)),
+                note: None,
             }),
         });
         (pane, now)
@@ -2169,6 +2309,215 @@ mod tests {
         );
         assert!(pane.animating(now + CHIP_LINGER + CHIP_FADE / 2));
         assert!(!pane.animating(now + CHIP_LINGER + CHIP_FADE * 2));
+    }
+
+    /// A stored-only zip, byte by byte: `(name, data, encrypted)` per member,
+    /// a trailing `/` making a directory. df-core's own fixture builder is
+    /// private to its tests, and the format is small enough to write twice.
+    fn zip_of(members: &[(&str, &[u8], bool)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data, encrypted) in members {
+            let at = out.len() as u32;
+            let flags: u16 = if *encrypted { 0x0001 } else { 0 };
+            let external: u32 = if name.ends_with('/') { 0x10 } else { 0 };
+            let len = (data.len() as u32).to_le_bytes();
+            let name_len = (name.len() as u16).to_le_bytes();
+            for chunk in [
+                b"PK\x03\x04".as_slice(),
+                &20u16.to_le_bytes(),
+                &flags.to_le_bytes(),
+                &0u16.to_le_bytes(), // stored
+                &0u16.to_le_bytes(),
+                &0x0021u16.to_le_bytes(),
+                &0u32.to_le_bytes(), // crc, which a listing never reads
+                &len,
+                &len,
+                &name_len,
+                &0u16.to_le_bytes(),
+                name.as_bytes(),
+                data,
+            ] {
+                out.extend_from_slice(chunk);
+            }
+            for chunk in [
+                b"PK\x01\x02".as_slice(),
+                &20u16.to_le_bytes(),
+                &20u16.to_le_bytes(),
+                &flags.to_le_bytes(),
+                &0u16.to_le_bytes(),
+                &0u16.to_le_bytes(),
+                &0x0021u16.to_le_bytes(),
+                &0u32.to_le_bytes(),
+                &len,
+                &len,
+                &name_len,
+                &0u16.to_le_bytes(),
+                &0u16.to_le_bytes(),
+                &0u16.to_le_bytes(),
+                &0u16.to_le_bytes(),
+                &external.to_le_bytes(),
+                &at.to_le_bytes(),
+                name.as_bytes(),
+            ] {
+                central.extend_from_slice(chunk);
+            }
+        }
+        let (cd_at, cd_len) = (out.len() as u32, central.len() as u32);
+        out.extend_from_slice(&central);
+        let count = (members.len() as u16).to_le_bytes();
+        for chunk in [
+            b"PK\x05\x06".as_slice(),
+            &0u16.to_le_bytes(),
+            &0u16.to_le_bytes(),
+            &count,
+            &count,
+            &cd_len.to_le_bytes(),
+            &cd_at.to_le_bytes(),
+            &0u16.to_le_bytes(),
+        ] {
+            out.extend_from_slice(chunk);
+        }
+        out
+    }
+
+    /// A zip df-core lists becomes a body with its counts, its first
+    /// [`listing::PREVIEW_ENTRIES`] rows in the archive's order, a truncation
+    /// that says there is more, and the encrypted flag of a member past the
+    /// kept rows.
+    #[test]
+    fn a_listed_zip_becomes_an_archive_body() {
+        let tree = df_core::test_support::TempTree::new("preview-archive-body");
+        let names: Vec<String> = (0..600).map(|i| format!("proj/f{i:03}.txt")).collect();
+        let mut members: Vec<(&str, &[u8], bool)> = vec![("proj/", b"", false)];
+        for (i, name) in names.iter().enumerate() {
+            members.push((name.as_str(), b"hello", i == 550));
+        }
+        let path = tree.file("big.zip", &zip_of(&members));
+        let listed = df_core::archive::list(&path).expect("the fixture zip lists");
+
+        let Body::Archive {
+            format,
+            entries,
+            shown,
+            total,
+            files,
+            total_len,
+            truncated,
+            complete,
+            encrypted,
+        } = body_from_listing(listing::Listing::from_tree(&listed))
+        else {
+            panic!("a listing is an archive body");
+        };
+        assert_eq!(format, "ZIP");
+        assert_eq!(shown, listing::PREVIEW_ENTRIES);
+        assert_eq!(entries.len(), shown);
+        assert_eq!(total, 601);
+        assert_eq!(files, 600);
+        assert_eq!(total_len, 600 * 5);
+        assert!(truncated, "600 files do not fit in 500 rows");
+        assert!(complete);
+        assert!(
+            encrypted,
+            "member 550 is past the kept rows and still counts"
+        );
+        // The archive's order, with its single top-level folder kept.
+        assert_eq!(entries[0].name, "proj");
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[0].len, None);
+        assert_eq!(entries[1].name, "proj/f000.txt");
+        assert_eq!(entries[1].len, Some(5));
+        assert_eq!(entries[499].name, "proj/f498.txt");
+
+        // A zip of bare file paths lists what it stores: the folders df-core
+        // synthesizes for browsing are not rows, and a listing that fits is
+        // not truncated.
+        let small = tree.file(
+            "small.zip",
+            &zip_of(&[("b/one.txt", b"1", false), ("a/two.txt", b"22", false)]),
+        );
+        let Body::Archive {
+            entries,
+            total,
+            truncated,
+            encrypted,
+            ..
+        } = body_from_listing(listing::Listing::from_tree(
+            &df_core::archive::list(&small).expect("the fixture zip lists"),
+        ))
+        else {
+            panic!("a listing is an archive body");
+        };
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["b/one.txt", "a/two.txt"],
+            "stored order, no folders"
+        );
+        assert_eq!(total, 2);
+        assert!(!truncated);
+        assert!(!encrypted);
+    }
+
+    /// The badge goes up first and the listing replaces it; a listing that
+    /// could not be read keeps the badge and adds its reason; an answer about
+    /// a file the cursor has left is dropped.
+    #[test]
+    fn a_listing_replaces_the_badge_and_a_failure_keeps_it() {
+        let now = Instant::now();
+        let mut pane = Pane::start(df_core::fs::no_notifier());
+        let path = Path::new("/archives/a.zip");
+        pane.sync(Some(path), (400, 400), now);
+        let badge = || Shown {
+            body: Body::Media(Media {
+                kind: PreviewKind::Archive,
+                thumb: None,
+                full: None,
+                swapped_at: None,
+                anim: None,
+                error: None,
+                decoding: false,
+                doc: None,
+                note: None,
+            }),
+        };
+        let listed = || listing::Listing {
+            format: "zip".to_string(),
+            rows: Vec::new(),
+            total: 0,
+            files: 0,
+            total_len: 0,
+            encrypted: false,
+            complete: true,
+        };
+
+        pane.shown = Some(badge());
+        assert!(!pane.apply_listing(Path::new("/archives/b.zip"), Ok(listed())));
+        assert!(matches!(
+            pane.shown.as_ref().map(|s| &s.body),
+            Some(Body::Media(_))
+        ));
+
+        assert!(pane.apply_listing(path, Err("Install 7-Zip to list this archive".into())));
+        let Some(Body::Media(media)) = pane.shown.as_ref().map(|s| &s.body) else {
+            panic!("a failure keeps the badge");
+        };
+        assert_eq!(
+            media.note.as_deref(),
+            Some("Install 7-Zip to list this archive")
+        );
+        assert_eq!(media.badge(), Some("archive"));
+
+        pane.shown = Some(badge());
+        assert!(pane.apply_listing(path, Ok(listed())));
+        assert!(matches!(
+            pane.shown.as_ref().map(|s| &s.body),
+            Some(Body::Archive { .. })
+        ));
+        // …and a listing is text-shaped: the wheel scrolls it by lines.
+        assert!(!pane.is_media());
+        assert_eq!(pane.poster(), Poster::Absent);
     }
 
     #[test]

@@ -1991,7 +1991,7 @@ impl App {
         // and this catches whatever wins the race anyway.
         for body in self.bodies.drain() {
             match body {
-                crate::preview::body::Body::Archive {
+                crate::preview::body::Body::Entry {
                     archive,
                     inner,
                     text,
@@ -2012,6 +2012,9 @@ impl App {
                         }
                     }
                 }
+                // Whole-archive listings are the preview pane's, on a worker
+                // of its own (`Pane::poll`); none is ever asked of this one.
+                crate::preview::body::Body::Archive { .. } => {}
             }
         }
         // The search's reader thread (PLAN §7.2) and the grid's tile workers
@@ -2902,13 +2905,13 @@ impl App {
         // later, which is what a card whose subject is inside an archive
         // already does for its listing.
         if wanted {
-            self.bodies.request(crate::preview::body::Job::Archive {
+            self.bodies.request(crate::preview::body::Job::Entry {
                 archive: archive.clone(),
                 inner: inner.clone(),
                 limit: crate::archive::PREVIEW_LIMIT,
             });
         } else {
-            self.bodies.cancel(crate::preview::body::Which::Archive);
+            self.bodies.cancel(crate::preview::body::Which::Entry);
         }
         self.archive_preview = Some((archive, inner, None));
         true

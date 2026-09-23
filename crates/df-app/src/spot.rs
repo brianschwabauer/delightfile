@@ -367,7 +367,7 @@ fn duration(micros: i64) -> String {
 
 /// A count with thousands separators. One loop over the digits, which is the
 /// whole of what a formatting crate would do here.
-fn grouped(n: u64) -> String {
+pub(crate) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {

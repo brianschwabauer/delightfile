@@ -253,6 +253,20 @@ pub fn format_for(head: &[u8], path: &Path) -> Result<ArchiveFormat, ArchiveErro
 /// it. Callers on the event loop must run it as a [`crate::tasks::Job`] — the
 /// same rule every other read in this crate follows.
 pub fn list(path: &Path) -> Result<ArchiveTree, ArchiveError> {
+    list_until(path, &|| false)
+}
+
+/// [`list`], abandoned the moment `stop` says so.
+///
+/// For the caller whose answer can go stale mid-read: the preview pane lists
+/// the archive under the cursor, and a tar has to be read to its end to be
+/// listed — a 10 GB `.tar.zst` is `zstd` decompressing ten gigabytes nobody
+/// wants once the cursor has moved on, and a worker that cannot take the next
+/// archive until it is done. `stop` is asked before every read of the tar
+/// stream, a few KiB apart, and a stopped listing is an
+/// [`ArchiveError::Read`] with the decompressor killed behind it. A zip is
+/// never asked: its index is one bounded read ([`zip::MAX_CENTRAL_BYTES`]).
+pub fn list_until(path: &Path, stop: &dyn Fn() -> bool) -> Result<ArchiveTree, ArchiveError> {
     let format = detect(path)?;
     let (raws, truncated) = match format {
         ArchiveFormat::Zip => {
@@ -265,11 +279,29 @@ pub fn list(path: &Path) -> Result<ArchiveTree, ArchiveError> {
         }
         ArchiveFormat::Tar => {
             let file = File::open(path).map_err(|e| ArchiveError::io(path, e))?;
-            tar::list(file)?
+            tar::list(Stoppable { inner: file, stop })?
         }
-        other => list_compressed_tar(path, other)?,
+        other => list_compressed_tar(path, other, stop)?,
     };
     Ok(tree::build(path.to_path_buf(), format, raws, truncated))
+}
+
+/// A reader that fails once `stop` says so — how a walk through a whole tar
+/// is abandoned between two reads rather than at the end.
+struct Stoppable<'a, R> {
+    inner: R,
+    stop: &'a dyn Fn() -> bool,
+}
+
+impl<R: Read> Read for Stoppable<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if (self.stop)() {
+            // `Other`, never `Interrupted`: the tar reader retries an
+            // interrupted read, and would ask again for ever.
+            return Err(std::io::Error::other("the listing was stopped"));
+        }
+        self.inner.read(buf)
+    }
 }
 
 /// Stream a compressed tar through its decompressor and the tar parser.
@@ -280,6 +312,7 @@ pub fn list(path: &Path) -> Result<ArchiveTree, ArchiveError> {
 fn list_compressed_tar(
     path: &Path,
     format: ArchiveFormat,
+    stop: &dyn Fn() -> bool,
 ) -> Result<(Vec<tree::RawEntry>, bool), ArchiveError> {
     let Some(binary) = format.decompressor() else {
         return Err(ArchiveError::Unsupported {
@@ -318,7 +351,10 @@ fn list_compressed_tar(
         });
     };
 
-    let result = tar::list(stdout);
+    let result = tar::list(Stoppable {
+        inner: stdout,
+        stop,
+    });
 
     match &result {
         // Read to the end: the child is finished, and its exit status is the

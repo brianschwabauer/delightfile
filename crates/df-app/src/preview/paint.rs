@@ -174,6 +174,9 @@ pub fn preview(
             pane.scroll,
             alpha,
         ),
+        Body::Archive { .. } => {
+            archive_body(paint, &painter, content, &shown.body, pane.scroll, alpha)
+        }
         Body::Media(media) => {
             media_body(
                 paint,
@@ -216,6 +219,39 @@ fn quiet(paint: &Painting<'_>, content: egui::Rect, text: &str, alpha: f32) {
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::proportional(BODY),
+        color,
+    );
+}
+
+/// The one line under a [`quiet`] label: why an archive is still only its
+/// badge. Smaller than the badge, in the same grey, and cut to the pane's
+/// width with an ellipsis rather than wrapped — it is a reason, not a message.
+fn quiet_note(paint: &Painting<'_>, content: egui::Rect, text: &str, alpha: f32) {
+    use egui::text::{LayoutJob, TextFormat, TextWrapping};
+    let color = paint.palette.overlay0.gamma_multiply(alpha);
+    let mut job = LayoutJob::single_section(
+        text.to_string(),
+        TextFormat {
+            font_id: egui::FontId::proportional(BODY - 1.0),
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = TextWrapping {
+        max_width: content.width().max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let galley = paint.painter.layout_job(job);
+    // One line below the badge's centre, and centred on it the same way.
+    let y = content.top() + content.height() * crate::chrome::OPTICAL_BASELINE + LINE + 2.0;
+    paint.painter.galley(
+        egui::pos2(
+            content.center().x - galley.size().x / 2.0,
+            y - galley.size().y / 2.0,
+        ),
+        galley,
         color,
     );
 }
@@ -788,6 +824,293 @@ fn summarise(entries: &[Entry], truncated: bool) -> String {
     text
 }
 
+// ── Archive ─────────────────────────────────────────────────────────────────
+
+/// The space between the header strip and its hairline, and again between the
+/// hairline and the first row.
+const RULE_GAP: f32 = 3.0;
+
+/// What the padlock takes from the name's room on every row of an archive that
+/// has any encrypted member: the glyph and the gap to the size after it.
+/// Reserved on every row, not only on the locked ones, so the names all stop
+/// at one x — the git dot column's rule (`ui::GIT_DOT_COLUMN`).
+const LOCK_SLOT: f32 = 16.0;
+
+/// The gap between the padlock and the size it sits before.
+const LOCK_GAP: f32 = 4.0;
+
+/// An archive's members ([`Body::Archive`]).
+///
+/// **The header is what says "archive".** A folder preview has none, so the
+/// strip across the top — the archive glyph, the format in capitals, the
+/// counts, a hairline under it — is the difference between the two at a
+/// glance, and it stays put while the rows scroll under it. The ground is the
+/// pane's own, like every other body's: a tint would be a second way of saying
+/// the same thing, and the louder one.
+///
+/// The rows are the directory preview's height and face, drawn with each
+/// member's *path* rather than as a tree (the archive stores paths, and the
+/// order it stores them in is kept), folders a step dimmer than files, and the
+/// size right-aligned in the column the directory preview puts its size in.
+/// A path too long for the pane loses leading directories first
+/// (`…/preview/paint.rs`), and its last component is cut only when that alone
+/// does not fit: rows of one archive share their prefixes, so the end is what
+/// tells them apart ([`crate::chrome::elide_path`]).
+///
+/// Returns the largest scroll that still shows something, as every
+/// text-shaped body does.
+fn archive_body(
+    paint: &Painting<'_>,
+    painter: &egui::Painter,
+    content: egui::Rect,
+    body: &Body,
+    scroll: usize,
+    alpha: f32,
+) -> usize {
+    use egui::text::{LayoutJob, TextFormat, TextWrapping};
+    let Body::Archive {
+        format,
+        entries,
+        shown,
+        total,
+        files,
+        total_len,
+        truncated,
+        complete,
+        encrypted,
+    } = body
+    else {
+        return 0;
+    };
+    let palette = paint.palette;
+    // The compact step, whatever the list pane is at — the directory body's
+    // reason: this is a picture of a container in the narrowest pane.
+    let scale = crate::ui::Scale::default();
+    let columns = paint.row_columns(painter, scale);
+    let font = egui::FontId::proportional(scale.font);
+    let pad = crate::ui::ROW_PAD_X;
+
+    // ── The header ──
+    let header =
+        egui::Rect::from_min_size(content.min, egui::vec2(content.width(), scale.row_height));
+    let icon = crate::icons::archive(palette, paint.nerd);
+    let family = if paint.nerd {
+        egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())
+    } else {
+        egui::FontFamily::Monospace
+    };
+    painter.text(
+        egui::pos2(header.left() + pad, header.center().y),
+        egui::Align2::LEFT_CENTER,
+        icon.glyph,
+        egui::FontId::new(scale.icon, family),
+        icon.color.gamma_multiply(alpha),
+    );
+    // Three runs on one line: the format, the counts, and the warning. In a
+    // pane too narrow for all three it is the counts that give way, never the
+    // warning — "this needs a password" is the one fact here a person acts on
+    // before extracting.
+    let mut x = header.left() + pad + scale.icon_column;
+    let end = header.right() - pad;
+    let centre = header.center().y;
+    let run = |text: String, color: egui::Color32| {
+        painter.layout_no_wrap(text, font.clone(), color.gamma_multiply(alpha))
+    };
+    let label = run(format.clone(), palette.text);
+    let warning = encrypted.then(|| run(" · encrypted".to_string(), palette.yellow));
+    let label_width = label.size().x;
+    painter.galley(
+        egui::pos2(x, centre - label.size().y / 2.0),
+        label,
+        palette.text,
+    );
+    // A word's width between the format and the counts: the two are one line
+    // and two facts.
+    x += label_width + scale.font * 0.6;
+    let warning_width = warning.as_ref().map_or(0.0, |g| g.size().x);
+    let mut counts = LayoutJob::single_section(
+        archive_counts(*files, *total, *total_len, *complete),
+        TextFormat {
+            font_id: font.clone(),
+            color: palette.subtext0.gamma_multiply(alpha),
+            ..Default::default()
+        },
+    );
+    counts.wrap = TextWrapping {
+        max_width: (end - x - warning_width).max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let counts = painter.layout_job(counts);
+    let counts_width = counts.size().x;
+    painter.galley(
+        egui::pos2(x, centre - counts.size().y / 2.0),
+        counts,
+        palette.subtext0,
+    );
+    if let Some(warning) = warning {
+        painter.galley(
+            egui::pos2(x + counts_width, centre - warning.size().y / 2.0),
+            warning,
+            palette.yellow,
+        );
+    }
+    // The hairline, inset to the rows' padding so it reads as the header's
+    // underline rather than a rule across the pane.
+    let rule = header.bottom() + RULE_GAP;
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(content.left() + pad, rule),
+            egui::pos2(content.right() - pad, rule + 1.0),
+        ),
+        0,
+        palette.surface0.gamma_multiply(alpha),
+    );
+
+    // ── The rows ──
+    // Clipped below the hairline, so nothing scrolls up over the header.
+    let top = rule + 1.0 + RULE_GAP;
+    let rows_area = egui::Rect::from_min_max(
+        egui::pos2(content.left(), top.min(content.bottom())),
+        content.max,
+    );
+    let rows_painter = painter.with_clip_rect(rows_area.intersect(painter.clip_rect()));
+    let rows = (rows_area.height() / scale.row_height).floor().max(1.0) as usize;
+    // The footer is the listing's last line, so it scrolls into view after the
+    // last row it counts past rather than sitting under row twenty.
+    let lines = entries.len() + usize::from(*truncated);
+    let first = scroll.min(lines);
+    let lock_slot = if *encrypted { LOCK_SLOT } else { 0.0 };
+    for (row, index) in (first..(first + rows).min(lines)).enumerate() {
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(content.left(), top + row as f32 * scale.row_height),
+            egui::vec2(content.width(), scale.row_height),
+        );
+        match entries.get(index) {
+            Some(entry) => {
+                archive_row(paint, &rows_painter, rect, entry, columns, lock_slot, alpha)
+            }
+            None => {
+                rows_painter.text(
+                    egui::pos2(rect.left() + pad, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    archive_footer(*total, *shown, *complete),
+                    font.clone(),
+                    palette.overlay0.gamma_multiply(alpha),
+                );
+            }
+        }
+    }
+    lines.saturating_sub(rows)
+}
+
+/// One member's row: its path, and its size with a padlock before it when it
+/// needs a password.
+fn archive_row(
+    paint: &Painting<'_>,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    entry: &super::listing::ArchiveRow,
+    columns: crate::ui::RowColumns,
+    lock_slot: f32,
+    alpha: f32,
+) {
+    let palette = paint.palette;
+    let scale = columns.scale;
+    let font = egui::FontId::proportional(scale.font);
+    let right = rect.right() - crate::ui::ROW_PAD_X;
+
+    // A folder has no size to give; a file whose size the archive does not
+    // record says so with the em dash the size column always uses for "not
+    // known", never with a zero.
+    let size = match (entry.is_dir, entry.len) {
+        (true, _) => None,
+        (false, Some(len)) => Some(crate::format::human_size(len)),
+        (false, None) => Some("—".to_string()),
+    };
+    let mut size_left = right;
+    if let Some(text) = size {
+        let color = palette.overlay0.gamma_multiply(alpha);
+        let galley = painter.layout_no_wrap(text, font.clone(), color);
+        size_left = right - galley.size().x;
+        painter.galley(
+            egui::pos2(size_left, rect.center().y - galley.size().y / 2.0),
+            galley,
+            color,
+        );
+    }
+    if entry.encrypted {
+        let family = if paint.nerd {
+            egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())
+        } else {
+            egui::FontFamily::Proportional
+        };
+        painter.text(
+            egui::pos2(size_left - LOCK_GAP, rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            crate::icons::glyph(paint.nerd, crate::icons::LOCK, crate::icons::LOCK_PLAIN),
+            egui::FontId::new(scale.icon - 2.0, family),
+            palette.yellow.gamma_multiply(alpha),
+        );
+    }
+
+    let name_left = rect.left() + crate::ui::ROW_PAD_X;
+    let room = right - columns.size - crate::ui::LINEMODE_GAP - lock_slot - name_left;
+    let (name, color) = if entry.is_dir {
+        (format!("{}/", entry.name), palette.overlay1)
+    } else {
+        (entry.name.clone(), palette.subtext0)
+    };
+    // Shortened from the front, a directory at a time, so the column keeps
+    // what tells its rows apart — the last component — instead of forty
+    // copies of the prefix they share (`chrome::elide_segments`).
+    let name = crate::chrome::elide_path(painter, &name, font.clone(), room.max(0.0));
+    painter.text(
+        egui::pos2(name_left, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        font,
+        color.gamma_multiply(alpha),
+    );
+}
+
+/// The header's counts: `43 files · 12.0 MB uncompressed`.
+///
+/// A `+` on the count when the listing stopped before the archive did, since
+/// the number is then a floor. No size at all when none is known — a `0 B`
+/// beside a file whose size the archive never recorded would be a figure
+/// nobody could reproduce.
+fn archive_counts(files: usize, total: usize, total_len: u64, complete: bool) -> String {
+    if total == 0 && complete {
+        return "empty".to_string();
+    }
+    let plus = if complete { "" } else { "+" };
+    let noun = if files == 1 && complete {
+        "file"
+    } else {
+        "files"
+    };
+    let mut text = format!("{}{plus} {noun}", crate::spot::grouped(files as u64));
+    if total_len > 0 {
+        text.push_str(&format!(
+            " · {} uncompressed",
+            crate::format::human_size(total_len)
+        ));
+    }
+    text
+}
+
+/// The last line of a listing the preview did not keep all of.
+fn archive_footer(total: usize, shown: usize, complete: bool) -> String {
+    let more = total.saturating_sub(shown);
+    if more == 0 {
+        return "… and more".to_string();
+    }
+    let plus = if complete { "" } else { "+" };
+    format!("… and {}{plus} more", crate::spot::grouped(more as u64))
+}
+
 // ── Hexdump ─────────────────────────────────────────────────────────────────
 
 /// One row of a hexdump: `(offset, hex, ascii)`.
@@ -1117,6 +1440,9 @@ fn media_body(
             // to appear is a flash, not feedback.
         } else if let Some(badge) = media.badge() {
             quiet(paint, content, badge, alpha);
+            if let Some(note) = &media.note {
+                quiet_note(paint, content, note, alpha);
+            }
         } else {
             quiet(paint, content, "no decoder for this format", alpha);
         }
@@ -1620,6 +1946,7 @@ mod tests {
                 error: None,
                 decoding: false,
                 doc: None,
+                note: None,
             }),
             Body::Media(Media {
                 kind: PreviewKind::Image,
@@ -1630,6 +1957,7 @@ mod tests {
                 error: Some("no decoder for this format".to_string()),
                 decoding: false,
                 doc: None,
+                note: None,
             }),
             // A document whose worker has answered but whose page has not
             // arrived, and one that has no reader at all: the two states a PDF
@@ -1643,6 +1971,7 @@ mod tests {
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(doc_fixture(42, crate::preview::doc::Counter::Page, false))),
+                note: None,
             }),
             Body::Media(Media {
                 kind: PreviewKind::Pdf,
@@ -1653,6 +1982,7 @@ mod tests {
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(doc_fixture(1, crate::preview::doc::Counter::Page, true))),
+                note: None,
             }),
             Body::Media(Media {
                 kind: PreviewKind::Gcode,
@@ -1663,6 +1993,7 @@ mod tests {
                 error: None,
                 decoding: false,
                 doc: Some(Box::new(doc_fixture(312, crate::preview::doc::Counter::Layer, false))),
+                note: None,
             }),
         ];
 
@@ -1710,6 +2041,182 @@ mod tests {
                 now,
             );
         });
+    }
+
+    /// An archive's listing draws in every state it has: kept rows with a
+    /// footer past them and locked members among them, an empty archive, a
+    /// listing that stopped early, and the badge with its reason when nothing
+    /// could list it — at every scroll, in a pane too small to hold the
+    /// header, and in none at all.
+    #[test]
+    fn an_archive_listing_paints_without_panicking() {
+        use crate::preview::listing::ArchiveRow;
+        let row = |name: &str, is_dir: bool, len: Option<u64>, encrypted: bool| ArchiveRow {
+            name: name.to_string(),
+            is_dir,
+            len,
+            encrypted,
+        };
+        let entries: Vec<ArchiveRow> = std::iter::once(row("project", true, None, false))
+            .chain((0..120).map(|i| {
+                row(
+                    &format!("project/src/a/rather/deep/path/to/module_{i}.rs"),
+                    false,
+                    Some(i * 997),
+                    i % 7 == 0,
+                )
+            }))
+            .chain(std::iter::once(row(
+                "project/unknown.bz2",
+                false,
+                None,
+                false,
+            )))
+            .collect();
+        let archive = |entries: Vec<ArchiveRow>, total: usize, complete: bool| {
+            let shown = entries.len();
+            Body::Archive {
+                format: "TAR.GZ".to_string(),
+                files: entries.iter().filter(|e| !e.is_dir).count(),
+                total_len: 123_456_789,
+                truncated: total > shown || !complete,
+                complete,
+                encrypted: entries.iter().any(|e| e.encrypted),
+                shown,
+                total,
+                entries,
+            }
+        };
+        let bodies = vec![
+            archive(entries.clone(), 1_234 + entries.len(), true),
+            archive(entries.clone(), entries.len(), false),
+            archive(Vec::new(), 0, true),
+            archive(entries[..3].to_vec(), 3, true),
+            Body::Media(Media {
+                kind: PreviewKind::Archive,
+                thumb: None,
+                full: None,
+                swapped_at: None,
+                anim: None,
+                error: None,
+                decoding: false,
+                doc: None,
+                note: Some(crate::preview::listing::INSTALL_7ZIP.to_string()),
+            }),
+        ];
+
+        let ctx = egui::Context::default();
+        let nerd = crate::icons::install(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let palette = crate::theme::Palette::default();
+            let theme = df_core::config::Theme::default();
+            let now = Instant::now();
+            let paint = Painting {
+                tips: None,
+                painter: ui.painter(),
+                palette: &palette,
+                theme: &theme,
+                nerd,
+                show_symlink: true,
+                now,
+            };
+            let mut pane = Pane::start(df_core::fs::no_notifier());
+            for body in &bodies {
+                for scroll in [0usize, 3, 10_000] {
+                    for size in [
+                        egui::vec2(420.0, 800.0),
+                        egui::vec2(0.0, 0.0),
+                        egui::vec2(30.0, 24.0),
+                        egui::vec2(160.0, 40.0),
+                    ] {
+                        let rect = egui::Rect::from_min_size(egui::pos2(900.0, 8.0), size);
+                        pane.shown = Some(crate::preview::Shown {
+                            body: clone_body(body),
+                        });
+                        pane.scroll = scroll;
+                        preview(&paint, rect, &mut pane, 2.0, now);
+                        // A pane with no content box draws nothing and
+                        // measures nothing; every other one clamps.
+                        if content_rect(rect).is_positive() {
+                            assert!(pane.scroll <= pane.max_scroll, "the scroll was not clamped");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// The last row can be scrolled to, and the footer after it: a listing
+    /// longer than the pane is scrollable by exactly the rows and the footer
+    /// that do not fit.
+    #[test]
+    fn an_archive_scrolls_to_its_footer() {
+        use crate::preview::listing::ArchiveRow;
+        let entries: Vec<ArchiveRow> = (0..40)
+            .map(|i| ArchiveRow {
+                name: format!("f{i}"),
+                is_dir: false,
+                len: Some(1),
+                encrypted: false,
+            })
+            .collect();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let palette = crate::theme::Palette::default();
+            let theme = df_core::config::Theme::default();
+            let paint = Painting {
+                tips: None,
+                painter: ui.painter(),
+                palette: &palette,
+                theme: &theme,
+                nerd: false,
+                show_symlink: true,
+                now: Instant::now(),
+            };
+            let content = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 400.0));
+            let body = |truncated| Body::Archive {
+                format: "ZIP".to_string(),
+                entries: entries.clone(),
+                shown: 40,
+                total: if truncated { 90 } else { 40 },
+                files: 40,
+                total_len: 40,
+                truncated,
+                complete: true,
+                encrypted: false,
+            };
+            let rows =
+                ((400.0 - (ROW_HEIGHT + RULE_GAP * 2.0 + 1.0)) / ROW_HEIGHT).floor() as usize;
+            let whole = archive_body(&paint, ui.painter(), content, &body(false), 0, 1.0);
+            assert_eq!(whole, 40 - rows);
+            let cut = archive_body(&paint, ui.painter(), content, &body(true), 0, 1.0);
+            assert_eq!(cut, whole + 1, "the footer is one more line to scroll to");
+        });
+    }
+
+    #[test]
+    fn the_archive_header_counts_and_the_footer_says_how_much_more() {
+        assert_eq!(
+            archive_counts(43, 50, 12 * 1024 * 1024, true),
+            "43 files · 12.0 MB uncompressed"
+        );
+        assert_eq!(archive_counts(1, 1, 12, true), "1 file · 12 B uncompressed");
+        assert_eq!(
+            archive_counts(500_000, 500_000, 1, false),
+            "500,000+ files · 1 B uncompressed",
+            "a listing that stopped early is a floor"
+        );
+        assert_eq!(
+            archive_counts(1, 1, 0, true),
+            "1 file",
+            "no size is not 0 B"
+        );
+        assert_eq!(archive_counts(0, 0, 0, true), "empty");
+        assert_eq!(archive_counts(0, 2, 0, true), "0 files");
+
+        assert_eq!(archive_footer(1_734, 500, true), "… and 1,234 more");
+        assert_eq!(archive_footer(500_000, 500, false), "… and 499,500+ more");
+        assert_eq!(archive_footer(500, 500, false), "… and more");
     }
 
     /// A document that has been opened but has no pixels yet — the state every
@@ -1834,7 +2341,29 @@ mod tests {
                     copy.chip_at = view.chip_at;
                     Box::new(copy)
                 }),
+                note: media.note.clone(),
             }),
+            Body::Archive {
+                format,
+                entries,
+                shown,
+                total,
+                files,
+                total_len,
+                truncated,
+                complete,
+                encrypted,
+            } => Body::Archive {
+                format: format.clone(),
+                entries: entries.clone(),
+                shown: *shown,
+                total: *total,
+                files: *files,
+                total_len: *total_len,
+                truncated: *truncated,
+                complete: *complete,
+                encrypted: *encrypted,
+            },
         }
     }
 

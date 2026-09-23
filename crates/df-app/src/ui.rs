@@ -128,12 +128,12 @@ impl Default for Scale {
 const ICON_COLUMN: f32 = 19.0;
 
 /// Horizontal padding inside a row.
-const ROW_PAD_X: f32 = 7.0;
+pub(crate) const ROW_PAD_X: f32 = 7.0;
 
 /// The gap between the longest name and the linemode column. Names truncate
 /// into it rather than colliding with it, so the right-hand column is always
 /// readable however long the file names get.
-const LINEMODE_GAP: f32 = 12.0;
+pub(crate) const LINEMODE_GAP: f32 = 12.0;
 
 /// The usage bar's track width, in logical points (PLAN §7.3's du mode).
 ///

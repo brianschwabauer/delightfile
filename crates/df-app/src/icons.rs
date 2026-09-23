@@ -414,6 +414,29 @@ pub fn generic(palette: &Palette, nerd: bool) -> Icon {
     }
 }
 
+/// The archive kind's glyph and hue, for the preview's archive header: the
+/// same mark an archive's row wears when no logo outranks it, so the header
+/// and the kind column agree about what the file is.
+pub fn archive(palette: &Palette, nerd: bool) -> Icon {
+    Icon {
+        glyph: if nerd {
+            kind_glyph(FileKind::Archive)
+        } else {
+            ' '
+        },
+        color: kind_color(FileKind::Archive, palette),
+    }
+}
+
+/// A padlock, for an archive member that needs a password
+/// (nf-fa-lock — the glyph the `lock` extension already wears).
+pub const LOCK: char = '\u{f023}';
+
+/// …and its stand-in without a patched font: a key, since egui's bundled faces
+/// have no padlock (`the_chrome_glyphs_all_render` holds it to one they do
+/// draw).
+pub const LOCK_PLAIN: &str = "🗝";
+
 /// The plain directory glyph, for a card that stands for a *place* rather than
 /// for a file: the ghost of a tab being dragged out of the strip (PLAN §2).
 pub fn folder(palette: &Palette, nerd: bool) -> Icon {
@@ -878,9 +901,9 @@ mod glyph_tests {
         let _ = ctx.run_ui(Default::default(), |_| {});
         let plain = [
             'Y', 'f', '⊞', '☰', '✓', '☐', '•', '◂', '▣', '▸', '›', '…', '×', '·', '→', '↑', '↓',
-            '←', '⇧', '≈',
+            '←', '⇧', '≈', '🗝',
         ];
-        let patched = ['\u{f418}', '\u{f0b0}', '\u{f01c}'];
+        let patched = ['\u{f418}', '\u{f0b0}', '\u{f01c}', super::LOCK, '\u{f1c6}'];
         let font = egui::FontId::proportional(14.0);
         for c in plain.iter().chain(patched.iter().filter(|_| nerd)) {
             assert!(
