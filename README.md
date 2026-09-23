@@ -49,7 +49,8 @@ open.
   what is inside, extract the selection. 7z, rar and bzip2 are detected and refused rather
   than half-read.
 - **Trash and mounts.** The freedesktop trash browsed as a directory with restore on
-  `Enter`, and udisks2 mount/unmount over a hand-rolled D-Bus client.
+  `Enter`, udisks2 mount/unmount over a hand-rolled D-Bus client, and gvfs network
+  shares (SMB, SFTP, FTP, WebDAV, NFS) listed beside the disks, with a connect prompt.
 - **SFTP.** Hosts from yazi's `vfs.toml` browse as directories, with download-on-open and
   upload-on-drop.
 - **Tabs.** Folder tabs joined to the bar below them, reorderable by dragging, and

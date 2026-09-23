@@ -580,7 +580,11 @@ pub fn mount_point_of(path: &Path) -> Option<PathBuf> {
     best
 }
 
-fn uid() -> u32 {
+/// The process's user id. Public because it is also what names the
+/// directories that belong to this user under `/run/user` — the app's mount
+/// manager finds gvfs's shares there — and one `getuid` wrapper is better than
+/// a second `unsafe` block beside it.
+pub fn uid() -> u32 {
     // `getuid` cannot fail and touches nothing; std simply does not expose it.
     #[allow(unsafe_code)]
     unsafe {

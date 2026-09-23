@@ -311,6 +311,22 @@ struct PendingArchive {
     slot: Arc<std::sync::Mutex<Option<std::result::Result<df_core::archive::ArchiveTree, String>>>>,
 }
 
+/// A `gio mount` running on the pool for the connect prompt, and where its
+/// answer lands.
+///
+/// A job rather than a request to the mounts worker because a server that is
+/// not answering holds it for as long as a network timeout, and the worker is
+/// also what lists the disks: a slow connect must not freeze the card. As a job
+/// it is in the task panel, which is where a long wait belongs.
+struct PendingConnect {
+    id: TaskId,
+    /// What was typed, validated: the address the terminal fallback re-runs.
+    url: String,
+    /// What the toasts call it — [`crate::mounts::Address::label`].
+    label: String,
+    slot: Arc<std::sync::Mutex<Option<crate::mounts::Connected>>>,
+}
+
 /// Why an archive is being listed.
 ///
 /// Extraction needs the tree as much as browsing does — [`df_core::archive::plan_extract`] is a
@@ -1088,6 +1104,8 @@ pub struct App {
     udisks: Option<crate::mounts::Mounts>,
     /// The disks card, while it is open (PLAN §7.4).
     mounts: Option<crate::mounts::Card>,
+    /// Connections to servers in flight, from the card's connect prompt.
+    connects: Vec<PendingConnect>,
     /// Files collected across directories (PLAN §7.1). Session-lived: see
     /// [`crate::basket`].
     basket: crate::basket::Basket,
@@ -1680,6 +1698,7 @@ impl App {
             folders_sorted: None,
             udisks: None,
             mounts: None,
+            connects: Vec::new(),
             basket: crate::basket::Basket::default(),
             basket_open: false,
             basket_first: 0,
@@ -2011,6 +2030,10 @@ impl App {
         if self.poll_mounts(now) {
             changed = true;
         }
+        // …and whatever a connection to a server came to.
+        if self.poll_connects(now) {
+            changed = true;
+        }
 
         for event in self.watcher.drain() {
             changed = true;
@@ -2186,6 +2209,10 @@ impl App {
                 // never fills one and would otherwise sit here for ever.
                 self.poll_remote_ops(now);
                 self.remote_ops.retain(|op| op.id != event.id);
+                // The same for a connection: read, then forgotten, so one
+                // cancelled before it ran is not waited on for ever.
+                self.poll_connects(now);
+                self.connects.retain(|pending| pending.id != event.id);
             }
             // A failure is not always the end — a transient one is republished
             // as `Failed { retries }` and then runs again — so the op stays
@@ -4641,9 +4668,10 @@ impl App {
     /// keymap can grow rows for them without this code changing shape.
     fn overlay_literal(&mut self, chord: Chord, now: Instant) -> bool {
         let plain = chord.mods.is_none() || chord.mods == df_core::keymap::Mods::SHIFT;
-        // The disks card's two extra verbs. Matched literally for the same
-        // reason the conflict resolver's answers were: `[pick]` is the shared
-        // "choose one of these" table and it has no row for ejecting a drive.
+        // The mount card's own verbs. Matched literally for the same reason
+        // the conflict resolver's answers were: `[pick]` is the shared "choose
+        // one of these" table and it has no row for ejecting a drive or
+        // connecting to a server.
         if self.mounts.is_some() && chord.mods.is_none() {
             match chord.key {
                 Key::Char('e') => {
@@ -4652,6 +4680,18 @@ impl App {
                 }
                 Key::Char('u') => {
                     self.unmount_selected(now);
+                    return true;
+                }
+                Key::Char('m') => {
+                    self.mount_selected(now);
+                    return true;
+                }
+                Key::Char('c') => {
+                    self.open_connect();
+                    return true;
+                }
+                Key::Char('r') => {
+                    self.refresh_mounts();
                     return true;
                 }
                 _ => {}
@@ -5088,14 +5128,39 @@ impl App {
     /// step that has to happen first when it has not happened yet, and pressing
     /// `Enter` twice on a fresh USB stick doing both is the shortest true
     /// description of the job.
+    ///
+    /// A share is always mounted — gvfs lists nothing else — so `Enter` on one
+    /// is always "go there". The connect row's `Enter` is its prompt.
     fn mount_action(&mut self, now: Instant) {
+        use crate::mounts::Item;
         let Some(card) = &self.mounts else { return };
+        match card.selected() {
+            Some(Item::Disk(_)) => {}
+            Some(Item::Share(_)) => {
+                let Some(share) = card.selected_share() else {
+                    return;
+                };
+                // Not into a share that is on its way out.
+                if card.busy.as_deref() == Some(share.url.as_str()) {
+                    return;
+                }
+                let path = share.path.clone();
+                self.close_overlay(now);
+                self.jump_to(path, now);
+                return;
+            }
+            Some(Item::Connect) => {
+                self.open_connect();
+                return;
+            }
+            None => return,
+        }
         if card.busy.is_some() {
             // One call at a time: two mounts of the same device is one of them
             // failing with `AlreadyMounted`.
             return;
         }
-        let Some(device) = card.selected().cloned() else {
+        let Some(device) = card.selected_device().cloned() else {
             return;
         };
         match &device.mount {
@@ -5104,25 +5169,77 @@ impl App {
                 self.close_overlay(now);
                 self.jump_to(path, now);
             }
-            None => {
-                if let Some(card) = &mut self.mounts {
-                    card.busy = Some(device.object.clone());
-                }
-                self.udisks()
-                    .ask(crate::mounts::Request::Mount(device.object));
-            }
+            None => self.mount_device(device),
         }
     }
 
-    /// `u` on a mounted row: put it away.
+    /// Ask udisks2 to mount `device`, and draw its row busy until it answers.
+    fn mount_device(&mut self, device: crate::mounts::Device) {
+        if let Some(card) = &mut self.mounts {
+            card.busy = Some(device.object.clone());
+        }
+        self.udisks()
+            .ask(crate::mounts::Request::Mount(device.object));
+    }
+
+    /// `m`: mount, and only mount.
+    ///
+    /// `Enter` mounts an unmounted disk too, and goes into a mounted one; `m`
+    /// is the key that never also *goes* anywhere, for a disk wanted mounted
+    /// with the cursor left where it is. On the connect row it is that row's
+    /// own action, since connecting is how a share gets mounted.
+    fn mount_selected(&mut self, now: Instant) {
+        use crate::mounts::Item;
+        let Some(card) = &self.mounts else { return };
+        let label = match card.selected() {
+            Some(Item::Connect) => {
+                self.open_connect();
+                return;
+            }
+            Some(Item::Share(_)) => card.selected_share().map(|share| share.label.clone()),
+            Some(Item::Disk(_)) => {
+                let Some(device) = card.selected_device().cloned() else {
+                    return;
+                };
+                if !device.is_mounted() {
+                    if card.busy.is_none() {
+                        self.mount_device(device);
+                    }
+                    return;
+                }
+                Some(device.label)
+            }
+            None => None,
+        };
+        if let Some(label) = label {
+            self.toasts
+                .notice(format!("{label} is already mounted"), now);
+        }
+    }
+
+    /// `u` on a mounted row: put it away. A disk goes back to udisks2 and a
+    /// share to gvfs, both through the one worker, so a share being unmounted
+    /// is drawn busy exactly as a disk is.
     fn unmount_selected(&mut self, now: Instant) {
-        let Some(device) = self
-            .mounts
-            .as_ref()
-            .filter(|card| card.busy.is_none())
-            .and_then(|card| card.selected())
-            .cloned()
-        else {
+        use crate::mounts::Item;
+        let Some(card) = self.mounts.as_ref().filter(|card| card.busy.is_none()) else {
+            return;
+        };
+        match card.selected() {
+            Some(Item::Disk(_)) => {}
+            Some(Item::Share(_)) => {
+                let Some(url) = card.selected_share().map(|share| share.url.clone()) else {
+                    return;
+                };
+                if let Some(card) = &mut self.mounts {
+                    card.busy = Some(url.clone());
+                }
+                self.udisks().ask(crate::mounts::Request::UnmountShare(url));
+                return;
+            }
+            Some(Item::Connect) | None => return,
+        }
+        let Some(device) = card.selected_device().cloned() else {
             return;
         };
         if !device.is_mounted() {
@@ -5139,13 +5256,25 @@ impl App {
 
     /// `e`: eject the whole drive, which is what "safely remove" means.
     fn eject_selected(&mut self, now: Instant) {
-        let Some(device) = self
-            .mounts
-            .as_ref()
-            .filter(|card| card.busy.is_none())
-            .and_then(|card| card.selected())
-            .cloned()
-        else {
+        use crate::mounts::Item;
+        let Some(card) = self.mounts.as_ref().filter(|card| card.busy.is_none()) else {
+            return;
+        };
+        match card.selected() {
+            Some(Item::Disk(_)) => {}
+            Some(Item::Share(_)) => {
+                // A share has no drive to eject. The key that does what the
+                // hand reaching for `e` meant is named, rather than `e`
+                // quietly unmounting — the card has a key for that already.
+                if let Some(label) = card.selected_share().map(|share| share.label.clone()) {
+                    self.toasts
+                        .notice(format!("{label} cannot be ejected: u unmounts it"), now);
+                }
+                return;
+            }
+            Some(Item::Connect) | None => return,
+        }
+        let Some(device) = card.selected_device().cloned() else {
             return;
         };
         let Some(drive) = device.drive.clone().filter(|_| device.ejectable) else {
@@ -5157,6 +5286,144 @@ impl App {
             card.busy = Some(device.object.clone());
         }
         self.udisks().ask(crate::mounts::Request::Eject(drive));
+    }
+
+    /// `r`: list again. For the share that was connected in a terminal, which
+    /// nothing announces to this program, and for the disk that was plugged in
+    /// while the card was up.
+    fn refresh_mounts(&mut self) {
+        if self.mounts.is_some() {
+            self.udisks().ask(crate::mounts::Request::List);
+        }
+    }
+
+    /// `c`, or `Enter` on the connect row: the address prompt.
+    ///
+    /// The card comes down first. The prompt is in the top row and the card's
+    /// scrim is over the top row, so a field left behind it would be typed
+    /// into under a veil. A connection that works goes to the new share, which
+    /// is past the card anyway, and the card lists it the next time it opens.
+    fn open_connect(&mut self) {
+        self.mounts = None;
+        self.open_prompt(PromptKind::Connect);
+    }
+
+    /// `Enter` in the connect prompt, with an address that passed
+    /// [`crate::mounts::connect_url`]: `gio mount` it on the pool.
+    fn connect(&mut self, url: String, now: Instant) {
+        let label = crate::mounts::Address::parse(&url)
+            .map(|address| address.label())
+            .unwrap_or_else(|| url.clone());
+        let slot: Arc<std::sync::Mutex<Option<crate::mounts::Connected>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&slot);
+        let job_url = url.clone();
+        let job = FnJob::new(
+            format!("Connect to {label}"),
+            Lane::Micro,
+            move |_ctx: &TaskCtx| {
+                let result = crate::mounts::connect(&job_url);
+                match sink.lock() {
+                    Ok(mut guard) => *guard = Some(result),
+                    Err(poisoned) => *poisoned.into_inner() = Some(result),
+                }
+                Ok(())
+            },
+        );
+        let id = self.engine.spawn(job);
+        // The prompt closes on this `Enter` and a server can take seconds to
+        // answer; without a word here the keystroke would look like it did
+        // nothing at all (`delightful-ui` §4).
+        self.toasts.notice(format!("Connecting to {label}…"), now);
+        self.connects.push(PendingConnect {
+            id,
+            url,
+            label,
+            slot,
+        });
+    }
+
+    /// Take whatever the connections have come to. Returns whether any had.
+    fn poll_connects(&mut self, now: Instant) -> bool {
+        if self.connects.is_empty() {
+            return false;
+        }
+        let mut landed = Vec::new();
+        self.connects.retain(|pending| {
+            let result = match pending.slot.lock() {
+                Ok(mut guard) => guard.take(),
+                Err(poisoned) => poisoned.into_inner().take(),
+            };
+            match result {
+                Some(result) => {
+                    landed.push((pending.url.clone(), pending.label.clone(), result));
+                    false
+                }
+                None => true,
+            }
+        });
+        let changed = !landed.is_empty();
+        for (url, label, result) in landed {
+            self.connected(url, label, result, now);
+        }
+        changed
+    }
+
+    /// One connection's outcome: go there, hand it to a terminal, or say why
+    /// not.
+    fn connected(
+        &mut self,
+        url: String,
+        label: String,
+        result: crate::mounts::Connected,
+        now: Instant,
+    ) {
+        match result {
+            crate::mounts::Connected::Mounted(path) => {
+                self.toasts.notice(format!("Connected to {label}"), now);
+                self.refresh_mounts();
+                // Only when nothing else has the keyboard. The connection lands
+                // seconds after its `Enter`, and a rename prompt or a delete
+                // confirmation opened in those seconds is about the directory
+                // it was opened in: moving the listing out from under it would
+                // point it at a different file.
+                if let Some(path) = path.filter(|_| self.free_to_move()) {
+                    self.mounts = None;
+                    self.sync_context();
+                    self.jump_to(path, now);
+                }
+            }
+            crate::mounts::Connected::NeedsTerminal => {
+                // gio wanted to ask something and there was nobody to ask; a
+                // terminal is somewhere it can. Nothing tells this program when
+                // the user has finished typing there, so the share turns up
+                // on the card's next listing — `M`, or `r` if it is up.
+                let cwd = self.child_cwd();
+                match open::spawn_detached(
+                    crate::mounts::TERMINAL_MOUNT,
+                    &[PathBuf::from(url)],
+                    &cwd,
+                ) {
+                    Ok(()) => self
+                        .toasts
+                        .notice("Enter your credentials in the terminal", now),
+                    Err(e) => self.toasts.error(format!("{e}"), now),
+                }
+            }
+            crate::mounts::Connected::Failed(message) => self.toasts.error(message, now),
+        }
+    }
+
+    /// Whether a finished connection may move the listing: no prompt, no
+    /// dialog, and no surface up but the mount card — which the move closes,
+    /// its job done — or the task panel, which is about tasks and not files.
+    fn free_to_move(&self) -> bool {
+        self.prompt.is_none()
+            && self.dialog.is_none()
+            && self.picker.is_none()
+            && self.spot.is_none()
+            && self.finder.is_none()
+            && self.search.is_none()
     }
 
     /// Take whatever the worker has said. Returns whether anything changed.
@@ -5174,9 +5441,9 @@ impl App {
                 card.busy = None;
             }
             match reply {
-                crate::mounts::Reply::Devices(devices) => {
+                crate::mounts::Reply::Listing { devices, shares } => {
                     if let Some(card) = &mut self.mounts {
-                        card.update(devices);
+                        card.update(devices, shares);
                     }
                 }
                 crate::mounts::Reply::Mounted(path) => {
@@ -6202,6 +6469,15 @@ impl App {
                 return;
             }
             PromptKind::Path => self.go_to_path(&text, now).err(),
+            // An address that is not one stays in the field with the reason
+            // beside it; one that is goes to the pool, and the prompt closes.
+            PromptKind::Connect => match crate::mounts::connect_url(&text) {
+                Ok(url) => {
+                    self.connect(url, now);
+                    None
+                }
+                Err(message) => Some(message),
+            },
         };
         match error {
             Some(message) => {
@@ -8172,15 +8448,17 @@ impl App {
             }
             return;
         }
-        // The disks card: a click puts the cursor on the row and acts on it,
+        // The mount card: a click puts the cursor on the row and acts on it,
         // which is the same one-click-is-Enter rule the opener picker follows.
+        // The offset counts drawn *rows*, headings and empty states skipped,
+        // which is what the card's own `visible_items` lists.
         if self.mounts.is_some() {
             if let Control::PanelRow(offset) = control {
-                if let Some(card) = &mut self.mounts {
-                    let index = (card.first + offset).min(card.devices.len().saturating_sub(1));
-                    let delta = index as isize - card.cursor as isize;
-                    card.move_cursor(delta);
-                }
+                let Some(card) = &mut self.mounts else { return };
+                let Some(item) = card.visible_items().get(offset).copied() else {
+                    return;
+                };
+                card.select(item);
                 self.mount_action(now);
             }
             return;
@@ -13190,15 +13468,17 @@ fn overlay_hints(
     dialog: &Option<Dialog>,
 ) -> Vec<(&'static str, &'static str)> {
     match overlay {
-        // The disks card's own vocabulary, including the two `[pick]` has no
+        // The mount card's own vocabulary, including the five `[pick]` has no
         // row for — which is exactly why they are listed here: a key that is
         // not on the help sheet has to be on the card or it may as well not
         // exist.
         OverlayGeom::Mounts(_) => vec![
-            ("↑↓", "choose"),
-            ("Enter", "mount / open"),
+            ("Enter", "open"),
+            ("m", "mount"),
             ("u", "unmount"),
             ("e", "eject"),
+            ("c", "connect"),
+            ("r", "refresh"),
             ("Esc", "close"),
         ],
         // Every key the spot card answers to, including the two df-core's
@@ -14548,19 +14828,24 @@ mod tests {
         assert!(spot.iter().any(|(k, _)| k.contains("Space")));
         assert!(spot.iter().any(|(k, _)| k.contains('⇧')));
         assert!(spot.iter().any(|(k, _)| k.contains("Tab")));
-        // The disks card advertises the two verbs `[pick]` has no row for.
+        // The mount card advertises the five verbs `[pick]` has no row for.
         let mounts = overlay_hints(
             &OverlayGeom::Mounts(crate::mounts::Geometry {
                 card: nowhere,
                 body: nowhere,
+                lines: Vec::new(),
                 rows: Vec::new(),
             }),
             &None,
         );
-        assert!(mounts.iter().any(|(k, what)| *k == "e" && *what == "eject"));
-        assert!(mounts
+        let keys: Vec<String> = mounts
             .iter()
-            .any(|(k, what)| *k == "u" && *what == "unmount"));
+            .map(|(k, what)| format!("{k} {what}"))
+            .collect();
+        assert_eq!(
+            keys.join(" · "),
+            "Enter open · m mount · u unmount · e eject · c connect · r refresh · Esc close"
+        );
     }
 
     /// **Only video and audio grow a transport** (PLAN §4.3). A PDF has pages

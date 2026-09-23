@@ -45,6 +45,8 @@ pub enum PromptKind {
     /// A click on the breadcrumb's last segment: the directory you are in,
     /// as a whole path you can edit, paste over, and `Enter` to go to.
     Path,
+    /// `c` in the mount manager: a server address for `gio mount`.
+    Connect,
 }
 
 impl PromptKind {
@@ -60,6 +62,7 @@ impl PromptKind {
             PromptKind::ShellBlock => "Shell (block):",
             PromptKind::ConflictRename => "New name:",
             PromptKind::Path => "Go to:",
+            PromptKind::Connect => "Connect to:",
         }
     }
 
@@ -200,6 +203,7 @@ mod tests {
             PromptKind::ShellBlock,
             PromptKind::ConflictRename,
             PromptKind::Path,
+            PromptKind::Connect,
         ] {
             assert!(kind.title().ends_with(':'), "{kind:?}");
         }
