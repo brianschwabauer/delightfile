@@ -7,8 +7,9 @@
 //!
 //! Rate handling (M2): audible at forward rates ≤ 2× (nearest-neighbor
 //! resample — 2× sounds chipmunk, per §4.4 pitch is not corrected); muted
-//! above 2× and in reverse. The device may run at any rate/channel count; the
-//! callback adapts from the ring's fixed 48 kHz stereo.
+//! above 2× and in reverse. The device is opened at the ring's 48 kHz when it
+//! will take it; when it will not, the callback interpolates (see
+//! [`Resampler`]) and maps the ring's stereo onto whatever channels it has.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crossbeam_channel::{Receiver, Sender};
 use dv_media::{AudioDecoder, AUDIO_RATE};
 
+use crate::dsp::Limiter;
 use crate::ring::AudioRing;
 
 /// How far ahead of the clock the render thread keeps the ring (§5).
@@ -238,8 +240,184 @@ impl AudioSys {
     }
 }
 
-/// Open the default output device. The callback adapts rate (nearest
-/// neighbor) and channel count from the ring's 48 kHz stereo.
+/// 4-point Catmull-Rom (cubic Hermite with centred-difference tangents) at
+/// `t ∈ [0, 1)` between `p1` and `p2`. Passes through both, so a conversion
+/// that lands exactly on a source sample reproduces it untouched.
+fn catmull_rom(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let c1 = 0.5 * (p2 - p0);
+    let c2 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+    let c3 = 0.5 * (p3 - p0) + 1.5 * (p1 - p2);
+    ((c3 * t + c2) * t + c1) * t + p1
+}
+
+/// Place one stereo frame into the device's channel layout: a mono device gets
+/// the downmix, anything wider gets L/R and silence above them.
+fn write_frame(out: &mut [f32], channels: usize, f: usize, l: f32, r: f32) {
+    match channels {
+        1 => out[f] = (l + r) * 0.5,
+        _ => {
+            out[f * channels] = l;
+            out[f * channels + 1] = r;
+            for c in 2..channels {
+                out[f * channels + c] = 0.0;
+            }
+        }
+    }
+}
+
+/// Turns the ring's fixed 48 kHz stereo into the device's rate and channel
+/// count, one cpal callback at a time.
+///
+/// The device is opened at [`AUDIO_RATE`] when it will take it (see
+/// [`output_config`]) and then this is a straight copy. When it will not —
+/// plenty of machines only offer 44.1 kHz — the conversion has to genuinely
+/// interpolate: picking the nearest ring frame drops every ~12th one at
+/// 48→44.1, and a dropped sample is a step discontinuity, which is broadband
+/// noise. It is audible as grit on anything bright.
+///
+/// So each output frame is a 4-point Catmull-Rom between the ring frames
+/// around it. That window reaches one frame behind the output position and two
+/// ahead, and a callback boundary falls wherever the device's buffer size puts
+/// it — so the frames at and before the next output position are carried over
+/// to the next callback along with the fractional phase. Without them the
+/// window would restart from silence at the device's buffer rate, which is a
+/// click train rather than a stream.
+struct Resampler {
+    /// Ring frames per output frame (`AUDIO_RATE` ÷ the device's rate).
+    ratio: f64,
+    /// Fractional source position of the next output frame, measured from
+    /// `win`'s second frame.
+    phase: f64,
+    /// Source frames, interleaved stereo.
+    ///
+    /// On the interpolating path this is the window the next output frame
+    /// reads: frame 0 is the point behind it and frame 1 the one `phase` is
+    /// measured from, so it is never shorter than three frames. A callback
+    /// pulls whatever it is short of and keeps whatever it did not consume —
+    /// a device running faster than the ring can over-pull by a frame, and a
+    /// pulled frame left behind is a dropped sample, which is exactly the
+    /// defect this whole path exists to avoid. On the native-rate path
+    /// nothing is carried and this is plain scratch.
+    win: Vec<f32>,
+}
+
+/// Frames of history the window needs behind and ahead of the next output
+/// position: one behind, the two the interpolation runs between. Cubic needs a
+/// fourth point, but that one is always ahead of the carry.
+const WINDOW_CARRY: usize = 3;
+
+impl Resampler {
+    fn new(ratio: f64) -> Resampler {
+        Resampler {
+            ratio,
+            phase: 0.0,
+            win: vec![0.0; WINDOW_CARRY * 2],
+        }
+    }
+
+    /// Write one callback's worth of output — `out.len() / channels` frames —
+    /// pulling ring samples through `pull`, which fills its argument and
+    /// returns how many samples it actually got. Short is an underrun, and an
+    /// underrun reads as silence.
+    fn fill(
+        &mut self,
+        out: &mut [f32],
+        channels: usize,
+        mut pull: impl FnMut(&mut [f32]) -> usize,
+    ) {
+        let channels = channels.max(1);
+        let frames = out.len() / channels;
+        if frames == 0 {
+            return;
+        }
+
+        // Device at the ring's own rate: nothing to interpolate, and nothing
+        // to carry — an interpolator asked for the sample it was handed
+        // returns it, but only after paying for four multiplies.
+        if self.ratio == 1.0 {
+            let n = frames * 2;
+            self.win.resize(n, 0.0);
+            let got = pull(&mut self.win[..n]).min(n);
+            self.win[got..n].fill(0.0);
+            for f in 0..frames {
+                write_frame(out, channels, f, self.win[f * 2], self.win[f * 2 + 1]);
+            }
+            return;
+        }
+
+        // Output frame `f` reads a window at source position `phase + f ×
+        // ratio` that reaches one frame back and two forward, so the last
+        // output frame sets how far `win` has to extend. The window then moves
+        // on by `advance` whole frames and must leave `WINDOW_CARRY` behind it
+        // for the next callback, which for a fast device is the binding
+        // constraint instead. Pull only the difference: everything already in
+        // `win` is a frame that was pulled and not yet read.
+        let last = self.phase + (frames - 1) as f64 * self.ratio;
+        let end = self.phase + frames as f64 * self.ratio;
+        let advance = end.floor() as usize;
+        let have = self.win.len() / 2;
+        let total = have
+            .max(last.floor() as usize + WINDOW_CARRY + 1)
+            .max(advance + WINDOW_CARRY);
+        self.win.resize(total * 2, 0.0);
+        let got = pull(&mut self.win[have * 2..]).min((total - have) * 2);
+        self.win[have * 2 + got..].fill(0.0);
+
+        let (phase, ratio) = (self.phase, self.ratio);
+        for f in 0..frames {
+            let u = phase + f as f64 * ratio;
+            let i = u.floor();
+            let t = (u - i) as f32;
+            // Window frames `i-1 ..= i+2` live at `win` frames `i ..= i+3`.
+            // The arithmetic above guarantees the slice; taking it fallibly
+            // anyway keeps a panic out of the audio callback, where it would
+            // take the process with it.
+            let base = i as usize * 2;
+            let Some(w) = self.win.get(base..base + 8) else {
+                write_frame(out, channels, f, 0.0, 0.0);
+                continue;
+            };
+            let l = catmull_rom(w[0], w[2], w[4], w[6], t);
+            let r = catmull_rom(w[1], w[3], w[5], w[7], t);
+            write_frame(out, channels, f, l, r);
+        }
+
+        // Carry: drop what the window has moved past, keep the rest.
+        self.win.drain(..advance * 2);
+        self.phase = end - advance as f64;
+    }
+}
+
+/// Pick the output config. The ring is fixed at [`AUDIO_RATE`], so a device
+/// that will take 48 kHz is opened at 48 kHz and the callback copies instead
+/// of resampling — the conversion that is not done cannot colour anything.
+/// Failing that (44.1 kHz-only devices are common) fall back to whatever the
+/// device calls its default and let [`Resampler`] interpolate.
+fn output_config(device: &cpal::Device) -> Option<cpal::SupportedStreamConfig> {
+    let wanted = cpal::SampleRate(AUDIO_RATE);
+    device
+        .supported_output_configs()
+        .ok()
+        .and_then(|configs| {
+            configs
+                .filter(|c| {
+                    c.sample_format() == cpal::SampleFormat::F32
+                        && c.channels() >= 2
+                        && c.min_sample_rate() <= wanted
+                        && c.max_sample_rate() >= wanted
+                })
+                // Plain stereo first: the callback fills everything above the
+                // second channel with silence, so opening a surround config
+                // would leave the centre and the surrounds dead.
+                .min_by_key(|c| c.channels())
+        })
+        .and_then(|c| c.try_with_sample_rate(wanted))
+        .or_else(|| device.default_output_config().ok())
+}
+
+/// Open the default output device at the ring's rate where possible; the
+/// callback adapts rate (cubic) and channel count from the ring's 48 kHz
+/// stereo where not.
 fn build_stream(
     ring: Arc<AudioRing>,
     muted: Arc<std::sync::atomic::AtomicBool>,
@@ -247,44 +425,16 @@ fn build_stream(
 ) -> Option<cpal::Stream> {
     let host = cpal::default_host();
     let device = host.default_output_device()?;
-    let config = device.default_output_config().ok()?;
-    let dev_rate = config.sample_rate().0 as f64;
+    let config = output_config(&device)?;
+    let dev_rate = config.sample_rate().0;
     let channels = config.channels() as usize;
-    let ratio = AUDIO_RATE as f64 / dev_rate;
 
-    let mut phase = 0.0f64;
-    // Scratch for pulled ring samples (stereo); sized generously per callback.
-    let mut scratch: Vec<f32> = Vec::new();
+    let mut resampler = Resampler::new(AUDIO_RATE as f64 / dev_rate as f64);
     let stream = device
         .build_output_stream(
             &config.config(),
             move |out: &mut [f32], _| {
-                let frames = out.len() / channels.max(1);
-                // How many ring frames this callback needs.
-                let need = ((frames as f64) * ratio + phase).ceil() as usize;
-                scratch.resize(need * 2, 0.0);
-                let got = ring.pop(&mut scratch[..need * 2]) / 2;
-                let mut src_pos = phase;
-                for f in 0..frames {
-                    let i = src_pos as usize;
-                    let (l, r) = if i < got {
-                        (scratch[i * 2], scratch[i * 2 + 1])
-                    } else {
-                        (0.0, 0.0)
-                    };
-                    match channels {
-                        1 => out[f] = (l + r) * 0.5,
-                        _ => {
-                            out[f * channels] = l;
-                            out[f * channels + 1] = r;
-                            for c in 2..channels {
-                                out[f * channels + c] = 0.0;
-                            }
-                        }
-                    }
-                    src_pos += ratio;
-                }
-                phase = (src_pos - got as f64).clamp(0.0, 1.0);
+                resampler.fill(out, channels, |buf| ring.pop(buf));
                 if muted.load(std::sync::atomic::Ordering::Relaxed) {
                     out.fill(0.0);
                 } else {
@@ -302,15 +452,34 @@ fn build_stream(
         )
         .ok()?;
     stream.play().ok()?;
-    log::info!("audio out: {dev_rate} Hz, {channels} ch");
+    if dev_rate == AUDIO_RATE {
+        log::info!("audio out: {dev_rate} Hz, {channels} ch (native {AUDIO_RATE})");
+    } else {
+        log::info!("audio out: {dev_rate} Hz, {channels} ch (resampling from {AUDIO_RATE})");
+    }
     Some(stream)
 }
+
+/// Ceiling for the single-source limiter, in dBTP. The same number as
+/// `MasterParams`' default in §5, deliberately: a file has to sound the same
+/// played on its own as it does dropped on a timeline.
+const SOURCE_CEILING_DBTP: f64 = -1.0;
 
 struct RenderState {
     decoder: Option<AudioDecoder>,
     source: Option<std::path::PathBuf>,
     /// Timeline mixer (§5); `Some` = timeline mode (overrides `source`).
     mix: Option<crate::mix::MixRenderer>,
+    /// True-peak limiter on the decoded stream (single-source mode only —
+    /// timeline mode has the same limiter on the mixer's master bus).
+    ///
+    /// A decoded stream is not bounded to ±1. MP3 and AAC reconstruct from
+    /// coefficients, not samples, so a hot master decodes past full scale —
+    /// the file this was written for peaks at 1.42 — and everything past full
+    /// scale is squared off by the device. That is the sound of a loud song
+    /// "distorting" in a player that is doing nothing wrong except handing the
+    /// device what it was given.
+    limiter: Limiter,
     /// Desired transport state. In mix mode `media_us`/`write_us` are
     /// TIMELINE µs (so the audio clock reports timeline time).
     media_us: i64,
@@ -387,6 +556,7 @@ fn render_thread(
         decoder: None,
         source: None,
         mix: None,
+        limiter: Limiter::new(SOURCE_CEILING_DBTP),
         media_us: 0,
         rate: 1.0,
         playing: false,
@@ -471,6 +641,11 @@ fn render_thread(
             ring.flush();
             st.pending.clear();
             st.step_phase = 0.0;
+            // The limiter's gain and lookahead line describe audio that is
+            // about to be thrown away; carried across a seek they would duck
+            // the first milliseconds of the new position for a peak that is no
+            // longer coming.
+            st.limiter.reset();
             // "The stream has no audio" is a permanent answer even on a live
             // source (`TemporalInfo.has_audio` is assumed true for streams,
             // so a camera with no mic lands here); a failed *connection* is
@@ -570,6 +745,11 @@ fn render_thread(
                             + (samples.len() / 2) as i64 * 1_000_000 / AUDIO_RATE as i64;
                         st.pending = samples;
                     }
+                    // Nothing above full scale reaches the ring. The limiter
+                    // is transparent below its ceiling, so this runs
+                    // unconditionally rather than on a level test — a test
+                    // would only add a place for the gain to jump.
+                    st.limiter.process(&mut st.pending);
                 }
                 Ok(None) | Err(_) => {
                     // EOF: let the ring drain; the controller stops playback
@@ -590,6 +770,169 @@ fn render_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HZ: f64 = 1_000.0;
+    const AMP: f64 = 0.9;
+    /// The common case the resampler exists for: a 44.1 kHz device fed from
+    /// the 48 kHz ring.
+    const DEV_RATE: f64 = 44_100.0;
+
+    /// `frames` stereo frames of a 1 kHz sine at the ring's rate.
+    fn source(frames: usize) -> Vec<f32> {
+        let mut v = Vec::with_capacity(frames * 2);
+        for n in 0..frames {
+            let s = ((2.0 * std::f64::consts::PI * HZ * n as f64 / AUDIO_RATE as f64).sin() * AMP)
+                as f32;
+            v.push(s);
+            v.push(s);
+        }
+        v
+    }
+
+    /// What output frame `f` *should* be: the same sine read at source
+    /// position `f × ratio`, less the two frames the window sits behind by
+    /// (the frame the phase is measured from starts two before the first
+    /// sample ever pulled).
+    fn ideal(f: usize, ratio: f64) -> f64 {
+        let pos = f as f64 * ratio - 2.0;
+        (2.0 * std::f64::consts::PI * HZ * pos / AUDIO_RATE as f64).sin() * AMP
+    }
+
+    /// One cpal callback: `frames` stereo output frames, pulled from `src`
+    /// where the last callback left off.
+    fn callback(res: &mut Resampler, src: &[f32], cursor: &mut usize, frames: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; frames * 2];
+        res.fill(&mut out, 2, |buf| {
+            let n = buf.len().min(src.len() - *cursor);
+            buf[..n].copy_from_slice(&src[*cursor..*cursor + n]);
+            *cursor += n;
+            n
+        });
+        out
+    }
+
+    /// Push a 1 kHz sine through the resampler for `dev_rate` in a run of
+    /// deliberately uneven callbacks, and return how many dB the output is
+    /// above its own error against the ideal resampled sine.
+    fn resample_snr(dev_rate: f64) -> f64 {
+        let ratio = AUDIO_RATE as f64 / dev_rate;
+        let src = source(48_000); // 1 s, far more than the callbacks below use
+        let mut res = Resampler::new(ratio);
+        let mut cursor = 0usize;
+        let mut out: Vec<f32> = Vec::new();
+        // Uneven sizes on purpose: the phase and the carried window have to
+        // survive a callback boundary landing anywhere within a source frame.
+        for frames in [512usize, 480, 501, 499, 512, 333] {
+            out.extend_from_slice(&callback(&mut res, &src, &mut cursor, frames));
+        }
+        assert!(
+            cursor < src.len(),
+            "test ran the source dry at {dev_rate} Hz"
+        );
+
+        // Skip the warm-up: the window starts from silence, which is the
+        // stream starting rather than an error. How many output frames that
+        // covers depends on the rate — a device four times the ring's takes
+        // four times as many output frames to clear the same source frames.
+        let warm = (3.0 / ratio).ceil() as usize + 1;
+        let mut err2 = 0.0f64;
+        let mut sig2 = 0.0f64;
+        for f in warm..out.len() / 2 {
+            let want = ideal(f, ratio);
+            let got = out[f * 2] as f64;
+            assert_eq!(out[f * 2], out[f * 2 + 1], "channels diverged at {f}");
+            err2 += (got - want) * (got - want);
+            sig2 += want * want;
+        }
+        10.0 * (sig2 / err2).log10()
+    }
+
+    /// A 1 kHz sine converted to the device's rate must still be a 1 kHz sine.
+    ///
+    /// The nearest-neighbour pick this replaced dropped every ~12th ring frame
+    /// at 48 → 44.1, and a dropped sample is a step discontinuity — broadband
+    /// noise, spread across the spectrum, audible as grit on anything bright.
+    /// Measured against the ideal resampled sine it scored about 22 dB; cubic
+    /// has to do very much better than that.
+    ///
+    /// The rates run both ways past the ring's own. A device *faster* than
+    /// 48 kHz is the case where a callback can pull a frame it has no room to
+    /// read yet, and dropping that frame instead of carrying it is the same
+    /// defect wearing a different hat.
+    #[test]
+    fn a_sine_resampled_to_the_devices_rate_is_still_a_sine() {
+        for dev_rate in [DEV_RATE, 88_200.0, 96_000.0, 192_000.0, 32_000.0, 8_000.0] {
+            let snr = resample_snr(dev_rate);
+            assert!(snr > 40.0, "{dev_rate} Hz output is only {snr:.1} dB clean");
+        }
+    }
+
+    /// Two callbacks in a row have to join without a seam.
+    ///
+    /// The interpolation window reaches behind the output position, so a
+    /// callback that starts it from nothing restarts from silence — at the
+    /// device's buffer rate, which is a click train. The three carried frames
+    /// are what prevent that, and the way to see them working is that the
+    /// joined output never steps further between samples than the sine itself
+    /// does.
+    #[test]
+    fn consecutive_callbacks_join_without_a_seam() {
+        let ratio = AUDIO_RATE as f64 / DEV_RATE;
+        let src = source(8_000);
+        let mut res = Resampler::new(ratio);
+        let mut cursor = 0usize;
+        let seam = 301usize;
+        let mut out = callback(&mut res, &src, &mut cursor, seam);
+        out.extend_from_slice(&callback(&mut res, &src, &mut cursor, 289));
+        let frames = out.len() / 2;
+
+        // The largest step the ideal sine takes between two output samples.
+        let mut want_step = 0.0f64;
+        for f in 5..frames {
+            want_step = want_step.max((ideal(f, ratio) - ideal(f - 1, ratio)).abs());
+        }
+        // The largest the real output takes, warm-up excluded. A window
+        // restarting at the seam would put most of the amplitude into one
+        // step, which is nowhere near this bound.
+        for f in 5..frames {
+            let step = (out[f * 2] as f64 - out[(f - 1) * 2] as f64).abs();
+            assert!(
+                step <= want_step * 1.05,
+                "step {step:.4} at frame {f} (seam {seam}) exceeds the sine's own {want_step:.4}"
+            );
+        }
+        // And the seam frames are not merely continuous but correct.
+        for f in seam - 1..=seam + 1 {
+            let e = (out[f * 2] as f64 - ideal(f, ratio)).abs();
+            assert!(e < 1e-3, "frame {f} is {e:.5} off the ideal");
+        }
+    }
+
+    /// A device already at the ring's rate gets the ring, sample for sample.
+    #[test]
+    fn a_native_rate_device_gets_a_straight_copy() {
+        let src = source(600);
+        let mut res = Resampler::new(1.0);
+        let mut cursor = 0usize;
+        let out = callback(&mut res, &src, &mut cursor, 300);
+        assert_eq!(&out[..600], &src[..600]);
+        assert_eq!(cursor, 600);
+    }
+
+    /// A ring that cannot keep up reads as silence rather than as the last
+    /// frame repeated, and the callback still fills its whole buffer.
+    #[test]
+    fn an_underrun_reads_as_silence() {
+        let ratio = AUDIO_RATE as f64 / DEV_RATE;
+        let src = source(64);
+        let mut res = Resampler::new(ratio);
+        let mut cursor = 0usize;
+        let out = callback(&mut res, &src, &mut cursor, 256);
+        assert_eq!(out.len(), 512);
+        assert_eq!(cursor, src.len(), "should have drained what there was");
+        // Well past the 64 frames the source had, everything is silence.
+        assert!(out[200 * 2..].iter().all(|s| *s == 0.0));
+    }
 
     /// The boost curve: transparent under the knee, never past the rail, and
     /// symmetric about zero.

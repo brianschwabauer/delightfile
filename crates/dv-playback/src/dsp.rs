@@ -920,6 +920,55 @@ mod tests {
         assert!(db(tp) <= -1.0 + 0.1, "true peak {} dB", db(tp));
     }
 
+    /// The case the single-source path puts through it: a decoded MP3 that
+    /// peaks at 1.42. Nothing above the ceiling may reach the device, because
+    /// what the device does with it is square it off.
+    #[test]
+    fn limiter_holds_a_decoded_mp3_overshoot_to_the_ceiling() {
+        let mut lim = Limiter::new(-1.0);
+        let mut buf = sine(1_000.0, 1.4, RATE as usize);
+        assert!((peak(&buf) - 1.4).abs() < 1e-3, "test signal is not 1.4");
+        lim.process(&mut buf);
+
+        // True peak of the output, measured the way the limiter measures it.
+        let ch: Vec<f32> = buf.chunks_exact(2).map(|f| f[0]).collect();
+        let mut tp = 0.0f32;
+        for w in ch.windows(2) {
+            for k in 0..LIMIT_OVERSAMPLE {
+                let f = k as f32 / LIMIT_OVERSAMPLE as f32;
+                tp = tp.max((w[0] + (w[1] - w[0]) * f).abs());
+            }
+        }
+        assert!(db(tp) <= -1.0 + 0.1, "true peak {:.2} dBTP", db(tp));
+        // And the sample peak too, which is what actually hits the rail.
+        assert!(
+            db(peak(&buf)) <= -1.0 + 0.1,
+            "peak {:.2} dB",
+            db(peak(&buf))
+        );
+    }
+
+    /// …and a signal that never asks for gain reduction comes back out
+    /// untouched, sample for sample, once the lookahead delay is accounted
+    /// for. This is what makes running it unconditionally defensible.
+    #[test]
+    fn limiter_is_bit_transparent_below_the_ceiling() {
+        let mut lim = Limiter::new(-1.0);
+        let input = sine(1_000.0, 0.5, RATE as usize);
+        assert!((peak(&input) - 0.5).abs() < 1e-3);
+        let mut buf = input.clone();
+        lim.process(&mut buf);
+
+        let mut worst = 0.0f32;
+        for f in LIMIT_LOOKAHEAD..input.len() / 2 {
+            for ch in 0..2 {
+                let d = (buf[f * 2 + ch] - input[(f - LIMIT_LOOKAHEAD) * 2 + ch]).abs();
+                worst = worst.max(d);
+            }
+        }
+        assert!(worst < 1e-4, "quiet signal moved by {worst}");
+    }
+
     #[test]
     fn limiter_passes_quiet_signal() {
         let mut lim = Limiter::new(-1.0);
