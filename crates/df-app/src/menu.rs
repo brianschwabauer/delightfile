@@ -339,6 +339,12 @@ pub struct AppFacts {
     /// dialog, where `q` cancels the dialog rather than quitting a file
     /// manager — so the last row says what it will actually do.
     pub picker: bool,
+    /// Whether the list pane is a directory on this machine, rather than an
+    /// archive's interior, a remote service or the trash. "Go to path…" types
+    /// a path this disk has to resolve, so it refuses anywhere else — with a
+    /// check of its own rather than the gate's lists, which is why it needs a
+    /// fact of its own here.
+    pub local: bool,
     /// How many files an operation would act on: the selection, or the cursor
     /// row.
     pub targets: usize,
@@ -469,7 +475,7 @@ pub fn app_items(
     vec![
         run("New tab", C::TabCreate, true),
         run("New window", C::NewWindow, true),
-        run("Go to path…", C::GotoPath, true).after_gap(),
+        run("Go to path…", C::GotoPath, facts.local).after_gap(),
         run("Jump to…", C::FuzzyJump, true),
         run("Search by name…", C::SearchName, true),
         run("Search contents…", C::SearchContent, true),
@@ -872,8 +878,22 @@ pub fn geometry(area: egui::Rect, menu: &Menu, painter: &egui::Painter) -> Geome
     Geometry { card, rows, sub }
 }
 
-/// The room the `▸` gets on every row.
+/// The room the `▸` gets at a row's right-hand end: the glyph, seven and a
+/// half points at [`FONT`], and the gap that keeps a key beside it from
+/// touching it.
 const CHEVRON_COLUMN: f32 = 12.0;
+
+/// Where a row's key column ends.
+///
+/// In a list with a parent row anywhere in it, the whole list keeps
+/// [`CHEVRON_COLUMN`] clear at its right-hand end and every key stands to the
+/// left of it: "Open with" reads `O ▸` rather than the two drawn on top of
+/// each other, and the other rows' keys stay in one column with its `O`. A
+/// list with no parent row has no `▸` to make room for, and its keys keep the
+/// edge.
+fn keys_right(row: egui::Rect, chevrons: bool) -> f32 {
+    row.right() - PAD_X - if chevrons { CHEVRON_COLUMN } else { 0.0 }
+}
 
 // ── Paint ───────────────────────────────────────────────────────────────────
 
@@ -931,6 +951,7 @@ fn list(
     alpha: f32,
     now: Instant,
 ) {
+    let chevrons = items.iter().any(Item::has_submenu);
     for (index, (item, rect)) in items.iter().zip(rects).enumerate() {
         if item.gap_before {
             // The hairline in the middle of the gap it opened. Inset to the
@@ -950,6 +971,7 @@ fn list(
             paint,
             *rect,
             item,
+            chevrons,
             selected == Some(index),
             control(index),
             hovers,
@@ -960,12 +982,14 @@ fn list(
     }
 }
 
-/// One row of either list.
+/// One row of either list. `chevrons` is whether the list it is in keeps a
+/// chevron column ([`keys_right`]).
 #[allow(clippy::too_many_arguments)]
 fn row(
     paint: &Painting<'_>,
     rect: egui::Rect,
     item: &Item,
+    chevrons: bool,
     selected: bool,
     key: Control,
     hovers: &Hovers<Control>,
@@ -975,7 +999,6 @@ fn row(
 ) {
     let palette = paint.palette;
     let enabled = item.enabled;
-    let chevron = item.has_submenu();
     // A disabled row takes no hover and no press: the pointer must not be able
     // to make something inert look live.
     let hover = if enabled { hovers.hover(key) } else { 0.0 };
@@ -1012,7 +1035,7 @@ fn row(
         let width = galley.size().x;
         inside.galley(
             egui::pos2(
-                rect.right() - PAD_X - width,
+                keys_right(rect, chevrons) - width,
                 rect.center().y - galley.size().y / 2.0,
             ),
             galley,
@@ -1020,7 +1043,7 @@ fn row(
         );
         width + PAD_X
     };
-    if chevron {
+    if item.has_submenu() {
         // The submenu's promise, in the place every menu puts it.
         inside.text(
             egui::pos2(rect.right() - PAD_X, rect.center().y),
@@ -1056,7 +1079,7 @@ fn row(
             - PAD_X * 2.0
             - check
             - keys_width
-            - if chevron { CHEVRON_COLUMN } else { 0.0 })
+            - if chevrons { CHEVRON_COLUMN } else { 0.0 })
         .max(0.0),
     );
 }
@@ -1478,6 +1501,7 @@ mod tests {
     fn app_facts() -> AppFacts {
         AppFacts {
             picker: false,
+            local: true,
             targets: 1,
             clipboard: true,
             scale: ViewScale::Compact,
@@ -1623,6 +1647,48 @@ mod tests {
         ] {
             assert!(enabled(empty, label), "{label} greyed for no reason");
         }
+
+        // An archive, a server or the trash: "Go to path…" has nothing it
+        // could resolve there, and it is the only row that fact greys.
+        let away = AppFacts {
+            local: false,
+            ..app_facts()
+        };
+        assert!(!enabled(away, "Go to path…"));
+        assert!(enabled(app_facts(), "Go to path…"));
+        let greyed: Vec<String> = app(away)
+            .into_iter()
+            .filter(|i| !i.enabled)
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(greyed, vec!["Go to path…"]);
+    }
+
+    /// "Open with" draws its `O` beside its ▸, not on top of it: a list with a
+    /// parent row ends every key a chevron column in from the edge, and the
+    /// gap that leaves beside the drawn ▸ is a real one. A list with no
+    /// parent row keeps its keys at the edge.
+    #[test]
+    fn a_key_stands_clear_of_the_chevron() {
+        assert!(items(facts(), &openers()).iter().any(Item::has_submenu));
+        let in_trash = Facts {
+            trash: true,
+            ..facts()
+        };
+        assert!(!items(in_trash, &openers()).iter().any(Item::has_submenu));
+
+        let row = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, ROW));
+        assert_eq!(keys_right(row, false), row.right() - PAD_X);
+        assert_eq!(keys_right(row, true), row.right() - PAD_X - CHEVRON_COLUMN);
+        let ctx = egui::Context::default();
+        let _ = crate::icons::install(&ctx);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            // The ▸ is drawn right-aligned at the row's padding.
+            let chevron =
+                crate::chrome::text_width(ui.painter(), "▸", egui::FontId::proportional(FONT));
+            let gap = (row.right() - PAD_X - chevron) - keys_right(row, true);
+            assert!(gap >= 4.0, "the key is {gap} pt from the ▸");
+        });
     }
 
     /// The gate's own answer greys the row: whatever `refused` would turn away

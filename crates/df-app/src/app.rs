@@ -6070,29 +6070,20 @@ impl App {
     /// a step along it (PLAN §4.1).
     ///
     /// [`App::step_scale`]'s path with the destination given instead of found:
-    /// the same record, the same jump when the move crosses into or out of the
-    /// grid, and the same silence when there is nowhere to go — picking the
-    /// step you are already at writes nothing and says nothing.
+    /// the same tab record, the same jump when the move crosses into or out of
+    /// the grid, and the same silence when there is nowhere to go — picking the
+    /// step you are already at changes nothing and says nothing.
     fn set_scale_step(&mut self, next: ViewScale, now: Instant) {
-        let path = self.tab().cwd.path().to_path_buf();
-        let at = self.scale_of(&path);
-        if at == next {
+        if self.scale_of() == next {
             return;
         }
-        if at.is_grid() != next.is_grid() {
-            self.tabs
-                .active_mut()
-                .cwd
-                .set_first_over(0, Duration::ZERO, now);
-        }
-        self.set_scale(path, next, now);
+        self.set_scale(next, now);
         self.toasts.notice(Self::scale_notice(next), now);
     }
 
-    /// Where the directory on screen is on the ladder: what the View radios
-    /// tick.
+    /// Where this tab is on the ladder: what the View radios tick.
     fn scale_here(&self) -> ViewScale {
-        self.scale_of(self.tab().cwd.path())
+        self.scale_of()
     }
 
     /// The one line a step of the ladder says for itself.
@@ -9726,6 +9717,8 @@ impl App {
     fn open_app_menu(&mut self) {
         let facts = menu::AppFacts {
             picker: self.chooser_file.is_some(),
+            // `GotoPath`'s own refusal, in `run`.
+            local: self.tab().virtual_kind().is_none(),
             targets: self.targets().len(),
             clipboard: !self.clipboard.is_empty(),
             scale: self.scale_here(),
@@ -16508,6 +16501,7 @@ mod tests {
         };
         assert!(!row("Paste").enabled, "nothing is yanked");
         assert!(row("Copy").enabled && row("Rename").enabled);
+        assert!(row("Go to path…").enabled, "a local folder");
         assert_eq!(
             row("New tab").keys,
             app.keymap.binding_label(Command::TabCreate).expect("bound")
@@ -16559,35 +16553,33 @@ mod tests {
     }
 
     /// The View radios go straight to their step, with `-`/`=`'s bookkeeping:
-    /// the grid is recorded as a view, a list step as a scale, the config's
-    /// own step as no preference at all — and the step you are already at is
-    /// no change.
+    /// the tab records the step, the grid remembers the list step to come
+    /// back to, and the step you are already at is no change.
     #[test]
     fn a_view_radio_goes_straight_to_its_step() {
         let mut app = Fixture::new("menu-scale", &["a.txt"]);
         let now = Instant::now();
-        let dir = app.files.clone();
         assert_eq!(app.scale_here(), ViewScale::Compact);
 
         app.run(Command::ViewScaleRoomy, 10, now);
         assert_eq!(app.scale_here(), ViewScale::Roomy);
-        assert_eq!(app.state.scale(&dir), Some(ViewScale::Roomy));
+        assert_eq!(app.tab().list_scale, ViewScale::Roomy);
 
         app.run(Command::ViewScaleGrid, 10, now);
         assert_eq!(app.scale_here(), ViewScale::Grid);
-        assert_eq!(app.state.view(&dir), Some(View::Grid));
+        assert!(app.is_grid());
+        assert_eq!(app.tab().list_scale, ViewScale::Roomy, "the step to come back to");
 
         app.run(Command::ViewScaleComfortable, 10, now);
         assert_eq!(app.scale_here(), ViewScale::Comfortable);
-        assert_eq!(app.state.view(&dir), None, "out of the grid");
+        assert!(!app.is_grid(), "out of the grid");
 
         app.run(Command::ViewScaleCompact, 10, now);
         assert_eq!(app.scale_here(), ViewScale::Compact);
-        assert_eq!(app.state.scale(&dir), None, "the default is no preference");
 
-        // Nowhere to go: no write armed.
-        app.flush_state();
+        // Nowhere to go: nothing said.
+        app.toasts.clear();
         app.run(Command::ViewScaleCompact, 10, now);
-        assert!(!app.state.is_dirty());
+        assert!(app.toasts.current().is_none());
     }
 }
