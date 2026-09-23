@@ -102,9 +102,11 @@ impl Extractor {
     /// The arguments that extract `archive` into `dest`, which must exist.
     ///
     /// `overwrite` is [`super::ExtractPlan::overwrite`]'s policy spelled in each
-    /// program's flags. 7-Zip: `-aoa` replaces, `-aos` skips what is already
-    /// there — `-y` alone would overwrite, which is not what an extraction of a
-    /// single archive may do. `bsdtar` overwrites by default and `-k` keeps.
+    /// program's flags. 7-Zip: `-aoa` replaces, `-aou` renames what it is
+    /// extracting when the name is taken (`top_1.txt`), which is the same
+    /// ladder the built-in reader climbs — `-y` alone would overwrite, which is
+    /// not what an extraction of a single archive may do. `bsdtar` overwrites
+    /// by default and `-k` keeps what is there; it has no rename.
     ///
     /// `--` before the archive for 7-Zip, whose switches are recognised
     /// anywhere on the line; the paths handed here are absolute in practice,
@@ -117,7 +119,7 @@ impl Extractor {
                 vec![
                     "x".into(),
                     "-y".into(),
-                    if overwrite { "-aoa" } else { "-aos" }.into(),
+                    if overwrite { "-aoa" } else { "-aou" }.into(),
                     out,
                     "--".into(),
                     archive.as_os_str().to_owned(),
@@ -338,7 +340,7 @@ mod tests {
         };
         assert_eq!(
             args(&seven, false),
-            vec!["x", "-y", "-aos", "-o/out dir", "--", "/a/-x.7z"]
+            vec!["x", "-y", "-aou", "-o/out dir", "--", "/a/-x.7z"]
         );
         assert_eq!(args(&seven, true)[2], "-aoa");
 

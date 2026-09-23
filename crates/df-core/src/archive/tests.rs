@@ -2095,9 +2095,16 @@ fn an_extractor_into_a_folder_and_into_a_directory() {
     assert_eq!(
         read(&here.join("top.txt")),
         "mine",
-        "-aos keeps what was there"
+        "-aou keeps what was there"
     );
-    assert_eq!(outcome.made, vec![here.join("photos")]);
+    assert_eq!(
+        read(&here.join("top_1.txt")),
+        "top",
+        "…and the archive's copy lands under the next free name"
+    );
+    let mut made = outcome.made.clone();
+    made.sort();
+    assert_eq!(made, vec![here.join("photos"), here.join("top_1.txt")]);
     assert!(outcome.record.is_none());
 
     let outcome = Unpack {
