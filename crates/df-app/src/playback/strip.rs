@@ -751,7 +751,33 @@ pub fn paint(
     Some(hits)
 }
 
-/// The audio card: what an audio file looks like while it plays.
+/// Whether the [`audio_card`] takes the pane this frame.
+///
+/// Only for a clip with no video, and only when the preview pane is not
+/// showing the song's sleeve instead — a card over the art is a caption on the
+/// album cover. The interesting case is the pane not knowing yet: the
+/// transport mounts off a probe, and the probe usually lands before the pane
+/// has read the file, let alone decoded the sleeve. So the probe's
+/// `has_cover_art` breaks the tie. A song it says has art waits, blank under
+/// its strip, for a picture that is on its way; a song without art gets the
+/// card at once, exactly as it always has; and a sleeve that turns out not to
+/// decode leaves the pane [`Poster::Absent`], which hands it back to the card.
+///
+/// [`Poster::Absent`]: crate::preview::Poster::Absent
+pub fn card_shows(info: &super::TemporalInfo, poster: crate::preview::Poster) -> bool {
+    use crate::preview::Poster;
+    if info.has_video {
+        return false;
+    }
+    match poster {
+        Poster::Shown => false,
+        Poster::Pending => !info.has_cover_art,
+        Poster::Absent => true,
+    }
+}
+
+/// The audio card: what an audio file with no sleeve looks like while it
+/// plays. A song with one shows the sleeve instead ([`card_shows`]).
 ///
 /// Metadata and the strip, centred in the pane — deliberately not a waveform.
 /// **The waveform is deferred**: `dv_media::waveform` can generate one, but it
@@ -975,6 +1001,7 @@ mod tests {
                     &super::super::TemporalInfo {
                         has_video: false,
                         has_audio: true,
+                        has_cover_art: false,
                         duration_us: 225_000_000,
                         width: None,
                         height: None,
@@ -992,6 +1019,7 @@ mod tests {
                     &super::super::TemporalInfo {
                         has_video: false,
                         has_audio: true,
+                        has_cover_art: false,
                         duration_us: 0,
                         width: None,
                         height: None,
@@ -1146,5 +1174,55 @@ mod tests {
         assert_eq!(rate_label(128.0, true).as_deref(), Some("128×"));
         assert_eq!(rate_label(-4.0, true).as_deref(), Some("◂ 4×"));
         assert_eq!(rate_label(0.5, true).as_deref(), Some("0.5×"));
+    }
+
+    /// **A song with a sleeve shows the sleeve; a song without one shows the
+    /// card, as it always has** — and neither flashes the other on its way in.
+    #[test]
+    fn the_audio_card_gives_way_to_a_sleeve_and_only_to_a_sleeve() {
+        use crate::preview::Poster;
+        let song = super::super::TemporalInfo {
+            has_video: false,
+            has_audio: true,
+            has_cover_art: false,
+            duration_us: 225_000_000,
+            width: None,
+            height: None,
+            rotation: 0,
+            mirrored: false,
+            video_codec: None,
+            audio_codec: Some("mp3".into()),
+            sample_rate: Some(44_100),
+        };
+        let tagged = super::super::TemporalInfo {
+            has_cover_art: true,
+            ..song.clone()
+        };
+
+        // No art: the card, whether or not the pane has finished looking —
+        // waiting on a pane that will find nothing would only delay it.
+        assert!(card_shows(&song, Poster::Pending));
+        assert!(card_shows(&song, Poster::Absent));
+
+        // Art: the pane is about to draw it, so the card waits rather than
+        // flashing its words underneath…
+        assert!(!card_shows(&tagged, Poster::Pending));
+        // …stays out of the way once it is there…
+        assert!(!card_shows(&tagged, Poster::Shown));
+        // …and comes back if the sleeve would not decode after all.
+        assert!(card_shows(&tagged, Poster::Absent));
+
+        // A picture on the pane is never captioned, whatever the probe said.
+        assert!(!card_shows(&song, Poster::Shown));
+
+        // **A real video never gets the card**: its picture is the player's.
+        let video = super::super::TemporalInfo {
+            has_video: true,
+            video_codec: Some("h264".into()),
+            ..song
+        };
+        for poster in [Poster::Shown, Poster::Pending, Poster::Absent] {
+            assert!(!card_shows(&video, poster), "{poster:?}");
+        }
     }
 }

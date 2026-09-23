@@ -12308,9 +12308,10 @@ impl App {
                 }
                 // Audio, or a video whose first frame has not landed: the card
                 // says what the list cannot — how long, what codec, what rate.
+                // Not over a song's sleeve, which the pane draws itself.
                 None => {
                     if let Some(info) = &media_info {
-                        if !info.has_video {
+                        if crate::playback::strip::card_shows(info, self.preview.poster()) {
                             crate::playback::strip::audio_card(&paint, content, info, 1.0);
                         }
                     }

@@ -413,11 +413,46 @@ mod tests {
         // exactly why the by-name rule comes first.
         assert_eq!(
             names("teapot.obj", "text/plain", false),
-            vec!["delightviewer", "reveal"]
+            vec!["delightviewer", "open", "terminal-at"]
+        );
+        // Text opens in Zed; the terminal editor and the system default are
+        // what `O` offers after it, and a shell in the file's folder is last.
+        assert_eq!(
+            names("notes.txt", "text/plain", false),
+            vec!["zed", "edit", "open", "terminal-at"]
+        );
+        assert_eq!(
+            names("index.html", "text/html", false),
+            vec!["zed", "open-in-chrome", "edit", "open", "terminal-at"]
+        );
+        assert_eq!(
+            names("Cargo.toml", "application/toml", false),
+            vec!["zed", "edit", "open", "terminal-at"]
         );
         assert_eq!(names("cat.png", "image/png", false)[0], "delightviewer");
+        assert_eq!(
+            names("mystery", "application/octet-stream", false),
+            vec!["open", "terminal-at"]
+        );
         let dir = names("Work", "inode/directory", true);
         assert!(dir.len() > 1, "a directory has a picker's worth of choices");
+        assert_eq!(dir.last().map(String::as_str), Some("terminal-here"));
+
+        // **`edit` does not hold the window.** A blocking `$EDITOR` from a
+        // program with no tty was a terminal editor with nowhere to draw; it
+        // runs in a terminal of its own now, detached like every other launch.
+        let edit = config.opener("edit").expect("edit");
+        assert!(!edit.block, "edit must not block: {}", edit.command);
+        assert!(edit.command.starts_with("setsid uwsm-app -- "));
+        // …and nothing reveals: from a file manager, that opened another one.
+        assert!(config.opener("reveal").is_none());
+        assert!(
+            config
+                .rules
+                .iter()
+                .all(|rule| rule.openers.iter().all(|name| name != "reveal")),
+            "a rule still names reveal"
+        );
         // An archive gets the extract rule PLAN §6 says yazi was missing.
         let archive = names("backup.tar.gz", "application/gzip", false);
         assert_eq!(archive[0], "extract");

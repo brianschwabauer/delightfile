@@ -2,10 +2,21 @@
 //!
 //! df-core answers [`df_core::preview::Preview::NeedsDecode`] for anything it
 //! cannot render from bytes it already read — images, video, audio, PDFs,
-//! fonts, models — and this is what takes that over. Phase 3 implements the
-//! **image** half; the other kinds arrive here only for their cached
-//! thumbnail, which is what lets a video row show its frame before dv-playback
-//! exists (PLAN §10's next checkbox).
+//! fonts, models — and this is what takes that over. What it decodes out of
+//! the file itself is decided by [`plan`]: a picture is decoded whole, a song
+//! gives up its **sleeve**, and everything else arrives here only for its
+//! cached thumbnail — the poster a video's first frame, or a PDF's first page,
+//! lands on top of.
+//!
+//! ## A song's picture is its sleeve
+//!
+//! A tagged MP3, FLAC or M4A carries its artwork as a one-frame `ATTACHED_PIC`
+//! stream. dv-media's probe, decoder and keyframe index skip that stream on
+//! purpose — a song with a sleeve is audio, not a one-frame video — so the
+//! transport never shows it, and the only way it reaches the screen is here:
+//! [`dv_media::cover_art`], on this worker, fitted to the pane like any other
+//! still and written back to the shared cache like any other still, which is
+//! how the grid's tile for the song gets it too.
 //!
 //! ## Why a thread of its own
 //!
@@ -72,7 +83,7 @@ use std::sync::Arc;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use df_core::fs::Notifier;
-use df_core::preview::{store_thumb, PreviewToken, STILL_SKIP};
+use df_core::preview::{store_thumb, PreviewKind, PreviewToken, STILL_SKIP};
 
 /// The largest file the decoders are allowed to open, in bytes: 512 MiB.
 ///
@@ -162,7 +173,65 @@ pub struct Decoded {
     ///
     /// `Err` carries something the pane can print. A failed *thumb* is not
     /// worth showing (the full decode is still coming), a failed *full* is.
-    pub result: Result<egui::ColorImage, String>,
+    ///
+    /// `Ok(None)` is a [`Stage::Full`] that worked and found nothing to draw:
+    /// a song with no sleeve. It is not an error — most songs have no art —
+    /// and it is not silence either, because the pane is waiting on it (see
+    /// [`Plan::decoding`]) and the audio card is waiting on the pane.
+    pub result: Result<Option<egui::ColorImage>, String>,
+}
+
+/// Where the **full** picture — the one that replaces the cached thumbnail —
+/// comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Full {
+    /// Somewhere other than this worker. A video's frames are
+    /// [`crate::playback`]'s, and a PDF's, font's or model's pages are
+    /// [`super::doc`]'s; the cached thumbnail is all this worker fetches, as
+    /// the poster those land on top of.
+    Elsewhere,
+    /// The file *is* the picture: decode it, and its loop if it has one.
+    File,
+    /// The file is a song, and its picture is the sleeve riding inside it
+    /// ([`dv_media::cover_art`]). Never the file's bytes: those are the
+    /// music, and a 400 MB FLAC is not read into memory to find a JPEG at its
+    /// front.
+    CoverArt,
+}
+
+/// What the pane asks the worker for, for one file: the part of a request that
+/// is a decision rather than plumbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Plan {
+    pub full: Full,
+    /// Write the full decode back to the shared cache (see [`Job::store`]).
+    pub store: bool,
+    /// Something is coming, so an empty pane is "not yet" rather than "no
+    /// picture" — which decides whether the pane says what the file is, and
+    /// whether the audio card may take it.
+    pub decoding: bool,
+}
+
+/// Decide what to decode for a file of `kind`, given whether df-core found a
+/// cached thumbnail for it.
+///
+/// Pure, so "a song's poster comes from its cover art and a video's does not"
+/// is a table test rather than a thing noticed in the pane.
+pub fn plan(kind: &PreviewKind, cached: bool) -> Plan {
+    let full = match kind {
+        PreviewKind::Image => Full::File,
+        PreviewKind::Audio => Full::CoverArt,
+        _ => Full::Elsewhere,
+    };
+    let fetches = full != Full::Elsewhere;
+    Plan {
+        full,
+        // Only a decode that happens here can be written back, only when the
+        // cache did not already have it, and only for the kinds the cache is
+        // read back for — otherwise it is a write nobody reads.
+        store: fetches && !cached && kind.thumbnailable(),
+        decoding: fetches || cached,
+    }
 }
 
 /// What the pane asks for.
@@ -174,13 +243,11 @@ pub struct Job {
     pub target: (u32, u32),
     /// The cached thumbnail df-core found, if any.
     pub thumb: Option<PathBuf>,
-    /// Whether to decode the file itself. False for the kinds Phase 3 does not
-    /// decode yet — video, audio, PDF, fonts, models — which get their cached
-    /// thumbnail and a badge (PLAN §10's next checkbox picks them up).
-    pub full: bool,
+    /// What to decode after the thumbnail, if anything ([`plan`]).
+    pub full: Full,
     /// Whether a successful full decode should be written back to the shared
     /// cache. Only when there was no thumbnail to begin with, and only for the
-    /// kinds yazi itself thumbnails.
+    /// kinds that cache is read back for.
     pub store: bool,
 }
 
@@ -299,7 +366,7 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
     if let Some(thumb) = &thumb {
         match decode_file(thumb, target).and_then(|image| to_color(&image)) {
             Ok(image) => {
-                if !send(Stage::Thumb, Ok(image)) {
+                if !send(Stage::Thumb, Ok(Some(image))) {
                     return;
                 }
             }
@@ -309,23 +376,33 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
         }
     }
 
-    if !full || !live(state, token) {
+    if !live(state, token) {
         return;
     }
 
-    // Read once and decoded twice at most: the still comes out of these bytes,
-    // and so — for the handful of formats that have one — does the loop.
-    let bytes = match read_source(&path) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            log::debug!("{}: {e}", path.display());
-            send(Stage::Full, Err(e));
-            return;
-        }
+    // The file's own picture. `bytes` is kept only for a picture file: it is
+    // read once and decoded twice at most — the still comes out of these
+    // bytes, and so, for the handful of formats that have one, does the loop.
+    let mut bytes = None;
+    let still = match full {
+        // The thumbnail was the whole job; the real pixels are not ours.
+        Full::Elsewhere => return,
+        // A sleeve that will not decode is a song with no sleeve. The file is
+        // still a song that plays, and printing ffmpeg's complaint across the
+        // pane would be reporting a failure nobody asked about.
+        Full::CoverArt => Ok(decode_cover(&path, target).unwrap_or_else(|e| {
+            log::debug!("{}: no cover art: {e}", path.display());
+            None
+        })),
+        Full::File => read_source(&path).and_then(|read| {
+            let still = decode_bytes(&path, &read, target);
+            bytes = Some(read);
+            still.map(Some)
+        }),
     };
 
-    match decode_bytes(&path, &bytes, target) {
-        Ok(image) => {
+    match still {
+        Ok(Some(image)) => {
             let store_from = store.then(|| (image.width, image.height, image.pixels.clone()));
             let color = match to_color(&image) {
                 Ok(color) => color,
@@ -334,7 +411,7 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
                     return;
                 }
             };
-            if !send(Stage::Full, Ok(color)) {
+            if !send(Stage::Full, Ok(Some(color))) {
                 return;
             }
             // After the pane has its pixels, never before: the write-back is a
@@ -344,12 +421,22 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
                 write_thumb(&path, w, h, &pixels);
             }
         }
+        // Nothing to draw, and nothing wrong: said out loud all the same,
+        // because the pane is holding the space open until it hears.
+        Ok(None) => {
+            send(Stage::Full, Ok(None));
+            return;
+        }
         Err(e) => {
             log::debug!("{}: {e}", path.display());
             send(Stage::Full, Err(e));
             return;
         }
     }
+    let Some(bytes) = bytes else {
+        // A sleeve is one picture; there is no loop to look for.
+        return;
+    };
 
     // ── …and then the loop, if the file has one ─────────────────────────────
     //
@@ -399,7 +486,7 @@ fn run(job: Job, out: &Sender<Decoded>, state: &AtomicU64, notify: &Notifier) {
             return false;
         };
         sent.set(sent.get() + 1);
-        send(Stage::Frame { delay_ms }, Ok(color))
+        send(Stage::Frame { delay_ms }, Ok(Some(color)))
     };
     match stream_animation(&path, &bytes, target, route, &mut room, &mut emit) {
         Ok(0) => {}
@@ -632,6 +719,32 @@ fn decode_bytes(path: &Path, bytes: &[u8], target: (u32, u32)) -> Result<Rgba, S
             log::debug!("{}: image crate said: {first}", path.display());
         }),
     }
+}
+
+/// A song's sleeve, fitted to `target` like any other still. `Ok(None)` is a
+/// song with no art, which is most of them.
+///
+/// Two steps, for the reason [`decode_file`] gives: the only full-size buffer
+/// should be the one the decoder had to make. `cover_art` shrinks inside the
+/// swscale pass it runs anyway, but it can only cap the *long* side, and which
+/// side of the pane binds depends on an aspect ratio nobody knows until the
+/// picture is open. Capping at the pane's longer side can never undershoot the
+/// fit — whichever side binds, the fitted picture is no longer than that — so
+/// the 3000-pixel sleeve is gone before this function sees it, and
+/// [`scale_dynamic`] makes the exact fit with the same filter every other
+/// still in the pane gets.
+fn decode_cover(path: &Path, target: (u32, u32)) -> Result<Option<Rgba>, String> {
+    let cap = target.0.max(target.1).max(1);
+    let Some(art) = dv_media::cover_art(path, Some(cap)).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let (width, height) = (art.width, art.height);
+    let image = image::RgbaImage::from_raw(width, height, art.rgba)
+        .ok_or_else(|| format!("cover art is shorter than its own {width}×{height}"))?;
+    Ok(Some(scale_dynamic(
+        image::DynamicImage::ImageRgba8(image),
+        target,
+    )))
 }
 
 /// Fit `(w, h)` inside `target`, never enlarging.
@@ -1186,6 +1299,139 @@ mod tests {
         );
         assert!(!iso_sequence(b"not an iso file at all, honestly"));
         assert!(!iso_sequence(b"short"), "a truncated header is not a panic");
+    }
+
+    /// **A song's poster comes from its cover art; a video's does not.** The
+    /// regression this exists for: dv-media stopped calling a tagged song a
+    /// one-frame video, which was the only road its sleeve had to the screen,
+    /// and nothing here had been asked to decode it instead.
+    #[test]
+    fn a_songs_picture_is_its_cover_art_and_a_videos_is_not_decoded_here() {
+        // A song: the sleeve, written back when the cache did not have it,
+        // and the pane waits for the answer either way.
+        assert_eq!(
+            plan(&PreviewKind::Audio, false),
+            Plan {
+                full: Full::CoverArt,
+                store: true,
+                decoding: true,
+            }
+        );
+        assert_eq!(
+            plan(&PreviewKind::Audio, true),
+            Plan {
+                full: Full::CoverArt,
+                store: false,
+                decoding: true,
+            },
+            "a cached sleeve is the placeholder, and is not written twice"
+        );
+
+        // A picture decodes itself, exactly as before.
+        assert_eq!(
+            plan(&PreviewKind::Image, false),
+            Plan {
+                full: Full::File,
+                store: true,
+                decoding: true,
+            }
+        );
+
+        // **A real video is untouched**: its frames are the player's, so the
+        // cached thumbnail is all this worker fetches — and with none, nothing
+        // is pending and the badge may say "video".
+        assert_eq!(
+            plan(&PreviewKind::Video, true),
+            Plan {
+                full: Full::Elsewhere,
+                store: false,
+                decoding: true,
+            }
+        );
+        assert_eq!(
+            plan(&PreviewKind::Video, false),
+            Plan {
+                full: Full::Elsewhere,
+                store: false,
+                decoding: false,
+            }
+        );
+
+        // The documents are `doc`'s, whatever the cache holds.
+        for kind in [PreviewKind::Pdf, PreviewKind::Font, PreviewKind::Model3d] {
+            assert_eq!(plan(&kind, false).full, Full::Elsewhere, "{kind:?}");
+            assert!(!plan(&kind, false).store, "{kind:?}");
+        }
+    }
+
+    /// The generated fixtures (`build/test-assets.sh`), or `None` with a
+    /// printed reason where there is no `ffmpeg` CLI to make them — the same
+    /// gate dv-media's own integration tests use.
+    fn media_fixtures() -> Option<PathBuf> {
+        let ffmpeg = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ffmpeg {
+            eprintln!("SKIP: `ffmpeg` CLI not on PATH — cannot generate the media fixtures");
+            return None;
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2)?;
+        let status = std::process::Command::new("bash")
+            .arg(root.join("build/test-assets.sh"))
+            .status()
+            .ok()?;
+        assert!(status.success(), "build/test-assets.sh failed");
+        Some(root.join("build/assets"))
+    }
+
+    /// The sleeve end to end, through ffmpeg: the tagged song's 300×300 art
+    /// comes out fitted to the pane like a photograph would; a song with no
+    /// art, and a real video, come out with nothing — a video's first frame
+    /// is not a sleeve.
+    #[test]
+    fn a_tagged_song_decodes_its_sleeve_to_the_panes_fit() {
+        let Some(assets) = media_fixtures() else {
+            return;
+        };
+
+        // A portrait pane: the width binds, so the square sleeve comes out
+        // 200 wide and 200 tall — not capped at the long side and left 300.
+        let art = decode_cover(&assets.join("cover.mp3"), (200, 400))
+            .expect("decode the sleeve")
+            .expect("cover.mp3 has a sleeve");
+        assert_eq!((art.width, art.height), (200, 200));
+        assert_eq!(art.pixels.len(), 200 * 200 * 4, "tightly packed RGBA");
+        // The fixture's sleeve is flat orange, and it survived the trip.
+        let centre = ((100 * 200 + 100) * 4) as usize;
+        let [r, g, b, a] = [
+            art.pixels[centre],
+            art.pixels[centre + 1],
+            art.pixels[centre + 2],
+            art.pixels[centre + 3],
+        ];
+        assert!(
+            r > 200 && (100..200).contains(&g) && b < 60 && a == 255,
+            "{r} {g} {b} {a}"
+        );
+
+        // A pane bigger than the sleeve leaves it alone, like any still.
+        let whole = decode_cover(&assets.join("cover.mp3"), (1000, 800))
+            .expect("decode")
+            .expect("sleeve");
+        assert_eq!((whole.width, whole.height), (300, 300));
+
+        // No art: an honest nothing, not an error.
+        assert!(decode_cover(&assets.join("tone.m4a"), (200, 200))
+            .expect("tone.m4a opens")
+            .is_none());
+        assert!(
+            decode_cover(&assets.join("basic.mp4"), (200, 200))
+                .expect("basic.mp4 opens")
+                .is_none(),
+            "a video's first frame is not cover art"
+        );
     }
 
     /// Every browser's reading of a delay that says "as fast as you can".

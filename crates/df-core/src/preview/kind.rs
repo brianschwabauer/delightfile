@@ -83,11 +83,14 @@ impl PreviewKind {
     }
 
     /// Whether a yazi-cached thumbnail could stand in while the decode runs
-    /// (PLAN §6's crossfade). Only the kinds yazi itself thumbnails.
+    /// (PLAN §6's crossfade). The kinds yazi itself thumbnails, plus a song:
+    /// its thumbnail is its sleeve, which df-app writes to the same cache the
+    /// first time it shows one — so a song with art is looked up like a
+    /// photograph, and one without is a cheap miss.
     pub fn thumbnailable(&self) -> bool {
         matches!(
             self,
-            PreviewKind::Image | PreviewKind::Video | PreviewKind::Pdf
+            PreviewKind::Image | PreviewKind::Video | PreviewKind::Audio | PreviewKind::Pdf
         )
     }
 }
@@ -364,7 +367,8 @@ mod tests {
 
         assert!(PreviewKind::Image.thumbnailable());
         assert!(PreviewKind::Video.thumbnailable());
-        assert!(!PreviewKind::Audio.thumbnailable());
+        // A song's thumbnail is its sleeve (df-app's decode worker).
+        assert!(PreviewKind::Audio.thumbnailable());
         assert!(!PreviewKind::Binary.thumbnailable());
     }
 

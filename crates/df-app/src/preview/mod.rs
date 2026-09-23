@@ -37,9 +37,9 @@
 //!
 //! ## The seam, and what has taken it up
 //!
-//! Video, audio, PDFs, fonts and models reach [`decode::Job`] with `full:
-//! false`: what it fetches for them is the *cached thumbnail*, and the real
-//! answer comes from somewhere else.
+//! Video, PDFs, fonts and models reach [`decode::Job`] with
+//! [`decode::Full::Elsewhere`]: what it fetches for them is the *cached
+//! thumbnail*, and the real answer comes from somewhere else.
 //!
 //! **Video and audio are now [`crate::playback`]'s.** The cached thumbnail is
 //! still what this module draws — it is the poster the first decoded frame
@@ -47,6 +47,13 @@
 //! transport has the file, at which point the kind badge stands down and the
 //! frame, the audio card and the position strip are painted over this pane by
 //! the player.
+//!
+//! **A song's picture is this module's, though, not the player's.** Its sleeve
+//! is an `ATTACHED_PIC` stream that dv-media deliberately does not play, so
+//! nothing on the player's side will ever put it on screen. [`decode`] fetches
+//! it instead ([`decode::Full::CoverArt`]) and this pane draws it exactly as it
+//! draws a photograph — fitted, zoomable, under the strip — and
+//! [`Pane::poster`] is how the audio card knows to stay out of its way.
 //!
 //! **PDFs, fonts, models and G-code are [`doc`]'s.** They take the same seam
 //! from the other side: [`decode`] still fetches the cached thumbnail so a PDF
@@ -157,6 +164,21 @@ pub enum Zoom {
     Out,
     /// `0`: back to fit, which is the only zoom a picture starts at.
     Fit,
+}
+
+/// Whether the pane has a picture of the hovered file's own: the question the
+/// audio card asks before it takes the pane (`playback::strip::card_shows`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Poster {
+    /// A picture is on screen — a photograph, a cached thumbnail, a song's
+    /// sleeve.
+    Shown,
+    /// Not known yet: the preview is still being read, or its decode is still
+    /// in flight.
+    Pending,
+    /// The pane has answered, and it has no picture: a song without a sleeve,
+    /// or a body that is not a picture at all.
+    Absent,
 }
 
 /// A decoded picture living on the GPU.
@@ -849,6 +871,33 @@ impl Pane {
         self.media_frame = showing;
     }
 
+    /// Whether this pane has a picture of the hovered file's own, or may still
+    /// get one.
+    ///
+    /// The audio card draws over this pane, so it asks first: a song whose
+    /// sleeve is on screen keeps it, and a card laid across it would be a
+    /// caption on the album cover. `Pending` is the part that needs saying —
+    /// the preview is still being read, or the sleeve still decoding — because
+    /// the transport usually mounts *before* either has finished, and a card
+    /// drawn in that gap is a flash of text on every song that has art.
+    pub fn poster(&self) -> Poster {
+        match self.shown.as_ref().map(|s| &s.body) {
+            Some(Body::Media(media)) => {
+                if media.thumb.is_some() || media.full.is_some() || media.anim.is_some() {
+                    Poster::Shown
+                } else if media.decoding {
+                    Poster::Pending
+                } else {
+                    Poster::Absent
+                }
+            }
+            Some(_) => Poster::Absent,
+            // Asked for and not arrived: the answer is still coming.
+            None if self.wanted.is_some() => Poster::Pending,
+            None => Poster::Absent,
+        }
+    }
+
     /// Take whatever the workers finished. `ctx` is where decoded pixels
     /// become textures — the one thing in this file that has to happen on the
     /// thread egui lives on. Returns whether anything changed.
@@ -883,9 +932,11 @@ impl Pane {
             .into_iter()
             .filter(|decoded| Some(decoded.token) == self.token)
             .collect();
+        // A full decode that found *nothing* — a song with no sleeve — does not
+        // count: the thumb is then the only picture there is.
         let full_here = batch
             .iter()
-            .any(|d| d.stage == decode::Stage::Full && d.result.is_ok());
+            .any(|d| d.stage == decode::Stage::Full && matches!(d.result, Ok(Some(_))));
         for decoded in batch {
             changed = true;
             if full_here && decoded.stage == decode::Stage::Thumb {
@@ -1363,13 +1414,15 @@ impl Pane {
                 let Some(token) = self.token else {
                     return Some(Body::Unsupported { kind });
                 };
-                // Pictures decode here; documents go to their own worker and
-                // are drawn over whatever thumbnail the shared cache had.
-                // Video and audio still take their frame from the cache and
-                // wait for a transport to mount.
-                let full = kind == PreviewKind::Image;
-                let store = full && thumb.is_none() && kind.thumbnailable();
-                let decoding = full || thumb.is_some();
+                // Pictures decode here, and so does a song's sleeve; documents
+                // go to their own worker and are drawn over whatever thumbnail
+                // the shared cache had. Video takes its poster from the cache
+                // and waits for a transport to mount (`decode::plan`).
+                let decode::Plan {
+                    full,
+                    store,
+                    decoding,
+                } = decode::plan(&kind, thumb.is_some());
                 let is_doc = matches!(
                     kind,
                     PreviewKind::Pdf
@@ -1429,19 +1482,28 @@ impl Pane {
             return;
         };
         match (decoded.stage, decoded.result) {
-            (decode::Stage::Thumb, Ok(image)) => {
+            (decode::Stage::Thumb, Ok(Some(image))) => {
                 // Only while the real thing is still missing: a placeholder
                 // that arrives late is worthless (delightviewer's rule).
                 if media.full.is_none() {
                     media.thumb = upload_color(ctx, "df-preview-thumb", image);
                 }
             }
-            (decode::Stage::Full, Ok(image)) => {
+            (decode::Stage::Full, Ok(Some(image))) => {
                 media.full = upload_color(ctx, "df-preview", image);
                 media.swapped_at = Some(now);
                 media.decoding = false;
             }
-            (decode::Stage::Frame { delay_ms }, Ok(image)) => {
+            // A song with no sleeve. Nothing to draw and nothing to report —
+            // only the wait is over, which is what lets the audio card have
+            // the pane (`Pane::poster`).
+            (decode::Stage::Full, Ok(None)) => {
+                media.decoding = false;
+            }
+            // Only a full decode ever finds nothing; a thumbnail or a frame
+            // that did would be a worker bug, and there is nothing to draw.
+            (decode::Stage::Thumb | decode::Stage::Frame { .. }, Ok(None)) => {}
+            (decode::Stage::Frame { delay_ms }, Ok(Some(image))) => {
                 // A texture apiece rather than one re-uploaded per frame: the
                 // worker has already capped the set at 64 MiB of pane-sized
                 // pixels, and a preloaded loop costs nothing per frame where a
@@ -1807,6 +1869,69 @@ mod tests {
         pane.cancel();
         pane.sync(Some(a), target, now);
         assert_eq!(pane.scroll, 7);
+    }
+
+    /// The answer the audio card waits on, through the states a song's pane
+    /// really passes through: asked for, reading, decoding the sleeve, and
+    /// then either showing it or saying there is none.
+    #[test]
+    fn the_pane_says_whether_a_songs_sleeve_is_coming() {
+        let now = Instant::now();
+        let mut pane = Pane::start(df_core::fs::no_notifier());
+        assert_eq!(pane.poster(), Poster::Absent, "nothing hovered");
+
+        // Asked for, not arrived: the transport has usually mounted by now,
+        // and this is the gap a card would flash in.
+        pane.sync(Some(Path::new("/music/song.mp3")), (400, 400), now);
+        assert_eq!(pane.poster(), Poster::Pending);
+
+        // The body is up and the sleeve is decoding — exactly what
+        // `decode::plan` asks for, for a song.
+        let song = |pane: &mut Pane| {
+            let decode::Plan { decoding, .. } = decode::plan(&PreviewKind::Audio, false);
+            pane.shown = Some(Shown {
+                body: Body::Media(Media {
+                    kind: PreviewKind::Audio,
+                    thumb: None,
+                    full: None,
+                    swapped_at: None,
+                    anim: None,
+                    error: None,
+                    decoding,
+                    doc: None,
+                }),
+            });
+        };
+        song(&mut pane);
+        assert_eq!(pane.poster(), Poster::Pending);
+
+        // No sleeve: the wait is over, nothing is printed, and the card may
+        // have the pane.
+        let answer = |result| decode::Decoded {
+            token: PreviewToken(1),
+            stage: decode::Stage::Full,
+            result,
+        };
+        pane.apply_decoded(answer(Ok(None)), None, now);
+        assert_eq!(pane.poster(), Poster::Absent);
+        let Some(Shown {
+            body: Body::Media(media),
+        }) = &pane.shown
+        else {
+            panic!("the body is still the song's");
+        };
+        assert!(media.error.is_none(), "a song without art is not an error");
+
+        // A sleeve: on screen, and the card stays off it.
+        song(&mut pane);
+        let ctx = egui::Context::default();
+        let sleeve = egui::ColorImage::filled([4, 4], egui::Color32::from_rgb(255, 165, 0));
+        pane.apply_decoded(answer(Ok(Some(sleeve))), Some(&ctx), now);
+        assert_eq!(pane.poster(), Poster::Shown);
+
+        // Text is not a picture, whatever the card thinks of it.
+        pane.shown = Some(Shown { body: Body::Empty });
+        assert_eq!(pane.poster(), Poster::Absent);
     }
 
     /// A pane showing a document with `pages` pages and nothing rendered yet.

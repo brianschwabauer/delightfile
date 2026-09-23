@@ -250,6 +250,16 @@ pub fn list_seek(down: bool, mounted: bool) -> ListSeek {
 pub struct TemporalInfo {
     pub has_video: bool,
     pub has_audio: bool,
+    /// The file carries a sleeve — cover art riding along as an
+    /// `ATTACHED_PIC` stream (`dv_media::ProbeInfo::has_cover_art`).
+    ///
+    /// Never a reason for [`TemporalInfo::has_video`]: a song with art is
+    /// still a song, and the transport does not play its picture. The preview
+    /// pane decodes the sleeve itself (`preview::decode::Full::CoverArt`);
+    /// this is how the audio card knows, before the pane has finished, that a
+    /// picture is on its way and it should wait for it
+    /// ([`strip::card_shows`]).
+    pub has_cover_art: bool,
     pub duration_us: i64,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -320,6 +330,7 @@ impl Prober {
                     let info = dv_media::probe(&path).ok().map(|p| TemporalInfo {
                         has_video: p.video_codec.is_some(),
                         has_audio: p.has_audio || p.audio_codec.is_some(),
+                        has_cover_art: p.has_cover_art,
                         duration_us: p.duration_us.unwrap_or(0),
                         width: p.width,
                         height: p.height,
@@ -1111,6 +1122,7 @@ mod tests {
         let none = TemporalInfo {
             has_video: false,
             has_audio: false,
+            has_cover_art: false,
             duration_us: 0,
             width: None,
             height: None,

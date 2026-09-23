@@ -167,9 +167,9 @@ Hold a prefix key and a which-key card lists what follows it.
 ## Configuration
 
 `~/.config/delightfile/delightfile.toml`, `keymap.toml` and `theme.toml`. All three are
-optional. The defaults are a port of my yazi config, so they carry the same opener rules,
-the same `[1, 4, 3]` column ratio, catppuccin-mocha, and the nineteen custom directory
-icons.
+optional. The defaults are a port of my yazi config, so they carry its opener rules (with
+delightfile's own edits), the same `[1, 4, 3]` column ratio, catppuccin-mocha, and the
+nineteen custom directory icons.
 
 SFTP hosts come from `~/.config/yazi/vfs.toml` first and
 `~/.config/delightfile/vfs.toml` second, so an existing yazi setup needs no second copy.

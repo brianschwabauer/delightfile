@@ -9,7 +9,9 @@
 //! custom directory icons from `theme.toml` (PLAN §3 says twenty; the file has
 //! nineteen, and the file wins). So the constants below are not
 //! "sensible defaults" chosen in the abstract — they are a transcription, and
-//! the tests assert they still match.
+//! the tests assert they still match. The one place the transcription was
+//! departed from on purpose is the opener rules, where a window is not a
+//! terminal: see `DEFAULT_RULES` for what changed and why.
 //!
 //! **A missing file is silence.** Not a warning, not an error: the shipped
 //! config *is* the config, and a user who has never written one has not done
@@ -66,7 +68,7 @@
 //! # shipped ones, so the fallback stays reachable.
 //! [[open.rules]]
 //! mime = "image/*"
-//! use = ["delightviewer", "reveal"]
+//! use = ["delightviewer", "terminal-at"]
 //!
 //! [[open.rules]]
 //! glob = "*.{stl,obj}"
@@ -171,14 +173,26 @@ pub const DEFAULT_BOOKMARKS: &[(&str, &str, &str)] = &[
 /// The `setsid uwsm-app --` prefix is how a launched program is detached from
 /// delightfile's own process group and handed to the compositor's scope — kill
 /// the file manager and the editor you opened from it stays up. `block = true`
-/// means delightfile waits, which only `$EDITOR` and bulk-rename want.
+/// means delightfile waits, which only bulk-rename wants.
+///
+/// **`edit` is a terminal, not a wait.** yazi runs `$EDITOR` blocking because
+/// yazi *is* a terminal: it hands its own tty to the editor and takes it back.
+/// delightfile is a window with no tty to hand over, so a blocking `nvim` had
+/// nowhere to draw and did nothing at all. It gets a terminal of its own
+/// instead — `$TERMINAL`, ghostty when unset — launched the way everything
+/// else here is.
 ///
 /// `builtin:` is not a shell command: it names a job delightfile does itself.
 /// `builtin:extract` fills the gap PLAN §6 calls out — yazi shells out to a
 /// plugin for this, and archives get no extract rule at all in the config being
 /// ported, which is the one thing the rules were missing.
 pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
-    ("edit", r#"${EDITOR:-vi} "$@""#, true, "$EDITOR"),
+    (
+        "edit",
+        r#"setsid uwsm-app -- "${TERMINAL:-ghostty}" -e "${EDITOR:-vi}" "$@" >/dev/null 2>&1"#,
+        false,
+        "Edit in $EDITOR",
+    ),
     (
         "zed",
         r#"setsid uwsm-app -- zeditor "$@" >/dev/null 2>&1"#,
@@ -196,6 +210,14 @@ pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
         r#"setsid uwsm-app -- "${TERMINAL:-ghostty}" --working-directory="$1" >/dev/null 2>&1"#,
         false,
         "Open a terminal here",
+    ),
+    // The file's counterpart to `terminal-here`: a shell in the directory the
+    // file is in, which is where you want one after looking at a file.
+    (
+        "terminal-at",
+        r#"setsid uwsm-app -- "${TERMINAL:-ghostty}" --working-directory="$(dirname "$1")" >/dev/null 2>&1"#,
+        false,
+        "Terminal here",
     ),
     (
         "open-in-chrome",
@@ -240,13 +262,26 @@ pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
         "Bulk rename in Zed",
     ),
     ("open", r#"xdg-open "$1""#, false, "Open"),
-    ("reveal", r#"xdg-open "$(dirname "$1")""#, false, "Reveal"),
     ("play", r#"mpv --force-window "$@""#, false, "Play in mpv"),
     ("extract", "builtin:extract", false, "Extract here"),
 ];
 
 /// Opener rules, matched top-down. Transcribed from `yazi.toml`'s
-/// `[[open.prepend_rules]]`, plus the archive rules PLAN §6 asks for.
+/// `[[open.prepend_rules]]`, plus the archive rules PLAN §6 asks for — and
+/// then changed on purpose in three places where a window is not a terminal:
+///
+/// - **Text opens in Zed first.** yazi's `$EDITOR` first is a terminal
+///   program's answer; from a window, the editor that is already a window is
+///   the one `o` should reach. `edit` (in a terminal) and `open` (whatever
+///   `xdg-open` says) follow it in the picker.
+/// - **No `reveal`.** In yazi it showed the file's folder in a GUI file
+///   manager, which from a file manager is a second copy of the program you
+///   are already in. `terminal-at` — a shell in that folder — is the thing
+///   you actually leave for, so it is the last entry of every file rule
+///   instead, bar bulk-rename's and the archives' (`extract`, then `open`). A
+///   rule that `reveal` was the only alternative in gets `open`, so `O` still
+///   offers the system default.
+/// - **`edit` runs in a terminal** (see [`DEFAULT_OPENERS`]).
 ///
 /// The by-name rules come first for the reason the yazi config gives: an `.obj`
 /// and a `.ply` are `text/plain` and an `.stl` is `application/octet-stream`,
@@ -255,37 +290,41 @@ pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
 /// would open a 40 MB toolpath in a text editor.
 const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
     ("glob", "bulk-rename.txt", &["bulk-rename"]),
-    ("glob", "*.{stl,obj,ply,3mf}", &["delightviewer", "reveal"]),
+    (
+        "glob",
+        "*.{stl,obj,ply,3mf}",
+        &["delightviewer", "open", "terminal-at"],
+    ),
     (
         "glob",
         "*.{gcode,gco}",
-        &["delightviewer", "edit", "open", "reveal"],
+        &["delightviewer", "edit", "open", "terminal-at"],
     ),
     (
         "glob",
         "*.{ttf,otf,ttc}",
-        &["delightviewer", "open", "reveal"],
+        &["delightviewer", "open", "terminal-at"],
     ),
     (
         "glob",
         "*.{zip,tar,tgz,gz,bz2,xz,zst,7z,rar,cbz,cbr}",
-        &["extract", "reveal"],
+        &["extract", "open"],
     ),
     (
         "mime",
         "application/{zip,x-tar,gzip,x-bzip2,x-xz,zstd,x-7z-compressed,vnd.rar}",
-        &["extract", "reveal"],
+        &["extract", "open"],
     ),
     (
         "mime",
         "text/html",
-        &["edit", "zed", "open-in-chrome", "reveal"],
+        &["zed", "open-in-chrome", "edit", "open", "terminal-at"],
     ),
-    ("mime", "text/*", &["edit", "zed", "reveal"]),
+    ("mime", "text/*", &["zed", "edit", "open", "terminal-at"]),
     (
         "mime",
         "application/{json,ndjson,xml,javascript,x-shellscript,x-yaml,toml}",
-        &["edit", "zed", "reveal"],
+        &["zed", "edit", "open", "terminal-at"],
     ),
     (
         "mime",
@@ -294,30 +333,30 @@ const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
             "delightviewer",
             "delightviewer-edit",
             "optimize-avif",
-            "reveal",
             "set-wallpaper",
             "edit-image",
+            "terminal-at",
         ],
     ),
     (
         "mime",
         "video/*",
-        &["delightviewer", "delightviewer-edit", "play", "reveal"],
+        &["delightviewer", "delightviewer-edit", "play", "terminal-at"],
     ),
     (
         "mime",
         "audio/*",
-        &["delightviewer", "delightviewer-edit", "reveal"],
+        &["delightviewer", "delightviewer-edit", "terminal-at"],
     ),
     (
         "mime",
         "application/pdf",
-        &["delightviewer", "delightviewer-edit", "reveal"],
+        &["delightviewer", "delightviewer-edit", "terminal-at"],
     ),
     ("glob", "*/", &["open", "zed-workspace", "terminal-here"]),
     // The fallback. yazi leaves this implicit; writing it down means the picker
     // is never empty, which is the one state `O` must not have.
-    ("glob", "*", &["open", "reveal"]),
+    ("glob", "*", &["open", "terminal-at"]),
 ];
 
 /// The twenty directory icons from `theme.toml`: glob, glyph, colour.
@@ -1804,22 +1843,54 @@ mod tests {
                 .map(String::as_str),
             Some("delightviewer")
         );
+        // Text: Zed first, then the terminal editor, then the system default,
+        // and a shell in the file's folder last.
         assert_eq!(
             names(c.openers_for("notes.md", "text/markdown", false)),
-            vec!["edit", "zed", "reveal"]
+            vec!["zed", "edit", "open", "terminal-at"]
         );
         assert_eq!(
             names(c.openers_for("index.html", "text/html", false)),
-            vec!["edit", "zed", "open-in-chrome", "reveal"]
+            vec!["zed", "open-in-chrome", "edit", "open", "terminal-at"]
+        );
+        assert_eq!(
+            names(c.openers_for("package.json", "application/json", false)),
+            vec!["zed", "edit", "open", "terminal-at"]
         );
         // Glob, ahead of the mime rules on purpose: a .obj is text/plain.
         assert_eq!(
             names(c.openers_for("bracket.OBJ", "text/plain", false)),
-            vec!["delightviewer", "reveal"]
+            vec!["delightviewer", "open", "terminal-at"]
         );
+        // The toolpath and font rules end in the same shell as every other
+        // file rule. A `.gcode` is `text/plain`, which is why its rule is
+        // matched by name, ahead of the text rule.
+        assert_eq!(
+            names(c.openers_for("benchy.gcode", "text/plain", false)),
+            vec!["delightviewer", "edit", "open", "terminal-at"]
+        );
+        assert_eq!(
+            names(c.openers_for("Inter.ttf", "font/ttf", false)),
+            vec!["delightviewer", "open", "terminal-at"]
+        );
+        // Media and PDFs end in the same shell.
+        for (name, mime) in [
+            ("cat.png", "image/png"),
+            ("clip.mp4", "video/mp4"),
+            ("song.mp3", "audio/mpeg"),
+            ("paper.pdf", "application/pdf"),
+        ] {
+            let got = names(c.openers_for(name, mime, false));
+            assert_eq!(got.first().map(String::as_str), Some("delightviewer"));
+            assert_eq!(
+                got.last().map(String::as_str),
+                Some("terminal-at"),
+                "{name}"
+            );
+        }
         // The archive rule PLAN §6 asks for, which yazi's config was missing.
         let extract = c.openers_for("backup.tar.gz", "application/gzip", false);
-        assert_eq!(names(extract), vec!["extract", "reveal"]);
+        assert_eq!(names(extract), vec!["extract", "open"]);
         assert_eq!(
             c.opener("extract").and_then(Opener::builtin),
             Some("extract")
@@ -1832,8 +1903,40 @@ mod tests {
         // …and nothing is ever an empty picker.
         assert_eq!(
             names(c.openers_for("mystery", "application/octet-stream", false)),
-            vec!["open", "reveal"]
+            vec!["open", "terminal-at"]
         );
+    }
+
+    /// `edit` used to wait on `$EDITOR` with no terminal behind it, which for
+    /// a terminal editor is nothing happening at all; and `reveal` opened a
+    /// second file manager from inside this one. Both are gone for good.
+    #[test]
+    fn edit_opens_a_terminal_and_nothing_reveals() {
+        let c = Config::default();
+        let edit = c.opener("edit").expect("edit");
+        assert!(!edit.block, "a blocking editor from a window has no tty");
+        assert!(edit.command.contains("${TERMINAL:-ghostty}"));
+        assert!(edit.command.contains("${EDITOR:-vi}"));
+        assert_eq!(edit.description, "Edit in $EDITOR");
+
+        let terminal = c.opener("terminal-at").expect("terminal-at");
+        assert!(!terminal.block);
+        assert!(terminal
+            .command
+            .contains(r#"--working-directory="$(dirname "$1")""#));
+
+        assert!(c.opener("reveal").is_none(), "the opener is gone");
+        for rule in &c.rules {
+            assert!(
+                !rule.openers.iter().any(|name| name == "reveal"),
+                "{rule:?} still names reveal"
+            );
+            // A rule naming an opener that does not exist drops it silently
+            // (`openers_for`), so a leftover would be a quiet hole in `O`.
+            for name in &rule.openers {
+                assert!(c.opener(name).is_some(), "{rule:?} names a missing {name}");
+            }
+        }
     }
 
     #[test]
