@@ -1,5 +1,7 @@
 //! The two modal cards a destructive operation goes through: the **confirm**
-//! (`d`, `D`) and the **conflict resolver** (`p` onto a name that is taken).
+//! (`D`, and `d` on a server, which has no trash) and the **conflict resolver**
+//! (`p` onto a name that is taken). A local `d` asks nothing — the trash is
+//! undoable, and its toast says how.
 //!
 //! Both are modal in the strong sense — while one is up, keystrokes are matched
 //! against the `[confirm]` context **alone** and never fall through to the
@@ -35,6 +37,10 @@ const BUTTON_HEIGHT: f32 = 26.0;
 /// Between two buttons.
 const BUTTON_GAP: f32 = 8.0;
 
+/// The narrowest a button gets. A two-letter verb on a button the width of its
+/// word is a target the pointer has to aim for rather than land on.
+const BUTTON_MIN_WIDTH: f32 = 64.0;
+
 /// The widest either dialog gets. Past this a two-column comparison stops being
 /// a comparison — the eye cannot hold both halves at once.
 const MAX_WIDTH: f32 = 620.0;
@@ -43,6 +49,20 @@ const MAX_WIDTH: f32 = 620.0;
 /// to recognise the set you selected; past that the count in the title is the
 /// thing being read anyway.
 const BODY_VISIBLE: usize = 6;
+
+/// The narrowest a confirm gets. The card is sized to what it says, and a
+/// one-file delete says little — but a card much narrower than this stops
+/// reading as a question laid over the window and starts reading as a tooltip.
+const CONFIRM_MIN_WIDTH: f32 = 300.0;
+
+/// Between the confirm's title and its first name: close, because the names
+/// are what the title's count is counting.
+const TITLE_GAP: f32 = 8.0;
+
+/// Between the confirm's last name and its buttons: wider than the title's
+/// gap, because the buttons are a different kind of thing — the answer, not
+/// more of the question.
+const ANSWER_GAP: f32 = 12.0;
 
 /// How many conflicts the resolver lists at once, for the same reason.
 const CONFLICT_VISIBLE: usize = 5;
@@ -55,14 +75,18 @@ const FACTS_HEIGHT: f32 = 74.0;
 /// Which irreversible thing is being confirmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmKind {
-    /// `d`. Undoable — the toast that follows says so.
+    /// A local `d`. **Never shown as a card**: a trash is undoable, and the
+    /// undo toast that follows it answers "are you sure" better than a card
+    /// asking before anything has happened. `d` builds one of these and hands
+    /// it straight to the confirm's own yes, so the trash is carried out on
+    /// exactly one path whether anybody was asked or not.
     Trash,
     /// `D`. The one operation with no inverse (PLAN §5).
     Delete,
     /// `d` on a remote service (PLAN §7.6). Its own kind rather than
     /// [`ConfirmKind::Trash`] with different words, because it is a different
-    /// promise: **there is no trash on the other machine**, so the body has to
-    /// say so before the key lands, not in the toast afterwards.
+    /// promise: **there is no trash on the other machine**, so the title has
+    /// to say so before the key lands, not in the toast afterwards.
     RemoteDelete,
     /// `D` inside the trash view (PLAN §7.4): destroy what is already deleted.
     Purge,
@@ -78,6 +102,14 @@ pub struct Confirm {
     /// First visible body line — `↑`/`↓` scroll the body, as the `[confirm]`
     /// keymap says, rather than moving a cursor there is nothing to move.
     pub scroll: usize,
+    /// How wide the widest name in the body is, measured once.
+    ///
+    /// The card is as wide as its longest name, and the longest name can be in
+    /// a list that is a whole trash: ten thousand names laid out on every frame
+    /// is a stall paid for a number that cannot change while the card is up.
+    /// Filled the first time the card is laid out, because that is the first
+    /// moment there is a painter to measure with.
+    name_width: std::cell::OnceCell<f32>,
 }
 
 impl Confirm {
@@ -86,37 +118,40 @@ impl Confirm {
             kind,
             paths,
             scroll: 0,
+            name_width: std::cell::OnceCell::new(),
         }
     }
 
     /// yazi's custom-body style: the question names the verb, the count and
     /// where the files came from, so the title alone is enough to answer with.
+    ///
+    /// **The title is the whole message.** There is no line under it: the one
+    /// sentence a subtitle used to carry was the word *permanently* (or
+    /// *destroy*), and it reads better inside the question than as a second,
+    /// smaller one beneath it. A remote delete says it too, because it is the
+    /// fact that card exists to put in front of you — there is no trash on the
+    /// other machine, so that `d` is not the local one.
     pub fn title(&self) -> String {
         let n = self.paths.len();
         let noun = if n == 1 { "file" } else { "files" };
         match self.kind {
             ConfirmKind::Trash => format!("Trash {n} selected {noun}?"),
-            ConfirmKind::Delete => format!("Delete {n} selected {noun}?"),
-            ConfirmKind::RemoteDelete => format!("Delete {n} remote {noun}?"),
+            ConfirmKind::Delete => format!("Delete {n} selected {noun} permanently?"),
+            ConfirmKind::RemoteDelete => format!("Delete {n} remote {noun} permanently?"),
             ConfirmKind::Purge => format!("Destroy {n} trashed {noun}?"),
             ConfirmKind::EmptyTrash => format!("Empty the trash — all {n} {noun}?"),
         }
     }
 
-    /// The line under the title: what this will actually do.
-    pub fn subtitle(&self) -> &'static str {
-        match self.kind {
-            ConfirmKind::Trash => "They go to the trash — u puts them back.",
-            ConfirmKind::Delete => "Permanently delete — cannot be undone.",
-            // The one sentence this dialog exists to say. A remote `d` looks
-            // exactly like a local one and does something irreversible; the
-            // body is where the difference is allowed to be noticed.
-            ConfirmKind::RemoteDelete => {
-                "There is no trash on the server — this deletes them for good."
-            }
-            ConfirmKind::Purge => crate::trashview::PURGE_SUBTITLE,
-            ConfirmKind::EmptyTrash => crate::trashview::PURGE_SUBTITLE,
-        }
+    /// The widest body line, in the face the body is drawn in.
+    fn name_width(&self, painter: &egui::Painter) -> f32 {
+        *self.name_width.get_or_init(|| {
+            let font = egui::FontId::proportional(FONT);
+            self.body()
+                .iter()
+                .map(|name| chrome::text_width(painter, name, font.clone()))
+                .fold(0.0, f32::max)
+        })
     }
 
     pub fn danger(&self) -> bool {
@@ -469,10 +504,12 @@ impl Geometry {
     }
 }
 
-/// A card of `height`, centred horizontally and biased *above* true centre —
-/// `delightful-ui` §16: content centred in a big region reads as sitting low.
-fn card_rect(area: egui::Rect, height: f32) -> egui::Rect {
-    let width = (area.width() - CARD_MARGIN * 2.0).min(MAX_WIDTH);
+/// A card of `width` × `height`, centred horizontally and biased *above* true
+/// centre — `delightful-ui` §16: content centred in a big region reads as
+/// sitting low. Never wider than [`MAX_WIDTH`] or than the window can hold
+/// with its margins, whatever was asked for.
+fn card_rect(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
+    let width = width.min(MAX_WIDTH).min(area.width() - CARD_MARGIN * 2.0);
     let height = height.min((area.height() - CARD_MARGIN * 2.0).max(0.0));
     // 40 % of the free space above, 60 % below.
     let top = area.top() + (area.height() - height).max(0.0) * chrome::OPTICAL_CENTRE;
@@ -482,20 +519,50 @@ fn card_rect(area: egui::Rect, height: f32) -> egui::Rect {
     )
 }
 
-/// Lay out the confirm card.
-pub fn confirm_geometry(area: egui::Rect, confirm: &Confirm) -> Geometry {
+/// The confirm's title face: a step over the body, because the title is the
+/// question and the names are only what it is about.
+fn title_font() -> egui::FontId {
+    egui::FontId::proportional(FONT + 2.0)
+}
+
+/// Lay out the confirm card: the question, the names, the two answers.
+///
+/// **Sized to what it says**, which needs real measurement — hence the
+/// painter, and hence one call per frame shared by the hit test and the paint
+/// rather than one each, so both see the same widths. As wide as the widest of
+/// the title, the longest name and the button row, plus the padding either
+/// side; never under [`CONFIRM_MIN_WIDTH`], never over [`MAX_WIDTH`] or the
+/// window.
+///
+/// Top to bottom: the pad, the title, [`TITLE_GAP`], one [`ROW`] per visible
+/// name, [`ANSWER_GAP`], the buttons, the pad. The title and the names share
+/// one left edge, the card's padding. The buttons sit exactly [`CARD_PAD`] in
+/// from the card's right and bottom edges, and since the card's radius is
+/// [`chrome::CARD_RADIUS`] = [`ROW_RADIUS`] + [`CARD_PAD`] and a button's is
+/// [`ROW_RADIUS`], the last button's corner is concentric with the card's —
+/// the gap between them is the same width all the way round the curve
+/// (`delightful-ui` §15).
+pub fn confirm_geometry(painter: &egui::Painter, area: egui::Rect, confirm: &Confirm) -> Geometry {
     let lines = confirm.paths.len().min(BODY_VISIBLE);
-    let height = CARD_PAD * 2.0
-        + ROW * 2.0                       // title and subtitle
-        + 6.0
-        + lines as f32 * ROW
-        + 10.0
-        + BUTTON_HEIGHT
-        + chrome::HINT_ROW; // the card's own hint strip
-    let card = card_rect(area, height);
+    let title = painter
+        .layout_no_wrap(confirm.title(), title_font(), egui::Color32::WHITE)
+        .size();
+    // Cancel first, the committing button last and rightmost: the destructive
+    // one is the furthest from where the pointer rests after opening the card.
+    let labels = ["Cancel", confirm_verb(confirm.kind)];
+    let buttons = labels
+        .iter()
+        .map(|label| button_width(painter, label))
+        .sum::<f32>()
+        + BUTTON_GAP * (labels.len() - 1) as f32;
+    let content = title.x.max(confirm.name_width(painter)).max(buttons);
+    let width = (content + CARD_PAD * 2.0).max(CONFIRM_MIN_WIDTH);
+    let height =
+        CARD_PAD + title.y + TITLE_GAP + lines as f32 * ROW + ANSWER_GAP + BUTTON_HEIGHT + CARD_PAD;
+    let card = card_rect(area, width, height);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
-    let body_top = card.top() + CARD_PAD + ROW * 2.0 + 6.0;
+    let body_top = card.top() + CARD_PAD + title.y + TITLE_GAP;
     let body = egui::Rect::from_min_max(
         egui::pos2(inner_left, body_top),
         egui::pos2(inner_right, body_top + lines as f32 * ROW),
@@ -508,12 +575,11 @@ pub fn confirm_geometry(area: egui::Rect, confirm: &Confirm) -> Geometry {
             )
         })
         .collect();
-    // Cancel first, the committing button last and rightmost: the destructive
-    // one is the furthest from where the pointer rests after opening the card.
     let actions = button_row(
+        painter,
         inner_right,
-        card.bottom() - CARD_PAD - chrome::HINT_ROW - BUTTON_HEIGHT,
-        &["Cancel", confirm_verb(confirm.kind)],
+        card.bottom() - CARD_PAD - BUTTON_HEIGHT,
+        &labels,
     );
     Geometry {
         card,
@@ -535,7 +601,11 @@ pub fn confirm_verb(kind: ConfirmKind) -> &'static str {
 }
 
 /// Lay out the conflict card.
-pub fn conflict_geometry(area: egui::Rect, dialog: &ConflictDialog) -> Geometry {
+pub fn conflict_geometry(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    dialog: &ConflictDialog,
+) -> Geometry {
     let listed = dialog.len().min(CONFLICT_VISIBLE);
     let height = CARD_PAD * 2.0
         + ROW * 2.0                       // title and subtitle
@@ -546,7 +616,7 @@ pub fn conflict_geometry(area: egui::Rect, dialog: &ConflictDialog) -> Geometry 
         + 10.0
         + BUTTON_HEIGHT
         + chrome::HINT_ROW; // the card's own hint strip
-    let card = card_rect(area, height);
+    let card = card_rect(area, MAX_WIDTH, height);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
     let body_top = card.top() + CARD_PAD + ROW * 2.0 + 6.0;
@@ -564,7 +634,7 @@ pub fn conflict_geometry(area: egui::Rect, dialog: &ConflictDialog) -> Geometry 
     );
     let buttons_top = card.bottom() - CARD_PAD - chrome::HINT_ROW - BUTTON_HEIGHT;
     let labels: Vec<&str> = ConflictAction::ALL.iter().map(|a| a.label()).collect();
-    let actions = button_row(inner_right, buttons_top, &labels);
+    let actions = button_row(painter, inner_right, buttons_top, &labels);
     // The toggle sits on the left of the same line as the buttons: it modifies
     // what pressing one of them means, so it must be read before them.
     let apply_all = Some(egui::Rect::from_min_size(
@@ -580,15 +650,25 @@ pub fn conflict_geometry(area: egui::Rect, dialog: &ConflictDialog) -> Geometry 
     }
 }
 
+/// How wide a button with `label` on it is: the word, measured in the face
+/// [`button`] draws it in, with a bar's padding either side — and never under
+/// [`BUTTON_MIN_WIDTH`].
+///
+/// Measured rather than guessed from the character count. A guess per
+/// character is right for none of them: `Destroy` and `Empty` are the same
+/// seven-points-a-letter to a guess and visibly different widths on screen, and
+/// a card sized to its content has to be sized to the content it really draws.
+fn button_width(painter: &egui::Painter, label: &str) -> f32 {
+    (chrome::text_width(painter, label, egui::FontId::proportional(FONT)) + PAD_X * 2.0)
+        .max(BUTTON_MIN_WIDTH)
+}
+
 /// Buttons laid right-to-left from `right`, returned left-to-right.
-fn button_row(right: f32, top: f32, labels: &[&str]) -> Vec<egui::Rect> {
+fn button_row(painter: &egui::Painter, right: f32, top: f32, labels: &[&str]) -> Vec<egui::Rect> {
     let mut rects = Vec::new();
     let mut x = right;
     for label in labels.iter().rev() {
-        // Measured from the label length without a painter: every dialog button
-        // is short, and a fixed 7 pt per character plus padding is stable
-        // across frames, which a re-measured width is not.
-        let width = (label.chars().count() as f32 * 7.0 + PAD_X * 2.0).max(64.0);
+        let width = button_width(painter, label);
         rects.push(egui::Rect::from_min_size(
             egui::pos2(x - width, top),
             egui::vec2(width, BUTTON_HEIGHT),
@@ -615,52 +695,69 @@ pub fn paint_confirm(
     painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
     chrome::card(paint, geometry.card, 1.0);
 
-    let accent = if confirm.danger() {
-        palette.red
-    } else {
-        palette.yellow
-    };
-    let left = geometry.card.left() + CARD_PAD;
-    painter.text(
-        egui::pos2(left, geometry.card.top() + CARD_PAD + ROW / 2.0),
-        egui::Align2::LEFT_CENTER,
-        confirm.title(),
-        egui::FontId::proportional(FONT + 2.0),
-        palette.text,
+    // The title fills the band the geometry left above the names: from the
+    // card's top padding down to the gap before the first name. The same left
+    // edge as the names, so the card reads as one column.
+    let title = egui::Rect::from_min_max(
+        egui::pos2(
+            geometry.card.left() + CARD_PAD,
+            geometry.card.top() + CARD_PAD,
+        ),
+        egui::pos2(
+            geometry.card.right() - CARD_PAD,
+            geometry.body.top() - TITLE_GAP,
+        ),
     );
-    painter.text(
-        egui::pos2(left, geometry.card.top() + CARD_PAD + ROW + ROW / 2.0),
-        egui::Align2::LEFT_CENTER,
-        confirm.subtitle(),
-        egui::FontId::proportional(FONT),
-        accent,
+    chrome::truncated_in(
+        painter,
+        egui::pos2(title.left(), title.center().y),
+        &confirm.title(),
+        palette.text,
+        title.width().max(0.0),
+        title_font(),
     );
 
     let body = confirm.body();
+    // How many names are below the last visible row, and the marker saying so.
+    // Measured before the names are drawn, because the last row's name has to
+    // stop short of it rather than run underneath.
+    let more = body
+        .len()
+        .saturating_sub(geometry.rows.len() + confirm.scroll);
+    let marker = (more > 0).then(|| {
+        painter.layout_no_wrap(
+            format!("+{more} more"),
+            egui::FontId::proportional(FONT - 1.0),
+            palette.overlay0,
+        )
+    });
     let clipped = painter.with_clip_rect(geometry.body);
+    let last = geometry.rows.len().saturating_sub(1);
     for (i, rect) in geometry.rows.iter().enumerate() {
         let Some(line) = body.get(confirm.scroll + i) else {
             break;
         };
+        let room = match &marker {
+            Some(marker) if i == last => rect.width() - marker.size().x - PAD_X,
+            _ => rect.width(),
+        };
         chrome::truncated(
             &clipped,
-            egui::pos2(rect.left() + PAD_X, rect.center().y),
+            egui::pos2(rect.left(), rect.center().y),
             line,
             palette.subtext0,
-            (rect.width() - PAD_X * 2.0).max(0.0),
+            room.max(0.0),
         );
     }
-    if body.len() > geometry.rows.len() {
-        let more = body.len() - geometry.rows.len() - confirm.scroll;
-        if more > 0 {
-            painter.text(
-                egui::pos2(geometry.body.right(), geometry.body.bottom() - ROW / 2.0),
-                egui::Align2::RIGHT_CENTER,
-                format!("+{more} more"),
-                egui::FontId::proportional(FONT - 1.0),
-                palette.overlay0,
-            );
-        }
+    if let (Some(marker), Some(row)) = (marker, geometry.rows.last()) {
+        painter.galley(
+            egui::pos2(
+                row.right() - marker.size().x,
+                row.center().y - marker.size().y / 2.0,
+            ),
+            marker,
+            palette.overlay0,
+        );
     }
 
     let labels = ["Cancel", confirm_verb(confirm.kind)];
@@ -695,7 +792,11 @@ const BULK_ROW: f32 = 24.0;
 /// [`Geometry::apply_all`] is borrowed to carry the find/replace strip — the
 /// struct is the shape every modal here reports, and growing a variant of it for
 /// one dialog would mean a second hit-test path for the same three questions.
-pub fn bulk_geometry(area: egui::Rect, bulk: &crate::bulk::Bulk) -> Geometry {
+pub fn bulk_geometry(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    bulk: &crate::bulk::Bulk,
+) -> Geometry {
     let visible = bulk.rows.len().min(crate::bulk::ROWS);
     let height = CARD_PAD * 2.0
         + ROW * 2.0                       // title and subtitle
@@ -706,7 +807,7 @@ pub fn bulk_geometry(area: egui::Rect, bulk: &crate::bulk::Bulk) -> Geometry {
         + 10.0
         + BUTTON_HEIGHT
         + chrome::HINT_ROW; // the card's own hint strip
-    let card = card_rect(area, height);
+    let card = card_rect(area, MAX_WIDTH, height);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
 
@@ -730,6 +831,7 @@ pub fn bulk_geometry(area: egui::Rect, bulk: &crate::bulk::Bulk) -> Geometry {
         })
         .collect();
     let actions = button_row(
+        painter,
         inner_right,
         card.bottom() - CARD_PAD - chrome::HINT_ROW - BUTTON_HEIGHT,
         &["Cancel", "Rename"],
@@ -1323,6 +1425,13 @@ mod tests {
         }
     }
 
+    /// Run `f` with a painter that can measure text — which every layout here
+    /// needs, now that the cards are sized to what they say.
+    fn with_painter(mut f: impl FnMut(&egui::Painter)) {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| f(ui.painter()));
+    }
+
     fn plan(tree: &TempTree) -> PastePlan {
         let a = tree.file("src/a.txt", b"new");
         let b = tree.file("src/b.txt", b"new");
@@ -1333,22 +1442,30 @@ mod tests {
 
     #[test]
     fn a_confirm_says_what_it_is_about_to_do() {
-        let trash = Confirm::new(
-            ConfirmKind::Trash,
-            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],
-        );
+        let two = vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")];
+        let trash = Confirm::new(ConfirmKind::Trash, two.clone());
         assert_eq!(trash.title(), "Trash 2 selected files?");
         assert!(!trash.danger());
-        assert!(
-            trash.subtitle().contains('u'),
-            "it says how to take it back"
-        );
 
         let one = Confirm::new(ConfirmKind::Delete, vec![PathBuf::from("/tmp/a")]);
-        assert_eq!(one.title(), "Delete 1 selected file?");
+        assert_eq!(one.title(), "Delete 1 selected file permanently?");
         assert!(one.danger());
-        assert_eq!(one.subtitle(), "Permanently delete — cannot be undone.");
         assert_eq!(one.body(), vec!["a".to_string()]);
+
+        // With no line under the title, the title carries the warning: a
+        // remote `d` is the one that looks local and is not.
+        for (kind, title) in [
+            (
+                ConfirmKind::RemoteDelete,
+                "Delete 2 remote files permanently?",
+            ),
+            (ConfirmKind::Purge, "Destroy 2 trashed files?"),
+            (ConfirmKind::EmptyTrash, "Empty the trash — all 2 files?"),
+        ] {
+            let confirm = Confirm::new(kind, two.clone());
+            assert_eq!(confirm.title(), title);
+            assert!(confirm.danger(), "{kind:?} is red");
+        }
     }
 
     /// The body scrolls and stops — `↑` at the top and `↓` at the bottom are
@@ -1510,29 +1627,111 @@ mod tests {
     /// A click lands on the button it looks like it landed on.
     #[test]
     fn the_geometry_hit_tests_where_it_draws() {
-        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
-        let confirm = Confirm::new(ConfirmKind::Delete, vec![PathBuf::from("/tmp/a")]);
-        let geometry = confirm_geometry(area, &confirm);
-        assert_eq!(geometry.actions.len(), 2);
-        for (i, rect) in geometry.actions.iter().enumerate() {
-            assert_eq!(geometry.action_at(rect.center()), Some(i));
-            assert!(geometry.card.contains(rect.center()));
-        }
-        assert_eq!(geometry.action_at(egui::pos2(-5.0, -5.0)), None);
-
         let tree = TempTree::new("dialog-geometry");
         let dialog = ConflictDialog::new(plan(&tree));
-        let geometry = conflict_geometry(area, &dialog);
-        assert_eq!(geometry.actions.len(), 3);
-        assert_eq!(geometry.rows.len(), 2);
-        assert!(geometry.apply_all.is_some());
-        for (i, rect) in geometry.rows.iter().enumerate() {
-            assert_eq!(geometry.row_at(rect.center()), Some(i));
-        }
-        // …and it survives a window too small to hold the card.
-        let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 120.0));
-        let small = conflict_geometry(tiny, &dialog);
-        assert!(small.card.height() <= tiny.height());
+        with_painter(|painter| {
+            let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+            let confirm = Confirm::new(ConfirmKind::Delete, vec![PathBuf::from("/tmp/a")]);
+            let geometry = confirm_geometry(painter, area, &confirm);
+            assert_eq!(geometry.actions.len(), 2);
+            for (i, rect) in geometry.actions.iter().enumerate() {
+                assert_eq!(geometry.action_at(rect.center()), Some(i));
+                assert!(geometry.card.contains(rect.center()));
+            }
+            assert_eq!(geometry.action_at(egui::pos2(-5.0, -5.0)), None);
+
+            let geometry = conflict_geometry(painter, area, &dialog);
+            assert_eq!(geometry.actions.len(), 3);
+            assert_eq!(geometry.rows.len(), 2);
+            assert!(geometry.apply_all.is_some());
+            for (i, rect) in geometry.rows.iter().enumerate() {
+                assert_eq!(geometry.row_at(rect.center()), Some(i));
+            }
+            // …and it survives a window too small to hold the card.
+            let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 120.0));
+            let small = conflict_geometry(painter, tiny, &dialog);
+            assert!(small.card.height() <= tiny.height());
+        });
+    }
+
+    /// The confirm card is a question, the names and two answers, laid out to
+    /// a rhythm rather than to a template: sized to its own text, one left
+    /// edge for the title and the names, and the buttons tucked into the
+    /// corner at exactly the card's padding — which, with the card's radius
+    /// being the buttons' plus that padding, is what makes the two corners
+    /// concentric.
+    #[test]
+    fn the_confirm_card_fits_its_words_and_tucks_its_buttons_into_the_corner() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+        with_painter(|painter| {
+            let short = Confirm::new(ConfirmKind::Delete, vec![PathBuf::from("/tmp/a")]);
+            let g = confirm_geometry(painter, area, &short);
+            let title = painter
+                .layout_no_wrap(short.title(), title_font(), egui::Color32::WHITE)
+                .size();
+
+            // As wide as the widest thing on it and no wider: a one-letter
+            // delete is a card around its question, not a 620 pt slab.
+            let buttons =
+                button_width(painter, "Cancel") + BUTTON_GAP + button_width(painter, "Delete");
+            let name = chrome::text_width(painter, "a", egui::FontId::proportional(FONT));
+            let fitted = (title.x.max(buttons).max(name) + CARD_PAD * 2.0).max(CONFIRM_MIN_WIDTH);
+            assert!(
+                (g.card.width() - fitted).abs() < 1e-3,
+                "{} is not {fitted}",
+                g.card.width()
+            );
+            assert!(g.card.width() < MAX_WIDTH);
+
+            // The corner. Exactly the padding in from the right and the
+            // bottom, the gap between the two buttons, and the radii that make
+            // those insets concentric.
+            let (cancel, verb) = (g.actions[0], g.actions[1]);
+            assert!((g.card.right() - verb.right() - CARD_PAD).abs() < 1e-3);
+            assert!((g.card.bottom() - verb.bottom() - CARD_PAD).abs() < 1e-3);
+            assert!((verb.left() - cancel.right() - BUTTON_GAP).abs() < 1e-3);
+            assert_eq!(cancel.top(), verb.top());
+            assert_eq!(
+                f32::from(chrome::CARD_RADIUS),
+                f32::from(ROW_RADIUS) + CARD_PAD,
+                "the card's radius is the button's plus the inset"
+            );
+            assert!(cancel.width() >= BUTTON_MIN_WIDTH && verb.width() >= BUTTON_MIN_WIDTH);
+
+            // The rhythm, top to bottom: pad, title, gap, names, gap, buttons,
+            // pad — and the names start at the card's padding, not indented
+            // past the title.
+            let row = g.rows[0];
+            assert!((row.left() - (g.card.left() + CARD_PAD)).abs() < 1e-3);
+            assert!((row.top() - (g.card.top() + CARD_PAD + title.y + TITLE_GAP)).abs() < 1e-3);
+            assert!((verb.top() - (g.body.bottom() + ANSWER_GAP)).abs() < 1e-3);
+
+            // A long name widens the card to hold it — up to the cap and no
+            // further, and never past the window.
+            let long = "a-name-long-enough-to-want-a-wider-card-than-the-minimum.txt";
+            let wide = Confirm::new(ConfirmKind::Delete, vec![PathBuf::from("/tmp").join(long)]);
+            let w = confirm_geometry(painter, area, &wide);
+            let needed = chrome::text_width(painter, long, egui::FontId::proportional(FONT));
+            assert!(w.card.width() > CONFIRM_MIN_WIDTH);
+            assert!(w.body.width() + 1e-3 >= needed, "the name has its room");
+            let huge = Confirm::new(
+                ConfirmKind::Delete,
+                vec![PathBuf::from("/tmp").join(long.repeat(8))],
+            );
+            assert!(confirm_geometry(painter, area, &huge).card.width() <= MAX_WIDTH + 1e-3);
+            let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(280.0, 400.0));
+            let n = confirm_geometry(painter, narrow, &huge);
+            assert!(n.card.width() <= narrow.width() - CARD_MARGIN * 2.0 + 1e-3);
+
+            // Six names show, the rest scroll, and the card does not grow for
+            // them.
+            let many: Vec<PathBuf> = (0..20)
+                .map(|i| PathBuf::from(format!("/tmp/{i}")))
+                .collect();
+            let m = confirm_geometry(painter, area, &Confirm::new(ConfirmKind::Purge, many));
+            assert_eq!(m.rows.len(), BODY_VISIBLE);
+            assert!((m.body.height() - BODY_VISIBLE as f32 * ROW).abs() < 1e-3);
+        });
     }
 
     #[test]
@@ -1556,23 +1755,33 @@ mod tests {
             let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
             let hovers = Hovers::new();
             let ripples = Ripples::new();
-            let g = conflict_geometry(area, &dialog);
+            let g = conflict_geometry(ui.painter(), area, &dialog);
             paint_conflict(&paint, area, &dialog, &g, &hovers, &ripples);
-            let g = confirm_geometry(area, &confirm);
+            let g = confirm_geometry(ui.painter(), area, &confirm);
             paint_confirm(&paint, area, &confirm, &g, &hovers, &ripples);
+
+            // A confirm longer than it shows, scrolled part way, so the
+            // `+N more` marker draws beside a name that has to make room.
+            let many: Vec<PathBuf> = (0..20)
+                .map(|i| tree.join(&format!("a-rather-long-file-name-{i}.txt")))
+                .collect();
+            let mut long = Confirm::new(ConfirmKind::EmptyTrash, many);
+            long.scroll_by(3);
+            let g = confirm_geometry(ui.painter(), area, &long);
+            paint_confirm(&paint, area, &long, &g, &hovers, &ripples);
 
             // The rename card, in the three states it has: clean, refused, and
             // longer than it can show at once.
             let many: Vec<String> = (0..30).map(|i| format!("file-{i}.txt")).collect();
             let mut bulk = crate::bulk::Bulk::new(tree.path.clone(), many.clone(), &many)
                 .expect("a local directory builds a card");
-            let g = bulk_geometry(area, &bulk);
+            let g = bulk_geometry(ui.painter(), area, &bulk);
             paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
 
             bulk.field = crate::bulk::Field::Find;
             bulk.find = df_core::input::InputBuffer::new("file-".to_string(), 5);
             bulk.apply_replace();
-            let g = bulk_geometry(area, &bulk);
+            let g = bulk_geometry(ui.painter(), area, &bulk);
             paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
 
             // Two rows wanting the same name, so the refusal treatment draws.
@@ -1580,12 +1789,12 @@ mod tests {
             bulk.rows[1].buffer = df_core::input::InputBuffer::new("same".to_string(), 0);
             bulk.field = crate::bulk::Field::Row(1);
             assert!(!bulk.valid());
-            let g = bulk_geometry(area, &bulk);
+            let g = bulk_geometry(ui.painter(), area, &bulk);
             paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
 
             // …and a window with no room for a card at all.
             let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 60.0));
-            let g = bulk_geometry(tiny, &bulk);
+            let g = bulk_geometry(ui.painter(), tiny, &bulk);
             paint_bulk(&paint, tiny, &bulk, &g, &hovers, &ripples);
         });
     }
@@ -1597,23 +1806,25 @@ mod tests {
         let names: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
         let bulk = crate::bulk::Bulk::new(PathBuf::from("/tmp"), names, &[]).expect("local");
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
-        let g = bulk_geometry(area, &bulk);
-        assert_eq!(g.rows.len(), crate::bulk::ROWS);
-        assert!(g.apply_all.is_some(), "the find/replace strip is there");
-        assert!(g.actions.len() == 2);
-        assert!(g.card.width() <= MAX_WIDTH + 1e-3);
-        // Every row is inside the body, and the strip is above all of them.
-        for rect in &g.rows {
-            assert!(g.body.contains_rect(*rect));
-            assert!(g.apply_all.unwrap().bottom() <= rect.top());
-        }
-        // A short card is only as tall as it needs to be.
-        let two = crate::bulk::Bulk::new(
-            PathBuf::from("/tmp"),
-            vec!["a".to_string(), "b".to_string()],
-            &[],
-        )
-        .expect("local");
-        assert!(bulk_geometry(area, &two).card.height() < g.card.height());
+        with_painter(|painter| {
+            let g = bulk_geometry(painter, area, &bulk);
+            assert_eq!(g.rows.len(), crate::bulk::ROWS);
+            assert!(g.apply_all.is_some(), "the find/replace strip is there");
+            assert!(g.actions.len() == 2);
+            assert!(g.card.width() <= MAX_WIDTH + 1e-3);
+            // Every row is inside the body, and the strip is above all of them.
+            for rect in &g.rows {
+                assert!(g.body.contains_rect(*rect));
+                assert!(g.apply_all.unwrap().bottom() <= rect.top());
+            }
+            // A short card is only as tall as it needs to be.
+            let two = crate::bulk::Bulk::new(
+                PathBuf::from("/tmp"),
+                vec!["a".to_string(), "b".to_string()],
+                &[],
+            )
+            .expect("local");
+            assert!(bulk_geometry(painter, area, &two).card.height() < g.card.height());
+        });
     }
 }

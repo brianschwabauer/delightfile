@@ -464,6 +464,22 @@ impl DirState {
         self.selected.clear();
     }
 
+    /// Replace the selection with exactly these names — what a paste of five
+    /// files leaves selected, so the next `y`, `d` or `r` is about the five
+    /// that just landed rather than whatever was marked before.
+    ///
+    /// Unlike every other selector here, the names **need not be rows yet**.
+    /// The operation that produced them has only just finished, and the scan
+    /// that will bring their rows is still in flight; a selection that could
+    /// only name rows already present would be empty every time. The rebuild
+    /// each batch triggers never prunes the set, so the names wait for their
+    /// rows; the scan's `Done` is the one place a name that never arrived is
+    /// dropped — the same rule a file deleted under a selection has always
+    /// had.
+    pub fn select_names(&mut self, names: impl IntoIterator<Item = String>) {
+        self.selected = names.into_iter().collect();
+    }
+
     /// Select a run of rows — visual mode (`v`) committing its range.
     pub fn select_range(&mut self, from: usize, to: usize, selected: bool) {
         let (lo, hi) = if from <= to { (from, to) } else { (to, from) };

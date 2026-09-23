@@ -42,6 +42,9 @@ pub enum PromptKind {
     ShellBlock,
     /// The conflict dialog's "keep both, under this name".
     ConflictRename,
+    /// A click on the breadcrumb's last segment: the directory you are in,
+    /// as a whole path you can edit, paste over, and `Enter` to go to.
+    Path,
 }
 
 impl PromptKind {
@@ -56,7 +59,16 @@ impl PromptKind {
             PromptKind::Shell => "Shell:",
             PromptKind::ShellBlock => "Shell (block):",
             PromptKind::ConflictRename => "New name:",
+            PromptKind::Path => "Go to:",
         }
+    }
+
+    /// Whether the bar keeps the directory the prompt is about at its far
+    /// left. Every bar prompt does except `Go to:`, whose field *is* that
+    /// directory, spelled out in full — the same path twice on one line would
+    /// be the second copy crowding out the one you are editing.
+    pub fn shows_directory(self) -> bool {
+        !matches!(self, PromptKind::Path)
     }
 
     /// Whether this prompt drives the help overlay rather than the listing.
@@ -187,9 +199,19 @@ mod tests {
             PromptKind::Shell,
             PromptKind::ShellBlock,
             PromptKind::ConflictRename,
+            PromptKind::Path,
         ] {
             assert!(kind.title().ends_with(':'), "{kind:?}");
         }
+        assert!(
+            !PromptKind::Path.shows_directory(),
+            "the field already holds the whole path"
+        );
+        assert!(PromptKind::Filter.shows_directory());
+        assert!(
+            !PromptKind::Path.is_live() && !PromptKind::Path.anchored(),
+            "a typed path goes nowhere until Enter, and it is typed in the bar"
+        );
         assert!(PromptKind::HelpFilter.is_help());
         assert!(!PromptKind::Filter.is_help());
         assert!(PromptKind::Filter.is_live());

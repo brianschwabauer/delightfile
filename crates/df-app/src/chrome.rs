@@ -703,10 +703,11 @@ pub struct Crumb {
 
 /// The path, as segments from the root rightwards.
 ///
-/// The last one is the directory you are in. It is still a crumb and still
-/// clickable — clicking it is a no-op navigation, which is exactly what a user
-/// who clicked it expects, and special-casing it would mean one segment of the
-/// bar behaves differently from all the others for no visible reason.
+/// The last one is the directory you are in. It is still a crumb, shaped and
+/// hit-tested like every other; the difference is only in what a click on it
+/// does. It cannot go anywhere, so it opens the `Go to:` prompt over the bar
+/// with the whole path in it — the app decides that, and this function does
+/// not need to know.
 pub fn crumbs(path: &std::path::Path) -> Vec<Crumb> {
     use std::path::Component;
     let mut out = Vec::new();

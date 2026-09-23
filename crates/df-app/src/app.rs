@@ -292,6 +292,11 @@ struct PendingOp {
     /// which is why `rescan` is idempotent — a second read of a directory that
     /// is already right costs one scan and changes nothing.
     dirs: Vec<PathBuf>,
+    /// What the job will have produced, in plan order: the pasted copies, the
+    /// extracted top-level entries. The cursor goes to the first of them when
+    /// the job lands (see [`App::land_on`]). Empty for a job whose results
+    /// are not rows anybody should land on — a trash, a delete, a shell line.
+    focus: Vec<PathBuf>,
 }
 
 /// An `archive::list` running on the pool, and what its result is for.
@@ -385,7 +390,7 @@ struct RemotePreview {
 
 /// The modal card that is up, if one is.
 enum Dialog {
-    /// `d` / `D`.
+    /// `D`, and `d` on a server.
     Confirm(Confirm),
     /// A paste that hit a name that is taken. Boxed: it carries a whole
     /// [`PastePlan`](df_core::ops::paste::PastePlan) and the enum is otherwise
@@ -2180,11 +2185,47 @@ impl App {
         for dir in &op.dirs {
             self.rescan(dir, now);
         }
+        // After the rescans, so the aim is waiting for the scan that will
+        // bring the rows rather than for one that started before they existed.
+        self.land_on(&op.focus);
     }
 
     /// Queue a job and remember where to look for its result.
     fn track(&mut self, id: TaskId, slot: Outcome, dirs: Vec<PathBuf>) {
-        self.ops.push(PendingOp { id, slot, dirs });
+        self.track_focus(id, slot, dirs, Vec::new());
+    }
+
+    /// The same, for a job whose results are rows: `focus` is what it will
+    /// have produced, in plan order, and [`App::finish_op`] lands the cursor
+    /// on it.
+    fn track_focus(&mut self, id: TaskId, slot: Outcome, dirs: Vec<PathBuf>, focus: Vec<PathBuf>) {
+        self.ops.push(PendingOp {
+            id,
+            slot,
+            dirs,
+            focus,
+        });
+    }
+
+    /// Put the cursor on what an operation produced, and — when it produced
+    /// more than one thing — make exactly those the selection, so the next
+    /// `y`, `d` or `r` is about what just arrived.
+    ///
+    /// Only when every path is in the directory on screen. A paste dropped on
+    /// a folder row or into another tab produced rows nobody is looking at,
+    /// and so does anything that lands after you have walked away; moving this
+    /// listing's cursor for them would be moving it towards nothing.
+    ///
+    /// **Aimed, not placed.** The rows are almost never here yet: a directory
+    /// read is asynchronous and the one that brings them was asked for a
+    /// moment ago, so [`df_core::fs::DirState::cursor_to_name`] would find
+    /// nothing and give up. The aim waits for the batch that has the row.
+    fn land_on(&mut self, focus: &[PathBuf]) {
+        let Some(names) = focus_names(&self.cwd(), focus) else {
+            return;
+        };
+        land(self.dir(), names);
+        self.attach_view();
     }
 
     // ── Archives as directories (PLAN §7.3) ─────────────────────────────────
@@ -2260,12 +2301,12 @@ impl App {
                     .unwrap_or_else(|| self.cwd());
                 let dest = self.extract_dest(
                     &pending.path,
-                    into,
+                    into.clone(),
                     pending.intent == ArchiveIntent::ExtractSubfolder,
                     now,
                 );
                 if let Some(dest) = dest {
-                    self.spawn_extract(&tree, &[], dest, now);
+                    self.spawn_extract(&tree, &[], dest, &into, now);
                 }
             }
         }
@@ -2365,11 +2406,11 @@ impl App {
         }
         // An empty selection means the whole archive to `plan_extract`, which
         // is exactly right at the root of an empty listing.
-        let Some(dest) = self.extract_dest(&archive, into, subfolder, now) else {
+        let Some(dest) = self.extract_dest(&archive, into.clone(), subfolder, now) else {
             return;
         };
         let borrowed: Vec<&str> = selection.iter().map(String::as_str).collect();
-        self.spawn_extract(&tree, &borrowed, dest, now);
+        self.spawn_extract(&tree, &borrowed, dest, &into, now);
     }
 
     /// Where an extraction lands: the directory itself, or a fresh folder named
@@ -2406,11 +2447,16 @@ impl App {
     }
 
     /// Plan and queue the extraction.
+    ///
+    /// `into` is the directory the archive sits in — the listing the result
+    /// appears in, whether that is its top level spilled straight into it or
+    /// the one fresh subfolder `dest` is.
     fn spawn_extract(
         &mut self,
         tree: &df_core::archive::ArchiveTree,
         selection: &[&str],
         dest: PathBuf,
+        into: &Path,
         now: Instant,
     ) {
         let plan = df_core::archive::plan_extract(tree, selection, &dest);
@@ -2428,10 +2474,11 @@ impl App {
             self.toasts.notice(message, now);
             return;
         }
+        let focus = extract_focus(plan.items.iter().map(|item| item.dest.as_path()), into);
         let job = df_core::ops::ExtractJob::new(plan);
         let slot = job.outcome();
         let id = self.engine.spawn(job);
-        self.track(id, slot, vec![dest]);
+        self.track_focus(id, slot, vec![dest], focus);
     }
 
     /// The preview card's body: the entry under the cursor, decompressed once.
@@ -3629,11 +3676,20 @@ impl App {
             &plan.ready.iter().map(|i| i.src.clone()).collect::<Vec<_>>(),
             Some(&plan.dest_dir),
         );
+        // Where the pasted rows will be — the conflict dialog's renames
+        // included, since a settled plan's destinations are its answers. Only
+        // for a paste into the directory on screen: one dropped on a folder
+        // row or into another tab lands where nobody is looking.
+        let focus = if plan.dest_dir == self.cwd() {
+            plan.ready.iter().map(|item| item.dst.clone()).collect()
+        } else {
+            Vec::new()
+        };
         let cut = plan.mode == PasteMode::Cut;
         let job = PasteJob::new(plan);
         let slot = job.outcome();
         let id = self.engine.spawn(job);
-        self.track(id, slot, dirs);
+        self.track_focus(id, slot, dirs, focus);
         // A cut is spent by its paste: pasting it a second time would move
         // files that are no longer where the clipboard says they are.
         if cut {
@@ -3641,7 +3697,30 @@ impl App {
         }
     }
 
-    /// `d` and `D`, both of which ask first.
+    /// `d`, and the context menu's "Move to trash".
+    ///
+    /// **Locally it asks nothing.** A trash is undoable, and the toast that
+    /// lands with it says so and offers the undo; a card asking "are you sure"
+    /// before anything has happened is a second question about the same
+    /// keystroke, answered by reflex after the first few times. On a server
+    /// there is no trash, so the `d` there is a permanent delete and it keeps
+    /// its card — whose title says *permanently* for exactly that reason.
+    fn trash(&mut self, now: Instant) {
+        if self.tab().remote.is_some() {
+            self.open_confirm(ConfirmKind::RemoteDelete, now);
+            return;
+        }
+        let paths = self.targets();
+        if paths.is_empty() {
+            self.toasts.notice("Nothing selected", now);
+            return;
+        }
+        // Straight to the confirm's own yes: one path carries a trash out,
+        // whether anybody was asked or not.
+        self.run_confirm(Confirm::new(ConfirmKind::Trash, paths), now);
+    }
+
+    /// `D`, remote `d` and the two trash-view purges, all of which ask first.
     fn open_confirm(&mut self, kind: ConfirmKind, now: Instant) {
         // "Empty trash" is about the whole trash, not about what is selected —
         // and it is the one confirm whose body has to be able to say how many
@@ -3669,7 +3748,8 @@ impl App {
         self.sync_context();
     }
 
-    /// The confirm was answered yes.
+    /// The confirm was answered yes — or, for a local trash, was never put
+    /// up at all (see [`App::trash`]).
     fn run_confirm(&mut self, confirm: Confirm, now: Instant) {
         let dirs = Self::affected(&confirm.paths, None);
         let (id, slot) = match confirm.kind {
@@ -3734,7 +3814,7 @@ impl App {
         kind: Option<LinkKind>,
         now: Instant,
     ) {
-        let mut made = 0;
+        let mut made: Vec<PathBuf> = Vec::new();
         let mut failure = None;
         for target in &paths {
             let Some(name) = target.file_name() else {
@@ -3747,7 +3827,7 @@ impl App {
             };
             match result {
                 Ok(()) => {
-                    made += 1;
+                    made.push(link.clone());
                     // One record per link: `OpRecord::Link` describes a single
                     // one, so `u` takes them back one at a time.
                     if let Ok(fingerprint) = Fingerprint::of(&link) {
@@ -3761,12 +3841,15 @@ impl App {
                 Err(e) => failure = Some(e.to_string()),
             }
         }
-        match (made, failure) {
+        match (made.len(), failure) {
             (0, Some(error)) => self.toasts.error(error, now),
             (n, _) => {
                 self.toasts
                     .undo(format!("Linked {}", plural(n, "item", "items")), now);
                 self.rescan(&cwd.clone(), now);
+                // The links are what this made, so they are where the cursor
+                // goes — when they were made where you are looking.
+                self.land_on(&made);
             }
         }
     }
@@ -3782,6 +3865,9 @@ impl App {
             self.toasts.notice("Nothing to undo", now);
             return;
         }
+        // Asked before the undo, because afterwards the record is gone and the
+        // report only says which paths it touched, not what kind of touch.
+        let restores = self.journal.peek().is_some_and(undo_restores);
         match self.journal.undo(&TaskCtx::detached()) {
             Ok(report) => {
                 // The refusal *and* the success are the user's words: df-core
@@ -3791,6 +3877,21 @@ impl App {
                     self.rescan(&dir, now);
                 }
                 self.refresh_all(now);
+                // A rename taken back, or a trash restored, is a row coming
+                // back — the old name, the file out of the trash — and the
+                // cursor goes to it: the first of them that is in this
+                // listing, aimed because the rescan above has not landed.
+                let cwd = self.cwd();
+                let back = report
+                    .touched
+                    .iter()
+                    .filter(|path| path.parent() == Some(cwd.as_path()))
+                    .find_map(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned());
+                if let (true, Some(name)) = (restores, back) {
+                    self.dir().aim_cursor(name);
+                    self.attach_view();
+                }
             }
             Err(e) => self.toasts.error(e.to_string(), now),
         }
@@ -5727,6 +5828,16 @@ impl App {
         self.prompt_changed();
     }
 
+    /// `Go to:`, seeded with where you are. The whole absolute path rather
+    /// than an empty field: the next directory is usually a few characters
+    /// away from this one, and with the caret at the end a path copied from
+    /// somewhere else replaces it in two keys — `Ctrl+u`, `Ctrl+v`.
+    fn open_path_prompt(&mut self) {
+        let here = self.cwd().to_string_lossy().into_owned();
+        let caret = here.chars().count();
+        self.open_prompt_with(PromptKind::Path, InputBuffer::new(here, caret));
+    }
+
     /// `r` and `R`: the two rename presets, both anchored to the cursor's row.
     fn open_rename(&mut self, empty_stem: bool, now: Instant) {
         // PLAN §5: a selection of more than one is a *bulk* rename, and it gets
@@ -5928,7 +6039,7 @@ impl App {
             // onto the change it made rather than onto wherever the list
             // happens to sort it (`delightful-ui` §8).
             self.attach_view();
-            self.tabs.active_mut().cwd.dir.cursor_to_name(&name);
+            self.tabs.active_mut().cwd.dir.aim_cursor(name);
         }
     }
 
@@ -6055,6 +6166,7 @@ impl App {
                 // its own message on the prompt it re-opened.
                 return;
             }
+            PromptKind::Path => self.go_to_path(&text, now).err(),
         };
         match error {
             Some(message) => {
@@ -6101,7 +6213,8 @@ impl App {
         if let Some(at) = self.remote_at() {
             return self.remote_create(at, text);
         }
-        let path = self.cwd().join(text);
+        let cwd = self.cwd();
+        let path = cwd.join(text);
         let created = df_core::ops::create(&path).map_err(|e| e.to_string())?;
         let name = created
             .path
@@ -6123,10 +6236,18 @@ impl App {
             ),
             now,
         );
-        let cwd = self.cwd();
         self.rescan(&cwd, now);
         self.attach_view();
-        self.dir().cursor_to_name(&name);
+        // The row that appears *here*: `a/b/c/` makes three levels and this
+        // listing only ever shows the first of them. Aimed, because the scan
+        // that brings it was asked for on the line above and has not landed.
+        let row = first_under(&cwd, &created.path)
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned());
+        if let Some(row) = row {
+            self.dir().aim_cursor(row);
+        }
         Ok(())
     }
 
@@ -6161,8 +6282,30 @@ impl App {
         let cwd = self.cwd();
         self.rescan(&cwd, now);
         self.attach_view();
-        self.dir().cursor_to_name(&name);
+        // Aimed: the new name is not a row until the rescan lands, and the old
+        // one the cursor remembers is about to vanish.
+        self.dir().aim_cursor(name);
         Ok(())
+    }
+
+    /// `Enter` on `Go to:`.
+    ///
+    /// A directory is gone to. A file is gone to *with the cursor on it* —
+    /// its directory opens and the row is aimed at, the shape
+    /// `delightfile <file>` and a basket row already have. Anything else keeps
+    /// the field open with the reason beside it, because the fix is almost
+    /// always one typo away in the text that is still under the caret.
+    fn go_to_path(&mut self, text: &str, now: Instant) -> Result<(), String> {
+        let path = typed_path(text, &self.cwd(), home().as_deref());
+        if path.is_dir() {
+            self.jump_to(path, now);
+            return Ok(());
+        }
+        if path.exists() {
+            self.reveal(&path, now);
+            return Ok(());
+        }
+        Err("No such directory".to_string())
     }
 
     /// The conflict dialog's rename came back from the prompt.
@@ -7128,14 +7271,7 @@ impl App {
             // `d`: the trash locally, and a confirm that says there is no trash
             // remotely (PLAN §7.6). In the trash view it is on `inert_in_trash`,
             // because what it names has already been trashed.
-            C::Trash => {
-                let kind = if self.tab().remote.is_some() {
-                    ConfirmKind::RemoteDelete
-                } else {
-                    ConfirmKind::Trash
-                };
-                self.open_confirm(kind, now);
-            }
+            C::Trash => self.trash(now),
             C::DeletePermanently => {
                 let kind = if self.tab().trash.is_some() {
                     ConfirmKind::Purge
@@ -7916,6 +8052,10 @@ impl App {
     /// behind it, and reused by the paint so the two cannot disagree.
     fn overlay_geometry(
         &self,
+        // The dialogs are sized to what they say, so they measure their text;
+        // this is the frame's painter, and the geometry it produces is the
+        // one both the hit test and the paint read.
+        painter: &egui::Painter,
         area: egui::Rect,
         layout: &ui::Layout,
         // What the floating cards hang above: the bottom of the panes, which
@@ -7925,16 +8065,18 @@ impl App {
         match &self.dialog {
             Some(Dialog::Confirm(confirm)) => {
                 return Some(OverlayGeom::Confirm(dialog::confirm_geometry(
-                    area, confirm,
+                    painter, area, confirm,
                 )))
             }
             Some(Dialog::Conflict(conflict)) => {
                 return Some(OverlayGeom::Conflict(dialog::conflict_geometry(
-                    area, conflict,
+                    painter, area, conflict,
                 )))
             }
             Some(Dialog::Bulk(bulk)) => {
-                return Some(OverlayGeom::Bulk(dialog::bulk_geometry(area, bulk)))
+                return Some(OverlayGeom::Bulk(dialog::bulk_geometry(
+                    painter, area, bulk,
+                )))
             }
             None => {}
         }
@@ -8266,12 +8408,21 @@ impl App {
         };
     }
 
-    /// The directory a non-anchored prompt is about, as the row shows it.
+    /// The directory a non-anchored prompt is about, as the row shows it —
+    /// or nothing, for the one prompt whose field already spells it out (see
+    /// [`PromptKind::shows_directory`]).
     ///
     /// One function because two callers have to agree: the paint spends this
     /// much of the row on it, and [`App::path_lines`] decides how tall the row
     /// is from what is left.
     fn prompt_tail(&self) -> Option<&str> {
+        if self
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| !prompt.kind.shows_directory())
+        {
+            return None;
+        }
         self.path_bar.1.last().map(|crumb| crumb.label.as_str())
     }
 
@@ -8518,8 +8669,16 @@ impl App {
                 let rect = geom.crumbs.get(index).copied().unwrap_or(egui::Rect::ZERO);
                 if let Some(crumb) = self.path_bar.1.get(index) {
                     let path = crumb.path.clone();
+                    let last = index + 1 == self.path_bar.1.len();
                     if path != self.cwd() {
                         self.navigate(path, now);
+                    } else if last && self.tab().virtual_kind().is_none() {
+                        // The segment you are already in has nowhere to go, so
+                        // it is where you *type* somewhere: the whole path,
+                        // caret at the end, ready to be edited or pasted over.
+                        // Not inside an archive, a server or the trash — their
+                        // paths are not ones `Enter` could resolve on this disk.
+                        self.open_path_prompt();
                     }
                 }
                 rect
@@ -8921,20 +9080,13 @@ impl App {
             A::Cut => self.set_clipboard(true, now),
             A::Paste => self.paste(false, now),
             A::Rename => self.open_rename(false, now),
-            // The same choice `d` makes, and it still has to be made here:
+            // The same door `d` goes through, and it has to be that one:
             // `Trash` is deliberately *not* inert remotely — it becomes a
             // `RemoteDelete` — so the gate above lets it through, and a plain
-            // `ConfirmKind::Trash` would hand a `TrashJob` a list of `sftp://…`
-            // strings, which are *relative* `PathBuf`s resolved against the
-            // process's own directory.
-            A::Trash => {
-                let kind = if self.tab().remote.is_some() {
-                    ConfirmKind::RemoteDelete
-                } else {
-                    ConfirmKind::Trash
-                };
-                self.open_confirm(kind, now);
-            }
+            // local trash would hand a `TrashJob` a list of `sftp://…` strings,
+            // which are *relative* `PathBuf`s resolved against the process's
+            // own directory. [`App::trash`] makes that choice for both.
+            A::Trash => self.trash(now),
             A::CopyPath => self.copy_piece(Piece::Path, now),
             A::CopyName => self.copy_piece(Piece::Filename, now),
             A::Properties => self.toggle_spot(),
@@ -10727,12 +10879,12 @@ impl App {
             now,
         );
         self.rescan(&cwd, now);
-        // The cursor only follows when the file landed where you are looking.
-        // Aiming it at a name that is not in this listing would move it to
-        // wherever `cursor_to_name` gave up.
+        // The cursor only follows when the file landed where you are looking,
+        // and it is aimed rather than placed: the rescan that brings the row
+        // was asked for on the line above and has not landed yet.
         if self.cwd() == cwd {
             self.attach_view();
-            self.dir().cursor_to_name(&name);
+            self.dir().aim_cursor(name);
         }
     }
 
@@ -10905,7 +11057,7 @@ impl App {
         self.tab_widths = tab_widths.clone();
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
-        let overlay = self.overlay_geometry(area, &layout, area.bottom() - ui::GAP);
+        let overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
 
         // The breadcrumb is measured once and used by both the hit test and the
         // paint, for the reason `tab_rects` is: two functions computing this
@@ -12882,11 +13034,12 @@ fn overlay_hints(
             ("w / Esc", "close"),
         ],
         OverlayGeom::Confirm(_) | OverlayGeom::Conflict(_) | OverlayGeom::Bulk(_) => match dialog {
-            Some(Dialog::Confirm(_)) => vec![
-                ("Enter / y", "confirm"),
-                ("Esc / n", "cancel"),
-                ("↑↓", "scroll"),
-            ],
+            // The one card with no strip. It is a question and two buttons,
+            // and its keys are the ones every yes/no in every program has —
+            // `Enter` is the lit button, `Esc` is the other. A footer spelling
+            // that out was the most crowded line on the smallest card. The
+            // keys themselves (`y`, `n`, the arrows) all still work.
+            Some(Dialog::Confirm(_)) => Vec::new(),
             Some(Dialog::Bulk(_)) => vec![
                 ("Tab / ↑↓", "next field"),
                 ("Enter", "rename"),
@@ -13173,6 +13326,124 @@ fn nearest_existing(path: &Path) -> PathBuf {
         candidate = parent;
     }
     PathBuf::from("/")
+}
+
+/// What a path typed into `Go to:` names.
+///
+/// Trimmed, because a path pasted out of a terminal or a chat brings a newline
+/// or a space with it. `~` and `~/…` are `$HOME` — only those two, since
+/// `~bob` is somebody else's home and `$HOME` cannot say where that is. Anything
+/// relative is relative to the directory on screen. `.` and `..` are resolved
+/// on the *text*, the logical walk a shell's `cd` does: `../photos` from inside
+/// a symlinked folder goes to the sibling the breadcrumb shows, not to one
+/// beside wherever the link happens to point, and the history gets a clean path
+/// rather than one with `..` in the middle of it.
+fn typed_path(text: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
+    use std::path::Component;
+    let text = text.trim();
+    let expanded = match (text.strip_prefix('~'), home) {
+        (Some(""), Some(home)) => home.to_path_buf(),
+        (Some(rest), Some(home)) if rest.starts_with('/') => {
+            home.join(rest.trim_start_matches('/'))
+        }
+        _ => PathBuf::from(text),
+    };
+    // `join` with an absolute path *replaces*, which is exactly what `/etc`
+    // typed from anywhere should do.
+    let joined = cwd.join(expanded);
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            // `pop` at the root is a no-op, which is where `/..` is.
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// The names `focus` has in `cwd` — when **every** one of them is directly in
+/// it, and there is at least one.
+///
+/// All or nothing: an operation whose results are partly here and partly
+/// somewhere else has no one place for the cursor to go, and landing on the
+/// half that is here would read as the other half having gone missing.
+fn focus_names(cwd: &Path, focus: &[PathBuf]) -> Option<Vec<String>> {
+    if focus.is_empty() {
+        return None;
+    }
+    focus
+        .iter()
+        .map(|path| {
+            if path.parent() != Some(cwd) {
+                return None;
+            }
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+/// Land a listing on `names`: the cursor aimed at the first, and the
+/// selection replaced by all of them when there is more than one. One name is
+/// just a cursor — a selection of the single row the cursor is on says
+/// nothing the cursor does not, and would outlive it.
+fn land(dir: &mut df_core::fs::DirState, names: Vec<String>) {
+    let Some(first) = names.first().cloned() else {
+        return;
+    };
+    if names.len() > 1 {
+        dir.select_names(names);
+    }
+    dir.aim_cursor(first);
+}
+
+/// The entry of `dir` that `path` is in or is: `dir/a` for `dir/a/b/c`.
+///
+/// What appears in a listing when something is made several levels below it
+/// — `a` then `notes/2026/plan.md` shows a new `notes` row and nothing else —
+/// so it is the row an operation's cursor belongs on. `None` for a path that
+/// is not under `dir` at all, including one that climbs out of it with `..`.
+fn first_under(dir: &Path, path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let rest = path.strip_prefix(dir).ok()?;
+    match rest
+        .components()
+        .find(|component| !matches!(component, Component::CurDir))?
+    {
+        Component::Normal(name) => Some(dir.join(name)),
+        _ => None,
+    }
+}
+
+/// What an extraction adds to `into`, the directory it was started from: one
+/// path per entry it creates there, in plan order and without repeats. For an
+/// extraction into a fresh subfolder that is the subfolder alone; for one
+/// straight into `into`, it is the archive's top level.
+fn extract_focus<'a>(dests: impl IntoIterator<Item = &'a Path>, into: &Path) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    dests
+        .into_iter()
+        .filter_map(|dest| first_under(into, dest))
+        .filter(|top| seen.insert(top.clone()))
+        .collect()
+}
+
+/// Whether undoing `record` puts a name back that the cursor should go to.
+///
+/// A rename's undo brings the old name back, and a trash's undo brings the
+/// file back: both are a row reappearing, and the cursor belongs on it. The
+/// rest take something *away* — the copies a paste made, a created file, a
+/// link — or move it somewhere else entirely, and there is no row left to land
+/// on.
+fn undo_restores(record: &OpRecord) -> bool {
+    matches!(
+        record,
+        OpRecord::Rename { .. } | OpRecord::Renames { .. } | OpRecord::Trash { .. }
+    )
 }
 
 impl ApplicationHandler<crate::Wake> for App {
@@ -13709,6 +13980,205 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tree);
     }
 
+    /// Drain `scanner` into `tab` until its listing has finished loading.
+    fn settle(tab: &mut Tab, scanner: &Scanner) {
+        use df_core::fs::LoadState;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while tab.cwd.dir.state() != LoadState::Loaded && Instant::now() < deadline {
+            for update in scanner.drain() {
+                tab.apply(&update);
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(
+            tab.cwd.dir.state(),
+            LoadState::Loaded,
+            "the scan never landed"
+        );
+    }
+
+    /// A finished operation puts the cursor on what it made, and a paste of
+    /// several selects them — **through the scan that brings the rows**.
+    ///
+    /// That is the whole difficulty. When a job lands, [`App::finish_op`] has
+    /// only just asked for the rescan, and the listing still holds the
+    /// directory as it was before the paste: a `cursor_to_name` there finds
+    /// nothing and gives up, which is the bug this replaces. Driven the way
+    /// `finish_op` drives it — rescan, then land — against a real scanner and a
+    /// real directory, for the reason the start-up test above gives.
+    #[test]
+    fn a_finished_operation_lands_the_cursor_on_what_it_made() {
+        use df_core::fs::no_notifier;
+
+        let tree = std::env::temp_dir().join(format!("df-op-focus-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        std::fs::create_dir_all(&tree).expect("make the fixture directory");
+        for name in ["a.txt", "b.txt", "m.txt"] {
+            std::fs::write(tree.join(name), b"x").expect("write the fixture");
+        }
+        let scanner = Scanner::start(no_notifier());
+        let now = Instant::now();
+        let mgr = MgrConfig::default();
+        let sort = sort_options(&mgr, 0);
+        let mut tab = Tab::open(tree.clone(), &mgr, sort, &scanner, now);
+        settle(&mut tab, &scanner);
+        // Something marked before the paste, which the paste replaces.
+        tab.cwd.dir.toggle_selected(0);
+
+        // The job has written its copies…
+        let made = [tree.join("b_1.txt"), tree.join("m_1.txt")];
+        for path in &made {
+            std::fs::write(path, b"x").expect("the paste's copy");
+        }
+        // …and `finish_op` rescans and then lands, before a single batch of
+        // the new scan has arrived.
+        tab.cwd.begin_scan(&scanner, now);
+        let names = focus_names(&tree, &made).expect("both landed in this listing");
+        land(&mut tab.cwd.dir, names);
+        let name = tab.cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_ne!(name.as_deref(), Some("b_1.txt"), "the row was already here");
+
+        settle(&mut tab, &scanner);
+        let name = tab.cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_eq!(
+            name.as_deref(),
+            Some("b_1.txt"),
+            "the cursor did not follow"
+        );
+        assert_eq!(
+            tab.cwd.dir.selected_paths(),
+            made.to_vec(),
+            "the selection is exactly what the paste made"
+        );
+
+        // A rename is one row: the cursor follows the new name, and the
+        // selection is left as it was.
+        std::fs::rename(tree.join("a.txt"), tree.join("z.txt")).expect("rename");
+        tab.cwd.begin_scan(&scanner, now);
+        tab.cwd.dir.aim_cursor("z.txt");
+        settle(&mut tab, &scanner);
+        let name = tab.cwd.dir.cursor_entry().map(|e| e.name.clone());
+        assert_eq!(name.as_deref(), Some("z.txt"), "the cursor lost the rename");
+        assert_eq!(tab.cwd.dir.selected_count(), 2);
+
+        let _ = std::fs::remove_dir_all(&tree);
+    }
+
+    /// Which row an operation lands on, as pure functions of its paths.
+    #[test]
+    fn an_operation_lands_on_the_row_it_made_in_this_listing() {
+        let cwd = Path::new("/w");
+
+        // `a` then `a/b/c/` makes three levels; the listing shows the first.
+        assert_eq!(
+            first_under(cwd, Path::new("/w/a/b/c")),
+            Some(PathBuf::from("/w/a"))
+        );
+        assert_eq!(
+            first_under(cwd, Path::new("/w/./notes")),
+            Some(PathBuf::from("/w/notes"))
+        );
+        // Out of the listing, whichever way it leaves.
+        assert_eq!(first_under(cwd, Path::new("/w/../x")), None);
+        assert_eq!(first_under(cwd, Path::new("/elsewhere/x")), None);
+        assert_eq!(first_under(cwd, cwd), None);
+
+        // An extraction straight here lands on its top level, once each and in
+        // plan order; one into a fresh subfolder lands on the subfolder.
+        let here = [
+            Path::new("/w/src"),
+            Path::new("/w/docs"),
+            Path::new("/w/src/main.rs"),
+            Path::new("/w/README.md"),
+        ];
+        assert_eq!(
+            extract_focus(here, cwd),
+            vec![
+                PathBuf::from("/w/src"),
+                PathBuf::from("/w/docs"),
+                PathBuf::from("/w/README.md")
+            ]
+        );
+        let sub = [Path::new("/w/pkg/src"), Path::new("/w/pkg/src/lib.rs")];
+        assert_eq!(extract_focus(sub, cwd), vec![PathBuf::from("/w/pkg")]);
+
+        // All in this listing or nothing at all.
+        let two = [PathBuf::from("/w/b_1.txt"), PathBuf::from("/w/m_1.txt")];
+        assert_eq!(
+            focus_names(cwd, &two),
+            Some(vec!["b_1.txt".to_string(), "m_1.txt".to_string()])
+        );
+        let split = [PathBuf::from("/w/b_1.txt"), PathBuf::from("/other/m.txt")];
+        assert_eq!(focus_names(cwd, &split), None);
+        assert_eq!(focus_names(cwd, &[]), None, "nothing made, nowhere to go");
+        let deeper = [PathBuf::from("/w/sub/x.txt")];
+        assert_eq!(focus_names(cwd, &deeper), None, "a drop onto a folder row");
+    }
+
+    /// `u` lands on a row only when the undo brings one back.
+    #[test]
+    fn an_undo_lands_on_what_it_brought_back() {
+        use df_core::ops::journal::FileKind;
+        let fingerprint = Fingerprint {
+            kind: FileKind::File,
+            len: 0,
+            mtime: None,
+            entries: None,
+        };
+        let moved = MovedPath {
+            from: PathBuf::from("/w/old.txt"),
+            to: PathBuf::from("/w/new.txt"),
+            fingerprint: fingerprint.clone(),
+        };
+        // The old name comes back; the trashed file comes back.
+        assert!(undo_restores(&OpRecord::Rename {
+            moved: moved.clone()
+        }));
+        assert!(undo_restores(&OpRecord::Renames {
+            moved: vec![moved.clone()]
+        }));
+        assert!(undo_restores(&OpRecord::Trash { items: Vec::new() }));
+        // A paste's copies go away, and a cut goes back where it came from.
+        assert!(!undo_restores(&OpRecord::Copy {
+            created: Vec::new()
+        }));
+        assert!(!undo_restores(&OpRecord::Move { moves: vec![moved] }));
+        assert!(!undo_restores(&OpRecord::Create {
+            path: PathBuf::from("/w/new"),
+            is_dir: false,
+            fingerprint,
+            created_parents: Vec::new(),
+        }));
+        assert!(!undo_restores(&OpRecord::Links { links: Vec::new() }));
+    }
+
+    /// `Go to:` resolves what was typed the way a shell would, without asking
+    /// the disk: `~`, relative paths, `.` and `..`, and whatever a paste
+    /// brought with it at either end.
+    #[test]
+    fn a_typed_path_resolves_like_a_shell_would() {
+        let cwd = Path::new("/home/me/src");
+        let home = Some(Path::new("/home/me"));
+        let go = |text: &str| typed_path(text, cwd, home);
+
+        assert_eq!(go("  /etc/\n"), PathBuf::from("/etc"));
+        assert_eq!(go("~"), PathBuf::from("/home/me"));
+        assert_eq!(go("~/"), PathBuf::from("/home/me"));
+        assert_eq!(go("~/Downloads"), PathBuf::from("/home/me/Downloads"));
+        assert_eq!(go("app/lib"), PathBuf::from("/home/me/src/app/lib"));
+        assert_eq!(go("../photos"), PathBuf::from("/home/me/photos"));
+        assert_eq!(go("./a/./b/"), PathBuf::from("/home/me/src/a/b"));
+        assert_eq!(go("/../.."), PathBuf::from("/"), "the root has no parent");
+        assert_eq!(go(""), cwd.to_path_buf(), "nothing typed is here");
+        // `~bob` is somebody else's home, which `$HOME` cannot name, so it is
+        // an ordinary relative name — and so is `~` with no `$HOME` at all.
+        assert_eq!(go("~bob"), PathBuf::from("/home/me/src/~bob"));
+        assert_eq!(
+            typed_path("~/x", cwd, None),
+            PathBuf::from("/home/me/src/~/x")
+        );
+    }
+
     #[test]
     fn a_directory_argument_opens_it() {
         let (dir, focus) = start_directory(Some(Path::new("/")));
@@ -13835,7 +14305,8 @@ mod tests {
     }
 
     /// Every modal surface says what its keys do, and never claims a key the
-    /// surface does not have.
+    /// surface does not have — except the confirm, which is a question and two
+    /// buttons and says nothing else at all.
     #[test]
     fn each_overlay_teaches_its_own_keys() {
         let nowhere = egui::Rect::ZERO;
@@ -13853,8 +14324,16 @@ mod tests {
                 vec![PathBuf::from("/tmp/a")],
             ))),
         );
-        assert!(confirm.iter().any(|(k, _)| k.contains("Enter")));
-        assert!(confirm.iter().any(|(k, _)| k.contains("Esc")));
+        assert!(confirm.is_empty(), "the confirm grew a footer: {confirm:?}");
+        // …while the other two cards keep theirs.
+        let bulk = crate::bulk::Bulk::new(PathBuf::from("/tmp"), vec!["a".to_string()], &[])
+            .expect("a local directory builds a card");
+        let bulk = overlay_hints(
+            &OverlayGeom::Bulk(empty.clone()),
+            &Some(Dialog::Bulk(Box::new(bulk))),
+        );
+        assert!(bulk.iter().any(|(k, _)| k.contains("Enter")));
+        assert!(bulk.iter().any(|(k, _)| k.contains("Esc")));
         // A card with no dialog behind it says nothing rather than somebody
         // else's keys.
         assert!(overlay_hints(&OverlayGeom::Confirm(empty), &None).is_empty());

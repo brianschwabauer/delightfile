@@ -386,12 +386,6 @@ fn name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
-/// The dialog body for `D` in the trash. Its own sentence because the ordinary
-/// one — "Permanently delete — cannot be undone" — is true but incomplete here:
-/// what is being deleted is already deleted, and the thing being destroyed is
-/// the *chance to get it back*.
-pub const PURGE_SUBTITLE: &str = "Destroys them for good — there is no way back from the trash.";
-
 #[cfg(test)]
 mod tests {
     use super::*;

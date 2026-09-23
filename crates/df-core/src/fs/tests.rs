@@ -851,6 +851,62 @@ fn a_selection_drops_files_that_are_gone_after_a_rescan() {
     assert!(state.is_selected("a.txt"));
 }
 
+/// What a finished paste does to the listing it landed in: the names it
+/// produced are selected **before their rows exist**, and they stay selected
+/// through every rebuild the rescan causes — the batches that bring them and
+/// the ones that do not. Only the scan's end prunes, and only what really is
+/// not there.
+#[test]
+fn a_selection_of_names_waits_for_the_rows_that_will_carry_it() {
+    let mut state = loaded_state(files(&["a.txt", "b.txt"]));
+    state.select_all();
+
+    // Replaced, not added to: the two that were marked before are not.
+    state.select_names([
+        "c.txt".to_string(),
+        "d.txt".to_string(),
+        "e.txt".to_string(),
+    ]);
+    assert_eq!(state.selected_count(), 3);
+    assert!(!state.is_selected("a.txt"));
+
+    let token = ScanToken(9);
+    let dir = PathBuf::from("/fixture");
+    state.token = Some(token);
+    state.apply(&ScanUpdate::Started {
+        token,
+        dir: dir.clone(),
+    });
+    // A batch without them is a rebuild, and a rebuild must not prune.
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: dir.clone(),
+        entries: files(&["a.txt", "b.txt"]),
+    });
+    assert_eq!(state.selected_count(), 3, "a rebuild pruned the selection");
+    state.apply(&ScanUpdate::Batch {
+        token,
+        dir: dir.clone(),
+        entries: files(&["c.txt", "d.txt"]),
+    });
+    assert!(state.is_selected("c.txt") && state.is_selected("d.txt"));
+
+    // The scan is over and `e.txt` never came (a cancelled paste): that one
+    // goes, the two that landed stay.
+    state.apply(&ScanUpdate::Done {
+        token,
+        dir,
+        total: 4,
+    });
+    assert_eq!(
+        state.selected_paths(),
+        vec![
+            PathBuf::from("/fixture/c.txt"),
+            PathBuf::from("/fixture/d.txt")
+        ]
+    );
+}
+
 /// A *page* clamps: `Ctrl+f` at the bottom stops there.
 #[test]
 fn a_page_of_cursor_clamps_at_both_ends() {
