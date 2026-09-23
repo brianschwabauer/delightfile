@@ -124,11 +124,12 @@ org.freedesktop.impl.portal.FileChooser=termfilechooser
 Then `systemctl --user restart xdg-desktop-portal`.
 
 In a picker session the top row ends with `Cancel` and a button that answers the dialog:
-`Select` for files, `Choose folder` for a folder, `Save` for a save. `Enter` picks the
-selection (or the file under the cursor) and quits, a directory still opens on `Enter`, a
-double-click picks the row it lands on, and `q`, `Esc` or `Cancel` cancels. A dialog that
-takes one file holds the selection to one row. In a save, `Enter` on a file replaces it
-(asking first unless it is the name the dialog suggested) and `Save` types a new name.
+`Select` for files, `Choose folder` for a folder, `Save` for a save; `Ctrl+Enter` presses
+it. `Enter` picks the selection (or the file under the cursor) and quits, a directory still
+opens on `Enter`, a double-click picks the row it lands on, and `q`, `Esc` or `Cancel`
+cancels. A dialog that takes one file holds the selection to one row, and a drag draws no
+band there. In a save, `Enter` on a file replaces it (asking first unless it is the name the
+dialog suggested) and `Save` types a new name.
 
 The mechanism underneath is one flag, plus three switches the wrapper passes through from
 the portal:
@@ -157,6 +158,7 @@ it without leaving the list.
 | `Alt+←` `Alt+→` | history back, forward |
 | `Ctrl+l` | type a path to go to |
 | `Enter` `o` | open. `O` picks the opener |
+| `Ctrl+Enter` | in a file dialog: its Select / Choose folder / Save button |
 | `Space` `v` `Ctrl+a` | select, visual mode, all |
 | `y` `x` `p` `P` | yank, cut, paste, paste over |
 | `Y` `c t` | copy the file to the clipboard, copy its text |

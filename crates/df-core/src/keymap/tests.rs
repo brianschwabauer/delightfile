@@ -70,6 +70,8 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("o", Command::Open),
         ("enter", Command::Open),
         ("O", Command::OpenInteractive),
+        // A picker's primary button, from the keyboard.
+        ("ctrl+enter", Command::Choose),
         ("y", Command::Yank),
         ("x", Command::YankCut),
         ("p", Command::Paste),

@@ -115,9 +115,9 @@ usage: delightfile [path] [options]
   --cwd-file=<path>      write the final directory here when quitting with `q`
                          (`Q` quits without writing it)
   --chooser-file=<path>  pick rather than open: `Enter` or the Select button
-                         writes the picked paths here, one per line, and
-                         quits. Quitting any other way writes nothing, which
-                         is a cancel.
+                         (`Ctrl+Enter`) writes the picked paths here, one per
+                         line, and quits. Quitting any other way writes
+                         nothing, which is a cancel.
   --chooser-multiple     the dialog takes several files (default: one)
   --chooser-directory    the dialog wants a folder: Choose folder picks the
                          selected folders, or the one you are in

@@ -129,6 +129,11 @@ commands! {
     // ── File operations (PLAN §5) ─────────────────────────────────────────
     Open => "open",
     OpenInteractive => "open-interactive",
+    // `Ctrl+Enter`: what a picker session's primary button does — Select,
+    // Choose folder or Save, by the dialog. The keyboard's door to it,
+    // because `Enter` walks into a folder and a folder dialog still has to be
+    // answerable without the mouse. Nothing at all outside a picker.
+    Choose => "choose",
     Yank => "yank",
     YankCut => "yank-cut",
     Unyank => "unyank",

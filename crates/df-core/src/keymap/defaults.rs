@@ -182,6 +182,11 @@ pub(super) fn build() -> Registry {
         (Files, "enter",       C::Open,            "Open",       Always),
         (Files, "O",           C::OpenInteractive, "Open with…", Always),
         (Files, "shift+enter", C::OpenInteractive, "Open with…", Always),
+        // No yazi ancestor: yazi has no button to stand in for. `Ctrl+Enter`
+        // is the "submit the form" key everywhere a plain `Enter` already
+        // means something closer to hand — here, walking into a folder.
+        (Files, "ctrl+enter",  C::Choose,
+            "Choose — what the dialog's Select / Choose folder / Save button does", Always),
 
         // ── Files: the clipboard and the file operations (§5) ────────────────
         (Files, "y",      C::Yank,              "Yank (copy)",                         Always),

@@ -4373,10 +4373,11 @@ impl App {
     /// whatever opened the dialog, and end.
     ///
     /// Refused inside a virtual listing — see [`App::refuse_virtual_pick`].
-    /// Refused too when a one-file dialog has somehow been handed several: the
-    /// selection is held to one row in that mode, but a band drawn over the
-    /// list is still a way to mark more, and the dialog on the other end would
-    /// take the first line and drop the rest without a word.
+    /// Refused too when a one-file dialog has somehow been handed several.
+    /// Nothing in that mode marks a second row — not `Space`, not a click, not
+    /// a band — so this is belt and braces: a selection that got there by a
+    /// route nobody thought of must not reach a dialog that would take the
+    /// first line and drop the rest without a word.
     fn choose(&mut self, now: Instant) {
         if self.refuse_virtual_pick(now) {
             return;
@@ -8436,6 +8437,10 @@ impl App {
             C::ArchiveExtractHere => self.extract(ExtractMode::Here, now),
             C::ArchiveExtractSubfolder => self.extract(ExtractMode::Folder, now),
             C::OpenInteractive => self.open_picker(now),
+            // The primary button, from the keyboard: exactly what a click on
+            // it does, dimmed-and-silent included. Outside a picker there is
+            // no button, and `press_pick` does nothing without one.
+            C::Choose => self.press_pick(now),
 
             // ── The palette and the jumps (PLAN §4.4, §7.2) ─────────────────
             C::CommandPalette => self.open_palette(),
@@ -10488,6 +10493,16 @@ impl App {
                 return;
             }
             if !press.band_origin && !press.band_on_row {
+                return;
+            }
+            // A dialog that takes one path has no use for a rectangle of
+            // them: the drag that would have drawn one does nothing — no band,
+            // no rows marked. What the press already did on mouse-down (the
+            // cursor, a `Ctrl`-click's mark) stands. It still ends the click
+            // run, for the reason a band does below: in a picker the second
+            // half of a double click is a *pick*, and a drag is not a click.
+            if self.single_pick() {
+                self.clicks.reset();
                 return;
             }
             self.band = Some(select::Band::new(press.at, press.list_scroll, now));
@@ -17065,8 +17080,8 @@ mod tests {
 
     /// A one-file dialog holds the selection to one row: marking another row
     /// moves the mark, Shift-click is a plain click, the three many-row
-    /// selectors say why they do nothing, and a pick of two — which a band can
-    /// still make — is refused rather than half-delivered.
+    /// selectors say why they do nothing, and a pick of two — which no gesture
+    /// in this mode can make — is refused rather than half-delivered.
     #[test]
     fn a_one_file_dialog_holds_one_mark() {
         let mut app = picker("pick-one", &["a.txt", "b.txt", "c.txt"], &[], FILE);
@@ -17103,7 +17118,7 @@ mod tests {
             );
         }
 
-        // Two marked the only way left — a band — and `Enter` refuses them.
+        // Two marked behind the dialog's back, and `Enter` refuses them.
         app.toasts.clear();
         app.dir().select_range(0, 1, true);
         app.run(Command::Open, 10, now);
@@ -17414,6 +17429,117 @@ mod tests {
         assert_eq!(
             picker_greeting(PickMode::Save),
             "Enter on a file replaces it, Save names a new one"
+        );
+    }
+
+    /// A primary-button press at `from` and three frames of travel to `to`,
+    /// with the button still down: far enough past the drag threshold that a
+    /// band, if one is going to start, has started and been read.
+    fn drag_to(app: &mut App, ctx: &egui::Context, from: egui::Pos2, to: egui::Pos2) {
+        let down = egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(app, ctx, vec![egui::Event::PointerMoved(from), down]);
+        for step in 1..=3 {
+            let at = from + (to - from) * (step as f32 / 3.0);
+            run_frame(app, ctx, vec![egui::Event::PointerMoved(at)]);
+        }
+    }
+
+    fn release_at(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
+        let up = egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(app, ctx, vec![up]);
+    }
+
+    /// A drag from the list's empty space up over its rows draws a band in a
+    /// dialog that takes several files, and nothing at all in one that takes
+    /// one: no band, no marks.
+    #[test]
+    fn a_one_file_dialog_draws_no_band() {
+        let names = ["a.txt", "b.txt", "c.txt"];
+        let ctx = egui::Context::default();
+        for (mode, label) in [(FILES, "pick-band-many"), (FILE, "pick-band-one")] {
+            let mut app = picker(label, &names, &[], mode);
+            run_frame(&mut app, &ctx, Vec::new());
+            let below = row_rect(&app, 2).center_bottom() + egui::vec2(0.0, 40.0);
+            assert!(layout_of(&app).list.contains(below), "no empty space below");
+            let over = row_centre(&app, 0);
+            drag_to(&mut app, &ctx, below, over);
+            if mode == FILES {
+                // The control: the harness really does draw bands.
+                assert!(app.band.is_some(), "no band in a many-file dialog");
+                release_at(&mut app, &ctx, over);
+                assert_eq!(selected(&app), names, "the band marked nothing");
+            } else {
+                assert!(app.band.is_none(), "a one-file dialog drew a band");
+                release_at(&mut app, &ctx, over);
+                assert!(selected(&app).is_empty(), "a one-file dialog marked rows");
+                assert_eq!(app.quit, None);
+            }
+        }
+    }
+
+    /// `Ctrl+Enter` is the primary button: the same pick in every dialog —
+    /// including the folder dialog's "this one, here", which `Enter` on a
+    /// folder cannot say — and the same silence where the button is dimmed.
+    /// Outside a picker it does nothing and says nothing. It is on the help
+    /// sheet like every other binding.
+    #[test]
+    fn ctrl_enter_is_the_primary_button() {
+        let now = Instant::now();
+        let mut app = picker("choose-file", &["a.txt", "b.txt"], &["docs"], FILE);
+        // The cursor opens on the folder: the button is dimmed, and so is this.
+        app.run(Command::Choose, 10, now);
+        assert_eq!(app.quit, None);
+        assert_eq!(app.cwd(), app.files, "Choose walked into the folder");
+        cursor_to(&mut app, "b.txt");
+        app.run(Command::Choose, 10, now);
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("b.txt")]);
+
+        let mut app = picker("choose-folder", &["a.txt"], &["docs"], FOLDER);
+        app.run(Command::Choose, 10, now);
+        assert_eq!(
+            app.chosen,
+            [app.files.clone()],
+            "a folder row is not a choice"
+        );
+
+        let mut app = picker("choose-save", &["a.txt"], &[], SAVE);
+        app.run(Command::Choose, 10, now);
+        assert_eq!(
+            app.prompt.as_ref().map(|p| p.kind),
+            Some(PromptKind::SaveAs)
+        );
+
+        let mut app = Fixture::new("choose-browser", &["a.txt"]);
+        app.run(Command::Choose, 10, now);
+        assert_eq!(app.quit, None);
+        assert!(app.prompt.is_none() && app.dialog.is_none());
+        assert!(toast(&app).is_none(), "{:?}", toast(&app));
+
+        let rows = help::all_rows(&app.keymap, &app.help_stack(), WhenFlags::NONE);
+        let row = rows
+            .iter()
+            .find(|row| row.id == "choose")
+            .expect("Choose is on the help sheet");
+        assert_eq!(
+            row.description,
+            "Choose — what the dialog's Select / Choose folder / Save button does"
+        );
+        let keys = row.keys.to_lowercase();
+        assert!(
+            keys.contains("ctrl") && keys.contains("enter"),
+            "{}",
+            row.keys
         );
     }
 }
