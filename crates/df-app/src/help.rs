@@ -356,7 +356,12 @@ mod tests {
         vec![
             row(Context::Files, "q", "Quit", "quit"),
             row(Context::Files, ", m", "Sort by modified", "sort-mtime"),
-            row(Context::Files, "f", "Filter files", "filter"),
+            row(
+                Context::Files,
+                "f",
+                "Filter this folder, hide the rest",
+                "filter",
+            ),
             row(
                 Context::Global,
                 "Ctrl+p",

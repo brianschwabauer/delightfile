@@ -224,6 +224,9 @@ commands! {
     SearchName => "search-name",
     SearchContent => "search-content",
     CancelSearch => "cancel-search",
+    // Inside the search panel: the same query, asked of the other tool —
+    // names become contents and contents names.
+    SearchToggle => "search-toggle",
 
     // ── Sort (PLAN §4.1 `,` chord) ────────────────────────────────────────
     SortMtime => "sort-mtime",

@@ -20,6 +20,11 @@
 //! you opened the overlay to look at. So it takes the parent and list columns,
 //! leaves the preview pane alone, and the two halves read as "results here,
 //! what they are there".
+//!
+//! Its title is a switch rather than a sentence — **Names | Contents**, the
+//! lit half being the mode it is in — because the panel is one search asked
+//! two ways ([`crate::search`]), and a title that only named the current way
+//! would hide that the other one is a click (or `Tab`) away.
 
 use egui::{Align2, Color32, FontId, Rect};
 
@@ -299,6 +304,9 @@ const ICON_COLUMN: f32 = 16.0;
 pub struct SearchGeom {
     pub card: Rect,
     pub field: Rect,
+    /// The **Names | Contents** switch at the head of the field: one plate per
+    /// [`Mode::ALL`], in that order, side by side.
+    pub switch: [Rect; 2],
     pub rows: Vec<Rect>,
 }
 
@@ -307,10 +315,57 @@ impl SearchGeom {
         self.rows.iter().position(|rect| rect.contains(pos))
     }
 
+    /// Which half of the switch `pos` is on.
+    ///
+    /// Asked of each plate grown by [`SWITCH_INSET`] above and below, to the
+    /// field's full height: the plates are inset inside the field, and a press
+    /// in the sliver of field over one is aimed at it — the target is allowed
+    /// to be bigger than what is drawn (`delightful-ui` §1). Not sideways,
+    /// where the two halves touch and a grown one would take the other's edge.
+    pub fn switch_at(&self, pos: egui::Pos2) -> Option<Mode> {
+        Mode::ALL
+            .into_iter()
+            .zip(self.switch)
+            .find(|(_, rect)| rect.expand2(egui::vec2(0.0, SWITCH_INSET)).contains(pos))
+            .map(|(mode, _)| mode)
+    }
+
+    /// Where `mode`'s half of the switch is drawn, for the ripple to start in.
+    pub fn switch_rect(&self, mode: Mode) -> Rect {
+        match mode {
+            Mode::Names => self.switch[0],
+            Mode::Content => self.switch[1],
+        }
+    }
+
     /// How many rows fit — what the scrolloff rule is given.
     pub fn page(&self) -> usize {
         self.rows.len()
     }
+}
+
+/// The pointer's name for one half of the switch — what its hover, its press
+/// and its ripple are keyed on.
+pub fn switch_control(mode: Mode) -> Control {
+    match mode {
+        Mode::Names => Control::SearchNames,
+        Mode::Content => Control::SearchContents,
+    }
+}
+
+/// How far the switch's plates sit inside the field, on every side they share
+/// with it (`delightful-ui` §15's even insets): the top, the bottom, and the
+/// field's left end.
+///
+/// The top row's chip inset, because a switch plate is the same kind of thing
+/// — a pill lying in a bar — at the same scale.
+const SWITCH_INSET: f32 = chrome::CHIP_INSET;
+
+/// The plates' corner radius: **the field's less the inset**, so the gap
+/// between the first plate and the field's own corner stays a constant width
+/// as it turns (`delightful-ui` §15). Derived, never picked.
+fn switch_radius() -> u8 {
+    field_radius().saturating_sub(SWITCH_INSET as u8).max(2)
 }
 
 /// Lay the search panel out over the parent and list columns, leaving the
@@ -319,12 +374,35 @@ impl SearchGeom {
 /// The `left`/`right` are the two columns' outer edges rather than the whole
 /// window: the live preview is half of what this overlay is *for* (PLAN §7.2),
 /// and covering or dimming it would be covering the answer.
-pub fn search_geometry(left: f32, right: f32, top: f32, bottom: f32, mode: Mode) -> SearchGeom {
+///
+/// `painter` measures the switch's two words, which is what its plates are
+/// sized to: each half is as wide as its word plus a chip's padding, so
+/// **Names** and **Contents** are not stretched to one width that would leave
+/// the short word floating in the middle of a wide plate.
+pub fn search_geometry(
+    painter: &egui::Painter,
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    mode: Mode,
+) -> SearchGeom {
     let card = Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
     let field = Rect::from_min_size(
         card.min + egui::vec2(CARD_PAD, CARD_PAD),
         egui::vec2(card.width() - CARD_PAD * 2.0, FIELD_ROW),
     );
+    let mut x = field.left() + SWITCH_INSET;
+    let switch = Mode::ALL.map(|half| {
+        let width =
+            chrome::text_width(painter, half.label(), FontId::proportional(FONT)) + PAD_X * 2.0;
+        let rect = Rect::from_min_max(
+            egui::pos2(x, field.top() + SWITCH_INSET),
+            egui::pos2(x + width, field.bottom() - SWITCH_INSET),
+        );
+        x += width;
+        rect
+    });
     let row_height = match mode {
         Mode::Names => NAME_ROW,
         Mode::Content => CONTENT_ROW,
@@ -344,7 +422,12 @@ pub fn search_geometry(left: f32, right: f32, top: f32, bottom: f32, mode: Mode)
             )
         })
         .collect();
-    SearchGeom { card, field, rows }
+    SearchGeom {
+        card,
+        field,
+        switch,
+        rows,
+    }
 }
 
 /// Draw the `s` / `S` panel.
@@ -362,16 +445,8 @@ pub fn paint_search(
     let field = geometry.field;
     painter.rect_filled(field, field_radius(), palette.mantle);
     let baseline = field.center().y;
-    let text_left = field.left() + PAD_X;
-    painter.text(
-        egui::pos2(text_left, baseline),
-        Align2::LEFT_CENTER,
-        search.mode.title(),
-        FontId::proportional(FONT),
-        palette.overlay0,
-    );
-    let title_width = chrome::text_width(painter, search.mode.title(), FontId::proportional(FONT));
-    let query_left = text_left + title_width + GAP;
+    paint_switch(paint, geometry, search.mode, hovers, ripples);
+    let query_left = geometry.switch[1].right() + GAP;
     let query = search.query();
     painter.text(
         egui::pos2(query_left, baseline),
@@ -555,6 +630,64 @@ pub fn paint_search(
     }
 }
 
+/// The **Names | Contents** switch at the head of the search field.
+///
+/// The lit half is a plate in the colour the cursor's row wears on this card —
+/// the card's one word for "this one" — with its word in full text colour. It
+/// does not lift or press: it is where you already are, so the pointer treats
+/// it as inert (see the app's hit handling), and a plate that answered a hover
+/// would be promising a click that changes nothing.
+///
+/// The other half is a word and no plate until the pointer is on it. At rest
+/// it has to read as the title's second word rather than as a second button
+/// competing with the field; under the pointer it lifts instantly and fades
+/// back out (`delightful-ui` §3), and presses like every other control.
+///
+/// The ripple is drawn on **both** halves. The press that switches the mode
+/// lights the half it landed on in the same frame, so the splash it started
+/// plays out on the plate it just lit — which is the acknowledgement landing
+/// where the hand is — and a lit half never starts one of its own.
+fn paint_switch(
+    paint: &Painting<'_>,
+    geometry: &SearchGeom,
+    mode: Mode,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let (painter, palette) = (paint.painter, paint.palette);
+    for half in Mode::ALL {
+        let key = switch_control(half);
+        let lit = half == mode;
+        let (rect, ink) = if lit {
+            let rect = geometry.switch_rect(half);
+            painter.rect_filled(rect, switch_radius(), palette.surface1);
+            (rect, palette.text)
+        } else {
+            let hover = hovers.hover(key);
+            let rect = pressed_rect(geometry.switch_rect(half), hovers.press(key));
+            if hover > 0.0 {
+                painter.rect_filled(rect, switch_radius(), chrome::fade(palette.surface0, hover));
+            }
+            (rect, mix(palette.overlay1, palette.text, hover))
+        };
+        let inside = painter.with_clip_rect(rect);
+        for splash in ripples.splashes(key, paint.now) {
+            inside.circle_filled(
+                splash.center,
+                splash.radius,
+                Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            );
+        }
+        inside.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            half.label(),
+            FontId::proportional(FONT),
+            ink,
+        );
+    }
+}
+
 /// A path with its directory part dimmed and its last component bright.
 ///
 /// The directory is context and the file name is the answer, and drawing them
@@ -665,6 +798,12 @@ mod tests {
         Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0))
     }
 
+    /// A frame's painter, for the geometry that measures words.
+    fn with_painter(mut f: impl FnMut(&egui::Painter)) {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| f(ui.painter()));
+    }
+
     /// The card is centred horizontally and biased *above* true centre — the
     /// optical-centring rule, pinned so a later tidy-up cannot quietly drop it.
     #[test]
@@ -728,18 +867,63 @@ mod tests {
     /// edge — the whole reason it is a panel and not a card.
     #[test]
     fn the_search_panel_leaves_the_preview_pane_alone() {
-        let geometry = search_geometry(0.0, 800.0, 30.0, 870.0, Mode::Content);
-        assert_eq!(geometry.card.right(), 800.0);
-        assert!(geometry.page() > 0);
-        for (n, rect) in geometry.rows.iter().enumerate() {
-            assert!(geometry.card.contains_rect(*rect), "row {n} escaped");
-            assert_eq!(geometry.row_at(rect.center()), Some(n));
-        }
-        // A content row is taller than a name row, because it carries two
-        // lines rather than one.
-        let names = search_geometry(0.0, 800.0, 30.0, 870.0, Mode::Names);
-        assert!(names.rows[0].height() < geometry.rows[0].height());
-        assert!(names.page() > geometry.page());
+        with_painter(|painter| {
+            let geometry = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Content);
+            assert_eq!(geometry.card.right(), 800.0);
+            assert!(geometry.page() > 0);
+            for (n, rect) in geometry.rows.iter().enumerate() {
+                assert!(geometry.card.contains_rect(*rect), "row {n} escaped");
+                assert_eq!(geometry.row_at(rect.center()), Some(n));
+            }
+            // A content row is taller than a name row, because it carries two
+            // lines rather than one.
+            let names = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names);
+            assert!(names.rows[0].height() < geometry.rows[0].height());
+            assert!(names.page() > geometry.page());
+        });
+    }
+
+    /// The **Names | Contents** switch: two plates inside the field at its
+    /// left end, evenly inset, rounded concentric with it, each sized to its
+    /// word — and each half answers the pointer as itself, including in the
+    /// sliver of field above and below its plate.
+    #[test]
+    fn the_switch_heads_the_field_and_each_half_is_its_own_target() {
+        with_painter(|painter| {
+            let geometry = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names);
+            let [names, contents] = geometry.switch;
+            let field = geometry.field;
+            for rect in [names, contents] {
+                assert!(field.contains_rect(rect), "{rect:?} is outside the field");
+            }
+            // Even insets on the three sides the switch shares with the field.
+            assert!((names.left() - field.left() - SWITCH_INSET).abs() < 0.01);
+            assert!((names.top() - field.top() - SWITCH_INSET).abs() < 0.01);
+            assert!((field.bottom() - names.bottom() - SWITCH_INSET).abs() < 0.01);
+            // Concentric with the field's corner.
+            assert_eq!(
+                u32::from(field_radius()),
+                u32::from(switch_radius()) + SWITCH_INSET as u32
+            );
+            // Side by side, in the order `Mode::ALL` gives, sized to the words.
+            assert!((names.right() - contents.left()).abs() < 0.01);
+            assert!(
+                contents.width() > names.width(),
+                "Contents is the longer word"
+            );
+
+            assert_eq!(geometry.switch_at(names.center()), Some(Mode::Names));
+            assert_eq!(geometry.switch_at(contents.center()), Some(Mode::Content));
+            // The target is the field's full height, not just the plate.
+            let above = egui::pos2(contents.center().x, field.top() + 1.0);
+            assert_eq!(geometry.switch_at(above), Some(Mode::Content));
+            // The query's side of the field is not the switch.
+            let query = egui::pos2(contents.right() + GAP * 2.0, field.center().y);
+            assert_eq!(geometry.switch_at(query), None);
+            assert_eq!(geometry.switch_rect(Mode::Content), contents);
+            assert_eq!(switch_control(Mode::Names), Control::SearchNames);
+            assert_eq!(switch_control(Mode::Content), Control::SearchContents);
+        });
     }
 
     /// Both surfaces lay out and paint, at a comfortable window size and at one
@@ -794,8 +978,14 @@ mod tests {
                 for mode in [Mode::Names, Mode::Content] {
                     let notify: df_core::fs::Notifier = std::sync::Arc::new(|| {});
                     let mut search = crate::search::Search::new(mode, "/tmp", false, notify);
-                    let geometry =
-                        search_geometry(area.left(), area.right(), area.top(), area.bottom(), mode);
+                    let geometry = search_geometry(
+                        ui.painter(),
+                        area.left(),
+                        area.right(),
+                        area.top(),
+                        area.bottom(),
+                        mode,
+                    );
                     // Empty, then failed, then full — every state the panel has.
                     paint_search(&paint, &geometry, &search, &hovers, &ripples);
                     search.error = Some("rg is not installed".to_string());
@@ -823,8 +1013,10 @@ mod tests {
     /// its way to saying so.
     #[test]
     fn a_panel_with_no_room_has_no_rows() {
-        let geometry = search_geometry(0.0, 400.0, 0.0, 30.0, Mode::Names);
-        assert_eq!(geometry.page(), 0);
-        assert!(geometry.row_at(egui::pos2(10.0, 10.0)).is_none());
+        with_painter(|painter| {
+            let geometry = search_geometry(painter, 0.0, 400.0, 0.0, 30.0, Mode::Names);
+            assert_eq!(geometry.page(), 0);
+            assert!(geometry.row_at(egui::pos2(10.0, 10.0)).is_none());
+        });
     }
 }

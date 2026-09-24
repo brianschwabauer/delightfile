@@ -233,17 +233,17 @@ pub(super) fn build() -> Registry {
         (Files, "c t", C::CopyFileText, "Copy the text contents (yank if binary)", Always),
 
         // ── Files: filter, find, search, jump ───────────────────────────────
-        (Files, "f",      C::Filter,        "Filter files",                Always),
+        (Files, "f",      C::Filter,        "Filter this folder, hide the rest", Always),
         // The vi set, minus the half of it that would cost the help key: `/`
         // searches forward, `n` is the next match and `N` the previous one.
         // Backwards *search* (`find-prev`) keeps its command id for anybody who
         // wants it back in `keymap.toml`; `?` is help (see Global above), which
         // is what the key is for in every other program on the machine.
-        (Files, "/",      C::FindNext,      "Find",                        Always),
+        (Files, "/",      C::FindNext,      "Jump to a name in this folder",     Always),
         (Files, "n",      C::FindArrowNext, "Next match",                  Always),
         (Files, "N",      C::FindArrowPrev, "Previous match",              Always),
-        (Files, "s",      C::SearchName,    "Search by name (fd)",         Always),
-        (Files, "S",      C::SearchContent, "Search by content (rg)",      Always),
+        (Files, "s",      C::SearchName,    "Search everywhere by name",         Always),
+        (Files, "S",      C::SearchContent, "Search everywhere inside files",    Always),
         (Files, "ctrl+s", C::CancelSearch,  "Cancel the search",           Always),
         (Files, "z",      C::FuzzyJump,     "Jump to a file or directory", Always),
         (Files, "Z",      C::ZoxideJump,    "Jump by frecency (zoxide)",   Always),
@@ -369,6 +369,7 @@ pub(super) fn build() -> Registry {
         (Pick, "down",   C::OverlayNext,   "Next option",     Always),
         // The search panel stacks on Pick; this puts ctrl+s on its help sheet.
         (Pick, "ctrl+s", C::CancelSearch,  "Cancel the search", Always),
+        (Pick, "tab",    C::SearchToggle,  "Names ⟷ contents",  Always),
 
         // ── Tasks (`w`) ─────────────────────────────────────────────────────
         (Tasks, "esc",    C::OverlayClose, "Close the task manager", Always),

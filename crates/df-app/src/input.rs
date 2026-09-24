@@ -166,6 +166,15 @@ pub struct Prompt {
     /// beside the field rather than raised as a toast, because it is about the
     /// text under the caret and belongs where that text is (PLAN §5).
     pub error: Option<String>,
+    /// A quiet word about what `Enter` will do, drawn where the error goes and
+    /// in a colour that is not the error's: the filter's "No matches here ·
+    /// Enter searches everywhere". Not a complaint — nothing typed is wrong —
+    /// so an error, when there is one, is said instead.
+    ///
+    /// Owned by the app rather than by the editing here, which is why typing
+    /// does not clear it: it is about the listing behind the prompt, and the
+    /// app sets it afresh every frame from what that listing shows.
+    pub hint: Option<&'static str>,
     /// How far the field's text is scrolled to the left, in points, as it
     /// was last drawn: what [`crate::chrome::caret_scroll`] starts from, so the
     /// text holds still while the caret moves inside the field and scrolls
@@ -184,12 +193,23 @@ impl Prompt {
             buffer,
             origin,
             error: None,
+            hint: None,
             scroll: 0.0,
         }
     }
 
     pub fn query(&self) -> &str {
         self.buffer.text()
+    }
+
+    /// What the line says beside the query, and whether it is an error: the
+    /// error when there is one, the hint when there is not.
+    pub fn message(&self) -> Option<(&str, bool)> {
+        match (&self.error, self.hint) {
+            (Some(error), _) => Some((error.as_str(), true)),
+            (None, Some(hint)) => Some((hint, false)),
+            (None, None) => None,
+        }
     }
 
     /// The caret as a byte offset, which is what the painter measures with.

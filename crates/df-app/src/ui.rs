@@ -446,6 +446,12 @@ pub enum Control {
     /// A row inside a floating surface: the task panel's tasks, the opener
     /// picker's choices, the conflict resolver's names.
     PanelRow(usize),
+    /// The two halves of the search panel's **Names | Contents** switch
+    /// (PLAN §7.2). Two variants rather than one carrying the mode, so this
+    /// enum stays free of what the search module means by a mode — the
+    /// panel's own geometry maps between them ([`crate::overlay::switch_control`]).
+    SearchNames,
+    SearchContents,
     /// A segment of the breadcrumb path bar, from the root rightwards
     /// (PLAN §2).
     Crumb(usize),

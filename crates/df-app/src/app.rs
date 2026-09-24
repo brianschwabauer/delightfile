@@ -540,7 +540,11 @@ impl OverlayGeom {
                 .position(|r| r.contains(pos))
                 .map(Control::PanelRow),
             OverlayGeom::Finder(geometry) => geometry.row_at(pos).map(Control::PanelRow),
-            OverlayGeom::Search(geometry) => geometry.row_at(pos).map(Control::PanelRow),
+            // The switch at the head of the field, then the hits.
+            OverlayGeom::Search(geometry) => geometry
+                .switch_at(pos)
+                .map(overlay::switch_control)
+                .or_else(|| geometry.row_at(pos).map(Control::PanelRow)),
             OverlayGeom::Mounts(geometry) => geometry.row_at(pos).map(Control::PanelRow),
             // The spot has two kinds of target on one card — nine permission
             // chips and the checksum's button — so it does its own hit test.
@@ -563,6 +567,12 @@ impl OverlayGeom {
             ) => rows.get(i).copied(),
             (OverlayGeom::Finder(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
             (OverlayGeom::Search(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
+            (OverlayGeom::Search(geometry), Control::SearchNames) => {
+                Some(geometry.switch_rect(search::Mode::Names))
+            }
+            (OverlayGeom::Search(geometry), Control::SearchContents) => {
+                Some(geometry.switch_rect(search::Mode::Content))
+            }
             (OverlayGeom::Mounts(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
             (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
             _ => None,
@@ -888,6 +898,32 @@ enum SaveAs {
     /// A name, but a folder's. A toast has said so, and the prompt stays open
     /// as typed.
     Kept,
+}
+
+/// What `Enter` does on a filter that has hidden every row in the folder
+/// (see [`App::filter_ran_out`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RanOut {
+    /// Takes the query to the search panel, which walks everything below
+    /// here: the filter only ever looked in this one folder.
+    Search,
+    /// Commits the filter as always. The listing is one the search panel
+    /// cannot walk — an archive, a remote service, the trash — so there is
+    /// nowhere further to look.
+    Here,
+}
+
+impl RanOut {
+    /// What the prompt says beside the query, in the place an error would go
+    /// but not in an error's colour: nothing is wrong with what was typed, the
+    /// folder simply does not have it. The half after the dot is said only
+    /// where it is true.
+    fn hint(self) -> &'static str {
+        match self {
+            RanOut::Search => "No matches here · Enter searches everywhere",
+            RanOut::Here => "No matches here",
+        }
+    }
 }
 
 /// The whole application.
@@ -5465,6 +5501,14 @@ impl App {
             C::OverlaySubmit => self.submit_overlay(page, now),
             C::OverlayPrev => self.overlay_move(-1),
             C::OverlayNext => self.overlay_move(1),
+            // `Tab` in the search panel: the same query, the other tool. The
+            // row is in `[pick]`, which the mount card and the opener picker
+            // stack on too, and there it finds no panel and does nothing.
+            C::SearchToggle => {
+                if let Some(search) = &mut self.search {
+                    search.toggle(now);
+                }
+            }
             C::TaskInspect => {
                 if let Some(panel) = &mut self.panel {
                     panel.inspect = !panel.inspect;
@@ -7211,8 +7255,72 @@ impl App {
                     self.prompt_changed();
                 }
             }
+            // Only `Enter` hands a spent filter on to the search panel. A
+            // click away commits the prompt too ([`App::resolve_prompt_for_click`]),
+            // but that is the hand going somewhere else, and opening a panel
+            // under it would be answering a question it did not ask.
+            InputEvent::Submit(text) if self.filter_ran_out() == Some(RanOut::Search) => {
+                self.search_from_filter(text, now)
+            }
             InputEvent::Submit(text) => self.submit_prompt(text, now),
             InputEvent::Cancel => self.cancel_prompt(),
+        }
+    }
+
+    /// Whether the open filter has narrowed this folder to nothing, and if it
+    /// has, what `Enter` will do about it.
+    ///
+    /// `None` while there is no filter prompt, while its field is empty, or
+    /// while anything still matches: then `Enter` commits the filter exactly as
+    /// it always has, and the prompt has nothing to add.
+    ///
+    /// The count is the listing's own rows, the ones on screen, because the
+    /// filter is live — what the eye sees under the prompt is the answer, and
+    /// a filter that has emptied the list has said "not in this folder" as
+    /// plainly as it can. Where the search panel cannot go (an archive, a
+    /// remote service, the trash: [`App::refusal`]'s places) the filter still
+    /// ran out, and says so, but `Enter` has nowhere else to send it.
+    fn filter_ran_out(&self) -> Option<RanOut> {
+        let prompt = self.prompt.as_ref()?;
+        if prompt.kind != PromptKind::Filter
+            || prompt.query().is_empty()
+            || !self.tab().cwd.dir.is_empty()
+        {
+            return None;
+        }
+        Some(match self.refusal(Command::SearchName) {
+            None => RanOut::Search,
+            Some(_) => RanOut::Here,
+        })
+    }
+
+    /// Keep the open prompt's hint in step with what the filter has found —
+    /// here, once a frame, rather than at each keystroke, because a keystroke
+    /// is not the only thing that changes the answer. A scan that lands while
+    /// the prompt is open can bring the first match with it, and the hint has
+    /// to go the moment it does.
+    fn sync_prompt_hint(&mut self) {
+        let hint = self.filter_ran_out().map(RanOut::hint);
+        if let Some(prompt) = &mut self.prompt {
+            prompt.hint = hint;
+        }
+    }
+
+    /// `Enter` on a filter that has run out of folder: the same letters,
+    /// asked of everything below here by name (PLAN §7.2).
+    ///
+    /// The filter goes rather than staying behind the panel. The empty listing
+    /// is what sent you looking, and coming back from the search — `Esc`, or
+    /// `Enter` on a hit in this very folder — to a folder still filtered down
+    /// to nothing would be coming back to the dead end. Names rather than
+    /// contents because a filter is a filter on names; `Tab` is one key away
+    /// if the thing turns out to be inside a file.
+    fn search_from_filter(&mut self, query: String, now: Instant) {
+        self.dir().clear_filter();
+        self.prompt = None;
+        self.open_search(search::Mode::Names);
+        if let Some(search) = &mut self.search {
+            search.seed(&query, now);
         }
     }
 
@@ -9356,6 +9464,7 @@ impl App {
             // The two left columns only: the live preview is half of what this
             // overlay is for, so the pane showing it stays uncovered.
             return Some(OverlayGeom::Search(Box::new(overlay::search_geometry(
+                painter,
                 layout.parent.left(),
                 layout.list.right(),
                 layout.parent.top(),
@@ -9373,6 +9482,18 @@ impl App {
         // The two overlays with a list of results: a click is "this one", the
         // same as arrowing to it and pressing Enter.
         if self.finder.is_some() || self.search.is_some() {
+            // …and the search panel's switch: a click on its unlit half is
+            // `Tab` by pointer. The lit half never gets here — it is inert
+            // where the press is dispatched, being the mode already on screen.
+            let half = match control {
+                Control::SearchNames => Some(search::Mode::Names),
+                Control::SearchContents => Some(search::Mode::Content),
+                _ => None,
+            };
+            if let (Some(mode), Some(search)) = (half, &mut self.search) {
+                search.set_mode(mode, now);
+                return;
+            }
             let Control::PanelRow(offset) = control else {
                 return;
             };
@@ -9442,6 +9563,8 @@ impl App {
                 Control::Row(..)
                 | Control::Tab(_)
                 | Control::Crumb(_)
+                | Control::SearchNames
+                | Control::SearchContents
                 | Control::FilterChip
                 | Control::TypeChip
                 | Control::YankChip
@@ -9520,6 +9643,8 @@ impl App {
             Control::Row(..)
             | Control::Tab(_)
             | Control::Crumb(_)
+            | Control::SearchNames
+            | Control::SearchContents
             | Control::FilterChip
             | Control::TypeChip
             | Control::YankChip
@@ -10064,7 +10189,10 @@ impl App {
                 self.open_app_menu();
                 geom.top.menu
             }
-            Control::Action(_) | Control::PanelRow(_) => {
+            Control::Action(_)
+            | Control::PanelRow(_)
+            | Control::SearchNames
+            | Control::SearchContents => {
                 let rect = geom
                     .overlay
                     .as_ref()
@@ -12542,6 +12670,9 @@ impl App {
         self.tick_state(now);
         self.sync_yank(now);
         self.sync_filter_chip(now);
+        // Before the row is measured: a hint too long to sit beside the query
+        // is what asks the row for a second line.
+        self.sync_prompt_hint();
         self.sync_path_lines(&painter, area);
 
         let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1, self.path_lines);
@@ -13051,11 +13182,20 @@ impl App {
         //
         // A disabled pick button is the third: it is drawn, but there is
         // nothing it could pick, and a splash on it would say otherwise.
+        //
+        // The lit half of the search panel's switch is the fourth. It names
+        // the mode the panel is already in, so a press on it switches to
+        // where you are.
         let pick_live = self.pick_button().is_some_and(|pick| pick.enabled);
+        let lit_half = self
+            .search
+            .as_ref()
+            .map(|search| overlay::switch_control(search.mode));
         let inert = match over {
             Some((Control::GitChip | Control::CrumbEllipsis, _)) => true,
             Some((Control::PickButton, _)) => !pick_live,
-            _ => false,
+            Some((control, _)) => Some(control) == lit_half,
+            None => false,
         };
         // The prompt's text is not a button, so it takes its press apart from
         // them: no ripple (a field acknowledges a click with the caret, which
@@ -13328,11 +13468,16 @@ impl App {
                 // …and a pick button with nothing to pick is a third, for the
                 // same reason.
                 Control::PickButton if !pick_live => egui::CursorIcon::Default,
+                // …and so is the lit half of the search panel's switch: a
+                // click there would switch to the mode already on screen.
+                control if Some(control) == lit_half => egui::CursorIcon::Default,
                 // Text is pointed at with the text cursor: it says "the caret
                 // goes here", which is exactly what a click will do.
                 Control::PromptField => egui::CursorIcon::Text,
                 Control::Row(..)
                 | Control::Crumb(_)
+                | Control::SearchNames
+                | Control::SearchContents
                 | Control::FilterChip
                 | Control::TypeChip
                 | Control::YankChip
@@ -14848,6 +14993,10 @@ fn overlay_hints(
         OverlayGeom::Search(_) => vec![
             ("↑↓", "move"),
             ("Enter", "go there"),
+            // `⟷` and not the shorter `↔`, here and on the help sheet: no
+            // face the program ships draws `↔`, so it would be a box
+            // (`icons`' glyph test holds the line).
+            ("Tab", "names ⟷ contents"),
             ("Ctrl+s", "stop"),
             ("Esc", "close"),
         ],
@@ -16990,6 +17139,243 @@ mod tests {
             hovered.as_deref(),
             Some("apricot.txt"),
             "the click did not land"
+        );
+    }
+
+    /// What the open prompt says beside its query this frame.
+    fn prompt_hint(app: &mut App) -> Option<&'static str> {
+        app.sync_prompt_hint();
+        app.prompt.as_ref().and_then(|prompt| prompt.hint)
+    }
+
+    /// `Enter` on a filter that has hidden every row: the filter goes, the
+    /// prompt goes, and the search panel opens in names mode on the same
+    /// letters — caret at the end, debounce armed, so fd starts on its own.
+    #[test]
+    fn enter_on_a_filter_that_matches_nothing_searches_everywhere() {
+        let names = ["apple.txt", "banana.txt"];
+        let mut app = Fixture::new("filter-hands-off", &names);
+        let now = Instant::now();
+
+        app.run(Command::Filter, 10, now);
+        app.prompt_text("zebra");
+        assert_eq!(app.tab().cwd.dir.len(), 0, "the filter is live");
+        assert_eq!(
+            prompt_hint(&mut app),
+            Some("No matches here · Enter searches everywhere")
+        );
+
+        app.prompt_key(Chord::plain(Key::Enter), now);
+        assert!(app.prompt.is_none(), "the prompt is still open");
+        assert_eq!(app.tab().cwd.dir.filter(), "", "the filter stayed on");
+        assert_eq!(app.tab().cwd.dir.len(), 2, "the folder is not back");
+        let search = app.search.as_ref().expect("the search panel opened");
+        assert_eq!(search.mode, search::Mode::Names);
+        assert_eq!(search.query(), "zebra");
+        assert_eq!(
+            search.buffer.cursor_byte(),
+            "zebra".len(),
+            "caret at the end"
+        );
+        assert_eq!(search.root, app.files, "it searches from here");
+        assert_eq!(
+            search.deadline(now),
+            Some(search::DEBOUNCE),
+            "armed, so fd starts without another key"
+        );
+        assert!(
+            !app.context.contains(Context::Input),
+            "the keyboard is still in the prompt"
+        );
+        assert!(
+            app.context.contains(Context::Pick),
+            "the panel has the keys"
+        );
+    }
+
+    /// While anything still matches, `Enter` commits the filter exactly as it
+    /// always has, and the prompt has no hint to show.
+    #[test]
+    fn enter_on_a_filter_with_matches_commits_it() {
+        let names = ["apple.txt", "apricot.txt", "banana.txt"];
+        let mut app = Fixture::new("filter-commits", &names);
+        let now = Instant::now();
+
+        app.run(Command::Filter, 10, now);
+        app.prompt_text("zeb");
+        assert_eq!(prompt_hint(&mut app), Some(RanOut::Search.hint()));
+        // Backspacing into a match takes the hint straight down.
+        app.prompt_key(Chord::plain(Key::Backspace), now);
+        app.prompt_key(Chord::plain(Key::Backspace), now);
+        app.prompt_key(Chord::plain(Key::Backspace), now);
+        app.prompt_text("ap");
+        assert_eq!(app.tab().cwd.dir.len(), 2);
+        assert_eq!(prompt_hint(&mut app), None);
+
+        app.prompt_key(Chord::plain(Key::Enter), now);
+        assert!(app.prompt.is_none());
+        assert!(
+            app.search.is_none(),
+            "a filter that matched opened a search"
+        );
+        assert_eq!(app.tab().cwd.dir.filter(), "ap", "the filter was undone");
+        assert_eq!(app.tab().cwd.dir.len(), 2);
+    }
+
+    /// An empty filter is not one that ran out, even in a folder with nothing
+    /// in it: `Enter` closes the prompt as it always has.
+    #[test]
+    fn enter_on_an_empty_filter_commits_even_in_an_empty_folder() {
+        let mut app = Fixture::new("filter-empty", &[]);
+        let now = Instant::now();
+        app.run(Command::Filter, 10, now);
+        assert_eq!(app.tab().cwd.dir.len(), 0);
+        assert_eq!(prompt_hint(&mut app), None);
+        app.prompt_key(Chord::plain(Key::Enter), now);
+        assert!(app.prompt.is_none());
+        assert!(app.search.is_none());
+    }
+
+    /// Where the search panel cannot go — the trash here, and an archive or a
+    /// remote service by the same gate — a filter that runs out says so, and
+    /// `Enter` commits it as always, because there is nowhere else to look.
+    #[test]
+    fn where_search_is_refused_a_spent_filter_commits() {
+        let names = ["apple.txt", "banana.txt"];
+        let mut app = Fixture::new("filter-refused", &names);
+        let now = Instant::now();
+        let origin = app.files.clone();
+        app.tabs.active_mut().trash = Some(crate::trashview::View {
+            items: Vec::new(),
+            origin,
+        });
+        assert!(app.refusal(Command::SearchName).is_some());
+
+        app.run(Command::Filter, 10, now);
+        app.prompt_text("zebra");
+        assert_eq!(app.tab().cwd.dir.len(), 0);
+        assert_eq!(prompt_hint(&mut app), Some("No matches here"));
+
+        app.prompt_key(Chord::plain(Key::Enter), now);
+        assert!(app.prompt.is_none());
+        assert!(app.search.is_none(), "the search opened in the trash");
+        assert_eq!(app.tab().cwd.dir.filter(), "zebra", "the filter was undone");
+    }
+
+    /// Only `Enter` hands a spent filter on. A click elsewhere commits the
+    /// prompt too, but that is the hand going somewhere else, and a panel
+    /// opening under it would be an answer to nothing it asked.
+    #[test]
+    fn a_click_away_from_a_spent_filter_does_not_search() {
+        let names = ["apple.txt", "banana.txt"];
+        let mut app = Fixture::new("filter-click-spent", &names);
+        let now = Instant::now();
+        app.run(Command::Filter, 10, now);
+        app.prompt_text("zebra");
+        app.resolve_prompt_for_click(now);
+        assert!(app.prompt.is_none());
+        assert!(app.search.is_none(), "a click opened the search");
+        assert_eq!(app.tab().cwd.dir.filter(), "zebra");
+    }
+
+    /// `Tab` in the search panel, through the real registry: the query stays,
+    /// the mode flips, and the list the other mode found goes.
+    #[test]
+    fn tab_in_the_search_panel_asks_the_other_tool() {
+        let mut app = Fixture::new("search-tab", &["a.txt"]);
+        let now = Instant::now();
+        app.run(Command::SearchName, 10, now);
+        for c in "needle".chars() {
+            app.overlay_key(Chord::from_char(c).expect("a letter"), 10, now);
+        }
+        {
+            let search = app.search.as_mut().expect("the panel is open");
+            assert_eq!(search.query(), "needle", "the letters went elsewhere");
+            search.hits.push(search::Hit {
+                path: PathBuf::from("/tmp/needle.txt"),
+                relative: "needle.txt".to_string(),
+                entry: None,
+                line: None,
+                text: String::new(),
+                span: None,
+            });
+        }
+
+        app.overlay_key(Chord::plain(Key::Tab), 10, now);
+        let search = app.search.as_ref().expect("Tab closed the panel");
+        assert_eq!(search.mode, search::Mode::Content);
+        assert_eq!(search.query(), "needle");
+        assert!(search.hits.is_empty(), "file names under Contents");
+        assert!(search.searching(), "the new mode is armed");
+
+        app.overlay_key(Chord::plain(Key::Tab), 10, now);
+        assert_eq!(
+            app.search.as_ref().map(|s| s.mode),
+            Some(search::Mode::Names)
+        );
+
+        // `S` opens on contents, as it always has.
+        app.close_overlay(now);
+        app.run(Command::SearchContent, 10, now);
+        assert_eq!(
+            app.search.as_ref().map(|s| s.mode),
+            Some(search::Mode::Content)
+        );
+    }
+
+    /// The pointer's `Tab`: a click on the unlit half of the switch flips the
+    /// mode, and a click on the lit half does nothing at all.
+    #[test]
+    fn a_click_on_the_switch_flips_the_mode() {
+        let mut app = Fixture::new("search-switch", &["a.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::SearchName, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+
+        // The switch, where the frame lays it out: at the head of the field,
+        // which is at the top left of the panel over the parent column.
+        let layout = layout_of(&app);
+        let mut halves = None;
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let geometry = overlay::search_geometry(
+                ui.painter(),
+                layout.parent.left(),
+                layout.list.right(),
+                layout.parent.top(),
+                screen().bottom() - ui::GAP * 2.0,
+                search::Mode::Names,
+            );
+            halves = Some(geometry.switch);
+        });
+        let [names, contents] = halves.expect("laid out");
+
+        click_at(&mut app, &ctx, contents.center());
+        assert_eq!(
+            app.search.as_ref().map(|s| s.mode),
+            Some(search::Mode::Content),
+            "the click did not switch"
+        );
+        // Now lit, and therefore inert: no switch, and no splash either — a
+        // ripple on a press that changed nothing would claim it had acted.
+        let splashes = |app: &App| {
+            app.ripples
+                .splashes(Control::SearchContents, Instant::now())
+                .count()
+        };
+        let before = splashes(&app);
+        assert!(before > 0, "the switching press left no ripple");
+        click_at(&mut app, &ctx, contents.center());
+        assert_eq!(
+            app.search.as_ref().map(|s| s.mode),
+            Some(search::Mode::Content),
+            "the lit half switched to something"
+        );
+        assert!(splashes(&app) <= before, "the lit half rippled");
+        click_at(&mut app, &ctx, names.center());
+        assert_eq!(
+            app.search.as_ref().map(|s| s.mode),
+            Some(search::Mode::Names)
         );
     }
 

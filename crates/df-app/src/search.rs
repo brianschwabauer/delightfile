@@ -7,9 +7,30 @@
 //! whole difference between a file manager that has search and a file manager
 //! that launches one.
 //!
+//! ## One panel, two modes
+//!
+//! Names and contents are one search asked two ways, so they are one panel
+//! with a [`Mode`], not two overlays. `s` opens it on names and `S` on
+//! contents, and from inside it `Tab` — or a click on the other half of the
+//! **Names | Contents** switch at the head of the field — asks the same query
+//! of the other tool ([`Search::toggle`]). The query stays; the hits go,
+//! because a list of file names and a list of matching lines answer
+//! different questions, and neither is a stale copy of the other.
+//!
+//! That is what makes the switch cheap enough to reach for. "I typed the name
+//! and it is not a name, it is something *in* a file" is one key, not `Esc`,
+//! `S`, and the query typed again.
+//!
+//! The panel is also where the filter goes when it runs out of folder: `f`
+//! narrows the listing you are looking at, and `Enter` on a filter that has
+//! narrowed it to nothing hands the same letters to this panel in names mode
+//! ([`Search::seed`]). "Not here" becomes "then everywhere below here" without
+//! retyping anything.
+//!
 //! ## The shape of a running search
 //!
-//! One process at a time, killed and respawned when the query changes. Three
+//! One process at a time, killed and respawned when the query changes — or
+//! when the mode does, which is the same thing to the process. Three
 //! defences, because a search box is a machine for asking a process to do
 //! something enormous:
 //!
@@ -90,10 +111,28 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn title(self) -> &'static str {
+    /// Both, in the order the switch at the head of the field draws them.
+    pub const ALL: [Mode; 2] = [Mode::Names, Mode::Content];
+
+    /// What this mode's half of the **Names | Contents** switch says.
+    ///
+    /// One word each, and the switch is the panel's whole title: the field
+    /// beside it already says "search" by being a field with a caret in it, so
+    /// the only thing left for the title to say is *what* is being searched —
+    /// and saying it as a switch says in the same breath that the other thing
+    /// is one click away.
+    pub fn label(self) -> &'static str {
         match self {
-            Mode::Names => "Search by name",
-            Mode::Content => "Search in files",
+            Mode::Names => "Names",
+            Mode::Content => "Contents",
+        }
+    }
+
+    /// The other one — what `Tab` switches to.
+    pub fn other(self) -> Mode {
+        match self {
+            Mode::Names => Mode::Content,
+            Mode::Content => Mode::Names,
         }
     }
 
@@ -172,7 +211,7 @@ impl Drop for Running {
     }
 }
 
-/// The `s` / `S` overlay.
+/// The `s` / `S` overlay: one panel, in whichever [`Mode`] it was last put.
 pub struct Search {
     pub mode: Mode,
     /// Where the search runs, and what `relative` is relative to.
@@ -259,6 +298,61 @@ impl Search {
             return;
         }
         self.pending = Some((query, now + DEBOUNCE));
+    }
+
+    /// Open on a query somebody else typed: the filter that ran out of folder
+    /// hands its letters over here (see the module note).
+    ///
+    /// The caret goes at the end, where it would be had the letters been typed
+    /// into this field, so the next key carries the query on rather than
+    /// landing in the middle of it. The debounce is armed exactly as a
+    /// keystroke arms it, so the process starts on its own, without a key
+    /// having to be pressed to wake it.
+    pub fn seed(&mut self, query: &str, now: Instant) {
+        self.buffer = InputBuffer::new(query, query.chars().count());
+        self.changed(now);
+    }
+
+    /// `Tab`: the same query, asked of the other tool.
+    pub fn toggle(&mut self, now: Instant) {
+        self.set_mode(self.mode.other(), now);
+    }
+
+    /// Put the panel in `mode`: `Tab`, or a click on one half of the switch.
+    /// Returns whether anything changed. A click on the half that is already
+    /// lit changes nothing.
+    ///
+    /// The query is kept and **everything the old mode found is dropped**,
+    /// unlike [`Search::changed`], which keeps the stale list up until the new
+    /// one lands. A stale list is the right answer while a query is being
+    /// narrowed, because most of the rows it shows are still true. After a
+    /// switch they answer the other question — file names under a switch that
+    /// now says Contents — and would be read as this mode's. The process goes
+    /// with them (dropping [`Running`] kills it), and the generation moves on
+    /// so nothing it had already sent can land.
+    ///
+    /// Then the debounce is armed as if the query had just been typed, which
+    /// runs it in the new mode without another key. Armed rather than spawned
+    /// on the spot: `Tab Tab`, to peek and come back, is two switches in a
+    /// breath, and the second should not have to kill a walk the first one
+    /// started.
+    pub fn set_mode(&mut self, mode: Mode, now: Instant) -> bool {
+        if mode == self.mode {
+            return false;
+        }
+        self.mode = mode;
+        self.running = None;
+        self.pending = None;
+        self.hits.clear();
+        self.cursor = 0;
+        self.first = 0;
+        self.capped = false;
+        self.done = false;
+        self.error = None;
+        self.notice = false;
+        self.generation += 1;
+        self.changed(now);
+        true
     }
 
     /// When the next frame is owed by the debounce, if one is. This is the
@@ -840,6 +934,86 @@ mod tests {
         assert!(search.hits.is_empty());
         assert!(!search.searching());
         assert_eq!(search.deadline(now), None, "nothing is owed a frame");
+    }
+
+    fn hit(name: &str) -> Hit {
+        Hit {
+            path: PathBuf::from("/tmp").join(name),
+            relative: name.to_string(),
+            entry: None,
+            line: None,
+            text: String::new(),
+            span: None,
+        }
+    }
+
+    /// `Tab` keeps the query and throws away everything the other mode found:
+    /// the hits, the cursor, the cap, the "done" and the error — and then asks
+    /// again, on the debounce a keystroke would have armed.
+    #[test]
+    fn a_mode_switch_keeps_the_query_and_drops_the_hits() {
+        let now = Instant::now();
+        let mut search = Search::new(Mode::Names, "/tmp", false, silent());
+        let _ = search.buffer.insert_text("needle");
+        search.hits = (0..5).map(|n| hit(&format!("needle-{n}"))).collect();
+        search.cursor = 3;
+        search.first = 1;
+        search.capped = true;
+        search.done = true;
+        search.error = Some("fd would not start".to_string());
+        let before = search.generation;
+
+        search.toggle(now);
+        assert_eq!(search.mode, Mode::Content);
+        assert_eq!(search.query(), "needle", "the query went with the mode");
+        assert_eq!(
+            search.buffer.cursor_byte(),
+            "needle".len(),
+            "the caret moved"
+        );
+        assert!(search.hits.is_empty(), "file names under Contents");
+        assert_eq!((search.cursor, search.first), (0, 0));
+        assert!(!search.capped && !search.done);
+        assert!(search.error.is_none());
+        assert!(search.generation > before, "a late batch could still land");
+        // Armed, not spawned: the new mode runs one debounce later.
+        assert_eq!(search.deadline(now), Some(DEBOUNCE));
+        assert!(search.searching());
+
+        // …and back again, which is the same thing the other way round.
+        search.toggle(now);
+        assert_eq!(search.mode, Mode::Names);
+        assert_eq!(search.query(), "needle");
+
+        // The half that is already lit is not a switch: the list stays.
+        search.hits.push(hit("kept"));
+        assert!(!search.set_mode(Mode::Names, now));
+        assert_eq!(search.hits.len(), 1);
+    }
+
+    /// A switch on an empty field has nothing to ask the other tool, so it
+    /// arms nothing — the same rule as emptying the field.
+    #[test]
+    fn a_mode_switch_on_an_empty_query_runs_nothing() {
+        let now = Instant::now();
+        let mut search = Search::new(Mode::Content, "/tmp", false, silent());
+        search.toggle(now);
+        assert_eq!(search.mode, Mode::Names);
+        assert!(!search.searching());
+        assert_eq!(search.deadline(now), None);
+    }
+
+    /// The filter's hand-over: the letters are in the field, the caret is
+    /// after them, and the debounce is armed without a key being pressed.
+    #[test]
+    fn a_seeded_search_is_ready_to_run() {
+        let now = Instant::now();
+        let mut search = Search::new(Mode::Names, "/tmp", false, silent());
+        search.seed("café", now);
+        assert_eq!(search.query(), "café");
+        assert_eq!(search.buffer.cursor(), 4, "after the last character");
+        assert_eq!(search.buffer.cursor_byte(), "café".len());
+        assert_eq!(search.deadline(now), Some(DEBOUNCE));
     }
 
     /// A machine with no `fd` gets a sentence saying so, raised once —

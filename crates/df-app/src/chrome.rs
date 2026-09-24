@@ -2290,6 +2290,9 @@ struct FieldLayout {
 enum Furniture {
     /// The inline error, laid out to the room it has.
     Error(Arc<egui::text::Galley>),
+    /// The prompt's hint ([`Prompt::hint`]), laid out exactly as the error is
+    /// and drawn in a quiet colour instead of the error's.
+    Hint(Arc<egui::text::Galley>),
     /// The smart-case indicator on a live prompt, and whether it is lit.
     Case(Arc<egui::text::Galley>, bool),
 }
@@ -2308,13 +2311,16 @@ fn field_layout(
     // There is no mode chip: the editor has no modes to report, and the field
     // itself is the only thing on this line that says the keyboard is here.
     let mut right = inner.right();
-    let furniture = match &prompt.error {
+    let furniture = match prompt.message() {
         // The row grew for this: the error has a line of its own, under the
         // query it is about, and this line keeps its whole width for the text.
         Some(_) if error_line => None,
-        Some(error) => {
+        Some((message, error)) => {
             // The error takes the place the case indicator would have had: it
-            // is the more urgent thing to say about what has been typed.
+            // is the more urgent thing to say about what has been typed. A
+            // hint takes it on the same terms — the filter's "No matches
+            // here" is more use than whether the empty result was
+            // case-sensitive.
             //
             // Laid out **to the room it has**, with an ellipsis, rather than
             // laid out full width and then drawn from a left edge computed
@@ -2325,13 +2331,18 @@ fn field_layout(
             // of the card.
             let room = (right - inner.left()).max(0.0);
             let mut job = egui::text::LayoutJob::single_section(
-                error.clone(),
+                message.to_string(),
                 egui::TextFormat::simple(font.clone(), blank),
             );
             job.wrap = egui::text::TextWrapping::truncate_at_width(room);
             let galley = painter.layout_job(job);
             right -= galley.size().x.min(room);
-            Some((Furniture::Error(galley), right))
+            let furniture = if error {
+                Furniture::Error(galley)
+            } else {
+                Furniture::Hint(galley)
+            };
+            Some((furniture, right))
         }
         None if prompt.kind.is_live() => {
             // The smart-case indicator: lit when the query has a capital in it
@@ -2397,7 +2408,9 @@ pub fn prompt_lines(
     width: f32,
     tail: Option<&str>,
 ) -> usize {
-    let Some(error) = &prompt.error else {
+    // A hint is measured exactly as an error is: it sits where one would, and
+    // squeezed to three characters it would say as little.
+    let Some((message, _)) = prompt.message() else {
         return 1;
     };
     let font = egui::FontId::proportional(FONT);
@@ -2405,7 +2418,7 @@ pub fn prompt_lines(
         + PAD_X
         + text_width(painter, prompt.query(), font.clone())
         + PAD_X
-        + text_width(painter, error, font.clone())
+        + text_width(painter, message, font.clone())
         + PAD_X;
     let inner = width - PAD_X * 2.0;
     let tail_width = tail
@@ -2503,21 +2516,32 @@ fn prompt_field(
         palette.blue,
     );
 
-    if let (Some(error), Some(line)) = (&prompt.error, error_line) {
+    if let (Some((message, error)), Some(line)) = (prompt.message(), error_line) {
         // The row grew for this: the error gets a line of its own, under the
         // query it is about, rather than being squeezed into three characters
         // beside it.
         painter.text(
             egui::pos2(line.left(), line.center().y),
             egui::Align2::LEFT_CENTER,
-            error,
+            message,
             egui::FontId::proportional(FONT),
-            palette.red,
+            if error {
+                palette.red
+            } else {
+                hint_ink(palette)
+            },
         );
     }
     match &layout.furniture {
         Some((Furniture::Error(galley), left)) => {
             painter.galley(egui::pos2(*left, top(galley)), galley.clone(), palette.red);
+        }
+        Some((Furniture::Hint(galley), left)) => {
+            painter.galley(
+                egui::pos2(*left, top(galley)),
+                galley.clone(),
+                hint_ink(palette),
+            );
         }
         Some((Furniture::Case(galley, lit), left)) => {
             let color = if *lit {
@@ -2568,6 +2592,17 @@ fn prompt_field(
         0,
         palette.blue,
     );
+}
+
+/// The colour a prompt's hint is drawn in.
+///
+/// The directory tail's grey family, a step brighter than the tail itself: the
+/// hint is a sentence with an instruction in it and has to be read, where the
+/// tail only has to be recognised — but it is about the listing, not a fault
+/// in the text, so it stays well clear of the error's red and of the query's
+/// own full-strength ink.
+fn hint_ink(palette: &crate::theme::Palette) -> egui::Color32 {
+    palette.overlay1
 }
 
 /// The insert caret's width, in points. One-and-a-half rather than one: a
@@ -4391,6 +4426,22 @@ mod tests {
             );
             prompt_row(&paint, tall, &prompt, Some("delightfile"), true);
             prompt.error = None;
+            // The filter's hint, which is measured and placed as an error is:
+            // beside the query when it fits, on a line of its own when not.
+            prompt.hint = Some("No matches here · Enter searches everywhere");
+            assert_eq!(prompt.message().map(|(_, error)| error), Some(false));
+            assert_eq!(prompt_lines(paint.painter, &prompt, 1200.0, None), 1);
+            prompt_row(&paint, path_rect, &prompt, Some("delightfile"), false);
+            assert_eq!(
+                prompt_lines(paint.painter, &prompt, 220.0, Some("delightfile")),
+                2
+            );
+            prompt_row(&paint, tall, &prompt, Some("delightfile"), false);
+            // An error outranks it: that one is about what was typed.
+            prompt.error = Some("bad".to_string());
+            assert_eq!(prompt.message(), Some(("bad", true)));
+            prompt.error = None;
+            prompt.hint = None;
             let mut rename = Prompt::with(
                 PromptKind::Rename,
                 0,

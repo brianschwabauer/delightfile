@@ -877,6 +877,53 @@ fn user_bookmarks_rebuild_the_goto_chords() {
     );
 }
 
+// ── The four ways of finding something ─────────────────────────────────────
+
+/// `f`, `/`, `s` and `S` all find something, and the only way to tell them
+/// apart from the help sheet or the palette is what each one says it does —
+/// so each says *where* it looks. Two stay in this folder and two go
+/// everywhere below it, and the words are the thing that has to carry that.
+#[test]
+fn the_find_family_says_where_each_one_looks() {
+    let km = Registry::defaults();
+    let listed = km.active_bindings(&files(), WhenFlags::NONE);
+    for (command, description) in [
+        (Command::Filter, "Filter this folder, hide the rest"),
+        (Command::FindNext, "Jump to a name in this folder"),
+        (Command::SearchName, "Search everywhere by name"),
+        (Command::SearchContent, "Search everywhere inside files"),
+    ] {
+        let row = listed
+            .iter()
+            .find(|b| b.command == command)
+            .unwrap_or_else(|| panic!("{} is not on the help sheet", command.id()));
+        assert_eq!(row.description, description, "{}", command.id());
+    }
+}
+
+/// `Tab` in the search panel swaps names for contents and back (the panel
+/// stacks on `[pick]`, which is why the row lives there) — and it does not
+/// leak into the browser, where `Tab` is still the spot panel.
+#[test]
+fn tab_in_the_search_panel_swaps_names_and_contents() {
+    let km = Registry::defaults();
+    let pick = ContextStack::with(&[Context::Pick]);
+    assert_eq!(
+        press(&km, &pick, WhenFlags::NONE, "tab"),
+        Dispatch::Match(Command::SearchToggle)
+    );
+    let row = km
+        .active_bindings(&pick, WhenFlags::NONE)
+        .into_iter()
+        .find(|b| b.command == Command::SearchToggle)
+        .expect("the toggle is on the panel's help sheet");
+    assert_eq!(row.description, "Names ⟷ contents");
+    assert_eq!(
+        press(&km, &files(), WhenFlags::NONE, "tab"),
+        Dispatch::Match(Command::Spot)
+    );
+}
+
 // ── Labels ──────────────────────────────────────────────────────────────────
 
 /// The help sheet advertises the easiest binding, and prints it as the keys the
