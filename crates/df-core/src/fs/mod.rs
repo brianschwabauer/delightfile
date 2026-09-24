@@ -396,13 +396,15 @@ impl DirState {
         self.show_hidden
     }
 
-    /// The `.` toggle.
+    /// The `.` toggle. Hiding the dotfiles also deselects the ones that were
+    /// selected — see [`DirState::deselect_unshown`].
     pub fn set_show_hidden(&mut self, show: bool) {
         if self.show_hidden == show {
             return;
         }
         self.show_hidden = show;
         self.rebuild();
+        self.deselect_unshown();
     }
 
     pub fn toggle_hidden(&mut self) {
@@ -416,13 +418,53 @@ impl DirState {
 
     /// Narrow the listing to the files `types` admits, or stop narrowing it.
     /// The cursor stays on its file when that file is still shown, as it does
-    /// for every other change to the view.
+    /// for every other change to the view; a selected file that is not is
+    /// deselected ([`DirState::deselect_unshown`]).
     pub fn set_types(&mut self, types: Option<TypeFilter>) {
         if self.types == types {
             return;
         }
         self.types = types;
         self.rebuild();
+        self.deselect_unshown();
+    }
+
+    /// Whether the hidden toggle and the type filter let `entry` be shown.
+    /// The `f` query is not asked — see [`DirState::deselect_unshown`].
+    fn shown(&self, entry: &Entry) -> bool {
+        (self.show_hidden || !entry.is_hidden)
+            && self.types.as_ref().is_none_or(|types| types.admits(entry))
+    }
+
+    /// Deselect every row the hidden toggle or the type filter has just taken
+    /// off screen.
+    ///
+    /// A selection is what a file dialog picks and what `y`, `d` and `r` act
+    /// on, and a pick must never deliver a file the person cannot see. So when
+    /// either of those two narrows the view, the selection narrows with it —
+    /// and does not come back when the view widens again, because a
+    /// selection that reappeared would be one nobody made on the rows in
+    /// front of them.
+    ///
+    /// Two things are deliberately left alone. A name with **no row yet** is
+    /// kept: [`DirState::select_names`] selects a paste's names before their
+    /// rows arrive, and nothing has said those are hidden. And a row hidden
+    /// only by the **`f` query** stays selected, as it always has: that query
+    /// is a search over rows you have already seen, typed and cleared in a
+    /// breath, not a statement about what the directory holds.
+    fn deselect_unshown(&mut self) {
+        if self.selected.is_empty() {
+            return;
+        }
+        let unshown: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|entry| self.selected.contains(&entry.name) && !self.shown(entry))
+            .map(|entry| entry.name.clone())
+            .collect();
+        for name in unshown {
+            self.selected.remove(&name);
+        }
     }
 
     pub fn filter(&self) -> &str {

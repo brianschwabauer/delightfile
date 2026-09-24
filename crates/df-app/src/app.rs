@@ -17869,6 +17869,53 @@ mod tests {
         );
     }
 
+    /// Stepping the ladder back to the filter, or choosing another filter,
+    /// deselects every file that goes off screen, so a pick never delivers
+    /// one the person cannot see — the Select button's count included.
+    #[test]
+    fn narrowing_the_type_ladder_deselects_what_it_hides() {
+        let mut app = typed_picker("typed-deselect", FILES);
+        let now = Instant::now();
+        // All files, hidden too: everything selected.
+        app.run(Command::ToggleHidden, 10, now);
+        app.run(Command::ToggleHidden, 10, now);
+        app.run(Command::SelectAll, 10, now);
+        assert_eq!(selected(&app).len(), 7);
+
+        // Back round to Markdown: only what it shows stays selected.
+        app.run(Command::ToggleHidden, 10, now);
+        assert_eq!(selected(&app), ["docs", "notes.md"]);
+        assert_eq!(
+            app.pick_button().map(|pick| pick.label),
+            Some("Select 2".to_string())
+        );
+
+        // Another filter: notes.md is off screen now, and off the selection.
+        app.menu_action(menu::Action::FileType(1), 10, now);
+        assert_eq!(selected(&app), ["docs"]);
+        // …and widening again brings nothing back.
+        app.menu_action(menu::Action::AllFiles, 10, now);
+        assert_eq!(selected(&app), ["docs"]);
+    }
+
+    /// The plain hidden toggle, in a dialog without filters and in a file
+    /// manager alike: hiding the dotfiles deselects the selected ones.
+    #[test]
+    fn hiding_dotfiles_deselects_them() {
+        for mut app in [
+            picker("dot-deselect-picker", &["a.txt", ".b.txt"], &[], FILES),
+            Fixture::new("dot-deselect", &["a.txt", ".b.txt"]),
+        ] {
+            let now = Instant::now();
+            app.run(Command::ToggleHidden, 10, now);
+            app.run(Command::SelectAll, 10, now);
+            assert_eq!(selected(&app), [".b.txt", "a.txt"]);
+            app.run(Command::ToggleHidden, 10, now);
+            assert_eq!(selected(&app), ["a.txt"]);
+            assert_eq!(app.targets(), [app.cwd().join("a.txt")]);
+        }
+    }
+
     /// A rescan and a walk into another directory keep the rung: the filter
     /// is the session's, and a listing built mid-session is built with it.
     #[test]

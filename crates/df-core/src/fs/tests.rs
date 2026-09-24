@@ -898,6 +898,52 @@ fn a_type_filter_narrows_the_view_like_the_hidden_toggle() {
     assert_eq!(state.len(), 6);
 }
 
+/// Narrowing the view deselects what it takes off screen: dotfiles when the
+/// hidden toggle goes off, files the type filter fails when it comes on. A
+/// name with no row yet is kept, and so is a row the `f` query alone hides —
+/// and widening again brings no selection back.
+#[test]
+fn narrowing_the_view_deselects_what_it_hides() {
+    let mut state = loaded_state(files(&["a.png", "b.txt", ".c.png", ".d.txt"]));
+    state.set_show_hidden(true);
+    state.select_all();
+    state.set_filter("a");
+    // Selected while visible, then only the query hides it.
+    assert!(state.is_selected("b.txt"));
+
+    state.set_show_hidden(false);
+    let mut selected: Vec<&str> = ["a.png", "b.txt", ".c.png", ".d.txt"]
+        .into_iter()
+        .filter(|name| state.is_selected(name))
+        .collect();
+    assert_eq!(selected, ["a.png", "b.txt"], "the dotfiles went");
+    state.clear_filter();
+
+    // A paste's names wait for their rows, and a narrowing does not touch
+    // them.
+    state.select_names([
+        "a.png".to_string(),
+        "b.txt".to_string(),
+        "later.txt".to_string(),
+    ]);
+    state.set_types(Some(TypeFilter {
+        name: "Images".to_string(),
+        globs: Vec::new(),
+        mimes: vec!["image/*".to_string()],
+    }));
+    assert!(state.is_selected("a.png"));
+    assert!(!state.is_selected("b.txt"), "the filter hid it");
+    assert!(state.is_selected("later.txt"), "no row yet, nothing hid it");
+
+    state.set_types(None);
+    state.set_show_hidden(true);
+    selected = ["a.png", "b.txt", ".c.png", ".d.txt"]
+        .into_iter()
+        .filter(|name| state.is_selected(name))
+        .collect();
+    assert_eq!(selected, ["a.png"], "widening brings nothing back");
+}
+
 /// A listing built from a config that carries a type filter is narrowed from
 /// its first batch — how a directory entered mid-session keeps the dialog's
 /// filter without anybody re-applying it.
