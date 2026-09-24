@@ -10836,7 +10836,15 @@ impl App {
             // Below the rows, between tiles, on the scrollbar: nothing there
             // is a row, so the menu is about the folder, and the cursor stays
             // where the keyboard left it.
-            self.open_folder_menu(at);
+            //
+            // Except in the trash, which is not a folder anything is made or
+            // pasted in: its empty space keeps the trash's own menu, where
+            // "Empty trash" — the one verb about the whole place — lives.
+            if self.tab().trash.is_some() {
+                self.open_menu(at);
+            } else {
+                self.open_folder_menu(at);
+            }
             return;
         };
         // The menu is about the row it opened on, so the row becomes the
@@ -18530,6 +18538,45 @@ mod tests {
         press_key(&mut app, &ctx, Key::Enter);
         assert!(app.prompt.is_none(), "the prompt is still open");
         assert!(app.files.join("docs").is_dir(), "no folder was made");
+    }
+
+    /// The trash is not a folder anything is made in: a right click on its
+    /// empty space opens the trash's own menu, Empty trash and all, and
+    /// leaves the cursor where it was.
+    #[test]
+    fn a_right_click_below_the_trash_rows_opens_the_trash_menu() {
+        let mut app = Fixture::new("menu-trash-space", &["a.txt"]);
+        let ctx = egui::Context::default();
+        let now = Instant::now();
+        let item = |name: &str| df_core::ops::TrashedItem {
+            trash_root: app.files.join("Trash"),
+            name: std::ffi::OsString::from(name),
+            original: app.files.join(name),
+            deleted_at: "2026-08-30T09:15:00".to_string(),
+        };
+        let view = crate::trashview::View {
+            items: vec![item("old.txt"), item("older.txt")],
+            origin: app.files.clone(),
+        };
+        let (mgr, sort) = (app.mgr.clone(), app.sort());
+        app.tabs.active_mut().show_trash(view, &mgr, sort, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        app.dir().set_cursor(1);
+
+        let below = row_rect(&app, 1).center_bottom() + egui::vec2(0.0, 40.0);
+        assert!(layout_of(&app).list.contains(below), "no empty space below");
+        right_click_at(&mut app, &ctx, below);
+        assert_eq!(live_menu(&app), Some(menu::Kind::Context));
+        let items = &app.menu.as_ref().expect("up").items;
+        assert_eq!(items[0].action, menu::Action::Restore);
+        let empty = items.last().expect("rows");
+        assert_eq!(empty.action, menu::Action::EmptyTrash);
+        assert!(empty.enabled, "there are two items to empty");
+        assert!(
+            items.iter().all(|i| i.action != menu::Action::CreateFolder),
+            "the folder menu opened in the trash"
+        );
+        assert_eq!(app.tab().cwd.dir.cursor(), 1, "the cursor moved");
     }
 
     /// The rows are the app's state as it opens: the ticks are the view and

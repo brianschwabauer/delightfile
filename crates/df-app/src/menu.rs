@@ -96,9 +96,9 @@ const SUBMENU_OVERLAP: f32 = 4.0;
 /// group start in one column whichever of them is ticked — a label that
 /// stepped sideways as the tick moved would be the menu moving under the eye.
 /// For the same reason a list with a tick row anywhere in it keeps the column
-/// on every row, as a list with a parent row keeps [`CHEVRON_COLUMN`]: the
-/// folder menu's one "Show hidden" would otherwise be the one label out of
-/// line with the rest.
+/// on every row, as a list with a parent row keeps [`CHEVRON_COLUMN`]: a
+/// lone tick row among plain ones would otherwise be the one label out of line
+/// with the rest.
 const CHECK_COLUMN: f32 = 12.0 + ICON_GAP;
 
 /// The tick, with the patched font (nf-fa-check) and without it.
@@ -663,16 +663,17 @@ pub fn folder_items(
         )
         .after_gap(),
         run("Select all", C::SelectAll, facts.rows),
-        run("Show hidden", C::ToggleHidden, true)
-            .check(facts.hidden)
+        // Hidden files are View's "Show hidden files", as in the app menu: a
+        // second row for the one toggle would be two names for one thing.
+        Item::new("View", "", Action::Nothing, true)
+            .with_submenu(view_items(
+                facts.scale,
+                facts.hidden,
+                facts.linemode,
+                keymap,
+                &refused,
+            ))
             .after_gap(),
-        Item::new("View", "", Action::Nothing, true).with_submenu(view_items(
-            facts.scale,
-            facts.hidden,
-            facts.linemode,
-            keymap,
-            &refused,
-        )),
         Item::new("Sort", "", Action::Nothing, true).with_submenu(sort_items(
             facts.sort,
             facts.reverse,
@@ -1951,15 +1952,7 @@ mod tests {
                     false,
                     None
                 ),
-                (
-                    "Show hidden",
-                    ".",
-                    Action::Run(C::ToggleHidden),
-                    true,
-                    true,
-                    Some(true)
-                ),
-                ("View", "", Action::Nothing, true, false, None),
+                ("View", "", Action::Nothing, true, true, None),
                 ("Sort", "", Action::Nothing, true, false, None),
             ]
         );
@@ -1982,6 +1975,12 @@ mod tests {
             };
             assert_eq!(list(&rows), list(&app), "the two {label} lists differ");
         }
+        // Hidden files are toggled in View, and only there.
+        let view = row(&rows, "View").submenu.as_deref().expect("a list");
+        assert_eq!(row(view, "Show hidden files").checked, Some(true));
+        assert!(rows
+            .iter()
+            .all(|i| i.action != Action::Run(C::ToggleHidden)));
     }
 
     /// Paste greys with nothing to paste, Select all with nothing to
@@ -2011,7 +2010,7 @@ mod tests {
         for label in ["New file…", "New folder…", "Paste"] {
             assert!(!enabled(&refused, label), "{label} would be refused");
         }
-        for label in ["Select all", "Show hidden", "View", "Sort"] {
+        for label in ["Select all", "View", "Sort"] {
             assert!(enabled(&refused, label), "{label} is not refused");
         }
     }
