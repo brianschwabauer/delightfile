@@ -218,11 +218,14 @@ pub enum Gesture {
     Band,
     /// A selection being dragged out of the top-bar prompt's text.
     Text,
+    /// A pane's scrollbar thumb, held and dragged ([`crate::scrollbar`]).
+    Scrollbar(Column),
 }
 
 /// What the pointer is over, as far as anything is allowed to answer it while
 /// `gesture` has it: a list row during a band, the prompt's text during a text
-/// selection, or nothing.
+/// selection, the held scrollbar's own band while its thumb is dragged, or
+/// nothing.
 ///
 /// A drag is the hand doing one thing, not pointing at the things it crosses
 /// on the way. A parent row, a crumb, a chip or a tab that lit up — or sank
@@ -249,6 +252,7 @@ pub fn gesture_filter(
         None => true,
         Some(Gesture::Band) => matches!(control, Control::Row(Column::List, _)),
         Some(Gesture::Text) => matches!(control, Control::PromptField),
+        Some(Gesture::Scrollbar(column)) => *control == Control::Scrollbar(column),
     })
 }
 
@@ -286,7 +290,11 @@ mod tests {
             Control::YankClear,
             Control::Toast,
         ] {
-            for gesture in [Gesture::Band, Gesture::Text] {
+            for gesture in [
+                Gesture::Band,
+                Gesture::Text,
+                Gesture::Scrollbar(Column::List),
+            ] {
                 assert_eq!(
                     gesture_filter(Some(gesture), Some((control, at))),
                     None,
@@ -299,6 +307,16 @@ mod tests {
                 "{control:?} answers again once the gesture is let go"
             );
         }
+        // A thumb in the hand keeps its own bar lit, and lights no row it
+        // is dragged across, nor the other pane's bar.
+        let list_bar = Some((Control::Scrollbar(Column::List), at));
+        let held = Some(Gesture::Scrollbar(Column::List));
+        assert_eq!(gesture_filter(held, list_bar), list_bar);
+        assert_eq!(gesture_filter(held, row), None);
+        assert_eq!(
+            gesture_filter(held, Some((Control::Scrollbar(Column::Parent), at))),
+            None
+        );
         // Outside every pane there was nothing to begin with.
         assert_eq!(gesture_filter(Some(Gesture::Band), None), None);
         assert_eq!(gesture_filter(Some(Gesture::Text), None), None);

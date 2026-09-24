@@ -87,6 +87,14 @@ pub struct Listing {
     /// different directories' listings is animating between two unrelated
     /// things (`delightful-ui` §5).
     fresh: bool,
+    /// When the view last moved, for the scrollbar's linger-then-leave
+    /// ([`crate::scrollbar::alpha`]).
+    ///
+    /// Stamped wherever `first` actually changes — the wheel, the scrollbar,
+    /// and the scrolloff rule following a keyboard cursor — so a page down
+    /// shows where it landed as a wheel roll does. Not by the first placement
+    /// in a new directory, which is a jump nobody scrolled.
+    scrolled_at: Option<Instant>,
     /// When the current scan was asked for, so the pane can tell "still
     /// arriving" from "slow enough to say so" (PLAN §2's first-batch latency).
     pub scan_started: Instant,
@@ -108,6 +116,7 @@ impl Listing {
             wheel_carry: 0.0,
             detached: None,
             fresh: true,
+            scrolled_at: None,
             scan_started: now,
         }
     }
@@ -116,9 +125,15 @@ impl Listing {
         self.dir.path()
     }
 
-    #[cfg(test)]
+    /// The first visible row, where the view is going rather than where it
+    /// is drawn.
     pub fn first(&self) -> usize {
         self.first
+    }
+
+    /// When the view last moved (see the field).
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.scrolled_at
     }
 
     /// Where to draw the rows from, in rows. Fractional mid-slide.
@@ -163,6 +178,7 @@ impl Listing {
         let from = self.scroll.value(now);
         self.first = first;
         self.scroll = Tween::new(from, first as f32, duration, Easing::OutQuint, now);
+        self.scrolled_at = Some(now);
     }
 
     /// A wheel roll over this pane (PLAN §7.5's "scroll with momentum").
@@ -206,6 +222,38 @@ impl Listing {
             return false;
         }
         self.set_first_over(target, crate::mouse::WHEEL_GLIDE, now);
+        self.detached = Some(columns);
+        true
+    }
+
+    /// Put the view at `first` for a hand on the scrollbar: the thumb dragged,
+    /// which follows the hand with no slide (`Duration::ZERO`), or the track
+    /// clicked, which pages over the wheel's glide.
+    ///
+    /// Detached exactly as a wheel roll is, for the same reason: the bar moves
+    /// the view to look somewhere, and the cursor stays where it was until a
+    /// cursor command takes the view back. Clamped to the last row the view
+    /// can start at, counted in rows of the pane as [`Listing::wheel`] counts.
+    ///
+    /// Returns whether anything moved.
+    pub fn scroll_to(
+        &mut self,
+        first: usize,
+        visible: usize,
+        columns: usize,
+        duration: Duration,
+        now: Instant,
+    ) -> bool {
+        let columns = columns.max(1);
+        let rows = self.dir.len().div_ceil(columns);
+        if visible == 0 || rows <= visible {
+            return false;
+        }
+        let target = first.min(rows - visible);
+        if target == self.first {
+            return false;
+        }
+        self.set_first_over(target, duration, now);
         self.detached = Some(columns);
         true
     }
@@ -1136,6 +1184,44 @@ mod tests {
 
     /// A grid that reflows on a resize keeps looking at the same entry, rather
     /// than reading its old row number against a new column count.
+    /// The scrollbar puts the view where the hand says, clamped to the last
+    /// row it can start at, and detaches it as the wheel does; the moment it
+    /// moved is what the bar lingers from. A first placement is not a scroll.
+    #[test]
+    fn the_scrollbar_moves_the_view_detached_and_says_when() {
+        let t0 = Instant::now();
+        let mut fresh = Listing::new("/", &MgrConfig::default(), SortOptions::default(), t0);
+        fresh.dir.load_blocking().expect("read /");
+        fresh.set_first(2, t0);
+        assert_eq!(fresh.scrolled_at(), None, "the first placement stamped");
+
+        let mut l = listing(t0);
+        let rows = l.dir.len();
+        let visible = 5.min(rows.saturating_sub(1));
+        assert!(
+            visible >= 2,
+            "`/` should have more than a couple of entries"
+        );
+        assert_eq!(l.scrolled_at(), None);
+
+        let at = t0 + Duration::from_millis(5);
+        assert!(l.scroll_to(1, visible, 1, Duration::ZERO, at));
+        assert_eq!(l.first(), 1);
+        assert_eq!(l.scroll_rows(at), 1.0, "a drag does not slide");
+        assert!(l.is_detached());
+        assert_eq!(l.scrolled_at(), Some(at));
+        assert_eq!(l.dir.cursor(), 0, "the cursor stayed");
+
+        assert!(l.scroll_to(usize::MAX, visible, 1, Duration::ZERO, at));
+        assert_eq!(l.first(), rows - visible, "clamped to the last page");
+        assert!(
+            !l.scroll_to(rows, visible, 1, Duration::ZERO, at),
+            "no move"
+        );
+        // Everything fits: nothing to move.
+        assert!(!l.scroll_to(0, rows, 1, Duration::ZERO, at));
+    }
+
     #[test]
     fn a_reflow_re_derives_a_detached_view() {
         let t0 = Instant::now();

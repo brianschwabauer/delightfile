@@ -43,6 +43,7 @@ mod preview;
 /// Remote services browsed as directories (PLAN §7.6).
 mod remote;
 mod ripple;
+mod scrollbar;
 mod search;
 mod select;
 mod sha256;

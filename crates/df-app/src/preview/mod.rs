@@ -1693,10 +1693,7 @@ impl Pane {
         let loading = (self.shown.is_none() && self.wanted.is_some())
             .then(|| (self.requested_at + LOADING_DELAY).saturating_duration_since(now))
             .filter(|d| !d.is_zero());
-        let bar = self
-            .scrolled_at
-            .map(|at| (at + SCROLLBAR_LINGER).saturating_duration_since(now))
-            .filter(|d| !d.is_zero());
+        let bar = crate::scrollbar::deadline(self.scrolled_at, now);
         // The page indicator's one scheduled wake-up: the instant its linger
         // ends and its fade begins.
         let chip = self
@@ -1725,32 +1722,13 @@ impl Pane {
             .min()
     }
 
-    /// How visible the scrollbar is, 0–1: held for [`SCROLLBAR_LINGER`] after
-    /// the last scroll, then eased away over [`SCROLLBAR_FADE`] (PLAN §8's
-    /// "linger then leave").
+    /// How visible the scrollbar is, 0–1: held after the last scroll, then
+    /// eased away — the panes' bar's rule, to the millisecond
+    /// ([`crate::scrollbar::alpha`]).
     fn scrollbar_alpha(&self, now: Instant) -> f32 {
-        let Some(at) = self.scrolled_at else {
-            return 0.0;
-        };
-        let elapsed = now.saturating_duration_since(at);
-        if elapsed < SCROLLBAR_LINGER {
-            return 1.0;
-        }
-        let over = (elapsed - SCROLLBAR_LINGER).as_secs_f32() / SCROLLBAR_FADE.as_secs_f32();
-        (1.0 - over).clamp(0.0, 1.0)
+        crate::scrollbar::alpha(self.scrolled_at, now)
     }
 }
-
-/// How long the scrollbar is held after the last `K`/`J`.
-///
-/// PLAN §8's transient chrome holds ~2.5–3 s; a scrollbar is the quietest thing
-/// in that family — it answers "where am I", which is a question asked *while*
-/// scrolling — so it takes the short end of the range.
-const SCROLLBAR_LINGER: Duration = Duration::from_millis(2000);
-
-/// …then leaves over this. Half PLAN §8's 500 ms, because the bar is 3 points
-/// wide and a longer fade on something that small reads as a rendering bug.
-const SCROLLBAR_FADE: Duration = Duration::from_millis(250);
 
 /// How far a crossfade that started at `at` has got, eased.
 ///

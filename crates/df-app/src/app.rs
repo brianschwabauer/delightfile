@@ -678,6 +678,16 @@ struct PressStart {
     /// While it is set, nothing but the field answers the pointer
     /// ([`select::Gesture::Text`]).
     in_prompt: Option<FieldPress>,
+    /// The press landed on a pane's scrollbar thumb: which pane, and how far
+    /// below the thumb's top the hand took hold of it.
+    ///
+    /// The offset is what keeps the thumb under the hand. Without it the first
+    /// frame of the drag would jump the thumb's top to the pointer. While it is
+    /// set the drag is the thumb's from the first point of travel, with no
+    /// threshold (the view follows the hand, and a hand that has not moved has
+    /// moved nothing), and nothing else answers the pointer
+    /// ([`select::Gesture::Scrollbar`]).
+    scrollbar: Option<(Column, f32)>,
     /// Whether the drag threshold has already been crossed, so the decision is
     /// made once rather than re-made every frame.
     dragging: bool,
@@ -767,6 +777,13 @@ struct Geom<'a> {
     grid: Option<grid::Metrics>,
     parent: egui::Rect,
     parent_scroll: f32,
+    /// How many rows fit in the parent column: its page, as `page` is the
+    /// list's.
+    parent_page: usize,
+    /// The two panes' scrollbars, where they are drawn this frame; `None`
+    /// where the listing fits ([`crate::scrollbar`]).
+    list_bar: Option<crate::scrollbar::Geometry>,
+    parent_bar: Option<crate::scrollbar::Geometry>,
     crumbs: &'a [egui::Rect],
     overlay: &'a Option<OverlayGeom>,
     /// The top row's crumbs, filter chip and cluster (PLAN §2).
@@ -783,6 +800,16 @@ struct Geom<'a> {
     prompt: Option<&'a chrome::FieldGeom>,
     /// The help sheet's card, while it is up.
     help: Option<egui::Rect>,
+}
+
+impl Geom<'_> {
+    /// One pane's scrollbar, when it has one this frame.
+    fn bar(&self, column: Column) -> Option<crate::scrollbar::Geometry> {
+        match column {
+            Column::List => self.list_bar,
+            Column::Parent => self.parent_bar,
+        }
+    }
 }
 
 /// Which piece of a path `c c` / `c d` / `c f` / `c n` copy (PLAN §7.4).
@@ -9672,6 +9699,7 @@ impl App {
                 // while a modal card is up — the hit test above never
                 // produces them — and the `×` is closed by `click` itself.
                 Control::Row(..)
+                | Control::Scrollbar(_)
                 | Control::Tab(_)
                 | Control::TabClose(_)
                 | Control::TabNew
@@ -9755,6 +9783,7 @@ impl App {
                 }
             }
             Control::Row(..)
+            | Control::Scrollbar(_)
             | Control::Tab(_)
             | Control::TabClose(_)
             | Control::TabNew
@@ -10157,6 +10186,100 @@ impl App {
         }
     }
 
+    // ── The panes' scrollbars ([`crate::scrollbar`]) ────────────────────────
+
+    /// The listing a pane's scrollbar moves.
+    fn scroll_listing(&mut self, column: Column) -> Option<&mut crate::tab::Listing> {
+        let tab = self.tabs.active_mut();
+        match column {
+            Column::List => Some(&mut tab.cwd),
+            Column::Parent => tab.parent.as_mut(),
+        }
+    }
+
+    /// One frame of a thumb in the hand: the view goes to the row the thumb's
+    /// top now stands for, at once — the hand is holding it, and a slide would
+    /// put the rows behind the hand.
+    ///
+    /// `thumb_top` is the pointer less the offset it took hold at. `visible` and
+    /// `columns` are the numbers the bar was drawn from: the pane's page, and
+    /// how many entries a row of it holds. Like the wheel, the view detaches
+    /// from the cursor, and a pending aim is cancelled only by a scroll that
+    /// actually moved something.
+    fn hold_scrollbar(
+        &mut self,
+        column: Column,
+        pane: egui::Rect,
+        visible: usize,
+        columns: usize,
+        thumb_top: f32,
+        now: Instant,
+    ) {
+        let Some(listing) = self.scroll_listing(column) else {
+            return;
+        };
+        let rows = listing.dir.len().div_ceil(columns.max(1));
+        // Where the thumb is along the track does not depend on the row the
+        // view is on, only its length does — so any first will do here.
+        let Some(bar) = crate::scrollbar::geometry(pane, 0.0, visible as f32, rows as f32) else {
+            return;
+        };
+        let first = bar.first_at(thumb_top).round() as usize;
+        if listing.scroll_to(first, visible, columns, Duration::ZERO, now) {
+            listing.dir.cancel_aim();
+        }
+    }
+
+    /// One pane's scrollbar, over its rows. Up for the linger after the view
+    /// last moved, and while the pointer is in its band or a hand is on its
+    /// thumb — the hover's fade is what takes it away when the pointer leaves
+    /// a bar nobody has scrolled lately (`delightful-ui` §3: instant in, eased
+    /// out).
+    fn paint_scrollbar(
+        &self,
+        paint: &ui::Painting<'_>,
+        column: Column,
+        bar: Option<crate::scrollbar::Geometry>,
+        now: Instant,
+    ) {
+        let Some(bar) = bar else { return };
+        let scrolled_at = match column {
+            Column::List => self.tab().cwd.scrolled_at(),
+            Column::Parent => self.tab().parent.as_ref().and_then(|p| p.scrolled_at()),
+        };
+        let lit = self.hovers.hover(Control::Scrollbar(column));
+        let held = self
+            .press
+            .and_then(|press| press.scrollbar)
+            .is_some_and(|(held, _)| held == column);
+        let alpha = crate::scrollbar::visibility(scrolled_at, lit, held, now);
+        crate::scrollbar::paint(paint, &bar, alpha, lit, held);
+    }
+
+    /// A press on the track, above the thumb (`up`) or below it: a page
+    /// that way, over the wheel's glide, detached as the wheel is.
+    fn page_scrollbar(
+        &mut self,
+        column: Column,
+        up: bool,
+        visible: usize,
+        columns: usize,
+        now: Instant,
+    ) {
+        let Some(listing) = self.scroll_listing(column) else {
+            return;
+        };
+        let first = listing.first();
+        let target = if up {
+            first.saturating_sub(visible)
+        } else {
+            first + visible
+        };
+        if listing.scroll_to(target, visible, columns, crate::mouse::WHEEL_GLIDE, now) {
+            listing.dir.cancel_aim();
+        }
+    }
+
     /// A primary click on something. Returns where it landed, for the ripple.
     fn click(
         &mut self,
@@ -10223,6 +10346,22 @@ impl App {
                     self.navigate(path, now);
                 }
                 rect
+            }
+            // A press on the track pages towards it, as every scrollbar does.
+            // A press on the thumb does nothing yet: it is the start of a drag,
+            // which the press site records ([`PressStart::scrollbar`]).
+            Control::Scrollbar(column) => {
+                let Some(bar) = geom.bar(column) else {
+                    return egui::Rect::ZERO;
+                };
+                if let Some(at) = pointer.at.filter(|at| !bar.on_thumb(*at)) {
+                    let (visible, columns) = match column {
+                        Column::List => (geom.page, geom.grid.map_or(1, |m| m.columns)),
+                        Column::Parent => (geom.parent_page, 1),
+                    };
+                    self.page_scrollbar(column, at.y < bar.thumb.top(), visible, columns, now);
+                }
+                bar.track
             }
             Control::Crumb(index) => {
                 let rect = geom.crumbs.get(index).copied().unwrap_or(egui::Rect::ZERO);
@@ -10861,16 +11000,18 @@ impl App {
     }
 
     /// The drag that owns the pointer until the button comes up, if one does:
-    /// a band select, or a text selection from the prompt. While one does,
-    /// nothing but its own target answers the pointer
-    /// ([`select::gesture_filter`]).
+    /// a band select, a text selection from the prompt, or a scrollbar's thumb
+    /// in the hand. While one does, nothing but its own target answers the
+    /// pointer ([`select::gesture_filter`]).
     fn gesture(&self) -> Option<select::Gesture> {
         if self.band.is_some() {
             Some(select::Gesture::Band)
         } else if self.press.is_some_and(|press| press.in_prompt.is_some()) {
             Some(select::Gesture::Text)
         } else {
-            None
+            self.press
+                .and_then(|press| press.scrollbar)
+                .map(|(column, _)| select::Gesture::Scrollbar(column))
         }
     }
 
@@ -10972,6 +11113,12 @@ impl App {
             if field.clicks == 1 {
                 self.drag_text(at, geom, now);
             }
+            return;
+        }
+        // …and so does a scrollbar's thumb, which has already been moved this
+        // frame, before the rows were measured ([`App::hold_scrollbar`]). No
+        // band and no file drag from the bar, whichever way the hand goes.
+        if press.scrollbar.is_some() {
             return;
         }
         if !press.dragging {
@@ -12996,12 +13143,30 @@ impl App {
         if let Some(at) = travelled {
             self.row_hover.moved(at);
         }
-        let scroll_rows = self.tab().cwd.scroll_rows(now);
         let parent_content = ui::content_rect(layout.parent);
         // The parent column is a list at the *list's* step, whatever the list
         // pane itself is drawn as — the two columns are one listing.
         let parent_page =
             crate::viewport::visible_rows(parent_content.height(), self.scale.row_height);
+        // ── A scrollbar's thumb in the hand ([`crate::scrollbar`]) ──────────
+        // Moved *before* the rows are measured, unlike every other drag: the
+        // view follows the hand with no slide, so the frame that reads the
+        // pointer has to be the frame that draws the rows where it put them.
+        // Measured after, the rows would trail the thumb by a frame — and a
+        // hand that stopped would leave them a step short of it, since a view
+        // that did not slide asks for no frame to catch up in.
+        if let (true, Some(at), Some((column, grab))) = (
+            pointer.down,
+            pointer.at,
+            self.press.and_then(|press| press.scrollbar),
+        ) {
+            let (pane, visible, columns) = match column {
+                Column::List => (layout.list, page, metrics.as_ref().map_or(1, |m| m.columns)),
+                Column::Parent => (layout.parent, parent_page, 1),
+            };
+            self.hold_scrollbar(column, pane, visible, columns, at.y - grab, now);
+        }
+        let scroll_rows = self.tab().cwd.scroll_rows(now);
         let parent_scroll = self
             .tab()
             .parent
@@ -13009,6 +13174,21 @@ impl App {
             .map(|parent| parent.scroll_rows(now))
             .unwrap_or(0.0);
         let parent_len = self.tab().parent.as_ref().map(|p| p.dir.len()).unwrap_or(0);
+        // The two scrollbars, measured once for the hit test, the press and
+        // the paint, in rows of each pane — a row of tiles in the grid, as the
+        // wheel counts them.
+        let list_rows = match &metrics {
+            Some(metrics) => metrics.rows(self.tab().cwd.dir.len()),
+            None => self.tab().cwd.dir.len(),
+        };
+        let list_bar =
+            crate::scrollbar::geometry(layout.list, scroll_rows, page as f32, list_rows as f32);
+        let parent_bar = crate::scrollbar::geometry(
+            layout.parent,
+            parent_scroll,
+            parent_page as f32,
+            parent_len as f32,
+        );
         // The chips are measured once, here, and every reading of the strip
         // this frame — the hit test, the drag, the paint — is laid out from
         // the same numbers, for the reason `tab_rects` gives.
@@ -13290,6 +13470,15 @@ impl App {
                             hit(top_geom.filter.filter(|_| filter_live), Control::FilterChip)
                         })
                 })
+                // The scrollbars, before the rows they sit beside: the band is
+                // wider than the thumb so the hand need not aim, and the few
+                // points of it that overlap a row's end are the bar's.
+                .or_else(|| {
+                    [(Column::List, list_bar), (Column::Parent, parent_bar)]
+                        .into_iter()
+                        .find(|(_, bar)| bar.is_some_and(|bar| bar.contains(p)))
+                        .map(|(column, _)| Control::Scrollbar(column))
+                })
                 .or_else(|| {
                     grid::pane_at(
                         list_content,
@@ -13519,6 +13708,9 @@ impl App {
             grid: metrics,
             parent: parent_content,
             parent_scroll,
+            parent_page,
+            list_bar,
+            parent_bar,
             crumbs: &crumb_rects,
             overlay: &overlay,
             top: &top_geom,
@@ -13587,7 +13779,12 @@ impl App {
             // acknowledging.
             let double = self.clicks.press(control, position, now);
             let rect = self.click(control, double, &pointer, &geom, now);
-            self.ripples.spawn(control, position, rect, now);
+            // Not on a scrollbar: the bar answers by moving the rows, and it
+            // draws no splash — one spawned there would only be frames asked
+            // for a ripple nothing paints.
+            if !matches!(control, Control::Scrollbar(_)) {
+                self.ripples.spawn(control, position, rect, now);
+            }
         }
 
         // Middle click: a new tab on the row it landed on (PLAN §7.5).
@@ -13655,6 +13852,15 @@ impl App {
                     ticked: now,
                     scrolling: false,
                 }),
+                // The thumb, taken where the hand took it. A press on the
+                // track below or above it has already paged, in `click`.
+                scrollbar: match over {
+                    Some((Control::Scrollbar(column), _)) => geom
+                        .bar(column)
+                        .filter(|bar| bar.on_thumb(at))
+                        .map(|bar| (column, at.y - bar.thumb.top())),
+                    _ => None,
+                },
                 dragging: false,
             });
         }
@@ -13876,6 +14082,7 @@ impl App {
                 Control::Row(..)
                 | Control::TabClose(_)
                 | Control::TabNew
+                | Control::Scrollbar(_)
                 | Control::Crumb(_)
                 | Control::SearchNames
                 | Control::SearchContents
@@ -14225,6 +14432,10 @@ impl App {
                     && overlay.is_none()
                     && !menu_live
                     && !self.row_hover.parked()
+                    // The scrollbar's band overlaps the rows' far end, where
+                    // their marks are, and a pointer on the bar is not
+                    // pointing at a mark.
+                    && !list_bar.is_some_and(|bar| bar.contains(*at))
             })
             .map(ui::RowTips::new);
         let paint = ui::Painting {
@@ -14294,6 +14505,7 @@ impl App {
                 folders: None,
             });
         }
+        self.paint_scrollbar(&paint, Column::Parent, parent_bar, now);
         let list_view = ListView {
             pane: layout.list,
             ground: list_ground,
@@ -14356,6 +14568,7 @@ impl App {
             // rather than a directory drawn as nothing.
             _ => paint.listing(list_view),
         }
+        self.paint_scrollbar(&paint, Column::List, list_bar, now);
         // What the pointer turned out to be on, now that the rows have been
         // drawn. The fade is the window's own instant-in/eased-out, so the card
         // arrives with the pointer and lingers a moment behind it; the rect is
@@ -14905,6 +15118,14 @@ impl App {
                     .is_some_and(|chip| chip.leaving.is_some() && !chip.spent(now)),
             ),
             ("tab", self.tab().animating(now)),
+            // The panes' scrollbars on their way out. The fade only: the
+            // linger before it is one wake-up (`next_deadline`), and a bar
+            // held up by the pointer is the hover's to fade.
+            (
+                "scrollbar",
+                self.scrolled_at()
+                    .any(|at| crate::scrollbar::fading(Some(at), now)),
+            ),
             ("preview", self.preview.animating(now)),
             // The picture's zoom and pan: a wheel blend, a double-click, a
             // fling, the spring back to fit. Named apart from "preview" so
@@ -15087,10 +15308,24 @@ impl App {
             folders,
             clipboard,
             wl_copy,
+            // …and the panes' scrollbars, the instant their linger ends and
+            // the fade is owed its first frame.
+            self.scrolled_at()
+                .filter_map(|at| crate::scrollbar::deadline(Some(at), now))
+                .min(),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// When the list and the parent column last scrolled, for their
+    /// scrollbars' linger and fade.
+    fn scrolled_at(&self) -> impl Iterator<Item = Instant> + '_ {
+        let tab = self.tab();
+        std::iter::once(&tab.cwd)
+            .chain(tab.parent.iter())
+            .filter_map(|listing| listing.scrolled_at())
     }
 
     /// How long until a pane has to admit it is loading, if one is about to.
@@ -18977,6 +19212,132 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         };
         run_frame(app, ctx, vec![up]);
+    }
+
+    /// A listing long enough to scroll: two hundred files.
+    fn long_listing(name: &str) -> Fixture {
+        let names: Vec<String> = (0..200).map(|i| format!("f{i:03}.txt")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        Fixture::new(name, &names)
+    }
+
+    /// The list pane's scrollbar, from the numbers the frame draws it from.
+    fn list_bar(app: &App) -> (crate::scrollbar::Geometry, usize) {
+        let list = layout_of(app).list;
+        let page =
+            crate::viewport::visible_rows(ui::content_rect(list).height(), app.scale.row_height);
+        let scroll = app.tab().cwd.scroll_rows(Instant::now());
+        let rows = app.tab().cwd.dir.len();
+        let bar = crate::scrollbar::geometry(list, scroll, page as f32, rows as f32)
+            .expect("the listing overflows");
+        (bar, page)
+    }
+
+    /// The thumb pressed and pulled: the view follows the hand at once, to
+    /// the row the thumb's place on the track stands for. It leaves the
+    /// cursor where it was, as the wheel does, and starts no band and no file
+    /// drag however far the hand goes, even out over the rows. Letting go
+    /// leaves the view there.
+    #[test]
+    fn dragging_the_thumb_moves_the_view_and_nothing_else() {
+        let mut app = long_listing("bar-drag");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let (bar, page) = list_bar(&app);
+        assert_eq!(app.tab().cwd.first(), 0);
+        assert_eq!(bar.thumb.top(), bar.track.top());
+
+        // Half the travel down, then left out over the rows.
+        let travel = bar.track.height() - bar.thumb.height();
+        let grab = bar.thumb.center();
+        let to = grab + egui::vec2(-200.0, travel / 2.0);
+        assert!(layout_of(&app).list.contains(to), "{to:?} is off the list");
+        drag_to(&mut app, &ctx, grab, to);
+
+        let rows = app.tab().cwd.dir.len();
+        let want = ((rows - page) as f32 / 2.0).round() as usize;
+        let first = app.tab().cwd.first();
+        assert!(
+            first.abs_diff(want) <= 1,
+            "half the travel is row {want}, not {first}"
+        );
+        assert_eq!(
+            app.tab().cwd.scroll_rows(Instant::now()),
+            first as f32,
+            "a thumb in the hand does not slide"
+        );
+        assert!(app.tab().cwd.is_detached());
+        assert_eq!(app.tab().cwd.dir.cursor(), 0, "the cursor moved");
+        assert!(app.band.is_none(), "the bar started a band");
+        assert!(app.drag.is_none(), "the bar started a file drag");
+        assert!(selected(&app).is_empty());
+
+        // All the way down, and past the end: the last page, and no further.
+        let bottom = grab + egui::vec2(0.0, travel + 300.0);
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(bottom)]);
+        assert_eq!(app.tab().cwd.first(), rows - page);
+
+        release_at(&mut app, &ctx, bottom);
+        assert!(app.press.is_none());
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.tab().cwd.first(), rows - page, "the view went back");
+    }
+
+    /// A press on the track pages towards it, over the wheel's glide, and
+    /// leaves the cursor where it was.
+    #[test]
+    fn a_press_on_the_track_pages_towards_it() {
+        let mut app = long_listing("bar-page");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let (bar, page) = list_bar(&app);
+
+        let below = egui::pos2(bar.thumb.center().x, bar.track.bottom() - 4.0);
+        assert!(!bar.on_thumb(below));
+        click_at(&mut app, &ctx, below);
+        assert_eq!(app.tab().cwd.first(), page);
+        assert!(app.tab().cwd.animating(Instant::now()), "a page glides");
+        assert!(app.tab().cwd.is_detached());
+        assert_eq!(app.tab().cwd.dir.cursor(), 0);
+        assert!(app.press.is_none_or(|press| press.scrollbar.is_none()));
+
+        // Above the thumb: a page back up. The view is put three pages down
+        // first, with no glide, so the thumb is drawn where it is going.
+        let now = Instant::now();
+        let cwd = &mut app.tabs.active_mut().cwd;
+        assert!(cwd.scroll_to(3 * page, page, 1, Duration::ZERO, now));
+        run_frame(&mut app, &ctx, Vec::new());
+        let (bar, _) = list_bar(&app);
+        let above = egui::pos2(bar.thumb.center().x, bar.track.top() + 2.0);
+        assert!(!bar.on_thumb(above), "the thumb is at the top");
+        click_at(&mut app, &ctx, above);
+        assert_eq!(app.tab().cwd.first(), 2 * page);
+    }
+
+    /// The bar is up for the linger after the view moves — by the keyboard as
+    /// much as by the pointer — and gone after the fade, with the pointer
+    /// nowhere near it; the fade is what asks for frames.
+    #[test]
+    fn the_list_bar_lingers_after_a_scroll_and_then_goes() {
+        let mut app = long_listing("bar-linger");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.tab().cwd.scrolled_at(), None, "opening is not a scroll");
+
+        app.run(Command::CursorBottom, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        assert!(app.tab().cwd.first() > 0, "the cursor did not scroll");
+        let at = app.tab().cwd.scrolled_at().expect("the keyboard scrolled");
+        let lit = app.hovers.hover(Control::Scrollbar(Column::List));
+        assert_eq!(lit, 0.0, "nothing is hovering the bar");
+        let alpha = |now| crate::scrollbar::visibility(Some(at), lit, false, now);
+        assert_eq!(alpha(at), 1.0);
+        let fading = at + crate::scrollbar::LINGER + crate::scrollbar::FADE / 2;
+        assert!(alpha(fading) > 0.0 && alpha(fading) < 1.0);
+        assert!(crate::scrollbar::fading(Some(at), fading));
+        let gone = at + crate::scrollbar::LINGER + crate::scrollbar::FADE;
+        assert_eq!(alpha(gone), 0.0);
+        assert!(!crate::scrollbar::fading(Some(at), gone), "still asking");
     }
 
     /// A drag from the list's empty space up over its rows draws a band in a

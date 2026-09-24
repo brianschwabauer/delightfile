@@ -21,6 +21,7 @@ use df_core::config::LineMode;
 use df_core::fs::Entry;
 use df_core::preview::PreviewKind;
 
+use crate::scrollbar;
 use crate::theme::mix;
 use crate::ui::{content_rect, Painting, ROW_HEIGHT};
 
@@ -63,14 +64,6 @@ const LINE_NUMBERS: bool = false;
 /// Bytes per row of the hexdump. Sixteen, as every hexdump since `od`: the
 /// offsets are round in hex and the ASCII column lines up with the address.
 const HEX_COLS: usize = 16;
-
-/// The scrollbar's width, in logical points. Thin: it reports a position, it is
-/// not a control (there is no pointer scrolling in the preview yet).
-const SCROLLBAR_WIDTH: f32 = 3.0;
-
-/// The shortest the scrollbar's thumb gets, so a 20,000-line file still has
-/// something visible to point at.
-const SCROLLBAR_MIN: f32 = 24.0;
 
 /// Padding inside the kind badge and the code plate.
 const CHIP_PAD: f32 = 6.0;
@@ -1640,8 +1633,9 @@ fn chip(
 /// A thin bar down the pane's right edge, only while it has something to say.
 ///
 /// It reports a position rather than offering a control — there is no pointer
-/// scrolling in the preview yet — so it is three points wide, has no track, and
+/// scrolling in the preview yet — so it has no track and no hit band, and
 /// leaves on its own (`delightful-ui`: transient chrome lingers, then fades).
+/// Its width, floor and timing are the panes' bar's ([`crate::scrollbar`]).
 fn scrollbar(
     paint: &Painting<'_>,
     content: egui::Rect,
@@ -1654,17 +1648,17 @@ fn scrollbar(
     }
     let total = (max_scroll + rows_in(content)) as f32;
     let visible = rows_in(content) as f32;
-    let height = (content.height() * (visible / total).clamp(0.0, 1.0)).max(SCROLLBAR_MIN);
+    let height = (content.height() * (visible / total).clamp(0.0, 1.0)).max(scrollbar::MIN_THUMB);
     let travel = (content.height() - height).max(0.0);
     let at = scroll as f32 / max_scroll as f32;
     let top = content.top() + travel * at.clamp(0.0, 1.0);
     let rect = egui::Rect::from_min_size(
-        egui::pos2(content.right() - SCROLLBAR_WIDTH, top),
-        egui::vec2(SCROLLBAR_WIDTH, height),
+        egui::pos2(content.right() - scrollbar::WIDTH, top),
+        egui::vec2(scrollbar::WIDTH, height),
     );
     paint.painter.rect_filled(
         rect,
-        (SCROLLBAR_WIDTH / 2.0) as u8,
+        scrollbar::RADIUS,
         paint.palette.overlay0.gamma_multiply(alpha),
     );
 }

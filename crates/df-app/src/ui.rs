@@ -438,6 +438,9 @@ pub enum Column {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Control {
     Row(Column, usize),
+    /// A pane's scrollbar: the band down its right edge, thumb and track
+    /// alike ([`crate::scrollbar`]). The thumb is dragged, the track pages.
+    Scrollbar(Column),
     /// A chip in the tab strip, by tab index.
     Tab(usize),
     /// The `×` a chip wears in its numeral's slot while the pointer is on it,
