@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use df_core::fs::is_case_sensitive;
 use df_core::keymap::{Chord, Command};
+use df_core::text::grouped;
 
 use crate::help::{self, Help, HelpLine};
 use crate::hover::{pressed_rect, Hovers};
@@ -999,7 +1000,9 @@ pub fn crumb_rects(
 /// Pure, so the formatting is a test rather than a repository.
 pub fn branch_label(branch: &str, counts: Option<df_core::git::DirtyCounts>) -> String {
     match counts {
-        Some(counts) if !counts.is_clean() => format!("{branch} ·{}", counts.total()),
+        Some(counts) if !counts.is_clean() => {
+            format!("{branch} ·{}", grouped(counts.total() as u64))
+        }
         _ => branch.to_string(),
     }
 }
@@ -1160,7 +1163,11 @@ fn counter_text(cluster: &Cluster<'_>) -> String {
 
 /// The yank chip's label: `3 yanked` / `3 cut`.
 pub fn yank_label(count: usize, cut: bool) -> String {
-    format!("{count} {}", if cut { "cut" } else { "yanked" })
+    format!(
+        "{} {}",
+        grouped(count as u64),
+        if cut { "cut" } else { "yanked" }
+    )
 }
 
 /// The chip's own colour, matching the mark on the rows it is about — and the
@@ -1260,7 +1267,7 @@ pub fn cluster_geometry(
         });
     let mut selected_text = None;
     let selected = (cluster.selected > 0).then(|| {
-        let label = format!("{} selected", cluster.selected);
+        let label = format!("{} selected", grouped(cluster.selected as u64));
         let width = text_width(painter, &label, font.clone()) + PAD_X * 2.0;
         selected_text = Some(label);
         chip_at(width, &mut right)
@@ -1627,7 +1634,7 @@ fn yank_tooltip(
     if yank.paths.len() > YANK_TOOLTIP_NAMES {
         lines.push(format!(
             "and {} more",
-            yank.paths.len() - YANK_TOOLTIP_NAMES
+            grouped((yank.paths.len() - YANK_TOOLTIP_NAMES) as u64)
         ));
     }
     tip(paint, area, rect, &lines, YANK_TOOLTIP_NAMES, warm);
@@ -1656,7 +1663,7 @@ pub fn branch_tooltip(branch: &str, counts: Option<df_core::git::DirtyCounts>) -
                 (counts.conflicted, "conflicted"),
             ] {
                 if n > 0 {
-                    lines.push(format!("{n} {what}"));
+                    lines.push(format!("{} {what}", grouped(n as u64)));
                 }
             }
         }

@@ -179,7 +179,7 @@ pub fn summary(mesh: &Mesh) -> String {
     } else {
         "triangles"
     };
-    let count = format!("{} {word}", grouped(triangles));
+    let count = format!("{} {word}", df_core::text::grouped(triangles as u64));
     match mesh.bounds() {
         Some((lo, hi)) => format!(
             "{count} · {:.1} × {:.1} × {:.1} mm",
@@ -189,20 +189,6 @@ pub fn summary(mesh: &Mesh) -> String {
         ),
         None => count,
     }
-}
-
-/// A count with thousands separators, written out rather than pulled in: one
-/// loop over the digits is the whole of what a formatting crate would do here.
-fn grouped(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 // ── STL ────────────────────────────────────────────────────────────────────
@@ -2044,8 +2030,6 @@ mod tests {
         assert_eq!(summary(&one), "1 triangle · 1.0 × 2.5 × 0.0 mm");
 
         assert_eq!(summary(&Mesh::default()), "0 triangles");
-        assert_eq!(grouped(12_345), "12,345");
-        assert_eq!(grouped(1_000_000), "1,000,000");
     }
 
     /// The renderer draws the canvas it was asked for, draws *something* on it,

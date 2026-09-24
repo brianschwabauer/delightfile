@@ -34,6 +34,7 @@ use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
 use df_core::preview::PreviewKind;
 use df_core::state::{StateStore, View};
 use df_core::tasks::{FnJob, Lane, TaskCtx, TaskEngine, TaskEvent, TaskId, TaskState};
+use df_core::text::grouped;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -4144,8 +4145,9 @@ impl App {
         let verb = if cut { "Cut" } else { "Yanked" };
         let message = match dropped {
             Some(dropped) => format!(
-                "{verb} {} · replaced {dropped} you were carrying",
-                plural(n, "item", "items")
+                "{verb} {} · replaced {} you were carrying",
+                plural(n, "item", "items"),
+                grouped(dropped as u64)
             ),
             None => format!("{verb} {}", plural(n, "item", "items")),
         };
@@ -4948,7 +4950,7 @@ impl App {
         };
         let label = match mode {
             PickMode::File | PickMode::Files if selected > 1 => {
-                format!("{} {selected}", verb("Select"))
+                format!("{} {}", verb("Select"), grouped(selected as u64))
             }
             PickMode::File | PickMode::Files => verb("Select"),
             PickMode::Folder => verb("Choose folder"),
@@ -6558,11 +6560,19 @@ impl App {
         let message = if toggled.removed > 0 && all == 0 {
             "Clipboard cleared".to_string()
         } else if toggled.removed > 0 {
-            format!("Took {} out · {all} in all", toggled.removed)
+            format!(
+                "Took {} out · {} in all",
+                grouped(toggled.removed as u64),
+                grouped(all as u64)
+            )
         } else if was_empty {
             format!("Yanked {}", plural(toggled.added, "item", "items"))
         } else {
-            format!("Yanked {} more · {all} in all", toggled.added)
+            format!(
+                "Yanked {} more · {} in all",
+                grouped(toggled.added as u64),
+                grouped(all as u64)
+            )
         };
         self.toasts.notice(message, now);
         // Advance the cursor like `Space` does: `b b b` down a listing is the
@@ -12641,7 +12651,7 @@ impl App {
                 let list = crate::clipboard::uri_list(&paths);
                 let message = match &single {
                     Some(path) => format!("Copied file reference: {}", file_name(path)),
-                    None => format!("Copied {} paths", paths.len()),
+                    None => format!("Copied {} paths", grouped(paths.len() as u64)),
                 };
                 self.offer(Some("text/uri-list"), list.as_bytes(), message, now);
             }
@@ -13195,7 +13205,11 @@ impl App {
                 if count == 0 {
                     "The clipboard has no files on it".to_string()
                 } else {
-                    format!("{} clipboard {} no longer there", count, plural_verb(count))
+                    format!(
+                        "{} clipboard {} no longer there",
+                        grouped(count as u64),
+                        plural_verb(count)
+                    )
                 },
                 now,
             );
@@ -13204,8 +13218,9 @@ impl App {
         if paths.len() < count {
             self.toasts.notice(
                 format!(
-                    "{} of {count} clipboard files are gone",
-                    count - paths.len()
+                    "{} of {} clipboard files are gone",
+                    grouped((count - paths.len()) as u64),
+                    grouped(count as u64)
                 ),
                 now,
             );
@@ -15935,7 +15950,7 @@ fn op_toast(outcome: &df_core::ops::OpOutcome) -> (String, crate::toast::ToastKi
     use crate::toast::ToastKind;
     let failed = outcome.errors.len();
     let message = if failed > 0 {
-        format!("{} · {} failed", outcome.message, failed)
+        format!("{} · {} failed", outcome.message, grouped(failed as u64))
     } else {
         outcome.message.clone()
     };
@@ -15957,7 +15972,10 @@ fn op_toast(outcome: &df_core::ops::OpOutcome) -> (String, crate::toast::ToastKi
             if failed == 1 {
                 format!("{name}: {error}")
             } else {
-                format!("{name}: {error} · {} more failed", failed - 1)
+                format!(
+                    "{name}: {error} · {} more failed",
+                    grouped((failed - 1) as u64)
+                )
             },
             ToastKind::Error,
         );
@@ -16066,13 +16084,15 @@ const HELP_HINTS: [chrome::Hint; 3] = [
     chrome::Hint::new("Esc", "clear / close", Command::Escape),
 ];
 
-/// "1 item" / "3 items". The same wording df-core's jobs use, so a toast about
-/// a paste and a toast about a link count the same way.
+/// "1 item" / "3 items" / "1,234 items". The same wording df-core's jobs use,
+/// so a toast about a paste and a toast about a link count the same way —
+/// down to the commas, which is why the count goes through the core's
+/// [`df_core::text::grouped`] rather than a second copy of it here.
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
     } else {
-        format!("{n} {many}")
+        format!("{} {many}", grouped(n as u64))
     }
 }
 
@@ -17780,6 +17800,9 @@ mod tests {
         assert_eq!(plural(1, "item", "items"), "1 item");
         assert_eq!(plural(0, "item", "items"), "0 items");
         assert_eq!(plural(3, "item", "items"), "3 items");
+        // A count a person has to read is grouped; the singular never needs it.
+        assert_eq!(plural(1234, "file", "files"), "1,234 files");
+        assert_eq!(plural(1_000_000, "file", "files"), "1,000,000 files");
     }
 
     /// Deleting the directory you are standing in must land somewhere real.

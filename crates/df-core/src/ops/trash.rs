@@ -234,8 +234,9 @@ impl Trash {
             }
         }
         Err(DfError::Op(format!(
-            "{}: {MAX_TRASH_COLLISIONS} names of this shape are already in the trash",
-            base.to_string_lossy()
+            "{}: {} names of this shape are already in the trash",
+            base.to_string_lossy(),
+            crate::text::grouped(u64::from(MAX_TRASH_COLLISIONS))
         )))
     }
 

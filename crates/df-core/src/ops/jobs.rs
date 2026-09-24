@@ -48,11 +48,13 @@ fn store(slot: &Outcome, outcome: OpOutcome) {
     *guard = Some(outcome);
 }
 
+/// "1 item" / "1,234 items" — the count a job's toast leads with, grouped so a
+/// big one reads at a glance.
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
     } else {
-        format!("{n} {many}")
+        format!("{} {many}", crate::text::grouped(n as u64))
     }
 }
 
@@ -368,6 +370,15 @@ mod tests {
 
     fn taken(slot: &Outcome) -> OpOutcome {
         slot.lock().unwrap().clone().expect("an outcome was stored")
+    }
+
+    /// The singular stays a bare `1`, and a count past a thousand is grouped
+    /// the way the app's own toasts group it.
+    #[test]
+    fn a_job_counts_the_way_a_person_reads() {
+        assert_eq!(plural(1, "file", "files"), "1 file");
+        assert_eq!(plural(0, "file", "files"), "0 files");
+        assert_eq!(plural(1234, "file", "files"), "1,234 files");
     }
 
     #[test]

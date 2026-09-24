@@ -109,7 +109,11 @@ pub fn row_for(task: &TaskSnapshot) -> TaskRow {
         Some(p) => {
             let mut parts = Vec::new();
             if p.files_total > 0 {
-                parts.push(format!("{} / {} files", p.files_done, p.files_total));
+                parts.push(format!(
+                    "{} / {} files",
+                    df_core::text::grouped(p.files_done),
+                    df_core::text::grouped(p.files_total)
+                ));
             }
             if p.bytes_total > 0 {
                 parts.push(format!(

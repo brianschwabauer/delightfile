@@ -376,7 +376,7 @@ pub(crate) struct RowColumns {
 ///
 /// The hand-written pair used to be `["999 items", "999.9 GB"]`, and it was
 /// wrong at both ends. A count that hits [`df_core::du::MAX_COUNTED_ENTRIES`]
-/// says `10000+ items`, which is three characters longer than any `999 items`;
+/// says `10,000+ items`, which is four characters longer than any `999 items`;
 /// and the tilde on a running size is *not* narrower than nothing at all — a
 /// proportional font gives `~999.9 GB` more width than `999.9 GB`, and the
 /// column that had been measured without it reflowed the name beside it the
@@ -1459,7 +1459,10 @@ impl Painting<'_> {
             _ if dir.is_empty() && dir.total() > 0 => {
                 // Everything here is hidden — a `.git`-only directory with `.`
                 // off. Saying "empty" would be a lie you cannot act on.
-                Some(format!("{} hidden", dir.total()))
+                Some(format!(
+                    "{} hidden",
+                    df_core::text::grouped(dir.total() as u64)
+                ))
             }
             _ if dir.is_empty() => Some("empty".to_string()),
             _ => None,
@@ -1565,13 +1568,14 @@ impl Painting<'_> {
         // The badge takes its room out of the name's, so a count never lands on
         // top of a file name however long the name is.
         let badge = top.count.map(|count| {
+            let text = df_core::text::grouped(count as u64);
             let font = egui::FontId::proportional(FONT_SIZE - 1.5);
             let width = self
                 .painter
-                .layout_no_wrap(count.to_string(), font.clone(), self.palette.crust)
+                .layout_no_wrap(text.clone(), font.clone(), self.palette.crust)
                 .size()
                 .x;
-            (count.to_string(), font, width + DROP_BADGE)
+            (text, font, width + DROP_BADGE)
         });
         let reserved = badge
             .as_ref()
@@ -2059,9 +2063,9 @@ mod tests {
                 }),
             )
             .as_deref(),
-            Some("10000+ items")
+            Some("10,000+ items")
         );
-        assert!(has("10000+ items"), "{widest:?}");
+        assert!(has("10,000+ items"), "{widest:?}");
 
         // …and the widest a size gets, still counting.
         let running = crate::format::folder_size_text(

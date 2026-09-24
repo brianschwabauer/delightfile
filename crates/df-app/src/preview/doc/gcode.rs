@@ -624,7 +624,7 @@ pub fn summary(toolpath: &Toolpath) -> String {
     let mut parts = vec![if count == 1 {
         "1 layer".to_string()
     } else {
-        format!("{count} layers")
+        format!("{} layers", df_core::text::grouped(count as u64))
     }];
     if let Some(h) = toolpath.layer_height_mm().filter(|h| h.is_finite()) {
         parts.push(format!("{h:.2} mm"));

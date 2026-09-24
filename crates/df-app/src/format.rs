@@ -67,8 +67,10 @@ fn size_text(entry: &Entry) -> String {
 /// - a child count — `12 items`, which is not a size and does not look like
 ///   one. The unit word is the whole point: a bare `12` in a column of `4.2 MB`
 ///   would read as twelve bytes. A count that hit the counting cap says
-///   `10000+ items`: the pass stopped there, and rounding "a lot" up to a
-///   precise-looking number would be a figure nobody could reproduce.
+///   `10,000+ items`: the pass stopped there, and rounding "a lot" up to a
+///   precise-looking number would be a figure nobody could reproduce. The
+///   count is grouped like every other count a person reads, and the same way
+///   [`df_core::du::MAX_COUNTED_ENTRIES`]'s own doc spells it.
 pub fn folder_size_text(
     size: Option<crate::folders::Size>,
     count: Option<df_core::du::ChildCount>,
@@ -85,7 +87,7 @@ pub fn folder_size_text(
     let plus = if count.capped { "+" } else { "" };
     Some(format!(
         "{}{plus} {}",
-        count.entries,
+        df_core::text::grouped(count.entries),
         if count.entries == 1 && !count.capped {
             "item"
         } else {
@@ -286,7 +288,7 @@ mod tests {
         // the answer.
         assert_eq!(
             folder_size_text(None, capped(10_000)).as_deref(),
-            Some("10000+ items")
+            Some("10,000+ items")
         );
 
         // A size outranks a count the moment there is one, tilde and all.

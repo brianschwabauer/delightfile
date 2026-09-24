@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use df_core::fs::{Entry, Kind};
+use df_core::text::grouped;
 
 use crate::chrome::{self, CARD_PAD, FONT, PAD_X};
 use crate::format::{human_size, long_stamp};
@@ -363,20 +364,6 @@ fn duration(micros: i64) -> String {
     } else {
         format!("{m}:{s:02}")
     }
-}
-
-/// A count with thousands separators. One loop over the digits, which is the
-/// whole of what a formatting crate would do here.
-pub(crate) fn grouped(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 /// The octal a mode is written as: `0644`.

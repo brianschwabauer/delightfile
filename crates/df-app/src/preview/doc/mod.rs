@@ -558,7 +558,7 @@ fn meta_for(doc: &Doc) -> Meta {
             pages: pdf.page_count().max(1),
             summary: match pdf.page_count() {
                 1 => "1 page".to_string(),
-                n => format!("{n} pages"),
+                n => format!("{} pages", df_core::text::grouped(n as u64)),
             },
             counter: Counter::Page,
         },

@@ -148,7 +148,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("1 {one}")
     } else {
-        format!("{n} {many}")
+        format!("{} {many}", crate::text::grouped(n as u64))
     }
 }
 

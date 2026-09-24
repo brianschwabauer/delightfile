@@ -799,8 +799,10 @@ fn directory_body(
 fn summarise(entries: &[Entry], truncated: bool) -> String {
     let dirs = entries.iter().filter(|e| e.is_dir()).count();
     let files = entries.len() - dirs;
-    let plural =
-        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let plural = |n: usize, one: &str, many: &str| {
+        let word = if n == 1 { one } else { many };
+        format!("{} {word}", df_core::text::grouped(n as u64))
+    };
     let mut text = match (dirs, files) {
         (0, 0) => "empty".to_string(),
         (d, 0) => plural(d, "folder", "folders"),
@@ -1084,7 +1086,7 @@ fn archive_counts(files: usize, total: usize, total_len: u64, complete: bool) ->
     } else {
         "files"
     };
-    let mut text = format!("{}{plus} {noun}", crate::spot::grouped(files as u64));
+    let mut text = format!("{}{plus} {noun}", df_core::text::grouped(files as u64));
     if total_len > 0 {
         text.push_str(&format!(
             " · {} uncompressed",
@@ -1101,7 +1103,7 @@ fn archive_footer(total: usize, shown: usize, complete: bool) -> String {
         return "… and more".to_string();
     }
     let plus = if complete { "" } else { "+" };
-    format!("… and {}{plus} more", crate::spot::grouped(more as u64))
+    format!("… and {}{plus} more", df_core::text::grouped(more as u64))
 }
 
 // ── Hexdump ─────────────────────────────────────────────────────────────────

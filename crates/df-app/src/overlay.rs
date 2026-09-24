@@ -516,14 +516,15 @@ pub fn paint_search(
     // The count, and whether it is still growing. "Searching…" rather than a
     // spinner: the number climbing *is* the progress indicator, and a spinner
     // beside a climbing number would be two of them.
+    let hits = df_core::text::grouped(search.hits.len() as u64);
     let status = if let Some(error) = &search.error {
         error.clone()
     } else if search.searching() {
-        format!("{} so far…", search.hits.len())
+        format!("{hits} so far…")
     } else if search.capped {
-        format!("first {}", search.hits.len())
+        format!("first {hits}")
     } else {
-        format!("{}", search.hits.len())
+        hits
     };
     painter.text(
         egui::pos2(field.right() - PAD_X, baseline),

@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::tasks::TaskCtx;
+use crate::text::grouped;
 use crate::{DfError, Result};
 
 use super::trash::TrashedItem;
@@ -344,8 +345,9 @@ fn walk(
 ) -> Result<()> {
     if out.len() >= cap {
         return Err(DfError::Op(format!(
-            "{}: more than {cap} files, too large to record an undo for",
-            path.display()
+            "{}: more than {} files, too large to record an undo for",
+            path.display(),
+            grouped(cap as u64)
         )));
     }
     let fp = Fingerprint::of(path)?;
@@ -473,7 +475,7 @@ impl OpRecord {
             if n == 1 {
                 format!("1 {one}")
             } else {
-                format!("{n} {many}")
+                format!("{} {many}", grouped(n as u64))
             }
         }
         match self {
@@ -725,7 +727,7 @@ fn undo_moves(
             .to_string_lossy()
             .to_string()
     } else {
-        format!("{} items", moves.len())
+        format!("{} items", grouped(moves.len() as u64))
     };
     UndoAttempt {
         result: Ok(UndoReport {
@@ -779,7 +781,7 @@ fn undo_copy(created: &[CopyManifest], ctx: &TaskCtx) -> UndoAttempt {
                         .to_string_lossy()
                 )
             } else {
-                format!("Removed {} copies", created.len())
+                format!("Removed {} copies", grouped(created.len() as u64))
             },
             touched,
         }),
@@ -819,7 +821,10 @@ fn undo_trash(items: &[TrashedItem], ctx: &TaskCtx) -> Result<UndoReport> {
                     .to_string_lossy()
             )
         } else {
-            format!("Restored {} items from the trash", items.len())
+            format!(
+                "Restored {} items from the trash",
+                grouped(items.len() as u64)
+            )
         },
         touched,
     })
@@ -948,7 +953,7 @@ fn undo_links(links: &[CreatedLink], ctx: &TaskCtx) -> UndoAttempt {
                         .to_string_lossy()
                 )
             } else {
-                format!("Removed {} links", links.len())
+                format!("Removed {} links", grouped(links.len() as u64))
             },
             touched,
         }),

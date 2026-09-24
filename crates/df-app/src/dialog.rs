@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use df_core::fs::Entry;
 use df_core::ops::paste::{Conflict, PastePlan, Resolution};
+use df_core::text::grouped;
 
 use crate::chrome::{self, CARD_MARGIN, CARD_PAD, FONT, PAD_X};
 use crate::hover::{pressed_rect, Hovers};
@@ -142,12 +143,13 @@ impl Confirm {
     pub fn title(&self) -> String {
         let n = self.paths.len();
         let noun = if n == 1 { "file" } else { "files" };
+        let count = grouped(n as u64);
         match self.kind {
-            ConfirmKind::Trash => format!("Trash {n} selected {noun}?"),
-            ConfirmKind::Delete => format!("Delete {n} selected {noun} permanently?"),
-            ConfirmKind::RemoteDelete => format!("Delete {n} remote {noun} permanently?"),
-            ConfirmKind::Purge => format!("Destroy {n} trashed {noun}?"),
-            ConfirmKind::EmptyTrash => format!("Empty the trash — all {n} {noun}?"),
+            ConfirmKind::Trash => format!("Trash {count} selected {noun}?"),
+            ConfirmKind::Delete => format!("Delete {count} selected {noun} permanently?"),
+            ConfirmKind::RemoteDelete => format!("Delete {count} remote {noun} permanently?"),
+            ConfirmKind::Purge => format!("Destroy {count} trashed {noun}?"),
+            ConfirmKind::EmptyTrash => format!("Empty the trash — all {count} {noun}?"),
             // One file, by name: the question is about *that* file, and a
             // count of one would be the card not saying which.
             ConfirmKind::Replace => format!("Replace {}?", self.body().join(", ")),
@@ -756,7 +758,7 @@ pub fn paint_confirm(
         .saturating_sub(geometry.rows.len() + confirm.scroll);
     let marker = (more > 0).then(|| {
         painter.layout_no_wrap(
-            format!("+{more} more"),
+            format!("+{} more", grouped(more as u64)),
             egui::FontId::proportional(FONT - 1.0),
             palette.overlay0,
         )
@@ -916,7 +918,7 @@ pub fn paint_bulk(
                 if changes == 1 {
                     "1 file".to_string()
                 } else {
-                    format!("{changes} files")
+                    format!("{} files", grouped(changes as u64))
                 }
             ),
             palette.green,
@@ -1013,7 +1015,7 @@ pub fn paint_bulk(
             painter.text(
                 egui::pos2(geometry.body.right(), geometry.body.bottom() + 5.0),
                 egui::Align2::RIGHT_TOP,
-                format!("+{more} more"),
+                format!("+{} more", grouped(more as u64)),
                 egui::FontId::proportional(FONT - 1.0),
                 palette.overlay0,
             );
@@ -1155,7 +1157,7 @@ pub fn paint_conflict(
         &if n == 1 {
             "A file with that name is already there".to_string()
         } else {
-            format!("{n} names are already taken")
+            format!("{} names are already taken", grouped(n as u64))
         },
         palette.text,
         (title_right - left).max(0.0),

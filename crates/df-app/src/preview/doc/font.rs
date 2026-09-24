@@ -294,7 +294,10 @@ pub fn summary(f: &Facts) -> String {
     if !f.style.trim().is_empty() {
         parts.push(f.style.clone());
     }
-    parts.push(format!("{} glyphs", grouped(u32::from(f.glyphs))));
+    parts.push(format!(
+        "{} glyphs",
+        df_core::text::grouped(u64::from(f.glyphs))
+    ));
     parts.push(format!("{} upem", f.units_per_em));
     if f.faces > 1 {
         parts.push(format!("{} faces", f.faces));
@@ -427,21 +430,6 @@ fn label_line(f: &Facts) -> String {
         parts.push("variable".to_string());
     }
     parts.join(" · ")
-}
-
-/// A number with thousands separators, written out by hand because a
-/// formatting crate for one call site would be a dependency for a for-loop.
-fn grouped(n: u32) -> String {
-    let digits = n.to_string();
-    let len = digits.len();
-    let mut out = String::with_capacity(len + len / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (len - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 // ─── Setting type ───────────────────────────────────────────────────────────
@@ -1065,10 +1053,6 @@ mod tests {
             ..fixture()
         };
         assert!(summary(&nameless).starts_with("Unnamed · Regular"));
-        assert_eq!(grouped(0), "0");
-        assert_eq!(grouped(999), "999");
-        assert_eq!(grouped(1000), "1,000");
-        assert_eq!(grouped(65535), "65,535");
     }
 
     #[test]
