@@ -682,6 +682,8 @@ pub struct Geometry {
     pub bits: Vec<egui::Rect>,
     /// The checksum chip, while there is one to press.
     pub action: Option<egui::Rect>,
+    /// The `×` at the title row's far end.
+    pub close: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -772,6 +774,7 @@ pub fn geometry(area: egui::Rect, bar_top: f32, spot: &Spot) -> Geometry {
         rows,
         bits,
         action,
+        close: Some(chrome::close_button_rect(card)),
     }
 }
 
@@ -848,10 +851,17 @@ pub fn paint(
     );
     // The octal, up in the title row as well as beside the chips: it is the
     // thing a person came to read off, and it should be findable without
-    // walking the card.
+    // walking the card. Left of the `×`, which has the corner.
+    let octal_right = match geometry.close {
+        Some(close) => {
+            chrome::close_button(paint, close, hovers, ripples);
+            close.left() - crate::ui::GAP
+        }
+        None => geometry.card.right() - CARD_PAD,
+    };
     painter.text(
         egui::pos2(
-            geometry.card.right() - CARD_PAD,
+            octal_right,
             geometry.card.top() + CARD_PAD + chrome::CARD_ROW / 2.0,
         ),
         egui::Align2::RIGHT_CENTER,

@@ -77,6 +77,8 @@ pub struct FinderGeom {
     pub field: Rect,
     /// One rectangle per visible row, in the order they are drawn.
     pub rows: Vec<Rect>,
+    /// The `×` at the field's right, in the card's corner.
+    pub close: Option<Rect>,
 }
 
 impl FinderGeom {
@@ -105,7 +107,7 @@ pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
     );
     let field = Rect::from_min_size(
         card.min + egui::vec2(CARD_PAD, CARD_PAD),
-        egui::vec2(width - CARD_PAD * 2.0, FIELD_ROW),
+        egui::vec2(field_width(card), FIELD_ROW),
     );
     let rows = (0..shown)
         .map(|n| {
@@ -118,7 +120,29 @@ pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
             )
         })
         .collect();
-    FinderGeom { card, field, rows }
+    FinderGeom {
+        card,
+        field,
+        rows,
+        close: Some(close_beside(card, field)),
+    }
+}
+
+/// How wide a card's query field is: the card's inner width less the `×`
+/// beside it and the gap between them.
+fn field_width(card: Rect) -> f32 {
+    (card.width() - CARD_PAD * 2.0 - CARD_ROW - GAP).max(0.0)
+}
+
+/// The `×` right of the query field: a [`CARD_ROW`] square centred on the
+/// field's row and [`CARD_PAD`] in from the card's right edge. Centred rather
+/// than tucked into the corner, because the field is taller than the button
+/// and the two read as one row.
+fn close_beside(card: Rect, field: Rect) -> Rect {
+    Rect::from_center_size(
+        egui::pos2(card.right() - CARD_PAD - CARD_ROW / 2.0, field.center().y),
+        egui::vec2(CARD_ROW, CARD_ROW),
+    )
 }
 
 /// Draw the command palette / jump card.
@@ -137,6 +161,9 @@ pub fn paint_finder(
     // ── The field ───────────────────────────────────────────────────────────
     let field = geometry.field;
     painter.rect_filled(field, field_radius(), palette.mantle);
+    if let Some(close) = geometry.close {
+        chrome::close_button(paint, close, hovers, ripples);
+    }
     let text_left = field.left() + PAD_X;
     let baseline = field.center().y;
     painter.text(
@@ -289,8 +316,9 @@ pub fn paint_finder(
 /// The corner radius of the field inside the card.
 ///
 /// Concentric with the card (`delightful-ui` §15): the field hugs the card's
-/// top corners with [`CARD_PAD`] of air, so its radius is the card's minus that
-/// padding — and then the gap stays a constant width as it turns the corner.
+/// top-left corner with [`CARD_PAD`] of air, so its radius is the card's minus
+/// that padding — and then the gap stays a constant width as it turns the
+/// corner.
 fn field_radius() -> u8 {
     chrome::CARD_RADIUS.saturating_sub(CARD_PAD as u8).max(2)
 }
@@ -304,6 +332,8 @@ const ICON_COLUMN: f32 = 16.0;
 pub struct SearchGeom {
     pub card: Rect,
     pub field: Rect,
+    /// The `×` at the field's right, in the card's corner.
+    pub close: Option<Rect>,
     /// The **Names | Contents** switch at the head of the field: one plate per
     /// [`Mode::ALL`], in that order, side by side.
     pub switch: [Rect; 2],
@@ -390,7 +420,7 @@ pub fn search_geometry(
     let card = Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
     let field = Rect::from_min_size(
         card.min + egui::vec2(CARD_PAD, CARD_PAD),
-        egui::vec2(card.width() - CARD_PAD * 2.0, FIELD_ROW),
+        egui::vec2(field_width(card), FIELD_ROW),
     );
     let mut x = field.left() + SWITCH_INSET;
     let switch = Mode::ALL.map(|half| {
@@ -425,6 +455,7 @@ pub fn search_geometry(
     SearchGeom {
         card,
         field,
+        close: Some(close_beside(card, field)),
         switch,
         rows,
     }
@@ -444,6 +475,9 @@ pub fn paint_search(
     // ── The field ───────────────────────────────────────────────────────────
     let field = geometry.field;
     painter.rect_filled(field, field_radius(), palette.mantle);
+    if let Some(close) = geometry.close {
+        chrome::close_button(paint, close, hovers, ripples);
+    }
     let baseline = field.center().y;
     paint_switch(paint, geometry, search.mode, hovers, ripples);
     let query_left = geometry.switch[1].right() + GAP;

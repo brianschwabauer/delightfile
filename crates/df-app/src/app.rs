@@ -518,10 +518,27 @@ impl OverlayGeom {
         }
     }
 
+    /// The card's `×`. None on the two cards with a `Cancel` button of their
+    /// own and on the opener picker, a popover with no heading to put one in.
+    fn close_rect(&self) -> Option<egui::Rect> {
+        match self {
+            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g.close,
+            OverlayGeom::Picker(..) => None,
+            OverlayGeom::Panel(card, _, _) => Some(chrome::close_button_rect(*card)),
+            OverlayGeom::Spot(g) => g.close,
+            OverlayGeom::Finder(g) => g.close,
+            OverlayGeom::Mounts(g) => g.close,
+            OverlayGeom::Search(g) => g.close,
+        }
+    }
+
     /// What the pointer is over. `None` inside the card but not on anything is
     /// still "inside the card" as far as the caller is concerned — the modal
     /// swallows the pointer either way (see the hit test in `frame`).
     fn hit(&self, pos: egui::Pos2) -> Option<Control> {
+        if self.close_rect().is_some_and(|close| close.contains(pos)) {
+            return Some(Control::Close);
+        }
         match self {
             // The confirm card's rows are *not* in this list. They are the
             // list of files the answer is about — nothing to click — and
@@ -560,6 +577,7 @@ impl OverlayGeom {
     /// Where a control was drawn, for the ripple to start from.
     fn rect_of(&self, control: Control) -> Option<egui::Rect> {
         match (self, control) {
+            (_, Control::Close) => self.close_rect(),
             (OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g), Control::Action(i)) => {
                 g.actions.get(i).copied().or(g.apply_all)
             }
@@ -758,6 +776,8 @@ struct Geom<'a> {
     /// The text of the prompt on the top row, when one has taken it
     /// ([`chrome::prompt_field_geometry`]).
     prompt: Option<&'a chrome::FieldGeom>,
+    /// The help sheet's card, while it is up.
+    help: Option<egui::Rect>,
 }
 
 /// Which piece of a path `c c` / `c d` / `c f` / `c n` copy (PLAN §7.4).
@@ -9618,7 +9638,7 @@ impl App {
                 }
                 // Nothing in the panes and nothing on the menu is reachable
                 // while a modal card is up — the hit test above never
-                // produces them.
+                // produces them — and the `×` is closed by `click` itself.
                 Control::Row(..)
                 | Control::Tab(_)
                 | Control::Crumb(_)
@@ -9640,6 +9660,7 @@ impl App {
                 | Control::VisualChip
                 | Control::PickButton
                 | Control::CancelButton
+                | Control::Close
                 | Control::Toast
                 | Control::ToastAction
                 | Control::PromptField => {}
@@ -9720,6 +9741,7 @@ impl App {
             | Control::VisualChip
             | Control::PickButton
             | Control::CancelButton
+            | Control::Close
             | Control::Toast
             | Control::ToastAction
             | Control::PromptField => {}
@@ -10267,6 +10289,23 @@ impl App {
                 self.overlay_click(control, double, geom.page, now);
                 rect
             }
+            // The `×`: `Esc` for the card it is on. A modal card is hit-tested
+            // before the help sheet, so when both are up it is the card's.
+            Control::Close => match geom.overlay {
+                Some(overlay) => {
+                    let rect = overlay.rect_of(control).unwrap_or(egui::Rect::ZERO);
+                    self.close_overlay(now);
+                    rect
+                }
+                None => {
+                    let rect = geom
+                        .help
+                        .map(chrome::close_button_rect)
+                        .unwrap_or(egui::Rect::ZERO);
+                    self.close_help();
+                    rect
+                }
+            },
             // The yank tray (PLAN §7.1): `Clear` is the pointer's `X`, a row
             // goes to the file it names, and the `×` takes that file back out.
             Control::YankClear => {
@@ -12862,7 +12901,7 @@ impl App {
         self.tab_widths = tab_widths.clone();
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
-        let overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+        let mut overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
 
         // The breadcrumb is measured once and used by both the hit test and the
         // paint, for the reason `tab_rects` is: two functions computing this
@@ -12990,6 +13029,15 @@ impl App {
         // the panes and over a modal card — everything except the menu, which
         // is drawn after it — so it is hit-tested in that same order.
         let toast_geom = self.toasts.geometry(&painter, area, area.bottom(), now);
+        // The help card, measured once for the hit test and the backdrop press
+        // below, from the numbers its paint uses.
+        let mut help_card = self.help.is_some().then(|| {
+            chrome::help_rect(
+                area,
+                layout.path.bottom() + ui::GAP,
+                area.bottom() - ui::GAP,
+            )
+        });
 
         let over = pointer.at.and_then(|p| {
             // The menu is over everything, a modal card included: it is the
@@ -13020,14 +13068,15 @@ impl App {
             if let Some(overlay) = &overlay {
                 return overlay.hit(p).map(|control| (control, p));
             }
-            // The help sheet is a surface like any other: it has nothing
-            // clickable in it, and everything it covers is therefore inert
-            // while it is up. Without this the pointer reached straight through
-            // the card and moved the cursor in the listing behind it. The top
-            // row is the exception the sheet is deliberately drawn under —
-            // that is where its filter is typed.
-            if self.help.is_some() && !layout.path.contains(p) {
-                return None;
+            // The help sheet is a surface like any other: its `×` is the one
+            // thing in it to click, and everything else under its scrim —
+            // the top row included, now that its filter is typed in the card's
+            // own heading — is inert while it is up. Without this the pointer
+            // reached straight through the card and moved the cursor in the
+            // listing behind it.
+            if let Some(card) = help_card {
+                let close = chrome::close_button_rect(card);
+                return close.contains(p).then_some((Control::Close, p));
             }
             // The rename card floats over the row it renames and over part of
             // its neighbours, and what it covers is not clickable through it.
@@ -13253,7 +13302,7 @@ impl App {
         // A press anywhere but on the menu dismisses it, and the press is spent
         // doing so: a click that closed a menu *and* moved the cursor under it
         // would act on something the menu was covering.
-        let dismissing = menu_live
+        let mut dismissing = menu_live
             && any_press
             && !pointer
                 .at
@@ -13261,6 +13310,39 @@ impl App {
                 .is_some_and(|(p, g)| g.contains(p));
         if dismissing {
             self.close_menu(now);
+        }
+
+        // ── A press on the backdrop: the pointer's `Esc` ────────────────────
+        // Any button, anywhere outside the open card, closes it, and the press
+        // is spent the way the menu's is: it was aimed at the card's edge, not
+        // at the row the card was covering. A toast over the scrim keeps its
+        // own click, and a press inside the card on nothing stays inert.
+        //
+        // The bulk rename with names typed into it is the exception: a stray
+        // click must not throw away thirty of them. Its `Esc` and its `Cancel`
+        // still close it.
+        if any_press && !menu_live && over.is_none() {
+            if let Some(p) = pointer.at {
+                let unsaved =
+                    matches!(&self.dialog, Some(Dialog::Bulk(bulk)) if bulk.changes() > 0);
+                if let Some(open) = &overlay {
+                    if !open.card().contains(p) && !unsaved {
+                        self.close_overlay(now);
+                        // Measured again, closed: the hints and the anchored
+                        // prompt below read this geometry, and a card that
+                        // outlived the press by a frame would flinch. Not
+                        // always `None` — a prompt the dialog opened closes
+                        // first and leaves the card up.
+                        overlay =
+                            self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+                        dismissing = true;
+                    }
+                } else if help_card.is_some_and(|card| !card.contains(p)) {
+                    self.close_help();
+                    help_card = None;
+                    dismissing = true;
+                }
+            }
         }
 
         // ── A press outside the tray (PLAN §7.1) ────────────────────────────
@@ -13272,8 +13354,8 @@ impl App {
         // The chip is part of "on it": the chip's own click toggles the tray,
         // and a press that first closed it and then toggled it would open it
         // again. Not while the menu is up, because every press is the menu's
-        // then.
-        if self.tray_open && any_press && !menu_live {
+        // then, nor when the press was spent closing a card.
+        if self.tray_open && any_press && !menu_live && !dismissing {
             let on_tray = pointer
                 .at
                 .is_some_and(|p| tray_geometry.contains(p) || tray_chip.contains(p));
@@ -13309,6 +13391,7 @@ impl App {
             toast: toast_geom,
             tabs: &tab_widths,
             prompt: prompt_field.as_ref(),
+            help: help_card,
         };
 
         // A right click on the prompt itself opens nothing: the rename card
@@ -13372,7 +13455,7 @@ impl App {
         }
 
         // Middle click: a new tab on the row it landed on (PLAN §7.5).
-        if pointer.middle && !menu_live && overlay.is_none() {
+        if pointer.middle && !dismissing && !menu_live && overlay.is_none() {
             if let Some((control, _)) = over {
                 self.middle_click(control, now);
             }
@@ -13644,6 +13727,7 @@ impl App {
                 | Control::VisualChip
                 | Control::PickButton
                 | Control::CancelButton
+                | Control::Close
                 | Control::Toast
                 | Control::ToastAction
                 | Control::Action(_)
@@ -14388,10 +14472,8 @@ impl App {
             }
         }
 
-        // The help sheet is drawn over the panes but *under* the top row,
-        // because the row is where its filter is typed — an overlay that
-        // covered its own input would be asking a question it hid the answer
-        // box for.
+        // The help sheet, over the panes and the top row: its scrim dims the
+        // whole window, and its filter is typed in the card's own heading.
         if let Some((rect, lines, total, help)) = &help_view {
             // The live field, drawn in the sheet's heading. **Query and caret
             // come from one source**: the caret is a byte offset into the
@@ -14411,7 +14493,17 @@ impl App {
                     caret: None,
                 },
             };
-            chrome::help_overlay(&paint, area, *rect, lines, help, *total, filter);
+            chrome::help_overlay(
+                &paint,
+                area,
+                *rect,
+                lines,
+                help,
+                *total,
+                filter,
+                &self.hovers,
+                &self.ripples,
+            );
             chrome::hints(
                 &paint,
                 chrome::hint_rect(*rect),
@@ -14480,8 +14572,9 @@ impl App {
         // Each surface's own hints, along the bottom edge of its card: what
         // the keys do now belongs to the thing that has taken them, and an eye
         // reading a dialog should not have to travel to the other end of the
-        // window to find out what `Enter` does in it (PLAN §4).
-        if let Some(geometry) = &overlay {
+        // window to find out what `Enter` does in it (PLAN §4). Not for a card
+        // a click on its `×` closed this frame: its strip would outlive it.
+        if let Some(geometry) = overlay.as_ref().filter(|_| self.overlay_open()) {
             chrome::hints(
                 &paint,
                 chrome::hint_rect(geometry.card()),
@@ -16711,6 +16804,7 @@ mod tests {
             rows: Vec::new(),
             actions: Vec::new(),
             apply_all: None,
+            close: None,
         };
         let confirm = overlay_hints(
             &OverlayGeom::Confirm(empty.clone()),
@@ -16745,6 +16839,7 @@ mod tests {
                 rows: Vec::new(),
                 bits: Vec::new(),
                 action: None,
+                close: None,
             }),
             &None,
         );
@@ -16758,6 +16853,7 @@ mod tests {
                 body: nowhere,
                 lines: Vec::new(),
                 rows: Vec::new(),
+                close: None,
             }),
             &None,
         );
@@ -19159,5 +19255,342 @@ mod tests {
         );
         assert_eq!(app.tray_first, 0, "a roll over the list reached the tray");
         assert!(settled(&app) > list, "the list did not scroll");
+    }
+
+    // ── Closing a card with the pointer ─────────────────────────────────────
+
+    /// The open surface's pieces, measured the way the frame measures them.
+    fn overlay_of(app: &App) -> Option<OverlayGeom> {
+        let measure = egui::Context::default();
+        let mut out = None;
+        let bar_top = screen().bottom() - ui::GAP;
+        let _ = measure.run_ui(Default::default(), |ui| {
+            out = app.overlay_geometry(ui.painter(), screen(), &layout_of(app), bar_top);
+        });
+        out
+    }
+
+    /// Where the frame draws the breadcrumb's segments.
+    fn crumb_rects(app: &App) -> Vec<egui::Rect> {
+        let measure = egui::Context::default();
+        let mut rects = Vec::new();
+        let _ = measure.run_ui(Default::default(), |ui| {
+            let cluster = app.cluster(Instant::now());
+            rects = chrome::top_geometry(
+                ui.painter(),
+                layout_of(app).path,
+                &app.path_bar.1,
+                app.filter_chip_text(),
+                &cluster,
+                app.nerd,
+            )
+            .crumbs;
+        });
+        rects
+    }
+
+    /// A point on the scrim well clear of `card`: halfway between its bottom
+    /// edge and the window's.
+    fn below(card: egui::Rect) -> egui::Pos2 {
+        egui::pos2(card.center().x, (card.bottom() + screen().bottom()) / 2.0)
+    }
+
+    /// Every card without a `Cancel` of its own wears an `×` in its top-right
+    /// corner, [`chrome::CARD_PAD`] in from the right edge, and the card's hit
+    /// test answers it before anything else. The finder and the search panel
+    /// sit theirs beside the query field, centred on the field's taller row.
+    /// The confirm and the bulk rename have a `Cancel`, and no `×`.
+    #[test]
+    fn every_card_without_a_cancel_has_a_close_in_its_corner() {
+        let now = Instant::now();
+        let mut app = Fixture::with_folders("close-corner", &["a.txt", "b.txt"], &["sub"]);
+        let check = |geometry: &OverlayGeom, what: &str| {
+            let card = geometry.card();
+            let close = geometry
+                .close_rect()
+                .unwrap_or_else(|| panic!("{what} has no ×"));
+            assert!(card.contains_rect(close), "{what}: the × is off the card");
+            assert!(
+                (card.right() - close.right() - chrome::CARD_PAD).abs() < 1e-3,
+                "{what}: not the card's padding in from the right"
+            );
+            assert!(
+                (close.size() - egui::vec2(chrome::CARD_ROW, chrome::CARD_ROW)).length() < 1e-3,
+                "{what}: the × is not a card row square"
+            );
+            assert_eq!(
+                geometry.hit(close.center()),
+                Some(Control::Close),
+                "{what}: the × does not answer the pointer"
+            );
+            assert_eq!(geometry.rect_of(Control::Close), Some(close));
+        };
+        let corner = |geometry: &OverlayGeom, what: &str| {
+            check(geometry, what);
+            let (card, close) = (geometry.card(), geometry.close_rect().expect("checked"));
+            assert!(
+                (close.top() - card.top() - chrome::CARD_PAD).abs() < 1e-3,
+                "{what}: not the card's padding down from the top"
+            );
+        };
+        let beside = |geometry: &OverlayGeom, field: egui::Rect, what: &str| {
+            check(geometry, what);
+            let close = geometry.close_rect().expect("checked");
+            assert!(
+                (close.center().y - field.center().y).abs() < 1e-3,
+                "{what}: off the field's row"
+            );
+            assert!(
+                (close.left() - field.right() - ui::GAP).abs() < 1e-3,
+                "{what}: the field does not stop a gap short of the ×"
+            );
+        };
+
+        // The conflict resolver: its three answers all answer, so it closes by
+        // the corner.
+        std::fs::write(app.files.join("sub").join("a.txt"), b"y").expect("write the source");
+        let plan = plan_paste(
+            &Clipboard::yank([app.files.join("sub").join("a.txt")]),
+            &app.files,
+            false,
+        )
+        .expect("a plan");
+        assert_eq!(plan.conflicts.len(), 1, "a.txt is taken");
+        app.dialog = Some(Dialog::Conflict(Box::new(ConflictDialog::new(plan))));
+        app.sync_context();
+        corner(&overlay_of(&app).expect("the conflict card"), "conflict");
+        app.close_overlay(now);
+
+        app.run(Command::CommandPalette, 10, now);
+        let geometry = overlay_of(&app).expect("the palette");
+        let OverlayGeom::Finder(finder) = &geometry else {
+            panic!("no finder");
+        };
+        beside(&geometry, finder.field, "finder");
+        app.close_overlay(now);
+
+        app.run(Command::SearchName, 10, now);
+        let geometry = overlay_of(&app).expect("the search panel");
+        let OverlayGeom::Search(search) = &geometry else {
+            panic!("no search panel");
+        };
+        beside(&geometry, search.field, "search");
+        app.close_overlay(now);
+
+        app.run(Command::Spot, 10, now);
+        corner(&overlay_of(&app).expect("the spot"), "spot");
+        app.close_overlay(now);
+
+        app.run(Command::TasksShow, 10, now);
+        corner(&overlay_of(&app).expect("the task panel"), "panel");
+        app.close_overlay(now);
+
+        // Built rather than opened: `M` would start the worker that talks to
+        // the system bus.
+        corner(
+            &OverlayGeom::Mounts(crate::mounts::geometry(
+                screen(),
+                &crate::mounts::Card::new(),
+            )),
+            "mounts",
+        );
+
+        app.run(Command::DeletePermanently, 10, now);
+        match overlay_of(&app) {
+            Some(OverlayGeom::Confirm(geometry)) => assert_eq!(geometry.close, None),
+            _ => panic!("no confirm"),
+        }
+        app.close_overlay(now);
+
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Rename, 10, now);
+        match overlay_of(&app) {
+            Some(OverlayGeom::Bulk(geometry)) => assert_eq!(geometry.close, None),
+            _ => panic!("no bulk rename"),
+        }
+    }
+
+    /// A press on the scrim is the pointer's `Esc`: the confirm goes, and the
+    /// press goes no further — the cursor stays off the row it landed over,
+    /// and nothing is deleted. A press on the card's own words is inert, as it
+    /// always was. Any button: a right press on the scrim closes the card too,
+    /// and opens no menu.
+    #[test]
+    fn a_press_on_the_scrim_closes_the_confirm_and_goes_no_further() {
+        let ctx = egui::Context::default();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        let mut app = Fixture::new("close-scrim", &names);
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::DeletePermanently, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let Some(OverlayGeom::Confirm(geometry)) = overlay_of(&app) else {
+            panic!("no confirm");
+        };
+
+        click_at(&mut app, &ctx, geometry.rows[0].center());
+        assert!(
+            matches!(app.dialog, Some(Dialog::Confirm(_))),
+            "a press on the card's own words closed it"
+        );
+
+        let before = app.tab().cwd.dir.cursor();
+        let target = row_centre(&app, 2);
+        assert_ne!(before, 2);
+        assert!(!geometry.card.contains(target), "row 2 is under the card");
+        click_at(&mut app, &ctx, target);
+        assert!(
+            app.dialog.is_none(),
+            "the press on the scrim left the card up"
+        );
+        assert_eq!(
+            app.tab().cwd.dir.cursor(),
+            before,
+            "the press reached the row under the scrim"
+        );
+        for name in names {
+            assert!(app.files.join(name).exists(), "{name} was deleted");
+        }
+
+        app.run(Command::DeletePermanently, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let right = egui::Event::PointerButton {
+            pos: target,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(target), right],
+        );
+        assert!(
+            app.dialog.is_none(),
+            "a right press on the scrim left the card up"
+        );
+        assert_eq!(live_menu(&app), None, "the press also opened a menu");
+    }
+
+    /// With the help sheet up, the whole window outside its card is backdrop —
+    /// the top row too, now that the filter is typed in the card's heading. A
+    /// press on a crumb there puts the sheet away and goes nowhere; the same
+    /// press with the sheet gone navigates, which is what it was kept from.
+    #[test]
+    fn a_press_on_the_top_row_closes_the_help_sheet_and_goes_nowhere() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::with_folders("close-help-row", &["a.txt"], &["sub"]);
+        let sub = app.files.join("sub");
+        app.navigate(sub.clone(), Instant::now());
+        let inner = &mut app.app;
+        settle(inner.tabs.active_mut(), &inner.scanner);
+        run_frame(&mut app, &ctx, Vec::new());
+
+        app.run(Command::Help, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let crumbs = crumb_rects(&app);
+        let parent = crumbs[crumbs.len() - 2];
+        click_at(&mut app, &ctx, parent.center());
+        assert!(
+            app.help.is_none(),
+            "the press on the top row left the sheet up"
+        );
+        assert_eq!(app.cwd(), sub, "the press went through to the crumb");
+
+        // A right press on the sliver of the list pane beside the card, where
+        // a right press opens the list's menu: the sheet goes, and no menu
+        // comes up about a row nobody could see.
+        app.run(Command::Help, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let sheet = chrome::help_rect(
+            screen(),
+            layout_of(&app).path.bottom() + ui::GAP,
+            screen().bottom() - ui::GAP,
+        );
+        let list = layout_of(&app).list;
+        let row = egui::pos2(list.left() + 2.0, row_centre(&app, 0).y);
+        assert!(
+            !sheet.contains(row) && list.contains(row),
+            "no list beside the sheet"
+        );
+        let right = egui::Event::PointerButton {
+            pos: row,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(row), right]);
+        assert!(
+            app.help.is_none(),
+            "a right press on the scrim left the sheet up"
+        );
+        assert_eq!(live_menu(&app), None, "the press also opened a menu");
+
+        click_at(&mut app, &ctx, parent.center());
+        assert_eq!(app.cwd(), app.files, "the crumb is not the parent's");
+    }
+
+    /// The bulk rename with a name typed into it keeps its card through a
+    /// press on the scrim: a stray click must not throw thirty names away.
+    /// Untouched, it closes like any other card, and says so.
+    #[test]
+    fn a_bulk_rename_with_typed_names_ignores_the_scrim() {
+        let ctx = egui::Context::default();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        let mut app = Fixture::new("close-bulk", &names);
+        let now = Instant::now();
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Rename, 10, now);
+        assert!(app.bulk_key(Chord::from_char('z').expect("z"), now));
+        run_frame(&mut app, &ctx, Vec::new());
+        let card = overlay_of(&app).expect("the bulk card").card();
+
+        click_at(&mut app, &ctx, below(card));
+        let Some(Dialog::Bulk(bulk)) = &app.dialog else {
+            panic!("a press on the scrim threw the typed names away");
+        };
+        assert!(bulk.changes() > 0);
+        for name in names {
+            assert!(app.files.join(name).exists(), "{name} was renamed");
+        }
+
+        app.close_overlay(now);
+        app.run(Command::Rename, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert!(matches!(app.dialog, Some(Dialog::Bulk(_))));
+        click_at(&mut app, &ctx, below(card));
+        assert!(app.dialog.is_none(), "an untouched card stayed up");
+        assert_eq!(toast_text(&app), Some("Rename cancelled"));
+    }
+
+    /// The `×` closes what it is on — the help sheet, and a card — and
+    /// ripples like every other control.
+    #[test]
+    fn the_close_button_closes_the_help_sheet_and_the_card() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("close-button", &["a.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+
+        app.run(Command::Help, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let sheet = chrome::help_rect(
+            screen(),
+            layout_of(&app).path.bottom() + ui::GAP,
+            screen().bottom() - ui::GAP,
+        );
+        click_at(&mut app, &ctx, chrome::close_button_rect(sheet).center());
+        assert!(app.help.is_none(), "the × left the sheet up");
+        assert!(
+            app.ripples.splashes(Control::Close, Instant::now()).count() > 0,
+            "the × took the press without a ripple"
+        );
+
+        app.run(Command::CommandPalette, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let close = overlay_of(&app)
+            .and_then(|geometry| geometry.close_rect())
+            .expect("the palette's ×");
+        click_at(&mut app, &ctx, close.center());
+        assert!(app.finder.is_none(), "the × left the palette up");
     }
 }

@@ -2879,6 +2879,7 @@ pub fn help_page(rect: egui::Rect) -> usize {
 /// be typed into the top row, which this card is painted *over*: the one thing
 /// on screen that was changing under the fingers was the one thing behind the
 /// scrim.
+#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn help_overlay(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -2887,6 +2888,8 @@ pub fn help_overlay(
     help: &Help,
     total: usize,
     filter: crate::help::Filter<'_>,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
 ) {
     let (query, caret) = (filter.query, filter.caret);
     let painter = paint.painter;
@@ -2912,9 +2915,13 @@ pub fn help_overlay(
     } else {
         format!("{shown} of {total}")
     };
+    // The `×` takes the heading's far corner, and the count sits left of it.
+    let close = close_button_rect(rect);
+    close_button(paint, close, hovers, ripples);
+    let count_right = close.left() - GAP;
     let count_width = text_width(painter, &count, egui::FontId::proportional(FONT));
     painter.text(
-        egui::pos2(rect.right() - CARD_PAD, heading.y),
+        egui::pos2(count_right, heading.y),
         egui::Align2::RIGHT_CENTER,
         &count,
         egui::FontId::proportional(FONT),
@@ -2926,7 +2933,7 @@ pub fn help_overlay(
     // empty. The invitation is in `overlay0` and the query in `text`, so the
     // two never read as the same thing.
     let filter_left = heading.x + text_width(painter, "Keys", title) + GAP * 2.0;
-    let filter_width = (rect.right() - CARD_PAD - count_width - GAP * 2.0 - filter_left).max(0.0);
+    let filter_width = (count_right - count_width - GAP * 2.0 - filter_left).max(0.0);
     let font = egui::FontId::proportional(FONT);
     let clipped = painter.with_clip_rect(egui::Rect::from_min_max(
         egui::pos2(filter_left, rect.top()),
@@ -3151,6 +3158,56 @@ pub fn card(paint: &Painting<'_>, rect: egui::Rect, alpha: f32) {
         CARD_RADIUS,
         egui::Stroke::new(1.0, fade(paint.palette.surface1, alpha)),
         egui::StrokeKind::Inside,
+    );
+}
+
+/// Where a card's `×` goes: a [`CARD_ROW`] square tucked into the top-right
+/// corner at [`CARD_PAD`], so its hover plate is concentric with the card's
+/// corner the way a row's is (`delightful-ui` §15).
+pub fn close_button_rect(card: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(card.right() - CARD_PAD - CARD_ROW, card.top() + CARD_PAD),
+        egui::pos2(card.right() - CARD_PAD, card.top() + CARD_PAD + CARD_ROW),
+    )
+}
+
+/// A card's `×` ([`Control::Close`]), the pointer's `Esc`: a glyph at rest, a
+/// row's plate under the pointer, and the press and ripple every control gets.
+/// Neutral rather than red, because it closes the card and destroys nothing.
+pub fn close_button(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let key = Control::Close;
+    let hover = hovers.hover(key);
+    let rect = pressed_rect(rect, hovers.press(key));
+    if hover > 0.0 {
+        paint.painter.rect_filled(
+            rect,
+            CARD_ROW_RADIUS,
+            mix(palette.crust, palette.surface1, hover),
+        );
+    }
+    let inside = paint.painter.with_clip_rect(rect);
+    for splash in ripples.splashes(key, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+        );
+    }
+    inside.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "×",
+        // A size up from the tray's per-row `×`: this one is the only control
+        // in its corner, and at the row size it read as a speck beside the
+        // heading's count.
+        egui::FontId::proportional(FONT + 5.0),
+        mix(palette.overlay0, palette.text, hover),
     );
 }
 
@@ -4491,6 +4548,8 @@ mod tests {
                 &help,
                 all.len(),
                 filter("", None),
+                &Hovers::new(),
+                &Ripples::new(),
             );
             help_overlay(
                 &paint,
@@ -4500,6 +4559,8 @@ mod tests {
                 &help,
                 all.len(),
                 filter("so", Some(1)),
+                &Hovers::new(),
+                &Ripples::new(),
             );
             help_overlay(
                 &paint,
@@ -4509,6 +4570,8 @@ mod tests {
                 &help,
                 all.len(),
                 filter("", Some(0)),
+                &Hovers::new(),
+                &Ripples::new(),
             );
         });
     }

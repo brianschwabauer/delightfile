@@ -281,13 +281,16 @@ pub fn paint(
         egui::FontId::proportional(FONT + 2.0),
         palette.text,
     );
+    // The `×` in the heading's far corner, and the counts left of it.
+    let close = chrome::close_button_rect(card);
+    chrome::close_button(paint, close, hovers, ripples);
     let active = rows
         .iter()
         .filter(|r| matches!(r.tone, Tone::Running | Tone::Waiting | Tone::Paused))
         .count();
     painter.text(
         egui::pos2(
-            card.right() - CARD_PAD,
+            close.left() - crate::ui::GAP,
             card.top() + CARD_PAD + chrome::CARD_ROW / 2.0,
         ),
         egui::Align2::RIGHT_CENTER,

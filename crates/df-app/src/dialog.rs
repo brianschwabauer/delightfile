@@ -34,8 +34,9 @@ const ROW: f32 = 20.0;
 /// pressed, and `delightful-ui` §1 wants a real hit target under them.
 const BUTTON_HEIGHT: f32 = 26.0;
 
-/// Between two buttons.
-const BUTTON_GAP: f32 = 8.0;
+/// Between two buttons: the card's padding, so every gap beside a button —
+/// the card's edge, its neighbour, the content above — is the same width.
+const BUTTON_GAP: f32 = CARD_PAD;
 
 /// The narrowest a button gets. A two-letter verb on a button the width of its
 /// word is a target the pointer has to aim for rather than land on.
@@ -59,10 +60,11 @@ const CONFIRM_MIN_WIDTH: f32 = 300.0;
 /// are what the title's count is counting.
 const TITLE_GAP: f32 = 8.0;
 
-/// Between the confirm's last name and its buttons: wider than the title's
-/// gap, because the buttons are a different kind of thing — the answer, not
-/// more of the question.
-const ANSWER_GAP: f32 = 12.0;
+/// Between a dialog's content and its buttons: wider than the title's gap,
+/// because the buttons are a different kind of thing — the answer, not more
+/// of the question — and the card's padding, so the gap above a button is the
+/// gap beside it.
+const ANSWER_GAP: f32 = CARD_PAD;
 
 /// How many conflicts the resolver lists at once, for the same reason.
 const CONFLICT_VISIBLE: usize = 5;
@@ -512,6 +514,8 @@ pub struct Geometry {
     pub actions: Vec<egui::Rect>,
     /// The apply-to-all toggle, when the dialog has one.
     pub apply_all: Option<egui::Rect>,
+    /// The `×` in the top-right corner, on a card with no `Cancel` of its own.
+    pub close: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -608,6 +612,7 @@ pub fn confirm_geometry(painter: &egui::Painter, area: egui::Rect, confirm: &Con
         rows,
         actions,
         apply_all: None,
+        close: None,
     }
 }
 
@@ -635,7 +640,7 @@ pub fn conflict_geometry(
         + listed as f32 * ROW
         + 10.0
         + FACTS_HEIGHT
-        + 10.0
+        + ANSWER_GAP
         + BUTTON_HEIGHT
         + chrome::HINT_ROW; // the card's own hint strip
     let card = card_rect(area, MAX_WIDTH, height);
@@ -669,6 +674,9 @@ pub fn conflict_geometry(
         rows,
         actions,
         apply_all,
+        // Overwrite, Skip and Rename all answer the question, and none of
+        // them backs out of the paste, so the card carries its own way out.
+        close: Some(chrome::close_button_rect(card)),
     }
 }
 
@@ -826,7 +834,7 @@ pub fn bulk_geometry(
         + BULK_ROW                        // the find / replace strip
         + 10.0
         + visible as f32 * BULK_ROW
-        + 10.0
+        + ANSWER_GAP
         + BUTTON_HEIGHT
         + chrome::HINT_ROW; // the card's own hint strip
     let card = card_rect(area, MAX_WIDTH, height);
@@ -864,6 +872,7 @@ pub fn bulk_geometry(
         rows,
         actions,
         apply_all,
+        close: None,
     }
 }
 
@@ -1132,16 +1141,25 @@ pub fn paint_conflict(
 
     let left = geometry.card.left() + CARD_PAD;
     let n = dialog.len();
-    painter.text(
+    // The title stops short of the `×` that shares its row.
+    let title_right = match geometry.close {
+        Some(close) => {
+            chrome::close_button(paint, close, hovers, ripples);
+            close.left() - crate::ui::GAP
+        }
+        None => geometry.card.right() - CARD_PAD,
+    };
+    chrome::truncated_in(
+        painter,
         egui::pos2(left, geometry.card.top() + CARD_PAD + ROW / 2.0),
-        egui::Align2::LEFT_CENTER,
-        if n == 1 {
+        &if n == 1 {
             "A file with that name is already there".to_string()
         } else {
             format!("{n} names are already taken")
         },
-        egui::FontId::proportional(FONT + 2.0),
         palette.text,
+        (title_right - left).max(0.0),
+        egui::FontId::proportional(FONT + 2.0),
     );
     painter.text(
         egui::pos2(left, geometry.card.top() + CARD_PAD + ROW + ROW / 2.0),

@@ -1421,6 +1421,8 @@ pub struct Geometry {
     /// The rows among them — the lines the pointer can press — in order. What
     /// `Control::PanelRow(i)` indexes, and what [`Card::visible_items`] names.
     pub rows: Vec<egui::Rect>,
+    /// The `×` at the title row's far end.
+    pub close: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -1471,6 +1473,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         body,
         lines,
         rows,
+        close: Some(crate::chrome::close_button_rect(rect)),
     }
 }
 
@@ -1564,6 +1567,9 @@ pub fn paint(
         egui::FontId::proportional(FONT + 2.0),
         palette.text,
     );
+    if let Some(close) = geometry.close {
+        crate::chrome::close_button(paint, close, hovers, ripples);
+    }
     // The keys are *not* repeated here: they are on the hint strip along the
     // bottom, where every other overlay puts them
     // ([`crate::chrome::hint_rect`]). Saying them twice on one card taught the

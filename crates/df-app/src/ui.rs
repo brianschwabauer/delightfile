@@ -446,6 +446,10 @@ pub enum Control {
     /// A row inside a floating surface: the task panel's tasks, the opener
     /// picker's choices, the conflict resolver's names.
     PanelRow(usize),
+    /// The `×` at a floating card's top-right corner: the pointer's `Esc`.
+    /// One variant serves every card, because only one closable surface is
+    /// ever under the pointer.
+    Close,
     /// The two halves of the search panel's **Names | Contents** switch
     /// (PLAN §7.2). Two variants rather than one carrying the mode, so this
     /// enum stays free of what the search module means by a mode — the
