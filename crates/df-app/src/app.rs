@@ -12984,7 +12984,7 @@ impl App {
                 pointer.wheel,
             );
         }
-        let tray_geometry = tray_at(self.tray_first);
+        let mut tray_geometry = tray_at(self.tray_first);
 
         // The toast, measured where it will be painted (PLAN §5). It floats over
         // the panes and over a modal card — everything except the menu, which
@@ -13261,6 +13261,36 @@ impl App {
                 .is_some_and(|(p, g)| g.contains(p));
         if dismissing {
             self.close_menu(now);
+        }
+
+        // ── A press outside the tray (PLAN §7.1) ────────────────────────────
+        // The tray is a popover, not a menu: a press anywhere but on it puts
+        // it away and then **goes on to land** where it was aimed, the way a
+        // press outside the prompt does. Spending the press, as the menu does,
+        // would make the first click on a row after opening the tray do
+        // nothing, and nothing is what a popover must never make a click do.
+        // The chip is part of "on it": the chip's own click toggles the tray,
+        // and a press that first closed it and then toggled it would open it
+        // again. Not while the menu is up, because every press is the menu's
+        // then.
+        if self.tray_open && any_press && !menu_live {
+            let on_tray = pointer
+                .at
+                .is_some_and(|p| tray_geometry.contains(p) || tray_chip.contains(p));
+            if !on_tray {
+                self.tray_open = false;
+                // Measured again, closed: the paint below reads this geometry,
+                // and a card drawn for one more frame after the press that put
+                // it away would be a card that flinched.
+                tray_geometry = crate::tray::geometry(
+                    area,
+                    tray_chip,
+                    layout.path,
+                    &self.clipboard,
+                    false,
+                    self.tray_first,
+                );
+            }
         }
 
         let geom = Geom {
@@ -19023,6 +19053,52 @@ mod tests {
         assert!(app.clipboard.is_empty(), "Clear left the clipboard");
         assert!(!app.tray_open);
         assert_eq!(toast(&app).as_deref(), Some("Clipboard cleared"));
+    }
+
+    /// A press anywhere but on the tray puts it away **and still lands**: the
+    /// tray is a popover, and a click on a row while it is out is a click on
+    /// that row. The chip is part of the tray for this purpose — its own click
+    /// toggles, and a close-then-toggle would have reopened it.
+    #[test]
+    fn a_click_outside_the_tray_closes_it_and_lands_where_it_was_aimed() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("yank-tray-away", &["a.txt", "b.txt", "c.txt"]);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Yank, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+
+        let chip = yank_chip(&app).center();
+        click_at(&mut app, &ctx, chip);
+        assert!(app.tray_open);
+
+        // A row well away from the card: the tray hangs at the right end of
+        // the top row, and the list's third row is under the pane on the left.
+        let target = row_centre(&app, 2);
+        assert!(!tray_of(&app).contains(target), "the row is under the card");
+        click_at(&mut app, &ctx, target);
+        assert!(!app.tray_open, "the press did not put the tray away");
+        assert_eq!(
+            app.tab()
+                .cwd
+                .dir
+                .cursor_entry()
+                .map(|e| e.name.clone())
+                .as_deref(),
+            Some("c.txt"),
+            "the press that closed the tray did not land on the row"
+        );
+        assert_eq!(
+            app.clipboard.len(),
+            3,
+            "closing the tray touched the clipboard"
+        );
+
+        // The chip toggles, and only toggles.
+        click_at(&mut app, &ctx, chip);
+        assert!(app.tray_open, "the chip did not reopen the tray");
+        click_at(&mut app, &ctx, chip);
+        assert!(!app.tray_open, "the chip's second click did not close it");
     }
 
     /// The wheel over the tray scrolls the tray — whole rows, as far as the
