@@ -866,7 +866,9 @@ pub fn branch_label(branch: &str, counts: Option<df_core::git::DirtyCounts>) -> 
 /// *always* true and so is always in the same place at the far end; the git
 /// chip is next because it is about the directory rather than the cursor; and
 /// the status chips — the ones that are only there when they have something to
-/// say — grow leftwards from those two towards the crumbs.
+/// say — grow leftwards from those two towards the crumbs. A file dialog with
+/// type filters puts its filter's chip between the counter and the git chip,
+/// because it says what the counter is counting.
 pub struct Cluster<'a> {
     /// How many files are selected (PLAN §4.1's `Space`/`Ctrl+a`/`v`).
     pub selected: usize,
@@ -889,6 +891,23 @@ pub struct Cluster<'a> {
     /// The picker's two buttons, when this window is somebody's file dialog
     /// (`--chooser-file`); `None` in a file manager.
     pub pick: Option<Pick>,
+    /// The dialog's type-filter chip, when the dialog offered filters.
+    pub types: Option<Types<'a>>,
+}
+
+/// Which of a file dialog's type filters the listing is narrowed to, as the
+/// top row's chip says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Types<'a> {
+    /// The active filter's name, or [`crate::menu::ALL_FILES`].
+    pub label: &'a str,
+    /// Whether a filter is narrowing the listing. `false` is "All files",
+    /// drawn dim: the chip is still there to be clicked, but it is no longer
+    /// saying the listing is short of anything.
+    pub narrowing: bool,
+    /// Its popover is out, so it is held down the way the app menu's button
+    /// is while that menu is.
+    pub open: bool,
 }
 
 /// What a picker session's primary button says, and whether it can be
@@ -957,6 +976,9 @@ pub struct ClusterGeom {
     /// before it. `None` outside a picker session.
     pub pick: Option<egui::Rect>,
     pub cancel: Option<egui::Rect>,
+    /// The type-filter chip, beside the counter. `None` unless the session is
+    /// a dialog with filters.
+    pub types: Option<egui::Rect>,
     /// The three strings the measuring already built, kept rather than built a
     /// second time by the painter a few lines later. Measuring text means
     /// laying it out, which means having the string; formatting each of them
@@ -1050,6 +1072,18 @@ pub fn cluster_geometry(
         *right = rect.left();
         rect
     };
+    // The type filter stands right beside the counter, because it is what the
+    // counter is counting — `Images 12 / 40` is the twelfth of forty images —
+    // and because it is there for the whole session, so it keeps one place
+    // while the chips that come and go grow leftwards past it.
+    let types = cluster.types.as_ref().map(|types| {
+        let glyph = crate::icons::glyph(nerd, TYPES_ICON, TYPES_GLYPH);
+        let width = text_width(painter, types.label, font.clone())
+            + PAD_X * 2.0
+            + icon_width(painter, &glyph, &font)
+            + ICON_GAP;
+        chip_at(width, &mut right)
+    });
     let mut git_text = None;
     let git = cluster.branch.map(|branch| {
         let label = branch_label(branch, cluster.dirty);
@@ -1096,6 +1130,7 @@ pub fn cluster_geometry(
         visual,
         pick,
         cancel,
+        types,
         labels: ClusterLabels {
             counter: counter_label,
             yank: yank_text,
@@ -1136,6 +1171,9 @@ fn paint_cluster(
         egui::FontId::proportional(FONT),
         mix(palette.overlay1, palette.text, counter_hover),
     );
+    if let (Some(rect), Some(types)) = (geom.types, &cluster.types) {
+        type_chip(paint, rect, types, hovers, ripples);
+    }
     if let (Some(rect), Some(branch)) = (geom.git, geom.labels.git.as_deref()) {
         let font = egui::FontId::proportional(FONT);
         let glyph = crate::icons::glyph(paint.nerd, GIT_ICON, GIT_GLYPH);
@@ -1227,6 +1265,66 @@ fn paint_cluster(
     if let (Some(rect), Some(pick)) = (geom.pick, &cluster.pick) {
         pick_button(paint, rect, pick, hovers, ripples);
     }
+}
+
+/// The type-filter chip: the name filter's chip in every measure — the inset,
+/// the radius, the tint, the icon before the word — because it is the same
+/// kind of fact, "you are looking at part of this directory".
+///
+/// At "All files" it goes quiet rather than away: grey where it was blue, as
+/// the listing is no longer short of anything, but still where the hand left
+/// it, since it is also the way back to the dialog's filter.
+fn type_chip(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    types: &Types<'_>,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let painter = paint.painter;
+    let key = Control::TypeChip;
+    let open = f32::from(types.open);
+    // Lit and held while its popover is out, so the card has a visible thing
+    // it came out of — [`menu_button`]'s rule.
+    let hover = hovers.hover(key).max(open);
+    let rect = pressed_rect(rect, hovers.press(key).max(open));
+    let (accent, ink) = if types.narrowing {
+        (palette.blue, palette.blue)
+    } else {
+        (
+            palette.overlay1,
+            mix(palette.overlay1, palette.subtext0, hover),
+        )
+    };
+    plate(paint, rect, accent, 1.0 + hover * 0.9);
+    let inside = painter.with_clip_rect(rect);
+    for splash in ripples.splashes(key, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+        );
+    }
+    let font = egui::FontId::proportional(FONT);
+    let glyph = crate::icons::glyph(paint.nerd, TYPES_ICON, TYPES_GLYPH);
+    inside.text(
+        egui::pos2(rect.left() + PAD_X, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        &glyph,
+        font.clone(),
+        ink,
+    );
+    inside.text(
+        egui::pos2(
+            rect.left() + PAD_X + icon_width(painter, &glyph, &font) + ICON_GAP,
+            rect.center().y,
+        ),
+        egui::Align2::LEFT_CENTER,
+        types.label,
+        font,
+        ink,
+    );
 }
 
 /// The picker's primary button: the accent, filled, with its word in the
@@ -1499,6 +1597,15 @@ const FILTER_GLYPH: &str = "f";
 
 /// …and with it: the funnel.
 const FILTER_ICON: char = '\u{f0b0}';
+
+/// The type chip's glyph without the patched font: the glob wildcard the
+/// filters it names are written in (`*.png`).
+const TYPES_GLYPH: &str = "*";
+
+/// …and with it: an outlined funnel (nf-md-filter_outline). Kin to the name
+/// filter's solid one, not the same glyph: the two chips can sit on one row
+/// at once, and they are two different filters.
+const TYPES_ICON: char = '\u{f0233}';
 
 /// The branch chip's glyph without the patched font: the plain face has no
 /// fork of its own (`⑂` came up as a blank box), so the column carries the
@@ -3344,6 +3451,7 @@ mod tests {
                 position: 0,
                 rows: 0,
                 pick: None,
+                types: None,
             };
             let wide =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
@@ -3623,6 +3731,7 @@ mod tests {
                 position: 0,
                 rows: 0,
                 pick: None,
+                types: None,
             };
             let geom = top_geometry(ui.painter(), row, &path, "", &bare, false);
             assert_eq!(geom.menu, button);
@@ -3680,6 +3789,7 @@ mod tests {
                 position: 12,
                 rows: 340,
                 pick: None,
+                types: None,
             };
             let geom = cluster_geometry(ui.painter(), row, &full, false);
             let chips = [
@@ -3711,6 +3821,7 @@ mod tests {
                 position: 0,
                 rows: 0,
                 pick: None,
+                types: None,
             };
             let quiet = cluster_geometry(ui.painter(), row, &bare, false);
             assert!(quiet.git.is_none() && quiet.yank.is_none());
@@ -3753,6 +3864,7 @@ mod tests {
                 position: 1,
                 rows: 4,
                 pick: None,
+                types: None,
             };
             let picking = Cluster {
                 selected: 0,
@@ -3766,6 +3878,7 @@ mod tests {
                     label: "Choose folder".to_string(),
                     enabled: true,
                 }),
+                types: None,
             };
             let plain = cluster_geometry(ui.painter(), row, &bare, false);
             assert!(plain.pick.is_none() && plain.cancel.is_none());
@@ -3812,6 +3925,60 @@ mod tests {
             };
             let without = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
             assert!(shown(&with) < shown(&without), "the buttons took no room");
+        });
+    }
+
+    /// A dialog's type chip sits beside the counter — it is what the counter
+    /// counts — inset like every chip, and reserved, so the crumbs keep clear
+    /// of it; the chips that come and go stand further left.
+    #[test]
+    fn the_type_chip_stands_beside_the_counter() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let row =
+                egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
+            let cluster = |types: Option<Types<'static>>| Cluster {
+                selected: 2,
+                visual: None,
+                yank: None,
+                branch: Some("main"),
+                dirty: None,
+                position: 1,
+                rows: 4,
+                pick: Some(Pick {
+                    label: "Select".to_string(),
+                    enabled: true,
+                }),
+                types,
+            };
+            let images = Types {
+                label: "Images",
+                narrowing: true,
+                open: false,
+            };
+            let without = cluster_geometry(ui.painter(), row, &cluster(None), false);
+            assert!(without.types.is_none());
+            let geom = cluster_geometry(ui.painter(), row, &cluster(Some(images)), false);
+            let chip = geom.types.expect("a dialog with filters has the chip");
+            assert!((chip.right() + GAP - geom.counter.left()).abs() < 1e-3);
+            let branch = geom.git.expect("a branch was given");
+            assert!(branch.right() <= chip.left() + 1e-3);
+            assert!((chip.top() - row.top() - CHIP_INSET).abs() < 1e-3);
+            assert!((row.bottom() - chip.bottom() - CHIP_INSET).abs() < 1e-3);
+            assert!((geom.width - without.width - chip.width() - GAP).abs() < 1e-3);
+            // "All files" is a longer word than "Images", and the chip grows
+            // to hold it rather than clipping it.
+            let all = cluster_geometry(
+                ui.painter(),
+                row,
+                &cluster(Some(Types {
+                    label: crate::menu::ALL_FILES,
+                    narrowing: false,
+                    open: false,
+                })),
+                false,
+            );
+            assert!(all.types.expect("the chip").width() > chip.width());
         });
     }
 
@@ -4134,6 +4301,12 @@ mod tests {
                         label: "Select 3".to_string(),
                         enabled: true,
                     }),
+                    // …and the type chip lit, with its popover out.
+                    types: branch.map(|_| Types {
+                        label: "Images",
+                        narrowing: true,
+                        open: true,
+                    }),
                 };
                 let geom = top_geometry(paint.painter, path_rect, &path, filter, &cluster, false);
                 path_bar(
@@ -4166,6 +4339,12 @@ mod tests {
                 pick: Some(Pick {
                     label: "Select".to_string(),
                     enabled: false,
+                }),
+                // …and the type chip at rest at "All files", which is dim.
+                types: Some(Types {
+                    label: crate::menu::ALL_FILES,
+                    narrowing: false,
+                    open: false,
                 }),
             };
             let geom = top_geometry(paint.painter, narrow, &path, "", &cluster, false);

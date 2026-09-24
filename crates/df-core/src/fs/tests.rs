@@ -843,6 +843,80 @@ fn the_view_reacts_to_hidden_filter_and_sort_without_moving_the_entries() {
     assert_eq!(state.len(), 4);
 }
 
+/// A file dialog's type filter narrows the view the way `.` does: folders
+/// stay, files that fail it go, and everything that reads the view — the
+/// count, the cursor, select-all — sees only what is left. It composes with
+/// the hidden toggle and the `f` query rather than overriding either.
+#[test]
+fn a_type_filter_narrows_the_view_like_the_hidden_toggle() {
+    let images = TypeFilter {
+        name: "Images".to_string(),
+        globs: vec!["*.webp".to_string()],
+        mimes: vec!["image/*".to_string()],
+    };
+    let mut entries = files(&["a.png", "b.txt", "C.JPG", ".d.png", "e.webp", "f.pdf"]);
+    entries.push(dir("photos"));
+    let mut state = loaded_state(entries);
+    assert_eq!(state.len(), 6, "hidden off, no type filter");
+    state.cursor_to_name("e.webp");
+
+    state.set_types(Some(images.clone()));
+    assert_eq!(state.types(), Some(&images));
+    let shown: Vec<&str> = state.rows().map(|(e, _)| e.name.as_str()).collect();
+    assert_eq!(shown, ["photos", "a.png", "C.JPG", "e.webp"]);
+    assert_eq!(
+        state.total(),
+        7,
+        "the entries themselves are all still here"
+    );
+    assert_eq!(
+        state.cursor_entry().map(|e| e.name.as_str()),
+        Some("e.webp"),
+        "the cursor stays on its file"
+    );
+
+    // Select-all takes the rows on screen and nothing the filter hides.
+    state.select_all();
+    assert_eq!(state.selected_count(), 4);
+    assert!(!state.is_selected("b.txt") && !state.is_selected(".d.png"));
+    state.clear_selection();
+
+    // The hidden toggle brings back the dotfile that passes, not the rest.
+    state.set_show_hidden(true);
+    assert_eq!(state.len(), 5);
+    assert!(state.position_of(".d.png").is_some());
+    assert!(state.position_of("b.txt").is_none());
+    // …and `f` narrows what is left.
+    state.set_filter("png");
+    let shown: Vec<&str> = state.rows().map(|(e, _)| e.name.as_str()).collect();
+    assert_eq!(shown, [".d.png", "a.png"]);
+    state.clear_filter();
+    state.set_show_hidden(false);
+
+    // Off again: the whole directory.
+    state.set_types(None);
+    assert_eq!(state.len(), 6);
+}
+
+/// A listing built from a config that carries a type filter is narrowed from
+/// its first batch — how a directory entered mid-session keeps the dialog's
+/// filter without anybody re-applying it.
+#[test]
+fn a_type_filter_in_the_config_narrows_a_new_listing() {
+    let mgr = MgrConfig {
+        types: Some(TypeFilter {
+            name: "PDF".to_string(),
+            globs: Vec::new(),
+            mimes: vec!["application/pdf".to_string()],
+        }),
+        ..MgrConfig::default()
+    };
+    let mut state = DirState::new("/fixture", &mgr);
+    state.set_entries(files(&["a.pdf", "b.txt", "c.PDF"]));
+    let shown: Vec<&str> = state.rows().map(|(e, _)| e.name.as_str()).collect();
+    assert_eq!(shown, ["a.pdf", "c.PDF"]);
+}
+
 #[test]
 fn selection_is_by_name_and_survives_a_re_sort() {
     let mut state = loaded_state(files(&["a.txt", "b.txt", "c.txt"]));

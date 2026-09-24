@@ -79,17 +79,10 @@ pub struct Chooser {
 /// One named file-type filter, as the file-chooser portal describes it: a
 /// label for the menu and the patterns a file has to match to be shown.
 ///
-/// Two pattern kinds because the portal has two: a glob is matched against the
-/// file's name (`*.png`, case-insensitively — a picker that hid `PHOTO.JPG`
-/// from a `*.jpg` filter would be wrong far more often than right), a MIME
-/// pattern against the type its extension implies (`image/png`, or `image/*`
-/// for the whole family). A file passes when any one pattern matches.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TypeFilter {
-    pub name: String,
-    pub globs: Vec<String>,
-    pub mimes: Vec<String>,
-}
+/// Defined in df-core, where it is applied: a filter narrows a listing's view
+/// the way the hidden toggle does, and the view is df-core's. The matching
+/// rules are documented there.
+pub use df_core::fs::TypeFilter;
 
 impl Chooser {
     /// A plain dialog writing to `out`: one file, no title, no filters. The

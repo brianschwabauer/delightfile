@@ -452,6 +452,9 @@ pub enum Control {
     /// The committed filter's trailing chip on the top row, which re-opens the
     /// prompt that set it (PLAN §7.2).
     FilterChip,
+    /// A file dialog's type-filter chip on the top row — "Images", or "All
+    /// files" — which drops the dialog's list of filters out beneath it.
+    TypeChip,
     /// The clipboard chip on the top row, which clears it — the pointer's `X`
     /// (PLAN §4.1).
     YankChip,

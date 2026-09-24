@@ -132,9 +132,14 @@ pub enum Action {
     /// An app-menu row: the command it *is*, run through the one door its key
     /// goes through, so the row cannot behave differently from the key.
     Run(Command),
-    /// A row that does nothing itself: the app menu's "View" and "Sort", which
-    /// are only the lists they fly out, and "Reverse" while the sort has no
-    /// direction to reverse.
+    /// A file dialog's type filter, by its index in the dialog's own list:
+    /// show only the files it admits.
+    FileType(usize),
+    /// …or every file, whatever the dialog's filters say.
+    AllFiles,
+    /// A row that does nothing itself: the app menu's "View", "Sort" and "File
+    /// type", which are only the lists they fly out, and "Reverse" while the
+    /// sort has no direction to reverse.
     Nothing,
 }
 
@@ -329,6 +334,39 @@ pub fn items(facts: Facts, openers: &[String]) -> Vec<Item> {
     items
 }
 
+// ── A file dialog's type filters ────────────────────────────────────────────
+
+/// The last radio of the type-filter list, and what the chip reads while it
+/// is the one ticked.
+pub const ALL_FILES: &str = "All files";
+
+/// A file dialog's type filters as radio rows: one per filter, in the order
+/// the dialog gave them, the active one ticked, and [`ALL_FILES`] after a gap,
+/// ticked when no filter is narrowing the listing (`active` is `None`).
+///
+/// The chip's popover and the app menu's "File type" list are both exactly
+/// this, so the two cannot disagree about which row is which. No keys: the
+/// one key near this, `.`, steps a ladder rather than choosing a row, and
+/// drawing it beside "All files" would teach it as something it is not.
+pub fn type_items<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    active: Option<usize>,
+) -> Vec<Item> {
+    let mut rows: Vec<Item> = names
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            Item::new(name, "", Action::FileType(index), true).check(active == Some(index))
+        })
+        .collect();
+    rows.push(
+        Item::new(ALL_FILES, "", Action::AllFiles, true)
+            .check(active.is_none())
+            .after_gap(),
+    );
+    rows
+}
+
 // ── The app menu ────────────────────────────────────────────────────────────
 
 /// What the app menu needs to know to decide its rows: [`Facts`]' counterpart,
@@ -391,8 +429,16 @@ fn sort_command(by: SortBy, reverse: bool) -> Option<Command> {
 /// question [`crate::app`]'s gate asks before a verb runs where the list pane
 /// is showing an archive, a remote service or the trash: a row it would refuse
 /// is greyed here rather than left live to toast "not here" when clicked.
+///
+/// `types` is a file dialog's [`type_items`], flown out of a "File type" row
+/// beside View and Sort; empty — every session that is not a dialog with
+/// filters — and there is no such row. Absent rather than grey, for the
+/// reason the context menu's extract rows are: a file manager has no dialog
+/// whose filters the row could ever list, and a row that is grey every time
+/// is a row to read past every time.
 pub fn app_items(
     facts: AppFacts,
+    types: Vec<Item>,
     keymap: &Registry,
     refused: impl Fn(Command) -> bool,
 ) -> Vec<Item> {
@@ -472,7 +518,7 @@ pub fn app_items(
         .after_gap(),
     );
 
-    vec![
+    let mut rows = vec![
         run("New tab", C::TabCreate, true),
         run("New window", C::NewWindow, true),
         run("Go to path…", C::GotoPath, facts.local).after_gap(),
@@ -503,7 +549,19 @@ pub fn app_items(
         run("Command palette…", C::CommandPalette, true).after_gap(),
         run("Keyboard shortcuts", C::Help, true),
         run(if facts.picker { "Cancel" } else { "Quit" }, C::Quit, true).after_gap(),
-    ]
+    ];
+    if !types.is_empty() {
+        // After Sort, in the group of lists about what the pane shows.
+        let at = rows
+            .iter()
+            .position(|item| item.label == "Sort")
+            .map_or(rows.len(), |sort| sort + 1);
+        rows.insert(
+            at,
+            Item::new("File type", "", Action::Nothing, true).with_submenu(types),
+        );
+    }
+    rows
 }
 
 // ── The menu, while it is up ────────────────────────────────────────────────
@@ -515,6 +573,10 @@ pub fn app_items(
 pub enum Kind {
     Context,
     App,
+    /// A file dialog's type filters, dropped out of their chip on the top
+    /// row. The chip stays pressed while it is out, as the app menu's button
+    /// does.
+    Types,
 }
 
 /// What the card is placed from.
@@ -555,6 +617,11 @@ impl Menu {
     /// The app menu, hanging from its button.
     pub fn app(button: egui::Rect, items: Vec<Item>) -> Menu {
         Menu::new(Kind::App, Anchor::Below(button), items)
+    }
+
+    /// The type-filter popover ([`type_items`]), hanging from its chip.
+    pub fn types(chip: egui::Rect, items: Vec<Item>) -> Menu {
+        Menu::new(Kind::Types, Anchor::Below(chip), items)
     }
 
     fn new(kind: Kind, anchor: Anchor, items: Vec<Item>) -> Menu {
@@ -1513,7 +1580,7 @@ mod tests {
     }
 
     fn app(facts: AppFacts) -> Vec<Item> {
-        app_items(facts, &Registry::defaults(), |_| false)
+        app_items(facts, Vec::new(), &Registry::defaults(), |_| false)
     }
 
     fn row<'a>(rows: &'a [Item], label: &str) -> &'a Item {
@@ -1603,7 +1670,7 @@ mod tests {
         let mut keymap = Registry::defaults();
         let t = df_core::keymap::parse_sequence("t").expect("parses");
         keymap.unbind(df_core::keymap::Context::Files, &t);
-        let rows = app_items(app_facts(), &keymap, |_| false);
+        let rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
         assert_eq!(row(&rows, "New tab").keys, "");
         keymap
             .register(
@@ -1614,7 +1681,7 @@ mod tests {
                 df_core::keymap::When::Always,
             )
             .expect("free");
-        let rows = app_items(app_facts(), &keymap, |_| false);
+        let rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
         assert_eq!(row(&rows, "New tab").keys, "Alt+t");
     }
 
@@ -1703,7 +1770,7 @@ mod tests {
                 C::Yank | C::YankCut | C::Paste | C::Trash | C::Create | C::OpenTrash
             )
         };
-        let rows = app_items(app_facts(), &Registry::defaults(), trash_like);
+        let rows = app_items(app_facts(), Vec::new(), &Registry::defaults(), trash_like);
         for label in [
             "Copy",
             "Cut",
@@ -1717,7 +1784,7 @@ mod tests {
         for label in ["Rename", "Undo", "Select all", "View", "Sort", "Quit"] {
             assert!(row(&rows, label).enabled, "{label} is not refused");
         }
-        let everything = app_items(app_facts(), &Registry::defaults(), |_| true);
+        let everything = app_items(app_facts(), Vec::new(), &Registry::defaults(), |_| true);
         assert!(row(&everything, "View").enabled && row(&everything, "Sort").enabled);
     }
 
@@ -1904,5 +1971,59 @@ mod tests {
         assert!(menu.open_submenu());
         menu.move_cursor(-1);
         assert_eq!(menu.activate(), Some(Action::Run(Command::SortRandom)));
+    }
+
+    // ── A file dialog's type filters ────────────────────────────────────────
+
+    /// One radio per filter in the dialog's order, then "All files" after a
+    /// gap; the tick is on the active filter, or on "All files" when none is
+    /// narrowing. Every row is live and has no key.
+    #[test]
+    fn the_type_list_is_the_filters_then_all_files() {
+        let rows = type_items(["Images", "PDF"], Some(1));
+        let labels: Vec<&str> = rows.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, ["Images", "PDF", ALL_FILES]);
+        assert_eq!(ticked(&rows), ["PDF"]);
+        assert_eq!(
+            rows.iter().map(|i| i.action).collect::<Vec<_>>(),
+            [Action::FileType(0), Action::FileType(1), Action::AllFiles]
+        );
+        assert!(rows.iter().all(|i| i.enabled && i.keys.is_empty()));
+        assert!(rows.iter().all(|i| i.checked.is_some()), "one radio group");
+        assert_eq!(
+            rows.iter().map(|i| i.gap_before).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+
+        let all = type_items(["Images", "PDF"], None);
+        assert_eq!(ticked(&all), [ALL_FILES]);
+        // The popover hangs from the chip it came out of.
+        let chip = egui::Rect::from_min_size(egui::pos2(400.0, 8.0), egui::vec2(90.0, 30.0));
+        let menu = Menu::types(chip, all);
+        assert_eq!(menu.kind, Kind::Types);
+        assert_eq!(menu.anchor, Anchor::Below(chip));
+    }
+
+    /// The app menu grows a "File type" list after Sort only when it is given
+    /// one — a dialog with filters — and the list is exactly the rows given.
+    #[test]
+    fn the_app_menu_lists_file_types_only_when_there_are_some() {
+        assert!(app(app_facts()).iter().all(|i| i.label != "File type"));
+
+        let rows = app_items(
+            app_facts(),
+            type_items(["Images"], Some(0)),
+            &Registry::defaults(),
+            |_| false,
+        );
+        let at = rows
+            .iter()
+            .position(|i| i.label == "File type")
+            .expect("a File type row");
+        assert_eq!(rows[at - 1].label, "Sort");
+        assert!(rows[at].enabled);
+        let list = rows[at].submenu.as_deref().expect("a list");
+        assert_eq!(ticked(list), ["Images"]);
+        assert_eq!(list.last().map(|i| i.action), Some(Action::AllFiles));
     }
 }

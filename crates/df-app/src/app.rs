@@ -1008,6 +1008,10 @@ pub struct App {
     /// [`crate::cli`]). Not to be confused with `picker`, which is `O`'s
     /// opener card.
     chooser: Option<crate::cli::Chooser>,
+    /// Which rung of `.`'s ladder a file dialog with type filters is on (see
+    /// [`Showing`]). Meaningless without filters, where `.` is the plain
+    /// hidden toggle it always was.
+    showing: Showing,
     /// The file a save dialog suggested, when the portal handed us one — the
     /// path it created before launching us (see `build/delightfile-wrapper.sh`).
     ///
@@ -1707,7 +1711,21 @@ impl App {
         }
         let task_events = engine.events();
 
-        let mgr = config.mgr.clone();
+        let mut mgr = config.mgr.clone();
+        // A file dialog that offered type filters opens on its active one with
+        // the dotfiles hidden, whatever `show_hidden` says ([`Showing`]'s first
+        // rung). Set here, before the first listing is built from `mgr`, so
+        // its first batch arrives already narrowed rather than a frame later.
+        if let Some(chooser) = args.chooser.as_ref() {
+            if let Some(active) = chooser
+                .filters
+                .get(chooser.current_filter)
+                .or(chooser.filters.first())
+            {
+                mgr.show_hidden = false;
+                mgr.types = Some(active.clone());
+            }
+        }
         let seed = 0;
         let sort = sort_options(&mgr, seed);
         // A directory *peek* is listed the way entering it would list it.
@@ -1772,6 +1790,7 @@ impl App {
             tabs: Tabs::new(tab),
             cwd_file: args.cwd_file,
             chooser: args.chooser,
+            showing: Showing::Filtered,
             suggested,
             chosen: Vec::new(),
             quit: None,
@@ -4423,6 +4442,144 @@ impl App {
             now,
         );
         true
+    }
+
+    /// The type filters the dialog offered, in its order. Empty outside a
+    /// picker, and in a picker whose caller offered none.
+    fn type_filters(&self) -> &[crate::cli::TypeFilter] {
+        self.chooser
+            .as_ref()
+            .map_or(&[], |chooser| chooser.filters.as_slice())
+    }
+
+    /// Which filter is the dialog's chosen one: `current_filter`, or the first
+    /// when that names none.
+    fn active_type_index(&self) -> Option<usize> {
+        let chooser = self.chooser.as_ref()?;
+        match chooser.filters.len() {
+            0 => None,
+            count if chooser.current_filter < count => Some(chooser.current_filter),
+            _ => Some(0),
+        }
+    }
+
+    fn active_type(&self) -> Option<&crate::cli::TypeFilter> {
+        self.type_filters().get(self.active_type_index()?)
+    }
+
+    /// The filter narrowing the listings right now: the active one, while the
+    /// ladder is on its first rung.
+    fn narrowing(&self) -> Option<&crate::cli::TypeFilter> {
+        self.active_type()
+            .filter(|_| self.showing == Showing::Filtered)
+    }
+
+    /// Put the ladder's rung into force: into `mgr`, which every listing
+    /// opened from here on is built from, and into every listing already open,
+    /// in every tab — the rung is the session's, not a tab's.
+    ///
+    /// It overrides `show_hidden` in both directions: a dialog asking for
+    /// images opens without dotfiles for someone whose file manager shows
+    /// them, and the last rung shows them to someone whose does not.
+    ///
+    /// A session without filters is left exactly as it is. `.` is its plain
+    /// toggle, and this has nothing to say there.
+    fn apply_showing(&mut self) {
+        if self.type_filters().is_empty() {
+            return;
+        }
+        let show = self.showing == Showing::Everything;
+        let types = self.narrowing().cloned();
+        self.mgr.show_hidden = show;
+        self.mgr.types = types.clone();
+        for tab in self.tabs.iter_mut() {
+            tab.cwd.dir.set_show_hidden(show);
+            tab.cwd.dir.set_types(types.clone());
+            if let Some(parent) = &mut tab.parent {
+                parent.dir.set_show_hidden(show);
+                parent.dir.set_types(types.clone());
+            }
+            tab.sync_parent_marker();
+        }
+    }
+
+    fn set_showing(&mut self, showing: Showing) {
+        self.showing = showing;
+        self.apply_showing();
+    }
+
+    /// `.` in a dialog with type filters: the next rung, said in a toast,
+    /// since what changed is which rows are *missing* and that is the one
+    /// change a glance at the list cannot confirm.
+    fn step_showing(&mut self, now: Instant) {
+        self.set_showing(self.showing.next());
+        let message = match (self.showing, self.active_type()) {
+            (Showing::Filtered, Some(active)) => format!("{} only", active.name),
+            (Showing::Everything, _) => "All files, hidden too".to_string(),
+            _ => menu::ALL_FILES.to_string(),
+        };
+        self.toasts.notice(message, now);
+    }
+
+    /// A filter chosen from the chip's list or the app menu's: it becomes the
+    /// dialog's active one, and the ladder goes back to its first rung so the
+    /// choice is what is shown.
+    fn choose_type(&mut self, index: usize) {
+        let Some(chooser) = self.chooser.as_mut() else {
+            return;
+        };
+        if index >= chooser.filters.len() {
+            return;
+        }
+        chooser.current_filter = index;
+        self.set_showing(Showing::Filtered);
+    }
+
+    /// What the type chip says this frame, in a dialog with filters: the
+    /// active filter's name, or "All files" on the two rungs that show more.
+    fn type_chip(&self) -> Option<chrome::Types<'_>> {
+        let active = self.active_type()?;
+        let narrowing = self.showing == Showing::Filtered;
+        Some(chrome::Types {
+            label: if narrowing {
+                active.name.as_str()
+            } else {
+                menu::ALL_FILES
+            },
+            narrowing,
+            open: self
+                .menu
+                .as_ref()
+                .is_some_and(|menu| menu.live() && menu.kind == menu::Kind::Types),
+        })
+    }
+
+    /// The type radios the chip's list and the app menu's "File type" list
+    /// both show. Empty without filters.
+    fn type_items(&self) -> Vec<menu::Item> {
+        if self.type_filters().is_empty() {
+            return Vec::new();
+        }
+        let active = self
+            .active_type_index()
+            .filter(|_| self.showing == Showing::Filtered);
+        menu::type_items(
+            self.type_filters()
+                .iter()
+                .map(|filter| filter.name.as_str()),
+            active,
+        )
+    }
+
+    /// A click on the type chip: the dialog's filters, hanging from it.
+    fn open_types_menu(&mut self, chip: egui::Rect) {
+        let items = self.type_items();
+        if items.is_empty() {
+            return;
+        }
+        // One menu at a time: this replaces whichever was up.
+        self.menu = Some(Menu::types(chip, items));
+        self.clicks.reset();
     }
 
     /// Which dialog this is, when it is one.
@@ -8307,6 +8464,9 @@ impl App {
             }
 
             // ── What is shown ───────────────────────────────────────────────
+            // A file dialog with type filters has three rungs here rather than
+            // two ([`Showing`]); every other session keeps the toggle.
+            C::ToggleHidden if !self.type_filters().is_empty() => self.step_showing(now),
             C::ToggleHidden => {
                 self.mgr.show_hidden = !self.mgr.show_hidden;
                 let show = self.mgr.show_hidden;
@@ -9283,6 +9443,7 @@ impl App {
                 | Control::Tab(_)
                 | Control::Crumb(_)
                 | Control::FilterChip
+                | Control::TypeChip
                 | Control::YankChip
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
@@ -9360,6 +9521,7 @@ impl App {
             | Control::Tab(_)
             | Control::Crumb(_)
             | Control::FilterChip
+            | Control::TypeChip
             | Control::YankChip
             | Control::MenuItem(_)
             | Control::SubmenuItem(_)
@@ -9480,6 +9642,7 @@ impl App {
             position: if dir.is_empty() { 0 } else { dir.cursor() + 1 },
             rows: dir.len(),
             pick: self.pick_button(),
+            types: self.type_chip(),
         }
     }
 
@@ -9794,6 +9957,15 @@ impl App {
                 self.open_prompt(PromptKind::Filter);
                 rect
             }
+            // The type chip drops the dialog's filters out beneath it. Only
+            // ever reached with no menu up — while one is, the hit test
+            // answers for the menu alone — so a second press on the chip is
+            // spent putting its list away, as the app menu's button's is.
+            Control::TypeChip => {
+                let rect = geom.top.cluster.types.unwrap_or(egui::Rect::ZERO);
+                self.open_types_menu(rect);
+                rect
+            }
             // The clipboard chip is the pointer's `X`, down to the toast.
             Control::YankChip => {
                 let rect = geom.top.cluster.yank.unwrap_or(egui::Rect::ZERO);
@@ -10104,7 +10276,7 @@ impl App {
             sort: self.mgr.sort_by,
             reverse: self.mgr.sort_reverse,
         };
-        let items = menu::app_items(facts, &self.keymap, |command| {
+        let items = menu::app_items(facts, self.type_items(), &self.keymap, |command| {
             self.refusal(command).is_some()
         });
         // One menu at a time: this replaces a context menu that was up.
@@ -10265,6 +10437,8 @@ impl App {
         match action {
             A::Open => self.open_hovered(now),
             A::OpenWithMenu | A::Nothing | A::Run(_) => {}
+            A::FileType(index) => self.choose_type(index),
+            A::AllFiles => self.set_showing(Showing::AllFiles),
             A::OpenWith(index) => {
                 let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
                     return;
@@ -12694,6 +12868,7 @@ impl App {
                         // listed in the order they are drawn in.
                         .or_else(|| hit(cluster.selected, Control::SelectedChip))
                         .or_else(|| hit(cluster.visual, Control::VisualChip))
+                        .or_else(|| hit(cluster.types, Control::TypeChip))
                         .or_else(|| hit(cluster.git, Control::GitChip))
                         .or_else(|| hit(Some(cluster.counter), Control::Counter))
                         .or_else(|| hit(top_geom.ellipsis, Control::CrumbEllipsis))
@@ -13089,18 +13264,24 @@ impl App {
         // With the app menu up and nothing else held, the press is the menu's
         // button: it stays down for as long as the menu is out, and springs
         // back over the press's own release when the menu goes (see
-        // [`chrome::path_bar`], which also holds it down outright).
+        // [`chrome::path_bar`], which also holds it down outright). The type
+        // chip's list holds the type chip down the same way.
         let hot = over
             .map(|(control, _)| control)
             .filter(|control| *control != Control::PromptField);
-        let app_menu = self
+        let held = self
             .menu
             .as_ref()
-            .is_some_and(|menu| menu.live() && menu.kind == menu::Kind::App);
+            .filter(|menu| menu.live())
+            .and_then(|menu| match menu.kind {
+                menu::Kind::App => Some(Control::MenuButton),
+                menu::Kind::Types => Some(Control::TypeChip),
+                menu::Kind::Context => None,
+            });
         self.hovers.tick(
             hot.filter(|control| !(self.row_hover.parked() && matches!(control, Control::Row(..)))),
             hot.filter(|_| pointer.down && self.gesture().is_none())
-                .or(app_menu.then_some(Control::MenuButton)),
+                .or(held),
             now,
         );
         self.ripples.tick(now);
@@ -13153,6 +13334,7 @@ impl App {
                 Control::Row(..)
                 | Control::Crumb(_)
                 | Control::FilterChip
+                | Control::TypeChip
                 | Control::YankChip
                 | Control::Counter
                 | Control::SelectedChip
@@ -14486,7 +14668,9 @@ impl App {
             // A picker session says so on the frame it appears — see
             // [`picker_greeting`].
             if let Some(mode) = self.pick_mode() {
-                self.toasts.notice(picker_greeting(mode), Instant::now());
+                let filter = self.narrowing().map(|filter| filter.name.as_str());
+                self.toasts
+                    .notice(picker_line(mode, filter), Instant::now());
             }
         }
         if !self.logged_first_listing {
@@ -14770,7 +14954,9 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         A::Properties => C::Spot,
         A::Purge => C::DeletePermanently,
         A::Run(command) => command,
-        A::Restore | A::EmptyTrash | A::Nothing => return None,
+        // Choosing what a file dialog shows acts on no file, so no gate has
+        // anything to refuse it: it works in an archive as it does anywhere.
+        A::Restore | A::EmptyTrash | A::Nothing | A::FileType(_) | A::AllFiles => return None,
     })
 }
 
@@ -14937,6 +15123,67 @@ fn picker_greeting(mode: PickMode) -> &'static str {
         PickMode::Files => "Pick files — Space or Ctrl-click selects, Enter or Select chooses",
         PickMode::Folder => "Choose a folder — Enter walks in, Choose folder picks it",
         PickMode::Save => "Enter on a file replaces it, Save names a new one",
+    }
+}
+
+/// The longest greeting, in characters, that still gets the filter's clause.
+///
+/// The greeting is a notice, up for [`crate::toast::NOTICE_LIFETIME`]; a line
+/// much past seventy characters is not read in that time, and the half that
+/// goes unread is the half about how to answer the dialog.
+const GREETING_MAX: usize = 70;
+
+/// The greeting a picker session opens with: [`picker_greeting`], plus — in a
+/// dialog that opened narrowed by a type filter — `· Images only, . shows
+/// more`, when the whole line still fits under [`GREETING_MAX`]. When it would
+/// not, the greeting is left as it is: how to pick and cancel matters more
+/// than the filter, which the chip on the top row is saying anyway.
+fn picker_line(mode: PickMode, filter: Option<&str>) -> String {
+    let greeting = picker_greeting(mode);
+    match filter {
+        Some(name) => with_filter_clause(greeting, name),
+        None => greeting.to_string(),
+    }
+}
+
+/// `greeting · <name> only, . shows more`, or `greeting` alone when that
+/// would not fit under [`GREETING_MAX`]. Apart from [`picker_line`] so the
+/// rule can be tested on a greeting short enough to take the clause.
+fn with_filter_clause(greeting: &str, name: &str) -> String {
+    let line = format!("{greeting} · {name} only, . shows more");
+    if line.chars().count() < GREETING_MAX {
+        line
+    } else {
+        greeting.to_string()
+    }
+}
+
+/// How much of a directory a file dialog with type filters shows: the rungs
+/// `.` steps through in such a session, in place of the two-way hidden
+/// toggle it is everywhere else.
+///
+/// One value for the whole session rather than one per tab or per directory:
+/// the dialog asked for one kind of file, and a tab that quietly showed
+/// another would be a second answer to the same question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Showing {
+    /// Only the files the active filter admits, dotfiles hidden. Where every
+    /// such dialog opens.
+    Filtered,
+    /// Every file but the dotfiles.
+    AllFiles,
+    /// Every file.
+    Everything,
+}
+
+impl Showing {
+    /// The rung `.` goes to next, wrapping back round to the filter.
+    fn next(self) -> Showing {
+        match self {
+            Showing::Filtered => Showing::AllFiles,
+            Showing::AllFiles => Showing::Everything,
+            Showing::Everything => Showing::Filtered,
+        }
     }
 }
 
@@ -17438,6 +17685,381 @@ mod tests {
             picker_greeting(PickMode::Save),
             "Enter on a file replaces it, Save names a new one"
         );
+    }
+
+    // ── A dialog's type filters ─────────────────────────────────────────────
+
+    fn type_filter(name: &str, globs: &[&str], mimes: &[&str]) -> crate::cli::TypeFilter {
+        crate::cli::TypeFilter {
+            name: name.to_string(),
+            globs: globs.iter().map(|glob| glob.to_string()).collect(),
+            mimes: mimes.iter().map(|mime| mime.to_string()).collect(),
+        }
+    }
+
+    /// The two filters the dialogs below offer, in the order they offer them:
+    /// Markdown by type, Notes by a shouting glob.
+    fn two_filters() -> Vec<crate::cli::TypeFilter> {
+        vec![
+            type_filter("Markdown", &[], &["text/markdown"]),
+            type_filter("Notes", &["*.TXT"], &[]),
+        ]
+    }
+
+    /// A dialog that offered [`two_filters`], on notes, Markdown, a JSON file
+    /// neither admits, a dotfile of each kind and a folder — narrowed the way
+    /// [`App::assemble`] narrows one the portal opens (see
+    /// `a_dialog_with_filters_opens_narrowed` for that path itself).
+    ///
+    /// Markdown and JSON rather than pictures: they are text, so the preview
+    /// keeps out of the thumbnail cache, which is [`Fixture`]'s rule.
+    fn typed_picker(name: &str, mode: (bool, bool, bool)) -> Fixture {
+        let mut app = picker(name, &["a.txt", "b.txt", ".c.txt"], &["docs"], mode);
+        for extra in ["notes.md", ".draft.md", "data.json"] {
+            std::fs::write(app.files.join(extra), b"x").expect("write the fixture");
+        }
+        if let Some(chooser) = app.chooser.as_mut() {
+            chooser.filters = two_filters();
+        }
+        app.dir().load_blocking().expect("the listing reloads");
+        app.apply_showing();
+        app
+    }
+
+    /// The names on screen, in order.
+    fn shown(app: &App) -> Vec<String> {
+        app.tab()
+            .cwd
+            .dir
+            .rows()
+            .map(|(entry, _)| entry.name.clone())
+            .collect()
+    }
+
+    fn chip(app: &App) -> Option<(String, bool)> {
+        app.type_chip()
+            .map(|chip| (chip.label.to_string(), chip.narrowing))
+    }
+
+    /// A dialog the portal opened with filters is narrowed from its first
+    /// listing, to the filter it named, with the dotfiles hidden even though
+    /// this config shows them — before any frame has been drawn.
+    #[test]
+    fn a_dialog_with_filters_opens_narrowed() {
+        let root =
+            std::env::temp_dir().join(format!("df-fixture-typed-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _sandbox = Sandbox(root.clone());
+        let files = root.join("files");
+        std::fs::create_dir_all(files.join("docs")).expect("make the fixture");
+        for name in ["a.txt", ".b.txt", "c.md"] {
+            std::fs::write(files.join(name), b"x").expect("write the fixture");
+        }
+        let mut config = Config::default();
+        config.mgr.show_hidden = true;
+        let mut chooser = crate::cli::Chooser::new(root.join("out"));
+        chooser.filters = two_filters();
+        chooser.current_filter = 1;
+        let args = crate::cli::Args {
+            start: Some(files.clone()),
+            chooser: Some(chooser),
+            ..Default::default()
+        };
+        let waker = Waker {
+            ring: Arc::new(|| {}),
+            source: "test",
+        };
+        let mut app = App::assemble(
+            waker,
+            args,
+            config,
+            Theme::default(),
+            Registry::defaults(),
+            StateStore::load_from(root.join("state").join("state")),
+        );
+        settle(app.tabs.active_mut(), &app.scanner);
+        assert_eq!(shown(&app), ["docs", "a.txt"], "Notes, dotfiles hidden");
+        assert!(!app.mgr.show_hidden);
+        assert_eq!(chip(&app), Some(("Notes".to_string(), true)));
+        // The ladder's last rung shows the dotfile the config would have.
+        app.run(Command::ToggleHidden, 10, Instant::now());
+        app.run(Command::ToggleHidden, 10, Instant::now());
+        assert_eq!(shown(&app), ["docs", ".b.txt", "a.txt", "c.md"]);
+    }
+
+    /// `.` is a ladder in a dialog with filters — the filter, all files, all
+    /// files and the dotfiles, and round again — and says each rung. The chip
+    /// reads the filter's name on the first rung and "All files", dim, on the
+    /// other two.
+    #[test]
+    fn the_dot_key_climbs_the_type_ladder() {
+        let mut app = typed_picker("ladder", FILES);
+        let now = Instant::now();
+        assert_eq!(shown(&app), ["docs", "notes.md"]);
+        assert_eq!(chip(&app), Some(("Markdown".to_string(), true)));
+
+        app.run(Command::ToggleHidden, 10, now);
+        assert_eq!(toast(&app).as_deref(), Some("All files"));
+        assert_eq!(
+            shown(&app),
+            ["docs", "a.txt", "b.txt", "data.json", "notes.md"]
+        );
+        assert_eq!(chip(&app), Some(("All files".to_string(), false)));
+
+        app.run(Command::ToggleHidden, 10, now);
+        assert_eq!(toast(&app).as_deref(), Some("All files, hidden too"));
+        assert_eq!(
+            shown(&app),
+            [
+                "docs",
+                ".c.txt",
+                ".draft.md",
+                "a.txt",
+                "b.txt",
+                "data.json",
+                "notes.md"
+            ]
+        );
+        assert_eq!(chip(&app), Some(("All files".to_string(), false)));
+
+        app.run(Command::ToggleHidden, 10, now);
+        assert_eq!(toast(&app).as_deref(), Some("Markdown only"));
+        assert_eq!(shown(&app), ["docs", "notes.md"]);
+        assert_eq!(chip(&app), Some(("Markdown".to_string(), true)));
+        // The counter counts what is shown.
+        assert_eq!(app.cluster(now).rows, 2);
+    }
+
+    /// Without filters `.` is the toggle it always was — two states, no toast,
+    /// no type filter anywhere, and no chip — in a picker and out of one.
+    #[test]
+    fn the_dot_key_is_a_plain_toggle_without_filters() {
+        for mut app in [
+            picker("dot-plain-picker", &["a.txt", ".b.txt"], &[], FILE),
+            Fixture::new("dot-plain", &["a.txt", ".b.txt"]),
+        ] {
+            let now = Instant::now();
+            assert_eq!(shown(&app), ["a.txt"]);
+            app.run(Command::ToggleHidden, 10, now);
+            assert!(app.mgr.show_hidden);
+            assert_eq!(shown(&app), [".b.txt", "a.txt"]);
+            app.run(Command::ToggleHidden, 10, now);
+            assert!(!app.mgr.show_hidden);
+            assert_eq!(shown(&app), ["a.txt"]);
+            assert!(toast(&app).is_none());
+            assert!(app.tab().cwd.dir.types().is_none());
+            assert!(chip(&app).is_none());
+        }
+    }
+
+    /// Select-all takes the rows the filter shows and none it hides — nor the
+    /// dotfiles, which are hidden on the filter's rung too.
+    #[test]
+    fn select_all_takes_only_what_the_type_filter_shows() {
+        let mut app = typed_picker("typed-select-all", FILES);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        assert_eq!(selected(&app), ["docs", "notes.md"]);
+        app.dir().clear_selection();
+        app.run(Command::ToggleHidden, 10, now);
+        app.run(Command::SelectAll, 10, now);
+        assert_eq!(
+            selected(&app),
+            ["a.txt", "b.txt", "data.json", "docs", "notes.md"]
+        );
+    }
+
+    /// A rescan and a walk into another directory keep the rung: the filter
+    /// is the session's, and a listing built mid-session is built with it.
+    #[test]
+    fn the_type_ladder_survives_a_rescan_and_a_new_directory() {
+        let mut fixture = typed_picker("typed-keep", FILE);
+        let now = Instant::now();
+        for name in ["inner.md", "inner.txt"] {
+            std::fs::write(fixture.files.join("docs").join(name), b"x").expect("write");
+        }
+        let app: &mut App = &mut fixture;
+        app.tabs.active_mut().cwd.dir.begin_scan(&app.scanner);
+        settle(app.tabs.active_mut(), &app.scanner);
+        assert_eq!(
+            shown(app),
+            ["docs", "notes.md"],
+            "a rescan keeps the filter"
+        );
+
+        let docs = app.cwd().join("docs");
+        app.navigate(docs, now);
+        settle(app.tabs.active_mut(), &app.scanner);
+        assert_eq!(shown(app), ["inner.md"], "a new directory is narrowed too");
+
+        // …and a rung further up the ladder follows it as well.
+        app.run(Command::ToggleHidden, 10, now);
+        app.run(Command::Leave, 10, now);
+        settle(app.tabs.active_mut(), &app.scanner);
+        assert_eq!(
+            shown(app),
+            ["docs", "a.txt", "b.txt", "data.json", "notes.md"]
+        );
+    }
+
+    /// Choosing a filter — from the chip's list or the app menu's — makes it
+    /// the active one and puts the ladder back on its first rung, from
+    /// whichever rung it was on; "All files" is the second rung.
+    #[test]
+    fn choosing_a_filter_resets_the_ladder() {
+        let mut app = typed_picker("typed-choose", FILE);
+        let now = Instant::now();
+        app.run(Command::ToggleHidden, 10, now);
+        app.run(Command::ToggleHidden, 10, now);
+        assert_eq!(app.showing, Showing::Everything);
+
+        app.menu_action(menu::Action::FileType(1), 10, now);
+        assert_eq!(app.showing, Showing::Filtered);
+        assert_eq!(app.chooser.as_ref().map(|c| c.current_filter), Some(1));
+        assert_eq!(
+            shown(&app),
+            ["docs", "a.txt", "b.txt"],
+            "Notes, no dotfiles"
+        );
+        assert_eq!(chip(&app), Some(("Notes".to_string(), true)));
+
+        app.menu_action(menu::Action::AllFiles, 10, now);
+        assert_eq!(app.showing, Showing::AllFiles);
+        assert_eq!(chip(&app), Some(("All files".to_string(), false)));
+        // `.` climbs on from there, and comes back round to the filter that
+        // was chosen, not the one the dialog opened on.
+        app.run(Command::ToggleHidden, 10, now);
+        app.run(Command::ToggleHidden, 10, now);
+        assert_eq!(toast(&app).as_deref(), Some("Notes only"));
+        assert_eq!(chip(&app), Some(("Notes".to_string(), true)));
+    }
+
+    /// Where the frame draws the type chip, measured the way the frame
+    /// measures it.
+    fn type_chip_rect(app: &App) -> egui::Rect {
+        let measure = egui::Context::default();
+        let mut rect = None;
+        let _ = measure.run_ui(Default::default(), |ui| {
+            let cluster = app.cluster(Instant::now());
+            let geom =
+                chrome::cluster_geometry(ui.painter(), layout_of(app).path, &cluster, app.nerd);
+            rect = geom.types;
+        });
+        rect.expect("a dialog with filters draws its type chip")
+    }
+
+    /// The chip, clicked: its list drops out beneath it — every filter as a
+    /// radio with the active one ticked, then "All files" after a gap — the
+    /// chip stays down while it is out, and a row chosen from it is the
+    /// filter shown.
+    #[test]
+    fn the_type_chip_drops_its_list() {
+        let ctx = egui::Context::default();
+        let mut app = typed_picker("typed-chip", FILE);
+        run_frame(&mut app, &ctx, Vec::new());
+        let chip_rect = type_chip_rect(&app);
+        click_at(&mut app, &ctx, chip_rect.center());
+        assert_eq!(live_menu(&app), Some(menu::Kind::Types));
+        let menu = app.menu.as_ref().expect("up");
+        assert_eq!(menu.anchor, menu::Anchor::Below(chip_rect));
+        let rows: Vec<(&str, Option<bool>, bool)> = menu
+            .items
+            .iter()
+            .map(|item| (item.label.as_str(), item.checked, item.gap_before))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Markdown", Some(true), false),
+                ("Notes", Some(false), false),
+                ("All files", Some(false), true),
+            ]
+        );
+        assert!(app.type_chip().is_some_and(|chip| chip.open), "held down");
+
+        let notes = row_labelled(&app, "Notes");
+        let at = menu_geometry(&app, &ctx).rows[notes].center();
+        click_at(&mut app, &ctx, at);
+        assert_eq!(live_menu(&app), None);
+        assert_eq!(chip(&app), Some(("Notes".to_string(), true)));
+        assert_eq!(shown(&app), ["docs", "a.txt", "b.txt"]);
+
+        // At "All files" the list ticks that row and no filter.
+        app.run(Command::ToggleHidden, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let at = type_chip_rect(&app).center();
+        click_at(&mut app, &ctx, at);
+        let menu = app.menu.as_ref().expect("up again");
+        let ticked: Vec<&str> = menu
+            .items
+            .iter()
+            .filter(|item| item.checked == Some(true))
+            .map(|item| item.label.as_str())
+            .collect();
+        assert_eq!(ticked, ["All files"]);
+    }
+
+    /// The app menu lists the file types after Sort in a dialog with filters,
+    /// and nowhere else: not in a dialog without them, not in a file manager.
+    #[test]
+    fn the_app_menu_lists_file_types_only_with_filters() {
+        let file_type = |app: &mut App| -> Option<Vec<String>> {
+            app.run(Command::AppMenu, 10, Instant::now());
+            let menu = app.menu.as_ref().expect("up");
+            let at = menu
+                .items
+                .iter()
+                .position(|item| item.label == "File type")?;
+            assert_eq!(menu.items[at - 1].label, "Sort");
+            let rows = menu.items[at].submenu.as_ref().expect("a list");
+            let listed = rows
+                .iter()
+                .map(|item| match item.checked {
+                    Some(true) => format!("[x] {}", item.label),
+                    _ => item.label.clone(),
+                })
+                .collect();
+            app.close_menu(Instant::now());
+            Some(listed)
+        };
+        let mut app = typed_picker("typed-app-menu", FILE);
+        assert_eq!(
+            file_type(&mut app),
+            Some(vec![
+                "[x] Markdown".to_string(),
+                "Notes".to_string(),
+                "All files".to_string()
+            ])
+        );
+        let mut plain = picker("typed-app-menu-none", &["a.txt"], &[], FILE);
+        assert_eq!(file_type(&mut plain), None);
+        let mut manager = Fixture::new("typed-app-menu-manager", &["a.txt"]);
+        assert_eq!(file_type(&mut manager), None);
+    }
+
+    /// The greeting takes the filter's clause only when the whole line stays
+    /// under [`GREETING_MAX`] — and every dialog's greeting today is already
+    /// long enough that it never does, so each is left as it is.
+    #[test]
+    fn the_greeting_names_the_filter_only_when_it_fits() {
+        assert_eq!(
+            with_filter_clause("Pick one", "Images"),
+            "Pick one · Images only, . shows more"
+        );
+        assert_eq!(
+            with_filter_clause(&"x".repeat(60), "Images"),
+            "x".repeat(60),
+            "too long: the greeting alone"
+        );
+        for mode in [
+            PickMode::File,
+            PickMode::Files,
+            PickMode::Folder,
+            PickMode::Save,
+        ] {
+            assert_eq!(picker_line(mode, None), picker_greeting(mode));
+            assert_eq!(picker_line(mode, Some("Images")), picker_greeting(mode));
+        }
     }
 
     /// A primary-button press at `from` and three frames of travel to `to`,

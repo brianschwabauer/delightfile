@@ -16,6 +16,8 @@
 //!                              │
 //!                    sort::sort_order      (a permutation)
 //!                              │
+//!          TypeFilter::admits              (a file dialog's type filter)
+//!                              │
 //!            filter::filter_indices        (hidden toggle + `f` query)
 //!                              │
 //!                        DirState.view     ──▶  the rows the pane draws
@@ -23,7 +25,8 @@
 //!
 //! Entries are stored in the order the filesystem handed them over and are
 //! **never** permuted. Everything the user can change — the sort mode, the
-//! direction, `dir_first`, `.`, `f` — only recomputes `view`, a `Vec<usize>`.
+//! direction, `dir_first`, `.`, `f`, a file dialog's type filter — only
+//! recomputes `view`, a `Vec<usize>`.
 //! Three consequences, all of them the point:
 //!
 //! - Changing the sort of a 200k-entry directory moves 200k `usize`s, not 200k
@@ -53,6 +56,7 @@ pub mod mime;
 pub mod owner;
 mod scan;
 mod sort;
+mod typefilter;
 mod watch;
 
 #[cfg(test)]
@@ -73,6 +77,7 @@ pub use scan::{
     SCAN_WORKERS,
 };
 pub use sort::{alphabetical_cmp, natural_cmp, random_seed, sort_entries, sort_order, SortOptions};
+pub use typefilter::TypeFilter;
 pub use watch::{WatchEvent, Watcher, DEBOUNCE};
 
 use crate::config::MgrConfig;
@@ -120,7 +125,8 @@ pub enum LoadState {
 pub struct DirState {
     path: PathBuf,
     entries: Vec<Entry>,
-    /// Indices into `entries`, in draw order, after sort + hidden + filter.
+    /// Indices into `entries`, in draw order, after sort + type filter +
+    /// hidden + filter.
     view: Vec<usize>,
     /// Highlight spans per visible row, parallel to `view`. Kept beside the
     /// view rather than on the entry because they belong to the *query*, not to
@@ -155,6 +161,11 @@ pub struct DirState {
     selected: BTreeSet<String>,
     sort: SortOptions,
     show_hidden: bool,
+    /// A file dialog's active type filter, when a picker session has one on
+    /// (see [`TypeFilter`]). Seeded from [`MgrConfig::types`] like
+    /// `show_hidden` is from its own field, so a directory opened mid-session
+    /// is narrowed from its first batch rather than a frame later.
+    types: Option<TypeFilter>,
     filter: String,
     token: Option<ScanToken>,
     state: LoadState,
@@ -179,6 +190,7 @@ impl DirState {
             selected: BTreeSet::new(),
             sort: SortOptions::from_config(mgr),
             show_hidden: mgr.show_hidden,
+            types: mgr.types.clone(),
             filter: String::new(),
             token: None,
             state: LoadState::Idle,
@@ -395,6 +407,22 @@ impl DirState {
 
     pub fn toggle_hidden(&mut self) {
         self.set_show_hidden(!self.show_hidden);
+    }
+
+    /// The type filter narrowing this listing, if any.
+    pub fn types(&self) -> Option<&TypeFilter> {
+        self.types.as_ref()
+    }
+
+    /// Narrow the listing to the files `types` admits, or stop narrowing it.
+    /// The cursor stays on its file when that file is still shown, as it does
+    /// for every other change to the view.
+    pub fn set_types(&mut self, types: Option<TypeFilter>) {
+        if self.types == types {
+            return;
+        }
+        self.types = types;
+        self.rebuild();
     }
 
     pub fn filter(&self) -> &str {
@@ -737,7 +765,13 @@ impl DirState {
     /// is still running, a name that has not arrived is kept, and the cursor
     /// waits on a legal row for it (see [`DirState::missing_at`]).
     fn rebuild(&mut self) {
-        let order = sort_order(&self.entries, &self.sort);
+        let mut order = sort_order(&self.entries, &self.sort);
+        // The type filter goes first, before the hidden toggle and the `f`
+        // query, so the three compose as narrowings of one another and none
+        // of them can bring back a row another took away.
+        if let Some(types) = &self.types {
+            order.retain(|&index| self.entries.get(index).is_some_and(|e| types.admits(e)));
+        }
         let matched = filter::filter_indices(&self.entries, &order, &self.filter, self.show_hidden);
         self.view = matched.iter().map(|m| m.index).collect();
         self.spans = matched.into_iter().map(|m| m.spans).collect();

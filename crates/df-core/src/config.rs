@@ -654,6 +654,15 @@ pub struct MgrConfig {
     /// the old behaviour and is only right on a directory somebody else is
     /// writing to continuously.
     pub folder_size_ttl: u64,
+    /// The file-type filter every listing is narrowed to, when this session is
+    /// a file dialog that offered some (see [`crate::fs::TypeFilter`]).
+    ///
+    /// **Not a key in `[mgr]`.** No file sets it; the picker does, beside the
+    /// `show_hidden` it overrides, and for the same reason it lives here: this
+    /// struct is what every new listing is built from, so a directory entered
+    /// mid-session is narrowed from its first batch like it is hidden-filtered
+    /// from its first batch.
+    pub types: Option<crate::fs::TypeFilter>,
 }
 
 impl Default for MgrConfig {
@@ -671,6 +680,7 @@ impl Default for MgrConfig {
             view_scale: ViewScale::Compact,
             folder_sizes: true,
             folder_size_ttl: DEFAULT_FOLDER_SIZE_TTL,
+            types: None,
         }
     }
 }
