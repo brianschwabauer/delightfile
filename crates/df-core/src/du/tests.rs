@@ -847,8 +847,9 @@ fn an_approximate_record_is_never_reused_and_never_a_heavy_hitter() {
     assert_eq!(cache.reusable_under(Path::new("/synthetic"), now).len(), 1);
 }
 
-/// Reuse is opt-in, and `m u` does not opt in: a walk somebody asked for out
-/// loud counts everything.
+/// Reuse is opt-in: a walk that does not ask for it counts everything. The
+/// size column and `m u` both ask for it; a plain `DuScanner::request` does
+/// not.
 #[test]
 fn reuse_is_off_unless_asked_for() {
     assert!(!DuOptions::default().reuse_cache);

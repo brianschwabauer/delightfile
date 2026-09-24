@@ -242,9 +242,13 @@ pub struct DuOptions {
     /// approximation twice over: the freshness test cannot see a change three
     /// levels down (see [`super::cache`]), and a file hardlinked between a
     /// reused subtree and a walked one is counted in both, because the reused
-    /// side's inodes were never seen. The size column asks for it; "what's big"
-    /// mode ([`crate::du`]'s drill-down) does not, because a number somebody
-    /// asked for out loud has to be the real one.
+    /// side's inodes were never seen. The size column asks for it, and so does
+    /// "what's big" mode ([`crate::du`]'s drill-down): both would rather have
+    /// the answer on screen now than count again a subtree that was counted a
+    /// minute ago and still looks the same. What neither is given is an
+    /// estimate built on an estimate, because the records a reusing walk
+    /// leaves behind are marked approximate and never reused in turn (see
+    /// [`super::cache::DuCache::reusable_under`]).
     pub reuse_cache: bool,
 }
 

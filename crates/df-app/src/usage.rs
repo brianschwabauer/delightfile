@@ -32,12 +32,40 @@
 //! the mode opens (`delightful-ui` §5: intro motion on the palette's own out-quint) and then
 //! follows the number without a second animation — a bar that re-animated on
 //! every 100 ms update would be a column of twitching, not a measurement.
+//!
+//! ## Numbers that are there before the walk is
+//!
+//! The walk is the accurate answer, but it does not have to be the first one.
+//! The size column has usually been through here already, and the cache it
+//! filled remembers what each child weighed. That number may be stale, or
+//! partly folded in from other walks, and it is still far closer than the empty
+//! column the mode used to open on. So the mode opens seeded ([`Usage::seed`]).
+//! Every remembered child starts as an unsettled weight wearing its `≈`, the
+//! rows sort on those estimates in the same movement that opens the mode, and
+//! the walk corrects them in place.
+//!
+//! Two rules keep the correction from reading as a reset. A running total only
+//! ever raises an estimate: the walk climbs from zero, and a bar that collapsed
+//! to nothing and regrew while it did would be the column forgetting something
+//! it knew a moment ago. A `done` total replaces the estimate outright, larger
+//! or smaller, because that is the walk's answer and not its progress. The
+//! directory's own total follows the same two rules, and the walk's final total
+//! beats any seed.
+//!
+//! The walk leans on the cache as well
+//! ([`df_core::du::DuOptions::reusing_cache`]). A subtree counted recently and
+//! unchanged since is folded in whole instead of being counted again, which is
+//! what the size column already does, and what makes opening the mode on a
+//! parent you have just come up from nearly free. Such a subtree arrives as one
+//! `done` update, so its row settles at once on the remembered number. Only
+//! counted records are reused, never approximate ones, so an estimate is never
+//! built on another estimate (see `DuCache::reusable_under`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use df_core::du::{DuToken, DuUpdate};
+use df_core::du::{ChildTotal, DuToken, DuUpdate};
 use df_core::fs::SortOptions;
 
 /// How long the bars take to grow in when the mode opens.
@@ -64,7 +92,8 @@ pub const STAGGER_ROWS: usize = 24;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Weight {
     pub bytes: u64,
-    /// `false` while the subtree is still being counted — the `≈` rows.
+    /// `false` while the subtree is still being counted, or while the number
+    /// is still the cache's from before the walk reached it — the `≈` rows.
     pub settled: bool,
 }
 
@@ -102,18 +131,84 @@ impl Usage {
         }
     }
 
+    /// Fill in from what the cache remembers, before the walk has said
+    /// anything. Returns whether anything on screen changed.
+    ///
+    /// `children` is [`df_core::du::DuScanner::remembered_children`], which
+    /// already prefers a child's own newer record over what its parent's last
+    /// walk believed. `total` is the directory's own remembered total, if it
+    /// has one, however old. When it has none, the denominator is put together
+    /// from the parts: the remembered children plus `files_bytes`, the listing's
+    /// own non-directory rows, which the caller has and this does not. A rough
+    /// denominator draws bars of roughly the right length. A zero draws none at
+    /// all, and a column of empty tracks is the thing this exists to replace.
+    ///
+    /// **A seed is never settled**, even when the record it came from is fresh.
+    /// Only the walk settles a row, by reporting it `done` or by finishing, so a
+    /// row without its `≈` always means the walk has spoken for it. For the
+    /// same reason a seed never lands on top of the walk. A row the walk has
+    /// already settled keeps its number, a row it is still counting keeps the
+    /// larger of the two, and a mode whose walk has finished takes no seed.
+    pub fn seed(&mut self, children: &[ChildTotal], total: Option<u64>, files_bytes: u64) -> bool {
+        if self.done {
+            return false;
+        }
+        let mut changed = false;
+        let mut summed = files_bytes;
+        for child in children {
+            let bytes = child.totals.total_bytes;
+            summed = summed.saturating_add(bytes);
+            let weight = match self.weights.get(&child.name) {
+                Some(existing) if existing.settled => continue,
+                Some(existing) => Weight {
+                    bytes: existing.bytes.max(bytes),
+                    settled: false,
+                },
+                None => Weight {
+                    bytes,
+                    settled: false,
+                },
+            };
+            if self.weights.insert(child.name.clone(), weight) != Some(weight) {
+                changed = true;
+            }
+        }
+        let total = total.unwrap_or(summed);
+        if total > self.total {
+            self.total = total;
+            changed = true;
+        }
+        changed
+    }
+
     /// Take a batch of updates. Returns whether anything on screen changed.
     ///
     /// Only depth 0 and depth 1 are kept. Deeper directories are counted — that
     /// is what makes the depth-1 numbers true — but nothing on screen is about
     /// them, and storing a hundred thousand of them would be a megabyte of map
     /// nobody reads.
+    ///
+    /// A running total never lowers a number that is still an estimate. The
+    /// walk counts every subtree up from zero, so without this a seeded bar
+    /// (see [`Usage::seed`]) would drop to nothing the moment the walk first
+    /// mentioned its directory and then climb back to where it started. The
+    /// walk's `done` number is its answer, not its progress, so it replaces
+    /// whatever is there, smaller or larger, and settles the row. A walk's own
+    /// running totals only ever grow, so for a row that was never seeded the
+    /// larger of the two is simply the newer one.
     pub fn apply(&mut self, updates: &[DuUpdate]) -> bool {
         let mut changed = false;
         for update in updates {
             if update.depth == 0 {
-                if self.total != update.total_bytes {
-                    self.total = update.total_bytes;
+                // The same rule for the denominator: a seeded total holds until
+                // the walk has counted past it or has finished counting.
+                let total = if update.done {
+                    update.total_bytes
+                } else {
+                    self.total.max(update.total_bytes)
+                };
+                if self.total != total {
+                    self.total = total;
                     changed = true;
                 }
                 continue;
@@ -128,9 +223,21 @@ impl Usage {
             else {
                 continue;
             };
-            let weight = Weight {
-                bytes: update.total_bytes,
-                settled: update.done,
+            let weight = if update.done {
+                Weight {
+                    bytes: update.total_bytes,
+                    settled: true,
+                }
+            } else {
+                let estimate = self
+                    .weights
+                    .get(&name)
+                    .filter(|weight| !weight.settled)
+                    .map_or(0, |weight| weight.bytes);
+                Weight {
+                    bytes: update.total_bytes.max(estimate),
+                    settled: false,
+                }
             };
             if self.weights.get(&name) != Some(&weight) {
                 self.weights.insert(name, weight);
@@ -143,9 +250,20 @@ impl Usage {
     /// Mark the walk finished. Every row that is still `≈` settles with it —
     /// a directory the walk never reported is one it found nothing in, and it
     /// weighs what it weighs.
+    ///
+    /// The total is the walk's, exactly. It used to be the larger of the two,
+    /// which was harmless while every number here came from this walk, and is
+    /// wrong now that a seed can come from a record older than a big delete.
+    /// The finished walk is the one number in the mode that is not an estimate,
+    /// so it wins even when it is the smaller.
+    ///
+    /// A seeded row the walk never mentioned settles too, on the number the
+    /// cache had for it. The walk reports every child it descends into, so
+    /// that is a child it would not enter: one on another filesystem, or one
+    /// deleted since the cache saw it, which has no row left to draw on.
     pub fn finish(&mut self, total: u64) {
         self.done = true;
-        self.total = self.total.max(total);
+        self.total = total;
         for weight in self.weights.values_mut() {
             weight.settled = true;
         }
@@ -255,6 +373,139 @@ mod tests {
             SortOptions::default(),
             Instant::now(),
         )
+    }
+
+    /// One child as the cache remembers it.
+    fn child(name: &str, bytes: u64, fresh: bool) -> ChildTotal {
+        ChildTotal {
+            name: name.to_string(),
+            totals: df_core::du::DuTotals {
+                total_bytes: bytes,
+                apparent_bytes: bytes,
+                files: 1,
+                dirs: 1,
+            },
+            fresh,
+        }
+    }
+
+    fn estimate(bytes: u64) -> Option<Weight> {
+        Some(Weight {
+            bytes,
+            settled: false,
+        })
+    }
+
+    fn settled(bytes: u64) -> Option<Weight> {
+        Some(Weight {
+            bytes,
+            settled: true,
+        })
+    }
+
+    /// The mode opens with the cache's numbers already on the rows, every one
+    /// of them an estimate, and a denominator for the bars to be a share of.
+    #[test]
+    fn seeding_puts_the_remembered_numbers_up_as_estimates() {
+        let mut u = usage();
+        assert!(u.seed(
+            &[child("Work", 300, true), child("Music", 100, false)],
+            Some(1000),
+            0,
+        ));
+        // Fresh or stale, a seed wears its `≈`: only the walk settles a row.
+        assert_eq!(u.weight("Work"), estimate(300));
+        assert_eq!(u.weight("Music"), estimate(100));
+        assert_eq!(u.total(), 1000, "the directory's own remembered total");
+        assert!(
+            (u.fraction(300) - 0.3).abs() < 1e-6,
+            "the bars have a share"
+        );
+        assert!(
+            !u.seed(&[child("Work", 300, true)], Some(1000), 0),
+            "the same seed again changes nothing, so nothing repaints"
+        );
+    }
+
+    /// With no record for the directory itself, the denominator is the parts
+    /// the caller can name: the remembered children and the listing's files.
+    #[test]
+    fn a_seed_with_no_remembered_total_adds_up_the_children_and_the_files() {
+        let mut u = usage();
+        u.seed(&[child("a", 300, true), child("b", 200, false)], None, 50);
+        assert_eq!(u.total(), 550);
+        // Nothing remembered at all is still no denominator, not a bogus one.
+        let mut empty = usage();
+        assert!(!empty.seed(&[], None, 0));
+        assert_eq!(empty.total(), 0);
+    }
+
+    /// The walk climbs from zero. Until it has counted past a seed, or has
+    /// finished counting, the seed stands, so the bar does not collapse and
+    /// regrow as the walk works its way up to it.
+    #[test]
+    fn a_running_total_below_a_seed_leaves_the_seed_standing() {
+        let mut u = usage();
+        u.seed(&[child("Work", 300, false)], Some(1000), 0);
+        assert!(
+            !u.apply(&[
+                update("/home/b", 0, 400, false),
+                update("/home/b/Work", 1, 120, false),
+            ]),
+            "nothing on screen moved"
+        );
+        assert_eq!(u.weight("Work"), estimate(300));
+        assert_eq!(u.total(), 1000);
+
+        // Past the seed, the running number is the better estimate.
+        assert!(u.apply(&[
+            update("/home/b", 0, 1200, false),
+            update("/home/b/Work", 1, 350, false),
+        ]));
+        assert_eq!(u.weight("Work"), estimate(350));
+        assert_eq!(u.total(), 1200);
+    }
+
+    /// A subtree the walk has finished is its answer, not its progress: it
+    /// replaces the seed even when smaller, and the `≈` comes off.
+    #[test]
+    fn a_finished_subtree_replaces_its_seed_and_settles() {
+        let mut u = usage();
+        u.seed(&[child("Work", 300, true)], Some(1000), 0);
+        assert!(u.apply(&[update("/home/b/Work", 1, 120, true)]));
+        assert_eq!(u.weight("Work"), settled(120));
+        // And the walk's word stays put: a late seed does not unsettle it.
+        assert!(!u.seed(&[child("Work", 300, true)], None, 0));
+        assert_eq!(u.weight("Work"), settled(120));
+    }
+
+    /// A seeded total from before a big delete is larger than the directory
+    /// is now. The finished walk's total wins, and so does the root's own
+    /// finished update ahead of it.
+    #[test]
+    fn the_walks_final_total_beats_a_seed_that_was_too_large() {
+        let mut u = usage();
+        u.seed(&[child("gone", 4000, false)], Some(5000), 0);
+        u.apply(&[update("/home/b", 0, 800, false)]);
+        assert_eq!(u.total(), 5000, "still counting: the seed stands");
+        u.apply(&[update("/home/b", 0, 900, true)]);
+        assert_eq!(u.total(), 900, "the root is done counting");
+        u.finish(900);
+        assert_eq!(u.total(), 900);
+        assert_eq!(
+            u.weight("gone"),
+            settled(4000),
+            "a row the walk never mentioned settles with it"
+        );
+
+        // `finish` on its own, with no root update ahead of it, wins as well.
+        let mut v = usage();
+        v.seed(&[], Some(5000), 0);
+        v.finish(900);
+        assert_eq!(v.total(), 900);
+        assert!(!v.seed(&[child("late", 10, true)], Some(9000), 0));
+        assert_eq!(v.weight("late"), None, "a finished mode takes no seed");
+        assert_eq!(v.total(), 900);
     }
 
     /// The stream overwrites by name and only the two depths that are on screen

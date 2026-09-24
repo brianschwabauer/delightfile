@@ -8807,12 +8807,12 @@ impl App {
                 }
                 tab.sync_parent_marker();
             }
-            C::LinemodeSize => self.mgr.linemode = LineMode::Size,
-            C::LinemodePermissions => self.mgr.linemode = LineMode::Permissions,
-            C::LinemodeBtime => self.mgr.linemode = LineMode::Btime,
-            C::LinemodeMtime => self.mgr.linemode = LineMode::Mtime,
-            C::LinemodeOwner => self.mgr.linemode = LineMode::Owner,
-            C::LinemodeNone => self.mgr.linemode = LineMode::None,
+            C::LinemodeSize => self.choose_linemode(LineMode::Size, now),
+            C::LinemodePermissions => self.choose_linemode(LineMode::Permissions, now),
+            C::LinemodeBtime => self.choose_linemode(LineMode::Btime, now),
+            C::LinemodeMtime => self.choose_linemode(LineMode::Mtime, now),
+            C::LinemodeOwner => self.choose_linemode(LineMode::Owner, now),
+            C::LinemodeNone => self.choose_linemode(LineMode::None, now),
 
             // ── Sort ────────────────────────────────────────────────────────
             C::SortMtime => self.sort_by(SortBy::Mtime, false, Some(LineMode::Mtime)),
@@ -9035,6 +9035,23 @@ impl App {
             parent.dir.set_sort(sort);
         }
         tab.sync_parent_marker();
+    }
+
+    /// `m s`, `m p`, `m b`, `m m`, `m o`, `m n`, and the View menu's rows: the
+    /// right-hand column shows `mode`.
+    ///
+    /// Leaves "what's big" first, when it is on. The mode *is* a right-hand
+    /// column, a bar and a number that outrank the linemode for the same strip
+    /// of pixels (see `ui::Painting::row`), so a linemode command is the user
+    /// asking for a different column there, and the only way to give them one
+    /// is to end the mode. Before this, `m s` inside the mode changed a setting
+    /// nothing on screen was reading. The bars stayed where they were, and the
+    /// key looked broken until `m u` had been pressed to leave first. Now
+    /// `m s` from inside the mode is exactly `m u` and then `m s`: the old sort
+    /// comes back, the directory is re-read, and the column is the size column.
+    fn choose_linemode(&mut self, mode: LineMode, now: Instant) {
+        self.leave_usage(now);
+        self.mgr.linemode = mode;
     }
 
     // ── "What's big" mode (PLAN §7.3) ───────────────────────────────────────
@@ -9464,21 +9481,92 @@ impl App {
             return;
         }
         let dir = self.cwd();
+        // What the cache already knows, read before the walk is asked for so
+        // it is what was known *before* this walk and not a record the walk
+        // might, on a tiny directory, already have replaced. The directory's
+        // own total at any age: a stale number is a far better denominator
+        // than the zero the bars would otherwise be a share of.
+        let remembered = self
+            .du()
+            .remembered(&dir)
+            .map(|remembered| remembered.record.totals.total_bytes);
+        let mut children = self.du().remembered_children(&dir);
+        // …and what the size column has on screen right now. Its walk is about
+        // to be cancelled by the request below — same root — and a walk the
+        // cache only hears from when it finishes leaves nothing behind when it
+        // is cut short. The running numbers it had reached are still the best
+        // estimate of the rows it had reached, and they are the numbers the
+        // person was just looking at: a bar that started from them carries on
+        // from the column, where one that started from the cache alone would
+        // drop to nothing for every row the column had counted past the cache.
+        // `seed` keeps the larger of a name given twice, so a stale cache
+        // record never lowers a fresher running count.
+        let tab = self.tabs.active_index();
+        if self.folders.is_about(&dir, tab) {
+            for entry in self.tab().cwd.dir.entries() {
+                let Some(size) = self.folders.size(&entry.name) else {
+                    continue;
+                };
+                children.push(df_core::du::ChildTotal {
+                    name: entry.name.clone(),
+                    totals: df_core::du::DuTotals {
+                        total_bytes: size.bytes,
+                        apparent_bytes: size.bytes,
+                        files: 0,
+                        dirs: 0,
+                    },
+                    fresh: false,
+                });
+            }
+        }
+        // The files' part of the total, for when the directory itself has no
+        // record to take one from. Every entry, hidden or not, because the
+        // walk counts every entry.
+        let files_bytes = self
+            .tab()
+            .cwd
+            .dir
+            .entries()
+            .iter()
+            .filter(|entry| !entry.is_dir())
+            .fold(0u64, |sum, entry| sum.saturating_add(entry.len));
         // Depth 1: the mode shows this directory's children, and every level
         // below that is counted into them rather than listed.
-        let token = self.du().request(dir.clone(), 1);
+        //
+        // Reusing the cache: a subtree counted recently and unchanged since is
+        // folded in whole instead of counted again. Speed over exactness, the
+        // bargain the size column already makes, and the one that makes `m u`
+        // on a parent you have just walked up to nearly free. Approximate
+        // records are still refused (`DuCache::reusable_under`), so the walk
+        // never builds an estimate on an estimate.
+        let options = df_core::du::DuOptions::at_depth(1).reusing_cache();
+        let token = self.du().request_with(dir.clone(), options);
         let previous = SortOptions {
             by: self.mgr.sort_by,
             reverse: self.mgr.sort_reverse,
             ..self.sort()
         };
-        self.usage = Some(crate::usage::Usage::new(dir, token, previous, now));
+        let mut usage = crate::usage::Usage::new(dir, token, previous, now);
+        // The immediate estimate: the rows carry the remembered sizes from the
+        // first frame, and the walk corrects them as it goes.
+        let seeded = usage.seed(&children, remembered, files_bytes);
+        self.usage = Some(usage);
+        // Into `Entry::len` *before* the sort below, so the FLIP carries every
+        // row to its estimated place in one movement. After it, the rows would
+        // land in the old order's idea of "biggest" and then jump again a
+        // frame later when the first update arrived.
+        if seeded {
+            self.apply_usage_sizes();
+        }
         // Biggest first — which *is* the drill-down (PLAN §7.3). The sort is
         // the existing one, applied by the existing command, so the FLIP
-        // animation carries the rows to their new places exactly as `, S`
-        // would.
+        // animation carries the rows to their new places exactly as `, s`
+        // would. Not reversed: the size sort is biggest-first on its own
+        // (`df_core::fs::sort`, the way `ls -S` and yazi's are), and asking
+        // for it reversed here put the *smallest* thing at the top of a mode
+        // whose one job is to put the biggest there.
         self.flip_before = Some(self.last_layout.clone());
-        self.sort_by(SortBy::Size, true, None);
+        self.sort_by(SortBy::Size, false, None);
         self.toasts.notice("Measuring…", now);
     }
 
@@ -9494,9 +9582,9 @@ impl App {
         self.flip_before = Some(self.last_layout.clone());
         self.sort_by(usage.previous_sort.by, usage.previous_sort.reverse, None);
         // The mode's own walk superseded the size column's — same root, so
-        // `request` cancelled it — and the cache it filled is exactly what the
-        // column wants. Dropping this makes the next frame ask again, and the
-        // answer is already sitting in the cache.
+        // `request_with` cancelled it — and the cache it filled is exactly
+        // what the column wants. Dropping this makes the next frame ask again,
+        // and the answer is already sitting in the cache.
         //
         // **Before the rescan, not after.** `rescan` looks at this state to
         // decide whether the directory it is re-reading is one being measured;
@@ -18593,6 +18681,38 @@ mod tests {
             "the folder menu opened in the trash"
         );
         assert_eq!(app.tab().cwd.dir.cursor(), 1, "the cursor moved");
+    }
+
+    /// A linemode key inside "what's big" leaves the mode and then shows its
+    /// column. The mode owns the right-hand column, so an `m s` that only
+    /// changed the setting behind it changed nothing on screen, and the key
+    /// looked broken until `m u` had been pressed to get out first.
+    #[test]
+    fn a_linemode_command_leaves_the_usage_mode() {
+        let mut app = Fixture::with_folders("usage-linemode", &["a.txt"], &["sub"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        // Away from size, so the assertion below is about the command and not
+        // about a default that already said so.
+        app.run(Command::LinemodeMtime, 10, Instant::now());
+        let before = (app.mgr.sort_by, app.mgr.sort_reverse);
+
+        app.run(Command::DiskUsage, 10, Instant::now());
+        assert!(app.usage.is_some(), "the mode is on");
+        assert_eq!(
+            (app.mgr.sort_by, app.mgr.sort_reverse),
+            (SortBy::Size, false),
+            "biggest first: the size sort's own order, not its reverse"
+        );
+
+        app.run(Command::LinemodeSize, 10, Instant::now());
+        assert!(app.usage.is_none(), "the linemode command left the mode");
+        assert_eq!(app.mgr.linemode, LineMode::Size);
+        assert_eq!(
+            (app.mgr.sort_by, app.mgr.sort_reverse),
+            before,
+            "leaving put the old sort back, as `m u` would have"
+        );
     }
 
     /// The rows are the app's state as it opens: the ticks are the view and

@@ -353,6 +353,15 @@ pub(crate) struct GitMark {
 pub(crate) struct RowColumns {
     /// The widest thing the size column can ever hold.
     pub size: f32,
+    /// The widest number "what's big" can put beside a bar, `≈` and all.
+    ///
+    /// The bar is placed just left of the number column, so while that column
+    /// was as wide as each row's own text, every bar's right edge sat somewhere
+    /// different: `≈4.2 MB` pushed its bar further left than `12.0 KB` did, and
+    /// a column whose whole job is to be compared by eye had no common edge to
+    /// compare against. Reserved at this width, the numbers right-align inside
+    /// one strip and every track starts and ends at the same x.
+    pub usage: f32,
     /// How big this listing's rows are drawn ([`Scale`]).
     ///
     /// It rides along here rather than as a tenth argument to [`Painting::row`]
@@ -885,7 +894,25 @@ impl Painting<'_> {
                     .x
             })
             .fold(0.0, f32::max);
-        RowColumns { size, scale }
+        // The same derivation as the size column's: the strings come from the
+        // function that draws them, so the `≈` is measured as the glyph it is
+        // rather than assumed to be free.
+        let usage = [true, false]
+            .into_iter()
+            .map(|estimate| {
+                let widest = crate::usage::RowUsage {
+                    fraction: 0.0,
+                    bytes: WIDEST_DIRECTORY_BYTES,
+                    estimate,
+                    growth: 0.0,
+                };
+                painter
+                    .layout_no_wrap(widest.label(), font.clone(), self.palette.overlay1)
+                    .size()
+                    .x
+            })
+            .fold(0.0, f32::max);
+        RowColumns { size, usage, scale }
     }
 
     /// A directory listing's rows.
@@ -1064,12 +1091,24 @@ impl Painting<'_> {
                     // A directory's weight comes from the walk; a file's is
                     // simply its own length, which is known and final from the
                     // moment the row was scanned.
+                    //
+                    // A directory the walk has not reached and nothing
+                    // remembered is still counting, whatever its `len` says:
+                    // its `0 B` is the stat size, not a measurement, and a
+                    // number that is about to be replaced wears the `≈` like
+                    // every other one that is. Once the walk has finished it
+                    // is a directory the walk never entered, and the zero is
+                    // as settled as it is going to get.
                     let weight = usage.weight(&entry.name);
                     let bytes = weight.map(|w| w.bytes).unwrap_or(entry.len);
+                    let estimate = match weight {
+                        Some(w) => !w.settled,
+                        None => entry.is_dir() && !usage.done,
+                    };
                     crate::usage::RowUsage {
                         fraction: usage.fraction(bytes),
                         bytes,
-                        estimate: weight.is_some_and(|w| !w.settled),
+                        estimate,
                         growth: usage.growth(index.saturating_sub(first), self.now),
                     }
                 }),
@@ -1171,12 +1210,19 @@ impl Painting<'_> {
                 .and_then(|folders| folders.label(&entry.name))
                 .unwrap_or_else(|| linemode_text(entry, linemode)),
         };
-        // …but the *reservation* is fixed, and only in the size linemode: that
-        // is the one whose text changes under you while a directory is being
-        // measured. A permission string and a timestamp are the same width on
-        // every row already, and the two modes that take the column over
-        // (`usage`, `note`) do their own arithmetic below.
-        let reserved = if usage.is_none() && note.is_none() && linemode == LineMode::Size {
+        // …but the *reservation* is fixed, in the size linemode and in the
+        // "what's big" column: those are the two whose text changes under you
+        // while a directory is being measured. A permission string and a
+        // timestamp are the same width on every row already, and a virtual
+        // listing's `note` does its own arithmetic.
+        //
+        // The usage column has a second reason. Its bar is placed from this
+        // width, so a reservation that varied with the row's number put the
+        // bars' right edges at a different x on every row; reserved, the
+        // numbers right-align in one strip and the bars line up to be compared.
+        let reserved = if usage.is_some() {
+            columns.usage
+        } else if note.is_none() && linemode == LineMode::Size {
             columns.size
         } else {
             0.0
@@ -1224,8 +1270,10 @@ impl Painting<'_> {
             width.max(reserved) + LINEMODE_GAP
         };
 
-        // The bar, immediately left of its number, so the column reads as one
-        // measurement rather than as a graphic and a caption.
+        // The bar, immediately left of the number's reserved strip, so the
+        // column reads as one measurement rather than as a graphic and a
+        // caption. Against the strip and not the number itself, so a short
+        // number leaves a little air on its left rather than moving its bar.
         let mode_width = match &usage {
             None => mode_width,
             Some(usage) => {
