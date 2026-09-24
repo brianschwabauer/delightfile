@@ -800,6 +800,35 @@ struct Geom<'a> {
     prompt: Option<&'a chrome::FieldGeom>,
     /// The help sheet's card, while it is up.
     help: Option<egui::Rect>,
+    /// The hint strip that answers the pointer — the open card's, or the help
+    /// sheet's when no card is over it — and where each hint was drawn.
+    hints: &'a [chrome::Hint],
+    hint_rects: &'a [egui::Rect],
+}
+
+/// A card's hint strip as this frame laid it out: its hints, and where each one
+/// that fitted went ([`chrome::hint_rects`]). Measured before the hit test and
+/// painted from the same numbers, so a press lands on the hint it is seen to.
+struct HintStrip {
+    hints: Vec<chrome::Hint>,
+    rects: Vec<egui::Rect>,
+}
+
+impl HintStrip {
+    fn measure(painter: &egui::Painter, card: egui::Rect, hints: Vec<chrome::Hint>) -> HintStrip {
+        let rects = chrome::hint_rects(painter, chrome::hint_rect(card), &hints);
+        HintStrip { hints, rects }
+    }
+
+    /// The hint under `pos` that a press would run. An inert one is no
+    /// control: the pointer over it is over the card and nothing else.
+    fn hit(&self, pos: egui::Pos2) -> Option<Control> {
+        self.hints
+            .iter()
+            .zip(&self.rects)
+            .position(|(hint, rect)| hint.command.is_some() && rect.contains(pos))
+            .map(Control::Hint)
+    }
 }
 
 impl Geom<'_> {
@@ -5594,6 +5623,14 @@ impl App {
             self.overlay_text(chord);
             return;
         };
+        self.overlay_command(command, page, now);
+    }
+
+    /// What a command does on the open surface: a key's, once the registry
+    /// has matched it, and a hint's on the card's strip, pressed by the
+    /// pointer ([`chrome::Hint`]). One match for both, so a hint cannot do
+    /// something its key does not.
+    fn overlay_command(&mut self, command: Command, page: usize, now: Instant) {
         use Command as C;
         match command {
             // Only the overlay vocabulary is honoured. `Global` is still under
@@ -5626,6 +5663,21 @@ impl App {
             // The card's own `c c`: the focused row's value, not the file's
             // path — the browser's `c c` is the one that copies that.
             C::SpotCopyCell => self.copy_spot_cell(now),
+            // Three rows whose keys never reach this match: `overlay_literal`
+            // takes `Ctrl+s`, `p` and `a` before the registry is asked. A hint
+            // names them by the command their row gives them, so each is done
+            // here by the call its literal key makes.
+            C::CancelSearch => {
+                if let Some(search) = &mut self.search {
+                    search.cancel();
+                }
+            }
+            C::TaskPauseResume => self.pause_selected_task(now),
+            C::ConflictApplyAll => {
+                if let Some(Dialog::Conflict(dialog)) = &mut self.dialog {
+                    dialog.toggle_apply_all();
+                }
+            }
             other => log::trace!("`{}` is not an overlay key", other.id()),
         }
     }
@@ -5823,6 +5875,13 @@ impl App {
         }
         if self.spot.is_some() {
             self.spot_action(now);
+            return;
+        }
+        // The rename card's keyboard `Enter` is its line editor's submit (see
+        // `bulk_key`) and never reaches here. The pointer's does — the card's
+        // `Rename` button and its `Enter` hint — and it is the same submit.
+        if let Some(Dialog::Bulk(_)) = &self.dialog {
+            self.submit_bulk(now);
             return;
         }
         if let Some(Dialog::Confirm(_)) = &self.dialog {
@@ -7988,6 +8047,13 @@ impl App {
                     return;
                 }
             };
+        self.help_command(command);
+    }
+
+    /// What a command does on the help sheet: a key's, once `[help]` has
+    /// matched it, and the `Esc` hint's on the sheet's strip. One match for
+    /// both, as [`App::overlay_command`] is for the cards.
+    fn help_command(&mut self, command: Command) {
         // A page is what the *sheet* shows, measured the same way the pane
         // measures its own — see [`App::frame`], which publishes it before the
         // keys are routed for exactly this.
@@ -9613,6 +9679,21 @@ impl App {
         None
     }
 
+    /// The open card's hint strip, laid along the bottom of the card `overlay`
+    /// measured.
+    fn card_hints(
+        &self,
+        painter: &egui::Painter,
+        overlay: &Option<OverlayGeom>,
+    ) -> Option<HintStrip> {
+        let geometry = overlay.as_ref()?;
+        Some(HintStrip::measure(
+            painter,
+            geometry.card(),
+            overlay_hints(geometry, &self.dialog),
+        ))
+    }
+
     /// A click on a surface. Pressing a button *is* choosing it — the pointer
     /// does not get a two-step "select, then confirm" the keyboard does not
     /// have.
@@ -9723,6 +9804,7 @@ impl App {
                 | Control::PickButton
                 | Control::CancelButton
                 | Control::Close
+                | Control::Hint(_)
                 | Control::Toast
                 | Control::ToastAction
                 | Control::PromptField => {}
@@ -9807,6 +9889,7 @@ impl App {
             | Control::PickButton
             | Control::CancelButton
             | Control::Close
+            | Control::Hint(_)
             | Control::Toast
             | Control::ToastAction
             | Control::PromptField => {}
@@ -10552,6 +10635,24 @@ impl App {
                     rect
                 }
             },
+            // A hint on the strip: what its key runs, through the match the
+            // key itself goes through, so a refusal or a toast is the key's.
+            // The card's strip when a card is up, as for the `×`.
+            Control::Hint(index) => {
+                let rect = geom
+                    .hint_rects
+                    .get(index)
+                    .copied()
+                    .unwrap_or(egui::Rect::ZERO);
+                if let Some(command) = geom.hints.get(index).and_then(|hint| hint.command) {
+                    if geom.overlay.is_some() {
+                        self.overlay_command(command, geom.page, now);
+                    } else {
+                        self.help_command(command);
+                    }
+                }
+                rect
+            }
             // The yank tray (PLAN §7.1): `Clear` is the pointer's `X`, a row
             // goes to the file it names, and the `×` takes that file back out.
             Control::YankClear => {
@@ -13368,6 +13469,12 @@ impl App {
                 area.bottom() - ui::GAP,
             )
         });
+        // The hint strips along the bottoms of those two, measured before the
+        // hit test for the reason the breadcrumb is: the press and the paint
+        // read one set of rects.
+        let mut card_hints = self.card_hints(&painter, &overlay);
+        let mut help_hints =
+            help_card.map(|card| HintStrip::measure(&painter, card, HELP_HINTS.to_vec()));
 
         let over = pointer.at.and_then(|p| {
             // The menu is over everything, a modal card included: it is the
@@ -13394,19 +13501,28 @@ impl App {
             }
             // A modal surface takes the pointer with the keyboard: nothing
             // behind the scrim is hoverable, so a stray click cannot move the
-            // cursor under a question about the row it was on.
+            // cursor under a question about the row it was on. The card's
+            // hint strip is on the card, below everything else on it.
             if let Some(overlay) = &overlay {
-                return overlay.hit(p).map(|control| (control, p));
+                return overlay
+                    .hit(p)
+                    .or_else(|| card_hints.as_ref().and_then(|strip| strip.hit(p)))
+                    .map(|control| (control, p));
             }
-            // The help sheet is a surface like any other: its `×` is the one
-            // thing in it to click, and everything else under its scrim —
-            // the top row included, now that its filter is typed in the card's
-            // own heading — is inert while it is up. Without this the pointer
-            // reached straight through the card and moved the cursor in the
-            // listing behind it.
+            // The help sheet is a surface like any other: its `×` and its
+            // strip's `Esc` are the things in it to click, and everything else
+            // under its scrim — the top row included, now that its filter is
+            // typed in the card's own heading — is inert while it is up.
+            // Without this the pointer reached straight through the card and
+            // moved the cursor in the listing behind it.
             if let Some(card) = help_card {
-                let close = chrome::close_button_rect(card);
-                return close.contains(p).then_some((Control::Close, p));
+                if chrome::close_button_rect(card).contains(p) {
+                    return Some((Control::Close, p));
+                }
+                return help_hints
+                    .as_ref()
+                    .and_then(|strip| strip.hit(p))
+                    .map(|control| (control, p));
             }
             // The rename card floats over the row it renames and over part of
             // its neighbours, and what it covers is not clickable through it.
@@ -13694,11 +13810,13 @@ impl App {
                         // first and leaves the card up.
                         overlay =
                             self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+                        card_hints = self.card_hints(&painter, &overlay);
                         dismissing = true;
                     }
                 } else if help_card.is_some_and(|card| !card.contains(p)) {
                     self.close_help();
                     help_card = None;
+                    help_hints = None;
                     dismissing = true;
                 }
             }
@@ -13734,6 +13852,9 @@ impl App {
             }
         }
 
+        // A card is hit-tested before the sheet, so when both are up the
+        // strip that answers is the card's.
+        let live_hints = card_hints.as_ref().or(help_hints.as_ref());
         let geom = Geom {
             layout: &layout,
             page,
@@ -13754,6 +13875,12 @@ impl App {
             tabs: &tab_widths,
             prompt: prompt_field.as_ref(),
             help: help_card,
+            hints: live_hints
+                .map(|strip| strip.hints.as_slice())
+                .unwrap_or_default(),
+            hint_rects: live_hints
+                .map(|strip| strip.rects.as_slice())
+                .unwrap_or_default(),
         };
 
         // A right click on the prompt itself opens nothing: the rename card
@@ -14129,6 +14256,7 @@ impl App {
                 | Control::PickButton
                 | Control::CancelButton
                 | Control::Close
+                | Control::Hint(_)
                 | Control::Toast
                 | Control::ToastAction
                 | Control::Action(_)
@@ -14911,15 +15039,31 @@ impl App {
                 &self.hovers,
                 &self.ripples,
             );
-            chrome::hints(
-                &paint,
-                chrome::hint_rect(*rect),
-                &[
-                    ("↑↓", "move"),
-                    ("PgUp PgDn", "page"),
-                    ("Esc", "clear / close"),
-                ],
-            );
+            let strip = match help_hints.take() {
+                Some(strip) => strip,
+                // A sheet a click opened this frame was not up to be measured
+                // with everything else.
+                None => HintStrip::measure(&painter, *rect, HELP_HINTS.to_vec()),
+            };
+            if overlay.is_none() {
+                chrome::hints(
+                    &paint,
+                    &strip.hints,
+                    &strip.rects,
+                    &self.hovers,
+                    &self.ripples,
+                );
+            } else {
+                // Under a modal card the sheet's strip is only words: the card
+                // has the pointer, and its own hints share these indices.
+                chrome::hints(
+                    &paint,
+                    &strip.hints,
+                    &strip.rects,
+                    &Hovers::new(),
+                    &Ripples::new(),
+                );
+            }
         }
 
         // An anchored prompt (`r`, `R`, the conflict rename) floats over the
@@ -14981,11 +15125,13 @@ impl App {
         // reading a dialog should not have to travel to the other end of the
         // window to find out what `Enter` does in it (PLAN §4). Not for a card
         // a click on its `×` closed this frame: its strip would outlive it.
-        if let Some(geometry) = overlay.as_ref().filter(|_| self.overlay_open()) {
+        if let Some(strip) = card_hints.as_ref().filter(|_| self.overlay_open()) {
             chrome::hints(
                 &paint,
-                chrome::hint_rect(geometry.card()),
-                &overlay_hints(geometry, &self.dialog),
+                &strip.hints,
+                &strip.rects,
+                &self.hovers,
+                &self.ripples,
             );
         }
 
@@ -15638,56 +15784,68 @@ fn op_toast(outcome: &df_core::ops::OpOutcome) -> (String, crate::toast::ToastKi
     (message, ToastKind::Notice)
 }
 
-/// What a modal surface's hint strip says while it owns the keyboard.
+/// What a modal surface's hint strip says while it owns the keyboard, and what
+/// a press on each hint runs.
 ///
 /// Keyed on the surface that is open rather than on a handful of booleans: the
 /// hints and the card are one thing, and a list that could describe a card that
-/// is not up is a list that will eventually describe the wrong one.
-fn overlay_hints(
-    overlay: &OverlayGeom,
-    dialog: &Option<Dialog>,
-) -> Vec<(&'static str, &'static str)> {
+/// is not up is a list that will eventually describe the wrong one. Each
+/// command is the one the key's row in the surface's own context gives it
+/// ([`App::overlay_stack`]); `Esc` is `overlay-close` in every one of them.
+fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::Hint> {
+    use chrome::Hint;
+    use Command as C;
     match overlay {
         // The mount card's own vocabulary, including the five `[pick]` has no
         // row for — which is exactly why they are listed here: a key that is
         // not on the help sheet has to be on the card or it may as well not
-        // exist.
+        // exist. With no row there is no command for a press to run, so
+        // those five are words: `overlay_literal` matches them by hand.
         OverlayGeom::Mounts(_) => vec![
-            ("Enter", "open"),
-            ("m", "mount"),
-            ("u", "unmount"),
-            ("e", "eject"),
-            ("c", "connect"),
-            ("r", "refresh"),
-            ("Esc", "close"),
+            Hint::new("Enter", "open", C::OverlaySubmit),
+            Hint::inert("m", "mount"),
+            Hint::inert("u", "unmount"),
+            Hint::inert("e", "eject"),
+            Hint::inert("c", "connect"),
+            Hint::inert("r", "refresh"),
+            Hint::new("Esc", "close", C::OverlayClose),
         ],
         // Every key the spot card answers to, including the two df-core's
-        // `[spot]` table has no row for, for the same reason.
+        // `[spot]` table has no row for, for the same reason — and, for the
+        // same reason, `Space` has no command to run.
         OverlayGeom::Spot(_) => vec![
-            ("↑↓", "row"),
-            ("←→", "previous / next file"),
-            ("⇧←→", "permission bit"),
-            ("Space", "toggle / hash"),
-            ("Tab / Esc", "close"),
+            Hint::inert("↑↓", "row"),
+            Hint::inert("←→", "previous / next file"),
+            Hint::inert("⇧←→", "permission bit"),
+            Hint::inert("Space", "toggle / hash"),
+            Hint::inert("Tab / Esc", "close"),
         ],
-        OverlayGeom::Finder(_) => vec![("↑↓", "move"), ("Enter", "run"), ("Esc", "close")],
+        OverlayGeom::Finder(_) => vec![
+            Hint::inert("↑↓", "move"),
+            Hint::new("Enter", "run", C::OverlaySubmit),
+            Hint::new("Esc", "close", C::OverlayClose),
+        ],
         OverlayGeom::Search(_) => vec![
-            ("↑↓", "move"),
-            ("Enter", "go there"),
+            Hint::inert("↑↓", "move"),
+            Hint::new("Enter", "go there", C::OverlaySubmit),
             // `⟷` and not the shorter `↔`, here and on the help sheet: no
             // face the program ships draws `↔`, so it would be a box
             // (`icons`' glyph test holds the line).
-            ("Tab", "names ⟷ contents"),
-            ("Ctrl+s", "stop"),
-            ("Esc", "close"),
+            Hint::new("Tab", "names ⟷ contents", C::SearchToggle),
+            Hint::new("Ctrl+s", "stop", C::CancelSearch),
+            Hint::new("Esc", "close", C::OverlayClose),
         ],
-        OverlayGeom::Picker(_, _) => vec![("↑↓", "choose"), ("Enter", "open"), ("Esc", "close")],
+        OverlayGeom::Picker(_, _) => vec![
+            Hint::inert("↑↓", "choose"),
+            Hint::new("Enter", "open", C::OverlaySubmit),
+            Hint::new("Esc", "close", C::OverlayClose),
+        ],
         OverlayGeom::Panel(_, _, _) => vec![
-            ("↑↓", "select"),
-            ("p", "pause"),
-            ("x", "cancel"),
-            ("Enter", "inspect"),
-            ("w / Esc", "close"),
+            Hint::inert("↑↓", "select"),
+            Hint::new("p", "pause", C::TaskPauseResume),
+            Hint::new("x", "cancel", C::TaskCancel),
+            Hint::new("Enter", "inspect", C::TaskInspect),
+            Hint::inert("w / Esc", "close"),
         ],
         OverlayGeom::Confirm(_) | OverlayGeom::Conflict(_) | OverlayGeom::Bulk(_) => match dialog {
             // The one card with no strip. It is a question and two buttons,
@@ -15697,16 +15855,16 @@ fn overlay_hints(
             // keys themselves (`y`, `n`, the arrows) all still work.
             Some(Dialog::Confirm(_)) => Vec::new(),
             Some(Dialog::Bulk(_)) => vec![
-                ("Tab / ↑↓", "next field"),
-                ("Enter", "rename"),
-                ("Esc", "cancel"),
+                Hint::inert("Tab / ↑↓", "next field"),
+                Hint::new("Enter", "rename", C::OverlaySubmit),
+                Hint::new("Esc", "cancel", C::OverlayClose),
             ],
             Some(Dialog::Conflict(_)) => vec![
-                ("↑↓", "choose"),
-                ("o s r", "overwrite / skip / rename"),
-                ("a", "apply to all"),
-                ("Enter", "apply"),
-                ("Esc", "cancel the paste"),
+                Hint::inert("↑↓", "choose"),
+                Hint::inert("o s r", "overwrite / skip / rename"),
+                Hint::new("a", "apply to all", C::ConflictApplyAll),
+                Hint::new("Enter", "apply", C::OverlaySubmit),
+                Hint::new("Esc", "cancel the paste", C::OverlayClose),
             ],
             // The geometry outliving its dialog by a frame is not a state the
             // program can be in, but a card with no hints reads better than a
@@ -15715,6 +15873,14 @@ fn overlay_hints(
         },
     }
 }
+
+/// The help sheet's strip. `Esc` is `[help]`'s `escape` — clear the filter, or
+/// close — and the two ranges only describe.
+const HELP_HINTS: [chrome::Hint; 3] = [
+    chrome::Hint::inert("↑↓", "move"),
+    chrome::Hint::inert("PgUp PgDn", "page"),
+    chrome::Hint::new("Esc", "clear / close", Command::Escape),
+];
 
 /// "1 item" / "3 items". The same wording df-core's jobs use, so a toast about
 /// a paste and a toast about a link count the same way.
@@ -17252,16 +17418,18 @@ mod tests {
             &OverlayGeom::Bulk(empty.clone()),
             &Some(Dialog::Bulk(Box::new(bulk))),
         );
-        assert!(bulk.iter().any(|(k, _)| k.contains("Enter")));
-        assert!(bulk.iter().any(|(k, _)| k.contains("Esc")));
+        assert!(bulk.iter().any(|hint| hint.keys.contains("Enter")));
+        assert!(bulk.iter().any(|hint| hint.keys.contains("Esc")));
         // A card with no dialog behind it says nothing rather than somebody
         // else's keys.
         assert!(overlay_hints(&OverlayGeom::Confirm(empty), &None).is_empty());
 
         let panel = overlay_hints(&OverlayGeom::Panel(nowhere, Vec::new(), Vec::new()), &None);
-        assert!(panel.iter().any(|(k, what)| *k == "x" && *what == "cancel"));
+        assert!(panel
+            .iter()
+            .any(|hint| hint.keys == "x" && hint.label == "cancel"));
         let picker = overlay_hints(&OverlayGeom::Picker(nowhere, Vec::new()), &None);
-        assert!(picker.iter().any(|(_, what)| *what == "open"));
+        assert!(picker.iter().any(|hint| hint.label == "open"));
         // The spot's hints cover the two keys df-core's `[spot]` table has no
         // row for, which is the only place they are ever advertised.
         let spot = overlay_hints(
@@ -17274,9 +17442,9 @@ mod tests {
             }),
             &None,
         );
-        assert!(spot.iter().any(|(k, _)| k.contains("Space")));
-        assert!(spot.iter().any(|(k, _)| k.contains('⇧')));
-        assert!(spot.iter().any(|(k, _)| k.contains("Tab")));
+        assert!(spot.iter().any(|hint| hint.keys.contains("Space")));
+        assert!(spot.iter().any(|hint| hint.keys.contains('⇧')));
+        assert!(spot.iter().any(|hint| hint.keys.contains("Tab")));
         // The mount card advertises the five verbs `[pick]` has no row for.
         let mounts = overlay_hints(
             &OverlayGeom::Mounts(crate::mounts::Geometry {
@@ -17290,7 +17458,7 @@ mod tests {
         );
         let keys: Vec<String> = mounts
             .iter()
-            .map(|(k, what)| format!("{k} {what}"))
+            .map(|hint| format!("{} {}", hint.keys, hint.label))
             .collect();
         assert_eq!(
             keys.join(" · "),
@@ -20586,5 +20754,353 @@ mod tests {
         };
         back(&mut app);
         assert_eq!(app.scale_of(), ViewScale::Compact);
+    }
+
+    // ── A card's hints, pressed ─────────────────────────────────────────────
+
+    /// The strip the frame lays along `card`, measured as the frame measures
+    /// it.
+    fn strip_of(card: egui::Rect, hints: &[chrome::Hint]) -> HintStrip {
+        let measure = egui::Context::default();
+        let mut out = None;
+        let _ = measure.run_ui(Default::default(), |ui| {
+            out = Some(HintStrip::measure(ui.painter(), card, hints.to_vec()));
+        });
+        out.expect("measured")
+    }
+
+    /// The help sheet's card, where the frame puts it.
+    fn help_card(app: &App) -> egui::Rect {
+        chrome::help_rect(
+            screen(),
+            layout_of(app).path.bottom() + ui::GAP,
+            screen().bottom() - ui::GAP,
+        )
+    }
+
+    /// Where the open card's hint `keys` is, and its index on the strip.
+    fn card_hint(app: &App, keys: &str) -> (usize, egui::Rect) {
+        let geometry = overlay_of(app).expect("a card");
+        let strip = strip_of(geometry.card(), &overlay_hints(&geometry, &app.dialog));
+        let index = strip
+            .hints
+            .iter()
+            .position(|hint| hint.keys == keys)
+            .unwrap_or_else(|| panic!("no `{keys}` hint"));
+        let rect = *strip
+            .rects
+            .get(index)
+            .unwrap_or_else(|| panic!("`{keys}` did not fit on the strip"));
+        (index, rect)
+    }
+
+    /// Every hint sits inside its card's strip, one after another with air
+    /// between: a press on one can never be read as a press on its neighbour.
+    /// The first starts at the strip's own edge, so its plate is concentric
+    /// with the card's corner, and a strip too narrow for them all drops the
+    /// ones that do not fit whole.
+    #[test]
+    fn hints_lie_inside_their_strip_and_do_not_overlap() {
+        let now = Instant::now();
+        let mut app = Fixture::with_folders("hint-rects", &["a.txt", "b.txt"], &["sub"]);
+        let check = |card: egui::Rect, hints: &[chrome::Hint], what: &str| {
+            let strip = chrome::hint_rect(card);
+            let measured = strip_of(card, hints);
+            assert!(!measured.rects.is_empty(), "{what}: nothing fitted");
+            assert!(measured.rects.len() <= hints.len());
+            assert!(
+                (measured.rects[0].left() - strip.left()).abs() < 1e-3,
+                "{what}: the first hint is off the strip's edge"
+            );
+            for rect in &measured.rects {
+                assert!(
+                    strip.contains_rect(*rect),
+                    "{what}: {rect:?} is off the strip"
+                );
+                assert!(
+                    (rect.height() - chrome::HINT_ROW).abs() < 1e-3,
+                    "{what}: not the strip's height"
+                );
+            }
+            for pair in measured.rects.windows(2) {
+                assert!(
+                    pair[0].right() < pair[1].left(),
+                    "{what}: {:?} runs into {:?}",
+                    pair[0],
+                    pair[1]
+                );
+            }
+        };
+
+        app.run(Command::CommandPalette, 10, now);
+        let geometry = overlay_of(&app).expect("the palette");
+        check(
+            geometry.card(),
+            &overlay_hints(&geometry, &app.dialog),
+            "palette",
+        );
+        app.close_overlay(now);
+        app.run(Command::SearchName, 10, now);
+        let geometry = overlay_of(&app).expect("the search panel");
+        check(
+            geometry.card(),
+            &overlay_hints(&geometry, &app.dialog),
+            "search",
+        );
+        app.close_overlay(now);
+        app.run(Command::TasksShow, 10, now);
+        let geometry = overlay_of(&app).expect("the task panel");
+        check(
+            geometry.card(),
+            &overlay_hints(&geometry, &app.dialog),
+            "panel",
+        );
+        app.close_overlay(now);
+        let mounts = OverlayGeom::Mounts(crate::mounts::geometry(
+            screen(),
+            &crate::mounts::Card::new(),
+        ));
+        check(mounts.card(), &overlay_hints(&mounts, &None), "mounts");
+        check(help_card(&app), &HELP_HINTS, "help");
+
+        // A card too narrow for the whole strip keeps the hints that fit, in
+        // order, and not a word of the next one.
+        let narrow = egui::Rect::from_min_size(egui::pos2(40.0, 40.0), egui::vec2(160.0, 80.0));
+        let hints = overlay_hints(&mounts, &None);
+        let kept = strip_of(narrow, &hints);
+        assert!(kept.rects.len() < hints.len(), "all seven fitted in 160");
+        check(narrow, &hints, "narrow");
+    }
+
+    /// A hint runs what its key runs on that card: each command is the one
+    /// the key's row in the card's own context gives it, dispatched the way
+    /// the card dispatches a key. A single key with no command is a key that
+    /// context has no row for — matched by hand, so there is nothing for a
+    /// press to run — and everything else that is inert is a pair or a range.
+    #[test]
+    fn a_hint_runs_what_its_key_runs() {
+        let now = Instant::now();
+        let mut app = Fixture::with_folders("hint-commands", &["a.txt", "b.txt"], &["sub"]);
+        let check = |app: &App, stack: &ContextStack, hints: &[chrome::Hint], what: &str| {
+            for hint in hints {
+                let chord = df_core::keymap::parse_chord(&hint.keys.to_lowercase());
+                let dispatched = chord.as_ref().ok().map(|chord| {
+                    app.keymap.dispatch(
+                        &mut KeymapState::new(),
+                        stack,
+                        WhenFlags::NONE,
+                        *chord,
+                        now,
+                    )
+                });
+                match (hint.command, dispatched) {
+                    (Some(command), Some(dispatched)) => assert_eq!(
+                        dispatched,
+                        Dispatch::Match(command),
+                        "{what}: `{}` runs something else",
+                        hint.keys
+                    ),
+                    (Some(_), None) => panic!("{what}: `{}` is not one key", hint.keys),
+                    (None, Some(dispatched)) => assert_eq!(
+                        dispatched,
+                        Dispatch::NoMatch,
+                        "{what}: `{}` has a row, and no command",
+                        hint.keys
+                    ),
+                    (None, None) => {}
+                }
+            }
+        };
+        let card = |app: &mut App, what: &str| {
+            let geometry = overlay_of(app).unwrap_or_else(|| panic!("no {what}"));
+            let hints = overlay_hints(&geometry, &app.dialog);
+            check(app, &app.overlay_stack(), &hints, what);
+            app.close_overlay(now);
+        };
+
+        app.run(Command::CommandPalette, 10, now);
+        card(&mut app, "palette");
+        app.run(Command::SearchName, 10, now);
+        card(&mut app, "search");
+        app.run(Command::Spot, 10, now);
+        card(&mut app, "spot");
+        app.run(Command::TasksShow, 10, now);
+        card(&mut app, "panel");
+        // Built rather than opened, as `M` would start the udisks worker.
+        app.mounts = Some(crate::mounts::Card::new());
+        let mounts = overlay_hints(
+            &OverlayGeom::Mounts(crate::mounts::geometry(
+                screen(),
+                &crate::mounts::Card::new(),
+            )),
+            &None,
+        );
+        check(&app, &app.overlay_stack(), &mounts, "mounts");
+        app.mounts = None;
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Rename, 10, now);
+        card(&mut app, "bulk");
+        std::fs::write(app.files.join("sub").join("a.txt"), b"y").expect("write the source");
+        let plan = plan_paste(
+            &Clipboard::yank([app.files.join("sub").join("a.txt")]),
+            &app.files,
+            false,
+        )
+        .expect("a plan");
+        app.dialog = Some(Dialog::Conflict(Box::new(ConflictDialog::new(plan))));
+        app.sync_context();
+        card(&mut app, "conflict");
+        check(
+            &app,
+            &ContextStack::with(&[Context::Help]),
+            &HELP_HINTS,
+            "help",
+        );
+    }
+
+    /// The help sheet's `Esc` hint is its key: it clears a filter first, and
+    /// closes the sheet the next time — and ripples from where it was pressed.
+    #[test]
+    fn a_click_on_the_help_sheets_esc_hint_closes_it() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("hint-help", &["a.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::Help, 10, Instant::now());
+        app.help_query = "zz".to_string();
+        run_frame(&mut app, &ctx, Vec::new());
+        let strip = strip_of(help_card(&app), &HELP_HINTS);
+        let esc = strip
+            .hints
+            .iter()
+            .position(|hint| hint.keys == "Esc")
+            .expect("an Esc hint");
+        let at = strip.rects[esc].center();
+
+        click_at(&mut app, &ctx, at);
+        assert!(app.help.is_some(), "the first Esc closed the sheet");
+        assert!(app.help_query.is_empty(), "the first Esc left the filter");
+        assert!(
+            app.ripples
+                .splashes(Control::Hint(esc), Instant::now())
+                .count()
+                > 0,
+            "the hint took the press without a ripple"
+        );
+
+        click_at(&mut app, &ctx, at);
+        assert!(app.help.is_none(), "the Esc hint left the sheet up");
+    }
+
+    /// An inert hint is words: the pointer over it is over nothing, and a
+    /// press on it runs nothing, draws nothing, and leaves the card as it was.
+    #[test]
+    fn a_click_on_an_inert_hint_does_nothing() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("hint-inert", &["a.txt", "b.txt", "c.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::CommandPalette, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let (index, rect) = card_hint(&app, "↑↓");
+        let geometry = overlay_of(&app).expect("the palette");
+        let strip = strip_of(geometry.card(), &overlay_hints(&geometry, &app.dialog));
+        assert_eq!(strip.hit(rect.center()), None, "the words took the pointer");
+        let cursor = app.finder.as_ref().expect("the palette").cursor;
+
+        click_at(&mut app, &ctx, rect.center());
+        let finder = app.finder.as_ref().expect("the press closed the palette");
+        assert_eq!(
+            finder.cursor, cursor,
+            "the press moved the palette's cursor"
+        );
+        assert_eq!(
+            app.ripples
+                .splashes(Control::Hint(index), Instant::now())
+                .count(),
+            0,
+            "an inert hint rippled"
+        );
+        assert_eq!(app.tab().cwd.dir.selected_count(), 0);
+    }
+
+    /// The palette's `Enter` hint runs the highlighted row, as `Enter` does.
+    #[test]
+    fn a_click_on_the_finders_enter_hint_runs_the_highlighted_row() {
+        let ctx = egui::Context::default();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        let mut app = Fixture::new("hint-finder", &names);
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::CommandPalette, 10, Instant::now());
+        let finder = app.finder.as_mut().expect("the palette");
+        finder.cursor = finder
+            .hits
+            .iter()
+            .position(|hit| {
+                matches!(
+                    finder.pool[hit.index].choice,
+                    Choice::Run(Command::SelectAll)
+                )
+            })
+            .expect("select-all is in the palette");
+        run_frame(&mut app, &ctx, Vec::new());
+        let (_, enter) = card_hint(&app, "Enter");
+
+        click_at(&mut app, &ctx, enter.center());
+        assert!(app.finder.is_none(), "the palette stayed up");
+        assert_eq!(
+            app.tab().cwd.dir.selected_count(),
+            names.len(),
+            "the highlighted row did not run"
+        );
+    }
+
+    /// The bulk rename's `Enter` hint renames, and so does its `Rename`
+    /// button: the pointer's two ways of saying what the keyboard's `Enter`
+    /// says.
+    #[test]
+    fn the_bulk_cards_enter_hint_and_rename_button_both_rename() {
+        let ctx = egui::Context::default();
+        let names = ["a.txt", "b.txt"];
+        let mut app = Fixture::new("hint-bulk", &names);
+        let now = Instant::now();
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Rename, 10, now);
+        assert!(app.bulk_key(Chord::from_char('z').expect("z"), now));
+        run_frame(&mut app, &ctx, Vec::new());
+        let (_, enter) = card_hint(&app, "Enter");
+        click_at(&mut app, &ctx, enter.center());
+        assert!(app.dialog.is_none(), "the Enter hint left the card up");
+        assert!(
+            names.iter().any(|name| !app.files.join(name).exists()),
+            "the Enter hint renamed nothing"
+        );
+
+        // The listing the second card is built from is the one the rename
+        // left, not the one it started from.
+        let inner = &mut app.app;
+        settle(inner.tabs.active_mut(), &inner.scanner);
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Rename, 10, now);
+        assert!(app.bulk_key(Chord::from_char('y').expect("y"), now));
+        run_frame(&mut app, &ctx, Vec::new());
+        let Some(OverlayGeom::Bulk(geometry)) = overlay_of(&app) else {
+            panic!("no bulk card");
+        };
+        click_at(&mut app, &ctx, geometry.actions[1].center());
+        assert!(app.dialog.is_none(), "the Rename button left the card up");
+        let listed: Vec<String> = std::fs::read_dir(&app.files)
+            .expect("read the fixture")
+            .map(|entry| {
+                entry
+                    .expect("an entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            listed.iter().any(|name| name.contains('y')),
+            "the Rename button renamed nothing: {listed:?}"
+        );
     }
 }

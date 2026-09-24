@@ -24,6 +24,7 @@
 use std::sync::Arc;
 
 use df_core::fs::is_case_sensitive;
+use df_core::keymap::Command;
 
 use crate::help::{self, Help, HelpLine};
 use crate::hover::{pressed_rect, Hovers};
@@ -2784,54 +2785,158 @@ pub fn hint_rect(card: egui::Rect) -> egui::Rect {
     )
 }
 
-/// What the keys do now, along the bottom of the surface that owns them.
+/// One entry of a card's hint strip: a key, what it does on that card, and the
+/// command a press on the hint runs ([`Control::Hint`]).
+///
+/// The command is the one the key itself runs on that surface, read off
+/// df-core's table for the card's context, so the pointer's copy of a verb and
+/// the keyboard's cannot drift apart. `None` is a hint that only describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hint {
+    pub keys: &'static str,
+    pub label: &'static str,
+    pub command: Option<Command>,
+}
+
+impl Hint {
+    /// A hint the pointer can press: `keys` is one chord, and `command` is what
+    /// that chord runs on the card.
+    pub const fn new(keys: &'static str, label: &'static str, command: Command) -> Hint {
+        Hint {
+            keys,
+            label,
+            command: Some(command),
+        }
+    }
+
+    /// A hint that describes and does not do: two keys or a range (`↑↓`,
+    /// `Tab / Esc`), which no one press could stand for, or a key the card
+    /// matches by hand with no command behind it. No hover, no press, no hand.
+    pub const fn inert(keys: &'static str, label: &'static str) -> Hint {
+        Hint {
+            keys,
+            label,
+            command: None,
+        }
+    }
+}
+
+/// Where each hint goes along the strip `rect`, in order: its key and label
+/// with [`HINT_AIR`] either side, the strip's full height.
+///
+/// One function for the hit test and the paint, so a press lands on the hint
+/// it is seen to. A hint that does not fit is **dropped whole**, and so is
+/// everything after it, which is why this can be shorter than `hints`. The
+/// strip used to be clipped, which cut the last hint off mid-word — `Enter ope`
+/// — and a hint truncated into a different word is worse than no hint, because
+/// the reader has no way of telling that is what happened. The hints are in
+/// importance order already, so dropping from the end drops the least
+/// important thing on the strip.
+///
+/// The first rect starts at the strip's own edge, which is the card's padding
+/// in from the card's: a hover plate there is concentric with the card's
+/// corner (`delightful-ui` §15).
+pub fn hint_rects(painter: &egui::Painter, rect: egui::Rect, hints: &[Hint]) -> Vec<egui::Rect> {
+    let mut rects = Vec::with_capacity(hints.len());
+    let mut x = rect.left();
+    for hint in hints {
+        let width = HINT_AIR
+            + text_width(painter, hint.keys, key_font(HINT_FONT))
+            + HINT_KEY_GAP
+            + text_width(painter, hint.label, egui::FontId::proportional(HINT_FONT))
+            + HINT_AIR;
+        if x + width > rect.right() {
+            break;
+        }
+        rects.push(egui::Rect::from_min_max(
+            egui::pos2(x, rect.top()),
+            egui::pos2(x + width, rect.bottom()),
+        ));
+        x += width + HINT_SEP;
+    }
+    rects
+}
+
+/// What the keys do now, along the bottom of the surface that owns them, at
+/// the places [`hint_rects`] measured.
 ///
 /// On the overlay rather than on a strip of window chrome: a hint is about the
 /// card it belongs to, and the eye that is reading the card should not have to
 /// travel to the other end of the window to find out what `Enter` does there.
-/// A pair that does not fit is **dropped whole**, and so is everything after
-/// it. The strip used to be clipped, which cut the last hint off mid-word —
-/// `Enter ope` — and a hint that has been truncated into a different word is
-/// worse than no hint, because the reader has no way of telling that is what
-/// happened. The pairs are in importance order already, so dropping from the
-/// end drops the least important thing on the strip.
-pub fn hints(paint: &Painting<'_>, rect: egui::Rect, hints: &[(&str, &str)]) {
-    let painter = paint.painter;
-    let painter = painter.with_clip_rect(rect);
-    let mut x = rect.left();
-    for (keys, what) in hints {
-        let key_galley = painter.layout_no_wrap(
-            keys.to_string(),
-            key_font(HINT_FONT),
-            paint.palette.subtext0,
-        );
-        let what_galley = painter.layout_no_wrap(
-            what.to_string(),
-            egui::FontId::proportional(HINT_FONT),
-            paint.palette.overlay0,
-        );
-        let pair = key_galley.size().x + HINT_KEY_GAP + what_galley.size().x;
-        if x + pair > rect.right() {
-            break;
+///
+/// A hint with a command is a button, and wears a row's plate under the
+/// pointer, the press and the ripple, with its label brightening towards the
+/// body text. An inert one is words, painted as the whole strip always was.
+pub fn hints(
+    paint: &Painting<'_>,
+    hints: &[Hint],
+    rects: &[egui::Rect],
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    for (index, (hint, rect)) in hints.iter().zip(rects).enumerate() {
+        let key = Control::Hint(index);
+        let (hover, press) = match hint.command {
+            Some(_) => (hovers.hover(key), hovers.press(key)),
+            None => (0.0, 0.0),
+        };
+        let plate = pressed_rect(*rect, press);
+        if hover > 0.0 {
+            paint.painter.rect_filled(
+                plate,
+                CARD_ROW_RADIUS,
+                mix(palette.crust, palette.surface1, hover),
+            );
         }
+        if hint.command.is_some() {
+            let inside = paint.painter.with_clip_rect(plate);
+            for splash in ripples.splashes(key, paint.now) {
+                inside.circle_filled(
+                    splash.center,
+                    splash.radius,
+                    egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                );
+            }
+        }
+        let painter = paint.painter.with_clip_rect(*rect);
+        let label_colour = mix(palette.overlay0, palette.text, hover);
+        let key_galley =
+            painter.layout_no_wrap(hint.keys.to_string(), key_font(HINT_FONT), palette.subtext0);
+        let label_galley = painter.layout_no_wrap(
+            hint.label.to_string(),
+            egui::FontId::proportional(HINT_FONT),
+            label_colour,
+        );
+        let x = rect.left() + HINT_AIR;
         painter.galley(
             egui::pos2(x, rect.center().y - key_galley.size().y / 2.0),
             key_galley.clone(),
-            paint.palette.subtext0,
+            palette.subtext0,
         );
-        x += key_galley.size().x + HINT_KEY_GAP;
         painter.galley(
-            egui::pos2(x, rect.center().y - what_galley.size().y / 2.0),
-            what_galley.clone(),
-            paint.palette.overlay0,
+            egui::pos2(
+                x + key_galley.size().x + HINT_KEY_GAP,
+                rect.center().y - label_galley.size().y / 2.0,
+            ),
+            label_galley,
+            label_colour,
         );
-        x += what_galley.size().x + GAP * 2.0;
     }
 }
 
 /// Between a hint's key and what it does. Narrower than the gap between two
 /// hints, so the strip reads as pairs rather than as a row of words.
 const HINT_KEY_GAP: f32 = 6.0;
+
+/// The air either side of a hint's words, inside its rect: half a chip's
+/// padding, so a hover plate has room round its text without the strip
+/// spreading out.
+const HINT_AIR: f32 = PAD_X / 2.0;
+
+/// Between two hints' rects: the words keep the two-gap spacing they always
+/// had, less the air each rect now carries inside it.
+const HINT_SEP: f32 = GAP * 2.0 - HINT_AIR * 2.0;
 
 // ── The which-key card (PLAN §4, §8) ────────────────────────────────────────
 
@@ -4747,13 +4852,20 @@ mod tests {
             rename.error = Some("photo.jpg already exists".to_string());
             let row = egui::Rect::from_min_size(egui::pos2(300.0, 400.0), egui::vec2(400.0, 22.0));
             prompt_popup(&paint, area, row, &rename);
+            let strip = hint_rect(egui::Rect::from_min_size(
+                egui::pos2(300.0, 500.0),
+                egui::vec2(400.0, 120.0),
+            ));
+            let shown = [
+                Hint::inert("↑↓", "move"),
+                Hint::new("Esc", "close", Command::Escape),
+            ];
             hints(
                 &paint,
-                hint_rect(egui::Rect::from_min_size(
-                    egui::pos2(300.0, 500.0),
-                    egui::vec2(400.0, 120.0),
-                )),
-                &[("Esc", "close"), ("f", "filter")],
+                &shown,
+                &hint_rects(paint.painter, strip, &shown),
+                &Hovers::new(),
+                &Ripples::new(),
             );
 
             let rows: Vec<(String, String)> = (0..14)
