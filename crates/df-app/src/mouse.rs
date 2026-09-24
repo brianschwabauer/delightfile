@@ -371,7 +371,7 @@ pub enum WheelUnit {
 /// toolkit has converged on. At [`crate::ui::ROW_HEIGHT`] that is a shade over
 /// two rows per notch — the familiar three-line scroll, in a list whose rows are
 /// taller than a line of text.
-const POINTS_PER_LINE: f32 = 50.0;
+pub const POINTS_PER_LINE: f32 = 50.0;
 
 /// …and one *page*. A screenful is a property of the window, which this
 /// function does not have, so it is the largest travel a single event may claim

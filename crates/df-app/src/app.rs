@@ -1257,6 +1257,10 @@ pub struct App {
     /// The fraction of a row the wheel has rolled over the tray and not yet
     /// spent ([`crate::tray::scroll`]).
     tray_carry: f32,
+    /// The touchpad travel `Ctrl`+wheel has gathered over the list and not yet
+    /// spent on a rung of the view-scale ladder, in points, DOM-signed
+    /// ([`App::wheel_scale`]). Let go of `Ctrl` and it is dropped.
+    scale_wheel: f32,
     /// The archive entry the preview card is showing, and its text if it had
     /// any: `(archive, inner path, body)`. The body is `None` until the
     /// worker that reads it comes back (see [`crate::preview::body`]).
@@ -1894,6 +1898,7 @@ impl App {
             tray_open: false,
             tray_first: 0,
             tray_carry: 0.0,
+            scale_wheel: 0.0,
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
             repo_counts: None,
@@ -10104,6 +10109,54 @@ impl App {
         }
     }
 
+    /// `Ctrl`+wheel over the list: a rung of the view-scale ladder per notch,
+    /// up for a roll away from the hand. `=` and `-` by the wheel, and through
+    /// the door those keys go through, so the tab's own step, the jump into
+    /// and out of the grid, the toast and any refusal are theirs.
+    ///
+    /// `ticks` are DOM-signed, so a roll away from the hand is negative. A
+    /// notched wheel reports its notches outright. A touchpad reports travel,
+    /// dozens of events to a stroke, so that is gathered in
+    /// [`App::scale_wheel`] and spent a notch's worth
+    /// ([`crate::mouse::POINTS_PER_LINE`], what the list scrolls for a notch)
+    /// at a time — a rung per event would run the whole ladder before the
+    /// fingers had got anywhere. A stroke that turns back starts again from
+    /// nothing, so the first notch the other way is not spent paying off the
+    /// travel before it.
+    fn wheel_scale(
+        &mut self,
+        ticks: &[(crate::mouse::WheelUnit, egui::Vec2)],
+        page: usize,
+        now: Instant,
+    ) {
+        use crate::mouse::{WheelUnit, POINTS_PER_LINE};
+        for (unit, delta) in ticks {
+            if delta.y == 0.0 {
+                continue;
+            }
+            if self.scale_wheel * delta.y < 0.0 {
+                self.scale_wheel = 0.0;
+            }
+            self.scale_wheel += match unit {
+                WheelUnit::Point => delta.y,
+                WheelUnit::Line => delta.y * POINTS_PER_LINE,
+                // A screenful means nothing on a ladder of four rungs: a page
+                // is a notch.
+                WheelUnit::Page => delta.y.signum() * POINTS_PER_LINE,
+            };
+            let notches = (self.scale_wheel / POINTS_PER_LINE).trunc();
+            self.scale_wheel -= notches * POINTS_PER_LINE;
+            let command = if notches < 0.0 {
+                Command::ViewScaleUp
+            } else {
+                Command::ViewScaleDown
+            };
+            for _ in 0..notches.abs() as usize {
+                self.run(command, page, now);
+            }
+        }
+    }
+
     /// A primary click on something. Returns where it landed, for the ripple.
     fn click(
         &mut self,
@@ -13328,9 +13381,30 @@ impl App {
         // to be in would be the one control in the program that ignores where
         // it was pointed.
         // A roll over the tray has already been spent on it.
+        //
+        // With `Ctrl` held over the list the wheel is `=` and `-` instead
+        // ([`App::wheel_scale`]) — the zoom it is everywhere else — but only
+        // where those keys would reach: not under a menu, a card or a prompt.
+        // And not with a button down: mid-band or mid-drag `Ctrl` is the
+        // band's modifier or the drop's *copy*, and the wheel is how the hand
+        // reaches rows that are not on screen yet. Anywhere else it scrolls as
+        // it did. Off the gesture, the travel it was gathering is dropped.
+        let stepping = pointer.toggle
+            && !pointer.down
+            && !menu_live
+            && !self.overlay_open()
+            && self.prompt.is_none()
+            && pointer.at.is_some_and(|at| layout.list.contains(at));
+        if !stepping {
+            self.scale_wheel = 0.0;
+        }
         if pointer.wheel != 0.0 && self.help.is_none() && !over_tray {
             if let Some(at) = pointer.at {
-                self.wheel(pointer.wheel, at, &layout, page, parent_page, now);
+                if stepping {
+                    self.wheel_scale(&pointer.wheel_raw, page, now);
+                } else {
+                    self.wheel(pointer.wheel, at, &layout, page, parent_page, now);
+                }
             }
         }
 
@@ -19888,5 +19962,161 @@ mod tests {
             matches!(app.dialog, Some(Dialog::Confirm(_))),
             "the back button closed the card"
         );
+    }
+
+    // ── Ctrl and the wheel ──────────────────────────────────────────────────
+
+    /// One frame with `modifiers` held throughout it, which is where egui
+    /// reads `Ctrl` from.
+    fn run_frame_held(
+        app: &mut App,
+        ctx: &egui::Context,
+        modifiers: egui::Modifiers,
+        events: Vec<egui::Event>,
+    ) {
+        let input = egui::RawInput {
+            screen_rect: Some(screen()),
+            events,
+            modifiers,
+            focused: true,
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| app.frame(ui));
+    }
+
+    /// A wheel event in egui's own sign: positive `y` is a roll away from the
+    /// hand.
+    fn roll(unit: egui::MouseWheelUnit, y: f32, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::MouseWheel {
+            unit,
+            delta: egui::vec2(0.0, y),
+            phase: egui::TouchPhase::Move,
+            modifiers,
+        }
+    }
+
+    /// `Ctrl`+wheel over the list is `=` and `-`: a notch away from the hand
+    /// goes a rung up the ladder and a notch back comes down one, and neither
+    /// scrolls. The same notch without `Ctrl` scrolls and leaves the rung
+    /// alone, and over the parent column `Ctrl` changes nothing.
+    #[test]
+    fn ctrl_and_a_wheel_notch_over_the_list_step_the_view_scale() {
+        use egui::{Modifiers, MouseWheelUnit as Unit};
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..80).map(|i| format!("f{i:02}.txt")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = Fixture::new("scale-wheel", &names);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.scale_of(), ViewScale::Compact);
+        // Where the list's scroll is headed, rather than where its glide has
+        // got to this instant.
+        let settled = |app: &App| {
+            app.tab()
+                .cwd
+                .scroll_rows(Instant::now() + Duration::from_secs(5))
+        };
+        let list = layout_of(&app).list.center();
+        let moved = egui::Event::PointerMoved(list);
+
+        // No `Ctrl`: a notch towards the hand scrolls, and the rung stays.
+        let top = settled(&app);
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![moved.clone(), roll(Unit::Line, -1.0, Modifiers::NONE)],
+        );
+        let scrolled = settled(&app);
+        assert!(scrolled > top, "the plain wheel did not scroll");
+        assert_eq!(app.scale_of(), ViewScale::Compact);
+
+        // `Ctrl`: up a rung, and the list stays where the wheel left it.
+        let ctrl = Modifiers::CTRL;
+        run_frame_held(
+            &mut app,
+            &ctx,
+            ctrl,
+            vec![moved.clone(), roll(Unit::Line, 1.0, ctrl)],
+        );
+        assert_eq!(app.scale_of(), ViewScale::Comfortable);
+        assert_eq!(toast_text(&app), Some("Comfortable rows"));
+        assert_eq!(settled(&app), scrolled, "Ctrl+wheel scrolled");
+        run_frame_held(
+            &mut app,
+            &ctx,
+            ctrl,
+            vec![moved.clone(), roll(Unit::Line, -1.0, ctrl)],
+        );
+        assert_eq!(app.scale_of(), ViewScale::Compact);
+        assert_eq!(settled(&app), scrolled, "Ctrl+wheel scrolled");
+
+        // Over the parent column `Ctrl` is nothing to the wheel.
+        let parent = layout_of(&app).parent.center();
+        run_frame_held(
+            &mut app,
+            &ctx,
+            ctrl,
+            vec![
+                egui::Event::PointerMoved(parent),
+                roll(Unit::Line, 1.0, ctrl),
+            ],
+        );
+        assert_eq!(
+            app.scale_of(),
+            ViewScale::Compact,
+            "the parent column stepped"
+        );
+    }
+
+    /// A touchpad reports travel, not notches: a stroke's events are gathered
+    /// and spent a notch's worth at a time — one rung for fifty points however
+    /// many events carried them — and letting go of `Ctrl` drops what was
+    /// gathered.
+    #[test]
+    fn a_touchpad_stroke_with_ctrl_steps_once_per_notch_of_travel() {
+        use egui::{Modifiers, MouseWheelUnit as Unit};
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("scale-touchpad", &["a.txt", "b.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.scale_of(), ViewScale::Compact);
+        let ctrl = Modifiers::CTRL;
+        let list = egui::Event::PointerMoved(layout_of(&app).list.center());
+        let stroke = |app: &mut App, events: usize| {
+            let mut frame = vec![list.clone()];
+            frame.extend((0..events).map(|_| roll(Unit::Point, 12.0, ctrl)));
+            run_frame_held(app, &ctx, ctrl, frame);
+        };
+
+        // Forty-eight points over four events, in two frames: no rung yet.
+        stroke(&mut app, 2);
+        stroke(&mut app, 2);
+        assert_eq!(app.scale_of(), ViewScale::Compact, "a rung before a notch");
+        // The fifth crosses fifty: one rung, not five.
+        stroke(&mut app, 1);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable);
+        // Twenty-four more on the ten left over is still short of the next.
+        stroke(&mut app, 2);
+        assert_eq!(app.scale_of(), ViewScale::Comfortable);
+
+        // `Ctrl` let go: the thirty-four gathered are dropped, so another
+        // twenty-four is still no rung.
+        run_frame(&mut app, &ctx, vec![list.clone()]);
+        stroke(&mut app, 2);
+        assert_eq!(
+            app.scale_of(),
+            ViewScale::Comfortable,
+            "the gathered travel survived"
+        );
+        // …and a stroke back the other way starts from nothing, so the first
+        // notch's worth of it comes down a rung.
+        let back = |app: &mut App| {
+            let frame = vec![
+                list.clone(),
+                roll(Unit::Point, -25.0, ctrl),
+                roll(Unit::Point, -25.0, ctrl),
+            ];
+            run_frame_held(app, &ctx, ctrl, frame);
+        };
+        back(&mut app);
+        assert_eq!(app.scale_of(), ViewScale::Compact);
     }
 }
