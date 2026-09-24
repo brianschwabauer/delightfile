@@ -283,7 +283,7 @@ mod tests {
             Control::FilterChip,
             Control::MenuButton,
             Control::Counter,
-            Control::BasketChip,
+            Control::YankClear,
             Control::Toast,
         ] {
             for gesture in [Gesture::Band, Gesture::Text] {

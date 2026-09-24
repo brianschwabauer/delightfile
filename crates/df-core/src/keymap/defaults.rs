@@ -210,8 +210,8 @@ pub(super) fn build() -> Registry {
         (Files, "u",      C::Undo,              "Undo last operation",                 Always),
         (Files, "w",      C::TasksShow,         "Task manager",                        Always),
         (Files, "M",      C::MountManager,      "Mount manager",                       Always),
-        (Files, "b",      C::BasketToggle,      "Toss into / out of the basket",       Always),
-        (Files, "B",      C::BasketShow,        "Show the selection basket",           Always),
+        (Files, "b",      C::YankToggle,        "Add to the yank, or take back out",   Always),
+        (Files, "B",      C::YankShow,          "Show what is yanked",                 Always),
         (Files, "e",      C::ArchiveExtractHere,      "Extract here",                  Always),
         (Files, "E",      C::ArchiveExtractSubfolder, "Extract to folder",             Always),
 

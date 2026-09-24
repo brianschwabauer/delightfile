@@ -1,11 +1,18 @@
-//! Yank, cut and paste — `y`, `x`, `p`, `P`.
+//! Yank, cut and paste — `y`, `x`, `b`, `p`, `P`.
 //!
-//! The clipboard is a set of paths and a verb, nothing more. The interesting
-//! part is [`plan_paste`]: given a clipboard and a destination, it works out
-//! what each item would become, and hands back the collisions **as data** for
-//! the UI to resolve with the side-by-side dialog (PLAN §5). It never decides
-//! for the user. `P` — paste with force — is the one exception, and even it
-//! cannot talk the safety rails out of anything.
+//! The clipboard is a set of paths and a verb, nothing more. It is also the
+//! *only* set of paths the program carries: `y` and `x` replace it, and `b`
+//! adds to it or takes back out of it one gesture at a time, so a handful of
+//! files gathered from four directories is a clipboard like any other (the
+//! app's `tray` module tells the story of the second container this used to
+//! be). The rules for that — [`Clipboard::toggle`] and the rest — live here
+//! rather than in the app so they are tested without a window.
+//!
+//! The interesting part is [`plan_paste`]: given a clipboard and a
+//! destination, it works out what each item would become, and hands back the
+//! collisions **as data** for the UI to resolve with the side-by-side dialog
+//! (PLAN §5). It never decides for the user. `P` — paste with force — is the
+//! one exception, and even it cannot talk the safety rails out of anything.
 //!
 //! ## The rails
 //!
@@ -52,7 +59,23 @@ pub enum PasteMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Clipboard {
     pub mode: PasteMode,
+    /// The carried paths, in the order they were picked up.
+    ///
+    /// Insertion order, not sorted: a pile built with `b` is a record of *what
+    /// you picked*, and re-ordering it under the user would break the one thing
+    /// a person tracks about a pile they made by hand — that the last thing
+    /// they added is at the bottom.
     pub paths: Vec<PathBuf>,
+}
+
+/// What one `b` press did, so the toast can say it.
+///
+/// At most one of the two is non-zero: [`Clipboard::toggle`] moves a whole
+/// batch the same way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Toggled {
+    pub added: usize,
+    pub removed: usize,
 }
 
 impl Clipboard {
@@ -83,6 +106,75 @@ impl Clipboard {
 
     pub fn len(&self) -> usize {
         self.paths.len()
+    }
+
+    /// Whether `path` is being carried, however it is spelled.
+    pub fn contains(&self, path: &Path) -> bool {
+        let path = normalize(path);
+        self.paths.contains(&path)
+    }
+
+    /// `b` over a selection, or over one row: add to the clipboard, or take
+    /// back out of it.
+    ///
+    /// The gesture is a *toggle*, and the whole batch goes the same way: if
+    /// every path offered is already carried the press takes them all out, and
+    /// otherwise it puts the missing ones in. Deciding per path would mean a
+    /// `b` on a selection of five, three of which are already in, doing two
+    /// different things at once — and the toast could only say one of them.
+    ///
+    /// The verb is kept: adding to a cut adds to the cut, because the chip and
+    /// the row marks already say which one this is, and a `b` that quietly
+    /// turned a cut into a copy would change what the next `p` does. An empty
+    /// clipboard has no verb worth keeping — `X` leaves the old one behind — so
+    /// a pile started from nothing is a copy, the verb that cannot lose a file.
+    pub fn toggle(&mut self, paths: &[PathBuf]) -> Toggled {
+        let offered: Vec<PathBuf> = paths.iter().map(|p| normalize(p)).collect();
+        if offered.is_empty() {
+            return Toggled::default();
+        }
+        // Sets for the membership questions: the cap the old basket had is
+        // gone, so a `b` after `Ctrl+a` on a big directory must not be
+        // quadratic in it.
+        let mut held: std::collections::HashSet<PathBuf> = self.paths.iter().cloned().collect();
+        if offered.iter().all(|path| held.contains(path)) {
+            let offered: std::collections::HashSet<PathBuf> = offered.into_iter().collect();
+            let before = self.paths.len();
+            self.paths.retain(|path| !offered.contains(path));
+            return Toggled {
+                added: 0,
+                removed: before - self.paths.len(),
+            };
+        }
+        if self.paths.is_empty() {
+            self.mode = PasteMode::Copy;
+        }
+        let mut added = 0;
+        for path in offered {
+            if held.insert(path.clone()) {
+                self.paths.push(path);
+                added += 1;
+            }
+        }
+        Toggled { added, removed: 0 }
+    }
+
+    /// Take one path out, by its place in the list — the tray's `×`.
+    pub fn remove(&mut self, index: usize) -> Option<PathBuf> {
+        (index < self.paths.len()).then(|| self.paths.remove(index))
+    }
+
+    /// Whether the paths live in more than one directory.
+    ///
+    /// `y` and `x` only ever take rows from the listing on screen, so a
+    /// clipboard that spans directories was built on purpose with `b` — which
+    /// is what makes it worth a word before a `y` replaces it.
+    pub fn spans_directories(&self) -> bool {
+        let mut parents = self.paths.iter().map(|path| path.parent());
+        let Some(first) = parents.next() else {
+            return false;
+        };
+        parents.any(|parent| parent != first)
     }
 }
 
@@ -1030,5 +1122,129 @@ mod tests {
         assert_eq!(clip.mode, PasteMode::Copy);
         clip.clear();
         assert!(clip.is_empty());
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// One `b` puts the batch in, the next takes the same batch out — and a
+    /// path offered twice is held once.
+    #[test]
+    fn toggling_is_a_toggle_over_the_whole_batch() {
+        let mut clip = Clipboard::default();
+        let batch = paths(&["/a", "/b"]);
+        assert_eq!(
+            clip.toggle(&batch),
+            Toggled {
+                added: 2,
+                removed: 0
+            }
+        );
+        assert_eq!(clip.len(), 2);
+
+        // Already in, all of it: the same press takes it back out.
+        assert_eq!(
+            clip.toggle(&batch),
+            Toggled {
+                added: 0,
+                removed: 2
+            }
+        );
+        assert!(clip.is_empty());
+
+        // A mixed batch goes *in* — the press has to mean one thing.
+        clip.toggle(&paths(&["/a"]));
+        assert_eq!(
+            clip.toggle(&paths(&["/a", "/c", "/c"])),
+            Toggled {
+                added: 1,
+                removed: 0
+            }
+        );
+        assert_eq!(clip.paths, paths(&["/a", "/c"]));
+    }
+
+    /// Insertion order, because that is the one thing a person tracks about a
+    /// pile they made by hand; and the tray's `×` takes out exactly one.
+    #[test]
+    fn the_order_is_the_order_things_were_added() {
+        let mut clip = Clipboard::default();
+        clip.toggle(&paths(&["/z"]));
+        clip.toggle(&paths(&["/a"]));
+        clip.toggle(&paths(&["/m"]));
+        assert_eq!(clip.paths, paths(&["/z", "/a", "/m"]));
+        assert_eq!(clip.remove(1), Some(PathBuf::from("/a")));
+        assert_eq!(clip.paths, paths(&["/z", "/m"]));
+        assert_eq!(clip.remove(9), None);
+    }
+
+    /// An empty press does nothing, and says nothing.
+    #[test]
+    fn toggling_nothing_is_a_no_op() {
+        let mut clip = Clipboard::cut([PathBuf::from("/a")]);
+        assert_eq!(clip.toggle(&[]), Toggled::default());
+        assert_eq!(clip.paths, paths(&["/a"]));
+        assert_eq!(clip.mode, PasteMode::Cut);
+    }
+
+    /// Adding to a cut is adding to the cut; a pile started from nothing is a
+    /// copy, whatever the clipboard was the last time it held anything.
+    #[test]
+    fn toggling_keeps_the_verb_unless_there_was_nothing_to_keep() {
+        let mut clip = Clipboard::cut([PathBuf::from("/a")]);
+        clip.toggle(&paths(&["/b"]));
+        assert_eq!(
+            clip.mode,
+            PasteMode::Cut,
+            "a `b` turned the cut into a copy"
+        );
+        assert_eq!(clip.paths, paths(&["/a", "/b"]));
+
+        // Taken back out down to nothing, and started again: a copy.
+        clip.toggle(&paths(&["/a", "/b"]));
+        assert!(clip.is_empty());
+        clip.toggle(&paths(&["/c"]));
+        assert_eq!(clip.mode, PasteMode::Copy);
+
+        // `X` leaves the old verb behind; the next pile does not inherit it.
+        let mut clip = Clipboard::cut([PathBuf::from("/a")]);
+        clip.clear();
+        clip.toggle(&paths(&["/b"]));
+        assert_eq!(clip.mode, PasteMode::Copy);
+    }
+
+    /// The same file, spelled two ways, is one file: the paths are held
+    /// normalised, exactly as `y` and `x` hold them, which is what lets a row
+    /// in another directory find its mark by path.
+    #[test]
+    fn toggling_holds_paths_the_way_a_yank_does() {
+        let mut clip = Clipboard::default();
+        clip.toggle(&paths(&["/d/./e/../f.txt"]));
+        assert_eq!(clip.paths, paths(&["/d/f.txt"]));
+        assert!(clip.contains(Path::new("/d/f.txt")));
+        assert!(clip.contains(Path::new("/d/e/../f.txt")));
+        assert!(!clip.contains(Path::new("/d/g.txt")));
+        assert_eq!(
+            clip.toggle(&paths(&["/d/f.txt"])),
+            Toggled {
+                added: 0,
+                removed: 1
+            }
+        );
+        assert_eq!(
+            Clipboard::yank(paths(&["/d/./f.txt"])).paths,
+            paths(&["/d/f.txt"])
+        );
+    }
+
+    /// One directory is an ordinary yank; two is a pile somebody built.
+    #[test]
+    fn a_clipboard_spans_directories_when_its_parents_differ() {
+        assert!(!Clipboard::default().spans_directories());
+        assert!(!Clipboard::yank(paths(&["/d/a", "/d/b", "/d/c"])).spans_directories());
+        assert!(Clipboard::yank(paths(&["/d/a", "/e/b"])).spans_directories());
+        // A folder and a file inside it are in two directories.
+        assert!(Clipboard::yank(paths(&["/d/sub", "/d/sub/x"])).spans_directories());
     }
 }

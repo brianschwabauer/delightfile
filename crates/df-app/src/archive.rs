@@ -496,7 +496,7 @@ pub fn inert_in_archive(command: df_core::keymap::Command) -> bool {
             | C::SearchContent
             | C::OpenInteractive
             | C::DiskUsage
-            | C::BasketToggle
+            | C::YankToggle
     )
 }
 

@@ -386,11 +386,6 @@ fn extension_glyph(name: &str, kind: FileKind) -> Option<char> {
         .map(|(_, glyph, _)| *glyph)
 }
 
-/// The plain file glyph, for a card that stands for several files at once —
-/// the selection basket's drag ghost (PLAN §7.1).
-///
-/// A basket holds whatever it holds; a ghost wearing the first file's icon
-/// would claim they are all that kind of thing.
 /// A chrome glyph: the patched font's icon when [`install`] found one, and a
 /// character the stock faces are known to carry otherwise.
 ///
@@ -407,6 +402,11 @@ pub fn glyph(nerd: bool, patched: char, plain: &'static str) -> String {
     }
 }
 
+/// The plain file glyph, for a card that stands for several files at once —
+/// the ghost of the whole clipboard, dragged off the yank chip (PLAN §7.1).
+///
+/// A clipboard carries whatever it carries; a ghost wearing the first file's
+/// icon would claim they are all that kind of thing.
 pub fn generic(palette: &Palette, nerd: bool) -> Icon {
     Icon {
         glyph: if nerd { GENERIC_FILE } else { ' ' },

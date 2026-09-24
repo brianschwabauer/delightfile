@@ -17,9 +17,8 @@
 //! would have to separate:
 //!
 //! - *Per process*: the scanner, the watcher, the task engine, the undo
-//!   journal, the clipboard, the basket, the config, the keymap registry, the
-//!   state store, the git front end, the vfs, the du scanner, the udisks
-//!   worker.
+//!   journal, the clipboard, the config, the keymap registry, the state
+//!   store, the git front end, the vfs, the du scanner, the udisks worker.
 //! - *Per window*: `gfx`, `tabs`, the preview pane and its decoders,
 //!   the player, every overlay (`help`, `finder`, `search`, `dialog`,
 //!   `picker`, `panel`, `spot`, `menu`, `mounts`), the hover, ripple and
@@ -55,7 +54,7 @@
 //! [`crate::dnd::self_mime`]).
 //!
 //! **What it costs, honestly.** A second window is a second process, so it has
-//! its own undo journal, its own basket, its own cut/copy clipboard and its own
+//! its own undo journal, its own cut/copy clipboard and its own
 //! task engine: a copy started in window A does not appear in window B's `w`
 //! panel, and `u` in B cannot undo what A did. It is also a second wgpu device
 //! and a second set of workers — tens of megabytes, not hundreds, and nothing

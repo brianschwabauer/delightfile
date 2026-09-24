@@ -115,8 +115,8 @@ pub fn display(at: &VfsPath) -> PathBuf {
 ///
 /// This is the one question everything asks — "is this row remote at all?" —
 /// and it is a string parse rather than a flag on the pane, so a path that
-/// escapes into the clipboard, a drag or the basket still answers it correctly
-/// wherever it lands.
+/// escapes into the clipboard or a drag still answers it correctly wherever it
+/// lands.
 pub fn at_of(display: &Path) -> Option<VfsPath> {
     VfsPath::parse(&display.to_string_lossy())
 }
@@ -273,7 +273,7 @@ pub fn inert_remotely(command: df_core::keymap::Command) -> bool {
             | C::SearchContent
             | C::Undo
             | C::DiskUsage
-            | C::BasketToggle
+            | C::YankToggle
             | C::ArchiveExtractHere
             | C::ArchiveExtractSubfolder
             // `O` hands the row's path to a child process as an argument; a

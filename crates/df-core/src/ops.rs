@@ -55,7 +55,7 @@ pub use journal::{
 pub use link::{hardlink, relative_to, symlink, LinkKind};
 pub use paste::{
     execute as paste, plan_paste, unique_name, Clipboard, Conflict, PasteItem, PasteMode,
-    PastePlan, PasteReport, Resolution,
+    PastePlan, PasteReport, Resolution, Toggled,
 };
 pub use trash::{purge, Trash, TrashedItem};
 

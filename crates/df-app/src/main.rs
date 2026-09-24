@@ -9,7 +9,6 @@
 
 mod app;
 mod archive;
-mod basket;
 mod bulk;
 mod chrome;
 mod cli;
@@ -54,6 +53,7 @@ mod theme;
 mod toast;
 /// The trash, browsed as a directory (PLAN §7.4).
 mod trashview;
+mod tray;
 mod ui;
 mod usage;
 mod viewport;

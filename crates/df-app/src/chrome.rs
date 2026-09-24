@@ -1013,8 +1013,9 @@ pub fn yank_label(count: usize, cut: bool) -> String {
     format!("{count} {}", if cut { "cut" } else { "yanked" })
 }
 
-/// The chip's own colour, matching the mark on the rows it is about.
-fn yank_color(palette: &crate::theme::Palette, cut: bool) -> egui::Color32 {
+/// The chip's own colour, matching the mark on the rows it is about — and the
+/// tray's header, which is the chip opened ([`crate::tray`]).
+pub fn yank_color(palette: &crate::theme::Palette, cut: bool) -> egui::Color32 {
     if cut {
         palette.peach
     } else {
@@ -1209,9 +1210,9 @@ fn paint_cluster(
         let accent = yank_color(palette, yank.cut);
         let hover = hovers.hover(Control::YankChip);
         let rect = pressed_rect(rect, hovers.press(Control::YankChip));
-        // Lifted a little under the pointer, because it is the one chip on the
-        // row that *does* something when clicked (it clears the clipboard, the
-        // same as `X`).
+        // Lifted a little under the pointer, because it *does* something when
+        // clicked: it opens the tray that lists what is carried, the same as
+        // `B` ([`crate::tray`]).
         plate(paint, rect, accent, yank.alpha * (1.0 + hover * 0.6));
         let inside = painter.with_clip_rect(rect);
         for splash in ripples.splashes(Control::YankChip, paint.now) {
@@ -1234,7 +1235,7 @@ fn paint_cluster(
         // badge and the yellow bars down the column are visibly the same fact,
         // said twice, in the two places the eye looks. Clicking it clears the
         // selection — the pointer's `Esc`, the same as the yank chip is the
-        // pointer's `X`.
+        // pointer's `B`.
         action_chip(
             paint,
             rect,

@@ -461,8 +461,9 @@ pub enum Control {
     /// A file dialog's type-filter chip on the top row — "Images", or "All
     /// files" — which drops the dialog's list of filters out beneath it.
     TypeChip,
-    /// The clipboard chip on the top row, which clears it — the pointer's `X`
-    /// (PLAN §4.1).
+    /// The clipboard chip on the top row, which opens and closes the tray that
+    /// lists what is carried — the pointer's `B` (PLAN §4.1, §7.1). Pressed
+    /// and pulled, it drags the whole clipboard out as one payload.
     YankChip,
     /// A row of the open menu — the right-click one or the app menu — and a
     /// row of the submenu it has flown out (PLAN §7.5).
@@ -472,11 +473,11 @@ pub enum Control {
     /// out: every command a person might not know the key for, where the
     /// pointer can find it.
     MenuButton,
-    /// The selection basket's chip, and the rows of the tray it opens
-    /// (PLAN §7.1).
-    BasketChip,
-    BasketRow(usize),
-    BasketRemove(usize),
+    /// The yank tray's rows, each row's `×`, and the header's `Clear` — the
+    /// pointer's `X` (PLAN §7.1, [`crate::tray`]).
+    YankRow(usize),
+    YankRemove(usize),
+    YankClear,
     /// The leading `…` the breadcrumb wears when the path did not fit. Nothing
     /// happens when it is clicked — there is no one segment it stands for — but
     /// it is the only place the hidden part of the path can be asked for, so it

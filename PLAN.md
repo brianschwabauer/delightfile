@@ -348,8 +348,10 @@ on cold start (delightviewer's ordering); results crossfade in over ~80 ms.
 - **Choreography** (delightful-ui): multi-file drags show a stacked-card ghost with a
   count badge; valid targets highlight as the drag approaches; commit thresholds fill
   a badge delightviewer-dismiss-style; cancel springs back (BackOut).
-- **Selection basket**: collect files from multiple directories (`b` to toss in),
-  shown as a floating tray; paste or drag the whole basket as one payload.
+- **Carrying across directories**: `b` adds files to the yank (or takes them back
+  out) from any directory, so the clipboard itself is the collection — there is
+  no second container. `B` or the yank chip shows it as a floating tray; paste
+  or drag the whole yank as one payload.
 
 ### 7.2 Search & jump
 

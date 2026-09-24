@@ -1400,7 +1400,7 @@ const STATUS_SHARE: f32 = 0.42;
 /// `CARD_ROW_RADIUS + CARD_PAD`; a row inset by anything else stops being
 /// concentric with it (`delightful-ui` §15). This was 14 against a 10-derived
 /// radius, so the gap *widened* by 4 px as it turned each corner — the same
-/// mistake the basket tray made in the other direction.
+/// mistake the yank tray made in the other direction.
 const PAD: f32 = crate::chrome::CARD_PAD;
 const TITLE: f32 = 20.0;
 /// The title row and the air under it. It used to be two title rows' worth,
@@ -1735,7 +1735,7 @@ fn right_aligned(
 mod tests {
     use super::*;
 
-    /// Same rule as the basket tray, which this card got wrong in the other
+    /// Same rule as the yank tray, which this card got wrong in the other
     /// direction — a 14 pt inset against a 10-derived radius, so the gap
     /// *widened* around each corner (`delightful-ui` §15).
     #[test]

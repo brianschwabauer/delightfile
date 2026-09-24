@@ -620,12 +620,13 @@ struct PressStart {
     /// hand went down: a `Ctrl`-click near the pane's edge moves the cursor and
     /// the scrolloff rule slides the view before the drag has even begun.
     list_scroll: f32,
-    /// The press landed on the basket's chip, which drags the whole basket
+    /// The press landed on the yank chip, which drags the whole clipboard
     /// (PLAN §7.1) — and the chip's rectangle, because that is where the
     /// ghost flies home to if the drag is called off. Measured at press time
-    /// rather than at cancel time: the tray can be closed mid-drag, and a
-    /// ghost has to land somewhere it can be seen landing.
-    on_basket: Option<egui::Rect>,
+    /// rather than at cancel time: a paste of a cut can empty the clipboard
+    /// mid-drag and take the chip with it, and a ghost has to land somewhere
+    /// it can be seen landing.
+    on_yank: Option<egui::Rect>,
     /// The press landed on a tab chip, which drags the tab out into a window
     /// (PLAN §2).
     on_tab: Option<usize>,
@@ -641,7 +642,7 @@ struct PressStart {
     /// starts, the band selects *list* rows: the rectangle is drawn in window
     /// space and clipped to the list before it is read as rows.
     ///
-    /// Never through something floating over the panes — a toast, the basket,
+    /// Never through something floating over the panes — a toast, the tray,
     /// a modal card, the help sheet, the rename card: a press that landed on
     /// one of those must not also start dragging a rectangle across the rows
     /// it was covering.
@@ -748,8 +749,8 @@ struct Geom<'a> {
     /// The top row's crumbs, filter chip and cluster (PLAN §2).
     top: &'a chrome::TopGeom,
     menu: &'a Option<menu::Geometry>,
-    /// The selection basket's tray (PLAN §7.1).
-    basket: &'a crate::basket::Geometry,
+    /// The yank tray (PLAN §7.1).
+    tray: &'a crate::tray::Geometry,
     /// The toast, when one is up (PLAN §5): the plate, and the offer inside it.
     toast: Option<crate::toast::ToastGeom>,
     /// How wide each tab's chip is this frame ([`chrome::tab_widths`]).
@@ -1223,15 +1224,11 @@ pub struct App {
     mounts: Option<crate::mounts::Card>,
     /// Connections to servers in flight, from the card's connect prompt.
     connects: Vec<PendingConnect>,
-    /// Files collected across directories (PLAN §7.1). Session-lived: see
-    /// [`crate::basket`].
-    basket: crate::basket::Basket,
-    /// Whether the tray is expanded. The *chip* is always there while the
-    /// basket has anything in it — that is what makes the basket visible enough
-    /// to earn its place ahead of the system clipboard in `p`'s ladder.
-    basket_open: bool,
-    /// The first row the expanded tray draws.
-    basket_first: usize,
+    /// Whether the yank tray is out (PLAN §7.1, [`crate::tray`]). Closed by
+    /// [`App::clamp_tray`] the moment the clipboard has nothing to list.
+    tray_open: bool,
+    /// The first row the tray draws.
+    tray_first: usize,
     /// The archive entry the preview card is showing, and its text if it had
     /// any: `(archive, inner path, body)`. The body is `None` until the
     /// worker that reads it comes back (see [`crate::preview::body`]).
@@ -1457,7 +1454,7 @@ struct Drag {
     /// The glyph and colour beside it, from the same table the rows use.
     icon: crate::icons::Icon,
     /// Where the ghost springs back to: the middle of the *thing* it came off
-    /// — the row, or the basket's chip. Not a pointer position; see
+    /// — the row, or the yank chip. Not a pointer position; see
     /// [`dnd::ghost_home`], which is what turns it into one.
     home: egui::Pos2,
     at: egui::Pos2,
@@ -1866,9 +1863,8 @@ impl App {
             udisks: None,
             mounts: None,
             connects: Vec::new(),
-            basket: crate::basket::Basket::default(),
-            basket_open: false,
-            basket_first: 0,
+            tray_open: false,
+            tray_first: 0,
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
             repo_counts: None,
@@ -4021,70 +4017,89 @@ impl App {
         self.refresh_trash(now);
     }
 
-    /// `y` / `x`.
+    /// `y` / `x`: carry the targets, in place of whatever was carried before.
+    ///
+    /// **The selection is spent.** Its job was to say what to carry, and that
+    /// is done: the rows now wear the clipboard's bar, and leaving the yellow
+    /// one on them as well was two marks saying one thing — and it left those
+    /// same rows as the subject of the next key, so `y` then `d` trashed what
+    /// had just been yanked. See [`App::spend_selection`].
+    ///
+    /// **A replace that throws away a pile says so.** `y` and `x` take their
+    /// rows from the one listing on screen, so a clipboard that spans
+    /// directories was built on purpose with `b`, perhaps over several
+    /// minutes. The toast names how many files were let go. It offers no undo —
+    /// the op journal is for the filesystem, and the clipboard is not part of
+    /// it — but a count is enough to turn the loss into something the user
+    /// saw happen rather than something they find at the next `p`.
     fn set_clipboard(&mut self, cut: bool, now: Instant) {
         let paths = self.targets();
         if paths.is_empty() {
             return;
         }
+        self.spend_selection();
         let n = paths.len();
+        let dropped = self
+            .clipboard
+            .spans_directories()
+            .then(|| self.clipboard.len());
         self.clipboard = if cut {
             Clipboard::cut(paths)
         } else {
             Clipboard::yank(paths)
         };
+        self.clamp_tray();
         let verb = if cut { "Cut" } else { "Yanked" };
-        self.toasts
-            .notice(format!("{verb} {}", plural(n, "item", "items")), now);
+        let message = match dropped {
+            Some(dropped) => format!(
+                "{verb} {} · replaced {dropped} you were carrying",
+                plural(n, "item", "items")
+            ),
+            None => format!("{verb} {}", plural(n, "item", "items")),
+        };
+        self.toasts.notice(message, now);
     }
 
-    /// `X`: the yank is off. The marks come off the rows with it.
+    /// Put the selection down once a gesture has taken what it said to take:
+    /// `y`, `x`, `b` and `Y`.
     ///
-    /// With nothing yanked, the same key empties the **basket** — it is the
-    /// other thing the program is carrying, `X` already means "stop carrying
-    /// this", and a tray of thirty files with no way to put them all down but
-    /// thirty clicks on an `×` would be a collection you cannot get rid of. The
-    /// order matches `p`'s ladder (see [`crate::basket`]): the clipboard first,
-    /// because it is the more recent gesture.
+    /// Visual mode goes with it — the whole of `Esc`'s `LeaveVisual` rung —
+    /// because a run still stretching after its rows had been carried off would
+    /// be selecting for a gesture that has already happened.
+    fn spend_selection(&mut self) {
+        self.visual = None;
+        self.dir().clear_selection();
+    }
+
+    /// `X`, and the tray's `Clear`: the yank is off. The marks come off the
+    /// rows with it, the chip fades, and the tray — with nothing left to list —
+    /// closes.
+    ///
+    /// One thing to put down, because there is one thing carried: the pile `b`
+    /// builds *is* the clipboard ([`crate::tray`] tells the story of when it
+    /// was not, and `X` had to guess which of two you meant).
     fn unyank(&mut self, now: Instant) {
-        if !self.clipboard.is_empty() {
-            self.clipboard.clear();
-            self.toasts.notice("Clipboard cleared", now);
+        if self.clipboard.is_empty() {
             return;
         }
-        if !self.basket.is_empty() {
-            let n = self.basket.len();
-            self.basket.clear();
-            self.clamp_basket();
-            self.toasts.notice(
-                format!("Basket emptied — {}", plural(n, "file", "files")),
-                now,
-            );
-        }
+        self.clipboard.clear();
+        self.clamp_tray();
+        self.toasts.notice("Clipboard cleared", now);
     }
 
     /// `p` / `P`. Conflicts open the dialog; a settled plan goes straight to
     /// the pool.
     fn paste(&mut self, force: bool, now: Instant) {
-        // The three-way ladder, spelled out in [`crate::basket`]: the internal
-        // clipboard, then the basket, then whatever another application put on
-        // the system clipboard. The rule itself is a pure function there so
-        // that it is a test rather than three `if`s.
-        match crate::basket::Precedence::of(!self.clipboard.is_empty(), !self.basket.is_empty()) {
-            crate::basket::Precedence::Clipboard => {
-                let clipboard = self.clipboard.clone();
-                self.paste_from(&clipboard, force, now);
-            }
-            crate::basket::Precedence::Basket => {
-                // A copy, always. A basket gathered over five directories has
-                // no single origin to have been *cut* from, and a `p` that
-                // emptied five folders at once would be the most destructive
-                // keystroke in the program.
-                let clipboard = Clipboard::yank(self.basket.paths().to_vec());
-                self.paste_from(&clipboard, force, now);
-            }
-            crate::basket::Precedence::System => self.paste_system(force, now),
+        // Two rungs: what this program is carrying, and failing that whatever
+        // another application put on the system clipboard (PLAN §7.4). There
+        // used to be a basket between them, and a rule for which of the two
+        // carried sets `p` meant; [`crate::tray`] says why that went.
+        if self.clipboard.is_empty() {
+            self.paste_system(force, now);
+            return;
         }
+        let clipboard = self.clipboard.clone();
+        self.paste_from(&clipboard, force, now);
     }
 
     /// Plan and run a paste of `clipboard` into the current directory.
@@ -6373,63 +6388,61 @@ impl App {
         true
     }
 
-    // ── The selection basket (PLAN §7.1) ────────────────────────────────────
+    // ── Carrying files from several directories (PLAN §7.1) ─────────────────
 
-    /// `b`: toss the selection — or the row under the cursor — in, or back out.
-    fn toss_basket(&mut self, now: Instant) {
+    /// `b`: add the selection — or the row under the cursor — to the
+    /// clipboard, or take it back out. [`Clipboard::toggle`] holds the rule:
+    /// the whole batch goes one way, and the verb already there is kept.
+    ///
+    /// The selection is spent for the reason `y` spends it
+    /// ([`App::set_clipboard`]): it has said what to carry.
+    fn toggle_yank(&mut self, now: Instant) {
+        // Read before the selection is put down: whether the targets were the
+        // cursor's row is what decides the advance below.
+        let one_row = self.tab().cwd.dir.selected_count() == 0;
         let paths = self.targets();
         if paths.is_empty() {
-            self.toasts.notice("Nothing to put in the basket", now);
+            self.toasts.notice("Nothing to yank", now);
             return;
         }
-        let tossed = self.basket.toss(&paths);
-        self.clamp_basket();
-        let message = if tossed.full {
-            format!(
-                "The basket is full at {} — took {}",
-                crate::basket::CAPACITY,
-                plural(tossed.added, "file", "files")
-            )
-        } else if tossed.removed > 0 {
-            format!(
-                "Took {} out of the basket",
-                plural(tossed.removed, "file", "files")
-            )
+        self.spend_selection();
+        let toggled = self.clipboard.toggle(&paths);
+        self.clamp_tray();
+        let all = self.clipboard.len();
+        let message = if toggled.removed > 0 {
+            format!("Took {} out of the yank · {all} in all", toggled.removed)
         } else {
-            format!(
-                "{} in the basket — {} in all",
-                plural(tossed.added, "file", "files"),
-                self.basket.len()
-            )
+            format!("Yanked {} more · {all} in all", toggled.added)
         };
         self.toasts.notice(message, now);
         // Advance the cursor like `Space` does: `b b b` down a listing is the
         // gesture, and stopping to move the cursor between each would make it
         // six keystrokes instead of three.
-        if self.tab().cwd.dir.selected_count() == 0 {
+        if one_row {
             self.dir().move_cursor(1);
         }
     }
 
-    /// `B`, and the palette's "Show the selection basket".
-    fn show_basket(&mut self, now: Instant) {
-        if self.basket.is_empty() {
+    /// `B`, the palette's "Show what is yanked", and a click on the yank chip:
+    /// the tray, out or away.
+    fn toggle_tray(&mut self, now: Instant) {
+        if self.clipboard.is_empty() {
             self.toasts
-                .notice("The basket is empty — press b to put files in it", now);
+                .notice("Nothing is yanked — y or b picks files up", now);
             return;
         }
-        self.basket_open = !self.basket_open;
-        if self.basket_open {
-            self.prune_basket(now);
+        self.tray_open = !self.tray_open;
+        if self.tray_open {
+            self.prune_tray(now);
         }
     }
 
-    /// Drop paths that are gone, and say how many. Called when the tray opens:
-    /// that is the moment the list is about to be read, and so the moment it
-    /// has to be true.
-    fn prune_basket(&mut self, now: Instant) {
-        let gone = self.basket.prune();
-        self.clamp_basket();
+    /// Drop carried paths that are gone, and say how many. Called when the
+    /// tray opens: that is the moment the list is about to be read, and so the
+    /// moment it has to be true ([`crate::tray::prune`]).
+    fn prune_tray(&mut self, now: Instant) {
+        let gone = crate::tray::prune(&mut self.clipboard);
+        self.clamp_tray();
         if gone > 0 {
             self.toasts.notice(
                 format!("{} no longer there", plural(gone, "file is", "files are")),
@@ -6440,23 +6453,28 @@ impl App {
 
     /// Keep the tray's scroll inside the list it is about, and close it when
     /// there is nothing left to show.
-    fn clamp_basket(&mut self) {
-        let len = self.basket.len();
+    ///
+    /// Called by everything here that changes the clipboard, and by
+    /// [`App::sync_yank`] every frame for the ones elsewhere — a paste that
+    /// spends a cut empties the clipboard from the task code, and the tray has
+    /// to close then too.
+    fn clamp_tray(&mut self) {
+        let len = self.clipboard.len();
         if len == 0 {
-            self.basket_open = false;
-            self.basket_first = 0;
+            self.tray_open = false;
+            self.tray_first = 0;
             return;
         }
-        self.basket_first = self
-            .basket_first
-            .min(len.saturating_sub(crate::basket::ROWS.min(len)));
+        self.tray_first = self
+            .tray_first
+            .min(len.saturating_sub(crate::tray::ROWS.min(len)));
     }
 
     /// A click on a tray row: go to the file, wherever it is.
     ///
-    /// The basket's whole point is that its contents are somewhere else, so a
-    /// row is a *link* — the pane navigates to the directory and the cursor
-    /// lands on the file.
+    /// What is carried is, as a rule, somewhere other than here — that is why
+    /// it had to be carried — so a row is a *link*: the pane navigates to the
+    /// directory and the cursor lands on the file.
     fn reveal(&mut self, path: &Path, now: Instant) {
         let Some(parent) = path.parent().map(Path::to_path_buf) else {
             return;
@@ -7601,7 +7619,7 @@ impl App {
     ///
     /// A directory is gone to. A file is gone to *with the cursor on it* —
     /// its directory opens and the row is aimed at, the shape
-    /// `delightfile <file>` and a basket row already have. Anything else keeps
+    /// `delightfile <file>` and a tray row already have. Anything else keeps
     /// the field open with the reason beside it, because the fix is almost
     /// always one typo away in the text that is still under the caret.
     fn go_to_path(&mut self, text: &str, now: Instant) -> Result<(), String> {
@@ -8034,8 +8052,8 @@ impl App {
         // The tray is the smallest thing on screen that `Esc` can take back,
         // so it goes first: closing it is never what somebody meant `Esc` to
         // do *instead* of something bigger.
-        if self.basket_open {
-            self.basket_open = false;
+        if self.tray_open {
+            self.tray_open = false;
             return;
         }
         // Above the ladder proper for the same reason a band is: the usage
@@ -8626,8 +8644,8 @@ impl App {
             C::SortBtimeReverse => self.sort_by(SortBy::Btime, true, Some(LineMode::Btime)),
             C::DiskUsage => self.toggle_usage(now),
             C::MountManager => self.open_mounts(),
-            C::BasketToggle => self.toss_basket(now),
-            C::BasketShow => self.show_basket(now),
+            C::YankToggle => self.toggle_yank(now),
+            C::YankShow => self.toggle_tray(now),
             C::SortSize => self.sort_by(SortBy::Size, false, Some(LineMode::Size)),
             C::SortSizeReverse => self.sort_by(SortBy::Size, true, Some(LineMode::Size)),
             C::SortExtension => self.sort_by(SortBy::Extension, false, None),
@@ -9598,9 +9616,9 @@ impl App {
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
                 | Control::MenuButton
-                | Control::BasketChip
-                | Control::BasketRow(_)
-                | Control::BasketRemove(_)
+                | Control::YankClear
+                | Control::YankRow(_)
+                | Control::YankRemove(_)
                 | Control::CrumbEllipsis
                 | Control::Counter
                 | Control::GitChip
@@ -9678,9 +9696,9 @@ impl App {
             | Control::MenuItem(_)
             | Control::SubmenuItem(_)
             | Control::MenuButton
-            | Control::BasketChip
-            | Control::BasketRow(_)
-            | Control::BasketRemove(_)
+            | Control::YankClear
+            | Control::YankRow(_)
+            | Control::YankRemove(_)
             | Control::CrumbEllipsis
             | Control::Counter
             | Control::GitChip
@@ -9696,13 +9714,15 @@ impl App {
 
     // ── The pointer (PLAN §7.5) ─────────────────────────────────────────────
 
-    /// Keep the top row's clipboard chip in step with the clipboard.
+    /// Keep the top row's clipboard chip — and the tray it opens — in step
+    /// with the clipboard.
     ///
     /// Noticed here rather than at each of the several places that can empty
     /// the clipboard — `X`, a paste of a cut, a tab closing under one — so the
     /// chip has exactly one rule and cannot be left behind by a path that
     /// forgot to tell it.
     fn sync_yank(&mut self, now: Instant) {
+        self.clamp_tray();
         let cut = self.clipboard.mode == PasteMode::Cut;
         if !self.clipboard.is_empty() {
             let stale = match &self.yank {
@@ -10118,10 +10138,14 @@ impl App {
                 self.open_types_menu(rect);
                 rect
             }
-            // The clipboard chip is the pointer's `X`, down to the toast.
+            // The clipboard chip is the pointer's `B`: it opens the tray that
+            // lists what the chip is counting, and closes it again. Putting
+            // the lot down is the tray's `Clear` — one step further away than
+            // a click on the count, which is where a click that throws away a
+            // pile built over several folders belongs.
             Control::YankChip => {
                 let rect = geom.top.cluster.yank.unwrap_or(egui::Rect::ZERO);
-                self.unyank(now);
+                self.toggle_tray(now);
                 rect
             }
             // `4 selected` is the pointer's `Esc`: it clears the selection, and
@@ -10228,34 +10252,31 @@ impl App {
                 self.overlay_click(control, double, geom.page, now);
                 rect
             }
-            // The basket tray (PLAN §7.1): the chip opens and closes it, a row
+            // The yank tray (PLAN §7.1): `Clear` is the pointer's `X`, a row
             // goes to the file it names, and the `×` takes that file back out.
-            Control::BasketChip => {
-                self.basket_open = !self.basket_open;
-                if self.basket_open {
-                    self.prune_basket(now);
-                }
-                geom.basket.chip
+            Control::YankClear => {
+                self.unyank(now);
+                geom.tray.clear
             }
-            Control::BasketRemove(index) => {
+            Control::YankRemove(index) => {
                 let rect = geom
-                    .basket
+                    .tray
                     .removes
                     .get(index)
                     .copied()
                     .unwrap_or(egui::Rect::ZERO);
-                self.basket.remove(self.basket_first + index);
-                self.clamp_basket();
+                self.clipboard.remove(self.tray_first + index);
+                self.clamp_tray();
                 rect
             }
-            Control::BasketRow(index) => {
+            Control::YankRow(index) => {
                 let rect = geom
-                    .basket
+                    .tray
                     .rows
                     .get(index)
                     .copied()
                     .unwrap_or(egui::Rect::ZERO);
-                if let Some(path) = self.basket.paths().get(self.basket_first + index).cloned() {
+                if let Some(path) = self.clipboard.paths.get(self.tray_first + index).cloned() {
                     self.reveal(&path, now);
                 }
                 rect
@@ -10705,7 +10726,10 @@ impl App {
         // file drag (or, with a modifier, a band that `band_on_row` starts).
         // A modal card and the help sheet make everything behind them inert,
         // and a band drawn under one would be selecting rows nobody can see.
-        if over.is_some() || geom.overlay.is_some() || self.help.is_some() {
+        // The tray's card is the same, over the part of it that is not a
+        // control — its padding, and the label in its header.
+        let covered = geom.overlay.is_some() || self.help.is_some() || geom.tray.contains(at);
+        if over.is_some() || covered {
             return false;
         }
         let layout = geom.layout;
@@ -10797,13 +10821,13 @@ impl App {
                 self.begin_tab_drag(index, press.at, at, strip, now);
                 return;
             }
-            if let Some(chip) = press.on_basket {
-                // PLAN §7.1: "drag the whole basket as one payload". The same
+            if let Some(chip) = press.on_yank {
+                // PLAN §7.1: "drag the whole yank as one payload". The same
                 // drag machinery, given a different set of paths — so the
                 // ghost, the target highlighting, the modifier badges, the
                 // spring-back and the Wayland hand-off are all the ones that
                 // already work.
-                self.drag_basket(chip, at, now);
+                self.drag_clipboard(chip, at, now);
                 return;
             }
             if press.on_row && !press.band_on_row {
@@ -10973,29 +10997,36 @@ impl App {
 
     // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────────
 
-    /// The basket's chip has been dragged: pick up everything in it.
+    /// The yank chip has been dragged: pick up everything the clipboard
+    /// carries.
     ///
     /// Deliberately a separate entry point from [`App::begin_drag`] and not a
     /// parameter on it: that one is about a *row*, and half of it (the pane
     /// geometry, the index, the "is the grabbed row in the selection" rule) has
     /// no meaning here. What they share is the `Drag` they build, which is the
     /// part that matters.
-    fn drag_basket(&mut self, chip: egui::Rect, at: egui::Pos2, now: Instant) {
-        let paths = self.basket.paths().to_vec();
-        if paths.is_empty() {
+    ///
+    /// Not with a server's files in it. `y` in a remote tab carries `sftp://…`
+    /// display paths, and a drag hands its paths to whatever application it is
+    /// dropped on as a `text/uri-list` — [`App::begin_drag`] refuses a remote
+    /// row for exactly that reason, and a clipboard of them is the same
+    /// fiction. `p` in a local folder is how those come down.
+    fn drag_clipboard(&mut self, chip: egui::Rect, at: egui::Pos2, now: Instant) {
+        let paths = self.clipboard.paths.clone();
+        if paths.is_empty() || paths.iter().any(|path| crate::remote::is_remote(path)) {
             return;
         }
         let label = paths
             .first()
             .and_then(|path| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "basket".to_string());
+            .unwrap_or_else(|| "yanked".to_string());
         self.drag = Some(Drag {
             paths,
             label,
-            // The generic file glyph: a basket holds whatever it holds, and a
-            // card wearing the first file's icon would claim they are all that
-            // kind.
+            // The generic file glyph: a clipboard carries whatever it carries,
+            // and a card wearing the first file's icon would claim they are
+            // all that kind.
             icon: crate::icons::generic(&self.palette, self.nerd),
             // The chip's middle, like every other `home` in this file: what
             // the ghost lands *on* is the thing it was picked up from, and
@@ -11667,7 +11698,7 @@ impl App {
     fn spring_home(&mut self, drag: Drag, now: Instant) {
         self.spring_back = Some(SpringHome {
             // `drag.home` is the middle of the row the drag came off (or, for
-            // the basket, the point the chip was taken hold of); the tween
+            // the clipboard, of the yank chip it was taken hold of); the tween
             // moves the *pointer*, which sits near the card's left edge. See
             // [`dnd::ghost_home`] — without it the card lands most of its own
             // width to the right of where it was picked up.
@@ -11976,12 +12007,16 @@ impl App {
     // ── The system clipboard (PLAN §7.4) ────────────────────────────────────
 
     /// `Y`: the native port of `clipboard.sh`.
+    ///
+    /// The selection is spent here as it is by `y` ([`App::set_clipboard`]):
+    /// it said what to copy, and the copy is made.
     fn yank_to_system(&mut self, now: Instant) {
         let paths = self.targets();
         if paths.is_empty() {
             self.toasts.notice("Nothing to copy", now);
             return;
         }
+        self.spend_selection();
         let single = paths.first().filter(|_| paths.len() == 1).cloned();
         let (mime, size) = match &single {
             Some(path) => self.type_of(path),
@@ -12895,11 +12930,11 @@ impl App {
         // A menu that is fading is pixels, not a surface: it takes no pointer.
         let menu_live = self.menu.as_ref().is_some_and(Menu::live);
 
-        // The basket tray (PLAN §7.1), measured before the hit test for the
+        // The yank tray (PLAN §7.1), measured before the hit test for the
         // reason the breadcrumb is: two functions working it out separately is
         // how a floating surface grows a one-pixel lie at its edges.
-        let basket_geometry =
-            crate::basket::geometry(area, &self.basket, self.basket_open, self.basket_first);
+        let tray_geometry =
+            crate::tray::geometry(area, &self.clipboard, self.tray_open, self.tray_first);
 
         // The toast, measured where it will be painted (PLAN §5). It floats over
         // the panes and over a modal card — everything except the menu, which
@@ -12953,17 +12988,19 @@ impl App {
                 return None;
             }
             // The tray floats over the panes, so it is hit-tested before them:
-            // a click on the chip must not also land on the row underneath it.
-            if basket_geometry.contains(p) {
-                let control = basket_geometry
+            // a click on the card must not also land on the row underneath it.
+            // Its header's label and its padding are the card and nothing
+            // else, so a press there is taken and answered with nothing.
+            if tray_geometry.contains(p) {
+                let control = tray_geometry
                     .remove_at(p)
-                    .map(Control::BasketRemove)
-                    .or_else(|| basket_geometry.row_at(p).map(Control::BasketRow))
+                    .map(Control::YankRemove)
+                    .or_else(|| tray_geometry.row_at(p).map(Control::YankRow))
                     .or_else(|| {
-                        basket_geometry
-                            .chip
+                        tray_geometry
+                            .clear
                             .contains(p)
-                            .then_some(Control::BasketChip)
+                            .then_some(Control::YankClear)
                     })?;
                 return Some((control, p));
             }
@@ -13001,9 +13038,8 @@ impl App {
                     // prompt on a narrow row.
                     //
                     // …but not while the chip is fading out: it is pixels then,
-                    // not a control, and `X` on an empty clipboard means
-                    // something else entirely (it empties the basket — see
-                    // [`App::unyank`]).
+                    // not a control, and there is no tray left for a click on
+                    // it to open.
                     let yank_live = self
                         .yank
                         .as_ref()
@@ -13188,7 +13224,7 @@ impl App {
             overlay: &overlay,
             top: &top_geom,
             menu: &menu_geometry,
-            basket: &basket_geometry,
+            tray: &tray_geometry,
             toast: toast_geom,
             tabs: &tab_widths,
             prompt: prompt_field.as_ref(),
@@ -13275,8 +13311,10 @@ impl App {
                 // Read *now*, with the press, and never again: see the field.
                 band_on_row: on_row && (pointer.shift || pointer.toggle),
                 list_scroll: scroll_rows,
-                on_basket: matches!(over, Some((Control::BasketChip, _)))
-                    .then_some(basket_geometry.chip),
+                on_yank: match over {
+                    Some((Control::YankChip, _)) => top_geom.cluster.yank,
+                    _ => None,
+                },
                 on_tab: match over {
                     Some((Control::Tab(index), _)) => Some(index),
                     _ => None,
@@ -13485,8 +13523,20 @@ impl App {
             ui.ctx().set_cursor_icon(match control {
                 // A tab chip is draggable as well as clickable — it is how a
                 // tab becomes a window (PLAN §2) — so it wears the hand that
-                // says so (`delightful-ui` §2), like the basket's chip.
-                Control::Tab(_) | Control::BasketChip => egui::CursorIcon::Grab,
+                // says so (`delightful-ui` §2), and so does the yank chip,
+                // which drags out everything it counts. Not when what it
+                // counts is on a server: that drag is refused (see
+                // [`App::drag_clipboard`]), and the hand would promise it.
+                Control::Tab(_) => egui::CursorIcon::Grab,
+                Control::YankChip
+                    if !self
+                        .clipboard
+                        .paths
+                        .iter()
+                        .any(|path| crate::remote::is_remote(path)) =>
+                {
+                    egui::CursorIcon::Grab
+                }
                 // Two things take the pointer without answering it: the
                 // branch chip and the `…`. Both exist to *say* something on
                 // hover, and a hand over either would promise a click that
@@ -13520,8 +13570,9 @@ impl App {
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
                 | Control::MenuButton
-                | Control::BasketRow(_)
-                | Control::BasketRemove(_) => egui::CursorIcon::PointingHand,
+                | Control::YankRow(_)
+                | Control::YankRemove(_)
+                | Control::YankClear => egui::CursorIcon::PointingHand,
             });
         }
 
@@ -14197,12 +14248,12 @@ impl App {
                 &self.ripples,
             );
         }
-        // The basket tray, over the panes and under every modal (PLAN §7.1).
-        crate::basket::paint(
+        // The yank tray, over the panes and under every modal (PLAN §7.1).
+        crate::tray::paint(
             &paint,
-            &self.basket,
-            &basket_geometry,
-            self.basket_first,
+            &self.clipboard,
+            &tray_geometry,
+            self.tray_first,
             &self.hovers,
             &self.ripples,
         );
@@ -14467,7 +14518,7 @@ impl App {
         // bar to sit above, and under the which-key card: a message about what
         // just happened must not cover the answer to the key being held down
         // now. Centred rather than in the corner because the corner is the
-        // selection basket's (PLAN §7.1), and two transient surfaces stacking
+        // yank tray's (PLAN §7.1), and two transient surfaces stacking
         // in one place is how a notice ends up under a tray.
         self.toasts
             .paint(&paint, area, area.bottom(), &self.hovers, now);
@@ -15166,7 +15217,7 @@ fn inert_in_trash(command: Command) -> bool {
             | C::SearchName
             | C::SearchContent
             | C::DiskUsage
-            | C::BasketToggle
+            | C::YankToggle
             | C::ArchiveExtractHere
             | C::ArchiveExtractSubfolder
             // Nested trash is not a place.
@@ -18673,5 +18724,228 @@ mod tests {
             "{}",
             row.keys
         );
+    }
+
+    // ── The one carried set: `y`, `x`, `b`, `B`, `X` and the tray ──────────
+
+    /// Land the listing of wherever the fixture has just navigated to.
+    fn settle_here(app: &mut App) {
+        settle(app.tabs.active_mut(), &app.scanner);
+    }
+
+    /// Whether the row named `name` would wear the clipboard's bar, asked the
+    /// way the row painter asks it: by the row's own path.
+    fn marked(app: &App, name: &str) -> bool {
+        let dir = &app.tab().cwd.dir;
+        let at = dir.position_of(name).expect("a row by that name");
+        let entry = dir.row(at).expect("the row");
+        app.clipboard.paths.contains(&entry.path)
+    }
+
+    /// `y` takes what the selection said and puts the selection down: the
+    /// rows wear the clipboard's bar and not the yellow one as well, and the
+    /// next key is about the cursor again — a `d` straight after a `y` used to
+    /// trash what had just been yanked. `x` spends a visual run the same way.
+    #[test]
+    fn a_yank_puts_the_selection_down() {
+        let mut app = Fixture::new("yank-spends", &["a.txt", "b.txt", "c.txt"]);
+        let now = Instant::now();
+        app.dir().select_range(0, 1, true);
+        assert_eq!(selected(&app).len(), 2);
+
+        app.run(Command::Yank, 10, now);
+        assert_eq!(app.clipboard.len(), 2, "both selected rows are carried");
+        assert_eq!(app.clipboard.mode, PasteMode::Copy);
+        assert!(selected(&app).is_empty(), "the selection outlived the yank");
+        assert_eq!(toast(&app).as_deref(), Some("Yanked 2 items"));
+
+        cursor_to(&mut app, "a.txt");
+        app.run(Command::VisualMode, 10, now);
+        app.run(Command::CursorDown, 10, now);
+        assert_eq!(selected(&app), ["a.txt", "b.txt"]);
+        app.run(Command::YankCut, 10, now);
+        assert_eq!(app.clipboard.mode, PasteMode::Cut);
+        assert_eq!(app.clipboard.len(), 2);
+        assert!(app.visual.is_none(), "the run outlived the cut");
+        assert!(selected(&app).is_empty());
+        // Moving on does not start selecting again.
+        app.run(Command::CursorDown, 10, now);
+        assert!(selected(&app).is_empty());
+    }
+
+    /// `b` builds the clipboard from wherever you are: it adds, it takes back
+    /// out, it keeps the verb, and the rows it picked up in another folder
+    /// wear their bar again when you walk back to them. `y` over such a pile
+    /// says what it let go of.
+    #[test]
+    fn b_adds_to_the_yank_across_directories() {
+        let mut app = Fixture::with_folders("yank-toggle", &["a.txt", "b.txt"], &["sub"]);
+        let now = Instant::now();
+        let files = app.files.clone();
+        let sub = files.join("sub");
+        for name in ["c.txt", "d.txt"] {
+            std::fs::write(sub.join(name), b"x").expect("write the fixture");
+        }
+
+        // One row: in it goes, and the cursor steps on like `Space`'s does.
+        cursor_to(&mut app, "a.txt");
+        let at = app.tab().cwd.dir.cursor();
+        app.run(Command::YankToggle, 10, now);
+        assert_eq!(app.clipboard.paths, [files.join("a.txt")]);
+        assert_eq!(app.clipboard.mode, PasteMode::Copy);
+        assert_eq!(toast(&app).as_deref(), Some("Yanked 1 more · 1 in all"));
+        assert_eq!(app.tab().cwd.dir.cursor(), at + 1, "`b b b` walks the list");
+
+        // Another folder, a selection: added after, in the order picked, and
+        // the selection is spent without the cursor moving.
+        app.navigate(sub.clone(), now);
+        settle_here(&mut app);
+        app.dir().select_range(0, 1, true);
+        let at = app.tab().cwd.dir.cursor();
+        app.run(Command::YankToggle, 10, now);
+        assert_eq!(
+            app.clipboard.paths,
+            [files.join("a.txt"), sub.join("c.txt"), sub.join("d.txt")]
+        );
+        assert_eq!(toast(&app).as_deref(), Some("Yanked 2 more · 3 in all"));
+        assert!(selected(&app).is_empty(), "the selection outlived the `b`");
+        assert_eq!(app.tab().cwd.dir.cursor(), at);
+        assert!(marked(&app, "c.txt") && marked(&app, "d.txt"));
+
+        // Back where the first one came from: its mark is by path, so it is
+        // there, and its neighbour's is not.
+        app.navigate(files.clone(), now);
+        settle_here(&mut app);
+        assert!(
+            marked(&app, "a.txt"),
+            "a row picked up earlier lost its bar"
+        );
+        assert!(!marked(&app, "b.txt"));
+
+        // The same row again takes it back out.
+        cursor_to(&mut app, "a.txt");
+        app.run(Command::YankToggle, 10, now);
+        assert_eq!(app.clipboard.paths, [sub.join("c.txt"), sub.join("d.txt")]);
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Took 1 out of the yank · 2 in all")
+        );
+
+        // A `y` over a pile that spans folders replaces it — and says so.
+        cursor_to(&mut app, "a.txt");
+        app.run(Command::YankToggle, 10, now);
+        assert!(app.clipboard.spans_directories());
+        cursor_to(&mut app, "b.txt");
+        app.run(Command::Yank, 10, now);
+        assert_eq!(app.clipboard.paths, [files.join("b.txt")]);
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Yanked 1 item · replaced 3 you were carrying")
+        );
+        // …and one that does not, replaces it quietly, as it always has.
+        cursor_to(&mut app, "a.txt");
+        app.run(Command::YankCut, 10, now);
+        assert_eq!(toast(&app).as_deref(), Some("Cut 1 item"));
+
+        // Adding to a cut is adding to the cut.
+        cursor_to(&mut app, "b.txt");
+        app.run(Command::YankToggle, 10, now);
+        assert_eq!(app.clipboard.mode, PasteMode::Cut);
+        assert_eq!(
+            app.clipboard.paths,
+            [files.join("a.txt"), files.join("b.txt")]
+        );
+    }
+
+    /// `b` is refused in the trash, in an archive and on a server — the three
+    /// places its old basket key was — with each place's own words; `B` is
+    /// about the carried set, not about the place, so it is never refused.
+    #[test]
+    fn b_is_refused_where_it_always_was() {
+        use df_core::keymap::Command as C;
+        assert!(inert_in_trash(C::YankToggle));
+        assert!(crate::archive::inert_in_archive(C::YankToggle));
+        assert!(crate::remote::inert_remotely(C::YankToggle));
+        assert!(!inert_in_trash(C::YankShow));
+        assert!(!crate::archive::inert_in_archive(C::YankShow));
+        assert!(!crate::remote::inert_remotely(C::YankShow));
+    }
+
+    /// `B` opens the tray on the clipboard, pruning what has gone; `X` puts
+    /// the lot down and the tray goes with it.
+    #[test]
+    fn the_tray_is_the_clipboard_listed() {
+        let mut app = Fixture::new("yank-tray", &["a.txt", "b.txt", "c.txt"]);
+        let now = Instant::now();
+        app.run(Command::YankShow, 10, now);
+        assert!(!app.tray_open, "an empty clipboard has no tray");
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Nothing is yanked — y or b picks files up")
+        );
+
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Yank, 10, now);
+        std::fs::remove_file(app.files.join("b.txt")).expect("remove a yanked file");
+        app.run(Command::YankShow, 10, now);
+        assert!(app.tray_open);
+        assert_eq!(
+            app.clipboard.len(),
+            2,
+            "the tray opened on a file that is gone"
+        );
+        assert_eq!(toast(&app).as_deref(), Some("1 file is no longer there"));
+
+        app.run(Command::YankShow, 10, now);
+        assert!(!app.tray_open, "`B` puts it away again");
+        app.run(Command::YankShow, 10, now);
+        app.run(Command::Unyank, 10, now);
+        assert!(app.clipboard.is_empty());
+        assert!(!app.tray_open, "the tray outlived the clipboard");
+        assert_eq!(toast(&app).as_deref(), Some("Clipboard cleared"));
+    }
+
+    /// Where the frame draws the yank chip, measured the way the frame
+    /// measures it.
+    fn yank_chip(app: &App) -> egui::Rect {
+        let measure = egui::Context::default();
+        let mut rect = None;
+        let _ = measure.run_ui(Default::default(), |ui| {
+            let cluster = app.cluster(Instant::now());
+            rect = chrome::cluster_geometry(ui.painter(), layout_of(app).path, &cluster, app.nerd)
+                .yank;
+        });
+        rect.expect("a clipboard draws its chip")
+    }
+
+    /// The pointer's way through it: the chip opens the tray rather than
+    /// throwing the clipboard away, a row's `×` takes one file out, and
+    /// `Clear` is `X`.
+    #[test]
+    fn the_chip_opens_the_tray_and_clear_empties_it() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("yank-chip", &["a.txt", "b.txt", "c.txt"]);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Yank, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+
+        let chip = yank_chip(&app);
+        click_at(&mut app, &ctx, chip.center());
+        assert!(app.tray_open, "the chip did not open the tray");
+        assert_eq!(app.clipboard.len(), 3, "the chip threw the clipboard away");
+
+        let tray = crate::tray::geometry(screen(), &app.clipboard, true, app.tray_first);
+        let first = app.clipboard.paths[0].clone();
+        click_at(&mut app, &ctx, tray.removes[0].center());
+        assert_eq!(app.clipboard.len(), 2);
+        assert!(!app.clipboard.contains(&first), "the × took the wrong row");
+        assert!(app.tray_open);
+
+        let tray = crate::tray::geometry(screen(), &app.clipboard, true, app.tray_first);
+        click_at(&mut app, &ctx, tray.clear.center());
+        assert!(app.clipboard.is_empty(), "Clear left the clipboard");
+        assert!(!app.tray_open);
+        assert_eq!(toast(&app).as_deref(), Some("Clipboard cleared"));
     }
 }

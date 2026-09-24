@@ -168,10 +168,12 @@ commands! {
     // needs no second keymap to learn.
     OpenTrash => "open-trash",
     EmptyTrash => "empty-trash",
-    // The selection basket (PLAN §7.1): files collected across directories and
-    // pasted or dragged as one payload.
-    BasketToggle => "basket-toggle",
-    BasketShow => "basket-show",
+    // Carrying files from several directories (PLAN §7.1): `b` adds the
+    // targets to the clipboard or takes them back out, and `B` shows the tray
+    // that lists what it holds. The clipboard is the one carried set — there
+    // is no second container for these to fill.
+    YankToggle => "yank-toggle",
+    YankShow => "yank-show",
 
     // ── View ──────────────────────────────────────────────────────────────
     ToggleHidden => "toggle-hidden",
