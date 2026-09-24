@@ -24,7 +24,7 @@
 use std::sync::Arc;
 
 use df_core::fs::is_case_sensitive;
-use df_core::keymap::Command;
+use df_core::keymap::{Chord, Command};
 
 use crate::help::{self, Help, HelpLine};
 use crate::hover::{pressed_rect, Hovers};
@@ -2785,17 +2785,27 @@ pub fn hint_rect(card: egui::Rect) -> egui::Rect {
     )
 }
 
-/// One entry of a card's hint strip: a key, what it does on that card, and the
-/// command a press on the hint runs ([`Control::Hint`]).
-///
-/// The command is the one the key itself runs on that surface, read off
-/// df-core's table for the card's context, so the pointer's copy of a verb and
-/// the keyboard's cannot drift apart. `None` is a hint that only describes.
+/// One entry of a card's hint strip: a key, what it does on that card, and what
+/// a press on the hint does ([`Control::Hint`]). `None` is a hint that only
+/// describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hint {
     pub keys: &'static str,
     pub label: &'static str,
-    pub command: Option<Command>,
+    pub act: Option<HintAct>,
+}
+
+/// What a press on a hint does: what its key does on the card, one of two ways.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintAct {
+    /// The command the key's row in the card's context runs — the form to
+    /// prefer, because it is read off df-core's table, so the pointer's copy of
+    /// a verb and the keyboard's cannot drift apart.
+    Command(Command),
+    /// The key itself, typed into the card as the keyboard would type it: for
+    /// the keys a card matches by hand (`overlay_literal`), which have no row
+    /// and so no command to run.
+    Key(Chord),
 }
 
 impl Hint {
@@ -2805,18 +2815,28 @@ impl Hint {
         Hint {
             keys,
             label,
-            command: Some(command),
+            act: Some(HintAct::Command(command)),
+        }
+    }
+
+    /// A hint the pointer presses by typing its key, `chord`, into the card: a
+    /// key the card matches by hand, with no command behind it.
+    pub const fn key(keys: &'static str, label: &'static str, chord: Chord) -> Hint {
+        Hint {
+            keys,
+            label,
+            act: Some(HintAct::Key(chord)),
         }
     }
 
     /// A hint that describes and does not do: two keys or a range (`↑↓`,
-    /// `Tab / Esc`), which no one press could stand for, or a key the card
-    /// matches by hand with no command behind it. No hover, no press, no hand.
+    /// `Tab / Esc`), which no one press could stand for. No hover, no press,
+    /// no hand.
     pub const fn inert(keys: &'static str, label: &'static str) -> Hint {
         Hint {
             keys,
             label,
-            command: None,
+            act: None,
         }
     }
 }
@@ -2877,7 +2897,7 @@ pub fn hints(
     let palette = paint.palette;
     for (index, (hint, rect)) in hints.iter().zip(rects).enumerate() {
         let key = Control::Hint(index);
-        let (hover, press) = match hint.command {
+        let (hover, press) = match hint.act {
             Some(_) => (hovers.hover(key), hovers.press(key)),
             None => (0.0, 0.0),
         };
@@ -2889,7 +2909,7 @@ pub fn hints(
                 mix(palette.crust, palette.surface1, hover),
             );
         }
-        if hint.command.is_some() {
+        if hint.act.is_some() {
             let inside = paint.painter.with_clip_rect(plate);
             for splash in ripples.splashes(key, paint.now) {
                 inside.circle_filled(

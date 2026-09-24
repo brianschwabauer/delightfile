@@ -828,7 +828,7 @@ impl HintStrip {
         self.hints
             .iter()
             .zip(&self.rects)
-            .position(|(hint, rect)| hint.command.is_some() && rect.contains(pos))
+            .position(|(hint, rect)| hint.act.is_some() && rect.contains(pos))
             .map(Control::Hint)
     }
 }
@@ -10664,12 +10664,25 @@ impl App {
                     .get(index)
                     .copied()
                     .unwrap_or(egui::Rect::ZERO);
-                if let Some(command) = geom.hints.get(index).and_then(|hint| hint.command) {
-                    if geom.overlay.is_some() {
+                let card = geom.overlay.is_some();
+                match geom.hints.get(index).and_then(|hint| hint.act) {
+                    Some(chrome::HintAct::Command(command)) if card => {
                         self.overlay_command(command, geom.page, now);
-                    } else {
-                        self.help_command(command);
                     }
+                    Some(chrome::HintAct::Command(command)) => self.help_command(command),
+                    // A key the card matches by hand is typed into it, from
+                    // the top of the card's own router — the rename card's
+                    // fields and the literal keys first, as the keyboard's is.
+                    Some(chrome::HintAct::Key(chord)) => {
+                        // A click is never a key held down.
+                        self.key_repeat = false;
+                        if card {
+                            self.overlay_key(chord, geom.page, now);
+                        } else {
+                            self.help_key(chord, now);
+                        }
+                    }
+                    None => {}
                 }
                 rect
             }
@@ -15871,33 +15884,36 @@ fn op_toast(outcome: &df_core::ops::OpOutcome) -> (String, crate::toast::ToastKi
 /// hints and the card are one thing, and a list that could describe a card that
 /// is not up is a list that will eventually describe the wrong one. Each
 /// command is the one the key's row in the surface's own context gives it
-/// ([`App::overlay_stack`]); `Esc` is `overlay-close` in every one of them.
+/// ([`App::overlay_stack`]); `Esc` is `overlay-close` in every one of them. A
+/// key with no row there — one `overlay_literal` matches by hand — is typed
+/// into the card instead.
 fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::Hint> {
     use chrome::Hint;
+    use df_core::keymap::Key as K;
     use Command as C;
     match overlay {
         // The mount card's own vocabulary, including the five `[pick]` has no
         // row for — which is exactly why they are listed here: a key that is
         // not on the help sheet has to be on the card or it may as well not
-        // exist. With no row there is no command for a press to run, so
-        // those five are words: `overlay_literal` matches them by hand.
+        // exist. With no row there is no command, so a press on one of those
+        // five types its key.
         OverlayGeom::Mounts(_) => vec![
             Hint::new("Enter", "open", C::OverlaySubmit),
-            Hint::inert("m", "mount"),
-            Hint::inert("u", "unmount"),
-            Hint::inert("e", "eject"),
-            Hint::inert("c", "connect"),
-            Hint::inert("r", "refresh"),
+            Hint::key("m", "mount", Chord::plain(K::Char('m'))),
+            Hint::key("u", "unmount", Chord::plain(K::Char('u'))),
+            Hint::key("e", "eject", Chord::plain(K::Char('e'))),
+            Hint::key("c", "connect", Chord::plain(K::Char('c'))),
+            Hint::key("r", "refresh", Chord::plain(K::Char('r'))),
             Hint::new("Esc", "close", C::OverlayClose),
         ],
         // Every key the spot card answers to, including the two df-core's
         // `[spot]` table has no row for, for the same reason — and, for the
-        // same reason, `Space` has no command to run.
+        // same reason, a press on `Space` types it.
         OverlayGeom::Spot(_) => vec![
             Hint::inert("↑↓", "row"),
             Hint::inert("←→", "previous / next file"),
             Hint::inert("⇧←→", "permission bit"),
-            Hint::inert("Space", "toggle / hash"),
+            Hint::key("Space", "toggle / hash", Chord::plain(K::Space)),
             Hint::inert("Tab / Esc", "close"),
         ],
         OverlayGeom::Finder(_) => vec![
@@ -20993,11 +21009,12 @@ mod tests {
 
     /// A hint runs what its key runs on that card: each command is the one
     /// the key's row in the card's own context gives it, dispatched the way
-    /// the card dispatches a key. A single key with no command is a key that
-    /// context has no row for — matched by hand, so there is nothing for a
-    /// press to run — and everything else that is inert is a pair or a range.
+    /// the card dispatches a key. A hint that types its key instead is a key
+    /// that context has no row for — matched by hand, so there is no command
+    /// to prefer — and one that does nothing is a pair or a range.
     #[test]
     fn a_hint_runs_what_its_key_runs() {
+        use chrome::HintAct;
         let now = Instant::now();
         let mut app = Fixture::with_folders("hint-commands", &["a.txt", "b.txt"], &["sub"]);
         let check = |app: &App, stack: &ContextStack, hints: &[chrome::Hint], what: &str| {
@@ -21012,18 +21029,30 @@ mod tests {
                         now,
                     )
                 });
-                match (hint.command, dispatched) {
-                    (Some(command), Some(dispatched)) => assert_eq!(
+                match (hint.act, dispatched) {
+                    (Some(HintAct::Command(command)), Some(dispatched)) => assert_eq!(
                         dispatched,
                         Dispatch::Match(command),
                         "{what}: `{}` runs something else",
                         hint.keys
                     ),
+                    (Some(HintAct::Key(typed)), Some(dispatched)) => {
+                        assert_eq!(
+                            chord.as_ref().ok(),
+                            Some(&typed),
+                            "{what}: `{}` types another key",
+                            hint.keys
+                        );
+                        assert_eq!(
+                            dispatched,
+                            Dispatch::NoMatch,
+                            "{what}: `{}` has a row, and its command is the one to run",
+                            hint.keys
+                        );
+                    }
                     (Some(_), None) => panic!("{what}: `{}` is not one key", hint.keys),
-                    (None, Some(dispatched)) => assert_eq!(
-                        dispatched,
-                        Dispatch::NoMatch,
-                        "{what}: `{}` has a row, and no command",
+                    (None, Some(_)) => panic!(
+                        "{what}: `{}` is one key, and a press on it does nothing",
                         hint.keys
                     ),
                     (None, None) => {}
@@ -21075,6 +21104,82 @@ mod tests {
             &HELP_HINTS,
             "help",
         );
+    }
+
+    /// The disks card's five hand-matched keys are pressable: a press on one
+    /// types it into the card. `c` is the one of the five that answers without
+    /// the udisks worker — which a test must not start — and it takes the card
+    /// down for the address prompt, as the key does.
+    #[test]
+    fn a_click_on_the_disks_cards_connect_hint_types_c() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("hint-mounts", &["a.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        // Built rather than opened, as `M` would start the udisks worker.
+        app.mounts = Some(crate::mounts::Card::new());
+        app.sync_context();
+        run_frame(&mut app, &ctx, Vec::new());
+        for keys in ["m", "u", "e", "c", "r"] {
+            let (_, rect) = card_hint(&app, keys);
+            let geometry = overlay_of(&app).expect("the disks card");
+            let strip = strip_of(geometry.card(), &overlay_hints(&geometry, &app.dialog));
+            assert!(
+                strip.hit(rect.center()).is_some(),
+                "`{keys}` does not take the pointer"
+            );
+        }
+
+        let (index, connect) = card_hint(&app, "c");
+        click_at(&mut app, &ctx, connect.center());
+        assert!(app.mounts.is_none(), "the card stayed up over the prompt");
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::Connect),
+            "the press did not ask for an address"
+        );
+        assert!(app.udisks.is_none(), "the press started the udisks worker");
+        assert!(
+            app.ripples
+                .splashes(Control::Hint(index), Instant::now())
+                .count()
+                > 0,
+            "the hint took the press without a ripple"
+        );
+    }
+
+    /// The spot's `Space` hint is `Space` on the focused row: over the
+    /// permission row it flips the chosen bit, on the file itself.
+    #[test]
+    fn a_click_on_the_spots_space_hint_toggles_the_chosen_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("hint-spot", &["a.txt"]);
+        let file = app.files.join("a.txt");
+        let mode = |file: &Path| {
+            std::fs::metadata(file)
+                .expect("the file is there")
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))
+            .expect("set a known mode");
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::Spot, 10, Instant::now());
+        let spot = app.spot.as_mut().expect("the spot");
+        let row = spot.perm_row().expect("a permission row");
+        spot.select(row);
+        // Group execute: off in 644, and harmless to turn on.
+        spot.bit = 5;
+        run_frame(&mut app, &ctx, Vec::new());
+
+        let (_, space) = card_hint(&app, "Space");
+        click_at(&mut app, &ctx, space.center());
+        assert_eq!(mode(&file), 0o654, "the press did not flip group execute");
+        assert!(app.spot.is_some(), "the press closed the card");
+
+        click_at(&mut app, &ctx, space.center());
+        assert_eq!(mode(&file), 0o644, "a second press did not flip it back");
     }
 
     /// The help sheet's `Esc` hint is its key: it clears a filter first, and
