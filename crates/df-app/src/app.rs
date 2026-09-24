@@ -10665,7 +10665,8 @@ impl App {
 
     // ── The menus: right-click and the app menu (PLAN §7.5) ─────────────────
 
-    /// Right click: the menu, about whatever row it landed on.
+    /// Right click: the menu, about whatever row it landed on — or, on the
+    /// list's empty space, about the folder.
     fn right_click(
         &mut self,
         at: egui::Pos2,
@@ -10691,13 +10692,41 @@ impl App {
         if !layout.list.contains(at) {
             return;
         }
-        if let Some(Control::Row(Column::List, index)) = over {
-            // The menu is about the row it opened on, so the row becomes the
-            // cursor first — otherwise "Rename" would rename something else.
-            self.dir().set_cursor(index);
-            self.apply_visual();
-        }
+        let Some(Control::Row(Column::List, index)) = over else {
+            // Below the rows, between tiles, on the scrollbar: nothing there
+            // is a row, so the menu is about the folder, and the cursor stays
+            // where the keyboard left it.
+            self.open_folder_menu(at);
+            return;
+        };
+        // The menu is about the row it opened on, so the row becomes the
+        // cursor first — otherwise "Rename" would rename something else.
+        self.dir().set_cursor(index);
+        self.apply_visual();
         self.open_menu(at);
+    }
+
+    /// The folder menu (a right click on the list's empty space): make
+    /// something here, put the clipboard down, select, and how the pane shows
+    /// the folder. Built from the state it opens on, as the app menu is.
+    fn open_folder_menu(&mut self, at: egui::Pos2) {
+        let facts = menu::FolderFacts {
+            clipboard: !self.clipboard.is_empty(),
+            rows: !self.tab().cwd.dir.is_empty(),
+            scale: self.scale_here(),
+            hidden: self.mgr.show_hidden,
+            linemode: self.mgr.linemode,
+            sort: self.mgr.sort_by,
+            reverse: self.mgr.sort_reverse,
+        };
+        let items = menu::folder_items(facts, &self.keymap, |command| {
+            self.refusal(command).is_some()
+        });
+        // One menu at a time: this replaces an app menu that was up.
+        self.menu = Some(Menu::context(at, items));
+        // The click that opened the menu is not half of a double click on
+        // whatever is underneath it.
+        self.clicks.reset();
     }
 
     fn open_menu(&mut self, at: egui::Pos2) {
@@ -10921,6 +10950,11 @@ impl App {
             A::OpenWithMenu | A::Nothing | A::Run(_) => {}
             A::FileType(index) => self.choose_type(index),
             A::AllFiles => self.set_showing(Showing::AllFiles),
+            // `a`'s prompt with the `/` that makes the name a folder already
+            // typed, and the caret before it: what is typed next is the name.
+            A::CreateFolder => {
+                self.open_prompt_with(PromptKind::Create, InputBuffer::new("/", 0));
+            }
             A::OpenWith(index) => {
                 let Some(entry) = self.tab().cwd.dir.cursor_entry().cloned() else {
                     return;
@@ -15749,6 +15783,8 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         A::CopyName => C::CopyFilename,
         A::Properties => C::Spot,
         A::Purge => C::DeletePermanently,
+        // A folder is made by the same `Create` a file is, behind its gates.
+        A::CreateFolder => C::Create,
         A::Run(command) => command,
         // Choosing what a file dialog shows acts on no file, so no gate has
         // anything to refuse it: it works in an archive as it does anywhere.
@@ -17351,6 +17387,8 @@ mod tests {
         assert_eq!(menu_command(A::Cut), Some(C::YankCut));
         assert_eq!(menu_command(A::Rename), Some(C::Rename));
         assert_eq!(menu_command(A::Trash), Some(C::Trash));
+        // The folder menu's New folder… is `a`, and is refused where `a` is.
+        assert_eq!(menu_command(A::CreateFolder), Some(C::Create));
         // The two rows that are not verbs the keymap has: the trash view gates
         // them itself, and mapping them to something they are not would be the
         // very drift this function exists to stop.
@@ -18183,6 +18221,75 @@ mod tests {
         assert_eq!(live_menu(&app), Some(menu::Kind::App), "swapped");
         press_key(&mut app, &ctx, Key::Escape);
         assert_eq!(live_menu(&app), None);
+    }
+
+    /// A secondary click at `at`, down on one frame and up on the next.
+    fn right_click_at(app: &mut App, ctx: &egui::Context, at: egui::Pos2) {
+        let secondary = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(
+            app,
+            ctx,
+            vec![egui::Event::PointerMoved(at), secondary(true)],
+        );
+        run_frame(app, ctx, vec![secondary(false)]);
+    }
+
+    /// A right click on the list's empty space is about the folder: its menu
+    /// starts with New file…, greys Paste with nothing to paste, and leaves
+    /// the cursor where the keyboard put it. A right click on a row is still
+    /// about the row: Open first, and the row under the cursor.
+    #[test]
+    fn a_right_click_below_the_rows_opens_the_folder_menu() {
+        let mut app = Fixture::new("menu-folder", &["a.txt", "b.txt", "c.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        app.dir().set_cursor(2);
+        assert!(app.clipboard.is_empty());
+
+        let below = row_rect(&app, 2).center_bottom() + egui::vec2(0.0, 40.0);
+        assert!(layout_of(&app).list.contains(below), "no empty space below");
+        right_click_at(&mut app, &ctx, below);
+        assert_eq!(live_menu(&app), Some(menu::Kind::Context));
+        let items = &app.menu.as_ref().expect("up").items;
+        assert_eq!(items[0].label, "New file…");
+        assert_eq!(items[0].action, menu::Action::Run(Command::Create));
+        let paste = items.iter().find(|i| i.label == "Paste").expect("Paste");
+        assert!(!paste.enabled, "Paste is live with nothing to paste");
+        assert_eq!(app.tab().cwd.dir.cursor(), 2, "the cursor moved");
+
+        press_key(&mut app, &ctx, Key::Escape);
+        assert_eq!(live_menu(&app), None);
+        let row = row_centre(&app, 0);
+        right_click_at(&mut app, &ctx, row);
+        assert_eq!(live_menu(&app), Some(menu::Kind::Context));
+        let items = &app.menu.as_ref().expect("up").items;
+        assert_eq!(items[0].label, "Open");
+        assert_eq!(items[0].action, menu::Action::Open);
+        assert_eq!(app.tab().cwd.dir.cursor(), 0, "the row is the cursor");
+    }
+
+    /// New folder… is `a`'s prompt with the `/` already typed and the caret
+    /// before it: a name and `Enter` make a folder.
+    #[test]
+    fn new_folder_types_the_slash_for_you() {
+        let mut app = Fixture::new("menu-new-folder", &["a.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        app.menu_action(menu::Action::CreateFolder, 10, Instant::now());
+        let prompt = app.prompt.as_ref().expect("a prompt");
+        assert_eq!(prompt.kind, PromptKind::Create);
+        assert_eq!(prompt.buffer.text(), "/");
+        assert_eq!(prompt.buffer.cursor(), 0);
+
+        app.prompt_text("docs");
+        press_key(&mut app, &ctx, Key::Enter);
+        assert!(app.prompt.is_none(), "the prompt is still open");
+        assert!(app.files.join("docs").is_dir(), "no folder was made");
     }
 
     /// The rows are the app's state as it opens: the ticks are the view and

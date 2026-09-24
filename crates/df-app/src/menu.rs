@@ -1,6 +1,8 @@
 //! The two menus: the right-click context menu (PLAN §7.5), "mirroring opener
 //! rules + operations, with shortcuts rendered inline", and the app menu that
-//! drops out of the button at the top row's leading end.
+//! drops out of the button at the top row's leading end. The context menu is
+//! about the row it opened on, or — opened on the list's empty space — about
+//! the folder ([`folder_items`]).
 //!
 //! Both are the same floating card the which-key hint and the opener picker
 //! are ([`crate::chrome::card`]) at a third size, for the reason that file's
@@ -93,6 +95,10 @@ const SUBMENU_OVERLAP: f32 = 4.0;
 /// group too ([`Item::checked`]'s `Some(false)`), so the labels of a radio
 /// group start in one column whichever of them is ticked — a label that
 /// stepped sideways as the tick moved would be the menu moving under the eye.
+/// For the same reason a list with a tick row anywhere in it keeps the column
+/// on every row, as a list with a parent row keeps [`CHEVRON_COLUMN`]: the
+/// folder menu's one "Show hidden" would otherwise be the one label out of
+/// line with the rest.
 const CHECK_COLUMN: f32 = 12.0 + ICON_GAP;
 
 /// The tick, with the patched font (nf-fa-check) and without it.
@@ -137,6 +143,11 @@ pub enum Action {
     FileType(usize),
     /// …or every file, whatever the dialog's filters say.
     AllFiles,
+    /// The folder menu's "New folder…": the `Create:` prompt `a` opens, with
+    /// the trailing `/` that makes the name a folder already typed and the
+    /// caret in front of it. Not a [`Command`]: the keyboard's way to a folder
+    /// is `a` and a name ending in `/`, which has no command of its own.
+    CreateFolder,
     /// A row that does nothing itself: the app menu's "View", "Sort" and "File
     /// type", which are only the lists they fly out, and "Reverse" while the
     /// sort has no direction to reverse.
@@ -327,9 +338,8 @@ pub fn items(facts: Facts, openers: &[String]) -> Vec<Item> {
         }
         items.splice(at..at, extract);
     }
-    // A menu that opened on empty pane space with everything grey would be a
-    // menu about nothing; Paste is the one row that still makes sense there,
-    // and `items` already says so.
+    // Empty pane space has a menu of its own ([`folder_items`]), about the
+    // folder rather than a row, so this one always opens on something.
     items.retain(|item| item.action != Action::OpenWithMenu || !openers.is_empty());
     items
 }
@@ -422,6 +432,114 @@ fn sort_command(by: SortBy, reverse: bool) -> Option<Command> {
     })
 }
 
+/// A row that runs `command`: the key the registry advertises for it, or none
+/// when it is unbound, and greyed where `refused` says the gate would turn it
+/// away rather than left live to toast "not here" when clicked.
+fn command_row(
+    label: &str,
+    command: Command,
+    enabled: bool,
+    keymap: &Registry,
+    refused: &dyn Fn(Command) -> bool,
+) -> Item {
+    Item::new(
+        label,
+        &keymap.binding_label(command).unwrap_or_default(),
+        Action::Run(command),
+        enabled && !refused(command),
+    )
+}
+
+/// The "View" list: the scale ladder, hidden files, and the linemode, each
+/// ticked where the pane is now. One builder for the app menu and the folder
+/// menu, so the two lists cannot drift apart.
+fn view_items(
+    scale: ViewScale,
+    hidden: bool,
+    linemode: LineMode,
+    keymap: &Registry,
+    refused: &dyn Fn(Command) -> bool,
+) -> Vec<Item> {
+    use Command as C;
+    let run = |label: &str, command: Command| command_row(label, command, true, keymap, refused);
+    let scales = [
+        ("Compact", ViewScale::Compact, C::ViewScaleCompact),
+        (
+            "Comfortable",
+            ViewScale::Comfortable,
+            C::ViewScaleComfortable,
+        ),
+        ("Roomy", ViewScale::Roomy, C::ViewScaleRoomy),
+        ("Grid", ViewScale::Grid, C::ViewScaleGrid),
+    ];
+    let linemodes = [
+        ("Size", LineMode::Size, C::LinemodeSize),
+        ("Permissions", LineMode::Permissions, C::LinemodePermissions),
+        ("Created", LineMode::Btime, C::LinemodeBtime),
+        ("Modified", LineMode::Mtime, C::LinemodeMtime),
+        ("Owner", LineMode::Owner, C::LinemodeOwner),
+        ("None", LineMode::None, C::LinemodeNone),
+    ];
+    let mut view: Vec<Item> = scales
+        .iter()
+        .map(|(label, step, command)| run(label, *command).check(scale == *step))
+        .collect();
+    view.push(
+        run("Show hidden files", C::ToggleHidden)
+            .check(hidden)
+            .after_gap(),
+    );
+    for (index, (label, mode, command)) in linemodes.iter().enumerate() {
+        let item = run(label, *command).check(linemode == *mode);
+        view.push(if index == 0 { item.after_gap() } else { item });
+    }
+    view
+}
+
+/// The "Sort" list: every order, the one in force ticked, and Reverse. The
+/// app menu's and the folder menu's, for the reason [`view_items`] is both.
+fn sort_items(
+    sort: SortBy,
+    reverse: bool,
+    keymap: &Registry,
+    refused: &dyn Fn(Command) -> bool,
+) -> Vec<Item> {
+    let run = |label: &str, command: Command| command_row(label, command, true, keymap, refused);
+    // Each key keeps the direction the listing is in now, so picking a key is
+    // "order by this" and never also "and flip it" — the direction is the
+    // Reverse row's business. Each row is the command for exactly that, so
+    // the key it teaches is the key that does what the click does.
+    let sorts = [
+        ("Alphabetical", SortBy::Alphabetical),
+        ("Natural", SortBy::Natural),
+        ("Modified", SortBy::Mtime),
+        ("Created", SortBy::Btime),
+        ("Extension", SortBy::Extension),
+        ("Size", SortBy::Size),
+        ("Random", SortBy::Random),
+    ];
+    let mut rows: Vec<Item> = sorts
+        .iter()
+        .filter_map(|(label, by)| {
+            let command = sort_command(*by, reverse)?;
+            Some(run(label, command).check(sort == *by))
+        })
+        .collect();
+    // Reverse is the current key again, the other way round. A shuffle has no
+    // other way round, so the row greys rather than reshuffling under a name
+    // that promised something else.
+    let flip = sort_command(sort, !reverse).filter(|_| sort != SortBy::Random);
+    rows.push(
+        match flip {
+            Some(command) => run("Reverse", command),
+            None => Item::new("Reverse", "", Action::Nothing, false),
+        }
+        .check(reverse)
+        .after_gap(),
+    );
+    rows
+}
+
 /// The app menu's rows, in order, with their enablement, ticks and submenus.
 ///
 /// Every leaf is a [`Command`] ([`Action::Run`]) and its key is whatever the
@@ -445,78 +563,10 @@ pub fn app_items(
     use Command as C;
     let acts = facts.targets > 0;
     let run = |label: &str, command: Command, enabled: bool| {
-        Item::new(
-            label,
-            &keymap.binding_label(command).unwrap_or_default(),
-            Action::Run(command),
-            enabled && !refused(command),
-        )
+        command_row(label, command, enabled, keymap, &refused)
     };
-
-    let scales = [
-        ("Compact", ViewScale::Compact, C::ViewScaleCompact),
-        (
-            "Comfortable",
-            ViewScale::Comfortable,
-            C::ViewScaleComfortable,
-        ),
-        ("Roomy", ViewScale::Roomy, C::ViewScaleRoomy),
-        ("Grid", ViewScale::Grid, C::ViewScaleGrid),
-    ];
-    let linemodes = [
-        ("Size", LineMode::Size, C::LinemodeSize),
-        ("Permissions", LineMode::Permissions, C::LinemodePermissions),
-        ("Created", LineMode::Btime, C::LinemodeBtime),
-        ("Modified", LineMode::Mtime, C::LinemodeMtime),
-        ("Owner", LineMode::Owner, C::LinemodeOwner),
-        ("None", LineMode::None, C::LinemodeNone),
-    ];
-    let mut view: Vec<Item> = scales
-        .iter()
-        .map(|(label, step, command)| run(label, *command, true).check(facts.scale == *step))
-        .collect();
-    view.push(
-        run("Show hidden files", C::ToggleHidden, true)
-            .check(facts.hidden)
-            .after_gap(),
-    );
-    for (index, (label, mode, command)) in linemodes.iter().enumerate() {
-        let item = run(label, *command, true).check(facts.linemode == *mode);
-        view.push(if index == 0 { item.after_gap() } else { item });
-    }
-
-    // Each key keeps the direction the listing is in now, so picking a key is
-    // "order by this" and never also "and flip it" — the direction is the
-    // Reverse row's business. Each row is the command for exactly that, so
-    // the key it teaches is the key that does what the click does.
-    let sorts = [
-        ("Alphabetical", SortBy::Alphabetical),
-        ("Natural", SortBy::Natural),
-        ("Modified", SortBy::Mtime),
-        ("Created", SortBy::Btime),
-        ("Extension", SortBy::Extension),
-        ("Size", SortBy::Size),
-        ("Random", SortBy::Random),
-    ];
-    let mut sort: Vec<Item> = sorts
-        .iter()
-        .filter_map(|(label, by)| {
-            let command = sort_command(*by, facts.reverse)?;
-            Some(run(label, command, true).check(facts.sort == *by))
-        })
-        .collect();
-    // Reverse is the current key again, the other way round. A shuffle has no
-    // other way round, so the row greys rather than reshuffling under a name
-    // that promised something else.
-    let flip = sort_command(facts.sort, !facts.reverse).filter(|_| facts.sort != SortBy::Random);
-    sort.push(
-        match flip {
-            Some(command) => run("Reverse", command, true),
-            None => Item::new("Reverse", "", Action::Nothing, false),
-        }
-        .check(facts.reverse)
-        .after_gap(),
-    );
+    let view = view_items(facts.scale, facts.hidden, facts.linemode, keymap, &refused);
+    let sort = sort_items(facts.sort, facts.reverse, keymap, &refused);
 
     let mut rows = vec![
         run("New tab", C::TabCreate, true),
@@ -562,6 +612,74 @@ pub fn app_items(
         );
     }
     rows
+}
+
+// ── The folder menu ─────────────────────────────────────────────────────────
+
+/// What the folder menu needs to know: [`Facts`]' counterpart for a right
+/// click on the list's empty space, which is about the directory rather than
+/// a row in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FolderFacts {
+    /// Is there anything on the internal clipboard? The same question, and the
+    /// same deliberately narrow answer, as [`Facts::clipboard`].
+    pub clipboard: bool,
+    /// Does the listing have any rows, for "Select all" to select?
+    pub rows: bool,
+    pub scale: ViewScale,
+    pub hidden: bool,
+    pub linemode: LineMode,
+    pub sort: SortBy,
+    pub reverse: bool,
+}
+
+/// The folder menu's rows: what can be done *here* — make something, put the
+/// clipboard down, select, and change how the pane shows the folder.
+///
+/// The same door as the app menu's: every command row carries the registry's
+/// key and greys where the gate would refuse it (`refused`), and View and
+/// Sort are the app menu's own lists ([`view_items`], [`sort_items`]).
+pub fn folder_items(
+    facts: FolderFacts,
+    keymap: &Registry,
+    refused: impl Fn(Command) -> bool,
+) -> Vec<Item> {
+    use Command as C;
+    let run = |label: &str, command: Command, enabled: bool| {
+        command_row(label, command, enabled, keymap, &refused)
+    };
+    let key = |command: Command| keymap.binding_label(command).unwrap_or_default();
+    vec![
+        run("New file…", C::Create, true),
+        // No key of its own: the keyboard's folder is `a` and a name ending
+        // in `/`, and drawing `a` here would teach it as a key that makes a
+        // folder, which on its own it does not.
+        Item::new("New folder…", "", Action::CreateFolder, !refused(C::Create)),
+        Item::new(
+            "Paste",
+            &key(C::Paste),
+            Action::Paste,
+            facts.clipboard && !refused(C::Paste),
+        )
+        .after_gap(),
+        run("Select all", C::SelectAll, facts.rows),
+        run("Show hidden", C::ToggleHidden, true)
+            .check(facts.hidden)
+            .after_gap(),
+        Item::new("View", "", Action::Nothing, true).with_submenu(view_items(
+            facts.scale,
+            facts.hidden,
+            facts.linemode,
+            keymap,
+            &refused,
+        )),
+        Item::new("Sort", "", Action::Nothing, true).with_submenu(sort_items(
+            facts.sort,
+            facts.reverse,
+            keymap,
+            &refused,
+        )),
+    ]
 }
 
 // ── The menu, while it is up ────────────────────────────────────────────────
@@ -871,14 +989,14 @@ pub fn height(items: &[Item]) -> f32 {
 /// keys it does not have would be a card with a hole down its right side.
 fn width(items: &[Item], painter: &egui::Painter, top_level: bool) -> f32 {
     let label_font = egui::FontId::proportional(FONT);
+    let check = if items.iter().any(|item| item.checked.is_some()) {
+        CHECK_COLUMN
+    } else {
+        0.0
+    };
     items
         .iter()
         .map(|item| {
-            let check = if item.checked.is_some() {
-                CHECK_COLUMN
-            } else {
-                0.0
-            };
             let label = crate::chrome::text_width(painter, &item.label, label_font.clone());
             let keys = if top_level || !item.keys.is_empty() {
                 KEY_GAP + crate::chrome::text_width(painter, &item.keys, key_font(FONT - 1.0))
@@ -1019,6 +1137,7 @@ fn list(
     now: Instant,
 ) {
     let chevrons = items.iter().any(Item::has_submenu);
+    let checks = items.iter().any(|item| item.checked.is_some());
     for (index, (item, rect)) in items.iter().zip(rects).enumerate() {
         if item.gap_before {
             // The hairline in the middle of the gap it opened. Inset to the
@@ -1038,7 +1157,7 @@ fn list(
             paint,
             *rect,
             item,
-            chevrons,
+            (chevrons, checks),
             selected == Some(index),
             control(index),
             hovers,
@@ -1049,14 +1168,15 @@ fn list(
     }
 }
 
-/// One row of either list. `chevrons` is whether the list it is in keeps a
-/// chevron column ([`keys_right`]).
+/// One row of either list. `chevrons` and `checks` are whether the list it is
+/// in keeps a chevron column ([`keys_right`]) and a tick column
+/// ([`CHECK_COLUMN`]).
 #[allow(clippy::too_many_arguments)]
 fn row(
     paint: &Painting<'_>,
     rect: egui::Rect,
     item: &Item,
-    chevrons: bool,
+    (chevrons, checks): (bool, bool),
     selected: bool,
     key: Control,
     hovers: &Hovers<Control>,
@@ -1121,22 +1241,17 @@ fn row(
         );
     }
     // The tick, in the column [`CHECK_COLUMN`] keeps for it — and that column
-    // kept empty on the unticked rows of the group.
-    let check = match item.checked {
-        Some(on) => {
-            if on {
-                inside.text(
-                    egui::pos2(rect.left() + PAD_X, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    crate::icons::glyph(paint.nerd, CHECK_ICON, CHECK_GLYPH),
-                    egui::FontId::proportional(FONT),
-                    text_color,
-                );
-            }
-            CHECK_COLUMN
-        }
-        None => 0.0,
-    };
+    // kept empty on every other row of a list that has one.
+    if item.checked == Some(true) {
+        inside.text(
+            egui::pos2(rect.left() + PAD_X, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            crate::icons::glyph(paint.nerd, CHECK_ICON, CHECK_GLYPH),
+            egui::FontId::proportional(FONT),
+            text_color,
+        );
+    }
+    let check = if checks { CHECK_COLUMN } else { 0.0 };
     crate::chrome::truncated(
         &inside,
         egui::pos2(rect.left() + PAD_X + check, rect.center().y),
@@ -1238,9 +1353,8 @@ mod tests {
                 .find(|i| i.action == action)
                 .map(|i| i.enabled)
         };
-        // An empty directory: nothing to open, nothing to act on — but a
-        // clipboard is still pastable, which is the whole reason the menu
-        // opens on empty pane space at all.
+        // No row under the cursor: nothing to open, nothing to act on — but
+        // a clipboard is still pastable.
         let empty = Facts {
             has_row: false,
             is_dir: false,
@@ -1786,6 +1900,120 @@ mod tests {
         }
         let everything = app_items(app_facts(), Vec::new(), &Registry::defaults(), |_| true);
         assert!(row(&everything, "View").enabled && row(&everything, "Sort").enabled);
+    }
+
+    fn folder_facts() -> FolderFacts {
+        FolderFacts {
+            clipboard: true,
+            rows: true,
+            scale: ViewScale::Compact,
+            hidden: true,
+            linemode: LineMode::Size,
+            sort: SortBy::Alphabetical,
+            reverse: false,
+        }
+    }
+
+    /// A row as everything that decides how it looks and what it does, so two
+    /// lists can be compared whole.
+    fn shape(item: &Item) -> (&str, &str, Action, bool, bool, Option<bool>) {
+        (
+            item.label.as_str(),
+            item.keys.as_str(),
+            item.action,
+            item.enabled,
+            item.gap_before,
+            item.checked,
+        )
+    }
+
+    /// The folder menu, top to bottom: make something here, put the
+    /// clipboard down, select, and how the pane shows the folder — with the
+    /// registry's keys, and View and Sort the very lists the app menu flies
+    /// out.
+    #[test]
+    fn the_folder_menu_is_about_the_folder() {
+        use Command as C;
+        let keymap = Registry::defaults();
+        let rows = folder_items(folder_facts(), &keymap, |_| false);
+        let got: Vec<_> = rows.iter().map(shape).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("New file…", "a", Action::Run(C::Create), true, false, None),
+                ("New folder…", "", Action::CreateFolder, true, false, None),
+                ("Paste", "p", Action::Paste, true, true, None),
+                (
+                    "Select all",
+                    "Ctrl+a",
+                    Action::Run(C::SelectAll),
+                    true,
+                    false,
+                    None
+                ),
+                (
+                    "Show hidden",
+                    ".",
+                    Action::Run(C::ToggleHidden),
+                    true,
+                    true,
+                    Some(true)
+                ),
+                ("View", "", Action::Nothing, true, false, None),
+                ("Sort", "", Action::Nothing, true, false, None),
+            ]
+        );
+        let app = app(AppFacts {
+            hidden: true,
+            ..app_facts()
+        });
+        for label in ["View", "Sort"] {
+            let list = |rows: &[Item]| -> Vec<(String, String, Action, bool, bool, Option<bool>)> {
+                row(rows, label)
+                    .submenu
+                    .as_deref()
+                    .expect("a list")
+                    .iter()
+                    .map(|i| {
+                        let (l, k, a, e, g, c) = shape(i);
+                        (l.to_string(), k.to_string(), a, e, g, c)
+                    })
+                    .collect()
+            };
+            assert_eq!(list(&rows), list(&app), "the two {label} lists differ");
+        }
+    }
+
+    /// Paste greys with nothing to paste, Select all with nothing to
+    /// select, and both New rows where the gate would refuse `Create`; the
+    /// lists stay live whatever is refused.
+    #[test]
+    fn the_folder_menu_greys_what_cannot_happen_here() {
+        use Command as C;
+        let keymap = Registry::defaults();
+        let enabled = |rows: &[Item], label: &str| row(rows, label).enabled;
+
+        let nothing = folder_items(
+            FolderFacts {
+                clipboard: false,
+                rows: false,
+                ..folder_facts()
+            },
+            &keymap,
+            |_| false,
+        );
+        assert!(!enabled(&nothing, "Paste"), "Paste with an empty clipboard");
+        assert!(!enabled(&nothing, "Select all"), "Select all with no rows");
+        assert!(enabled(&nothing, "New file…") && enabled(&nothing, "New folder…"));
+
+        let trash_like = |command: Command| matches!(command, C::Create | C::Paste);
+        let refused = folder_items(folder_facts(), &keymap, trash_like);
+        for label in ["New file…", "New folder…", "Paste"] {
+            assert!(!enabled(&refused, label), "{label} would be refused");
+        }
+        for label in ["Select all", "Show hidden", "View", "Sort"] {
+            assert!(enabled(&refused, label), "{label} is not refused");
+        }
     }
 
     /// A picker session's last row is the dialog's Cancel, not a file
