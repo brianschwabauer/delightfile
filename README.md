@@ -139,6 +139,14 @@ takes one file holds the selection to one row, and a drag draws no band there. I
 `Enter` on a file replaces it (asking first unless it is the name the dialog suggested) and
 `Save` types a new name.
 
+When the dialog comes with file-type filters (a web form that accepts only images, say),
+the listing shows only what the active filter admits; folders always show. A chip beside
+the position counter names the filter, and clicking it — or `F10` → File type — switches
+to another filter the dialog offered, or to all files. The `.` key, which normally toggles
+hidden files, is a three-step ladder in such a dialog: the filter's files, then every file,
+then every file including the hidden ones, and round again. Narrowing the view deselects
+anything it hides, so a pick never includes a file you cannot see.
+
 ### The termfilechooser alternative
 
 [xdg-desktop-portal-termfilechooser](https://github.com/hunkyburrito/xdg-desktop-portal-termfilechooser)
