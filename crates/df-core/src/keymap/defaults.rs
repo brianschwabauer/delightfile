@@ -240,13 +240,13 @@ pub(super) fn build() -> Registry {
         // wants it back in `keymap.toml`; `?` is help (see Global above), which
         // is what the key is for in every other program on the machine.
         (Files, "/",      C::FindNext,      "Jump to a name in this folder",     Always),
-        (Files, "n",      C::FindArrowNext, "Next match",                  Always),
-        (Files, "N",      C::FindArrowPrev, "Previous match",              Always),
+        (Files, "n",      C::FindArrowNext, "Next match",                        Always),
+        (Files, "N",      C::FindArrowPrev, "Previous match",                    Always),
         (Files, "s",      C::SearchName,    "Search everywhere by name",         Always),
         (Files, "S",      C::SearchContent, "Search everywhere inside files",    Always),
-        (Files, "ctrl+s", C::CancelSearch,  "Cancel the search",           Always),
-        (Files, "z",      C::FuzzyJump,     "Jump to a file or directory", Always),
-        (Files, "Z",      C::ZoxideJump,    "Jump by frecency (zoxide)",   Always),
+        (Files, "ctrl+s", C::CancelSearch,  "Cancel the search",                 Always),
+        (Files, "z",      C::FuzzyJump,     "Jump to a file or directory",       Always),
+        (Files, "Z",      C::ZoxideJump,    "Jump by frecency (zoxide)",         Always),
 
         // ── Files: sort. The time and size sorts also switch the linemode, as
         // in the yazi config this is ported from — the column you just sorted

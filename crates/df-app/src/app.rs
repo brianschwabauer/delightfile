@@ -1227,8 +1227,11 @@ pub struct App {
     /// Whether the yank tray is out (PLAN §7.1, [`crate::tray`]). Closed by
     /// [`App::clamp_tray`] the moment the clipboard has nothing to list.
     tray_open: bool,
-    /// The first row the tray draws.
+    /// The first row the tray draws, moved by the wheel over the card.
     tray_first: usize,
+    /// The fraction of a row the wheel has rolled over the tray and not yet
+    /// spent ([`crate::tray::scroll`]).
+    tray_carry: f32,
     /// The archive entry the preview card is showing, and its text if it had
     /// any: `(archive, inner path, body)`. The body is `None` until the
     /// worker that reads it comes back (see [`crate::preview::body`]).
@@ -1865,6 +1868,7 @@ impl App {
             connects: Vec::new(),
             tray_open: false,
             tray_first: 0,
+            tray_carry: 0.0,
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
             repo_counts: None,
@@ -6406,11 +6410,20 @@ impl App {
             return;
         }
         self.spend_selection();
+        let was_empty = self.clipboard.is_empty();
         let toggled = self.clipboard.toggle(&paths);
         self.clamp_tray();
+        // Each outcome in the words of the key it amounts to: a `b` into an
+        // empty clipboard is a `y`, and one that takes out the last of it is
+        // an `X`. Only the two in between have anything of their own to say,
+        // and what they say is the running total.
         let all = self.clipboard.len();
-        let message = if toggled.removed > 0 {
-            format!("Took {} out of the yank · {all} in all", toggled.removed)
+        let message = if toggled.removed > 0 && all == 0 {
+            "Clipboard cleared".to_string()
+        } else if toggled.removed > 0 {
+            format!("Took {} out · {all} in all", toggled.removed)
+        } else if was_empty {
+            format!("Yanked {}", plural(toggled.added, "item", "items"))
         } else {
             format!("Yanked {} more · {all} in all", toggled.added)
         };
@@ -6463,6 +6476,7 @@ impl App {
         if len == 0 {
             self.tray_open = false;
             self.tray_first = 0;
+            self.tray_carry = 0.0;
             return;
         }
         self.tray_first = self
@@ -9808,6 +9822,7 @@ impl App {
                 paths: &chip.paths,
                 cut: chip.cut,
                 alpha: chip.alpha(now),
+                tray: self.tray_open,
             }),
             branch: self.path_bar.2.as_deref(),
             dirty: self.repo_counts,
@@ -12930,11 +12945,46 @@ impl App {
         // A menu that is fading is pixels, not a surface: it takes no pointer.
         let menu_live = self.menu.as_ref().is_some_and(Menu::live);
 
-        // The yank tray (PLAN §7.1), measured before the hit test for the
-        // reason the breadcrumb is: two functions working it out separately is
-        // how a floating surface grows a one-pixel lie at its edges.
-        let tray_geometry =
-            crate::tray::geometry(area, &self.clipboard, self.tray_open, self.tray_first);
+        // The yank tray (PLAN §7.1), hung from the yank chip and measured
+        // before the hit test for the reason the breadcrumb is: two functions
+        // working it out separately is how a floating surface grows a one-pixel
+        // lie at its edges. The chip is always laid out while there is a
+        // clipboard; the row's own right end is only a fallback.
+        let tray_chip = top_geom.cluster.yank.unwrap_or(layout.path);
+        let tray_at = |first: usize| {
+            crate::tray::geometry(
+                area,
+                tray_chip,
+                layout.path,
+                &self.clipboard,
+                self.tray_open,
+                first,
+            )
+        };
+        // **The wheel over the card is the card's.** It scrolls the names,
+        // not the pane underneath them — a card that let the list slide by
+        // behind it while its own rows stood still would be a card the wheel
+        // went straight through. Taken here, before the card is measured for
+        // the frame, so the rows drawn are the rows the wheel just asked for;
+        // and asked of the card as it stood, since that is what the pointer
+        // was over. Not while something is over the card: the menu, a modal
+        // card, the help sheet.
+        let over_tray = pointer.wheel != 0.0
+            && !menu_live
+            && overlay.is_none()
+            && self.help.is_none()
+            && pointer
+                .at
+                .is_some_and(|p| tray_at(self.tray_first).contains(p));
+        if over_tray {
+            self.tray_first = crate::tray::scroll(
+                self.tray_first,
+                self.clipboard.len(),
+                &mut self.tray_carry,
+                pointer.wheel,
+            );
+        }
+        let tray_geometry = tray_at(self.tray_first);
 
         // The toast, measured where it will be painted (PLAN §5). It floats over
         // the panes and over a modal card — everything except the menu, which
@@ -13166,7 +13216,8 @@ impl App {
         // is aimed with the hand, and scrolling the pane the keyboard happens
         // to be in would be the one control in the program that ignores where
         // it was pointed.
-        if pointer.wheel != 0.0 && self.help.is_none() {
+        // A roll over the tray has already been spent on it.
+        if pointer.wheel != 0.0 && self.help.is_none() && !over_tray {
             if let Some(at) = pointer.at {
                 self.wheel(pointer.wheel, at, &layout, page, parent_page, now);
             }
@@ -14517,9 +14568,9 @@ impl App {
         // The toast sits at the window's own bottom edge now that there is no
         // bar to sit above, and under the which-key card: a message about what
         // just happened must not cover the answer to the key being held down
-        // now. Centred rather than in the corner because the corner is the
-        // yank tray's (PLAN §7.1), and two transient surfaces stacking
-        // in one place is how a notice ends up under a tray.
+        // now. Centred, and well clear of the yank tray, which hangs from the
+        // top row's right end (PLAN §7.1): two transient surfaces stacking in
+        // one place is how a notice ends up under a tray.
         self.toasts
             .paint(&paint, area, area.bottom(), &self.hovers, now);
 
@@ -18793,7 +18844,7 @@ mod tests {
         app.run(Command::YankToggle, 10, now);
         assert_eq!(app.clipboard.paths, [files.join("a.txt")]);
         assert_eq!(app.clipboard.mode, PasteMode::Copy);
-        assert_eq!(toast(&app).as_deref(), Some("Yanked 1 more · 1 in all"));
+        assert_eq!(toast(&app).as_deref(), Some("Yanked 1 item"));
         assert_eq!(app.tab().cwd.dir.cursor(), at + 1, "`b b b` walks the list");
 
         // Another folder, a selection: added after, in the order picked, and
@@ -18826,10 +18877,7 @@ mod tests {
         cursor_to(&mut app, "a.txt");
         app.run(Command::YankToggle, 10, now);
         assert_eq!(app.clipboard.paths, [sub.join("c.txt"), sub.join("d.txt")]);
-        assert_eq!(
-            toast(&app).as_deref(),
-            Some("Took 1 out of the yank · 2 in all")
-        );
+        assert_eq!(toast(&app).as_deref(), Some("Took 1 out · 2 in all"));
 
         // A `y` over a pile that spans folders replaces it — and says so.
         cursor_to(&mut app, "a.txt");
@@ -18855,6 +18903,16 @@ mod tests {
             app.clipboard.paths,
             [files.join("a.txt"), files.join("b.txt")]
         );
+        assert_eq!(toast(&app).as_deref(), Some("Yanked 1 more · 2 in all"));
+
+        // Taking out the last of it is an `X`, and says what `X` says.
+        for name in ["a.txt", "b.txt"] {
+            let at = app.tab().cwd.dir.position_of(name).expect("a row");
+            app.toggle_row(at);
+        }
+        app.run(Command::YankToggle, 10, now);
+        assert!(app.clipboard.is_empty());
+        assert_eq!(toast(&app).as_deref(), Some("Clipboard cleared"));
     }
 
     /// `b` is refused in the trash, in an archive and on a server — the three
@@ -18918,9 +18976,21 @@ mod tests {
         rect.expect("a clipboard draws its chip")
     }
 
-    /// The pointer's way through it: the chip opens the tray rather than
-    /// throwing the clipboard away, a row's `×` takes one file out, and
-    /// `Clear` is `X`.
+    /// Where the frame hangs the tray, from the chip the frame measures.
+    fn tray_of(app: &App) -> crate::tray::Geometry {
+        crate::tray::geometry(
+            screen(),
+            yank_chip(app),
+            layout_of(app).path,
+            &app.clipboard,
+            app.tray_open,
+            app.tray_first,
+        )
+    }
+
+    /// The pointer's way through it: the chip opens the tray under itself
+    /// rather than throwing the clipboard away, a row's `×` takes one file
+    /// out, and `Clear` is `X`.
     #[test]
     fn the_chip_opens_the_tray_and_clear_empties_it() {
         let ctx = egui::Context::default();
@@ -18935,17 +19005,83 @@ mod tests {
         assert!(app.tray_open, "the chip did not open the tray");
         assert_eq!(app.clipboard.len(), 3, "the chip threw the clipboard away");
 
-        let tray = crate::tray::geometry(screen(), &app.clipboard, true, app.tray_first);
+        let tray = tray_of(&app);
+        let card = tray.card.expect("the tray is out");
+        assert_eq!(card.right(), chip.right(), "the card hangs from the chip");
+        assert!(
+            card.top() > layout_of(&app).path.bottom(),
+            "under the top row"
+        );
         let first = app.clipboard.paths[0].clone();
         click_at(&mut app, &ctx, tray.removes[0].center());
         assert_eq!(app.clipboard.len(), 2);
         assert!(!app.clipboard.contains(&first), "the × took the wrong row");
         assert!(app.tray_open);
 
-        let tray = crate::tray::geometry(screen(), &app.clipboard, true, app.tray_first);
+        let tray = tray_of(&app);
         click_at(&mut app, &ctx, tray.clear.center());
         assert!(app.clipboard.is_empty(), "Clear left the clipboard");
         assert!(!app.tray_open);
         assert_eq!(toast(&app).as_deref(), Some("Clipboard cleared"));
+    }
+
+    /// The wheel over the tray scrolls the tray — whole rows, as far as the
+    /// last windowful and no further — and leaves the list under it where it
+    /// was. Off the card, the wheel is the list's again.
+    #[test]
+    fn the_wheel_scrolls_the_tray_and_not_the_list_under_it() {
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..40).map(|i| format!("f{i:02}.txt")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = Fixture::new("yank-wheel", &names);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Yank, 10, now);
+        app.run(Command::YankShow, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        let card = tray_of(&app).card.expect("the tray is out");
+
+        // Where the list's scroll is headed, rather than where its glide has
+        // got to this instant.
+        let settled = |app: &App| {
+            app.tab()
+                .cwd
+                .scroll_rows(Instant::now() + Duration::from_secs(5))
+        };
+        let notch = |lines: f32| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -lines),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let list = settled(&app);
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(card.center()), notch(1.0)],
+        );
+        // One notch is fifty points, and a tray row is twenty-two.
+        assert_eq!(app.tray_first, 2);
+        assert_eq!(settled(&app), list, "the list scrolled under the tray");
+
+        for _ in 0..20 {
+            run_frame(&mut app, &ctx, vec![notch(1.0)]);
+        }
+        assert_eq!(app.tray_first, 40 - crate::tray::ROWS, "past the last row");
+        for _ in 0..30 {
+            run_frame(&mut app, &ctx, vec![notch(-1.0)]);
+        }
+        assert_eq!(app.tray_first, 0, "past the first row");
+        assert_eq!(settled(&app), list);
+
+        let over_list = row_centre(&app, 5);
+        assert!(!card.contains(over_list));
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(over_list), notch(1.0)],
+        );
+        assert_eq!(app.tray_first, 0, "a roll over the list reached the tray");
+        assert!(settled(&app) > list, "the list did not scroll");
     }
 }

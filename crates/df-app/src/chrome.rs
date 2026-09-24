@@ -949,6 +949,10 @@ pub struct Yank<'a> {
     /// The chip's fade: 1 while there is a clipboard, and its eased way out
     /// after `X` (PLAN §8's instant-in, eased-out).
     pub alpha: f32,
+    /// Whether the tray is hanging under the chip ([`crate::tray`]). It lists
+    /// the same names in the same place the tooltip would hang, so the
+    /// tooltip keeps quiet while it is out rather than covering its header.
+    pub tray: bool,
 }
 
 /// The most names the yank chip's tooltip lists.
@@ -1461,7 +1465,7 @@ fn yank_tooltip(
     yank: &Yank<'_>,
     warm: f32,
 ) {
-    if warm <= 0.0 || yank.paths.is_empty() {
+    if warm <= 0.0 || yank.paths.is_empty() || yank.tray {
         return;
     }
     let mut lines: Vec<String> = yank
@@ -3816,6 +3820,7 @@ mod tests {
                     paths: &yanked,
                     cut: true,
                     alpha: 1.0,
+                    tray: false,
                 }),
                 branch: Some("main"),
                 dirty: Some(df_core::git::DirtyCounts {
@@ -4320,6 +4325,7 @@ mod tests {
                         paths: &yanked,
                         cut: false,
                         alpha: 1.0,
+                        tray: false,
                     }),
                 ),
             ] {

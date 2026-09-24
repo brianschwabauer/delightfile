@@ -1,8 +1,8 @@
 //! The yank tray — the clipboard, listed. `B` opens it, and so does a click on
-//! the top row's `3 yanked` chip: a card in the window's bottom-right corner
-//! with one row per carried file, an `×` on each, and a `Clear` that does what
-//! `X` does — PLAN §7.1's floating tray, with the whole yank pasted or dragged
-//! as one payload.
+//! the top row's `3 yanked` chip: a card hanging under that chip with one row
+//! per carried file, an `×` on each, and a `Clear` that does what `X` does —
+//! PLAN §7.1's floating tray, with the whole yank pasted or dragged as one
+//! payload. The wheel over the card scrolls it a row at a time.
 //!
 //! ## Why a selection is not enough
 //!
@@ -57,6 +57,11 @@ pub const ROWS: usize = 8;
 
 /// The height of the header and of one row.
 const TRAY_ROW: f32 = 22.0;
+/// How far under the top row the card's top edge sits: the gap the menus
+/// leave under the control they drop out of (`menu::BELOW_GAP`), so the card
+/// reads as having come out of the chip rather than as a plate glued to the
+/// row.
+const HANG: f32 = 4.0;
 /// The tray's inner padding.
 ///
 /// `chrome::CARD_PAD`, not a number of its own. The tray's plate is
@@ -119,29 +124,41 @@ impl Geometry {
     }
 }
 
-/// Lay the tray out against the bottom-right of `area`.
+/// Hang the tray from the yank chip: its top edge [`HANG`] under `row` (the
+/// top row the chip sits on), its right edge on the chip's right edge.
 ///
-/// Bottom-**right** and not anywhere else: the file panes are read left to
-/// right and top to bottom, so the bottom-right corner is the one place a
-/// floating card can sit without being over the row the eye is on. The card
-/// grows *upwards* from that corner as it gets longer, so its bottom edge —
-/// and the last thing added, which is the bottom row — stays where it was.
+/// **Under the thing that was clicked.** The chip is what opens the card, and
+/// the card says what the chip counts, so it comes out of the chip the way a
+/// menu comes out of its button; a card that appeared in some other corner of
+/// the window would leave the eye to go and find it, and to work out that the
+/// two were the same list. Right-aligned, because the chip sits at the right
+/// end of the row and a card extending left of it stays inside the window; it
+/// is slid back inside `area` if the chip is ever too close to either edge
+/// for that.
+///
+/// The card grows *downwards* as it gets longer, so its header — the chip's
+/// own label, and `Clear` — stays right under the chip whatever the count.
 ///
 /// Nothing at all when the tray is closed or there is nothing to list: the
-/// chip that says how much is carried is the top row's, and it is there
-/// whether the card is out or not.
-pub fn geometry(area: egui::Rect, clipboard: &Clipboard, open: bool, first: usize) -> Geometry {
+/// chip that says how much is carried is there whether the card is out or
+/// not.
+pub fn geometry(
+    area: egui::Rect,
+    chip: egui::Rect,
+    row: egui::Rect,
+    clipboard: &Clipboard,
+    open: bool,
+    first: usize,
+) -> Geometry {
     if !open || clipboard.is_empty() {
         return Geometry::default();
     }
-    let right = area.right() - TRAY_MARGIN;
-    let bottom = area.bottom() - TRAY_MARGIN;
+    let right = chip.right().min(area.right() - TRAY_MARGIN);
+    let left = (right - TRAY_WIDTH).max(area.left() + TRAY_MARGIN);
+    let top = row.bottom() + HANG;
     let visible = clipboard.len().saturating_sub(first).min(ROWS);
     let height = TRAY_PAD * 2.0 + TRAY_ROW + visible as f32 * TRAY_ROW;
-    let card = egui::Rect::from_min_max(
-        egui::pos2(right - TRAY_WIDTH, bottom - height),
-        egui::pos2(right, bottom),
-    );
+    let card = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(TRAY_WIDTH, height));
     // The header's button sits in the card's corner, so it is inset by the
     // same padding on its top and its right as the rows are on their sides,
     // and rounds like a row: concentric with the card (`delightful-ui` §15).
@@ -178,6 +195,27 @@ pub fn geometry(area: egui::Rect, clipboard: &Clipboard, open: bool, first: usiz
         rows,
         removes,
     }
+}
+
+/// A wheel roll over the card, as the tray's new first row.
+///
+/// Whole rows at a time: the tray is a short list of names, and a row half out
+/// of the card would be half a name. A trackpad's fractions of a row are kept
+/// in `carry` until they add up to one, so a slow two-finger drag still gets
+/// there instead of rounding to nothing on every frame. Clamped to the list —
+/// the last windowful is as far as it goes — and the carry is dropped at
+/// either end, so the first notch back the other way moves at once rather than
+/// paying off a debt rolled up against the stop.
+pub fn scroll(first: usize, len: usize, carry: &mut f32, points: f32) -> usize {
+    *carry += crate::mouse::wheel_rows(points, TRAY_ROW);
+    let whole = carry.trunc();
+    *carry -= whole;
+    let last = len.saturating_sub(ROWS) as i64;
+    let moved = (first as i64 + whole as i64).clamp(0, last);
+    if (moved == 0 && *carry < 0.0) || (moved == last && *carry > 0.0) {
+        *carry = 0.0;
+    }
+    moved as usize
 }
 
 /// Drop paths that are no longer there, and say how many went.
@@ -333,30 +371,50 @@ mod tests {
         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0))
     }
 
-    /// The tray is bottom-right and grows upwards; `Clear` sits in the card's
-    /// corner with even insets; every row has a target at least 24 points
-    /// across (`delightful-ui` §1).
+    /// A top row across the window, and a yank chip near its right-hand end —
+    /// where the cluster puts it, left of the counter.
+    fn row() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 30.0), egui::pos2(1400.0, 62.0))
+    }
+
+    fn chip() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(1220.0, 34.0), egui::pos2(1300.0, 58.0))
+    }
+
+    /// The tray hangs under the chip, right edges together, and grows
+    /// downwards; `Clear` sits in the card's corner with even insets; every
+    /// row has a target at least 24 points across (`delightful-ui` §1).
     #[test]
-    fn the_tray_sits_in_the_corner_and_opens_upwards() {
+    fn the_tray_hangs_under_the_chip_and_grows_downwards() {
         // Closed, or with nothing carried, there is no tray at all.
         let empty = Clipboard::default();
-        assert!(geometry(area(), &empty, true, 0).card.is_none());
+        assert!(geometry(area(), chip(), row(), &empty, true, 0)
+            .card
+            .is_none());
         let clip = carrying(&["/a", "/b", "/c"]);
-        let closed = geometry(area(), &clip, false, 0);
+        let closed = geometry(area(), chip(), row(), &clip, false, 0);
         assert!(closed.card.is_none());
         assert_eq!(closed.clear, egui::Rect::NOTHING);
         assert!(!closed.contains(area().center()));
 
-        let open = geometry(area(), &clip, true, 0);
+        let open = geometry(area(), chip(), row(), &clip, true, 0);
         let card = open.card.expect("the card is out");
         assert!(area().contains_rect(card));
-        assert_eq!(card.right(), area().right() - TRAY_MARGIN);
-        assert_eq!(card.bottom(), area().bottom() - TRAY_MARGIN);
-        // Upwards: a longer list moves the top, never the bottom.
-        let longer = geometry(area(), &carrying(&["/a", "/b", "/c", "/d"]), true, 0);
+        assert_eq!(card.right(), chip().right(), "right edges together");
+        assert_eq!(card.top(), row().bottom() + HANG, "just under the top row");
+        assert!(!card.intersects(row()), "the card covers none of the row");
+        // Downwards: a longer list moves the bottom, never the top.
+        let longer = geometry(
+            area(),
+            chip(),
+            row(),
+            &carrying(&["/a", "/b", "/c", "/d"]),
+            true,
+            0,
+        );
         let longer = longer.card.expect("out");
-        assert_eq!(longer.bottom(), card.bottom());
-        assert!(longer.top() < card.top());
+        assert_eq!(longer.top(), card.top());
+        assert!(longer.bottom() > card.bottom());
 
         assert!(card.contains_rect(open.clear));
         assert_eq!(
@@ -375,14 +433,69 @@ mod tests {
         assert!(!open.contains(egui::pos2(10.0, 10.0)));
     }
 
+    /// A chip too close to either edge for the card to hang from it whole:
+    /// the card slides back inside the window rather than off it.
+    #[test]
+    fn the_tray_stays_inside_the_window() {
+        let clip = carrying(&["/a"]);
+        let at = |left: f32, right: f32| {
+            let chip = egui::Rect::from_min_max(egui::pos2(left, 34.0), egui::pos2(right, 58.0));
+            geometry(area(), chip, row(), &clip, true, 0)
+                .card
+                .expect("out")
+        };
+        let hard_right = at(1380.0, 1400.0);
+        assert_eq!(hard_right.right(), area().right() - TRAY_MARGIN);
+        let hard_left = at(4.0, 60.0);
+        assert_eq!(hard_left.left(), area().left() + TRAY_MARGIN);
+        assert_eq!(hard_left.width(), TRAY_WIDTH);
+        for card in [hard_right, hard_left] {
+            assert!(area().contains_rect(card));
+        }
+    }
+
     /// More rows than fit: the card caps, and the scroll offset picks up where
     /// it is told to.
     #[test]
     fn a_long_yank_shows_a_windowful() {
         let clip = Clipboard::yank((0..30).map(|i| PathBuf::from(format!("/f{i}"))));
-        assert_eq!(geometry(area(), &clip, true, 0).rows.len(), ROWS);
+        assert_eq!(
+            geometry(area(), chip(), row(), &clip, true, 0).rows.len(),
+            ROWS
+        );
         // Near the end there are fewer rows left to draw than the cap.
-        assert_eq!(geometry(area(), &clip, true, 28).rows.len(), 2);
+        assert_eq!(
+            geometry(area(), chip(), row(), &clip, true, 28).rows.len(),
+            2
+        );
+    }
+
+    /// The wheel moves whole rows, keeps a trackpad's fractions until they add
+    /// up, and stops at either end of the list without owing anything back.
+    #[test]
+    fn the_wheel_scrolls_the_tray_a_row_at_a_time() {
+        let down = |rows: f32| -rows * TRAY_ROW;
+        let mut carry = 0.0;
+        // Three rows down, then back up two.
+        assert_eq!(scroll(0, 30, &mut carry, down(3.0)), 3);
+        assert_eq!(scroll(3, 30, &mut carry, down(-2.0)), 1);
+        // A trackpad's four tenths of a row, three times: nothing, nothing, one.
+        let mut carry = 0.0;
+        assert_eq!(scroll(0, 30, &mut carry, down(0.4)), 0);
+        assert_eq!(scroll(0, 30, &mut carry, down(0.4)), 0);
+        assert_eq!(scroll(0, 30, &mut carry, down(0.4)), 1);
+        // The last windowful is as far as it goes…
+        let last = 30 - ROWS;
+        let mut carry = 0.0;
+        assert_eq!(scroll(last - 1, 30, &mut carry, down(5.0)), last);
+        // …and pushing on against the stop leaves no debt: the first row back
+        // up moves at once.
+        assert_eq!(scroll(last, 30, &mut carry, down(0.9)), last);
+        assert_eq!(scroll(last, 30, &mut carry, down(-1.0)), last - 1);
+        // The top holds the same way, and a list that fits does not move.
+        let mut carry = 0.0;
+        assert_eq!(scroll(0, 30, &mut carry, down(-4.0)), 0);
+        assert_eq!(scroll(0, ROWS, &mut carry, down(3.0)), 0);
     }
 
     /// The tray paints in every state without panicking, including in a window
@@ -409,12 +522,16 @@ mod tests {
                 Clipboard::cut([PathBuf::from("/a/one.txt")]),
                 Clipboard::default(),
             ] {
-                for area in [
-                    area(),
-                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, 60.0)),
+                for (area, chip, row) in [
+                    (area(), chip(), row()),
+                    (
+                        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, 60.0)),
+                        egui::Rect::from_min_max(egui::pos2(60.0, 4.0), egui::pos2(110.0, 20.0)),
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(120.0, 24.0)),
+                    ),
                 ] {
                     for open in [false, true] {
-                        let g = geometry(area, &clip, open, 0);
+                        let g = geometry(area, chip, row, &clip, open, 0);
                         paint(&painting, &clip, &g, 0, &hovers, &ripples);
                     }
                 }
