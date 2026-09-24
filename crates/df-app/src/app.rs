@@ -720,6 +720,11 @@ struct Pointer {
     released: bool,
     secondary: bool,
     middle: bool,
+    /// The mouse's back and forward thumb buttons, pressed this frame — egui's
+    /// `Extra1` and `Extra2`, which is where egui-winit puts winit's `Back`
+    /// and `Forward`.
+    back: bool,
+    forward: bool,
     /// The wheel this frame, in logical points.
     wheel: f32,
     /// The same wheel events in their own units, sign-flipped into the DOM's
@@ -12882,6 +12887,8 @@ impl App {
             released: i.pointer.primary_released(),
             secondary: i.pointer.secondary_pressed(),
             middle: i.pointer.button_pressed(egui::PointerButton::Middle),
+            back: i.pointer.button_pressed(egui::PointerButton::Extra1),
+            forward: i.pointer.button_pressed(egui::PointerButton::Extra2),
             // The events themselves, not egui's smoothed delta: that one is
             // meant for widgets egui is animating, and these panes run their
             // own momentum (see [`crate::mouse::Fling`]).
@@ -13513,6 +13520,28 @@ impl App {
         if pointer.middle && !dismissing && !menu_live && overlay.is_none() {
             if let Some((control, _)) = over {
                 self.middle_click(control, now);
+            }
+        }
+
+        // ── The mouse's back and forward buttons ────────────────────────────
+        // `Alt+←` and `Alt+→`, through the door the keys go through. They are
+        // not aimed — a browser goes back wherever the pointer is — so they
+        // take no hit test and leave nothing behind them: no click, no press a
+        // drag could start from. They are not in `any_press` either, so they
+        // settle no prompt and close no card. Only with nothing open over the
+        // listing, where the keys would not reach it: a menu, a card, the help
+        // sheet and a prompt each take the keyboard whole.
+        if (pointer.back || pointer.forward)
+            && !menu_live
+            && !self.overlay_open()
+            && self.help.is_none()
+            && self.prompt.is_none()
+        {
+            if pointer.back {
+                self.run(Command::HistoryBack, page, now);
+            }
+            if pointer.forward {
+                self.run(Command::HistoryForward, page, now);
             }
         }
 
@@ -19803,5 +19832,61 @@ mod tests {
         );
         assert_eq!(app.tabs.active_index(), 2);
         assert_eq!(app.cwd(), one);
+    }
+
+    // ── The mouse's back and forward buttons ────────────────────────────────
+
+    /// A press of one of the mouse's thumb buttons at `at`, and its release on
+    /// the next frame.
+    fn thumb_at(app: &mut App, ctx: &egui::Context, button: egui::PointerButton, at: egui::Pos2) {
+        let event = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(app, ctx, vec![egui::Event::PointerMoved(at), event(true)]);
+        run_frame(app, ctx, vec![event(false)]);
+    }
+
+    /// The back button is `Alt+←` and the forward button `Alt+→`, wherever
+    /// the pointer is — here over the preview pane, which neither of them is
+    /// about — and neither leaves a press behind. With a card up they do
+    /// nothing, as the keys would not, and the card stays up.
+    #[test]
+    fn the_mouse_s_back_and_forward_buttons_walk_the_history() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::with_folders("mouse-history", &["a.txt"], &["sub"]);
+        let (files, sub) = (app.files.clone(), app.files.join("sub"));
+        std::fs::write(sub.join("b.txt"), b"x").expect("write into the folder");
+        app.navigate(sub.clone(), Instant::now());
+        let inner = &mut app.app;
+        settle(inner.tabs.active_mut(), &inner.scanner);
+        run_frame(&mut app, &ctx, Vec::new());
+
+        let at = layout_of(&app).preview.center();
+        thumb_at(&mut app, &ctx, egui::PointerButton::Extra1, at);
+        assert_eq!(app.cwd(), files, "back did not leave the folder");
+        assert!(app.press.is_none(), "the back button left a press behind");
+        let inner = &mut app.app;
+        settle(inner.tabs.active_mut(), &inner.scanner);
+        thumb_at(&mut app, &ctx, egui::PointerButton::Extra2, at);
+        assert_eq!(app.cwd(), sub, "forward did not go back in");
+        let inner = &mut app.app;
+        settle(inner.tabs.active_mut(), &inner.scanner);
+
+        // A card up: the confirm a `D` opens, with the pointer on its scrim.
+        app.run(Command::DeletePermanently, 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+        let Some(OverlayGeom::Confirm(geometry)) = overlay_of(&app) else {
+            panic!("no confirm");
+        };
+        let scrim = below(geometry.card);
+        thumb_at(&mut app, &ctx, egui::PointerButton::Extra1, scrim);
+        assert_eq!(app.cwd(), sub, "back went through the card");
+        assert!(
+            matches!(app.dialog, Some(Dialog::Confirm(_))),
+            "the back button closed the card"
+        );
     }
 }
