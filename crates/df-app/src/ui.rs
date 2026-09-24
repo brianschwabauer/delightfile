@@ -440,6 +440,13 @@ pub enum Control {
     Row(Column, usize),
     /// A chip in the tab strip, by tab index.
     Tab(usize),
+    /// The `×` a chip wears in its numeral's slot while the pointer is on it,
+    /// by tab index: the pointer's `Ctrl+c` for *that* tab, which need not be
+    /// the one on screen. Its own variant rather than a part of [`Control::Tab`]
+    /// so a press on it closes and never picks the chip up to drag.
+    TabClose(usize),
+    /// The `+` after the last chip: the pointer's `t`.
+    TabNew,
     /// A button on a floating surface — a dialog's answers, the conflict
     /// resolver's apply-to-all — by its index in that surface's own list.
     Action(usize),

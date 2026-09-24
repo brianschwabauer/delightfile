@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::motion::{Easing, Tween};
-use crate::ui::Column;
+use crate::ui::{Column, Control};
 
 /// What a drop will do, and the word the chip beside the ghost says.
 ///
@@ -204,8 +204,13 @@ pub fn target_at(
     pos: egui::Pos2,
     is_dir: impl Fn(Column, usize) -> bool,
 ) -> Option<Target> {
+    // The whole chip, its `×` included: a drop is not a press, and the `×` is
+    // only the numeral's slot on the tab the files are being dropped into. The
+    // `+` is not a place, so a drop there lands on nothing.
     if let Some(strip) = zones.strip {
-        if let Some(index) = crate::chrome::tab_at(strip, &zones.tabs, pos) {
+        if let Some(Control::Tab(index) | Control::TabClose(index)) =
+            crate::chrome::tab_at(strip, &zones.tabs, pos)
+        {
             return Some(Target::Tab(index));
         }
     }

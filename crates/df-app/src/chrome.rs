@@ -227,15 +227,16 @@ pub fn tab_rects(strip: egui::Rect, widths: &[f32]) -> Vec<egui::Rect> {
     if count == 0 {
         return Vec::new();
     }
+    let chips = tab_room(strip);
     let total_gap = TAB_GAP * (count - 1) as f32;
     let natural: f32 = widths.iter().map(|w| w.max(0.0)).sum();
-    let room = (strip.width() - total_gap).max(0.0);
+    let room = (chips.width() - total_gap).max(0.0);
     let squeeze = if natural > room && natural > 0.0 {
         room / natural
     } else {
         1.0
     };
-    let mut left = strip.left();
+    let mut left = chips.left();
     widths
         .iter()
         .map(|width| {
@@ -250,11 +251,59 @@ pub fn tab_rects(strip: egui::Rect, widths: &[f32]) -> Vec<egui::Rect> {
         .collect()
 }
 
-/// Which tab chip a point is over, if any.
-pub fn tab_at(strip: egui::Rect, widths: &[f32], pos: egui::Pos2) -> Option<usize> {
-    tab_rects(strip, widths)
-        .into_iter()
-        .position(|rect| rect.contains(pos))
+/// The part of the strip the chips are laid out in: all of it but the `+`'s
+/// square at the end and the gap before it.
+///
+/// Held back even when the chips are nowhere near the end, so that a strip
+/// squeezed full still has its `+`: the one way to a new tab that does not
+/// need the keyboard.
+fn tab_room(strip: egui::Rect) -> egui::Rect {
+    let right = (strip.right() - TAB_GAP - CHROME_HEIGHT).max(strip.left());
+    egui::Rect::from_min_max(strip.min, egui::pos2(right, strip.bottom()))
+}
+
+/// Where the `+` goes ([`Control::TabNew`]): a strip-high square one
+/// [`TAB_GAP`] after the last chip, which is where a hand looks for the next
+/// tab — and at the strip's far end, in the room [`tab_room`] keeps for it,
+/// once the chips are squeezed up to it.
+pub fn tab_new_rect(strip: egui::Rect, widths: &[f32]) -> egui::Rect {
+    let left = tab_rects(strip, widths)
+        .last()
+        .map_or(strip.left(), |last| last.right() + TAB_GAP);
+    egui::Rect::from_min_size(
+        egui::pos2(left, strip.top()),
+        egui::vec2(CHROME_HEIGHT, strip.height()),
+    )
+}
+
+/// The chip's numeral slot, the full height of the chip: where its `×`
+/// ([`Control::TabClose`]) is drawn and hit.
+///
+/// The numeral's own column and nothing wider, so the `×` takes the number's
+/// place without the title beside it moving a point. Held inside the chip, for
+/// a strip squeezed so tight the column no longer fits.
+pub fn tab_close_rect(chip: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(chip.left() + PAD_X, chip.top()),
+        egui::pos2(chip.left() + PAD_X + FONT, chip.bottom()),
+    )
+    .intersect(chip)
+}
+
+/// What in the strip a point is over, if anything: a chip's `×`, the rest of
+/// a chip, or the `+` after them.
+pub fn tab_at(strip: egui::Rect, widths: &[f32], pos: egui::Pos2) -> Option<Control> {
+    let rects = tab_rects(strip, widths);
+    if let Some(index) = rects.iter().position(|rect| rect.contains(pos)) {
+        return Some(if tab_close_rect(rects[index]).contains(pos) {
+            Control::TabClose(index)
+        } else {
+            Control::Tab(index)
+        });
+    }
+    tab_new_rect(strip, widths)
+        .contains(pos)
+        .then_some(Control::TabNew)
 }
 
 /// The band a tab drag has to stay inside to be a *reorder*.
@@ -281,7 +330,15 @@ pub fn reordering(strip: egui::Rect, at: egui::Pos2) -> bool {
 /// `grab_dx` is where in the chip the button went down, so the chip travels
 /// with the point the hand took hold of rather than jumping its centre under
 /// the cursor. Clamped to the strip because a chip that could be dragged off
-/// the end would be a chip in a slot that does not exist.
+/// the end would be a chip in a slot that does not exist — to the chips' part
+/// of it, short of the square [`tab_room`] keeps for the `+`, so a strip
+/// squeezed full ends the carry where its last slot ends.
+///
+/// A strip with room to spare lets the chip on past its last slot and over the
+/// `+`, which the chip in the hand is drawn over. Stopping it at the end of the
+/// last chip instead would strand a slot: a slot is found from the carried
+/// chip's middle ([`tab_slot`]), and a wide chip held at the end of a run of
+/// narrow ones has its middle nearer the second-last slot than the last.
 pub fn tab_carry(
     strip: egui::Rect,
     widths: &[f32],
@@ -293,10 +350,8 @@ pub fn tab_carry(
     let Some(home) = rects.get(index).copied() else {
         return egui::Rect::NOTHING;
     };
-    let left = (x - grab_dx).clamp(
-        strip.left(),
-        (strip.right() - home.width()).max(strip.left()),
-    );
+    let room = tab_room(strip);
+    let left = (x - grab_dx).clamp(room.left(), (room.right() - home.width()).max(room.left()));
     egui::Rect::from_min_size(egui::pos2(left, home.top()), home.size())
 }
 
@@ -409,6 +464,9 @@ pub struct Carry {
 /// `carry` is the chip that is off the ground — one being dragged along the
 /// strip, or one settling into the slot it was dropped in — and the sideways
 /// displacement the rest of the strip is wearing to make room for it.
+///
+/// After the chips is the `+` ([`tab_new_rect`]), and a chip under the pointer
+/// wears its `×` in its numeral's slot ([`tab_close_rect`]).
 #[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn tab_strip(
     paint: &Painting<'_>,
@@ -474,16 +532,22 @@ pub fn tab_strip(
     // old slot now belongs to. A chip merely settling into a slot is past
     // that — the pointer is free again and the strip has stopped moving.
     let in_hand = carry.is_some_and(|carry| carry.settle <= 0.0);
+    // The chip is lit while the pointer is anywhere on it, its `×` included:
+    // moving onto the `×` is still being on the chip, and a chip that went
+    // dark under it would take the `×` away with its hover.
     let warm = |index: usize| {
         if in_hand {
-            (0.0, 0.0)
+            Warmth::default()
         } else {
-            let key = Control::Tab(index);
-            (hovers.hover(key), hovers.press(key))
+            let (key, close) = (Control::Tab(index), Control::TabClose(index));
+            Warmth {
+                hover: hovers.hover(key).max(hovers.hover(close)),
+                press: hovers.press(key),
+                close: hovers.hover(close),
+            }
         }
     };
     for index in order {
-        let (hover, press) = warm(index);
         tab_chip(
             paint,
             strip,
@@ -493,10 +557,19 @@ pub fn tab_strip(
             index == active,
             1.0,
             filter,
-            (hover, press),
+            warm(index),
             ripples,
         );
     }
+    // The `+` stays where it is while a chip is carried — the chips are
+    // trading places, not changing how much room they take — and under the
+    // chip in the hand, which may be carried over it.
+    let (hover, press) = if in_hand {
+        (0.0, 0.0)
+    } else {
+        (hovers.hover(Control::TabNew), hovers.press(Control::TabNew))
+    };
+    tab_new(paint, tab_new_rect(strip, widths), (hover, press), ripples);
     if let Some(carry) = carry {
         tab_chip(
             paint,
@@ -509,14 +582,65 @@ pub fn tab_strip(
             filter,
             // A chip off the ground wears its own plate, and a hover under it
             // would be a second one saying the same thing more faintly.
-            (0.0, 0.0),
+            Warmth::default(),
             ripples,
         );
     }
 }
 
-/// One chip of the strip: its plate if it has one, its ripples, its number and
-/// its title.
+/// How lit a chip is, read once by [`tab_strip`] and handed to [`tab_chip`]
+/// whole: the strip decides whether any of it applies (see there), and a chip
+/// that read the hovers itself could not be told to ignore them.
+#[derive(Debug, Clone, Copy, Default)]
+struct Warmth {
+    /// The chip's hover, its `×` included: the plate an inactive chip lifts
+    /// on, and how far the numeral has turned into the `×`.
+    hover: f32,
+    /// The chip's own press. Not the `×`'s — that one closes the chip, and an
+    /// inset on a chip that is going away is never seen.
+    press: f32,
+    /// The `×`'s own hover, which brightens the glyph.
+    close: f32,
+}
+
+/// The `+` after the last chip ([`Control::TabNew`]): a glyph at rest, and the
+/// plate an inactive chip lifts on under the pointer — it sits among them and
+/// answers the hand the way they do — with the press and ripple every control
+/// gets.
+fn tab_new(
+    paint: &Painting<'_>,
+    rect: egui::Rect,
+    (hover, press): (f32, f32),
+    ripples: &Ripples<Control>,
+) {
+    let palette = paint.palette;
+    let rect = pressed_rect(rect, press);
+    if hover > 0.0 {
+        paint.painter.rect_filled(
+            rect,
+            TAB_RADIUS,
+            mix(palette.crust, palette.surface0, hover),
+        );
+    }
+    let inside = paint.painter.with_clip_rect(rect);
+    for splash in ripples.splashes(Control::TabNew, paint.now) {
+        inside.circle_filled(
+            splash.center,
+            splash.radius,
+            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+        );
+    }
+    inside.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "+",
+        egui::FontId::proportional(FONT + 3.0),
+        mix(palette.overlay0, palette.text, hover),
+    );
+}
+
+/// One chip of the strip: its plate if it has one, its ripples, its number (or,
+/// under the pointer, its `×`) and its title.
 ///
 /// `settle` is 1 for a chip in its slot and 0 for one in the hand, and every
 /// difference between the two rides on it — the active tab's bottom corners
@@ -533,14 +657,16 @@ fn tab_chip(
     is_active: bool,
     settle: f32,
     filter: f32,
-    // The hover and press amounts, passed in rather than read: the strip
-    // decides whether they apply at all (see [`tab_strip`]), and a chip that
-    // read them itself could not be told to ignore them.
-    (hover, press): (f32, f32),
+    warmth: Warmth,
     ripples: &Ripples<Control>,
 ) {
     let palette = paint.palette;
     let key = Control::Tab(index);
+    let Warmth {
+        hover,
+        press,
+        close,
+    } = warmth;
     let settle = settle.clamp(0.0, 1.0);
     // The press inset is the inactive tabs' alone: shrinking the active one
     // would open a seam between it and the row it is joined to, and pressing
@@ -594,7 +720,13 @@ fn tab_chip(
     }
 
     let inside = paint.painter.with_clip_rect(rect);
-    for splash in ripples.splashes(key, paint.now) {
+    // The `×`'s ripples are the chip's too, clipped to it: the press that made
+    // them closed the tab, so what they land on is the chip that has slid into
+    // its place under the pointer.
+    let splashes = ripples
+        .splashes(key, paint.now)
+        .chain(ripples.splashes(Control::TabClose(index), paint.now));
+    for splash in splashes {
         inside.circle_filled(
             splash.center,
             splash.radius,
@@ -607,14 +739,27 @@ fn tab_chip(
         palette.overlay1
     };
     // The number is what `1`–`9` press, so it is on the chip rather than in
-    // the help sheet: the strip teaches its own shortcut.
+    // the help sheet: the strip teaches its own shortcut. Under the pointer it
+    // gives its slot to the `×`, which closes this tab without switching to it
+    // first. The two trade places over the hover's fade, so the number comes
+    // back as the pointer leaves rather than snapping in behind it.
+    let hover = hover.clamp(0.0, 1.0);
     inside.text(
         egui::pos2(rect.left() + PAD_X, rect.center().y),
         egui::Align2::LEFT_CENTER,
         format!("{}", index + 1),
         key_font(FONT - 1.0),
-        palette.overlay0,
+        fade(palette.overlay0, 1.0 - hover),
     );
+    if hover > 0.0 {
+        inside.text(
+            tab_close_rect(rect).center(),
+            egui::Align2::CENTER_CENTER,
+            "×",
+            egui::FontId::proportional(FONT + 2.0),
+            fade(mix(palette.overlay0, palette.text, close), hover),
+        );
+    }
     let text_left = rect.left() + PAD_X + FONT;
     truncated(
         &inside,
@@ -3597,7 +3742,10 @@ mod tests {
         let strip = strip();
         let rects = tab_rects(strip, &[120.0; 4]);
         for (index, rect) in rects.iter().enumerate() {
-            assert_eq!(tab_at(strip, &[120.0; 4], rect.center()), Some(index));
+            assert_eq!(
+                tab_at(strip, &[120.0; 4], rect.center()),
+                Some(Control::Tab(index))
+            );
         }
         assert_eq!(
             tab_at(
@@ -3608,6 +3756,61 @@ mod tests {
             None
         );
         assert_eq!(tab_at(strip, &[120.0; 4], egui::pos2(-10.0, -10.0)), None);
+    }
+
+    /// A chip's numeral slot is its `×`, top to bottom, and nowhere else on
+    /// the chip is; the `+` is a strip-high square one gap after the last chip,
+    /// and the chips never reach it, however many are squeezed in.
+    #[test]
+    fn the_strip_has_a_close_on_each_chip_and_a_new_tab_after_them() {
+        let strip = strip();
+        let widths = [120.0; 3];
+        let rects = tab_rects(strip, &widths);
+        for (index, chip) in rects.iter().enumerate() {
+            let close = tab_close_rect(*chip);
+            assert!((close.left() - chip.left() - PAD_X).abs() < 1e-3);
+            assert!(
+                (close.width() - FONT).abs() < 1e-3,
+                "not the numeral's width"
+            );
+            assert_eq!((close.top(), close.bottom()), (chip.top(), chip.bottom()));
+            for y in [chip.top() + 1.0, chip.center().y, chip.bottom() - 1.0] {
+                let at = egui::pos2(close.center().x, y);
+                assert_eq!(tab_at(strip, &widths, at), Some(Control::TabClose(index)));
+            }
+            // Either side of the slot is the chip: the pad before it, and the
+            // title after it.
+            for x in [chip.left() + 1.0, close.right() + 1.0, chip.right() - 1.0] {
+                let at = egui::pos2(x, chip.center().y);
+                assert_eq!(tab_at(strip, &widths, at), Some(Control::Tab(index)));
+            }
+        }
+
+        let plus = tab_new_rect(strip, &widths);
+        assert!((plus.left() - rects[2].right() - TAB_GAP).abs() < 1e-3);
+        assert_eq!(plus.size(), egui::vec2(CHROME_HEIGHT, CHROME_HEIGHT));
+        assert_eq!(plus.top(), strip.top());
+        assert_eq!(tab_at(strip, &widths, plus.center()), Some(Control::TabNew));
+        // The gap between the last chip and the `+` is neither, and past the
+        // `+` is empty strip.
+        let gap = egui::pos2(rects[2].right() + TAB_GAP / 2.0, strip.center().y);
+        assert_eq!(tab_at(strip, &widths, gap), None);
+        let past = egui::pos2(plus.right() + 1.0, strip.center().y);
+        assert_eq!(tab_at(strip, &widths, past), None);
+
+        // Nine chips at the cap in a strip too narrow for them: squeezed up
+        // to the `+`, which is still whole at the end of the strip.
+        let narrow =
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, CHROME_HEIGHT));
+        let full = [TAB_MAX_WIDTH; 9];
+        let plus = tab_new_rect(narrow, &full);
+        assert!((plus.right() - narrow.right()).abs() < 1e-3);
+        assert!(tab_rects(narrow, &full)
+            .iter()
+            .all(|chip| chip.right() + TAB_GAP <= plus.left() + 1e-3));
+        assert_eq!(tab_at(narrow, &full, plus.center()), Some(Control::TabNew));
+        // …and a chip carried over it is still slotted among the chips.
+        assert_eq!(tab_slot(narrow, &full, plus.center().x), 8);
     }
 
     /// Chips sized to their titles: a short name gets the floor, a long one
@@ -3625,7 +3828,11 @@ mod tests {
         let narrow =
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, CHROME_HEIGHT));
         let squeezed = tab_rects(narrow, &[100.0, 100.0, 100.0]);
-        assert!((squeezed[2].right() - narrow.right()).abs() < 1e-3);
+        // Squeezed up to the `+`, which keeps its square at the end.
+        assert!((squeezed[2].right() + TAB_GAP + CHROME_HEIGHT - narrow.right()).abs() < 1e-3);
+        let plus = tab_new_rect(narrow, &[100.0, 100.0, 100.0]);
+        assert!((plus.right() - narrow.right()).abs() < 1e-3);
+        assert!((plus.left() - squeezed[2].right() - TAB_GAP).abs() < 1e-3);
         let ratio = squeezed[0].width() / squeezed[1].width();
         assert!((ratio - 1.0).abs() < 1e-3);
         assert!(squeezed.iter().all(|r| r.width() < 100.0));
@@ -3700,8 +3907,9 @@ mod tests {
         // Dragged off either end: clamped, never outside.
         let left = tab_carry(strip, &[120.0; 4], 1, grab_dx, strip.left() - 500.0);
         assert!((left.left() - strip.left()).abs() < 1e-3);
+        // …short of the `+`'s square at the far end, which is not a slot.
         let right = tab_carry(strip, &[120.0; 4], 1, grab_dx, strip.right() + 500.0);
-        assert!((right.right() - strip.right()).abs() < 1e-3);
+        assert!((right.right() + TAB_GAP + CHROME_HEIGHT - strip.right()).abs() < 1e-3);
         // A tab that is no longer there is no rectangle at all.
         assert_eq!(
             tab_carry(strip, &[120.0; 4], 9, grab_dx, 0.0),
@@ -4365,6 +4573,31 @@ mod tests {
                 &Hovers::new(),
                 &Ripples::new(),
             );
+            // Under the pointer: a chip's `×` lit and pressed with a ripple on
+            // it, the `+` lit and rippling, on the active chip and off it.
+            let now = std::time::Instant::now();
+            for (hot, pressed) in [
+                (Control::TabClose(1), Some(Control::TabClose(1))),
+                (Control::TabClose(0), None),
+                (Control::Tab(2), None),
+                (Control::TabNew, Some(Control::TabNew)),
+            ] {
+                let mut hovers = Hovers::new();
+                hovers.tick(Some(hot), pressed, now);
+                let mut ripples = Ripples::new();
+                ripples.spawn(hot, strip().center(), strip(), now);
+                tab_strip(
+                    &paint,
+                    strip(),
+                    &titles,
+                    0,
+                    0.0,
+                    &widths,
+                    None,
+                    &hovers,
+                    &ripples,
+                );
+            }
             let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile"));
             let path_rect =
                 egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(1384.0, TOP_HEIGHT));

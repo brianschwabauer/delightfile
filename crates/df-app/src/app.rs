@@ -8161,6 +8161,28 @@ impl App {
         self.rewatch();
     }
 
+    /// Close the tab at `index` — a chip's `×`, or a middle click on it.
+    ///
+    /// `Ctrl+c` for a tab that need not be the one on screen. Closing the one
+    /// on screen is exactly `Ctrl+c`, the quit on the last tab included. Any
+    /// other leaves the window showing what it was showing, so none of
+    /// [`App::tab_changed`] applies: the player and the preview belong to the
+    /// tab still on screen, and the watcher only ever follows that tab.
+    fn close_tab(&mut self, index: usize, now: Instant) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if index == self.tabs.active_index() {
+            if self.tabs.close_active() {
+                self.tab_changed(now);
+            } else {
+                self.quit = Some(Quit::WriteCwd);
+            }
+            return;
+        }
+        self.tabs.close(index);
+    }
+
     /// The three gates a verb passes before it acts, in one place.
     ///
     /// Returns whether the command was refused (and said so). Where the list
@@ -9641,6 +9663,8 @@ impl App {
                 // produces them — and the `×` is closed by `click` itself.
                 Control::Row(..)
                 | Control::Tab(_)
+                | Control::TabClose(_)
+                | Control::TabNew
                 | Control::Crumb(_)
                 | Control::SearchNames
                 | Control::SearchContents
@@ -9722,6 +9746,8 @@ impl App {
             }
             Control::Row(..)
             | Control::Tab(_)
+            | Control::TabClose(_)
+            | Control::TabNew
             | Control::Crumb(_)
             | Control::SearchNames
             | Control::SearchContents
@@ -10261,6 +10287,29 @@ impl App {
                     .and_then(|rects| rects.get(index).copied())
                     .unwrap_or(egui::Rect::ZERO)
             }
+            // The chip's rect rather than the `×`'s: the ripple is drawn on the
+            // chip (see [`chrome::tab_strip`]), which is the one the next tab
+            // slides into.
+            Control::TabClose(index) => {
+                let rect = geom
+                    .layout
+                    .strip
+                    .map(|strip| chrome::tab_rects(strip, geom.tabs))
+                    .and_then(|rects| rects.get(index).copied())
+                    .unwrap_or(egui::Rect::ZERO);
+                self.close_tab(index, now);
+                rect
+            }
+            // `t`, through the door the key goes through.
+            Control::TabNew => {
+                let rect = geom
+                    .layout
+                    .strip
+                    .map(|strip| chrome::tab_new_rect(strip, geom.tabs))
+                    .unwrap_or(egui::Rect::ZERO);
+                self.run(Command::TabCreate, geom.page, now);
+                rect
+            }
             Control::MenuItem(_) | Control::SubmenuItem(_) => {
                 let rect = geom
                     .menu
@@ -10360,8 +10409,14 @@ impl App {
         dir.set_cursor(index);
     }
 
-    /// Middle click: the row's directory in a new tab (PLAN §7.5).
+    /// Middle click: the row's directory in a new tab (PLAN §7.5), and on a
+    /// tab's chip, that tab closed — the browser's gesture, and the one a hand
+    /// already on the strip reaches for.
     fn middle_click(&mut self, control: Control, now: Instant) {
+        if let Control::Tab(index) | Control::TabClose(index) = control {
+            self.close_tab(index, now);
+            return;
+        }
         let path = match control {
             Control::Row(Column::List, index) => self
                 .tab()
@@ -11413,6 +11468,7 @@ impl App {
             // and the one under the cursor going dark.
             let remap = |control: Control| match control {
                 Control::Tab(index) if index < count => Control::Tab(moved[index]),
+                Control::TabClose(index) if index < count => Control::TabClose(moved[index]),
                 other => other,
             };
             self.hovers.remap(&remap);
@@ -13106,7 +13162,6 @@ impl App {
             let control = layout
                 .strip
                 .and_then(|strip| chrome::tab_at(strip, &tab_widths, p))
-                .map(Control::Tab)
                 .or_else(|| {
                     crumb_rects
                         .iter()
@@ -13716,6 +13771,8 @@ impl App {
                 // goes here", which is exactly what a click will do.
                 Control::PromptField => egui::CursorIcon::Text,
                 Control::Row(..)
+                | Control::TabClose(_)
+                | Control::TabNew
                 | Control::Crumb(_)
                 | Control::SearchNames
                 | Control::SearchContents
@@ -19592,5 +19649,159 @@ mod tests {
             .expect("the palette's ×");
         click_at(&mut app, &ctx, close.center());
         assert!(app.finder.is_none(), "the × left the palette up");
+    }
+
+    // ── The tab strip by pointer ────────────────────────────────────────────
+
+    /// Three tabs — on the fixture's folder, on `one` and on `two` — with the
+    /// last on screen, and a frame drawn so the strip has been measured.
+    fn three_tabs(name: &str, ctx: &egui::Context) -> Fixture {
+        let mut app = Fixture::with_folders(name, &["a.txt"], &["one", "two"]);
+        let now = Instant::now();
+        for folder in ["one", "two"] {
+            app.run(Command::TabCreate, 10, now);
+            let path = app.files.join(folder);
+            app.navigate(path, now);
+            let inner = &mut app.app;
+            settle(inner.tabs.active_mut(), &inner.scanner);
+        }
+        run_frame(&mut app, ctx, Vec::new());
+        app
+    }
+
+    /// Every tab's directory, in strip order.
+    fn tab_paths(app: &App) -> Vec<PathBuf> {
+        app.tabs
+            .iter()
+            .map(|tab| tab.cwd.path().to_path_buf())
+            .collect()
+    }
+
+    /// Where the frame drew each tab's chip.
+    fn chip_rects(app: &App) -> Vec<egui::Rect> {
+        let strip = layout_of(app).strip.expect("a strip");
+        chrome::tab_rects(strip, &app.tab_widths)
+    }
+
+    /// A press on a chip's `×` closes that tab — not the one on screen, which
+    /// stays on screen — and picks nothing up: pulled away with the button
+    /// still down, it neither carries a chip nor detaches one. The `×` on the
+    /// tab on screen is `Ctrl+c`, and the tab beside it takes over.
+    #[test]
+    fn a_press_on_a_chip_s_close_closes_that_tab_and_picks_nothing_up() {
+        let ctx = egui::Context::default();
+        let mut app = three_tabs("tab-close", &ctx);
+        let (files, one, two) = (
+            app.files.clone(),
+            app.files.join("one"),
+            app.files.join("two"),
+        );
+        assert_eq!(tab_paths(&app), [files, one.clone(), two.clone()]);
+        assert_eq!(app.cwd(), two);
+
+        // The hand arrives first, as a hand does: the `×` is drawn from the
+        // hover, in the numeral's slot.
+        let close = chrome::tab_close_rect(chip_rects(&app)[0]).center();
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(close)]);
+        assert_eq!(app.hovers.hover(Control::TabClose(0)), 1.0);
+        let button = |at: egui::Pos2, pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(&mut app, &ctx, vec![button(close, true)]);
+        assert_eq!(tab_paths(&app), [one.clone(), two.clone()]);
+        assert_eq!(app.cwd(), two, "the tab on screen changed");
+        assert!(
+            app.press.is_some_and(|press| press.on_tab.is_none()),
+            "the press on the × took hold of a chip"
+        );
+        assert!(
+            app.ripples
+                .splashes(Control::TabClose(0), Instant::now())
+                .count()
+                > 0,
+            "the × took the press without a ripple"
+        );
+
+        // Well past the drag threshold and out of the reorder band, towards a
+        // detach, with the button still down.
+        let away = close + egui::vec2(40.0, 80.0);
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(away)]);
+        assert!(app.tab_drag.is_none(), "a chip came up off the strip");
+        assert!(app.drag.is_none(), "the press started a file drag");
+        run_frame(&mut app, &ctx, vec![button(away, false)]);
+        assert_eq!(tab_paths(&app), [one.clone(), two.clone()]);
+
+        // The `×` on the tab on screen closes it, and the tab beside it — the
+        // only one left — takes over.
+        let close = chrome::tab_close_rect(chip_rects(&app)[1]).center();
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(close)]);
+        click_at(&mut app, &ctx, close);
+        assert_eq!(tab_paths(&app), vec![one.clone()]);
+        assert_eq!(app.cwd(), one);
+        assert!(app.quit.is_none(), "closing a tab quit");
+    }
+
+    /// A middle press on a chip closes that tab, wherever on the chip it
+    /// lands, and leaves the tab on screen where it was.
+    #[test]
+    fn a_middle_press_on_a_chip_closes_it() {
+        let ctx = egui::Context::default();
+        let mut app = three_tabs("tab-middle", &ctx);
+        let (files, two) = (app.files.clone(), app.files.join("two"));
+        let at = chip_rects(&app)[1].center();
+        assert_eq!(
+            chrome::tab_at(layout_of(&app).strip.expect("a strip"), &app.tab_widths, at),
+            Some(Control::Tab(1)),
+            "the middle of the chip is not its ×"
+        );
+        let middle = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Middle,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(at), middle(true)],
+        );
+        run_frame(&mut app, &ctx, vec![middle(false)]);
+        assert_eq!(tab_paths(&app), [files, two.clone()]);
+        assert_eq!(app.cwd(), two, "the tab on screen changed");
+        assert_eq!(app.tabs.active_index(), 1);
+    }
+
+    /// A press on the `+` after the last chip is `t`: a tab on the directory
+    /// on screen, beside the tab it was opened from, and on screen itself.
+    #[test]
+    fn a_press_on_the_plus_opens_a_tab() {
+        let ctx = egui::Context::default();
+        let mut app = three_tabs("tab-new", &ctx);
+        let (files, one, two) = (
+            app.files.clone(),
+            app.files.join("one"),
+            app.files.join("two"),
+        );
+        app.run(Command::TabSwitch(1), 10, Instant::now());
+        run_frame(&mut app, &ctx, Vec::new());
+
+        let strip = layout_of(&app).strip.expect("a strip");
+        let plus = chrome::tab_new_rect(strip, &app.tab_widths);
+        let last = chip_rects(&app)[2];
+        assert!(
+            plus.left() > last.right(),
+            "the + is not after the last chip"
+        );
+        click_at(&mut app, &ctx, plus.center());
+        assert_eq!(
+            tab_paths(&app),
+            [files, one.clone(), one.clone(), two],
+            "the tab did not open beside the one it came from"
+        );
+        assert_eq!(app.tabs.active_index(), 2);
+        assert_eq!(app.cwd(), one);
     }
 }
