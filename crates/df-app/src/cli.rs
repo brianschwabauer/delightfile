@@ -1,6 +1,7 @@
 //! The command line: `delightfile [path]`, `--cwd-file=<path>`,
 //! `--chooser-file=<path>` and the three `--chooser-*` switches that say what
-//! kind of dialog it is standing in for (PLAN §3).
+//! kind of dialog it is standing in for (PLAN §3), `--chooser-request=<path>`
+//! for the whole of a dialog, and `--portal`.
 //!
 //! Hand-rolled rather than clap, for the same reason the TOML parser is
 //! hand-rolled: there are a handful of flags, and a dependency that parses them
@@ -26,8 +27,14 @@
 //! never cancel one. A window that draws its own "Select" button has to know
 //! what the button is selecting, so the wrapper passes the portal's
 //! `multiple`, `directory` and `save` straight through.
+//!
+//! Three switches are all a wrapper *can* pass. `--chooser-request` is the
+//! rest of the dialog — its title, the caller's button label, the suggested
+//! name, where to start, the file-type filters — as a small TOML file that
+//! `delightfile --portal` (see [`crate::portal`]) writes for each dialog it
+//! is asked for and removes once the window has answered.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What the command line asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -139,6 +146,9 @@ impl Chooser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Run(Args),
+    /// `--portal`: no window, just the file-chooser backend on the session
+    /// bus.
+    Portal,
     /// Print this and exit 0 — `--help`, `--version`.
     Print(String),
     /// Print this to stderr and exit 2.
@@ -166,6 +176,13 @@ usage: delightfile [path] [options]
   --chooser-save         the dialog is a save: pick a file to replace, or
                          Save to type a new name
                          (the three above need --chooser-file)
+  --chooser-request=<path>
+                         read the whole dialog from this file instead: its
+                         kind, title, button label, suggested name, starting
+                         folder and file-type filters (written by --portal;
+                         needs --chooser-file, and outranks the switches)
+  --portal               serve the xdg-desktop-portal file chooser on the
+                         session bus; D-Bus starts this, not a person
   -h, --help             show this
   -V, --version          show the version
 ";
@@ -178,8 +195,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
     // at the end, because they may come before `--chooser-file` as well as
     // after it — the order a person types flags in is not a meaning.
     let mut chooser_file: Option<PathBuf> = None;
+    let mut chooser_request: Option<PathBuf> = None;
     let (mut multiple, mut directory, mut save) = (false, false, false);
+    let (mut portal, mut count) = (false, 0);
     for arg in args {
+        count += 1;
         if rest_are_paths || !arg.starts_with('-') {
             if out.start.is_some() {
                 return Outcome::Fail(format!("only one path can be opened (got `{arg}` as well)"));
@@ -198,21 +218,57 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
             "--chooser-multiple" => multiple = true,
             "--chooser-directory" => directory = true,
             "--chooser-save" => save = true,
-            _ => match flag(&arg, "--cwd-file") {
-                Flag::Value(path) => out.cwd_file = Some(PathBuf::from(path)),
-                Flag::Empty => return Outcome::Fail("--cwd-file needs a path".to_string()),
-                Flag::Absent => match flag(&arg, "--chooser-file") {
-                    Flag::Value(path) => chooser_file = Some(PathBuf::from(path)),
-                    Flag::Empty => return Outcome::Fail("--chooser-file needs a path".to_string()),
-                    Flag::Absent => {
-                        return Outcome::Fail(format!("unknown option `{arg}`\n\n{USAGE}"))
-                    }
-                },
-            },
+            "--portal" => portal = true,
+            _ => {
+                let found = ["--cwd-file", "--chooser-file", "--chooser-request"]
+                    .into_iter()
+                    .find_map(|name| match flag(&arg, name) {
+                        Flag::Absent => None,
+                        found => Some((name, found)),
+                    });
+                let Some((name, found)) = found else {
+                    return Outcome::Fail(format!("unknown option `{arg}`\n\n{USAGE}"));
+                };
+                let Flag::Value(path) = found else {
+                    return Outcome::Fail(format!("{name} needs a path"));
+                };
+                let path = Some(PathBuf::from(path));
+                match name {
+                    "--cwd-file" => out.cwd_file = path,
+                    "--chooser-file" => chooser_file = path,
+                    _ => chooser_request = path,
+                }
+            }
         }
     }
-    match chooser_file {
-        Some(out_path) => {
+    // The backend has no window to aim, so anything beside it is a mistake
+    // in whatever started it, said rather than ignored.
+    if portal {
+        return if count == 1 {
+            Outcome::Portal
+        } else {
+            Outcome::Fail("--portal takes no other arguments".to_string())
+        };
+    }
+    match (chooser_file, chooser_request) {
+        // The request file says everything the switches could, and more; a
+        // switch given beside it is outranked rather than merged, because
+        // "a save that is also a folder dialog" is not a dialog.
+        (Some(out_path), Some(request)) => match read_request(&request, out_path) {
+            Ok((chooser, start)) => {
+                out.chooser = Some(chooser);
+                // A path on the command line is a person overriding the
+                // request; it wins, as it would over any default.
+                out.start = out.start.or(start);
+            }
+            Err(message) => return Outcome::Fail(message),
+        },
+        (None, Some(_)) => {
+            return Outcome::Fail(
+                "--chooser-request: only meaningful with --chooser-file".to_string(),
+            )
+        }
+        (Some(out_path), None) => {
             out.chooser = Some(Chooser {
                 multiple,
                 directory,
@@ -224,7 +280,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
         // lost an argument. Refused rather than ignored: the window would open
         // as a plain file manager, and the dialog behind it would wait on a
         // pick that has nowhere to go.
-        None if multiple || directory || save => {
+        (None, None) if multiple || directory || save => {
             let which = [
                 (multiple, "--chooser-multiple"),
                 (directory, "--chooser-directory"),
@@ -237,7 +293,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
             .join(", ");
             return Outcome::Fail(format!("{which}: only meaningful with --chooser-file"));
         }
-        None => {}
+        (None, None) => {}
     }
     Outcome::Run(out)
 }
@@ -253,8 +309,8 @@ enum Flag<'a> {
 
 /// Read `--name=value` out of one argument.
 ///
-/// Two flags take a path and both reject an empty one, so the reading and the
-/// rejecting are one function rather than the same three lines twice.
+/// Three flags take a path and all reject an empty one, so the reading and
+/// the rejecting are one function rather than the same three lines thrice.
 fn flag<'a>(arg: &'a str, name: &str) -> Flag<'a> {
     match arg
         .strip_prefix(name)
@@ -263,6 +319,130 @@ fn flag<'a>(arg: &'a str, name: &str) -> Flag<'a> {
         Some(value) if !value.is_empty() => Flag::Value(value),
         Some(_) => Flag::Empty,
         None => Flag::Absent,
+    }
+}
+
+/// Read a `--chooser-request` file into the chooser it describes, answering
+/// to `out`, and the path the window should start at.
+pub fn read_request(path: &Path, out: PathBuf) -> Result<(Chooser, Option<PathBuf>), String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    parse_request(&text, path, out)
+}
+
+/// The request file's text, understood — the format `crate::portal` writes:
+///
+/// ```toml
+/// kind = "open"            # or "save", or "save-files" (a folder to save into)
+/// title = "Open File"
+/// accept = "Upload"
+/// multiple = true
+/// directory = false
+/// folder = "/home/brian/Pictures"
+/// name = "untitled.png"    # a save's suggested name
+/// file = "/home/brian/x.png"  # the file a save is saving over
+/// current_filter = "Images"
+///
+/// [[filter]]
+/// name = "Images"
+/// glob = ["*.png", "*.jpg"]
+/// mime = ["image/*"]
+/// ```
+///
+/// Only `kind` is required. Unlike the config files, which apply every line
+/// they can, a line this cannot read fails the whole request: the file is
+/// written by a program, so a bad line is a bug, and a dialog opened on half
+/// its description could answer the wrong question.
+pub fn parse_request(
+    text: &str,
+    path: &Path,
+    out: PathBuf,
+) -> Result<(Chooser, Option<PathBuf>), String> {
+    use df_core::toml::{Table, Value};
+
+    let doc = df_core::toml::parse(text, path);
+    if let Some(warning) = doc.warnings.first() {
+        return Err(warning.to_string());
+    }
+    let empty = Table::default();
+    let root = doc.root().unwrap_or(&empty);
+    let wrong = |key: &str, value: &Value, wanted: &str| {
+        format!(
+            "{}: `{key}` should be {wanted}, not {}",
+            path.display(),
+            value.type_name()
+        )
+    };
+    let string = |table: &Table, key: &str| match table.get(key) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|s| Some(s.to_string()))
+            .ok_or_else(|| wrong(key, value, "a string")),
+    };
+    let strings = |table: &Table, key: &str| match table.get(key) {
+        None => Ok(Vec::new()),
+        Some(value) => value
+            .as_str_array()
+            .map(|items| items.into_iter().map(str::to_string).collect())
+            .ok_or_else(|| wrong(key, value, "a list of strings")),
+    };
+    let switch = |key: &str| match root.get(key) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| wrong(key, value, "true or false")),
+    };
+
+    let mut chooser = Chooser::new(out);
+    match string(root, "kind")?.as_deref() {
+        Some("open") => {
+            chooser.multiple = switch("multiple")?;
+            chooser.directory = switch("directory")?;
+        }
+        Some("save") => chooser.save = true,
+        // A folder to save several files into: to the window, a folder dialog.
+        Some("save-files") => chooser.directory = true,
+        Some(other) => return Err(format!("{}: unknown kind `{other}`", path.display())),
+        None => return Err(format!("{}: no `kind`", path.display())),
+    }
+    chooser.title = string(root, "title")?;
+    chooser.accept = string(root, "accept")?;
+    chooser.name = string(root, "name")?;
+    for table in doc.tables_named("filter") {
+        chooser.filters.push(TypeFilter {
+            name: string(table, "name")?.unwrap_or_default(),
+            globs: strings(table, "glob")?,
+            mimes: strings(table, "mime")?,
+        });
+    }
+    chooser.current_filter = string(root, "current_filter")?
+        .and_then(|name| chooser.filters.iter().position(|f| f.name == name))
+        .unwrap_or(0);
+    let folder = string(root, "folder")?.map(PathBuf::from);
+    let file = string(root, "file")?.map(PathBuf::from);
+    Ok((chooser, request_start(folder, file)))
+}
+
+/// Where a request's window starts, as a positional path would say it.
+///
+/// A file that exists wins when it is in the folder (or there is no folder):
+/// a path to a file already means "its folder, cursor on it" (see
+/// `start_directory` in `app.rs`), which is how a save over an existing file
+/// should open. A file that does not exist yet cannot be aimed at, so the
+/// window starts where it would be.
+fn request_start(folder: Option<PathBuf>, file: Option<PathBuf>) -> Option<PathBuf> {
+    match (folder, file) {
+        (folder, Some(file))
+            if file.exists()
+                && folder
+                    .as_deref()
+                    .is_none_or(|folder| file.parent() == Some(folder)) =>
+        {
+            Some(file)
+        }
+        (Some(folder), _) => Some(folder),
+        (None, Some(file)) => file.parent().map(Path::to_path_buf),
+        (None, None) => None,
     }
 }
 
@@ -489,6 +669,122 @@ mod tests {
             "/tmp/a b\tc\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--portal` is the backend and nothing else.
+    #[test]
+    fn portal_stands_alone() {
+        assert_eq!(parse_str(&["--portal"]), Outcome::Portal);
+        assert!(matches!(parse_str(&["--portal", "/tmp"]), Outcome::Fail(_)));
+        assert!(matches!(
+            parse_str(&["--chooser-file=/tmp/out", "--portal"]),
+            Outcome::Fail(_)
+        ));
+    }
+
+    /// A scratch request file with `text` in it.
+    fn request_file(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("df-request-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        let path = dir.join("request.toml");
+        std::fs::write(&path, text).expect("written");
+        path
+    }
+
+    /// The request file fills in the whole chooser, and its folder is where
+    /// the window starts — unless a path on the command line says otherwise.
+    #[test]
+    fn a_request_file_describes_the_whole_dialog() {
+        let request = request_file(
+            "whole",
+            r#"
+kind = "open"
+title = "Upload to Drive"
+accept = "Upload"
+multiple = true
+folder = "/srv/photos"
+current_filter = "Text"
+
+[[filter]]
+name = "Images"
+glob = ["*.png"]
+mime = ["image/*"]
+
+[[filter]]
+name = "Text"
+mime = ["text/plain"]
+"#,
+        );
+        let chooser_request = format!("--chooser-request={}", request.display());
+        let Outcome::Run(args) = parse_str(&["--chooser-file=/tmp/out", &chooser_request]) else {
+            panic!("did not parse");
+        };
+        assert_eq!(args.start, Some(PathBuf::from("/srv/photos")));
+        let chooser = args.chooser.expect("a chooser");
+        assert_eq!(chooser.mode(), PickMode::Files);
+        assert_eq!(chooser.title.as_deref(), Some("Upload to Drive"));
+        assert_eq!(chooser.accept.as_deref(), Some("Upload"));
+        assert_eq!(chooser.filters.len(), 2);
+        assert_eq!(chooser.filters[1].globs, Vec::<String>::new());
+        assert_eq!(chooser.current_filter, 1);
+
+        // A positional path wins over the request's folder, and the switches
+        // are outranked by its kind.
+        let Outcome::Run(args) = parse_str(&[
+            "--chooser-save",
+            &chooser_request,
+            "--chooser-file=/tmp/out",
+            "/home/brian",
+        ]) else {
+            panic!("did not parse");
+        };
+        assert_eq!(args.start, Some(PathBuf::from("/home/brian")));
+        assert_eq!(args.chooser.map(|c| c.mode()), Some(PickMode::Files));
+        let _ = std::fs::remove_dir_all(request.parent().expect("a dir"));
+    }
+
+    /// A request with nowhere to answer, one that cannot be read, and one that
+    /// does not say what kind of dialog it is are refused, not guessed at.
+    #[test]
+    fn a_bad_request_file_is_refused() {
+        let good = request_file("good", "kind = \"save\"\n");
+        let good_flag = format!("--chooser-request={}", good.display());
+        assert!(matches!(parse_str(&[&good_flag]), Outcome::Fail(_)));
+        assert!(matches!(
+            parse_str(&["--chooser-file=/tmp/out", "--chooser-request="]),
+            Outcome::Fail(_)
+        ));
+        assert!(matches!(
+            parse_str(&[
+                "--chooser-file=/tmp/out",
+                "--chooser-request=/nonexistent/request.toml"
+            ]),
+            Outcome::Fail(_)
+        ));
+        for (name, text) in [
+            ("nokind", "title = \"x\"\n"),
+            ("badkind", "kind = \"delete\"\n"),
+            ("badtype", "kind = \"open\"\nmultiple = \"yes\"\n"),
+            ("badline", "kind = \"open\"\nthis is not toml\n"),
+            (
+                "badglob",
+                "kind = \"open\"\n[[filter]]\nname = \"x\"\nglob = [1]\n",
+            ),
+        ] {
+            let path = request_file(name, text);
+            let flag = format!("--chooser-request={}", path.display());
+            match parse_str(&["--chooser-file=/tmp/out", &flag]) {
+                Outcome::Fail(_) => {}
+                other => panic!("{name}: {other:?}"),
+            }
+            let _ = std::fs::remove_dir_all(path.parent().expect("a dir"));
+        }
+        let Outcome::Run(args) = parse_str(&["--chooser-file=/tmp/out", &good_flag]) else {
+            panic!("a bare save request parses");
+        };
+        assert_eq!(args.chooser.map(|c| c.mode()), Some(PickMode::Save));
+        assert_eq!(args.start, None);
+        let _ = std::fs::remove_dir_all(good.parent().expect("a dir"));
     }
 
     /// A directory really can be called `--help`.

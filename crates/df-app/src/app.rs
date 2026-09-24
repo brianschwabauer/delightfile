@@ -82,16 +82,21 @@ const WINDOW_SIZE: (f64, f64) = (1400.0, 900.0);
 /// writes, so it must never change casually.
 const APP_ID: &str = "delightfile";
 
-/// The window's title while it is somebody else's file dialog
-/// (`--chooser-file`).
+/// The Wayland `app_id` (and X11 class) while the window is somebody else's
+/// file dialog (`--chooser-file`).
 ///
-/// Not decoration — Wayland compositors here draw no titlebar — but the
-/// *handle a window rule grabs*. A picker wants to be a floating, centred,
-/// pinned sheet and a file manager wants to be a tiled window, and the `app_id`
-/// cannot say which this process is because it is both on different runs. The
-/// title can, and it is the string the existing rule already matches (see
-/// `config/hypr/lua/apps/file-picker.lua` in the system repo), which is why it
-/// is this exact spelling and not a prettier one.
+/// The *handle a window rule grabs*. A picker wants to be a floating, centred,
+/// pinned sheet and a file manager wants to be a tiled window, so the two get
+/// different ids. The title used to be that handle; through the portal the
+/// calling program names the dialog ("Open File", "Upload to Drive"), so a
+/// rule can no longer rely on it.
+const PICKER_APP_ID: &str = "delightfile-picker";
+
+/// The window's title in a picker session whose caller gave none.
+///
+/// The string the existing title rule matches (see
+/// `config/hypr/lua/apps/file-picker.lua` in the system repo), kept so that
+/// rule still catches a picker the termfilechooser wrapper starts.
 const PICKER_TITLE: &str = "file-picker";
 
 /// Ignore an egui repaint deadline further out than this and just go to sleep.
@@ -1049,12 +1054,14 @@ pub struct App {
     /// hidden toggle it always was.
     showing: Showing,
     /// The file a save dialog suggested, when the portal handed us one — the
-    /// path it created before launching us (see `build/delightfile-wrapper.sh`).
+    /// path termfilechooser created before launching us (see
+    /// `build/delightfile-wrapper.sh`), or, through `--portal`, the file the
+    /// caller says it is saving (`current_file`).
     ///
     /// Held because it is the one existing file a save may land on without
-    /// being asked about: nobody's work is in it, and asking "Replace
-    /// photo.jpg?" about the name the dialog itself offered a second ago would
-    /// be a question with only one sensible answer.
+    /// being asked about: asking "Replace photo.jpg?" about the name the
+    /// dialog itself offered a second ago would be a question with only one
+    /// sensible answer.
     suggested: Option<PathBuf>,
     /// What a pick picked, held until `finish` writes it.
     ///
@@ -1946,14 +1953,17 @@ impl App {
     fn init_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<(), GfxError> {
         use winit::platform::wayland::WindowAttributesExtWayland;
 
-        let title = match self.chooser {
-            Some(_) => PICKER_TITLE,
-            None => APP_ID,
+        let (title, app_id) = match &self.chooser {
+            Some(chooser) => (
+                chooser.title.as_deref().unwrap_or(PICKER_TITLE),
+                PICKER_APP_ID,
+            ),
+            None => (APP_ID, APP_ID),
         };
         let attrs = Window::default_attributes()
             .with_title(title)
             .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_SIZE.0, WINDOW_SIZE.1))
-            .with_name(APP_ID, APP_ID);
+            .with_name(app_id, app_id);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -4757,7 +4767,8 @@ impl App {
     }
 
     /// A save dialog's Save button: `Save as:`, prefilled with the name the
-    /// dialog suggested — or, when it suggested none, the file under the
+    /// caller suggested (`current_name`, through the portal) or the file the
+    /// dialog was opened on — or, when there is neither, the file under the
     /// cursor, since saving next to a file under a name like it is the common
     /// case — with the stem selected, so typing replaces the name and keeps
     /// the extension, the way every save dialog opens.
@@ -4766,10 +4777,15 @@ impl App {
             return;
         }
         let name = self
-            .suggested
-            .as_deref()
-            .and_then(Path::file_name)
-            .map(|name| name.to_string_lossy().into_owned())
+            .chooser
+            .as_ref()
+            .and_then(|chooser| chooser.name.clone())
+            .or_else(|| {
+                self.suggested
+                    .as_deref()
+                    .and_then(Path::file_name)
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
             .or_else(|| {
                 self.tab()
                     .cwd
@@ -4810,15 +4826,26 @@ impl App {
     }
 
     /// What the top row's picker buttons say this frame, in a picker session.
+    ///
+    /// The caller's own verb when it gave one ("Upload", "Attach"), else the
+    /// mode's; a multi-file pick counts its selection either way ("Upload 3").
     fn pick_button(&self) -> Option<chrome::Pick> {
         let mode = self.pick_mode()?;
         let dir = &self.tab().cwd.dir;
         let selected = dir.selected_count();
+        let verb = |default: &'static str| {
+            self.chooser
+                .as_ref()
+                .and_then(|chooser| chooser.accept.clone())
+                .unwrap_or_else(|| default.to_string())
+        };
         let label = match mode {
-            PickMode::File | PickMode::Files if selected > 1 => format!("Select {selected}"),
-            PickMode::File | PickMode::Files => "Select".to_string(),
-            PickMode::Folder => "Choose folder".to_string(),
-            PickMode::Save => "Save".to_string(),
+            PickMode::File | PickMode::Files if selected > 1 => {
+                format!("{} {selected}", verb("Select"))
+            }
+            PickMode::File | PickMode::Files => verb("Select"),
+            PickMode::Folder => verb("Choose folder"),
+            PickMode::Save => verb("Save"),
         };
         // Nothing in an archive, a server or the trash can be picked at all.
         // A file dialog needs a selection or a file under the cursor; a
@@ -17861,6 +17888,48 @@ mod tests {
         // …and a file manager has no such button at all.
         let app = Fixture::new("button-none", &["a.txt"]);
         assert_eq!(pick(&app), None);
+    }
+
+    /// A caller's own verb (the portal's `accept_label`) replaces the mode's
+    /// word, and a multi-file pick still counts its selection.
+    #[test]
+    fn the_pick_button_speaks_the_callers_verb() {
+        let pick = |app: &App| app.pick_button().map(|pick| pick.label);
+
+        let mut app = picker("verb-files", &["a.txt", "b.txt", "c.txt"], &[], FILES);
+        if let Some(chooser) = app.chooser.as_mut() {
+            chooser.accept = Some("Upload".to_string());
+        }
+        cursor_to(&mut app, "a.txt");
+        assert_eq!(pick(&app).as_deref(), Some("Upload"));
+        app.dir().select_all();
+        assert_eq!(pick(&app).as_deref(), Some("Upload 3"));
+
+        let mut app = picker("verb-folder", &[], &["docs"], FOLDER);
+        if let Some(chooser) = app.chooser.as_mut() {
+            chooser.accept = Some("Save here".to_string());
+        }
+        assert_eq!(pick(&app).as_deref(), Some("Save here"));
+    }
+
+    /// `Save as:` starts from the name the caller suggested (`current_name`),
+    /// even when the dialog opened on an existing file, stem selected as ever.
+    #[test]
+    fn save_as_starts_from_the_callers_name() {
+        let mut app = picker("save-as-name", &["current.txt"], &[], SAVE);
+        app.suggested = Some(app.files.join("current.txt"));
+        if let Some(chooser) = app.chooser.as_mut() {
+            chooser.name = Some("untitled.txt".to_string());
+        }
+        app.press_pick(Instant::now());
+        let prompt = app.prompt.as_ref().expect("Save opened a prompt");
+        assert_eq!(prompt.kind, PromptKind::SaveAs);
+        assert_eq!(prompt.query(), "untitled.txt");
+        assert_eq!(
+            prompt.buffer.selection(),
+            Some(0..8),
+            "the stem is selected"
+        );
     }
 
     /// Where the frame draws the picker's two buttons, measured the way the

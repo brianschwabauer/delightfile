@@ -72,8 +72,9 @@ cargo build --release
 ```
 
 The binary lands at `target/release/delightfile`. `bash build/install.sh` copies it to
-`~/.local/bin` along with the desktop entry, the icons, and the file-picker wrapper, then
-prints the two commands that make it the system default.
+`~/.local/bin` along with the desktop entry and the icons, registers it as the desktop's
+file-picker backend (see below), and prints the command that makes it the default file
+manager. `bash build/install.sh uninstall` takes all of it back out.
 
 PDF previews want `libpdfium.so`, loaded at runtime from `~/.local/lib/delightfile/`,
 `~/.local/lib/delightviewer/`, or the system loader. Grab a build from
@@ -97,14 +98,55 @@ database who handles a directory.
 
 ## Making it the file picker
 
-Every GTK and Qt file dialog on a Wayland desktop can be routed through
-[xdg-desktop-portal-termfilechooser](https://github.com/hunkyburrito/xdg-desktop-portal-termfilechooser),
-which hands a wrapper script an output path and runs a file manager against it. Chrome's
-upload box, its "Save as", and every "Attach a file" in every web app then open delightfile
-instead of GTK's dialog.
+Every GTK, Qt and browser file dialog on a Wayland desktop goes through
+[xdg-desktop-portal](https://flatpak.github.io/xdg-desktop-portal/), which hands it to a
+backend. delightfile is one: `delightfile --portal` serves
+`org.freedesktop.impl.portal.FileChooser` on the session bus, so Chrome's upload box, its
+"Save as", and every "Attach a file" in every web app open a delightfile window instead of
+GTK's dialog — told the dialog's title, the caller's button label ("Upload" rather than
+"Select"), the suggested file name, the folder to start in, and the file-type filters.
 
-`build/delightfile-wrapper.sh` is that wrapper. Install it (or run `build/install.sh`,
-which does), then write two files:
+`build/install.sh` sets it up for the user running it, no root needed:
+
+- a D-Bus service file, `~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.delightfile.service`,
+  so the bus starts the backend on the first dialog;
+- `~/.local/share/xdg-desktop-portal/portals/delightfile.portal`, which xdg-desktop-portal
+  reads from there since 1.20.1 (on an older one the script installs it to
+  `/usr/share/xdg-desktop-portal/portals/` with `sudo`, or prints the command);
+- the preference, in `~/.config/xdg-desktop-portal/portals.conf`:
+
+  ```ini
+  [preferred]
+  org.freedesktop.impl.portal.FileChooser=delightfile
+  ```
+
+  If that file already names a different file chooser, it is left alone and the line to
+  change is printed instead.
+
+Then `systemctl --user restart xdg-desktop-portal`. `bash build/install.sh --remove-portal`
+undoes all three.
+
+The picker window's Wayland app_id (X11 class) is `delightfile-picker`, not `delightfile`,
+so a window rule can float and centre it without touching the file manager. Its title is
+whatever the calling program called the dialog.
+
+In a picker session the top row ends with `Cancel` and a button that answers the dialog:
+`Select` for files, `Choose folder` for a folder, `Save` for a save — or the calling
+program's own word, such as `Upload` — and `Ctrl+Enter` presses it. `Enter` picks the
+selection (or the file under the cursor) and quits, a directory still opens on `Enter`, a
+double-click picks the row it lands on, and `q`, `Esc` or `Cancel` cancels. A dialog that
+takes one file holds the selection to one row, and a drag draws no band there. In a save,
+`Enter` on a file replaces it (asking first unless it is the name the dialog suggested) and
+`Save` types a new name.
+
+### The termfilechooser alternative
+
+[xdg-desktop-portal-termfilechooser](https://github.com/hunkyburrito/xdg-desktop-portal-termfilechooser)
+is a backend that hands a wrapper script an output path and runs a file manager against it.
+`build/delightfile-wrapper.sh` is that wrapper, and the installer puts it where the portal
+looks. It works, but the wrapper is only told whether the dialog takes several files, a
+folder, or a save — the title, the button label and the filters do not reach the window. To
+use it instead, write these two files:
 
 ```ini
 # ~/.config/xdg-desktop-portal-termfilechooser/config
@@ -121,18 +163,12 @@ save_mode=suggested
 org.freedesktop.impl.portal.FileChooser=termfilechooser
 ```
 
-Then `systemctl --user restart xdg-desktop-portal`.
+A window the wrapper starts has the title `file-picker`.
 
-In a picker session the top row ends with `Cancel` and a button that answers the dialog:
-`Select` for files, `Choose folder` for a folder, `Save` for a save; `Ctrl+Enter` presses
-it. `Enter` picks the selection (or the file under the cursor) and quits, a directory still
-opens on `Enter`, a double-click picks the row it lands on, and `q`, `Esc` or `Cancel`
-cancels. A dialog that takes one file holds the selection to one row, and a drag draws no
-band there. In a save, `Enter` on a file replaces it (asking first unless it is the name the
-dialog suggested) and `Save` types a new name.
+### Underneath
 
-The mechanism underneath is one flag, plus three switches the wrapper passes through from
-the portal:
+The mechanism underneath is one flag, plus three switches the termfilechooser wrapper
+passes through from the portal:
 
 ```sh
 delightfile --chooser-file=/tmp/picked ~/Downloads
@@ -142,7 +178,10 @@ delightfile --chooser-file=/tmp/picked --chooser-save ~/Downloads/photo.jpg
 ```
 
 Whatever was picked is written to that file, one absolute path per line. Nothing is written
-if you quit any other way, which is how the portal is told the dialog was dismissed.
+if you quit any other way, which is how the portal is told the dialog was dismissed. The
+backend passes `--chooser-request=<file>` instead of the switches: a short TOML file with
+everything the portal said about the dialog, written for each dialog into
+`$XDG_RUNTIME_DIR/delightfile/` and removed once it has been answered.
 
 ## Keys
 

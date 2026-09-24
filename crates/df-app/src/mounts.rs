@@ -1026,7 +1026,7 @@ fn run(requests: Receiver<Request>, replies: Sender<Reply>, notify: df_core::fs:
 /// One request that needs udisks2, over the kept connection.
 fn udisks(bus: &mut Option<Bus>, request: &Request) -> Reply {
     if bus.is_none() {
-        match Bus::connect() {
+        match Bus::system() {
             Ok(connected) => *bus = Some(connected),
             Err(e) => return Reply::Failed(e),
         }

@@ -1,4 +1,5 @@
-//! Just enough D-Bus to ask udisks2 about the disks.
+//! Just enough D-Bus to ask udisks2 about the disks, and to *be* a file-chooser
+//! portal backend on the session bus.
 //!
 //! Ported from delightviewer's `dbus.rs`, which talks to the desktop portal on
 //! the *session* bus; this one talks to udisks2 on the **system** bus. The wire
@@ -8,8 +9,19 @@
 //!
 //! What is actually needed is: connect to a unix socket, do the one-line SASL
 //! handshake, marshal a call, and read messages until the reply arrives. That is
-//! this file. It implements the subset of the wire format those messages use and
-//! nothing else; anything unexpected is an error, not a best guess.
+//! the client half of this file. It implements the wire format those messages
+//! use and nothing else; anything unexpected is an error, not a best guess.
+//!
+//! ## The service half
+//!
+//! `delightfile --portal` ([`crate::portal`]) is the other end of a call: it
+//! owns a name, reads method calls off the socket and answers them. That needs
+//! three things the client never did — marshalling *arbitrary* values (the
+//! portal's options arrive as `a{sv}` holding `a(sa(us))` filters and `ay`
+//! paths, and the answer goes back as `(ua{sv})`), building replies and errors
+//! as well as calls, and a connection that splits into one reader and a writer
+//! several threads share ([`Bus::into_service`]). [`Value`] and [`marshal`] are
+//! that generic layer; the udisks2 client is one more user of it.
 //!
 //! ## Why the system bus is easier than the session bus
 //!
@@ -40,20 +52,41 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 /// Little-endian, which is what every machine this runs on is.
 const LE: u8 = b'l';
 
-const MSG_METHOD_CALL: u8 = 1;
-const MSG_METHOD_RETURN: u8 = 2;
-const MSG_ERROR: u8 = 3;
+pub const MSG_METHOD_CALL: u8 = 1;
+pub const MSG_METHOD_RETURN: u8 = 2;
+pub const MSG_ERROR: u8 = 3;
 /// A broadcast. This client subscribes to none, but udisks2 sends them anyway
 /// and [`Bus::call`] has to read past them to find its reply — so the constant
 /// exists to *name* what is being skipped, and the tests check one parses.
 #[cfg_attr(not(test), allow(dead_code))]
-const MSG_SIGNAL: u8 = 4;
+pub const MSG_SIGNAL: u8 = 4;
+
+/// The header flag a caller sets when it will not read the answer. A service
+/// sends none then: the bus would deliver it to somebody not listening.
+pub const FLAG_NO_REPLY_EXPECTED: u8 = 0x1;
+
+/// `RequestName`'s "do not wait in line" flag. A second `--portal` started by
+/// hand while the activated one runs should fail at once and say so, not sit
+/// in the queue owning nothing.
+const NAME_DO_NOT_QUEUE: u32 = 0x4;
+
+/// The largest array the specification allows (64 MiB). A value this side
+/// builds that is bigger is refused before the bus refuses it by hanging up.
+const MAX_ARRAY: usize = 64 * 1024 * 1024;
+
+/// How many method calls addressed to this connection a [`Bus::call`] keeps
+/// for later while it waits for its own reply (see [`Bus::backlog`]). More
+/// than a service could be sent in the moment between owning its name and
+/// starting to read, and few enough that a peer spraying calls at a client
+/// that never serves them cannot grow it without bound.
+const MAX_BACKLOG: usize = 64;
 
 // Header field codes.
 const F_PATH: u8 = 1;
@@ -92,13 +125,17 @@ pub const MAX_MESSAGE: usize = 32 * 1024 * 1024;
 /// carry. Real replies from udisks2 nest four or five deep.
 pub const MAX_NESTING: u32 = 32;
 
-/// A value read off the wire, whatever its type.
+/// A value on the wire, whatever its type — read off it, or about to go on it.
 ///
 /// D-Bus is statically typed and this client mostly knows what it is asking
 /// for — except for `GetManagedObjects`, whose whole answer is "here are the
 /// types you did not know about". So there is one enum wide enough for anything
-/// udisks2 puts in a property, and the accessors below are how a caller says
-/// what it expected.
+/// udisks2 puts in a property or a portal puts in its options, and the
+/// accessors below are how a caller says what it expected.
+///
+/// Going *out*, the value is always paired with the signature it is sent as
+/// ([`marshal`]): an empty `Array` could be `as` or `a{sv}`, and only the
+/// signature can say which.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Bool(bool),
@@ -119,18 +156,50 @@ pub enum Value {
     /// are ordered arrays and a key may in principle repeat.
     Dict(Vec<(Value, Value)>),
     Struct(Vec<Value>),
+    /// `v`: a value with its own signature beside it.
+    ///
+    /// Kept as a wrapper, not unwrapped on the way in, because a service has
+    /// to *send* variants too — every value in the portal's `a{sv}` answer is
+    /// one — and a variant holding an empty array has no element to infer its
+    /// type from. The accessors look through it, so a reader of a property
+    /// never has to care.
+    Variant(String, Box<Value>),
 }
 
 impl Value {
+    /// `value` as a variant of type `sig`.
+    pub fn variant(sig: &str, value: Value) -> Value {
+        Value::Variant(sig.to_string(), Box::new(value))
+    }
+
+    /// This value with any variant wrappers taken off: what a caller reading
+    /// a property means by "the value".
+    pub fn peeled(&self) -> &Value {
+        let mut value = self;
+        while let Value::Variant(_, inner) = value {
+            value = inner;
+        }
+        value
+    }
+
+    /// [`Value::peeled`], by value.
+    pub fn into_peeled(self) -> Value {
+        let mut value = self;
+        while let Value::Variant(_, inner) = value {
+            value = *inner;
+        }
+        value
+    }
+
     pub fn as_str(&self) -> Option<&str> {
-        match self {
+        match self.peeled() {
             Value::Str(s) | Value::Path(s) | Value::Signature(s) => Some(s),
             _ => None,
         }
     }
 
     pub fn as_bool(&self) -> Option<bool> {
-        match self {
+        match self.peeled() {
             Value::Bool(b) => Some(*b),
             _ => None,
         }
@@ -139,7 +208,7 @@ impl Value {
     /// Any unsigned integer, widened. udisks2 reports sizes as `t` and a few
     /// things as `u`, and no caller here cares which.
     pub fn as_u64(&self) -> Option<u64> {
-        match self {
+        match self.peeled() {
             Value::U64(n) => Some(*n),
             Value::U32(n) => Some(*n as u64),
             Value::U16(n) => Some(*n as u64),
@@ -150,6 +219,22 @@ impl Value {
         }
     }
 
+    /// A `ay`, exactly as sent — NULs and all. A unix path is bytes, and a
+    /// caller that has to hand it back to the filesystem wants those bytes
+    /// rather than a lossy decoding of them.
+    pub fn as_bytes(&self) -> Option<Vec<u8>> {
+        let Value::Array(items) = self.peeled() else {
+            return None;
+        };
+        items
+            .iter()
+            .map(|item| match item {
+                Value::U8(b) => Some(*b),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// A `ay` — udisks2's spelling for a device node or a mount point, which
     /// are byte arrays because a unix path is bytes and not text.
     ///
@@ -157,16 +242,7 @@ impl Value {
     /// lossily: a mount point with a non-UTF-8 name is still worth showing, and
     /// showing it wrong is better than not listing the disk.
     pub fn as_bytestring(&self) -> Option<String> {
-        let Value::Array(items) = self else {
-            return None;
-        };
-        let mut bytes: Vec<u8> = Vec::with_capacity(items.len());
-        for item in items {
-            match item {
-                Value::U8(b) => bytes.push(*b),
-                _ => return None,
-            }
-        }
+        let mut bytes = self.as_bytes()?;
         while bytes.last() == Some(&0) {
             bytes.pop();
         }
@@ -175,28 +251,37 @@ impl Value {
 
     /// An `aay` — a list of byte strings, which is how mount points arrive.
     pub fn as_bytestrings(&self) -> Option<Vec<String>> {
-        let Value::Array(items) = self else {
+        let Value::Array(items) = self.peeled() else {
             return None;
         };
         items.iter().map(Value::as_bytestring).collect()
     }
+
+    /// A `ay` for `bytes`: how a path goes out.
+    #[cfg(test)]
+    pub fn bytes(bytes: &[u8]) -> Value {
+        Value::Array(bytes.iter().copied().map(Value::U8).collect())
+    }
 }
 
-/// One message off the wire.
-#[derive(Debug, Default, Clone)]
+/// One message, off the wire or about to go on it.
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Message {
     pub kind: u8,
+    /// [`FLAG_NO_REPLY_EXPECTED`] and friends.
+    pub flags: u8,
+    /// This message's own serial: what a reply to it names as its
+    /// `reply_serial`. Stamped by whoever sends it ([`Outbox::send`]).
+    pub serial: u32,
     pub path: Option<String>,
     pub interface: Option<String>,
     pub member: Option<String>,
-    pub sender: Option<String>,
     pub error_name: Option<String>,
     pub reply_serial: Option<u32>,
-    /// This message's own serial. A client never needs it — nothing here
-    /// answers a call — but a message without it is not a message, and reading
-    /// it is what proves the fixed header was understood.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub serial: u32,
+    pub destination: Option<String>,
+    pub sender: Option<String>,
+    /// The body's signature. `None` is an empty body.
+    pub signature: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -213,6 +298,131 @@ impl Message {
             Ok(text) if !text.is_empty() => readable_error(&name, &text),
             _ => readable_error(&name, ""),
         }
+    }
+
+    /// A call to `member` on `destination`, with no arguments yet.
+    pub fn method_call(destination: &str, path: &str, interface: &str, member: &str) -> Message {
+        Message {
+            kind: MSG_METHOD_CALL,
+            path: Some(path.to_string()),
+            interface: Some(interface.to_string()),
+            member: Some(member.to_string()),
+            destination: Some(destination.to_string()),
+            ..Message::default()
+        }
+    }
+
+    /// The (so far empty) answer to `call`, addressed to whoever made it.
+    ///
+    /// Flagged as wanting no reply of its own: nothing answers an answer, and
+    /// saying so costs nothing.
+    pub fn method_return(call: &Message) -> Message {
+        Message {
+            kind: MSG_METHOD_RETURN,
+            flags: FLAG_NO_REPLY_EXPECTED,
+            reply_serial: Some(call.serial),
+            destination: call.sender.clone(),
+            ..Message::default()
+        }
+    }
+
+    /// An error answering `call`: a D-Bus error name and a sentence.
+    pub fn error(call: &Message, name: &str, text: &str) -> Message {
+        let mut body = Vec::new();
+        // A NUL cannot travel in a D-Bus string, and an error about a caller's
+        // bad bytes may well quote them; the text is for a log, so it is
+        // cleaned rather than refused.
+        marshal_string(&mut body, &text.replace('\0', "\u{FFFD}"));
+        Message {
+            kind: MSG_ERROR,
+            flags: FLAG_NO_REPLY_EXPECTED,
+            reply_serial: Some(call.serial),
+            destination: call.sender.clone(),
+            error_name: Some(name.to_string()),
+            signature: Some("s".to_string()),
+            body,
+            ..Message::default()
+        }
+    }
+
+    /// This message with `args` as its body, marshalled as `sig`.
+    pub fn with_args(mut self, sig: &str, args: &[Value]) -> Result<Message, String> {
+        self.body = marshal_body(sig, args)?;
+        self.signature = (!sig.is_empty()).then(|| sig.to_string());
+        Ok(self)
+    }
+
+    /// The body, read back as the values its signature says it holds.
+    pub fn args(&self) -> Result<Vec<Value>, String> {
+        match &self.signature {
+            Some(sig) => Reader::new(&self.body).values(sig),
+            None if self.body.is_empty() => Ok(Vec::new()),
+            None => Err("a D-Bus body with no signature".into()),
+        }
+    }
+
+    /// Whether whoever sent this call is waiting for an answer.
+    pub fn wants_reply(&self) -> bool {
+        self.kind == MSG_METHOD_CALL && self.flags & FLAG_NO_REPLY_EXPECTED == 0
+    }
+
+    /// The whole message as bytes: the fixed header and its field array —
+    /// which is itself just the value `(yyyyuua(yv))` — then the body on its
+    /// own 8-byte boundary.
+    ///
+    /// Every string that goes into the header is checked on the way (an
+    /// object path's grammar, a signature's), because the bus answers a
+    /// malformed message by dropping the connection, and for a service that
+    /// is every dialog open at the time.
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        let mut fields = Vec::new();
+        let mut field = |code: u8, sig: &str, value: Value| {
+            fields.push(Value::Struct(vec![
+                Value::U8(code),
+                Value::variant(sig, value),
+            ]));
+        };
+        if let Some(path) = &self.path {
+            field(F_PATH, "o", Value::Path(path.clone()));
+        }
+        if let Some(interface) = &self.interface {
+            field(F_INTERFACE, "s", Value::Str(interface.clone()));
+        }
+        if let Some(member) = &self.member {
+            field(F_MEMBER, "s", Value::Str(member.clone()));
+        }
+        if let Some(name) = &self.error_name {
+            field(F_ERROR_NAME, "s", Value::Str(name.clone()));
+        }
+        if let Some(serial) = self.reply_serial {
+            field(F_REPLY_SERIAL, "u", Value::U32(serial));
+        }
+        if let Some(destination) = &self.destination {
+            field(F_DESTINATION, "s", Value::Str(destination.clone()));
+        }
+        if let Some(sender) = &self.sender {
+            field(F_SENDER, "s", Value::Str(sender.clone()));
+        }
+        if let Some(sig) = &self.signature {
+            field(F_SIGNATURE, "g", Value::Signature(sig.clone()));
+        }
+        let header = Value::Struct(vec![
+            Value::U8(LE),
+            Value::U8(self.kind),
+            Value::U8(self.flags),
+            Value::U8(1), // protocol version
+            Value::U32(self.body.len() as u32),
+            Value::U32(self.serial),
+            Value::Array(fields),
+        ]);
+        let mut out = Vec::with_capacity(128 + self.body.len());
+        marshal(&mut out, "(yyyyuua(yv))", &header)?;
+        pad_to(&mut out, 8);
+        out.extend_from_slice(&self.body);
+        if out.len() > MAX_MESSAGE {
+            return Err("a D-Bus message too large to send".into());
+        }
+        Ok(out)
     }
 }
 
@@ -244,7 +454,8 @@ pub fn readable_error(name: &str, text: &str) -> String {
 /// carry.
 pub const BUS_DRIVER: &str = "org.freedesktop.DBus";
 
-/// A connection to the system bus.
+/// A connection to a bus: the system bus for udisks2, the session bus for the
+/// portal.
 pub struct Bus {
     sock: UnixStream,
     serial: u32,
@@ -254,18 +465,40 @@ pub struct Bus {
     /// than the constant so a test can ask for a deadline it can afford to
     /// wait for; nothing but a test ever changes it.
     timeout: Duration,
+    /// Which bus this is, for the sentences its errors are.
+    name: &'static str,
+    /// Method calls that arrived while a [`Bus::call`] was waiting for its
+    /// reply, oldest first, for the [`Inbox`] to hand out before anything
+    /// else.
+    ///
+    /// **The call that started a service is one of them.** D-Bus activation
+    /// queues the call that asked for the name, and delivers it the moment
+    /// the name is owned — which is inside `RequestName`, before its reply.
+    /// Read past like a stray signal, it was lost, and the first file dialog
+    /// after every login waited out its timeout.
+    backlog: std::collections::VecDeque<Message>,
 }
 
 impl Bus {
-    /// Connect, authenticate, and say Hello.
-    pub fn connect() -> Result<Bus, String> {
-        let path = match std::env::var("DBUS_SYSTEM_BUS_ADDRESS") {
-            Ok(address) => socket_path(&address)?,
-            Err(_) => SYSTEM_BUS.to_string(),
-        };
-        let sock = UnixStream::connect(&path)
-            .map_err(|e| format!("connecting to the system bus at {path}: {e}"))?;
+    /// Connect to the system bus, authenticate, and say Hello.
+    pub fn system() -> Result<Bus, String> {
+        let address = std::env::var("DBUS_SYSTEM_BUS_ADDRESS")
+            .unwrap_or_else(|_| format!("unix:path={SYSTEM_BUS}"));
+        Bus::open(&address, "the system bus")
+    }
+
+    /// Connect to the session bus, authenticate, and say Hello.
+    pub fn session() -> Result<Bus, String> {
+        Bus::open(&session_address()?, "the session bus")
+    }
+
+    fn open(address: &str, name: &'static str) -> Result<Bus, String> {
+        let socket = bus_socket(address)?;
+        let sock = socket
+            .connect()
+            .map_err(|e| format!("connecting to {name} at {socket:?}: {e}"))?;
         let mut bus = Bus::on_socket(sock);
+        bus.name = name;
         bus.authenticate()?;
         bus.hello()?;
         Ok(bus)
@@ -286,7 +519,66 @@ impl Bus {
             serial: start_serial(),
             buf: Vec::new(),
             timeout: CALL_TIMEOUT,
+            name: "the bus",
+            backlog: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Own `name`, or say who does.
+    ///
+    /// Refuses to queue ([`NAME_DO_NOT_QUEUE`]): a service that is second in
+    /// line owns nothing, receives nothing, and would sit there looking alive.
+    pub fn request_name(&mut self, name: &str) -> Result<(), String> {
+        let body = marshal_body(
+            "su",
+            &[Value::Str(name.to_string()), Value::U32(NAME_DO_NOT_QUEUE)],
+        )?;
+        let reply = self.call(
+            BUS_DRIVER,
+            "/org/freedesktop/DBus",
+            BUS_DRIVER,
+            "RequestName",
+            Some("su"),
+            &body,
+        )?;
+        match Reader::new(&reply).u32()? {
+            // Primary owner now, or already was.
+            1 | 4 => Ok(()),
+            3 => Err(format!("{name} is already owned by another process")),
+            other => Err(format!("RequestName({name}) answered {other}")),
+        }
+    }
+
+    /// Hand the connection over to a service: one [`Inbox`] for the single
+    /// loop that reads calls, and one [`Outbox`] the request threads share to
+    /// answer them.
+    ///
+    /// Two handles on one socket rather than one behind a lock, because the
+    /// reader spends its life blocked in `read` — a lock it held there would
+    /// stop every answer from going out until the next call came in.
+    pub fn into_service(self) -> Result<(Inbox, Outbox), String> {
+        let writer = self
+            .sock
+            .try_clone()
+            .map_err(|e| format!("splitting the connection to {}: {e}", self.name))?;
+        // A service is idle until somebody opens a dialog, which may be days:
+        // the reader waits without a deadline. (The timeout is a property of
+        // the socket, so this is also the writer's read timeout — which it
+        // never reads.)
+        self.sock.set_read_timeout(None).ok();
+        Ok((
+            Inbox {
+                sock: self.sock,
+                buf: self.buf,
+                name: self.name,
+                backlog: self.backlog,
+            },
+            Outbox {
+                sock: writer,
+                serial: self.serial,
+                name: self.name,
+            },
+        ))
     }
 
     /// SASL EXTERNAL: the kernel already told the bus who we are, so the whole
@@ -298,7 +590,7 @@ impl Bus {
             .map_err(|e| format!("bus auth: {e}"))?;
         let line = self.read_line()?;
         if !line.starts_with("OK") {
-            return Err(format!("the system bus refused EXTERNAL auth: {line}"));
+            return Err(format!("{} refused EXTERNAL auth: {line}", self.name));
         }
         self.sock
             .write_all(b"BEGIN\r\n")
@@ -323,7 +615,7 @@ impl Bus {
                 .deadline_read(&mut byte, deadline)
                 .map_err(|e| format!("bus auth: {e}"))?;
             if n == 0 {
-                return Err("the system bus closed the connection during auth".into());
+                return Err(format!("{} closed the connection during auth", self.name));
             }
             line.push(byte[0]);
             if line.ends_with(b"\r\n") {
@@ -377,7 +669,7 @@ impl Bus {
     /// The sentence a wait that ran out says. One place, so the auth handshake
     /// and the call loop cannot describe the same deadline two ways.
     fn gave_up(&self) -> String {
-        format!("the system bus did not answer within {:?}", self.timeout)
+        format!("{} did not answer within {:?}", self.name, self.timeout)
     }
 
     /// `org.freedesktop.DBus.Hello` — mandatory first call.
@@ -398,7 +690,9 @@ impl Bus {
     /// Messages that are not this call's reply — signals udisks2 broadcasts
     /// about devices appearing, which this client does not subscribe to but may
     /// still be sent — are read past rather than queued: there is no second
-    /// consumer to hand them to.
+    /// consumer to hand them to. Method calls *to* this connection are the
+    /// exception: a service may yet serve them, so they go to
+    /// [`Bus::backlog`].
     ///
     /// ## Two things stop a reply being taken from the wrong message
     ///
@@ -435,6 +729,7 @@ impl Bus {
         loop {
             let msg = self.read_message(deadline)?;
             if msg.reply_serial != Some(serial) {
+                self.keep(msg);
                 continue;
             }
             if let Some(expected) = &expected {
@@ -496,23 +791,32 @@ impl Bus {
         signature: Option<&str>,
         body: &[u8],
     ) -> Result<u32, String> {
-        // Wrapping, and never 0 — the specification reserves it, and a
-        // connection that lived long enough to wrap must not send one.
-        self.serial = self.serial.wrapping_add(1).max(1);
-        let serial = self.serial;
-        let mut fields = Vec::new();
-        push_field(&mut fields, F_PATH, 'o', path);
-        push_field(&mut fields, F_DESTINATION, 's', destination);
-        push_field(&mut fields, F_INTERFACE, 's', interface);
-        push_field(&mut fields, F_MEMBER, 's', member);
-        if let Some(sig) = signature {
-            push_signature_field(&mut fields, sig);
-        }
-        let out = encode_message(MSG_METHOD_CALL, 0, serial, &fields, body);
+        self.serial = next_serial(self.serial);
+        let msg = Message {
+            serial: self.serial,
+            signature: signature.map(str::to_string),
+            body: body.to_vec(),
+            ..Message::method_call(destination, path, interface, member)
+        };
         self.sock
-            .write_all(&out)
-            .map_err(|e| format!("writing to the system bus: {e}"))?;
-        Ok(serial)
+            .write_all(&msg.encode()?)
+            .map_err(|e| format!("writing to {}: {e}", self.name))?;
+        Ok(self.serial)
+    }
+
+    /// Hold on to a method call that arrived mid-call; drop anything else.
+    fn keep(&mut self, msg: Message) {
+        if msg.kind != MSG_METHOD_CALL {
+            return;
+        }
+        if self.backlog.len() < MAX_BACKLOG {
+            self.backlog.push_back(msg);
+        } else {
+            log::warn!(
+                "dropping a call to {:?} that arrived while waiting for a reply",
+                msg.member
+            );
+        }
     }
 
     /// Read exactly one message off the wire, no later than `deadline`.
@@ -530,14 +834,93 @@ impl Bus {
         while self.buf.len() < want {
             let n = self
                 .deadline_read(&mut chunk, deadline)
-                .map_err(|e| format!("reading from the system bus: {e}"))?;
+                .map_err(|e| format!("reading from {}: {e}", self.name))?;
             if n == 0 {
-                return Err("the system bus closed the connection".into());
+                return Err(format!("{} closed the connection", self.name));
             }
             self.buf.extend_from_slice(&chunk[..n]);
         }
         Ok(())
     }
+}
+
+/// The reading half of a service's connection ([`Bus::into_service`]).
+pub struct Inbox {
+    sock: UnixStream,
+    buf: Vec<u8>,
+    name: &'static str,
+    /// Calls that came in before the service was reading ([`Bus::backlog`]).
+    backlog: std::collections::VecDeque<Message>,
+}
+
+impl Inbox {
+    /// The next message, however long it takes to come: first anything that
+    /// arrived before the service was reading, then the socket.
+    ///
+    /// A message that frames but does not parse is skipped with a warning —
+    /// one peer's odd bytes are not a reason to stop serving everyone else.
+    /// An error is the connection itself: gone, or a stream this cannot frame
+    /// (a big-endian peer), and either way the service is over.
+    pub fn next(&mut self) -> Result<Message, String> {
+        if let Some(msg) = self.backlog.pop_front() {
+            return Ok(msg);
+        }
+        loop {
+            self.fill(16)?;
+            let total = frame_len(&self.buf)?;
+            self.fill(total)?;
+            let parsed = parse_message(&self.buf[..total]);
+            self.buf.drain(..total);
+            match parsed {
+                Ok(msg) => return Ok(msg),
+                Err(e) => log::warn!("skipping a message from {}: {e}", self.name),
+            }
+        }
+    }
+
+    fn fill(&mut self, want: usize) -> Result<(), String> {
+        let mut chunk = [0u8; 8192];
+        while self.buf.len() < want {
+            let n = match self.sock.read(&mut chunk) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(format!("reading from {}: {e}", self.name)),
+            };
+            if n == 0 {
+                return Err(format!("{} closed the connection", self.name));
+            }
+            self.buf.extend_from_slice(&chunk[..n]);
+        }
+        Ok(())
+    }
+}
+
+/// The writing half of a service's connection, shared behind a lock by every
+/// thread that answers a call. One `send` is one whole message, so two answers
+/// finishing at once cannot interleave their bytes.
+pub struct Outbox {
+    sock: UnixStream,
+    serial: u32,
+    name: &'static str,
+}
+
+impl Outbox {
+    /// Stamp `msg` with the next serial and send it.
+    pub fn send(&mut self, mut msg: Message) -> Result<u32, String> {
+        self.serial = next_serial(self.serial);
+        msg.serial = self.serial;
+        self.sock
+            .write_all(&msg.encode()?)
+            .map_err(|e| format!("writing to {}: {e}", self.name))?;
+        Ok(self.serial)
+    }
+}
+
+/// The serial after `serial`: wrapping, and never 0 — the specification
+/// reserves it, and a connection that lived long enough to wrap must not send
+/// one.
+fn next_serial(serial: u32) -> u32 {
+    serial.wrapping_add(1).max(1)
 }
 
 /// Where a connection's serials start.
@@ -584,32 +967,110 @@ fn uid() -> u32 {
         .unwrap_or(1000)
 }
 
-/// The socket out of a bus address. Only `unix:path=` is handled — an abstract
-/// socket would need a raw `sockaddr_un`, i.e. `unsafe`, and no system bus uses
-/// one.
-pub fn socket_path(address: &str) -> Result<String, String> {
+/// The socket a bus address names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BusSocket {
+    /// `unix:path=` — a socket file.
+    Path(std::path::PathBuf),
+    /// `unix:abstract=` — a name in Linux's abstract socket namespace, which
+    /// is what a `dbus-daemon` started with `unix:tmpdir=` listens on.
+    Abstract(Vec<u8>),
+}
+
+impl BusSocket {
+    fn connect(&self) -> std::io::Result<UnixStream> {
+        match self {
+            BusSocket::Path(path) => UnixStream::connect(path),
+            BusSocket::Abstract(name) => {
+                // Safe std since 1.70: no raw `sockaddr_un` needed.
+                use std::os::linux::net::SocketAddrExt;
+                let addr = std::os::unix::net::SocketAddr::from_abstract_name(name)?;
+                UnixStream::connect_addr(&addr)
+            }
+        }
+    }
+}
+
+/// The socket out of a bus address: the first `unix:` entry with a `path=` or
+/// an `abstract=`. Other transports (`tcp:`, `unixexec:`) are skipped rather
+/// than attempted — nothing a desktop session starts uses them.
+pub fn bus_socket(address: &str) -> Result<BusSocket, String> {
     for part in address.split(';') {
         let Some(rest) = part.strip_prefix("unix:") else {
             continue;
         };
         for field in rest.split(',') {
             if let Some(path) = field.strip_prefix("path=") {
-                return Ok(path.to_string());
+                let bytes = unescape_address(path)?;
+                return Ok(BusSocket::Path(std::path::PathBuf::from(
+                    std::ffi::OsString::from_vec(bytes),
+                )));
+            }
+            if let Some(name) = field.strip_prefix("abstract=") {
+                return Ok(BusSocket::Abstract(unescape_address(name)?));
             }
         }
     }
     Err(format!("cannot use bus address `{address}`"))
 }
 
+/// A bus address value with its `%xx` escapes undone. The specification lets
+/// any byte be written that way, and a path with a space or a comma in it has
+/// to be.
+fn unescape_address(value: &str) -> Result<Vec<u8>, String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| format!("bad escape in bus address value `{value}`"))?;
+            out.push(hex);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    Ok(out)
+}
+
+/// The session bus's address: the variable every session sets, then the one
+/// the bus sets for a service it activated, then the socket systemd puts in
+/// the runtime directory.
+fn session_address() -> Result<String, String> {
+    for var in ["DBUS_SESSION_BUS_ADDRESS", "DBUS_STARTER_ADDRESS"] {
+        match std::env::var(var) {
+            Ok(address) if !address.is_empty() => return Ok(address),
+            _ => {}
+        }
+    }
+    match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(dir) if !dir.is_empty() => Ok(format!("unix:path={dir}/bus")),
+        _ => Err("no session bus: DBUS_SESSION_BUS_ADDRESS and XDG_RUNTIME_DIR are unset".into()),
+    }
+}
+
 // ── Framing ─────────────────────────────────────────────────────────────────
 
 /// How many bytes the message starting at `head` occupies, from its first 16.
+///
+/// A big-endian message is *framed* even though it is never parsed
+/// ([`parse_message`] refuses it): the bus forwards a message in its sender's
+/// byte order, and a service that could not step over one would have to stop
+/// reading altogether — one odd peer ending the service for everyone.
 pub fn frame_len(head: &[u8]) -> Result<usize, String> {
-    if head.first() != Some(&LE) {
-        return Err("big-endian message from the bus (unsupported)".into());
-    }
-    let body_len = u32_at(head, 4)? as usize;
-    let fields_len = u32_at(head, 12)? as usize;
+    let big = match head.first() {
+        Some(&LE) => false,
+        Some(b'B') => true,
+        _ => return Err("not a D-Bus message".into()),
+    };
+    let word = |at| u32_at(head, at).map(|n| if big { n.swap_bytes() } else { n });
+    let body_len = word(4)? as usize;
+    let fields_len = word(12)? as usize;
     let total = (16 + fields_len).next_multiple_of(8) + body_len;
     if total > MAX_MESSAGE {
         return Err("absurd message length from the bus".into());
@@ -620,6 +1081,9 @@ pub fn frame_len(head: &[u8]) -> Result<usize, String> {
 /// One complete message, understood. Split from the framing so a hand-built
 /// message can be checked without a socket.
 pub fn parse_message(bytes: &[u8]) -> Result<Message, String> {
+    if bytes.first() != Some(&LE) {
+        return Err("big-endian message from the bus (unsupported)".into());
+    }
     let total = frame_len(bytes)?;
     if bytes.len() < total {
         return Err("truncated D-Bus message".into());
@@ -630,6 +1094,7 @@ pub fn parse_message(bytes: &[u8]) -> Result<Message, String> {
     }
     let mut msg = Message {
         kind: bytes[1],
+        flags: bytes[2],
         serial: u32_at(bytes, 8)?,
         body: bytes[fields_end.next_multiple_of(8)..total].to_vec(),
         ..Message::default()
@@ -655,6 +1120,8 @@ fn parse_header_fields(bytes: &[u8], msg: &mut Message) -> Result<(), String> {
             (F_SENDER, "s") => msg.sender = Some(r.string()?),
             (F_ERROR_NAME, "s") => msg.error_name = Some(r.string()?),
             (F_REPLY_SERIAL, "u") => msg.reply_serial = Some(r.u32()?),
+            (F_DESTINATION, "s") => msg.destination = Some(r.string()?),
+            (F_SIGNATURE, "g") => msg.signature = Some(r.signature()?).filter(|s| !s.is_empty()),
             // Everything else is read past rather than understood — a field
             // this code does not use must not fail a message it could parse.
             (_, sig) => r.skip(sig)?,
@@ -666,7 +1133,12 @@ fn parse_header_fields(bytes: &[u8], msg: &mut Message) -> Result<(), String> {
 // ── Marshalling ─────────────────────────────────────────────────────────────
 
 /// The fixed 16-byte header, the field array, and the body on its own 8-byte
-/// boundary.
+/// boundary — built by hand, byte by byte.
+///
+/// Only the tests use it now ([`Message::encode`] is the real encoder): it is
+/// a second, independent spelling of the framing, so the parser is checked
+/// against something other than the encoder it would share a mistake with.
+#[cfg(test)]
 pub fn encode_message(kind: u8, flags: u8, serial: u32, fields: &[u8], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(128 + body.len());
     out.push(LE);
@@ -726,6 +1198,251 @@ pub fn marshal_no_options(out: &mut Vec<u8>) {
     marshal_array(out, 8, |_| {});
 }
 
+/// Put `values` on the wire as a body of signature `sig`, one complete type
+/// per value.
+///
+/// A body starts on an 8-byte boundary of the message, so marshalling it into
+/// a fresh buffer — whose offset 0 *is* that boundary — puts every alignment
+/// where the receiver expects it.
+pub fn marshal_body(sig: &str, values: &[Value]) -> Result<Vec<u8>, String> {
+    check_signature(sig)?;
+    let types = split_types(sig);
+    if types.len() != values.len() {
+        return Err(format!(
+            "signature `{sig}` has {} types for {} values",
+            types.len(),
+            values.len()
+        ));
+    }
+    let mut out = Vec::new();
+    for (one, value) in types.iter().zip(values) {
+        marshal(&mut out, one, value)?;
+    }
+    Ok(out)
+}
+
+/// Put one value of the single complete type `sig` on the wire, aligned from
+/// wherever `out` has got to.
+///
+/// Driven by the signature, not the value: the value only has to *fit* it. A
+/// mismatch — a `Str` where `sig` says `u`, a struct with a field too few — is
+/// an error before any byte of it could reach the bus, because the bus answers
+/// a malformed message by dropping the connection.
+pub fn marshal(out: &mut Vec<u8>, sig: &str, value: &Value) -> Result<(), String> {
+    marshal_at(out, sig, value, 0)
+}
+
+fn marshal_at(out: &mut Vec<u8>, sig: &str, value: &Value, depth: u32) -> Result<(), String> {
+    if depth > MAX_NESTING {
+        return Err("D-Bus value is nested too deeply to send".into());
+    }
+    let depth = depth + 1;
+    let head = sig.as_bytes().first().copied();
+    match (head, value) {
+        (Some(b'y'), Value::U8(n)) => out.push(*n),
+        (Some(b'b'), Value::Bool(b)) => put_aligned(out, &u32::from(*b).to_le_bytes()),
+        (Some(b'n'), Value::I16(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b'q'), Value::U16(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b'i'), Value::I32(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b'u' | b'h'), Value::U32(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b'x'), Value::I64(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b't'), Value::U64(n)) => put_aligned(out, &n.to_le_bytes()),
+        (Some(b'd'), Value::F64(f)) => put_aligned(out, &f.to_bits().to_le_bytes()),
+        (Some(b's'), Value::Str(s)) => {
+            if s.contains('\0') {
+                return Err("a D-Bus string cannot hold a NUL".into());
+            }
+            marshal_string(out, s);
+        }
+        (Some(b'o'), Value::Path(path)) => {
+            check_object_path(path)?;
+            marshal_string(out, path);
+        }
+        (Some(b'g'), Value::Signature(s)) => {
+            check_signature(s)?;
+            marshal_signature(out, s);
+        }
+        (Some(b'v'), Value::Variant(inner_sig, inner)) => {
+            check_signature(inner_sig)?;
+            if split_types(inner_sig).len() != 1 {
+                return Err(format!("variant signature `{inner_sig}` is not one type"));
+            }
+            marshal_signature(out, inner_sig);
+            marshal_at(out, inner_sig, inner, depth)?;
+        }
+        (Some(b'a'), Value::Dict(pairs)) if sig[1..].starts_with('{') => {
+            let entry = dict_entry(&sig[1..])?;
+            let mut chars = entry.chars().peekable();
+            let key_sig = take_one_type(&mut chars);
+            let value_sig: String = chars.collect();
+            marshal_array_of(out, 8, |out| {
+                for (key, value) in pairs {
+                    pad_to(out, 8);
+                    marshal_at(out, &key_sig, key, depth)?;
+                    marshal_at(out, &value_sig, value, depth)?;
+                }
+                Ok(())
+            })?;
+        }
+        (Some(b'a'), Value::Array(items)) if !sig[1..].starts_with('{') => {
+            let element = &sig[1..];
+            if element.is_empty() {
+                return Err("an array signature with no element type".into());
+            }
+            marshal_array_of(out, element_align(element), |out| {
+                for item in items {
+                    marshal_at(out, element, item, depth)?;
+                }
+                Ok(())
+            })?;
+        }
+        (Some(b'('), Value::Struct(fields)) => {
+            let inner = sig
+                .strip_prefix('(')
+                .and_then(|s| s.strip_suffix(')'))
+                .ok_or_else(|| format!("unterminated struct signature `{sig}`"))?;
+            let types = split_types(inner);
+            if types.len() != fields.len() {
+                return Err(format!(
+                    "struct `{sig}` has {} fields, the value {}",
+                    types.len(),
+                    fields.len()
+                ));
+            }
+            pad_to(out, 8);
+            for (one, field) in types.iter().zip(fields) {
+                marshal_at(out, one, field, depth)?;
+            }
+        }
+        _ => return Err(format!("cannot send {} as `{sig}`", kind_of(value))),
+    }
+    Ok(())
+}
+
+/// A fixed-width number on its own natural boundary, which for every D-Bus
+/// scalar is its own width.
+fn put_aligned(out: &mut Vec<u8>, bytes: &[u8]) {
+    pad_to(out, bytes.len());
+    out.extend_from_slice(bytes);
+}
+
+/// [`marshal_array`] for contents that can fail, with the specification's
+/// size ceiling checked once they are there.
+fn marshal_array_of(
+    out: &mut Vec<u8>,
+    elem_align: usize,
+    contents: impl FnOnce(&mut Vec<u8>) -> Result<(), String>,
+) -> Result<(), String> {
+    pad_to(out, 4);
+    let len_at = out.len();
+    out.extend_from_slice(&0u32.to_le_bytes());
+    pad_to(out, elem_align);
+    let start = out.len();
+    contents(out)?;
+    let len = out.len() - start;
+    if len > MAX_ARRAY {
+        return Err("a D-Bus array too large to send".into());
+    }
+    out[len_at..len_at + 4].copy_from_slice(&(len as u32).to_le_bytes());
+    Ok(())
+}
+
+/// What kind of value this is, for an error that says what did not fit.
+fn kind_of(value: &Value) -> &'static str {
+    match value {
+        Value::Bool(_) => "a bool",
+        Value::U8(_) => "a byte",
+        Value::U16(_) | Value::I16(_) => "a 16-bit integer",
+        Value::U32(_) | Value::I32(_) => "a 32-bit integer",
+        Value::U64(_) | Value::I64(_) => "a 64-bit integer",
+        Value::F64(_) => "a double",
+        Value::Str(_) => "a string",
+        Value::Path(_) => "an object path",
+        Value::Signature(_) => "a signature",
+        Value::Array(_) => "an array",
+        Value::Dict(_) => "a dictionary",
+        Value::Struct(_) => "a struct",
+        Value::Variant(..) => "a variant",
+    }
+}
+
+/// A signature split into its complete types: `sa{sv}(ub)` → `s`, `a{sv}`,
+/// `(ub)`.
+fn split_types(sig: &str) -> Vec<String> {
+    let mut chars = sig.chars().peekable();
+    std::iter::from_fn(|| Some(take_one_type(&mut chars)).filter(|one| !one.is_empty())).collect()
+}
+
+/// Whether `sig` is a signature the bus will accept: at most 255 bytes of
+/// complete types, containers closed, dictionary keys basic, no empty struct.
+pub fn check_signature(sig: &str) -> Result<(), String> {
+    if sig.len() > 255 {
+        return Err("a D-Bus signature longer than 255 bytes".into());
+    }
+    let bytes = sig.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        at = complete_type_end(bytes, at, 0)
+            .map_err(|e| format!("bad D-Bus signature `{sig}`: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Where the complete type starting at `bytes[at]` ends.
+fn complete_type_end(bytes: &[u8], at: usize, depth: u32) -> Result<usize, String> {
+    // The specification's own limits: 32 arrays and 32 structs deep.
+    if depth > 2 * MAX_NESTING {
+        return Err("nested too deeply".into());
+    }
+    const BASIC: &[u8] = b"ybnqiuxtdsogh";
+    match bytes.get(at) {
+        None => Err("ends in the middle of a type".into()),
+        Some(c) if BASIC.contains(c) || *c == b'v' => Ok(at + 1),
+        Some(b'a') if bytes.get(at + 1) == Some(&b'{') => {
+            if !bytes.get(at + 2).is_some_and(|key| BASIC.contains(key)) {
+                return Err("a dictionary key must be a basic type".into());
+            }
+            let end = complete_type_end(bytes, at + 3, depth + 1)?;
+            if bytes.get(end) != Some(&b'}') {
+                return Err("a dictionary entry is one key and one value".into());
+            }
+            Ok(end + 1)
+        }
+        Some(b'a') => complete_type_end(bytes, at + 1, depth + 1),
+        Some(b'(') => {
+            let mut pos = at + 1;
+            if bytes.get(pos) == Some(&b')') {
+                return Err("an empty struct".into());
+            }
+            while bytes.get(pos) != Some(&b')') {
+                pos = complete_type_end(bytes, pos, depth + 1)?;
+            }
+            Ok(pos + 1)
+        }
+        Some(other) => Err(format!("`{}` is not a type", char::from(*other))),
+    }
+}
+
+/// Whether `path` is an object path: `/`, or `/`-separated non-empty
+/// elements of `[A-Za-z0-9_]` with no trailing slash.
+pub fn check_object_path(path: &str) -> Result<(), String> {
+    let valid = path == "/"
+        || path.strip_prefix('/').is_some_and(|rest| {
+            rest.split('/').all(|element| {
+                !element.is_empty()
+                    && element
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("`{path}` is not a D-Bus object path"))
+    }
+}
+
+#[cfg(test)]
 fn push_field(out: &mut Vec<u8>, code: u8, sig: char, value: &str) {
     pad_to(out, 8);
     out.push(code);
@@ -733,6 +1450,7 @@ fn push_field(out: &mut Vec<u8>, code: u8, sig: char, value: &str) {
     marshal_string(out, value);
 }
 
+#[cfg(test)]
 fn push_signature_field(out: &mut Vec<u8>, sig: &str) {
     pad_to(out, 8);
     out.push(F_SIGNATURE);
@@ -884,7 +1602,11 @@ impl<'a> Reader<'a> {
             'h' => Ok(Value::U32(self.u32()?)),
             'v' => {
                 let inner = self.signature()?;
-                self.value_at(&inner, depth)
+                if split_types(&inner).len() != 1 {
+                    return Err(format!("variant signature `{inner}` is not one type"));
+                }
+                let value = self.value_at(&inner, depth)?;
+                Ok(Value::Variant(inner, Box::new(value)))
             }
             'a' => {
                 let element = sig[1..].to_string();
@@ -960,6 +1682,19 @@ impl<'a> Reader<'a> {
                 Ok(Value::Struct(fields))
             }
             other => Err(format!("unhandled D-Bus type '{other}'")),
+        }
+    }
+
+    /// Read every value a body of signature `sig` holds, in order.
+    pub fn values(&mut self, sig: &str) -> Result<Vec<Value>, String> {
+        let mut chars = sig.chars().peekable();
+        let mut out = Vec::new();
+        loop {
+            let one = take_one_type(&mut chars);
+            if one.is_empty() {
+                return Ok(out);
+            }
+            out.push(self.one(&one)?);
         }
     }
 
@@ -1058,9 +1793,11 @@ pub fn parse_managed_objects(body: &[u8]) -> Result<Vec<(String, Interfaces)>, S
             let Value::Dict(properties) = properties else {
                 continue;
             };
+            // Unwrapped here, once: a property *is* its value to every reader
+            // in `mounts`, and the variant around it says nothing they use.
             let props = properties
                 .into_iter()
-                .filter_map(|(key, value)| Some((key.as_str()?.to_string(), value)))
+                .filter_map(|(key, value)| Some((key.as_str()?.to_string(), value.into_peeled())))
                 .collect();
             map.insert(name, props);
         }
@@ -1077,7 +1814,7 @@ mod tests {
 
     /// Build a body the way a service would, so the reader can be checked
     /// against something other than itself.
-    fn marshal(out: &mut Vec<u8>, value: &Value) {
+    fn by_hand(out: &mut Vec<u8>, value: &Value) {
         match value {
             Value::U8(n) => out.push(*n),
             Value::Bool(b) => {
@@ -1105,7 +1842,7 @@ mod tests {
     /// A variant: its signature, then the value.
     fn marshal_variant(out: &mut Vec<u8>, sig: &str, value: &Value) {
         marshal_signature(out, sig);
-        marshal(out, value);
+        by_hand(out, value);
     }
 
     /// A `ay` byte string, the way udisks2 spells a path.
@@ -1190,7 +1927,7 @@ mod tests {
         ];
         for (sig, value) in cases {
             let mut body = Vec::new();
-            marshal(&mut body, &value);
+            by_hand(&mut body, &value);
             let read = Reader::new(&body).value(sig).unwrap();
             assert_eq!(read, value, "signature {sig}");
         }
@@ -1346,15 +2083,29 @@ mod tests {
 
     #[test]
     fn bus_addresses_yield_their_socket() {
+        let path = |p: &str| BusSocket::Path(std::path::PathBuf::from(p));
         assert_eq!(
-            socket_path("unix:path=/run/dbus/system_bus_socket").unwrap(),
-            "/run/dbus/system_bus_socket"
+            bus_socket("unix:path=/run/dbus/system_bus_socket").unwrap(),
+            path("/run/dbus/system_bus_socket")
         );
         assert_eq!(
-            socket_path("unix:guid=abc,path=/tmp/bus").unwrap(),
-            "/tmp/bus"
+            bus_socket("unix:guid=abc,path=/tmp/bus").unwrap(),
+            path("/tmp/bus")
         );
-        assert!(socket_path("tcp:host=localhost,port=1").is_err());
+        // The abstract namespace, which `dbus-daemon --session` listens on
+        // when its config says `unix:tmpdir=`.
+        assert_eq!(
+            bus_socket("unix:abstract=/tmp/dbus-XyZ,guid=0123").unwrap(),
+            BusSocket::Abstract(b"/tmp/dbus-XyZ".to_vec())
+        );
+        // Escapes are undone, and a transport this client cannot use is
+        // skipped for the next entry rather than failing the address.
+        assert_eq!(
+            bus_socket("tcp:host=localhost,port=1;unix:path=/run/user/1000/my%20bus").unwrap(),
+            path("/run/user/1000/my bus")
+        );
+        assert!(bus_socket("tcp:host=localhost,port=1").is_err());
+        assert!(bus_socket("unix:path=/tmp/bad%2").is_err());
     }
 
     /// The three refusals a file manager actually meets, each turned into a
@@ -1413,7 +2164,7 @@ mod tests {
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].1.as_str(), Some("yes"));
         assert_eq!(
-            pairs[1].1,
+            *pairs[1].1.peeled(),
             Value::Struct(vec![
                 Value::U32(1),
                 Value::U32(2),
@@ -1659,7 +2410,10 @@ mod hostile {
             ok.extend_from_slice(&[1, b'v', 0]);
         }
         ok.extend_from_slice(&[1, b'y', 0, 7]);
-        assert!(matches!(Reader::new(&ok).value("v"), Ok(Value::U8(7))));
+        assert!(matches!(
+            Reader::new(&ok).value("v").map(Value::into_peeled),
+            Ok(Value::U8(7))
+        ));
     }
 
     /// `take_one_type` hands an unterminated container back verbatim, and the
@@ -1720,5 +2474,503 @@ mod hostile {
             let msg = encode_message(MSG_METHOD_RETURN, 0, 1, &fields, &[]);
             assert!(parse_message(&msg).is_err());
         }
+    }
+}
+
+/// The generic layer the portal service stands on: every signature the
+/// file-chooser interface uses, marshalled and read back, and the framing in
+/// both directions.
+#[cfg(test)]
+mod generic {
+    #![allow(clippy::unwrap_used)] // tests: a broken fixture should panic
+
+    use super::*;
+
+    fn s(text: &str) -> Value {
+        Value::Str(text.to_string())
+    }
+
+    /// One `(sa(us))` filter: a name and its `(kind, pattern)` pairs.
+    fn filter(name: &str, patterns: &[(u32, &str)]) -> Value {
+        Value::Struct(vec![
+            s(name),
+            Value::Array(
+                patterns
+                    .iter()
+                    .map(|(kind, pattern)| Value::Struct(vec![Value::U32(*kind), s(pattern)]))
+                    .collect(),
+            ),
+        ])
+    }
+
+    /// The options a real `OpenFile` / `SaveFile` / `SaveFiles` call carries,
+    /// every key the portal documents, each under its own signature.
+    fn options() -> Value {
+        let filters = Value::Array(vec![
+            filter("Images", &[(0, "*.png"), (1, "image/*")]),
+            filter("A", &[]),
+            filter("Odd", &[(0, "*.x")]),
+        ]);
+        let choices = Value::Array(vec![Value::Struct(vec![
+            s("encoding"),
+            s("Encoding"),
+            Value::Array(vec![
+                Value::Struct(vec![s("utf8"), s("Unicode")]),
+                Value::Struct(vec![s("latin15"), s("Western")]),
+            ]),
+            s("latin15"),
+        ])]);
+        let pairs = vec![
+            ("accept_label", Value::variant("s", s("_Upload"))),
+            ("modal", Value::variant("b", Value::Bool(true))),
+            ("multiple", Value::variant("b", Value::Bool(false))),
+            ("filters", Value::variant("a(sa(us))", filters)),
+            (
+                "current_filter",
+                Value::variant("(sa(us))", filter("Images", &[(0, "*.png")])),
+            ),
+            ("choices", Value::variant("a(ssa(ss)s)", choices)),
+            (
+                "current_folder",
+                Value::variant("ay", Value::bytes(b"/home/brian/Pictures\0")),
+            ),
+            (
+                "files",
+                Value::variant(
+                    "aay",
+                    Value::Array(vec![Value::bytes(b"a.png\0"), Value::bytes(b"b\0")]),
+                ),
+            ),
+            ("empty", Value::variant("as", Value::Array(vec![]))),
+        ];
+        Value::Dict(pairs.into_iter().map(|(k, v)| (s(k), v)).collect())
+    }
+
+    /// Every signature the portal's calls and answers use.
+    fn cases() -> Vec<(&'static str, Value)> {
+        vec![
+            ("y", Value::U8(0xFE)),
+            ("b", Value::Bool(true)),
+            ("u", Value::U32(2)),
+            ("s", s("Open File")),
+            ("s", s("")),
+            (
+                "o",
+                Value::Path("/org/freedesktop/portal/desktop/request/1_42/t".into()),
+            ),
+            ("g", Value::Signature("a{sv}".into())),
+            // A byte array with NULs inside it and at the end: the bytes of a
+            // path, which are not text.
+            ("ay", Value::bytes(b"/tmp/a\0b\0")),
+            ("ay", Value::bytes(b"")),
+            (
+                "aay",
+                Value::Array(vec![
+                    Value::bytes(b"one\0"),
+                    Value::bytes(b""),
+                    Value::bytes(b"x"),
+                ]),
+            ),
+            ("aay", Value::Array(vec![])),
+            (
+                "as",
+                Value::Array(vec![s("file:///a"), s(""), s("file:///%C3%BC")]),
+            ),
+            ("as", Value::Array(vec![])),
+            ("v", Value::variant("as", Value::Array(vec![]))),
+            (
+                "v",
+                Value::variant("(sa(us))", filter("Odd", &[(1, "text/plain")])),
+            ),
+            (
+                "a(sa(us))",
+                Value::Array(vec![filter("abc", &[(0, "*.x")]), filter("de", &[])]),
+            ),
+            ("a(sa(us))", Value::Array(vec![])),
+            (
+                "(sa(us))",
+                filter("Images", &[(0, "*.png"), (1, "image/*")]),
+            ),
+            (
+                "a(ssa(ss)s)",
+                Value::Array(vec![Value::Struct(vec![
+                    s("k"),
+                    s("Label"),
+                    Value::Array(vec![]),
+                    s("true"),
+                ])]),
+            ),
+            ("a{sv}", options()),
+            ("a{sv}", Value::Dict(vec![])),
+            // Nested arrays, and a struct straight after an odd-length string.
+            (
+                "aas",
+                Value::Array(vec![Value::Array(vec![s("a")]), Value::Array(vec![])]),
+            ),
+            (
+                "(sy(us))",
+                Value::Struct(vec![
+                    s("odd"),
+                    Value::U8(1),
+                    Value::Struct(vec![Value::U32(9), s("z")]),
+                ]),
+            ),
+        ]
+    }
+
+    /// Each signature alone, and again behind a byte and an odd-length
+    /// string, so its alignment is exercised from an offset that is not
+    /// already on its boundary.
+    #[test]
+    fn every_portal_signature_round_trips_at_every_alignment() {
+        for (sig, value) in cases() {
+            let mut out = Vec::new();
+            marshal(&mut out, sig, &value).unwrap();
+            let mut reader = Reader::new(&out);
+            assert_eq!(reader.value(sig).unwrap(), value, "`{sig}` alone");
+            assert_eq!(reader.pos, out.len(), "`{sig}` read every byte");
+
+            let body_sig = format!("ys{sig}");
+            let args = [Value::U8(7), s("odd"), value.clone()];
+            let body = marshal_body(&body_sig, &args).unwrap();
+            assert_eq!(
+                Reader::new(&body).values(&body_sig).unwrap(),
+                args,
+                "`{sig}` behind a prefix"
+            );
+        }
+    }
+
+    /// The bytes themselves, worked out by hand from the specification — so
+    /// the round trip above is not just the encoder agreeing with itself.
+    #[test]
+    fn a_filter_is_laid_out_the_way_the_specification_says() {
+        let mut out = Vec::new();
+        marshal(&mut out, "(sa(us))", &filter("abc", &[(0, "*.x")])).unwrap();
+        #[rustfmt::skip]
+        let expected = vec![
+            3, 0, 0, 0, b'a', b'b', b'c', 0,    // "abc"
+            12, 0, 0, 0,                        // the array: 12 bytes of content…
+            0, 0, 0, 0,                         // …starting on the struct's 8
+            0, 0, 0, 0,                         // u 0 (a glob)
+            3, 0, 0, 0, b'*', b'.', b'x', 0,    // "*.x"
+        ];
+        assert_eq!(out, expected);
+
+        // An empty array still pads to where its first element would have
+        // been: four bytes of length and four of padding for 8-aligned
+        // elements, just the length for 4-aligned ones.
+        let mut empty = Vec::new();
+        marshal(&mut empty, "a(us)", &Value::Array(vec![])).unwrap();
+        assert_eq!(empty, vec![0; 8]);
+        let mut empty = Vec::new();
+        marshal(&mut empty, "aay", &Value::Array(vec![])).unwrap();
+        assert_eq!(empty, vec![0; 4]);
+        // A byte array after a byte: the length word waits for offset 4.
+        let body = marshal_body("yay", &[Value::U8(7), Value::bytes(b"\0")]).unwrap();
+        assert_eq!(body, vec![7, 0, 0, 0, 1, 0, 0, 0, 0]);
+    }
+
+    /// A value that does not fit its signature is refused before a byte of it
+    /// reaches the bus, which would hang up on it.
+    #[test]
+    fn a_value_that_does_not_fit_is_refused() {
+        let mut out = Vec::new();
+        assert!(marshal(&mut out, "u", &s("2")).is_err());
+        assert!(marshal(&mut out, "s", &s("a\0b")).is_err());
+        assert!(marshal(&mut out, "o", &Value::Path("not/a/path".into())).is_err());
+        assert!(marshal(&mut out, "o", &Value::Path("/trailing/".into())).is_err());
+        assert!(marshal(&mut out, "o", &Value::Path("/a//b".into())).is_err());
+        assert!(marshal(&mut out, "(us)", &Value::Struct(vec![Value::U32(1)])).is_err());
+        assert!(marshal(&mut out, "a{sv}", &Value::Array(vec![])).is_err());
+        assert!(marshal(&mut out, "as", &Value::Dict(vec![])).is_err());
+        assert!(marshal(&mut out, "v", &Value::variant("ss", s("x"))).is_err());
+        assert!(marshal(&mut out, "v", &Value::variant("u", s("x"))).is_err());
+        assert!(marshal(&mut out, "a", &Value::Array(vec![])).is_err());
+        assert!(marshal_body("su", &[s("one")]).is_err());
+        assert!(marshal(&mut out, "o", &Value::Path("/".into())).is_ok());
+    }
+
+    #[test]
+    fn signatures_are_checked_the_way_the_bus_checks_them() {
+        for good in [
+            "",
+            "osssa{sv}",
+            "ua{sv}",
+            "a(sa(us))",
+            "a(ssa(ss)s)",
+            "aay",
+            "a{oa{sa{sv}}}",
+        ] {
+            assert!(check_signature(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "a", "(s", "()", "a{vs}", "a{sss}", "a{s}", "z", "s)", "{sv}",
+        ] {
+            assert!(check_signature(bad).is_err(), "{bad}");
+        }
+        assert!(check_signature(&"u".repeat(256)).is_err());
+    }
+
+    /// A call, a return and an error, each encoded and parsed back into the
+    /// message it was — flags, serial, every header field and the body.
+    #[test]
+    fn messages_survive_the_round_trip_in_both_directions() {
+        let call = Message {
+            serial: 41,
+            sender: Some(":1.7".into()),
+            ..Message::method_call(
+                "org.freedesktop.impl.portal.desktop.delightfile",
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.impl.portal.FileChooser",
+                "OpenFile",
+            )
+        }
+        .with_args(
+            "osssa{sv}",
+            &[
+                Value::Path("/org/freedesktop/portal/desktop/request/1_7/t".into()),
+                s("org.example.App"),
+                s(""),
+                s("Open"),
+                options(),
+            ],
+        )
+        .unwrap();
+        let bytes = call.encode().unwrap();
+        assert_eq!(frame_len(&bytes).unwrap(), bytes.len());
+        let parsed = parse_message(&bytes).unwrap();
+        assert_eq!(parsed, call);
+        assert!(parsed.wants_reply());
+        assert_eq!(parsed.args().unwrap()[4], options());
+
+        let reply = Message {
+            serial: 3,
+            ..Message::method_return(&call)
+        }
+        .with_args(
+            "ua{sv}",
+            &[
+                Value::U32(0),
+                Value::Dict(vec![(
+                    s("uris"),
+                    Value::variant("as", Value::Array(vec![s("file:///a")])),
+                )]),
+            ],
+        )
+        .unwrap();
+        let parsed = parse_message(&reply.encode().unwrap()).unwrap();
+        assert_eq!(parsed, reply);
+        assert_eq!(parsed.reply_serial, Some(41));
+        assert_eq!(parsed.destination.as_deref(), Some(":1.7"));
+        assert!(!parsed.wants_reply(), "nobody answers an answer");
+
+        let error = Message {
+            serial: 4,
+            ..Message::error(
+                &call,
+                "org.freedesktop.DBus.Error.UnknownMethod",
+                "no \0such",
+            )
+        };
+        let parsed = parse_message(&error.encode().unwrap()).unwrap();
+        assert_eq!(parsed.kind, MSG_ERROR);
+        assert_eq!(parsed.args().unwrap(), vec![s("no \u{FFFD}such")]);
+
+        // An empty body has no signature field at all.
+        let empty = Message {
+            serial: 5,
+            ..Message::method_return(&call)
+        };
+        let parsed = parse_message(&empty.encode().unwrap()).unwrap();
+        assert_eq!(parsed.signature, None);
+        assert_eq!(parsed.args().unwrap(), Vec::<Value>::new());
+    }
+
+    /// The encoder and the hand-built fixture agree to the byte on a call —
+    /// two spellings of the header that could not share a mistake.
+    #[test]
+    fn the_encoder_matches_the_header_built_by_hand() {
+        let body = marshal_body("s", &[s("hello")]).unwrap();
+        let mut fields = Vec::new();
+        push_field(&mut fields, F_PATH, 'o', "/org/freedesktop/DBus");
+        push_field(&mut fields, F_INTERFACE, 's', "org.freedesktop.DBus");
+        push_field(&mut fields, F_MEMBER, 's', "GetNameOwner");
+        push_field(&mut fields, F_DESTINATION, 's', "org.freedesktop.DBus");
+        push_signature_field(&mut fields, "s");
+        let by_hand = encode_message(MSG_METHOD_CALL, 0, 9, &fields, &body);
+        let encoded = Message {
+            serial: 9,
+            ..Message::method_call(
+                "org.freedesktop.DBus",
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+                "GetNameOwner",
+            )
+        }
+        .with_args("s", &[s("hello")])
+        .unwrap()
+        .encode()
+        .unwrap();
+        assert_eq!(encoded, by_hand);
+    }
+
+    /// A body whose bytes do not match its signature is an error from
+    /// `args`, never a panic — the service answers it with `InvalidArgs`.
+    #[test]
+    fn a_body_that_lies_about_its_signature_is_an_error() {
+        let mut msg = Message::method_call("a.b", "/", "a.b", "M");
+        msg.signature = Some("osssa{sv}".into());
+        msg.body = marshal_body("s", &[s("short")]).unwrap();
+        assert!(msg.args().is_err());
+        msg.signature = None;
+        assert!(msg.args().is_err(), "bytes with no signature");
+    }
+
+    /// **The bug this fixes**: D-Bus activation delivers the call that
+    /// started the service the moment the name is owned — inside
+    /// `RequestName`, before its reply. `Bus::call` read past it like a stray
+    /// signal, and the first dialog after every login timed out. Now a method
+    /// call that arrives mid-call waits in the backlog for the inbox; signals
+    /// are still dropped.
+    #[test]
+    fn a_call_that_arrives_during_request_name_is_served_afterwards() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        bus.timeout = Duration::from_secs(5);
+        let peer = std::thread::spawn(move || {
+            let mut peer = theirs;
+            let mut head = [0u8; 16];
+            peer.read_exact(&mut head).unwrap();
+            let mut rest = vec![0u8; frame_len(&head).unwrap() - 16];
+            peer.read_exact(&mut rest).unwrap();
+            let request = parse_message(&[&head[..], &rest[..]].concat()).unwrap();
+            assert_eq!(request.member.as_deref(), Some("RequestName"));
+            assert_eq!(
+                request.args().unwrap(),
+                vec![s("org.example.Service"), Value::U32(NAME_DO_NOT_QUEUE)]
+            );
+            // The activating call, queued by the bus until the name was owned…
+            let activating = Message {
+                serial: 70,
+                sender: Some(":1.5".into()),
+                ..Message::method_call("org.example.Service", "/x", "x.y", "Activate")
+            };
+            peer.write_all(&activating.encode().unwrap()).unwrap();
+            // …the bus's own broadcast about the name…
+            let acquired = Message {
+                kind: MSG_SIGNAL,
+                serial: 71,
+                sender: Some(BUS_DRIVER.into()),
+                path: Some("/org/freedesktop/DBus".into()),
+                member: Some("NameAcquired".into()),
+                ..Message::default()
+            };
+            peer.write_all(&acquired.encode().unwrap()).unwrap();
+            // …and only then the reply: primary owner.
+            let reply = Message {
+                serial: 72,
+                sender: Some(BUS_DRIVER.into()),
+                ..Message::method_return(&request)
+            }
+            .with_args("u", &[Value::U32(1)])
+            .unwrap();
+            peer.write_all(&reply.encode().unwrap()).unwrap();
+            peer
+        });
+        bus.request_name("org.example.Service").unwrap();
+        // The peer hangs up, so a lost call is an error below, not a wait.
+        drop(peer.join().unwrap());
+        let (mut inbox, _outbox) = bus.into_service().unwrap();
+        let first = inbox.next().unwrap();
+        assert_eq!(first.member.as_deref(), Some("Activate"));
+        assert_eq!(first.serial, 70);
+        assert!(inbox.backlog.is_empty(), "the signal was not kept");
+    }
+
+    /// A message the inbox can frame but not read — big-endian, or with a
+    /// header this parser refuses — is stepped over, and the next one served.
+    #[test]
+    fn the_inbox_steps_over_a_message_it_cannot_read() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let (mut inbox, _outbox) = Bus::on_socket(ours).into_service().unwrap();
+
+        let mut big_endian = Message {
+            serial: 1,
+            ..Message::method_call("x.y", "/a", "x.y", "Odd")
+        }
+        .encode()
+        .unwrap();
+        big_endian[0] = b'B';
+        for at in [4, 8, 12] {
+            big_endian[at..at + 4].reverse();
+        }
+        theirs.write_all(&big_endian).unwrap();
+
+        let mut fields = Vec::new();
+        pad_to(&mut fields, 8);
+        fields.extend_from_slice(&[9, 1, b'(', 0]);
+        theirs
+            .write_all(&encode_message(MSG_METHOD_CALL, 0, 2, &fields, &[]))
+            .unwrap();
+
+        let fine = Message {
+            serial: 3,
+            ..Message::method_call("x.y", "/b", "x.y", "Fine")
+        };
+        theirs.write_all(&fine.encode().unwrap()).unwrap();
+        assert_eq!(inbox.next().unwrap().member.as_deref(), Some("Fine"));
+    }
+
+    /// The service's two halves over a socket pair: what the outbox sends the
+    /// inbox reads, a message at a time, however the bytes were split.
+    #[test]
+    fn the_inbox_reads_whole_messages_however_they_arrive() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (mut inbox, outbox) = Bus::on_socket(ours).into_service().unwrap();
+        let (_, mut peer) = Bus::on_socket(theirs).into_service().unwrap();
+
+        let first = Message {
+            sender: Some(":1.1".into()),
+            ..Message::method_call("x.y", "/a", "x.y", "One")
+        };
+        let second = Message::method_call("x.y", "/b", "x.y", "Two")
+            .with_args("as", &[Value::Array(vec![s("z")])])
+            .unwrap();
+        let one = peer.send(first).unwrap();
+        let two = peer.send(second).unwrap();
+        assert_ne!(one, two, "each message gets its own serial");
+
+        let got = inbox.next().unwrap();
+        assert_eq!(got.member.as_deref(), Some("One"));
+        assert_eq!(got.serial, one);
+        let got = inbox.next().unwrap();
+        assert_eq!(got.args().unwrap(), vec![Value::Array(vec![s("z")])]);
+        assert_eq!(got.serial, two);
+
+        // One message written in two halves still comes out as one.
+        let bytes = Message {
+            serial: 77,
+            ..Message::method_call("x.y", "/c", "x.y", "Three")
+        }
+        .encode()
+        .unwrap();
+        let (left, right) = bytes.split_at(bytes.len() / 2);
+        peer.sock.write_all(left).unwrap();
+        let writer = {
+            let mut sock = peer.sock.try_clone().unwrap();
+            let right = right.to_vec();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                sock.write_all(&right).unwrap();
+            })
+        };
+        assert_eq!(inbox.next().unwrap().member.as_deref(), Some("Three"));
+        writer.join().unwrap();
+
+        // And a connection closed at the other end is an error, not a hang.
+        drop(peer);
+        drop(outbox);
+        assert!(inbox.next().is_err());
     }
 }

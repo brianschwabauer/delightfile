@@ -38,6 +38,8 @@ mod open;
 mod overlay;
 mod panel;
 mod playback;
+/// `--portal`: the xdg-desktop-portal file-chooser backend.
+mod portal;
 mod preview;
 /// Remote services browsed as directories (PLAN §7.6).
 mod remote;
@@ -83,6 +85,9 @@ fn main() {
 
     let args = match cli::parse(std::env::args().skip(1)) {
         cli::Outcome::Run(args) => args,
+        // Before the event loop: the backend has no window, and building a
+        // loop would open a Wayland connection it never uses.
+        cli::Outcome::Portal => std::process::exit(portal::run()),
         cli::Outcome::Print(text) => {
             print!("{text}");
             return;

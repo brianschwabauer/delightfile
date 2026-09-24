@@ -3,6 +3,11 @@
 # where a GTK or Qt file dialog would otherwise be — Chrome's upload picker,
 # its "Save as", every "Attach a file" in every web app.
 #
+# The alternative route. delightfile is its own portal backend
+# (`delightfile --portal`, set up by build/install.sh), and that one is told
+# the dialog's title, button label and file-type filters, which never reach
+# this script.
+#
 # Install it next to the portal's own wrappers, or anywhere the portal's
 # modified PATH reaches (its own config dir first, then
 # /usr/share/xdg-desktop-portal-termfilechooser, then $PATH), and point the

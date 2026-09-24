@@ -1,0 +1,6 @@
+# D-Bus starts the portal backend when the first file dialog asks for it.
+# build/install.sh writes this out with the placeholder in Exec replaced by
+# the installed binary's absolute path.
+[D-BUS Service]
+Name=org.freedesktop.impl.portal.desktop.delightfile
+Exec=@BIN@ --portal

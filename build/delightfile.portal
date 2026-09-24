@@ -1,0 +1,11 @@
+# Tells xdg-desktop-portal that `delightfile --portal` can be the file
+# chooser. It is picked only where portals.conf prefers it:
+#
+#   [preferred]
+#   org.freedesktop.impl.portal.FileChooser=delightfile
+#
+# The name `delightfile` in that line is this file's basename. build/install.sh
+# installs both.
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.delightfile
+Interfaces=org.freedesktop.impl.portal.FileChooser;
