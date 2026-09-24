@@ -58,6 +58,55 @@ pub struct Chooser {
     /// `--chooser-save`: the answer is a name to save *to*, which need not
     /// exist yet.
     pub save: bool,
+    /// What the calling program called the dialog ("Open File", "Upload"),
+    /// when it said. The window's title; `None` is the plain picker.
+    pub title: Option<String>,
+    /// The verb the caller put on its button ("Upload", "Attach"), with any
+    /// GTK mnemonic underscore already stripped. `None` is the mode's own
+    /// word: Select, Choose folder, Save.
+    pub accept: Option<String>,
+    /// A save's suggested file name, when the caller suggested one and no file
+    /// by that name exists yet — the `Save as:` prompt's prefill.
+    pub name: Option<String>,
+    /// The file-type filters the caller offers, in its order. Empty means the
+    /// dialog shows every file.
+    pub filters: Vec<TypeFilter>,
+    /// Which of `filters` starts active: the caller's `current_filter` when it
+    /// names one, else the first. Meaningless when `filters` is empty.
+    pub current_filter: usize,
+}
+
+/// One named file-type filter, as the file-chooser portal describes it: a
+/// label for the menu and the patterns a file has to match to be shown.
+///
+/// Two pattern kinds because the portal has two: a glob is matched against the
+/// file's name (`*.png`, case-insensitively — a picker that hid `PHOTO.JPG`
+/// from a `*.jpg` filter would be wrong far more often than right), a MIME
+/// pattern against the type its extension implies (`image/png`, or `image/*`
+/// for the whole family). A file passes when any one pattern matches.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TypeFilter {
+    pub name: String,
+    pub globs: Vec<String>,
+    pub mimes: Vec<String>,
+}
+
+impl Chooser {
+    /// A plain dialog writing to `out`: one file, no title, no filters. The
+    /// switches and the request file fill in the rest.
+    pub fn new(out: PathBuf) -> Chooser {
+        Chooser {
+            out,
+            multiple: false,
+            directory: false,
+            save: false,
+            title: None,
+            accept: None,
+            name: None,
+            filters: Vec::new(),
+            current_filter: 0,
+        }
+    }
 }
 
 /// What a [`Chooser`] is choosing, read off its switches in one place.
@@ -172,10 +221,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
     match chooser_file {
         Some(out_path) => {
             out.chooser = Some(Chooser {
-                out: out_path,
                 multiple,
                 directory,
                 save,
+                ..Chooser::new(out_path)
             })
         }
         // A switch with nothing to write its answer to is a wrapper that has
@@ -304,10 +353,10 @@ mod tests {
     /// A chooser writing to `/tmp/out`, with the three switches as given.
     fn chooser(multiple: bool, directory: bool, save: bool) -> Option<Chooser> {
         Some(Chooser {
-            out: PathBuf::from("/tmp/out"),
             multiple,
             directory,
             save,
+            ..Chooser::new(PathBuf::from("/tmp/out"))
         })
     }
 

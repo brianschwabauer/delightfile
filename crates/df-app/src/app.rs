@@ -16951,10 +16951,10 @@ mod tests {
 
         app.close_menu(Instant::now());
         app.chooser = Some(crate::cli::Chooser {
-            out: app.files.join("chosen"),
             multiple: false,
             directory: false,
             save: false,
+            ..crate::cli::Chooser::new(app.files.join("chosen"))
         });
         app.run(Command::AppMenu, 10, Instant::now());
         let menu = app.menu.as_ref().expect("up");
@@ -17046,10 +17046,10 @@ mod tests {
         let mut app = Fixture::with_folders(name, files, folders);
         let out = app.files.join("..").join("out");
         app.chooser = Some(crate::cli::Chooser {
-            out,
             multiple,
             directory,
             save,
+            ..crate::cli::Chooser::new(out)
         });
         app
     }
