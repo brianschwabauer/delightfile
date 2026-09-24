@@ -29,9 +29,11 @@ use std::time::Instant;
 pub trait Key: Copy + PartialEq {}
 impl<T: Copy + PartialEq> Key for T {}
 
-/// Hover fade-out, in seconds. delightstack's 300 ms colour transition rounded
-/// to the length that still reads as a trail rather than as lag (PLAN §8).
-pub const FADE: f32 = 0.24;
+/// Hover fade-out, in seconds. Started at delightstack's 300 ms colour
+/// transition and came down twice: 240 ms still read as a trail, but a sweep
+/// down a long list left the trail lingering behind the pointer, so 140 ms —
+/// the shortest that still shows a fade at all rather than a cut (PLAN §8).
+pub const FADE: f32 = 0.14;
 
 /// Press release, in seconds. Quicker than [`FADE`]: the control is coming
 /// *back*, and a slow return reads as a button that is stuck rather than one
@@ -305,8 +307,8 @@ mod tests {
         Save,
     }
 
-    /// The rule, as a test: hover arrives in one frame and leaves over a
-    /// quarter of a second.
+    /// The rule, as a test: hover arrives in one frame and leaves over
+    /// [`FADE`].
     #[test]
     fn hover_snaps_in_and_eases_out() {
         let mut h = Hovers::new();
@@ -325,7 +327,7 @@ mod tests {
             "a hover parked under the pointer must not ask for frames"
         );
 
-        h.tick(None, None, t0 + Duration::from_millis(16 + 120));
+        h.tick(None, None, t0 + Duration::from_millis(16 + 70));
         let half = h.hover(hit);
         assert!(half > 0.3 && half < 0.7, "got {half}");
         assert!(h.animating());
