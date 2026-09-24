@@ -2940,87 +2940,60 @@ const HINT_SEP: f32 = GAP * 2.0 - HINT_AIR * 2.0;
 
 // ── The which-key card (PLAN §4, §8) ────────────────────────────────────────
 
-/// The most continuations one column shows before the card grows a second one.
-///
-/// The `g` chord has a dozen bookmarks and the `,` chord thirteen sorts; a
-/// single column of those is a tower up the middle of the window that the eye
-/// has to scan end to end. Nine is about the length a list is still taken in at
-/// a glance rather than read.
-const WHICH_KEY_COLUMN: usize = 9;
-
-/// Between a key and what it does.
-const WHICH_KEY_GAP: f32 = 14.0;
-
-/// Between two columns of the card. Wider than the key/label gap by enough that
-/// the columns are unambiguously separate groups.
-const WHICH_KEY_COL_SEP: f32 = 26.0;
-
-/// Draw the card listing what could finish the pending chord.
+/// Draw the card listing what could finish the pending chord, where
+/// [`crate::whichkey::geometry`] laid it out.
 ///
 /// `alpha` is [`crate::whichkey::WhichKey::alpha`] — 1 while the card is up, and
-/// its fade on the way out. `bottom` is what the card sits above: the bar, so
-/// the card never covers the thing it is a hint about.
+/// its fade on the way out. A row under the pointer lifts as a menu row does,
+/// because a click on it presses its key ([`Control::WhichKey`]).
 pub fn which_key(
     paint: &Painting<'_>,
-    area: egui::Rect,
-    bottom: f32,
-    rows: &[(String, String)],
+    geometry: &crate::whichkey::Geometry,
+    rows: &[crate::whichkey::Row],
     alpha: f32,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
 ) {
     if rows.is_empty() || alpha <= 0.0 {
         return;
     }
-    let painter = paint.painter;
-    let columns: Vec<&[(String, String)]> = rows.chunks(WHICH_KEY_COLUMN).collect();
-    let measure = |group: &[(String, String)]| {
-        let key_w = group.iter().fold(0.0f32, |m, (key, _)| {
-            m.max(text_width(painter, key, key_font(FONT)))
-        });
-        let label_w = group.iter().fold(0.0f32, |m, (_, label)| {
-            m.max(text_width(painter, label, egui::FontId::proportional(FONT)))
-        });
-        (key_w, key_w + WHICH_KEY_GAP + label_w)
-    };
-    let widths: Vec<(f32, f32)> = columns.iter().map(|g| measure(g)).collect();
-    let tall = columns.iter().map(|g| g.len()).max().unwrap_or(0);
-    let size = egui::vec2(
-        widths.iter().map(|(_, w)| w).sum::<f32>()
-            + WHICH_KEY_COL_SEP * (columns.len().saturating_sub(1)) as f32
-            + CARD_PAD * 2.0,
-        tall as f32 * CARD_ROW + CARD_PAD * 2.0,
-    );
-    // Bottom-anchored and horizontally centred: the card is an answer to
-    // something the hand is doing right now, so it belongs where the eyes are —
-    // and near the bar, which is where every other transient thing appears.
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(
-            (area.center().x - size.x / 2.0).max(area.left() + CARD_MARGIN),
-            (bottom - CARD_MARGIN - size.y).max(area.top() + CARD_MARGIN),
-        ),
-        size,
-    );
-    card(paint, rect, alpha);
-
-    let mut left = rect.left() + CARD_PAD;
-    for (group, (key_w, col_w)) in columns.iter().zip(&widths) {
-        for (i, (key, label)) in group.iter().enumerate() {
-            let y = rect.top() + CARD_PAD + i as f32 * CARD_ROW + CARD_ROW / 2.0;
-            painter.text(
-                egui::pos2(left, y),
-                egui::Align2::LEFT_CENTER,
-                key,
-                key_font(FONT),
-                fade(paint.palette.yellow, alpha),
-            );
-            painter.text(
-                egui::pos2(left + key_w + WHICH_KEY_GAP, y),
-                egui::Align2::LEFT_CENTER,
-                label,
-                egui::FontId::proportional(FONT),
-                fade(paint.palette.subtext0, alpha),
+    let palette = paint.palette;
+    card(paint, geometry.card, alpha);
+    let placed = rows.iter().zip(&geometry.rows).zip(&geometry.labels);
+    for (index, ((row, rect), label_x)) in placed.enumerate() {
+        let key = Control::WhichKey(index);
+        let hover = hovers.hover(key);
+        let plate = pressed_rect(*rect, hovers.press(key));
+        if hover > 0.0 {
+            paint.painter.rect_filled(
+                plate,
+                CARD_ROW_RADIUS,
+                fade(mix(palette.crust, palette.surface1, hover), alpha),
             );
         }
-        left += col_w + WHICH_KEY_COL_SEP;
+        let inside = paint.painter.with_clip_rect(plate);
+        for splash in ripples.splashes(key, paint.now) {
+            inside.circle_filled(
+                splash.center,
+                splash.radius,
+                egui::Color32::from_white_alpha((splash.alpha * alpha * 255.0).round() as u8),
+            );
+        }
+        let y = rect.center().y;
+        paint.painter.text(
+            egui::pos2(rect.left() + PAD_X, y),
+            egui::Align2::LEFT_CENTER,
+            &row.keys,
+            key_font(FONT),
+            fade(palette.yellow, alpha),
+        );
+        paint.painter.text(
+            egui::pos2(*label_x, y),
+            egui::Align2::LEFT_CENTER,
+            &row.label,
+            egui::FontId::proportional(FONT),
+            fade(palette.subtext0, alpha),
+        );
     }
 }
 
@@ -4868,12 +4841,19 @@ mod tests {
                 &Ripples::new(),
             );
 
-            let rows: Vec<(String, String)> = (0..14)
-                .map(|i| (format!("{i}"), format!("do the {i}th thing")))
+            let rows: Vec<crate::whichkey::Row> = (0..14)
+                .map(|i| crate::whichkey::Row {
+                    keys: format!("{i}"),
+                    label: format!("do the {i}th thing"),
+                    next: df_core::keymap::Chord::from_char('x').expect("x"),
+                })
                 .collect();
-            which_key(&paint, area, area.bottom(), &rows, 1.0);
-            which_key(&paint, area, area.bottom(), &rows, 0.4);
-            which_key(&paint, area, area.bottom(), &[], 1.0);
+            let geometry = crate::whichkey::geometry(paint.painter, area, area.bottom(), &rows);
+            let (hovers, ripples) = (Hovers::new(), Ripples::new());
+            which_key(&paint, &geometry, &rows, 1.0, &hovers, &ripples);
+            which_key(&paint, &geometry, &rows, 0.4, &hovers, &ripples);
+            let empty = crate::whichkey::geometry(paint.painter, area, area.bottom(), &[]);
+            which_key(&paint, &empty, &[], 1.0, &hovers, &ripples);
 
             let registry = df_core::keymap::Registry::defaults();
             let stack = df_core::keymap::ContextStack::with(&[df_core::keymap::Context::Help]);

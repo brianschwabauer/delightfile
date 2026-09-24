@@ -804,6 +804,8 @@ struct Geom<'a> {
     /// sheet's when no card is over it — and where each hint was drawn.
     hints: &'a [chrome::Hint],
     hint_rects: &'a [egui::Rect],
+    /// The which-key card, while it is fully up.
+    which: Option<&'a crate::whichkey::Geometry>,
 }
 
 /// A card's hint strip as this frame laid it out: its hints, and where each one
@@ -1393,10 +1395,10 @@ pub struct App {
 
     /// The which-key card's timing (PLAN §4).
     which: WhichKey,
-    /// What the card lists: `(keys, description)` in df-core's declaration
-    /// order. Kept after the chord resolves so the card has something to draw
-    /// while it fades.
-    which_rows: Vec<(String, String)>,
+    /// What the card lists, in df-core's declaration order, and the key each
+    /// row's click presses. Kept after the chord resolves so the card has
+    /// something to draw while it fades.
+    which_rows: Vec<crate::whichkey::Row>,
 
     // ── Painting ────────────────────────────────────────────────────────────
     /// Hover/press amounts for every row on screen (PLAN §8).
@@ -5437,15 +5439,7 @@ impl App {
         // at thirty call sites is a rule that will be forgotten at one of them.
         let cursor_before = self.cursor_mark();
 
-        // The `when` predicate, rebuilt from the one thing left that decides
-        // it: whether the cursor is on something playable (PLAN §2.1 took the
-        // pane-focus half away). Recomputed per keystroke rather than per
-        // frame, because a keystroke can move the cursor onto a clip and the
-        // *next* keystroke in the same frame has to see that.
         for press in std::mem::take(&mut self.pending_keys) {
-            let flags = WhenFlags {
-                media_hovered: self.media_hovered(),
-            };
             self.key_repeat = press.repeat;
             // A *commit* is text, not a keystroke. A dead-key sequence, an IME
             // conversion or a compositor's own paste arrives on winit's text
@@ -5470,55 +5464,7 @@ impl App {
                     .and_then(Chord::from_char)
             });
             let Some(chord) = chord else { continue };
-            // The context menu is the nearest surface to the user and takes
-            // the keyboard whole, above even a modal card — it is the most
-            // recent thing they asked for. See [`App::menu_key`] for why its
-            // keys are matched literally.
-            if self.menu.as_ref().is_some_and(Menu::live) {
-                self.menu_key(chord, page, now);
-                continue;
-            }
-            // The help sheet is a modal surface like any other, and it is
-            // matched against its own context **alone** — see [`App::help_key`]
-            // for what that buys and what it costs.
-            if self.help.is_some()
-                && !self.overlay_open()
-                && self.prompt.as_ref().is_none_or(|p| p.kind.is_help())
-            {
-                self.help_key(chord, now);
-                continue;
-            }
-            // A prompt swallows every key: df-core's editor decides what each
-            // one means, including which ones are text (PLAN §4.2).
-            if self.prompt.is_some() {
-                self.prompt_key(chord, now);
-                continue;
-            }
-            // A modal surface is matched against its own context **alone**.
-            // Merely pushing `Confirm` onto the browser's stack would leave
-            // `Files` reachable underneath it, and a `d` typed into a delete
-            // confirmation would queue a second trash. A dialog that is asking
-            // "are you sure" must not also be a file manager.
-            if self.overlay_open() {
-                self.overlay_key(chord, page, now);
-                continue;
-            }
-            match self
-                .keymap
-                .dispatch(&mut self.keys, &self.context, flags, chord, now)
-            {
-                Dispatch::Match(command) => self.run(command, page, now),
-                // The chord is held: remember what could finish it, in df-core's
-                // declaration order (PLAN §4), for the card to draw once it is
-                // due. Nothing is shown yet — that is [`WhichKey`]'s decision.
-                Dispatch::Pending { continuations, .. } => {
-                    self.which_rows = continuations
-                        .iter()
-                        .map(|c| (c.label(), c.description.clone()))
-                        .collect();
-                }
-                Dispatch::NoMatch => log::trace!("unbound: {}", chord.label()),
-            }
+            self.route_chord(chord, page, now);
         }
 
         // **The keyboard moved the cursor, so the mouse's highlight stands
@@ -5531,6 +5477,69 @@ impl App {
         // one written beside it.
         if self.cursor_mark() != cursor_before {
             self.row_hover.park();
+        }
+    }
+
+    /// One keystroke, to whichever surface has the keyboard.
+    ///
+    /// Where every key goes, and where a click on a row of the which-key card
+    /// goes too: that click is the row's key pressed into the chord in hand,
+    /// so it has to meet exactly the surface, the context and the chord state
+    /// the key would have met.
+    fn route_chord(&mut self, chord: Chord, page: usize, now: Instant) {
+        // The context menu is the nearest surface to the user and takes the
+        // keyboard whole, above even a modal card — it is the most recent
+        // thing they asked for. See [`App::menu_key`] for why its keys are
+        // matched literally.
+        if self.menu.as_ref().is_some_and(Menu::live) {
+            self.menu_key(chord, page, now);
+            return;
+        }
+        // The help sheet is a modal surface like any other, and it is matched
+        // against its own context **alone** — see [`App::help_key`] for what
+        // that buys and what it costs.
+        if self.help.is_some()
+            && !self.overlay_open()
+            && self.prompt.as_ref().is_none_or(|p| p.kind.is_help())
+        {
+            self.help_key(chord, now);
+            return;
+        }
+        // A prompt swallows every key: df-core's editor decides what each one
+        // means, including which ones are text (PLAN §4.2).
+        if self.prompt.is_some() {
+            self.prompt_key(chord, now);
+            return;
+        }
+        // A modal surface is matched against its own context **alone**.
+        // Merely pushing `Confirm` onto the browser's stack would leave `Files`
+        // reachable underneath it, and a `d` typed into a delete confirmation
+        // would queue a second trash. A dialog that is asking "are you sure"
+        // must not also be a file manager.
+        if self.overlay_open() {
+            self.overlay_key(chord, page, now);
+            return;
+        }
+        // The `when` predicate, rebuilt from the one thing left that decides
+        // it: whether the cursor is on something playable (PLAN §2.1 took the
+        // pane-focus half away). Recomputed per keystroke rather than per
+        // frame, because a keystroke can move the cursor onto a clip and the
+        // *next* keystroke in the same frame has to see that.
+        let flags = WhenFlags {
+            media_hovered: self.media_hovered(),
+        };
+        match self
+            .keymap
+            .dispatch(&mut self.keys, &self.context, flags, chord, now)
+        {
+            Dispatch::Match(command) => self.run(command, page, now),
+            // The chord is held: remember what could finish it, in df-core's
+            // declaration order (PLAN §4), for the card to draw once it is
+            // due. Nothing is shown yet — that is [`WhichKey`]'s decision.
+            Dispatch::Pending { continuations, .. } => {
+                self.which_rows = continuations.iter().map(crate::whichkey::Row::of).collect();
+            }
+            Dispatch::NoMatch => log::trace!("unbound: {}", chord.label()),
         }
     }
 
@@ -5615,13 +5624,25 @@ impl App {
         let dispatch = self
             .keymap
             .dispatch(&mut self.keys, &stack, WhenFlags::NONE, chord, now);
-        let Dispatch::Match(command) = dispatch else {
+        let command = match dispatch {
+            Dispatch::Match(command) => command,
+            // A chord in the card's own table — the spot's `c c` — lists what
+            // could finish it, as the browser's chords do. Left to the arm
+            // below it drew the card with whatever the last chord had listed,
+            // and a click on one of those rows pressed a key this chord has
+            // no row for.
+            Dispatch::Pending { continuations, .. } => {
+                self.which_rows = continuations.iter().map(crate::whichkey::Row::of).collect();
+                return;
+            }
             // The two overlays with a field in them take every key the
             // registry did not claim — which is the same rule the bottom-bar
             // prompt follows, and the reason a `q` typed into a search is a
             // `q` and not a quit.
-            self.overlay_text(chord);
-            return;
+            Dispatch::NoMatch => {
+                self.overlay_text(chord);
+                return;
+            }
         };
         self.overlay_command(command, page, now);
     }
@@ -8028,10 +8049,7 @@ impl App {
             {
                 Dispatch::Match(command) => command,
                 Dispatch::Pending { continuations, .. } => {
-                    self.which_rows = continuations
-                        .iter()
-                        .map(|c| (c.label(), c.description.clone()))
-                        .collect();
+                    self.which_rows = continuations.iter().map(crate::whichkey::Row::of).collect();
                     return;
                 }
                 Dispatch::NoMatch => {
@@ -9805,6 +9823,7 @@ impl App {
                 | Control::CancelButton
                 | Control::Close
                 | Control::Hint(_)
+                | Control::WhichKey(_)
                 | Control::Toast
                 | Control::ToastAction
                 | Control::PromptField => {}
@@ -9890,6 +9909,7 @@ impl App {
             | Control::CancelButton
             | Control::Close
             | Control::Hint(_)
+            | Control::WhichKey(_)
             | Control::Toast
             | Control::ToastAction
             | Control::PromptField => {}
@@ -10650,6 +10670,25 @@ impl App {
                     } else {
                         self.help_command(command);
                     }
+                }
+                rect
+            }
+            // A row of the which-key card: its key, pressed into the chord in
+            // hand through the keyboard's own router, so `g` `g` goes to the
+            // top and a row whose binding goes on brings up the next rows.
+            Control::WhichKey(index) => {
+                let rect = geom
+                    .which
+                    .and_then(|which| which.rows.get(index).copied())
+                    .unwrap_or(egui::Rect::ZERO);
+                if let Some(next) = self.which_rows.get(index).map(|row| row.next) {
+                    // A click is never a key held down.
+                    self.key_repeat = false;
+                    self.route_chord(next, geom.page, now);
+                    // …and the card follows it within this frame, as it
+                    // follows a key: the frame told it about the chord before
+                    // this press was dispatched.
+                    self.which.update(self.keys.which_key_due(), now);
                 }
                 rect
             }
@@ -13475,6 +13514,19 @@ impl App {
         let mut card_hints = self.card_hints(&painter, &overlay);
         let mut help_hints =
             help_card.map(|card| HintStrip::measure(&painter, card, HELP_HINTS.to_vec()));
+        // The which-key card, from the function its paint lays it out with.
+        // Only while it is fully up: a card on its way out is pixels about a
+        // chord that has already resolved, and takes no pointer.
+        let which_geometry = self
+            .which
+            .shown()
+            .then(|| crate::whichkey::geometry(&painter, area, area.bottom(), &self.which_rows));
+        // A press anywhere on that card is the card's, its padding included:
+        // it starts no drag and no band, and reaches no transport under it.
+        let on_which = pointer
+            .at
+            .zip(which_geometry.as_ref())
+            .is_some_and(|(p, which)| which.card.contains(p));
 
         let over = pointer.at.and_then(|p| {
             // The menu is over everything, a modal card included: it is the
@@ -13497,6 +13549,15 @@ impl App {
                         _ => Control::Toast,
                     };
                     return Some((control, p));
+                }
+            }
+            // The which-key card next: a chord is the most recent thing the
+            // hand did, and the card is drawn over everything. It cannot in
+            // practice share the screen with a modal card, but if it does it
+            // is the one on top.
+            if let Some(which) = &which_geometry {
+                if which.card.contains(p) {
+                    return which.row_at(p).map(|row| (Control::WhichKey(row), p));
                 }
             }
             // A modal surface takes the pointer with the keyboard: nothing
@@ -13759,8 +13820,9 @@ impl App {
         // gets the first look at the pointer — and once a scrub has started it
         // keeps the pointer until the release, wherever the drag wanders. Not
         // while a modal or a menu owns the window: chrome that is *over* the
-        // strip owns what lands on it.
-        let scrubbing = if overlay.is_none() && !menu_live {
+        // strip owns what lands on it. Nor for a press on the which-key card,
+        // which is drawn over the strip where the two meet.
+        let scrubbing = if overlay.is_none() && !menu_live && !(pointer.pressed && on_which) {
             self.media_pointer(layout.preview, &pointer, now)
         } else {
             // **Chrome over the strip ends the drag it is covering.** A card or
@@ -13881,6 +13943,7 @@ impl App {
             hint_rects: live_hints
                 .map(|strip| strip.rects.as_slice())
                 .unwrap_or_default(),
+            which: which_geometry.as_ref(),
         };
 
         // A right click on the prompt itself opens nothing: the rename card
@@ -13982,8 +14045,10 @@ impl App {
         // row is a slip of the hand, not a band select of the rows underneath.
         // …and not while the press belongs to the transport: a drag that began
         // on the scrubber or the play button is a seek or a click, not a band
-        // select of the rows beside the preview pane.
-        if pointer.pressed && !dismissing && !menu_live && !scrubbing {
+        // select of the rows beside the preview pane. …and not from the
+        // which-key card, which is a keystroke by hand and nothing more: a
+        // drag that began on it is not a band of the rows it was covering.
+        if pointer.pressed && !dismissing && !menu_live && !scrubbing && !on_which {
             let on_row = matches!(over, Some((Control::Row(Column::List, _), _)));
             self.press = pointer.at.map(|at| PressStart {
                 at,
@@ -14257,6 +14322,7 @@ impl App {
                 | Control::CancelButton
                 | Control::Close
                 | Control::Hint(_)
+                | Control::WhichKey(_)
                 | Control::Toast
                 | Control::ToastAction
                 | Control::Action(_)
@@ -15260,12 +15326,18 @@ impl App {
         // Last, and over everything: the card is an answer to a key that is
         // being held down right now, so nothing may cover it.
         if self.which.visible(now) {
+            // Laid out again rather than taken from the hit test's: a click on
+            // a row whose binding goes on has just replaced the rows, and a
+            // card on its way out was not measured for the pointer at all.
+            let geometry =
+                crate::whichkey::geometry(&painter, area, area.bottom(), &self.which_rows);
             chrome::which_key(
                 &paint,
-                area,
-                area.bottom(),
+                &geometry,
                 &self.which_rows,
                 self.which.alpha(now),
+                &self.hovers,
+                &self.ripples,
             );
         }
 
@@ -21102,5 +21174,207 @@ mod tests {
             listed.iter().any(|name| name.contains('y')),
             "the Rename button renamed nothing: {listed:?}"
         );
+    }
+
+    // ── The which-key card, pressed ─────────────────────────────────────────
+
+    /// `keys` typed the way the window reports them, routed as though they
+    /// had been typed long enough ago for the which-key card to be due, and
+    /// then a frame to put it up.
+    fn hesitate_on(app: &mut App, ctx: &egui::Context, keys: &str) {
+        for key in keys.chars() {
+            app.pending_keys.push(Press {
+                repeat: false,
+                chord: Chord::from_char(key),
+                text: None,
+            });
+        }
+        let past = Instant::now() - df_core::keymap::WHICH_KEY_DELAY * 2;
+        app.route_keys(10, past);
+        run_frame(app, ctx, Vec::new());
+        assert!(app.which.shown(), "the card is not up after `{keys}`");
+    }
+
+    /// The which-key card as the frame lays it out.
+    fn which_geometry(app: &App) -> crate::whichkey::Geometry {
+        let measure = egui::Context::default();
+        let mut out = None;
+        let _ = measure.run_ui(Default::default(), |ui| {
+            out = Some(crate::whichkey::geometry(
+                ui.painter(),
+                screen(),
+                screen().bottom(),
+                &app.which_rows,
+            ));
+        });
+        out.expect("measured")
+    }
+
+    /// Where the card's row for the key `next` is, and its index.
+    fn which_row(app: &App, next: char) -> (usize, egui::Rect) {
+        let chord = Chord::from_char(next).expect("a key");
+        let index = app
+            .which_rows
+            .iter()
+            .position(|row| row.next == chord)
+            .unwrap_or_else(|| panic!("no `{next}` row"));
+        (index, which_geometry(app).rows[index])
+    }
+
+    /// Every text a frame drew, and where.
+    fn painted_text(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_string(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
+    /// The rows the pointer is tested against are the rows on screen: each
+    /// row's key and label are painted inside the rect the hit test uses for
+    /// it, the rects stack a card row apart inside the card, and the card's
+    /// padding stays between them and its edge.
+    #[test]
+    fn the_which_key_rows_are_where_they_are_painted() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("which-rows", &["a.txt", "b.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        hesitate_on(&mut app, &ctx, "g");
+        let rows = app.which_rows.clone();
+        assert!(rows.len() > 9, "one column is not the case this is about");
+        let geometry = which_geometry(&app);
+        assert_eq!(geometry.rows.len(), rows.len());
+
+        let input = egui::RawInput {
+            screen_rect: Some(screen()),
+            focused: true,
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| app.frame(ui));
+        let painted = painted_text(&output.shapes);
+        for (row, rect) in rows.iter().zip(&geometry.rows) {
+            for text in [&row.keys, &row.label] {
+                assert!(
+                    painted
+                        .iter()
+                        .any(|(drawn, at)| drawn == text && rect.contains_rect(*at)),
+                    "`{text}` is not painted inside its row {rect:?}"
+                );
+            }
+            let inner = geometry.card.shrink(chrome::CARD_PAD);
+            assert!(
+                inner.contains_rect(*rect),
+                "{rect:?} is in the card's padding"
+            );
+            assert!((rect.height() - chrome::CARD_ROW).abs() < 1e-3);
+        }
+        for pair in geometry.rows.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(
+                !a.shrink(0.5).intersects(b.shrink(0.5)),
+                "{a:?} overlaps {b:?}"
+            );
+        }
+    }
+
+    /// A click on the `g` card's `g` row is `g` pressed: the chord completes
+    /// to `cursor-top`, the card goes, and the row ripples. A press on the
+    /// card's padding is the card's, and lands on nothing under it.
+    #[test]
+    fn a_click_on_the_g_cards_g_row_goes_to_the_top() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("which-top", &["a.txt", "b.txt", "c.txt", "d.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        app.dir().set_cursor(3);
+        hesitate_on(&mut app, &ctx, "g");
+
+        let card = which_geometry(&app).card;
+        click_at(&mut app, &ctx, card.min + egui::vec2(2.0, 2.0));
+        assert_eq!(
+            app.tab().cwd.dir.cursor(),
+            3,
+            "the padding moved the cursor"
+        );
+        assert!(app.keys.is_pending(), "the padding spent the chord");
+
+        let (index, row) = which_row(&app, 'g');
+        click_at(&mut app, &ctx, row.center());
+        assert_eq!(app.tab().cwd.dir.cursor(), 0, "`g g` did not go to the top");
+        assert!(!app.keys.is_pending(), "the chord is still held");
+        assert!(!app.which.shown(), "the card stayed up");
+        assert!(
+            app.ripples
+                .splashes(Control::WhichKey(index), Instant::now())
+                .count()
+                > 0,
+            "the row took the press without a ripple"
+        );
+    }
+
+    /// A row whose binding goes on is its next key alone: the chord stays
+    /// held, the card lists what finishes it from there, and a click on that
+    /// row finishes it.
+    #[test]
+    fn a_click_on_a_row_that_goes_on_brings_up_the_next_rows() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("which-deeper", &["a.txt", "b.txt", "c.txt"]);
+        let seq = df_core::keymap::parse_sequence("g x y").expect("a sequence");
+        app.keymap
+            .register(
+                Context::Files,
+                seq,
+                Command::CursorBottom,
+                "To the bottom, the long way",
+                df_core::keymap::When::Always,
+            )
+            .expect("g x y is free");
+        run_frame(&mut app, &ctx, Vec::new());
+        hesitate_on(&mut app, &ctx, "g");
+
+        let (_, row) = which_row(&app, 'x');
+        click_at(&mut app, &ctx, row.center());
+        let x = Chord::from_char('x').expect("x");
+        let g = Chord::from_char('g').expect("g");
+        assert_eq!(app.keys.pending(), &[g, x], "the chord did not take `x`");
+        let y = Chord::from_char('y').expect("y");
+        assert_eq!(
+            app.which_rows,
+            vec![crate::whichkey::Row {
+                keys: "y".to_string(),
+                label: "To the bottom, the long way".to_string(),
+                next: y,
+            }]
+        );
+        assert!(app.which.shown(), "the card went with the chord still held");
+
+        let (_, row) = which_row(&app, 'y');
+        click_at(&mut app, &ctx, row.center());
+        assert_eq!(app.tab().cwd.dir.cursor(), 2, "`g x y` did not run");
+        assert!(!app.keys.is_pending());
+    }
+
+    /// A chord in a card's own table lists its own continuations: the spot's
+    /// `c` shows `c`, not whatever the last chord in the browser listed.
+    #[test]
+    fn the_spots_chord_lists_its_own_rows() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("which-spot", &["a.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        hesitate_on(&mut app, &ctx, "g");
+        app.run(Command::Escape, 10, Instant::now());
+        app.run(Command::Spot, 10, Instant::now());
+        hesitate_on(&mut app, &ctx, "c");
+        let keys: Vec<&str> = app.which_rows.iter().map(|row| row.keys.as_str()).collect();
+        assert_eq!(keys, ["c"], "the card listed another chord's rows");
     }
 }

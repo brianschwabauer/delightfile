@@ -1,5 +1,6 @@
 //! The which-key card's timing (PLAN §4, §8) — ported from delightviewer's
-//! `ui/chords.rs`, whose delay this shares.
+//! `ui/chords.rs`, whose delay this shares — and its layout, which the paint
+//! and the pointer both read: a click on a row presses that row's key.
 //!
 //! The card lists what could finish a half-typed chord. df-core already decides
 //! *when* it is due — [`KeymapState::which_key_due`] is
@@ -23,6 +24,10 @@
 //! [`KeymapState::which_key_due`]: df_core::keymap::KeymapState::which_key_due
 
 use std::time::{Duration, Instant};
+
+use df_core::keymap::{Chord, Continuation};
+
+use crate::chrome::{key_font, text_width, CARD_MARGIN, CARD_PAD, CARD_ROW, FONT, PAD_X};
 
 /// How long the card takes to leave once the chord has resolved or been
 /// abandoned.
@@ -98,6 +103,13 @@ impl WhichKey {
         self.alpha(now) > 0.0
     }
 
+    /// Whether the card is fully up, over a chord still pending — the only
+    /// time it takes the pointer. A card on its way out is pixels about a
+    /// chord that has already resolved, as a fading menu is.
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+
     /// Whether the card is mid-fade and therefore needs frames back to back. A
     /// card that is *up* is not animating — it is a static rectangle, and asking
     /// for 60 frames a second to redraw it is how a hint costs a battery.
@@ -117,6 +129,125 @@ impl WhichKey {
             Some(at) if !self.shown => Some(at),
             _ => None,
         }
+    }
+}
+
+/// One row of the card: the keys that finish the chord from here, what they
+/// do, and the keystroke a click on the row presses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    pub keys: String,
+    pub label: String,
+    /// The next key alone. A click is one keystroke, as a key press is, so a
+    /// row whose binding goes on (`x y`) presses `x` and the card follows the
+    /// chord to its next rows.
+    pub next: Chord,
+}
+
+impl Row {
+    pub fn of(continuation: &Continuation) -> Row {
+        Row {
+            keys: continuation.label(),
+            label: continuation.description.clone(),
+            next: continuation.next,
+        }
+    }
+}
+
+// ── Where the card goes (PLAN §4, §8) ───────────────────────────────────────
+
+/// The most continuations one column shows before the card grows a second one.
+///
+/// The `g` chord has a dozen bookmarks and the `,` chord thirteen sorts; a
+/// single column of those is a tower up the middle of the window that the eye
+/// has to scan end to end. Nine is about the length a list is still taken in at
+/// a glance rather than read.
+const COLUMN: usize = 9;
+
+/// Between a key and what it does.
+const KEY_GAP: f32 = 14.0;
+
+/// Between the words of two columns of the card. Wider than the key/label gap
+/// by enough that the columns are unambiguously separate groups.
+const COLUMN_SEP: f32 = 26.0;
+
+/// Between two columns' rows: the words keep [`COLUMN_SEP`], less the padding
+/// each row carries inside it.
+const ROW_SEP: f32 = COLUMN_SEP - PAD_X * 2.0;
+
+/// The card and its rows, as the paint draws them and the hit test reads them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Geometry {
+    pub card: egui::Rect,
+    /// One per row, in order: a card row tall and as wide as its column, the
+    /// words inset by a chip's padding, so a hovered row lifts as a menu row
+    /// does and its plate keeps the card's padding off the card's edge
+    /// (`delightful-ui` §15).
+    pub rows: Vec<egui::Rect>,
+    /// Where each row's label starts: its column's keys all take the width of
+    /// the widest.
+    pub labels: Vec<f32>,
+}
+
+impl Geometry {
+    pub fn row_at(&self, pos: egui::Pos2) -> Option<usize> {
+        self.rows.iter().position(|row| row.contains(pos))
+    }
+}
+
+/// Lay the card out for `rows`, sitting above `bottom`.
+///
+/// Bottom-anchored and horizontally centred: the card is an answer to
+/// something the hand is doing right now, so it belongs where the eyes are —
+/// and near the bottom edge, which is where every other transient thing
+/// appears. Needs a painter because the columns are measured from their text.
+pub fn geometry(painter: &egui::Painter, area: egui::Rect, bottom: f32, rows: &[Row]) -> Geometry {
+    let columns: Vec<&[Row]> = rows.chunks(COLUMN).collect();
+    let measure = |group: &[Row]| {
+        let key_w = group.iter().fold(0.0f32, |m, row| {
+            m.max(text_width(painter, &row.keys, key_font(FONT)))
+        });
+        let label_w = group.iter().fold(0.0f32, |m, row| {
+            m.max(text_width(
+                painter,
+                &row.label,
+                egui::FontId::proportional(FONT),
+            ))
+        });
+        (key_w, PAD_X + key_w + KEY_GAP + label_w + PAD_X)
+    };
+    let widths: Vec<(f32, f32)> = columns.iter().map(|group| measure(group)).collect();
+    let tall = columns.iter().map(|group| group.len()).max().unwrap_or(0);
+    let size = egui::vec2(
+        widths.iter().map(|(_, width)| width).sum::<f32>()
+            + ROW_SEP * (columns.len().saturating_sub(1)) as f32
+            + CARD_PAD * 2.0,
+        tall as f32 * CARD_ROW + CARD_PAD * 2.0,
+    );
+    let card = egui::Rect::from_min_size(
+        egui::pos2(
+            (area.center().x - size.x / 2.0).max(area.left() + CARD_MARGIN),
+            (bottom - CARD_MARGIN - size.y).max(area.top() + CARD_MARGIN),
+        ),
+        size,
+    );
+    let mut rects = Vec::with_capacity(rows.len());
+    let mut labels = Vec::with_capacity(rows.len());
+    let mut left = card.left() + CARD_PAD;
+    for (group, (key_w, width)) in columns.iter().zip(&widths) {
+        for i in 0..group.len() {
+            rects.push(egui::Rect::from_min_size(
+                egui::pos2(left, card.top() + CARD_PAD + i as f32 * CARD_ROW),
+                egui::vec2(*width, CARD_ROW),
+            ));
+            labels.push(left + PAD_X + key_w + KEY_GAP);
+        }
+        left += width + ROW_SEP;
+    }
+    Geometry {
+        card,
+        rows: rects,
+        labels,
     }
 }
 

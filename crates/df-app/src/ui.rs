@@ -464,6 +464,10 @@ pub enum Control {
     /// index in that strip's list ([`crate::chrome::Hint`]). One variant for
     /// every card, for the reason [`Control::Close`] is one.
     Hint(usize),
+    /// A row of the which-key card, by its index in the card's rows: a click
+    /// presses that row's key into the pending chord
+    /// ([`crate::whichkey::Row`]).
+    WhichKey(usize),
     /// The two halves of the search panel's **Names | Contents** switch
     /// (PLAN §7.2). Two variants rather than one carrying the mode, so this
     /// enum stays free of what the search module means by a mode — the
