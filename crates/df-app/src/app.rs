@@ -3269,20 +3269,30 @@ impl App {
     // `df_core::vfs::CONNECT_TIMEOUT` and never leave the sticky up.
     fn enter_remote(&mut self, at: df_core::vfs::VfsPath, now: Instant) {
         let vfs = self.vfs();
-        if vfs.service(&at.service).is_none() {
+        let Some(service) = vfs.service(&at.service) else {
             // Naming what *is* configured is the difference between an error
             // and an error a person can act on: the usual cause is a typo in a
             // bookmark, and the fix is in the sentence.
             let known: Vec<&str> = vfs.services().iter().map(|s| s.name.as_str()).collect();
             let known = if known.is_empty() {
-                "vfs.toml defines no services".to_string()
+                "vfs.toml and rclone.conf define no services".to_string()
             } else {
-                format!("vfs.toml has {}", known.join(", "))
+                format!("vfs.toml and rclone.conf have {}", known.join(", "))
             };
             self.toasts
                 .error(format!("No service called {} — {known}", at.service), now);
             return;
-        }
+        };
+        // The service's name is what reaches it; the scheme only says which
+        // backend that is, and the config is the authority on that. A bookmark
+        // written `sftp://r2` for an rclone remote still lands on the remote —
+        // with `rclone://` rows, so the breadcrumb, the cache and every path
+        // the pane hands out agree with what the vfs actually is.
+        let at = if at.kind == service.kind {
+            at
+        } else {
+            df_core::vfs::VfsPath::for_service(service, at.path)
+        };
 
         let origin = self.local_origin();
         let session = match self.tabs.active_mut().remote.take() {
@@ -4311,7 +4321,7 @@ impl App {
                 // what they are asking for rather than working it out from a
                 // progress bar that runs twice.
                 self.toasts.notice(
-                    "Server to server would come through this machine — download it first",
+                    "Remote to remote would come through this machine — download it first",
                     now,
                 );
                 return;
@@ -7220,7 +7230,7 @@ impl App {
         // the card's chips do not act remotely.
         if crate::remote::at_of(&path).is_some() {
             self.toasts
-                .notice("Permissions cannot be changed over sftp yet", now);
+                .notice("Permissions cannot be changed remotely yet", now);
             return;
         }
         // `chmod` follows a symlink, and there is no `lchmod` on Linux. So
@@ -7942,6 +7952,15 @@ impl App {
     /// the field open with the reason beside it, because the fix is almost
     /// always one typo away in the text that is still under the caret.
     fn go_to_path(&mut self, text: &str, now: Instant) -> Result<(), String> {
+        // `sftp://host/srv` and `rclone://r2/bucket` are places too, and
+        // `navigate` is where every door into one is routed. `typed_path` would
+        // have joined the URL onto the directory on screen as if it were a
+        // relative folder name.
+        let typed = Path::new(text.trim());
+        if crate::remote::is_remote(typed) {
+            self.navigate(typed.to_path_buf(), now);
+            return Ok(());
+        }
         let path = typed_path(text, &self.cwd(), home().as_deref());
         if path.is_dir() {
             self.jump_to(path, now);
@@ -12627,13 +12646,13 @@ impl App {
         let verb = match (verb, crate::remote::at_of(dest)) {
             (dnd::Verb::Move, Some(_)) => {
                 self.toasts.notice(
-                    "Uploaded as a copy — a move to a server is not supported",
+                    "Uploaded as a copy — a move into a remote folder is not supported",
                     now,
                 );
                 dnd::Verb::Copy
             }
             (dnd::Verb::Link, Some(_)) => {
-                self.toasts.notice("Cannot link onto a server", now);
+                self.toasts.notice("Cannot link into a remote folder", now);
                 return;
             }
             (verb, _) => verb,
@@ -17294,6 +17313,9 @@ mod tests {
 
     /// `A`, driven through the prompt, the card and the job.
     mod compress;
+
+    /// `rclone://` from every door, and the refusals a remote gets.
+    mod cloud;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the

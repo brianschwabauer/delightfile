@@ -22,6 +22,12 @@
 //! hands one to the local filesystem. The only local paths a remote session
 //! produces are the temporary downloads [`crate::remote::Temps`] accounts for.
 //!
+//! A cloud remote is the same picture with the other scheme:
+//! `rclone://r2/bucket/photos`, reached through rclone rather than ssh (see
+//! [`df_core::vfs`]). Nothing in this module tells the two apart except the
+//! facts card, which does not show permissions or an owner that a cloud
+//! object does not have.
+//!
 //! ## What works remotely in v1, and what does not
 //!
 //! Works: browsing, preview of small text files, `o`/`Enter` (download to a
@@ -217,7 +223,7 @@ impl Session {
 /// called `showandtour1` on this computer. Which is exactly the mistake the
 /// whole feature must not invite.
 pub fn crumbs(at: &VfsPath) -> Vec<crate::chrome::Crumb> {
-    let root = VfsPath::new(&at.service, "");
+    let root = at.service_root();
     let mut out = vec![crate::chrome::Crumb {
         label: at.service.clone(),
         path: display(&root),
@@ -561,7 +567,10 @@ fn is_texty(mime: &str) -> bool {
 /// Pure, so what the card says is a table test. What it does *not* say is as
 /// deliberate as what it does: there is no "created" row, because SFTP version
 /// 3 has no birth time at all and a column echoing the modification time would
-/// be a fabrication.
+/// be a fabrication. For the same reason a cloud remote's row has no
+/// permissions and no owner: an object in a bucket has neither, and the mode
+/// word its row carries (so the pane can sort and classify it) is the vfs's
+/// stand-in, not something the provider said.
 pub fn card_rows(entry: &Entry, service: &str) -> Vec<(String, String)> {
     let mut rows = Vec::new();
     rows.push((
@@ -581,7 +590,8 @@ pub fn card_rows(entry: &Entry, service: &str) -> Vec<(String, String)> {
             crate::format::long_stamp(Some(mtime)),
         ));
     }
-    if entry.mode != 0 {
+    let cloud = at_of(&entry.path).is_some_and(|at| at.kind == df_core::vfs::ServiceKind::Rclone);
+    if entry.mode != 0 && !cloud {
         rows.push(("Permissions".to_string(), entry.permissions_string()));
         rows.push(("Owner".to_string(), entry.owner_label()));
     }
@@ -1047,6 +1057,105 @@ mod tests {
         );
         assert!(find("Created").is_none());
         assert!(find("Modified").is_none(), "no mtime means no row");
+    }
+
+    /// A cloud row's card leaves out what a cloud object does not have: the
+    /// mode word the row carries is the vfs's stand-in, not the provider's.
+    /// A server row with the same mode still shows its permissions and owner.
+    #[test]
+    fn a_cloud_rows_card_has_no_permissions_or_owner() {
+        let mut cloud = entry("index.html", "rclone://r2/site", 4096, "text/html", false);
+        cloud.mode = 0o100_644;
+        let rows = card_rows(&cloud, "r2");
+        let labels: Vec<&str> = rows.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["Kind", "Size", "Path"]);
+        assert_eq!(rows[0].1, "text/html on r2");
+        assert_eq!(rows[2].1, "rclone://r2/site/index.html");
+
+        let mut server = entry("index.html", "sftp://s/srv", 4096, "text/html", false);
+        server.mode = 0o100_644;
+        let labels: Vec<String> = card_rows(&server, "s")
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect();
+        assert!(labels.iter().any(|l| l == "Permissions"), "{labels:?}");
+        assert!(labels.iter().any(|l| l == "Owner"), "{labels:?}");
+    }
+
+    /// An `rclone://` place is the same fiction as an `sftp://` one: the URL
+    /// round-trips through a `PathBuf`, `←` walks up and then out, and the
+    /// breadcrumb's chip and segments keep the scheme they started with.
+    #[test]
+    fn cloud_places_round_trip_walk_up_and_crumb_in_their_own_scheme() {
+        let at = VfsPath::rclone("r2", "bucket/photos");
+        assert_eq!(display(&at), PathBuf::from("rclone://r2/bucket/photos"));
+        assert_eq!(at_of(&display(&at)), Some(at.clone()));
+        assert!(is_remote(Path::new("rclone://r2")));
+
+        let origin = Path::new("/home/brian/Work");
+        assert_eq!(
+            leave(&at, origin),
+            Leave::Up(VfsPath::rclone("r2", "bucket"))
+        );
+        assert_eq!(
+            leave(&VfsPath::rclone("r2", "bucket"), origin),
+            Leave::Up(VfsPath::rclone("r2", ""))
+        );
+        assert_eq!(
+            leave(&VfsPath::rclone("r2", ""), origin),
+            Leave::Out(origin.to_path_buf())
+        );
+
+        let bar = crumbs(&at);
+        let paths: Vec<&Path> = bar.iter().map(|c| c.path.as_path()).collect();
+        assert_eq!(
+            paths,
+            [
+                Path::new("rclone://r2"),
+                Path::new("rclone://r2/bucket"),
+                Path::new("rclone://r2/bucket/photos"),
+            ],
+            "the chip goes to the remote's top, not to an sftp:// of the same name"
+        );
+        assert!(bar[0].accent);
+    }
+
+    /// `p`'s table with a cloud at one end or both: a download, an upload, and
+    /// — remote to remote, whichever two schemes — the refusal.
+    #[test]
+    fn a_paste_with_a_cloud_end_reads_the_same_table() {
+        let cloud = PathBuf::from("rclone://r2/photo.jpg");
+        let server = PathBuf::from("sftp://showandtour1/srv/a.txt");
+        let local = PathBuf::from("/home/brian/a.txt");
+        let here = Path::new("/home/brian/Work");
+        assert_eq!(
+            Transfer::of(std::slice::from_ref(&cloud), here),
+            Transfer::Download
+        );
+        assert_eq!(
+            Transfer::of(
+                std::slice::from_ref(&local),
+                Path::new("rclone://r2/bucket")
+            ),
+            Transfer::Upload
+        );
+        assert_eq!(
+            Transfer::of(
+                std::slice::from_ref(&cloud),
+                Path::new("sftp://showandtour1/srv")
+            ),
+            Transfer::Across,
+            "cloud to server is remote to remote"
+        );
+        assert_eq!(
+            Transfer::of(
+                std::slice::from_ref(&server),
+                Path::new("rclone://r2/bucket")
+            ),
+            Transfer::Across,
+            "and so is server to cloud"
+        );
+        assert_eq!(Transfer::of(&[cloud, local], here), Transfer::Mixed);
     }
 
     /// The whole temp-file ledger: remembered, found, replaced, forgotten, and

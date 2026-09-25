@@ -52,7 +52,7 @@ impl App {
             // The paste's two refusals, in the sync's words.
             T::Across => {
                 self.toasts.notice(
-                    "Server to server would come through this machine — download it first",
+                    "Remote to remote would come through this machine — download it first",
                     now,
                 );
                 return;
@@ -120,6 +120,20 @@ impl App {
         dest: &Path,
         direction: Direction,
     ) -> Result<Remote, String> {
+        // A sync with a server is rsync over ssh, and a cloud remote is reached
+        // through rclone with no ssh behind it. Refused first, so the reason
+        // given is the real one rather than "needs rsync" on a machine without
+        // it, or an ssh to a host called `r2`.
+        let cloud = std::iter::once(dest)
+            .chain(sources.iter().map(PathBuf::as_path))
+            .filter_map(crate::remote::at_of)
+            .find(|at| at.kind == df_core::vfs::ServiceKind::Rclone);
+        if let Some(at) = cloud {
+            return Err(format!(
+                "Sync needs ssh, and {} is an rclone remote",
+                at.service
+            ));
+        }
         if !df_core::sync::rsync::available() {
             return Err("Sync to a server needs rsync".to_string());
         }
@@ -138,6 +152,11 @@ impl App {
         }
         let vfs = self.vfs();
         let (host, root) = match vfs.service(&service) {
+            // The refusal above, for an `sftp://` URL that names a service the
+            // config says is an rclone remote.
+            Some(found) if found.kind == df_core::vfs::ServiceKind::Rclone => {
+                return Err(format!("Sync needs ssh, and {service} is an rclone remote"));
+            }
             Some(found) if found.program.is_some() => {
                 return Err(format!("Sync needs ssh to reach {service}"));
             }

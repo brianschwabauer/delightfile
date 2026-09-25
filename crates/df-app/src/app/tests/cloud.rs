@@ -1,0 +1,158 @@
+//! Cloud remotes through the app: `rclone://` from every door and the
+//! refusals that name what a remote cannot do.
+//!
+//! No daemon runs. Every service here points its program at a path that does
+//! not exist, so a listing that does start fails on its worker and changes
+//! nothing these tests look at — and nothing reads this machine's `vfs.toml`
+//! or `rclone.conf`, because each test hands the app its vfs.
+
+use df_core::ops::paste::{Clipboard, PasteMode};
+use df_core::vfs::{Service, Vfs, VfsConfig, VfsPath};
+
+use super::*;
+
+/// Where no rclone is.
+const NO_RCLONE: &str = "/nonexistent/df-test-rclone";
+
+/// An rclone service that can never start a daemon.
+fn cloud(name: &str, provider: Option<&str>) -> Service {
+    let mut service = Service::rclone(name, name);
+    service.provider = provider.map(str::to_string);
+    service.program = Some((PathBuf::from(NO_RCLONE), Vec::new()));
+    service
+}
+
+/// An sftp service that can never start an ssh.
+fn server(name: &str) -> Service {
+    Service::direct(name, NO_RCLONE, Vec::new())
+}
+
+fn with_services(app: &mut App, services: Vec<Service>) {
+    let mut config = VfsConfig::default();
+    for service in services {
+        config.insert(service);
+    }
+    app.vfs = Some(Arc::new(Vfs::with_config(
+        config,
+        Vec::new(),
+        Arc::new(|| {}),
+    )));
+}
+
+fn toast(app: &App) -> Option<String> {
+    app.toasts.current().map(|toast| toast.message.clone())
+}
+
+fn remote_at(app: &App) -> Option<VfsPath> {
+    app.tab().remote.as_ref().map(|session| session.at.clone())
+}
+
+/// `Go to:` takes a URL of either scheme to the place it names, rather than
+/// joining it onto the folder on screen as a relative name.
+#[test]
+fn go_to_takes_a_cloud_url_and_a_server_one() {
+    let mut app = Fixture::new("cloud-goto", &["a.txt"]);
+    with_services(&mut app, vec![server("box"), cloud("r2", Some("s3"))]);
+    let now = Instant::now();
+
+    assert_eq!(app.go_to_path("rclone://r2/bucket/photos", now), Ok(()));
+    assert_eq!(
+        remote_at(&app),
+        Some(VfsPath::rclone("r2", "bucket/photos"))
+    );
+    assert_eq!(
+        app.cwd(),
+        PathBuf::from("rclone://r2/bucket/photos"),
+        "the pane is on the remote, by its URL"
+    );
+
+    // Pasted out of a terminal, with the whitespace that brings.
+    assert_eq!(app.go_to_path("  sftp://box/srv\n", now), Ok(()));
+    assert_eq!(remote_at(&app), Some(VfsPath::new("box", "/srv")));
+}
+
+/// The config decides which backend a name is: `sftp://r2` for an rclone
+/// remote lands on the remote, and the pane's rows and crumbs are `rclone://`.
+#[test]
+fn a_server_url_for_a_cloud_remote_lands_on_the_remote() {
+    let mut app = Fixture::new("cloud-scheme", &["a.txt"]);
+    with_services(&mut app, vec![cloud("r2", None)]);
+    app.navigate(PathBuf::from("sftp://r2/bucket"), Instant::now());
+    assert_eq!(remote_at(&app), Some(VfsPath::rclone("r2", "bucket")));
+    assert_eq!(app.cwd(), PathBuf::from("rclone://r2/bucket"));
+}
+
+#[test]
+fn an_unknown_service_names_both_files() {
+    let mut app = Fixture::new("cloud-unknown", &["a.txt"]);
+    let now = Instant::now();
+    with_services(&mut app, Vec::new());
+    app.navigate(PathBuf::from("rclone://nope"), now);
+    assert_eq!(
+        toast(&app).as_deref(),
+        Some("No service called nope — vfs.toml and rclone.conf define no services")
+    );
+    assert!(app.tab().remote.is_none());
+
+    with_services(&mut app, vec![server("box"), cloud("r2", None)]);
+    app.navigate(PathBuf::from("rclone://nope/x"), now);
+    assert_eq!(
+        toast(&app).as_deref(),
+        Some("No service called nope — vfs.toml and rclone.conf have box, r2")
+    );
+    assert!(app.tab().remote.is_none());
+}
+
+/// A sync with a server is rsync over ssh; a cloud remote is refused by name
+/// before anything else is asked.
+#[test]
+fn a_sync_with_a_cloud_remote_is_refused_by_name() {
+    let mut app = Fixture::new("cloud-sync", &["a.txt"]);
+    with_services(&mut app, vec![cloud("r2", Some("s3"))]);
+    app.clipboard = Clipboard {
+        mode: PasteMode::Copy,
+        paths: vec![PathBuf::from("rclone://r2/photos")],
+    };
+    app.run(Command::PasteSync, 10, Instant::now());
+    assert_eq!(
+        toast(&app).as_deref(),
+        Some("Sync needs ssh, and r2 is an rclone remote")
+    );
+    assert!(app.dialog.is_none(), "no card for a sync that cannot run");
+
+    // The same for an `sftp://` URL naming the remote: the config says what
+    // `r2` is, whatever the scheme says. That refusal is past the check for
+    // rsync, which a machine without it answers first.
+    if df_core::sync::rsync::available() {
+        app.toasts.clear();
+        app.clipboard = Clipboard {
+            mode: PasteMode::Copy,
+            paths: vec![PathBuf::from("sftp://r2/photos")],
+        };
+        app.run(Command::PasteSync, 10, Instant::now());
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Sync needs ssh, and r2 is an rclone remote")
+        );
+        assert!(app.dialog.is_none());
+    }
+}
+
+/// Remote to remote is refused in words that fit a cloud at either end —
+/// including the case of one of each.
+#[test]
+fn a_paste_between_a_server_and_a_cloud_is_refused_in_neutral_words() {
+    let mut app = Fixture::new("cloud-across", &["a.txt"]);
+    with_services(&mut app, vec![server("box"), cloud("r2", None)]);
+    let now = Instant::now();
+    app.navigate(PathBuf::from("sftp://box/srv"), now);
+    app.clipboard = Clipboard {
+        mode: PasteMode::Copy,
+        paths: vec![PathBuf::from("rclone://r2/photo.jpg")],
+    };
+    app.run(Command::Paste, 10, now);
+    assert_eq!(
+        toast(&app).as_deref(),
+        Some("Remote to remote would come through this machine — download it first")
+    );
+}
