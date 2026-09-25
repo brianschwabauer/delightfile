@@ -543,6 +543,49 @@ impl OverlayGeom {
         }
     }
 
+    /// Whether the card dims the window behind it: the palette and the
+    /// dialogs, which make the window scenery while they are up
+    /// ([`crate::overlay`]'s note on the fuzzy card), and not the cards that
+    /// sit beside what they are about — the task panel, the opener picker,
+    /// the file-info card, and the search panel, whose live preview is half
+    /// of what it is for.
+    ///
+    /// The one list of which cards those are: the scrim is painted from it
+    /// and nowhere else, and the wheel reads it ([`wheel_owner`]) — a card
+    /// that has made the window scenery owns the wheel everywhere on it, and
+    /// a list scrolling behind the scrim would be scenery moving.
+    fn backdrop(&self) -> bool {
+        match self {
+            OverlayGeom::Confirm(_)
+            | OverlayGeom::Conflict(_)
+            | OverlayGeom::Bulk(_)
+            | OverlayGeom::Sync(_)
+            | OverlayGeom::Finder(_)
+            | OverlayGeom::Mounts(_) => true,
+            OverlayGeom::Picker(..)
+            | OverlayGeom::Panel(..)
+            | OverlayGeom::Spot(_)
+            | OverlayGeom::Search(_) => false,
+        }
+    }
+
+    /// Who a wheel over the card is spent on: the card's own list.
+    fn wheel_owner(&self) -> WheelOwner {
+        use crate::scrollbar::Surface;
+        match self {
+            OverlayGeom::Confirm(_) => WheelOwner::Card(Surface::Confirm),
+            OverlayGeom::Conflict(_) => WheelOwner::Card(Surface::Conflict),
+            OverlayGeom::Bulk(_) => WheelOwner::Bulk,
+            OverlayGeom::Sync(_) => WheelOwner::Card(Surface::Sync),
+            OverlayGeom::Picker(..) => WheelOwner::Card(Surface::Picker),
+            OverlayGeom::Panel(..) => WheelOwner::Card(Surface::Tasks),
+            OverlayGeom::Spot(_) => WheelOwner::Card(Surface::Spot),
+            OverlayGeom::Finder(_) => WheelOwner::Card(Surface::Palette),
+            OverlayGeom::Mounts(_) => WheelOwner::Card(Surface::Mounts),
+            OverlayGeom::Search(_) => WheelOwner::Search,
+        }
+    }
+
     /// Whether `pos` is on the surface: its card, or the rename card's `{`
     /// list, which may hang past the card's edge. A press there is not a
     /// press on the backdrop.
@@ -673,6 +716,105 @@ impl OverlayGeom {
             _ => None,
         }
     }
+}
+
+/// Who a roll of the wheel is spent on this frame ([`wheel_owner`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WheelOwner {
+    /// The pane under the pointer, as [`App::wheel`] routes it.
+    Pane,
+    /// Nothing moves: the pointer is on something with nothing to scroll,
+    /// or off a card that has made the window scenery.
+    Spent,
+    /// The app menu's card, and the submenu flown out of it.
+    Menu,
+    Submenu,
+    /// A card whose list wears a bar ([`crate::scrollbar::Surface`]): the
+    /// dialogs, the palette, the task panel, the mount card, the opener
+    /// picker, the file-info card, the tray and the which-key card.
+    Card(crate::scrollbar::Surface),
+    /// The bulk rename card, whose bar is its own.
+    Bulk,
+    /// The search panel's hits.
+    Search,
+    /// The help sheet.
+    Help,
+}
+
+/// What floats over the panes this frame, each measured as the hit test
+/// reads it, and `None` while it is not there to take the pointer: a menu
+/// fading out, a which-key card on its way off.
+struct Floating<'a> {
+    menu: Option<&'a menu::Geometry>,
+    toast: Option<egui::Rect>,
+    which: Option<&'a crate::whichkey::Geometry>,
+    overlay: Option<&'a OverlayGeom>,
+    help: Option<egui::Rect>,
+    /// The one-file rename's card, hung from the cursor's row.
+    rename: Option<egui::Rect>,
+    tray: &'a crate::tray::Geometry,
+}
+
+/// Who this frame's wheel belongs to, decided once, from what the pointer is
+/// over, in the order the hit test asks — the topmost thing first.
+///
+/// **A card that dims the window owns the wheel everywhere on it**
+/// ([`OverlayGeom::backdrop`], and the help sheet, which always does): over
+/// the card the wheel scrolls its list, and anywhere else it is spent, since
+/// what is behind the scrim is scenery and a list sliding by there would be
+/// the wheel going through the card. **A card that floats without one** — the
+/// menu, the which-key card, the toast, the task panel, the opener picker, the
+/// file-info card, the search panel, the one-file rename's card, the tray —
+/// owns it only while the pointer is on it, and past its edge the pane under
+/// the pointer scrolls as it always has. A card whose list fits spends the
+/// roll on nothing rather than letting it through.
+///
+/// Tooltips are not in it: nothing aims at one. A tip hangs beside the chip
+/// or the mark it is about, takes no press, and fades the moment the pointer
+/// leaves that chip, so the wheel under it is the wheel over whatever it
+/// hangs above.
+fn wheel_owner(pointer: &Pointer, floating: &Floating<'_>) -> WheelOwner {
+    let Some(at) = pointer.at else {
+        return WheelOwner::Spent;
+    };
+    // The menu is over everything, a modal card included; the submenu is
+    // drawn over its parent.
+    if let Some(menu) = floating.menu {
+        if menu.sub.as_ref().is_some_and(|(card, _)| card.contains(at)) {
+            return WheelOwner::Submenu;
+        }
+        if menu.contains(at) {
+            return WheelOwner::Menu;
+        }
+    }
+    if floating.toast.is_some_and(|toast| toast.contains(at)) {
+        return WheelOwner::Spent;
+    }
+    if floating.which.is_some_and(|which| which.card.contains(at)) {
+        return WheelOwner::Card(crate::scrollbar::Surface::WhichKey);
+    }
+    if let Some(overlay) = floating.overlay {
+        if overlay.covers(at) {
+            return overlay.wheel_owner();
+        }
+        if overlay.backdrop() {
+            return WheelOwner::Spent;
+        }
+    }
+    if let Some(help) = floating.help {
+        return if help.contains(at) {
+            WheelOwner::Help
+        } else {
+            WheelOwner::Spent
+        };
+    }
+    if floating.rename.is_some_and(|card| card.contains(at)) {
+        return WheelOwner::Spent;
+    }
+    if floating.tray.contains(at) {
+        return WheelOwner::Card(crate::scrollbar::Surface::Tray);
+    }
+    WheelOwner::Pane
 }
 
 /// Where the primary button went down, and on what.
@@ -6119,7 +6261,7 @@ impl App {
             return;
         }
         if let Some(search) = &mut self.search {
-            search.cursor = jump.target(search.cursor, search.hits.len(), self.search_rows);
+            search.set_cursor(jump.target(search.cursor, search.hits.len(), self.search_rows));
             self.search_follow = true;
             return;
         }
@@ -6131,7 +6273,7 @@ impl App {
             // A page is the choices on screen: all of them in a window tall
             // enough, as many as fit in one that is not.
             let rows = picker.choices.len();
-            picker.cursor = jump.target(picker.cursor, rows, picker.page());
+            picker.set_cursor(jump.target(picker.cursor, rows, picker.page()));
         }
     }
 
@@ -6387,8 +6529,7 @@ impl App {
             let rows = self.jump_rows(source, &query);
             if let Some(finder) = &mut self.finder {
                 finder.set_pool(rows);
-                finder.cursor = 0;
-                finder.first = 0;
+                finder.top();
             }
             return;
         }
@@ -10187,6 +10328,22 @@ impl App {
         None
     }
 
+    /// Whether the card `geometry` was measured for is still the one up.
+    fn overlay_up(&self, geometry: &OverlayGeom) -> bool {
+        match geometry {
+            OverlayGeom::Confirm(_) => matches!(self.dialog, Some(Dialog::Confirm(_))),
+            OverlayGeom::Conflict(_) => matches!(self.dialog, Some(Dialog::Conflict(_))),
+            OverlayGeom::Bulk(_) => matches!(self.dialog, Some(Dialog::Bulk(_))),
+            OverlayGeom::Sync(_) => matches!(self.dialog, Some(Dialog::Sync(_))),
+            OverlayGeom::Picker(..) => self.picker.is_some(),
+            OverlayGeom::Panel(..) => self.panel.is_some(),
+            OverlayGeom::Spot(_) => self.spot.is_some(),
+            OverlayGeom::Finder(_) => self.finder.is_some(),
+            OverlayGeom::Mounts(_) => self.mounts.is_some(),
+            OverlayGeom::Search(_) => self.search.is_some(),
+        }
+    }
+
     /// The open card's hint strip, laid along the bottom of the card `overlay`
     /// measured.
     fn card_hints(
@@ -10230,7 +10387,7 @@ impl App {
                 return;
             }
             if let Some(search) = &mut self.search {
-                search.cursor = (search.first + offset).min(search.hits.len().saturating_sub(1));
+                search.set_cursor(search.first + offset);
                 self.search_submit(now);
             }
             return;
@@ -10374,8 +10531,7 @@ impl App {
                     return;
                 }
                 if let Some(picker) = &mut self.picker {
-                    picker.cursor =
-                        (picker.first + index).min(picker.choices.len().saturating_sub(1));
+                    picker.set_cursor(picker.first + index);
                     self.submit_overlay(page, now);
                     return;
                 }
@@ -11800,16 +11956,88 @@ impl App {
         prompt.drag_to(scrolled.boundary_at(x));
     }
 
-    /// Hand the rename card what this frame measured (how many rows fit, how
-    /// far its two caret lines are scrolled), then let the wheel over the card
-    /// and a thumb in the hand scroll its list. Returns whether the list
-    /// moved, so the card is measured again before anything reads it.
-    fn bulk_layout(
+    /// The wheel over an open card, or the help sheet, spent on its list —
+    /// `owner` is [`wheel_owner`]'s answer — through the scroll its keys and
+    /// its bar go through, so the bar lingers after it as after them. Returns
+    /// whether a card's list moved, so the card is measured again before
+    /// anything reads it.
+    fn card_wheel(
         &mut self,
-        pointer: &Pointer,
+        owner: WheelOwner,
+        points: f32,
         overlay: &Option<OverlayGeom>,
-        wheel: bool,
+        now: Instant,
     ) -> bool {
+        use crate::scrollbar::Surface;
+        match owner {
+            WheelOwner::Card(Surface::Palette) => self
+                .finder
+                .as_mut()
+                .is_some_and(|finder| finder.wheel(points, now)),
+            WheelOwner::Card(Surface::Tasks) => {
+                let rows = self.task_rows().len();
+                self.panel
+                    .as_mut()
+                    .is_some_and(|panel| panel.wheel(points, rows, now))
+            }
+            WheelOwner::Card(Surface::Mounts) => self
+                .mounts
+                .as_mut()
+                .is_some_and(|card| card.wheel(points, now)),
+            WheelOwner::Card(Surface::Picker) => self
+                .picker
+                .as_mut()
+                .is_some_and(|picker| picker.wheel(points, now)),
+            WheelOwner::Card(Surface::Spot) => self
+                .spot
+                .as_mut()
+                .is_some_and(|spot| spot.wheel(points, now)),
+            WheelOwner::Card(Surface::Sync) => self.sync_wheel(points),
+            WheelOwner::Card(Surface::Confirm | Surface::Conflict) | WheelOwner::Bulk => {
+                match &mut self.dialog {
+                    Some(Dialog::Confirm(confirm)) => confirm.wheel(points, now),
+                    Some(Dialog::Conflict(conflict)) => conflict.wheel(points, now),
+                    Some(Dialog::Bulk(bulk)) => {
+                        let before = bulk.first;
+                        bulk.wheel(crate::mouse::wheel_rows(points, dialog::BULK_ROW));
+                        bulk.first != before
+                    }
+                    _ => false,
+                }
+            }
+            WheelOwner::Search => match (&mut self.search, overlay) {
+                (Some(search), Some(OverlayGeom::Search(geometry))) => {
+                    let rows = crate::mouse::wheel_rows(points, geometry.row_height());
+                    search.wheel(rows, geometry.page())
+                }
+                _ => false,
+            },
+            // The sheet is laid out from its own state further down the
+            // frame, and is not measured for the hit test by its lines.
+            WheelOwner::Help => {
+                let lines = self.help_lines().len();
+                let page = self.help_rows;
+                if let Some(help) = &mut self.help {
+                    help.wheel(points, lines, page);
+                }
+                false
+            }
+            // Spent where the frame measures them: the menu, the tray and
+            // the which-key card.
+            WheelOwner::Card(Surface::Tray | Surface::WhichKey)
+            | WheelOwner::Menu
+            | WheelOwner::Submenu
+            | WheelOwner::Pane
+            | WheelOwner::Spent => false,
+        }
+    }
+
+    /// Hand the rename card what this frame measured (how many rows fit, how
+    /// far its two caret lines are scrolled), then let a thumb in the hand
+    /// scroll its list. Returns whether the list moved, so the card is
+    /// measured again before anything reads it. The wheel over the card is
+    /// spent with every other card's ([`App::card_wheel`]).
+    fn bulk_layout(&mut self, pointer: &Pointer, overlay: &Option<OverlayGeom>) -> bool {
         let (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) =
             (overlay, &mut self.dialog)
         else {
@@ -11821,9 +12049,6 @@ impl App {
             geometry.row_scroll,
         );
         let before = bulk.first;
-        if wheel {
-            bulk.wheel(crate::mouse::wheel_rows(pointer.wheel, dialog::BULK_ROW));
-        }
         // The thumb follows the hand with no slide, as a pane's does: the
         // offset it was taken at keeps it under the pointer.
         let grab = self.press.and_then(|press| press.bulk_bar);
@@ -14217,24 +14442,10 @@ impl App {
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
         let mut overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
-        // **The wheel over the rename card is the card's**, as the tray's is:
-        // it scrolls the names, not the pane under the scrim. Taken here, with
-        // a thumb in the hand, before anything reads the card, so the rows
-        // drawn are the rows the wheel just asked for. "Over the card" is the
-        // press's test (`covers`): the `{` list can hang past the card's
-        // edge, and a wheel there is still on the card, not on the pane.
-        let over_bulk = pointer.wheel != 0.0
-            && matches!(&overlay, Some(surface @ OverlayGeom::Bulk(_))
-                if pointer.at.is_some_and(|at| surface.covers(at)));
-        if self.bulk_layout(&pointer, &overlay, over_bulk) {
+        // The rename card's thumb in the hand, taken before anything reads
+        // the card, so the rows drawn are the rows the hand just asked for.
+        if self.bulk_layout(&pointer, &overlay) {
             overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
-        }
-        // …and over the sync card, which scrolls its list.
-        if pointer.wheel != 0.0
-            && matches!(&overlay, Some(surface @ OverlayGeom::Sync(_))
-                if pointer.at.is_some_and(|at| surface.covers(at)))
-        {
-            self.sync_wheel(pointer.wheel);
         }
 
         // The breadcrumb is measured once and used by both the hit test and the
@@ -14317,30 +14528,6 @@ impl App {
             .map(|menu| menu::geometry(area, menu, &painter));
         // A menu that is fading is pixels, not a surface: it takes no pointer.
         let menu_live = self.menu.as_ref().is_some_and(Menu::live);
-        // **The wheel over the menu is the menu's**, as the tray's is the
-        // tray's: a card too tall for the window scrolls its rows, and one
-        // that fits stands still rather than letting the pane behind it slide
-        // by. Asked of the card the pointer was over as it stood — the
-        // submenu first, since it is drawn over its parent — and taken before
-        // the hit test, so the row under the pointer is the row the wheel
-        // just brought there.
-        let over_menu = pointer.wheel != 0.0
-            && menu_live
-            && pointer
-                .at
-                .zip(menu_geometry.as_ref())
-                .is_some_and(|(at, g)| g.contains(at));
-        if over_menu {
-            let on_sub = pointer
-                .at
-                .zip(menu_geometry.as_ref().and_then(|g| g.sub.as_ref()))
-                .is_some_and(|(at, (card, _))| card.contains(at));
-            if let Some(menu) = &mut self.menu {
-                if menu.wheel(on_sub, pointer.wheel, area, now) {
-                    menu_geometry = Some(menu::geometry(area, menu, &painter));
-                }
-            }
-        }
 
         // The yank tray (PLAN §7.1), hung from the yank chip and measured
         // before the hit test for the reason the breadcrumb is: two functions
@@ -14365,30 +14552,6 @@ impl App {
                 first,
             )
         };
-        // **The wheel over the card is the card's.** It scrolls the names,
-        // not the pane underneath them — a card that let the list slide by
-        // behind it while its own rows stood still would be a card the wheel
-        // went straight through. Taken here, before the card is measured for
-        // the frame, so the rows drawn are the rows the wheel just asked for;
-        // and asked of the card as it stood, since that is what the pointer
-        // was over. Not while something is over the card: the menu, a modal
-        // card, the help sheet.
-        let over_tray = pointer.wheel != 0.0
-            && !menu_live
-            && overlay.is_none()
-            && self.help.is_none()
-            && pointer
-                .at
-                .is_some_and(|p| tray_at(self.tray_first).contains(p));
-        if over_tray {
-            self.tray_first = crate::tray::scroll(
-                self.tray_first,
-                self.clipboard.len(),
-                tray_fit,
-                &mut self.tray_carry,
-                pointer.wheel,
-            );
-        }
         let mut tray_geometry = tray_at(self.tray_first);
 
         // The toast, measured where it will be painted (PLAN §5). It floats over
@@ -14404,12 +14567,6 @@ impl App {
                 area.bottom() - ui::GAP,
             )
         });
-        // The hint strips along the bottoms of those two, measured before the
-        // hit test for the reason the breadcrumb is: the press and the paint
-        // read one set of rects.
-        let mut card_hints = self.card_hints(&painter, &overlay);
-        let mut help_hints =
-            help_card.map(|card| HintStrip::measure(&painter, card, HELP_HINTS.to_vec()));
         // The which-key card, from the function its paint lays it out with.
         // Only while it is fully up: a card on its way out is pixels about a
         // chord that has already resolved, and takes no pointer.
@@ -14417,21 +14574,70 @@ impl App {
             crate::whichkey::geometry(&painter, area, area.bottom(), &self.which_rows, first)
         };
         let mut which_geometry = self.which.shown().then(|| which_at(self.which.first()));
-        // **The wheel over the which-key card is the card's**, as the tray's
-        // is: a card too long for the window scrolls its columns, and a roll
-        // that went through it would scroll the rows it is covering. Measured
-        // again after, so the rows pressed are the rows drawn.
-        let over_which = pointer.wheel != 0.0
-            && which_geometry
-                .as_ref()
-                .zip(pointer.at)
-                .is_some_and(|(which, at)| which.card.contains(at));
-        if let (true, Some(which)) = (over_which, &which_geometry) {
-            self.which.wheel(pointer.wheel, which);
-            which_geometry = Some(which_at(self.which.first()));
+
+        // ── Whose wheel it is ([`wheel_owner`]) ─────────────────────────────
+        // Decided once, from everything floating as it stood — that is what
+        // the pointer was over — and spent on a card here, before the hit
+        // test, so the rows under the pointer are the rows the wheel just
+        // brought there. The panes take theirs further down, where they
+        // always have.
+        let wheel = wheel_owner(
+            &pointer,
+            &Floating {
+                menu: menu_geometry.as_ref().filter(|_| menu_live),
+                toast: toast_geom.as_ref().map(|toast| toast.rect),
+                which: which_geometry.as_ref(),
+                overlay: overlay.as_ref(),
+                help: help_card,
+                rename: rename_card,
+                tray: &tray_geometry,
+            },
+        );
+        if pointer.wheel != 0.0 {
+            match wheel {
+                WheelOwner::Menu | WheelOwner::Submenu => {
+                    if let Some(menu) = &mut self.menu {
+                        let sub = wheel == WheelOwner::Submenu;
+                        if menu.wheel(sub, pointer.wheel, area, now) {
+                            menu_geometry = Some(menu::geometry(area, menu, &painter));
+                        }
+                    }
+                }
+                WheelOwner::Card(crate::scrollbar::Surface::Tray) => {
+                    self.tray_first = crate::tray::scroll(
+                        self.tray_first,
+                        self.clipboard.len(),
+                        tray_fit,
+                        &mut self.tray_carry,
+                        pointer.wheel,
+                    );
+                    tray_geometry = tray_at(self.tray_first);
+                }
+                WheelOwner::Card(crate::scrollbar::Surface::WhichKey) => {
+                    if let Some(which) = &which_geometry {
+                        self.which.wheel(pointer.wheel, which);
+                        which_geometry = Some(which_at(self.which.first()));
+                    }
+                }
+                WheelOwner::Pane | WheelOwner::Spent => {}
+                card => {
+                    if self.card_wheel(card, pointer.wheel, &overlay, now) {
+                        overlay =
+                            self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+                    }
+                }
+            }
         }
-        // A press anywhere on that card is the card's, its padding included:
-        // it starts no drag and no band, and reaches no transport under it.
+
+        // The hint strips along the bottoms of the open card and the sheet,
+        // measured before the hit test for the reason the breadcrumb is: the
+        // press and the paint read one set of rects.
+        let mut card_hints = self.card_hints(&painter, &overlay);
+        let mut help_hints =
+            help_card.map(|card| HintStrip::measure(&painter, card, HELP_HINTS.to_vec()));
+        // A press anywhere on the which-key card is the card's, its padding
+        // included: it starts no drag and no band, and reaches no transport
+        // under it.
         let on_which = pointer
             .at
             .zip(which_geometry.as_ref())
@@ -14717,9 +14923,8 @@ impl App {
         // Routed by what the pointer is *over*, not by what has focus: a wheel
         // is aimed with the hand, and scrolling the pane the keyboard happens
         // to be in would be the one control in the program that ignores where
-        // it was pointed.
-        // A roll over the tray, over the menu, or over the which-key card has
-        // already been spent on it.
+        // it was pointed. A roll anything floating owns has already been
+        // spent on it, or on nothing ([`wheel_owner`]).
         //
         // With `Ctrl` held over the list the wheel is `=` and `-` instead
         // ([`App::wheel_scale`]) — the zoom it is everywhere else — but only
@@ -14737,13 +14942,7 @@ impl App {
         if !stepping {
             self.scale_wheel = 0.0;
         }
-        if pointer.wheel != 0.0
-            && self.help.is_none()
-            && !over_tray
-            && !over_bulk
-            && !over_menu
-            && !over_which
-        {
+        if pointer.wheel != 0.0 && wheel == WheelOwner::Pane {
             if let Some(at) = pointer.at {
                 if stepping {
                     self.wheel_scale(&pointer.wheel_raw, page, now);
@@ -15612,13 +15811,7 @@ impl App {
                 let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE).len();
                 // The same scrolloff rule the panes use, on the same numbers:
                 // one list-scrolling behaviour in the program, not two.
-                help.first = crate::viewport::first_visible(
-                    help.first,
-                    help.cursor,
-                    lines.len(),
-                    chrome::help_page(rect),
-                    scrolloff,
-                );
+                help.settle(lines.len(), chrome::help_page(rect), scrolloff);
                 self.help = Some(help);
                 Some((rect, lines, total, help))
             }
@@ -16265,39 +16458,35 @@ impl App {
         if matches!(self.dialog, Some(Dialog::Bulk(_))) {
             overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
         }
+        // The scrim under a card that dims the window, from the one list of
+        // those cards ([`OverlayGeom::backdrop`]). Only under a card that is
+        // still up: a press this frame can have closed the one measured, or
+        // put another in its place, and a scrim with no card on it would be a
+        // flash of dark over nothing.
+        if overlay
+            .as_ref()
+            .is_some_and(|geometry| geometry.backdrop() && self.overlay_up(geometry))
+        {
+            painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
+        }
         match (&overlay, &self.dialog) {
             (Some(OverlayGeom::Mounts(geometry)), _) => {
                 if let Some(card) = &self.mounts {
-                    crate::mounts::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
+                    crate::mounts::paint(&paint, card, geometry, &self.hovers, &self.ripples);
                 }
             }
             (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) => {
                 let held = pointer.down && self.press.is_some_and(|p| p.bulk_bar.is_some());
-                dialog::paint_bulk(
-                    &paint,
-                    area,
-                    bulk,
-                    geometry,
-                    &self.hovers,
-                    &self.ripples,
-                    held,
-                );
+                dialog::paint_bulk(&paint, bulk, geometry, &self.hovers, &self.ripples, held);
             }
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
-                dialog::paint_confirm(&paint, area, confirm, geometry, &self.hovers, &self.ripples);
+                dialog::paint_confirm(&paint, confirm, geometry, &self.hovers, &self.ripples);
             }
             (Some(OverlayGeom::Sync(geometry)), Some(Dialog::Sync(card))) => {
-                crate::sync::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
+                crate::sync::paint(&paint, card, geometry, &self.hovers, &self.ripples);
             }
             (Some(OverlayGeom::Conflict(geometry)), Some(Dialog::Conflict(conflict))) => {
-                dialog::paint_conflict(
-                    &paint,
-                    area,
-                    conflict,
-                    geometry,
-                    &self.hovers,
-                    &self.ripples,
-                );
+                dialog::paint_conflict(&paint, conflict, geometry, &self.hovers, &self.ripples);
             }
             _ => {}
         }
@@ -16308,7 +16497,7 @@ impl App {
             spot::paint(&paint, spot, geometry, &self.hovers, &self.ripples, now);
         }
         if let (Some(OverlayGeom::Finder(geometry)), Some(finder)) = (&overlay, &self.finder) {
-            overlay::paint_finder(&paint, area, geometry, finder, &self.hovers, &self.ripples);
+            overlay::paint_finder(&paint, geometry, finder, &self.hovers, &self.ripples);
         }
         if let (Some(OverlayGeom::Search(geometry)), Some(search)) = (&overlay, &self.search) {
             overlay::paint_search(&paint, geometry, search, &self.hovers, &self.ripples);
@@ -17994,6 +18183,9 @@ mod tests {
 
     /// The `[pick]` cards' page keys and the mount card's wrapping arrows.
     mod paging;
+
+    /// Whose wheel it is: the cards', the scrim's, or the panes'.
+    mod wheel;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the

@@ -166,17 +166,15 @@ fn close_beside(card: Rect, field: Rect) -> Rect {
     )
 }
 
-/// Draw the command palette / jump card.
+/// Draw the command palette / jump card, over the scrim the app lays for it.
 pub fn paint_finder(
     paint: &Painting<'_>,
-    area: Rect,
     geometry: &FinderGeom,
     finder: &Finder,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
 ) {
     let (painter, palette) = (paint.painter, paint.palette);
-    painter.rect_filled(area, 0, Color32::from_black_alpha(chrome::HELP_SCRIM));
     chrome::card(paint, geometry.card, 1.0);
 
     // ── The field ───────────────────────────────────────────────────────────
@@ -396,6 +394,12 @@ impl SearchGeom {
     /// How many rows fit — what the scrolloff rule is given.
     pub fn page(&self) -> usize {
         self.rows.len()
+    }
+
+    /// How tall one hit is in the mode laid out, which is what the wheel's
+    /// travel is counted in ([`crate::mouse::wheel_rows`]).
+    pub fn row_height(&self) -> f32 {
+        self.rows.first().map_or(NAME_ROW, Rect::height)
     }
 }
 
@@ -1118,7 +1122,7 @@ mod tests {
                         let _ = finder.buffer.insert_text(query);
                         finder.requery();
                         let geometry = finder_geometry(area, finder.hits.len());
-                        paint_finder(&paint, area, &geometry, &finder, &hovers, &ripples);
+                        paint_finder(&paint, &geometry, &finder, &hovers, &ripples);
                     }
                 }
 

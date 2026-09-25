@@ -220,6 +220,13 @@ pub struct Search {
     pub hits: Vec<Hit>,
     pub cursor: usize,
     pub first: usize,
+    /// The wheel's roll that has not come to a whole row yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// The wheel has scrolled the hits off the cursor, and they stay where it
+    /// left them until a key moves the cursor: the panes' rule
+    /// ([`crate::tab::Listing::attach`]).
+    detached: bool,
     /// The search was cut off at [`MAX_HITS`].
     pub capped: bool,
     /// The process has ended, so the list is final.
@@ -250,6 +257,8 @@ impl Search {
             hits: Vec::new(),
             cursor: 0,
             first: 0,
+            carry: 0.0,
+            detached: false,
             capped: false,
             done: false,
             error: None,
@@ -292,6 +301,8 @@ impl Search {
             self.hits.clear();
             self.cursor = 0;
             self.first = 0;
+            self.carry = 0.0;
+            self.detached = false;
             self.done = true;
             self.capped = false;
             self.error = None;
@@ -346,6 +357,8 @@ impl Search {
         self.hits.clear();
         self.cursor = 0;
         self.first = 0;
+        self.carry = 0.0;
+        self.detached = false;
         self.capped = false;
         self.done = false;
         self.error = None;
@@ -446,21 +459,48 @@ impl Search {
         }
         let last = self.hits.len() as isize - 1;
         self.cursor = (self.cursor as isize + delta).clamp(0, last) as usize;
+        self.detached = false;
+    }
+
+    /// Put the cursor on hit `index`, a page key's or a click's: a cursor
+    /// command, so the view comes back to it.
+    pub fn set_cursor(&mut self, index: usize) {
+        self.cursor = index.min(self.hits.len().saturating_sub(1));
+        self.detached = false;
     }
 
     pub fn chosen(&self) -> Option<&Hit> {
         self.hits.get(self.cursor)
     }
 
-    /// Keep the cursor on screen, by the same scrolloff rule the panes use.
+    /// Keep the cursor on screen, by the same scrolloff rule the panes use —
+    /// or, while the wheel has taken the view off it, only inside the list.
     pub fn scroll_into_view(&mut self, rows: usize, scrolloff: usize) {
-        self.first = crate::viewport::first_visible(
-            self.first,
-            self.cursor,
-            self.hits.len(),
-            rows,
-            scrolloff,
-        );
+        self.first = if self.detached {
+            self.first.min(self.hits.len().saturating_sub(rows))
+        } else {
+            crate::viewport::first_visible(
+                self.first,
+                self.cursor,
+                self.hits.len(),
+                rows,
+                scrolloff,
+            )
+        };
+    }
+
+    /// The wheel over the panel, `rows` of the `page` it shows
+    /// ([`crate::mouse::wheel_rows`]): whole hits at a time, the view leaving
+    /// the cursor where it was. Returns whether the hits moved.
+    pub fn wheel(&mut self, rows: f32, page: usize) -> bool {
+        let last = self.hits.len().saturating_sub(page);
+        let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        if first == self.first {
+            return false;
+        }
+        self.first = first;
+        self.detached = true;
+        true
     }
 
     /// Kill whatever is running and start a process for `query`.
@@ -470,6 +510,8 @@ impl Search {
         self.hits.clear();
         self.cursor = 0;
         self.first = 0;
+        self.carry = 0.0;
+        self.detached = false;
         self.capped = false;
         self.done = false;
         self.error = None;

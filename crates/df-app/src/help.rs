@@ -298,6 +298,13 @@ pub struct Filter<'a> {
 pub struct Help {
     pub cursor: usize,
     pub first: usize,
+    /// The wheel's roll that has not come to a whole line yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// The wheel has scrolled the sheet off the cursor, and it stays where
+    /// the wheel left it until a key moves the cursor: the panes' rule
+    /// ([`crate::tab::Listing::attach`]).
+    detached: bool,
 }
 
 impl Help {
@@ -308,6 +315,7 @@ impl Help {
     /// ends of the sheet — which is what `Home` and `End` pass, rather than a
     /// count of lines the caller would have to ask for first.
     pub fn move_cursor(&mut self, lines: &[HelpLine], delta: isize) {
+        self.detached = false;
         let selectable: Vec<usize> = lines
             .iter()
             .enumerate()
@@ -336,6 +344,35 @@ impl Help {
     pub fn reset(&mut self, lines: &[HelpLine]) {
         self.cursor = lines.iter().position(HelpLine::selectable).unwrap_or(0);
         self.first = 0;
+        self.carry = 0.0;
+        self.detached = false;
+    }
+
+    /// Where the sheet starts for `lines` lines in a `page` of them: by the
+    /// panes' scrolloff rule around the cursor, or — while the wheel has
+    /// taken it off the cursor — where the wheel left it, inside the lines,
+    /// which a filter may have made fewer.
+    pub fn settle(&mut self, lines: usize, page: usize, scrolloff: usize) {
+        self.first = if self.detached {
+            self.first.min(lines.saturating_sub(page))
+        } else {
+            crate::viewport::first_visible(self.first, self.cursor, lines, page, scrolloff)
+        };
+    }
+
+    /// The wheel over the sheet, in points, with `lines` lines in a `page` of
+    /// them: whole lines at a time ([`crate::mouse::roll`]), the sheet
+    /// leaving the cursor where it was. Returns whether the lines moved.
+    pub fn wheel(&mut self, points: f32, lines: usize, page: usize) -> bool {
+        let rows = crate::mouse::wheel_rows(points, crate::chrome::HELP_ROW);
+        let last = lines.saturating_sub(page);
+        let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        if first == self.first {
+            return false;
+        }
+        self.first = first;
+        self.detached = true;
+        true
     }
 }
 

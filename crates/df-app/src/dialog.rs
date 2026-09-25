@@ -128,6 +128,9 @@ pub struct Confirm {
     shown: usize,
     /// When the names last scrolled, for their bar.
     bar: crate::scrollbar::Linger,
+    /// The wheel's roll that has not come to a whole name yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
 }
 
 impl Confirm {
@@ -139,6 +142,7 @@ impl Confirm {
             name_width: std::cell::OnceCell::new(),
             shown: BODY_VISIBLE,
             bar: crate::scrollbar::Linger::default(),
+            carry: 0.0,
         }
     }
 
@@ -224,6 +228,27 @@ impl Confirm {
     /// When the names last scrolled, for their bar's linger.
     pub fn scrolled_at(&self) -> Option<std::time::Instant> {
         self.bar.scrolled_at()
+    }
+
+    /// The wheel over the card, in points: whole names at a time
+    /// ([`crate::mouse::roll`]). Returns whether the names moved.
+    pub fn wheel(&mut self, points: f32, now: std::time::Instant) -> bool {
+        let rows = crate::mouse::wheel_rows(points, ROW);
+        let last = self.paths.len().saturating_sub(self.shown);
+        let first = crate::mouse::roll(self.scroll, last, &mut self.carry, rows);
+        self.scroll_to(first, now)
+    }
+
+    /// Start the names at `first`, kept inside the list. Returns whether they
+    /// moved.
+    pub fn scroll_to(&mut self, first: usize, now: std::time::Instant) -> bool {
+        let first = first.min(self.paths.len().saturating_sub(self.shown));
+        if first == self.scroll {
+            return false;
+        }
+        self.scroll = first;
+        self.bar.saw(first as f32, now);
+        true
     }
 }
 
@@ -375,6 +400,14 @@ pub struct ConflictDialog {
     shown: usize,
     /// When the list last scrolled, for its bar.
     bar: crate::scrollbar::Linger,
+    /// The wheel's roll that has not come to a whole name yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// Where the wheel left the list, off the cursor, until a key or a click
+    /// moves the cursor: the panes' rule ([`crate::tab::Listing::attach`]).
+    /// `None` is the list following the cursor
+    /// ([`ConflictDialog::first_visible`]).
+    detached: Option<usize>,
 }
 
 impl ConflictDialog {
@@ -398,6 +431,8 @@ impl ConflictDialog {
             facts,
             shown: CONFLICT_VISIBLE,
             bar: crate::scrollbar::Linger::default(),
+            carry: 0.0,
+            detached: None,
         };
         dialog.load_facts();
         dialog
@@ -435,6 +470,7 @@ impl ConflictDialog {
         let last = self.plan.conflicts.len() as isize - 1;
         self.cursor = (self.cursor as isize + delta).clamp(0, last) as usize;
         self.error = None;
+        self.detached = None;
         self.load_facts();
     }
 
@@ -530,9 +566,35 @@ impl ConflictDialog {
     }
 
     /// Where the resolver's first visible conflict row is, so a long list
-    /// scrolls with the cursor instead of hiding it.
+    /// scrolls with the cursor instead of hiding it — or where the wheel left
+    /// it, kept inside a list an answer may have made shorter.
     pub fn first_visible(&self) -> usize {
-        self.cursor.saturating_sub(self.shown.saturating_sub(1))
+        match self.detached {
+            Some(first) => first.min(self.len().saturating_sub(self.shown)),
+            None => self.cursor.saturating_sub(self.shown.saturating_sub(1)),
+        }
+    }
+
+    /// The wheel over the card, in points: whole names at a time
+    /// ([`crate::mouse::roll`]), the list leaving the cursor where it was.
+    /// Returns whether the names moved.
+    pub fn wheel(&mut self, points: f32, now: std::time::Instant) -> bool {
+        let rows = crate::mouse::wheel_rows(points, ROW);
+        let last = self.len().saturating_sub(self.shown);
+        let first = crate::mouse::roll(self.first_visible(), last, &mut self.carry, rows);
+        self.scroll_to(first, now)
+    }
+
+    /// Start the list at `first`, kept inside it, off the cursor until a key
+    /// or a click moves it. Returns whether the names moved.
+    pub fn scroll_to(&mut self, first: usize, now: std::time::Instant) -> bool {
+        let first = first.min(self.len().saturating_sub(self.shown));
+        if first == self.first_visible() {
+            return false;
+        }
+        self.detached = Some(first);
+        self.bar.saw(first as f32, now);
+        true
     }
 
     /// The card was laid out listing `shown` names: the list scrolls by that
@@ -833,10 +895,9 @@ pub fn conflicts_bar(
 
 // ── Painting ────────────────────────────────────────────────────────────────
 
-/// Draw the confirm card over a scrim.
+/// Draw the confirm card, over the scrim the app lays for it.
 pub fn paint_confirm(
     paint: &Painting<'_>,
-    area: egui::Rect,
     confirm: &Confirm,
     geometry: &Geometry,
     hovers: &Hovers<Control>,
@@ -844,7 +905,6 @@ pub fn paint_confirm(
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
     chrome::card(paint, geometry.card, 1.0);
 
     // The title fills the band the geometry left above the names: from the
@@ -1357,7 +1417,6 @@ fn popover_geometry(
 #[allow(clippy::too_many_arguments)]
 pub fn paint_bulk(
     paint: &Painting<'_>,
-    area: egui::Rect,
     bulk: &Bulk,
     geometry: &BulkGeometry,
     hovers: &Hovers<Control>,
@@ -1366,7 +1425,6 @@ pub fn paint_bulk(
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
     chrome::card(paint, geometry.card, 1.0);
 
     let problems = bulk.problems();
@@ -1868,7 +1926,6 @@ fn paint_popover(
 /// Draw the conflict resolver.
 pub fn paint_conflict(
     paint: &Painting<'_>,
-    area: egui::Rect,
     dialog: &ConflictDialog,
     geometry: &Geometry,
     hovers: &Hovers<Control>,
@@ -1876,7 +1933,6 @@ pub fn paint_conflict(
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
     chrome::card(paint, geometry.card, 1.0);
 
     let left = geometry.card.left() + CARD_PAD;
@@ -2666,9 +2722,9 @@ mod tests {
             let hovers = Hovers::new();
             let ripples = Ripples::new();
             let g = conflict_geometry(ui.painter(), area, &dialog);
-            paint_conflict(&paint, area, &dialog, &g, &hovers, &ripples);
+            paint_conflict(&paint, &dialog, &g, &hovers, &ripples);
             let g = confirm_geometry(ui.painter(), area, &confirm);
-            paint_confirm(&paint, area, &confirm, &g, &hovers, &ripples);
+            paint_confirm(&paint, &confirm, &g, &hovers, &ripples);
 
             // A confirm longer than it shows, scrolled part way, so the
             // `+N more` marker draws beside a name that has to make room.
@@ -2678,7 +2734,7 @@ mod tests {
             let mut long = Confirm::new(ConfirmKind::EmptyTrash, many);
             long.scroll_by(3);
             let g = confirm_geometry(ui.painter(), area, &long);
-            paint_confirm(&paint, area, &long, &g, &hovers, &ripples);
+            paint_confirm(&paint, &long, &g, &hovers, &ripples);
 
             // The rename card, in the states it has: clean, rewritten by the
             // template, with the `{` list open, refused with carets on two
@@ -2692,17 +2748,17 @@ mod tests {
             )
             .expect("a local directory builds a card");
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
 
             bulk.insert_text("-x");
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
 
             bulk.insert_text("{");
             assert!(bulk.live_popover().is_some());
             let g = bulk_geometry(ui.painter(), area, &bulk);
             assert!(g.popover.is_some(), "the list is measured");
-            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
 
             // Two rows wanting the same name, so the refusal treatment draws.
             for script in ["esc", "tab", "ctrl+a", "ctrl+k"] {
@@ -2716,12 +2772,12 @@ mod tests {
             bulk.key(chord("ctrl+shift+down"));
             assert!(!bulk.valid());
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, true);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, true);
 
             // …and a window with no room for a card at all.
             let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 60.0));
             let g = bulk_geometry(ui.painter(), tiny, &bulk);
-            paint_bulk(&paint, tiny, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
         });
     }
 

@@ -238,6 +238,13 @@ pub struct Picker {
     shown: Option<usize>,
     /// When the choices last scrolled, for their bar.
     bar: crate::scrollbar::Linger,
+    /// The wheel's roll that has not come to a whole choice yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// The wheel has scrolled the choices off the cursor, and they stay where
+    /// it left them until a key moves the cursor: the panes' rule
+    /// ([`crate::tab::Listing::attach`]).
+    detached: bool,
 }
 
 impl Picker {
@@ -250,6 +257,8 @@ impl Picker {
             first: 0,
             shown: None,
             bar: crate::scrollbar::Linger::default(),
+            carry: 0.0,
+            detached: false,
         }
     }
 
@@ -259,6 +268,14 @@ impl Picker {
         }
         let last = self.choices.len() as isize - 1;
         self.cursor = (self.cursor as isize + delta).clamp(0, last) as usize;
+        self.detached = false;
+    }
+
+    /// Put the cursor on choice `index`, a page key's or a click's: a cursor
+    /// command, so the view comes back to it.
+    pub fn set_cursor(&mut self, index: usize) {
+        self.cursor = index.min(self.choices.len().saturating_sub(1));
+        self.detached = false;
     }
 
     pub fn chosen(&self) -> Option<&Choice> {
@@ -266,12 +283,40 @@ impl Picker {
     }
 
     /// The card was laid out showing `shown` choices: the view follows the
-    /// cursor in those, so it never walks below the last one drawn.
+    /// cursor in those, so it never walks below the last one drawn — unless
+    /// the wheel has taken it off the cursor, when it is only kept inside the
+    /// choices.
     pub fn fit(&mut self, shown: usize, now: std::time::Instant) {
         self.shown = Some(shown);
-        self.first =
-            crate::viewport::first_visible(self.first, self.cursor, self.choices.len(), shown, 0);
+        self.first = if self.detached {
+            self.first.min(self.choices.len().saturating_sub(shown))
+        } else {
+            crate::viewport::first_visible(self.first, self.cursor, self.choices.len(), shown, 0)
+        };
         self.bar.saw(self.first as f32, now);
+    }
+
+    /// The wheel over the card, in points: whole choices at a time
+    /// ([`crate::mouse::roll`]), the view leaving the cursor where it was.
+    /// Returns whether the choices moved.
+    pub fn wheel(&mut self, points: f32, now: std::time::Instant) -> bool {
+        let rows = crate::mouse::wheel_rows(points, chrome::CARD_ROW);
+        let last = self.choices.len().saturating_sub(self.page());
+        let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        self.scroll_to(first, now)
+    }
+
+    /// Start the choices at `first`, kept inside them, off the cursor until
+    /// a key moves it. Returns whether they moved.
+    pub fn scroll_to(&mut self, first: usize, now: std::time::Instant) -> bool {
+        let first = first.min(self.choices.len().saturating_sub(self.page()));
+        if first == self.first {
+            return false;
+        }
+        self.first = first;
+        self.detached = true;
+        self.bar.saw(first as f32, now);
+        true
     }
 
     /// A page of choices, for the page keys: the rows the card showed when

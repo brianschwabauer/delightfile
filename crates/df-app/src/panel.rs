@@ -154,6 +154,13 @@ pub struct TaskPanel {
     shown: usize,
     /// When the rows last scrolled, for their bar.
     bar: crate::scrollbar::Linger,
+    /// The wheel's roll that has not come to a whole row yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// The wheel has scrolled the rows off the cursor, and they stay where it
+    /// left them until a key or a click moves the cursor: the panes' rule
+    /// ([`crate::tab::Listing::attach`]).
+    detached: bool,
 }
 
 impl Default for TaskPanel {
@@ -165,6 +172,8 @@ impl Default for TaskPanel {
             fills: HashMap::new(),
             shown: VISIBLE,
             bar: crate::scrollbar::Linger::default(),
+            carry: 0.0,
+            detached: false,
         }
     }
 }
@@ -182,11 +191,13 @@ impl TaskPanel {
         let last = rows as isize - 1;
         self.cursor = (self.cursor as isize + delta).clamp(0, last) as usize;
         self.inspect = false;
+        self.detached = false;
         self.scroll_into_view(rows);
     }
 
     pub fn select(&mut self, index: usize, rows: usize) {
         self.cursor = index.min(rows.saturating_sub(1));
+        self.detached = false;
         self.scroll_into_view(rows);
     }
 
@@ -205,11 +216,40 @@ impl TaskPanel {
 
     /// The panel was laid out showing `shown` of its `rows`: the cursor
     /// scrolls by that from now on, and is brought back into view now, since
-    /// a window made shorter can have left it below the last row drawn.
+    /// a window made shorter can have left it below the last row drawn —
+    /// unless the wheel has taken the view off it, when the rows are only
+    /// kept inside the list.
     pub fn fit(&mut self, shown: usize, rows: usize, now: Instant) {
         self.shown = shown;
-        self.scroll_into_view(rows);
+        if self.detached {
+            self.first = self.first.min(rows.saturating_sub(shown));
+        } else {
+            self.scroll_into_view(rows);
+        }
         self.bar.saw(self.first as f32, now);
+    }
+
+    /// The wheel over the panel, in points, with `rows` tasks listed: whole
+    /// rows at a time ([`crate::mouse::roll`]), the view leaving the cursor
+    /// where it was. Returns whether the rows moved.
+    pub fn wheel(&mut self, points: f32, rows: usize, now: Instant) -> bool {
+        let step = crate::mouse::wheel_rows(points, ROW);
+        let last = rows.saturating_sub(self.shown);
+        let first = crate::mouse::roll(self.first, last, &mut self.carry, step);
+        self.scroll_to(first, rows, now)
+    }
+
+    /// Start the rows at `first`, kept inside the `rows` listed, off the
+    /// cursor until a key or a click moves it. Returns whether they moved.
+    pub fn scroll_to(&mut self, first: usize, rows: usize, now: Instant) -> bool {
+        let first = first.min(rows.saturating_sub(self.shown));
+        if first == self.first {
+            return false;
+        }
+        self.first = first;
+        self.detached = true;
+        self.bar.saw(first as f32, now);
+        true
     }
 
     /// When the rows last scrolled, for their bar's linger.
@@ -255,7 +295,7 @@ impl TaskPanel {
         if self.cursor >= rows.len() {
             self.cursor = rows.len().saturating_sub(1);
         }
-        if self.first > self.cursor {
+        if self.first > self.cursor && !self.detached {
             self.first = self.cursor;
         }
         if rebuilt {

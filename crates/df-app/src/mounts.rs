@@ -1225,6 +1225,14 @@ pub struct Card {
     window: f32,
     /// When the lines last scrolled, for their bar.
     bar: crate::scrollbar::Linger,
+    /// The wheel's roll that has not come to a whole line yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// The wheel has scrolled the lines off the cursor, and they stay where
+    /// it left them until a key or a click moves the cursor: the panes' rule
+    /// ([`crate::tab::Listing::attach`]). Without it the card would follow
+    /// the cursor back on the next frame ([`Card::fit`]).
+    detached: bool,
 }
 
 impl Card {
@@ -1240,6 +1248,8 @@ impl Card {
             loading: true,
             window: WINDOW,
             bar: crate::scrollbar::Linger::default(),
+            carry: 0.0,
+            detached: false,
         }
     }
 
@@ -1365,6 +1375,7 @@ impl Card {
         // division by it.
         let len = self.items().len().max(1) as isize;
         self.cursor = (self.cursor as isize + delta).rem_euclid(len) as usize;
+        self.detached = false;
         self.follow();
     }
 
@@ -1375,6 +1386,7 @@ impl Card {
     pub fn jump(&mut self, jump: Jump) {
         let page = self.visible_items().len();
         self.cursor = jump.target(self.cursor, self.items().len(), page);
+        self.detached = false;
         self.follow();
     }
 
@@ -1382,6 +1394,7 @@ impl Card {
     pub fn select(&mut self, item: Item) {
         if let Some(index) = self.items().iter().position(|i| *i == item) {
             self.cursor = index;
+            self.detached = false;
             self.follow();
         }
     }
@@ -1395,11 +1408,23 @@ impl Card {
         }
     }
 
+    /// The view where it belongs after the lines or the window changed: on
+    /// the cursor, or — while the wheel has taken it off the cursor — where
+    /// the wheel left it, kept inside the lines, which may have got fewer.
+    fn settle(&mut self) {
+        if self.detached {
+            let heights: Vec<f32> = self.lines().iter().map(|line| line.height()).collect();
+            self.first = self.first.min(deepest(&heights, self.window));
+        } else {
+            self.follow();
+        }
+    }
+
     /// The lines were rebuilt under the card — a listing landed, a pin came
     /// off, the remotes arrived — so the view follows the cursor to wherever
     /// its row went, and that is not a scroll ([`crate::scrollbar::Linger`]).
     fn rebuilt(&mut self) {
-        self.follow();
+        self.settle();
         self.bar = crate::scrollbar::Linger::default();
     }
 
@@ -1409,8 +1434,33 @@ impl Card {
     /// last line drawn.
     pub fn fit(&mut self, window: f32, now: std::time::Instant) {
         self.window = window;
-        self.follow();
+        self.settle();
         self.bar.saw(self.first as f32, now);
+    }
+
+    /// The wheel over the card, in points: whole lines at a time, a notch
+    /// counted in rows ([`crate::mouse::roll`]), the view leaving the cursor
+    /// where it was. Returns whether the lines moved.
+    pub fn wheel(&mut self, points: f32, now: std::time::Instant) -> bool {
+        let heights: Vec<f32> = self.lines().iter().map(|line| line.height()).collect();
+        let rows = crate::mouse::wheel_rows(points, ROW);
+        let last = deepest(&heights, self.window);
+        let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        self.scroll_to_line(first, now)
+    }
+
+    /// Start the view at line `first`, kept inside the lines, off the cursor
+    /// until a key or a click moves it. Returns whether the lines moved.
+    fn scroll_to_line(&mut self, first: usize, now: std::time::Instant) -> bool {
+        let heights: Vec<f32> = self.lines().iter().map(|line| line.height()).collect();
+        let first = first.min(deepest(&heights, self.window));
+        if first == self.first {
+            return false;
+        }
+        self.first = first;
+        self.detached = true;
+        self.bar.saw(first as f32, now);
+        true
     }
 
     /// When the lines last scrolled, for their bar's linger.
@@ -1567,14 +1617,20 @@ fn scroll(first: usize, at: usize, lines: &[Line], window: f32) -> usize {
     while first < at && heights[first..=at].iter().sum::<f32>() > window {
         first += 1;
     }
-    // The furthest the view goes: the last lines exactly filling it.
+    first.min(deepest(&heights, window))
+}
+
+/// The furthest the view goes down lines of these `heights` in a body
+/// `window` points tall: the first of the last lines exactly filling it, or
+/// the top when they all fit.
+fn deepest(heights: &[f32], window: f32) -> usize {
     let mut deepest = heights.len();
     let mut tail = 0.0;
     while deepest > 0 && tail + heights[deepest - 1] <= window {
         deepest -= 1;
         tail += heights[deepest];
     }
-    first.min(deepest)
+    deepest
 }
 
 // ── The card ────────────────────────────────────────────────────────────────
@@ -1830,10 +1886,9 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
     }
 }
 
-/// Draw it.
+/// Draw it, over the scrim the app lays for it.
 pub fn paint(
     paint: &crate::ui::Painting<'_>,
-    area: egui::Rect,
     card: &Card,
     geometry: &Geometry,
     hovers: &crate::hover::Hovers<crate::ui::Control>,
@@ -1841,11 +1896,6 @@ pub fn paint(
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
-    painter.rect_filled(
-        area,
-        0,
-        egui::Color32::from_black_alpha(crate::chrome::HELP_SCRIM),
-    );
     crate::chrome::card(paint, geometry.card, 1.0);
 
     let left = geometry.card.left() + PAD;
@@ -2706,7 +2756,6 @@ Mount(3): backup -> file:///mnt/backup
                 let draw = |card: &Card| {
                     paint(
                         &painting,
-                        area,
                         card,
                         &geometry(area, card),
                         &hovers,

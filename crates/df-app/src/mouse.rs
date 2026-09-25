@@ -399,6 +399,27 @@ pub fn wheel_rows(points: f32, row_height: f32) -> f32 {
     (-points / row_height).clamp(-WHEEL_MAX_ROWS, WHEEL_MAX_ROWS)
 }
 
+/// A card's list, rolled by the wheel: `rows` more of it ([`wheel_rows`])
+/// added to what the last rolls left over in `carry`, the whole part moving
+/// `first` and kept between the top and `last`, the fraction kept for the
+/// next roll.
+///
+/// Whole rows, because a card draws whole rows. The fraction is dropped at
+/// either end, so the first notch back moves at once rather than paying off
+/// travel the list could not make. The tray's rule, and every card's since
+/// the wheel over a card became the card's.
+pub fn roll(first: usize, last: usize, carry: &mut f32, rows: f32) -> usize {
+    *carry += rows;
+    let whole = carry.trunc();
+    *carry -= whole;
+    let last = last as i64;
+    let moved = (first as i64 + whole as i64).clamp(0, last);
+    if (moved == 0 && *carry < 0.0) || (moved == last && *carry > 0.0) {
+        *carry = 0.0;
+    }
+    moved as usize
+}
+
 /// One eased coast toward a target, retargeted in flight.
 ///
 /// The preview pane's momentum. The listing panes do not need one — their
@@ -842,6 +863,24 @@ mod tests {
         assert_eq!(wheel_rows(-10_000.0, H), WHEEL_MAX_ROWS);
         assert_eq!(wheel_rows(10_000.0, H), -WHEEL_MAX_ROWS);
         assert_eq!(wheel_rows(100.0, 0.0), 0.0);
+    }
+
+    /// A card's roll moves whole rows, keeps the fraction for the next one,
+    /// stops at both ends, and drops the fraction there, so the first roll
+    /// back moves at once.
+    #[test]
+    fn a_roll_moves_whole_rows_and_stops_at_the_ends() {
+        let mut carry = 0.0;
+        assert_eq!(roll(0, 10, &mut carry, 0.6), 0, "not a row yet");
+        assert_eq!(roll(0, 10, &mut carry, 0.6), 1, "the fractions add up");
+        assert!((carry - 0.2).abs() < 1e-5, "{carry}");
+        assert_eq!(roll(8, 10, &mut carry, 5.3), 10, "held at the last row");
+        assert_eq!(carry, 0.0, "dropped against the end");
+        assert_eq!(roll(10, 10, &mut carry, -1.0), 9, "and back at once");
+        let mut carry = 0.0;
+        assert_eq!(roll(1, 10, &mut carry, -3.5), 0, "held at the top");
+        assert_eq!(carry, 0.0);
+        assert_eq!(roll(0, 0, &mut carry, 4.0), 0, "a list that fits");
     }
 
     /// The momentum contract: one tween, retargeted from where it has got to,

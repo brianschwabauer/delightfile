@@ -142,15 +142,9 @@ impl WhichKey {
     /// fraction kept for the next roll and dropped at either end, the tray's
     /// rule ([`crate::tray::scroll`]), in the card laid out as `geometry`.
     pub fn wheel(&mut self, points: f32, geometry: &Geometry) {
-        self.carry += crate::mouse::wheel_rows(points, CARD_ROW);
-        let whole = self.carry.trunc();
-        self.carry -= whole;
-        let last = geometry.total.saturating_sub(geometry.per) as i64;
-        let moved = (self.first as i64 + whole as i64).clamp(0, last);
-        if (moved == 0 && self.carry < 0.0) || (moved == last && self.carry > 0.0) {
-            self.carry = 0.0;
-        }
-        self.first = moved as usize;
+        let rows = crate::mouse::wheel_rows(points, CARD_ROW);
+        let last = geometry.total.saturating_sub(geometry.per);
+        self.first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
     }
 
     /// The card was laid out as `geometry`: its scroll is kept inside the

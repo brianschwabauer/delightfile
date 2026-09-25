@@ -235,15 +235,8 @@ pub fn fit(area: egui::Rect, row: egui::Rect) -> usize {
 /// either end, so the first notch back the other way moves at once rather than
 /// paying off a debt rolled up against the stop.
 pub fn scroll(first: usize, len: usize, visible: usize, carry: &mut f32, points: f32) -> usize {
-    *carry += crate::mouse::wheel_rows(points, TRAY_ROW);
-    let whole = carry.trunc();
-    *carry -= whole;
-    let last = len.saturating_sub(visible) as i64;
-    let moved = (first as i64 + whole as i64).clamp(0, last);
-    if (moved == 0 && *carry < 0.0) || (moved == last && *carry > 0.0) {
-        *carry = 0.0;
-    }
-    moved as usize
+    let rows = crate::mouse::wheel_rows(points, TRAY_ROW);
+    crate::mouse::roll(first, len.saturating_sub(visible), carry, rows)
 }
 
 /// The tray's bar, beside its rows, while it carries more than it shows.

@@ -470,6 +470,13 @@ pub struct Spot {
     window: f32,
     /// When the rows last scrolled, for their bar.
     bar: crate::scrollbar::Linger,
+    /// The wheel's roll that has not come to a whole row yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// The wheel has scrolled the rows off the cursor, and they stay where it
+    /// left them until a key, a click or a swipe moves the cursor: the panes'
+    /// rule ([`crate::tab::Listing::attach`]).
+    detached: bool,
 }
 
 impl Spot {
@@ -488,6 +495,8 @@ impl Spot {
             first: 0,
             window: f32::INFINITY,
             bar: crate::scrollbar::Linger::default(),
+            carry: 0.0,
+            detached: false,
         }
     }
 
@@ -509,8 +518,37 @@ impl Spot {
         // Never less than the tallest row, so the cursor always has a whole
         // row's room to be in.
         self.window = heights.iter().fold(window, |room, h| room.max(*h));
-        self.first = follow(self.first, self.cursor, &heights, self.window);
+        self.first = if self.detached {
+            // Where the wheel left them, inside rows that may have got fewer.
+            self.first.min(deepest(&heights, self.window))
+        } else {
+            follow(self.first, self.cursor, &heights, self.window)
+        };
         self.bar.saw(self.first as f32, now);
+    }
+
+    /// The wheel over the card, in points: whole rows at a time, a notch
+    /// counted in plain rows ([`crate::mouse::roll`]), the view leaving the
+    /// cursor where it was. Returns whether the rows moved.
+    pub fn wheel(&mut self, points: f32, now: Instant) -> bool {
+        let heights = self.heights();
+        let rows = crate::mouse::wheel_rows(points, ROW);
+        let last = deepest(&heights, self.window);
+        let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        self.scroll_to_row(first, now)
+    }
+
+    /// Start the view at row `first`, kept inside the rows, off the cursor
+    /// until a key, a click or a swipe moves it. Returns whether they moved.
+    fn scroll_to_row(&mut self, first: usize, now: Instant) -> bool {
+        let first = first.min(deepest(&self.heights(), self.window));
+        if first == self.first {
+            return false;
+        }
+        self.first = first;
+        self.detached = true;
+        self.bar.saw(first as f32, now);
+        true
     }
 
     /// When the rows last scrolled, for their bar's linger.
@@ -531,8 +569,11 @@ impl Spot {
         self.facts = facts;
         self.rows = rows(&self.facts);
         self.cursor = was.min(self.rows.len().saturating_sub(1));
-        // Another file's rows: wherever the view goes for them, it has not
-        // been scrolled ([`crate::scrollbar::Linger`]).
+        // Another file's rows, and the view comes back to the cursor for
+        // them, since the fact under it is the one being compared. Wherever
+        // the view goes for them, it has not been scrolled
+        // ([`crate::scrollbar::Linger`]).
+        self.detached = false;
         self.bar = crate::scrollbar::Linger::default();
     }
 
@@ -550,10 +591,12 @@ impl Spot {
         }
         let last = self.rows.len() as isize - 1;
         self.cursor = (self.cursor as isize + delta).clamp(0, last) as usize;
+        self.detached = false;
     }
 
     pub fn select(&mut self, index: usize) {
         self.cursor = index.min(self.rows.len().saturating_sub(1));
+        self.detached = false;
     }
 
     /// Move the permission selection — `Shift+←`/`Shift+→`.
@@ -800,13 +843,20 @@ fn follow(first: usize, at: usize, heights: &[f32], window: f32) -> usize {
     while first < at && heights[first..=at].iter().sum::<f32>() > window {
         first += 1;
     }
+    first.min(deepest(heights, window))
+}
+
+/// The furthest the view goes down rows of these `heights` in `window`
+/// points: the first of the last rows exactly filling it, or the top when
+/// they all fit.
+fn deepest(heights: &[f32], window: f32) -> usize {
     let mut deepest = heights.len();
     let mut tail = 0.0;
     while deepest > 0 && tail + heights[deepest - 1] <= window {
         deepest -= 1;
         tail += heights[deepest];
     }
-    first.min(deepest)
+    deepest
 }
 
 /// Lay the card out above the panes' bottom edge, centred, for the rows

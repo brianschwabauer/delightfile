@@ -380,6 +380,17 @@ pub struct Finder {
     pub first: usize,
     /// When the rows last scrolled, for their bar.
     bar: crate::scrollbar::Linger,
+    /// How many rows the card showed when it was last drawn: what the wheel
+    /// scrolls against ([`Finder::scroll_into_view`]).
+    shown: usize,
+    /// The wheel's roll that has not come to a whole row yet
+    /// ([`crate::mouse::roll`]).
+    carry: f32,
+    /// The wheel has scrolled the rows off the cursor, and they stay where it
+    /// left them until a key moves the cursor: the panes' rule
+    /// ([`crate::tab::Listing::attach`]). Without it the scrolloff rule would
+    /// put the view back under the cursor on the next frame.
+    detached: bool,
 }
 
 impl Finder {
@@ -395,6 +406,9 @@ impl Finder {
             cursor: 0,
             first: 0,
             bar: crate::scrollbar::Linger::default(),
+            shown: ROWS,
+            carry: 0.0,
+            detached: false,
         }
     }
 
@@ -424,8 +438,7 @@ impl Finder {
     pub fn requery(&mut self) {
         let query = self.ranking_query().to_string();
         self.hits = rank(&self.pool, &query);
-        self.cursor = 0;
-        self.first = 0;
+        self.top();
         // A new list, not the old one scrolled back to its top: its bar has
         // nothing to linger for.
         self.bar = crate::scrollbar::Linger::default();
@@ -459,6 +472,16 @@ impl Finder {
         }
         let len = len as isize;
         self.cursor = (self.cursor as isize + delta).rem_euclid(len) as usize;
+        self.detached = false;
+    }
+
+    /// The cursor and the view back on the first row, for a list that
+    /// answers a new query.
+    pub fn top(&mut self) {
+        self.cursor = 0;
+        self.first = 0;
+        self.carry = 0.0;
+        self.detached = false;
     }
 
     /// The row under the cursor.
@@ -469,16 +492,46 @@ impl Finder {
 
     /// Keep the cursor on screen, by the same scrolloff rule the panes use,
     /// in the `visible` rows the card was laid out with: [`ROWS`], or fewer
-    /// in a window too short for them.
+    /// in a window too short for them. Not while the wheel has taken the view
+    /// off the cursor: then the rows are only kept inside the list, which may
+    /// have got shorter under them.
     pub fn scroll_into_view(&mut self, visible: usize, scrolloff: usize, now: Instant) {
-        self.first = crate::viewport::first_visible(
-            self.first,
-            self.cursor,
-            self.hits.len(),
-            visible,
-            scrolloff,
-        );
+        self.shown = visible;
+        self.first = if self.detached {
+            self.first.min(self.hits.len().saturating_sub(visible))
+        } else {
+            crate::viewport::first_visible(
+                self.first,
+                self.cursor,
+                self.hits.len(),
+                visible,
+                scrolloff,
+            )
+        };
         self.bar.saw(self.first as f32, now);
+    }
+
+    /// The wheel over the card, in points: whole rows at a time
+    /// ([`crate::mouse::roll`]), the view leaving the cursor where it was.
+    /// Returns whether the rows moved.
+    pub fn wheel(&mut self, points: f32, now: Instant) -> bool {
+        let rows = crate::mouse::wheel_rows(points, crate::chrome::CARD_ROW);
+        let last = self.hits.len().saturating_sub(self.shown);
+        let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        self.scroll_to(first, now)
+    }
+
+    /// Start the rows at `first`, kept inside the list, off the cursor until
+    /// a key moves it. Returns whether the rows moved.
+    pub fn scroll_to(&mut self, first: usize, now: Instant) -> bool {
+        let first = first.min(self.hits.len().saturating_sub(self.shown));
+        if first == self.first {
+            return false;
+        }
+        self.first = first;
+        self.detached = true;
+        self.bar.saw(first as f32, now);
+        true
     }
 
     /// When the rows last scrolled, for their bar's linger.
