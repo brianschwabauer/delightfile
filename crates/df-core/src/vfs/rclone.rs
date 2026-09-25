@@ -39,7 +39,11 @@
 //! would not notice. So the child is started with a parent-death signal (see
 //! `super::child`): if the worker thread that spawned it ends — including when
 //! the whole process dies by `SIGKILL`, an abort or the OOM killer, where no
-//! destructor runs — the kernel sends the daemon `SIGTERM`.
+//! destructor runs — the kernel sends the daemon `SIGTERM`. An ordinary end
+//! (the worker dropping the [`Daemon`]) sends the same `SIGTERM` itself and
+//! waits for rclone to go, which is what lets rclone remove its `.partial`
+//! files and its socket; `SIGKILL` is only for a daemon that has not gone
+//! within [`STOP_GRACE`].
 //!
 //! ## One HTTP request per call
 //!
@@ -64,7 +68,9 @@
 //! becomes `job/stop`. rclone writes a download to a `.partial` name and
 //! renames it into place, and removes the partial when a job is stopped, so a
 //! cancelled transfer leaves the destination exactly as it was: the same
-//! promise the SFTP upload's scratch file keeps, kept by rclone.
+//! promise the SFTP upload's scratch file keeps, kept by rclone. A download
+//! that fails some other way sweeps up any partial of its own that rclone did
+//! not get to (see [`sweep_partials`]).
 //!
 //! **A listing is a job too.** Paging through a big cloud folder can take
 //! rclone longer than [`super::OP_TIMEOUT`], and a synchronous `operations/list`
@@ -130,14 +136,18 @@ const READY_POLL: Duration = Duration::from_millis(20);
 const READY_ANSWER: Duration = Duration::from_secs(2);
 
 /// How long a stopped job is given to wind down before `Cancelled` is
-/// returned anyway.
+/// returned anyway — and how long a terminated daemon is given to exit before
+/// it is killed.
 ///
-/// The wind-down is where rclone removes its `.partial` file, so the cancel is
+/// Both wind-downs are where rclone removes its `.partial` files, so they are
 /// waited for rather than fired and forgotten: a caller that looks at the
 /// destination the moment it is told "cancelled" must find it as it was. Five
-/// seconds is far past what a stop takes (tens of milliseconds, measured); it
-/// is a bound, not an estimate.
+/// seconds is far past what either takes (tens of milliseconds for a job, two
+/// hundred for the daemon, measured); it is a bound, not an estimate.
 const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// How often a terminated daemon is checked for having exited.
+const EXIT_POLL: Duration = Duration::from_millis(10);
 
 /// How long a daemon that has exited is given to finish saying why.
 ///
@@ -170,7 +180,7 @@ const NOT_INSTALLED: &str = "rclone is not installed";
 ///
 /// Owned by the service's worker thread, exactly as an SFTP [`super::conn`]
 /// connection is — and spawned on it, which is what ties the daemon's life to
-/// that thread's (see the module note). Dropping it kills and reaps the daemon
+/// that thread's (see the module note). Dropping it stops and reaps the daemon
 /// and removes its socket.
 pub(super) struct Daemon {
     service: Arc<Service>,
@@ -273,7 +283,7 @@ impl Daemon {
             reader,
             next_group: 0,
         };
-        // On failure `daemon` drops here, which kills and reaps the child and
+        // On failure `daemon` drops here, which stops and reaps the child and
         // removes the socket — the same teardown as any other end.
         daemon.wait_ready()?;
         log::debug!(
@@ -555,8 +565,10 @@ impl Daemon {
     ///
     /// A failure removes `local` if it was not there before — rclone never
     /// renames its partial file into place unless the copy finished, so this
-    /// is belt and braces for a daemon killed mid-rename — and a success is
-    /// flushed to disk before it is reported, as the SFTP download is.
+    /// is belt and braces for a daemon killed mid-rename — and sweeps up any
+    /// `.partial` of `local`'s that rclone left beside it, which a daemon that
+    /// died or was killed mid-copy never removes itself. A success is flushed
+    /// to disk before it is reported, as the SFTP download is.
     fn download(&mut self, remote: &VfsPath, local: &Path, ctx: &TaskCtx) -> Result<u64, VfsError> {
         let attrs = self.stat(remote)?;
         if attrs.is_dir() {
@@ -593,6 +605,7 @@ impl Daemon {
                 if !existed {
                     let _ = std::fs::remove_file(local);
                 }
+                sweep_partials(local);
                 Err(e)
             }
         }
@@ -830,12 +843,37 @@ impl Daemon {
 }
 
 impl Drop for Daemon {
-    /// Kill, reap, unlink — unconditionally, for `conn::Transport`'s reason:
+    /// Stop, reap, unlink — unconditionally, for `conn::Transport`'s reason:
     /// a daemon per reconnect that nobody reaped is a file manager that leaks
     /// processes for as long as it runs.
+    ///
+    /// Stop *gently* first. `SIGTERM` is the signal rclone cleans up on — it
+    /// removes the `.partial` file of anything it was writing, and its socket,
+    /// and exits in about 200 ms — where `SIGKILL` leaves both behind. So
+    /// `SIGTERM`, a wait of up to [`STOP_GRACE`] for the exit, and `SIGKILL`
+    /// only for a daemon that is still there after it.
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let pid = self.pid();
+        if let Err(e) = child::terminate(&mut self.child) {
+            log::debug!("vfs {}: SIGTERM to rclone {pid}: {e}", self.service.name);
+        }
+        let deadline = Instant::now() + STOP_GRACE;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(EXIT_POLL),
+                Ok(None) | Err(_) => {
+                    log::warn!(
+                        "vfs {}: rclone {pid} did not exit within {}s of SIGTERM; killing it",
+                        self.service.name,
+                        STOP_GRACE.as_secs()
+                    );
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    break;
+                }
+            }
+        }
         let _ = std::fs::remove_file(&self.socket);
     }
 }
@@ -940,6 +978,57 @@ fn code_for(message: &str) -> StatusCode {
     } else {
         StatusCode::Failure
     }
+}
+
+/// Remove the `.partial` files rclone left beside `local` — its own name, a
+/// dot, rclone's eight lowercase hex digits, `.partial` — and nothing else.
+///
+/// rclone removes its partial file itself when a job is stopped or fails, and
+/// when the daemon is sent `SIGTERM`; this is for the ends where it could not:
+/// a daemon that crashed, or was killed, mid-copy. The pattern is exact
+/// ([`is_rclone_partial`]) because the directory is the user's: a file called
+/// `notes.txt.backup.partial` is somebody's, not debris.
+fn sweep_partials(local: &Path) {
+    let (Some(dir), Some(name)) = (local.parent(), local.file_name().and_then(|n| n.to_str()))
+    else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(candidate) = file_name.to_str() else {
+            continue;
+        };
+        if !is_rclone_partial(candidate, name) {
+            continue;
+        }
+        // A file, never a folder or a link that happens to wear the name.
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => log::debug!("vfs: removed rclone's leftover {}", entry.path().display()),
+            Err(e) => log::warn!("vfs: {}: {e}", entry.path().display()),
+        }
+    }
+}
+
+/// `candidate` is `<name>.<8 lowercase hex digits>.partial` — the shape rclone
+/// gives the file a copy to `name` writes before it is renamed into place.
+fn is_rclone_partial(candidate: &str, name: &str) -> bool {
+    let Some(middle) = candidate
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".partial"))
+    else {
+        return false;
+    };
+    middle.len() == 8
+        && middle
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Why a daemon would not start, in words.
@@ -1298,6 +1387,91 @@ mod tests {
             .map(|_| ())
             .expect_err("a socket path past sun_path is refused");
         assert!(error.to_string().contains("short enough"), "{error}");
+    }
+
+    /// **Dropped mid-copy, the daemon is stopped gently** — `SIGTERM`, which
+    /// rclone cleans up on — so the `.partial` it was writing goes with it,
+    /// and the drop does not have to wait for the `SIGKILL` fallback.
+    #[test]
+    fn a_daemon_dropped_mid_copy_cleans_up_after_itself() {
+        use super::super::rclone_tests::{
+            find_rclone, partials_in, scratch_service, sockets_in, unique_name,
+        };
+        use super::super::tests::TempDir;
+        let Some(rclone) = find_rclone() else {
+            eprintln!(
+                "skipping a_daemon_dropped_mid_copy_cleans_up_after_itself: no rclone on $PATH"
+            );
+            return;
+        };
+        let remote = TempDir::new("rclone-drop-remote");
+        let scratch = TempDir::new("rclone-drop-scratch");
+        let local = TempDir::new("rclone-drop-local");
+        let big: Vec<u8> = (0..16 * 1024 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        remote.file("big.bin", &big);
+        let name = unique_name("dr");
+        let service = scratch_service(
+            Service::rclone(&name, remote.path.display().to_string()),
+            &scratch,
+            &rclone,
+        );
+        let Ok(mut daemon) = Daemon::spawn(Arc::new(service), &["--bwlimit".into(), "2M".into()])
+        else {
+            panic!("the daemon did not start");
+        };
+        let about = VfsPath::rclone(&name, "big.bin");
+        let params = Json::object([
+            ("srcFs", Json::from(daemon.fs.as_str())),
+            ("srcRemote", Json::from("big.bin")),
+            ("dstFs", Json::from(local.path.display().to_string())),
+            ("dstRemote", Json::from("big.bin")),
+        ]);
+        assert!(daemon
+            .start_job("operations/copyfile", params, &about)
+            .is_ok());
+        // Wait for the copy to be under way: its partial file exists.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while partials_in(&local.path).is_empty() {
+            assert!(Instant::now() < deadline, "the copy never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let started = Instant::now();
+        drop(daemon);
+        assert!(
+            started.elapsed() < STOP_GRACE,
+            "SIGTERM was enough; the drop took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            partials_in(&local.path).is_empty(),
+            "rclone left {:?} behind",
+            partials_in(&local.path)
+        );
+        assert!(!local.path.join("big.bin").exists());
+        assert!(sockets_in(&scratch).is_empty());
+    }
+
+    /// Only `<name>.<8 lowercase hex>.partial` is rclone's debris.
+    #[test]
+    fn only_rclones_own_partial_names_are_debris() {
+        assert!(is_rclone_partial("keep.bin.0123abcd.partial", "keep.bin"));
+        assert!(is_rclone_partial("a b.txt.fb7953c6.partial", "a b.txt"));
+        for (candidate, name) in [
+            ("keep.bin.backup.partial", "keep.bin"),
+            ("keep.bin.0123ABCD.partial", "keep.bin"),
+            ("keep.bin.0123abc.partial", "keep.bin"),
+            ("keep.bin.0123abcde.partial", "keep.bin"),
+            ("keep.bin.partial", "keep.bin"),
+            ("keep.bin.0123abcd.partial.old", "keep.bin"),
+            ("other.bin.0123abcd.partial", "keep.bin"),
+            ("xkeep.bin.0123abcd.partial", "keep.bin"),
+            ("keep.bin", "keep.bin"),
+        ] {
+            assert!(!is_rclone_partial(candidate, name), "{candidate}");
+        }
     }
 
     #[test]

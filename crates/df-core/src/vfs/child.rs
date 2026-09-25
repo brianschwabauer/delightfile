@@ -7,7 +7,8 @@
 //! without running its destructors (a panic with `panic = "abort"`, `SIGKILL`,
 //! the OOM killer, a compositor that kills the client), the daemon lives on,
 //! holding a socket that answers anyone who can reach the directory it is in
-//! and a remote the user thought was closed. Two syscalls close that hole:
+//! and a remote the user thought was closed. Two syscalls close that hole, and
+//! a third lets a daemon we are finished with clean up after itself:
 //!
 //! - **`prctl(PR_SET_PDEATHSIG, SIGTERM)`**, run in the child between `fork`
 //!   and `exec`, asks the kernel to send the daemon `SIGTERM` when its parent
@@ -21,14 +22,20 @@
 //!   captured before the spawn and, if the parent has changed (the child has
 //!   been re-parented to init or a subreaper), exits before `exec` rather than
 //!   start a daemon nobody owns.
+//! - **`kill(pid, SIGTERM)`** stops a daemon gently. `std` only offers
+//!   `SIGKILL`, and a killed rclone leaves its `<name>.<hex>.partial` file
+//!   beside whatever it was writing; a terminated one removes it, and its
+//!   socket, and exits in a fraction of a second.
 //!
 //! The rules, unchanged from `fs::inotify` and `poll`:
 //!
-//! 1. Nothing here **owns** a process. It configures a `Command` that the
-//!    caller spawns and owns.
+//! 1. Nothing here **owns** a process. [`terminate`] borrows the
+//!    [`std::process::Child`] whose handle keeps the pid ours, and refuses to
+//!    signal a pid that `Child` has already reaped — after a reap the number
+//!    may belong to somebody else.
 //! 2. Every syscall's return is checked and turned into an
 //!    [`std::io::Error::last_os_error`].
-//! 3. No `unsafe` escapes the file. Everything above it sees safe functions.
+//! 3. No `unsafe` escapes the file. Everything above it sees `io::Result`.
 //!
 //! The closure given to `pre_exec` runs in the forked child of a threaded
 //! process, where only async-signal-safe work is allowed: it makes two
@@ -40,7 +47,7 @@
 
 use std::io;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Child, Command};
 
 /// Arrange for the child `command` is about to spawn to receive `SIGTERM` when
 /// the calling thread exits, and to not start at all if this process is
@@ -79,4 +86,26 @@ pub(super) fn tie_to_this_thread(command: &mut Command) {
             Ok(())
         });
     }
+}
+
+/// Ask `child` to exit with `SIGTERM`, the signal rclone cleans up on.
+///
+/// A child that has already been reaped is left alone and is `Ok`: once `std`
+/// has collected its status the pid is free for the kernel to hand to another
+/// process, and a signal sent to the number would land on a stranger. One not
+/// yet reaped is still ours — a zombie keeps its pid until it is waited for —
+/// so the check-then-signal here has no window.
+pub(super) fn terminate(child: &mut Child) -> io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pid = libc::pid_t::try_from(child.id())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: `kill` takes two integers and touches no memory of ours. `pid`
+    // is a child this `Child` has not reaped (checked above), so it names our
+    // own process.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }

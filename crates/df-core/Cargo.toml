@@ -31,9 +31,10 @@ crossbeam-channel.workspace = true
 # The FFI is confined to `fs::inotify`, the crate's only unsafe.
 # Also the two syscalls std does not expose elsewhere: the `FICLONE` ioctl
 # behind reflink copies (PLAN §5) and `getuid` for the freedesktop trash
-# `.Trash-$uid` directory. And, in `vfs::child`, the two that keep an
+# `.Trash-$uid` directory. And, in `vfs::child`, the three that keep an
 # `rclone rcd` daemon from outliving delightfile: `prctl(PR_SET_PDEATHSIG)` and
-# `getppid`, between fork and exec.
+# `getppid` between fork and exec, and `kill(SIGTERM)` for a stop that lets
+# rclone clean up — std offers only SIGKILL.
 libc.workspace = true
 # Inflate, for the deflate members of a zip (`archive::unpack`). Already in the
 # tree — df-app's PDF reader decompresses object streams with it — and a

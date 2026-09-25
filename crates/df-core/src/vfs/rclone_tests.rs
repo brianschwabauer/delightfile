@@ -1068,3 +1068,60 @@ fn a_daemon_dies_with_the_thread_that_spawned_it() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// A download that fails removes the `.partial` rclone left beside its
+/// destination — and only that: the user's own files that merely look alike
+/// stay.
+#[test]
+fn a_failed_download_sweeps_up_its_own_partials_and_nothing_else() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(rclone) = find_rclone() else {
+        eprintln!(
+            "skipping a_failed_download_sweeps_up_its_own_partials_and_nothing_else: \
+             no rclone on $PATH"
+        );
+        return;
+    };
+    let remote = TempDir::new("rclone-sweep-remote");
+    let scratch = TempDir::new("rclone-sweep-scratch");
+    let local = TempDir::new("rclone-sweep-local");
+    // A file rclone can stat but not read: the copy fails after it starts.
+    let locked = remote.file("locked.bin", b"secret");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&locked).is_ok() {
+        eprintln!(
+            "skipping a_failed_download_sweeps_up_its_own_partials_and_nothing_else: \
+             running as a user permissions do not stop"
+        );
+        return;
+    }
+    // What a daemon killed mid-copy leaves, and three neighbours that are
+    // somebody's own files.
+    let debris = local.file("target.bin.0123abcd.partial", b"half");
+    let theirs = [
+        local.file("target.bin.backup.partial", b"mine"),
+        local.file("other.bin.0123abcd.partial", b"mine"),
+        local.file("target.bin.partial", b"mine"),
+    ];
+
+    let name = unique_name("sw");
+    let vfs = vfs_over(local_service(&name, &remote, &scratch, &rclone));
+    let root = VfsPath::rclone(&name, "");
+    let error = vfs
+        .download(
+            &root.join("locked.bin"),
+            &local.path.join("target.bin"),
+            &TaskCtx::detached(),
+        )
+        .expect_err("the source cannot be read");
+    assert!(
+        matches!(&error, VfsError::Status { status, .. } if status.code == StatusCode::Failure),
+        "{error}"
+    );
+    assert!(!debris.exists(), "rclone's leftover partial was swept up");
+    for file in &theirs {
+        assert!(file.exists(), "{} is not rclone's to lose", file.display());
+    }
+    assert!(!local.path.join("target.bin").exists());
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
