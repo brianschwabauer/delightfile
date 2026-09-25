@@ -1,5 +1,5 @@
-//! Cloud remotes through the app: `rclone://` from every door and the
-//! refusals that name what a remote cannot do.
+//! Cloud remotes through the app: `rclone://` from every door, the mount
+//! card's Network rows, and the refusals that name what a remote cannot do.
 //!
 //! No daemon runs. Every service here points its program at a path that does
 //! not exist, so a listing that does start fails on its worker and changes
@@ -10,6 +10,7 @@ use df_core::ops::paste::{Clipboard, PasteMode};
 use df_core::vfs::{Service, Vfs, VfsConfig, VfsPath};
 
 use super::*;
+use crate::mounts::{Cloud, Item};
 
 /// Where no rclone is.
 const NO_RCLONE: &str = "/nonexistent/df-test-rclone";
@@ -101,6 +102,58 @@ fn an_unknown_service_names_both_files() {
         Some("No service called nope — vfs.toml and rclone.conf have box, r2")
     );
     assert!(app.tab().remote.is_none());
+}
+
+/// `M`'s Network section lists the rclone services after the shares; `m`,
+/// `u` and `e` do nothing on one, and `Enter` goes there.
+#[test]
+fn the_mount_card_lists_cloud_remotes_and_enter_goes_there() {
+    let mut app = Fixture::new("cloud-card", &["a.txt"]);
+    with_services(
+        &mut app,
+        vec![
+            server("box"),
+            cloud("r2", Some("s3")),
+            cloud("gdrive", None),
+        ],
+    );
+    let now = Instant::now();
+
+    let mut card = app.mount_card();
+    card.set_clouds(app.cloud_rows());
+    assert_eq!(
+        card.clouds,
+        [
+            Cloud {
+                name: "r2".into(),
+                provider: "s3".into(),
+            },
+            Cloud {
+                name: "gdrive".into(),
+                provider: "rclone".into(),
+            },
+        ],
+        "rclone services only, in the vfs's order, `rclone` where the type is unknown"
+    );
+    card.select(Item::Cloud(0));
+    app.mounts = Some(card);
+
+    for verb in [
+        App::mount_selected,
+        App::unmount_selected,
+        App::eject_selected,
+    ] {
+        verb(&mut app, now);
+        let card = app.mounts.as_ref().expect("the card stays up");
+        assert_eq!(card.selected(), Some(Item::Cloud(0)));
+        assert!(card.busy.is_none(), "nothing was asked of udisks2 or gvfs");
+        assert!(remote_at(&app).is_none());
+        assert_eq!(toast(&app), None, "and nothing was said about it");
+    }
+
+    app.mount_action(now);
+    assert!(app.mounts.is_none(), "the card came down");
+    assert_eq!(remote_at(&app), Some(VfsPath::rclone("r2", "")));
 }
 
 /// A sync with a server is rsync over ssh; a cloud remote is refused by name

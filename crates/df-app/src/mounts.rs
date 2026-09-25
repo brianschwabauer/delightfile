@@ -54,6 +54,14 @@
 //! [`Spec`] is the bridge between the two: it builds the spec from the URL the
 //! way gvfs does, and finds it among the directories that are really there.
 //!
+//! ## Cloud remotes are rows, not mounts
+//!
+//! Under the shares, the Network section lists the vfs's rclone services —
+//! every remote in the user's `rclone.conf` ([`Cloud`]). They are not mounted
+//! and are not gvfs's: `Enter` goes to `rclone://<name>` the way a `g` key
+//! goes to `sftp://…`, and the mount verbs have nothing to act on, so the hint
+//! strip does not offer them there ([`Geometry::cloud`]).
+//!
 //! ## Every one of them blocks
 //!
 //! Mounting waits for the filesystem; unmounting waits for the writeback; and
@@ -1129,6 +1137,29 @@ pub struct Place {
 /// and the key that fills it.
 pub const PLACES_EMPTY: &str = "Nothing pinned · g b pins this folder";
 
+/// One cloud remote in the Network section: an rclone service — a remote in
+/// the user's `rclone.conf`, or a `type = "rclone"` service in `vfs.toml`.
+///
+/// Not a share: nothing is mounted, gvfs has never heard of it, and there is
+/// nothing to unmount or eject. It is on this card because the card is where a
+/// person looks for "where can I go that is not on this disk", and a Google
+/// Drive is an answer to that. `Enter` goes there, as `rclone://<name>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cloud {
+    /// The service's name, which is what the URL addresses.
+    pub name: String,
+    /// rclone's type for it — `s3`, `drive`, `dropbox` — or `rclone` when the
+    /// config did not say.
+    pub provider: String,
+}
+
+impl Cloud {
+    /// Where `Enter` goes: the top of the remote.
+    pub fn target(&self) -> PathBuf {
+        PathBuf::from(df_core::vfs::VfsPath::rclone(&self.name, "").to_url())
+    }
+}
+
 /// Something the cursor can be on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item {
@@ -1138,6 +1169,8 @@ pub enum Item {
     Disk(usize),
     /// An index into [`Card::shares`].
     Share(usize),
+    /// An index into [`Card::clouds`].
+    Cloud(usize),
     /// The Network section's last row, always there.
     Connect,
 }
@@ -1169,6 +1202,11 @@ pub struct Card {
     pub places: Vec<Place>,
     pub devices: Vec<Device>,
     pub shares: Vec<Share>,
+    /// The rclone services, after the shares in the Network section. Handed
+    /// in by the app when the card opens ([`Card::set_clouds`]): they are the
+    /// vfs config's, known at once, and never part of a udisks2 or gvfs
+    /// listing.
+    pub clouds: Vec<Cloud>,
     /// Which of [`Card::items`] the cursor is on.
     pub cursor: usize,
     /// The first of [`Card::lines`] drawn.
@@ -1189,6 +1227,7 @@ impl Card {
             places: Vec::new(),
             devices: Vec::new(),
             shares: Vec::new(),
+            clouds: Vec::new(),
             cursor: 0,
             first: 0,
             busy: None,
@@ -1212,14 +1251,26 @@ impl Card {
         card
     }
 
+    /// The rclone services, put under the shares. The cursor keeps its index,
+    /// which on a card still waiting for udisks2 is the first row after the
+    /// places — so it rests on the first cloud row until the disks arrive
+    /// above it, exactly as it rests on the connect row when there are none
+    /// (see [`Card::with_places`]).
+    pub fn set_clouds(&mut self, clouds: Vec<Cloud>) {
+        self.clouds = clouds;
+        self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
+        self.follow();
+    }
+
     /// Everything the cursor can land on, in order: the places, the disks, the
-    /// shares, and the connect row. Never empty — the connect row is always
-    /// there.
+    /// shares, the cloud remotes, and the connect row. Never empty — the
+    /// connect row is always there.
     pub fn items(&self) -> Vec<Item> {
         (0..self.places.len())
             .map(Item::Place)
             .chain((0..self.devices.len()).map(Item::Disk))
             .chain((0..self.shares.len()).map(Item::Share))
+            .chain((0..self.clouds.len()).map(Item::Cloud))
             .chain(std::iter::once(Item::Connect))
             .collect()
     }
@@ -1242,6 +1293,10 @@ impl Card {
             Some(message) => lines.push(Line::Empty(message)),
             None => lines.extend((0..self.shares.len()).map(|i| Line::Item(Item::Share(i)))),
         }
+        // After gvfs's shares, whatever gvfs said about them: "nothing
+        // mounted" stays true with a Google Drive under it, because nothing
+        // was mounted to reach one.
+        lines.extend((0..self.clouds.len()).map(|i| Line::Item(Item::Cloud(i))));
         lines.push(Line::Item(Item::Connect));
         lines
     }
@@ -1267,6 +1322,13 @@ impl Card {
     pub fn selected_place(&self) -> Option<&Place> {
         match self.selected()? {
             Item::Place(i) => self.places.get(i),
+            _ => None,
+        }
+    }
+
+    pub fn selected_cloud(&self) -> Option<&Cloud> {
+        match self.selected()? {
+            Item::Cloud(i) => self.clouds.get(i),
             _ => None,
         }
     }
@@ -1359,6 +1421,7 @@ impl Card {
                 .map(|p| format!("place {}", p.target.display())),
             Item::Disk(i) => self.devices.get(i).map(|d| format!("disk {}", d.object)),
             Item::Share(i) => self.shares.get(i).map(|s| format!("share {}", s.url)),
+            Item::Cloud(i) => self.clouds.get(i).map(|c| format!("cloud {}", c.name)),
             Item::Connect => Some("connect".to_string()),
         }
     }
@@ -1527,6 +1590,11 @@ pub struct Geometry {
     /// it. Only then: a `[goto]` row is the config's, and a key on the strip
     /// that could only ever say "not this one" is a key that lied.
     pub unpin: bool,
+    /// The cursor is on a cloud remote, so the hint strip leaves out `m`, `u`
+    /// and `e`: a remote is gone to, never mounted, and those three keys do
+    /// nothing on its row. The same rule as [`Geometry::unpin`], from the
+    /// other side — a key the row cannot use is not offered on it.
+    pub cloud: bool,
 }
 
 impl Geometry {
@@ -1579,6 +1647,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         rows,
         close: Some(crate::chrome::close_button_rect(rect)),
         unpin: card.selected_place().is_some_and(|place| place.pinned),
+        cloud: card.selected_cloud().is_some(),
     }
 }
 
@@ -1653,6 +1722,23 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
                 name: share.label.clone(),
                 detail: share.url.clone(),
                 status: Some(status),
+            }
+        }
+        Item::Cloud(i) => {
+            let Some(cloud) = card.clouds.get(i) else {
+                return Face::default();
+            };
+            // The network glyph a remote place wears in the Places section:
+            // it is the same kind of thing — somewhere that is not this disk —
+            // and a second glyph for "far away, but a cloud" would be a
+            // distinction the row's second line already draws in words.
+            Face {
+                icon: Some(crate::icons::network(palette, nerd)),
+                name: cloud.name.clone(),
+                detail: cloud.provider.clone(),
+                // No state: nothing is mounted, so there is no green to wear
+                // and nothing to be busy with.
+                status: None,
             }
         }
         Item::Connect => Face {
@@ -2550,6 +2636,8 @@ Mount(3): backup -> file:///mnt/backup
                 draw(&card);
                 card.update(many_devices(20), share_rows(3));
                 draw(&card);
+                card.set_clouds(clouds());
+                draw(&card);
                 card.move_cursor(21);
                 card.busy = Some("sftp://me@host1/".to_string());
                 draw(&card);
@@ -2870,6 +2958,89 @@ Mount(3): backup -> file:///mnt/backup
         assert_eq!(
             scroll(3, 1, &[Line::Section("Disks"), Line::Item(Item::Connect)]),
             0
+        );
+    }
+
+    fn clouds() -> Vec<Cloud> {
+        vec![
+            Cloud {
+                name: "r2".into(),
+                provider: "s3".into(),
+            },
+            Cloud {
+                name: "gdrive".into(),
+                provider: "rclone".into(),
+            },
+        ]
+    }
+
+    /// The rclone services sit under gvfs's shares and over the connect row,
+    /// go to `rclone://<name>`, wear the remote glyph with their provider
+    /// under the name, and take the mount verbs off the hint strip while the
+    /// cursor is on one.
+    #[test]
+    fn cloud_remotes_follow_the_shares_in_the_network_section() {
+        let mut card = Card::with_places(places(1));
+        card.set_clouds(clouds());
+        // While udisks2 is still being asked, the cursor waits where the
+        // first disk will be — on the first cloud row, for now…
+        assert_eq!(card.selected(), Some(Item::Cloud(0)));
+        card.update(many_devices(1), share_rows(1));
+        // …and the disk arrives under it.
+        assert_eq!(card.selected(), Some(Item::Disk(0)));
+        let network = |card: &Card| -> Vec<Line> {
+            card.lines()
+                .into_iter()
+                .skip_while(|line| *line != Line::Section("Network"))
+                .collect()
+        };
+        assert_eq!(
+            network(&card),
+            [
+                Line::Section("Network"),
+                Line::Item(Item::Share(0)),
+                Line::Item(Item::Cloud(0)),
+                Line::Item(Item::Cloud(1)),
+                Line::Item(Item::Connect),
+            ]
+        );
+        // With no shares gvfs's sentence stays, and the remotes follow it.
+        card.update(many_devices(1), Vec::new());
+        assert_eq!(
+            network(&card),
+            [
+                Line::Section("Network"),
+                Line::Empty("nothing mounted"),
+                Line::Item(Item::Cloud(0)),
+                Line::Item(Item::Cloud(1)),
+                Line::Item(Item::Connect),
+            ]
+        );
+
+        // A refresh keeps the cursor on the remote it was on.
+        card.select(Item::Cloud(1));
+        card.update(many_devices(2), share_rows(2));
+        let on = card.selected_cloud().expect("still on a remote");
+        assert_eq!(on.name, "gdrive");
+        assert_eq!(on.target(), PathBuf::from("rclone://gdrive"));
+
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+        let g = geometry(area, &card);
+        assert!(g.cloud, "the strip drops m, u and e here");
+        assert!(!g.unpin);
+        card.select(Item::Connect);
+        assert!(!geometry(area, &card).cloud);
+
+        let theme = df_core::config::Theme::default();
+        let palette = crate::theme::Palette::from_theme(&theme);
+        let row = face(&card, Item::Cloud(0), &palette, true);
+        assert_eq!(row.name, "r2");
+        assert_eq!(row.detail, "s3");
+        assert!(row.status.is_none(), "nothing is mounted, so no state");
+        assert_eq!(
+            row.icon.map(|icon| icon.glyph),
+            Some(crate::icons::network(&palette, true).glyph),
+            "the glyph a remote place wears"
         );
     }
 }

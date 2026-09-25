@@ -6293,9 +6293,32 @@ impl App {
 
     /// `M`: open the card and ask for the listing.
     fn open_mounts(&mut self) {
-        self.mounts = Some(self.mount_card());
+        let mut card = self.mount_card();
+        card.set_clouds(self.cloud_rows());
+        self.mounts = Some(card);
         self.udisks().ask(crate::mounts::Request::List);
         self.sync_context();
+    }
+
+    /// The Network section's cloud rows: every rclone service the vfs knows,
+    /// in its order.
+    ///
+    /// This is what starts the vfs when the card is the first thing to want
+    /// it — a read of `vfs.toml` and `rclone.conf`, and no connection: a
+    /// daemon is started by going to a remote, not by seeing it listed.
+    fn cloud_rows(&mut self) -> Vec<crate::mounts::Cloud> {
+        self.vfs()
+            .services()
+            .iter()
+            .filter(|service| service.kind == df_core::vfs::ServiceKind::Rclone)
+            .map(|service| crate::mounts::Cloud {
+                name: service.name.clone(),
+                provider: service
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| "rclone".to_string()),
+            })
+            .collect()
     }
 
     /// `Enter` on a row: mount it, or — if it is already mounted — go there.
@@ -6328,6 +6351,15 @@ impl App {
                 let path = share.path.clone();
                 self.close_overlay(now);
                 self.jump_to(path, now);
+                return;
+            }
+            // A cloud remote has nothing to mount: `Enter` is going there.
+            Some(Item::Cloud(_)) => {
+                let Some(target) = card.selected_cloud().map(crate::mounts::Cloud::target) else {
+                    return;
+                };
+                self.close_overlay(now);
+                self.navigate(target, now);
                 return;
             }
             Some(Item::Connect) => {
@@ -6377,8 +6409,9 @@ impl App {
                 self.open_connect();
                 return;
             }
-            // A place is a folder, and there is nothing to mount.
-            Some(Item::Place(_)) => return,
+            // A place is a folder, and a cloud remote is reached rather than
+            // mounted: there is nothing to mount in either.
+            Some(Item::Place(_) | Item::Cloud(_)) => return,
             Some(Item::Share(_)) => card.selected_share().map(|share| share.label.clone()),
             Some(Item::Disk(_)) => {
                 let Some(device) = card.selected_device().cloned() else {
@@ -6420,7 +6453,7 @@ impl App {
                 self.udisks().ask(crate::mounts::Request::UnmountShare(url));
                 return;
             }
-            Some(Item::Place(_) | Item::Connect) | None => return,
+            Some(Item::Place(_) | Item::Cloud(_) | Item::Connect) | None => return,
         }
         let Some(device) = card.selected_device().cloned() else {
             return;
@@ -6455,7 +6488,7 @@ impl App {
                 }
                 return;
             }
-            Some(Item::Place(_) | Item::Connect) | None => return,
+            Some(Item::Place(_) | Item::Cloud(_) | Item::Connect) | None => return,
         }
         let Some(device) = card.selected_device().cloned() else {
             return;
@@ -16472,6 +16505,11 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
             if geometry.unpin {
                 hints.insert(1, Hint::key("d", "unpin", Chord::plain(K::Char('d'))));
             }
+            // Not on a cloud remote, which has nothing to mount, unmount or
+            // eject: see `mounts::Geometry::cloud`.
+            if geometry.cloud {
+                hints.retain(|hint| !matches!(hint.keys, "m" | "u" | "e"));
+            }
             hints
         }
         // Every key the spot card answers to, including the two df-core's
@@ -17314,7 +17352,7 @@ mod tests {
     /// `A`, driven through the prompt, the card and the job.
     mod compress;
 
-    /// `rclone://` from every door, and the refusals a remote gets.
+    /// `rclone://` from every door, and the mount card's cloud rows.
     mod cloud;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
@@ -18197,24 +18235,32 @@ mod tests {
         assert!(spot.iter().any(|hint| hint.keys.contains('⇧')));
         assert!(spot.iter().any(|hint| hint.keys.contains("Tab")));
         // The mount card advertises the five verbs `[pick]` has no row for.
-        let mounts = overlay_hints(
-            &OverlayGeom::Mounts(crate::mounts::Geometry {
-                card: nowhere,
-                body: nowhere,
-                lines: Vec::new(),
-                rows: Vec::new(),
-                close: None,
-                unpin: false,
-            }),
-            &None,
-        );
-        let keys: Vec<String> = mounts
+        let mount_hints = |cloud: bool| {
+            overlay_hints(
+                &OverlayGeom::Mounts(crate::mounts::Geometry {
+                    card: nowhere,
+                    body: nowhere,
+                    lines: Vec::new(),
+                    rows: Vec::new(),
+                    close: None,
+                    unpin: false,
+                    cloud,
+                }),
+                &None,
+            )
             .iter()
             .map(|hint| format!("{} {}", hint.keys, hint.label))
-            .collect();
+            .collect::<Vec<String>>()
+            .join(" · ")
+        };
         assert_eq!(
-            keys.join(" · "),
+            mount_hints(false),
             "Enter open · m mount · u unmount · e eject · c connect · r refresh · Esc close"
+        );
+        // On a cloud remote the three verbs it has no use for are not offered.
+        assert_eq!(
+            mount_hints(true),
+            "Enter open · c connect · r refresh · Esc close"
         );
     }
 
