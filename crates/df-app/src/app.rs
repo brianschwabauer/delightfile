@@ -18296,8 +18296,13 @@ mod tests {
     // the cursor itself would pass with the resolution in the wrong place.
 
     /// The window the frames below are drawn into.
+    /// The window every fixture is laid out in: the size a first run opens
+    /// at, so what fits on screen in a test is what fits on a fresh one — the
+    /// app menu, at its full length, hangs from its button here and is only
+    /// pushed up to fit on a shorter window.
     fn screen() -> egui::Rect {
-        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))
+        let (w, h) = WINDOW_SIZE;
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w as f32, h as f32))
     }
 
     impl App {
