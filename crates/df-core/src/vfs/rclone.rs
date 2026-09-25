@@ -34,6 +34,13 @@
 //! program, and Go dies of `SIGPIPE` the first time it logs to a closed pipe —
 //! and its last lines are what a failure to start reports.
 //!
+//! **The daemon cannot outlive the thread that owns it.** `ssh` exits when
+//! delightfile's end of its stdin closes; `rclone rcd` serves a socket and
+//! would not notice. So the child is started with a parent-death signal (see
+//! `super::child`): if the worker thread that spawned it ends — including when
+//! the whole process dies by `SIGKILL`, an abort or the OOM killer, where no
+//! destructor runs — the kernel sends the daemon `SIGTERM`.
+//!
 //! ## One HTTP request per call
 //!
 //! [`Daemon::call`] is a `POST` of a JSON object to `/<method>`, answered with
@@ -90,6 +97,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::child;
 use super::config::Service;
 use super::http::{self, HttpError};
 use super::json::Json;
@@ -161,8 +169,9 @@ const NOT_INSTALLED: &str = "rclone is not installed";
 /// A running `rclone rcd` for one service, and the client that talks to it.
 ///
 /// Owned by the service's worker thread, exactly as an SFTP [`super::conn`]
-/// connection is. Dropping it kills and reaps the daemon and removes its
-/// socket.
+/// connection is — and spawned on it, which is what ties the daemon's life to
+/// that thread's (see the module note). Dropping it kills and reaps the daemon
+/// and removes its socket.
 pub(super) struct Daemon {
     service: Arc<Service>,
     /// [`Service::rclone_fs`], computed once.
@@ -224,12 +233,16 @@ impl Daemon {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        // This is the worker thread that will own the daemon, so its end —
+        // however it comes — is the daemon's too.
+        child::tie_to_this_thread(&mut command);
         let mut child = command
             .spawn()
             .map_err(|source| spawn_failure(&service, &program, source))?;
         log::info!(
-            "vfs {}: rclone rcd on {} for {}",
+            "vfs {}: rclone rcd (pid {}) on {} for {}",
             service.name,
+            child.id(),
             socket.display(),
             service.rclone_fs()
         );
@@ -263,7 +276,18 @@ impl Daemon {
         // On failure `daemon` drops here, which kills and reaps the child and
         // removes the socket — the same teardown as any other end.
         daemon.wait_ready()?;
+        log::debug!(
+            "vfs {}: rclone {} is answering",
+            daemon.service.name,
+            daemon.pid()
+        );
         Ok(daemon)
+    }
+
+    /// The daemon's process id — what the log line names, and what the tests
+    /// watch for after the thread that owned it has gone.
+    pub(super) fn pid(&self) -> u32 {
+        self.child.id()
     }
 
     /// Knock on the socket until `rc/noop` answers, the daemon exits, or

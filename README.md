@@ -21,8 +21,9 @@ Each tab keeps its own step as it moves between folders, and a new tab starts at
 Every phase of [PLAN.md](PLAN.md) is built. About 129,000 lines of Rust and 1,531 tests,
 clippy-clean. The workspace warns on `unsafe_code`, so each of the sixty-odd uses is opted
 in by hand and sits next to a comment saying why: libc calls for inotify, `statfs`,
-`copy_file_range` and thread priority, the Wayland data-device client, and FFmpeg's FFI in
-the vendored `dv-media`.
+`copy_file_range` and thread priority, the parent-death signal that stops an rclone daemon
+outliving the app, the Wayland data-device client, and FFmpeg's FFI in the vendored
+`dv-media`.
 
 It is my daily file manager on Hyprland with an NVIDIA card. It has not been tested on
 other compositors, other GPUs, or X11. Bugs from those are expected rather than

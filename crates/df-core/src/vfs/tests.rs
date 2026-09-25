@@ -1595,7 +1595,8 @@ fn a_dropped_connection_reconnects_on_the_next_request() {
         .parse()
         .unwrap();
     // `kill(1)` rather than `libc::kill`, so the test file stays out of the
-    // crate's unsafe census (poll.rs and fs::inotify are its only islands).
+    // crate's unsafe census (in the vfs, poll.rs and child.rs are its only
+    // islands).
     let killed = std::process::Command::new("kill")
         .args(["-9", &pid.to_string()])
         .status()

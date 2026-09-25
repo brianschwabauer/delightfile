@@ -315,6 +315,20 @@ pub(super) fn sockets_in(scratch: &TempDir) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Whether process `pid` has exited: gone from `/proc`, or a zombie (`Z`)
+/// waiting for a parent that will never reap it.
+fn has_exited(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return true;
+    };
+    // `pid (comm) S …` — the state follows the last `)`, since `comm` may
+    // itself contain one.
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next());
+    matches!(state, Some("Z" | "X" | "x"))
+}
+
 /// Anything rclone left half-written in `dir`.
 pub(super) fn partials_in(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir)
@@ -1016,4 +1030,41 @@ fn a_listing_nobody_wants_is_stopped_rather_than_waited_out() {
     done.store(true, Ordering::SeqCst);
     drop(vfs);
     server.join().unwrap();
+}
+
+/// **The daemon cannot outlive the thread that owns it.** The thread that
+/// spawned it ends without the `Daemon` ever being dropped — which is what a
+/// `SIGKILL`, an abort or the OOM killer does to the whole process — and the
+/// kernel's parent-death signal ends rclone anyway.
+///
+/// The exited daemon is left a zombie: its `Child` was forgotten, so nothing
+/// in this process will reap it, and it goes when the test binary does.
+#[test]
+fn a_daemon_dies_with_the_thread_that_spawned_it() {
+    let Some(rclone) = find_rclone() else {
+        eprintln!("skipping a_daemon_dies_with_the_thread_that_spawned_it: no rclone on $PATH");
+        return;
+    };
+    let remote = TempDir::new("rclone-orphan-remote");
+    let scratch = TempDir::new("rclone-orphan-scratch");
+    let service = local_service(&unique_name("or"), &remote, &scratch, &rclone);
+    let pid = std::thread::spawn(move || {
+        let daemon = Daemon::spawn(Arc::new(service), &[]).unwrap();
+        let pid = daemon.pid();
+        assert!(!has_exited(pid), "the daemon is up while its thread is");
+        // No destructor: no SIGTERM from us, no reap, no unlink.
+        std::mem::forget(daemon);
+        pid
+    })
+    .join()
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !has_exited(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "rclone {pid} outlived the thread that owned it"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

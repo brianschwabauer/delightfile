@@ -45,6 +45,9 @@
 //! - `rclone` — one `rclone rcd` child per cloud service and the calls made to
 //!   it, over [`json`], `http` (one `POST` per call on a unix socket) and
 //!   `rfc3339` (rclone's dates).
+//! - `child` — the daemon's life tied to its worker thread's (a parent-death
+//!   signal set between `fork` and `exec`); the vfs's other island of
+//!   `unsafe`, beside `poll`.
 //! - [`Vfs`] (this file) — the manager: one worker thread per service, lazy
 //!   connect, reconnect after a drop, and the channel-and-token listing API.
 //!
@@ -75,6 +78,7 @@
 //! after a teardown reconnects lazily — a dropped wifi link costs one visible
 //! error and one reconnect, not a restart.
 
+mod child;
 mod config;
 mod conn;
 mod http;
