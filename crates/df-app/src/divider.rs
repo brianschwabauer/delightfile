@@ -98,10 +98,7 @@ impl Divider {
 
     /// Its place in [`Split`]'s pairs and [`crate::ui::Layout::dividers`].
     pub fn index(self) -> usize {
-        match self {
-            Divider::Left => 0,
-            Divider::Right => 1,
-        }
+        self.side().slot()
     }
 
     /// Which way the side pane grows as the pointer moves right: the parent
@@ -132,7 +129,9 @@ pub fn rubber_band(overflow: f32) -> f32 {
 /// from it: `GRAVITY · t + (1 − GRAVITY) · t²` of the escape radius, with `t`
 /// the pull as a fraction of it. At the boundary that is exactly the pull,
 /// which is the whole point: the divider catches up with the pointer at the
-/// moment it lets go.
+/// moment it lets go. Being *captured* is the one place it jumps — up to 6.4
+/// points towards home at the 14-point edge — and that is meant: it is the
+/// click of the magnet, and `SplitPane` does the same.
 pub fn gravity(pull: f32) -> f32 {
     let t = (pull.abs() / SNAP_ESCAPE).min(1.0);
     pull.signum() * (GRAVITY * t + (1.0 - GRAVITY) * t * t) * SNAP_ESCAPE
@@ -270,6 +269,13 @@ pub struct Dividers {
     /// Each divider's stretch or lag let go, springing back to nothing on
     /// `back-out`.
     springs: [Option<Tween>; 2],
+    /// The share a side pane a drag folded is being folded *from*: the width
+    /// the hand left it at, which is not the share it will open back to.
+    /// Kept here rather than on the drag, because the fold outlives the drag
+    /// — a divider let go mid-fold must go on folding from where it was, not
+    /// from the share it had before the press. Cleared when the fold is done
+    /// or the pane opens again.
+    fold_from: [Option<f32>; 2],
     drag: Option<Drag>,
 }
 
@@ -288,8 +294,14 @@ impl Dividers {
             ],
             slide: None,
             springs: [None; 2],
+            fold_from: [None; 2],
             drag: None,
         }
+    }
+
+    /// How open the parent and the preview are at `now`.
+    fn openness(&self, now: Instant) -> [f32; 2] {
+        self.open.map(|tween| tween.value(now))
     }
 
     /// The widths as they are now, a drag included.
@@ -310,7 +322,7 @@ impl Dividers {
 
     /// The panes as they are to be drawn at `now` ([`Split`]).
     pub fn split(&self, now: Instant) -> Split {
-        let open = [self.open[0].value(now), self.open[1].value(now)];
+        let open = self.openness(now);
         let mut fractions = self.fractions(open);
         if let Some((from, tween)) = &self.slide {
             let e = tween.value(now);
@@ -338,15 +350,13 @@ impl Dividers {
     fn fractions(&self, open: [f32; 2]) -> [f32; 3] {
         let live = self.live();
         let mut fractions = live.ratio;
-        for (side, open) in [(Side::Parent, open[0]), (Side::Preview, open[1])] {
-            if !live.collapsed(side) || open <= 0.0 {
+        for side in [Side::Parent, Side::Preview] {
+            if !live.collapsed(side) || open[side.slot()] <= 0.0 {
                 continue;
             }
-            let share = match self.drag {
-                Some(drag) if drag.which.side() == side && drag.usable > 0.0 => {
-                    (drag.shown.width / drag.usable).min(fractions[1])
-                }
-                _ => live.reopen_share(side, &self.home),
+            let share = match self.fold_from[side.slot()] {
+                Some(share) => share.min(fractions[1]),
+                None => live.reopen_share(side, &self.home),
             };
             fractions[side.index()] = share;
             fractions[1] -= share;
@@ -361,9 +371,17 @@ impl Dividers {
 
     /// Let divider `which` go `from` points away from where it settles. A
     /// spring it is still on is carried into the new one rather than cut off,
-    /// so a divider let go twice in quick succession never jumps.
+    /// so a divider let go twice in quick succession never jumps — and a
+    /// let-go that adds nothing to it (a click, a press that never moved)
+    /// leaves it running on its own clock rather than starting it again.
+    /// "Nothing" is anything under [`SPRING_FLOOR`], the same half point a
+    /// spring is not started for.
     fn spring_from(&mut self, which: Divider, from: f32, now: Instant) {
         let k = which.index();
+        let running = self.springs[k].is_some_and(|spring| !spring.finished(now));
+        if running && from.abs() <= SPRING_FLOOR {
+            return;
+        }
         let from = from + self.spring_at(k, now);
         self.springs[k] = (from.abs() > SPRING_FLOOR)
             .then(|| Tween::new(from, 0.0, SPRING, Easing::BackOut, now));
@@ -388,6 +406,11 @@ impl Dividers {
         if self.slide.is_some_and(|(_, tween)| tween.finished(now)) {
             self.slide = None;
         }
+        for (fold_from, open) in self.fold_from.iter_mut().zip(&self.open) {
+            if open.finished(now) {
+                *fold_from = None;
+            }
+        }
         for spring in &mut self.springs {
             if spring.is_some_and(|spring| spring.finished(now)) {
                 *spring = None;
@@ -408,7 +431,7 @@ impl Dividers {
         self.settle(now);
         let side = which.side();
         let folded = self.panes.collapsed(side);
-        let open = self.open[which.index()].value(now);
+        let open = self.open[side.slot()].value(now);
         let width = if folded {
             0.0
         } else if open > 0.0 {
@@ -425,13 +448,18 @@ impl Dividers {
         // What a pane still folding is drawn from, so taking hold of it does
         // not snap what is left of it away.
         let shown = Reading {
-            width: if folded {
-                self.panes.reopen_share(side, &self.home) * usable
-            } else {
-                width
+            width: match self.fold_from[side.slot()] {
+                Some(share) if folded => share * usable,
+                _ if folded => self.panes.reopen_share(side, &self.home) * usable,
+                _ => width,
             },
             ..at_rest
         };
+        // A divider taken hold of at home is held there from the start, or
+        // the magnet would depend on how fast the hand moved: one quick pull
+        // past the capture distance on the first frame would skip it.
+        let at_home =
+            !folded && (width - self.home.ratio[side.index()] * usable).abs() <= SNAP_CAPTURE;
         self.drag = Some(Drag {
             which,
             from_x: x,
@@ -439,7 +467,7 @@ impl Dividers {
             at_press: self.panes,
             live: self.panes,
             latch: Latch {
-                snapped: false,
+                snapped: at_home,
                 folded,
             },
             reading: at_rest,
@@ -482,8 +510,13 @@ impl Dividers {
             live.open_at(side, share);
         }
         drag.live = live;
+        let fold_from = (usable > 0.0).then(|| drag.shown.width / usable);
         if reading.folded != was_folded {
             self.fold(side, reading.folded, now);
+            // Folding, it goes down from where the hand left it.
+            if reading.folded {
+                self.fold_from[side.slot()] = fold_from;
+            }
         }
     }
 
@@ -492,9 +525,7 @@ impl Dividers {
     /// divider writes nothing — and a stretch or a lag springs back.
     pub fn release(&mut self, now: Instant) -> Option<Panes> {
         let drag = self.drag.take()?;
-        if !drag.reading.folded {
-            self.spring_from(drag.which, drag.reading.overshoot, now);
-        }
+        self.let_go(&drag, now);
         let panes = drag.live.validated().unwrap_or(drag.at_press);
         self.panes = panes;
         (panes != drag.at_press).then_some(panes)
@@ -505,13 +536,11 @@ impl Dividers {
     /// written.
     pub fn cancel(&mut self, now: Instant) {
         let Some(drag) = self.drag else { return };
-        let open = [self.open[0].value(now), self.open[1].value(now)];
+        let open = self.openness(now);
         let from = self.fractions(open);
         self.drag = None;
         self.slide = Some((from, Tween::new(0.0, 1.0, FOLD, Easing::OutQuint, now)));
-        if !drag.reading.folded {
-            self.spring_from(drag.which, drag.shown.overshoot, now);
-        }
+        self.let_go(&drag, now);
         let side = drag.which.side();
         if drag.at_press.collapsed(side) != drag.live.collapsed(side) {
             self.fold(side, drag.at_press.collapsed(side), now);
@@ -541,12 +570,10 @@ impl Dividers {
     /// deliberate act — and a stretch it had springs back rather than
     /// vanishing.
     pub fn reset(&mut self, now: Instant) -> Panes {
-        let open = [self.open[0].value(now), self.open[1].value(now)];
+        let open = self.openness(now);
         let from = self.fractions(open);
         if let Some(drag) = self.drag.take() {
-            if !drag.reading.folded {
-                self.spring_from(drag.which, drag.shown.overshoot, now);
-            }
+            self.let_go(&drag, now);
         }
         self.panes = self.home;
         self.slide = Some((from, Tween::new(0.0, 1.0, FOLD, Easing::OutQuint, now)));
@@ -556,12 +583,25 @@ impl Dividers {
         self.panes
     }
 
-    /// Start `side` folding (or opening) from wherever it is now.
+    /// The stretch or lag a drag was drawn with, handed to the spring as the
+    /// hand lets go — the drawing is the same on the frame after as on the
+    /// frame before. Including for a pane the drag folded, which is still
+    /// drawn with it while it folds; not for one folded all the way, where
+    /// there is nothing left to see settle and the spring would be frames
+    /// asked for nothing.
+    fn let_go(&mut self, drag: &Drag, now: Instant) {
+        let slot = drag.which.side().slot();
+        let hidden = drag.reading.folded && self.open[slot].value(now) <= 0.0;
+        if !hidden {
+            self.spring_from(drag.which, drag.shown.overshoot, now);
+        }
+    }
+
+    /// Start `side` folding (or opening) from wherever it is now, from the
+    /// share it would open to — a drag that folds it says otherwise after.
     fn fold(&mut self, side: Side, folded: bool, now: Instant) {
-        let k = match side {
-            Side::Parent => 0,
-            Side::Preview => 1,
-        };
+        let k = side.slot();
+        self.fold_from[k] = None;
         let to = if folded { 0.0 } else { 1.0 };
         let at = self.open[k].value(now);
         if at == to && self.open[k].to == to {
@@ -644,10 +684,15 @@ mod tests {
             assert_eq!(reading.width, 96.0, "the width stays at the minimum");
             assert!(reading.overshoot < 0.0 && reading.overshoot > -BAND_REACH);
         }
-        assert!((r[0].overshoot - 24.0 * (-16.0f32 / 80.0).tanh()).abs() < 1e-4);
+        // Further out is further stretched, and never past the reach.
+        assert!(r[0].overshoot > r[1].overshoot && r[1].overshoot > r[2].overshoot);
+        let mut last = 0.0;
         for overflow in [-1.0, -50.0, -500.0, -1e9] {
-            assert!(rubber_band(overflow).abs() <= BAND_REACH);
+            let band = rubber_band(overflow);
+            assert!(band <= last && band.abs() <= BAND_REACH, "{overflow}");
+            last = band;
         }
+        assert!(rubber_band(10.0) > 0.0, "signed like the overflow");
     }
 
     /// The side folds 40 points past its minimum and opens again only 24
@@ -829,6 +874,110 @@ mod tests {
             (held.fractions[0] * USABLE + held.overshoot[0] - drawn).abs() < 1e-2,
             "held where it was drawn"
         );
+    }
+
+    /// The window the divider tests' panes are laid out in: `USABLE` points
+    /// of panes between the margins and the two gaps.
+    fn drawn(split: &Split) -> crate::ui::Layout {
+        let area = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(USABLE + 4.0 * crate::ui::GAP, 908.0),
+        );
+        crate::ui::layout(area, split, false, 1)
+    }
+
+    /// Let go while the pane it folded is still folding, the pane goes on
+    /// folding from where it was drawn — its width and its stretch — rather
+    /// than jumping to the share it will open back to.
+    #[test]
+    fn let_go_mid_fold_it_folds_on_from_where_it_was() {
+        let t0 = Instant::now();
+        for escape in [false, true] {
+            let mut d = dividers(t0);
+            let width = 0.375 * USABLE;
+            d.press(Divider::Right, 900.0, width, USABLE, t0);
+            // Into the stretch past the minimum first, so the pane folds from
+            // its minimum less the band — nowhere near the share it had.
+            let x_for = |raw: f32| 900.0 + (width - raw);
+            d.drag_to(x_for(PREVIEW_MIN - 30.0), USABLE, t0);
+            assert!(d.split(t0).overshoot[1] < -5.0, "stretched");
+            d.drag_to(x_for(PREVIEW_MIN - FOLD_PAST - 1.0), USABLE, t0);
+            assert!(d.collapsed(Side::Preview));
+            let at = t0 + FOLD / 4;
+            let before = drawn(&d.split(at)).preview.width();
+            assert!(before > 1.0, "still folding: {before}");
+            if escape {
+                d.cancel(at);
+            } else {
+                d.release(at);
+            }
+            let after = drawn(&d.split(at)).preview.width();
+            assert!(
+                (after - before).abs() < 1.0,
+                "escape {escape}: {before} → {after} on the frame it was let go"
+            );
+            let next = drawn(&d.split(at + Duration::from_millis(16)))
+                .preview
+                .width();
+            if escape {
+                assert!(next > after, "Esc opens it back up: {after} → {next}");
+            } else {
+                assert!(next < after, "it goes on folding: {after} → {next}");
+                assert_eq!(d.panes.preview_before, 0.375, "and opens to its old share");
+            }
+        }
+    }
+
+    /// A divider taken hold of at home is held there from the first frame,
+    /// however fast the hand goes: one 20-point pull is held with lag, one
+    /// 31-point pull escapes.
+    #[test]
+    fn home_holds_a_quick_first_pull() {
+        let t0 = Instant::now();
+        let home = 0.125 * USABLE;
+        let mut d = dividers(t0);
+        d.press(Divider::Left, 300.0, home, USABLE, t0);
+        d.drag_to(320.0, USABLE, t0);
+        let held = d.split(t0);
+        assert_eq!(held.fractions[0], 0.125, "held at home");
+        assert!(
+            held.overshoot[0] > 0.0 && held.overshoot[0] < 20.0,
+            "lagging"
+        );
+        d.release(t0);
+
+        let mut d = dividers(t0);
+        d.press(Divider::Left, 300.0, home, USABLE, t0);
+        d.drag_to(331.0, USABLE, t0);
+        let free = d.split(t0);
+        assert!((free.fractions[0] * USABLE - (home + 31.0)).abs() < 1e-2);
+        assert_eq!(free.overshoot[0], 0.0);
+    }
+
+    /// A click on a divider that is springing back leaves the spring on its
+    /// own clock: the drawing is what it would have been untouched, and the
+    /// frames stop when the first spring would have stopped.
+    #[test]
+    fn a_click_mid_spring_does_not_restart_it() {
+        let t0 = Instant::now();
+        let mut d = dividers(t0);
+        d.press(Divider::Left, 100.0, 0.125 * USABLE, USABLE, t0);
+        d.drag_to(100.0 - (0.125 * USABLE - PARENT_MIN) - 30.0, USABLE, t0);
+        d.release(t0);
+        let untouched = d.clone();
+        let mid = t0 + SPRING / 4;
+        let drawn_at = |d: &Dividers, now: Instant| drawn(&d.split(now)).parent.width();
+        let x = 100.0;
+        d.press(Divider::Left, x, drawn_at(&d, mid), USABLE, mid);
+        d.drag_to(x, USABLE, mid);
+        assert_eq!(d.release(mid), None, "nothing moved");
+        for later in [mid, t0 + SPRING / 2, t0 + SPRING * 3 / 4] {
+            assert!(
+                (drawn_at(&d, later) - drawn_at(&untouched, later)).abs() < 1e-3,
+                "the spring was restarted"
+            );
+        }
+        assert!(!d.animating(t0 + SPRING));
     }
 
     /// `Esc` puts back what the press found and commits nothing.

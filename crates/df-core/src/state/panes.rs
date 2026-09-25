@@ -62,6 +62,15 @@ impl Side {
             Side::Preview => 2,
         }
     }
+
+    /// Its place among the two side panes — in the app's pairs of openings,
+    /// dividers and collapsed flags, which have no slot for the list.
+    pub fn slot(self) -> usize {
+        match self {
+            Side::Parent => 0,
+            Side::Preview => 1,
+        }
+    }
 }
 
 /// The panes' widths, as the state file keeps them.
