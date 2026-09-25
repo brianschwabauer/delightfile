@@ -107,7 +107,7 @@ pub(super) fn goto_table(config: &[Bookmark], pins: &[Pin], home: Option<&Path>)
         Some(Bookmark {
             key: pin.key.clone()?,
             path: pin.path.clone(),
-            description: format!("Go to {}", shown(&pin.path, home)),
+            description: format!("Go to {}", said(&pin.path, home)),
         })
     }));
     table
@@ -117,6 +117,75 @@ pub(super) fn goto_table(config: &[Bookmark], pins: &[Pin], home: Option<&Path>)
 /// so `~/Work` and `/home/brian/Work` read the same whichever was written.
 fn shown(written: &str, home: Option<&Path>) -> String {
     finder::shorten_home(Path::new(&expand_home(written)), home)
+}
+
+/// How long a place may run inside a sentence — a toast, the prompt's title,
+/// a `g` row's description on the which-key card — before its middle goes.
+///
+/// Those three are one line each with no room to wrap, and a folder four
+/// levels under `/tmp` ran the which-key card's description out through the
+/// card's side and pushed the prompt's field off the end of the bar.
+const BRIEF: usize = 40;
+
+/// …and in a row of its own, the mount card's, which has the card's width.
+const ROW_BRIEF: usize = 56;
+
+/// `text` with its middle folders dropped until it fits in `max` characters,
+/// the start that says whose it is kept: `~/…/crates/df-app`,
+/// `sftp://host/…/www`, `…/files/Projects`. The last folder always stays
+/// whole — it is the name the place is known by — so a single enormous name
+/// is left to the painter's ellipsis.
+fn brief(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    // What stays at the front: home, or a server, and nothing else.
+    let head_len = if text.starts_with("~/") {
+        1
+    } else if let Some(scheme) = text.find("://") {
+        let after = scheme + 3;
+        text[after..]
+            .find('/')
+            .map_or(text.len(), |slash| after + slash)
+    } else {
+        0
+    };
+    let (head, rest) = text.split_at(head_len);
+    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    // `…/`, or the head and `/…/`.
+    let prefix = if head.is_empty() {
+        2
+    } else {
+        head.chars().count() + 3
+    };
+    let mut tail = String::new();
+    let mut kept = 0;
+    for part in parts.iter().rev() {
+        let longer = if tail.is_empty() {
+            (*part).to_string()
+        } else {
+            format!("{part}/{tail}")
+        };
+        if !tail.is_empty() && prefix + longer.chars().count() > max {
+            break;
+        }
+        tail = longer;
+        kept += 1;
+    }
+    // Nothing in the middle to drop: a `…` would only make it longer.
+    if kept == parts.len() {
+        return text.to_string();
+    }
+    if head.is_empty() {
+        format!("…/{tail}")
+    } else {
+        format!("{head}/…/{tail}")
+    }
+}
+
+/// A place as a sentence says it: [`shown`], then [`brief`].
+fn said(written: &str, home: Option<&Path>) -> String {
+    brief(&shown(written, home), BRIEF)
 }
 
 /// How a folder is written into the state file when it is pinned: under `~`
@@ -251,7 +320,7 @@ pub(super) fn card_places(
     pool.iter()
         .filter(|place| !place.fallback)
         .map(|place| crate::mounts::Place {
-            name: place.label(home),
+            name: brief(&place.label(home), ROW_BRIEF),
             detail: place
                 .key(keymap)
                 .or_else(|| place.description.clone())
@@ -293,7 +362,7 @@ impl App {
         }
         self.open_prompt_with(PromptKind::Pin, InputBuffer::new("", 0));
         if let Some(prompt) = &mut self.prompt {
-            prompt.label = Some(format!("Pin {} as:", shown(&here, home().as_deref())));
+            prompt.label = Some(format!("Pin {} as:", said(&here, home().as_deref())));
         }
         self.places.keying = Some(here);
     }
@@ -342,7 +411,7 @@ impl App {
         let holder = self.keymap.holder(Context::Files, &seq)?;
         let what = match holder.command {
             Command::Goto(slot) => match self.places.table().get(slot as usize) {
-                Some(bookmark) => shown(&bookmark.path, home().as_deref()),
+                Some(bookmark) => said(&bookmark.path, home().as_deref()),
                 None => holder.description.clone(),
             },
             _ => holder.description.clone(),
@@ -357,7 +426,7 @@ impl App {
             .places_pool()
             .into_iter()
             .find(|place| place.pinned && place.path == path);
-        let shown = shown(path, home().as_deref());
+        let shown = said(path, home().as_deref());
         match place.and_then(|place| place.key(&self.keymap)) {
             Some(key) => format!("Pinned {shown} · {key}"),
             None => match self.keymap.binding_label(Command::GotoInteractive) {
@@ -372,7 +441,7 @@ impl App {
         if let Some(pin) = self.state.unpin(path) {
             self.pins_changed(now);
             self.toasts.notice(
-                format!("Unpinned {}", shown(&pin.path, home().as_deref())),
+                format!("Unpinned {}", said(&pin.path, home().as_deref())),
                 now,
             );
         }
@@ -497,7 +566,7 @@ impl App {
             .places_pool()
             .iter()
             .map(|place| crate::menu::GoRow {
-                label: place.label(home.as_deref()),
+                label: brief(&place.label(home.as_deref()), BRIEF),
                 keys: place.key(&self.keymap).unwrap_or_default(),
             })
             .collect();
@@ -753,10 +822,49 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        /// A folder as the lists and the toasts spell it.
-        fn shown(&self, dir: &Path) -> String {
+        /// A folder as a sentence says it: a toast, the prompt's title, a
+        /// menu row. `$TMPDIR` is long enough on some machines for the middle
+        /// to go, which is what [`brief`] is for.
+        fn said(&self, dir: &Path) -> String {
+            said(&text(dir), home().as_deref())
+        }
+
+        /// …in full, as the picker lists it for the typing to match.
+        fn full(&self, dir: &Path) -> String {
             shown(&text(dir), home().as_deref())
         }
+
+        /// …as a mount card row names it.
+        fn row(&self, dir: &Path) -> String {
+            brief(&self.full(dir), ROW_BRIEF)
+        }
+    }
+
+    /// Long places lose their middle, keeping whose they are and the name
+    /// they are known by; short ones, and ones with no middle, stay whole.
+    #[test]
+    fn a_long_place_loses_its_middle_in_a_sentence() {
+        assert_eq!(brief("~/Work", 10), "~/Work");
+        assert_eq!(
+            brief("~/Work/delightfile/crates/df-app/src", 24),
+            "~/…/crates/df-app/src"
+        );
+        assert_eq!(
+            brief("/tmp/a-long-one/b/files/Projects", 20),
+            "…/b/files/Projects"
+        );
+        assert_eq!(
+            brief("sftp://box/srv/www/site/public", 26),
+            "sftp://box/…/site/public"
+        );
+        assert_eq!(
+            brief("/a-single-enormous-folder-name-with-no-middle", 10),
+            "/a-single-enormous-folder-name-with-no-middle",
+            "nothing to drop"
+        );
+        let long =
+            "/tmp/claude-1000/-home-brian-Work-delightfile/818c1cd4-fa17/live/files/Projects";
+        assert!(brief(long, BRIEF).chars().count() <= BRIEF);
     }
 
     /// `g b` on a folder that is not pinned asks for a key; `Enter` on
@@ -769,7 +877,7 @@ mod tests {
         s.keys("g b");
         let prompt = s.app.prompt.as_ref().expect("the pin prompt");
         assert_eq!(prompt.kind, PromptKind::Pin);
-        assert_eq!(prompt.title(), format!("Pin {} as:", s.shown(&files)));
+        assert_eq!(prompt.title(), format!("Pin {} as:", s.said(&files)));
         assert_eq!(
             prompt.message(),
             Some(("a key after g, or Enter for none", false))
@@ -786,7 +894,7 @@ mod tests {
         );
         assert_eq!(
             s.toast(),
-            format!("Pinned {} · g Space to jump", s.shown(&files))
+            format!("Pinned {} · g Space to jump", s.said(&files))
         );
 
         s.app.flush_state();
@@ -794,7 +902,7 @@ mod tests {
         assert!(s.app.prompt.is_none(), "unpinning asks nothing");
         assert!(s.app.state.pins().is_empty());
         assert!(s.app.state.is_dirty());
-        assert_eq!(s.toast(), format!("Unpinned {}", s.shown(&files)));
+        assert_eq!(s.toast(), format!("Unpinned {}", s.said(&files)));
     }
 
     /// A key makes `g <key>` go there through the real registry, the which-key
@@ -808,7 +916,7 @@ mod tests {
         s.go(sub.clone());
         s.keys("g b");
         s.answer("x");
-        assert_eq!(s.toast(), format!("Pinned {} · g x", s.shown(&sub)));
+        assert_eq!(s.toast(), format!("Pinned {} · g x", s.said(&sub)));
         let slot = Command::Goto(s.app.config.goto.len() as u8);
         assert_eq!(s.app.keymap.binding_label(slot).as_deref(), Some("g x"));
         let card = s.app.keymap.continuations(
@@ -820,7 +928,7 @@ mod tests {
             .iter()
             .find(|row| row.command == slot)
             .expect("on the g card");
-        assert_eq!(row.description, format!("Go to {}", s.shown(&sub)));
+        assert_eq!(row.description, format!("Go to {}", s.said(&sub)));
 
         s.go(files.clone());
         s.keys("g x");
@@ -865,7 +973,7 @@ mod tests {
         s.go(files.join("sub"));
         s.keys("g b");
         s.answer("q");
-        assert_eq!(s.toast(), format!("g q is already {}", s.shown(&files)));
+        assert_eq!(s.toast(), format!("g q is already {}", s.said(&files)));
         assert!(s.app.prompt.is_some());
         s.keys("esc");
         assert!(s.app.prompt.is_none(), "Esc drops the question");
@@ -909,8 +1017,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (s.shown(&files.join("other")), "g o".to_string()),
-                (s.shown(&files.join("sub")), String::new()),
+                (s.full(&files.join("other")), "g o".to_string()),
+                (s.full(&files.join("sub")), String::new()),
                 ("sftp://box/srv".to_string(), "g s".to_string()),
                 ("~".to_string(), "g h".to_string()),
             ],
@@ -976,18 +1084,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                (
-                    s.shown(&files.join("other")),
-                    "g o".to_string(),
-                    true,
-                    false
-                ),
-                (
-                    s.shown(&files.join("sub")),
-                    "pinned".to_string(),
-                    true,
-                    false
-                ),
+                (s.row(&files.join("other")), "g o".to_string(), true, false),
+                (s.row(&files.join("sub")), "pinned".to_string(), true, false),
                 ("sftp://box/srv".to_string(), "g s".to_string(), false, true),
             ],
             "no home fallback on the card"
@@ -1015,7 +1113,7 @@ mod tests {
         s.keys("down d");
         assert_eq!(
             s.toast(),
-            format!("Unpinned {}", s.shown(&files.join("sub")))
+            format!("Unpinned {}", s.said(&files.join("sub")))
         );
         assert_eq!(s.app.state.pins().len(), 1);
         let card = s.app.mounts.as_ref().expect("still up");
@@ -1075,7 +1173,7 @@ mod tests {
         );
         assert!(menu.items[at].gap_before && !menu.items[at + 1].gap_before);
         let list = menu.items[at].submenu.as_ref().expect("a list");
-        assert_eq!(list[0].label, s.shown(&files.join("other")));
+        assert_eq!(list[0].label, s.said(&files.join("other")));
         assert_eq!(list[0].keys, "g h");
         assert_eq!(list[0].action, Action::Place(0));
         let last = list.last().expect("the pin row");
@@ -1106,7 +1204,7 @@ mod tests {
         let menu = s.app.menu.take().expect("the app menu");
         let go = menu.items.iter().find(|i| i.label == "Go").expect("Go");
         let list = go.submenu.as_ref().expect("a list");
-        assert_eq!(list[0].label, s.shown(&files), "the pin heads the list");
+        assert_eq!(list[0].label, s.said(&files), "the pin heads the list");
         assert_eq!(list.last().expect("rows").label, "Unpin this folder");
 
         // Go ▸ a place goes there.
@@ -1140,7 +1238,7 @@ mod tests {
         assert_eq!(s.app.state.pinned(&text(&sub)).expect("pinned").key, None);
         assert_eq!(
             s.toast(),
-            format!("Pinned {} · g Space to jump", s.shown(&sub))
+            format!("Pinned {} · g Space to jump", s.said(&sub))
         );
         s.app.open_menu(egui::pos2(10.0, 10.0));
         let menu = s.app.menu.take().expect("the row menu");

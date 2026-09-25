@@ -1292,11 +1292,16 @@ impl Card {
 
     /// The lines drawn from [`Card::first`], each with its top measured from
     /// the top of the body, stopping at the bottom of the window.
+    ///
+    /// Whole lines only. A row cut in half by the window's edge was drawn
+    /// with its status under the `+N more` that says the list goes on — the
+    /// ordinary look of the card once the Places section is over the disks —
+    /// and half a row is not something a person can read or aim at anyway.
     pub fn visible(&self) -> Vec<(Line, f32)> {
         let mut top = 0.0;
         let mut out = Vec::new();
         for line in self.lines().into_iter().skip(self.first) {
-            if top >= WINDOW {
+            if top + line.height() > WINDOW + 0.01 {
                 break;
             }
             out.push((line, top));
@@ -2762,6 +2767,13 @@ Mount(3): backup -> file:///mnt/backup
         card.set_places(Vec::new());
         assert_eq!(card.selected(), Some(Item::Disk(1)), "the same height");
         assert!(card.selected_place().is_none());
+
+        // Ten places push the disks past the window; what is drawn is whole
+        // lines, so no half row sits under the "+N more".
+        card.set_places(places(10));
+        let (last, top) = *card.visible().last().expect("lines");
+        assert!(top + last.height() <= WINDOW + 0.01, "a row is cut off");
+        assert!(card.visible().len() < card.lines().len());
     }
 
     /// A long card scrolls to keep the cursor's row whole, brings a section's
