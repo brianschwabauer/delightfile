@@ -311,19 +311,28 @@ pub fn bar(
     panel: &TaskPanel,
     rows: usize,
 ) -> Option<crate::scrollbar::Geometry> {
-    let (first, last) = (rects.first()?, rects.last()?);
-    let body = egui::Rect::from_min_max(first.min, last.max);
     crate::scrollbar::card(
         card,
-        body,
+        body(rects)?,
         panel.first as f32,
         rects.len() as f32,
         rows as f32,
     )
 }
 
-/// Draw the panel. `over` is the pointer on the card, which brings up the
-/// rows' bar.
+/// Where the panel's bar is pointed at by, while there are more tasks than
+/// rows ([`crate::scrollbar::band`]).
+pub fn band(card: egui::Rect, rects: &[egui::Rect], rows: usize) -> Option<egui::Rect> {
+    crate::scrollbar::band(card, body(rects)?, rects.len() as f32, rows as f32)
+}
+
+/// The rows, as one rect.
+fn body(rects: &[egui::Rect]) -> Option<egui::Rect> {
+    let (first, last) = (rects.first()?, rects.last()?);
+    Some(egui::Rect::from_min_max(first.min, last.max))
+}
+
+/// Draw the panel.
 #[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn paint(
     paint: &Painting<'_>,
@@ -334,7 +343,6 @@ pub fn paint(
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
     now: Instant,
-    over: bool,
 ) {
     let painter = paint.painter;
     let palette = paint.palette;
@@ -486,7 +494,8 @@ pub fn paint(
         );
     }
     if let Some(bar) = bar(card, rects, panel, rows.len()) {
-        crate::scrollbar::paint_card(paint, &bar, over, panel.scrolled_at(), 1.0);
+        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Tasks));
+        crate::scrollbar::paint_card(paint, &bar, lit, panel.scrolled_at(), 1.0);
     }
 }
 
@@ -628,6 +637,7 @@ mod tests {
         assert!(bar(card, &rects, &panel, rows.len()).is_some());
         let (card, rects) = geometry(tall, tall.bottom() - 8.0, 3);
         assert_eq!(bar(card, &rects, &panel, 3), None, "three tasks fit");
+        assert_eq!(band(card, &rects, 3), None);
 
         let short = window(300.0);
         let (card, rects) = geometry(short, short.bottom() - 8.0, rows.len());
@@ -635,6 +645,7 @@ mod tests {
         assert!(!rects.is_empty() && rects.len() < VISIBLE);
         assert!(rects.iter().all(|rect| card.contains_rect(*rect)));
         assert!(bar(card, &rects, &panel, rows.len()).is_some());
+        assert!(band(card, &rects, rows.len()).is_some_and(|band| card.contains_rect(band)));
 
         let mut panel = TaskPanel::new();
         panel.fit(rects.len(), rows.len(), Instant::now());
@@ -740,7 +751,6 @@ mod tests {
                 &Hovers::new(),
                 &Ripples::new(),
                 now,
-                true,
             );
             let (card, rects) = geometry(area, 860.0, 0);
             paint(
@@ -752,7 +762,6 @@ mod tests {
                 &Hovers::new(),
                 &Ripples::new(),
                 now,
-                true,
             );
         });
     }

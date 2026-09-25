@@ -52,7 +52,8 @@
 
 use df_core::ops::Clipboard;
 
-/// How many rows the tray shows before it scrolls.
+/// How many rows the tray shows before it scrolls. At most: a window too
+/// short for eight under the top row gets as many as fit ([`fit`]).
 pub const ROWS: usize = 8;
 
 /// The height of the header and of one row.
@@ -95,6 +96,9 @@ pub struct Geometry {
     /// One rect per visible row, and the remove button inside it.
     pub rows: Vec<egui::Rect>,
     pub removes: Vec<egui::Rect>,
+    /// The band the rows' bar is pointed at by, while the tray carries more
+    /// than it shows ([`crate::scrollbar::band`]).
+    pub band: Option<egui::Rect>,
 }
 
 impl Default for Geometry {
@@ -104,6 +108,7 @@ impl Default for Geometry {
             clear: egui::Rect::NOTHING,
             rows: Vec::new(),
             removes: Vec::new(),
+            band: None,
         }
     }
 }
@@ -137,7 +142,9 @@ impl Geometry {
 /// for that.
 ///
 /// The card grows *downwards* as it gets longer, so its header — the chip's
-/// own label, and `Clear` — stays right under the chip whatever the count.
+/// own label, and `Clear` — stays right under the chip whatever the count,
+/// and stops at the window's foot: the rows past what fits there scroll
+/// ([`fit`]).
 ///
 /// Nothing at all when the tray is closed or there is nothing to list: the
 /// chip that says how much is carried is there whether the card is out or
@@ -155,10 +162,13 @@ pub fn geometry(
     }
     let right = chip.right().min(area.right() - TRAY_MARGIN);
     let left = (right - TRAY_WIDTH).max(area.left() + TRAY_MARGIN);
+    // …and never past the window's right edge either, which a card slid in
+    // from the left one would otherwise cross in a window narrower than it.
+    let width = ((left + TRAY_WIDTH).min(area.right() - TRAY_MARGIN) - left).max(0.0);
     let top = row.bottom() + HANG;
-    let visible = clipboard.len().saturating_sub(first).min(ROWS);
+    let visible = clipboard.len().saturating_sub(first).min(fit(area, row));
     let height = TRAY_PAD * 2.0 + TRAY_ROW + visible as f32 * TRAY_ROW;
-    let card = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(TRAY_WIDTH, height));
+    let card = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height));
     // The header's button sits in the card's corner, so it is inset by the
     // same padding on its top and its right as the rows are on their sides,
     // and rounds like a row: concentric with the card (`delightful-ui` §15).
@@ -189,15 +199,33 @@ pub fn geometry(
             )
         })
         .collect();
+    let band = rows.first().zip(rows.last()).and_then(|(top, bottom)| {
+        crate::scrollbar::band(
+            card,
+            egui::Rect::from_min_max(top.min, bottom.max),
+            rows.len() as f32,
+            clipboard.len() as f32,
+        )
+    });
     Geometry {
         card: Some(card),
         clear,
         rows,
         removes,
+        band,
     }
 }
 
-/// A wheel roll over the card, as the tray's new first row.
+/// How many rows the tray has room for, hanging from `row`: [`ROWS`], or as
+/// many as fit between its header and the window's foot, and never none.
+pub fn fit(area: egui::Rect, row: egui::Rect) -> usize {
+    let top = row.bottom() + HANG + TRAY_PAD * 2.0 + TRAY_ROW;
+    let room = (area.bottom() - TRAY_MARGIN - top).max(0.0);
+    ((room / TRAY_ROW).floor() as usize).clamp(1, ROWS)
+}
+
+/// A wheel roll over the card, as the tray's new first row, in a tray
+/// showing `visible` rows ([`fit`]).
 ///
 /// Whole rows at a time: the tray is a short list of names, and a row half out
 /// of the card would be half a name. A trackpad's fractions of a row are kept
@@ -206,16 +234,29 @@ pub fn geometry(
 /// the last windowful is as far as it goes — and the carry is dropped at
 /// either end, so the first notch back the other way moves at once rather than
 /// paying off a debt rolled up against the stop.
-pub fn scroll(first: usize, len: usize, carry: &mut f32, points: f32) -> usize {
+pub fn scroll(first: usize, len: usize, visible: usize, carry: &mut f32, points: f32) -> usize {
     *carry += crate::mouse::wheel_rows(points, TRAY_ROW);
     let whole = carry.trunc();
     *carry -= whole;
-    let last = len.saturating_sub(ROWS) as i64;
+    let last = len.saturating_sub(visible) as i64;
     let moved = (first as i64 + whole as i64).clamp(0, last);
     if (moved == 0 && *carry < 0.0) || (moved == last && *carry > 0.0) {
         *carry = 0.0;
     }
     moved as usize
+}
+
+/// The tray's bar, beside its rows, while it carries more than it shows.
+pub fn bar(geometry: &Geometry, first: usize, len: usize) -> Option<crate::scrollbar::Geometry> {
+    let card = geometry.card?;
+    let (top, bottom) = (geometry.rows.first()?, geometry.rows.last()?);
+    crate::scrollbar::card(
+        card,
+        egui::Rect::from_min_max(top.min, bottom.max),
+        first as f32,
+        geometry.rows.len() as f32,
+        len as f32,
+    )
 }
 
 /// Drop paths that are no longer there, and say how many went.
@@ -470,6 +511,54 @@ mod tests {
         );
     }
 
+    /// A short window: the card stops at the window's foot with the rows that
+    /// fit there, never none, and scrolls the rest, its bar there only while
+    /// rows are left out; a narrow one keeps the card's right edge inside it.
+    /// A tall window shows the old windowful.
+    #[test]
+    fn a_short_window_scrolls_the_tray() {
+        let clip = Clipboard::yank((0..30).map(|i| PathBuf::from(format!("/f{i}"))));
+        let few = carrying(&["/a", "/b"]);
+        assert_eq!(fit(area(), row()), ROWS, "the old windowful");
+        assert!(bar(&geometry(area(), chip(), row(), &clip, true, 0), 0, 30).is_some());
+        assert_eq!(
+            bar(&geometry(area(), chip(), row(), &few, true, 0), 0, 2),
+            None
+        );
+
+        let short = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 200.0));
+        let rows = fit(short, row());
+        assert!((1..ROWS).contains(&rows), "{rows}");
+        let g = geometry(short, chip(), row(), &clip, true, 0);
+        let card = g.card.expect("out");
+        assert!(short.contains_rect(card), "{card:?}");
+        assert_eq!(g.rows.len(), rows);
+        assert!(g.rows.iter().all(|rect| card.contains_rect(*rect)));
+        assert!(bar(&g, 0, 30).is_some());
+        assert!(g.band.is_some_and(|band| card.contains_rect(band)));
+        assert_eq!(geometry(short, chip(), row(), &few, true, 0).band, None);
+        let mut carry = 0.0;
+        let last = (0..20).fold(0, |first, _| {
+            scroll(first, 30, rows, &mut carry, -3.0 * TRAY_ROW)
+        });
+        assert_eq!(last, 30 - rows, "the last windowful of the rows that fit");
+        assert_eq!(
+            fit(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 80.0)),
+                row()
+            ),
+            1,
+            "never none"
+        );
+
+        let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 900.0));
+        let chip = egui::Rect::from_min_max(egui::pos2(120.0, 34.0), egui::pos2(180.0, 58.0));
+        let card = geometry(narrow, chip, row(), &few, true, 0)
+            .card
+            .expect("out");
+        assert!(narrow.contains_rect(card), "{card:?}");
+    }
+
     /// The wheel moves whole rows, keeps a trackpad's fractions until they add
     /// up, and stops at either end of the list without owing anything back.
     #[test]
@@ -477,25 +566,25 @@ mod tests {
         let down = |rows: f32| -rows * TRAY_ROW;
         let mut carry = 0.0;
         // Three rows down, then back up two.
-        assert_eq!(scroll(0, 30, &mut carry, down(3.0)), 3);
-        assert_eq!(scroll(3, 30, &mut carry, down(-2.0)), 1);
+        assert_eq!(scroll(0, 30, ROWS, &mut carry, down(3.0)), 3);
+        assert_eq!(scroll(3, 30, ROWS, &mut carry, down(-2.0)), 1);
         // A trackpad's four tenths of a row, three times: nothing, nothing, one.
         let mut carry = 0.0;
-        assert_eq!(scroll(0, 30, &mut carry, down(0.4)), 0);
-        assert_eq!(scroll(0, 30, &mut carry, down(0.4)), 0);
-        assert_eq!(scroll(0, 30, &mut carry, down(0.4)), 1);
+        assert_eq!(scroll(0, 30, ROWS, &mut carry, down(0.4)), 0);
+        assert_eq!(scroll(0, 30, ROWS, &mut carry, down(0.4)), 0);
+        assert_eq!(scroll(0, 30, ROWS, &mut carry, down(0.4)), 1);
         // The last windowful is as far as it goes…
         let last = 30 - ROWS;
         let mut carry = 0.0;
-        assert_eq!(scroll(last - 1, 30, &mut carry, down(5.0)), last);
+        assert_eq!(scroll(last - 1, 30, ROWS, &mut carry, down(5.0)), last);
         // …and pushing on against the stop leaves no debt: the first row back
         // up moves at once.
-        assert_eq!(scroll(last, 30, &mut carry, down(0.9)), last);
-        assert_eq!(scroll(last, 30, &mut carry, down(-1.0)), last - 1);
+        assert_eq!(scroll(last, 30, ROWS, &mut carry, down(0.9)), last);
+        assert_eq!(scroll(last, 30, ROWS, &mut carry, down(-1.0)), last - 1);
         // The top holds the same way, and a list that fits does not move.
         let mut carry = 0.0;
-        assert_eq!(scroll(0, 30, &mut carry, down(-4.0)), 0);
-        assert_eq!(scroll(0, ROWS, &mut carry, down(3.0)), 0);
+        assert_eq!(scroll(0, 30, ROWS, &mut carry, down(-4.0)), 0);
+        assert_eq!(scroll(0, ROWS, ROWS, &mut carry, down(3.0)), 0);
     }
 
     /// The tray paints in every state without panicking, including in a window

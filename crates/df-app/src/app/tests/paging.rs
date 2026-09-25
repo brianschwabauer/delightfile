@@ -101,8 +101,9 @@ fn the_mount_cards_page_keys_stop_at_the_ends_and_its_arrows_go_round() {
     assert!(app.udisks.is_none(), "a key started the udisks worker");
 }
 
-/// The opener picker shows every choice, so a page is all of them: the
-/// page keys go to its ends and its arrows stop there.
+/// The opener picker shows every choice in a window tall enough for them, so
+/// a page is all of them: the page keys go to its ends and its arrows stop
+/// there.
 #[test]
 fn the_opener_pickers_page_keys_go_to_its_ends() {
     let ctx = egui::Context::default();

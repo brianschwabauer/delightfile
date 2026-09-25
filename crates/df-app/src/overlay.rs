@@ -82,6 +82,9 @@ pub struct FinderGeom {
     pub rows: Vec<Rect>,
     /// The `×` at the field's right, in the card's corner.
     pub close: Option<Rect>,
+    /// The band the rows' bar is pointed at by, while there are more hits
+    /// than rows ([`crate::scrollbar::band`]).
+    pub band: Option<Rect>,
 }
 
 impl FinderGeom {
@@ -90,15 +93,16 @@ impl FinderGeom {
     }
 }
 
-/// Lay the fuzzy card out for a list that will show `shown` rows, or as many
-/// of them as the window has room for.
+/// Lay the fuzzy card out for a list of `hits`, showing up to
+/// [`crate::finder::ROWS`] of them, or as many as the window has room for.
 ///
 /// The card is exactly as tall as it has to be — an empty result list is a
 /// field and one line of guidance, not a field over eleven rows of nothing
 /// (`delightful-ui` §11) — and never taller than the window: a short window
 /// gets fewer rows, which the cursor scrolls, rather than rows drawn past the
 /// card's foot ([`crate::dialog::fit_rows`]).
-pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
+pub fn finder_geometry(area: Rect, hits: usize) -> FinderGeom {
+    let shown = hits.min(crate::finder::ROWS);
     let width = (area.width() - chrome::CARD_MARGIN * 2.0).min(CARD_WIDTH);
     // The field, and the strip its own hints go in (PLAN §4).
     let fixed = CARD_PAD * 2.0 + FIELD_ROW + GAP + chrome::HINT_ROW;
@@ -116,7 +120,7 @@ pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
             lines as f32 * CARD_ROW,
         ),
     );
-    let rows = (0..shown.min(lines))
+    let rows: Vec<Rect> = (0..shown.min(lines))
         .map(|n| {
             Rect::from_min_size(
                 egui::pos2(body.left(), body.top() + n as f32 * CARD_ROW),
@@ -128,6 +132,7 @@ pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
         card,
         field,
         body,
+        band: crate::scrollbar::band(card, body, rows.len() as f32, hits as f32),
         rows,
         close: Some(close_beside(card, field)),
     }
@@ -161,8 +166,7 @@ fn close_beside(card: Rect, field: Rect) -> Rect {
     )
 }
 
-/// Draw the command palette / jump card. `over` is the pointer on the card,
-/// which brings up the rows' bar.
+/// Draw the command palette / jump card.
 pub fn paint_finder(
     paint: &Painting<'_>,
     area: Rect,
@@ -170,7 +174,6 @@ pub fn paint_finder(
     finder: &Finder,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
-    over: bool,
 ) {
     let (painter, palette) = (paint.painter, paint.palette);
     painter.rect_filled(area, 0, Color32::from_black_alpha(chrome::HELP_SCRIM));
@@ -330,7 +333,8 @@ pub fn paint_finder(
         );
     }
     if let Some(bar) = finder_bar(geometry, finder) {
-        crate::scrollbar::paint_card(paint, &bar, over, finder.scrolled_at(), 1.0);
+        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Palette));
+        crate::scrollbar::paint_card(paint, &bar, lit, finder.scrolled_at(), 1.0);
     }
 }
 
@@ -911,8 +915,8 @@ mod tests {
 
     /// A short window gets the rows it has room for rather than rows drawn
     /// past the card's foot: the card inside the window, never no rows, and a
-    /// bar only while the list has more than the card shows. A tall window
-    /// gets the twelve it always did.
+    /// bar and its band only while the list has more than the card shows. A
+    /// tall window gets the twelve it always did.
     #[test]
     fn a_short_window_fits_the_palettes_rows() {
         use crate::finder::{Choice, Kind, Row, Source, ROWS};
@@ -926,16 +930,15 @@ mod tests {
         let few = Finder::new(Source::Commands, (0..3).map(row).collect());
         let short = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 300.0));
 
-        let tall = finder_geometry(area(), ROWS);
+        let tall = finder_geometry(area(), 40);
         assert_eq!(tall.rows.len(), ROWS, "the old count");
-        assert!(
-            finder_bar(&tall, &many).is_some(),
-            "forty hits in twelve rows"
-        );
+        assert!(finder_bar(&tall, &many).is_some(), "forty hits in twelve");
+        assert!(tall.band.is_some());
         let tall = finder_geometry(area(), 3);
         assert_eq!(finder_bar(&tall, &few), None, "three hits fit");
+        assert_eq!(tall.band, None, "nothing to point at");
 
-        let geometry = finder_geometry(short, ROWS);
+        let geometry = finder_geometry(short, 40);
         assert!(short.contains_rect(geometry.card), "{:?}", geometry.card);
         assert!(!geometry.rows.is_empty() && geometry.rows.len() < ROWS);
         assert!(geometry
@@ -943,6 +946,10 @@ mod tests {
             .iter()
             .all(|rect| geometry.card.contains_rect(*rect)));
         assert!(finder_bar(&geometry, &many).is_some());
+        let band = geometry.band.expect("the rows overflow");
+        assert!(geometry.card.contains_rect(band));
+        assert_eq!(band.right(), geometry.card.right(), "flush with the edge");
+        assert_eq!(band.width(), crate::scrollbar::HIT_WIDTH);
         assert_eq!(finder_bar(&finder_geometry(short, 3), &few), None);
 
         // The cursor scrolls by the rows drawn, so it is never below the last.
@@ -953,9 +960,45 @@ mod tests {
 
         // …and a window too short for any row still gets one.
         let tiny = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 110.0));
-        let geometry = finder_geometry(tiny, ROWS);
+        let geometry = finder_geometry(tiny, 40);
         assert_eq!(geometry.rows.len(), 1);
         assert!(tiny.contains_rect(geometry.card));
+    }
+
+    /// The bar comes and goes by the panes' rule and by nothing else: a card
+    /// that overflows but has not scrolled, with nothing on its band, shows
+    /// no bar however long the pointer rests elsewhere on the card; a scroll
+    /// or the band's hover brings it up.
+    #[test]
+    fn the_palettes_bar_shows_by_the_panes_rule() {
+        use crate::finder::{Choice, Kind, Row, Source};
+        use crate::scrollbar::{visibility, Surface};
+        let rows = (0..40)
+            .map(|n| Row {
+                label: format!("Row {n}"),
+                detail: String::new(),
+                kind: Kind::Command,
+                choice: Choice::Cd(std::path::PathBuf::from("/tmp")),
+            })
+            .collect();
+        let mut finder = Finder::new(Source::Commands, rows);
+        let geometry = finder_geometry(area(), finder.hits.len());
+        assert!(finder_bar(&geometry, &finder).is_some());
+        let now = std::time::Instant::now();
+        finder.scroll_into_view(geometry.rows.len(), 0, now);
+        let mut hovers: Hovers<Control> = Hovers::new();
+        hovers.tick(Some(Control::PanelRow(3)), None, now);
+        let lit = hovers.hover(Control::CardBar(Surface::Palette));
+        assert_eq!(lit, 0.0, "the pointer is on a row, not the band");
+        assert_eq!(visibility(finder.scrolled_at(), lit, false, now), 0.0);
+
+        hovers.tick(Some(Control::CardBar(Surface::Palette)), None, now);
+        let lit = hovers.hover(Control::CardBar(Surface::Palette));
+        assert_eq!(visibility(finder.scrolled_at(), lit, false, now), 1.0);
+
+        finder.move_cursor(30);
+        finder.scroll_into_view(geometry.rows.len(), 0, now);
+        assert_eq!(visibility(finder.scrolled_at(), 0.0, false, now), 1.0);
     }
 
     /// The field's radius is derived from the card's, not picked — the
@@ -1074,9 +1117,8 @@ mod tests {
                     for query in ["", "thing", "no-such-row-anywhere"] {
                         let _ = finder.buffer.insert_text(query);
                         finder.requery();
-                        let shown = finder.hits.len().min(crate::finder::ROWS);
-                        let geometry = finder_geometry(area, shown);
-                        paint_finder(&paint, area, &geometry, &finder, &hovers, &ripples, true);
+                        let geometry = finder_geometry(area, finder.hits.len());
+                        paint_finder(&paint, area, &geometry, &finder, &hovers, &ripples);
                     }
                 }
 

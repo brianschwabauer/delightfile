@@ -512,7 +512,9 @@ enum OverlayGeom {
     Conflict(dialog::Geometry),
     Bulk(Box<dialog::BulkGeometry>),
     Sync(Box<crate::sync::Geometry>),
-    Picker(egui::Rect, Vec<egui::Rect>),
+    /// The card, its rows, and its bar's band while it has more choices than
+    /// rows.
+    Picker(egui::Rect, Vec<egui::Rect>, Option<egui::Rect>),
     Panel(egui::Rect, Vec<egui::Rect>, Vec<TaskRow>),
     Spot(spot::Geometry),
     /// The fuzzy card (PLAN §4.4).
@@ -533,7 +535,7 @@ impl OverlayGeom {
             OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g.card,
             OverlayGeom::Bulk(g) => g.card,
             OverlayGeom::Sync(g) => g.card,
-            OverlayGeom::Picker(card, _) | OverlayGeom::Panel(card, _, _) => *card,
+            OverlayGeom::Picker(card, ..) | OverlayGeom::Panel(card, _, _) => *card,
             OverlayGeom::Spot(g) => g.card,
             OverlayGeom::Finder(g) => g.card,
             OverlayGeom::Mounts(g) => g.card,
@@ -570,12 +572,37 @@ impl OverlayGeom {
         }
     }
 
+    /// The band at the card's edge its bar is pointed at by, and whose card it
+    /// is, while the card's list is longer than it shows. The rename card's
+    /// bar is taken hold of, and it hit-tests its own.
+    fn band(&self) -> Option<(egui::Rect, crate::scrollbar::Surface)> {
+        use crate::scrollbar::Surface;
+        match self {
+            OverlayGeom::Confirm(g) => g.band.map(|band| (band, Surface::Confirm)),
+            OverlayGeom::Conflict(g) => g.band.map(|band| (band, Surface::Conflict)),
+            OverlayGeom::Picker(_, _, band) => band.map(|band| (band, Surface::Picker)),
+            OverlayGeom::Panel(card, rects, rows) => {
+                panel::band(*card, rects, rows.len()).map(|band| (band, Surface::Tasks))
+            }
+            OverlayGeom::Finder(g) => g.band.map(|band| (band, Surface::Palette)),
+            OverlayGeom::Mounts(g) => g.band.map(|band| (band, Surface::Mounts)),
+            OverlayGeom::Sync(g) => g.band.map(|band| (band, Surface::Sync)),
+            OverlayGeom::Spot(g) => g.band.map(|band| (band, Surface::Spot)),
+            OverlayGeom::Bulk(_) | OverlayGeom::Search(_) => None,
+        }
+    }
+
     /// What the pointer is over. `None` inside the card but not on anything is
     /// still "inside the card" as far as the caller is concerned — the modal
     /// swallows the pointer either way (see the hit test in `frame`).
     fn hit(&self, pos: egui::Pos2) -> Option<Control> {
         if self.close_rect().is_some_and(|close| close.contains(pos)) {
             return Some(Control::Close);
+        }
+        // The bar's band, ahead of the rows it overlaps by a hair, as a
+        // pane's is ahead of its rows.
+        if let Some((_, surface)) = self.band().filter(|(band, _)| band.contains(pos)) {
+            return Some(Control::CardBar(surface));
         }
         match self {
             // The confirm card's rows are *not* in this list. They are the
@@ -599,7 +626,7 @@ impl OverlayGeom {
                         .map(|_| Control::Action(dialog::ConflictAction::ALL.len()))
                 })
                 .or_else(|| g.row_at(pos).map(Control::PanelRow)),
-            OverlayGeom::Picker(_, rows) | OverlayGeom::Panel(_, rows, _) => rows
+            OverlayGeom::Picker(_, rows, _) | OverlayGeom::Panel(_, rows, _) => rows
                 .iter()
                 .position(|r| r.contains(pos))
                 .map(Control::PanelRow),
@@ -620,6 +647,7 @@ impl OverlayGeom {
     fn rect_of(&self, control: Control) -> Option<egui::Rect> {
         match (self, control) {
             (_, Control::Close) => self.close_rect(),
+            (_, Control::CardBar(_)) => self.band().map(|(band, _)| band),
             (OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g), Control::Action(i)) => {
                 g.actions.get(i).copied().or(g.apply_all)
             }
@@ -627,7 +655,7 @@ impl OverlayGeom {
                 g.rows.get(i).copied()
             }
             (
-                OverlayGeom::Picker(_, rows) | OverlayGeom::Panel(_, rows, _),
+                OverlayGeom::Picker(_, rows, _) | OverlayGeom::Panel(_, rows, _),
                 Control::PanelRow(i),
             ) => rows.get(i).copied(),
             (OverlayGeom::Finder(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
@@ -1396,6 +1424,9 @@ pub struct App {
     /// The fraction of a row the wheel has rolled over the tray and not yet
     /// spent ([`crate::tray::scroll`]).
     tray_carry: f32,
+    /// When the tray's rows last scrolled, for its bar. Forgotten while the
+    /// tray is shut, so opening it is never a scroll.
+    tray_bar: crate::scrollbar::Linger,
     /// The touchpad travel `Ctrl`+wheel has gathered over the list and not yet
     /// spent on a rung of the view-scale ladder, in points, DOM-signed
     /// ([`App::wheel_scale`]). Let go of `Ctrl` and it is dropped.
@@ -2057,6 +2088,7 @@ impl App {
             tray_open: false,
             tray_first: 0,
             tray_carry: 0.0,
+            tray_bar: crate::scrollbar::Linger::default(),
             scale_wheel: 0.0,
             cursor_rect: egui::Rect::ZERO,
             path_bar: (PathBuf::new(), Vec::new(), None),
@@ -5701,6 +5733,7 @@ impl App {
             // due. Nothing is shown yet — that is [`WhichKey`]'s decision.
             Dispatch::Pending { continuations, .. } => {
                 self.which_rows = continuations.iter().map(crate::whichkey::Row::of).collect();
+                self.which.rows_changed();
             }
             Dispatch::NoMatch => log::trace!("unbound: {}", chord.label()),
         }
@@ -5810,6 +5843,7 @@ impl App {
             // no row for.
             Dispatch::Pending { continuations, .. } => {
                 self.which_rows = continuations.iter().map(crate::whichkey::Row::of).collect();
+                self.which.rows_changed();
                 return;
             }
             // The two overlays with a field in them take every key the
@@ -6094,9 +6128,10 @@ impl App {
             return;
         }
         if let Some(picker) = &mut self.picker {
-            // The picker grows to show every choice, so a page is all of them.
+            // A page is the choices on screen: all of them in a window tall
+            // enough, as many as fit in one that is not.
             let rows = picker.choices.len();
-            picker.cursor = jump.target(picker.cursor, rows, rows);
+            picker.cursor = jump.target(picker.cursor, rows, picker.page());
         }
     }
 
@@ -6895,9 +6930,10 @@ impl App {
             self.tray_carry = 0.0;
             return;
         }
-        self.tray_first = self
-            .tray_first
-            .min(len.saturating_sub(crate::tray::ROWS.min(len)));
+        // A row of the list, and no more than that: how many rows the card
+        // shows is the window's to say, and the frame brings the scroll back
+        // to the last windowful of those before the card is measured.
+        self.tray_first = self.tray_first.min(len - 1);
     }
 
     /// A click on a tray row: go to the file, wherever it is.
@@ -8376,6 +8412,7 @@ impl App {
                 Dispatch::Match(command) => command,
                 Dispatch::Pending { continuations, .. } => {
                     self.which_rows = continuations.iter().map(crate::whichkey::Row::of).collect();
+                    self.which.rows_changed();
                     return;
                 }
                 Dispatch::NoMatch => {
@@ -10112,7 +10149,8 @@ impl App {
         }
         if let Some(picker) = &self.picker {
             let (card, rows) = open::picker_geometry(area, picker.anchor, picker.choices.len());
-            return Some(OverlayGeom::Picker(card, rows));
+            let band = open::picker_band(card, &rows, picker.choices.len());
+            return Some(OverlayGeom::Picker(card, rows, band));
         }
         if self.panel.is_some() {
             let rows = self.task_rows();
@@ -10129,8 +10167,10 @@ impl App {
             // As many rows as there are, up to the card's cap — an empty
             // result list is a field and a sentence, not a field over eleven
             // rows of nothing.
-            let shown = finder.hits.len().min(crate::finder::ROWS);
-            return Some(OverlayGeom::Finder(overlay::finder_geometry(area, shown)));
+            return Some(OverlayGeom::Finder(overlay::finder_geometry(
+                area,
+                finder.hits.len(),
+            )));
         }
         if let Some(search) = &self.search {
             // The two left columns only: the live preview is half of what this
@@ -10283,7 +10323,8 @@ impl App {
                 | Control::BulkTemplate
                 | Control::BulkRow(_)
                 | Control::BulkCandidate(_)
-                | Control::BulkScrollbar => {}
+                | Control::BulkScrollbar
+                | Control::CardBar(_) => {}
             }
             return;
         }
@@ -10323,8 +10364,8 @@ impl App {
                 None => {}
             },
             // The offset among the rows drawn, which is what the hit test
-            // reports; the resolver and the task panel turn it into a row of
-            // their list from where their view starts.
+            // reports; the resolver, the picker and the task panel turn it
+            // into a row of their list from where their view starts.
             Control::PanelRow(index) => {
                 if let Some(Dialog::Conflict(conflict)) = &mut self.dialog {
                     let index = conflict.first_visible() + index;
@@ -10333,7 +10374,8 @@ impl App {
                     return;
                 }
                 if let Some(picker) = &mut self.picker {
-                    picker.cursor = index.min(picker.choices.len().saturating_sub(1));
+                    picker.cursor =
+                        (picker.first + index).min(picker.choices.len().saturating_sub(1));
                     self.submit_overlay(page, now);
                     return;
                 }
@@ -10387,7 +10429,8 @@ impl App {
             | Control::BulkTemplate
             | Control::BulkRow(_)
             | Control::BulkCandidate(_)
-            | Control::BulkScrollbar => {}
+            | Control::BulkScrollbar
+            | Control::CardBar(_) => {}
         }
     }
 
@@ -11121,6 +11164,9 @@ impl App {
                 self.overlay_click(control, double, geom.page, now);
                 rect
             }
+            // A card's bar is only read: the pointer on its band brings it up,
+            // and a press there does nothing.
+            Control::CardBar(_) => egui::Rect::ZERO,
             // The `×`: `Esc` for the card it is on. A modal card is hit-tested
             // before the help sheet, so when both are up it is the card's.
             Control::Close => match geom.overlay {
@@ -14161,6 +14207,10 @@ impl App {
         if let Some(card) = &mut self.mounts {
             card.fit(crate::mounts::window(area), now);
         }
+        // …and so is the spot's, whose rows are not one height either.
+        if let Some(spot) = &mut self.spot {
+            spot.fit(spot::window(area, area.bottom() - ui::GAP), now);
+        }
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
         let mut overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
@@ -14295,6 +14345,13 @@ impl App {
         // lie at its edges. The chip is always laid out while there is a
         // clipboard; the row's own right end is only a fallback.
         let tray_chip = top_geom.cluster.yank.unwrap_or(layout.path);
+        // As many rows as fit under the top row, and the scroll kept to the
+        // last windowful of those, so a window or a clipboard made shorter
+        // leaves no gap under the last name.
+        let tray_fit = crate::tray::fit(area, layout.path);
+        self.tray_first = self
+            .tray_first
+            .min(self.clipboard.len().saturating_sub(tray_fit));
         let tray_at = |first: usize| {
             crate::tray::geometry(
                 area,
@@ -14324,6 +14381,7 @@ impl App {
             self.tray_first = crate::tray::scroll(
                 self.tray_first,
                 self.clipboard.len(),
+                tray_fit,
                 &mut self.tray_carry,
                 pointer.wheel,
             );
@@ -14352,10 +14410,23 @@ impl App {
         // The which-key card, from the function its paint lays it out with.
         // Only while it is fully up: a card on its way out is pixels about a
         // chord that has already resolved, and takes no pointer.
-        let which_geometry = self
-            .which
-            .shown()
-            .then(|| crate::whichkey::geometry(&painter, area, area.bottom(), &self.which_rows));
+        let which_at = |first: usize| {
+            crate::whichkey::geometry(&painter, area, area.bottom(), &self.which_rows, first)
+        };
+        let mut which_geometry = self.which.shown().then(|| which_at(self.which.first()));
+        // **The wheel over the which-key card is the card's**, as the tray's
+        // is: a card too long for the window scrolls its columns, and a roll
+        // that went through it would scroll the rows it is covering. Measured
+        // again after, so the rows pressed are the rows drawn.
+        let over_which = pointer.wheel != 0.0
+            && which_geometry
+                .as_ref()
+                .zip(pointer.at)
+                .is_some_and(|(which, at)| which.card.contains(at));
+        if let (true, Some(which)) = (over_which, &which_geometry) {
+            self.which.wheel(pointer.wheel, which);
+            which_geometry = Some(which_at(self.which.first()));
+        }
         // A press anywhere on that card is the card's, its padding included:
         // it starts no drag and no band, and reaches no transport under it.
         let on_which = pointer
@@ -14391,6 +14462,10 @@ impl App {
             // practice share the screen with a modal card, but if it does it
             // is the one on top.
             if let Some(which) = &which_geometry {
+                if which.band.is_some_and(|band| band.contains(p)) {
+                    let bar = Control::CardBar(crate::scrollbar::Surface::WhichKey);
+                    return Some((bar, p));
+                }
                 if which.card.contains(p) {
                     return which.row_at(p).map(|row| (Control::WhichKey(row), p));
                 }
@@ -14436,6 +14511,14 @@ impl App {
                 let control = tray_geometry
                     .remove_at(p)
                     .map(Control::YankRemove)
+                    // The bar's band, after the `×` it touches by a hair: the
+                    // `×` is a button, and the band only lights the bar.
+                    .or_else(|| {
+                        tray_geometry
+                            .band
+                            .filter(|band| band.contains(p))
+                            .map(|_| Control::CardBar(crate::scrollbar::Surface::Tray))
+                    })
                     .or_else(|| tray_geometry.row_at(p).map(Control::YankRow))
                     .or_else(|| {
                         tray_geometry
@@ -14632,7 +14715,8 @@ impl App {
         // is aimed with the hand, and scrolling the pane the keyboard happens
         // to be in would be the one control in the program that ignores where
         // it was pointed.
-        // A roll over the tray, or over the menu, has already been spent on it.
+        // A roll over the tray, over the menu, or over the which-key card has
+        // already been spent on it.
         //
         // With `Ctrl` held over the list the wheel is `=` and `-` instead
         // ([`App::wheel_scale`]) — the zoom it is everywhere else — but only
@@ -14650,7 +14734,13 @@ impl App {
         if !stepping {
             self.scale_wheel = 0.0;
         }
-        if pointer.wheel != 0.0 && self.help.is_none() && !over_tray && !over_bulk && !over_menu {
+        if pointer.wheel != 0.0
+            && self.help.is_none()
+            && !over_tray
+            && !over_bulk
+            && !over_menu
+            && !over_which
+        {
             if let Some(at) = pointer.at {
                 if stepping {
                     self.wheel_scale(&pointer.wheel_raw, page, now);
@@ -14884,13 +14974,15 @@ impl App {
             let rect = self.click(control, double, &pointer, &geom, now);
             // Not on a scrollbar: the bar answers by moving the rows, and it
             // draws no splash — one spawned there would only be frames asked
-            // for a ripple nothing paints. A menu's bar answers nothing at all.
+            // for a ripple nothing paints. A menu's bar and a card's answer
+            // nothing at all.
             if !matches!(
                 control,
                 Control::Scrollbar(_)
                     | Control::BulkScrollbar
                     | Control::MenuBar
                     | Control::SubmenuBar
+                    | Control::CardBar(_)
             ) {
                 self.ripples.spawn(control, position, rect, now);
             }
@@ -15231,6 +15323,9 @@ impl App {
                 // …and a menu's bar band, which lights the bar and takes no
                 // press.
                 Control::MenuBar | Control::SubmenuBar => egui::CursorIcon::Default,
+                // …and a card's bar, which the pointer brings up and a press
+                // does nothing to.
+                Control::CardBar(_) => egui::CursorIcon::Default,
                 // A divider moves sideways, and says so.
                 Control::Divider(_) => egui::CursorIcon::ResizeHorizontal,
                 // …and a pick button with nothing to pick is a third, for the
@@ -15554,6 +15649,10 @@ impl App {
         if let (Some(panel), Some(OverlayGeom::Panel(_, rects, rows))) = (&mut self.panel, &overlay)
         {
             panel.fit(rects.len(), rows.len(), now);
+        }
+        if let (Some(picker), Some(OverlayGeom::Picker(_, rects, _))) = (&mut self.picker, &overlay)
+        {
+            picker.fit(rects.len(), now);
         }
 
         // ── The clock-driven bits, ticked once, before anything is drawn ────
@@ -16027,6 +16126,18 @@ impl App {
             &self.hovers,
             &self.ripples,
         );
+        // …and its bar, from the rows it drew, by the panes' rule.
+        if tray_geometry.card.is_some() {
+            self.tray_bar.saw(self.tray_first as f32, now);
+        } else {
+            self.tray_bar = crate::scrollbar::Linger::default();
+        }
+        if let Some(bar) = crate::tray::bar(&tray_geometry, self.tray_first, self.clipboard.len()) {
+            let lit = self
+                .hovers
+                .hover(Control::CardBar(crate::scrollbar::Surface::Tray));
+            crate::scrollbar::paint_card(&paint, &bar, lit, self.tray_bar.scrolled_at(), 1.0);
+        }
         // ── The top row (PLAN §2) ───────────────────────────────────────────
         // A non-anchored prompt takes the crumbs' place, in the same row: the
         // keyboard is in one place at a time, and a prompt that opened a line
@@ -16149,24 +16260,10 @@ impl App {
         if matches!(self.dialog, Some(Dialog::Bulk(_))) {
             overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
         }
-        // Whether the pointer is on the open card, which is what brings up the
-        // bar beside a list the card has cut short.
-        let over_card = overlay
-            .as_ref()
-            .zip(pointer.at)
-            .is_some_and(|(geometry, at)| geometry.card().contains(at));
         match (&overlay, &self.dialog) {
             (Some(OverlayGeom::Mounts(geometry)), _) => {
                 if let Some(card) = &self.mounts {
-                    crate::mounts::paint(
-                        &paint,
-                        area,
-                        card,
-                        geometry,
-                        &self.hovers,
-                        &self.ripples,
-                        over_card,
-                    );
+                    crate::mounts::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
                 }
             }
             (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) => {
@@ -16182,26 +16279,10 @@ impl App {
                 );
             }
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
-                dialog::paint_confirm(
-                    &paint,
-                    area,
-                    confirm,
-                    geometry,
-                    &self.hovers,
-                    &self.ripples,
-                    over_card,
-                );
+                dialog::paint_confirm(&paint, area, confirm, geometry, &self.hovers, &self.ripples);
             }
             (Some(OverlayGeom::Sync(geometry)), Some(Dialog::Sync(card))) => {
-                crate::sync::paint(
-                    &paint,
-                    area,
-                    card,
-                    geometry,
-                    &self.hovers,
-                    &self.ripples,
-                    over_card,
-                );
+                crate::sync::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
             }
             (Some(OverlayGeom::Conflict(geometry)), Some(Dialog::Conflict(conflict))) => {
                 dialog::paint_conflict(
@@ -16211,27 +16292,18 @@ impl App {
                     geometry,
                     &self.hovers,
                     &self.ripples,
-                    over_card,
                 );
             }
             _ => {}
         }
-        if let (Some(OverlayGeom::Picker(card, rows)), Some(picker)) = (&overlay, &self.picker) {
+        if let (Some(OverlayGeom::Picker(card, rows, _)), Some(picker)) = (&overlay, &self.picker) {
             open::paint_picker(&paint, *card, rows, picker, &self.hovers, &self.ripples);
         }
         if let (Some(OverlayGeom::Spot(geometry)), Some(spot)) = (&overlay, &self.spot) {
             spot::paint(&paint, spot, geometry, &self.hovers, &self.ripples, now);
         }
         if let (Some(OverlayGeom::Finder(geometry)), Some(finder)) = (&overlay, &self.finder) {
-            overlay::paint_finder(
-                &paint,
-                area,
-                geometry,
-                finder,
-                &self.hovers,
-                &self.ripples,
-                over_card,
-            );
+            overlay::paint_finder(&paint, area, geometry, finder, &self.hovers, &self.ripples);
         }
         if let (Some(OverlayGeom::Search(geometry)), Some(search)) = (&overlay, &self.search) {
             overlay::paint_search(&paint, geometry, search, &self.hovers, &self.ripples);
@@ -16246,7 +16318,6 @@ impl App {
                 &self.hovers,
                 &self.ripples,
                 now,
-                over_card,
             );
         }
         // Each surface's own hints, along the bottom edge of its card: what
@@ -16392,8 +16463,14 @@ impl App {
             // Laid out again rather than taken from the hit test's: a click on
             // a row whose binding goes on has just replaced the rows, and a
             // card on its way out was not measured for the pointer at all.
-            let geometry =
-                crate::whichkey::geometry(&painter, area, area.bottom(), &self.which_rows);
+            let geometry = crate::whichkey::geometry(
+                &painter,
+                area,
+                area.bottom(),
+                &self.which_rows,
+                self.which.first(),
+            );
+            self.which.fit(&geometry, now);
             chrome::which_key(
                 &paint,
                 &geometry,
@@ -16402,6 +16479,14 @@ impl App {
                 &self.hovers,
                 &self.ripples,
             );
+            // …and its bar, by the panes' rule, fading with the card.
+            if let Some(bar) = crate::whichkey::bar(&geometry) {
+                let lit = self
+                    .hovers
+                    .hover(Control::CardBar(crate::scrollbar::Surface::WhichKey));
+                let scrolled_at = self.which.scrolled_at();
+                crate::scrollbar::paint_card(&paint, &bar, lit, scrolled_at, self.which.alpha(now));
+            }
         }
 
         // A menu whose fade is over is gone: see the `menu` row below.
@@ -16456,6 +16541,10 @@ impl App {
             bars[3],
             bars[4],
             bars[5],
+            bars[6],
+            bars[7],
+            bars[8],
+            bars[9],
             ("preview", self.preview.animating(now)),
             // A pane folding or opening, a reset's slide, a stretched divider
             // springing back. All three end, and `Dividers::settle` drops them
@@ -16679,7 +16768,7 @@ impl App {
     /// When each floating card's list last scrolled, for its bar's linger
     /// and fade, named for `DF_FRAME_LOG`. A card that is not open has no
     /// list to have scrolled, so a closed card can never hold a frame up.
-    fn card_bars(&self) -> [(&'static str, Option<Instant>); 6] {
+    fn card_bars(&self) -> [(&'static str, Option<Instant>); 10] {
         let dialog = |kind: fn(&Dialog) -> Option<Instant>| self.dialog.as_ref().and_then(kind);
         [
             (
@@ -16716,6 +16805,22 @@ impl App {
                     Dialog::Sync(card) => card.scrolled_at(),
                     _ => None,
                 }),
+            ),
+            (
+                "picker-bar",
+                self.picker.as_ref().and_then(Picker::scrolled_at),
+            ),
+            ("spot-bar", self.spot.as_ref().and_then(Spot::scrolled_at)),
+            // The tray forgets its linger while it is shut.
+            ("tray-bar", self.tray_bar.scrolled_at()),
+            // Only while the card is up: one on its way out fades its bar
+            // with it, on the card's own frames.
+            (
+                "which-bar",
+                self.which
+                    .shown()
+                    .then(|| self.which.scrolled_at())
+                    .flatten(),
             ),
         ]
     }
@@ -17065,7 +17170,7 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
             Hint::new("Ctrl+s", "stop", C::CancelSearch),
             Hint::new("Esc", "close", C::OverlayClose),
         ],
-        OverlayGeom::Picker(_, _) => vec![
+        OverlayGeom::Picker(..) => vec![
             Hint::inert("↑↓", "choose"),
             Hint::new("Enter", "open", C::OverlaySubmit),
             Hint::new("Esc", "close", C::OverlayClose),
@@ -18838,6 +18943,7 @@ mod tests {
             actions: Vec::new(),
             apply_all: None,
             close: None,
+            band: None,
         };
         let confirm = overlay_hints(
             &OverlayGeom::Confirm(empty.clone()),
@@ -18871,13 +18977,16 @@ mod tests {
         assert!(panel
             .iter()
             .any(|hint| hint.keys == "x" && hint.label == "cancel"));
-        let picker = overlay_hints(&OverlayGeom::Picker(nowhere, Vec::new()), &None);
+        let picker = overlay_hints(&OverlayGeom::Picker(nowhere, Vec::new(), None), &None);
         assert!(picker.iter().any(|hint| hint.label == "open"));
         // The spot's hints cover the two keys df-core's `[spot]` table has no
         // row for, which is the only place they are ever advertised.
         let spot = overlay_hints(
             &OverlayGeom::Spot(spot::Geometry {
                 card: nowhere,
+                body: nowhere,
+                first: 0,
+                band: None,
                 rows: Vec::new(),
                 bits: Vec::new(),
                 action: None,
@@ -18899,6 +19008,7 @@ mod tests {
                     close: None,
                     unpin: false,
                     cloud,
+                    band: None,
                 }),
                 &None,
             )
@@ -21778,9 +21888,7 @@ mod tests {
         assert_eq!(bar(&app), ("palette-bar", None), "opening is not a scroll");
 
         let hits = app.finder.as_ref().map_or(0, |finder| finder.hits.len());
-        let rows = overlay::finder_geometry(short, hits.min(finder::ROWS))
-            .rows
-            .len();
+        let rows = overlay::finder_geometry(short, hits).rows.len();
         assert!(
             rows < finder::ROWS,
             "the window is short enough to fit fewer"
@@ -21803,6 +21911,32 @@ mod tests {
         assert!(crate::scrollbar::fading(bar(&app).1, fading));
         let gone = moved + crate::scrollbar::LINGER + crate::scrollbar::FADE;
         assert!(!crate::scrollbar::fading(bar(&app).1, gone), "still asking");
+
+        // Long after, the bar is up again only while the pointer is on its
+        // band: a pointer elsewhere on the card lights nothing.
+        let lit = |app: &App| {
+            app.hovers
+                .hover(Control::CardBar(crate::scrollbar::Surface::Palette))
+        };
+        let geometry = overlay::finder_geometry(short, hits);
+        let band = geometry.band.expect("the rows overflow the card");
+        let point = |app: &mut App, at: egui::Pos2, now: Instant| {
+            let input = egui::RawInput {
+                screen_rect: Some(short),
+                focused: true,
+                events: vec![egui::Event::PointerMoved(at)],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| app.frame_at(ui, now));
+        };
+        point(&mut app, geometry.rows[1].center(), gone);
+        assert_eq!(lit(&app), 0.0, "on a row, not the band");
+        assert_eq!(
+            crate::scrollbar::visibility(bar(&app).1, lit(&app), false, gone),
+            0.0
+        );
+        point(&mut app, band.center(), gone + Duration::from_millis(16));
+        assert_eq!(lit(&app), 1.0, "the band lights the bar");
     }
 
     /// A drag from the list's empty space up over its rows draws a band in a
@@ -23602,6 +23736,7 @@ mod tests {
                 screen(),
                 screen().bottom(),
                 &app.which_rows,
+                app.which.first(),
             ));
         });
         out.expect("measured")

@@ -46,6 +46,14 @@ pub struct WhichKey {
     shown: bool,
     /// When the fade-out started, while one is running.
     fading_since: Option<Instant>,
+    /// The first row of the card's columns drawn, in a window too small for
+    /// all of them ([`geometry`]).
+    first: usize,
+    /// The part of a row the wheel has rolled over the card and not yet
+    /// spent.
+    carry: f32,
+    /// When the columns last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl WhichKey {
@@ -117,6 +125,46 @@ impl WhichKey {
         self.fading_since.is_some()
     }
 
+    /// The first row drawn, for [`geometry`].
+    pub fn first(&self) -> usize {
+        self.first
+    }
+
+    /// The card has new rows — a chord begun, or one gone a key further — so
+    /// it starts from their top, with nothing lingering from the last ones.
+    pub fn rows_changed(&mut self) {
+        self.first = 0;
+        self.carry = 0.0;
+        self.bar = crate::scrollbar::Linger::default();
+    }
+
+    /// A wheel roll over the card, in points: whole rows at a time, the
+    /// fraction kept for the next roll and dropped at either end, the tray's
+    /// rule ([`crate::tray::scroll`]), in the card laid out as `geometry`.
+    pub fn wheel(&mut self, points: f32, geometry: &Geometry) {
+        self.carry += crate::mouse::wheel_rows(points, CARD_ROW);
+        let whole = self.carry.trunc();
+        self.carry -= whole;
+        let last = geometry.total.saturating_sub(geometry.per) as i64;
+        let moved = (self.first as i64 + whole as i64).clamp(0, last);
+        if (moved == 0 && self.carry < 0.0) || (moved == last && self.carry > 0.0) {
+            self.carry = 0.0;
+        }
+        self.first = moved as usize;
+    }
+
+    /// The card was laid out as `geometry`: its scroll is kept inside the
+    /// columns, and the bar's linger is stamped from the frame they moved.
+    pub fn fit(&mut self, geometry: &Geometry, now: Instant) {
+        self.first = geometry.first;
+        self.bar.saw(self.first as f32, now);
+    }
+
+    /// When the columns last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.bar.scrolled_at()
+    }
+
     /// When the next frame is owed, or `None` when the card is settled — either
     /// fully up (a static card costs nothing) or fully gone.
     pub fn deadline(&self, due: Option<Instant>) -> Option<Instant> {
@@ -182,47 +230,120 @@ pub struct Geometry {
     /// One per row, in order: a card row tall and as wide as its column, the
     /// words inset by a chip's padding, so a hovered row lifts as a menu row
     /// does and its plate keeps the card's padding off the card's edge
-    /// (`delightful-ui` §15).
+    /// (`delightful-ui` §15). Every row, where it is: one scrolled out of
+    /// [`Geometry::clip`] is neither drawn nor pressed.
     pub rows: Vec<egui::Rect>,
     /// Where each row's label starts: its column's keys all take the width of
     /// the widest.
     pub labels: Vec<f32>,
+    /// The inside of the card, where rows are drawn and pressed.
+    pub clip: egui::Rect,
+    /// How many rows a column shows at once.
+    pub per: usize,
+    /// How many rows the tallest column has: more than [`Geometry::per`] only
+    /// when the window was too narrow for the columns and the last one took
+    /// the rest, which is when the card scrolls.
+    pub total: usize,
+    /// The first row drawn, kept inside the columns.
+    pub first: usize,
+    /// The band the card's bar is pointed at by, while it scrolls
+    /// ([`crate::scrollbar::band`]).
+    pub band: Option<egui::Rect>,
 }
 
 impl Geometry {
     pub fn row_at(&self, pos: egui::Pos2) -> Option<usize> {
+        if !self.clip.contains(pos) {
+            return None;
+        }
         self.rows.iter().position(|row| row.contains(pos))
     }
 }
 
-/// Lay the card out for `rows`, sitting above `bottom`.
+/// The card's bar, beside its columns, while they are taller than it.
+pub fn bar(geometry: &Geometry) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.clip,
+        geometry.first as f32,
+        geometry.per as f32,
+        geometry.total as f32,
+    )
+}
+
+/// Lay the card out for `rows`, sitting above `bottom`, drawn from row
+/// `first` of its columns.
 ///
 /// Bottom-anchored and horizontally centred: the card is an answer to
 /// something the hand is doing right now, so it belongs where the eyes are —
 /// and near the bottom edge, which is where every other transient thing
 /// appears. Needs a painter because the columns are measured from their text.
-pub fn geometry(painter: &egui::Painter, area: egui::Rect, bottom: f32, rows: &[Row]) -> Geometry {
-    let columns: Vec<&[Row]> = rows.chunks(COLUMN).collect();
-    let measure = |group: &[Row]| {
-        let key_w = group.iter().fold(0.0f32, |m, row| {
-            m.max(text_width(painter, &row.keys, key_font(FONT)))
-        });
-        let label_w = group.iter().fold(0.0f32, |m, row| {
-            m.max(text_width(
-                painter,
-                &row.label,
-                egui::FontId::proportional(FONT),
-            ))
-        });
-        (key_w, PAD_X + key_w + KEY_GAP + label_w + PAD_X)
+///
+/// Always inside the window. A column holds [`COLUMN`] rows, or as many as
+/// the window's height has room for, which makes more columns; the card has
+/// as many columns as its width has room for, and past that the last column
+/// takes every row left, runs on below the card's foot, and the card scrolls
+/// all its columns together as one block — never sideways. Its keys work the
+/// same whatever is on screen.
+pub fn geometry(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    bottom: f32,
+    rows: &[Row],
+    first: usize,
+) -> Geometry {
+    let room = egui::vec2(
+        (area.width() - CARD_MARGIN * 2.0).max(0.0),
+        (bottom - CARD_MARGIN) - (area.top() + CARD_MARGIN),
+    );
+    let fits = ((room.y - CARD_PAD * 2.0) / CARD_ROW).floor().max(1.0) as usize;
+    let per = fits.min(COLUMN);
+    let keys: Vec<f32> = rows
+        .iter()
+        .map(|row| text_width(painter, &row.keys, key_font(FONT)))
+        .collect();
+    let words: Vec<f32> = rows
+        .iter()
+        .map(|row| text_width(painter, &row.label, egui::FontId::proportional(FONT)))
+        .collect();
+    let measure = |span: &std::ops::Range<usize>| {
+        let widest = |widths: &[f32]| widths[span.clone()].iter().fold(0.0f32, |m, w| m.max(*w));
+        let key_w = widest(&keys);
+        (key_w, PAD_X + key_w + KEY_GAP + widest(&words) + PAD_X)
     };
-    let widths: Vec<(f32, f32)> = columns.iter().map(|group| measure(group)).collect();
-    let tall = columns.iter().map(|group| group.len()).max().unwrap_or(0);
-    let size = egui::vec2(
+    // `count` columns of `per` rows, the last one taking whatever is left.
+    let spans = |count: usize| -> Vec<std::ops::Range<usize>> {
+        (0..count)
+            .map(|c| {
+                let end = if c + 1 == count {
+                    rows.len()
+                } else {
+                    (c + 1) * per
+                };
+                c * per..end
+            })
+            .collect()
+    };
+    let span_width = |widths: &[(f32, f32)]| {
         widths.iter().map(|(_, width)| width).sum::<f32>()
-            + ROW_SEP * (columns.len().saturating_sub(1)) as f32
-            + CARD_PAD * 2.0,
-        tall as f32 * CARD_ROW + CARD_PAD * 2.0,
+            + ROW_SEP * widths.len().saturating_sub(1) as f32
+            + CARD_PAD * 2.0
+    };
+    let mut count = rows.len().div_ceil(per);
+    let (columns, widths) = loop {
+        let columns = spans(count);
+        let widths: Vec<(f32, f32)> = columns.iter().map(measure).collect();
+        if count <= 1 || span_width(&widths) <= room.x {
+            break (columns, widths);
+        }
+        count -= 1;
+    };
+    let total = columns.iter().map(|span| span.len()).max().unwrap_or(0);
+    let shown = total.min(per);
+    let first = first.min(total - shown);
+    let size = egui::vec2(
+        span_width(&widths).min(room.x.max(CARD_PAD * 2.0)),
+        shown as f32 * CARD_ROW + CARD_PAD * 2.0,
     );
     let card = egui::Rect::from_min_size(
         egui::pos2(
@@ -231,14 +352,18 @@ pub fn geometry(painter: &egui::Painter, area: egui::Rect, bottom: f32, rows: &[
         ),
         size,
     );
+    let clip = card.shrink(CARD_PAD);
     let mut rects = Vec::with_capacity(rows.len());
     let mut labels = Vec::with_capacity(rows.len());
-    let mut left = card.left() + CARD_PAD;
-    for (group, (key_w, width)) in columns.iter().zip(&widths) {
-        for i in 0..group.len() {
+    let mut left = clip.left();
+    for (span, (key_w, width)) in columns.iter().zip(&widths) {
+        for i in 0..span.len() {
+            let top = clip.top() + (i as f32 - first as f32) * CARD_ROW;
             rects.push(egui::Rect::from_min_size(
-                egui::pos2(left, card.top() + CARD_PAD + i as f32 * CARD_ROW),
-                egui::vec2(*width, CARD_ROW),
+                egui::pos2(left, top),
+                // A column wider than the card can be, alone in a window
+                // narrower than it, stops at the card's padding.
+                egui::vec2(width.min(clip.right() - left).max(0.0), CARD_ROW),
             ));
             labels.push(left + PAD_X + key_w + KEY_GAP);
         }
@@ -248,6 +373,11 @@ pub fn geometry(painter: &egui::Painter, area: egui::Rect, bottom: f32, rows: &[
         card,
         rows: rects,
         labels,
+        clip,
+        per: shown,
+        total,
+        first,
+        band: crate::scrollbar::band(card, clip, shown as f32, total as f32),
     }
 }
 
@@ -308,6 +438,89 @@ mod tests {
         card.update(None, end);
         assert!(!card.visible(end));
         assert_eq!(card.deadline(None), None, "and then it is asleep");
+    }
+
+    fn rows(n: usize) -> Vec<Row> {
+        (0..n)
+            .map(|i| Row {
+                keys: format!("g {i}"),
+                label: format!("Go to the place called number {i}"),
+                next: Chord::plain(df_core::keymap::Key::Char('a')),
+            })
+            .collect()
+    }
+
+    fn with_painter(mut f: impl FnMut(&egui::Painter)) {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| f(ui.painter()));
+    }
+
+    fn screen(width: f32, height: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, height))
+    }
+
+    /// A window big enough lays the card out as it always was: columns of
+    /// nine, side by side, nothing to scroll and no bar.
+    #[test]
+    fn a_big_window_lays_the_card_out_in_columns_of_nine() {
+        with_painter(|painter| {
+            let area = screen(1400.0, 900.0);
+            let g = geometry(painter, area, area.bottom(), &rows(25), 0);
+            assert_eq!((g.per, g.total), (COLUMN, COLUMN));
+            assert!(area.contains_rect(g.card));
+            assert_eq!(g.band, None);
+            assert_eq!(bar(&g), None);
+            let columns: std::collections::BTreeSet<i64> =
+                g.rows.iter().map(|row| row.left() as i64).collect();
+            assert_eq!(columns.len(), 3, "nine, nine and seven");
+            assert!(g.rows.iter().all(|row| g.clip.contains(row.center())));
+        });
+    }
+
+    /// A window too short for nine rows makes the columns shorter and more
+    /// of them; one too narrow for those as well lets the last column take
+    /// the rest and scrolls all of them as one block, down and never
+    /// sideways. The card is inside the window every time, and only the
+    /// rows inside it take the pointer.
+    #[test]
+    fn a_small_window_keeps_the_card_inside_it_and_scrolls_the_rest() {
+        with_painter(|painter| {
+            let short = screen(1400.0, 200.0);
+            let g = geometry(painter, short, short.bottom(), &rows(25), 0);
+            assert!(short.contains_rect(g.card), "{:?}", g.card);
+            assert!(g.per < COLUMN, "shorter columns");
+            assert_eq!(g.total, g.per, "and enough of them: nothing to scroll");
+            assert_eq!(g.band, None);
+            assert!(g.rows.iter().all(|row| g.clip.contains(row.center())));
+
+            let small = screen(400.0, 200.0);
+            let g = geometry(painter, small, small.bottom(), &rows(25), 0);
+            assert!(small.contains_rect(g.card), "{:?}", g.card);
+            assert!(g.total > g.per, "the last column runs on");
+            assert!(g.band.is_some() && bar(&g).is_some());
+            let mut drawn = g.rows.iter().filter(|row| g.clip.contains(row.center()));
+            assert!(drawn.all(|row| g.card.contains_rect(*row)));
+            let hidden = g.rows.last().expect("rows");
+            assert!(!g.clip.contains(hidden.center()));
+            assert_eq!(g.row_at(hidden.center()), None, "a row off the card");
+
+            // The wheel scrolls every column together, and stops at the end.
+            let mut which = WhichKey::new();
+            which.wheel(-3.0 * CARD_ROW, &g);
+            assert_eq!(which.first(), 3);
+            let scrolled = geometry(painter, small, small.bottom(), &rows(25), which.first());
+            assert_eq!(scrolled.rows[3].top(), scrolled.clip.top());
+            assert_eq!(scrolled.row_at(scrolled.rows[3].center()), Some(3));
+            for _ in 0..20 {
+                which.wheel(-3.0 * CARD_ROW, &scrolled);
+            }
+            assert_eq!(which.first(), g.total - g.per);
+            let end = geometry(painter, small, small.bottom(), &rows(25), 1_000);
+            assert_eq!(end.first, g.total - g.per, "kept inside the columns");
+            // New rows start from their top.
+            which.rows_changed();
+            assert_eq!(which.first(), 0);
+        });
     }
 
     /// A second chord started mid-fade takes the card back rather than waiting

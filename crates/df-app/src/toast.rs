@@ -425,12 +425,12 @@ impl Toasts {
             )
         };
 
+        let rect = measure(painter, area, bottom, toast, drop).rect;
         let message = painter.layout_no_wrap(
-            toast.message.clone(),
+            fitted_message(painter, toast, rect.width()),
             egui::FontId::proportional(FONT),
             palette.text,
         );
-        let rect = measure(painter, area, bottom, toast, drop).rect;
 
         // The same plate the which-key card and the help sheet use, so every
         // floating thing in delightfile is visibly one surface. Under the
@@ -523,14 +523,10 @@ fn measure(
 ) -> ToastGeom {
     let hint = hint_of(toast);
     let message = text_width(painter, &toast.message, egui::FontId::proportional(FONT));
-    let hint_width = hint
-        .map(|(key, what)| {
-            text_width(painter, key, egui::FontId::monospace(FONT))
-                + 6.0
-                + text_width(painter, what, egui::FontId::proportional(FONT))
-                + PAD
-        })
-        .unwrap_or(0.0);
+    let hint_width = hint_width(painter, toast);
+    // Never wider than the window: a message longer than that loses its
+    // middle to `…` where it is drawn ([`fitted_message`]), and the offer at
+    // the trailing edge stays on the plate.
     let width = (message + hint_width + PAD * 2.0 + RULE_WIDTH).min(area.width() - MARGIN * 2.0);
     let rect = egui::Rect::from_center_size(
         egui::pos2(area.center().x, bottom - MARGIN - HEIGHT / 2.0 + drop),
@@ -546,6 +542,34 @@ fn measure(
         )
     });
     ToastGeom { rect, action }
+}
+
+/// How wide the offer at a toast's trailing edge is, with the padding before
+/// it: nothing, on a toast that makes none.
+fn hint_width(painter: &egui::Painter, toast: &Toast) -> f32 {
+    hint_of(toast)
+        .map(|(key, what)| {
+            text_width(painter, key, egui::FontId::monospace(FONT))
+                + 6.0
+                + text_width(painter, what, egui::FontId::proportional(FONT))
+                + PAD
+        })
+        .unwrap_or(0.0)
+}
+
+/// The message as it fits a plate `width` wide: whole when it does, and
+/// otherwise with its middle taken out and `…` in its place
+/// ([`crate::chrome::elide_middle`]). The end is where a message names what
+/// it was about — the file, the folder, the count — and a message cut at its
+/// end would lose exactly that; cut in the middle, it keeps both its ends.
+fn fitted_message(painter: &egui::Painter, toast: &Toast, width: f32) -> String {
+    let room = width - RULE_WIDTH - PAD * 2.0 - hint_width(painter, toast);
+    crate::chrome::elide_middle(
+        painter,
+        &toast.message,
+        egui::FontId::proportional(FONT),
+        room.max(0.0),
+    )
 }
 
 /// The plate's radius — [`crate::chrome::CARD_RADIUS`], the same as every
@@ -628,6 +652,50 @@ mod tests {
             assert!(
                 !toasts.animating(settled + REPLACE_FADE),
                 "and then it rests"
+            );
+        });
+    }
+
+    /// A message longer than a narrow window loses its middle, not its end:
+    /// what is drawn fits the plate beside the offer, keeps its last word,
+    /// and the plate and its `u undo` stay inside the window.
+    #[test]
+    fn a_long_message_loses_its_middle_and_keeps_its_last_word() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter();
+            let narrow = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 600.0));
+            let t0 = Instant::now();
+            let mut toasts = Toasts::new();
+            let message = "Moved 1,204 files from the camera card into the folder called Holiday";
+            toasts.undo(message, t0);
+            let geometry = toasts
+                .geometry(painter, narrow, narrow.bottom(), t0 + RISE)
+                .expect("a toast is up");
+            assert!(narrow.contains_rect(geometry.rect), "{:?}", geometry.rect);
+            let action = geometry.action.expect("an undo toast offers `u`");
+            assert!(
+                geometry.rect.contains_rect(action),
+                "the offer is on the plate"
+            );
+
+            let toast = toasts.current().expect("the toast");
+            let shown = fitted_message(painter, toast, geometry.rect.width());
+            assert_ne!(shown, message, "the window is too narrow for all of it");
+            assert!(shown.contains('…'), "{shown}");
+            assert!(shown.ends_with("Holiday"), "the last word went: {shown}");
+            assert!(shown.starts_with("Moved"), "{shown}");
+            let room = geometry.rect.width() - RULE_WIDTH - PAD * 2.0 - hint_width(painter, toast);
+            assert!(text_width(painter, &shown, egui::FontId::proportional(FONT)) <= room);
+
+            // …and a message that fits is drawn whole.
+            let wide = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 600.0));
+            let geometry = toasts
+                .geometry(painter, wide, wide.bottom(), t0 + RISE)
+                .expect("a toast is up");
+            assert_eq!(
+                fitted_message(painter, toast, geometry.rect.width()),
+                message
             );
         });
     }

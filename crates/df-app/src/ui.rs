@@ -583,6 +583,11 @@ pub enum Control {
     BulkCandidate(usize),
     /// The rename card's scrollbar: the thumb is dragged, the track pages.
     BulkScrollbar,
+    /// The band at a floating card's edge where its bar is drawn, while the
+    /// card's list is longer than it shows ([`crate::scrollbar::band`]). The
+    /// pointer on it brings the bar up, as it does a pane's; a press does
+    /// nothing, since nothing takes hold of a card's bar.
+    CardBar(crate::scrollbar::Surface),
 }
 
 /// How the three panes share the window this frame: what [`layout`] is asked

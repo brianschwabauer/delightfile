@@ -11,7 +11,9 @@
 //! the task panel, the dialogs, the tray, the which-key card — wear it too
 //! ([`card`], [`paint_card`]), for the same reason: a list cut off at a card's
 //! edge has to say that it goes on, and the one bar in the window is how
-//! anything here says that.
+//! anything here says that. Theirs is only ever read — the keys and the wheel
+//! move a card's list — but it comes and goes by the panes' rule, the linger
+//! after a scroll or the pointer on its band, and by nothing else.
 //!
 //! ## Why the hit band is wider than the thumb
 //!
@@ -222,13 +224,28 @@ impl Linger {
     }
 }
 
+/// Which floating card a bar belongs to, so the hover on its band
+/// ([`crate::ui::Control::CardBar`]) is that card's and no other's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Palette,
+    Tasks,
+    Mounts,
+    Confirm,
+    Conflict,
+    Sync,
+    Picker,
+    Spot,
+    Tray,
+    WhichKey,
+}
+
 /// A card's bar: down the card's right-hand padding beside `body`, the part of
 /// the card its rows are drawn in, or `None` when every row fits.
 ///
-/// In the padding rather than over the rows. Nothing takes hold of a card's
-/// bar: it says where the list is, and the keys and the wheel are what move
-/// it. So it needs no band cut out of the rows for a hand to land in, and the
-/// padding is the one strip of the card nothing else is drawn on.
+/// In the padding rather than over the rows: the padding is the one strip of
+/// the card nothing else is drawn on, and the band a pointer lights the bar
+/// from is flush with the card's edge, as a pane's is with the pane's.
 pub fn card(
     card: egui::Rect,
     body: egui::Rect,
@@ -240,25 +257,29 @@ pub fn card(
     geometry(pane, first, visible, total)
 }
 
-/// Draw a card's bar: up while the pointer is on the card (`over`) and for
-/// the [`LINGER`] after its list last moved, then faded over [`FADE`], as a
-/// pane's is. Never lit and never held, because no hand is ever on it.
+/// Where a card's bar can be pointed at: its [`HIT_WIDTH`] band at the card's
+/// edge, beside `body`, while the list is longer than the card shows. The one
+/// part of the bar that does not move as the list scrolls, so a card measured
+/// before its view settled still has it right.
+pub fn band(card: egui::Rect, body: egui::Rect, visible: f32, total: f32) -> Option<egui::Rect> {
+    self::card(card, body, 0.0, visible, total).map(|bar| bar.hit)
+}
+
+/// Draw a card's bar by the panes' rule: up for the [`LINGER`] after its list
+/// last moved and while the pointer is on its band (`lit`, the band's hover,
+/// which fades on its own when the pointer leaves), faded over [`FADE`].
+/// Never held: no hand takes hold of a card's bar.
 ///
 /// `fade` is the card's own, for a card on its way out.
 pub fn paint_card(
     painting: &Painting<'_>,
     bar: &Geometry,
-    over: bool,
+    lit: f32,
     scrolled_at: Option<Instant>,
     fade: f32,
 ) {
-    let alpha = visibility(
-        scrolled_at,
-        if over { 1.0 } else { 0.0 },
-        false,
-        painting.now,
-    );
-    self::paint(painting, bar, alpha * fade, 0.0, false);
+    let alpha = visibility(scrolled_at, lit, false, painting.now);
+    self::paint(painting, bar, alpha * fade, lit, false);
 }
 
 #[cfg(test)]

@@ -1694,28 +1694,18 @@ pub fn tip(
         m.max(text_width(painter, line, font.clone()))
     }) + CARD_PAD * 2.0;
     let height = lines.len() as f32 * CARD_ROW + CARD_PAD * 2.0;
-    // Right-aligned with what it explains, and under it — hanging the card off
-    // the thing's own edge is what keeps it pointing at it. Above instead when
-    // there is no room below, which is the only case a mark low in the list
-    // ever hits; the top row never does.
-    let left = (rect.right() - width).max(area.left() + CARD_MARGIN);
-    let below = rect.bottom() + CHIP_INSET;
-    let top = if below + height <= area.bottom() - CARD_MARGIN {
-        below
-    } else {
-        rect.top() - CHIP_INSET - height
-    };
-    let card_rect = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height));
+    let card_rect = tip_rect(area, rect, width, height);
     card(paint, card_rect, warm);
     for (i, line) in lines.iter().enumerate() {
-        painter.text(
+        // Cut short with `…` in a window narrower than the line, rather than
+        // wrapped: every line of a tip keeps the one row it was measured for.
+        truncated_in(
+            painter,
             egui::pos2(
                 card_rect.left() + CARD_PAD,
                 card_rect.top() + CARD_PAD + i as f32 * CARD_ROW + CARD_ROW / 2.0,
             ),
-            egui::Align2::LEFT_CENTER,
             line,
-            font.clone(),
             fade(
                 if i < dim_from {
                     palette.subtext0
@@ -1724,8 +1714,30 @@ pub fn tip(
                 },
                 warm,
             ),
+            (card_rect.width() - CARD_PAD * 2.0).max(0.0),
+            font.clone(),
         );
     }
+}
+
+/// Where a tip of `width` × `height` goes for the thing at `rect`.
+///
+/// Right-aligned with what it explains, and under it — hanging the card off
+/// the thing's own edge is what keeps it pointing at it. Above instead when
+/// there is no room below, which is the only case a mark low in the list ever
+/// hits; the top row never does. Either way inside the window: never wider
+/// than it less its margins, and a tip turned above something near the top
+/// stops at the top margin rather than going off the window's edge.
+fn tip_rect(area: egui::Rect, rect: egui::Rect, width: f32, height: f32) -> egui::Rect {
+    let width = width.min(area.width() - CARD_MARGIN * 2.0).max(0.0);
+    let left = (rect.right() - width).max(area.left() + CARD_MARGIN);
+    let below = rect.bottom() + CHIP_INSET;
+    let top = if below + height <= area.bottom() - CARD_MARGIN {
+        below
+    } else {
+        (rect.top() - CHIP_INSET - height).max(area.top() + CARD_MARGIN)
+    };
+    egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height))
 }
 
 // ── The top row ─────────────────────────────────────────────────────────────
@@ -3031,19 +3043,25 @@ pub fn which_key(
     }
     let palette = paint.palette;
     card(paint, geometry.card, alpha);
+    // Inside the card's padding: rows scrolled past it are not drawn, and a
+    // label too long for a card squeezed narrow stops at its edge.
+    let painter = paint.painter.with_clip_rect(geometry.clip);
     let placed = rows.iter().zip(&geometry.rows).zip(&geometry.labels);
     for (index, ((row, rect), label_x)) in placed.enumerate() {
+        if !geometry.clip.contains(rect.center()) {
+            continue;
+        }
         let key = Control::WhichKey(index);
         let hover = hovers.hover(key);
         let plate = pressed_rect(*rect, hovers.press(key));
         if hover > 0.0 {
-            paint.painter.rect_filled(
+            painter.rect_filled(
                 plate,
                 CARD_ROW_RADIUS,
                 fade(mix(palette.crust, palette.surface1, hover), alpha),
             );
         }
-        let inside = paint.painter.with_clip_rect(plate);
+        let inside = painter.with_clip_rect(plate.intersect(geometry.clip));
         for splash in ripples.splashes(key, paint.now) {
             inside.circle_filled(
                 splash.center,
@@ -3052,14 +3070,14 @@ pub fn which_key(
             );
         }
         let y = rect.center().y;
-        paint.painter.text(
+        painter.text(
             egui::pos2(rect.left() + PAD_X, y),
             egui::Align2::LEFT_CENTER,
             &row.keys,
             key_font(FONT),
             fade(palette.yellow, alpha),
         );
-        paint.painter.text(
+        painter.text(
             egui::pos2(*label_x, y),
             egui::Align2::LEFT_CENTER,
             &row.label,
@@ -3604,6 +3622,54 @@ pub fn elide_path(
     })
 }
 
+/// `text` shortened to fit `max_width` in `font` by taking characters out of
+/// its middle, `…` standing for them.
+///
+/// For a sentence whose two ends both matter: the start says what happened
+/// and the end which — a file's name, a count — and a line cut at its end
+/// keeps the first and loses the second. The measured half of
+/// [`elide_middle_with`].
+pub fn elide_middle(
+    painter: &egui::Painter,
+    text: &str,
+    font: egui::FontId,
+    max_width: f32,
+) -> String {
+    elide_middle_with(text, |candidate| {
+        text_width(painter, candidate, font.clone()) <= max_width
+    })
+}
+
+/// Which middle-shortening of `text` fits, as `fits` measures it: the whole
+/// text when it does, and otherwise as many characters as fit, split either
+/// side of `…` with the odd one going to the end. Pure, for the reason
+/// [`elide_segments`] is.
+pub fn elide_middle_with(text: &str, fits: impl Fn(&str) -> bool) -> String {
+    if fits(text) {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let candidate = |keep: usize| {
+        let head = keep / 2;
+        let mut out: String = chars[..head].iter().collect();
+        out.push('…');
+        out.extend(&chars[chars.len() - (keep - head)..]);
+        out
+    };
+    // The most characters that fit, by bisection: `fits` is a text layout
+    // apiece, as it is for a path.
+    let (mut low, mut high) = (0usize, chars.len().saturating_sub(1));
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if fits(&candidate(mid)) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    candidate(low)
+}
+
 /// Which shortening of a path fits, as `fits` measures it.
 ///
 /// A listing of paths is a column of shared prefixes — `project/src/preview/`
@@ -3668,6 +3734,41 @@ mod tests {
     /// The ladder, measured in characters: the whole path, then leading
     /// directories dropped one at a time behind `…/`, and only then the name
     /// itself cut at its end.
+    #[test]
+    fn a_long_line_loses_its_middle_and_keeps_its_end() {
+        let text = "Copied 1,204 files from the camera card to Photos";
+        let at = |width: usize| elide_middle_with(text, |s| s.chars().count() <= width);
+        assert_eq!(at(100), text, "a line that fits is left alone");
+        let short = at(24);
+        assert!(short.chars().count() <= 24, "{short}");
+        assert!(short.starts_with("Copied"), "{short}");
+        assert!(short.ends_with("to Photos"), "the last word went: {short}");
+        assert!(short.contains('…'));
+        // Nothing fits at all: the mark alone, for the clip.
+        assert_eq!(at(1), "…");
+        assert_eq!(at(0), "…");
+    }
+
+    /// A tip turned above something near the window's top stops at the top
+    /// margin, and one wider than the window is cut to it.
+    #[test]
+    fn a_tip_stays_inside_the_window() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 140.0));
+        let near_top = egui::Rect::from_min_size(egui::pos2(300.0, 40.0), egui::vec2(60.0, 20.0));
+        // No room below, and not enough above: turned up, then stopped at the
+        // top margin rather than hung off the window's edge.
+        let tip = tip_rect(area, near_top, 200.0, 100.0);
+        assert_eq!(tip.top(), area.top() + CARD_MARGIN, "{tip:?}");
+        assert!(area.contains_rect(tip), "{tip:?}");
+        // With room above, it sits wholly above the thing it is about.
+        let lower = near_top.translate(egui::vec2(0.0, 60.0));
+        let tip = tip_rect(area, lower, 200.0, 60.0);
+        assert!(tip.bottom() <= lower.top(), "{tip:?}");
+        let wide = tip_rect(area, near_top, 900.0, 40.0);
+        assert!(wide.width() <= area.width() - CARD_MARGIN * 2.0);
+        assert!(area.contains_rect(wide), "{wide:?}");
+    }
+
     #[test]
     fn a_path_is_shortened_from_the_front_a_directory_at_a_time() {
         let path = ["delightfile-demo", "src", "preview", "paint.rs"];
@@ -4937,11 +5038,11 @@ mod tests {
                     next: df_core::keymap::Chord::from_char('x').expect("x"),
                 })
                 .collect();
-            let geometry = crate::whichkey::geometry(paint.painter, area, area.bottom(), &rows);
+            let geometry = crate::whichkey::geometry(paint.painter, area, area.bottom(), &rows, 0);
             let (hovers, ripples) = (Hovers::new(), Ripples::new());
             which_key(&paint, &geometry, &rows, 1.0, &hovers, &ripples);
             which_key(&paint, &geometry, &rows, 0.4, &hovers, &ripples);
-            let empty = crate::whichkey::geometry(paint.painter, area, area.bottom(), &[]);
+            let empty = crate::whichkey::geometry(paint.painter, area, area.bottom(), &[], 0);
             which_key(&paint, &empty, &[], 1.0, &hovers, &ripples);
 
             let registry = df_core::keymap::Registry::defaults();

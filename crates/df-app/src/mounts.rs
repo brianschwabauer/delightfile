@@ -1638,6 +1638,9 @@ pub struct Geometry {
     /// nothing on its row. The same rule as [`Geometry::unpin`], from the
     /// other side — a key the row cannot use is not offered on it.
     pub cloud: bool,
+    /// The band the body's bar is pointed at by, while there are lines the
+    /// body does not show ([`crate::scrollbar::band`]).
+    pub band: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -1688,6 +1691,8 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         }
         lines.push((line, rect));
     }
+    let total: f32 = card.lines().iter().map(|line| line.height()).sum();
+    let shown: f32 = lines.iter().map(|(line, _)| line.height()).sum();
     Geometry {
         card: rect,
         body,
@@ -1696,6 +1701,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         close: Some(crate::chrome::close_button_rect(rect)),
         unpin: card.selected_place().is_some_and(|place| place.pinned),
         cloud: card.selected_cloud().is_some(),
+        band: crate::scrollbar::band(rect, body, shown, total),
     }
 }
 
@@ -1813,8 +1819,7 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
     }
 }
 
-/// Draw it. `over` is the pointer on the card, which brings up the body's
-/// bar.
+/// Draw it.
 pub fn paint(
     paint: &crate::ui::Painting<'_>,
     area: egui::Rect,
@@ -1822,7 +1827,6 @@ pub fn paint(
     geometry: &Geometry,
     hovers: &crate::hover::Hovers<crate::ui::Control>,
     ripples: &crate::ripple::Ripples<crate::ui::Control>,
-    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -1936,7 +1940,10 @@ pub fn paint(
         );
     }
     if let Some(bar) = bar(geometry, card) {
-        crate::scrollbar::paint_card(paint, &bar, over, card.scrolled_at(), 1.0);
+        let lit = hovers.hover(crate::ui::Control::CardBar(
+            crate::scrollbar::Surface::Mounts,
+        ));
+        crate::scrollbar::paint_card(paint, &bar, lit, card.scrolled_at(), 1.0);
     }
 }
 
@@ -2693,7 +2700,6 @@ Mount(3): backup -> file:///mnt/backup
                         &geometry(area, card),
                         &hovers,
                         &crate::ripple::Ripples::new(),
-                        true,
                     );
                 };
                 // Still loading, empty, populated, scrolled, and busy.
@@ -3194,6 +3200,7 @@ Mount(3): backup -> file:///mnt/backup
         let g = geometry(tall, &card);
         assert!(tall.contains_rect(g.card));
         assert!(bar(&g, &card).is_some(), "twenty disks in the old window");
+        assert!(g.band.is_some());
 
         card.fit(window(short), now);
         let g = geometry(short, &card);
@@ -3218,7 +3225,9 @@ Mount(3): backup -> file:///mnt/backup
         let mut few = Card::new();
         few.update(Vec::new(), Vec::new());
         few.fit(window(tall), now);
-        assert_eq!(bar(&geometry(tall, &few), &few), None);
+        let g = geometry(tall, &few);
+        assert_eq!(bar(&g, &few), None);
+        assert_eq!(g.band, None);
     }
 
     fn clouds() -> Vec<Cloud> {

@@ -51,16 +51,14 @@ use crate::ui::{Control, Painting};
 /// 560 is what a full 64-character SHA-256 needs on two monospace lines beside
 /// a label column, which is the widest thing on the card and therefore the
 /// thing that sets its width. Everything else fits inside that with room.
-const WIDTH: f32 = 560.0;
-
-/// The narrowest the card is ever drawn, in points.
 ///
-/// The two paddings, the label column, the nine permission chips and the octal
-/// readout beside them come to a shade under 480. Below that the editor — the
-/// row this panel exists for — would spill out of its own card, and a card that
-/// overhangs a 120-point window nobody can use at that size is the better of
-/// two bad answers.
-const MIN_WIDTH: f32 = 480.0;
+/// At most. A window narrower than that and its margins gets a card as wide as
+/// it leaves room for, drawn whole: the chips slide left over their label
+/// (which gives way, cut short with `…`), the values are cut short, and what
+/// still does not fit — the octal readout past the chips, the second half of
+/// a digest — is clipped at the row's edge. A card overhanging both sides of a
+/// narrow window hid its `×` and half its facts, which is worse.
+const WIDTH: f32 = 560.0;
 
 /// The label column, in points. Wide enough for "Permissions" plus its gap, so
 /// every value on the card starts at the same x — a column of facts is read by
@@ -464,6 +462,14 @@ pub struct Spot {
     pub bit: usize,
     pub checksum: Checksum,
     hasher: Option<Hasher>,
+    /// The first row drawn, when the rows are taller than the window lets
+    /// the card be.
+    pub first: usize,
+    /// How tall the rows may be before they scroll ([`Spot::fit`]): the room
+    /// the window leaves the card, which has no height of its own to cap it.
+    window: f32,
+    /// When the rows last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl Spot {
@@ -479,7 +485,37 @@ impl Spot {
             bit: 0,
             checksum: Checksum::Idle,
             hasher: None,
+            first: 0,
+            window: f32::INFINITY,
+            bar: crate::scrollbar::Linger::default(),
         }
+    }
+
+    /// Each row's height, top to bottom, as the card draws it.
+    fn heights(&self) -> Vec<f32> {
+        self.rows
+            .iter()
+            .map(|row| row_height(row, &self.checksum))
+            .collect()
+    }
+
+    /// The window leaves the rows `window` points ([`window`]): they scroll
+    /// within that from now on, whole rows at a time, and the cursor's row is
+    /// brought into it now — a key, a swipe to a file with more facts, a
+    /// digest landing on two lines, or a window made shorter can each have
+    /// left it outside.
+    pub fn fit(&mut self, window: f32, now: Instant) {
+        let heights = self.heights();
+        // Never less than the tallest row, so the cursor always has a whole
+        // row's room to be in.
+        self.window = heights.iter().fold(window, |room, h| room.max(*h));
+        self.first = follow(self.first, self.cursor, &heights, self.window);
+        self.bar.saw(self.first as f32, now);
+    }
+
+    /// When the rows last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.bar.scrolled_at()
     }
 
     /// Swap in a different file, keeping the panel open — `←`/`→`.
@@ -664,6 +700,13 @@ fn set(slot: &Arc<Mutex<Checksum>>, value: Checksum) {
 /// two cannot disagree about where a chip is.
 pub struct Geometry {
     pub card: egui::Rect,
+    /// Where the rows are drawn: the card under its title row, as tall as the
+    /// window lets it be.
+    pub body: egui::Rect,
+    /// The first row drawn.
+    pub first: usize,
+    /// One per row, every row, where it would be: those scrolled off the body
+    /// are neither drawn nor pressed.
     pub rows: Vec<egui::Rect>,
     /// The nine permission chips, when that row is on the card.
     pub bits: Vec<egui::Rect>,
@@ -671,6 +714,9 @@ pub struct Geometry {
     pub action: Option<egui::Rect>,
     /// The `×` at the title row's far end.
     pub close: Option<egui::Rect>,
+    /// The band the rows' bar is pointed at by, while the rows are taller
+    /// than the body ([`crate::scrollbar::band`]).
+    pub band: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -678,6 +724,14 @@ impl Geometry {
     /// inside the card as far as the caller is concerned — the modal swallows
     /// the pointer either way.
     pub fn hit(&self, pos: egui::Pos2) -> Option<Control> {
+        if self.band.is_some_and(|band| band.contains(pos)) {
+            return Some(Control::CardBar(crate::scrollbar::Surface::Spot));
+        }
+        // Only what is on the body: a row scrolled off it, or a chip pushed
+        // past the edge of a card squeezed narrow, is not there to be pressed.
+        if !self.body.contains(pos) {
+            return None;
+        }
         if let Some(index) = self.bits.iter().position(|r| r.contains(pos)) {
             return Some(Control::Action(index));
         }
@@ -686,7 +740,7 @@ impl Geometry {
         }
         self.rows
             .iter()
-            .position(|r| r.contains(pos))
+            .position(|r| on_body(&self.body, r) && r.contains(pos))
             .map(Control::PanelRow)
     }
 
@@ -695,6 +749,7 @@ impl Geometry {
             Control::Action(i) if i < BITS.len() => self.bits.get(i).copied(),
             Control::Action(_) => self.action,
             Control::PanelRow(i) => self.rows.get(i).copied(),
+            Control::CardBar(_) => self.band,
             _ => None,
         }
     }
@@ -711,58 +766,133 @@ fn row_height(row: &Row, checksum: &Checksum) -> f32 {
     }
 }
 
-/// Lay the card out above the panes' bottom edge, centred.
+/// Everything on the card that is not a row: the padding, the title row and
+/// the hint strip.
+const FIXED: f32 = CARD_PAD * 2.0 + chrome::CARD_ROW + chrome::HINT_ROW;
+
+/// How tall the rows may be in `area` with the card hanging above `bar_top`:
+/// what the window leaves between the title row and the hint strip.
+pub fn window(area: egui::Rect, bar_top: f32) -> f32 {
+    let room = (bar_top - chrome::CARD_MARGIN) - (area.top() + chrome::CARD_MARGIN);
+    (room - FIXED).max(0.0)
+}
+
+/// The first row to draw so that row `at` is wholly inside `window` points:
+/// the view moves only when the cursor would leave it, and never past the
+/// last rows exactly filling it. The mount card's rule
+/// ([`crate::mounts`]), for a card whose rows are not all one height either.
+fn follow(first: usize, at: usize, heights: &[f32], window: f32) -> usize {
+    if heights.iter().sum::<f32>() <= window || heights.is_empty() {
+        return 0;
+    }
+    let at = at.min(heights.len() - 1);
+    let mut first = first.min(at);
+    while first < at && heights[first..=at].iter().sum::<f32>() > window {
+        first += 1;
+    }
+    let mut deepest = heights.len();
+    let mut tail = 0.0;
+    while deepest > 0 && tail + heights[deepest - 1] <= window {
+        deepest -= 1;
+        tail += heights[deepest];
+    }
+    first.min(deepest)
+}
+
+/// Lay the card out above the panes' bottom edge, centred, for the rows
+/// [`Spot::fit`] last scrolled to.
+///
+/// Never taller than the window: the rows past the room it leaves scroll,
+/// whole rows at a time, so a row is on the plate or not drawn at all — the
+/// permission chips are never outside the plate they are drawn on, and a card
+/// overhanging the window is not how that is kept true.
 pub fn geometry(area: egui::Rect, bar_top: f32, spot: &Spot) -> Geometry {
-    let heights: Vec<f32> = spot
-        .rows
-        .iter()
-        .map(|row| row_height(row, &spot.checksum))
-        .collect();
-    let body: f32 = heights.iter().sum();
-    let height = CARD_PAD * 2.0 + chrome::CARD_ROW + body + chrome::HINT_ROW;
-    let width = WIDTH
-        .min(area.width() - chrome::CARD_MARGIN * 2.0)
-        .max(MIN_WIDTH);
+    let heights = spot.heights();
+    let total: f32 = heights.iter().sum();
+    let first = spot.first.min(heights.len().saturating_sub(1));
+    let body_height = total.min(spot.window);
+    let height = FIXED + body_height;
+    let width = WIDTH.min(area.width() - chrome::CARD_MARGIN * 2.0).max(0.0);
     let card = egui::Rect::from_min_size(
         egui::pos2(
             area.center().x - width / 2.0,
             (bar_top - chrome::CARD_MARGIN - height).max(area.top() + chrome::CARD_MARGIN),
         ),
-        // **Not clamped to the window's height.** A card shorter than its own
-        // rows would put the permission chips outside the plate they are drawn
-        // on, which is a card lying about where its controls are; overhanging a
-        // window too short to hold it is the honest failure, and egui clips it.
-        egui::vec2(width.max(0.0), height),
+        egui::vec2(width, height),
+    );
+    let body_top = card.top() + CARD_PAD + chrome::CARD_ROW;
+    let body = egui::Rect::from_min_size(
+        egui::pos2(card.left() + CARD_PAD, body_top),
+        egui::vec2((card.width() - CARD_PAD * 2.0).max(0.0), body_height),
     );
 
-    let mut y = card.top() + CARD_PAD + chrome::CARD_ROW;
+    // Every row, where it is from the first one drawn: those above it and
+    // below the body are laid out and never drawn or pressed.
+    let mut y = body_top - heights[..first].iter().sum::<f32>();
     let mut rows = Vec::with_capacity(heights.len());
     for h in &heights {
         rows.push(egui::Rect::from_min_size(
-            egui::pos2(card.left() + CARD_PAD, y),
-            egui::vec2((card.width() - CARD_PAD * 2.0).max(0.0), *h),
+            egui::pos2(body.left(), y),
+            egui::vec2(body.width(), *h),
         ));
         y += h;
     }
+    let shown = |index: usize| rows.get(index).filter(|rect| on_body(&body, rect));
+    // A chip is on the plate or it is not there: a card squeezed narrower
+    // than the nine chips, or than the checksum's, draws and offers none of
+    // them rather than part of an editor hanging off its edge. The keys still
+    // work the row.
+    let fits = |chip: &egui::Rect| chip.right() <= body.right() + 0.01;
 
     let bits = spot
         .perm_row()
-        .and_then(|index| rows.get(index))
+        .and_then(shown)
         .map(|rect| bit_rects(*rect))
+        .filter(|bits| bits.iter().all(fits))
         .unwrap_or_default();
     let action = spot
         .hash_row()
-        .and_then(|index| rows.get(index))
+        .and_then(shown)
         .filter(|_| !matches!(spot.checksum, Checksum::Done(_)))
-        .map(|rect| chip_rect(*rect, &spot.checksum));
+        .map(|rect| chip_rect(*rect, &spot.checksum))
+        .filter(fits);
 
     Geometry {
         card,
+        body,
+        first,
+        band: crate::scrollbar::band(card, body, body_height, total),
         rows,
         bits,
         action,
         close: Some(chrome::close_button_rect(card)),
     }
+}
+
+/// Whether a row is inside the body: drawn, and taken by the pointer. Whole
+/// rows only, with a hair's slack for the sums the rows were placed by.
+fn on_body(body: &egui::Rect, row: &egui::Rect) -> bool {
+    row.top() >= body.top() - 0.01 && row.bottom() <= body.bottom() + 0.01
+}
+
+/// The card's bar, beside its rows, while they are taller than the body.
+/// Counted in points, since the rows are not one height.
+pub fn bar(geometry: &Geometry, spot: &Spot) -> Option<crate::scrollbar::Geometry> {
+    let heights = spot.heights();
+    let above: f32 = heights[..geometry.first.min(heights.len())].iter().sum();
+    let shown: f32 = geometry
+        .rows
+        .iter()
+        .filter(|rect| on_body(&geometry.body, rect))
+        .map(egui::Rect::height)
+        .sum();
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.body,
+        above,
+        shown,
+        heights.iter().sum(),
+    )
 }
 
 /// The nine chips inside the permissions row, in three triads.
@@ -773,7 +903,8 @@ fn bit_rects(row: egui::Rect) -> Vec<egui::Rect> {
     let mut out = Vec::with_capacity(BITS.len());
     // Nine targets, eight gaps and two triad gaps. Measured rather than
     // guessed, because it is what keeps the row inside a card that has been
-    // squeezed (see [`MIN_WIDTH`]).
+    // squeezed (see [`WIDTH`]): the chips slide left over their label before
+    // they leave the row.
     let total = BITS.len() as f32 * CHIP_HIT
         + (BITS.len() - 1) as f32 * (CHIP_PITCH - CHIP_HIT)
         + TRIAD_GAP * 2.0;
@@ -861,6 +992,9 @@ pub fn paint(
         let Some(row) = spot.rows.get(index) else {
             break;
         };
+        if !on_body(&geometry.body, rect) {
+            continue;
+        }
         let on_cursor = index == spot.cursor;
         let key = Control::PanelRow(index);
         let hover = hovers.hover(key);
@@ -886,15 +1020,21 @@ pub fn paint(
             );
         }
 
-        inside.text(
-            egui::pos2(rect.left() + PAD_X, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            row.label,
-            egui::FontId::proportional(FONT),
-            palette.overlay1,
-        );
         let value_left = rect.left() + PAD_X + LABEL_COLUMN;
         let room = (rect.right() - PAD_X - value_left).max(0.0);
+        // The label gives way to what is beside it: its value's column, or
+        // the chips, which slide left over it on a card squeezed narrow.
+        let label_end = match row.value {
+            Value::Permissions => geometry.bits.first().map_or(value_left, |chip| chip.left()),
+            _ => value_left,
+        };
+        chrome::truncated(
+            &inside,
+            egui::pos2(rect.left() + PAD_X, rect.center().y),
+            row.label,
+            palette.overlay1,
+            (label_end - crate::ui::GAP - rect.left() - PAD_X).max(0.0),
+        );
         match &row.value {
             Value::Text(text) => {
                 chrome::truncated(
@@ -918,6 +1058,10 @@ pub fn paint(
                 checksum(paint, &inside, spot, geometry, rect, hovers, ripples, now);
             }
         }
+    }
+    if let Some(bar) = bar(geometry, spot) {
+        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Spot));
+        crate::scrollbar::paint_card(paint, &bar, lit, spot.scrolled_at(), 1.0);
     }
 }
 
@@ -1483,6 +1627,66 @@ mod tests {
         });
     }
 
+    /// A short window: the card is inside it and its body shows the rows
+    /// that fit, whole, the cursor's always among them, scrolling the rest,
+    /// with a bar and its band only while rows are left out — and a row off
+    /// the body takes no press. A narrow window gets the whole card rather
+    /// than one overhanging both its sides. A tall window shows every row.
+    #[test]
+    fn a_short_window_scrolls_the_spot_and_a_narrow_one_narrows_it() {
+        let now = Instant::now();
+        let mut facts = facts();
+        facts.btime = Some(SystemTime::now());
+        facts.git = Some("M — modified".to_string());
+        facts.link_target = Some(PathBuf::from("elsewhere"));
+        let mut spot = Spot::new(facts);
+        let screen = |width: f32, height: f32| {
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, height))
+        };
+        let lay = |spot: &mut Spot, area: egui::Rect| {
+            spot.fit(window(area, area.bottom() - 8.0), now);
+            geometry(area, area.bottom() - 8.0, spot)
+        };
+
+        let tall = screen(1400.0, 900.0);
+        let g = lay(&mut spot, tall);
+        assert!(g.rows.iter().all(|row| on_body(&g.body, row)), "every row");
+        assert_eq!(bar(&g, &spot), None);
+        assert_eq!(g.band, None);
+
+        let short = screen(1400.0, 240.0);
+        let g = lay(&mut spot, short);
+        assert!(short.contains_rect(g.card), "{:?}", g.card);
+        assert!(g.rows.iter().any(|row| on_body(&g.body, row)));
+        assert!(
+            g.rows.iter().any(|row| !on_body(&g.body, row)),
+            "none scroll"
+        );
+        assert!(bar(&g, &spot).is_some());
+        let band = g.band.expect("a band beside the rows");
+        assert_eq!(
+            g.hit(band.center()),
+            Some(Control::CardBar(crate::scrollbar::Surface::Spot))
+        );
+        for _ in 0..spot.rows.len() {
+            spot.move_cursor(1);
+            let g = lay(&mut spot, short);
+            assert!(
+                on_body(&g.body, &g.rows[spot.cursor]),
+                "the cursor is off the card"
+            );
+            for row in &g.rows {
+                let at = egui::pos2(row.left() + PAD_X, row.center().y);
+                assert_eq!(g.hit(at).is_some(), on_body(&g.body, row), "{row:?}");
+            }
+        }
+
+        let narrow = screen(320.0, 900.0);
+        let g = lay(&mut spot, narrow);
+        assert!(narrow.contains_rect(g.card), "{:?}", g.card);
+        assert!(g.card.width() < WIDTH);
+    }
+
     /// The chips are at least `delightful-ui` §1's 24 points apart centre to
     /// centre, so the hit target of each one clears the minimum even though the
     /// chip itself is drawn smaller.
@@ -1490,11 +1694,10 @@ mod tests {
     fn every_permission_chip_clears_the_minimum_hit_target() {
         let row = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(560.0, PERM_ROW));
         let rects = bit_rects(row);
-        // …and on a card squeezed to its floor, the nine still fit inside it.
-        let narrow = egui::Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(MIN_WIDTH - CARD_PAD * 2.0, PERM_ROW),
-        );
+        // …and on a row squeezed until it is no wider than the nine, they
+        // slide over their label and still fit inside it.
+        let chips = BITS.len() as f32 * CHIP_PITCH - (CHIP_PITCH - CHIP_HIT) + TRIAD_GAP * 2.0;
+        let narrow = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(chips, PERM_ROW));
         for rect in bit_rects(narrow) {
             assert!(narrow.contains_rect(rect), "{rect:?} is outside {narrow:?}");
         }

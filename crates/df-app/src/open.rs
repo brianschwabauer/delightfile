@@ -230,6 +230,14 @@ pub struct Picker {
     pub paths: Vec<PathBuf>,
     /// The row the card points at — PLAN §6's "anchored to the hovered row".
     pub anchor: egui::Rect,
+    /// The first choice drawn, when there are more than the window has room
+    /// for.
+    pub first: usize,
+    /// How many choices the card showed when it was last drawn: a page, for
+    /// the page keys ([`Picker::page`]).
+    shown: Option<usize>,
+    /// When the choices last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl Picker {
@@ -239,6 +247,9 @@ impl Picker {
             cursor: 0,
             paths,
             anchor,
+            first: 0,
+            shown: None,
+            bar: crate::scrollbar::Linger::default(),
         }
     }
 
@@ -253,10 +264,35 @@ impl Picker {
     pub fn chosen(&self) -> Option<&Choice> {
         self.choices.get(self.cursor)
     }
+
+    /// The card was laid out showing `shown` choices: the view follows the
+    /// cursor in those, so it never walks below the last one drawn.
+    pub fn fit(&mut self, shown: usize, now: std::time::Instant) {
+        self.shown = Some(shown);
+        self.first =
+            crate::viewport::first_visible(self.first, self.cursor, self.choices.len(), shown, 0);
+        self.bar.saw(self.first as f32, now);
+    }
+
+    /// A page of choices, for the page keys: the rows the card showed when
+    /// it was last drawn — every choice in a window tall enough for them, as
+    /// many as fit in one that is not.
+    pub fn page(&self) -> usize {
+        self.shown.unwrap_or(self.choices.len())
+    }
+
+    /// When the choices last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<std::time::Instant> {
+        self.bar.scrolled_at()
+    }
 }
 
 /// The picker's card and its rows, anchored under (or over) the row it is
 /// about. Shared by paint and hit test.
+///
+/// As many rows as there are choices, and as many as the window has room for
+/// ([`crate::dialog::fit_rows`]): a longer list scrolls with the cursor
+/// rather than hanging the card off the window's edge.
 pub fn picker_geometry(
     area: egui::Rect,
     anchor: egui::Rect,
@@ -264,9 +300,10 @@ pub fn picker_geometry(
 ) -> (egui::Rect, Vec<egui::Rect>) {
     /// Wide enough for "Open in Zed" plus its opener name.
     const WIDTH: f32 = 260.0;
-    let rows = count.max(1);
-    let height = CARD_PAD * 2.0 + rows as f32 * chrome::CARD_ROW + chrome::HINT_ROW;
-    let width = WIDTH.min(area.width() - chrome::CARD_MARGIN * 2.0);
+    let fixed = CARD_PAD * 2.0 + chrome::HINT_ROW;
+    let (rows, fitted) =
+        crate::dialog::fit_rows(area, WIDTH, fixed, chrome::CARD_ROW, count.max(1));
+    let (width, height) = (fitted.width(), fitted.height());
     // Below the row, unless there is no room below — then above it, so the card
     // never covers the file it is offering to open.
     let below = anchor.bottom() + 4.0;
@@ -279,8 +316,8 @@ pub fn picker_geometry(
         .left()
         .min(area.right() - chrome::CARD_MARGIN - width)
         .max(area.left() + chrome::CARD_MARGIN);
-    let card = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width.max(0.0), height));
-    let rects = (0..count)
+    let card = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height));
+    let rects = (0..count.min(rows))
         .map(|i| {
             egui::Rect::from_min_size(
                 egui::pos2(
@@ -294,6 +331,35 @@ pub fn picker_geometry(
     (card, rects)
 }
 
+/// The picker's bar, beside its rows, while there are more choices than it
+/// shows.
+pub fn picker_bar(
+    card: egui::Rect,
+    rects: &[egui::Rect],
+    picker: &Picker,
+) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        card,
+        body(rects)?,
+        picker.first as f32,
+        rects.len() as f32,
+        picker.choices.len() as f32,
+    )
+}
+
+/// Where the picker's bar is pointed at by, while there are more of its
+/// `count` choices than rows ([`crate::scrollbar::band`]).
+pub fn picker_band(card: egui::Rect, rects: &[egui::Rect], count: usize) -> Option<egui::Rect> {
+    crate::scrollbar::band(card, body(rects)?, rects.len() as f32, count as f32)
+}
+
+/// The rows, as one rect.
+fn body(rects: &[egui::Rect]) -> Option<egui::Rect> {
+    let (first, last) = (rects.first()?, rects.last()?);
+    Some(egui::Rect::from_min_max(first.min, last.max))
+}
+
+/// Draw the picker.
 pub fn paint_picker(
     paint: &Painting<'_>,
     card: egui::Rect,
@@ -316,11 +382,13 @@ pub fn paint_picker(
         return;
     }
     for (i, rect) in rects.iter().enumerate() {
-        let Some(choice) = picker.choices.get(i) else {
+        let Some(choice) = picker.choices.get(picker.first + i) else {
             break;
         };
+        // The row's place among the drawn ones, which is what the hit test
+        // reports.
         let key = Control::PanelRow(i);
-        let on_cursor = i == picker.cursor;
+        let on_cursor = picker.first + i == picker.cursor;
         let hover = hovers.hover(key);
         let rect = pressed_rect(*rect, hovers.press(key));
         if on_cursor || hover > 0.0 {
@@ -373,6 +441,10 @@ pub fn paint_picker(
             },
             (rect.width() - PAD_X * 2.0 - name.size().x - 8.0).max(0.0),
         );
+    }
+    if let Some(bar) = picker_bar(card, rects, picker) {
+        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Picker));
+        crate::scrollbar::paint_card(paint, &bar, lit, picker.scrolled_at(), 1.0);
     }
 }
 
@@ -565,6 +637,52 @@ mod tests {
         let right = egui::Rect::from_min_size(egui::pos2(1380.0, 200.0), egui::vec2(20.0, 22.0));
         let (card, _) = picker_geometry(area, right, 2);
         assert!(card.right() <= area.right());
+    }
+
+    /// A short window gets the choices it has room for, with the card inside
+    /// the window, and the cursor scrolls in those; a tall one shows them
+    /// all. The bar is there only while choices are left out.
+    #[test]
+    fn a_short_window_scrolls_the_pickers_choices() {
+        let choices: Vec<Choice> = (0..20)
+            .map(|n| Choice {
+                name: format!("opener-{n}"),
+                command: "true".to_string(),
+                description: format!("Open with number {n}"),
+                block: false,
+            })
+            .collect();
+        let row = egui::Rect::from_min_size(egui::pos2(300.0, 120.0), egui::vec2(400.0, 22.0));
+        let mut picker = Picker::new(choices, Vec::new(), row);
+        let window = |height: f32| {
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height))
+        };
+
+        let tall = window(900.0);
+        let (card, rects) = picker_geometry(tall, row, picker.choices.len());
+        assert_eq!(rects.len(), picker.choices.len(), "all twenty fit");
+        assert_eq!(picker_bar(card, &rects, &picker), None);
+        assert_eq!(picker_band(card, &rects, picker.choices.len()), None);
+
+        let short = window(300.0);
+        let (card, rects) = picker_geometry(short, row, picker.choices.len());
+        assert!(short.contains_rect(card), "{card:?}");
+        assert!(!rects.is_empty() && rects.len() < picker.choices.len());
+        assert!(rects.iter().all(|rect| card.contains_rect(*rect)));
+        assert!(picker_bar(card, &rects, &picker).is_some());
+        assert!(picker_band(card, &rects, picker.choices.len()).is_some());
+        assert_eq!(
+            picker.page(),
+            picker.choices.len(),
+            "undrawn, a page is all"
+        );
+        for _ in 0..picker.choices.len() {
+            picker.move_cursor(1);
+            picker.fit(rects.len(), std::time::Instant::now());
+            assert!((picker.first..picker.first + rects.len()).contains(&picker.cursor));
+        }
+        // …and a page is the choices it showed, for the page keys.
+        assert_eq!(picker.page(), rects.len());
     }
 
     #[test]

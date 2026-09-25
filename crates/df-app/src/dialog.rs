@@ -562,6 +562,9 @@ pub struct Geometry {
     pub apply_all: Option<egui::Rect>,
     /// The `×` in the top-right corner, on a card with no `Cancel` of its own.
     pub close: Option<egui::Rect>,
+    /// The band the names' bar is pointed at by, while there are more names
+    /// than rows ([`crate::scrollbar::band`]).
+    pub band: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -686,6 +689,7 @@ pub fn confirm_geometry(painter: &egui::Painter, area: egui::Rect, confirm: &Con
         card.bottom() - CARD_PAD - BUTTON_HEIGHT,
         &labels,
     );
+    let band = crate::scrollbar::band(card, body, lines as f32, confirm.paths.len() as f32);
     Geometry {
         card,
         body,
@@ -693,6 +697,7 @@ pub fn confirm_geometry(painter: &egui::Painter, area: egui::Rect, confirm: &Con
         actions,
         apply_all: None,
         close: None,
+        band,
     }
 }
 
@@ -753,6 +758,7 @@ pub fn conflict_geometry(
     Geometry {
         card,
         body,
+        band: crate::scrollbar::band(card, body, listed as f32, dialog.len() as f32),
         rows,
         actions,
         apply_all,
@@ -824,8 +830,7 @@ pub fn conflicts_bar(
 
 // ── Painting ────────────────────────────────────────────────────────────────
 
-/// Draw the confirm card over a scrim. `over` is the pointer on the card,
-/// which brings up the names' bar.
+/// Draw the confirm card over a scrim.
 pub fn paint_confirm(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -833,7 +838,6 @@ pub fn paint_confirm(
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
-    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -905,7 +909,8 @@ pub fn paint_confirm(
         );
     }
     if let Some(bar) = names_bar(geometry, confirm) {
-        crate::scrollbar::paint_card(paint, &bar, over, confirm.scrolled_at(), 1.0);
+        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Confirm));
+        crate::scrollbar::paint_card(paint, &bar, lit, confirm.scrolled_at(), 1.0);
     }
 
     let labels = ["Cancel", confirm_verb(confirm.kind)];
@@ -1857,8 +1862,7 @@ fn paint_popover(
     }
 }
 
-/// Draw the conflict resolver. `over` is the pointer on the card, which
-/// brings up the list's bar.
+/// Draw the conflict resolver.
 pub fn paint_conflict(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -1866,7 +1870,6 @@ pub fn paint_conflict(
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
-    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -1960,7 +1963,8 @@ pub fn paint_conflict(
         );
     }
     if let Some(bar) = conflicts_bar(geometry, dialog) {
-        crate::scrollbar::paint_card(paint, &bar, over, dialog.scrolled_at(), 1.0);
+        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Conflict));
+        crate::scrollbar::paint_card(paint, &bar, lit, dialog.scrolled_at(), 1.0);
     }
 
     // The comparison: what is coming in, and what is already there.
@@ -2469,6 +2473,7 @@ mod tests {
                     assert!(g.body.bottom() <= g.actions[0].top(), "under the answers");
                     let overflows = paths.len() > g.rows.len();
                     assert_eq!(names_bar(&g, &confirm).is_some(), overflows);
+                    assert_eq!(g.band.is_some(), overflows, "a band only with a bar");
                     confirm.fit(g.rows.len(), std::time::Instant::now());
                     confirm.scroll_by(100);
                     assert_eq!(confirm.scroll, paths.len() - g.rows.len());
@@ -2508,6 +2513,7 @@ mod tests {
             assert!(conflicts_bar(&g, &dialog).is_some(), "twelve names in five");
             let g = conflict_geometry(painter, window(900.0), &few);
             assert_eq!(conflicts_bar(&g, &few), None, "two names fit");
+            assert_eq!(g.band, None);
 
             let short = window(300.0);
             let g = conflict_geometry(painter, short, &dialog);
@@ -2657,9 +2663,9 @@ mod tests {
             let hovers = Hovers::new();
             let ripples = Ripples::new();
             let g = conflict_geometry(ui.painter(), area, &dialog);
-            paint_conflict(&paint, area, &dialog, &g, &hovers, &ripples, false);
+            paint_conflict(&paint, area, &dialog, &g, &hovers, &ripples);
             let g = confirm_geometry(ui.painter(), area, &confirm);
-            paint_confirm(&paint, area, &confirm, &g, &hovers, &ripples, false);
+            paint_confirm(&paint, area, &confirm, &g, &hovers, &ripples);
 
             // A confirm longer than it shows, scrolled part way, so the
             // `+N more` marker draws beside a name that has to make room.
@@ -2669,7 +2675,7 @@ mod tests {
             let mut long = Confirm::new(ConfirmKind::EmptyTrash, many);
             long.scroll_by(3);
             let g = confirm_geometry(ui.painter(), area, &long);
-            paint_confirm(&paint, area, &long, &g, &hovers, &ripples, true);
+            paint_confirm(&paint, area, &long, &g, &hovers, &ripples);
 
             // The rename card, in the states it has: clean, rewritten by the
             // template, with the `{` list open, refused with carets on two

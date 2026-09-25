@@ -794,6 +794,9 @@ pub struct Geometry {
     /// The status, on the buttons' line from the card's padding to a gap
     /// short of the first button.
     pub status: egui::Rect,
+    /// The band the list's bar is pointed at by, while the list has more rows
+    /// than it shows ([`crate::scrollbar::band`]).
+    pub band: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -802,6 +805,9 @@ impl Geometry {
     pub fn hit(&self, pos: egui::Pos2) -> Option<Control> {
         if self.close.contains(pos) {
             return Some(Control::Close);
+        }
+        if self.band.is_some_and(|band| band.contains(pos)) {
+            return Some(Control::CardBar(crate::scrollbar::Surface::Sync));
         }
         self.actions
             .iter()
@@ -813,6 +819,7 @@ impl Geometry {
         match control {
             Control::Close => Some(self.close),
             Control::Action(i) => self.actions.get(i).copied(),
+            Control::CardBar(_) => self.band,
             _ => None,
         }
     }
@@ -878,6 +885,7 @@ pub fn geometry(painter: &egui::Painter, area: egui::Rect, card: &SyncCard) -> G
         visible,
         actions,
         status,
+        band: crate::scrollbar::band(rect, body, visible as f32, card.rows().len() as f32),
     }
 }
 
@@ -895,8 +903,7 @@ pub fn bar(geometry: &Geometry, card: &SyncCard) -> Option<crate::scrollbar::Geo
     )
 }
 
-/// Draw the card over a scrim. `over` is the pointer on the card, which
-/// brings up the list's bar.
+/// Draw the card over a scrim.
 pub fn paint(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -904,7 +911,6 @@ pub fn paint(
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
-    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -1006,7 +1012,8 @@ pub fn paint(
         );
     }
     if let Some(bar) = bar(geometry, card) {
-        crate::scrollbar::paint_card(paint, &bar, over, card.scrolled_at(), 1.0);
+        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Sync));
+        crate::scrollbar::paint_card(paint, &bar, lit, card.scrolled_at(), 1.0);
     }
 
     let status = card.status();
@@ -1550,8 +1557,15 @@ mod tests {
             let g = geometry(ui.painter(), tall, &ready);
             assert_eq!(g.rows.len(), VISIBLE, "the old count");
             assert!(bar(&g, &ready).is_some(), "thirty rows in ten");
+            let band = g.band.expect("a band beside the list");
+            assert_eq!(
+                g.hit(band.center()),
+                Some(Control::CardBar(crate::scrollbar::Surface::Sync))
+            );
             let g = geometry(ui.painter(), tall, &few);
             assert_eq!(bar(&g, &few), None, "three rows fit");
+            let edge = egui::pos2(g.card.right() - 2.0, g.body.center().y);
+            assert_eq!(g.hit(edge), None, "no band while the rows fit");
 
             let short = window(300.0);
             let g = geometry(ui.painter(), short, &ready);
