@@ -60,6 +60,10 @@
 
 mod config;
 mod conn;
+mod http;
+/// Public for the same reason [`wire`] is: rclone's replies are documents in
+/// this format, and the codec is a small, tested thing a reader may want.
+pub mod json;
 mod poll;
 /// Public because the codec *is* a documented artifact: df-app never speaks
 /// it, but the message-level types ([`wire::Request`], [`wire::Reply`]) and
