@@ -967,17 +967,44 @@ fn status_error(about: &VfsPath, message: String) -> VfsError {
 /// Only the not-found family is told apart, because it is the only one
 /// anything *decides* on: "is this name free?" is a stat that fails with
 /// [`StatusCode::NoSuchFile`], and a permission problem must never be read as
-/// that. rclone's words for it are "object not found" and "directory not
-/// found" from the operations, and the local backend's "no such file or
-/// directory". Everything else is a [`StatusCode::Failure`] carrying rclone's
-/// own sentence, which is the part a person reads anyway.
+/// that. Everything else is a [`StatusCode::Failure`] carrying rclone's own
+/// sentence, which is the part a person reads anyway.
+///
+/// **Only rclone's own sentences count, whole** ([`NOT_FOUND`]). A looser
+/// "contains *not found*" also caught a provider's `404 Not Found` and Google
+/// Drive's `File not found` — which Drive says for a file you may not see as
+/// well as for one that is not there — and a name reported free that is not
+/// free is the one wrong answer here that destroys something: `unique_name`
+/// hands it to an upload, and the upload replaces what was there. So the match
+/// is case-sensitive, as rclone writes them, and a phrase only counts when it
+/// is not part of a longer word on either side.
 fn code_for(message: &str) -> StatusCode {
-    let lower = message.to_lowercase();
-    if lower.contains("not found") || lower.contains("no such file or directory") {
+    if NOT_FOUND
+        .iter()
+        .any(|phrase| contains_phrase(message, phrase))
+    {
         StatusCode::NoSuchFile
     } else {
         StatusCode::Failure
     }
+}
+
+/// rclone's canonical "there is nothing there": `fs.ErrorObjectNotFound`,
+/// `fs.ErrorDirNotFound`, and the local backend's `ENOENT` as Go words it.
+const NOT_FOUND: [&str; 3] = [
+    "object not found",
+    "directory not found",
+    "no such file or directory",
+];
+
+/// Whether `phrase` occurs in `text` as a whole phrase: with no letter or digit
+/// touching it on either side.
+fn contains_phrase(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + phrase.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// Remove the `.partial` files rclone left beside `local` — its own name, a
@@ -1256,15 +1283,25 @@ mod tests {
 
     #[test]
     fn rclone_error_sentences_sort_into_not_found_and_everything_else() {
+        // rclone's own sentences, whole, wherever they sit in the message.
         for message in [
             "object not found",
             "error in ListJSON: directory not found",
             "stat /tmp/x/zz: no such file or directory",
-            "Object Not Found",
+            "Failed to copy: object not found.",
+            "(directory not found)",
         ] {
             assert_eq!(code_for(message), StatusCode::NoSuchFile, "{message}");
         }
+        // Everything else — including the providers' own "not found"s, which
+        // can mean "you may not see it" and so must never read as "free".
         for message in [
+            "404 Not Found",
+            "googleapi: Error 404: File not found: 1AbC., notFound",
+            "Object Not Found",
+            "job not found",
+            "subdirectory not found",
+            "object not founded",
             "remove /tmp/x/sub: directory not empty",
             "didn't find section in config file (\"r9\")",
             "permission denied",
