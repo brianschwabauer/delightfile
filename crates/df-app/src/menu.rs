@@ -36,8 +36,9 @@
 //! keyboard, which brings the row it moves to whole into view. Sliding the
 //! card off the edge instead would leave rows nobody can reach, which is the
 //! one thing [`place`] exists to prevent. The bar that says the list goes on
-//! is the list panes' own ([`crate::scrollbar`]), so a menu that scrolls looks
-//! like everything else here that scrolls, and a menu that fits has none.
+//! is the list panes' own ([`crate::scrollbar`]), shown by their rule, so a
+//! menu that scrolls looks like everything else here that scrolls, and a menu
+//! that fits has none.
 
 use std::time::{Duration, Instant};
 
@@ -1109,6 +1110,22 @@ impl Menu {
         true
     }
 
+    /// How visible a card's bar is — the submenu's when `sub` — by a pane's
+    /// rule exactly ([`scrollbar::visibility`]): up for the linger after its
+    /// list last moved and faded after it, or lit by the pointer's hover over
+    /// its band, which fades on its own when the pointer leaves. Never merely
+    /// because the pointer is somewhere on the card: a bar that came up every
+    /// time the hand crossed a long menu would be a second thing moving under
+    /// a pointer that was only choosing a row.
+    pub fn bar_alpha(&self, sub: bool, hovers: &Hovers<Control>, now: Instant) -> f32 {
+        let (scrolled_at, band) = if sub {
+            (self.sub_scrolled_at, Control::SubmenuBar)
+        } else {
+            (self.scrolled_at, Control::MenuBar)
+        };
+        scrollbar::visibility(scrolled_at, hovers.hover(band), false, now)
+    }
+
     /// Whether either card's bar is mid-fade and owed frames — the fade only,
     /// as a pane's ([`scrollbar::fading`]).
     pub fn bar_fading(&self, now: Instant) -> bool {
@@ -1172,11 +1189,22 @@ pub struct Geometry {
 
 impl Geometry {
     /// What the pointer is over.
+    ///
+    /// A card's bar band before its rows, as a pane's is before its rows: the
+    /// band runs down over the rows' right-hand ends, and a pointer in it is
+    /// pointing at the bar. Only while there is a bar — a list that fits has
+    /// no band, and its rows answer right to the edge.
     pub fn hit(&self, pos: egui::Pos2) -> Option<Control> {
         if let Some((card, rows)) = &self.sub {
+            if self.sub_bar.is_some_and(|bar| bar.contains(pos)) {
+                return Some(Control::SubmenuBar);
+            }
             if let Some(index) = row_at(*card, rows, pos) {
                 return Some(Control::SubmenuItem(index));
             }
+        }
+        if self.bar.is_some_and(|bar| bar.contains(pos)) {
+            return Some(Control::MenuBar);
         }
         row_at(self.card, &self.rows, pos).map(Control::MenuItem)
     }
@@ -1194,6 +1222,8 @@ impl Geometry {
                 .sub
                 .as_ref()
                 .and_then(|(_, rows)| rows.get(index).copied()),
+            Control::MenuBar => self.bar.map(|bar| bar.hit),
+            Control::SubmenuBar => self.sub_bar.map(|bar| bar.hit),
             _ => None,
         }
     }
@@ -1445,16 +1475,13 @@ fn keys_right(row: egui::Rect, chevrons: bool) -> f32 {
 
 // ── Paint ───────────────────────────────────────────────────────────────────
 
-/// Draw the menu and its submenu. `pointer` is where the pointer is, for the
-/// bars: a card's is up while the pointer is on it.
-#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
+/// Draw the menu and its submenu.
 pub fn paint(
     paint: &Painting<'_>,
     menu: &Menu,
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
-    pointer: Option<egui::Pos2>,
     now: Instant,
 ) {
     let alpha = menu.alpha(now);
@@ -1477,15 +1504,11 @@ pub fn paint(
         alpha,
         now,
     );
-    bar(
-        paint,
-        geometry.bar.as_ref(),
-        geometry.card,
-        menu.scrolled_at,
-        pointer,
-        alpha,
-        now,
-    );
+    if let Some(bar) = &geometry.bar {
+        let lit = hovers.hover(Control::MenuBar);
+        let shown = menu.bar_alpha(false, hovers, now);
+        scrollbar::paint(paint, bar, shown * alpha, lit, false);
+    }
 
     let (Some((sub_card, sub_rows)), Some(items)) = (&geometry.sub, menu.sub_items()) else {
         return;
@@ -1505,39 +1528,11 @@ pub fn paint(
         alpha,
         now,
     );
-    bar(
-        paint,
-        geometry.sub_bar.as_ref(),
-        *sub_card,
-        menu.sub_scrolled_at,
-        pointer,
-        alpha,
-        now,
-    );
-}
-
-/// One card's scrollbar, the list panes' own ([`crate::scrollbar`]): up while
-/// the pointer is on the card, or for the linger after its list last moved,
-/// then faded — and none at all on a list that fits (`bar` is `None`).
-///
-/// Drawn as a pane's is when the pointer is nowhere near its band: the thumb
-/// alone, at rest. The band here takes no hand — the wheel and the arrows are
-/// how a menu scrolls — so the lit plate a pane's band shows under the
-/// pointer, which says "this can be taken hold of", would be a promise the
-/// card does not keep.
-fn bar(
-    paint: &Painting<'_>,
-    bar: Option<&scrollbar::Geometry>,
-    card: egui::Rect,
-    scrolled_at: Option<Instant>,
-    pointer: Option<egui::Pos2>,
-    alpha: f32,
-    now: Instant,
-) {
-    let Some(bar) = bar else { return };
-    let over = pointer.is_some_and(|at| card.contains(at));
-    let shown = scrollbar::visibility(scrolled_at, f32::from(over), false, now);
-    scrollbar::paint(paint, bar, shown * alpha, 0.0, false);
+    if let Some(bar) = &geometry.sub_bar {
+        let lit = hovers.hover(Control::SubmenuBar);
+        let shown = menu.bar_alpha(true, hovers, now);
+        scrollbar::paint(paint, bar, shown * alpha, lit, false);
+    }
 }
 
 /// One card's rows and the separators between them.
@@ -2355,6 +2350,85 @@ mod tests {
         assert!(!menu.bar_fading(t1));
         assert!(menu.bar_fading(t1 + scrollbar::LINGER + scrollbar::FADE / 2));
         assert!(!menu.bar_fading(t1 + scrollbar::LINGER + scrollbar::FADE));
+    }
+
+    /// A card that scrolls has its bar's band down its inner right edge, and
+    /// the band is the bar's before it is the row's under it; a card that
+    /// fits has no band, and its rows answer right to their edge. The
+    /// submenu's band is its own.
+    #[test]
+    fn the_bar_band_takes_the_pointer_only_on_a_card_that_scrolls() {
+        let window = short();
+        let mut rows = tall(28);
+        rows.push(Item::new("Long", "", Action::Nothing, true).with_submenu(tall(40)));
+        let mut menu = Menu::context(egui::pos2(200.0, 100.0), rows);
+        let g = laid_out(window, &menu);
+        let bar = g.bar.expect("a list that scrolls has a bar");
+        assert_eq!(bar.hit.right(), view(g.card).right());
+        assert_eq!(g.hit(bar.thumb.center()), Some(Control::MenuBar));
+        let row = g.rows[2];
+        let edge = egui::pos2(row.right() - 1.0, row.center().y);
+        assert_eq!(g.hit(edge), Some(Control::MenuBar), "the band is the bar's");
+        assert_eq!(g.hit(row.center()), Some(Control::MenuItem(2)));
+        assert_eq!(g.rect_of(Control::MenuBar), Some(bar.hit));
+
+        menu.cursor = Some(28);
+        assert!(menu.open_submenu());
+        let g = laid_out(window, &menu);
+        let bar = g.sub_bar.expect("forty rows scroll");
+        assert_eq!(g.hit(bar.thumb.center()), Some(Control::SubmenuBar));
+        assert_eq!(g.rect_of(Control::SubmenuBar), Some(bar.hit));
+
+        let menu = Menu::context(egui::pos2(200.0, 200.0), items(facts(), &openers()));
+        let g = laid_out(area(), &menu);
+        assert!(g.bar.is_none());
+        let row = g.rows[2];
+        let edge = egui::pos2(row.right() - 1.0, row.center().y);
+        assert_eq!(g.hit(edge), Some(Control::MenuItem(2)));
+        assert_eq!(g.rect_of(Control::MenuBar), None);
+    }
+
+    /// The bar is up by a pane's rule and no other: for the linger after the
+    /// list last moved, then faded; or while the pointer's hover is on its
+    /// band, fading on its own when the pointer leaves — and not at all for a
+    /// pointer that is merely somewhere else on the card.
+    #[test]
+    fn the_bar_shows_by_the_panes_rule() {
+        let area = short();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut menu = Menu::context(egui::pos2(200.0, 100.0), tall(29));
+        let mut hovers: Hovers<Control> = Hovers::new();
+
+        // On a row, never scrolled: no bar.
+        hovers.tick(Some(Control::MenuItem(3)), None, t0);
+        assert_eq!(menu.bar_alpha(false, &hovers, t0), 0.0);
+        // On the band: up at once.
+        hovers.tick(Some(Control::MenuBar), None, at(10));
+        assert_eq!(menu.bar_alpha(false, &hovers, at(10)), 1.0);
+        assert_eq!(menu.bar_alpha(true, &hovers, at(10)), 0.0, "not the sub's");
+        // Off it onto a row: the hover's own fade takes it away.
+        hovers.tick(Some(Control::MenuItem(3)), None, at(80));
+        let fading = menu.bar_alpha(false, &hovers, at(80));
+        assert!(fading > 0.0 && fading < 1.0, "{fading}");
+        hovers.tick(Some(Control::MenuItem(3)), None, at(300));
+        assert_eq!(menu.bar_alpha(false, &hovers, at(300)), 0.0);
+
+        // A scroll: up for the linger with the pointer on a row, then faded.
+        let t1 = at(400);
+        assert!(menu.wheel(false, -50.0, area, t1));
+        assert_eq!(menu.bar_alpha(false, &hovers, t1), 1.0);
+        let linger = t1 + scrollbar::LINGER;
+        assert_eq!(
+            menu.bar_alpha(false, &hovers, linger - Duration::from_millis(1)),
+            1.0
+        );
+        let mid = menu.bar_alpha(false, &hovers, linger + scrollbar::FADE / 2);
+        assert!((mid - 0.5).abs() < 0.01, "{mid}");
+        assert_eq!(
+            menu.bar_alpha(false, &hovers, linger + scrollbar::FADE),
+            0.0
+        );
     }
 
     /// A submenu too tall for the window scrolls in a card of its own, apart

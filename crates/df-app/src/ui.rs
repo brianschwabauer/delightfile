@@ -525,6 +525,12 @@ pub enum Control {
     /// row of the submenu it has flown out (PLAN §7.5).
     MenuItem(usize),
     SubmenuItem(usize),
+    /// The band down the right edge of a menu's card, and of its submenu's,
+    /// while the list is taller than the card ([`crate::menu`]): hovered, it
+    /// brings the bar up as a pane's band does. A press on it does nothing —
+    /// the wheel and the arrows are how a menu scrolls.
+    MenuBar,
+    SubmenuBar,
     /// The three bars at the top row's leading end, which drop the app menu
     /// out: every command a person might not know the key for, where the
     /// pointer can find it.

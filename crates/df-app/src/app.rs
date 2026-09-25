@@ -1239,6 +1239,10 @@ pub struct App {
     /// the cursor — see [`crate::hover::Parking`], which is where the rule and
     /// its reasons live.
     row_hover: crate::hover::Parking,
+    /// …and the menu's, parked by the menu's own arrows: a pointer resting
+    /// on one of its rows would otherwise take the cursor back to that row on
+    /// the next frame, and with it whatever the arrow had scrolled into view.
+    menu_hover: crate::hover::Parking,
     /// How wide each tab's chip was the last time the strip was measured
     /// ([`chrome::tab_widths`]), kept so the drag — which runs from pointer
     /// events, off the frame that measured — lays its chips out from the same
@@ -2069,6 +2073,7 @@ impl App {
             clipboard_ready: false,
             pointer_moved_at: None,
             row_hover: crate::hover::Parking::default(),
+            menu_hover: crate::hover::Parking::default(),
             tab_widths: Vec::new(),
             prompt: None,
             visual: None,
@@ -10256,6 +10261,8 @@ impl App {
                 | Control::YankChip
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
+                | Control::MenuBar
+                | Control::SubmenuBar
                 | Control::MenuButton
                 | Control::YankClear
                 | Control::YankRow(_)
@@ -10354,6 +10361,8 @@ impl App {
             | Control::YankChip
             | Control::MenuItem(_)
             | Control::SubmenuItem(_)
+            | Control::MenuBar
+            | Control::SubmenuBar
             | Control::MenuButton
             | Control::YankClear
             | Control::YankRow(_)
@@ -11084,6 +11093,10 @@ impl App {
                 self.menu_click(control, geom.page, now);
                 rect
             }
+            // A menu's bar band takes the pointer to light the bar and does
+            // nothing when pressed: the wheel and the arrows scroll a menu. A
+            // press there is on the menu, so it dismisses nothing either.
+            Control::MenuBar | Control::SubmenuBar => egui::Rect::ZERO,
             // Only ever reached with no menu up: while one is, the hit test
             // answers for the menu alone, so a second press on the button is
             // spent closing its menu rather than opening it again.
@@ -11543,25 +11556,37 @@ impl App {
         let area = self.menu_area;
         let action = {
             let Some(menu) = &mut self.menu else { return };
+            // Every key here that moves the keyboard's place in the menu
+            // parks the pointer's hover until the hand moves (see the
+            // `menu_hover` field): a pointer resting on a row would otherwise
+            // take the cursor back to that row on the next frame, fly its list
+            // out again, and undo the scroll that brought the keyboard's row
+            // into view.
             match chord.key {
                 // A row the card has scrolled out of view is brought whole
                 // into it: the keyboard's row is always one you can see.
                 Key::ArrowUp if plain => {
                     menu.move_cursor(-1);
                     menu.reveal(area, now);
+                    self.menu_hover.park();
                     None
                 }
                 Key::ArrowDown if plain => {
                     menu.move_cursor(1);
                     menu.reveal(area, now);
+                    self.menu_hover.park();
                     None
                 }
                 Key::ArrowRight if plain => {
-                    menu.open_submenu();
+                    if menu.open_submenu() {
+                        self.menu_hover.park();
+                    }
                     None
                 }
                 Key::ArrowLeft if plain => {
-                    if !menu.close_submenu() {
+                    if menu.close_submenu() {
+                        self.menu_hover.park();
+                    } else {
                         self.close_menu(now);
                     }
                     None
@@ -11577,14 +11602,18 @@ impl App {
                             .and_then(|at| menu.items.get(at))
                             .is_some_and(|item| item.enabled && item.has_submenu()) =>
                 {
-                    menu.open_submenu();
+                    if menu.open_submenu() {
+                        self.menu_hover.park();
+                    }
                     None
                 }
                 Key::Enter if plain => menu.activate(),
                 Key::Escape => {
                     // One rung of its own: the submenu goes first, then the
                     // menu — the same "one rung at a time" the `Esc` ladder is.
-                    if !menu.close_submenu() {
+                    if menu.close_submenu() {
+                        self.menu_hover.park();
+                    } else {
                         self.close_menu(now);
                     }
                     None
@@ -14056,6 +14085,7 @@ impl App {
         });
         if let Some(at) = travelled {
             self.row_hover.moved(at);
+            self.menu_hover.moved(at);
         }
         let parent_content = ui::content_rect(layout.parent);
         // The parent column is a list at the *list's* step, whatever the list
@@ -14552,8 +14582,10 @@ impl App {
         // The menu follows the pointer: hovering a row makes it the keyboard's
         // row too (one cursor, not two), and hovering the chevron flies the
         // submenu out — which is what a menu does everywhere and the reason
-        // nobody has to be told a submenu is there.
-        if menu_live {
+        // nobody has to be told a submenu is there. Not while the menu's
+        // arrows have parked it: the keyboard's row is the one the keys chose
+        // until the hand moves, whatever row the pointer was left lying on.
+        if menu_live && !self.menu_hover.parked() {
             if let Some((Control::MenuItem(index), _)) = over {
                 let submenu = self
                     .menu
@@ -14833,8 +14865,14 @@ impl App {
             let rect = self.click(control, double, &pointer, &geom, now);
             // Not on a scrollbar: the bar answers by moving the rows, and it
             // draws no splash — one spawned there would only be frames asked
-            // for a ripple nothing paints.
-            if !matches!(control, Control::Scrollbar(_) | Control::BulkScrollbar) {
+            // for a ripple nothing paints. A menu's bar answers nothing at all.
+            if !matches!(
+                control,
+                Control::Scrollbar(_)
+                    | Control::BulkScrollbar
+                    | Control::MenuBar
+                    | Control::SubmenuBar
+            ) {
                 self.ripples.spawn(control, position, rect, now);
             }
         }
@@ -15095,8 +15133,16 @@ impl App {
                 menu::Kind::Types => Some(Control::TypeChip),
                 menu::Kind::Context => None,
             });
+        // A parked hover leaves its rows unlit: the list's while the file
+        // cursor's keys have it, the menu's while the menu's have it — two
+        // rows lit at once being what parking is for.
+        let parked = |control: &Control| match control {
+            Control::Row(..) => self.row_hover.parked(),
+            Control::MenuItem(_) | Control::SubmenuItem(_) => self.menu_hover.parked(),
+            _ => false,
+        };
         self.hovers.tick(
-            hot.filter(|control| !(self.row_hover.parked() && matches!(control, Control::Row(..)))),
+            hot.filter(|control| !parked(control)),
             hot.filter(|_| pointer.down && self.gesture().is_none())
                 .or(held),
             now,
@@ -15163,6 +15209,9 @@ impl App {
                 // hover, and a hand over either would promise a click that
                 // never happens (`delightful-ui` §2).
                 Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
+                // …and a menu's bar band, which lights the bar and takes no
+                // press.
+                Control::MenuBar | Control::SubmenuBar => egui::CursorIcon::Default,
                 // A divider moves sideways, and says so.
                 Control::Divider(_) => egui::CursorIcon::ResizeHorizontal,
                 // …and a pick button with nothing to pick is a third, for the
@@ -16255,15 +16304,7 @@ impl App {
         // the user asked for — and under the which-key card, which is an answer
         // to a key being held down right now.
         if let (Some(menu), Some(geometry)) = (&self.menu, &menu_geometry) {
-            menu::paint(
-                &paint,
-                menu,
-                geometry,
-                &self.hovers,
-                &self.ripples,
-                pointer.at,
-                now,
-            );
+            menu::paint(&paint, menu, geometry, &self.hovers, &self.ripples, now);
         }
 
         // Last, and over everything: the card is an answer to a key that is
@@ -19925,9 +19966,71 @@ mod tests {
         assert_eq!(app.scale_here(), ViewScale::Roomy);
     }
 
+    /// The menu's arrows park the pointer's hover: with the pointer resting
+    /// on row 3, two `↓` put the keyboard on row 5, and it stays there on the
+    /// frame after — the row under the pointer neither takes the cursor back
+    /// nor stays lit, and the compositor sending the same position again is
+    /// not the hand moving. The first real movement gives the cursor back to
+    /// the pointer.
+    #[test]
+    fn the_menus_arrows_park_the_row_under_a_resting_pointer() {
+        let mut app = Fixture::new("menu-park", &["a.txt", "b.txt", "c.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::Yank, 10, Instant::now());
+        assert!(!app.clipboard.is_empty(), "nothing was yanked");
+        let below = row_rect(&app, 2).center_bottom() + egui::vec2(0.0, 40.0);
+        right_click_at(&mut app, &ctx, below);
+        assert_eq!(live_menu(&app), Some(menu::Kind::Context));
+        let menu = app.menu.as_ref().expect("up");
+        let rows: Vec<(&str, bool)> = menu.items[..6]
+            .iter()
+            .map(|i| (i.label.as_str(), i.enabled))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("New file…", true),
+                ("New folder…", true),
+                ("Paste", true),
+                ("Sync here…", true),
+                ("Select all", true),
+                ("View", true),
+            ]
+        );
+        let cursor = |app: &App| app.menu.as_ref().and_then(|m| m.cursor);
+
+        let rest = menu_geometry(&app, &ctx).rows[3].center();
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(rest)]);
+        assert_eq!(cursor(&app), Some(3), "the pointer's row");
+        assert_eq!(app.hovers.hover(Control::MenuItem(3)), 1.0);
+
+        press_key(&mut app, &ctx, Key::ArrowDown);
+        press_key(&mut app, &ctx, Key::ArrowDown);
+        assert_eq!(cursor(&app), Some(5), "the keys' row, on their frame");
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(cursor(&app), Some(5), "the resting pointer took it back");
+        assert_eq!(
+            app.menu.as_ref().and_then(|m| m.submenu),
+            None,
+            "View flew out without being asked"
+        );
+        assert!(app.hovers.hover(Control::MenuItem(3)) < 1.0, "row 3 is lit");
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(rest)]);
+        assert_eq!(cursor(&app), Some(5), "a re-sent position woke the hover");
+
+        let moved = menu_geometry(&app, &ctx).rows[1].center();
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(moved)]);
+        assert_eq!(cursor(&app), Some(1), "the hand moved and was ignored");
+        assert_eq!(app.hovers.hover(Control::MenuItem(1)), 1.0);
+    }
+
     /// In a window too short for the app menu the card stops a margin short
-    /// of its edges, the wheel over the card scrolls the card's rows and not
-    /// the list behind it, and an arrow onto a row out of view brings it in.
+    /// of its edges and scrolls: the wheel over the card scrolls the card's
+    /// rows and not the list behind it, the bar comes up by a pane's rule —
+    /// after a scroll or with the pointer on its band, never for the pointer
+    /// merely being on the card — a press on the band does nothing, and an
+    /// arrow onto a row out of view brings it in.
     #[test]
     fn a_menu_too_tall_for_the_window_scrolls_under_the_wheel_and_the_arrows() {
         let names: Vec<String> = (0..80).map(|i| format!("{i:02}.txt")).collect();
@@ -19951,6 +20054,16 @@ mod tests {
                 text: None,
             });
             frame(app, Vec::new());
+        };
+        let click_on = |app: &mut App, at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(app, vec![egui::Event::PointerMoved(at), button(true)]);
+            frame(app, vec![button(false)]);
         };
         let laid_out = |app: &App| {
             let mut out = None;
@@ -19977,16 +20090,47 @@ mod tests {
             phase: egui::TouchPhase::Move,
             modifiers: egui::Modifiers::NONE,
         };
+        // The pointer on a row of the card, clear of the bar's band: the
+        // card has not scrolled, so there is no bar, however long the
+        // pointer stays on the card.
         let on_card = egui::pos2(g.card.right() - 30.0, g.card.center().y);
-        frame(
-            &mut app,
-            vec![egui::Event::PointerMoved(on_card), roll.clone()],
-        );
+        assert!(matches!(g.hit(on_card), Some(Control::MenuItem(_))));
+        frame(&mut app, vec![egui::Event::PointerMoved(on_card)]);
+        frame(&mut app, Vec::new());
+        let menu = app.menu.as_ref().expect("still up");
+        assert_eq!(app.hovers.hover(Control::MenuBar), 0.0);
+        assert_eq!(menu.bar_alpha(false, &app.hovers, Instant::now()), 0.0);
+
+        // A roll there scrolls the card, and the bar is up for the linger.
+        frame(&mut app, vec![roll.clone()]);
         let menu = app.menu.as_ref().expect("still up");
         assert!(menu.live());
         assert!(menu.scroll > 0.0, "the wheel did not scroll the card");
         assert!(menu.scrolled_at.is_some());
+        assert_eq!(menu.bar_alpha(false, &app.hovers, Instant::now()), 1.0);
         assert_eq!(app.tab().cwd.first(), 0, "the wheel went through the card");
+
+        // The pointer on the band lights the bar through the hover, as a
+        // pane's does; a press there does nothing, and closes nothing.
+        let g = laid_out(&app);
+        let bar = g.bar.expect("still scrolls");
+        let cursor = app.menu.as_ref().and_then(|m| m.cursor);
+        frame(
+            &mut app,
+            vec![egui::Event::PointerMoved(bar.thumb.center())],
+        );
+        assert_eq!(app.hovers.hover(Control::MenuBar), 1.0);
+        let lit = app.menu.as_ref().expect("up");
+        assert_eq!(lit.bar_alpha(false, &app.hovers, Instant::now()), 1.0);
+        click_on(&mut app, bar.thumb.center());
+        let menu = app.menu.as_ref().expect("still up");
+        assert!(menu.live(), "a press on the band closed the menu");
+        assert_eq!(menu.cursor, cursor, "the band moved the cursor");
+        assert!(app
+            .ripples
+            .splashes(Control::MenuBar, Instant::now())
+            .next()
+            .is_none());
 
         // The keyboard, in the menu opened again with the pointer off it: `↑`
         // from nothing lands on the last row, which the card scrolls to show
