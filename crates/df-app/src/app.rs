@@ -212,6 +212,13 @@ const BAND_FILL: f32 = 0.06;
 /// that says where the rectangle *ends*, which is the thing being aimed.
 const BAND_EDGE: f32 = 0.55;
 
+/// How strong a held divider's hairline is while it is free of home, as an
+/// opacity over the accent. Full strength is kept for home, so the line
+/// brightening is the moment the magnet takes hold — and the band's edge's
+/// weight is the line's, because it is the same kind of line: where
+/// something the hand is dragging ends.
+const DIVIDER_FREE: f32 = 0.55;
+
 /// Wakes the event loop from a worker thread.
 ///
 /// The **only** cross-thread wakeup mechanism in delightfile (PLAN §1). Workers
@@ -15769,8 +15776,15 @@ impl App {
 
         // The divider in the hand: a hairline down the middle of its gap, in
         // the accent every live thing in the window wears. Only while it is
-        // held — at rest a divider is the gap, and the gap needs no line.
+        // held — at rest a divider is the gap, and the gap needs no line —
+        // and at full strength only while home has hold of it, which is how
+        // the magnet is seen as well as felt.
         if let Some(which) = self.dividers.dragging() {
+            let accent = if self.dividers.held_at_home() {
+                self.palette.blue
+            } else {
+                chrome::fade(self.palette.blue, DIVIDER_FREE)
+            };
             let zone = layout.dividers[which.index()];
             // One point wide, its left edge on a pixel, so it is one crisp
             // line rather than two half-lit ones.
@@ -15781,7 +15795,7 @@ impl App {
                     egui::pos2(left + 1.0, zone.bottom()),
                 ),
                 0,
-                self.palette.blue,
+                accent,
             );
         }
 

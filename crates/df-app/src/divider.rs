@@ -7,16 +7,18 @@
 //!   divider stops following the pointer and stretches instead, by
 //!   [`rubber_band`]: `24 · tanh(overflow / 80)`, which gives at first and
 //!   then refuses, and can never be pulled more than 24 points. Let go and it
-//!   springs back onto the minimum over [`SPRING`] on `back-out`, the curve
-//!   every other spring in the program settles on (`crate::motion`).
+//!   springs back onto the minimum on a damped spring ([`Spring`]) — a real
+//!   one, which carries whatever speed the divider was let go at, overshoots
+//!   once and settles.
 //! - **Home is magnetic.** The position the config's ratio puts a divider at
 //!   captures it from [`SNAP_CAPTURE`] points away and does not let go until
 //!   it is pulled [`SNAP_ESCAPE`] away — hysteresis, so a hand resting near
 //!   the edge of the zone does not make the divider chatter between the two.
 //!   While it is held there it lags the pointer on [`gravity`]'s curve and
 //!   reaches it exactly at the escape boundary, so leaving is a release, not
-//!   a jump. Measured in points, not percentages: a magnet that grew with the
-//!   window would be a different magnet on every screen.
+//!   a jump. Let go there and it springs home the same way. Measured in
+//!   points, not percentages: a magnet that grew with the window would be a
+//!   different magnet on every screen.
 //! - The list never bounces and never folds. It is the pane the keyboard is
 //!   in, so a divider simply stops at its minimum.
 //!
@@ -39,11 +41,16 @@ use std::time::{Duration, Instant};
 
 use df_core::state::{Panes, Side};
 
-use crate::motion::{Easing, Tween};
+use crate::motion::{Easing, Spring, Tween, SPRING_SETTLE_DISTANCE, SPRING_SETTLE_SPEED};
 use crate::ui::{Split, LIST_MIN, PARENT_MIN, PREVIEW_MIN};
 
 /// How far from home a divider is captured, in points.
-pub const SNAP_CAPTURE: f32 = 14.0;
+///
+/// Wide enough to be *felt*: SplitPane's 8 per cent is a magnet in a
+/// 400-point component, and a fixed 14 points in a window a thousand wide was
+/// a divider let go 47 points from home by somebody who never noticed it
+/// pull. At 24 it takes hold from a finger's width away.
+pub const SNAP_CAPTURE: f32 = 24.0;
 
 /// How far it has to be pulled to get away again: `SplitPane`'s 2.2 × the
 /// capture, which is what makes home feel held rather than merely marked.
@@ -69,15 +76,18 @@ pub const FOLD_PAST: f32 = 40.0;
 /// again, in points.
 pub const UNFOLD_BACK: f32 = 24.0;
 
-/// A stretched or lagging divider settling onto where it stopped.
-pub const SPRING: Duration = Duration::from_millis(300);
-
 /// A pane folding, opening, or every pane going back home.
 pub const FOLD: Duration = Duration::from_millis(200);
 
-/// Below this the spring back is not worth a frame: half a point is a
-/// difference nobody sees settle.
-const SPRING_FLOOR: f32 = 0.5;
+/// How long before the button came up the last move may have been and still
+/// count towards the speed a divider is let go at. Longer ago, the hand had
+/// stopped: a divider held still and then let go settles from rest.
+pub const FLICK_WINDOW: Duration = Duration::from_millis(100);
+
+/// The fastest a divider is let go at, in points a second. Two moves a
+/// fraction of a millisecond apart are timer noise, not a hand, and a speed
+/// read off them would fling the pane across the window.
+const FLICK_LIMIT: f32 = 5000.0;
 
 /// Which divider: between the parent and the list, or between the list and
 /// the preview.
@@ -129,8 +139,8 @@ pub fn rubber_band(overflow: f32) -> f32 {
 /// from it: `GRAVITY · t + (1 − GRAVITY) · t²` of the escape radius, with `t`
 /// the pull as a fraction of it. At the boundary that is exactly the pull,
 /// which is the whole point: the divider catches up with the pointer at the
-/// moment it lets go. Being *captured* is the one place it jumps — up to 6.4
-/// points towards home at the 14-point edge — and that is meant: it is the
+/// moment it lets go. Being *captured* is the one place it jumps — up to 11
+/// points towards home at the 24-point edge — and that is meant: it is the
 /// click of the magnet, and `SplitPane` does the same.
 pub fn gravity(pull: f32) -> f32 {
     let t = (pull.abs() / SNAP_ESCAPE).min(1.0);
@@ -250,6 +260,29 @@ struct Drag {
     /// The width the drag was last measured against, for turning `shown`
     /// into a share.
     usable: f32,
+    /// Where the pointer was at the last move, so a frame that brings no move
+    /// — the frame the button comes up on, usually — is not taken for one.
+    last_x: f32,
+    /// The last two moves: when, and how wide the side pane was drawn. What
+    /// the speed it is let go at is read from.
+    moves: [Option<(Instant, f32)>; 2],
+}
+
+impl Drag {
+    /// How fast the drawn divider was moving as the button came up at `now`,
+    /// in points of the side pane's width a second: over the last two moves,
+    /// or nothing when there were not two, or the last was more than
+    /// [`FLICK_WINDOW`] ago.
+    fn speed(&self, now: Instant) -> f32 {
+        let [Some((before, from)), Some((last, to))] = self.moves else {
+            return 0.0;
+        };
+        let apart = last.saturating_duration_since(before).as_secs_f32();
+        if apart <= 0.0 || now.saturating_duration_since(last) > FLICK_WINDOW {
+            return 0.0;
+        }
+        ((to - from) / apart).clamp(-FLICK_LIMIT, FLICK_LIMIT)
+    }
 }
 
 /// Both dividers: the widths as the state file keeps them, and everything
@@ -266,9 +299,8 @@ pub struct Dividers {
     /// reset, or an `Esc` — and the clock of the slide from them to where
     /// they were sent.
     slide: Option<([f32; 3], Tween)>,
-    /// Each divider's stretch or lag let go, springing back to nothing on
-    /// `back-out`.
-    springs: [Option<Tween>; 2],
+    /// Each divider's stretch or lag let go, springing back to nothing.
+    springs: [Option<Spring>; 2],
     /// The share a side pane a drag folded is being folded *from*: the width
     /// the hand left it at, which is not the share it will open back to.
     /// Kept here rather than on the drag, because the fold outlives the drag
@@ -369,22 +401,31 @@ impl Dividers {
         self.springs[k].map_or(0.0, |spring| spring.value(now))
     }
 
-    /// Let divider `which` go `from` points away from where it settles. A
-    /// spring it is still on is carried into the new one rather than cut off,
-    /// so a divider let go twice in quick succession never jumps — and a
-    /// let-go that adds nothing to it (a click, a press that never moved)
-    /// leaves it running on its own clock rather than starting it again.
-    /// "Nothing" is anything under [`SPRING_FLOOR`], the same half point a
-    /// spring is not started for.
-    fn spring_from(&mut self, which: Divider, from: f32, now: Instant) {
+    /// Let divider `which` go `from` points away from where it settles,
+    /// moving at `speed` points a second. A spring it is still on is carried
+    /// into the new one — where it is and how fast it is going — rather than
+    /// cut off, so a divider let go twice in quick succession never jumps or
+    /// kinks. A let-go that adds nothing to it (a click, a press that never
+    /// moved: under the spring's own rest thresholds) leaves it running on its
+    /// own clock rather than starting it again.
+    fn spring_from(&mut self, which: Divider, from: f32, speed: f32, now: Instant) {
         let k = which.index();
-        let running = self.springs[k].is_some_and(|spring| !spring.finished(now));
-        if running && from.abs() <= SPRING_FLOOR {
+        let running = self.springs[k].filter(|spring| !spring.finished(now));
+        let nothing = from.abs() <= SPRING_SETTLE_DISTANCE && speed.abs() < SPRING_SETTLE_SPEED;
+        if running.is_some() && nothing {
             return;
         }
-        let from = from + self.spring_at(k, now);
-        self.springs[k] = (from.abs() > SPRING_FLOOR)
-            .then(|| Tween::new(from, 0.0, SPRING, Easing::BackOut, now));
+        let (at, moving) = running.map_or((0.0, 0.0), |spring| {
+            (spring.value(now), spring.velocity_at(now))
+        });
+        let spring = Spring::new(from + at, speed + moving, 0.0, now);
+        self.springs[k] = (!spring.finished(now)).then_some(spring);
+    }
+
+    /// Whether the divider in the hand is being held at home, which is what
+    /// its hairline says.
+    pub fn held_at_home(&self) -> bool {
+        self.drag.is_some_and(|drag| drag.reading.snapped)
     }
 
     /// Whether anything is moving on its own: a fold, a slide, a spring. A
@@ -439,10 +480,16 @@ impl Dividers {
         } else {
             self.panes.ratio[side.index()] * usable
         };
+        // A divider taken hold of at home is held there from the start, or
+        // the magnet would depend on how fast the hand moved: one quick pull
+        // past the capture distance on the first frame would skip it. Its
+        // hairline says so from the press.
+        let at_home =
+            !folded && (width - self.home.ratio[side.index()] * usable).abs() <= SNAP_CAPTURE;
         let at_rest = Reading {
             width,
             overshoot: 0.0,
-            snapped: false,
+            snapped: at_home,
             folded,
         };
         // What a pane still folding is drawn from, so taking hold of it does
@@ -455,11 +502,6 @@ impl Dividers {
             },
             ..at_rest
         };
-        // A divider taken hold of at home is held there from the start, or
-        // the magnet would depend on how fast the hand moved: one quick pull
-        // past the capture distance on the first frame would skip it.
-        let at_home =
-            !folded && (width - self.home.ratio[side.index()] * usable).abs() <= SNAP_CAPTURE;
         self.drag = Some(Drag {
             which,
             from_x: x,
@@ -473,6 +515,8 @@ impl Dividers {
             reading: at_rest,
             shown,
             usable,
+            last_x: x,
+            moves: [None; 2],
         });
     }
 
@@ -510,6 +554,16 @@ impl Dividers {
             live.open_at(side, share);
         }
         drag.live = live;
+        // A move is a frame the pointer went somewhere on. What is recorded
+        // is the divider as drawn — a stretched or lagging one moves slower
+        // than the hand, and it is the divider that is let go, not the hand.
+        if x != drag.last_x {
+            drag.last_x = x;
+            drag.moves = [
+                drag.moves[1],
+                Some((now, drag.shown.width + drag.shown.overshoot)),
+            ];
+        }
         let fold_from = (usable > 0.0).then(|| drag.shown.width / usable);
         if reading.folded != was_folded {
             self.fold(side, reading.folded, now);
@@ -525,7 +579,7 @@ impl Dividers {
     /// divider writes nothing — and a stretch or a lag springs back.
     pub fn release(&mut self, now: Instant) -> Option<Panes> {
         let drag = self.drag.take()?;
-        self.let_go(&drag, now);
+        self.let_go(&drag, drag.speed(now), now);
         let panes = drag.live.validated().unwrap_or(drag.at_press);
         self.panes = panes;
         (panes != drag.at_press).then_some(panes)
@@ -540,7 +594,9 @@ impl Dividers {
         let from = self.fractions(open);
         self.drag = None;
         self.slide = Some((from, Tween::new(0.0, 1.0, FOLD, Easing::OutQuint, now)));
-        self.let_go(&drag, now);
+        // From rest: `Esc` is not a throw, and the panes are sliding back
+        // under the spring anyway.
+        self.let_go(&drag, 0.0, now);
         let side = drag.which.side();
         if drag.at_press.collapsed(side) != drag.live.collapsed(side) {
             self.fold(side, drag.at_press.collapsed(side), now);
@@ -573,7 +629,7 @@ impl Dividers {
         let open = self.openness(now);
         let from = self.fractions(open);
         if let Some(drag) = self.drag.take() {
-            self.let_go(&drag, now);
+            self.let_go(&drag, 0.0, now);
         }
         self.panes = self.home;
         self.slide = Some((from, Tween::new(0.0, 1.0, FOLD, Easing::OutQuint, now)));
@@ -584,16 +640,16 @@ impl Dividers {
     }
 
     /// The stretch or lag a drag was drawn with, handed to the spring as the
-    /// hand lets go — the drawing is the same on the frame after as on the
-    /// frame before. Including for a pane the drag folded, which is still
-    /// drawn with it while it folds; not for one folded all the way, where
-    /// there is nothing left to see settle and the spring would be frames
-    /// asked for nothing.
-    fn let_go(&mut self, drag: &Drag, now: Instant) {
+    /// hand lets go at `speed` — the drawing is the same on the frame after
+    /// as on the frame before. Including for a pane the drag folded, which is
+    /// still drawn with it while it folds; not for one folded all the way,
+    /// where there is nothing left to see settle and the spring would be
+    /// frames asked for nothing.
+    fn let_go(&mut self, drag: &Drag, speed: f32, now: Instant) {
         let slot = drag.which.side().slot();
         let hidden = drag.reading.folded && self.open[slot].value(now) <= 0.0;
         if !hidden {
-            self.spring_from(drag.which, drag.shown.overshoot, now);
+            self.spring_from(drag.which, drag.shown.overshoot, speed, now);
         }
     }
 
@@ -631,24 +687,27 @@ mod tests {
             .collect()
     }
 
-    /// Home captures at 14 points and lets go at 2.2 × that: the same
+    /// Home captures at 24 points and lets go at 2.2 × that: the same
     /// pointer position is held or free depending on where it came from.
     #[test]
     fn home_captures_close_and_lets_go_far() {
         let r = walk(&[
-            240.0, 220.0, 213.0, 225.0, 230.0, 231.0, 225.0, 215.0, 214.0,
+            260.0, 230.0, 223.0, 240.0, 252.0, 253.0, 240.0, 226.0, 224.0,
         ]);
-        assert!(!r[0].snapped && !r[1].snapped, "20 points is not close");
-        assert!(r[2].snapped, "13 points is");
+        assert!(!r[0].snapped && !r[1].snapped, "30 points is not close");
+        assert!(r[2].snapped, "23 points is");
         assert_eq!(r[2].width, 200.0, "held at home");
-        assert!(r[3].snapped && r[4].snapped, "held until 30.8");
-        assert!(!r[5].snapped, "31 points out, free");
-        assert_eq!(r[5].width, 231.0);
+        assert!(r[3].snapped && r[4].snapped, "held until 52.8");
+        assert!(!r[5].snapped, "53 points out, free");
+        assert_eq!(r[5].width, 253.0);
         assert!(
             !r[6].snapped && !r[7].snapped,
-            "coming back, 25 and 15 are free"
+            "coming back, 40 and 26 are free"
         );
-        assert!(r[8].snapped, "14 is close again");
+        assert!(r[8].snapped, "24 is close again");
+        // The same from the other side.
+        let r = walk(&[160.0, 177.0, 148.0, 147.0]);
+        assert!(!r[0].snapped && r[1].snapped && r[2].snapped && !r[3].snapped);
     }
 
     /// While held, the divider lags on the gravity curve and reaches the
@@ -761,7 +820,7 @@ mod tests {
     }
 
     /// Let go at home, the share is home's to the bit, and the lag springs
-    /// back over 300 ms and then stops asking for frames.
+    /// back on its spring and then stops asking for frames.
     #[test]
     fn let_go_at_home_it_is_home_exactly() {
         let t0 = Instant::now();
@@ -779,12 +838,13 @@ mod tests {
         // Home is where it started, so nothing is written…
         assert_eq!(kept, None);
         assert_eq!(d.panes.ratio[0], home.ratio[0]);
-        // …and the lag springs back, on its own clock.
+        // …and the lag springs back, on its own clock, and then stops.
         assert!(d.animating(t0));
-        assert!(d.split(t0 + SPRING / 2).overshoot[0] != 0.0);
-        assert!(!d.animating(t0 + SPRING));
-        assert_eq!(d.split(t0 + SPRING).overshoot[0], 0.0);
-        d.settle(t0 + SPRING);
+        assert!(d.split(t0 + Duration::from_millis(50)).overshoot[0] != 0.0);
+        let rest = t0 + Duration::from_secs(1);
+        assert!(!d.animating(rest));
+        assert_eq!(d.split(rest).overshoot[0], 0.0);
+        d.settle(rest);
         assert!(
             d.springs.iter().all(Option::is_none),
             "a spent spring is dropped"
@@ -863,7 +923,7 @@ mod tests {
         d.press(Divider::Left, 100.0, 0.125 * USABLE, USABLE, t0);
         d.drag_to(100.0 - (0.125 * USABLE - PARENT_MIN) - 30.0, USABLE, t0);
         d.release(t0);
-        let half = t0 + SPRING / 8;
+        let half = t0 + Duration::from_millis(40);
         let split = d.split(half);
         let drawn = PARENT_MIN + split.overshoot[0];
         assert!(drawn < PARENT_MIN, "still stretched: {drawn}");
@@ -929,29 +989,120 @@ mod tests {
     }
 
     /// A divider taken hold of at home is held there from the first frame,
-    /// however fast the hand goes: one 20-point pull is held with lag, one
-    /// 31-point pull escapes.
+    /// however fast the hand goes: one 50-point pull is held with lag, one
+    /// 54-point pull escapes.
     #[test]
     fn home_holds_a_quick_first_pull() {
         let t0 = Instant::now();
         let home = 0.125 * USABLE;
         let mut d = dividers(t0);
         d.press(Divider::Left, 300.0, home, USABLE, t0);
-        d.drag_to(320.0, USABLE, t0);
+        assert!(d.held_at_home(), "held from the press");
+        d.drag_to(350.0, USABLE, t0);
         let held = d.split(t0);
+        assert!(d.held_at_home());
         assert_eq!(held.fractions[0], 0.125, "held at home");
         assert!(
-            held.overshoot[0] > 0.0 && held.overshoot[0] < 20.0,
+            held.overshoot[0] > 0.0 && held.overshoot[0] < 50.0,
             "lagging"
         );
         d.release(t0);
+        assert!(!d.held_at_home(), "nothing is held once let go");
 
         let mut d = dividers(t0);
         d.press(Divider::Left, 300.0, home, USABLE, t0);
-        d.drag_to(331.0, USABLE, t0);
+        d.drag_to(354.0, USABLE, t0);
         let free = d.split(t0);
-        assert!((free.fractions[0] * USABLE - (home + 31.0)).abs() < 1e-2);
+        assert!(!d.held_at_home());
+        assert!((free.fractions[0] * USABLE - (home + 54.0)).abs() < 1e-2);
         assert_eq!(free.overshoot[0], 0.0);
+    }
+
+    /// Where the drawn divider is, as a width of the side pane: the settled
+    /// width and whatever stretch, lag or spring is on it.
+    fn drawn_left(d: &Dividers, now: Instant) -> f32 {
+        let split = d.split(now);
+        split.fractions[0] * USABLE + split.overshoot[0]
+    }
+
+    /// The drawn divider at 1 ms steps for a second after `from`.
+    fn settle_trace(d: &Dividers, from: Instant) -> Vec<f32> {
+        (0..1000)
+            .map(|ms| drawn_left(d, from + Duration::from_millis(ms)))
+            .collect()
+    }
+
+    /// Two moves toward home and a let-go: `pulls` are how far past home the
+    /// pointer was at each, 16 ms apart, and the button comes up `after` the
+    /// last. Returns the dividers and the instant it was let go.
+    fn thrown_home(pulls: [f32; 2], after: Duration) -> (Dividers, Instant) {
+        let t0 = Instant::now();
+        let home = 0.125 * USABLE;
+        let mut d = dividers(t0);
+        let x = 300.0;
+        d.press(Divider::Left, x, home, USABLE, t0);
+        d.drag_to(x + 45.0, USABLE, t0);
+        let first = t0 + Duration::from_millis(100);
+        d.drag_to(x + pulls[0], USABLE, first);
+        let second = first + Duration::from_millis(16);
+        d.drag_to(x + pulls[1], USABLE, second);
+        assert!(d.held_at_home());
+        let at = second + after;
+        // The frame the button comes up on brings no move of its own.
+        d.drag_to(x + pulls[1], USABLE, at);
+        assert_eq!(d.release(at), None, "home is where it was");
+        (d, at)
+    }
+
+    /// Let go while moving toward home, the divider carries its speed: it
+    /// goes on past home, turns, and comes back to rest there.
+    #[test]
+    fn a_divider_thrown_home_passes_it_and_comes_back() {
+        let home = 0.125 * USABLE;
+        let (d, at) = thrown_home([30.0, 15.0], Duration::from_millis(8));
+        let trace = settle_trace(&d, at);
+        let before = trace[0];
+        assert!(before > home, "let go on the far side of home: {before}");
+        assert!(trace[1] < before, "moving toward home as it was let go");
+        let deepest = trace.iter().copied().fold(f32::MAX, f32::min);
+        assert!(deepest < home - 1.0, "it went past home: {deepest}");
+        let turned = trace.iter().position(|w| *w == deepest).expect("a low");
+        assert!(
+            trace[turned..].iter().any(|w| *w > deepest + 1.0),
+            "and came back"
+        );
+        assert_eq!(*trace.last().expect("samples"), home, "at rest at home");
+        assert!(!d.animating(at + Duration::from_secs(1)));
+    }
+
+    /// Let go after the hand stopped — more than the flick window since its
+    /// last move — the divider settles from rest: it never moves away from
+    /// home first, and it does not arrive with a throw's swing past it.
+    #[test]
+    fn a_divider_let_go_still_just_settles() {
+        let home = 0.125 * USABLE;
+        let (d, at) = thrown_home([30.0, 15.0], FLICK_WINDOW + Duration::from_millis(50));
+        let trace = settle_trace(&d, at);
+        let start = trace[0];
+        assert!(start > home);
+        assert!(trace.iter().all(|w| *w <= start), "it moved away first");
+        let deepest = trace.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            home - deepest < 0.25 * (start - home),
+            "a spring's own overshoot, not a throw's: {deepest}"
+        );
+        assert_eq!(*trace.last().expect("samples"), home);
+
+        // One move is no speed either, however recent.
+        let t0 = Instant::now();
+        let mut d = dividers(t0);
+        d.press(Divider::Left, 300.0, home, USABLE, t0);
+        let moved = t0 + Duration::from_millis(16);
+        d.drag_to(315.0, USABLE, moved);
+        let at = moved + Duration::from_millis(8);
+        d.release(at);
+        let trace = settle_trace(&d, at);
+        assert!(trace.iter().all(|w| *w <= trace[0]));
     }
 
     /// A click on a divider that is springing back leaves the spring on its
@@ -965,19 +1116,21 @@ mod tests {
         d.drag_to(100.0 - (0.125 * USABLE - PARENT_MIN) - 30.0, USABLE, t0);
         d.release(t0);
         let untouched = d.clone();
-        let mid = t0 + SPRING / 4;
+        let mid = t0 + Duration::from_millis(60);
         let drawn_at = |d: &Dividers, now: Instant| drawn(&d.split(now)).parent.width();
         let x = 100.0;
         d.press(Divider::Left, x, drawn_at(&d, mid), USABLE, mid);
         d.drag_to(x, USABLE, mid);
         assert_eq!(d.release(mid), None, "nothing moved");
-        for later in [mid, t0 + SPRING / 2, t0 + SPRING * 3 / 4] {
+        for ms in (60..1000).step_by(10) {
+            let later = t0 + Duration::from_millis(ms);
             assert!(
                 (drawn_at(&d, later) - drawn_at(&untouched, later)).abs() < 1e-3,
                 "the spring was restarted"
             );
+            assert_eq!(d.animating(later), untouched.animating(later), "{ms}");
         }
-        assert!(!d.animating(t0 + SPRING));
+        assert!(!d.animating(t0 + Duration::from_secs(1)));
     }
 
     /// `Esc` puts back what the press found and commits nothing.
