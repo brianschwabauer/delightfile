@@ -508,6 +508,9 @@ pub fn load_rclone_conf(path: &Path) -> (Vec<Service>, Vec<ConfigWarning>) {
 /// would only ever be wrong about something rclone accepts.
 pub fn parse_rclone_conf(text: &str, file: &Path) -> (Vec<Service>, Vec<ConfigWarning>) {
     let mut services: Vec<Service> = Vec::new();
+    // The section the lines are being read into, by index; `None` before the
+    // first header and under a repeated one.
+    let mut current: Option<usize> = None;
     for (index, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -526,22 +529,25 @@ pub fn parse_rclone_conf(text: &str, file: &Path) -> (Vec<Service>, Vec<ConfigWa
         }
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             let name = name.trim();
-            if name.is_empty() {
-                continue;
-            }
-            // A section written twice is one remote, as it is to rclone.
-            if !services.iter().any(|s| s.name == name) {
+            // A section written twice is one remote, as it is to rclone, and
+            // the first one's `type` is the one kept: the keys under the
+            // repeat go nowhere, rather than onto whichever section happens to
+            // be last in the list.
+            current = if name.is_empty() || services.iter().any(|s| s.name == name) {
+                None
+            } else {
                 services.push(Service::rclone(name, name));
-            }
+                Some(services.len() - 1)
+            };
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
         if key.trim() == "type" {
-            if let Some(current) = services.last_mut() {
+            if let Some(service) = current.and_then(|at| services.get_mut(at)) {
                 let value = value.trim();
-                current.provider = (!value.is_empty()).then(|| value.to_string());
+                service.provider = (!value.is_empty()).then(|| value.to_string());
             }
         }
     }

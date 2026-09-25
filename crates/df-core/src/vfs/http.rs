@@ -142,6 +142,14 @@ pub fn read_response(reader: impl Read) -> Result<Response, HttpError> {
         };
         let value = value.trim();
         if name.eq_ignore_ascii_case("content-length") {
+            // Digits and nothing else (RFC 9110 §8.6): `parse` would also
+            // take a leading `+`, and a length a strict peer reads differently
+            // from this one is the start of a desynchronised stream.
+            if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(HttpError::Malformed(
+                    "a Content-Length that is not a number",
+                ));
+            }
             let length: usize = value
                 .parse()
                 .map_err(|_| HttpError::Malformed("a Content-Length that is not a number"))?;
@@ -222,7 +230,12 @@ fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, HttpError> {
         let line = read_line(reader)?.ok_or(HttpError::Closed)?;
         // `1a2b;name=value` — chunk extensions are allowed and meaningless here.
         let size_text = line.split(';').next().unwrap_or("").trim();
-        if size_text.is_empty() || size_text.len() > 16 {
+        // Hex digits and nothing else (RFC 9112 §7.1): `from_str_radix` would
+        // also take a leading `+`.
+        if size_text.is_empty()
+            || size_text.len() > 16
+            || !size_text.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return Err(HttpError::Malformed("a chunk size that is not hex"));
         }
         let size = usize::from_str_radix(size_text, 16)
@@ -375,6 +388,18 @@ mod tests {
             (
                 b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n",
                 "bad length",
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello",
+                "a length with a sign",
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5 5\r\n\r\nhello",
+                "a length with a space in it",
+            ),
+            (
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+a\r\n0123456789\r\n0\r\n\r\n",
+                "a chunk size with a sign",
             ),
             (
                 b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nContent-Length: 2\r\n\r\nab",

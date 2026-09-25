@@ -117,6 +117,20 @@ fn an_encrypted_rclone_conf_warns_once_and_discovers_nothing() {
     }
 }
 
+/// A `[section]` written twice is one remote, and the keys under the repeat go
+/// nowhere — not onto whichever section happens to be last in the list.
+#[test]
+fn a_repeated_section_keeps_its_first_type_and_moves_nobody_elses() {
+    let text = "[r2]\ntype = s3\n\n[gdrive]\ntype = drive\n\n[r2]\ntype = dropbox\n";
+    let (services, warnings) = super::parse_rclone_conf(text, Path::new("rclone.conf"));
+    assert!(warnings.is_empty());
+    let names: Vec<(&str, Option<&str>)> = services
+        .iter()
+        .map(|s| (s.name.as_str(), s.provider.as_deref()))
+        .collect();
+    assert_eq!(names, [("r2", Some("s3")), ("gdrive", Some("drive"))]);
+}
+
 /// rclone's own search: `$RCLONE_CONFIG`, then the XDG file if it exists,
 /// then the legacy `~/.rclone.conf` if *it* exists, then the XDG path.
 #[test]
