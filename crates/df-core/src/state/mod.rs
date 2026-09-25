@@ -3,7 +3,9 @@
 //! PLAN §2 calls for "a small state db (`~/.local/state/delightfile/`)", and
 //! this is it: the per-directory overrides — a sort you chose *here*, a
 //! linemode you chose *here*, hidden files you turned on *here* — plus the tab
-//! list, so session restore later has somewhere to read from.
+//! list, so session restore later has somewhere to read from, and the pinned
+//! places ([`pins`], `g b`), which are here and not in config because a
+//! keystroke makes them and the program never writes config.
 //!
 //! **The view scale is not in here** (the list steps and the grid). It was, as
 //! `view=` and `scale=` on a directory's line, until 2026-09-23; since then it
@@ -22,11 +24,13 @@
 //! /home/brian/Pictures\tlinemode=none\thidden=1\tt=1756598400
 //! /home/brian/src\tsort=mtime\tsort_reverse=1\tt=1756598000
 //! !tabs\t0=/home/brian\t1=/tmp\tactive=1\tt=1756598400
+//! !pin\tpath=~/Work\tkey=w
 //! ```
 //!
 //! - Fields are separated by **tabs**. The first field is the record's key: an
-//!   absolute path, or `!tabs` for the one global record. Paths are absolute and
-//!   `!` is not a path, so the two can never collide.
+//!   absolute path, `!tabs` for the one tab record, or `!pin` for each pinned
+//!   place ([`pins`]). Paths are absolute and `!` is not a path, so the two can
+//!   never collide.
 //! - Every later field is `key=value`, split at the **first** `=` so a value may
 //!   contain one.
 //! - Escaping, applied to keys and values alike: `\\` for a backslash, `\t` for
@@ -74,6 +78,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{LineMode, SortBy};
 use crate::{DfError, Result};
+
+pub mod pins;
+pub use pins::{Pin, PinRefusal};
 
 #[cfg(test)]
 mod tests;
@@ -196,6 +203,8 @@ pub struct StateStore {
     tabs: Vec<PathBuf>,
     active_tab: usize,
     tabs_touched: u64,
+    /// The pinned places, in the order they were pinned ([`pins`]).
+    pins: Vec<Pin>,
     dirty: bool,
 }
 
@@ -262,6 +271,7 @@ impl StateStore {
             tabs: Vec::new(),
             active_tab: 0,
             tabs_touched: 0,
+            pins: Vec::new(),
             dirty: false,
         }
     }
@@ -493,6 +503,9 @@ impl StateStore {
             push_field(&mut out, "t", self.tabs_touched.to_string().as_bytes());
             out.push(b'\n');
         }
+        // Last, in the order they were pinned — the one record kind whose
+        // order is data rather than something to sort for stability.
+        self.render_pins(&mut out);
         out
     }
 
@@ -514,6 +527,10 @@ impl StateStore {
             };
             if key.as_slice() == TABS_KEY.as_bytes() {
                 self.parse_tabs(fields, index + 1);
+                continue;
+            }
+            if key.as_slice() == pins::PIN_KEY.as_bytes() {
+                self.parse_pin(fields, index + 1);
                 continue;
             }
             if !key.starts_with(b"/") {

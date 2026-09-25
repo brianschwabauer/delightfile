@@ -755,13 +755,22 @@ impl Bookmark {
     /// The path with a leading `~` replaced by `$HOME`. Left alone when there
     /// is no `$HOME` or the path is a URL (`sftp://…`), which the vfs resolves.
     pub fn expanded_path(&self) -> String {
-        let Some(rest) = self.path.strip_prefix('~') else {
-            return self.path.clone();
-        };
-        match std::env::var_os("HOME") {
-            Some(home) => format!("{}{}", home.to_string_lossy(), rest),
-            None => self.path.clone(),
-        }
+        expand_home(&self.path)
+    }
+}
+
+/// A place as a person writes one — `~/Work`, `/mnt/x`, `sftp://host/srv` —
+/// with a leading `~` replaced by `$HOME`: [`Bookmark::expanded_path`]'s rule,
+/// apart from the bookmark so the pinned places in the state file
+/// ([`crate::state::Pin`]) are read by the same rule and cannot come to
+/// disagree with `[goto]` about where `~` is.
+pub fn expand_home(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_string();
+    };
+    match std::env::var_os("HOME") {
+        Some(home) => format!("{}{}", home.to_string_lossy(), rest),
+        None => path.to_string(),
     }
 }
 

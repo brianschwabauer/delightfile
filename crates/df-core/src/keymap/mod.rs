@@ -681,7 +681,14 @@ impl Registry {
     /// Rebuild the `g <key>` rows from a bookmark table (PLAN §3's `[goto]`).
     /// The defaults register the shipped table; this is what a user's own
     /// `[goto]` runs through. Returns a warning per bookmark whose key will not
-    /// parse.
+    /// parse, and one per built-in `g` chord a bookmark took the key of.
+    ///
+    /// **Applied twice, it is applied once**: every `Goto` row goes before the
+    /// table is registered, so a second call replaces the first call's rows
+    /// rather than stacking beside them. What it does not do is give back a
+    /// built-in row an earlier table displaced — a table that takes `b` has
+    /// taken `pin-toggle`'s key for the session, which is what the warning is
+    /// for.
     pub fn apply_bookmarks(
         &mut self,
         bookmarks: &[crate::config::Bookmark],
@@ -701,6 +708,26 @@ impl Registry {
             let text = format!("g {}", bookmark.key);
             match parse_sequence(&text) {
                 Ok(seq) => {
+                    // The hand-written table wins the key — but out loud: a
+                    // `[goto]` row on `b` silently taking `g b` would be a pin
+                    // command that stopped answering for no reason anyone
+                    // could see.
+                    for held in self
+                        .bindings
+                        .iter()
+                        .filter(|b| b.context == Context::Files && b.seq == seq)
+                    {
+                        warnings.push(ConfigWarning::new(
+                            file,
+                            0,
+                            format!(
+                                "goto `{}` takes `{}` from `{}`, which is left without a key",
+                                bookmark.key,
+                                label_sequence(&seq),
+                                held.command.id()
+                            ),
+                        ));
+                    }
                     self.unbind(Context::Files, &seq);
                     if let Err(e) = self.register(
                         Context::Files,
@@ -716,6 +743,64 @@ impl Registry {
             }
         }
         warnings
+    }
+
+    /// Bind more `g <key>` rows on top of what is there, **displacing
+    /// nothing**: bookmark *i* becomes `Goto(first + i)`, and one whose chord
+    /// the registry already answers to is skipped and reported.
+    ///
+    /// The pinned places' layer (df-app's `places`), and the other half of
+    /// [`Registry::apply_bookmarks`]. That one takes its keys from whatever
+    /// held them, because a table somebody wrote by hand should win; a pin is
+    /// made by a keystroke, and the thing it must never do is take `g g` away
+    /// from the top of the list or `g w` away from `[goto]`. The app calls
+    /// this on a clone of the keymap as it stood before any pin, so a pin
+    /// added, removed or re-keyed is a rebuild rather than a second layer
+    /// stacked on the first.
+    pub fn add_bookmarks(
+        &mut self,
+        bookmarks: &[crate::config::Bookmark],
+        first: usize,
+    ) -> Vec<KeymapError> {
+        let mut refused = Vec::new();
+        for (i, bookmark) in bookmarks.iter().enumerate() {
+            let Ok(slot) = u8::try_from(first + i) else {
+                log::warn!("more than 256 goto slots; the rest of the pins have no key");
+                break;
+            };
+            let seq = match parse_sequence(&format!("g {}", bookmark.key)) {
+                Ok(seq) => seq,
+                Err(e) => {
+                    refused.push(e);
+                    continue;
+                }
+            };
+            if self.holder(Context::Files, &seq).is_some() {
+                refused.push(KeymapError::Conflict(label_sequence(&seq)));
+                continue;
+            }
+            if let Err(e) = self.register(
+                Context::Files,
+                seq,
+                Command::Goto(slot),
+                bookmark.description.clone(),
+                When::Always,
+            ) {
+                refused.push(e);
+            }
+        }
+        refused
+    }
+
+    /// The binding that already answers to `seq` in `context`: one bound to
+    /// exactly it, one it would be the start of, or one that would finish
+    /// before it got there. Any of the three means a new row on `seq` would
+    /// either not be reached or take something else's key.
+    pub fn holder(&self, context: Context, seq: &[Chord]) -> Option<&Binding> {
+        self.bindings.iter().find(|b| {
+            b.context == context
+                && (b.seq.as_slice() == seq || b.seq.starts_with(seq) || seq.starts_with(&b.seq))
+        })
     }
 
     /// The description a command already carries somewhere in the table, so a

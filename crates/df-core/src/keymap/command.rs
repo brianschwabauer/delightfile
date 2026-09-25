@@ -110,6 +110,10 @@ commands! {
     HistoryForward => "history-forward",
     GotoGitRoot => "goto-git-root",
     GotoInteractive => "goto-interactive",
+    // `g b`: put the folder on screen on the Places list, or take it off. The
+    // pins live in the state file rather than in `[goto]`, which is the
+    // owner's to write (see `crate::state::pins`).
+    PinToggle => "pin-toggle",
     // `Ctrl+l`: the `Go to:` prompt the last breadcrumb opens on a click,
     // seeded with where you are. The keyboard's door to it, because a file
     // manager that is keyboard-first cannot have a path field only the mouse

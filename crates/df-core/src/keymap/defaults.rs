@@ -269,13 +269,16 @@ pub(super) fn build() -> Registry {
         // ── Files: the goto chords that are not bookmarks. The bookmark rows
         // (`g h`, `g w`, …) are registered from the config table below, so the
         // paths stay editable in one place (PLAN §3).
-        (Files, "g r",     C::GotoGitRoot,     "Go to the git root",         Always),
-        (Files, "g space", C::GotoInteractive, "Jump interactively",         Always),
-        (Files, "g f",     C::FollowSymlink,   "Follow the hovered symlink", Always),
+        (Files, "g r",     C::GotoGitRoot,     "Go to the git root",           Always),
+        (Files, "g space", C::GotoInteractive, "Jump interactively",           Always),
+        // `b` for bookmark. A `[goto]` row that takes `b` wins it, and this one
+        // is left without a key (see `Registry::apply_bookmarks`).
+        (Files, "g b",     C::PinToggle,       "Pin this folder, or unpin it", Always),
+        (Files, "g f",     C::FollowSymlink,   "Follow the hovered symlink",   Always),
         // yazi binds `g t` to `/tmp`; PLAN §4.1 dropped that row, so the slot is
         // free and the trash — which PLAN §7.4 wants a virtual location for —
         // takes it. `t` for trash, one key from a list, next to the other places.
-        (Files, "g t",     C::OpenTrash,       "Browse the trash",           Always),
+        (Files, "g t",     C::OpenTrash,       "Browse the trash",             Always),
 
         // ── Files: tabs (§2). `[`/`]` belong to transport, so Alt carries the
         // switch and the swaps keep the shifted brackets.

@@ -117,6 +117,7 @@ fn the_files_table_is_the_muscle_memory_contract() {
         (", r", Command::SortRandom),
         ("g r", Command::GotoGitRoot),
         ("g space", Command::GotoInteractive),
+        ("g b", Command::PinToggle),
         ("g f", Command::FollowSymlink),
         // yazi's `/tmp` slot, reused for PLAN §7.4's trash view — the one goto
         // chord that does not lead to a directory.
@@ -875,6 +876,120 @@ fn user_bookmarks_rebuild_the_goto_chords() {
         press(&km, &files(), WhenFlags::NONE, "g r"),
         Dispatch::Match(Command::GotoGitRoot)
     );
+}
+
+fn bookmark(key: &str, path: &str) -> crate::config::Bookmark {
+    crate::config::Bookmark {
+        key: key.to_string(),
+        path: path.to_string(),
+        description: format!("Go to {path}"),
+    }
+}
+
+/// How many rows answer to `g <key>` in the browser.
+fn rows_on(km: &Registry, keys: &str) -> usize {
+    let seq = parse_sequence(keys).unwrap();
+    km.bindings()
+        .iter()
+        .filter(|b| b.context == Context::Files && b.seq == seq)
+        .count()
+}
+
+/// The table is re-applied whenever it changes, so a second application
+/// has to *replace* the first: one row per key, the slots renumbered, and a
+/// key the new table dropped gone rather than left pointing at a slot that
+/// now means something else.
+#[test]
+fn applying_the_bookmarks_twice_does_not_stack_them() {
+    let mut km = Registry::defaults();
+    let first = vec![bookmark("m", "/mnt"), bookmark("x", "/x")];
+    assert!(km.apply_bookmarks(&first, Path::new("t")).is_empty());
+    let second = vec![bookmark("x", "/x"), bookmark("m", "/mnt")];
+    assert!(km.apply_bookmarks(&second, Path::new("t")).is_empty());
+    assert!(km.apply_bookmarks(&second, Path::new("t")).is_empty());
+
+    assert_eq!(rows_on(&km, "g m"), 1);
+    assert_eq!(rows_on(&km, "g x"), 1);
+    let gotos = km
+        .bindings()
+        .iter()
+        .filter(|b| matches!(b.command, Command::Goto(_)))
+        .count();
+    assert_eq!(
+        gotos, 2,
+        "one row per bookmark, however often it is applied"
+    );
+    assert_eq!(
+        press(&km, &files(), WhenFlags::NONE, "g m"),
+        Dispatch::Match(Command::Goto(1)),
+        "the slot is the row's place in the latest table"
+    );
+    let under_g = km.continuations(&files(), WhenFlags::NONE, &[chord("g")]);
+    let mut keys: Vec<Chord> = under_g.iter().map(|c| c.next).collect();
+    let before = keys.len();
+    keys.sort_by_key(|c| c.label());
+    keys.dedup();
+    assert_eq!(keys.len(), before, "the card lists every key once");
+}
+
+/// A `[goto]` row on `b` wins `g b` from `pin-toggle` — the hand-written table
+/// is the owner's — and says so rather than leaving the command keyless in
+/// silence.
+#[test]
+fn a_goto_row_that_takes_a_built_in_key_says_so() {
+    let mut km = Registry::defaults();
+    let warnings = km.apply_bookmarks(&[bookmark("b", "/b")], Path::new("delightfile.toml"));
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let text = warnings[0].to_string();
+    assert!(text.contains("pin-toggle"), "{text}");
+    assert!(text.contains("g b"), "{text}");
+    assert_eq!(
+        press(&km, &files(), WhenFlags::NONE, "g b"),
+        Dispatch::Match(Command::Goto(0))
+    );
+    assert_eq!(km.binding_label(Command::PinToggle), None);
+}
+
+/// The pins' layer binds only keys nobody holds: not the `[goto]` table's, not
+/// a built-in chord's, not one another's — and rebuilt from the same base, it
+/// is the same keymap every time.
+#[test]
+fn the_pin_layer_takes_no_key_from_anything() {
+    let base = Registry::defaults();
+    let first = crate::config::default_bookmarks().len();
+    let pins = vec![
+        bookmark("w", "/pinned/work"),
+        bookmark("g", "/pinned/top"),
+        bookmark("space", "/pinned/space"),
+        bookmark("x", "/pinned/x"),
+        bookmark("x", "/pinned/x-again"),
+        bookmark("y", "/pinned/y"),
+    ];
+    for _ in 0..2 {
+        let mut km = base.clone();
+        let refused = km.add_bookmarks(&pins, first);
+        assert_eq!(
+            refused,
+            vec![
+                KeymapError::Conflict("g w".to_string()),
+                KeymapError::Conflict("g g".to_string()),
+                KeymapError::Conflict("g Space".to_string()),
+                KeymapError::Conflict("g x".to_string()),
+            ]
+        );
+        let at = |keys: &str| press(&km, &files(), WhenFlags::NONE, keys);
+        assert_eq!(
+            at("g w"),
+            Dispatch::Match(Command::Goto(3)),
+            "[goto] kept it"
+        );
+        assert_eq!(at("g g"), Dispatch::Match(Command::CursorTop));
+        assert_eq!(at("g space"), Dispatch::Match(Command::GotoInteractive));
+        assert_eq!(at("g x"), Dispatch::Match(Command::Goto((first + 3) as u8)));
+        assert_eq!(at("g y"), Dispatch::Match(Command::Goto((first + 5) as u8)));
+        assert_eq!(rows_on(&km, "g x"), 1);
+        assert_eq!(km.bindings().len(), base.bindings().len() + 2);
+    }
 }
 
 // ── The four ways of finding something ─────────────────────────────────────
