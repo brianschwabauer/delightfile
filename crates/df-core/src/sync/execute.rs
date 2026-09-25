@@ -6,33 +6,43 @@
 //! so every copy error and every verify mismatch goes into the
 //! [`SyncReport`], and the run carries on to the next path. Only a cancel
 //! stops it early, and what landed before the cancel is real and stays.
+//!
+//! A mirror's removals come after the copies and before the verify: nothing
+//! is taken away until everything that should be there has been written, and
+//! the verify then reads the destination as it will be left.
 
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::ops::copy::{self, CopyOptions};
-use crate::ops::COPY_CHUNK;
-use crate::tasks::TaskCtx;
+use crate::ops::{Trash, COPY_CHUNK};
+use crate::tasks::{NullSink, TaskCtx};
 use crate::{DfError, Result};
 
-use super::{Class, Item, Kind, SyncPlan, Verify};
+use super::{Class, Item, Kind, Mode, Removal, SyncPlan, Verify};
 
 /// What a sync did.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
+    pub mode: Mode,
     pub verify: Verify,
     /// Files and links written this run.
     pub copied: u64,
     pub copied_bytes: u64,
     /// Folders made.
     pub made: u64,
+    /// Extras a mirror removed, counted the way the card counted them.
+    pub removed: u64,
+    /// Where they went.
+    pub removal: Removal,
     /// Files and links read back on both sides and found the same.
     pub verified: u64,
     /// Each file the verify pass found wrong, and how.
     pub verify_failures: Vec<(PathBuf, String)>,
-    /// Each path that could not be copied, and why.
+    /// Each path that could not be copied or removed, and why.
     pub errors: Vec<(PathBuf, String)>,
     pub cancelled: bool,
 }
@@ -44,27 +54,38 @@ impl SyncReport {
     }
 }
 
-/// Carry out `plan`, then verify it.
+/// Carry out `plan` in `mode`, then verify it.
 ///
 /// Progress is honest from the first byte: the total is every byte to copy
 /// plus every byte to read back — both sides of each verified file — and the
-/// file count is every path to copy plus every path to verify. Pause and
-/// cancel are the task's own, asked at every chunk of every copy and read.
-pub fn execute(plan: &SyncPlan, verify: Verify, ctx: &TaskCtx) -> SyncReport {
+/// file count is every path to copy, remove and verify. Pause and cancel are
+/// the task's own, asked at every chunk of every copy and read.
+pub fn execute(plan: &SyncPlan, mode: Mode, verify: Verify, ctx: &TaskCtx) -> SyncReport {
     let mut run = Run {
         plan,
         ctx,
+        mode,
         report: SyncReport {
+            mode,
             verify,
+            removal: plan.removal,
             ..SyncReport::default()
         },
         copied: HashSet::new(),
         failed: HashSet::new(),
         failed_dirs: Vec::new(),
         buf: vec![0u8; COPY_CHUNK],
+        remover: None,
+        // Removing reports its own bytes and files as it goes — a trash that
+        // has to copy across a filesystem, a delete counting what it unlinks —
+        // and none of that is in the total. Its pause and cancel still are.
+        quiet: TaskCtx::with_sink(ctx.flags(), Arc::new(NullSink)),
     };
     run.set_totals(verify);
     run.copy_all();
+    if mode == Mode::Mirror && !run.report.cancelled {
+        run.remove_extras();
+    }
     #[cfg(test)]
     run_before_verify();
     if !run.report.cancelled {
@@ -76,6 +97,7 @@ pub fn execute(plan: &SyncPlan, verify: Verify, ctx: &TaskCtx) -> SyncReport {
 struct Run<'a> {
     plan: &'a SyncPlan,
     ctx: &'a TaskCtx,
+    mode: Mode,
     report: SyncReport,
     /// The items this run wrote, by index: what [`Verify::Copied`] reads back.
     copied: HashSet<usize>,
@@ -88,6 +110,19 @@ struct Run<'a> {
     /// One read buffer for the whole verify pass, rather than a megabyte
     /// allocated per file of a card full of small ones.
     buf: Vec<u8>,
+    /// Where removed paths go, decided the first time something is removed.
+    remover: Option<Remover>,
+    /// The task's flags without its progress, for the removals.
+    quiet: TaskCtx,
+}
+
+/// Where a run's removals go.
+enum Remover {
+    /// The trash on the destination's filesystem — or why there is none,
+    /// which fails each removal rather than quietly deleting what the card
+    /// said would go to the trash.
+    Trash(std::result::Result<Trash, String>),
+    Delete,
 }
 
 impl Run<'_> {
@@ -113,6 +148,9 @@ impl Run<'_> {
         {
             bytes += item.bytes * 2;
             files += 1;
+        }
+        if self.mode == Mode::Mirror {
+            files += self.plan.removals().len() as u64;
         }
         self.ctx.set_total(bytes, files);
     }
@@ -177,7 +215,7 @@ impl Run<'_> {
 
     /// Copy one path, and nothing under it — the walk order brings the
     /// children after. Returns the bytes moved.
-    fn copy_one(&self, item: &Item, src: &Path, dst: &Path) -> Result<u64> {
+    fn copy_one(&mut self, item: &Item, src: &Path, dst: &Path) -> Result<u64> {
         let options = CopyOptions {
             overwrite: item.class == Class::Changed,
             durable: true,
@@ -203,9 +241,11 @@ impl Run<'_> {
     ///
     /// A file or a link where a folder goes is replaced, the way an overwrite
     /// replaces one file with another. A *folder* in the way of a file is
-    /// refused: replacing it would throw away everything in it, and a sync
-    /// that only adds and updates must never be how a folder disappears.
-    fn clear_the_way(&self, item: &Item, dst: &Path) -> Result<()> {
+    /// refused by an update: replacing it would throw away everything in it,
+    /// and a sync that only adds and updates must never be how a folder
+    /// disappears. A mirror, which exists to make the destination match,
+    /// removes it the way it removes an extra — to the trash where it can.
+    fn clear_the_way(&mut self, item: &Item, dst: &Path) -> Result<()> {
         let Ok(meta) = std::fs::symlink_metadata(dst) else {
             return Ok(());
         };
@@ -214,6 +254,9 @@ impl Run<'_> {
             return Ok(());
         }
         if theirs == Kind::Dir {
+            if self.mode == Mode::Mirror {
+                return self.remove(dst);
+            }
             return Err(DfError::Op(
                 "a folder with that name is in the way".to_string(),
             ));
@@ -222,6 +265,45 @@ impl Run<'_> {
             std::fs::remove_file(dst).map_err(|e| DfError::io(dst, e))?;
         }
         Ok(())
+    }
+
+    /// A mirror's removal pass: the topmost extras, deepest first, each to
+    /// the trash or for good as the plan said.
+    fn remove_extras(&mut self) {
+        let plan = self.plan;
+        for (index, leaves) in plan.removals() {
+            if self.ctx.checkpoint().is_err() {
+                self.report.cancelled = true;
+                break;
+            }
+            let path = plan.dst_of(&plan.items[index]);
+            match self.remove(&path) {
+                Ok(()) => self.report.removed += leaves,
+                Err(DfError::Cancelled) => {
+                    self.report.cancelled = true;
+                    break;
+                }
+                Err(e) => self.report.errors.push((path, e.to_string())),
+            }
+            self.ctx.advance(0, 1);
+        }
+    }
+
+    /// Remove one path and everything under it, through the same trash `d`
+    /// uses — its rails included — or for good through `D`'s.
+    fn remove(&mut self, path: &Path) -> Result<()> {
+        let plan = self.plan;
+        let remover = self.remover.get_or_insert_with(|| match plan.removal {
+            Removal::Trash => {
+                Remover::Trash(super::trash_for(&plan.dest_dir).map_err(|e| e.to_string()))
+            }
+            Removal::Delete => Remover::Delete,
+        });
+        match remover {
+            Remover::Trash(Ok(bin)) => bin.trash(path, &self.quiet).map(|_| ()),
+            Remover::Trash(Err(why)) => Err(DfError::Op(format!("not moved to the trash: {why}"))),
+            Remover::Delete => crate::ops::delete_permanent(path, &self.quiet),
+        }
     }
 
     /// The verify pass: read both sides of each file back from the medium and

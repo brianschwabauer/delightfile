@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use crate::ops::{exists, file_name, is_ancestor_resolved, is_real_dir, normalize, same_file};
 use crate::{DfError, Result};
 
-use super::{Class, Item, Kind, Root, SyncOptions, SyncPlan, MTIME_SLACK};
+use super::{Class, Item, Kind, Removal, Root, SyncOptions, SyncPlan, MTIME_SLACK};
 
 /// Where each source lands, or why the sync cannot happen at all.
 ///
@@ -25,13 +25,13 @@ use super::{Class, Item, Kind, Root, SyncOptions, SyncPlan, MTIME_SLACK};
 /// would give it. The refusals are the ones no answer could make safe:
 ///
 /// - a folder into itself or below itself, which would walk its own output;
-/// - a path onto itself, which has nothing to sync and would read its own
-///   contents as extras;
+/// - a path onto itself, which has nothing to sync and, as a mirror, would
+///   read its own contents as extras;
 /// - a destination that *holds* the source (`dest/photos` when the source is
-///   `dest/photos/photos`), which would count the source as an extra of the
-///   folder it lives in;
+///   `dest/photos/photos`), where a mirror would remove the source as an
+///   extra of the folder it lives in;
 /// - two sources with one name, which would both land in the same place and
-///   each overwrite the other.
+///   each mirror the other away.
 ///
 /// Resolved rather than lexical, as [`crate::ops::paste`]'s rails are: a
 /// destination spelled through a symlink is still inside the source.
@@ -105,6 +105,11 @@ pub fn plan(
     }
     let mut plan = walk.plan;
     plan.count();
+    plan.removal = if super::trash_available(&plan.dest_dir) {
+        Removal::Trash
+    } else {
+        Removal::Delete
+    };
     Ok(plan)
 }
 

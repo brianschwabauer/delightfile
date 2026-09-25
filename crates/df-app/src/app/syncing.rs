@@ -7,9 +7,9 @@
 //! layout, its paint — is [`crate::sync`], beside [`crate::dialog`]; `app.rs`
 //! only hands it the keyboard, the pointer and a frame.
 //!
-//! Nothing here is journalled. The card is the confirmation, a sync only adds
-//! and updates, and there is no inverse of "these bytes were verified" to
-//! record.
+//! Nothing here is journalled. The card is the confirmation, an update only
+//! adds, and a mirror's removals go to the trash — whose own view is where
+//! they are put back — or were announced on the card's button as deletes.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,7 +88,7 @@ impl App {
         (self.engine.spawn(job), slot)
     }
 
-    /// The card's own keys: `v` and `c`. Matched by hand, as the disks card's
+    /// The card's own keys: `m`, `v` and `c`. Matched by hand, as the disks card's
     /// verbs are, because the `[confirm]` table the card is matched in has no
     /// rows for them — and the card's hint strip is where they are taught.
     pub(super) fn sync_key(&mut self, chord: Chord, _now: Instant) -> bool {
@@ -99,6 +99,10 @@ impl App {
             return false;
         }
         match chord.key {
+            Key::Char('m') => {
+                card.toggle_mode();
+                true
+            }
             Key::Char('v') => {
                 card.toggle_verify();
                 true
@@ -159,13 +163,13 @@ impl App {
         let Some(plan) = card.plan().map(Arc::clone) else {
             return;
         };
-        let verify = card.run_verify();
+        let (mode, verify) = (card.mode, card.run_verify());
         let title = card.title.clone();
         let dest = card.dest.clone();
         self.dialog = None;
         self.sync_context();
         let focus = sync::focus(&plan);
-        let (job, slot) = sync::sync_job(title.clone(), plan, verify);
+        let (job, slot) = sync::sync_job(title.clone(), plan, mode, verify);
         let id = self.engine.spawn(job);
         self.syncs.push(Running {
             id,
@@ -422,7 +426,7 @@ mod tests {
         compared(&mut app);
         key(&mut app, Key::Char('v'));
         assert_eq!(card(&app).verify, Verify::Everything);
-        assert!(card(&app).status().starts_with("verify everything"));
+        assert!(card(&app).status().contains("· verify everything ·"));
         key(&mut app, Key::Char('v'));
         assert_eq!(card(&app).verify, Verify::Copied);
 
@@ -458,6 +462,39 @@ mod tests {
             std::fs::read(tree.join("dest/photos/a.jpg")).unwrap(),
             b"aa"
         );
+    }
+
+    #[test]
+    fn m_switches_to_a_mirror_and_the_button_says_what_it_removes() {
+        let (tree, mut app) = yanked("sync-app-mirror");
+        tree.file("dest/photos/stray.txt", b"only here");
+        tree.file("dest/photos/old/gone.jpg", b"gone");
+        app.run(Command::PasteSync, 10, Instant::now());
+        compared(&mut app);
+        assert_eq!(card(&app).labels(), ["Cancel", "Sync"]);
+        key(&mut app, Key::Char('m'));
+        let shown = card(&app);
+        assert_eq!(shown.mode, df_core::sync::Mode::Mirror);
+        let verb = match shown.plan().unwrap().removal {
+            df_core::sync::Removal::Trash => "trash",
+            df_core::sync::Removal::Delete => "delete",
+        };
+        assert_eq!(
+            shown.labels(),
+            ["Cancel".to_string(), format!("Sync and {verb} 2")]
+        );
+        assert_eq!(shown.removal_line(), Some(format!("2 to {verb}")));
+        assert!(shown
+            .rows()
+            .iter()
+            .any(|row| row.text == "photos/stray.txt"));
+        // `m` again, and the extras are nobody's business.
+        key(&mut app, Key::Char('m'));
+        assert_eq!(card(&app).labels(), ["Cancel", "Sync"]);
+        assert!(!card(&app)
+            .rows()
+            .iter()
+            .any(|row| row.text.contains("stray")));
     }
 
     #[test]

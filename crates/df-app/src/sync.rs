@@ -5,7 +5,8 @@
 //! trees on the pool: the card is up at once and counts, because a walk of a
 //! big tree takes seconds and a key that shows nothing for five seconds is a
 //! key pressed twice. **Ready** once the plan lands: the counts, the list of
-//! what will be copied, and the switches that change what `Enter` does. And
+//! what will be copied — and, for a mirror, removed — and the switches that
+//! change what `Enter` does. And
 //! **Result**, only for a run that ended with problems: the same card, naming
 //! every file that failed and why. A toast has room for one name, and "2
 //! problems" with no names is not something anybody can act on.
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use df_core::keymap::{Chord, Command, Key};
-use df_core::sync::{Class, Kind, SyncOptions, SyncPlan, SyncReport, Verify};
+use df_core::sync::{Class, Kind, Mode, Removal, SyncOptions, SyncPlan, SyncReport, Verify};
 use df_core::tasks::{FnJob, Job, Lane, TaskCtx, TaskId};
 use df_core::text::grouped;
 use df_core::DfError;
@@ -72,6 +73,8 @@ pub enum Stage {
 pub enum Mark {
     New,
     Changed,
+    /// Only at the destination, and a mirror will remove it.
+    Extra,
     /// A source path the sync will not copy — a socket, a folder it could not
     /// read — or, on the result card, a path that failed.
     Problem,
@@ -84,6 +87,7 @@ impl Mark {
         match self {
             Mark::New => "+",
             Mark::Changed => "~",
+            Mark::Extra => "−",
             Mark::Problem => "!",
             Mark::More => "",
         }
@@ -108,6 +112,7 @@ pub struct SyncCard {
     /// `Sync 3 items → ~/Photos` — the card's heading, and the task's name in
     /// the `w` panel, so the two read as one thing.
     pub title: String,
+    pub mode: Mode,
     pub verify: Verify,
     pub content: bool,
     pub stage: Stage,
@@ -135,6 +140,7 @@ impl SyncCard {
             sources,
             dest,
             title,
+            mode: Mode::Update,
             verify: Verify::Copied,
             content: false,
             stage: Stage::Comparing { id, slot, seen: 0 },
@@ -152,6 +158,7 @@ impl SyncCard {
             sources: Vec::new(),
             dest,
             title,
+            mode: report.mode,
             verify: report.verify,
             content: false,
             stage: Stage::Result(Box::new(report)),
@@ -179,7 +186,7 @@ impl SyncCard {
 
     /// The planner's answer is in.
     pub fn land(&mut self, plan: SyncPlan) {
-        self.rows = plan_rows(&plan);
+        self.rows = plan_rows(&plan, self.mode);
         self.first = 0;
         self.reserved = 0;
         self.stage = Stage::Ready(Arc::new(plan));
@@ -213,6 +220,20 @@ impl SyncCard {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// `m`: update ⟷ mirror. The plan already knows the extras, so the
+    /// summary and the list change at once.
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            Mode::Update => Mode::Mirror,
+            Mode::Mirror => Mode::Update,
+        };
+        if let Stage::Ready(plan) = &self.stage {
+            self.rows = plan_rows(plan, self.mode);
+            let last = self.rows.len().saturating_sub(self.visible());
+            self.first = self.first.min(last);
         }
     }
 
@@ -284,7 +305,7 @@ impl SyncCard {
         match &self.stage {
             Stage::Comparing { seen, .. } => format!("Comparing… {} so far", grouped(*seen)),
             Stage::Ready(plan) => {
-                let mut parts = if plan.in_sync() {
+                let mut parts = if plan.in_sync(self.mode) {
                     vec![
                         "Already in sync".to_string(),
                         plural(plan.unchanged.count, "file", "files"),
@@ -309,12 +330,39 @@ impl SyncCard {
         }
     }
 
+    /// A mirror's second line: what it will take away, and where to. Red, as
+    /// the delete confirm's answer is, because it is the part of the card
+    /// that removes things.
+    pub fn removal_line(&self) -> Option<String> {
+        let plan = self.plan()?;
+        if self.mode != Mode::Mirror || !plan.has_extras() {
+            return None;
+        }
+        Some(format!(
+            "{} to {}",
+            grouped(plan.extra.count),
+            removal_verb(plan.removal)
+        ))
+    }
+
+    /// Whether the answer destroys something for good: a mirror with nowhere
+    /// to trash its extras. Its button is drawn as the delete confirm's is.
+    pub fn danger(&self) -> bool {
+        self.plan().is_some_and(|plan| {
+            self.mode == Mode::Mirror && plan.has_extras() && plan.removal == Removal::Delete
+        })
+    }
+
     /// The settings, beside the buttons: what `Enter` will do, read at the
     /// moment the hand is on its way there.
     pub fn status(&self) -> String {
         if self.is_result() {
             return String::new();
         }
+        let mode = match self.mode {
+            Mode::Update => "Update",
+            Mode::Mirror => "Mirror",
+        };
         let verify = match self.verify {
             Verify::Copied => "verify copied",
             Verify::Everything => "verify everything",
@@ -324,19 +372,25 @@ impl SyncCard {
         } else {
             "by size and date"
         };
-        format!("{verify} · {compare}")
+        format!("{mode} · {verify} · {compare}")
     }
 
     /// The buttons, left to right: the way out, then the answer. The result
-    /// card is only read, so it has the one.
+    /// card is only read, so it has the one. A mirror that removes things says
+    /// so on its own button — `Sync and trash 3` — so the removal is in the
+    /// label the hand is pressing, not only in a line above it.
     pub fn labels(&self) -> Vec<String> {
-        match &self.stage {
-            Stage::Result(_) => vec!["Close".to_string()],
-            Stage::Ready(plan) if plan.in_sync() => {
-                vec!["Cancel".to_string(), "Verify".to_string()]
-            }
-            _ => vec!["Cancel".to_string(), "Sync".to_string()],
-        }
+        let answer = match &self.stage {
+            Stage::Result(_) => return vec!["Close".to_string()],
+            Stage::Ready(plan) if plan.in_sync(self.mode) => "Verify".to_string(),
+            Stage::Ready(plan) if self.mode == Mode::Mirror && plan.has_extras() => format!(
+                "Sync and {} {}",
+                removal_verb(plan.removal),
+                grouped(plan.extra.count)
+            ),
+            _ => "Sync".to_string(),
+        };
+        vec!["Cancel".to_string(), answer]
     }
 
     /// Whether the answer button does anything yet. Not while comparing: there
@@ -349,7 +403,7 @@ impl SyncCard {
     /// verify of everything, which is the only thing left worth doing.
     pub fn run_verify(&self) -> Verify {
         match &self.stage {
-            Stage::Ready(plan) if plan.in_sync() => Verify::Everything,
+            Stage::Ready(plan) if plan.in_sync(self.mode) => Verify::Everything,
             _ => self.verify,
         }
     }
@@ -373,10 +427,15 @@ impl SyncCard {
             "compare contents"
         };
         let enter = match &self.stage {
-            Stage::Ready(plan) if plan.in_sync() => "verify",
+            Stage::Ready(plan) if plan.in_sync(self.mode) => "verify",
             _ => "sync",
         };
+        let mode = match self.mode {
+            Mode::Update => "mirror",
+            Mode::Mirror => "update only",
+        };
         vec![
+            Hint::key("m", mode, Chord::plain(Key::Char('m'))),
             Hint::key("v", verify, Chord::plain(Key::Char('v'))),
             Hint::key("c", compare, Chord::plain(Key::Char('c'))),
             Hint::new("Enter", enter, Command::OverlaySubmit),
@@ -385,19 +444,28 @@ impl SyncCard {
     }
 }
 
-/// The list for a plan: the new and the changed, then what the sync will not
-/// touch and why, capped at [`LIST_CAP`].
-fn plan_rows(plan: &SyncPlan) -> Vec<Row> {
+/// "trash" or "delete": what a mirror does with an extra.
+fn removal_verb(removal: Removal) -> &'static str {
+    match removal {
+        Removal::Trash => "trash",
+        Removal::Delete => "delete",
+    }
+}
+
+/// The list for a plan in `mode`: the new and the changed, then a mirror's
+/// extras, then what the sync will not touch and why, capped at
+/// [`LIST_CAP`].
+fn plan_rows(plan: &SyncPlan, mode: Mode) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut total = 0usize;
-    for item in plan.listed() {
+    for item in plan.listed(mode) {
         total += 1;
         if rows.len() < LIST_CAP {
             rows.push(Row {
-                mark: if item.class == Class::New {
-                    Mark::New
-                } else {
-                    Mark::Changed
+                mark: match item.class {
+                    Class::New => Mark::New,
+                    Class::Extra => Mark::Extra,
+                    _ => Mark::Changed,
                 },
                 text: plan.label(item),
                 detail: if item.kind == Kind::File {
@@ -450,16 +518,25 @@ fn problem_rows(dest: &Path, report: &SyncReport) -> Vec<Row> {
 /// A finished run in one line, for the toast and the result card's summary.
 pub fn outcome(report: &SyncReport) -> String {
     let mut parts = Vec::new();
-    if report.copied == 0 && report.made == 0 {
-        parts.push("Already in sync".to_string());
-    } else if report.copied > 0 {
+    if report.copied > 0 {
         parts.push(format!("Synced {}", plural(report.copied, "file", "files")));
         parts.push(crate::format::human_size(report.copied_bytes));
-    } else {
+    } else if report.made > 0 {
         parts.push(format!(
             "Synced {}",
             plural(report.made, "folder", "folders")
         ));
+    } else if report.removed > 0 {
+        parts.push("Mirrored".to_string());
+    } else {
+        parts.push("Already in sync".to_string());
+    }
+    if report.removed > 0 {
+        let verb = match report.removal {
+            Removal::Trash => "trashed",
+            Removal::Delete => "deleted",
+        };
+        parts.push(format!("{} {verb}", grouped(report.removed)));
     }
     if report.cancelled {
         parts.push("cancelled".to_string());
@@ -519,11 +596,16 @@ pub fn plan_job(
 /// ending is what the `w` panel shows: cancelled when it was, failed when
 /// anything could not be copied or did not verify — so a run with problems is
 /// a red row in the panel as well as a card — and done otherwise.
-pub fn sync_job(name: String, plan: Arc<SyncPlan>, verify: Verify) -> (impl Job, ReportSlot) {
+pub fn sync_job(
+    name: String,
+    plan: Arc<SyncPlan>,
+    mode: Mode,
+    verify: Verify,
+) -> (impl Job, ReportSlot) {
     let slot: ReportSlot = Arc::new(Mutex::new(None));
     let landing = Arc::clone(&slot);
     let job = FnJob::new(name, Lane::Macro, move |ctx: &TaskCtx| {
-        let report = df_core::sync::execute(&plan, verify, ctx);
+        let report = df_core::sync::execute(&plan, mode, verify, ctx);
         let (cancelled, problems) = (report.cancelled, report.problems());
         store(&landing, report);
         if cancelled {
@@ -568,7 +650,7 @@ pub struct Running {
 /// new or changed at or under it.
 pub fn focus(plan: &SyncPlan) -> Vec<PathBuf> {
     let mut touched = vec![false; plan.roots.len()];
-    for item in plan.listed() {
+    for item in plan.listed(Mode::Update) {
         touched[item.root] = true;
     }
     plan.roots
@@ -624,7 +706,7 @@ impl Geometry {
 /// As wide as the conflict card — a path is read left to right and the room
 /// is what keeps it whole — and as tall as its list needs, up to [`VISIBLE`]
 /// rows. Top to bottom: the pad, the heading (with the `×` on its line), the
-/// summary, the list, [`ANSWER_GAP`], the status and the buttons on one line,
+/// summary, a mirror's removal line, the list, [`ANSWER_GAP`], the status and the buttons on one line,
 /// the hint strip, the pad. The buttons are measured and placed by the confirm
 /// card's own rule ([`dialog::button_row`]), the last one [`CARD_PAD`] in from
 /// the card's right edge, so its corner is concentric with the card's.
@@ -635,12 +717,18 @@ pub fn geometry(painter: &egui::Painter, area: egui::Rect, card: &SyncCard) -> G
     } else {
         0.0
     };
+    // The heading, the summary, and a mirror's line of what it removes.
+    let lines = if card.removal_line().is_some() {
+        3.0
+    } else {
+        2.0
+    };
     let height =
-        CARD_PAD + ROW * 2.0 + list + ANSWER_GAP + BUTTON_HEIGHT + chrome::HINT_ROW + CARD_PAD;
+        CARD_PAD + ROW * lines + list + ANSWER_GAP + BUTTON_HEIGHT + chrome::HINT_ROW + CARD_PAD;
     let rect = dialog::card_rect(area, MAX_WIDTH, height);
     let inner_left = rect.left() + CARD_PAD;
     let inner_right = rect.right() - CARD_PAD;
-    let body_top = rect.top() + CARD_PAD + ROW * 2.0 + if visible > 0 { LIST_GAP } else { 0.0 };
+    let body_top = rect.top() + CARD_PAD + ROW * lines + if visible > 0 { LIST_GAP } else { 0.0 };
     let body = egui::Rect::from_min_max(
         egui::pos2(inner_left, body_top),
         egui::pos2(inner_right, body_top + visible as f32 * ROW),
@@ -714,6 +802,16 @@ pub fn paint(
         (geometry.card.right() - CARD_PAD - left).max(0.0),
         font.clone(),
     );
+    if let Some(line) = card.removal_line() {
+        chrome::truncated_in(
+            painter,
+            egui::pos2(left, geometry.card.top() + CARD_PAD + ROW * 2.0 + ROW / 2.0),
+            &line,
+            palette.red,
+            (geometry.card.right() - CARD_PAD - left).max(0.0),
+            font.clone(),
+        );
+    }
 
     let clipped = painter.with_clip_rect(geometry.body);
     let mono = egui::FontId::monospace(FONT);
@@ -738,6 +836,7 @@ pub fn paint(
         let (mark_tint, text_tint) = match row.mark {
             Mark::New => (palette.green, palette.subtext0),
             Mark::Changed => (palette.peach, palette.subtext0),
+            Mark::Extra => (palette.red, palette.subtext0),
             Mark::Problem => (palette.red, palette.subtext0),
             Mark::More => (palette.overlay0, palette.overlay0),
         };
@@ -796,7 +895,7 @@ pub fn paint(
             *rect,
             label,
             i == last,
-            false,
+            i == last && card.danger(),
             Control::Action(i),
             hovers,
             ripples,
@@ -839,6 +938,7 @@ mod tests {
                 bytes: 0,
             },
             extra: Tally::default(),
+            removal: Removal::Trash,
             skipped: Vec::new(),
         }
     }
@@ -911,9 +1011,12 @@ mod tests {
         );
         assert!(card.can_commit());
         assert_eq!(card.labels(), ["Cancel", "Sync"]);
-        assert_eq!(card.status(), "verify copied · by size and date");
+        assert_eq!(card.status(), "Update · verify copied · by size and date");
         card.toggle_verify();
-        assert_eq!(card.status(), "verify everything · by size and date");
+        assert_eq!(
+            card.status(),
+            "Update · verify everything · by size and date"
+        );
         assert_eq!(card.run_verify(), Verify::Everything);
     }
 
@@ -987,7 +1090,7 @@ mod tests {
                 PathBuf::from("/dst/photos/a.jpg"),
                 "Permission denied".to_string(),
             )],
-            cancelled: false,
+            ..SyncReport::default()
         };
         let card = SyncCard::result(PathBuf::from("/dst"), "Sync 1 item → /dst".into(), report);
         assert_eq!(card.heading(), "Sync finished with 2 problems");
@@ -1052,13 +1155,13 @@ mod tests {
         };
         assert_eq!(
             labels(&card),
-            "v verify everything · c compare contents · Enter sync · Esc cancel"
+            "m mirror · v verify everything · c compare contents · Enter sync · Esc cancel"
         );
         card.toggle_verify();
         card.toggle_content();
         assert_eq!(
             labels(&card),
-            "v verify copied · c compare size, date · Enter sync · Esc cancel"
+            "m mirror · v verify copied · c compare size, date · Enter sync · Esc cancel"
         );
     }
 
@@ -1089,6 +1192,115 @@ mod tests {
         assert_eq!(focus(&plan), [PathBuf::from("/dst/photos")]);
     }
 
+    /// A plan with one new file and three extras, two of them in a folder.
+    fn with_extras(removal: Removal) -> SyncPlan {
+        let mut plan = plan_with(
+            vec![
+                item("", Class::Unchanged, Kind::Dir, 0),
+                item("a.jpg", Class::New, Kind::File, 5),
+                item("old", Class::Extra, Kind::Dir, 0),
+                item("old/x.jpg", Class::Extra, Kind::File, 7),
+                item("old/y.jpg", Class::Extra, Kind::File, 7),
+                item("stray.txt", Class::Extra, Kind::File, 1),
+            ],
+            1,
+            0,
+            0,
+            5,
+        );
+        plan.extra = Tally {
+            count: 3,
+            bytes: 15,
+        };
+        plan.removal = removal;
+        plan
+    }
+
+    #[test]
+    fn m_turns_an_update_into_a_mirror_that_says_what_it_removes() {
+        let mut card = card();
+        card.land(with_extras(Removal::Trash));
+        assert_eq!(card.mode, Mode::Update);
+        assert_eq!(card.removal_line(), None, "an update removes nothing");
+        assert_eq!(card.labels(), ["Cancel", "Sync"]);
+        assert_eq!(card.rows().len(), 1);
+
+        card.toggle_mode();
+        assert_eq!(card.mode, Mode::Mirror);
+        assert_eq!(card.removal_line().as_deref(), Some("3 to trash"));
+        assert_eq!(card.labels(), ["Cancel", "Sync and trash 3"]);
+        assert!(!card.danger(), "the trash is undoable");
+        assert!(card.status().starts_with("Mirror · "));
+        assert_eq!(
+            card.rows()
+                .iter()
+                .map(|row| (row.mark, row.text.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (Mark::New, "photos/a.jpg"),
+                (Mark::Extra, "photos/old/"),
+                (Mark::Extra, "photos/old/x.jpg"),
+                (Mark::Extra, "photos/old/y.jpg"),
+                (Mark::Extra, "photos/stray.txt"),
+            ]
+        );
+        assert!(card.hints()[0].label == "update only");
+
+        card.toggle_mode();
+        assert_eq!(card.rows().len(), 1, "and back, at once");
+    }
+
+    #[test]
+    fn a_mirror_with_nowhere_to_trash_says_delete_and_its_button_is_red() {
+        let mut card = card();
+        card.land(with_extras(Removal::Delete));
+        card.toggle_mode();
+        assert_eq!(card.removal_line().as_deref(), Some("3 to delete"));
+        assert_eq!(card.labels(), ["Cancel", "Sync and delete 3"]);
+        assert!(card.danger());
+    }
+
+    #[test]
+    fn a_mirror_with_extras_is_not_in_sync_even_with_nothing_to_copy() {
+        let mut plan = with_extras(Removal::Trash);
+        plan.items.retain(|item| item.class != Class::New);
+        plan.new = Tally::default();
+        let mut card = card();
+        card.land(plan);
+        assert_eq!(
+            card.labels(),
+            ["Cancel", "Verify"],
+            "an update has nothing to do"
+        );
+        card.toggle_mode();
+        assert_eq!(card.labels(), ["Cancel", "Sync and trash 3"]);
+        assert_eq!(card.run_verify(), Verify::Copied);
+    }
+
+    #[test]
+    fn a_mirrors_removals_are_in_the_toast() {
+        let report = SyncReport {
+            mode: Mode::Mirror,
+            copied: 2,
+            copied_bytes: 10,
+            removed: 3,
+            removal: Removal::Trash,
+            verified: 2,
+            ..SyncReport::default()
+        };
+        assert_eq!(
+            outcome(&report),
+            "Synced 2 files · 10 B · 3 trashed · verified"
+        );
+        let only_removed = SyncReport {
+            mode: Mode::Mirror,
+            removed: 1,
+            removal: Removal::Delete,
+            ..SyncReport::default()
+        };
+        assert_eq!(outcome(&only_removed), "Mirrored · 1 deleted");
+    }
+
     /// The confirm card's rules, on this card: the last button a card's
     /// padding in from the right edge and sitting on the hint strip, so its
     /// corner is concentric with the card's; the status stopping short of the
@@ -1102,11 +1314,21 @@ mod tests {
         let comparing = card();
         let mut ready = card();
         ready.land(plan_with(items, 30, 0, 0, 30));
+        let mut mirror = card();
+        mirror.land(with_extras(Removal::Delete));
+        mirror.toggle_mode();
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
-            for (card, rows) in [(&comparing, 0), (&ready, VISIBLE)] {
+            for (card, rows) in [(&comparing, 0), (&ready, VISIBLE), (&mirror, 5)] {
                 let g = geometry(ui.painter(), area, card);
                 assert_eq!(g.rows.len(), rows);
+                // The list starts below every summary line.
+                let lines = if card.removal_line().is_some() {
+                    3.0
+                } else {
+                    2.0
+                };
+                assert!(g.body.top() >= g.card.top() + CARD_PAD + ROW * lines);
                 assert!(g.rows.iter().all(|row| g.body.contains_rect(*row)));
                 assert!(g.card.contains_rect(g.body));
                 let last = *g.actions.last().unwrap();

@@ -551,7 +551,7 @@ pub fn topdir_trash(topdir: &Path, uid: u32) -> Result<PathBuf> {
 }
 
 /// The device number of a path, or of the nearest ancestor that exists.
-fn device_of(path: &Path) -> Option<u64> {
+pub(crate) fn device_of(path: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     let mut cursor = Some(path);
     while let Some(p) = cursor {

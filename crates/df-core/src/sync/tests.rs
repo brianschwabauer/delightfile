@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use super::*;
 use crate::ops::copy::{syncs, without_reflink};
 use crate::ops::fixture::TempTree;
-use crate::ops::COPY_CHUNK;
+use crate::ops::{Trash, COPY_CHUNK};
 use crate::tasks::{ProgressSink, TaskCtx, TaskFlags};
 
 fn quick(sources: &[PathBuf], dest: &Path) -> SyncPlan {
@@ -174,7 +174,7 @@ fn the_planner_sorts_every_path_into_new_changed_unchanged_and_extra() {
     assert_eq!(plan.extra, Tally { count: 1, bytes: 5 });
     assert_eq!(plan.bytes_to_copy(), 23);
     assert_eq!(
-        plan.listed()
+        plan.listed(Mode::Update)
             .map(|item| plan.label(item))
             .collect::<Vec<_>>(),
         [
@@ -311,7 +311,10 @@ fn extras_are_found_at_every_depth_with_everything_under_them() {
     }
     // Three things, not five: the folders are how they are arranged.
     assert_eq!(plan.extra, Tally { count: 3, bytes: 9 });
-    assert!(plan.in_sync(), "extras alone are nothing to copy");
+    assert!(
+        plan.in_sync(Mode::Update),
+        "extras alone are nothing to copy"
+    );
 }
 
 #[test]
@@ -397,7 +400,7 @@ fn a_sync_copies_the_new_and_the_changed_and_touches_nothing_else() {
     let same_before = std::fs::metadata(&same).unwrap();
 
     let plan = quick(&[photos], &dest);
-    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
 
     assert_eq!(report.problems(), 0, "{report:?}");
     assert_eq!(report.copied, 3);
@@ -424,7 +427,7 @@ fn a_sync_copies_the_new_and_the_changed_and_touches_nothing_else() {
 
     // A second plan finds nothing left to do.
     let again = quick(&[t.join("src/photos")], &dest);
-    assert!(again.in_sync(), "{:?}", classes(&again));
+    assert!(again.in_sync(Mode::Update), "{:?}", classes(&again));
     assert_eq!(again.unchanged.count, 4);
 }
 
@@ -438,7 +441,7 @@ fn a_new_folder_gets_its_mode_and_date_after_its_children() {
     let dest = t.dir("dst");
 
     let plan = quick(std::slice::from_ref(&dir), &dest);
-    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
     let copy = dest.join("locked");
     let mode = std::fs::metadata(&copy).unwrap().permissions().mode();
@@ -468,7 +471,7 @@ fn a_sync_flushes_every_file_and_every_name_it_writes() {
     let plan = quick(&[dir], &t.dir("dst"));
 
     let before = syncs();
-    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
     let after = syncs();
     assert_eq!(report.problems(), 0, "{report:?}");
     assert_eq!(
@@ -502,7 +505,7 @@ fn the_verify_pass_catches_a_copy_damaged_after_it_was_written() {
         std::fs::write(&b, bytes).unwrap();
         std::fs::remove_file(&a).unwrap();
     });
-    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
 
     assert_eq!(report.copied, 3);
     assert_eq!(report.verified, 1);
@@ -532,15 +535,20 @@ fn verifying_everything_reads_back_what_was_not_copied_too() {
     set_mtime(&rotted, mtime(&t.join("src/d/rotted.txt")));
     let plan = quick(&[dir], &t.join("dst"));
 
-    let copied = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    let copied = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
     assert_eq!(
         (copied.copied, copied.verified, copied.problems()),
         (1, 1, 0)
     );
 
     let again = quick(&[t.join("src/d")], &t.join("dst"));
-    assert!(again.in_sync());
-    let everything = execute(&again, Verify::Everything, &TaskCtx::detached());
+    assert!(again.in_sync(Mode::Update));
+    let everything = execute(
+        &again,
+        Mode::Update,
+        Verify::Everything,
+        &TaskCtx::detached(),
+    );
     assert_eq!(everything.verified, 1, "{everything:?}");
     assert_eq!(
         everything.verify_failures,
@@ -555,8 +563,13 @@ fn an_in_sync_plan_still_verifies_everything_it_is_asked_to() {
     twin(&t, "d/a", b"aa");
     twin(&t, "d/b", b"bbb");
     let plan = quick(&[dir], &t.join("dst"));
-    assert!(plan.in_sync());
-    let report = execute(&plan, Verify::Everything, &TaskCtx::detached());
+    assert!(plan.in_sync(Mode::Update));
+    let report = execute(
+        &plan,
+        Mode::Update,
+        Verify::Everything,
+        &TaskCtx::detached(),
+    );
     assert_eq!(
         (report.copied, report.verified, report.problems()),
         (0, 2, 0)
@@ -583,7 +596,7 @@ fn the_progress_total_is_every_byte_copied_plus_both_sides_read_back() {
         let _ = std::fs::remove_file(t.join("dst/d/b"));
         let record = Arc::new(Record::default());
         let ctx = TaskCtx::with_sink(Arc::new(TaskFlags::new()), record.clone());
-        let report = execute(&plan, verify, &ctx);
+        let report = execute(&plan, Mode::Update, verify, &ctx);
         assert_eq!(report.problems(), 0, "{report:?}");
         let total = *record.total.lock().unwrap();
         assert_eq!(total, (copy_bytes + 2 * read, files), "{verify:?}");
@@ -611,7 +624,7 @@ fn a_cancelled_sync_leaves_no_temporary_files_and_no_half_written_one() {
         seen: AtomicU64::new(0),
     });
     let ctx = TaskCtx::with_sink(flags, sink);
-    let report = without_reflink(|| execute(&plan, Verify::Copied, &ctx));
+    let report = without_reflink(|| execute(&plan, Mode::Update, Verify::Copied, &ctx));
 
     assert!(report.cancelled);
     assert!(
@@ -637,7 +650,7 @@ fn a_folder_in_the_way_of_a_file_is_refused_and_a_file_in_the_way_of_a_folder_is
     t.file("dst/d/was-a-file", b"old file");
     t.file("src/d/after", b"still copied");
     let plan = quick(&[dir], &t.join("dst"));
-    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
 
     assert_eq!(report.errors.len(), 1, "{report:?}");
     assert_eq!(report.errors[0].0, t.join("dst/d/was-a-folder"));
@@ -652,6 +665,171 @@ fn a_folder_in_the_way_of_a_file_is_refused_and_a_file_in_the_way_of_a_folder_is
     );
 }
 
+// ── Mirror ──────────────────────────────────────────────────────────────────
+
+/// The extras fixture: a source `d` beside a destination that has an extra
+/// file three levels down, and an extra folder with more under it.
+fn with_extras(t: &TempTree) -> SyncPlan {
+    let dir = t.dir("src/d");
+    t.dir("src/d/a/b");
+    t.file("src/d/keep.txt", b"keep");
+    t.dir("dst/d/a/b");
+    t.file("dst/d/a/b/deep-extra.txt", b"12");
+    t.file("dst/d/gone/one.txt", b"123");
+    t.file("dst/d/gone/two/three.txt", b"1234");
+    // The trash this thread's mirrors use, inside the fixture.
+    trash_at(t.join("Trash"));
+    quick(&[dir], &t.join("dst"))
+}
+
+#[test]
+fn a_mirror_has_something_to_do_where_an_update_has_nothing() {
+    let t = TempTree::new("sync-mirror-in-sync");
+    let dir = t.dir("src/d");
+    twin(&t, "d/a", b"a");
+    t.file("dst/d/extra", b"x");
+    let plan = quick(&[dir], &t.join("dst"));
+    assert!(plan.in_sync(Mode::Update));
+    assert!(!plan.in_sync(Mode::Mirror));
+    assert_eq!(plan.listed(Mode::Update).count(), 0);
+    assert_eq!(
+        plan.listed(Mode::Mirror)
+            .map(|item| plan.label(item))
+            .collect::<Vec<_>>(),
+        ["d/extra"]
+    );
+}
+
+#[test]
+fn removals_are_the_topmost_extras_deepest_first_with_what_each_takes() {
+    let t = TempTree::new("sync-removals");
+    let plan = with_extras(&t);
+    let removals: Vec<(String, u64)> = plan
+        .removals()
+        .into_iter()
+        .map(|(index, leaves)| (plan.label(&plan.items[index]), leaves))
+        .collect();
+    assert_eq!(
+        removals,
+        vec![
+            ("d/a/b/deep-extra.txt".to_string(), 1),
+            // `gone/` takes `one.txt` and `two/three.txt` with it, and is
+            // removed once — not after its children, one by one.
+            ("d/gone/".to_string(), 2),
+        ]
+    );
+}
+
+#[test]
+fn a_mirror_trashes_the_extras_after_copying_and_before_verifying() {
+    let t = TempTree::new("sync-mirror-trash");
+    let mut plan = with_extras(&t);
+    plan.removal = Removal::Trash;
+    let dest = t.join("dst/d");
+    let gone = dest.join("gone");
+    execute::before_verify(move || {
+        assert!(
+            !gone.exists(),
+            "the extras are gone by the time the verify runs"
+        );
+    });
+    let report = execute(&plan, Mode::Mirror, Verify::Copied, &TaskCtx::detached());
+
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!((report.copied, report.removed), (1, 3));
+    assert_eq!(report.removal, Removal::Trash);
+    assert!(!dest.join("a/b/deep-extra.txt").exists());
+    assert!(!dest.join("gone").exists());
+    assert_eq!(std::fs::read(dest.join("keep.txt")).unwrap(), b"keep");
+    // In the trash, whole: the folder is one item that can go back as one.
+    let files = t.join("Trash/files");
+    assert_eq!(
+        std::fs::read(files.join("gone/two/three.txt")).unwrap(),
+        b"1234"
+    );
+    assert!(files.join("deep-extra.txt").is_file());
+    let trashed = Trash::at(t.join("Trash")).list().unwrap();
+    assert_eq!(trashed.len(), 2);
+
+    // And the next plan finds the two sides the same.
+    assert!(quick(&[t.join("src/d")], &t.join("dst")).in_sync(Mode::Mirror));
+}
+
+#[test]
+fn a_mirror_deletes_for_good_where_there_is_no_trash() {
+    let t = TempTree::new("sync-mirror-delete");
+    let mut plan = with_extras(&t);
+    plan.removal = Removal::Delete;
+    let report = execute(&plan, Mode::Mirror, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!((report.removed, report.removal), (3, Removal::Delete));
+    assert!(!t.join("dst/d/gone").exists());
+    assert!(!t.join("Trash").exists(), "nothing went to a trash");
+}
+
+#[test]
+fn an_update_removes_nothing_whatever_the_plan_found() {
+    let t = TempTree::new("sync-update-keeps");
+    let plan = with_extras(&t);
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+    assert_eq!((report.copied, report.removed), (1, 0));
+    assert!(t.join("dst/d/gone/two/three.txt").is_file());
+    assert!(t.join("dst/d/a/b/deep-extra.txt").is_file());
+}
+
+#[test]
+fn a_mirror_moves_a_folder_in_the_way_to_the_trash_and_copies_the_file() {
+    let t = TempTree::new("sync-mirror-in-the-way");
+    let dir = t.dir("src/d");
+    t.file("src/d/was-a-folder", b"now a file");
+    t.file("dst/d/was-a-folder/precious", b"kept, in the trash");
+    trash_at(t.join("Trash"));
+    let mut plan = quick(&[dir], &t.join("dst"));
+    plan.removal = Removal::Trash;
+    let report = execute(&plan, Mode::Mirror, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!(
+        std::fs::read(t.join("dst/d/was-a-folder")).unwrap(),
+        b"now a file"
+    );
+    assert_eq!(
+        std::fs::read(t.join("Trash/files/was-a-folder/precious")).unwrap(),
+        b"kept, in the trash"
+    );
+}
+
+#[test]
+fn a_removal_that_fails_is_recorded_and_the_rest_carry_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TempTree::new("sync-mirror-fail");
+    let mut plan = with_extras(&t);
+    plan.removal = Removal::Delete;
+    // Nothing may be unlinked from `a/b`, so its extra cannot go.
+    let locked = t.join("dst/d/a/b");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let report = execute(&plan, Mode::Mirror, Verify::Copied, &TaskCtx::detached());
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].0, locked.join("deep-extra.txt"));
+    assert_eq!(report.removed, 2, "the folder still went");
+    assert!(!t.join("dst/d/gone").exists());
+}
+
+#[test]
+fn a_mirrors_progress_counts_each_removal() {
+    let t = TempTree::new("sync-mirror-progress");
+    let mut plan = with_extras(&t);
+    plan.removal = Removal::Delete;
+    let record = Arc::new(Record::default());
+    let ctx = TaskCtx::with_sink(Arc::new(TaskFlags::new()), record.clone());
+    let report = execute(&plan, Mode::Mirror, Verify::Copied, &ctx);
+    assert_eq!(report.problems(), 0, "{report:?}");
+    // One copy, two removals, one verify; four bytes copied, eight read back.
+    let total = *record.total.lock().unwrap();
+    assert_eq!(total, (4 + 8, 1 + 2 + 1));
+    assert_eq!(*record.done.lock().unwrap(), total);
+}
+
 #[test]
 fn a_folder_that_cannot_be_made_fails_once_not_once_per_file_in_it() {
     let t = TempTree::new("sync-failed-dir");
@@ -662,7 +840,12 @@ fn a_folder_that_cannot_be_made_fails_once_not_once_per_file_in_it() {
     let plan = quick(&[dir], &t.dir("dst"));
     // Something takes the name between the plan and the run.
     t.file("dst/d/new", b"a file now");
-    let report = execute(&plan, Verify::Everything, &TaskCtx::detached());
+    let report = execute(
+        &plan,
+        Mode::Update,
+        Verify::Everything,
+        &TaskCtx::detached(),
+    );
     assert_eq!(report.errors.len(), 1, "{report:?}");
     assert_eq!(report.errors[0].0, t.join("dst/d/new"));
     assert!(report.verify_failures.is_empty(), "{report:?}");

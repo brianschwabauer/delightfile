@@ -1,4 +1,4 @@
-//! Sync — `alt+p`: a copy that proves it arrived.
+//! Sync — `alt+p`: a copy that proves it arrived, and a mirror.
 //!
 //! PLAN §5 promised copies "with optional verify", and a paste cannot keep
 //! that promise. A paste copies everything it is given, writes into the page
@@ -18,8 +18,10 @@
 //!    as the card's summary before anything is written.
 //! 2. **Execute** ([`execute`]). Copy the new and the changed through
 //!    [`crate::ops::copy`]'s machinery with [`CopyOptions::durable`] on, so each
-//!    file and each name is `fsync`ed before the copy is done with it. Nothing
-//!    is ever removed: an extra stays where it is.
+//!    file and each name is `fsync`ed before the copy is done with it; in
+//!    [`Mode::Mirror`], then remove the extras — to the trash when one lives on
+//!    the destination's filesystem, for good when none does. [`Mode::Update`]
+//!    removes nothing, ever.
 //! 3. **Verify**. Re-read what was copied (or, [`Verify::Everything`], every
 //!    file) on *both* sides, with the page cache dropped first, and compare
 //!    SHA-256 digests. Every mismatch is collected rather than the first one
@@ -37,6 +39,19 @@ use std::path::{Path, PathBuf};
 
 pub use execute::{execute, SyncReport};
 pub use plan::{plan, roots};
+
+/// What a sync does about paths the destination has and the source does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Copy what is new or has changed, and never remove anything. The safe
+    /// default: a sync that was only meant to top up a backup must not be one
+    /// keystroke away from emptying it.
+    #[default]
+    Update,
+    /// Update, then remove every [`Class::Extra`] so the destination ends up
+    /// holding exactly what the source holds.
+    Mirror,
+}
 
 /// How much the verify pass reads back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -72,7 +87,8 @@ pub enum Class {
     Changed,
     /// In both, and the same as far as the comparison looked.
     Unchanged,
-    /// Only at the destination. A sync leaves it where it is.
+    /// Only at the destination. Removed by [`Mode::Mirror`], left alone by
+    /// [`Mode::Update`].
     Extra,
 }
 
@@ -130,8 +146,8 @@ pub struct Item {
     /// What it is in the source — or, for an [`Class::Extra`], at the
     /// destination, since that is the only side it is on.
     pub kind: Kind,
-    /// A file's length: what copying it moves. Zero for everything that is
-    /// not a file.
+    /// A file's length: what copying it moves, or what removing it frees.
+    /// Zero for everything that is not a file.
     pub bytes: u64,
     /// Whether the counts count it: anything that is not a directory, and a
     /// directory with nothing under it. A folder of twelve new photos is
@@ -144,6 +160,19 @@ pub struct Item {
 pub struct Tally {
     pub count: u64,
     pub bytes: u64,
+}
+
+/// Where a mirror's extras go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Removal {
+    /// The trash on the destination's own filesystem, the one `d` uses —
+    /// undoable from the trash view.
+    #[default]
+    Trash,
+    /// For good: nowhere on that filesystem can hold a trash (a read-only
+    /// mount's root, a server). The card says "to delete" instead of "to
+    /// trash" so the difference is read before `Enter`, not after.
+    Delete,
 }
 
 /// What a sync would do, before it does any of it.
@@ -162,6 +191,8 @@ pub struct SyncPlan {
     pub changed: Tally,
     pub unchanged: Tally,
     pub extra: Tally,
+    /// Where [`Mode::Mirror`] would put the extras.
+    pub removal: Removal,
     /// Source paths the sync leaves alone, and why: special files, and
     /// anything that could not be read. Named rather than dropped, because a
     /// sync that silently skipped a folder it could not open would report a
@@ -181,6 +212,7 @@ impl SyncPlan {
             changed: Tally::default(),
             unchanged: Tally::default(),
             extra: Tally::default(),
+            removal: Removal::Trash,
             skipped: Vec::new(),
         }
     }
@@ -243,19 +275,163 @@ impl SyncPlan {
             .any(|item| matches!(item.class, Class::New | Class::Changed))
     }
 
-    /// Nothing to copy. The card says "Already in sync" and offers to verify
-    /// instead.
-    pub fn in_sync(&self) -> bool {
-        !self.has_copies()
+    /// Whether the destination has anything the source does not.
+    pub fn has_extras(&self) -> bool {
+        self.items.iter().any(|item| item.class == Class::Extra)
     }
 
-    /// What the card lists: the new and the changed. Unchanged paths are the
-    /// ones nobody needs to read.
-    pub fn listed(&self) -> impl Iterator<Item = &Item> {
-        self.items
-            .iter()
-            .filter(|item| matches!(item.class, Class::New | Class::Changed))
+    /// Nothing for `mode` to do: nothing to copy and, for a mirror, nothing to
+    /// remove. The card says "Already in sync" and offers to verify instead.
+    pub fn in_sync(&self, mode: Mode) -> bool {
+        !self.has_copies() && (mode == Mode::Update || !self.has_extras())
     }
+
+    /// What the card lists for `mode`: the new and the changed, then — for a
+    /// mirror — the extras. Unchanged paths are the ones nobody needs to read.
+    pub fn listed(&self, mode: Mode) -> impl Iterator<Item = &Item> {
+        let copies = self
+            .items
+            .iter()
+            .filter(|item| matches!(item.class, Class::New | Class::Changed));
+        let extras = self
+            .items
+            .iter()
+            .filter(move |item| mode == Mode::Mirror && item.class == Class::Extra);
+        copies.chain(extras)
+    }
+
+    /// What a mirror removes: the topmost extras, deepest first, each with how
+    /// many of the counted extras it takes with it.
+    ///
+    /// Only the topmost of each run of extras is removed, and its subtree goes
+    /// with it — one trashed folder the trash view can put back whole, rather
+    /// than its files one by one and then an empty folder. Deepest first, so
+    /// that however the list was built a child never outlives the removal of
+    /// the directory holding it. One pass over the items, and a lookup per
+    /// ancestor: a card full of extras must not be quadratic in them.
+    pub fn removals(&self) -> Vec<(usize, u64)> {
+        use std::collections::HashMap;
+        let extras: HashMap<(usize, &Path), usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.class == Class::Extra)
+            .map(|(index, item)| ((item.root, item.rel.as_path()), index))
+            .collect();
+        // Each extra's topmost extra ancestor, which may be itself.
+        let top_of = |item: &Item| -> Option<usize> {
+            let mut top = extras.get(&(item.root, item.rel.as_path())).copied();
+            let mut cursor = item.rel.parent();
+            while let Some(rel) = cursor.filter(|rel| !rel.as_os_str().is_empty()) {
+                if let Some(&index) = extras.get(&(item.root, rel)) {
+                    top = Some(index);
+                }
+                cursor = rel.parent();
+            }
+            top
+        };
+        let mut leaves: HashMap<usize, u64> = HashMap::new();
+        for item in self.items.iter().filter(|item| item.class == Class::Extra) {
+            if let Some(top) = top_of(item) {
+                *leaves.entry(top).or_default() += u64::from(item.leaf);
+            }
+        }
+        let mut tops: Vec<(usize, u64)> = leaves.into_iter().collect();
+        tops.sort_by_key(|&(index, _)| {
+            (
+                std::cmp::Reverse(self.items[index].rel.components().count()),
+                index,
+            )
+        });
+        tops
+    }
+}
+
+/// Whether a trash can live on the filesystem `dest` is on, asked without
+/// creating one.
+///
+/// The home trash when `dest` shares its device; otherwise the spec's
+/// `$topdir/.Trash/$uid` or `$topdir/.Trash-$uid` when one is already there,
+/// or could be made because the mount's root is writable. What `d` does past
+/// that — fall back to the home trash, copying the file across — is not a
+/// mirror's to do: pulling every extra off a card and onto the laptop's disk
+/// is not what the card's "to trash" promised.
+pub fn trash_available(dest: &Path) -> bool {
+    use crate::ops::trash;
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(home) = trash::Trash::home() else {
+        return false;
+    };
+    match (trash::device_of(dest), trash::device_of(home.root())) {
+        (Some(a), Some(b)) if a == b => return true,
+        (None, _) => return false,
+        _ => {}
+    }
+    let Some(top) = trash::mount_point_of(dest) else {
+        return false;
+    };
+    if let Ok(meta) = std::fs::symlink_metadata(top.join(".Trash")) {
+        if meta.is_dir() && meta.permissions().mode() & 0o1000 != 0 {
+            return true;
+        }
+    }
+    let own = top.join(format!(".Trash-{}", trash::uid()));
+    if std::fs::symlink_metadata(&own).is_ok_and(|meta| meta.is_dir()) {
+        return true;
+    }
+    writable(&top)
+}
+
+/// The trash a mirror's extras under `dest` go into — made if it has to be.
+///
+/// The same choice [`trash_available`] describes, made for real: the home
+/// trash on the home filesystem, the mount's own trash anywhere else, and an
+/// error rather than the home trash when the mount cannot have one.
+pub(crate) fn trash_for(dest: &Path) -> crate::Result<crate::ops::Trash> {
+    use crate::ops::trash;
+    #[cfg(test)]
+    if let Some(root) = TEST_TRASH.with(|slot| slot.borrow().clone()) {
+        return Ok(trash::Trash::at(root));
+    }
+    let home = trash::Trash::home()?;
+    if let (Some(a), Some(b)) = (trash::device_of(dest), trash::device_of(home.root())) {
+        if a == b {
+            return Ok(home);
+        }
+    }
+    let top = trash::mount_point_of(dest)
+        .ok_or_else(|| crate::DfError::Op(format!("no trash for {}", dest.display())))?;
+    Ok(trash::Trash::at(trash::topdir_trash(&top, trash::uid())?))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Where this thread's mirrors trash things, in place of the real choice:
+    /// a test must never fill the home trash, nor make a `.Trash-$uid` at the
+    /// root of whatever `$TMPDIR` is mounted on.
+    static TEST_TRASH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Send this thread's mirrors to the trash at `root`.
+#[cfg(test)]
+pub(crate) fn trash_at(root: PathBuf) {
+    TEST_TRASH.with(|slot| *slot.borrow_mut() = Some(root));
+}
+
+/// `access(2)` for writing: whether this user may make a name in `dir`.
+///
+/// Asked of the kernel rather than worked out from the mode bits, because
+/// ACLs, a read-only mount and root squashing on a network share all answer
+/// differently from what the bits say.
+fn writable(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // One syscall on a string we own; nothing is written through the pointer.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::access(path.as_ptr(), libc::W_OK) };
+    rc == 0
 }
 
 /// `base` with `rel` under it — or `base` itself for an empty `rel`, which
