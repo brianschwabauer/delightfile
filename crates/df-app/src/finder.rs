@@ -28,6 +28,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use df_core::config::Bookmark;
 use df_core::fs::Span;
@@ -45,6 +46,9 @@ use crate::fuzzy;
 /// enough to cover the window it is a shortcut into, and the rows past the
 /// tenth are never read anyway — if the answer is not in the first few, the
 /// thing to do is type another letter, not scroll.
+///
+/// At most: a window too short for twelve gets as many as fit
+/// ([`crate::overlay::finder_geometry`]).
 pub const ROWS: usize = 12;
 
 /// How many command ids the session-local most-recently-used list holds.
@@ -374,6 +378,8 @@ pub struct Finder {
     pub hits: Vec<Hit>,
     pub cursor: usize,
     pub first: usize,
+    /// When the rows last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl Finder {
@@ -388,6 +394,7 @@ impl Finder {
             hits,
             cursor: 0,
             first: 0,
+            bar: crate::scrollbar::Linger::default(),
         }
     }
 
@@ -419,6 +426,9 @@ impl Finder {
         self.hits = rank(&self.pool, &query);
         self.cursor = 0;
         self.first = 0;
+        // A new list, not the old one scrolled back to its top: its bar has
+        // nothing to linger for.
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     /// Replace the candidates without disturbing what has been typed — how the
@@ -454,15 +464,23 @@ impl Finder {
         self.pool.get(hit.index)
     }
 
-    /// Keep the cursor on screen, by the same scrolloff rule the panes use.
-    pub fn scroll_into_view(&mut self, scrolloff: usize) {
+    /// Keep the cursor on screen, by the same scrolloff rule the panes use,
+    /// in the `visible` rows the card was laid out with: [`ROWS`], or fewer
+    /// in a window too short for them.
+    pub fn scroll_into_view(&mut self, visible: usize, scrolloff: usize, now: Instant) {
         self.first = crate::viewport::first_visible(
             self.first,
             self.cursor,
             self.hits.len(),
-            ROWS,
+            visible,
             scrolloff,
         );
+        self.bar.saw(self.first as f32, now);
+    }
+
+    /// When the rows last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.bar.scrolled_at()
     }
 }
 

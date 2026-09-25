@@ -10322,8 +10322,12 @@ impl App {
                 }
                 None => {}
             },
+            // The offset among the rows drawn, which is what the hit test
+            // reports; the resolver and the task panel turn it into a row of
+            // their list from where their view starts.
             Control::PanelRow(index) => {
                 if let Some(Dialog::Conflict(conflict)) = &mut self.dialog {
+                    let index = conflict.first_visible() + index;
                     let delta = index as isize - conflict.cursor as isize;
                     conflict.move_cursor(delta);
                     return;
@@ -10335,7 +10339,7 @@ impl App {
                 }
                 let rows = self.task_rows();
                 if let Some(panel) = &mut self.panel {
-                    panel.select(index, rows.len());
+                    panel.select(panel.first + index, rows.len());
                 }
                 // A second click is `p` on the row the first click selected:
                 // pause, or resume, whichever the row already says it will do.
@@ -14151,6 +14155,12 @@ impl App {
         let tab_titles: Vec<String> = self.tabs.iter().map(Tab::title).collect();
         let tab_widths = chrome::tab_widths(ui.painter(), &tab_titles);
         self.tab_widths = tab_widths.clone();
+        // The mount card's body is as tall as the window leaves it, and its
+        // lines are laid out from wherever that puts the cursor, so it is told
+        // the room before it is measured.
+        if let Some(card) = &mut self.mounts {
+            card.fit(crate::mounts::window(area), now);
+        }
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
         let mut overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
@@ -15518,12 +15528,32 @@ impl App {
         };
 
         // The two new overlays' scroll, by the same scrolloff rule the panes
-        // use — one list-scrolling behaviour in the program, not three.
-        if let Some(finder) = &mut self.finder {
-            finder.scroll_into_view(scrolloff);
+        // use — one list-scrolling behaviour in the program, not three. The
+        // palette's page is the rows the window left it room for.
+        if let (Some(finder), Some(OverlayGeom::Finder(geometry))) = (&mut self.finder, &overlay) {
+            finder.scroll_into_view(geometry.rows.len(), scrolloff, now);
         }
         if let (Some(search), Some(OverlayGeom::Search(geometry))) = (&mut self.search, &overlay) {
             search.scroll_into_view(geometry.page(), scrolloff);
+        }
+        // …and the other cards whose lists a short window cuts down, told
+        // how many rows they were laid out with: what their keys scroll by
+        // from now on, and where their bars' linger is stamped from.
+        match (&mut self.dialog, &overlay) {
+            (Some(Dialog::Confirm(confirm)), Some(OverlayGeom::Confirm(geometry))) => {
+                confirm.fit(geometry.rows.len(), now);
+            }
+            (Some(Dialog::Conflict(conflict)), Some(OverlayGeom::Conflict(geometry))) => {
+                conflict.fit(geometry.rows.len(), now);
+            }
+            (Some(Dialog::Sync(card)), Some(OverlayGeom::Sync(geometry))) => {
+                card.fit(geometry.visible, now);
+            }
+            _ => {}
+        }
+        if let (Some(panel), Some(OverlayGeom::Panel(_, rects, rows))) = (&mut self.panel, &overlay)
+        {
+            panel.fit(rects.len(), rows.len(), now);
         }
 
         // ── The clock-driven bits, ticked once, before anything is drawn ────
@@ -16119,10 +16149,24 @@ impl App {
         if matches!(self.dialog, Some(Dialog::Bulk(_))) {
             overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
         }
+        // Whether the pointer is on the open card, which is what brings up the
+        // bar beside a list the card has cut short.
+        let over_card = overlay
+            .as_ref()
+            .zip(pointer.at)
+            .is_some_and(|(geometry, at)| geometry.card().contains(at));
         match (&overlay, &self.dialog) {
             (Some(OverlayGeom::Mounts(geometry)), _) => {
                 if let Some(card) = &self.mounts {
-                    crate::mounts::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
+                    crate::mounts::paint(
+                        &paint,
+                        area,
+                        card,
+                        geometry,
+                        &self.hovers,
+                        &self.ripples,
+                        over_card,
+                    );
                 }
             }
             (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) => {
@@ -16138,10 +16182,26 @@ impl App {
                 );
             }
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
-                dialog::paint_confirm(&paint, area, confirm, geometry, &self.hovers, &self.ripples);
+                dialog::paint_confirm(
+                    &paint,
+                    area,
+                    confirm,
+                    geometry,
+                    &self.hovers,
+                    &self.ripples,
+                    over_card,
+                );
             }
             (Some(OverlayGeom::Sync(geometry)), Some(Dialog::Sync(card))) => {
-                crate::sync::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
+                crate::sync::paint(
+                    &paint,
+                    area,
+                    card,
+                    geometry,
+                    &self.hovers,
+                    &self.ripples,
+                    over_card,
+                );
             }
             (Some(OverlayGeom::Conflict(geometry)), Some(Dialog::Conflict(conflict))) => {
                 dialog::paint_conflict(
@@ -16151,6 +16211,7 @@ impl App {
                     geometry,
                     &self.hovers,
                     &self.ripples,
+                    over_card,
                 );
             }
             _ => {}
@@ -16162,7 +16223,15 @@ impl App {
             spot::paint(&paint, spot, geometry, &self.hovers, &self.ripples, now);
         }
         if let (Some(OverlayGeom::Finder(geometry)), Some(finder)) = (&overlay, &self.finder) {
-            overlay::paint_finder(&paint, area, geometry, finder, &self.hovers, &self.ripples);
+            overlay::paint_finder(
+                &paint,
+                area,
+                geometry,
+                finder,
+                &self.hovers,
+                &self.ripples,
+                over_card,
+            );
         }
         if let (Some(OverlayGeom::Search(geometry)), Some(search)) = (&overlay, &self.search) {
             overlay::paint_search(&paint, geometry, search, &self.hovers, &self.ripples);
@@ -16177,6 +16246,7 @@ impl App {
                 &self.hovers,
                 &self.ripples,
                 now,
+                over_card,
             );
         }
         // Each surface's own hints, along the bottom edge of its card: what
@@ -16343,6 +16413,14 @@ impl App {
         // A frame is asked for only while something is actually moving. A
         // pointer parked on a row holds a 1.0 that will be 1.0 again next
         // frame, and `animating()` says so — idle costs zero frames.
+        //
+        // The cards' bars on their way out, by the panes' rule below: the
+        // fade only, the linger before it being one wake-up
+        // (`next_deadline`) and a bar the pointer holds up being the same
+        // pixels next frame.
+        let bars = self
+            .card_bars()
+            .map(|(name, at)| (name, crate::scrollbar::fading(at, now)));
         let animating = [
             ("hovers", self.hovers.animating()),
             ("row tips", self.tips.animating()),
@@ -16371,6 +16449,13 @@ impl App {
                 self.scrolled_at()
                     .any(|at| crate::scrollbar::fading(Some(at), now)),
             ),
+            // …and the cards', one row a card, so `DF_FRAME_LOG` says which.
+            bars[0],
+            bars[1],
+            bars[2],
+            bars[3],
+            bars[4],
+            bars[5],
             ("preview", self.preview.animating(now)),
             // A pane folding or opening, a reset's slide, a stretched divider
             // springing back. All three end, and `Dividers::settle` drops them
@@ -16571,6 +16656,11 @@ impl App {
                 .min(),
             // …and a scrolled menu's, by the same rule.
             self.menu.as_ref().and_then(|menu| menu.bar_deadline(now)),
+            // …and the cards', by the same rule.
+            self.card_bars()
+                .into_iter()
+                .filter_map(|(_, at)| crate::scrollbar::deadline(at, now))
+                .min(),
         ]
         .into_iter()
         .flatten()
@@ -16584,6 +16674,50 @@ impl App {
         std::iter::once(&tab.cwd)
             .chain(tab.parent.iter())
             .filter_map(|listing| listing.scrolled_at())
+    }
+
+    /// When each floating card's list last scrolled, for its bar's linger
+    /// and fade, named for `DF_FRAME_LOG`. A card that is not open has no
+    /// list to have scrolled, so a closed card can never hold a frame up.
+    fn card_bars(&self) -> [(&'static str, Option<Instant>); 6] {
+        let dialog = |kind: fn(&Dialog) -> Option<Instant>| self.dialog.as_ref().and_then(kind);
+        [
+            (
+                "palette-bar",
+                self.finder.as_ref().and_then(Finder::scrolled_at),
+            ),
+            (
+                "tasks-bar",
+                self.panel.as_ref().and_then(TaskPanel::scrolled_at),
+            ),
+            (
+                "mounts-bar",
+                self.mounts
+                    .as_ref()
+                    .and_then(crate::mounts::Card::scrolled_at),
+            ),
+            (
+                "confirm-bar",
+                dialog(|dialog| match dialog {
+                    Dialog::Confirm(confirm) => confirm.scrolled_at(),
+                    _ => None,
+                }),
+            ),
+            (
+                "conflict-bar",
+                dialog(|dialog| match dialog {
+                    Dialog::Conflict(conflict) => conflict.scrolled_at(),
+                    _ => None,
+                }),
+            ),
+            (
+                "sync-bar",
+                dialog(|dialog| match dialog {
+                    Dialog::Sync(card) => card.scrolled_at(),
+                    _ => None,
+                }),
+            ),
+        ]
     }
 
     /// How long until a pane has to admit it is loading, if one is about to.
@@ -21618,6 +21752,57 @@ mod tests {
         let gone = at + crate::scrollbar::LINGER + crate::scrollbar::FADE;
         assert_eq!(alpha(gone), 0.0);
         assert!(!crate::scrollbar::fading(Some(at), gone), "still asking");
+    }
+
+    /// The palette in a window too short for its twelve rows: the cursor
+    /// scrolls in the rows the card has and is never below the last one
+    /// drawn, and the card's bar lingers from the frame the rows moved, is
+    /// owed one wake-up for its fade, fades, and then asks for nothing.
+    #[test]
+    fn a_short_window_fits_the_palette_and_its_bar_goes_quiet() {
+        let mut app = long_listing("palette-short");
+        let ctx = egui::Context::default();
+        let short = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 300.0));
+        let frame_at = |app: &mut App, now: Instant| {
+            let input = egui::RawInput {
+                screen_rect: Some(short),
+                focused: true,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| app.frame_at(ui, now));
+        };
+        let bar = |app: &App| app.card_bars()[0];
+        let now = Instant::now();
+        app.open_palette();
+        frame_at(&mut app, now);
+        assert_eq!(bar(&app), ("palette-bar", None), "opening is not a scroll");
+
+        let hits = app.finder.as_ref().map_or(0, |finder| finder.hits.len());
+        let rows = overlay::finder_geometry(short, hits.min(finder::ROWS))
+            .rows
+            .len();
+        assert!(
+            rows < finder::ROWS,
+            "the window is short enough to fit fewer"
+        );
+        app.overlay_move(rows as isize + 3);
+        let moved = now + Duration::from_millis(16);
+        frame_at(&mut app, moved);
+        let finder = app.finder.as_ref().expect("the palette is open");
+        assert!(finder.first > 0, "the rows did not scroll");
+        assert!(
+            finder.cursor < finder.first + rows,
+            "the cursor is off the card"
+        );
+        assert_eq!(bar(&app), ("palette-bar", Some(moved)));
+
+        assert!(app
+            .next_deadline(moved)
+            .is_some_and(|due| due <= crate::scrollbar::LINGER));
+        let fading = moved + crate::scrollbar::LINGER + crate::scrollbar::FADE / 2;
+        assert!(crate::scrollbar::fading(bar(&app).1, fading));
+        let gone = moved + crate::scrollbar::LINGER + crate::scrollbar::FADE;
+        assert!(!crate::scrollbar::fading(bar(&app).1, gone), "still asking");
     }
 
     /// A drag from the list's empty space up over its rows draws a band in a

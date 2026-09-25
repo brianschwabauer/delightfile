@@ -33,7 +33,8 @@ const BAR: f32 = 4.0;
 
 /// How many rows the panel shows before it scrolls. The engine keeps 128
 /// finished tasks (`MAX_FINISHED_TASKS`), which is a history rather than a
-/// screenful; eight is about as many as can be taken in at once.
+/// screenful; eight is about as many as can be taken in at once. At most: a
+/// window too short for eight gets as many as fit ([`geometry`]).
 const VISIBLE: usize = 8;
 
 /// The panel's width, in points. Wide enough for "Copy 12 items → /very/long…"
@@ -138,7 +139,7 @@ pub fn row_for(task: &TaskSnapshot) -> TaskRow {
 }
 
 /// The `w` panel's own state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TaskPanel {
     pub cursor: usize,
     /// `Enter` expands the selected row's error text.
@@ -147,6 +148,25 @@ pub struct TaskPanel {
     pub first: usize,
     /// Each bar's animated fill.
     fills: HashMap<TaskId, Tween>,
+    /// How many rows the panel showed when it was last drawn: what the cursor
+    /// scrolls by. Fewer than [`VISIBLE`] in a window too short for eight
+    /// ([`TaskPanel::fit`]).
+    shown: usize,
+    /// When the rows last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
+}
+
+impl Default for TaskPanel {
+    fn default() -> TaskPanel {
+        TaskPanel {
+            cursor: 0,
+            inspect: false,
+            first: 0,
+            fills: HashMap::new(),
+            shown: VISIBLE,
+            bar: crate::scrollbar::Linger::default(),
+        }
+    }
 }
 
 impl TaskPanel {
@@ -171,13 +191,30 @@ impl TaskPanel {
     }
 
     fn scroll_into_view(&mut self, rows: usize) {
-        let last_visible = self.first + VISIBLE.saturating_sub(1);
+        let shown = self.shown.max(1);
+        let last_visible = self.first + shown - 1;
         if self.cursor < self.first {
             self.first = self.cursor;
         } else if self.cursor > last_visible {
-            self.first = self.cursor + 1 - VISIBLE;
+            self.first = self.cursor + 1 - shown;
         }
-        self.first = self.first.min(rows.saturating_sub(1));
+        // …and never past the last screenful, so a window made taller shows
+        // more rows rather than a gap under the last one.
+        self.first = self.first.min(rows.saturating_sub(shown));
+    }
+
+    /// The panel was laid out showing `shown` of its `rows`: the cursor
+    /// scrolls by that from now on, and is brought back into view now, since
+    /// a window made shorter can have left it below the last row drawn.
+    pub fn fit(&mut self, shown: usize, rows: usize, now: Instant) {
+        self.shown = shown;
+        self.scroll_into_view(rows);
+        self.bar.saw(self.first as f32, now);
+    }
+
+    /// When the rows last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.bar.scrolled_at()
     }
 
     /// The task the keys act on.
@@ -236,19 +273,26 @@ impl TaskPanel {
 }
 
 /// Where the panel's rows are. Shared by paint and hit test.
+///
+/// Up to [`VISIBLE`] rows, and as many as the window has room for above
+/// `bar_top` ([`crate::dialog::fit_rows`]): a short window scrolls the
+/// tasks rather than hanging the panel's heading off its top.
 pub fn geometry(area: egui::Rect, bar_top: f32, rows: usize) -> (egui::Rect, Vec<egui::Rect>) {
-    let listed = rows.clamp(1, VISIBLE);
-    let height = CARD_PAD * 2.0 + chrome::CARD_ROW + listed as f32 * ROW + chrome::HINT_ROW;
-    let width = WIDTH.min(area.width() - chrome::CARD_MARGIN * 2.0);
+    let fixed = CARD_PAD * 2.0 + chrome::CARD_ROW + chrome::HINT_ROW;
+    let above = egui::Rect::from_min_max(area.min, egui::pos2(area.right(), bar_top));
+    let (listed, fitted) =
+        crate::dialog::fit_rows(above, WIDTH, fixed, ROW, rows.clamp(1, VISIBLE));
+    // Hung above `bar_top`, where the panel has always sat: the fitted card
+    // lends it a size, not a place.
     let card = egui::Rect::from_min_size(
         egui::pos2(
-            area.center().x - width / 2.0,
-            (bar_top - chrome::CARD_MARGIN - height).max(area.top() + chrome::CARD_MARGIN),
+            fitted.left(),
+            (bar_top - chrome::CARD_MARGIN - fitted.height()).max(area.top() + chrome::CARD_MARGIN),
         ),
-        egui::vec2(width.max(0.0), height.min(area.height())),
+        fitted.size(),
     );
     let top = card.top() + CARD_PAD + chrome::CARD_ROW;
-    let rects = (0..rows.min(VISIBLE))
+    let rects = (0..rows.min(listed))
         .map(|i| {
             egui::Rect::from_min_size(
                 egui::pos2(card.left() + CARD_PAD, top + i as f32 * ROW),
@@ -259,7 +303,27 @@ pub fn geometry(area: egui::Rect, bar_top: f32, rows: usize) -> (egui::Rect, Vec
     (card, rects)
 }
 
-/// Draw the panel.
+/// The panel's bar, beside its rows, while it shows fewer tasks than there
+/// are.
+pub fn bar(
+    card: egui::Rect,
+    rects: &[egui::Rect],
+    panel: &TaskPanel,
+    rows: usize,
+) -> Option<crate::scrollbar::Geometry> {
+    let (first, last) = (rects.first()?, rects.last()?);
+    let body = egui::Rect::from_min_max(first.min, last.max);
+    crate::scrollbar::card(
+        card,
+        body,
+        panel.first as f32,
+        rects.len() as f32,
+        rows as f32,
+    )
+}
+
+/// Draw the panel. `over` is the pointer on the card, which brings up the
+/// rows' bar.
 #[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn paint(
     paint: &Painting<'_>,
@@ -270,6 +334,7 @@ pub fn paint(
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
     now: Instant,
+    over: bool,
 ) {
     let painter = paint.painter;
     let palette = paint.palette;
@@ -326,7 +391,10 @@ pub fn paint(
         };
         let index = panel.first + i;
         let on_cursor = index == panel.cursor;
-        let key = Control::PanelRow(index);
+        // The row's place among the drawn ones, which is what the hit test
+        // reports: a scrolled panel keyed by its tasks would light, and ripple,
+        // a row the pointer is not on.
+        let key = Control::PanelRow(i);
         let hover = hovers.hover(key);
         let rect = pressed_rect(*rect, hovers.press(key));
         let fill = mix(
@@ -416,6 +484,9 @@ pub fn paint(
             },
             (rect.width() - PAD_X * 2.0).max(0.0),
         );
+    }
+    if let Some(bar) = bar(card, rects, panel, rows.len()) {
+        crate::scrollbar::paint_card(paint, &bar, over, panel.scrolled_at(), 1.0);
     }
 }
 
@@ -538,6 +609,50 @@ mod tests {
         assert_eq!(panel.selected(&[]), None);
     }
 
+    /// A short window gets the tasks it has room for above `bar_top`, and the
+    /// cursor scrolls by those; a tall one gets the eight it always did. The
+    /// bar is there only while tasks are left out.
+    #[test]
+    fn a_short_window_fits_the_panels_rows() {
+        let rows: Vec<TaskRow> = (0..12)
+            .map(|i| row_for(&snapshot(i, TaskState::Done)))
+            .collect();
+        let window = |height: f32| {
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height))
+        };
+        let panel = TaskPanel::new();
+
+        let tall = window(900.0);
+        let (card, rects) = geometry(tall, tall.bottom() - 8.0, rows.len());
+        assert_eq!(rects.len(), VISIBLE, "the old count");
+        assert!(bar(card, &rects, &panel, rows.len()).is_some());
+        let (card, rects) = geometry(tall, tall.bottom() - 8.0, 3);
+        assert_eq!(bar(card, &rects, &panel, 3), None, "three tasks fit");
+
+        let short = window(300.0);
+        let (card, rects) = geometry(short, short.bottom() - 8.0, rows.len());
+        assert!(short.contains_rect(card), "{card:?}");
+        assert!(!rects.is_empty() && rects.len() < VISIBLE);
+        assert!(rects.iter().all(|rect| card.contains_rect(*rect)));
+        assert!(bar(card, &rects, &panel, rows.len()).is_some());
+
+        let mut panel = TaskPanel::new();
+        panel.fit(rects.len(), rows.len(), Instant::now());
+        panel.move_cursor(100, rows.len());
+        assert_eq!(
+            panel.first,
+            rows.len() - rects.len(),
+            "followed by the rows drawn"
+        );
+        // A window made taller shows more rows, not a gap under the last one.
+        panel.fit(VISIBLE, rows.len(), Instant::now());
+        assert_eq!(panel.first, rows.len() - VISIBLE);
+
+        // An empty panel keeps its line of guidance, inside the window.
+        let (card, rects) = geometry(short, short.bottom() - 8.0, 0);
+        assert!(rects.is_empty() && short.contains_rect(card));
+    }
+
     /// The bar animates to a new value and then stops asking for frames.
     #[test]
     fn the_progress_bar_settles() {
@@ -625,6 +740,7 @@ mod tests {
                 &Hovers::new(),
                 &Ripples::new(),
                 now,
+                true,
             );
             let (card, rects) = geometry(area, 860.0, 0);
             paint(
@@ -636,6 +752,7 @@ mod tests {
                 &Hovers::new(),
                 &Ripples::new(),
                 now,
+                true,
             );
         });
     }

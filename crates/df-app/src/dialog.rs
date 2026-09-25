@@ -122,6 +122,12 @@ pub struct Confirm {
     /// Filled the first time the card is laid out, because that is the first
     /// moment there is a painter to measure with.
     name_width: std::cell::OnceCell<f32>,
+    /// How many names the card showed when it was last drawn: what the keys
+    /// scroll against. Fewer than [`BODY_VISIBLE`] in a window too short for
+    /// six ([`Confirm::fit`]).
+    shown: usize,
+    /// When the names last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl Confirm {
@@ -131,6 +137,8 @@ impl Confirm {
             paths,
             scroll: 0,
             name_width: std::cell::OnceCell::new(),
+            shown: BODY_VISIBLE,
+            bar: crate::scrollbar::Linger::default(),
         }
     }
 
@@ -199,9 +207,23 @@ impl Confirm {
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
-        let max = self.paths.len().saturating_sub(BODY_VISIBLE);
+        let max = self.paths.len().saturating_sub(self.shown);
         let next = self.scroll as isize + delta;
         self.scroll = next.clamp(0, max as isize) as usize;
+    }
+
+    /// The card was laid out showing `shown` names: the keys scroll against
+    /// that from now on, and a scroll a taller window allowed is brought back
+    /// so the last name still ends the list rather than a gap.
+    pub fn fit(&mut self, shown: usize, now: std::time::Instant) {
+        self.shown = shown;
+        self.scroll_by(0);
+        self.bar.saw(self.scroll as f32, now);
+    }
+
+    /// When the names last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<std::time::Instant> {
+        self.bar.scrolled_at()
     }
 }
 
@@ -347,6 +369,12 @@ pub struct ConflictDialog {
     /// Metadata, read once per path. A dialog that stats on every frame is a
     /// dialog that hits the disk sixty times a second.
     facts: HashMap<PathBuf, Facts>,
+    /// How many taken names the card listed when it was last drawn: what the
+    /// list scrolls by. Fewer than [`CONFLICT_VISIBLE`] in a window too short
+    /// for five ([`ConflictDialog::fit`]).
+    shown: usize,
+    /// When the list last scrolled, for its bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl ConflictDialog {
@@ -368,6 +396,8 @@ impl ConflictDialog {
             apply_all: false,
             error: None,
             facts,
+            shown: CONFLICT_VISIBLE,
+            bar: crate::scrollbar::Linger::default(),
         };
         dialog.load_facts();
         dialog
@@ -498,9 +528,20 @@ impl ConflictDialog {
 
     /// Where the resolver's first visible conflict row is, so a long list
     /// scrolls with the cursor instead of hiding it.
-    fn first_visible(&self) -> usize {
-        self.cursor
-            .saturating_sub(CONFLICT_VISIBLE.saturating_sub(1))
+    pub fn first_visible(&self) -> usize {
+        self.cursor.saturating_sub(self.shown.saturating_sub(1))
+    }
+
+    /// The card was laid out listing `shown` names: the list scrolls by that
+    /// from now on, so a cursor in a short window never walks off its end.
+    pub fn fit(&mut self, shown: usize, now: std::time::Instant) {
+        self.shown = shown;
+        self.bar.saw(self.first_visible() as f32, now);
+    }
+
+    /// When the list last scrolled, for its bar's linger.
+    pub fn scrolled_at(&self) -> Option<std::time::Instant> {
+        self.bar.scrolled_at()
     }
 }
 
@@ -536,17 +577,49 @@ impl Geometry {
 
 /// A card of `width` × `height`, centred horizontally and biased *above* true
 /// centre — `delightful-ui` §16: content centred in a big region reads as
-/// sitting low. Never wider than [`MAX_WIDTH`] or than the window can hold
-/// with its margins, whatever was asked for.
-pub(crate) fn card_rect(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
-    let width = width.min(MAX_WIDTH).min(area.width() - CARD_MARGIN * 2.0);
+/// sitting low. Never wider or taller than the window can hold with its
+/// margins, whatever was asked for; any narrower cap, [`MAX_WIDTH`] or the
+/// rename card's own, is the caller's.
+pub(crate) fn place_card(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
+    let width = width.min(area.width() - CARD_MARGIN * 2.0).max(0.0);
     let height = height.min((area.height() - CARD_MARGIN * 2.0).max(0.0));
     // 40 % of the free space above, 60 % below.
     let top = area.top() + (area.height() - height).max(0.0) * chrome::OPTICAL_CENTRE;
     egui::Rect::from_min_size(
         egui::pos2(area.center().x - width / 2.0, top),
-        egui::vec2(width.max(0.0), height),
+        egui::vec2(width, height),
     )
+}
+
+/// How much of the window's height a card has for its rows, in points: the
+/// window less a [`CARD_MARGIN`] above and below, less the card's `fixed`
+/// parts — its padding, its heading, its answers, its hint strip.
+pub(crate) fn room(area: egui::Rect, fixed: f32) -> f32 {
+    (area.height() - CARD_MARGIN * 2.0 - fixed).max(0.0)
+}
+
+/// How many of `wanted` rows a card shows, and the card that shows them.
+///
+/// The card is `fixed` points of everything that is not a row and `row`
+/// points a row, `width` wide (the caller's to cap), placed by [`place_card`]
+/// and so never taller than the window allows. As many rows as the
+/// window has [`room`] for, up to `wanted`, and never none while there is one
+/// to show: a window too short for a row and the rest still gets that row,
+/// with the card clipped to the window, because a list showing nothing reads
+/// as a list with nothing in it.
+///
+/// The rename card ([`bulk_geometry`]) was the first card to fit its rows to
+/// the window, and this is its rule, for every card with a list.
+pub(crate) fn fit_rows(
+    area: egui::Rect,
+    width: f32,
+    fixed: f32,
+    row: f32,
+    wanted: usize,
+) -> (usize, egui::Rect) {
+    let fits = ((room(area, fixed) / row).floor() as usize).max(1);
+    let rows = wanted.min(fits);
+    (rows, place_card(area, width, fixed + rows as f32 * row))
 }
 
 /// The confirm's title face: a step over the body, because the title is the
@@ -562,7 +635,8 @@ pub(crate) fn title_font() -> egui::FontId {
 /// rather than one each, so both see the same widths. As wide as the widest of
 /// the title, the longest name and the button row, plus the padding either
 /// side; never under [`CONFIRM_MIN_WIDTH`], never over [`MAX_WIDTH`] or the
-/// window.
+/// window. As tall as its names need, up to [`BODY_VISIBLE`] of them and up
+/// to what the window leaves room for ([`fit_rows`]).
 ///
 /// Top to bottom: the pad, the title, [`TITLE_GAP`], one [`ROW`] per visible
 /// name, [`ANSWER_GAP`], the buttons, the pad. The title and the names share
@@ -587,9 +661,10 @@ pub fn confirm_geometry(painter: &egui::Painter, area: egui::Rect, confirm: &Con
         + BUTTON_GAP * (labels.len() - 1) as f32;
     let content = title.x.max(confirm.name_width(painter)).max(buttons);
     let width = (content + CARD_PAD * 2.0).max(CONFIRM_MIN_WIDTH);
-    let height =
-        CARD_PAD + title.y + TITLE_GAP + lines as f32 * ROW + ANSWER_GAP + BUTTON_HEIGHT + CARD_PAD;
-    let card = card_rect(area, width, height);
+    // As many names as fit between the title and the buttons, so a short
+    // window scrolls them rather than drawing them down over the answers.
+    let fixed = CARD_PAD + title.y + TITLE_GAP + ANSWER_GAP + BUTTON_HEIGHT + CARD_PAD;
+    let (lines, card) = fit_rows(area, width.min(MAX_WIDTH), fixed, ROW, lines);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
     let body_top = card.top() + CARD_PAD + title.y + TITLE_GAP;
@@ -638,17 +713,19 @@ pub fn conflict_geometry(
     area: egui::Rect,
     dialog: &ConflictDialog,
 ) -> Geometry {
-    let listed = dialog.len().min(CONFLICT_VISIBLE);
-    let height = CARD_PAD * 2.0
+    // Everything but the names, which get what the window leaves above the
+    // comparison and the answers: a short window scrolls the names rather
+    // than sliding the comparison down over the buttons.
+    let fixed = CARD_PAD * 2.0
         + ROW * 2.0                       // title and subtitle
         + 6.0
-        + listed as f32 * ROW
         + 10.0
         + FACTS_HEIGHT
         + ANSWER_GAP
         + BUTTON_HEIGHT
         + chrome::HINT_ROW; // the card's own hint strip
-    let card = card_rect(area, MAX_WIDTH, height);
+    let wanted = dialog.len().min(CONFLICT_VISIBLE);
+    let (listed, card) = fit_rows(area, MAX_WIDTH, fixed, ROW, wanted);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
     let body_top = card.top() + CARD_PAD + ROW * 2.0 + 6.0;
@@ -719,9 +796,36 @@ pub(crate) fn button_row(
     rects
 }
 
+/// The confirm's bar, beside its names, while it lists fewer than it has.
+pub fn names_bar(geometry: &Geometry, confirm: &Confirm) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.body,
+        confirm.scroll as f32,
+        geometry.rows.len() as f32,
+        confirm.paths.len() as f32,
+    )
+}
+
+/// The resolver's bar, beside its taken names, while it lists fewer than it
+/// has.
+pub fn conflicts_bar(
+    geometry: &Geometry,
+    dialog: &ConflictDialog,
+) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.body,
+        dialog.first_visible() as f32,
+        geometry.rows.len() as f32,
+        dialog.len() as f32,
+    )
+}
+
 // ── Painting ────────────────────────────────────────────────────────────────
 
-/// Draw the confirm card over a scrim.
+/// Draw the confirm card over a scrim. `over` is the pointer on the card,
+/// which brings up the names' bar.
 pub fn paint_confirm(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -729,6 +833,7 @@ pub fn paint_confirm(
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
+    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -798,6 +903,9 @@ pub fn paint_confirm(
             marker,
             palette.overlay0,
         );
+    }
+    if let Some(bar) = names_bar(geometry, confirm) {
+        crate::scrollbar::paint_card(paint, &bar, over, confirm.scrolled_at(), 1.0);
     }
 
     let labels = ["Cancel", confirm_verb(confirm.kind)];
@@ -1020,18 +1128,6 @@ pub fn bulk_char_at(painter: &egui::Painter, text: &str, x_origin: f32, x: f32) 
     }
 }
 
-/// A card of `width` × `height` placed as [`card_rect`] places one, without
-/// its [`MAX_WIDTH`]: the caller has already sized it to the window.
-fn bulk_card_rect(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
-    let width = width.min(area.width() - CARD_MARGIN * 2.0).max(0.0);
-    let height = height.min((area.height() - CARD_MARGIN * 2.0).max(0.0));
-    let top = area.top() + (area.height() - height).max(0.0) * chrome::OPTICAL_CENTRE;
-    egui::Rect::from_min_size(
-        egui::pos2(area.center().x - width / 2.0, top),
-        egui::vec2(width, height),
-    )
-}
-
 /// Lay out the bulk-rename card.
 ///
 /// As wide as the window allows up to [`BULK_MAX_WIDTH`], and as tall as its
@@ -1063,7 +1159,7 @@ pub fn bulk_geometry(painter: &egui::Painter, area: egui::Rect, bulk: &Bulk) -> 
     let fit = ((room / BULK_ROW).floor() as usize).max(1);
     let visible = count.min(fit).max(1);
     let width = (area.width() - CARD_MARGIN * 2.0).min(BULK_MAX_WIDTH);
-    let card = bulk_card_rect(area, width, fixed + visible as f32 * BULK_ROW);
+    let card = place_card(area, width, fixed + visible as f32 * BULK_ROW);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
     let font = egui::FontId::proportional(FONT);
@@ -1761,7 +1857,8 @@ fn paint_popover(
     }
 }
 
-/// Draw the conflict resolver.
+/// Draw the conflict resolver. `over` is the pointer on the card, which
+/// brings up the list's bar.
 pub fn paint_conflict(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -1769,6 +1866,7 @@ pub fn paint_conflict(
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
+    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -1820,7 +1918,10 @@ pub fn paint_conflict(
             break;
         };
         let on_cursor = first + i == dialog.cursor;
-        let key = Control::PanelRow(first + i);
+        // The row's place among the drawn ones, which is what the hit test
+        // reports: a scrolled list keyed by its conflicts would light a row
+        // the pointer is not on.
+        let key = Control::PanelRow(i);
         let hover = hovers.hover(key);
         let fill = mix(
             if on_cursor {
@@ -1857,6 +1958,9 @@ pub fn paint_conflict(
             },
             (rect.width() - PAD_X * 2.0).max(0.0),
         );
+    }
+    if let Some(bar) = conflicts_bar(geometry, dialog) {
+        crate::scrollbar::paint_card(paint, &bar, over, dialog.scrolled_at(), 1.0);
     }
 
     // The comparison: what is coming in, and what is already there.
@@ -2309,6 +2413,118 @@ mod tests {
         assert_eq!(local.size, "local body".len() as u64);
     }
 
+    /// `n` sources pasted onto `n` names already taken.
+    fn plan_of(tree: &TempTree, n: usize) -> PastePlan {
+        let sources: Vec<PathBuf> = (0..n)
+            .map(|i| {
+                tree.file(&format!("dst/{i}.txt"), b"old");
+                tree.file(&format!("src/{i}.txt"), b"new")
+            })
+            .collect();
+        plan_paste(&Clipboard::yank(sources), &tree.join("dst"), false).unwrap()
+    }
+
+    fn window(height: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height))
+    }
+
+    /// The rule every card with a list is fitted by: as many rows as the
+    /// window leaves room for, up to what is wanted, never none while there
+    /// is one to show, and the card inside the window.
+    #[test]
+    fn a_card_fits_as_many_rows_as_the_window_has_room_for() {
+        let (rows, card) = fit_rows(window(900.0), 400.0, 100.0, 20.0, 12);
+        assert_eq!(rows, 12, "room for all of them");
+        assert!((card.height() - (100.0 + 12.0 * 20.0)).abs() < 1e-3);
+        // 300 less two margins less the fixed parts is 168: eight rows.
+        let short = window(300.0);
+        let (rows, card) = fit_rows(short, 400.0, 100.0, 20.0, 12);
+        assert_eq!(rows, 8);
+        assert!(short.contains_rect(card));
+        assert_eq!(fit_rows(short, 400.0, 100.0, 20.0, 3).0, 3, "fewer wanted");
+        assert_eq!(fit_rows(short, 400.0, 100.0, 20.0, 0).0, 0, "none wanted");
+        let tiny = window(110.0);
+        let (rows, card) = fit_rows(tiny, 400.0, 100.0, 20.0, 12);
+        assert_eq!(rows, 1, "never none while there is one to show");
+        assert!(tiny.contains_rect(card), "clipped to the window instead");
+    }
+
+    /// A confirm in a short window lists what fits between its title and its
+    /// buttons, and its keys scroll the rest; in a tall one it lists six, as
+    /// it always did. The bar is there only while names are left out.
+    #[test]
+    fn a_short_window_scrolls_the_confirms_names() {
+        let many: Vec<PathBuf> = (0..20)
+            .map(|i| PathBuf::from(format!("/tmp/{i}")))
+            .collect();
+        let few = many[..3].to_vec();
+        with_painter(|painter| {
+            for area in [window(900.0), window(300.0), window(180.0)] {
+                for paths in [&many, &few] {
+                    let mut confirm = Confirm::new(ConfirmKind::Purge, paths.clone());
+                    let g = confirm_geometry(painter, area, &confirm);
+                    assert!(area.contains_rect(g.card), "{area:?}");
+                    assert!(!g.rows.is_empty());
+                    assert!(g.card.contains_rect(g.body));
+                    assert!(g.body.bottom() <= g.actions[0].top(), "under the answers");
+                    let overflows = paths.len() > g.rows.len();
+                    assert_eq!(names_bar(&g, &confirm).is_some(), overflows);
+                    confirm.fit(g.rows.len(), std::time::Instant::now());
+                    confirm.scroll_by(100);
+                    assert_eq!(confirm.scroll, paths.len() - g.rows.len());
+                }
+            }
+            let tall = confirm_geometry(
+                painter,
+                window(900.0),
+                &Confirm::new(ConfirmKind::Purge, many.clone()),
+            );
+            assert_eq!(tall.rows.len(), BODY_VISIBLE, "the old count");
+            let short = confirm_geometry(
+                painter,
+                window(180.0),
+                &Confirm::new(ConfirmKind::Purge, many.clone()),
+            );
+            assert!(short.rows.len() < BODY_VISIBLE);
+            // A replace lists nothing, however tall the window.
+            let replace = Confirm::new(ConfirmKind::Replace, vec![PathBuf::from("/tmp/a")]);
+            let g = confirm_geometry(painter, window(900.0), &replace);
+            assert!(g.rows.is_empty() && names_bar(&g, &replace).is_none());
+        });
+    }
+
+    /// The resolver in a short window lists what fits above the comparison
+    /// and the answers, and its cursor never walks below the last row drawn;
+    /// in a tall one it lists five, as it always did.
+    #[test]
+    fn a_short_window_scrolls_the_resolvers_names() {
+        let tree = TempTree::new("dialog-fit");
+        let mut dialog = ConflictDialog::new(plan_of(&tree, 12));
+        let two = TempTree::new("dialog-fit-two");
+        let few = ConflictDialog::new(plan(&two));
+        with_painter(|painter| {
+            let g = conflict_geometry(painter, window(900.0), &dialog);
+            assert_eq!(g.rows.len(), CONFLICT_VISIBLE, "the old count");
+            assert!(conflicts_bar(&g, &dialog).is_some(), "twelve names in five");
+            let g = conflict_geometry(painter, window(900.0), &few);
+            assert_eq!(conflicts_bar(&g, &few), None, "two names fit");
+
+            let short = window(300.0);
+            let g = conflict_geometry(painter, short, &dialog);
+            assert!(short.contains_rect(g.card), "{:?}", g.card);
+            assert!(!g.rows.is_empty() && g.rows.len() < CONFLICT_VISIBLE);
+            // The comparison under the names ends above the answers.
+            assert!(g.body.bottom() + 10.0 + FACTS_HEIGHT <= g.actions[0].top() + 1e-3);
+            assert!(conflicts_bar(&g, &dialog).is_some());
+            dialog.fit(g.rows.len(), std::time::Instant::now());
+            for _ in 0..8 {
+                dialog.move_cursor(1);
+                let first = dialog.first_visible();
+                assert!((first..first + g.rows.len()).contains(&dialog.cursor));
+            }
+        });
+    }
+
     /// A click lands on the button it looks like it landed on.
     #[test]
     fn the_geometry_hit_tests_where_it_draws() {
@@ -2441,9 +2657,9 @@ mod tests {
             let hovers = Hovers::new();
             let ripples = Ripples::new();
             let g = conflict_geometry(ui.painter(), area, &dialog);
-            paint_conflict(&paint, area, &dialog, &g, &hovers, &ripples);
+            paint_conflict(&paint, area, &dialog, &g, &hovers, &ripples, false);
             let g = confirm_geometry(ui.painter(), area, &confirm);
-            paint_confirm(&paint, area, &confirm, &g, &hovers, &ripples);
+            paint_confirm(&paint, area, &confirm, &g, &hovers, &ripples, false);
 
             // A confirm longer than it shows, scrolled part way, so the
             // `+N more` marker draws beside a name that has to make room.
@@ -2453,7 +2669,7 @@ mod tests {
             let mut long = Confirm::new(ConfirmKind::EmptyTrash, many);
             long.scroll_by(3);
             let g = confirm_geometry(ui.painter(), area, &long);
-            paint_confirm(&paint, area, &long, &g, &hovers, &ripples);
+            paint_confirm(&paint, area, &long, &g, &hovers, &ripples, true);
 
             // The rename card, in the states it has: clean, rewritten by the
             // template, with the `{` list open, refused with carets on two

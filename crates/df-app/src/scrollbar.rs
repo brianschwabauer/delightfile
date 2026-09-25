@@ -7,6 +7,12 @@
 //! would be two scrollbars in one window that disagree about what a scrollbar
 //! looks like.
 //!
+//! The floating cards whose lists can outgrow a short window — the palette,
+//! the task panel, the dialogs, the tray, the which-key card — wear it too
+//! ([`card`], [`paint_card`]), for the same reason: a list cut off at a card's
+//! edge has to say that it goes on, and the one bar in the window is how
+//! anything here says that.
+//!
 //! ## Why the hit band is wider than the thumb
 //!
 //! The thumb is [`WIDTH`] points: it reports a position and must not crowd the
@@ -184,6 +190,77 @@ pub fn paint(paint: &Painting<'_>, bar: &Geometry, alpha: f32, lit: f32, held: b
         .rect_filled(bar.thumb, RADIUS, color.gamma_multiply(alpha));
 }
 
+// ── The cards' bars ─────────────────────────────────────────────────────────
+
+/// When a card's list last moved, for its bar's linger ([`alpha`]).
+///
+/// A pane stamps its scroll where the scroll happens
+/// ([`crate::tab::Listing`]). A card's list moves for more reasons than it has
+/// places to stamp one — a key, the wheel, a click, a window made shorter
+/// under its cursor — so the card is told instead, once a frame, where its
+/// view starts, and a start that differs from the last frame's is a scroll.
+/// The first frame it hears anything is not one: a card opening is not a card
+/// scrolling.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Linger {
+    first: Option<f32>,
+    scrolled_at: Option<Instant>,
+}
+
+impl Linger {
+    /// The view starts at `first` this frame, in whatever the card counts its
+    /// list in: rows, lines, points.
+    pub fn saw(&mut self, first: f32, now: Instant) {
+        if self.first.is_some_and(|was| was != first) {
+            self.scrolled_at = Some(now);
+        }
+        self.first = Some(first);
+    }
+
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.scrolled_at
+    }
+}
+
+/// A card's bar: down the card's right-hand padding beside `body`, the part of
+/// the card its rows are drawn in, or `None` when every row fits.
+///
+/// In the padding rather than over the rows. Nothing takes hold of a card's
+/// bar: it says where the list is, and the keys and the wheel are what move
+/// it. So it needs no band cut out of the rows for a hand to land in, and the
+/// padding is the one strip of the card nothing else is drawn on.
+pub fn card(
+    card: egui::Rect,
+    body: egui::Rect,
+    first: f32,
+    visible: f32,
+    total: f32,
+) -> Option<Geometry> {
+    let pane = egui::Rect::from_min_max(body.min, egui::pos2(card.right(), body.bottom()));
+    geometry(pane, first, visible, total)
+}
+
+/// Draw a card's bar: up while the pointer is on the card (`over`) and for
+/// the [`LINGER`] after its list last moved, then faded over [`FADE`], as a
+/// pane's is. Never lit and never held, because no hand is ever on it.
+///
+/// `fade` is the card's own, for a card on its way out.
+pub fn paint_card(
+    painting: &Painting<'_>,
+    bar: &Geometry,
+    over: bool,
+    scrolled_at: Option<Instant>,
+    fade: f32,
+) {
+    let alpha = visibility(
+        scrolled_at,
+        if over { 1.0 } else { 0.0 },
+        false,
+        painting.now,
+    );
+    self::paint(painting, bar, alpha * fade, 0.0, false);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +361,36 @@ mod tests {
         assert_eq!(visibility(Some(at), 1.0, false, later), 1.0, "hovered");
         assert_eq!(visibility(Some(at), 0.4, false, later), 0.4, "hover fading");
         assert_eq!(visibility(None, 0.0, true, later), 1.0, "held");
+    }
+
+    /// A card's list scrolls when its first row changes from one frame to the
+    /// next, and only then: opening the card, or drawing it again where it
+    /// was, is not a scroll.
+    #[test]
+    fn a_card_lingers_from_the_frame_its_view_moved() {
+        let at = Instant::now();
+        let mut linger = Linger::default();
+        linger.saw(4.0, at);
+        assert_eq!(linger.scrolled_at(), None, "opening is not a scroll");
+        linger.saw(4.0, at + LINGER);
+        assert_eq!(linger.scrolled_at(), None, "nor is standing still");
+        let moved = at + LINGER * 2;
+        linger.saw(5.0, moved);
+        assert_eq!(linger.scrolled_at(), Some(moved));
+        linger.saw(5.0, moved + FADE);
+        assert_eq!(linger.scrolled_at(), Some(moved), "the stamp is the move's");
+    }
+
+    /// A card's bar sits in the card's right padding beside its rows, and a
+    /// card whose rows fit has none.
+    #[test]
+    fn a_cards_bar_is_in_its_padding_and_only_when_it_overflows() {
+        let card = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(300.0, 200.0));
+        let body = egui::Rect::from_min_max(egui::pos2(110.0, 90.0), egui::pos2(390.0, 230.0));
+        assert_eq!(super::card(card, body, 0.0, 7.0, 7.0), None);
+        let bar = super::card(card, body, 0.0, 7.0, 20.0).expect("overflows");
+        assert!(bar.thumb.left() >= body.right(), "clear of the rows");
+        assert!(bar.thumb.right() <= card.right(), "inside the card");
+        assert!(bar.track.top() >= body.top() && bar.track.bottom() <= body.bottom());
     }
 }

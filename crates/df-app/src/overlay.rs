@@ -75,6 +75,9 @@ pub struct FinderGeom {
     pub card: Rect,
     /// The query field.
     pub field: Rect,
+    /// Where the rows go: the part of the card under the field, as tall as
+    /// the rows the card has room for.
+    pub body: Rect,
     /// One rectangle per visible row, in the order they are drawn.
     pub rows: Vec<Rect>,
     /// The `×` at the field's right, in the card's corner.
@@ -87,45 +90,58 @@ impl FinderGeom {
     }
 }
 
-/// Lay the fuzzy card out for a list that will show `shown` rows.
+/// Lay the fuzzy card out for a list that will show `shown` rows, or as many
+/// of them as the window has room for.
 ///
 /// The card is exactly as tall as it has to be — an empty result list is a
 /// field and one line of guidance, not a field over eleven rows of nothing
-/// (`delightful-ui` §11).
+/// (`delightful-ui` §11) — and never taller than the window: a short window
+/// gets fewer rows, which the cursor scrolls, rather than rows drawn past the
+/// card's foot ([`crate::dialog::fit_rows`]).
 pub fn finder_geometry(area: Rect, shown: usize) -> FinderGeom {
     let width = (area.width() - chrome::CARD_MARGIN * 2.0).min(CARD_WIDTH);
+    // The field, and the strip its own hints go in (PLAN §4).
+    let fixed = CARD_PAD * 2.0 + FIELD_ROW + GAP + chrome::HINT_ROW;
     // One row's worth of height for the empty state's sentence, so the card
     // does not collapse to a bare field when a query matches nothing.
-    let body = (shown.max(1) as f32) * CARD_ROW;
-    // …plus the strip its own hints go in (PLAN §4).
-    let height = CARD_PAD * 2.0 + FIELD_ROW + GAP + body + chrome::HINT_ROW;
-    let height = height.min(area.height() - chrome::CARD_MARGIN * 2.0);
-    let top = area.top() + (area.height() - height) * crate::chrome::OPTICAL_CENTRE;
-    let card = Rect::from_min_size(
-        egui::pos2(area.center().x - width / 2.0, top),
-        egui::vec2(width, height),
-    );
+    let (lines, card) = crate::dialog::fit_rows(area, width, fixed, CARD_ROW, shown.max(1));
     let field = Rect::from_min_size(
         card.min + egui::vec2(CARD_PAD, CARD_PAD),
         egui::vec2(field_width(card), FIELD_ROW),
     );
-    let rows = (0..shown)
+    let body = Rect::from_min_size(
+        egui::pos2(card.left() + CARD_PAD, field.bottom() + GAP),
+        egui::vec2(
+            (card.width() - CARD_PAD * 2.0).max(0.0),
+            lines as f32 * CARD_ROW,
+        ),
+    );
+    let rows = (0..shown.min(lines))
         .map(|n| {
             Rect::from_min_size(
-                egui::pos2(
-                    card.left() + CARD_PAD,
-                    field.bottom() + GAP + n as f32 * CARD_ROW,
-                ),
-                egui::vec2(width - CARD_PAD * 2.0, CARD_ROW),
+                egui::pos2(body.left(), body.top() + n as f32 * CARD_ROW),
+                egui::vec2(body.width(), CARD_ROW),
             )
         })
         .collect();
     FinderGeom {
         card,
         field,
+        body,
         rows,
         close: Some(close_beside(card, field)),
     }
+}
+
+/// The card's bar, beside its rows, while it shows fewer than it has.
+pub fn finder_bar(geometry: &FinderGeom, finder: &Finder) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.body,
+        finder.first as f32,
+        geometry.rows.len() as f32,
+        finder.hits.len() as f32,
+    )
 }
 
 /// How wide a card's query field is: the card's inner width less the `×`
@@ -145,7 +161,8 @@ fn close_beside(card: Rect, field: Rect) -> Rect {
     )
 }
 
-/// Draw the command palette / jump card.
+/// Draw the command palette / jump card. `over` is the pointer on the card,
+/// which brings up the rows' bar.
 pub fn paint_finder(
     paint: &Painting<'_>,
     area: Rect,
@@ -153,6 +170,7 @@ pub fn paint_finder(
     finder: &Finder,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
+    over: bool,
 ) {
     let (painter, palette) = (paint.painter, paint.palette);
     painter.rect_filled(area, 0, Color32::from_black_alpha(chrome::HELP_SCRIM));
@@ -310,6 +328,9 @@ pub fn paint_finder(
             FontId::proportional(FONT),
             (rect.right() - PAD_X - detail_width - GAP - label_left).max(0.0),
         );
+    }
+    if let Some(bar) = finder_bar(geometry, finder) {
+        crate::scrollbar::paint_card(paint, &bar, over, finder.scrolled_at(), 1.0);
     }
 }
 
@@ -888,6 +909,55 @@ mod tests {
         assert_eq!(empty.rows.len(), 0);
     }
 
+    /// A short window gets the rows it has room for rather than rows drawn
+    /// past the card's foot: the card inside the window, never no rows, and a
+    /// bar only while the list has more than the card shows. A tall window
+    /// gets the twelve it always did.
+    #[test]
+    fn a_short_window_fits_the_palettes_rows() {
+        use crate::finder::{Choice, Kind, Row, Source, ROWS};
+        let row = |n: usize| Row {
+            label: format!("Row {n}"),
+            detail: String::new(),
+            kind: Kind::Command,
+            choice: Choice::Cd(std::path::PathBuf::from("/tmp")),
+        };
+        let many = Finder::new(Source::Commands, (0..40).map(row).collect());
+        let few = Finder::new(Source::Commands, (0..3).map(row).collect());
+        let short = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 300.0));
+
+        let tall = finder_geometry(area(), ROWS);
+        assert_eq!(tall.rows.len(), ROWS, "the old count");
+        assert!(
+            finder_bar(&tall, &many).is_some(),
+            "forty hits in twelve rows"
+        );
+        let tall = finder_geometry(area(), 3);
+        assert_eq!(finder_bar(&tall, &few), None, "three hits fit");
+
+        let geometry = finder_geometry(short, ROWS);
+        assert!(short.contains_rect(geometry.card), "{:?}", geometry.card);
+        assert!(!geometry.rows.is_empty() && geometry.rows.len() < ROWS);
+        assert!(geometry
+            .rows
+            .iter()
+            .all(|rect| geometry.card.contains_rect(*rect)));
+        assert!(finder_bar(&geometry, &many).is_some());
+        assert_eq!(finder_bar(&finder_geometry(short, 3), &few), None);
+
+        // The cursor scrolls by the rows drawn, so it is never below the last.
+        let mut finder = many;
+        finder.move_cursor(20);
+        finder.scroll_into_view(geometry.rows.len(), 0, std::time::Instant::now());
+        assert!(finder.cursor < finder.first + geometry.rows.len());
+
+        // …and a window too short for any row still gets one.
+        let tiny = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 110.0));
+        let geometry = finder_geometry(tiny, ROWS);
+        assert_eq!(geometry.rows.len(), 1);
+        assert!(tiny.contains_rect(geometry.card));
+    }
+
     /// The field's radius is derived from the card's, not picked — the
     /// concentric rule.
     #[test]
@@ -1006,7 +1076,7 @@ mod tests {
                         finder.requery();
                         let shown = finder.hits.len().min(crate::finder::ROWS);
                         let geometry = finder_geometry(area, shown);
-                        paint_finder(&paint, area, &geometry, &finder, &hovers, &ripples);
+                        paint_finder(&paint, area, &geometry, &finder, &hovers, &ripples, true);
                     }
                 }
 

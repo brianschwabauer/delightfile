@@ -139,6 +139,11 @@ pub struct SyncCard {
     reserved: usize,
     /// When one end is a server: what `c` compares again with.
     pub remote: Option<Remote>,
+    /// How many rows the list showed when it was last drawn: fewer than
+    /// [`VISIBLE`] in a window too short for ten ([`SyncCard::fit`]).
+    shown: usize,
+    /// When the list last scrolled, for its bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl SyncCard {
@@ -163,6 +168,8 @@ impl SyncCard {
             rows: Vec::new(),
             reserved: 0,
             remote: None,
+            shown: VISIBLE,
+            bar: crate::scrollbar::Linger::default(),
         }
     }
 
@@ -182,6 +189,8 @@ impl SyncCard {
             rows,
             reserved: 0,
             remote: None,
+            shown: VISIBLE,
+            bar: crate::scrollbar::Linger::default(),
         }
     }
 
@@ -271,12 +280,32 @@ impl SyncCard {
         &self.rows
     }
 
-    /// How many rows the list shows.
-    pub fn visible(&self) -> usize {
+    /// How many rows the list would show in a window tall enough for them.
+    fn wanted(&self) -> usize {
         if matches!(self.stage, Stage::Comparing { .. }) {
             return self.reserved;
         }
         self.rows.len().min(VISIBLE)
+    }
+
+    /// How many rows the list shows: what it wants, as many of them as the
+    /// window left room for when the card was last drawn.
+    pub fn visible(&self) -> usize {
+        self.wanted().min(self.shown)
+    }
+
+    /// The card was laid out showing `shown` rows: the keys and the wheel
+    /// scroll by that from now on, and a scroll a taller window allowed is
+    /// brought back so the last row still ends the list rather than a gap.
+    pub fn fit(&mut self, shown: usize, now: std::time::Instant) {
+        self.shown = shown;
+        self.scroll_by(0);
+        self.bar.saw(self.first as f32, now);
+    }
+
+    /// When the list last scrolled, for its bar's linger.
+    pub fn scrolled_at(&self) -> Option<std::time::Instant> {
+        self.bar.scrolled_at()
     }
 
     /// `↑`/`↓`: a row at a time.
@@ -757,6 +786,9 @@ pub struct Geometry {
     /// The list, every visible row's rect inside it.
     pub body: egui::Rect,
     pub rows: Vec<egui::Rect>,
+    /// How many rows the list has room for: [`VISIBLE`] or fewer, and the
+    /// space held while a comparison runs, which has no rows in it yet.
+    pub visible: usize,
     /// The buttons, left to right.
     pub actions: Vec<egui::Rect>,
     /// The status, on the buttons' line from the card's padding to a gap
@@ -790,30 +822,30 @@ impl Geometry {
 ///
 /// As wide as the conflict card — a path is read left to right and the room
 /// is what keeps it whole — and as tall as its list needs, up to [`VISIBLE`]
-/// rows. Top to bottom: the pad, the heading (with the `×` on its line), the
+/// rows and up to what the window has room for ([`dialog::fit_rows`]). Top
+/// to bottom: the pad, the heading (with the `×` on its line), the
 /// summary, a mirror's removal line, the list, [`ANSWER_GAP`], the status and the buttons on one line,
 /// the hint strip, the pad. The buttons are measured and placed by the confirm
 /// card's own rule ([`dialog::button_row`]), the last one [`CARD_PAD`] in from
 /// the card's right edge, so its corner is concentric with the card's.
 pub fn geometry(painter: &egui::Painter, area: egui::Rect, card: &SyncCard) -> Geometry {
-    let visible = card.visible();
-    let list = if visible > 0 {
-        LIST_GAP + visible as f32 * ROW
-    } else {
-        0.0
-    };
+    let wanted = card.wanted();
+    let gap = if wanted > 0 { LIST_GAP } else { 0.0 };
     // The heading, the summary, and a mirror's line of what it removes.
     let lines = if card.removal_line().is_some() {
         3.0
     } else {
         2.0
     };
-    let height =
-        CARD_PAD + ROW * lines + list + ANSWER_GAP + BUTTON_HEIGHT + chrome::HINT_ROW + CARD_PAD;
-    let rect = dialog::card_rect(area, MAX_WIDTH, height);
+    // Everything but the rows, which get what the window leaves above the
+    // buttons: a short window scrolls the list rather than running it down
+    // behind the answers.
+    let fixed =
+        CARD_PAD + ROW * lines + gap + ANSWER_GAP + BUTTON_HEIGHT + chrome::HINT_ROW + CARD_PAD;
+    let (visible, rect) = dialog::fit_rows(area, MAX_WIDTH, fixed, ROW, wanted);
     let inner_left = rect.left() + CARD_PAD;
     let inner_right = rect.right() - CARD_PAD;
-    let body_top = rect.top() + CARD_PAD + ROW * lines + if visible > 0 { LIST_GAP } else { 0.0 };
+    let body_top = rect.top() + CARD_PAD + ROW * lines + gap;
     let body = egui::Rect::from_min_max(
         egui::pos2(inner_left, body_top),
         egui::pos2(inner_right, body_top + visible as f32 * ROW),
@@ -843,6 +875,7 @@ pub fn geometry(painter: &egui::Painter, area: egui::Rect, card: &SyncCard) -> G
         close: chrome::close_button_rect(rect),
         body,
         rows,
+        visible,
         actions,
         status,
     }
@@ -850,7 +883,20 @@ pub fn geometry(painter: &egui::Painter, area: egui::Rect, card: &SyncCard) -> G
 
 // ── Painting ────────────────────────────────────────────────────────────────
 
-/// Draw the card over a scrim.
+/// The card's bar, beside its list, while the list has more rows than it
+/// shows.
+pub fn bar(geometry: &Geometry, card: &SyncCard) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.body,
+        card.first as f32,
+        geometry.visible as f32,
+        card.rows().len() as f32,
+    )
+}
+
+/// Draw the card over a scrim. `over` is the pointer on the card, which
+/// brings up the list's bar.
 pub fn paint(
     paint: &Painting<'_>,
     area: egui::Rect,
@@ -858,6 +904,7 @@ pub fn paint(
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
+    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -957,6 +1004,9 @@ pub fn paint(
             room.max(0.0),
             font.clone(),
         );
+    }
+    if let Some(bar) = bar(geometry, card) {
+        crate::scrollbar::paint_card(paint, &bar, over, card.scrolled_at(), 1.0);
     }
 
     let status = card.status();
@@ -1476,6 +1526,43 @@ mod tests {
             ..SyncReport::default()
         };
         assert_eq!(outcome(&only_removed), "Mirrored · 1 deleted");
+    }
+
+    /// A short window gets the rows it has room for above the buttons, and
+    /// the keys scroll by those; a tall one gets ten, as it always did. The
+    /// bar is there only while rows are left out.
+    #[test]
+    fn a_short_window_scrolls_the_list_above_the_buttons() {
+        let photos = |n: usize| {
+            (0..n)
+                .map(|i| item(&format!("{i}.jpg"), Class::New, Kind::File, 1))
+                .collect()
+        };
+        let mut ready = card();
+        ready.land(plan_with(photos(30), 30, 0, 0, 30));
+        let mut few = card();
+        few.land(plan_with(photos(3), 3, 0, 0, 3));
+        let window =
+            |height: f32| egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, height));
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let tall = window(900.0);
+            let g = geometry(ui.painter(), tall, &ready);
+            assert_eq!(g.rows.len(), VISIBLE, "the old count");
+            assert!(bar(&g, &ready).is_some(), "thirty rows in ten");
+            let g = geometry(ui.painter(), tall, &few);
+            assert_eq!(bar(&g, &few), None, "three rows fit");
+
+            let short = window(300.0);
+            let g = geometry(ui.painter(), short, &ready);
+            assert!(short.contains_rect(g.card), "{:?}", g.card);
+            assert!(!g.rows.is_empty() && g.rows.len() < VISIBLE);
+            assert!(g.body.bottom() <= g.actions[0].top(), "above the buttons");
+            assert!(bar(&g, &ready).is_some());
+            ready.fit(g.visible, std::time::Instant::now());
+            ready.scroll_by(1_000);
+            assert_eq!(ready.first, ready.rows().len() - g.rows.len());
+        });
     }
 
     /// The confirm card's rules, on this card: the last button a card's

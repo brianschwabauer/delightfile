@@ -1220,6 +1220,11 @@ pub struct Card {
     pub busy: Option<String>,
     /// Nothing has come back yet.
     pub loading: bool,
+    /// How tall the body may be before it scrolls: [`WINDOW`], or less in a
+    /// window too short for it ([`Card::fit`], [`window`]).
+    window: f32,
+    /// When the lines last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
 }
 
 impl Card {
@@ -1233,6 +1238,8 @@ impl Card {
             first: 0,
             busy: None,
             loading: true,
+            window: WINDOW,
+            bar: crate::scrollbar::Linger::default(),
         }
     }
 
@@ -1384,8 +1391,23 @@ impl Card {
         let lines = self.lines();
         let Some(item) = self.selected() else { return };
         if let Some(at) = lines.iter().position(|line| *line == Line::Item(item)) {
-            self.first = scroll(self.first, at, &lines);
+            self.first = scroll(self.first, at, &lines, self.window);
         }
+    }
+
+    /// The window leaves the body `window` points ([`window`]): the lines
+    /// scroll within that from now on, and the cursor's row is brought back
+    /// into it now, since a window made shorter can have left it below the
+    /// last line drawn.
+    pub fn fit(&mut self, window: f32, now: std::time::Instant) {
+        self.window = window;
+        self.follow();
+        self.bar.saw(self.first as f32, now);
+    }
+
+    /// When the lines last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<std::time::Instant> {
+        self.bar.scrolled_at()
     }
 
     /// The lines drawn from [`Card::first`], each with its top measured from
@@ -1399,7 +1421,7 @@ impl Card {
         let mut top = 0.0;
         let mut out = Vec::new();
         for line in self.lines().into_iter().skip(self.first) {
-            if top + line.height() > WINDOW + 0.01 {
+            if top + line.height() > self.window + 0.01 {
                 break;
             }
             out.push((line, top));
@@ -1428,7 +1450,7 @@ impl Card {
             .iter()
             .map(|line| line.height())
             .sum::<f32>()
-            .min(WINDOW)
+            .min(self.window)
     }
 
     /// What a row is across a refresh: the block object, the share's URL, or
@@ -1509,7 +1531,8 @@ impl Card {
     }
 }
 
-/// The first line to draw so that line `at` is wholly inside the window.
+/// The first line to draw so that line `at` is wholly inside a body `window`
+/// points tall.
 ///
 /// [`crate::viewport::first_visible`]'s job for a list whose lines are not all
 /// one height: the view moves only when the cursor would leave it, a section's
@@ -1522,9 +1545,9 @@ impl Card {
 /// that is the Places section's own heading and its empty state, and the
 /// card scrolled back to its first row that still hid its first section
 /// would be a card that looked as though it had no top.
-fn scroll(first: usize, at: usize, lines: &[Line]) -> usize {
+fn scroll(first: usize, at: usize, lines: &[Line], window: f32) -> usize {
     let heights: Vec<f32> = lines.iter().map(|line| line.height()).collect();
-    if heights.iter().sum::<f32>() <= WINDOW {
+    if heights.iter().sum::<f32>() <= window {
         return 0;
     }
     let mut first = first.min(at);
@@ -1533,13 +1556,13 @@ fn scroll(first: usize, at: usize, lines: &[Line]) -> usize {
             first -= 1;
         }
     }
-    while first < at && heights[first..=at].iter().sum::<f32>() > WINDOW {
+    while first < at && heights[first..=at].iter().sum::<f32>() > window {
         first += 1;
     }
     // The furthest the view goes: the last lines exactly filling it.
     let mut deepest = heights.len();
     let mut tail = 0.0;
-    while deepest > 0 && tail + heights[deepest - 1] <= WINDOW {
+    while deepest > 0 && tail + heights[deepest - 1] <= window {
         deepest -= 1;
         tail += heights[deepest];
     }
@@ -1565,7 +1588,7 @@ const SECTION_ROW: f32 = 26.0;
 /// A section with nothing in it: one line of text, not a two-line row.
 const EMPTY_ROW: f32 = 30.0;
 /// The most the rows may take before the card scrolls: [`ROWS`] rows and all
-/// three headings.
+/// three headings. At most: a window too short for it gets less ([`window`]).
 const WINDOW: f32 = ROWS as f32 * ROW + 3.0 * SECTION_ROW;
 /// The row's own left/right inset, inside the card's [`PAD`].
 const ROW_PAD: f32 = 10.0;
@@ -1629,17 +1652,22 @@ impl Geometry {
     }
 }
 
+/// Everything on the card that is not a line of the body: the padding, the
+/// heading and the hint strip.
+const FIXED: f32 = PAD * 2.0 + HEADING + crate::chrome::HINT_ROW;
+
+/// How tall the body may be in `area`: [`WINDOW`], or what the window leaves
+/// between the heading and the hint strip when that is less
+/// ([`crate::dialog::room`]). Never less than a row, so the cursor always has
+/// a whole line to be on.
+pub fn window(area: egui::Rect) -> f32 {
+    crate::dialog::room(area, FIXED).clamp(ROW, WINDOW)
+}
+
 /// Lay the card out, centred and biased above true centre
-/// (`delightful-ui` §16).
+/// (`delightful-ui` §16), for the body [`Card::fit`] was last given.
 pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
-    let height = PAD * 2.0 + HEADING + card.body_height() + crate::chrome::HINT_ROW;
-    let width = (area.width() - 40.0).clamp(0.0, MAX_WIDTH);
-    let height = height.min((area.height() - 40.0).max(0.0));
-    let top = area.top() + (area.height() - height).max(0.0) * crate::chrome::OPTICAL_CENTRE;
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(area.center().x - width / 2.0, top),
-        egui::vec2(width, height),
-    );
+    let rect = crate::dialog::place_card(area, MAX_WIDTH, FIXED + card.body_height());
     let body_top = rect.top() + PAD + HEADING;
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + PAD, body_top),
@@ -1669,6 +1697,21 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         unpin: card.selected_place().is_some_and(|place| place.pinned),
         cloud: card.selected_cloud().is_some(),
     }
+}
+
+/// The card's bar, beside its body, while the lines are more than it shows.
+/// Counted in points, since the lines are not one height.
+pub fn bar(geometry: &Geometry, card: &Card) -> Option<crate::scrollbar::Geometry> {
+    let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
+    let above: f32 = heights[..card.first.min(heights.len())].iter().sum();
+    let shown: f32 = geometry.lines.iter().map(|(line, _)| line.height()).sum();
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.body,
+        above,
+        shown,
+        heights.iter().sum(),
+    )
 }
 
 /// What one row says.
@@ -1770,7 +1813,8 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
     }
 }
 
-/// Draw it.
+/// Draw it. `over` is the pointer on the card, which brings up the body's
+/// bar.
 pub fn paint(
     paint: &crate::ui::Painting<'_>,
     area: egui::Rect,
@@ -1778,6 +1822,7 @@ pub fn paint(
     geometry: &Geometry,
     hovers: &crate::hover::Hovers<crate::ui::Control>,
     ripples: &crate::ripple::Ripples<crate::ui::Control>,
+    over: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -1889,6 +1934,9 @@ pub fn paint(
             egui::FontId::proportional(FONT - 1.0),
             palette.overlay0,
         );
+    }
+    if let Some(bar) = bar(geometry, card) {
+        crate::scrollbar::paint_card(paint, &bar, over, card.scrolled_at(), 1.0);
     }
 }
 
@@ -2645,6 +2693,7 @@ Mount(3): backup -> file:///mnt/backup
                         &geometry(area, card),
                         &hovers,
                         &crate::ripple::Ripples::new(),
+                        true,
                     );
                 };
                 // Still loading, empty, populated, scrolled, and busy.
@@ -2978,7 +3027,12 @@ Mount(3): backup -> file:///mnt/backup
 
         // A short list never scrolls.
         assert_eq!(
-            scroll(3, 1, &[Line::Section("Disks"), Line::Item(Item::Connect)]),
+            scroll(
+                3,
+                1,
+                &[Line::Section("Disks"), Line::Item(Item::Connect)],
+                WINDOW
+            ),
             0
         );
     }
@@ -3117,6 +3171,54 @@ Mount(3): backup -> file:///mnt/backup
         card.move_cursor(-2);
         card.jump(Jump::Page(1));
         assert_eq!(card.cursor, last);
+    }
+
+    /// A short window gives the body the room it leaves between the heading
+    /// and the hint strip, and the cursor's row is always among the lines
+    /// drawn; a tall one gives it the old window. The bar is there only while
+    /// there are lines the body does not show.
+    #[test]
+    fn a_short_window_scrolls_the_mount_cards_body() {
+        let now = std::time::Instant::now();
+        let screen = |height: f32| {
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height))
+        };
+        let (tall, short) = (screen(900.0), screen(300.0));
+        assert_eq!(window(tall), WINDOW, "the old window");
+        assert!(window(short) < WINDOW && window(short) >= ROW);
+        assert_eq!(window(screen(60.0)), ROW, "never less than a row");
+
+        let mut card = Card::with_places(places(3));
+        card.update(many_devices(20), share_rows(3));
+        card.fit(window(tall), now);
+        let g = geometry(tall, &card);
+        assert!(tall.contains_rect(g.card));
+        assert!(bar(&g, &card).is_some(), "twenty disks in the old window");
+
+        card.fit(window(short), now);
+        let g = geometry(short, &card);
+        assert!(short.contains_rect(g.card), "{:?}", g.card);
+        assert!(!g.rows.is_empty());
+        assert!(g
+            .lines
+            .iter()
+            .all(|(_, rect)| rect.bottom() <= g.body.bottom() + 1e-3));
+        assert!(bar(&g, &card).is_some());
+        for _ in 0..30 {
+            card.move_cursor(1);
+            let g = geometry(short, &card);
+            let item = card.selected().expect("a row");
+            assert!(
+                g.lines.iter().any(|(line, _)| *line == Line::Item(item)),
+                "the cursor's row is off the card"
+            );
+        }
+
+        // A short list in a tall window has nothing to scroll.
+        let mut few = Card::new();
+        few.update(Vec::new(), Vec::new());
+        few.fit(window(tall), now);
+        assert_eq!(bar(&geometry(tall, &few), &few), None);
     }
 
     fn clouds() -> Vec<Cloud> {
