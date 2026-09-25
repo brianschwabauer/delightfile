@@ -534,7 +534,10 @@ fn visit(path: &Path, name: Vec<u8>, walked: &mut Walked, ctx: &TaskCtx) -> Resu
             visit(&child_path, child_name, walked, ctx)?;
         }
     } else if kind.is_file() {
-        let stored = zip::stores(&String::from_utf8_lossy(&name));
+        // Its own name, not the path inside the archive: a folder called
+        // `trip.2024` must not make every file in it look like a `.2024`.
+        let leaf = path.file_name().map(|leaf| leaf.to_string_lossy());
+        let stored = leaf.is_some_and(|leaf| zip::stores(&leaf));
         walked.bytes += meta.len();
         walked
             .members

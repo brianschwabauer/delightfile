@@ -455,9 +455,15 @@ fn a_jpg_is_stored_and_a_txt_is_deflated() {
     let t = TempTree::new("write-methods");
     t.file("src/pics/photo.jpg", &[7u8; 20_000]);
     t.file("src/pics/notes.txt", &[7u8; 20_000]);
+    // A dot in a folder's name is not the extension of what is inside it.
+    t.file("src/pics/trip.mp4/notes", &[7u8; 20_000]);
     let dest = t.join("pics.zip");
     pack(vec![t.join("src/pics")], dest.clone(), Format::Zip);
     let tree = list(&dest).unwrap();
+    assert_eq!(
+        tree.get("pics/trip.mp4/notes").unwrap().method,
+        Method::Deflate
+    );
     let jpg = tree.get("pics/photo.jpg").unwrap();
     let txt = tree.get("pics/notes.txt").unwrap();
     assert_eq!(jpg.method, Method::Store);
