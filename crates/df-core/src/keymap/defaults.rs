@@ -379,6 +379,22 @@ pub(super) fn build() -> Registry {
         (Pick, "enter",  C::OverlaySubmit, "Choose",          Always),
         (Pick, "up",     C::OverlayPrev,   "Previous option", Always),
         (Pick, "down",   C::OverlayNext,   "Next option",     Always),
+        // The listing's paging keys, clamped at either end even on a card
+        // whose arrows wrap. `Ctrl+↑`/`Ctrl+↓` are the preview's in Global,
+        // but a card up runs only the overlay commands, so under one they
+        // did nothing until these rows. The search panel's field is asked
+        // first, so there `Home`, `End` and the four letters edit the query
+        // and only `PgUp`/`PgDn` and `Ctrl+↑`/`Ctrl+↓` page.
+        (Pick, "pageup",    C::OverlayPageUp,       "Page up",        Always),
+        (Pick, "ctrl+b",    C::OverlayPageUp,       "Page up",        Always),
+        (Pick, "pagedown",  C::OverlayPageDown,     "Page down",      Always),
+        (Pick, "ctrl+f",    C::OverlayPageDown,     "Page down",      Always),
+        (Pick, "ctrl+u",    C::OverlayHalfPageUp,   "Half page up",   Always),
+        (Pick, "ctrl+up",   C::OverlayHalfPageUp,   "Half page up",   Always),
+        (Pick, "ctrl+d",    C::OverlayHalfPageDown, "Half page down", Always),
+        (Pick, "ctrl+down", C::OverlayHalfPageDown, "Half page down", Always),
+        (Pick, "home",      C::OverlayTop,          "Go to top",      Always),
+        (Pick, "end",       C::OverlayBottom,       "Go to bottom",   Always),
         // The search panel stacks on Pick; this puts ctrl+s on its help sheet.
         (Pick, "ctrl+s", C::CancelSearch,  "Cancel the search", Always),
         (Pick, "tab",    C::SearchToggle,  "Names ⟷ contents",  Always),

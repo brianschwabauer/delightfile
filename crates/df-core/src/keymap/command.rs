@@ -309,6 +309,17 @@ commands! {
     OverlaySubmit => "overlay-submit",
     OverlayPrev => "overlay-prev",
     OverlayNext => "overlay-next",
+    // A `[pick]` card's paging, which stops at either end even where its
+    // arrows wrap. Commands of their own rather than `[pick]` rows pointing
+    // at the listing's `page-up`/`cursor-top`, for the reason the help
+    // sheet's are (below): `Registry::binding_label` would teach `g g` as
+    // "Home" in the palette, the which-key card and the sheet.
+    OverlayPageUp => "overlay-page-up",
+    OverlayPageDown => "overlay-page-down",
+    OverlayHalfPageUp => "overlay-half-page-up",
+    OverlayHalfPageDown => "overlay-half-page-down",
+    OverlayTop => "overlay-top",
+    OverlayBottom => "overlay-bottom",
     TaskInspect => "task-inspect",
     TaskCancel => "task-cancel",
     TaskPauseResume => "task-pause-resume",

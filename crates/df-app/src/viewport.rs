@@ -55,6 +55,43 @@ pub fn visible_rows(available: f32, height: f32) -> usize {
     (available / height).floor().max(0.0) as usize
 }
 
+/// A card's paging keys: a page or half of one either way, or an end.
+///
+/// **Clamped, never wrapped**, on a list whose arrows wrap as much as on one
+/// whose arrows do not. A page key is a long stride aimed at an end, and one
+/// that came out at the far end would put the cursor on a row the eye was not
+/// following.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Jump {
+    /// A page: `-1` up, `1` down.
+    Page(isize),
+    /// Half a page, and never less than a row: `-1` up, `1` down.
+    HalfPage(isize),
+    Top,
+    Bottom,
+}
+
+impl Jump {
+    /// Where the cursor lands from `cursor`, in a list of `rows` with `page`
+    /// of them on screen. A page is at least one row, so a surface nobody has
+    /// measured yet still moves.
+    pub fn target(self, cursor: usize, rows: usize, page: usize) -> usize {
+        let Some(last) = rows.checked_sub(1) else {
+            return 0;
+        };
+        let page = page.max(1) as isize;
+        let delta = match self {
+            Jump::Top => return 0,
+            Jump::Bottom => return last,
+            Jump::Page(n) => n.saturating_mul(page),
+            Jump::HalfPage(n) => n.saturating_mul((page / 2).max(1)),
+        };
+        (cursor as isize)
+            .saturating_add(delta)
+            .clamp(0, last as isize) as usize
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +179,46 @@ mod tests {
         assert_eq!(visible_rows(21.0, 22.0), 0);
         assert_eq!(visible_rows(-5.0, 22.0), 0);
         assert_eq!(visible_rows(100.0, 0.0), 0);
+    }
+
+    /// A page and half of one, stopping at either end rather than coming out
+    /// at the other.
+    #[test]
+    fn a_jump_strides_by_the_page_and_stops_at_the_ends() {
+        let (rows, page) = (30, 8);
+        assert_eq!(Jump::Page(1).target(3, rows, page), 11);
+        assert_eq!(Jump::Page(-1).target(11, rows, page), 3);
+        assert_eq!(Jump::HalfPage(1).target(3, rows, page), 7);
+        assert_eq!(Jump::HalfPage(-1).target(7, rows, page), 3);
+        // Clamped, not wrapped.
+        assert_eq!(Jump::Page(1).target(25, rows, page), 29);
+        assert_eq!(Jump::Page(-1).target(2, rows, page), 0);
+        assert_eq!(Jump::HalfPage(1).target(29, rows, page), 29);
+        assert_eq!(Jump::HalfPage(-1).target(0, rows, page), 0);
+        assert_eq!(Jump::Top.target(17, rows, page), 0);
+        assert_eq!(Jump::Bottom.target(17, rows, page), 29);
+    }
+
+    /// A page too small to halve still moves a row, a page nobody has
+    /// measured is one row, and an empty list has only row 0.
+    #[test]
+    fn a_jump_always_moves_and_never_leaves_the_list() {
+        assert_eq!(Jump::HalfPage(1).target(0, 10, 1), 1);
+        assert_eq!(Jump::HalfPage(-1).target(5, 10, 1), 4);
+        assert_eq!(Jump::Page(1).target(0, 10, 0), 1);
+        assert_eq!(Jump::HalfPage(1).target(0, 10, 0), 1);
+        for jump in [
+            Jump::Page(1),
+            Jump::Page(-1),
+            Jump::HalfPage(1),
+            Jump::HalfPage(-1),
+            Jump::Top,
+            Jump::Bottom,
+        ] {
+            assert_eq!(jump.target(0, 0, 10), 0, "{jump:?} on an empty list");
+            assert_eq!(jump.target(0, 1, 10), 0, "{jump:?} on one row");
+            // A cursor left past the end by a list that shrank comes back.
+            assert!(jump.target(40, 5, 10) <= 4, "{jump:?}");
+        }
     }
 }

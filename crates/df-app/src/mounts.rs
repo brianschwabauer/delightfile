@@ -94,6 +94,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::dbus::{Bus, Interfaces, Value};
+use crate::viewport::Jump;
 
 /// The udisks2 names, in one place.
 const SERVICE: &str = "org.freedesktop.UDisks2";
@@ -1350,12 +1351,23 @@ impl Card {
     /// running off the end of it would lose your place. `M` is a short menu
     /// you step around — a few places, a disk or two, a share, the connect
     /// row — and `↑` from the Places to reach the connect row is the move a
-    /// hand expects of a menu.
+    /// hand expects of a menu. The page keys still stop at the ends
+    /// ([`Card::jump`]).
     pub fn move_cursor(&mut self, delta: isize) {
         // Never empty (the connect row is always there); a zero would be a
         // division by it.
         let len = self.items().len().max(1) as isize;
         self.cursor = (self.cursor as isize + delta).rem_euclid(len) as usize;
+        self.follow();
+    }
+
+    /// `PageUp`/`PageDown`, `Ctrl+u`/`Ctrl+d`, `Home`/`End`: clamped at the
+    /// ends, where the arrows wrap. A page is the rows on screen now
+    /// ([`Card::visible_items`]), which is fewer while a section's heading or
+    /// empty state is in view.
+    pub fn jump(&mut self, jump: Jump) {
+        let page = self.visible_items().len();
+        self.cursor = jump.target(self.cursor, self.items().len(), page);
         self.follow();
     }
 
@@ -2754,7 +2766,8 @@ Mount(3): backup -> file:///mnt/backup
         assert!(devices_from(&[]).is_empty());
     }
 
-    /// The cursor wraps, and a refresh keeps it on the row it was on.
+    /// The page keys clamp, and a refresh keeps the cursor on the row it was
+    /// on.
     #[test]
     fn the_cursor_holds_its_place_across_a_refresh() {
         let mut card = Card::new();
@@ -2775,10 +2788,11 @@ Mount(3): backup -> file:///mnt/backup
             card.selected_device().map(|d| d.node.as_str()),
             Some("/dev/nvme0n1p2")
         );
-        // Wrapped, not clamped: `↓` off the connect row is the first disk.
-        card.move_cursor(2);
+        // A page key stops at the end, where the arrows wrap: all four rows
+        // are on screen, so a page from the second is past the bottom.
+        card.jump(Jump::Page(1));
         assert_eq!(card.selected(), Some(Item::Connect));
-        card.move_cursor(1);
+        card.jump(Jump::Page(-1));
         assert_eq!(card.cursor, 0);
 
         // The USB stick is now mounted and sorts the same way; the cursor is on
@@ -2918,7 +2932,7 @@ Mount(3): backup -> file:///mnt/backup
         let (last, top) = *long.visible().last().expect("lines");
         assert!(top + last.height() <= WINDOW + 0.01, "a row is cut off");
         assert!(long.visible().len() < long.lines().len());
-        long.select(Item::Place(0));
+        long.jump(Jump::Top);
         assert_eq!(long.selected(), Some(Item::Place(0)));
         assert_eq!(long.visible()[0].0, Line::Section("Places"));
     }
@@ -2933,7 +2947,7 @@ Mount(3): backup -> file:///mnt/backup
 
         // Down to the connect row, the last line: it is wholly inside the
         // window, and the view went no further than that.
-        card.select(Item::Connect);
+        card.jump(Jump::Bottom);
         assert_eq!(card.selected(), Some(Item::Connect));
         let (last, top) = *card.visible().last().expect("lines");
         assert_eq!(last, Line::Item(Item::Connect));
@@ -2958,7 +2972,7 @@ Mount(3): backup -> file:///mnt/backup
 
         // All the way up: the card's top is back — the Places section over
         // the Disks one, though the cursor is on a disk.
-        card.select(Item::Disk(0));
+        card.jump(Jump::Top);
         assert_eq!(card.first, 0);
         assert_eq!(card.visible()[0].0, Line::Section("Places"));
 
@@ -3012,7 +3026,7 @@ Mount(3): backup -> file:///mnt/backup
 
     /// The card has no empty case: the connect row is always there, before
     /// udisks2 has answered and after it has answered nothing. That one row
-    /// is both ends, so either arrow leaves the cursor on it.
+    /// is both ends, so every key leaves the cursor on it.
     #[test]
     fn a_card_with_one_row_stays_on_it() {
         let mut waiting = Card::new();
@@ -3024,8 +3038,85 @@ Mount(3): backup -> file:///mnt/backup
                 card.move_cursor(delta);
                 assert_eq!(card.cursor, 0, "{delta}");
             }
+            for jump in [
+                Jump::Page(1),
+                Jump::Page(-1),
+                Jump::HalfPage(1),
+                Jump::HalfPage(-1),
+                Jump::Top,
+                Jump::Bottom,
+            ] {
+                card.jump(jump);
+                assert_eq!(card.cursor, 0, "{jump:?}");
+            }
             assert_eq!(card.selected(), Some(Item::Connect));
         }
+    }
+
+    /// A page is the item rows on screen at the moment of the press — the
+    /// headings and empty states between them take room and are not rows —
+    /// and half a page is half that. Neither goes past an end, and the view
+    /// follows every one.
+    #[test]
+    fn the_page_keys_stride_by_the_rows_on_screen_and_stop_at_the_ends() {
+        let mut card = Card::new();
+        card.update(many_devices(20), share_rows(3));
+        let last = card.items().len() - 1;
+        assert_eq!(card.cursor, 0);
+        // Under the Places heading, its empty state and the Disks heading,
+        // nine rows fit; scrolled past them, more do.
+        assert_eq!(card.visible_items().len(), 9);
+
+        let page = card.visible_items().len();
+        card.jump(Jump::Page(1));
+        assert_eq!(card.cursor, page);
+        let on_screen = |card: &Card| {
+            let item = card.selected().expect("a row");
+            card.visible_items().contains(&item)
+        };
+        assert!(on_screen(&card), "the view follows a page down");
+
+        let page = card.visible_items().len();
+        let from = card.cursor;
+        card.jump(Jump::HalfPage(1));
+        assert_eq!(card.cursor, from + page / 2);
+        assert!(on_screen(&card));
+
+        let page = card.visible_items().len();
+        let from = card.cursor;
+        card.jump(Jump::HalfPage(-1));
+        assert_eq!(card.cursor, from - page / 2);
+        assert!(on_screen(&card));
+
+        let page = card.visible_items().len();
+        let from = card.cursor;
+        card.jump(Jump::Page(-1));
+        assert_eq!(card.cursor, from.saturating_sub(page));
+
+        card.jump(Jump::Bottom);
+        assert_eq!(card.cursor, last);
+        assert_eq!(card.selected(), Some(Item::Connect));
+        assert!(on_screen(&card));
+        // Clamped at the bottom, where `↓` would have wrapped.
+        card.jump(Jump::Page(1));
+        assert_eq!(card.cursor, last);
+        card.jump(Jump::HalfPage(1));
+        assert_eq!(card.cursor, last);
+
+        card.jump(Jump::Top);
+        assert_eq!(card.cursor, 0);
+        assert_eq!(card.first, 0);
+        // …and at the top.
+        card.jump(Jump::Page(-1));
+        assert_eq!(card.cursor, 0);
+        card.jump(Jump::HalfPage(-1));
+        assert_eq!(card.cursor, 0);
+
+        // A page from near the bottom stops on the last row, not past it.
+        card.jump(Jump::Bottom);
+        card.move_cursor(-2);
+        card.jump(Jump::Page(1));
+        assert_eq!(card.cursor, last);
     }
 
     fn clouds() -> Vec<Cloud> {

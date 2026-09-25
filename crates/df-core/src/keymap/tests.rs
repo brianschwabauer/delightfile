@@ -1039,6 +1039,66 @@ fn tab_in_the_search_panel_swaps_names_and_contents() {
     );
 }
 
+/// The `[pick]` cards page the way the listing does — a page on
+/// `PageUp`/`PageDown` and `Ctrl+b`/`Ctrl+f`, half of one on
+/// `Ctrl+u`/`Ctrl+d` and `Ctrl+↑`/`Ctrl+↓`, an end on `Home`/`End` — each
+/// row on the cards' help sheet in the listing's words, through commands of
+/// their own, so what the palette teaches for the listing's top is still
+/// `g g`.
+#[test]
+fn the_pick_cards_page_and_go_to_either_end() {
+    let km = Registry::defaults();
+    let pick = ContextStack::with(&[Context::Pick]);
+    let listed = km.active_bindings(&pick, WhenFlags::NONE);
+    for (keys, command, description) in [
+        ("pageup", Command::OverlayPageUp, "Page up"),
+        ("ctrl+b", Command::OverlayPageUp, "Page up"),
+        ("pagedown", Command::OverlayPageDown, "Page down"),
+        ("ctrl+f", Command::OverlayPageDown, "Page down"),
+        ("ctrl+u", Command::OverlayHalfPageUp, "Half page up"),
+        ("ctrl+up", Command::OverlayHalfPageUp, "Half page up"),
+        ("ctrl+d", Command::OverlayHalfPageDown, "Half page down"),
+        ("ctrl+down", Command::OverlayHalfPageDown, "Half page down"),
+        ("home", Command::OverlayTop, "Go to top"),
+        ("end", Command::OverlayBottom, "Go to bottom"),
+    ] {
+        assert_eq!(
+            press(&km, &pick, WhenFlags::NONE, keys),
+            Dispatch::Match(command),
+            "{keys}"
+        );
+        let row = listed
+            .iter()
+            .find(|b| b.context == Context::Pick && b.seq == [chord(keys)])
+            .unwrap_or_else(|| panic!("{keys} is not on the cards' help sheet"));
+        assert_eq!(row.description, description, "{keys}");
+    }
+    // The cheapest chords are the ones taught.
+    for (command, label) in [
+        (Command::OverlayPageUp, "PgUp"),
+        (Command::OverlayPageDown, "PgDn"),
+        (Command::OverlayTop, "Home"),
+        (Command::OverlayBottom, "End"),
+    ] {
+        assert_eq!(km.binding_label(command).as_deref(), Some(label));
+    }
+    assert_eq!(km.binding_label(Command::CursorTop).as_deref(), Some("g g"));
+    // The browser's own keys are the listing's still, and Global's
+    // `Ctrl+↑` is still the preview's.
+    for (keys, command) in [
+        ("ctrl+u", Command::HalfPageUp),
+        ("ctrl+f", Command::PageDown),
+        ("pagedown", Command::PageDown),
+        ("ctrl+up", Command::PreviewUp),
+    ] {
+        assert_eq!(
+            press(&km, &files(), WhenFlags::NONE, keys),
+            Dispatch::Match(command),
+            "{keys}"
+        );
+    }
+}
+
 // ── Labels ──────────────────────────────────────────────────────────────────
 
 /// The help sheet advertises the easiest binding, and prints it as the keys the

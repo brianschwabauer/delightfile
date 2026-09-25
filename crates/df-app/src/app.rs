@@ -71,6 +71,7 @@ use crate::tabs::Tabs;
 use crate::theme::Palette;
 use crate::toast::Toasts;
 use crate::ui::{self, ClipMark, Column, Control, ListView};
+use crate::viewport::Jump;
 use crate::whichkey::WhichKey;
 
 /// `A`: the selection packed into a new archive — its prompt, the prompt's
@@ -1297,6 +1298,10 @@ pub struct App {
     /// has loaded — but repeating it unconditionally would be a window that
     /// never goes to sleep (PLAN §1).
     search_follow: bool,
+    /// How many hits the search panel is showing, published by the frame
+    /// before the keys are routed, as [`App::help_rows`] is for the sheet: its
+    /// `PageDown` is a page of hits, not of the pane beside it.
+    search_rows: usize,
     // ── Operations (PLAN §5) ────────────────────────────────────────────────
     /// The worker pool. Started before the window, like every other worker.
     engine: TaskEngine,
@@ -2075,6 +2080,7 @@ impl App {
             zoxide: None,
             search: None,
             search_follow: false,
+            search_rows: 0,
             which: WhichKey::new(),
             which_rows: Vec::new(),
             hovers: Hovers::new(),
@@ -5765,6 +5771,20 @@ impl App {
         if self.overlay_literal(chord, now) {
             return;
         }
+        // **The search field's editing keys are the field's.** `Home`, `End`,
+        // `Ctrl+b`, `Ctrl+f`, `Ctrl+u` and `Ctrl+d` are in `[pick]` as page
+        // keys and in the editor as caret and kill keys, and the panel is
+        // always being typed into, so the editor is asked first — the help
+        // filter's rule ([`App::help_key`]). The panel pages on the keys the
+        // editor has no verb for: `PgUp`/`PgDn` and `Ctrl+↑`/`Ctrl+↓`. The
+        // mount card and the opener picker have no field, and keep all ten.
+        // Asked of the editor's own map rather than [`App::prompt_action`],
+        // because that map is the one the field is fed through.
+        let searching = self.search.is_some() && self.dialog.is_none() && self.finder.is_none();
+        if searching && matches!(InputBuffer::binding(chord), Some(InputAction::Edit(_))) {
+            self.overlay_text(chord);
+            return;
+        }
         let stack = self.overlay_stack();
         let dispatch = self
             .keymap
@@ -5807,6 +5827,12 @@ impl App {
             C::OverlaySubmit => self.submit_overlay(page, now),
             C::OverlayPrev => self.overlay_move(-1),
             C::OverlayNext => self.overlay_move(1),
+            C::OverlayPageUp => self.overlay_jump(Jump::Page(-1)),
+            C::OverlayPageDown => self.overlay_jump(Jump::Page(1)),
+            C::OverlayHalfPageUp => self.overlay_jump(Jump::HalfPage(-1)),
+            C::OverlayHalfPageDown => self.overlay_jump(Jump::HalfPage(1)),
+            C::OverlayTop => self.overlay_jump(Jump::Top),
+            C::OverlayBottom => self.overlay_jump(Jump::Bottom),
             // `Tab` in the search panel: the same query, the other tool. The
             // row is in `[pick]`, which the mount card and the opener picker
             // stack on too, and there it finds no panel and does nothing.
@@ -6032,6 +6058,33 @@ impl App {
         let rows = self.task_rows();
         if let Some(panel) = &mut self.panel {
             panel.move_cursor(delta, rows.len());
+        }
+    }
+
+    /// `PageUp`/`PageDown`, `Ctrl+u`/`Ctrl+d` and `Home`/`End` on a `[pick]`
+    /// card: a page of its rows, half of one, or an end, clamped where its
+    /// arrows may wrap ([`Jump`]).
+    ///
+    /// Only the cards `[pick]` is matched for, in [`App::overlay_stack`]'s
+    /// order, so a jump reaches the card that took the key and never one
+    /// under it; a dialog or the palette on top takes it to nothing.
+    fn overlay_jump(&mut self, jump: Jump) {
+        if self.dialog.is_some() || self.finder.is_some() {
+            return;
+        }
+        if let Some(search) = &mut self.search {
+            search.cursor = jump.target(search.cursor, search.hits.len(), self.search_rows);
+            self.search_follow = true;
+            return;
+        }
+        if let Some(card) = &mut self.mounts {
+            card.jump(jump);
+            return;
+        }
+        if let Some(picker) = &mut self.picker {
+            // The picker grows to show every choice, so a page is all of them.
+            let rows = picker.choices.len();
+            picker.cursor = jump.target(picker.cursor, rows, rows);
         }
     }
 
@@ -13853,6 +13906,17 @@ impl App {
             layout.path.bottom() + ui::GAP,
             area.bottom() - ui::GAP,
         ));
+        // …and how many hits the search panel shows, off the geometry its
+        // paint reads, for the same reason.
+        self.search_rows = 0;
+        if self.search.is_some() {
+            let bar_top = area.bottom() - ui::GAP;
+            if let Some(OverlayGeom::Search(geometry)) =
+                self.overlay_geometry(&painter, area, &layout, bar_top)
+            {
+                self.search_rows = geometry.page();
+            }
+        }
         self.route_keys(page, now);
         self.which.update(self.keys.which_key_due(), now);
         // The two write-behind timers, both of which are deadlines rather than
@@ -17617,6 +17681,9 @@ mod tests {
     /// `rclone://` from every door, and the mount card's cloud rows.
     mod cloud;
 
+    /// The `[pick]` cards' page keys and the mount card's wrapping arrows.
+    mod paging;
+
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the
     /// line with it — and the sheet was matched first, so `Ctrl+u` in a
@@ -17668,6 +17735,92 @@ mod tests {
             assert_eq!(prompt_action(&keymap, chord), None, "{}", chord.label());
             assert_eq!(keymap.lookup(Context::Help, chord), Some(command));
         }
+    }
+
+    /// The same two tables, in the search panel: `[pick]` pages with `Home`,
+    /// `End`, `Ctrl+b`, `Ctrl+f`, `Ctrl+u` and `Ctrl+d`, and the panel's field
+    /// is always being typed into, so each of those walks the caret or edits
+    /// the query and leaves the hit under the cursor alone. The keys the
+    /// editor has no verb for still page the hits.
+    #[test]
+    fn the_search_fields_editing_keys_edit_the_query_rather_than_paging_the_hits() {
+        let keymap = Registry::defaults();
+        // Both tables really do claim them — that is the whole conflict.
+        for (chord, command) in [
+            (Chord::plain(Key::Home), Command::OverlayTop),
+            (Chord::plain(Key::End), Command::OverlayBottom),
+            (Chord::ctrl(Key::Char('b')), Command::OverlayPageUp),
+            (Chord::ctrl(Key::Char('f')), Command::OverlayPageDown),
+            (Chord::ctrl(Key::Char('u')), Command::OverlayHalfPageUp),
+            (Chord::ctrl(Key::Char('d')), Command::OverlayHalfPageDown),
+        ] {
+            assert_eq!(keymap.lookup(Context::Pick, chord), Some(command));
+            assert!(
+                matches!(InputBuffer::binding(chord), Some(InputAction::Edit(_))),
+                "{} is an editing key",
+                chord.label()
+            );
+        }
+
+        let mut app = Fixture::new("search-field-keys", &["a.txt"]);
+        let now = Instant::now();
+        app.run(Command::SearchName, 10, now);
+        for c in "needle".chars() {
+            app.overlay_key(Chord::from_char(c).expect("a letter"), 10, now);
+        }
+        {
+            let search = app.search.as_mut().expect("the panel is open");
+            for i in 0..50 {
+                search.hits.push(search::Hit {
+                    path: PathBuf::from(format!("/tmp/needle{i}.txt")),
+                    relative: format!("needle{i}.txt"),
+                    entry: None,
+                    line: None,
+                    text: String::new(),
+                    span: None,
+                });
+            }
+            search.cursor = 20;
+        }
+        let field = |app: &App| {
+            let search = app.search.as_ref().expect("the panel stays up");
+            (search.query().to_string(), search.buffer.cursor_byte())
+        };
+        let hit = |app: &App| app.search.as_ref().expect("the panel stays up").cursor;
+
+        for (chord, query, caret) in [
+            (Chord::plain(Key::Home), "needle", 0),
+            (Chord::ctrl(Key::Char('f')), "needle", 1),
+            (Chord::ctrl(Key::Char('b')), "needle", 0),
+            (Chord::ctrl(Key::Char('d')), "eedle", 0),
+            (Chord::plain(Key::End), "eedle", 5),
+        ] {
+            app.overlay_key(chord, 10, now);
+            assert_eq!(
+                field(&app),
+                (query.to_string(), caret),
+                "{} went to the list",
+                chord.label()
+            );
+            assert_eq!(hit(&app), 20, "{} paged the hits", chord.label());
+        }
+
+        // The keys the editor has nothing for are the panel's.
+        app.overlay_key(Chord::plain(Key::PageDown), 10, now);
+        let paged = hit(&app);
+        assert!(paged > 20, "PgDn did not page the hits");
+        app.overlay_key(Chord::ctrl(Key::ArrowUp), 10, now);
+        assert!(hit(&app) < paged, "Ctrl+↑ did not page the hits");
+        app.overlay_key(Chord::plain(Key::PageUp), 10, now);
+        assert_eq!(
+            field(&app),
+            ("eedle".to_string(), 5),
+            "the query is as typed"
+        );
+
+        // …and `Ctrl+u` clears what was typed, which is the list going too.
+        app.overlay_key(Chord::ctrl(Key::Char('u')), 10, now);
+        assert_eq!(field(&app), (String::new(), 0));
     }
 
     /// The `[input]` table is not decoration: a line in `keymap.toml` moves an
