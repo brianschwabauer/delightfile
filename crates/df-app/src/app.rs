@@ -19847,9 +19847,12 @@ mod tests {
             vec!["Compact", "Modified", "Parent pane", "Preview pane"]
         );
         assert_eq!(ticked("Sort"), vec!["Size", "Reverse"]);
+        // On the top level or in a list a parent flies out: Edit's Paste,
+        // Go's "Go to path…".
         let row = |label: &str| {
             menu.items
                 .iter()
+                .flat_map(|i| std::iter::once(i).chain(i.submenu.iter().flatten()))
                 .find(|i| i.label == label)
                 .unwrap_or_else(|| panic!("no {label:?} row"))
         };
@@ -19874,9 +19877,10 @@ mod tests {
         assert_eq!(menu.items.last().map(|i| i.label.as_str()), Some("Cancel"));
     }
 
-    /// A row does what its key does: a click on "Select all" selects all,
-    /// hovering "View" flies its list out, and a radio in it goes straight to
-    /// that step of the ladder. The menu is gone before the command runs.
+    /// A row does what its key does: hovering "Edit" flies its list out and a
+    /// click on "Select all" in it selects all; hovering "View" flies its
+    /// list out, and a radio in it goes straight to that step of the ladder.
+    /// The menu is gone before the command runs.
     #[test]
     fn an_app_menu_row_runs_its_command() {
         let names = ["a.txt", "b.txt", "c.txt"];
@@ -19886,7 +19890,18 @@ mod tests {
 
         app.run(Command::AppMenu, 10, Instant::now());
         run_frame(&mut app, &ctx, Vec::new());
-        let at = menu_geometry(&app, &ctx).rows[row_labelled(&app, "Select all")].center();
+        let edit = row_labelled(&app, "Edit");
+        let at = menu_geometry(&app, &ctx).rows[edit].center();
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(app.menu.as_ref().and_then(|m| m.submenu), Some(edit));
+        let select_all = app
+            .menu
+            .as_ref()
+            .and_then(|m| m.sub_items())
+            .and_then(|rows| rows.iter().position(|i| i.label == "Select all"))
+            .expect("a Select all row");
+        let g = menu_geometry(&app, &ctx);
+        let at = g.sub.as_ref().expect("the Edit list is out").1[select_all].center();
         click_at(&mut app, &ctx, at);
         assert_eq!(live_menu(&app), None);
         assert_eq!(app.tab().cwd.dir.selected_count(), names.len());

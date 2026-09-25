@@ -1076,8 +1076,16 @@ mod tests {
             row(&folder(&app)),
             Some((true, menu::Action::Run(Command::PasteSync)))
         );
+        // The app menu's is in its Edit list.
+        let edit = |app: &App| {
+            app.menu
+                .as_ref()
+                .and_then(|menu| menu.items.iter().find(|item| item.label == "Edit"))
+                .and_then(|edit| edit.submenu.clone())
+                .expect("an Edit list")
+        };
         app.open_app_menu();
-        let items = app.menu.as_ref().unwrap().items.clone();
+        let items = edit(&app);
         assert_eq!(
             row(&items),
             Some((true, menu::Action::Run(Command::PasteSync)))
@@ -1092,7 +1100,7 @@ mod tests {
         );
         app.menu = None;
         app.open_app_menu();
-        let items = app.menu.as_ref().unwrap().items.clone();
+        let items = edit(&app);
         assert_eq!(row(&items).map(|(enabled, _)| enabled), Some(false));
     }
 

@@ -159,9 +159,9 @@ pub enum Action {
     /// caret in front of it. Not a [`Command`]: the keyboard's way to a folder
     /// is `a` and a name ending in `/`, which has no command of its own.
     CreateFolder,
-    /// A row that does nothing itself: the app menu's "View", "Sort" and "File
-    /// type", which are only the lists they fly out, and "Reverse" while the
-    /// sort has no direction to reverse.
+    /// A row that does nothing itself: the app menu's parents — "Go", "Find",
+    /// "Edit", "View", "Sort" and "File type" — which are only the lists they
+    /// fly out, and "Reverse" while the sort has no direction to reverse.
     Nothing,
     /// The Go list's `n`th place, by its index in the app's Places list — a
     /// pin, a `[goto]` row or home. Not `Run(Goto(n))`: a pin with no key has
@@ -590,6 +590,13 @@ fn sort_items(
 /// is showing an archive, a remote service or the trash: a row it would refuse
 /// is greyed here rather than left live to toast "not here" when clicked.
 ///
+/// The verbs are one level down, in lists named for what they are about —
+/// Go, Find, Edit, View, Sort — so the top level is short enough to take in
+/// at a glance and every verb is one hover from a name that says where it is.
+/// What stays on the top level are the rows that open something rather than
+/// act on the files: a tab or a window, the places and panels, the two ways
+/// to learn the rest, and leaving.
+///
 /// `types` is a file dialog's [`type_items`], flown out of a "File type" row
 /// beside View and Sort; empty — every session that is not a dialog with
 /// filters — and there is no such row. Absent rather than grey, for the
@@ -619,15 +626,19 @@ pub fn app_items(
     view.push(run("Preview pane", C::TogglePreview, true).check(facts.preview_open));
     view.push(run("Reset pane widths", C::ResetPanes, true));
     let sort = sort_items(facts.sort, facts.reverse, keymap, &refused);
-
-    let mut rows = vec![
-        run("New tab", C::TabCreate, true),
-        run("New window", C::NewWindow, true),
-        run("Go to path…", C::GotoPath, facts.local).after_gap(),
+    // The two ways of typing where to go. The places, which need no typing,
+    // come under them once [`insert_go`] has put them in.
+    let go = vec![
+        run("Go to path…", C::GotoPath, facts.local),
         run("Jump to…", C::FuzzyJump, true),
+    ];
+    let find = vec![
         run("Search everywhere by name…", C::SearchName, true),
         run("Search everywhere inside files…", C::SearchContent, true),
         run("Filter this folder…", C::Filter, true),
+    ];
+    let edit = vec![
+        run("Undo", C::Undo, true),
         run("Select all", C::SelectAll, true).after_gap(),
         run("Invert selection", C::InvertSelection, true),
         run("Copy", C::Yank, acts).after_gap(),
@@ -638,17 +649,25 @@ pub fn app_items(
         run("New file or folder…", C::Create, true),
         run("Move to trash", C::Trash, acts),
         run("Compress…", C::ArchiveCreate, acts),
-        run("Undo", C::Undo, true),
-        // Always live: a parent row only opens a list, and a grey one would
-        // hide the rows under it that *can* act.
-        Item::new("View", "", Action::Nothing, true)
-            .with_submenu(view)
-            .after_gap(),
-        Item::new("Sort", "", Action::Nothing, true).with_submenu(sort),
+    ];
+    // Every parent is always live: a parent row only opens a list, and a
+    // grey one would hide the rows under it that *can* act.
+    let parent = |label: &str, rows: Vec<Item>| {
+        Item::new(label, "", Action::Nothing, true).with_submenu(rows)
+    };
+
+    let mut rows = vec![
+        run("New tab", C::TabCreate, true),
+        run("New window", C::NewWindow, true),
+        parent("Go", go).after_gap(),
+        parent("Find", find),
+        parent("Edit", edit).after_gap(),
+        parent("View", view).after_gap(),
+        parent("Sort", sort),
         run("Mounts…", C::MountManager, true).after_gap(),
         run("Trash", C::OpenTrash, true),
         run("Tasks", C::TasksShow, true),
-        run("Show what is yanked", C::YankShow, true),
+        run("Clipboard", C::YankShow, true),
         run("Disk usage", C::DiskUsage, true),
         run("Command palette…", C::CommandPalette, true).after_gap(),
         run("Keyboard shortcuts", C::Help, true),
@@ -660,10 +679,7 @@ pub fn app_items(
             .iter()
             .position(|item| item.label == "Sort")
             .map_or(rows.len(), |sort| sort + 1);
-        rows.insert(
-            at,
-            Item::new("File type", "", Action::Nothing, true).with_submenu(types),
-        );
+        rows.insert(at, parent("File type", types));
     }
     rows
 }
@@ -750,13 +766,13 @@ pub struct GoRow {
     pub keys: String,
 }
 
-/// The app menu's "Go" row, flying out every place and, last, the row that
-/// pins the folder on screen or takes it off — so the list and the way onto
-/// it are in one place.
+/// The app menu's "Go" row as the places make it: every place and, last, the
+/// row that pins the folder on screen or takes it off — so the list and the
+/// way onto it are in one place.
 ///
-/// Built apart from [`app_items`] and put in with [`insert_go`], so the app
-/// menu's own rows, and the tests that hold them, are the same with or
-/// without it.
+/// Built apart from [`app_items`], which has no Places list to read, and
+/// folded into the Go row it builds by [`insert_go`], so the app menu's own
+/// rows, and the tests that hold them, are the same with or without it.
 pub fn go_item(
     places: &[GoRow],
     pinned: bool,
@@ -784,19 +800,22 @@ pub fn go_item(
     Item::new("Go", "", Action::Nothing, true).with_submenu(rows)
 }
 
-/// Put [`go_item`] into the app menu's rows at the head of the group about
-/// getting somewhere — above "Go to path…", taking over the gap before it.
-pub fn insert_go(rows: &mut Vec<Item>, go: Item) {
-    let at = rows
-        .iter()
-        .position(|item| item.action == Action::Run(Command::GotoPath))
-        .unwrap_or(rows.len());
-    let mut go = go;
-    if let Some(next) = rows.get_mut(at) {
-        go.gap_before = next.gap_before;
-        next.gap_before = false;
+/// Put [`go_item`]'s places into the app menu's own Go list, after a gap
+/// under the two rows [`app_items`] gave it: the ways of typing where to go,
+/// then the places that need no typing.
+pub fn insert_go(rows: &mut [Item], go: Item) {
+    let Some(list) = rows
+        .iter_mut()
+        .find(|item| item.label == "Go")
+        .and_then(|item| item.submenu.as_mut())
+    else {
+        return;
+    };
+    let mut places = go.submenu.unwrap_or_default();
+    if let Some(first) = places.first_mut() {
+        first.gap_before = true;
     }
-    rows.insert(at, go);
+    list.extend(places);
 }
 
 /// The folder menu's last row: pin the folder it is about, or unpin it.
@@ -1803,8 +1822,9 @@ mod tests {
 
     /// A folder's row menu pins it from under "Open with" — or under "Open
     /// folder" when no opener matched — says Unpin when it is pinned, and
-    /// greys where the gate would refuse; the Go list goes above "Go to
-    /// path…" and takes the gap that opened its group.
+    /// greys where the gate would refuse; the places go into the app menu's
+    /// Go list, after a gap under "Go to path…" and "Jump to…", and add no
+    /// row of their own to the top level.
     #[test]
     fn the_pin_rows_go_where_the_places_are() {
         let dir = Facts {
@@ -1840,10 +1860,18 @@ mod tests {
         let mut rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
         let before = rows.len();
         insert_go(&mut rows, go);
-        assert_eq!(rows.len(), before + 1);
-        let at = rows.iter().position(|i| i.label == "Go").expect("Go");
-        assert_eq!(rows[at + 1].label, "Go to path…");
-        assert!(rows[at].gap_before && !rows[at + 1].gap_before);
+        assert_eq!(rows.len(), before);
+        let list = row(&rows, "Go").submenu.as_deref().expect("a list");
+        assert_eq!(
+            outline(list),
+            [
+                ("Go to path…", "Ctrl+l", false),
+                ("Jump to…", "z", false),
+                ("~/Work", "g w", true),
+                ("Pin this folder", "g b", false),
+            ]
+        );
+        assert_eq!(list[2].action, Action::Place(0));
         assert_eq!(
             folder_pin_item(true, &keymap, |_| false).label,
             "Unpin this folder"
@@ -2420,26 +2448,76 @@ mod tests {
             .collect()
     }
 
+    /// Every row of a menu, each parent followed by the list it flies out —
+    /// one level, as the menus are.
+    fn flat(rows: &[Item]) -> Vec<&Item> {
+        rows.iter()
+            .flat_map(|i| std::iter::once(i).chain(i.submenu.iter().flatten()))
+            .collect()
+    }
+
+    /// The row labelled `label` wherever it is: on the top level or in a list
+    /// a parent flies out.
+    fn anywhere<'a>(rows: &'a [Item], label: &str) -> &'a Item {
+        flat(rows)
+            .into_iter()
+            .find(|i| i.label == label)
+            .unwrap_or_else(|| panic!("no row {label:?}"))
+    }
+
+    /// A list's rows as the label, the key and whether a separator opens
+    /// above them.
+    fn outline(rows: &[Item]) -> Vec<(&str, &str, bool)> {
+        rows.iter()
+            .map(|i| (i.label.as_str(), i.keys.as_str(), i.gap_before))
+            .collect()
+    }
+
     /// The whole menu, top to bottom: every row, where the separators fall,
     /// and the key each one teaches — read out of the default registry, not
-    /// spelled here a second time.
+    /// spelled here a second time — and the Go, Find and Edit lists the same
+    /// way.
     #[test]
     fn the_app_menu_rows_are_in_their_groups() {
         let rows = app(app_facts());
-        let got: Vec<(&str, &str, bool)> = rows
-            .iter()
-            .map(|i| (i.label.as_str(), i.keys.as_str(), i.gap_before))
-            .collect();
         assert_eq!(
-            got,
+            outline(&rows),
             vec![
                 ("New tab", "t", false),
                 ("New window", "Ctrl+n", false),
-                ("Go to path…", "Ctrl+l", true),
-                ("Jump to…", "z", false),
+                ("Go", "", true),
+                ("Find", "", false),
+                ("Edit", "", true),
+                ("View", "", true),
+                ("Sort", "", false),
+                ("Mounts…", "M", true),
+                ("Trash", "g t", false),
+                ("Tasks", "w", false),
+                ("Clipboard", "B", false),
+                ("Disk usage", "m u", false),
+                ("Command palette…", "Ctrl+p", true),
+                ("Keyboard shortcuts", "F1", false),
+                ("Quit", "q", true),
+            ]
+        );
+        let list = |label: &str| row(&rows, label).submenu.as_deref().expect("a list");
+        // The places are [`insert_go`]'s to add, under these two.
+        assert_eq!(
+            outline(list("Go")),
+            vec![("Go to path…", "Ctrl+l", false), ("Jump to…", "z", false)]
+        );
+        assert_eq!(
+            outline(list("Find")),
+            vec![
                 ("Search everywhere by name…", "s", false),
                 ("Search everywhere inside files…", "S", false),
                 ("Filter this folder…", "f", false),
+            ]
+        );
+        assert_eq!(
+            outline(list("Edit")),
+            vec![
+                ("Undo", "u", false),
                 ("Select all", "Ctrl+a", true),
                 ("Invert selection", "Ctrl+r", false),
                 ("Copy", "y", true),
@@ -2450,44 +2528,40 @@ mod tests {
                 ("New file or folder…", "a", false),
                 ("Move to trash", "d", false),
                 ("Compress…", "A", false),
-                ("Undo", "u", false),
-                ("View", "", true),
-                ("Sort", "", false),
-                ("Mounts…", "M", true),
-                ("Trash", "g t", false),
-                ("Tasks", "w", false),
-                ("Show what is yanked", "B", false),
-                ("Disk usage", "m u", false),
-                ("Command palette…", "Ctrl+p", true),
-                ("Keyboard shortcuts", "F1", false),
-                ("Quit", "q", true),
             ]
         );
         // Every leaf is the command its key runs, so it cannot drift from it.
         use Command as C;
-        let command = |label: &str| match row(&rows, label).action {
+        let command = |label: &str| match anywhere(&rows, label).action {
             Action::Run(command) => command,
             other => panic!("{label} is {other:?}"),
         };
         assert_eq!(command("New tab"), C::TabCreate);
         assert_eq!(command("Go to path…"), C::GotoPath);
+        assert_eq!(command("Jump to…"), C::FuzzyJump);
+        assert_eq!(command("Filter this folder…"), C::Filter);
+        assert_eq!(command("Undo"), C::Undo);
         assert_eq!(command("Copy"), C::Yank);
         assert_eq!(command("Cut"), C::YankCut);
         assert_eq!(command("Sync here…"), C::PasteSync);
         assert_eq!(command("New file or folder…"), C::Create);
         assert_eq!(command("Trash"), C::OpenTrash);
+        assert_eq!(command("Clipboard"), C::YankShow);
         assert_eq!(command("Keyboard shortcuts"), C::Help);
         assert_eq!(command("Quit"), C::Quit);
-        // Only the two parents fly anything out, and nothing on the top level
-        // is a tick.
+        // The five parents are the only rows that fly anything out, and
+        // nothing on the top level is a tick.
         let parents: Vec<&str> = rows
             .iter()
             .filter(|i| i.has_submenu())
             .map(|i| i.label.as_str())
             .collect();
-        assert_eq!(parents, vec!["View", "Sort"]);
+        assert_eq!(parents, vec!["Go", "Find", "Edit", "View", "Sort"]);
         assert!(rows.iter().all(|i| i.checked.is_none()));
-        assert!(rows.iter().all(|i| i.enabled), "everything can act here");
+        assert!(
+            flat(&rows).iter().all(|i| i.enabled),
+            "everything can act here"
+        );
         // View ends with a group of its own for the panes: the two side
         // panes as ticks, and the reset.
         let view = row(&rows, "View").submenu.as_ref().expect("a list");
@@ -2505,34 +2579,95 @@ mod tests {
         );
     }
 
-    /// A rebound key is taught where it was moved to, and an unbound command
-    /// teaches nothing rather than a key that does not run it.
+    /// Every row that runs a command teaches the key the registry has for
+    /// it, in the lists the parents fly out as on the top level, and every
+    /// command the menu has carried is still in it somewhere with its key. A
+    /// rebound key is taught where it was moved to — a row in a list too —
+    /// and an unbound command teaches nothing rather than a key that does not
+    /// run it.
     #[test]
     fn the_app_menu_teaches_the_keys_the_registry_has() {
+        use df_core::keymap::{parse_sequence, Context, When};
+        use Command as C;
+        let keymap = Registry::defaults();
+        let rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
+        let flat = flat(&rows);
+        for item in &flat {
+            if let Action::Run(command) = item.action {
+                assert_eq!(
+                    item.keys,
+                    keymap.binding_label(command).unwrap_or_default(),
+                    "{} teaches the wrong key",
+                    item.label
+                );
+            }
+        }
+        let taught = |command: Command| {
+            flat.iter()
+                .any(|i| i.action == Action::Run(command) && !i.keys.is_empty())
+        };
+        for command in [
+            C::TabCreate,
+            C::NewWindow,
+            C::GotoPath,
+            C::FuzzyJump,
+            C::SearchName,
+            C::SearchContent,
+            C::Filter,
+            C::Undo,
+            C::SelectAll,
+            C::InvertSelection,
+            C::Yank,
+            C::YankCut,
+            C::Paste,
+            C::PasteSync,
+            C::Rename,
+            C::Create,
+            C::Trash,
+            C::ArchiveCreate,
+            C::MountManager,
+            C::OpenTrash,
+            C::TasksShow,
+            C::YankShow,
+            C::DiskUsage,
+            C::CommandPalette,
+            C::Help,
+            C::Quit,
+        ] {
+            assert!(taught(command), "{command:?} is not taught");
+        }
+
         let mut keymap = Registry::defaults();
-        let t = df_core::keymap::parse_sequence("t").expect("parses");
-        keymap.unbind(df_core::keymap::Context::Files, &t);
+        keymap.unbind(Context::Files, &parse_sequence("t").expect("parses"));
+        keymap.unbind(Context::Files, &parse_sequence("y").expect("parses"));
         let rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
-        assert_eq!(row(&rows, "New tab").keys, "");
-        keymap
-            .register(
-                df_core::keymap::Context::Files,
-                df_core::keymap::parse_sequence("alt+t").expect("parses"),
-                Command::TabCreate,
-                "New tab",
-                df_core::keymap::When::Always,
-            )
-            .expect("free");
+        assert_eq!(anywhere(&rows, "New tab").keys, "");
+        assert_eq!(anywhere(&rows, "Copy").keys, "", "Edit ▸ Copy");
+        for (keys, command, label) in [
+            ("alt+t", C::TabCreate, "New tab"),
+            ("alt+y", C::Yank, "Copy"),
+        ] {
+            keymap
+                .register(
+                    Context::Files,
+                    parse_sequence(keys).expect("parses"),
+                    command,
+                    label,
+                    When::Always,
+                )
+                .expect("free");
+        }
         let rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
-        assert_eq!(row(&rows, "New tab").keys, "Alt+t");
+        assert_eq!(anywhere(&rows, "New tab").keys, "Alt+t");
+        assert_eq!(anywhere(&rows, "Copy").keys, "Alt+y", "Edit ▸ Copy");
     }
 
     /// Greyed by what is there: nothing yanked greys Paste, nothing under the
     /// cursor greys the four verbs that need a file — and the parents never
-    /// grey, because a grey "View" would hide rows that can still act.
+    /// grey, because a grey "Edit" would hide rows that can still act.
     #[test]
     fn the_app_menu_greys_what_cannot_act_here() {
-        let enabled = |facts: AppFacts, label: &str| row(&app(facts), label).enabled;
+        let enabled = |facts: AppFacts, label: &str| anywhere(&app(facts), label).enabled;
         let empty = AppFacts {
             targets: 0,
             clipboard: false,
@@ -2550,6 +2685,9 @@ mod tests {
             "New file or folder…",
             "Select all",
             "Undo",
+            "Go",
+            "Find",
+            "Edit",
             "View",
             "Sort",
             "Quit",
@@ -2565,12 +2703,14 @@ mod tests {
         };
         assert!(!enabled(away, "Go to path…"));
         assert!(enabled(app_facts(), "Go to path…"));
-        let greyed: Vec<String> = app(away)
+        let rows = app(away);
+        let greyed: Vec<&str> = flat(&rows)
             .into_iter()
             .filter(|i| !i.enabled)
-            .map(|i| i.label)
+            .map(|i| i.label.as_str())
             .collect();
         assert_eq!(greyed, vec!["Go to path…"]);
+        assert!(row(&rows, "Go").enabled, "Go greys with its first row");
     }
 
     /// "Open with" draws its `O` beside its ▸, not on top of it: a list with a
@@ -2621,13 +2761,15 @@ mod tests {
             "New file or folder…",
             "Trash",
         ] {
-            assert!(!row(&rows, label).enabled, "{label} would be refused");
+            assert!(!anywhere(&rows, label).enabled, "{label} would be refused");
         }
         for label in ["Rename", "Undo", "Select all", "View", "Sort", "Quit"] {
-            assert!(row(&rows, label).enabled, "{label} is not refused");
+            assert!(anywhere(&rows, label).enabled, "{label} is not refused");
         }
         let everything = app_items(app_facts(), Vec::new(), &Registry::defaults(), |_| true);
-        assert!(row(&everything, "View").enabled && row(&everything, "Sort").enabled);
+        for label in ["Go", "Find", "Edit", "View", "Sort"] {
+            assert!(row(&everything, label).enabled, "{label} greyed");
+        }
     }
 
     fn folder_facts() -> FolderFacts {

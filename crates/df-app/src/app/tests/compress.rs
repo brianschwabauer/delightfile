@@ -385,13 +385,15 @@ fn a_is_refused_in_the_trash_an_archive_and_over_the_link() {
         toast(&app).as_deref(),
         Some("Not in the trash — Enter restores, D destroys")
     );
-    // The app menu greys it where the key refuses.
+    // The app menu greys it where the key refuses, in its Edit list.
     app.open_app_menu();
     let compress = app
         .menu
         .as_ref()
-        .and_then(|menu| menu.items.iter().find(|i| i.label == "Compress…").cloned())
-        .expect("the app menu has Compress…");
+        .and_then(|menu| menu.items.iter().find(|i| i.label == "Edit"))
+        .and_then(|edit| edit.submenu.as_ref())
+        .and_then(|rows| rows.iter().find(|i| i.label == "Compress…").cloned())
+        .expect("the app menu's Edit list has Compress…");
     assert!(!compress.enabled, "Compress… is live in the trash");
     app.menu = None;
     app.tabs.active_mut().trash = None;
