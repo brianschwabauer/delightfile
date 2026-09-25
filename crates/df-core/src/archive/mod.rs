@@ -75,6 +75,7 @@ pub mod tree;
 pub mod unpack;
 pub mod volumes;
 pub mod whole;
+pub mod write;
 pub mod zip;
 
 #[cfg(test)]

@@ -79,7 +79,7 @@ pub fn extractor_on(path: &OsStr) -> Option<Extractor> {
     })
 }
 
-fn is_executable(path: &Path) -> bool {
+pub(super) fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
@@ -197,7 +197,18 @@ impl Ran {
 /// on a terminal nobody is looking at. stdout and stderr are drained on a thread
 /// each: waiting on the child while a pipe fills is the classic deadlock.
 pub fn run(program: &Path, args: &[OsString], ctx: &TaskCtx) -> Result<Ran> {
-    let mut child = Command::new(program)
+    run_in(program, args, None, ctx)
+}
+
+/// [`run`], started in `dir` — for a program whose arguments are names
+/// relative to where it runs, which is how 7-Zip is told what to call the
+/// members of an archive it is writing.
+pub fn run_in(program: &Path, args: &[OsString], dir: Option<&Path>, ctx: &TaskCtx) -> Result<Ran> {
+    let mut command = Command::new(program);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -242,7 +253,7 @@ pub fn run(program: &Path, args: &[OsString], ctx: &TaskCtx) -> Result<Ran> {
 
 /// Read a pipe to its end on a thread of its own, keeping the first
 /// [`KEEP_OUTPUT`] bytes.
-fn drain<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u8>> {
+pub(super) fn drain<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut kept = Vec::new();
         let _ = pipe.by_ref().take(KEEP_OUTPUT).read_to_end(&mut kept);

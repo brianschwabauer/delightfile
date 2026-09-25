@@ -52,26 +52,7 @@ pub fn create(path: &Path) -> Result<Created> {
         return Err(DfError::Op(format!("{} already exists", path.display())));
     }
 
-    let parent = path.parent().map(|p| p.to_path_buf());
-    let mut created_parents = Vec::new();
-    if let Some(parent) = parent {
-        if !parent.as_os_str().is_empty() && !exists(&parent) {
-            // Record which levels were missing, deepest last, so undo can peel
-            // them off in the reverse order.
-            let mut missing = Vec::new();
-            let mut cursor = Some(parent.as_path());
-            while let Some(dir) = cursor {
-                if dir.as_os_str().is_empty() || exists(dir) {
-                    break;
-                }
-                missing.push(dir.to_path_buf());
-                cursor = dir.parent();
-            }
-            missing.reverse();
-            std::fs::create_dir_all(&parent).map_err(|e| DfError::io(&parent, e))?;
-            created_parents = missing;
-        }
-    }
+    let created_parents = make_parents(&path)?;
 
     let made = if is_dir {
         std::fs::create_dir(&path).map_err(|e| DfError::io(&path, e))
@@ -86,9 +67,7 @@ pub fn create(path: &Path) -> Result<Created> {
 
     if let Err(e) = made {
         // Do not leave half a path behind after a failure.
-        for dir in created_parents.iter().rev() {
-            let _ignored = std::fs::remove_dir(dir);
-        }
+        remove_parents(&created_parents);
         return Err(e);
     }
 
@@ -97,6 +76,43 @@ pub fn create(path: &Path) -> Result<Created> {
         is_dir,
         created_parents,
     })
+}
+
+/// Make the directories `path` needs above it, and say which were missing —
+/// shallowest first, so an undo or a failure can peel them off in reverse.
+///
+/// `a`'s rule, shared with anything else that takes a typed name with slashes
+/// in it: an archive written as `out/photos.zip` makes `out/` the same way
+/// `a` makes it for `out/notes.md`.
+pub fn make_parents(path: &Path) -> Result<Vec<PathBuf>> {
+    let Some(parent) = path.parent() else {
+        return Ok(Vec::new());
+    };
+    if parent.as_os_str().is_empty() || exists(parent) {
+        return Ok(Vec::new());
+    }
+    let mut missing = Vec::new();
+    let mut cursor = Some(parent);
+    while let Some(dir) = cursor {
+        if dir.as_os_str().is_empty() || exists(dir) {
+            break;
+        }
+        missing.push(dir.to_path_buf());
+        cursor = dir.parent();
+    }
+    missing.reverse();
+    std::fs::create_dir_all(parent).map_err(|e| DfError::io(parent, e))?;
+    Ok(missing)
+}
+
+/// Take back what [`make_parents`] made, deepest first, stopping at the first
+/// one that is not empty — something else has moved in, and it stays.
+pub fn remove_parents(made: &[PathBuf]) {
+    for dir in made.iter().rev() {
+        if std::fs::remove_dir(dir).is_err() {
+            break;
+        }
+    }
 }
 
 /// Rename `from` to `to`, within one directory.
