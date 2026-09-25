@@ -567,16 +567,7 @@ impl Spot {
     /// at the row whose top is nearest, off the cursor until a key, a click
     /// or a swipe moves it. Returns whether the rows moved.
     pub fn scroll_to(&mut self, points: f32, now: Instant) -> bool {
-        let mut top = 0.0;
-        let mut first = self.rows.len();
-        for (index, height) in self.heights().into_iter().enumerate() {
-            if points < top + height / 2.0 {
-                first = index;
-                break;
-            }
-            top += height;
-        }
-        self.scroll_to_row(first, now)
+        self.scroll_to_row(nearest(&self.heights(), points), now)
     }
 
     /// Swap in a different file, keeping the panel open — `←`/`→`.
@@ -871,6 +862,18 @@ fn follow(first: usize, at: usize, heights: &[f32], window: f32) -> usize {
     first.min(deepest(heights, window))
 }
 
+/// The row of these `heights` whose top is nearest `points` down them.
+fn nearest(heights: &[f32], points: f32) -> usize {
+    let mut top = 0.0;
+    for (index, height) in heights.iter().enumerate() {
+        if points < top + height / 2.0 {
+            return index;
+        }
+        top += height;
+    }
+    heights.len()
+}
+
 /// The furthest the view goes down rows of these `heights` in `window`
 /// points: the first of the last rows exactly filling it, or the top when
 /// they all fit.
@@ -961,23 +964,17 @@ fn on_body(body: &egui::Rect, row: &egui::Rect) -> bool {
 }
 
 /// The card's bar, beside its rows, while they are taller than the body.
-/// Counted in points, since the rows are not one height.
+/// Counted in points, since the rows are not one height: the body's height
+/// for the view, and the rows as far down as a view can start plus that
+/// body for the whole — the mount card's reasons
+/// ([`crate::mounts`]'s `extent`), so the thumb is one length however the
+/// rows in view fall, and pulled to the bottom it lands on the last view.
 pub fn bar(geometry: &Geometry, spot: &Spot) -> Option<crate::scrollbar::Geometry> {
     let heights = spot.heights();
     let above: f32 = heights[..geometry.first.min(heights.len())].iter().sum();
-    let shown: f32 = geometry
-        .rows
-        .iter()
-        .filter(|rect| on_body(&geometry.body, rect))
-        .map(egui::Rect::height)
-        .sum();
-    crate::scrollbar::card(
-        geometry.card,
-        geometry.body,
-        above,
-        shown,
-        heights.iter().sum(),
-    )
+    let window = geometry.body.height();
+    let reach: f32 = heights[..deepest(&heights, window)].iter().sum();
+    crate::scrollbar::card(geometry.card, geometry.body, above, window, reach + window)
 }
 
 /// The nine chips inside the permissions row, in three triads.
@@ -1717,6 +1714,56 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// The thumb is one length wherever the view starts, however tall the
+    /// rows in it; and pulled all the way down it lands on the last view —
+    /// in windows of every height, some of which leave the last view's rows
+    /// well short of the body's foot.
+    #[test]
+    fn the_spots_thumb_is_one_length_all_the_way_down() {
+        let now = Instant::now();
+        let mut facts = facts();
+        facts.btime = Some(SystemTime::now());
+        facts.git = Some("M — modified".to_string());
+        facts.link_target = Some(PathBuf::from("elsewhere"));
+        for height in (200..=320).step_by(3) {
+            let mut spot = Spot::new(facts.clone());
+            let area =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height as f32));
+            let bar_top = area.bottom() - 8.0;
+            spot.fit(window(area, bar_top), now);
+            let last = deepest(&spot.heights(), spot.window);
+            if last == 0 {
+                continue;
+            }
+            let mut lengths = Vec::new();
+            for first in 0..=last {
+                spot.first = first;
+                let g = geometry(area, bar_top, &spot);
+                let bar = bar(&g, &spot).expect("the rows overflow");
+                lengths.push(bar.thumb.height());
+                if first == last {
+                    assert!((bar.thumb.bottom() - bar.track.bottom()).abs() < 1e-3);
+                }
+            }
+            assert!(
+                lengths
+                    .windows(2)
+                    .all(|pair| (pair[0] - pair[1]).abs() < 1e-3),
+                "the thumb breathes in {height}: {lengths:?}"
+            );
+
+            spot.first = 0;
+            let g = geometry(area, bar_top, &spot);
+            let top = bar(&g, &spot).expect("the rows overflow");
+            let bottom = top.first_at(top.track.bottom() - top.thumb.height());
+            assert!(spot.scroll_to(bottom, now));
+            assert_eq!(
+                spot.first, last,
+                "pulled down in {height}, the thumb stopped short"
+            );
+        }
     }
 
     /// A short window: the card is inside it and its body shows the rows

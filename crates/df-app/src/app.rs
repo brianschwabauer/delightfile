@@ -11189,6 +11189,44 @@ impl App {
         }
     }
 
+    /// One frame of a card's or a menu's thumb in the hand: the list goes to
+    /// the row — or the point — the thumb's top now stands for, at once,
+    /// wherever the hand has wandered, on the card or off it. Returns the
+    /// bar whose list moved, so the frame measures its card again.
+    ///
+    /// Asked before the hit test, for the reason a pane's thumb is moved
+    /// before its rows are measured: the list follows the hand with no
+    /// slide, so the frame that reads the pointer has to draw the rows where
+    /// it put them. A pane's thumb and the bulk rename card's are moved where
+    /// their rows are measured instead ([`App::hold_scrollbar`],
+    /// [`App::bulk_layout`]). `menu`, `overlay`, `tray` and `which` are the
+    /// floating cards as the frame measured them.
+    fn hold_bar(
+        &mut self,
+        pointer: &Pointer,
+        menu: Option<&menu::Geometry>,
+        overlay: &Option<OverlayGeom>,
+        tray: &crate::tray::Geometry,
+        which: Option<&crate::whichkey::Geometry>,
+        now: Instant,
+    ) -> Option<Bar> {
+        let (true, Some(at), Some((bar, grab))) = (
+            pointer.down,
+            pointer.at,
+            self.press.and_then(|press| press.scrollbar),
+        ) else {
+            return None;
+        };
+        let geometry = match bar {
+            Bar::Pane(_) | Bar::Bulk => None,
+            Bar::Menu => menu.and_then(|menu| menu.bar),
+            Bar::Submenu => menu.and_then(|menu| menu.sub_bar),
+            Bar::Card(surface) => self.card_bar(surface, overlay, tray, which),
+        }?;
+        let first = geometry.first_at(at.y - grab);
+        self.scroll_bar_to(bar, first, which, now).then_some(bar)
+    }
+
     /// A hand let go of `bar`: it lingers from now, as after a scroll, rather
     /// than leaving at once because the drag held still before the release.
     fn let_go_bar(&mut self, bar: Bar, now: Instant) {
@@ -14797,65 +14835,47 @@ impl App {
             }
         }
 
-        // ── A card's or a menu's thumb in the hand ([`crate::scrollbar`]) ───
-        // Moved here, before the hit test, for the reason a pane's is moved
-        // before its rows are measured: the list follows the hand with no
-        // slide, so the frame that reads the pointer has to draw the rows
-        // where it put them. Wherever the hand has wandered, on the card or
-        // off it. A pane's thumb and the bulk rename card's are moved where
-        // their rows are measured ([`App::hold_scrollbar`],
-        // [`App::bulk_layout`]).
-        if let (true, Some(at), Some((bar, grab))) = (
-            pointer.down,
-            pointer.at,
-            self.press.and_then(|press| press.scrollbar),
-        ) {
-            let geometry = match bar {
-                Bar::Pane(_) | Bar::Bulk => None,
-                Bar::Menu => menu_geometry.as_ref().and_then(|menu| menu.bar),
-                Bar::Submenu => menu_geometry.as_ref().and_then(|menu| menu.sub_bar),
-                Bar::Card(surface) => {
-                    self.card_bar(surface, &overlay, &tray_geometry, which_geometry.as_ref())
+        // ── A card's or a menu's thumb in the hand ([`App::hold_bar`]) ──────
+        // Moved here, before the hit test, and the card it moved measured
+        // again, so the rows pressed are the rows the hand put there.
+        let held = self.hold_bar(
+            &pointer,
+            menu_geometry.as_ref(),
+            &overlay,
+            &tray_geometry,
+            which_geometry.as_ref(),
+            now,
+        );
+        if let Some(bar) = held {
+            match bar {
+                Bar::Menu | Bar::Submenu => {
+                    menu_geometry = self
+                        .menu
+                        .as_ref()
+                        .map(|menu| menu::geometry(area, menu, &painter));
                 }
-            };
-            let first = geometry.map(|geometry| geometry.first_at(at.y - grab));
-            if let Some(first) = first {
-                if self.scroll_bar_to(bar, first, which_geometry.as_ref(), now) {
-                    match bar {
-                        Bar::Menu | Bar::Submenu => {
-                            menu_geometry = self
-                                .menu
-                                .as_ref()
-                                .map(|menu| menu::geometry(area, menu, &painter));
-                        }
-                        Bar::Card(crate::scrollbar::Surface::Tray) => {
-                            tray_geometry = crate::tray::geometry(
-                                area,
-                                tray_chip,
-                                layout.path,
-                                &self.clipboard,
-                                self.tray_open,
-                                self.tray_first,
-                            );
-                        }
-                        Bar::Card(crate::scrollbar::Surface::WhichKey) => {
-                            which_geometry = Some(crate::whichkey::geometry(
-                                &painter,
-                                area,
-                                area.bottom(),
-                                &self.which_rows,
-                                self.which.first(),
-                            ));
-                        }
-                        _ => {
-                            overlay = self.overlay_geometry(
-                                &painter,
-                                area,
-                                &layout,
-                                area.bottom() - ui::GAP,
-                            );
-                        }
-                    }
+                Bar::Card(crate::scrollbar::Surface::Tray) => {
+                    tray_geometry = crate::tray::geometry(
+                        area,
+                        tray_chip,
+                        layout.path,
+                        &self.clipboard,
+                        self.tray_open,
+                        self.tray_first,
+                    );
+                }
+                Bar::Card(crate::scrollbar::Surface::WhichKey) => {
+                    which_geometry = Some(crate::whichkey::geometry(
+                        &painter,
+                        area,
+                        area.bottom(),
+                        &self.which_rows,
+                        self.which.first(),
+                    ));
+                }
+                _ => {
+                    overlay =
+                        self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
                 }
             }
         }
@@ -15508,6 +15528,17 @@ impl App {
                 self.state_changed(now);
             }
         }
+        // …and a bar's thumb, for the same reason: a hand whose release went
+        // somewhere else is not holding the bar, and the bar lingers from the
+        // frame that noticed, as it would from a release it heard.
+        if pointer.released || !pointer.down {
+            if let Some(bar) = self.held_bar() {
+                self.let_go_bar(bar, now);
+                if let Some(press) = &mut self.press {
+                    press.scrollbar = None;
+                }
+            }
+        }
         if pointer.released {
             // A tab in the hand is decided *here*, unlike a file drag: there is
             // no drop target to resolve, only the question of whether the chip
@@ -15521,10 +15552,6 @@ impl App {
                     let at = drag.at;
                     self.spring_tab_home(drag, at, now);
                 }
-            }
-            // A bar let go lingers from the release.
-            if let Some(bar) = self.held_bar() {
-                self.let_go_bar(bar, now);
             }
             // …but *not* the file drag: `tick_drag` reads the release as the
             // drop, and clearing the press here only stops the gesture
@@ -15777,9 +15804,14 @@ impl App {
                 // hover, and a hand over either would promise a click that
                 // never happens (`delightful-ui` §2).
                 Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
-                // …and a card's bar and a menu's, taken and paged as a
-                // pane's is, but with the plain arrow they have always worn.
-                Control::Bar(Bar::Card(_) | Bar::Menu | Bar::Submenu) => egui::CursorIcon::Default,
+                // …and every scrollbar, a pane's and the bulk rename card's as
+                // much as a card's or a menu's. A bar is not a button: the
+                // hand says one click does one thing (`delightful-ui` §2),
+                // and a bar is dragged, or pressed to page. Its thumb says it
+                // can be taken by its shape and by brightening under the
+                // pointer, and the arrow keeps saying the same thing while
+                // the hand drags it off the band.
+                Control::Bar(_) => egui::CursorIcon::Default,
                 // A divider moves sideways, and says so.
                 Control::Divider(_) => egui::CursorIcon::ResizeHorizontal,
                 // …and a pick button with nothing to pick is a third, for the
@@ -15796,7 +15828,6 @@ impl App {
                 Control::Row(..)
                 | Control::TabClose(_)
                 | Control::TabNew
-                | Control::Bar(Bar::Pane(_) | Bar::Bulk)
                 | Control::Crumb(_)
                 | Control::SearchNames
                 | Control::SearchContents

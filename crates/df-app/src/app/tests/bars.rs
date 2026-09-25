@@ -312,3 +312,101 @@ fn a_menus_thumb_is_taken_and_dragged() {
     frame(&mut app, &ctx, short, vec![button(above, false)], late);
     assert!(app.menu.as_ref().is_some_and(Menu::live));
 }
+
+/// The mount card up over a long listing, thirty shares long, at `now`.
+fn with_mount_card(name: &str, ctx: &egui::Context, now: Instant) -> Fixture {
+    let mut app = long_listing(name);
+    frame(&mut app, ctx, screen(), Vec::new(), now);
+    // Built rather than opened, as `M` would start the udisks worker.
+    let mut built = Card::new();
+    built.update(Vec::new(), shares(30));
+    app.mounts = Some(built);
+    app.sync_context();
+    frame(&mut app, ctx, screen(), Vec::new(), now);
+    app
+}
+
+/// A thumb held when the window stops hearing the button — the release
+/// went to another window, or the compositor swallowed it — is let go on the
+/// first frame that finds the button up, and lingers from that frame, as it
+/// would from a release it heard.
+#[test]
+fn a_release_the_window_never_hears_still_lets_go_of_the_bar() {
+    let ctx = egui::Context::default();
+    let t0 = Instant::now();
+    let mut app = with_mount_card("bar-lost-release", &ctx, t0);
+    let grab = mount_bar(&app).thumb.center();
+    let pressed = vec![egui::Event::PointerMoved(grab), button(grab, true)];
+    frame(&mut app, &ctx, screen(), pressed, t0);
+    assert_eq!(app.held_bar(), Some(Bar::Card(Surface::Mounts)));
+
+    // A window that has no button down and was told of no release: a
+    // context of its own, which has never seen the press.
+    let late = t0 + crate::scrollbar::LINGER * 3;
+    let unaware = egui::Context::default();
+    frame(&mut app, &unaware, screen(), Vec::new(), late);
+    assert_eq!(
+        app.held_bar(),
+        None,
+        "the bar is still in a hand that let go"
+    );
+    assert_eq!(app.gesture(), None);
+    assert_eq!(app.card_scrolled_at(Surface::Mounts), Some(late));
+}
+
+/// The cursor a frame with `events` asks for.
+fn cursor_in(
+    app: &mut App,
+    ctx: &egui::Context,
+    events: Vec<egui::Event>,
+    now: Instant,
+) -> egui::CursorIcon {
+    let input = egui::RawInput {
+        screen_rect: Some(screen()),
+        events,
+        focused: true,
+        ..Default::default()
+    };
+    ctx.run_ui(input, |ui| app.frame_at(ui, now))
+        .platform_output
+        .cursor_icon
+}
+
+/// Every bar wears the plain arrow — a pane's as much as a card's — over
+/// its thumb and its track, and while its thumb is dragged off the band.
+#[test]
+fn every_bar_wears_the_arrow() {
+    let ctx = egui::Context::default();
+    let t0 = Instant::now();
+    let mut app = long_listing("bar-cursor");
+    frame(&mut app, &ctx, screen(), Vec::new(), t0);
+    let (pane, _) = list_bar(&app);
+    let track = egui::pos2(pane.thumb.center().x, pane.track.bottom() - 4.0);
+    for at in [pane.thumb.center(), track] {
+        let cursor = cursor_in(&mut app, &ctx, vec![egui::Event::PointerMoved(at)], t0);
+        assert_eq!(
+            cursor,
+            egui::CursorIcon::Default,
+            "the list's bar at {at:?}"
+        );
+    }
+
+    let mut app = with_mount_card("bar-cursor-card", &ctx, t0);
+    let grab = mount_bar(&app).thumb.center();
+    let cursor = cursor_in(&mut app, &ctx, vec![egui::Event::PointerMoved(grab)], t0);
+    assert_eq!(cursor, egui::CursorIcon::Default, "the mount card's bar");
+    let pressed = vec![button(grab, true)];
+    assert_eq!(
+        cursor_in(&mut app, &ctx, pressed, t0),
+        egui::CursorIcon::Default
+    );
+    assert_eq!(app.held_bar(), Some(Bar::Card(Surface::Mounts)));
+    let away = grab + egui::vec2(-200.0, 30.0);
+    let dragged = vec![egui::Event::PointerMoved(away)];
+    assert_eq!(
+        cursor_in(&mut app, &ctx, dragged, t0),
+        egui::CursorIcon::Default,
+        "the thumb dragged off the band"
+    );
+    frame(&mut app, &ctx, screen(), vec![button(away, false)], t0);
+}

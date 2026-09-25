@@ -1785,8 +1785,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         }
         lines.push((line, rect));
     }
-    let total: f32 = card.lines().iter().map(|line| line.height()).sum();
-    let shown: f32 = lines.iter().map(|(line, _)| line.height()).sum();
+    let (window, total) = extent(card);
     Geometry {
         card: rect,
         body,
@@ -1795,23 +1794,35 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         close: Some(crate::chrome::close_button_rect(rect)),
         unpin: card.selected_place().is_some_and(|place| place.pinned),
         cloud: card.selected_cloud().is_some(),
-        band: crate::scrollbar::band(rect, body, shown, total),
+        band: crate::scrollbar::band(rect, body, window, total),
     }
 }
 
 /// The card's bar, beside its body, while the lines are more than it shows.
-/// Counted in points, since the lines are not one height.
+/// Counted in points, since the lines are not one height ([`extent`]).
 pub fn bar(geometry: &Geometry, card: &Card) -> Option<crate::scrollbar::Geometry> {
     let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
     let above: f32 = heights[..card.first.min(heights.len())].iter().sum();
-    let shown: f32 = geometry.lines.iter().map(|(line, _)| line.height()).sum();
-    crate::scrollbar::card(
-        geometry.card,
-        geometry.body,
-        above,
-        shown,
-        heights.iter().sum(),
-    )
+    let (window, total) = extent(card);
+    crate::scrollbar::card(geometry.card, geometry.body, above, window, total)
+}
+
+/// The bar's view and its whole, in points: the window the lines scroll in,
+/// and the lines as far down as a view can start plus that window.
+///
+/// The window rather than the lines laid out in it, which are fewer while a
+/// heading or an empty section's line is in view and more when rows are:
+/// a thumb measured from them would lengthen and shorten as a drag went
+/// down the card, and near [`crate::scrollbar::MIN_THUMB`] flip a line back
+/// and forth from one frame to the next. And the reach rather than every
+/// line, because the view stops at the last lines that fill the window
+/// ([`deepest`]), which can start above the window's height from the end:
+/// the bottom of the thumb's travel is that line, so a thumb pulled all the
+/// way down lands on it rather than on the line before.
+fn extent(card: &Card) -> (f32, f32) {
+    let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
+    let reach: f32 = heights[..deepest(&heights, card.window)].iter().sum();
+    (card.window, reach + card.window)
 }
 
 /// What one row says.
@@ -3333,6 +3344,52 @@ Mount(3): backup -> file:///mnt/backup
         let g = geometry(tall, &few);
         assert_eq!(bar(&g, &few), None);
         assert_eq!(g.band, None);
+    }
+
+    /// The thumb is one length wherever the view starts, whatever mix of
+    /// headings, empty sections and rows is in it; at the last view its
+    /// bottom is the track's; and pulled all the way down it lands on the
+    /// last line a view can start at — in windows of every height, some of
+    /// which leave the last view's lines well short of the window's foot.
+    #[test]
+    fn the_mount_cards_thumb_is_one_length_all_the_way_down() {
+        let now = std::time::Instant::now();
+        for height in (300..=560).step_by(5) {
+            let area =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height as f32));
+            let mut card = Card::with_places(places(3));
+            card.update(Vec::new(), share_rows(9));
+            card.fit(window(area), now);
+            let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
+            let last = deepest(&heights, card.window);
+            assert!(last > 0, "the card does not scroll in {area:?}");
+            let mut lengths = Vec::new();
+            for first in 0..=last {
+                card.first = first;
+                let g = geometry(area, &card);
+                let bar = bar(&g, &card).expect("the lines overflow");
+                lengths.push(bar.thumb.height());
+                if first == last {
+                    assert!((bar.thumb.bottom() - bar.track.bottom()).abs() < 1e-3);
+                }
+            }
+            assert!(
+                lengths
+                    .windows(2)
+                    .all(|pair| (pair[0] - pair[1]).abs() < 1e-3),
+                "the thumb breathes in {height}: {lengths:?}"
+            );
+
+            card.first = 0;
+            let g = geometry(area, &card);
+            let top = bar(&g, &card).expect("the lines overflow");
+            let bottom = top.first_at(top.track.bottom() - top.thumb.height());
+            assert!(card.scroll_to(bottom, now));
+            assert_eq!(
+                card.first, last,
+                "pulled down in {height}, the thumb stopped short"
+            );
+        }
     }
 
     /// A listing that lands while the card is scrolled moves the view to
