@@ -1267,7 +1267,7 @@ impl Card {
     pub fn set_clouds(&mut self, clouds: Vec<Cloud>) {
         self.clouds = clouds;
         self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
-        self.follow();
+        self.rebuilt();
     }
 
     /// Everything the cursor can land on, in order: the places, the disks, the
@@ -1347,7 +1347,7 @@ impl Card {
     pub fn set_places(&mut self, places: Vec<Place>) {
         self.places = places;
         self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
-        self.follow();
+        self.rebuilt();
     }
 
     /// `↑`/`↓`, **wrapping**: `↑` on the first row is the last row, and `↓`
@@ -1393,6 +1393,14 @@ impl Card {
         if let Some(at) = lines.iter().position(|line| *line == Line::Item(item)) {
             self.first = scroll(self.first, at, &lines, self.window);
         }
+    }
+
+    /// The lines were rebuilt under the card — a listing landed, a pin came
+    /// off, the remotes arrived — so the view follows the cursor to wherever
+    /// its row went, and that is not a scroll ([`crate::scrollbar::Linger`]).
+    fn rebuilt(&mut self) {
+        self.follow();
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     /// The window leaves the body `window` points ([`window`]): the lines
@@ -1498,7 +1506,7 @@ impl Card {
             None => self.cursor,
         }
         .min(items.len().saturating_sub(1));
-        self.follow();
+        self.rebuilt();
     }
 
     /// What the disks section says when it has no rows, or `None` when it
@@ -1672,11 +1680,14 @@ pub fn window(area: egui::Rect) -> f32 {
 pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
     let rect = crate::dialog::place_card(area, MAX_WIDTH, FIXED + card.body_height());
     let body_top = rect.top() + PAD + HEADING;
+    // Never upside down: a window shorter than the heading and the hint
+    // strip leaves the body no height at all, and nothing is drawn or
+    // pressed in it, rather than a body whose bottom is above its top.
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + PAD, body_top),
         egui::pos2(
             rect.right() - PAD,
-            rect.bottom() - PAD - crate::chrome::HINT_ROW,
+            (rect.bottom() - PAD - crate::chrome::HINT_ROW).max(body_top),
         ),
     );
     let mut lines = Vec::new();
@@ -3221,6 +3232,19 @@ Mount(3): backup -> file:///mnt/backup
             );
         }
 
+        // A window shorter than the heading and the hint strip: the body has
+        // no height rather than a negative one, and nothing on it — no row,
+        // no bar, no band — for a pointer to find.
+        let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(60.0, 60.0));
+        card.fit(window(tiny), now);
+        let g = geometry(tiny, &card);
+        assert!(g.body.height() >= 0.0, "{:?}", g.body);
+        assert_eq!(g.band, None);
+        assert_eq!(bar(&g, &card), None);
+        for (_, rect) in &g.lines {
+            assert_eq!(g.row_at(rect.center()), None);
+        }
+
         // A short list in a tall window has nothing to scroll.
         let mut few = Card::new();
         few.update(Vec::new(), Vec::new());
@@ -3228,6 +3252,34 @@ Mount(3): backup -> file:///mnt/backup
         let g = geometry(tall, &few);
         assert_eq!(bar(&g, &few), None);
         assert_eq!(g.band, None);
+    }
+
+    /// A listing that lands while the card is scrolled moves the view to
+    /// wherever the cursor's row went, and that is the list rebuilt under the
+    /// card, not a scroll: the bar has nothing to linger for.
+    #[test]
+    fn a_refresh_under_the_card_is_not_a_scroll() {
+        let t0 = std::time::Instant::now();
+        let short = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 300.0));
+        let mut card = Card::with_places(places(3));
+        card.update(many_devices(20), share_rows(3));
+        card.fit(window(short), t0);
+        assert_eq!(card.scrolled_at(), None, "opening is not a scroll");
+
+        let t1 = t0 + std::time::Duration::from_millis(16);
+        card.jump(Jump::Bottom);
+        card.fit(window(short), t1);
+        assert_eq!(card.selected(), Some(Item::Connect));
+        assert_eq!(card.scrolled_at(), Some(t1), "the End key scrolled it");
+
+        // Fewer disks, and the connect row, which the cursor stays on, further
+        // up the list: the view follows it.
+        let before = card.first;
+        card.update(many_devices(8), share_rows(3));
+        let t2 = t1 + std::time::Duration::from_secs(5);
+        card.fit(window(short), t2);
+        assert_ne!(card.first, before, "the view moved with the refresh");
+        assert_eq!(card.scrolled_at(), None, "and nobody scrolled it");
     }
 
     fn clouds() -> Vec<Cloud> {

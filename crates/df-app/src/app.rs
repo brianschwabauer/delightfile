@@ -11249,6 +11249,9 @@ impl App {
                     .unwrap_or(egui::Rect::ZERO);
                 self.clipboard.remove(self.tray_first + index);
                 self.clamp_tray();
+                // A name gone from the list is not a scroll, however far the
+                // view moves for it ([`crate::scrollbar::Linger`]).
+                self.tray_bar = crate::scrollbar::Linger::default();
                 rect
             }
             Control::YankRow(index) => {
@@ -15646,10 +15649,6 @@ impl App {
             }
             _ => {}
         }
-        if let (Some(panel), Some(OverlayGeom::Panel(_, rects, rows))) = (&mut self.panel, &overlay)
-        {
-            panel.fit(rects.len(), rows.len(), now);
-        }
         if let (Some(picker), Some(OverlayGeom::Picker(_, rects, _))) = (&mut self.picker, &overlay)
         {
             picker.fit(rects.len(), now);
@@ -15666,6 +15665,12 @@ impl App {
         };
         if let Some(panel) = &mut self.panel {
             panel.tick(&task_rows, now);
+            // …and then told how many rows it was laid out with: after the
+            // tasks, so a view a task leaving the list moves is the list
+            // rebuilt rather than a scroll ([`TaskPanel::tick`]).
+            if let Some(OverlayGeom::Panel(_, rects, _)) = &overlay {
+                panel.fit(rects.len(), task_rows.len(), now);
+            }
         }
         // What the clipboard is holding, as a set the row painter can ask in
         // constant time.
@@ -16498,14 +16503,6 @@ impl App {
         // A frame is asked for only while something is actually moving. A
         // pointer parked on a row holds a 1.0 that will be 1.0 again next
         // frame, and `animating()` says so — idle costs zero frames.
-        //
-        // The cards' bars on their way out, by the panes' rule below: the
-        // fade only, the linger before it being one wake-up
-        // (`next_deadline`) and a bar the pointer holds up being the same
-        // pixels next frame.
-        let bars = self
-            .card_bars()
-            .map(|(name, at)| (name, crate::scrollbar::fading(at, now)));
         let animating = [
             ("hovers", self.hovers.animating()),
             ("row tips", self.tips.animating()),
@@ -16534,17 +16531,6 @@ impl App {
                 self.scrolled_at()
                     .any(|at| crate::scrollbar::fading(Some(at), now)),
             ),
-            // …and the cards', one row a card, so `DF_FRAME_LOG` says which.
-            bars[0],
-            bars[1],
-            bars[2],
-            bars[3],
-            bars[4],
-            bars[5],
-            bars[6],
-            bars[7],
-            bars[8],
-            bars[9],
             ("preview", self.preview.animating(now)),
             // A pane folding or opening, a reset's slide, a stretched divider
             // springing back. All three end, and `Dividers::settle` drops them
@@ -16635,6 +16621,15 @@ impl App {
                 self.panel.as_ref().is_some_and(|p| p.animating(now)),
             ),
         ];
+        // …and the floating cards' bars on their way out, one row a card so
+        // `DF_FRAME_LOG` says which, by the panes' rule: the fade only, the
+        // linger before it being one wake-up (`next_deadline`) and a bar the
+        // pointer holds up being the same pixels next frame.
+        let bars = crate::scrollbar::Surface::ALL.map(|surface| {
+            let at = self.card_scrolled_at(surface);
+            (surface.name(), crate::scrollbar::fading(at, now))
+        });
+        let animating: Vec<(&str, bool)> = animating.into_iter().chain(bars).collect();
         // DF_FRAME_LOG=1 names whoever is holding the frame rate up — the
         // instrument for the Phase 6 "zero repaints at rest" audit, because a
         // stuck `animating()` source is invisible from outside.
@@ -16746,9 +16741,11 @@ impl App {
             // …and a scrolled menu's, by the same rule.
             self.menu.as_ref().and_then(|menu| menu.bar_deadline(now)),
             // …and the cards', by the same rule.
-            self.card_bars()
+            crate::scrollbar::Surface::ALL
                 .into_iter()
-                .filter_map(|(_, at)| crate::scrollbar::deadline(at, now))
+                .filter_map(|surface| {
+                    crate::scrollbar::deadline(self.card_scrolled_at(surface), now)
+                })
                 .min(),
         ]
         .into_iter()
@@ -16765,64 +16762,34 @@ impl App {
             .filter_map(|listing| listing.scrolled_at())
     }
 
-    /// When each floating card's list last scrolled, for its bar's linger
-    /// and fade, named for `DF_FRAME_LOG`. A card that is not open has no
-    /// list to have scrolled, so a closed card can never hold a frame up.
-    fn card_bars(&self) -> [(&'static str, Option<Instant>); 10] {
-        let dialog = |kind: fn(&Dialog) -> Option<Instant>| self.dialog.as_ref().and_then(kind);
-        [
-            (
-                "palette-bar",
-                self.finder.as_ref().and_then(Finder::scrolled_at),
-            ),
-            (
-                "tasks-bar",
-                self.panel.as_ref().and_then(TaskPanel::scrolled_at),
-            ),
-            (
-                "mounts-bar",
-                self.mounts
-                    .as_ref()
-                    .and_then(crate::mounts::Card::scrolled_at),
-            ),
-            (
-                "confirm-bar",
-                dialog(|dialog| match dialog {
-                    Dialog::Confirm(confirm) => confirm.scrolled_at(),
-                    _ => None,
-                }),
-            ),
-            (
-                "conflict-bar",
-                dialog(|dialog| match dialog {
-                    Dialog::Conflict(conflict) => conflict.scrolled_at(),
-                    _ => None,
-                }),
-            ),
-            (
-                "sync-bar",
-                dialog(|dialog| match dialog {
-                    Dialog::Sync(card) => card.scrolled_at(),
-                    _ => None,
-                }),
-            ),
-            (
-                "picker-bar",
-                self.picker.as_ref().and_then(Picker::scrolled_at),
-            ),
-            ("spot-bar", self.spot.as_ref().and_then(Spot::scrolled_at)),
+    /// When a floating card's list last scrolled, for its bar's linger and
+    /// fade. A card that is not open has no list to have scrolled, so a closed
+    /// card can never hold a frame up.
+    fn card_scrolled_at(&self, surface: crate::scrollbar::Surface) -> Option<Instant> {
+        use crate::scrollbar::Surface;
+        match (surface, &self.dialog) {
+            (Surface::Palette, _) => self.finder.as_ref().and_then(Finder::scrolled_at),
+            (Surface::Tasks, _) => self.panel.as_ref().and_then(TaskPanel::scrolled_at),
+            (Surface::Mounts, _) => self
+                .mounts
+                .as_ref()
+                .and_then(crate::mounts::Card::scrolled_at),
+            (Surface::Confirm, Some(Dialog::Confirm(confirm))) => confirm.scrolled_at(),
+            (Surface::Conflict, Some(Dialog::Conflict(conflict))) => conflict.scrolled_at(),
+            (Surface::Sync, Some(Dialog::Sync(card))) => card.scrolled_at(),
+            (Surface::Confirm | Surface::Conflict | Surface::Sync, _) => None,
+            (Surface::Picker, _) => self.picker.as_ref().and_then(Picker::scrolled_at),
+            (Surface::Spot, _) => self.spot.as_ref().and_then(Spot::scrolled_at),
             // The tray forgets its linger while it is shut.
-            ("tray-bar", self.tray_bar.scrolled_at()),
+            (Surface::Tray, _) => self.tray_bar.scrolled_at(),
             // Only while the card is up: one on its way out fades its bar
             // with it, on the card's own frames.
-            (
-                "which-bar",
-                self.which
-                    .shown()
-                    .then(|| self.which.scrolled_at())
-                    .flatten(),
-            ),
-        ]
+            (Surface::WhichKey, _) => self
+                .which
+                .shown()
+                .then(|| self.which.scrolled_at())
+                .flatten(),
+        }
     }
 
     /// How long until a pane has to admit it is loading, if one is about to.
@@ -21881,7 +21848,10 @@ mod tests {
             };
             let _ = ctx.run_ui(input, |ui| app.frame_at(ui, now));
         };
-        let bar = |app: &App| app.card_bars()[0];
+        let bar = |app: &App| {
+            let palette = crate::scrollbar::Surface::Palette;
+            (palette.name(), app.card_scrolled_at(palette))
+        };
         let now = Instant::now();
         app.open_palette();
         frame_at(&mut app, now);

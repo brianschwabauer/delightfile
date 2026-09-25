@@ -523,6 +523,9 @@ impl ConflictDialog {
             self.cursor = self.plan.conflicts.len() - 1;
         }
         self.load_facts();
+        // The answered name is gone from the list, which can move the view
+        // without anybody scrolling it ([`crate::scrollbar::Linger`]).
+        self.bar = crate::scrollbar::Linger::default();
         Step::Continue
     }
 

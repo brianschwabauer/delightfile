@@ -207,6 +207,9 @@ impl SyncCard {
         self.rows.clear();
         self.first = 0;
         self.stage = Stage::Comparing { id, slot, seen: 0 };
+        // A new list on its way, not the old one scrolled to its top
+        // ([`crate::scrollbar::Linger`]).
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     /// The planner's answer is in.
@@ -215,6 +218,7 @@ impl SyncCard {
         self.first = 0;
         self.reserved = 0;
         self.stage = Stage::Ready(Arc::new(plan));
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     /// The comparing task, while there is one.
@@ -259,6 +263,7 @@ impl SyncCard {
             self.rows = plan_rows(plan, self.mode);
             let last = self.rows.len().saturating_sub(self.visible());
             self.first = self.first.min(last);
+            self.bar = crate::scrollbar::Linger::default();
         }
     }
 

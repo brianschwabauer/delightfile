@@ -438,6 +438,9 @@ impl Finder {
         let query = self.ranking_query().to_string();
         self.hits = rank(&self.pool, &query);
         self.cursor = self.cursor.min(self.hits.len().saturating_sub(1));
+        // New hits, not the old ones scrolled: nothing for the bar to linger
+        // for ([`crate::scrollbar::Linger`]).
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     /// `↑` / `↓`, **wrapping**.

@@ -241,8 +241,8 @@ pub struct Geometry {
     /// How many rows a column shows at once.
     pub per: usize,
     /// How many rows the tallest column has: more than [`Geometry::per`] only
-    /// when the window was too narrow for the columns and the last one took
-    /// the rest, which is when the card scrolls.
+    /// when the window was too narrow for the columns and the rows were
+    /// shared out among fewer, which is when the card scrolls.
     pub total: usize,
     /// The first row drawn, kept inside the columns.
     pub first: usize,
@@ -281,10 +281,10 @@ pub fn bar(geometry: &Geometry) -> Option<crate::scrollbar::Geometry> {
 ///
 /// Always inside the window. A column holds [`COLUMN`] rows, or as many as
 /// the window's height has room for, which makes more columns; the card has
-/// as many columns as its width has room for, and past that the last column
-/// takes every row left, runs on below the card's foot, and the card scrolls
-/// all its columns together as one block — never sideways. Its keys work the
-/// same whatever is on screen.
+/// as many columns as its width has room for, and past that the rows are
+/// shared out evenly among those columns, which run on below the card's foot,
+/// and the card scrolls them together as one block — never sideways. Its keys
+/// work the same whatever is on screen.
 pub fn geometry(
     painter: &egui::Painter,
     area: egui::Rect,
@@ -312,15 +312,26 @@ pub fn geometry(
         (key_w, PAD_X + key_w + KEY_GAP + widest(&words) + PAD_X)
     };
     // `count` columns of `per` rows, the last one taking whatever is left.
+    // `count` columns: of `per` rows while that many fit the width, the last
+    // one shorter. Fewer than that, and the rows are shared out evenly — no
+    // two columns more than a row apart, the longer ones first — so the
+    // columns scroll as one block whose every column keeps rows on the card
+    // however far it goes (in any window with room for two rows a column),
+    // where columns of `per` with the rest piled into the last would scroll
+    // the others empty.
     let spans = |count: usize| -> Vec<std::ops::Range<usize>> {
+        if count == 0 || count >= rows.len().div_ceil(per) {
+            return (0..rows.len().div_ceil(per))
+                .map(|c| c * per..((c + 1) * per).min(rows.len()))
+                .collect();
+        }
+        let (each, longer) = (rows.len() / count, rows.len() % count);
+        let mut start = 0;
         (0..count)
             .map(|c| {
-                let end = if c + 1 == count {
-                    rows.len()
-                } else {
-                    (c + 1) * per
-                };
-                c * per..end
+                let span = start..start + each + usize::from(c < longer);
+                start = span.end;
+                span
             })
             .collect()
     };
@@ -478,10 +489,10 @@ mod tests {
     }
 
     /// A window too short for nine rows makes the columns shorter and more
-    /// of them; one too narrow for those as well lets the last column take
-    /// the rest and scrolls all of them as one block, down and never
-    /// sideways. The card is inside the window every time, and only the
-    /// rows inside it take the pointer.
+    /// of them; one too narrow for those as well shares the rows out among
+    /// the columns it has room for and scrolls all of them as one block, down
+    /// and never sideways. The card is inside the window every time, and only
+    /// the rows inside it take the pointer.
     #[test]
     fn a_small_window_keeps_the_card_inside_it_and_scrolls_the_rest() {
         with_painter(|painter| {
@@ -496,7 +507,7 @@ mod tests {
             let small = screen(400.0, 200.0);
             let g = geometry(painter, small, small.bottom(), &rows(25), 0);
             assert!(small.contains_rect(g.card), "{:?}", g.card);
-            assert!(g.total > g.per, "the last column runs on");
+            assert!(g.total > g.per, "the columns run on");
             assert!(g.band.is_some() && bar(&g).is_some());
             let mut drawn = g.rows.iter().filter(|row| g.clip.contains(row.center()));
             assert!(drawn.all(|row| g.card.contains_rect(*row)));
@@ -520,6 +531,79 @@ mod tests {
             // New rows start from their top.
             which.rows_changed();
             assert_eq!(which.first(), 0);
+        });
+    }
+
+    /// Columns that do not all fit the width share the rows out evenly — no
+    /// two more than a row apart — so the block scrolls as one rectangle and,
+    /// wherever it has scrolled to, no column is left with nothing on the
+    /// card. Swept over window sizes, and over every row the view can start
+    /// at in each.
+    #[test]
+    fn a_scrolled_card_never_empties_a_column() {
+        let short: Vec<Row> = (0..25)
+            .map(|i| Row {
+                keys: format!("g {i}"),
+                label: format!("Row {i}"),
+                next: Chord::plain(df_core::keymap::Key::Char('a')),
+            })
+            .collect();
+        with_painter(|painter| {
+            let mut shared = 0;
+            for width in (150..=700).step_by(10) {
+                for height in [150.0, 175.0, 200.0, 250.0, 300.0] {
+                    let area = screen(width as f32, height);
+                    let g = geometry(painter, area, area.bottom(), &short, 0);
+                    assert!(area.contains_rect(g.card), "{area:?}: {:?}", g.card);
+                    // The columns, by where their rows start across the card.
+                    let mut lefts: Vec<f32> = g.rows.iter().map(|row| row.left()).collect();
+                    lefts.dedup();
+                    let heights: Vec<usize> = lefts
+                        .iter()
+                        .map(|left| g.rows.iter().filter(|row| row.left() == *left).count())
+                        .collect();
+                    if g.total == g.per {
+                        continue;
+                    }
+                    if heights.len() > 1 {
+                        shared += 1;
+                        let (low, high) = (heights.iter().min(), heights.iter().max());
+                        assert!(
+                            high.zip(low).is_some_and(|(high, low)| high - low <= 1),
+                            "{area:?}: uneven columns {heights:?}"
+                        );
+                    }
+                    for first in 0..=g.total - g.per {
+                        let g = geometry(painter, area, area.bottom(), &short, first);
+                        for left in &lefts {
+                            let on_card = g
+                                .rows
+                                .iter()
+                                .filter(|row| row.left() == *left)
+                                .any(|row| g.clip.contains(row.center()));
+                            assert!(on_card, "{area:?} from row {first}: a column is empty");
+                        }
+                    }
+                }
+            }
+            assert!(
+                shared > 0,
+                "no window in the sweep shared rows among columns"
+            );
+
+            // The case the rule is for: twenty-five rows, seven to a column,
+            // two columns' width — thirteen and twelve, not seven and eighteen.
+            let two = (150..=700)
+                .step_by(5)
+                .map(|width| screen(width as f32, 200.0))
+                .map(|area| geometry(painter, area, area.bottom(), &short, 0))
+                .find(|g| {
+                    let mut lefts: Vec<f32> = g.rows.iter().map(|row| row.left()).collect();
+                    lefts.dedup();
+                    g.per == 7 && lefts.len() == 2
+                })
+                .expect("a width for two columns");
+            assert_eq!((two.total, two.per), (13, 7), "a range of six rows");
         });
     }
 

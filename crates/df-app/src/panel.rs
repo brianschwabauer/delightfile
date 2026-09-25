@@ -224,7 +224,11 @@ impl TaskPanel {
 
     /// Retarget the bars, and forget the ones whose task is gone.
     pub fn tick(&mut self, rows: &[TaskRow], now: Instant) {
+        let known = self.fills.len();
         self.fills.retain(|id, _| rows.iter().any(|r| r.id == *id));
+        // A task gone from the list, or a new one in it, is the list rebuilt
+        // under the panel: a view that moves for it has not been scrolled.
+        let mut rebuilt = self.fills.len() != known;
         for row in rows {
             let target = row.fraction.unwrap_or(0.0);
             match self.fills.get(&row.id) {
@@ -237,6 +241,7 @@ impl TaskPanel {
                     );
                 }
                 None => {
+                    rebuilt = true;
                     // The first sight of a task starts its bar where it already
                     // is rather than sweeping up from zero — a panel opened
                     // mid-copy should show the truth immediately.
@@ -252,6 +257,9 @@ impl TaskPanel {
         }
         if self.first > self.cursor {
             self.first = self.cursor;
+        }
+        if rebuilt {
+            self.bar = crate::scrollbar::Linger::default();
         }
     }
 
@@ -662,6 +670,41 @@ mod tests {
         // An empty panel keeps its line of guidance, inside the window.
         let (card, rects) = geometry(short, short.bottom() - 8.0, 0);
         assert!(rects.is_empty() && short.contains_rect(card));
+    }
+
+    /// A task dropping off the list while the panel is scrolled to its end
+    /// moves the view, and that is the list rebuilt, not a scroll: the bar
+    /// has nothing to linger for. A key that scrolls is one.
+    #[test]
+    fn a_task_leaving_the_list_is_not_a_scroll() {
+        let t0 = Instant::now();
+        let rows = |n: u64| -> Vec<TaskRow> {
+            (0..n)
+                .map(|i| row_for(&snapshot(i, TaskState::Done)))
+                .collect()
+        };
+        let (twelve, eleven) = (rows(12), rows(11));
+        let mut panel = TaskPanel::new();
+        // The frame's order: told the tasks, then how many rows it shows.
+        panel.tick(&twelve, t0);
+        panel.fit(4, twelve.len(), t0);
+        assert_eq!(panel.scrolled_at(), None, "opening is not a scroll");
+
+        let t1 = t0 + Duration::from_millis(16);
+        panel.move_cursor(100, twelve.len());
+        panel.tick(&twelve, t1);
+        panel.fit(4, twelve.len(), t1);
+        assert_eq!(panel.scrolled_at(), Some(t1), "a key scrolled it");
+
+        let t2 = t1 + Duration::from_secs(5);
+        panel.tick(&eleven, t2);
+        panel.fit(4, eleven.len(), t2);
+        assert_eq!(panel.first, eleven.len() - 4, "the view moved up a row");
+        assert_eq!(panel.scrolled_at(), None, "and nobody scrolled it");
+        let t3 = t2 + Duration::from_millis(16);
+        panel.tick(&eleven, t3);
+        panel.fit(4, eleven.len(), t3);
+        assert_eq!(panel.scrolled_at(), None);
     }
 
     /// The bar animates to a new value and then stops asking for frames.

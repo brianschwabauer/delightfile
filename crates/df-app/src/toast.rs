@@ -527,7 +527,9 @@ fn measure(
     // Never wider than the window: a message longer than that loses its
     // middle to `…` where it is drawn ([`fitted_message`]), and the offer at
     // the trailing edge stays on the plate.
-    let width = (message + hint_width + PAD * 2.0 + RULE_WIDTH).min(area.width() - MARGIN * 2.0);
+    let width = (message + hint_width + PAD * 2.0 + RULE_WIDTH)
+        .min(area.width() - MARGIN * 2.0)
+        .max(0.0);
     let rect = egui::Rect::from_center_size(
         egui::pos2(area.center().x, bottom - MARGIN - HEIGHT / 2.0 + drop),
         egui::vec2(width, HEIGHT),
@@ -697,6 +699,14 @@ mod tests {
                 fitted_message(painter, toast, geometry.rect.width()),
                 message
             );
+
+            // A window narrower than the toast's own margins gets no plate at
+            // all, never one of negative width.
+            let sliver = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(10.0, 600.0));
+            let geometry = toasts
+                .geometry(painter, sliver, sliver.bottom(), t0 + RISE)
+                .expect("a toast is up");
+            assert_eq!(geometry.rect.width(), 0.0);
         });
     }
 

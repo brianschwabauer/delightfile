@@ -203,6 +203,13 @@ pub fn paint(paint: &Painting<'_>, bar: &Geometry, alpha: f32, lit: f32, held: b
 /// view starts, and a start that differs from the last frame's is a scroll.
 /// The first frame it hears anything is not one: a card opening is not a card
 /// scrolling.
+///
+/// Nor is a list rebuilt under the card: new hits for a new query, a finished
+/// task dropped off the end, a refresh that reorders the disks, a swipe to a
+/// file with fewer facts. The view's start can move with any of them, and a
+/// bar flashing up for it would be reporting a scroll nobody made, so the
+/// card starts a fresh `Linger` whenever its list is rebuilt, and the next
+/// frame it is told about is its first again.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Linger {
     first: Option<f32>,
@@ -240,8 +247,45 @@ pub enum Surface {
     WhichKey,
 }
 
+impl Surface {
+    /// Every card with a bar, for the frame-request list and the wake-ups
+    /// to walk: a card added here is asked about by both.
+    pub const ALL: [Surface; 10] = [
+        Surface::Palette,
+        Surface::Tasks,
+        Surface::Mounts,
+        Surface::Confirm,
+        Surface::Conflict,
+        Surface::Sync,
+        Surface::Picker,
+        Surface::Spot,
+        Surface::Tray,
+        Surface::WhichKey,
+    ];
+
+    /// The bar's name in `DF_FRAME_LOG`, which says whose fade is holding
+    /// the frame rate up.
+    pub fn name(self) -> &'static str {
+        match self {
+            Surface::Palette => "palette-bar",
+            Surface::Tasks => "tasks-bar",
+            Surface::Mounts => "mounts-bar",
+            Surface::Confirm => "confirm-bar",
+            Surface::Conflict => "conflict-bar",
+            Surface::Sync => "sync-bar",
+            Surface::Picker => "picker-bar",
+            Surface::Spot => "spot-bar",
+            Surface::Tray => "tray-bar",
+            Surface::WhichKey => "which-bar",
+        }
+    }
+}
+
 /// A card's bar: down the card's right-hand padding beside `body`, the part of
-/// the card its rows are drawn in, or `None` when every row fits.
+/// the card its rows are drawn in, or `None` when every row fits — or when
+/// the body has no height to scroll in, a window too short for even the
+/// card's fixed parts, where there is nothing on the card for a bar to be
+/// about.
 ///
 /// In the padding rather than over the rows: the padding is the one strip of
 /// the card nothing else is drawn on, and the band a pointer lights the bar
@@ -253,6 +297,9 @@ pub fn card(
     visible: f32,
     total: f32,
 ) -> Option<Geometry> {
+    if body.height() <= 0.0 {
+        return None;
+    }
     let pane = egui::Rect::from_min_max(body.min, egui::pos2(card.right(), body.bottom()));
     geometry(pane, first, visible, total)
 }
@@ -402,6 +449,16 @@ mod tests {
         assert_eq!(linger.scrolled_at(), Some(moved), "the stamp is the move's");
     }
 
+    /// Every card is in the list the frame walks, once, under a name of its
+    /// own in `DF_FRAME_LOG`.
+    #[test]
+    fn every_card_has_a_name_of_its_own() {
+        let names: std::collections::BTreeSet<&str> =
+            Surface::ALL.iter().map(|surface| surface.name()).collect();
+        assert_eq!(names.len(), Surface::ALL.len());
+        assert!(names.iter().all(|name| name.ends_with("-bar")));
+    }
+
     /// A card's bar sits in the card's right padding beside its rows, and a
     /// card whose rows fit has none.
     #[test]
@@ -413,5 +470,9 @@ mod tests {
         assert!(bar.thumb.left() >= body.right(), "clear of the rows");
         assert!(bar.thumb.right() <= card.right(), "inside the card");
         assert!(bar.track.top() >= body.top() && bar.track.bottom() <= body.bottom());
+        // A body with no height has nothing on it for a bar to be about.
+        let flat = egui::Rect::from_min_size(body.min, egui::vec2(body.width(), 0.0));
+        assert_eq!(super::card(card, flat, 0.0, 7.0, 20.0), None);
+        assert_eq!(band(card, flat, 7.0, 20.0), None);
     }
 }

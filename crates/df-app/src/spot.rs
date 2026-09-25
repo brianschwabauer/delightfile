@@ -531,12 +531,16 @@ impl Spot {
         self.facts = facts;
         self.rows = rows(&self.facts);
         self.cursor = was.min(self.rows.len().saturating_sub(1));
+        // Another file's rows: wherever the view goes for them, it has not
+        // been scrolled ([`crate::scrollbar::Linger`]).
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     /// Rebuild the rows after a late fact landed — a sniff, a probe, git.
     pub fn refresh(&mut self) {
         self.rows = rows(&self.facts);
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     pub fn move_cursor(&mut self, delta: isize) {
@@ -682,6 +686,12 @@ impl Spot {
         // joins it while it is already on its way out.
         if !self.checksum.running() {
             self.hasher = None;
+        }
+        // A digest takes two lines where the chip took one: the rows have
+        // changed height under the card, which moves the view without
+        // anybody scrolling it.
+        if matches!(self.checksum, Checksum::Done(_)) {
+            self.bar = crate::scrollbar::Linger::default();
         }
         true
     }
@@ -1685,6 +1695,35 @@ mod tests {
         let g = lay(&mut spot, narrow);
         assert!(narrow.contains_rect(g.card), "{:?}", g.card);
         assert!(g.card.width() < WIDTH);
+    }
+
+    /// A swipe to a file with fewer facts moves the view, and that is another
+    /// file's rows, not a scroll: the bar has nothing to linger for.
+    #[test]
+    fn a_swipe_is_not_a_scroll() {
+        let t0 = Instant::now();
+        let short = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 240.0));
+        let bar_top = short.bottom() - 8.0;
+        let mut rich = facts();
+        rich.btime = Some(SystemTime::now());
+        rich.git = Some("M — modified".to_string());
+        rich.link_target = Some(PathBuf::from("elsewhere"));
+        let mut spot = Spot::new(rich);
+        spot.fit(window(short, bar_top), t0);
+        assert_eq!(spot.scrolled_at(), None, "opening is not a scroll");
+
+        let t1 = t0 + Dur::from_millis(16);
+        spot.move_cursor(100);
+        spot.fit(window(short, bar_top), t1);
+        assert!(spot.first > 0, "the rows are taller than the card");
+        assert_eq!(spot.scrolled_at(), Some(t1), "the arrows scrolled it");
+
+        let before = spot.first;
+        spot.swipe(facts());
+        let t2 = t1 + Dur::from_secs(5);
+        spot.fit(window(short, bar_top), t2);
+        assert_ne!(spot.first, before, "the view moved with the swipe");
+        assert_eq!(spot.scrolled_at(), None, "and nobody scrolled it");
     }
 
     /// The chips are at least `delightful-ui` §1's 24 points apart centre to
