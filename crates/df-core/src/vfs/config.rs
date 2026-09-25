@@ -26,20 +26,50 @@
 //! ```
 //!
 //! One `[services.<name>]` table per machine; the table's last dotted segment
-//! *is* the service name, which is what `sftp://showandtour1/…` addresses. Only
-//! `type = "sftp"` exists; a table with any other type is skipped with a warning
-//! rather than a failure, because a future `type = "s3"` in yazi's file must not
-//! stop delightfile reading the sftp entries beside it.
+//! *is* the service name, which is what `sftp://showandtour1/…` addresses.
+//! `type = "sftp"` and `type = "rclone"` (below) exist; a table with any other
+//! type is skipped with a warning rather than a failure, because a future
+//! `type = "s3"` in yazi's file must not stop delightfile reading the sftp
+//! entries beside it.
 //!
-//! `host` is the only required key. Everything else has a default, and — this is
-//! the point of the whole design — *every* default is "let `ssh` decide". A
-//! `host` of `showandtour1` with no `user`, no `port` and no `key_file` is not
-//! underspecified: it is a `Host showandtour1` block in `~/.ssh/config`, which
-//! is where the user already put the answer. See [`super`] on why nothing here
-//! reimplements ssh.
+//! For an sftp service `host` is the only required key. Everything else has a
+//! default, and — this is the point of the whole design — *every* default is
+//! "let `ssh` decide". A `host` of `showandtour1` with no `user`, no `port`
+//! and no `key_file` is not underspecified: it is a `Host showandtour1` block
+//! in `~/.ssh/config`, which is where the user already put the answer. See
+//! [`super`] on why nothing here reimplements ssh.
 //!
 //! A bad line warns and the rest of the file still loads, per PLAN §3 and per
 //! [`crate::toml`]'s whole reason for existing.
+//!
+//! ## Cloud storage: `type = "rclone"`, and rclone's own file
+//!
+//! A second kind of service is a remote in the user's `rclone config` — a
+//! Google Drive, a Dropbox, an S3 or R2 bucket, anything rclone speaks — reached
+//! through `rclone rcd` (see `super::rclone`). Such a service can be written
+//! into `vfs.toml`:
+//!
+//! ```toml
+//! [services.photos]
+//! type = "rclone"
+//! remote = "r2"          # the [section] in rclone.conf; defaults to the name
+//! root = "photos-bucket" # optional: start inside the remote
+//! ```
+//!
+//! — but it usually does not have to be, because **rclone's own config file is
+//! read too**, and every remote in it becomes a service of the same name
+//! ([`VfsConfig::load`]). `rclone config` is where the user already told a
+//! program how to reach their cloud, with a token delightfile never sees; a
+//! second list to keep in step with it would be the retyped-bookmarks problem
+//! this file exists to avoid. `vfs.toml` still wins: a service it defines by
+//! name is left exactly as written, and the discovered remotes come after the
+//! file's own services, in `rclone.conf`'s order, so adding a remote to rclone
+//! never moves `g 1` or `g 2`.
+//!
+//! An encrypted `rclone.conf` cannot be read without its password, and asking
+//! for one is not this parser's job: it says so once, as a warning, and
+//! discovers nothing. Services from such a file go in `vfs.toml` by hand, and
+//! rclone itself reads the password from `RCLONE_CONFIG_PASS` when it runs.
 
 use std::path::{Path, PathBuf};
 
@@ -69,6 +99,7 @@ impl ServiceKind {
     pub fn parse(text: &str) -> Option<ServiceKind> {
         match text {
             "sftp" | "ssh" => Some(ServiceKind::Sftp),
+            "rclone" => Some(ServiceKind::Rclone),
             _ => None,
         }
     }
@@ -311,6 +342,17 @@ impl VfsConfig {
                 ));
                 continue;
             }
+            // An rclone service shares nothing with an ssh one but the table
+            // it is written in, so it has its own reader rather than a branch
+            // through every line of the ssh one.
+            if table.get("type").and_then(Value::as_str) == Some("rclone") {
+                let (service, notes) = parse_rclone_service(name, table);
+                for note in notes {
+                    warnings.push(ConfigWarning::new(file, table.line, note));
+                }
+                config.insert(service);
+                continue;
+            }
             match parse_service(name, table) {
                 Ok(service) => config.insert(service),
                 Err(message) => warnings.push(ConfigWarning::new(file, table.line, message)),
@@ -348,9 +390,36 @@ impl VfsConfig {
         (config, warnings)
     }
 
-    /// The real thing: yazi's file then delightfile's.
+    /// Every `vfs.toml` in `paths`, then the remotes of the `rclone.conf` at
+    /// `rclone_conf` that none of them defined by name.
+    ///
+    /// The seam [`VfsConfig::load`] is a thin wrapper round, with both
+    /// locations explicit so a test can hand it fixtures and never read the
+    /// user's own files.
+    pub fn load_with_rclone(
+        paths: &[PathBuf],
+        rclone_conf: Option<&Path>,
+    ) -> (VfsConfig, Vec<ConfigWarning>) {
+        let (mut config, mut warnings) = VfsConfig::load_files(paths);
+        if let Some(path) = rclone_conf {
+            let (remotes, mut notes) = load_rclone_conf(path);
+            for service in remotes {
+                // `vfs.toml` wins by name, and wins whole: a service written
+                // there is exactly what it says, whatever rclone calls the same
+                // name. Appended, never inserted, so the file's own services
+                // keep their numbers.
+                if config.service(&service.name).is_none() {
+                    config.services.push(service);
+                }
+            }
+            warnings.append(&mut notes);
+        }
+        (config, warnings)
+    }
+
+    /// The real thing: yazi's file, delightfile's, then rclone's remotes.
     pub fn load() -> (VfsConfig, Vec<ConfigWarning>) {
-        VfsConfig::load_files(&config_paths())
+        VfsConfig::load_with_rclone(&config_paths(), rclone_config_path().as_deref())
     }
 }
 
@@ -366,6 +435,85 @@ pub fn config_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Where rclone keeps its config, by rclone's own rule: `$RCLONE_CONFIG` when
+/// it is set, else `$XDG_CONFIG_HOME/rclone/rclone.conf`, else
+/// `~/.config/rclone/rclone.conf`.
+///
+/// The same answer `rclone` itself reaches, which matters because the daemon
+/// that does the work reads the file this function names — a service
+/// discovered from one file and served from another would be a remote that
+/// lists and then cannot be reached.
+pub fn rclone_config_path() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("RCLONE_CONFIG").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(explicit));
+    }
+    xdg_config_home().map(|base| base.join("rclone").join("rclone.conf"))
+}
+
+/// The line an encrypted `rclone.conf` carries instead of its sections.
+const RCLONE_ENCRYPTED: &str = "RCLONE_ENCRYPT_V0:";
+
+/// Read the remotes out of one `rclone.conf`. A missing file is silence, like
+/// a missing `vfs.toml`.
+pub fn load_rclone_conf(path: &Path) -> (Vec<Service>, Vec<ConfigWarning>) {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_rclone_conf(&text, path),
+        Err(_) => (Vec::new(), Vec::new()),
+    }
+}
+
+/// The remotes an `rclone.conf` defines, in file order: one
+/// [`ServiceKind::Rclone`] service per `[section]`, named after it, with the
+/// section's `type` as its [`Service::provider`].
+///
+/// The file is INI, and only two of its shapes matter here: `[name]` and
+/// `type = …`. Everything else — the tokens, the keys, the endpoints — is
+/// rclone's business and is not read, let alone kept. A line that is neither
+/// a section, a `key = value` nor a comment is skipped without a warning: this
+/// is rclone's file, rclone validates it, and a second opinion on its syntax
+/// would only ever be wrong about something rclone accepts.
+pub fn parse_rclone_conf(text: &str, file: &Path) -> (Vec<Service>, Vec<ConfigWarning>) {
+    let mut services: Vec<Service> = Vec::new();
+    for (index, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        // Encrypted: the first line that is not a comment is the marker, and
+        // everything after it is ciphertext.
+        if services.is_empty() && line.starts_with(RCLONE_ENCRYPTED) {
+            let warning = ConfigWarning::new(
+                file,
+                index + 1,
+                "the rclone config is encrypted, so its remotes cannot be listed — \
+                 add each one to vfs.toml as a service with type = \"rclone\"",
+            );
+            return (Vec::new(), vec![warning]);
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            // A section written twice is one remote, as it is to rclone.
+            if !services.iter().any(|s| s.name == name) {
+                services.push(Service::rclone(name, name));
+            }
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == "type" {
+            if let Some(current) = services.last_mut() {
+                let value = value.trim();
+                current.provider = (!value.is_empty()).then(|| value.to_string());
+            }
+        }
+    }
+    (services, Vec::new())
+}
+
 fn xdg_config_home() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
@@ -373,10 +521,56 @@ fn xdg_config_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
 }
 
+/// A `type = "rclone"` table. Never fails: every key it reads is optional,
+/// and the ssh keys it has no use for are named in a note rather than refused,
+/// because a service that moved from sftp to rclone and kept its old `user`
+/// line should still work.
+fn parse_rclone_service(name: &str, table: &Table) -> (Service, Vec<String>) {
+    let mut notes = Vec::new();
+    let mut text = |key: &str| match table.get(key) {
+        Some(value) => match value.as_str() {
+            Some(text) => Some(text.to_string()),
+            None => {
+                notes.push(format!(
+                    "[services.{name}] `{key}` should be a string, found {}",
+                    value.type_name()
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    let remote = text("remote");
+    // `root` and yazi's `path` mean the same thing here as they do for sftp.
+    let root = match text("root") {
+        Some(root) => Some(root),
+        None => text("path"),
+    };
+    let ignored: Vec<&str> = ["host", "user", "port", "key_file"]
+        .into_iter()
+        .filter(|key| table.get(key).is_some())
+        .collect();
+    if !ignored.is_empty() {
+        let list = ignored
+            .iter()
+            .map(|key| format!("`{key}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        notes.push(format!(
+            "[services.{name}] is an rclone service; {list} {} for ssh and ignored",
+            if ignored.len() == 1 { "is" } else { "are" }
+        ));
+    }
+    let mut service = Service::rclone(name, remote.unwrap_or_else(|| name.to_string()));
+    service.root = root;
+    (service, notes)
+}
+
 fn parse_service(name: &str, table: &Table) -> Result<Service, String> {
     let kind = match table.get("type").and_then(Value::as_str) {
-        Some(text) => ServiceKind::parse(text)
-            .ok_or_else(|| format!("[services.{name}] has type = \"{text}\", which is not sftp"))?,
+        Some(text) => ServiceKind::parse(text).ok_or_else(|| {
+            format!("[services.{name}] has type = \"{text}\", which is neither sftp nor rclone")
+        })?,
         // No `type` at all: the file only ever describes sftp services, so
         // assuming one is right far more often than refusing is.
         None => ServiceKind::Sftp,

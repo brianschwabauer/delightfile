@@ -33,6 +33,143 @@ use crate::tasks::{ProgressSink, TaskCtx, TaskFlags};
 /// Generous enough for a loaded machine, short enough that a hang fails.
 const T: Duration = Duration::from_secs(10);
 
+// ── rclone.conf discovery ───────────────────────────────────────────────────
+
+const VFS_TOML: &str = r#"
+[services.showandtour1]
+type = "sftp"
+host = "showandtour1"
+
+[services.dropbox]
+host = "a-machine-called-dropbox"
+"#;
+
+/// The shape of a real `rclone.conf`: sections, a `type` each, and keys this
+/// parser must never keep. The secrets are fake; the point is that they are
+/// not read into anything.
+const RCLONE_CONF: &str = r#"
+# rclone.conf
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = not-a-real-key
+secret_access_key = not-a-real-secret
+
+; a comment the other way
+[gdrive]
+type    =   drive
+token = {"access_token":"x","expiry":"2026-01-01T00:00:00Z"}
+
+this line is not INI at all
+
+[dropbox]
+type = dropbox
+
+[no-type]
+"#;
+
+#[test]
+fn rclone_remotes_follow_the_vfs_toml_services_and_never_displace_them() {
+    let dir = TempDir::new("rclone-conf");
+    let toml = dir.file("vfs.toml", VFS_TOML.as_bytes());
+    let conf = dir.file("rclone.conf", RCLONE_CONF.as_bytes());
+    let (config, warnings) = VfsConfig::load_with_rclone(&[toml], Some(&conf));
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let names: Vec<&str> = config.services.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["showandtour1", "dropbox", "r2", "gdrive", "no-type"],
+        "vfs.toml's services first, in file order, so `g 1`/`g 2` never shift"
+    );
+
+    let r2 = config.service("r2").unwrap();
+    assert_eq!(r2.kind, ServiceKind::Rclone);
+    assert_eq!(r2.remote.as_deref(), Some("r2"));
+    assert_eq!(r2.provider.as_deref(), Some("s3"));
+    assert_eq!(r2.host, "", "a cloud remote has no host");
+    assert_eq!(r2.rclone_fs(), "r2:");
+    assert_eq!(
+        config.service("gdrive").unwrap().provider.as_deref(),
+        Some("drive")
+    );
+    assert_eq!(config.service("no-type").unwrap().provider, None);
+
+    // The name vfs.toml already has is vfs.toml's, whole.
+    let dropbox = config.service("dropbox").unwrap();
+    assert_eq!(dropbox.kind, ServiceKind::Sftp);
+    assert_eq!(dropbox.host, "a-machine-called-dropbox");
+    assert_eq!(dropbox.provider, None);
+}
+
+#[test]
+fn an_encrypted_rclone_conf_warns_once_and_discovers_nothing() {
+    for text in [
+        "# Encrypted rclone configuration File\n\nRCLONE_ENCRYPT_V0:\nZm9vYmFy\n",
+        "RCLONE_ENCRYPT_V0:\nZm9vYmFy\n",
+    ] {
+        let (services, warnings) = super::parse_rclone_conf(text, Path::new("rclone.conf"));
+        assert!(services.is_empty(), "{services:?}");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let said = warnings[0].to_string();
+        assert!(said.contains("encrypted"), "{said}");
+        assert!(said.contains("vfs.toml"), "the way out is named: {said}");
+    }
+}
+
+#[test]
+fn a_missing_rclone_conf_is_silence() {
+    let (config, warnings) =
+        VfsConfig::load_with_rclone(&[], Some(Path::new("/nonexistent/rclone.conf")));
+    assert!(config.services.is_empty());
+    assert!(warnings.is_empty());
+    let (config, warnings) = VfsConfig::load_with_rclone(&[], None);
+    assert!(config.services.is_empty() && warnings.is_empty());
+}
+
+#[test]
+fn type_rclone_in_vfs_toml_needs_no_host() {
+    let text = r#"
+[services.photos]
+type = "rclone"
+remote = "r2"
+root = "photos-bucket"
+
+[services.plain]
+type = "rclone"
+
+[services.moved]
+type = "rclone"
+path = "/inside/"
+user = "brian"
+port = 2222
+"#;
+    let (config, warnings) = VfsConfig::parse(text, Path::new("vfs.toml"));
+    let photos = config.service("photos").unwrap();
+    assert_eq!(photos.kind, ServiceKind::Rclone);
+    assert_eq!(photos.host, "");
+    assert_eq!(photos.remote.as_deref(), Some("r2"));
+    assert_eq!(photos.rclone_fs(), "r2:photos-bucket");
+
+    let plain = config.service("plain").unwrap();
+    assert_eq!(
+        plain.rclone_fs(),
+        "plain:",
+        "the remote defaults to the name"
+    );
+
+    // The ssh keys are named, not obeyed, and the service still loads.
+    let moved = config.service("moved").unwrap();
+    assert_eq!(moved.rclone_fs(), "moved:inside", "yazi's `path` is `root`");
+    assert_eq!(moved.user, None);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let said = warnings[0].to_string();
+    assert!(
+        said.contains("`user`, `port`") && said.contains("ignored"),
+        "{said}"
+    );
+}
+
 // ── Addressing ──────────────────────────────────────────────────────────────
 
 #[test]

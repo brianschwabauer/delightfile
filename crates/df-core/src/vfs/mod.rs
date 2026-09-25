@@ -95,7 +95,10 @@ mod rclone_tests;
 #[cfg(test)]
 mod tests;
 
-pub use config::{config_paths, Service, ServiceKind, VfsConfig, DEFAULT_SSH_PORT};
+pub use config::{
+    config_paths, load_rclone_conf, parse_rclone_conf, rclone_config_path, Service, ServiceKind,
+    VfsConfig, DEFAULT_SSH_PORT,
+};
 pub use conn::{MAX_LINK_RESOLVES, READ_CHUNK, READ_WINDOW, WRITE_WINDOW};
 pub use wire::{Attrs, ProtocolError, Status, StatusCode, MAX_PACKET};
 
@@ -292,8 +295,8 @@ impl std::fmt::Display for VfsPath {
 /// sorting, in one place, so the reconnect rule cannot drift per call site.
 #[derive(Debug, thiserror::Error)]
 pub enum VfsError {
-    /// The URL named a service `vfs.toml` does not define.
-    #[error("no service named \"{service}\" in vfs.toml")]
+    /// The URL named a service neither `vfs.toml` nor `rclone.conf` defines.
+    #[error("no service named \"{service}\" in vfs.toml or rclone.conf")]
     UnknownService { service: String },
 
     /// `ssh`, `rclone` (or the configured program, or the worker thread
