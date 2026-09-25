@@ -1196,6 +1196,22 @@ impl Card {
         }
     }
 
+    /// A card with its Places section, the cursor on the first row after it.
+    ///
+    /// `M` is the disks' key, and `M` `Enter` mounting the stick just plugged
+    /// in is the card's main job, so the cursor starts where the first disk
+    /// will be — before udisks2 has named it, because the places are this
+    /// machine's own data and known the instant the card opens. Until the
+    /// listing lands that index is the connect row; [`Card::update`] keeps
+    /// the index and the first disk fills it. The places are one `↑` away.
+    pub fn with_places(places: Vec<Place>) -> Card {
+        let mut card = Card::new();
+        card.cursor = places.len();
+        card.places = places;
+        card.follow();
+        card
+    }
+
     /// Everything the cursor can land on, in order: the places, the disks, the
     /// shares, and the connect row. Never empty — the connect row is always
     /// there.
@@ -1352,17 +1368,16 @@ impl Card {
     /// Keyed on each row's identity, so a refresh that arrives after a mount
     /// leaves the cursor on the disk that was just mounted rather than on
     /// whatever now sorts into that row (`delightful-ui` §8). The *first*
-    /// listing has one exception: a cursor on the connect row, which is where
-    /// it has to be while there are no places and no listing yet, goes to the
-    /// top row — the card opening on its last line would be the wrong end.
-    /// A cursor on a place stays there. The places are on screen from the
-    /// first frame, and a cursor that jumped from the first pin to the first
-    /// disk half a second later, when gvfs answered, would move under the eye
-    /// of somebody already reading it.
+    /// listing has one exception: a cursor still where the card opened it —
+    /// on the first row after the places ([`Card::with_places`]), which is
+    /// the connect row until the listing lands — stays at that index, so the
+    /// first disk arrives *under* it. The index does not move, so nothing
+    /// jumps; it only gains the row it was waiting for. A cursor somebody has
+    /// moved, up into the places or anywhere else, is kept by identity like
+    /// any other.
     pub fn update(&mut self, devices: Vec<Device>, shares: Vec<Share>) {
         let on = self.selected().and_then(|item| self.identity(item));
-        let waiting =
-            self.loading && self.places.is_empty() && self.selected() == Some(Item::Connect);
+        let waiting = self.loading && self.cursor == self.places.len();
         self.devices = devices;
         self.shares = shares;
         self.loading = false;
@@ -1374,7 +1389,7 @@ impl Card {
         });
         self.cursor = match kept {
             Some(at) => at,
-            None if waiting => 0,
+            None if waiting => self.places.len(),
             None => self.cursor,
         }
         .min(items.len().saturating_sub(1));
@@ -2710,13 +2725,13 @@ Mount(3): backup -> file:///mnt/backup
     }
 
     /// The places are the card's first rows, ready before udisks2 has said
-    /// anything, and the cursor that starts on the first of them stays there
-    /// when the listing lands — rather than jumping to a disk under the eye.
-    /// A place coming off the list leaves the cursor at the same height.
+    /// anything, and the card opens with the cursor where the first disk will
+    /// be — the connect row's index while the listing is out, the first disk
+    /// once it lands, with the index never moving. The places are `↑` away,
+    /// and a place coming off the list leaves the cursor at the same height.
     #[test]
-    fn the_places_head_the_card_and_hold_the_cursor() {
-        let mut card = Card::new();
-        card.places = places(3);
+    fn the_card_opens_on_the_disks_with_the_places_above() {
+        let mut card = Card::with_places(places(3));
         assert_eq!(
             card.items()[..4],
             [
@@ -2726,17 +2741,20 @@ Mount(3): backup -> file:///mnt/backup
                 Item::Connect
             ]
         );
-        assert_eq!(card.selected(), Some(Item::Place(0)));
-        assert_eq!(
-            card.selected_place().map(|p| p.name.as_str()),
-            Some("~/place0")
-        );
-        card.update(devices_from(&objects()), share_rows(1));
+        assert_eq!(card.cursor, 3, "the first row after the places");
         assert_eq!(
             card.selected(),
-            Some(Item::Place(0)),
-            "no jump to the disks"
+            Some(Item::Connect),
+            "until a disk is there"
         );
+        card.update(devices_from(&objects()), share_rows(1));
+        assert_eq!(card.cursor, 3, "no jump when the listing lands");
+        assert_eq!(
+            card.selected(),
+            Some(Item::Disk(0)),
+            "the first disk filled it"
+        );
+        assert_eq!(card.first, 0, "the places are on screen above it");
         assert_eq!(
             card.lines()[..5],
             [
@@ -2747,6 +2765,29 @@ Mount(3): backup -> file:///mnt/backup
                 Line::Section("Disks"),
             ]
         );
+        card.move_cursor(-1);
+        assert_eq!(card.selected(), Some(Item::Place(2)), "one ↑ away");
+        assert_eq!(
+            card.selected_place().map(|p| p.name.as_str()),
+            Some("~/place2")
+        );
+
+        // No disks: the index waits and whatever is first after the places
+        // fills it — here the share.
+        let mut bare = Card::with_places(places(2));
+        bare.update(Vec::new(), share_rows(1));
+        assert_eq!(bare.cursor, 2);
+        assert_eq!(bare.selected(), Some(Item::Share(0)));
+        // No places: the first disk, as the card always opened.
+        let mut plain = Card::with_places(Vec::new());
+        plain.update(devices_from(&objects()), Vec::new());
+        assert_eq!(plain.selected(), Some(Item::Disk(0)));
+        // A cursor moved up into the places before the listing lands is
+        // somebody's choice, and stays.
+        let mut early = Card::with_places(places(3));
+        early.move_cursor(-2);
+        early.update(devices_from(&objects()), Vec::new());
+        assert_eq!(early.selected(), Some(Item::Place(1)));
 
         // A server wears the network glyph and a folder the folder, and
         // neither has a status: a place is not mounted or unmounted.
@@ -2761,19 +2802,29 @@ Mount(3): backup -> file:///mnt/backup
         );
         assert!(local.status.is_none());
 
-        card.move_cursor(1);
+        card.move_cursor(-1);
         card.set_places(places(2));
         assert_eq!(card.selected(), Some(Item::Place(1)));
         card.set_places(Vec::new());
         assert_eq!(card.selected(), Some(Item::Disk(1)), "the same height");
         assert!(card.selected_place().is_none());
 
-        // Ten places push the disks past the window; what is drawn is whole
-        // lines, so no half row sits under the "+N more".
-        card.set_places(places(10));
-        let (last, top) = *card.visible().last().expect("lines");
+        // Ten places push the disks past the window: the card opens scrolled
+        // so the first disk is whole, and what is drawn is whole lines, so no
+        // half row sits under the "+N more".
+        let mut long = Card::with_places(places(10));
+        long.update(devices_from(&objects()), share_rows(1));
+        assert_eq!(long.selected(), Some(Item::Disk(0)));
+        assert!(long
+            .visible()
+            .iter()
+            .any(|(line, _)| *line == Line::Item(Item::Disk(0))));
+        let (last, top) = *long.visible().last().expect("lines");
         assert!(top + last.height() <= WINDOW + 0.01, "a row is cut off");
-        assert!(card.visible().len() < card.lines().len());
+        assert!(long.visible().len() < long.lines().len());
+        long.move_cursor(-100);
+        assert_eq!(long.selected(), Some(Item::Place(0)));
+        assert_eq!(long.visible()[0].0, Line::Section("Places"));
     }
 
     /// A long card scrolls to keep the cursor's row whole, brings a section's

@@ -516,11 +516,10 @@ impl App {
     }
 
     /// A new mount card, its Places section filled — the part of `M` that is
-    /// this machine's own and needs no udisks2 to answer.
+    /// this machine's own and needs no udisks2 to answer — and the cursor
+    /// where the first disk will be ([`crate::mounts::Card::with_places`]).
     pub(super) fn mount_card(&self) -> crate::mounts::Card {
-        let mut card = crate::mounts::Card::new();
-        card.places = self.card_places();
-        card
+        crate::mounts::Card::with_places(self.card_places())
     }
 
     /// `d` on the mount card: unpin the place under the cursor. A `[goto]`
@@ -1056,7 +1055,8 @@ mod tests {
             .all(|row| !matches!(&row.choice, Choice::Cd(p) if crate::remote::is_remote(p))));
     }
 
-    /// The mount card opens with a Places section: pins, then `[goto]` rows
+    /// The mount card opens with a Places section over the disks, the cursor
+    /// below it where the first disk will be: pins, then `[goto]` rows
     /// not already pinned, each saying its key. `d` unpins a pin and says so,
     /// and on a `[goto]` row says why it will not; `Enter` on a place goes
     /// there. The strip offers `d` only while the cursor is on a pin.
@@ -1091,11 +1091,14 @@ mod tests {
             "no home fallback on the card"
         );
         assert_eq!(card.lines()[0], Line::Section("Places"));
+        // Where the first disk will be: udisks2 has not answered (and never
+        // will, here), so that index is the connect row for now.
         assert_eq!(
-            card.selected(),
-            Some(Item::Place(0)),
-            "the card opens on the top row"
+            card.cursor,
+            card.places.len(),
+            "the card opens below the places"
         );
+        assert_eq!(card.selected(), Some(Item::Connect));
         let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
         let strip = |app: &App| -> Vec<String> {
             let card = app.mounts.as_ref().expect("the card");
@@ -1107,10 +1110,20 @@ mod tests {
             .map(|hint| hint.keys.to_string())
             .collect()
         };
-        assert_eq!(strip(&s.app)[1], "d", "d is offered on a pin");
+        assert!(
+            !strip(&s.app).contains(&"d".to_string()),
+            "no d below the places"
+        );
 
-        // `d` on the second pin: off the list, the cursor where it was.
-        s.keys("down d");
+        // Up past the [goto] row to the second pin: `d` is offered, and takes
+        // it off the list with the cursor where it was.
+        s.keys("up up");
+        assert_eq!(
+            s.app.mounts.as_ref().and_then(|c| c.selected()),
+            Some(Item::Place(1))
+        );
+        assert_eq!(strip(&s.app)[1], "d", "d is offered on a pin");
+        s.keys("d");
         assert_eq!(
             s.toast(),
             format!("Unpinned {}", s.said(&files.join("sub")))
