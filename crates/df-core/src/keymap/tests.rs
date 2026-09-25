@@ -888,7 +888,7 @@ fn bookmark(key: &str, path: &str) -> crate::config::Bookmark {
 
 /// How many rows answer to `g <key>` in the browser.
 fn rows_on(km: &Registry, keys: &str) -> usize {
-    let seq = parse_sequence(keys).unwrap();
+    let seq = parse_sequence(keys).unwrap_or_else(|e| panic!("`{keys}`: {e}"));
     km.bindings()
         .iter()
         .filter(|b| b.context == Context::Files && b.seq == seq)

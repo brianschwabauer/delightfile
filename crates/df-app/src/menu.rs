@@ -152,6 +152,14 @@ pub enum Action {
     /// type", which are only the lists they fly out, and "Reverse" while the
     /// sort has no direction to reverse.
     Nothing,
+    /// The Go list's `n`th place, by its index in the app's Places list — a
+    /// pin, a `[goto]` row or home. Not `Run(Goto(n))`: a pin with no key has
+    /// no goto slot, and is on the list all the same.
+    Place(usize),
+    /// Pin the folder the row menu opened on, or unpin it. Not
+    /// `Run(PinToggle)`, which is about the folder on screen rather than a row
+    /// in it.
+    PinRow,
 }
 
 /// One row.
@@ -701,6 +709,100 @@ pub fn folder_items(
             &refused,
         )),
     ]
+}
+
+// ── Places ──────────────────────────────────────────────────────────────────
+
+/// One row of the app menu's Go list: a place, and the key that goes there
+/// when it has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoRow {
+    /// Where it is, as the list shows it: `~/Work`.
+    pub label: String,
+    /// `g w`, or empty for a place reached only from lists like this one.
+    pub keys: String,
+}
+
+/// The app menu's "Go" row, flying out every place and, last, the row that
+/// pins the folder on screen or takes it off — so the list and the way onto
+/// it are in one place.
+///
+/// Built apart from [`app_items`] and put in with [`insert_go`], so the app
+/// menu's own rows, and the tests that hold them, are the same with or
+/// without it.
+pub fn go_item(
+    places: &[GoRow],
+    pinned: bool,
+    keymap: &Registry,
+    refused: impl Fn(Command) -> bool,
+) -> Item {
+    let mut rows: Vec<Item> = places
+        .iter()
+        .enumerate()
+        .map(|(index, place)| Item::new(&place.label, &place.keys, Action::Place(index), true))
+        .collect();
+    rows.push(command_row(
+        if pinned {
+            "Unpin this folder"
+        } else {
+            "Pin this folder"
+        },
+        Command::PinToggle,
+        true,
+        keymap,
+        &refused,
+    ));
+    // Live even when the pin row is refused: the places under it can still
+    // be gone to, which is most of what the list is for.
+    Item::new("Go", "", Action::Nothing, true).with_submenu(rows)
+}
+
+/// Put [`go_item`] into the app menu's rows at the head of the group about
+/// getting somewhere — above "Go to path…", taking over the gap before it.
+pub fn insert_go(rows: &mut Vec<Item>, go: Item) {
+    let at = rows
+        .iter()
+        .position(|item| item.action == Action::Run(Command::GotoPath))
+        .unwrap_or(rows.len());
+    let mut go = go;
+    if let Some(next) = rows.get_mut(at) {
+        go.gap_before = next.gap_before;
+        next.gap_before = false;
+    }
+    rows.insert(at, go);
+}
+
+/// The folder menu's last row: pin the folder it is about, or unpin it.
+pub fn folder_pin_item(pinned: bool, keymap: &Registry, refused: impl Fn(Command) -> bool) -> Item {
+    command_row(
+        if pinned {
+            "Unpin this folder"
+        } else {
+            "Pin this folder"
+        },
+        Command::PinToggle,
+        true,
+        keymap,
+        &refused,
+    )
+    .after_gap()
+}
+
+/// Put "Pin folder" into a directory row's menu, under "Open with" where the
+/// row's other ways of going somewhere are.
+///
+/// No key: `g b` pins the folder on screen, and this row is about the one
+/// under the pointer, so drawing `g b` here would teach it as the key for
+/// something it does not do. Only on a folder, as the extract rows are only
+/// on an archive — a file is never a place.
+pub fn insert_pin_row(rows: &mut Vec<Item>, pinned: bool, enabled: bool) {
+    let at = rows
+        .iter()
+        .position(|item| item.action == Action::OpenWithMenu)
+        .or_else(|| rows.iter().position(|item| item.action == Action::Open))
+        .map_or(0, |at| at + 1);
+    let label = if pinned { "Unpin folder" } else { "Pin folder" };
+    rows.insert(at, Item::new(label, "", Action::PinRow, enabled));
 }
 
 // ── The menu, while it is up ────────────────────────────────────────────────
@@ -1423,6 +1525,55 @@ mod tests {
         };
         assert_eq!(items(dir, &openers())[0].label, "Open folder");
         assert_eq!(items(facts(), &openers())[0].label, "Open");
+    }
+
+    /// A folder's row menu pins it from under "Open with" — or under "Open
+    /// folder" when no opener matched — says Unpin when it is pinned, and
+    /// greys where the gate would refuse; the Go list goes above "Go to
+    /// path…" and takes the gap that opened its group.
+    #[test]
+    fn the_pin_rows_go_where_the_places_are() {
+        let dir = Facts {
+            is_dir: true,
+            ..facts()
+        };
+        let mut rows = items(dir, &openers());
+        insert_pin_row(&mut rows, false, true);
+        assert_eq!(rows[2].label, "Pin folder");
+        assert_eq!((rows[2].keys.as_str(), rows[2].enabled), ("", true));
+        let mut rows = items(dir, &[]);
+        insert_pin_row(&mut rows, true, false);
+        assert_eq!(rows[1].label, "Unpin folder");
+        assert!(!rows[1].enabled);
+
+        let keymap = Registry::defaults();
+        let places = [GoRow {
+            label: "~/Work".to_string(),
+            keys: "g w".to_string(),
+        }];
+        let go = go_item(&places, false, &keymap, |_| true);
+        let list = go.submenu.as_deref().expect("a list");
+        assert_eq!(list.len(), 2);
+        assert!(list[0].enabled, "a place is never refused");
+        assert_eq!(
+            (
+                list[1].label.as_str(),
+                list[1].keys.as_str(),
+                list[1].enabled
+            ),
+            ("Pin this folder", "g b", false)
+        );
+        let mut rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
+        let before = rows.len();
+        insert_go(&mut rows, go);
+        assert_eq!(rows.len(), before + 1);
+        let at = rows.iter().position(|i| i.label == "Go").expect("Go");
+        assert_eq!(rows[at + 1].label, "Go to path…");
+        assert!(rows[at].gap_before && !rows[at + 1].gap_before);
+        assert_eq!(
+            folder_pin_item(true, &keymap, |_| false).label,
+            "Unpin this folder"
+        );
     }
 
     fn area() -> egui::Rect {

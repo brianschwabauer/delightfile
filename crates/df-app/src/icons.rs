@@ -446,6 +446,19 @@ pub fn folder(palette: &Palette, nerd: bool) -> Icon {
     }
 }
 
+/// A place on another machine — an `sftp://` pin or bookmark — where
+/// [`folder`] is one on this disk (nf-fa-server). The Places rows of the mount
+/// card wear one or the other, so a folder that is a network round trip away
+/// does not look like one that is not.
+pub fn network(palette: &Palette, nerd: bool) -> Icon {
+    Icon {
+        glyph: if nerd { NETWORK_PLACE } else { ' ' },
+        color: palette.teal,
+    }
+}
+
+const NETWORK_PLACE: char = '\u{f233}'; // nf-fa-server
+
 /// The icon for one row.
 ///
 /// `theme` supplies the user's rules — `[[icon.dir]]`'s nineteen and whatever
@@ -921,9 +934,13 @@ mod glyph_tests {
                 *c as u32
             );
         }
-        for c in [super::GENERIC_DIR, super::GENERIC_FILE]
-            .iter()
-            .filter(|_| nerd)
+        for c in [
+            super::GENERIC_DIR,
+            super::GENERIC_FILE,
+            super::NETWORK_PLACE,
+        ]
+        .iter()
+        .filter(|_| nerd)
         {
             assert!(ctx.fonts_mut(|f| f.has_glyph(&font, *c)), "{c:?}");
         }

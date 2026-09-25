@@ -54,6 +54,10 @@ pub enum PromptKind {
     /// `A`: the name of the archive the selection is packed into. Its
     /// extension is the format.
     Archive,
+    /// `g b` on a folder that is not pinned: the key after `g` that will go
+    /// there, or nothing for a pin with no key. Its title names the folder
+    /// ([`Prompt::label`]), so the bar does not name it a second time.
+    Pin,
 }
 
 impl PromptKind {
@@ -72,6 +76,7 @@ impl PromptKind {
             PromptKind::Connect => "Connect to:",
             PromptKind::SaveAs => "Save as:",
             PromptKind::Archive => "Archive as:",
+            PromptKind::Pin => "Pin as:",
         }
     }
 
@@ -80,7 +85,17 @@ impl PromptKind {
     /// directory, spelled out in full — the same path twice on one line would
     /// be the second copy crowding out the one you are editing.
     pub fn shows_directory(self) -> bool {
-        !matches!(self, PromptKind::Path)
+        !matches!(self, PromptKind::Path | PromptKind::Pin)
+    }
+
+    /// The quiet word a prompt always says beside its field, when it has
+    /// one: what an empty `Enter` does is not something a person can guess
+    /// from a blank field, so the prompt that has an answer for it says it.
+    pub fn hint(self) -> Option<&'static str> {
+        match self {
+            PromptKind::Pin => Some("a key after g, or Enter for none"),
+            _ => None,
+        }
     }
 
     /// Whether this prompt drives the help overlay rather than the listing.
@@ -148,7 +163,8 @@ pub fn click_outside_action(kind: PromptKind) -> ClickOutside {
         | PromptKind::ShellBlock
         | PromptKind::Connect
         | PromptKind::SaveAs
-        | PromptKind::Archive => ClickOutside::Cancel,
+        | PromptKind::Archive
+        | PromptKind::Pin => ClickOutside::Cancel,
         PromptKind::Filter | PromptKind::FindNext | PromptKind::FindPrev => ClickOutside::Commit,
         PromptKind::ConflictRename | PromptKind::HelpFilter => ClickOutside::Keep,
     }
@@ -244,6 +260,9 @@ pub struct Prompt {
     /// it too. View state rather than editing state, kept here because it
     /// belongs to this prompt and goes when the prompt does.
     pub scroll: f32,
+    /// A title of this prompt's own, in place of its kind's: `Pin ~/Work
+    /// as:`, where the folder being pinned is what the question is about.
+    pub label: Option<String>,
 }
 
 impl Prompt {
@@ -258,7 +277,13 @@ impl Prompt {
             hint: None,
             inked: None,
             scroll: 0.0,
+            label: None,
         }
+    }
+
+    /// What the title says: its own label, or its kind's.
+    pub fn title(&self) -> &str {
+        self.label.as_deref().unwrap_or(self.kind.title())
     }
 
     pub fn query(&self) -> &str {
@@ -266,9 +291,10 @@ impl Prompt {
     }
 
     /// What the line says beside the query, and whether it is an error: the
-    /// error when there is one, the hint when there is not.
+    /// error when there is one, the hint when there is not — the app's for
+    /// this frame, or the one the kind always says ([`PromptKind::hint`]).
     pub fn message(&self) -> Option<(&str, bool)> {
-        match (&self.error, self.hint) {
+        match (&self.error, self.hint.or(self.kind.hint())) {
             (Some(error), _) => Some((error.as_str(), true)),
             (None, Some(hint)) => Some((hint, false)),
             (None, None) => self.inked.as_ref().map(|inked| (inked.text(), false)),
@@ -398,6 +424,7 @@ mod tests {
             PromptKind::Connect,
             PromptKind::SaveAs,
             PromptKind::Archive,
+            PromptKind::Pin,
         ] {
             assert!(kind.title().ends_with(':'), "{kind:?}");
         }
@@ -429,6 +456,30 @@ mod tests {
         assert!(!PromptKind::Create.anchored());
     }
 
+    /// The pin prompt names the folder in its own title, says what an empty
+    /// `Enter` does whatever the app's per-frame hint is, and gives way to an
+    /// error like any other hint.
+    #[test]
+    fn the_pin_prompt_says_what_it_pins_and_what_enter_does() {
+        let mut prompt = Prompt::with(PromptKind::Pin, 0, InputBuffer::new("", 0));
+        assert_eq!(prompt.title(), "Pin as:");
+        prompt.label = Some("Pin ~/Work as:".to_string());
+        assert_eq!(prompt.title(), "Pin ~/Work as:");
+        assert!(!PromptKind::Pin.shows_directory(), "the title names it");
+        assert_eq!(
+            prompt.message(),
+            Some(("a key after g, or Enter for none", false))
+        );
+        prompt.hint = None;
+        assert!(
+            prompt.message().is_some(),
+            "the app's frame does not clear it"
+        );
+        prompt.error = Some("bad".to_string());
+        assert_eq!(prompt.message(), Some(("bad", true)));
+        assert_eq!(PromptKind::Filter.hint(), None);
+    }
+
     /// A click away keeps what a live prompt is already showing and drops what
     /// a quiet one has not done yet. The two that live inside another surface
     /// are left to it.
@@ -450,6 +501,7 @@ mod tests {
             (PromptKind::Connect, Cancel),
             (PromptKind::SaveAs, Cancel),
             (PromptKind::Archive, Cancel),
+            (PromptKind::Pin, Cancel),
         ] {
             assert_eq!(click_outside_action(kind), expected, "{kind:?}");
             // The rule the table is written from: a prompt that waits for

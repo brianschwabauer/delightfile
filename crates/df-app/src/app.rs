@@ -75,6 +75,8 @@ use crate::whichkey::WhichKey;
 /// `A`: the selection packed into a new archive — its prompt, the prompt's
 /// format hint, the Replace card's yes, and the job.
 mod compress;
+/// Pinned places (`g b`, `g space`): a child, so its half of `App` lives there.
+mod places;
 
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
 /// columns (PLAN §2) to each be usable at once — the middle column is the one
@@ -1119,6 +1121,9 @@ pub struct App {
     /// order stays put while it is scrolled.
     seed: u64,
     keymap: Registry,
+    /// The goto table `[goto]` and the keyed pins make, and the keymap from
+    /// before the pins that each change to them rebuilds from.
+    places: places::Places,
     keys: KeymapState,
     context: ContextStack,
     scanner: Scanner,
@@ -1932,6 +1937,8 @@ impl App {
             tab.cwd.dir.aim_cursor(name);
         }
         watcher.watch(tab.watched());
+        // The pins' `g` keys, laid over the keymap as it arrived.
+        let (keymap, places) = places::Places::start(keymap, &config.goto, state.pins());
 
         App {
             gfx: None,
@@ -1950,6 +1957,7 @@ impl App {
             mgr,
             seed,
             keymap,
+            places,
             keys: KeymapState::new(),
             context: ContextStack::browser(),
             scanner,
@@ -5807,6 +5815,10 @@ impl App {
                     self.refresh_mounts();
                     return true;
                 }
+                Key::Char('d') => {
+                    self.unpin_selected_place(now);
+                    return true;
+                }
                 _ => {}
             }
         }
@@ -6126,8 +6138,9 @@ impl App {
             kind: finder::Kind::View,
             choice: Choice::ToggleView,
         });
-        // Then the places: bookmarks, then where this tab has been.
+        // Then the places: pins, bookmarks, then where this tab has been.
         rows.extend(finder::merge_places(
+            self.state.pins(),
             self.tab().history.back_stack(),
             &self.config.goto,
             &[],
@@ -6170,6 +6183,7 @@ impl App {
             _ => {
                 let dirs = self.zoxide_db().to_vec();
                 finder::merge_places(
+                    self.state.pins(),
                     self.tab().history.back_stack(),
                     &self.config.goto,
                     &dirs,
@@ -6240,7 +6254,7 @@ impl App {
 
     /// `M`: open the card and ask for the listing.
     fn open_mounts(&mut self) {
-        self.mounts = Some(crate::mounts::Card::new());
+        self.mounts = Some(self.mount_card());
         self.udisks().ask(crate::mounts::Request::List);
         self.sync_context();
     }
@@ -6260,6 +6274,10 @@ impl App {
         let Some(card) = &self.mounts else { return };
         match card.selected() {
             Some(Item::Disk(_)) => {}
+            Some(Item::Place(_)) => {
+                self.go_selected_place(now);
+                return;
+            }
             Some(Item::Share(_)) => {
                 let Some(share) = card.selected_share() else {
                     return;
@@ -6320,6 +6338,8 @@ impl App {
                 self.open_connect();
                 return;
             }
+            // A place is a folder, and there is nothing to mount.
+            Some(Item::Place(_)) => return,
             Some(Item::Share(_)) => card.selected_share().map(|share| share.label.clone()),
             Some(Item::Disk(_)) => {
                 let Some(device) = card.selected_device().cloned() else {
@@ -6361,7 +6381,7 @@ impl App {
                 self.udisks().ask(crate::mounts::Request::UnmountShare(url));
                 return;
             }
-            Some(Item::Connect) | None => return,
+            Some(Item::Place(_) | Item::Connect) | None => return,
         }
         let Some(device) = card.selected_device().cloned() else {
             return;
@@ -6396,7 +6416,7 @@ impl App {
                 }
                 return;
             }
-            Some(Item::Connect) | None => return,
+            Some(Item::Place(_) | Item::Connect) | None => return,
         }
         let Some(device) = card.selected_device().cloned() else {
             return;
@@ -6730,6 +6750,13 @@ impl App {
     /// at the old one wondering whether the key worked — zoxide's database and
     /// a tab's history both outlive the directories in them.
     fn jump_to(&mut self, path: PathBuf, now: Instant) {
+        // A server or the trash is not a directory on this disk for
+        // `is_dir` to find, and `navigate` is where those are routed — the
+        // `sftp://` rows `g space` lists arrive here.
+        if crate::remote::is_remote(&path) || path == Path::new(crate::trashview::URL) {
+            self.navigate(path, now);
+            return;
+        }
         if !path.is_dir() {
             self.toasts
                 .error(format!("{} is not there any more", path.display()), now);
@@ -6910,12 +6937,11 @@ impl App {
     /// debounce is the middle, and it is one scheduled wake-up rather than a
     /// poll.
     ///
-    /// Called by nothing since the view scale moved to the tab (2026-09-23):
-    /// it was the only thing the app wrote to the store. Kept, with the
-    /// debounce it arms, for the next thing that does — the store's sort,
-    /// linemode and hidden-file overrides have setters and no caller yet — so
-    /// that write goes through the debounce rather than around it.
-    #[allow(dead_code)]
+    /// The pins are what the app writes to the store now ([`places`]); the
+    /// view scale was, until it moved to the tab (2026-09-23). The store's
+    /// sort, linemode and hidden-file overrides have setters and no caller
+    /// yet, and whichever calls them next comes through here, so its write
+    /// goes through the debounce rather than around it.
     fn state_changed(&mut self, now: Instant) {
         self.state_due.touch(self.state.is_dirty(), now);
     }
@@ -7687,6 +7713,14 @@ impl App {
                 None
             }
             PromptKind::Create => self.create(&text, now).err(),
+            // A key that cannot be had is said in a toast and the field
+            // stays as typed, as a refused save name is.
+            PromptKind::Pin => {
+                if !self.pin_submit(&text, now) {
+                    return;
+                }
+                None
+            }
             PromptKind::Rename | PromptKind::RenameEmptyStem => self.rename(&text, now).err(),
             PromptKind::Shell => {
                 let paths = self.targets();
@@ -8439,6 +8473,11 @@ impl App {
     /// with an answer: a row that is live only to toast "not here" when it is
     /// clicked is a row that lied about being clickable.
     fn refusal(&self, command: Command) -> Option<&'static str> {
+        // `g b` is about the folder on screen, and two of the places the list
+        // can be are not folders anybody can come back to.
+        if let Some(notice) = places::refusal(command, self.tab().virtual_kind()) {
+            return Some(notice);
+        }
         // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
         // the commands that would write into one are inert *out loud*. A key
         // that silently does nothing is a key the user presses twice — and the
@@ -8634,6 +8673,8 @@ impl App {
                 }
             }
             C::Goto(slot) => self.goto(slot, now),
+            C::GotoInteractive => self.open_places(),
+            C::PinToggle => self.pin_toggle(now),
             C::OpenTrash => self.open_trash(now),
             C::EmptyTrash => self.open_confirm(ConfirmKind::EmptyTrash, now),
 
@@ -9807,9 +9848,10 @@ impl App {
         });
     }
 
-    /// The `g` chord's bookmarks (PLAN §3's `[goto]` table).
+    /// The `g` chord's bookmarks (PLAN §3's `[goto]` table), and after them
+    /// the pins that have a key ([`places`]).
     fn goto(&mut self, slot: u8, now: Instant) {
-        let Some(bookmark) = self.config.goto.get(slot as usize) else {
+        let Some(bookmark) = self.places.table().get(slot as usize) else {
             log::debug!("goto slot {slot} is not in the [goto] table");
             return;
         };
@@ -11119,9 +11161,14 @@ impl App {
             sort: self.mgr.sort_by,
             reverse: self.mgr.sort_reverse,
         };
-        let items = menu::folder_items(facts, &self.keymap, |command| {
+        let mut items = menu::folder_items(facts, &self.keymap, |command| {
             self.refusal(command).is_some()
         });
+        items.push(menu::folder_pin_item(
+            self.here_pinned(),
+            &self.keymap,
+            |command| self.refusal(command).is_some(),
+        ));
         // One menu at a time: this replaces an app menu that was up.
         self.menu = Some(Menu::context(at, items));
         // The click that opened the menu is not half of a double click on
@@ -11161,8 +11208,13 @@ impl App {
             archives,
         };
         let names: Vec<String> = openers.iter().map(|choice| choice.name.clone()).collect();
+        let mut items = menu::items(facts, &names);
+        if facts.is_dir && !facts.trash {
+            let pinnable = self.refusal(Command::PinToggle).is_none();
+            menu::insert_pin_row(&mut items, self.row_pinned(), pinnable);
+        }
         // One menu at a time: this replaces an app menu that was up.
-        self.menu = Some(Menu::context(at, menu::items(facts, &names)));
+        self.menu = Some(Menu::context(at, items));
         // The click that opened the menu is not half of a double click on
         // whatever is underneath it.
         self.clicks.reset();
@@ -11187,9 +11239,10 @@ impl App {
             sort: self.mgr.sort_by,
             reverse: self.mgr.sort_reverse,
         };
-        let items = menu::app_items(facts, self.type_items(), &self.keymap, |command| {
+        let mut items = menu::app_items(facts, self.type_items(), &self.keymap, |command| {
             self.refusal(command).is_some()
         });
+        menu::insert_go(&mut items, self.go_item());
         // One menu at a time: this replaces a context menu that was up.
         self.menu = Some(Menu::app(self.menu_button, items));
         self.clicks.reset();
@@ -11348,6 +11401,8 @@ impl App {
         match action {
             A::Open => self.open_hovered(now),
             A::OpenWithMenu | A::Nothing | A::Run(_) => {}
+            A::Place(index) => self.go_place(index, now),
+            A::PinRow => self.pin_row(now),
             A::FileType(index) => self.choose_type(index),
             A::AllFiles => self.set_showing(Showing::AllFiles),
             // `a`'s prompt with the `/` that makes the name a folder already
@@ -16334,15 +16389,22 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
         // not on the help sheet has to be on the card or it may as well not
         // exist. With no row there is no command, so a press on one of those
         // five types its key.
-        OverlayGeom::Mounts(_) => vec![
-            Hint::new("Enter", "open", C::OverlaySubmit),
-            Hint::key("m", "mount", Chord::plain(K::Char('m'))),
-            Hint::key("u", "unmount", Chord::plain(K::Char('u'))),
-            Hint::key("e", "eject", Chord::plain(K::Char('e'))),
-            Hint::key("c", "connect", Chord::plain(K::Char('c'))),
-            Hint::key("r", "refresh", Chord::plain(K::Char('r'))),
-            Hint::new("Esc", "close", C::OverlayClose),
-        ],
+        OverlayGeom::Mounts(geometry) => {
+            let mut hints = vec![
+                Hint::new("Enter", "open", C::OverlaySubmit),
+                Hint::key("m", "mount", Chord::plain(K::Char('m'))),
+                Hint::key("u", "unmount", Chord::plain(K::Char('u'))),
+                Hint::key("e", "eject", Chord::plain(K::Char('e'))),
+                Hint::key("c", "connect", Chord::plain(K::Char('c'))),
+                Hint::key("r", "refresh", Chord::plain(K::Char('r'))),
+                Hint::new("Esc", "close", C::OverlayClose),
+            ];
+            // Only on a pin: see `mounts::Geometry::unpin`.
+            if geometry.unpin {
+                hints.insert(1, Hint::key("d", "unpin", Chord::plain(K::Char('d'))));
+            }
+            hints
+        }
         // Every key the spot card answers to, including the two df-core's
         // `[spot]` table has no row for, for the same reason — and, for the
         // same reason, a press on `Space` types it.
@@ -16486,10 +16548,16 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         A::Purge => C::DeletePermanently,
         // A folder is made by the same `Create` a file is, behind its gates.
         A::CreateFolder => C::Create,
+        // Pinning a row's folder is refused where pinning this one is: an
+        // archive's folder is not somewhere to come back to.
+        A::PinRow => C::PinToggle,
         A::Run(command) => command,
         // Choosing what a file dialog shows acts on no file, so no gate has
         // anything to refuse it: it works in an archive as it does anywhere.
-        A::Restore | A::EmptyTrash | A::Nothing | A::FileType(_) | A::AllFiles => return None,
+        // Going to a place is going, which every door allows.
+        A::Restore | A::EmptyTrash | A::Nothing | A::FileType(_) | A::AllFiles | A::Place(_) => {
+            return None
+        }
     })
 }
 
@@ -18058,6 +18126,7 @@ mod tests {
                 lines: Vec::new(),
                 rows: Vec::new(),
                 close: None,
+                unpin: false,
             }),
             &None,
         );

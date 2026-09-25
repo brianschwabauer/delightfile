@@ -1,7 +1,8 @@
-//! The one fuzzy overlay, and the three lists that go in it (PLAN §4.4, §7.2).
+//! The one fuzzy overlay, and the lists that go in it (PLAN §4.4, §7.2).
 //!
 //! `Ctrl+p` is a command palette, `z` is a fuzzy jump over everywhere you have
-//! been, and `Z` is zoxide's frecency list. They look identical on screen and
+//! been, `Z` is zoxide's frecency list, and `g space` is the places somebody
+//! pinned or bookmarked. They look identical on screen and
 //! they behave identically under the hand, because they *are* identical: one
 //! card, one query, one ranked list, one `Enter`. Only the rows differ, and a
 //! row is `(what it says, what it does)`.
@@ -32,6 +33,7 @@ use df_core::config::Bookmark;
 use df_core::fs::Span;
 use df_core::input::InputBuffer;
 use df_core::keymap::Command;
+use df_core::state::Pin;
 use df_core::zoxide::ZoxideDir;
 
 use crate::fuzzy;
@@ -60,10 +62,13 @@ const MRU_LIMIT: usize = 32;
 pub enum Source {
     /// `Ctrl+p` — every command, plus bookmarks, recent directories and tabs.
     Commands,
-    /// `z` — history, bookmarks and zoxide merged into one place list.
+    /// `z` — pins, history, bookmarks and zoxide merged into one place list.
     Jump,
     /// `Z` — zoxide's frecency order, unmerged.
     Zoxide,
+    /// `g space` — the Places list: the pins, then `[goto]`, then home
+    /// (`crate::app::places`). Short, chosen by hand, and servers included.
+    Places,
 }
 
 impl Source {
@@ -73,6 +78,7 @@ impl Source {
             Source::Commands => "Command palette",
             Source::Jump => "Jump to",
             Source::Zoxide => "Frecent directories",
+            Source::Places => "Places",
         }
     }
 
@@ -82,6 +88,7 @@ impl Source {
             Source::Commands => "Type a command…",
             Source::Jump => "Type part of a path…",
             Source::Zoxide => "Type part of a path…",
+            Source::Places => "Type part of a path…",
         }
     }
 
@@ -92,6 +99,7 @@ impl Source {
             Source::Commands => "Nothing matches. Backspace to widen the search.",
             Source::Jump => "No directory matches. Backspace to widen the search.",
             Source::Zoxide => "zoxide has not been anywhere matching that yet.",
+            Source::Places => "No place matches. Backspace to widen the search.",
         }
     }
 }
@@ -236,21 +244,26 @@ pub fn by_recency(rows: &mut [Row], mru: &Mru) {
     });
 }
 
-/// The `z` overlay's list: everywhere you have been, everywhere you bookmarked,
-/// and everywhere zoxide remembers — as one list with no duplicates.
+/// The `z` overlay's list: everywhere you pinned, everywhere you have been,
+/// everywhere you bookmarked, and everywhere zoxide remembers — as one list
+/// with no duplicates.
 ///
-/// Order is **history, then bookmarks, then zoxide**, and it is an order rather
-/// than a score for a reason: the three sources answer three different
-/// questions, and the one that is nearly always right is "somewhere I was a
-/// moment ago". Bookmarks come next because they are places a person chose by
-/// hand. zoxide's own ranking is preserved within its own tail, and `Z` is the
-/// overlay for when zoxide's answer is the one you want.
+/// Order is **pins, then history, then bookmarks, then zoxide**, and it is an
+/// order rather than a score for a reason: the sources answer different
+/// questions. The pins are first because somebody asked for exactly that —
+/// they are the places chosen by hand *and* asked to be at the top — and in
+/// the order they were pinned, which is theirs. Then the one that is nearly
+/// always right, "somewhere I was a moment ago". Bookmarks come next because
+/// they are places a person chose by hand. zoxide's own ranking is preserved
+/// within its own tail, and `Z` is the overlay for when zoxide's answer is the
+/// one you want.
 ///
 /// Deduplication is by path, first occurrence winning, so a bookmark that is
 /// also in the history keeps the history's position and the bookmark's *label*
 /// is lost — which is the right way round: you are looking for the place, and
 /// the place is already at the top.
 pub fn merge_places(
+    pins: &[Pin],
     history: &[PathBuf],
     bookmarks: &[Bookmark],
     zoxide: &[ZoxideDir],
@@ -264,6 +277,15 @@ pub fn merge_places(
         }
         out.push(place_row(&path, label, home));
     };
+    for pin in pins {
+        let path = pin.expanded_path();
+        // `z` goes to directories on this machine; a pinned server is
+        // `g space`'s, which can reach one (PLAN §7.6).
+        if path.contains("://") {
+            continue;
+        }
+        push(PathBuf::from(path), None, &mut seen);
+    }
     // The history arrives oldest-first; the useful end is the recent one.
     for path in history.iter().rev() {
         push(path.clone(), None, &mut seen);
@@ -385,7 +407,7 @@ impl Finder {
     fn ranking_query(&self) -> &str {
         match self.source {
             Source::Zoxide => "",
-            Source::Commands | Source::Jump => self.buffer.text(),
+            Source::Commands | Source::Jump | Source::Places => self.buffer.text(),
         }
     }
 
@@ -555,6 +577,7 @@ mod tests {
         ];
         let zoxide = vec![zoxide_dir("/tmp"), zoxide_dir("/etc")];
         let rows = merge_places(
+            &[],
             &history,
             &bookmarks,
             &zoxide,
@@ -574,12 +597,43 @@ mod tests {
     #[test]
     fn remote_bookmarks_are_left_out_of_the_jump_list() {
         let rows = merge_places(
+            &[Pin {
+                path: "sftp://showandtour1/srv".to_string(),
+                key: None,
+            }],
             &[],
             &[bookmark("1", "sftp://showandtour1/", "Go to server one")],
             &[],
             None,
         );
         assert!(rows.is_empty());
+    }
+
+    /// The pins come first, in the order they were pinned — ahead of the
+    /// history — and a pinned place the history also holds is listed once,
+    /// where the pin put it.
+    #[test]
+    fn the_pins_head_the_jump_list() {
+        let pins = vec![
+            Pin {
+                path: "/srv/b".to_string(),
+                key: Some("b".to_string()),
+            },
+            Pin {
+                path: "/tmp".to_string(),
+                key: None,
+            },
+        ];
+        let history = vec![PathBuf::from("/tmp"), PathBuf::from("/etc")];
+        let rows = merge_places(
+            &pins,
+            &history,
+            &[bookmark("w", "/work", "Go to Work")],
+            &[zoxide_dir("/srv/b")],
+            None,
+        );
+        let paths: Vec<&str> = rows.iter().map(|r| r.detail.as_str()).collect();
+        assert_eq!(paths, vec!["/srv/b", "/tmp", "/etc", "/work"]);
     }
 
     /// `~` is only a prefix at a component boundary — `/home/brianne` is not

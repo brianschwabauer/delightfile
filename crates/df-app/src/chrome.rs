@@ -2465,7 +2465,7 @@ fn field_layout(
 ) -> FieldLayout {
     let font = egui::FontId::proportional(FONT);
     let blank = egui::Color32::PLACEHOLDER;
-    let title = painter.layout_no_wrap(prompt.kind.title().to_string(), font.clone(), blank);
+    let title = painter.layout_no_wrap(prompt.title().to_string(), font.clone(), blank);
 
     // ── The right-hand furniture, measured first so the text knows its room ──
     // There is no mode chip: the editor has no modes to report, and the field
@@ -2574,7 +2574,7 @@ pub fn prompt_lines(
         return 1;
     };
     let font = egui::FontId::proportional(FONT);
-    let wanted = text_width(painter, prompt.kind.title(), font.clone())
+    let wanted = text_width(painter, prompt.title(), font.clone())
         + PAD_X
         + text_width(painter, prompt.query(), font.clone())
         + PAD_X

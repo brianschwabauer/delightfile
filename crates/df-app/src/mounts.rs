@@ -2,6 +2,13 @@
 //! list/mount/unmount/eject" — and, under the disks, the network shares gvfs
 //! has mounted and the way to connect to another one.
 //!
+//! Over the disks, the places: every pinned folder and every `[goto]` row, as
+//! the app's Places list gives them ([`Place`]). The card is where a person
+//! looks for "where can I go that is not in this folder", and a pinned folder
+//! and a mounted stick are both answers to that. The card only draws them and
+//! says which one is under the cursor; going there, and `d` unpinning a pin,
+//! are the app's (`crate::app::places`).
+//!
 //! ## Why udisks2 and not `/proc/mounts`
 //!
 //! Reading `/proc/mounts` would list what is mounted; it would not list the USB
@@ -1100,9 +1107,33 @@ fn list_devices(bus: &mut Bus) -> Result<Vec<Device>, String> {
 
 // ── The card's state ────────────────────────────────────────────────────────
 
+/// One row of the Places section: a pinned folder or a `[goto]` row, as the
+/// app's Places list describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    /// Where it is, as the list shows it: `~/Work`, `sftp://host/srv`.
+    pub name: String,
+    /// The key that goes there (`g w`), or a `[goto]` row's own words.
+    pub detail: String,
+    /// Where `Enter` goes.
+    pub target: PathBuf,
+    /// A place on another machine, which wears the network glyph rather than
+    /// the folder.
+    pub remote: bool,
+    /// Pinned by hand, so `d` can take it off. A `[goto]` row is the config's,
+    /// and the card offers no key for it.
+    pub pinned: bool,
+}
+
+/// What the Places section says when there is nothing in it: what it is for,
+/// and the key that fills it.
+pub const PLACES_EMPTY: &str = "Nothing pinned · g b pins this folder";
+
 /// Something the cursor can be on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item {
+    /// An index into [`Card::places`].
+    Place(usize),
     /// An index into [`Card::devices`].
     Disk(usize),
     /// An index into [`Card::shares`].
@@ -1114,7 +1145,7 @@ pub enum Item {
 /// One line of the card, from top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Line {
-    /// A section's name: `Disks`, `Network`.
+    /// A section's name: `Places`, `Disks`, `Network`.
     Section(&'static str),
     /// A section with nothing in it, and why.
     Empty(&'static str),
@@ -1133,6 +1164,9 @@ impl Line {
 
 /// The card's own state, while it is open.
 pub struct Card {
+    /// The Places section, handed in by the app when the card opens and again
+    /// when a pin comes off it.
+    pub places: Vec<Place>,
     pub devices: Vec<Device>,
     pub shares: Vec<Share>,
     /// Which of [`Card::items`] the cursor is on.
@@ -1152,6 +1186,7 @@ pub struct Card {
 impl Card {
     pub fn new() -> Card {
         Card {
+            places: Vec::new(),
             devices: Vec::new(),
             shares: Vec::new(),
             cursor: 0,
@@ -1161,11 +1196,13 @@ impl Card {
         }
     }
 
-    /// Everything the cursor can land on, in order: the disks, the shares, and
-    /// the connect row. Never empty — the connect row is always there.
+    /// Everything the cursor can land on, in order: the places, the disks, the
+    /// shares, and the connect row. Never empty — the connect row is always
+    /// there.
     pub fn items(&self) -> Vec<Item> {
-        (0..self.devices.len())
-            .map(Item::Disk)
+        (0..self.places.len())
+            .map(Item::Place)
+            .chain((0..self.devices.len()).map(Item::Disk))
             .chain((0..self.shares.len()).map(Item::Share))
             .chain(std::iter::once(Item::Connect))
             .collect()
@@ -1173,7 +1210,13 @@ impl Card {
 
     /// Every line, headings and empty states included.
     pub fn lines(&self) -> Vec<Line> {
-        let mut lines = vec![Line::Section("Disks")];
+        let mut lines = vec![Line::Section("Places")];
+        if self.places.is_empty() {
+            lines.push(Line::Empty(PLACES_EMPTY));
+        } else {
+            lines.extend((0..self.places.len()).map(|i| Line::Item(Item::Place(i))));
+        }
+        lines.push(Line::Section("Disks"));
         match self.disks_empty() {
             Some(message) => lines.push(Line::Empty(message)),
             None => lines.extend((0..self.devices.len()).map(|i| Line::Item(Item::Disk(i)))),
@@ -1203,6 +1246,22 @@ impl Card {
             Item::Share(i) => self.shares.get(i),
             _ => None,
         }
+    }
+
+    pub fn selected_place(&self) -> Option<&Place> {
+        match self.selected()? {
+            Item::Place(i) => self.places.get(i),
+            _ => None,
+        }
+    }
+
+    /// Take a new Places list — a pin came off it — keeping the cursor at the
+    /// same height, so it lands on the row that moved up into the gap rather
+    /// than jumping back to the top.
+    pub fn set_places(&mut self, places: Vec<Place>) {
+        self.places = places;
+        self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
+        self.follow();
     }
 
     /// `↑`/`↓`, clamping. A list of disks has a top and a bottom, and running
@@ -1273,6 +1332,10 @@ impl Card {
     /// the connect row.
     fn identity(&self, item: Item) -> Option<String> {
         match item {
+            Item::Place(i) => self
+                .places
+                .get(i)
+                .map(|p| format!("place {}", p.target.display())),
             Item::Disk(i) => self.devices.get(i).map(|d| format!("disk {}", d.object)),
             Item::Share(i) => self.shares.get(i).map(|s| format!("share {}", s.url)),
             Item::Connect => Some("connect".to_string()),
@@ -1284,24 +1347,29 @@ impl Card {
     /// Keyed on each row's identity, so a refresh that arrives after a mount
     /// leaves the cursor on the disk that was just mounted rather than on
     /// whatever now sorts into that row (`delightful-ui` §8). The *first*
-    /// listing is the exception: before it the only row is the connect row,
-    /// and the cursor staying there would be the card opening on its last line
-    /// instead of on the first disk.
+    /// listing has one exception: a cursor on the connect row, which is where
+    /// it has to be while there are no places and no listing yet, goes to the
+    /// top row — the card opening on its last line would be the wrong end.
+    /// A cursor on a place stays there. The places are on screen from the
+    /// first frame, and a cursor that jumped from the first pin to the first
+    /// disk half a second later, when gvfs answered, would move under the eye
+    /// of somebody already reading it.
     pub fn update(&mut self, devices: Vec<Device>, shares: Vec<Share>) {
         let on = self.selected().and_then(|item| self.identity(item));
-        let first_listing = self.loading;
+        let waiting =
+            self.loading && self.places.is_empty() && self.selected() == Some(Item::Connect);
         self.devices = devices;
         self.shares = shares;
         self.loading = false;
         let items = self.items();
-        let kept = on.filter(|_| !first_listing).and_then(|identity| {
+        let kept = on.filter(|_| !waiting).and_then(|identity| {
             items
                 .iter()
                 .position(|item| self.identity(*item).as_deref() == Some(identity.as_str()))
         });
         self.cursor = match kept {
             Some(at) => at,
-            None if first_listing => 0,
+            None if waiting => 0,
             None => self.cursor,
         }
         .min(items.len().saturating_sub(1));
@@ -1345,14 +1413,22 @@ impl Card {
 /// heading comes back into view with the first row under it — a row at the top
 /// of the card with no name over it is a row whose section you have to
 /// remember — and the list never scrolls past its own end.
+///
+/// Everything between the row and the row before it comes back with it, not
+/// only the heading: over the first disk of a machine with nothing pinned
+/// that is the Places section's own heading and its empty state, and the
+/// card scrolled back to its first row that still hid its first section
+/// would be a card that looked as though it had no top.
 fn scroll(first: usize, at: usize, lines: &[Line]) -> usize {
     let heights: Vec<f32> = lines.iter().map(|line| line.height()).collect();
     if heights.iter().sum::<f32>() <= WINDOW {
         return 0;
     }
     let mut first = first.min(at);
-    if first == at && at > 0 && matches!(lines[at - 1], Line::Section(_)) {
-        first = at - 1;
+    if first == at {
+        while first > 0 && !matches!(lines[first - 1], Line::Item(_)) {
+            first -= 1;
+        }
     }
     while first < at && heights[first..=at].iter().sum::<f32>() > WINDOW {
         first += 1;
@@ -1385,11 +1461,15 @@ const DETAIL_LINE: f32 = 31.0;
 const SECTION_ROW: f32 = 26.0;
 /// A section with nothing in it: one line of text, not a two-line row.
 const EMPTY_ROW: f32 = 30.0;
-/// The most the rows may take before the card scrolls: [`ROWS`] rows and both
-/// headings.
-const WINDOW: f32 = ROWS as f32 * ROW + 2.0 * SECTION_ROW;
+/// The most the rows may take before the card scrolls: [`ROWS`] rows and all
+/// three headings.
+const WINDOW: f32 = ROWS as f32 * ROW + 3.0 * SECTION_ROW;
 /// The row's own left/right inset, inside the card's [`PAD`].
 const ROW_PAD: f32 = 10.0;
+/// The width a place's glyph is centred in: a little over the glyph itself,
+/// so the folder and the server glyph, which are not one width, start their
+/// text in one column.
+const ICON_COLUMN: f32 = 18.0;
 /// The most of a row the right-hand status may take before it is ellipsised.
 /// A mount point is a path and paths are long; the name is what the row is
 /// *about*, so it keeps the majority.
@@ -1423,6 +1503,10 @@ pub struct Geometry {
     pub rows: Vec<egui::Rect>,
     /// The `×` at the title row's far end.
     pub close: Option<egui::Rect>,
+    /// The cursor is on a pinned place, so the hint strip offers `d` to unpin
+    /// it. Only then: a `[goto]` row is the config's, and a key on the strip
+    /// that could only ever say "not this one" is a key that lied.
+    pub unpin: bool,
 }
 
 impl Geometry {
@@ -1474,22 +1558,41 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         lines,
         rows,
         close: Some(crate::chrome::close_button_rect(rect)),
+        unpin: card.selected_place().is_some_and(|place| place.pinned),
     }
 }
 
 /// What one row says.
 #[derive(Default)]
 struct Face {
+    /// The glyph in front of the two lines, for a place: what kind of place
+    /// it is, the way a file row's icon says what kind of file.
+    icon: Option<crate::icons::Icon>,
     name: String,
     detail: String,
     /// The right-hand text and its colour; `None` for a row with no state.
     status: Option<(String, egui::Color32)>,
 }
 
-fn face(card: &Card, item: Item, palette: &crate::theme::Palette) -> Face {
+fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) -> Face {
     let busy = |identity: &str| card.busy.as_deref() == Some(identity);
     let working = || ("working…".to_string(), palette.peach);
     match item {
+        Item::Place(i) => {
+            let Some(place) = card.places.get(i) else {
+                return Face::default();
+            };
+            Face {
+                icon: Some(if place.remote {
+                    crate::icons::network(palette, nerd)
+                } else {
+                    crate::icons::folder(palette, nerd)
+                }),
+                name: place.name.clone(),
+                detail: place.detail.clone(),
+                status: None,
+            }
+        }
         Item::Disk(i) => {
             let Some(device) = card.devices.get(i) else {
                 return Face::default();
@@ -1506,6 +1609,7 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette) -> Face {
                 (device.status(), palette.overlay1)
             };
             Face {
+                icon: None,
                 name: device.label.clone(),
                 detail: device.detail(),
                 status: Some(status),
@@ -1525,12 +1629,14 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette) -> Face {
                 (share.scheme.clone(), palette.green)
             };
             Face {
+                icon: None,
                 name: share.label.clone(),
                 detail: share.url.clone(),
                 status: Some(status),
             }
         }
         Item::Connect => Face {
+            icon: None,
             name: "Connect to server…".to_string(),
             detail: "smb · sftp · ftp · dav · nfs".to_string(),
             status: None,
@@ -1633,7 +1739,12 @@ pub fn paint(
                         egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
                     );
                 }
-                paint_face(&clipped, rect, &face(card, item, palette), palette);
+                paint_face(
+                    &clipped,
+                    rect,
+                    &face(card, item, palette, paint.nerd),
+                    palette,
+                );
             }
         }
     }
@@ -1674,7 +1785,24 @@ fn paint_face(
             egui::FontId::proportional(FONT - 1.0),
         )
     });
-    let left = rect.left() + ROW_PAD;
+    let mut left = rect.left() + ROW_PAD;
+    // A place's glyph, centred on the row's two lines together, and the lines
+    // moved over by its column. Without a patched font there is no glyph to
+    // draw — the file rows go without one too — and then no column either,
+    // so the text is not indented by a blank.
+    if let Some(icon) = face.icon.filter(|icon| icon.glyph != ' ') {
+        painter.text(
+            egui::pos2(
+                left + ICON_COLUMN / 2.0,
+                rect.top() + (NAME_LINE + DETAIL_LINE) / 2.0,
+            ),
+            egui::Align2::CENTER_CENTER,
+            icon.glyph,
+            egui::FontId::proportional(FONT + 3.0),
+            icon.color,
+        );
+        left += ICON_COLUMN + crate::chrome::ICON_GAP;
+    }
     let text_width = (rect.right() - ROW_PAD - status_width - crate::ui::GAP - left).max(0.0);
     crate::chrome::truncated_in(
         painter,
@@ -2398,6 +2526,8 @@ Mount(3): backup -> file:///mnt/backup
                 draw(&card);
                 card.update(Vec::new(), Vec::new());
                 draw(&card);
+                card.places = places(3);
+                draw(&card);
                 card.update(many_devices(20), share_rows(3));
                 draw(&card);
                 card.move_cursor(21);
@@ -2430,10 +2560,11 @@ Mount(3): backup -> file:///mnt/backup
         assert!(g.row_at(egui::pos2(0.0, 0.0)).is_none());
         // A heading is drawn, and is not a row.
         let (_, heading) = g.lines[0];
-        assert_eq!(g.lines[0].0, Line::Section("Disks"));
+        assert_eq!(g.lines[0].0, Line::Section("Places"));
+        assert_eq!(g.lines[2].0, Line::Section("Disks"));
         assert!(g.row_at(heading.center()).is_none());
 
-        // An empty card still has its two headings, both empty states, and
+        // An empty card still has its three headings, every empty state, and
         // the connect row.
         card.update(Vec::new(), Vec::new());
         let g = geometry(area, &card);
@@ -2441,6 +2572,8 @@ Mount(3): backup -> file:///mnt/backup
         assert_eq!(
             g.lines.iter().map(|(line, _)| *line).collect::<Vec<_>>(),
             vec![
+                Line::Section("Places"),
+                Line::Empty(PLACES_EMPTY),
                 Line::Section("Disks"),
                 Line::Empty("no removable filesystems"),
                 Line::Section("Network"),
@@ -2555,6 +2688,82 @@ Mount(3): backup -> file:///mnt/backup
         assert_eq!(card.shares_empty(), Some("nothing mounted"));
     }
 
+    fn places(n: usize) -> Vec<Place> {
+        (0..n)
+            .map(|i| Place {
+                name: format!("~/place{i}"),
+                detail: if i == 0 {
+                    "g w".into()
+                } else {
+                    "pinned".into()
+                },
+                target: PathBuf::from(format!("/home/me/place{i}")),
+                remote: i == 1,
+                pinned: i != 2,
+            })
+            .collect()
+    }
+
+    /// The places are the card's first rows, ready before udisks2 has said
+    /// anything, and the cursor that starts on the first of them stays there
+    /// when the listing lands — rather than jumping to a disk under the eye.
+    /// A place coming off the list leaves the cursor at the same height.
+    #[test]
+    fn the_places_head_the_card_and_hold_the_cursor() {
+        let mut card = Card::new();
+        card.places = places(3);
+        assert_eq!(
+            card.items()[..4],
+            [
+                Item::Place(0),
+                Item::Place(1),
+                Item::Place(2),
+                Item::Connect
+            ]
+        );
+        assert_eq!(card.selected(), Some(Item::Place(0)));
+        assert_eq!(
+            card.selected_place().map(|p| p.name.as_str()),
+            Some("~/place0")
+        );
+        card.update(devices_from(&objects()), share_rows(1));
+        assert_eq!(
+            card.selected(),
+            Some(Item::Place(0)),
+            "no jump to the disks"
+        );
+        assert_eq!(
+            card.lines()[..5],
+            [
+                Line::Section("Places"),
+                Line::Item(Item::Place(0)),
+                Line::Item(Item::Place(1)),
+                Line::Item(Item::Place(2)),
+                Line::Section("Disks"),
+            ]
+        );
+
+        // A server wears the network glyph and a folder the folder, and
+        // neither has a status: a place is not mounted or unmounted.
+        let palette = crate::theme::Palette::from_theme(&df_core::config::Theme::default());
+        let local = face(&card, Item::Place(0), &palette, true);
+        let remote = face(&card, Item::Place(1), &palette, true);
+        assert_eq!(local.icon, Some(crate::icons::folder(&palette, true)));
+        assert_eq!(remote.icon, Some(crate::icons::network(&palette, true)));
+        assert_eq!(
+            (local.name.as_str(), local.detail.as_str()),
+            ("~/place0", "g w")
+        );
+        assert!(local.status.is_none());
+
+        card.move_cursor(1);
+        card.set_places(places(2));
+        assert_eq!(card.selected(), Some(Item::Place(1)));
+        card.set_places(Vec::new());
+        assert_eq!(card.selected(), Some(Item::Disk(1)), "the same height");
+        assert!(card.selected_place().is_none());
+    }
+
     /// A long card scrolls to keep the cursor's row whole, brings a section's
     /// heading back with its first row, and never scrolls past its end.
     #[test]
@@ -2588,10 +2797,11 @@ Mount(3): backup -> file:///mnt/backup
             "the share at the top has its section's name over it"
         );
 
-        // All the way up: the Disks heading is back at the top.
+        // All the way up: the card's top is back — the Places section over
+        // the Disks one, though the cursor is on a disk.
         card.move_cursor(-100);
         assert_eq!(card.first, 0);
-        assert_eq!(card.visible()[0].0, Line::Section("Disks"));
+        assert_eq!(card.visible()[0].0, Line::Section("Places"));
 
         // A short list never scrolls.
         assert_eq!(
