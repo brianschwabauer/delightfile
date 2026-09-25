@@ -55,6 +55,9 @@ open.
   shares (SMB, SFTP, FTP, WebDAV, NFS) listed beside the disks, with a connect prompt.
 - **SFTP.** Hosts from yazi's `vfs.toml` browse as directories, with download-on-open and
   upload-on-drop.
+- **Cloud storage.** Every remote in `rclone.conf` (Google Drive, Dropbox, S3, R2, anything
+  rclone speaks) browses the same way at `rclone://<name>`. rclone does the talking, so
+  delightfile never holds a token.
 - **Tabs.** Folder tabs joined to the bar below them, reorderable by dragging, and
   detachable into their own window.
 
@@ -238,6 +241,22 @@ nineteen custom directory icons.
 SFTP hosts come from `~/.config/yazi/vfs.toml` first and
 `~/.config/delightfile/vfs.toml` second, so an existing yazi setup needs no second copy.
 
+Cloud remotes come from rclone's own config (`$RCLONE_CONFIG`, else
+`~/.config/rclone/rclone.conf`). Each `[section]` there is a service of the same name,
+listed after the `vfs.toml` ones and under Network on the `M` card. To start inside a
+bucket, or to reach a remote under another name, add it to `vfs.toml`:
+
+```toml
+[services.photos]
+type = "rclone"
+remote = "r2"           # the section in rclone.conf; defaults to the service name
+root = "photos-bucket"  # optional
+```
+
+`rclone://photos` then opens `r2:photos-bucket`. An encrypted `rclone.conf` cannot be read
+for its remotes, so list them in `vfs.toml` instead; rclone itself takes the password from
+`RCLONE_CONFIG_PASS`.
+
 `--cwd-file=<path>` writes the directory you ended in when you quit with `q`, which is what
 lets a shell function follow you:
 
@@ -256,8 +275,8 @@ Five crates:
 
 - `df-core` is headless. The filesystem model, sorting and filtering, the operation journal
   and undo, the keymap engine, config parsing, the task engine, previews, git, archives,
-  `du`, zoxide, and the SFTP vfs. It never touches winit, egui or wgpu, so `cargo test`
-  exercises it on a machine with no display.
+  `du`, zoxide, and the SFTP and rclone vfs. It never touches winit, egui or wgpu, so
+  `cargo test` exercises it on a machine with no display.
 - `df-app` is the binary. One winit `ApplicationHandler`, every pixel painted onto an
   `egui::Painter`, and the parts that need a compositor: drag-and-drop, the clipboard,
   D-Bus.
