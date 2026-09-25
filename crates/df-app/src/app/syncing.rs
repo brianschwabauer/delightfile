@@ -384,7 +384,13 @@ impl App {
             self.land_on(&focus);
         }
         if report.problems() == 0 {
-            self.toasts.notice(sync::outcome(&report), now);
+            // Files the plan could not read were never copied: not a failed
+            // run, but not one to read past either.
+            if report.skipped.is_empty() {
+                self.toasts.notice(sync::outcome(&report), now);
+            } else {
+                self.toasts.error(sync::outcome(&report), now);
+            }
             return;
         }
         let card = SyncCard::result(running.dest, running.title.clone(), report);
@@ -756,6 +762,23 @@ mod tests {
         // Esc puts it away without a word: there is nothing to cancel.
         key(&mut app, Key::Escape);
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn a_folder_that_could_not_be_read_is_in_the_toast() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tree, mut app) = yanked("sync-app-unreadable");
+        let locked = tree.dir("src/photos/locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        app.run(Command::PasteSync, 10, Instant::now());
+        compared(&mut app);
+        key(&mut app, Key::Enter);
+        synced(&mut app);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Synced 2 files · 3 B · 2 files verified · 1 could not be read")
+        );
     }
 
     #[test]

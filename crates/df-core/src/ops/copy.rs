@@ -438,6 +438,14 @@ fn sync_file(file: &File, path: &Path) -> Result<()> {
     file.sync_all().map_err(|e| DfError::io(path, e))
 }
 
+/// `fsync(2)` a file that is already written and closed, by opening it again:
+/// how a file another program wrote — `rsync` on a download — is made as
+/// durable as one this program wrote itself.
+pub(crate) fn sync_path(path: &Path) -> Result<()> {
+    let file = File::open(path).map_err(|e| DfError::io(path, e))?;
+    sync_file(&file, path)
+}
+
 /// `fsync(2)` the directory `path` is in, so the name it was just given — a
 /// rename, a `mkdir`, a `symlink` — is on the medium too.
 pub(crate) fn sync_parent(path: &Path) -> Result<()> {

@@ -330,6 +330,9 @@ fn a_socket_is_skipped_by_name_rather_than_silently() {
     assert!(!classes(&plan)
         .iter()
         .any(|(label, _)| label.ends_with("sock")));
+    // …and the run says so too, rather than reporting a clean copy.
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(report.skipped, plan.skipped);
 }
 
 #[test]

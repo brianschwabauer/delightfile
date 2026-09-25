@@ -45,6 +45,14 @@ pub struct SyncReport {
     /// as verified as `rsync`'s own transfer checks make it, and the toast
     /// says so rather than "verified".
     pub local_only: bool,
+    /// An upload whose server was never asked to flush what it wrote — its
+    /// `rsync` refused `--fsync`, or this one is too old to send it — so the
+    /// copy there is as durable as that server's page cache.
+    pub unflushed: bool,
+    /// What the plan could not read and so never copied
+    /// ([`SyncPlan::skipped`]), carried here so the result says it: a run
+    /// that left files behind must not read as a clean "verified".
+    pub skipped: Vec<(PathBuf, String)>,
     /// Each file the verify pass found wrong, and how.
     pub verify_failures: Vec<(PathBuf, String)>,
     /// Each path that could not be copied or removed, and why.
@@ -77,6 +85,7 @@ pub fn execute(plan: &SyncPlan, mode: Mode, verify: Verify, ctx: &TaskCtx) -> Sy
             mode,
             verify,
             removal: plan.removal,
+            skipped: plan.skipped.clone(),
             ..SyncReport::default()
         },
         copied: HashSet::new(),

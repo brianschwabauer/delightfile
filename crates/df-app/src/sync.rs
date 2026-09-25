@@ -509,14 +509,15 @@ fn plan_rows(plan: &SyncPlan, mode: Mode) -> Vec<Row> {
     rows
 }
 
-/// Every problem a run had, each once: the copies that failed, then the
-/// files the verify found wrong. Not capped — this is the list the card
-/// exists to show.
+/// Every problem a run had, each once: the copies that failed, the files the
+/// verify found wrong, then what could not be read to copy at all. Not
+/// capped — this is the list the card exists to show.
 fn problem_rows(dest: &Path, report: &SyncReport) -> Vec<Row> {
     report
         .errors
         .iter()
         .chain(&report.verify_failures)
+        .chain(&report.skipped)
         .map(|(path, why)| Row {
             mark: Mark::Problem,
             text: path
@@ -558,12 +559,24 @@ pub fn outcome(report: &SyncReport) -> String {
         // the toast must not say otherwise.
         parts.push("verified locally only".to_string());
     } else if report.verify_failures.is_empty() && report.verified > 0 {
-        let everything = report.verify == Verify::Everything || report.copied == 0;
+        // A bare "verified" says the whole of it arrived; with files left
+        // unread it did not, so the count of what was verified stands instead.
+        let everything =
+            report.verify == Verify::Everything || report.copied == 0 || !report.skipped.is_empty();
         parts.push(if everything {
             format!("{} verified", plural(report.verified, "file", "files"))
         } else {
             "verified".to_string()
         });
+    }
+    if report.unflushed && !report.cancelled {
+        parts.push("not flushed on the server".to_string());
+    }
+    if !report.skipped.is_empty() {
+        parts.push(format!(
+            "{} could not be read",
+            grouped(report.skipped.len() as u64)
+        ));
     }
     parts.join(" · ")
 }
@@ -1334,6 +1347,61 @@ mod tests {
         assert_eq!(
             outcome(&report),
             "Synced 3 files · 30 B · verified locally only"
+        );
+    }
+
+    #[test]
+    fn a_server_that_was_not_flushed_says_so_after_verified() {
+        let report = SyncReport {
+            copied: 1,
+            copied_bytes: 2,
+            verified: 1,
+            unflushed: true,
+            ..SyncReport::default()
+        };
+        assert_eq!(
+            outcome(&report),
+            "Synced 1 file · 2 B · verified · not flushed on the server"
+        );
+    }
+
+    #[test]
+    fn files_that_could_not_be_read_keep_a_run_from_reading_as_clean() {
+        let report = SyncReport {
+            copied: 3,
+            copied_bytes: 30,
+            verified: 3,
+            skipped: vec![
+                (
+                    PathBuf::from("/src/photos/locked"),
+                    "Permission denied".into(),
+                ),
+                (
+                    PathBuf::from("/src/photos/sock"),
+                    "not a file, folder or link".into(),
+                ),
+            ],
+            ..SyncReport::default()
+        };
+        assert_eq!(
+            outcome(&report),
+            "Synced 3 files · 30 B · 3 files verified · 2 could not be read"
+        );
+        // …and the result card, when one is up, names them.
+        let card = SyncCard::result(
+            PathBuf::from("/dst"),
+            "Sync".into(),
+            SyncReport {
+                errors: vec![(PathBuf::from("/dst/photos/a"), "No space left".into())],
+                ..report
+            },
+        );
+        assert_eq!(
+            card.rows()
+                .iter()
+                .map(|row| row.text.as_str())
+                .collect::<Vec<_>>(),
+            ["photos/a", "/src/photos/locked", "/src/photos/sock"]
         );
     }
 

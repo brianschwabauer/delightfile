@@ -18,9 +18,18 @@
 //!   the report says the copy was verified locally only, rather than claiming
 //!   a proof it does not have.
 //!
-//! `rsync --delete` deletes for good, wherever the extras are — there is no
-//! trash on the far side of it — so a remote plan always says
-//! [`Removal::Delete`], and the card says so on its button.
+//! `rsync --delete-after` deletes for good, wherever the extras are — there is
+//! no trash on the far side of it — so a remote plan always says
+//! [`Removal::Delete`], and the card says so on its button. *After*, as a
+//! local mirror does it: the copies land first, and only then do the extras
+//! go, so a run that fails half way has not already emptied the destination.
+//!
+//! Durability follows the local rule as far as `rsync` allows. On a download
+//! the files land on this machine, and each one — and the folder holding it —
+//! is `fsync`ed here once `rsync` is done, before the verify reads them back.
+//! On an upload the server's `rsync` has to do it, which `--fsync` asks for;
+//! a server too old to know the option refuses the run at once, the run is
+//! made again without it, and the result says the server was not flushed.
 //!
 //! The connection is the vfs's: the same `ssh` options
 //! ([`crate::vfs::Service::command`]) — never prompt, give up connecting after
@@ -221,13 +230,14 @@ impl Transfer {
 
     /// The dry run the card's plan comes from: every path itemized, the
     /// unchanged ones included (`-ii`) so the card can count them, and
-    /// `--delete` always, so the extras are known before `m` asks for them.
-    /// Each line is `%i %l %n`: the change, the length, the name.
+    /// `--delete-after` always, so the extras are known before `m` asks for
+    /// them. Each line is `%i %l %n`: the change, the length, the name.
     pub fn dry_run_args(&self, content: bool) -> Vec<OsString> {
-        let mut args: Vec<OsString> = ["-a", "-n", "-ii", "--delete", "--out-format=%i %l %n"]
-            .iter()
-            .map(OsString::from)
-            .collect();
+        let mut args: Vec<OsString> =
+            ["-a", "-n", "-ii", "--delete-after", "--out-format=%i %l %n"]
+                .iter()
+                .map(OsString::from)
+                .collect();
         if content {
             args.push("--checksum".into());
         }
@@ -238,22 +248,69 @@ impl Transfer {
 
     /// The run itself. `--no-inc-recursive` makes `rsync` count the whole
     /// transfer before it starts, so the progress line is about all of it
-    /// rather than about what has been found so far.
-    pub fn run_args(&self, mode: Mode, content: bool) -> Vec<OsString> {
+    /// rather than about what has been found so far; `fsync` asks the
+    /// receiving side to flush each file it writes ([`fsync_for`]).
+    pub fn run_args(&self, mode: Mode, content: bool, fsync: bool) -> Vec<OsString> {
         let mut args: Vec<OsString> = ["-a", "--info=progress2", "--no-inc-recursive"]
             .iter()
             .map(OsString::from)
             .collect();
         if mode == Mode::Mirror {
-            args.push("--delete".into());
+            args.push("--delete-after".into());
         }
         if content {
             args.push("--checksum".into());
+        }
+        if fsync {
+            args.push("--fsync".into());
         }
         args.extend(self.common());
         args.extend(self.endpoints());
         args
     }
+}
+
+/// The first `rsync` with `--fsync`.
+const FSYNC_SINCE: (u32, u32, u32) = (3, 2, 0);
+
+/// This machine's `rsync` version, from `rsync --version`.
+pub fn local_version() -> Option<(u32, u32, u32)> {
+    let out = Command::new("rsync")
+        .arg("--version")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The version on `rsync --version`'s first line — `rsync  version
+/// 3.5.0-g471e17dc  protocol version 32` is `(3, 5, 0)`; a missing third
+/// number is 0, and anything after the numbers (a git suffix, `pre1`) is not
+/// part of it.
+pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+    let line = text.lines().next()?;
+    let mut words = line.split_whitespace();
+    if words.next()? != "rsync" || words.next()? != "version" {
+        return None;
+    }
+    let mut numbers = words.next()?.split('.').map(|part| {
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().ok()
+    });
+    let major = numbers.next()??;
+    let minor = numbers.next().flatten().unwrap_or(0);
+    let patch = numbers.next().flatten().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Whether a run should ask for `--fsync`: only on an upload, where the
+/// receiver is the server's `rsync` and nobody else will flush what it wrote,
+/// and only when this `rsync` is new enough to send the option. A download's
+/// files are flushed here instead, with the same calls a local sync uses.
+pub fn fsync_for(direction: Direction, version: Option<(u32, u32, u32)>) -> bool {
+    direction == Direction::Upload && version.is_some_and(|version| version >= FSYNC_SINCE)
 }
 
 // ── The dry run ─────────────────────────────────────────────────────────────
@@ -616,6 +673,7 @@ pub(crate) fn execute(
         mode,
         verify,
         removal: Removal::Delete,
+        skipped: plan.skipped.clone(),
         ..SyncReport::default()
     };
     let to_copy = plan.bytes_to_copy();
@@ -634,13 +692,32 @@ pub(crate) fn execute(
         copies + checks.len() as u64,
     );
 
-    let ran = match run(transfer, mode, plan.options.content, ctx) {
+    let mut fsync = fsync_for(transfer.direction, local_version());
+    let mut ran = match run(transfer, mode, plan.options.content, fsync, ctx) {
         Ok(ran) => ran,
         Err(e) => {
             report.errors.push((plan.dest_dir.clone(), e.to_string()));
             return report;
         }
     };
+    // A server whose `rsync` predates `--fsync` refuses the whole run before
+    // a byte moves, naming the option. That is not a failed sync; it is a
+    // sync that has to go without the server's flush, and says so.
+    if fsync && refused_fsync(&ran) {
+        log::info!(
+            "{} refused --fsync; syncing without it",
+            transfer.host.destination
+        );
+        fsync = false;
+        ran = match run(transfer, mode, plan.options.content, fsync, ctx) {
+            Ok(ran) => ran,
+            Err(e) => {
+                report.errors.push((plan.dest_dir.clone(), e.to_string()));
+                return report;
+            }
+        };
+    }
+    report.unflushed = transfer.direction == Direction::Upload && !fsync;
     let Some(status) = ran.status else {
         report.cancelled = true;
         return report;
@@ -676,8 +753,54 @@ pub(crate) fn execute(
             .errors
             .push((plan.dest_dir.clone(), failure_line(&ran.stderr, status)));
     }
+    if transfer.direction == Direction::Download {
+        flush_here(
+            plan,
+            plan.items
+                .iter()
+                .filter(|item| matches!(item.class, Class::New | Class::Changed)),
+            &mut report,
+        );
+    }
     verify_remote(plan, transfer, &checks, ctx, &mut report);
     report
+}
+
+/// Whether a run was refused for `--fsync` alone: it failed, before any
+/// progress, with the option named on stderr.
+fn refused_fsync(ran: &Ran) -> bool {
+    ran.status.is_some_and(|status| !status.success())
+        && ran.moved == 0
+        && ran.stderr.contains("--fsync")
+}
+
+/// Flush what a download wrote on this machine: each file, and each folder
+/// that gained a name. `rsync` renames its temporary files into place without
+/// an `fsync` unless told, and the verify that follows would otherwise read
+/// the page cache — the same reason a local sync flushes (`ops::copy`). A
+/// file that cannot be flushed is a problem like a failed copy.
+fn flush_here<'a>(plan: &SyncPlan, items: impl Iterator<Item = &'a Item>, report: &mut SyncReport) {
+    let mut folders = std::collections::BTreeSet::new();
+    for item in items {
+        let path = plan.dst_of(item);
+        if item.kind == Kind::File {
+            if let Err(e) = crate::ops::copy::sync_path(&path) {
+                report
+                    .errors
+                    .push((path.clone(), format!("could not be flushed: {e}")));
+            }
+        }
+        if let Some(parent) = path.parent() {
+            folders.insert(parent.to_path_buf());
+        }
+    }
+    for folder in folders {
+        if let Err(e) = crate::ops::copy::sync_dir(&folder) {
+            report
+                .errors
+                .push((folder, format!("could not be flushed: {e}")));
+        }
+    }
 }
 
 /// What the run came to, and how many bytes the progress line had counted.
@@ -689,10 +812,10 @@ struct Ran {
 
 /// Run `rsync`, turning its progress line into the task's bar: stopped while
 /// the task is paused, killed when it is cancelled.
-fn run(transfer: &Transfer, mode: Mode, content: bool, ctx: &TaskCtx) -> Result<Ran> {
+fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCtx) -> Result<Ran> {
     let mut command = Command::new("rsync");
     command
-        .args(transfer.run_args(mode, content))
+        .args(transfer.run_args(mode, content, fsync))
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1030,7 +1153,7 @@ mod tests {
     fn the_run_is_rsync_archive_with_the_whole_transfer_counted_up_front() {
         let t = upload();
         assert_eq!(
-            strings(&t.run_args(Mode::Update, false)),
+            strings(&t.run_args(Mode::Update, false, false)),
             [
                 "-a",
                 "--info=progress2",
@@ -1043,8 +1166,12 @@ mod tests {
                 "brian@showandtour1:backups/photos/",
             ]
         );
-        let mirror = strings(&t.run_args(Mode::Mirror, true));
-        assert_eq!(mirror[3..5], ["--delete", "--checksum"]);
+        let mirror = strings(&t.run_args(Mode::Mirror, true, true));
+        assert_eq!(mirror[3..6], ["--delete-after", "--checksum", "--fsync"]);
+        assert!(
+            !mirror.contains(&"--delete".to_string()),
+            "after, not during"
+        );
     }
 
     #[test]
@@ -1052,7 +1179,7 @@ mod tests {
         let t = upload();
         assert_eq!(
             strings(&t.dry_run_args(false))[..5],
-            ["-a", "-n", "-ii", "--delete", "--out-format=%i %l %n"]
+            ["-a", "-n", "-ii", "--delete-after", "--out-format=%i %l %n"]
         );
         assert!(strings(&t.dry_run_args(true)).contains(&"--checksum".to_string()));
     }
@@ -1393,8 +1520,14 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         };
         let plan = remote_plan(&transfer, &t);
         assert_eq!(plan.new.count, 2);
+        let before = crate::ops::copy::syncs();
         let report =
             super::super::execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+        let after = crate::ops::copy::syncs();
+        // Both files flushed here, and the three folders that gained names:
+        // `local`, `local/shoot` and `local/shoot/day1`.
+        assert_eq!(after.0 - before.0, 2);
+        assert_eq!(after.1 - before.1, 3);
         assert_eq!(report.problems(), 0, "{report:?}");
         assert_eq!(report.verified, 2);
         assert_eq!(
@@ -1538,6 +1671,90 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         // Three paths to write (the new folder and its two files), two to read.
         assert_eq!(total, (bytes * 2, 3 + 2));
         assert_eq!(*record.done.lock().unwrap(), total);
+    }
+
+    #[test]
+    fn the_version_is_read_off_the_first_line() {
+        assert_eq!(
+            parse_version("rsync  version 3.5.0-g471e17dc  protocol version 32\nCopyright"),
+            Some((3, 5, 0))
+        );
+        assert_eq!(
+            parse_version("rsync  version 3.1.3  protocol version 31"),
+            Some((3, 1, 3))
+        );
+        assert_eq!(
+            parse_version("rsync version 3.2.0pre1 protocol"),
+            Some((3, 2, 0))
+        );
+        assert_eq!(
+            parse_version("rsync  version 2.6  protocol"),
+            Some((2, 6, 0))
+        );
+        assert_eq!(parse_version("openrsync: protocol version 29"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn only_an_upload_from_a_new_enough_rsync_asks_the_server_to_flush() {
+        assert!(fsync_for(Direction::Upload, Some((3, 2, 0))));
+        assert!(fsync_for(Direction::Upload, Some((3, 5, 0))));
+        assert!(!fsync_for(Direction::Upload, Some((3, 1, 3))));
+        assert!(!fsync_for(Direction::Upload, None));
+        assert!(
+            !fsync_for(Direction::Download, Some((3, 5, 0))),
+            "a download is flushed here"
+        );
+    }
+
+    #[test]
+    fn a_server_that_refuses_fsync_is_synced_without_it_and_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        if !rsync_here() || !fsync_for(Direction::Upload, local_version()) {
+            return;
+        }
+        let t = TempTree::new("rsync-old-server");
+        let photos = t.dir("src/photos");
+        t.file("src/photos/a.jpg", b"aaaa");
+        // An old server: its rsync does not know --fsync, and says so the way
+        // rsync does, before anything moves.
+        let script = t.file(
+            "bin/old-ssh",
+            b"#!/bin/sh\nshift\ncase \"$*\" in *--fsync*) echo 'rsync: on remote machine: --fsync: unknown option' >&2; exit 1;; esac\nexec sh -c \"$*\"\n",
+        );
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let transfer = Transfer {
+            host: Host {
+                program: Some(script),
+                ..Host::alias("old")
+            },
+            direction: Direction::Upload,
+            sources: vec![photos],
+            dest: t.dir("server"),
+        };
+        let plan = remote_plan(&transfer, &t);
+        let report =
+            super::super::execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+        assert_eq!(report.problems(), 0, "{report:?}");
+        assert!(report.unflushed, "the server was never asked to flush");
+        assert_eq!((report.copied, report.verified), (1, 1));
+        assert_eq!(
+            std::fs::read(t.join("server/photos/a.jpg")).unwrap(),
+            b"aaaa"
+        );
+
+        // A server that knows the option is asked, and the result says so.
+        let transfer = Transfer {
+            host: server(&t, false),
+            sources: vec![t.join("src/photos")],
+            dest: t.dir("server2"),
+            direction: Direction::Upload,
+        };
+        let plan = remote_plan(&transfer, &t);
+        let report =
+            super::super::execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+        assert_eq!(report.problems(), 0, "{report:?}");
+        assert!(!report.unflushed);
     }
 
     #[test]
