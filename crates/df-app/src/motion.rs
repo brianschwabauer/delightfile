@@ -192,6 +192,142 @@ impl Tween {
     }
 }
 
+/// A [`Spring`]'s damping ratio. Under 1 is underdamped: it goes past where it
+/// is going once, by about a sixth of the distance (`e^(−πζ/√(1−ζ²))` is
+/// 16 % at a half), and comes back — the overshoot that makes a let-go read
+/// as a *spring* rather than as a slide. The second swing is under 3 % and
+/// the third is not there to see.
+pub const SPRING_DAMPING: f32 = 0.5;
+
+/// A [`Spring`]'s natural frequency, in radians per second.
+///
+/// Chosen for the settle: a spring let go 24 points out, at rest — the
+/// furthest a divider's rubber band stretches, and about what a snap's lag
+/// is — has settled by [`SPRING_SETTLE_DISTANCE`] and [`SPRING_SETTLE_SPEED`]
+/// in 446 ms. Further out settles a little later (a 53-point lag in 534 ms),
+/// nearer a little sooner, because the decay is exponential in the distance.
+pub const SPRING_FREQUENCY: f32 = 18.0;
+
+/// A spring is at rest once it is within this many points of where it is
+/// going…
+pub const SPRING_SETTLE_DISTANCE: f32 = 0.5;
+
+/// …and moving slower than this many points a second. Both, because an
+/// oscillator passing through its target at speed is not at rest.
+pub const SPRING_SETTLE_SPEED: f32 = 10.0;
+
+/// A damped spring from `from` to `to`, with a starting velocity, sampled at
+/// an `Instant`: an underdamped harmonic oscillator, solved in closed form.
+///
+/// The [`Tween`] rule, kept for a physical curve: no integration step, so
+/// nothing accumulates and nothing drifts when frames are late — the position
+/// at any instant is a formula of the time since `t0`. What a spring has that
+/// a tween does not is a velocity to start with, which is what lets a thing
+/// let go while moving carry its momentum into the settle, and a velocity at
+/// every instant, which is what lets a second spring take over from a first
+/// without a kink.
+///
+/// Units are whatever `from` and `to` are in; the settle thresholds are
+/// [`SPRING_SETTLE_DISTANCE`] and [`SPRING_SETTLE_SPEED`], which read as
+/// points and points a second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spring {
+    pub from: f32,
+    /// At `t0`, in units a second. Positive is towards larger values.
+    pub velocity: f32,
+    pub to: f32,
+    pub t0: Instant,
+    /// How long after `t0` it is at rest, from the decay's envelope rather
+    /// than from the curve itself: the envelope only falls, so once it is
+    /// under both thresholds the curve is too, for good — which is what makes
+    /// [`Spring::finished`] a thing that becomes true and stays true.
+    settles_after: Duration,
+}
+
+impl Spring {
+    pub fn new(from: f32, velocity: f32, to: f32, now: Instant) -> Spring {
+        let (a, b) = Spring::coefficients(from - to, velocity);
+        let (zeta, omega, damped) = Spring::rates();
+        // The velocity is `e^(−ζωt)·(c·cos ωd·t + d·sin ωd·t)`: `c` is the
+        // starting velocity and `d` falls out of differentiating the position.
+        let c = velocity;
+        let d = -zeta * omega * b - damped * a;
+        let reach = a.hypot(b);
+        let pace = c.hypot(d);
+        let past = |reach: f32, threshold: f32| {
+            if reach > threshold && reach.is_finite() {
+                (reach / threshold).ln()
+            } else {
+                0.0
+            }
+        };
+        let decays = past(reach, SPRING_SETTLE_DISTANCE).max(past(pace, SPRING_SETTLE_SPEED));
+        Spring {
+            from,
+            velocity,
+            to,
+            t0: now,
+            settles_after: Duration::from_secs_f32(decays / (zeta * omega)),
+        }
+    }
+
+    /// ζ, ω and the damped frequency ωd = ω·√(1 − ζ²).
+    fn rates() -> (f32, f32, f32) {
+        let zeta = SPRING_DAMPING;
+        let omega = SPRING_FREQUENCY;
+        (zeta, omega, omega * (1.0 - zeta * zeta).sqrt())
+    }
+
+    /// The position's two coefficients for a start `offset` from the target
+    /// moving at `velocity`: `x − to = e^(−ζωt)·(a·cos ωd·t + b·sin ωd·t)`.
+    fn coefficients(offset: f32, velocity: f32) -> (f32, f32) {
+        let (zeta, omega, damped) = Spring::rates();
+        (offset, (velocity + zeta * omega * offset) / damped)
+    }
+
+    fn elapsed(&self, now: Instant) -> f32 {
+        now.saturating_duration_since(self.t0).as_secs_f32()
+    }
+
+    /// Where it is now — exactly `to` once it has come to rest, so a finished
+    /// spring leaves nothing behind for a caller to round away.
+    pub fn value(&self, now: Instant) -> f32 {
+        if self.finished(now) {
+            return self.to;
+        }
+        let (zeta, omega, damped) = Spring::rates();
+        let (a, b) = Spring::coefficients(self.from - self.to, self.velocity);
+        let t = self.elapsed(now);
+        let envelope = (-zeta * omega * t).exp();
+        self.to + envelope * (a * (damped * t).cos() + b * (damped * t).sin())
+    }
+
+    /// How fast it is moving now, in units a second: nothing once at rest.
+    pub fn velocity_at(&self, now: Instant) -> f32 {
+        if self.finished(now) {
+            return 0.0;
+        }
+        let (zeta, omega, damped) = Spring::rates();
+        let (a, b) = Spring::coefficients(self.from - self.to, self.velocity);
+        let d = -zeta * omega * b - damped * a;
+        let t = self.elapsed(now);
+        let envelope = (-zeta * omega * t).exp();
+        envelope * (self.velocity * (damped * t).cos() + d * (damped * t).sin())
+    }
+
+    /// At rest: within half a point of `to` and slower than ten points a
+    /// second, and from then on for good. The `animating()` half of PLAN §1's
+    /// idle-cost rule, as [`Tween::finished`] is.
+    pub fn finished(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.t0) >= self.settles_after
+    }
+
+    /// When it comes to rest.
+    pub fn ends_at(&self) -> Instant {
+        self.t0 + self.settles_after
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +419,118 @@ mod tests {
         let tw = Tween::new(0.0, 1.0, Duration::ZERO, Easing::OutQuint, t0);
         assert!(tw.finished(t0));
         assert_eq!(tw.value(t0), 1.0);
+    }
+
+    /// A spring sampled every millisecond from `t0` until a second after it
+    /// has come to rest.
+    fn trace(spring: &Spring) -> Vec<f32> {
+        let end = spring.ends_at() + Duration::from_secs(1);
+        let mut out = Vec::new();
+        let mut t = spring.t0;
+        while t <= end {
+            out.push(spring.value(t));
+            t += Duration::from_millis(1);
+        }
+        out
+    }
+
+    /// It starts where it was let go and ends exactly where it was going —
+    /// and, from rest 24 points out, it is at rest in about 450 ms.
+    #[test]
+    fn a_spring_starts_at_from_and_ends_at_to() {
+        let t0 = Instant::now();
+        let spring = Spring::new(24.0, 0.0, 0.0, t0);
+        assert_eq!(spring.value(t0), 24.0);
+        assert_eq!(spring.velocity_at(t0), 0.0);
+        let settle = spring.ends_at() - t0;
+        assert!(
+            settle >= Duration::from_millis(400) && settle <= Duration::from_millis(500),
+            "{settle:?}"
+        );
+        assert!(!spring.finished(t0 + settle / 2));
+        assert!(spring.finished(t0 + settle));
+        assert_eq!(spring.value(t0 + settle), 0.0);
+        assert_eq!(spring.velocity_at(t0 + settle), 0.0);
+        // …and stays there.
+        for later in [1, 10, 1000] {
+            let at = t0 + settle + Duration::from_millis(later);
+            assert!(spring.finished(at));
+            assert_eq!(spring.value(at), 0.0);
+        }
+        // Just before rest it is already within the thresholds.
+        let before = t0 + settle - Duration::from_millis(1);
+        assert!(spring.value(before).abs() < SPRING_SETTLE_DISTANCE * 1.5);
+        // Nothing to do is done already.
+        assert!(Spring::new(3.0, 0.0, 3.0, t0).finished(t0));
+    }
+
+    /// With ζ = 0.5 it goes past its target once, by between a tenth and a
+    /// quarter of the distance, and each swing is smaller than the last.
+    #[test]
+    fn a_spring_overshoots_once_and_decays() {
+        let t0 = Instant::now();
+        for (from, to) in [(24.0, 0.0), (-40.0, 10.0)] {
+            let spring = Spring::new(from, 0.0, to, t0);
+            let side = |x: f32| (x - to).signum();
+            let start = side(from);
+            let samples = trace(&spring);
+            // Swings onto the far side of `to` deeper than rest's half point:
+            // the second one is under half a percent of the distance, and
+            // an overshoot nobody can see is not one.
+            let mut past = 0;
+            let mut depth = 0.0f32;
+            for x in &samples {
+                let beyond = (x - to) * -start;
+                if beyond > 0.0 {
+                    depth = depth.max(beyond);
+                } else if depth > 0.0 {
+                    past += usize::from(depth > SPRING_SETTLE_DISTANCE);
+                    depth = 0.0;
+                }
+            }
+            past += usize::from(depth > SPRING_SETTLE_DISTANCE);
+            assert_eq!(past, 1, "{from} → {to}");
+            let deepest = samples
+                .iter()
+                .map(|x| (x - to) * -start)
+                .fold(0.0f32, f32::max);
+            let distance = (from - to).abs();
+            assert!(
+                deepest > 0.10 * distance && deepest < 0.25 * distance,
+                "{from} → {to}: {deepest}"
+            );
+            // The swings' peaks, in order, each smaller than the one before.
+            let offsets: Vec<f32> = samples.iter().map(|x| (x - to).abs()).collect();
+            let mut peaks = vec![offsets[0]];
+            for w in offsets.windows(3) {
+                if w[1] > w[0] && w[1] >= w[2] && w[1] > 0.0 {
+                    peaks.push(w[1]);
+                }
+            }
+            assert!(peaks.len() >= 2, "{peaks:?}");
+            assert!(peaks.windows(2).all(|p| p[1] < p[0]), "{peaks:?}");
+        }
+    }
+
+    /// Let go moving away from its target, it goes on away first, then turns
+    /// and comes back; let go at rest, it never moves away at all.
+    #[test]
+    fn a_spring_carries_its_velocity() {
+        let t0 = Instant::now();
+        let away = Spring::new(10.0, 200.0, 0.0, t0);
+        let soon = away.value(t0 + Duration::from_millis(10));
+        assert!(soon > 10.0, "it went on away: {soon}");
+        let samples = trace(&away);
+        let furthest = samples.iter().copied().fold(f32::MIN, f32::max);
+        assert!(furthest > 10.0 && furthest < 30.0, "{furthest}");
+        assert_eq!(*samples.last().expect("samples"), 0.0);
+
+        let still = Spring::new(10.0, 0.0, 0.0, t0);
+        assert!(trace(&still).iter().all(|x| *x <= 10.0));
+        // The velocity it reports is the curve's own.
+        let at = t0 + Duration::from_millis(50);
+        let dt = Duration::from_micros(100);
+        let slope = (away.value(at + dt) - away.value(at)) / dt.as_secs_f32();
+        assert!((slope - away.velocity_at(at)).abs() < 2.0, "{slope}");
     }
 }
