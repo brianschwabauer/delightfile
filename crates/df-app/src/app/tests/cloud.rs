@@ -4,7 +4,9 @@
 //! No daemon runs. Every service here points its program at a path that does
 //! not exist, so a listing that does start fails on its worker and changes
 //! nothing these tests look at — and nothing reads this machine's `vfs.toml`
-//! or `rclone.conf`, because each test hands the app its vfs.
+//! or `rclone.conf`, because each test hands the app its vfs. The socket a
+//! daemon would have had goes in the fixture's sandbox, so even the attempt
+//! never creates a directory in the user's runtime directory.
 
 use df_core::ops::paste::{Clipboard, PasteMode};
 use df_core::vfs::{Service, Vfs, VfsConfig, VfsPath};
@@ -28,9 +30,12 @@ fn server(name: &str) -> Service {
     Service::direct(name, NO_RCLONE, Vec::new())
 }
 
-fn with_services(app: &mut App, services: Vec<Service>) {
+fn with_services(app: &mut Fixture, services: Vec<Service>) {
+    // Beside the fixture's files, inside its sandbox, which goes when it does.
+    let sockets = app.files.with_file_name("run");
     let mut config = VfsConfig::default();
-    for service in services {
+    for mut service in services {
+        service.socket_dir = Some(sockets.clone());
         config.insert(service);
     }
     app.vfs = Some(Arc::new(Vfs::with_config(

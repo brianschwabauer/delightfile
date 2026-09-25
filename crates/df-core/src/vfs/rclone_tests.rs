@@ -261,7 +261,7 @@ fn unsupported_is_a_sentence_and_not_a_hang_up() {
 // ── The hermetic integration tests ──────────────────────────────────────────
 
 /// `rclone` on `$PATH`, the way the app will find it.
-fn find_rclone() -> Option<PathBuf> {
+pub(super) fn find_rclone() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|dir| dir.join("rclone"))
@@ -270,20 +270,31 @@ fn find_rclone() -> Option<PathBuf> {
 
 /// A service name no other test in this process is using, because the socket
 /// name carries it and the teardown check looks for it.
-fn unique_name(tag: &str) -> String {
+pub(super) fn unique_name(tag: &str) -> String {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     format!("{tag}{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
-/// An rclone service whose remote is `remote`'s directory and whose daemon
-/// reads an empty config in `scratch` rather than the user's.
+/// An rclone service whose remote is `remote`'s directory, whose daemon reads
+/// an empty config in `scratch` rather than the user's, and whose socket goes
+/// in `scratch` too — never in the user's runtime directory.
 fn local_service(name: &str, remote: &TempDir, scratch: &TempDir, rclone: &Path) -> Service {
+    scratch_service(
+        Service::rclone(name, remote.path.display().to_string()),
+        scratch,
+        rclone,
+    )
+}
+
+/// `service`, made hermetic: `rclone` with a scratch `--config`, and its socket
+/// in the scratch directory.
+pub(super) fn scratch_service(mut service: Service, scratch: &TempDir, rclone: &Path) -> Service {
     let conf = scratch.file("rclone.conf", b"");
-    let mut service = Service::rclone(name, remote.path.display().to_string());
     service.program = Some((
         rclone.to_path_buf(),
         vec!["--config".into(), conf.display().to_string()],
     ));
+    service.socket_dir = Some(scratch.path.join("run"));
     service
 }
 
@@ -293,29 +304,19 @@ fn vfs_over(service: Service) -> Vfs {
     Vfs::with_config(config, Vec::new(), no_notifier())
 }
 
-/// The sockets this process has open for `name`, by the naming rule in
-/// `rclone::socket_path`.
-fn sockets_for(name: &str) -> Vec<PathBuf> {
-    let prefix = format!("rclone-{}-{name}-", std::process::id());
-    let mut dirs =
-        vec![std::env::temp_dir().join(format!("delightfile-{}", crate::ops::trash::uid()))];
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        dirs.push(PathBuf::from(runtime).join("delightfile"));
-    }
-    dirs.iter()
-        .filter_map(|dir| std::fs::read_dir(dir).ok())
+/// The sockets in `scratch`'s socket directory (see [`scratch_service`]).
+pub(super) fn sockets_in(scratch: &TempDir) -> Vec<PathBuf> {
+    std::fs::read_dir(scratch.path.join("run"))
+        .into_iter()
         .flatten()
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
-        })
+        .filter(|path| path.extension().is_some_and(|e| e == "sock"))
         .collect()
 }
 
 /// Anything rclone left half-written in `dir`.
-fn partials_in(dir: &Path) -> Vec<String> {
+pub(super) fn partials_in(dir: &Path) -> Vec<String> {
     std::fs::read_dir(dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -647,7 +648,7 @@ fn rclone_round_trip_everything() {
     // ...and the daemon is still the same healthy daemon afterwards.
     assert!(vfs.stat(&root.join("big.bin"), true, &ctx).is_ok());
     assert_eq!(
-        sockets_for(&name).len(),
+        sockets_in(&scratch).len(),
         1,
         "one daemon for the whole session"
     );
@@ -655,7 +656,7 @@ fn rclone_round_trip_everything() {
     // ── Clean teardown ──────────────────────────────────────────────────
     drop(vfs);
     assert!(
-        sockets_for(&name).is_empty(),
+        sockets_in(&scratch).is_empty(),
         "dropping the vfs killed the daemon and removed its socket"
     );
 }
@@ -782,7 +783,7 @@ fn rclone_cancel_mid_transfer_stops_the_job_and_keeps_the_original() {
     }
     drop(daemon);
     assert!(
-        sockets_for(&name).is_empty(),
+        sockets_in(&scratch).is_empty(),
         "the socket went with the daemon"
     );
 }
@@ -795,9 +796,10 @@ fn a_daemon_that_cannot_start_says_why() {
         eprintln!("skipping a_daemon_that_cannot_start_says_why: no rclone on $PATH");
         return;
     };
-    let name = unique_name("bad");
-    let mut service = Service::rclone(&name, "/nonexistent");
+    let scratch = TempDir::new("rclone-bad-scratch");
+    let mut service = Service::rclone(unique_name("bad"), "/nonexistent");
     service.program = Some((rclone, vec!["--no-such-flag-anywhere".into()]));
+    service.socket_dir = Some(scratch.path.join("run"));
     let started = Instant::now();
     let error = Daemon::spawn(Arc::new(service), &[])
         .map(|_| ())
@@ -811,7 +813,7 @@ fn a_daemon_that_cannot_start_says_why() {
         started.elapsed() < T,
         "it exited; nobody waited out the deadline"
     );
-    assert!(sockets_for(&name).is_empty());
+    assert!(sockets_in(&scratch).is_empty());
 }
 
 /// Kill the daemon out from under a live vfs: one operation fails with a
@@ -875,5 +877,5 @@ fn a_killed_daemon_is_replaced_on_the_next_request() {
         .expect("a fresh daemon answers the next request");
     assert_eq!(attrs.size, Some(3));
     drop(vfs);
-    assert!(sockets_for(&name).is_empty());
+    assert!(sockets_in(&scratch).is_empty());
 }

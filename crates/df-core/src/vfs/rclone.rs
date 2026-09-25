@@ -872,8 +872,10 @@ fn spawn_failure(service: &Service, program: &Path, source: std::io::Error) -> V
     }
 }
 
-/// Where the socket goes: `$XDG_RUNTIME_DIR/delightfile/`, else a private
-/// directory under the temp dir.
+/// Where the socket goes: the service's [`Service::socket_dir`] when it names
+/// one (the tests' way to keep out of the user's runtime directory), else
+/// `$XDG_RUNTIME_DIR/delightfile/`, else a private directory under the temp
+/// dir.
 ///
 /// The name carries the pid, the service and a per-process counter. The pid
 /// keeps two delightfiles apart; the counter keeps two daemons in one process
@@ -888,15 +890,22 @@ fn socket_path(service: &Service) -> Result<PathBuf, VfsError> {
         std::process::id(),
         file_safe(&service.name)
     );
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        candidates.push(PathBuf::from(runtime).join("delightfile"));
-    }
     let uid = crate::ops::trash::uid();
-    candidates.push(std::env::temp_dir().join(format!("delightfile-{uid}")));
-    // A `$TMPDIR` deep enough to push the name past `sun_path` still leaves
-    // `/tmp`, which never does.
-    candidates.push(PathBuf::from("/tmp").join(format!("delightfile-{uid}")));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    match &service.socket_dir {
+        // Only there: a service that says where its socket goes has said
+        // where it must not go, too.
+        Some(dir) => candidates.push(dir.clone()),
+        None => {
+            if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+                candidates.push(PathBuf::from(runtime).join("delightfile"));
+            }
+            candidates.push(std::env::temp_dir().join(format!("delightfile-{uid}")));
+            // A `$TMPDIR` deep enough to push the name past `sun_path` still
+            // leaves `/tmp`, which never does.
+            candidates.push(PathBuf::from("/tmp").join(format!("delightfile-{uid}")));
+        }
+    }
     for dir in candidates {
         let path = dir.join(&name);
         if path.as_os_str().len() > SUN_PATH_MAX {
@@ -910,7 +919,9 @@ fn socket_path(service: &Service) -> Result<PathBuf, VfsError> {
     Err(VfsError::Spawn {
         service: service.name.clone(),
         program: RCLONE.to_string(),
-        source: std::io::Error::other("found no private directory to put its socket in"),
+        source: std::io::Error::other(
+            "found no private directory short enough to put its socket in",
+        ),
     })
 }
 
@@ -1162,9 +1173,22 @@ mod tests {
         assert_eq!(file_safe("r2"), "r2");
         assert_eq!(file_safe("my remote/../x"), "my_remote_.._x");
         assert_eq!(file_safe(&"x".repeat(100)).len(), 32);
-        let service = Service::rclone("my remote", "r2");
+        // In a scratch directory of its own, opened up so the check that
+        // closes it again has something to do — never the user's runtime
+        // directory.
+        let scratch = super::super::tests::TempDir::new("rclone-sockets");
+        let run = scratch.path.join("run");
+        std::fs::create_dir(&run).unwrap_or_default();
+        let _ = std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755));
+        let mut service = Service::rclone("my remote", "r2");
+        service.socket_dir = Some(run.clone());
         let a = socket_path(&service).unwrap_or_default();
         let b = socket_path(&service).unwrap_or_default();
+        assert_eq!(
+            a.parent(),
+            Some(run.as_path()),
+            "the service's own directory"
+        );
         assert_ne!(a, b, "two daemons in one process never share a socket");
         assert!(a.as_os_str().len() <= SUN_PATH_MAX, "{}", a.display());
         let name = a.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -1174,9 +1198,16 @@ mod tests {
             ),
             "{name:?}"
         );
-        let dir = a.parent().map(Path::to_path_buf).unwrap_or_default();
-        let mode = std::fs::metadata(&dir).map(|m| m.permissions().mode() & 0o777);
-        assert_eq!(mode.ok(), Some(0o700), "{}", dir.display());
+        let mode = std::fs::metadata(&run).map(|m| m.permissions().mode() & 0o777);
+        assert_eq!(mode.ok(), Some(0o700), "closed again: {}", run.display());
+
+        // A directory the socket would not fit in is refused, not bound.
+        let mut deep = Service::rclone("r2", "r2");
+        deep.socket_dir = Some(scratch.path.join("d".repeat(SUN_PATH_MAX)));
+        let error = socket_path(&deep)
+            .map(|_| ())
+            .expect_err("a socket path past sun_path is refused");
+        assert!(error.to_string().contains("short enough"), "{error}");
     }
 
     #[test]

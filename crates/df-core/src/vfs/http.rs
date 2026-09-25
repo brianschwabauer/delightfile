@@ -6,9 +6,9 @@
 //! written is the *client half of one exchange* and nothing else — no
 //! keep-alive, no redirects, no TLS, no proxies, no cookies. Each call opens a
 //! connection, sends one request with `Connection: close`, reads one response
-//! and drops the socket. The socket is a file in `$XDG_RUNTIME_DIR`; a connect
-//! costs microseconds, and one connection per call means no connection state
-//! that could desynchronise between two calls.
+//! and drops the socket. The socket is a local file (see `super::rclone`); a
+//! connect costs microseconds, and one connection per call means no
+//! connection state that could desynchronise between two calls.
 //!
 //! ## What a response may look like
 //!
@@ -426,19 +426,40 @@ mod tests {
         ));
     }
 
-    /// A socket path short enough for `sun_path`'s 108 bytes whatever
-    /// `$TMPDIR` is.
-    fn socket_path(tag: &str) -> std::path::PathBuf {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|d| !d.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-        dir.join(format!(
-            "df-http-{tag}-{}-{}.sock",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ))
+    /// A private scratch directory for one test's socket, removed on drop —
+    /// under the temp dir, never the user's runtime directory — and a socket
+    /// path in it short enough for `sun_path`'s 108 bytes.
+    struct Scratch {
+        dir: std::path::PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Scratch {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let name = format!(
+                "df-http-{tag}-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            // `/tmp` when `$TMPDIR` is too deep for a socket inside it.
+            let mut dir = std::env::temp_dir().join(&name);
+            if dir.as_os_str().len() > 90 {
+                dir = std::path::PathBuf::from("/tmp").join(&name);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch { dir }
+        }
+
+        fn socket(&self) -> std::path::PathBuf {
+            self.dir.join("s.sock")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     /// A one-shot server: accept one connection, read the request's head and
@@ -476,11 +497,11 @@ mod tests {
             &b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n{\"a\":\"1\"}\n"[..],
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n6\r\n:\"1\"}\n\r\n0\r\n\r\n",
         ] {
-            let socket = socket_path("post");
+            let scratch = Scratch::new("post");
+            let socket = scratch.socket();
             let server = serve_once(&socket, reply);
             let response = post(&socket, "rc/noop", r#"{"a":"1"}"#, Duration::from_secs(5)).unwrap();
             let request = server.join().unwrap();
-            let _ = std::fs::remove_file(&socket);
             assert_eq!(response.status, 200);
             assert_eq!(response.body, b"{\"a\":\"1\"}\n");
             assert!(request.starts_with("POST /rc/noop HTTP/1.1\r\n"), "{request}");
@@ -494,8 +515,8 @@ mod tests {
 
     #[test]
     fn a_silent_server_times_out_and_a_missing_one_is_an_io_error() {
-        let socket = socket_path("silent");
-        let _ = std::fs::remove_file(&socket);
+        let scratch = Scratch::new("silent");
+        let socket = scratch.socket();
         let listener = UnixListener::bind(&socket).unwrap();
         // Accept and then say nothing, holding the connection open.
         let held = std::thread::spawn(move || {

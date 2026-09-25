@@ -162,6 +162,14 @@ pub struct Service {
     /// known. Informational: the mount card's second line. Nothing is decided
     /// by it — rclone knows what its remotes are.
     pub provider: Option<String>,
+    /// Where an rclone service's daemon puts its socket. `None` — every real
+    /// service — is `$XDG_RUNTIME_DIR/delightfile`, or a private directory
+    /// under the temp dir without one.
+    ///
+    /// A real field for the reason [`Service::program`] is one: it is how the
+    /// tests, in this crate and in df-app, start daemons without creating or
+    /// re-permissioning a directory in the user's own runtime directory.
+    pub socket_dir: Option<PathBuf>,
 }
 
 impl Service {
@@ -178,6 +186,7 @@ impl Service {
             program: None,
             remote: None,
             provider: None,
+            socket_dir: None,
         }
     }
 
@@ -653,6 +662,7 @@ fn parse_service(name: &str, table: &Table) -> Result<Service, String> {
         program: None,
         remote: None,
         provider: None,
+        socket_dir: None,
     })
 }
 
