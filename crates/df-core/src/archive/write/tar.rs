@@ -34,14 +34,17 @@ use crate::{DfError, Result};
 /// The longest name the header's `name` field holds.
 const NAME_FIELD: usize = 100;
 
-/// Write every member, then the end-of-archive marker.
+/// Write every member, then the end-of-archive marker. Returns the bytes of
+/// file contents written, which is what the headers declared: a file is
+/// either read to that length or the archive fails.
 pub(super) fn write<W: Write>(
     members: &[Member],
     out: &mut W,
     archive: &Path,
     ctx: &TaskCtx,
-) -> Result<()> {
+) -> Result<u64> {
     let mut buf = vec![0u8; crate::ops::COPY_CHUNK];
+    let mut read = 0u64;
     let put = |out: &mut W, bytes: &[u8]| out.write_all(bytes).map_err(|e| DfError::io(archive, e));
     for member in members {
         ctx.checkpoint()?;
@@ -82,11 +85,13 @@ pub(super) fn write<W: Write>(
         )?;
         if let What::File(len) = member.what {
             copy(member, len, out, &mut buf, archive, ctx)?;
+            read += len;
             put(out, &vec![0u8; padding(len)])?;
         }
         ctx.advance(0, 1);
     }
-    put(out, &[0u8; 2 * TAR_BLOCK])
+    put(out, &[0u8; 2 * TAR_BLOCK])?;
+    Ok(read)
 }
 
 /// Exactly `len` bytes of the member's file, a chunk at a time.

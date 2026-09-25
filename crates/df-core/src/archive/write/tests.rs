@@ -199,6 +199,33 @@ fn tar_modes(bytes: &[u8]) -> Vec<(String, u32, u8, String)> {
     out
 }
 
+/// The local header whose name is `name`, found by walking the signatures.
+fn local_header<'a>(bytes: &'a [u8], name: &str) -> &'a [u8] {
+    header_named(bytes, b"PK\x03\x04", 26, 30, name)
+}
+
+/// The central-directory header whose name is `name`.
+fn central_header<'a>(bytes: &'a [u8], name: &str) -> &'a [u8] {
+    header_named(bytes, b"PK\x01\x02", 28, 46, name)
+}
+
+fn header_named<'a>(
+    bytes: &'a [u8],
+    signature: &[u8],
+    name_len_at: usize,
+    fixed: usize,
+    name: &str,
+) -> &'a [u8] {
+    (0..bytes.len().saturating_sub(fixed))
+        .filter(|&at| &bytes[at..at + 4] == signature)
+        .map(|at| &bytes[at..])
+        .find(|h| {
+            let n = u16::from_le_bytes([h[name_len_at], h[name_len_at + 1]]) as usize;
+            h.len() >= fixed + n && &h[fixed..fixed + n] == name.as_bytes()
+        })
+        .unwrap_or_else(|| panic!("no header named {name}"))
+}
+
 fn mode_of<'a>(rows: impl IntoIterator<Item = (&'a str, u32)>, name: &str) -> u32 {
     rows.into_iter()
         .find(|row| row.0 == name)
@@ -536,6 +563,9 @@ fn zip64_is_written_when_the_limits_are_passed() {
     let t = TempTree::new("write-zip64");
     t.file("src/z/big.txt", &b"zip64 ".repeat(1000));
     t.file("src/z/big.jpg", &[9u8; 3000]);
+    // Past half the limit and short of it: the 2–4 GiB case, where the local
+    // header reserves a zip64 extra the sizes turn out not to need.
+    t.file("src/z/mid.jpg", &[8u8; 600]);
     t.file("src/z/small.txt", b"small");
     t.dir("src/z/dir");
     let members = walk(&[t.join("src/z")], &TaskCtx::detached())
@@ -551,9 +581,31 @@ fn zip64_is_written_when_the_limits_are_passed() {
     for member in &members {
         writer.add(member, &TaskCtx::detached()).unwrap();
     }
-    writer.finish().unwrap().into_inner().unwrap();
+    let (out, read) = writer.finish().unwrap();
+    out.into_inner().unwrap();
+    assert_eq!(read, 6000 + 3000 + 600 + 5);
 
     let bytes = std::fs::read(&dest).unwrap();
+    // Both headers of one member agree: the one whose local header reserved
+    // a zip64 extra says 4.5 in its central entry too and carries the extra
+    // there, with the sizes behind the mark.
+    let local = local_header(&bytes, "z/mid.jpg");
+    assert_eq!(u16::from_le_bytes([local[4], local[5]]), 45, "local");
+    let central = central_header(&bytes, "z/mid.jpg");
+    assert_eq!(u16::from_le_bytes([central[6], central[7]]), 45, "central");
+    assert_eq!(&central[20..28], &[0xff; 8], "sizes behind the zip64 mark");
+    // A directory needs 2.0 (APPNOTE 4.4.3.2) — the first one, whose offset
+    // is short of the lowered limit; `z/dir/` is past it, and rightly 4.5.
+    let dir = central_header(&bytes, "z/");
+    assert_eq!(u16::from_le_bytes([dir[6], dir[7]]), 20, "a directory");
+    let far = central_header(&bytes, "z/dir/");
+    assert_eq!(
+        u16::from_le_bytes([far[6], far[7]]),
+        45,
+        "an offset past it"
+    );
+    let small = local_header(&bytes, "z/small.txt");
+    assert_eq!(u16::from_le_bytes([small[4], small[5]]), 20, "deflated");
     assert!(
         bytes.windows(4).any(|w| w == b"PK\x06\x06"),
         "a zip64 end record"
@@ -568,7 +620,19 @@ fn zip64_is_written_when_the_limits_are_passed() {
     let tree = list(&dest).unwrap();
     assert_eq!(
         paths(&tree),
-        ["z/", "z/big.jpg", "z/big.txt", "z/dir/", "z/small.txt"]
+        [
+            "z/",
+            "z/big.jpg",
+            "z/big.txt",
+            "z/dir/",
+            "z/mid.jpg",
+            "z/small.txt"
+        ]
+    );
+    assert_eq!(tree.get("z/mid.jpg").unwrap().len, 600);
+    assert_eq!(
+        read_entry(&dest, "z/mid.jpg", 1000).unwrap(),
+        Some(vec![8u8; 600])
     );
     assert_eq!(tree.get("z/big.txt").unwrap().len, 6000);
     assert_eq!(tree.get("z/big.jpg").unwrap().len, 3000);
@@ -697,7 +761,162 @@ fn a_name_taken_meanwhile_is_only_replaced_when_asked() {
     assert_eq!(paths(&list(&dest).unwrap()), ["a.txt"]);
 }
 
+/// A file that shrank between the walk and the write is counted as what was
+/// read, and declared as that too.
+#[test]
+fn the_bytes_counted_are_the_bytes_read() {
+    let t = TempTree::new("write-shrank");
+    let log = t.file("src/s/log.txt", &[b'x'; 5000]);
+    let members = walk(&[t.join("src/s")], &TaskCtx::detached())
+        .unwrap()
+        .members;
+    std::fs::write(&log, [b'y'; 1200]).unwrap();
+    let dest = t.join("s.zip");
+    let file = std::fs::File::create(&dest).unwrap();
+    let mut writer = zip::ZipWriter::new(std::io::BufWriter::new(file), &dest, zip::LIMITS);
+    for member in &members {
+        writer.add(member, &TaskCtx::detached()).unwrap();
+    }
+    let (out, read) = writer.finish().unwrap();
+    out.into_inner().unwrap();
+    assert_eq!(read, 1200);
+    assert_eq!(list(&dest).unwrap().get("s/log.txt").unwrap().len, 1200);
+}
+
+/// A name the 16-bit length field cannot hold is an error, not a length
+/// that wrapped round.
+#[test]
+fn a_name_too_long_for_a_zip_is_refused() {
+    let dest = PathBuf::from("/nowhere/long.zip");
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()), &dest, zip::LIMITS);
+    let member = Member {
+        source: PathBuf::from("/nowhere/long"),
+        name: vec![b'n'; 70_000],
+        what: What::Dir,
+        mode: 0o040_755,
+        mtime: STAMP,
+        uid: 0,
+        gid: 0,
+        stored: true,
+    };
+    let err = writer.add(&member, &TaskCtx::detached()).unwrap_err();
+    assert!(err.to_string().contains("too long"), "{err}");
+}
+
+/// Past 2038 the extended timestamp is still written — its low 32 bits,
+/// which is how the readers that know 2038 read it — and this crate's own
+/// reader, told by the DOS date which half it is in, gets the year right.
+#[test]
+fn a_time_past_2038_keeps_its_extended_timestamp() {
+    let t = TempTree::new("write-2038");
+    // 2039-09-18.
+    let later = 2_200_000_000i64;
+    let file = t.file("src/future.txt", b"soon");
+    set_mtime(&file, later);
+    let dest = t.join("future.zip");
+    pack(vec![file], dest.clone(), Format::Zip);
+    let bytes = std::fs::read(&dest).unwrap();
+    let central = central_header(&bytes, "future.txt");
+    let extra = &central[46 + "future.txt".len()..];
+    assert_eq!(&extra[..5], &[0x55, 0x54, 5, 0, 1]);
+    assert_eq!(&extra[5..9], &(later as u32).to_le_bytes());
+    assert_eq!(
+        list(&dest).unwrap().get("future.txt").unwrap().mtime,
+        Some(later)
+    );
+}
+
 // ── The checks before anything runs ─────────────────────────────────────────
+
+/// `path`, spelled relative to the process's own directory.
+fn relative_to_cwd(path: &Path) -> PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let common = cwd
+        .components()
+        .zip(path.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut out = PathBuf::new();
+    for _ in cwd.components().skip(common) {
+        out.push("..");
+    }
+    for part in path.components().skip(common) {
+        out.push(part);
+    }
+    out
+}
+
+/// A relative destination is where it says relative to the process — not
+/// relative to the sources' folder, which is where 7-Zip runs — and no
+/// temporary file is left in either place.
+#[test]
+fn a_relative_destination_lands_where_it_says() {
+    let t = TempTree::new("write-relative");
+    let photos = photos(&t);
+    let mut formats = vec![Format::Zip, Format::Tar];
+    if on_path("7z").is_some() {
+        formats.push(Format::SevenZip);
+    }
+    for format in formats {
+        let dest = t.join(format!("rel.{}", format.label()));
+        let relative = relative_to_cwd(&dest);
+        assert!(relative.is_relative());
+        let packed = pack(vec![relative_to_cwd(&photos)], relative, format);
+        assert!(packed.path.is_absolute(), "{format:?}");
+        assert_eq!(
+            std::fs::canonicalize(&packed.path).unwrap(),
+            std::fs::canonicalize(&dest).unwrap(),
+            "{format:?}"
+        );
+        assert!(
+            leftovers(&t.join("src")).is_empty(),
+            "{format:?}: a temporary file in the sources' folder"
+        );
+        assert!(leftovers(t.path()).is_empty(), "{format:?}");
+        assert!(
+            names_of(&dest, format).contains(&"photos/notes.txt".to_string()),
+            "{format:?}"
+        );
+    }
+}
+
+/// The names in an archive, through the reader — or through 7-Zip, for the
+/// one format the reader does not list.
+fn names_of(archive: &Path, format: Format) -> Vec<String> {
+    if format != Format::SevenZip {
+        return paths(&list(archive).unwrap());
+    }
+    let out = Command::new("7z")
+        .args(["l", "-slt", "-ba"])
+        .arg(archive)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix("Path = "))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn two_items_with_one_name_are_refused() {
+    let t = TempTree::new("write-twins");
+    let a = t.file("a/box", b"a");
+    let b = t.dir("b/box");
+    for format in Format::ALL {
+        let job = Pack {
+            sources: vec![a.clone(), b.clone()],
+            dest: t.join("twins.archive"),
+            format,
+            overwrite: false,
+        };
+        let err = job.check().unwrap_err();
+        assert!(err.contains("called box"), "{format:?}: {err}");
+        let err = job.run(&TaskCtx::detached()).unwrap_err();
+        assert!(err.to_string().contains("called box"), "{format:?}: {err}");
+        assert!(!crate::ops::exists(&t.join("twins.archive")));
+    }
+}
 
 #[test]
 fn an_archive_inside_what_it_archives_is_refused() {

@@ -250,11 +250,15 @@ pub struct Packed {
     pub path: PathBuf,
     /// The selected items, which is the count a person has in mind.
     pub items: usize,
-    /// Bytes of file contents read into it.
+    /// Bytes of file contents actually read into it — not what the walk
+    /// expected, if a file changed size in between. Zero for 7z, whose
+    /// reading is 7-Zip's.
     pub bytes: u64,
     /// The archive's own size on the disk.
     pub size: u64,
-    /// What could not go in: sockets, fifos, device nodes.
+    /// What the in-house writers left out: sockets, fifos, device nodes.
+    /// Always empty for 7z, which is handed the items whole and archives
+    /// what it finds by its own rules.
     pub skipped: Vec<PathBuf>,
     /// Directories made for the destination, shallowest first — what
     /// [`crate::ops::journal::OpRecord::Create`] peels off on undo.
@@ -280,8 +284,46 @@ impl Pack {
     /// installed is [`Format::is_available`]'s question, and a caller keeps
     /// that answer rather than asking it on every keystroke.
     pub fn check(&self) -> std::result::Result<(), String> {
+        self.absolute().check_absolute()
+    }
+
+    /// The same archive with every path made absolute against the process's
+    /// directory. Every writer works from this, because one of them — 7z —
+    /// runs in the sources' folder, where a relative temporary name would
+    /// land somewhere else entirely.
+    ///
+    /// `std::path::absolute`, not [`crate::ops::normalize`]: it prepends the
+    /// directory and leaves `..` where it is, so a path through a symlink
+    /// still goes where the person meant rather than where the text says.
+    fn absolute(&self) -> Pack {
+        let absolute =
+            |path: &Path| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        Pack {
+            sources: self.sources.iter().map(|source| absolute(source)).collect(),
+            dest: absolute(&self.dest),
+            format: self.format,
+            overwrite: self.overwrite,
+        }
+    }
+
+    fn check_absolute(&self) -> std::result::Result<(), String> {
         if self.sources.is_empty() {
             return Err("Nothing to archive".to_string());
+        }
+        // Each item goes in at the root under its own name, so two with the
+        // same name — `a/box` and `b/box` — would be two members with one
+        // name, and which of them an extraction keeps is anybody's guess.
+        let mut seen = std::collections::HashSet::new();
+        if let Some(twice) = self
+            .sources
+            .iter()
+            .filter_map(|source| source.file_name())
+            .find(|name| !seen.insert(*name))
+        {
+            return Err(format!(
+                "Two of the items are called {} — an archive holds one of each name at its root",
+                twice.to_string_lossy()
+            ));
         }
         // The archive cannot be inside something that is going into it: the
         // walk would find the half-written file and try to archive it, and
@@ -319,9 +361,10 @@ impl Pack {
     /// or a failure nothing is left behind, not the temporary file and not the
     /// directories made for the destination.
     pub fn run(&self, ctx: &TaskCtx) -> Result<Packed> {
-        self.check().map_err(DfError::Op)?;
-        let created_parents = crate::ops::create::make_parents(&self.dest)?;
-        match self.write(ctx) {
+        let pack = self.absolute();
+        pack.check_absolute().map_err(DfError::Op)?;
+        let created_parents = crate::ops::create::make_parents(&pack.dest)?;
+        match pack.write(ctx) {
             Ok(mut packed) => {
                 packed.created_parents = created_parents;
                 Ok(packed)
@@ -347,11 +390,13 @@ impl Pack {
             let walked = walk(&self.sources, ctx)?;
             ctx.set_total(walked.bytes, walked.members.len() as u64);
             let (temp, file) = claim_temp(&self.dest)?;
-            if let Err(e) = self.write_members(&walked.members, file, ctx) {
-                let _ignored = std::fs::remove_file(&temp);
-                return Err(e);
+            match self.write_members(&walked.members, file, ctx) {
+                Ok(read) => (temp, read, walked.skipped),
+                Err(e) => {
+                    let _ignored = std::fs::remove_file(&temp);
+                    return Err(e);
+                }
             }
-            (temp, walked.bytes, walked.skipped)
         };
 
         // The one moment a name can have been taken since the prompt asked:
@@ -379,15 +424,16 @@ impl Pack {
         })
     }
 
-    /// The in-house formats, into the temporary file.
-    fn write_members(&self, members: &[Member], file: File, ctx: &TaskCtx) -> Result<()> {
+    /// The in-house formats, into the temporary file. Returns how many bytes
+    /// of file contents went in.
+    fn write_members(&self, members: &[Member], file: File, ctx: &TaskCtx) -> Result<u64> {
         let archive = self.dest.as_path();
         let buffered = BufWriter::with_capacity(crate::ops::COPY_CHUNK, file);
         // The buffer's last flush is a write like any other, and a full disk
         // is most likely to say so here — so it is asked, not dropped.
-        let flushed = |out: BufWriter<File>| -> Result<()> {
+        let flushed = |out: BufWriter<File>, read: u64| -> Result<u64> {
             out.into_inner()
-                .map(|_file| ())
+                .map(|_file| read)
                 .map_err(|e| DfError::io(archive, e.into_error()))
         };
         match self.format {
@@ -396,17 +442,18 @@ impl Pack {
                 for member in members {
                     writer.add(member, ctx)?;
                 }
-                flushed(writer.finish()?)
+                let (out, read) = writer.finish()?;
+                flushed(out, read)
             }
             Format::Tar => {
                 let mut out = buffered;
-                tar::write(members, &mut out, archive, ctx)?;
-                flushed(out)
+                let read = tar::write(members, &mut out, archive, ctx)?;
+                flushed(out, read)
             }
             Format::TarGz => {
                 let mut out = deflate::Gzip::new(buffered).map_err(|e| DfError::io(archive, e))?;
-                tar::write(members, &mut out, archive, ctx)?;
-                flushed(out.finish().map_err(|e| DfError::io(archive, e))?)
+                let read = tar::write(members, &mut out, archive, ctx)?;
+                flushed(out.finish().map_err(|e| DfError::io(archive, e))?, read)
             }
             Format::TarZst | Format::TarXz => {
                 // The file goes to the compressor as its stdout; nothing here
@@ -627,7 +674,7 @@ fn piped(
     file: File,
     archive: &Path,
     ctx: &TaskCtx,
-) -> Result<()> {
+) -> Result<u64> {
     // `-T0`: every core. Both write a standard stream either way, and an
     // archive of a big folder is exactly the job threads are for.
     let args: &[&str] = match format {
@@ -661,8 +708,11 @@ fn piped(
     };
 
     let mut sink = BufWriter::with_capacity(crate::ops::COPY_CHUNK, stdin);
-    let wrote = tar::write(members, &mut sink, archive, ctx)
-        .and_then(|()| sink.flush().map_err(|e| DfError::io(archive, e)));
+    let wrote = tar::write(members, &mut sink, archive, ctx).and_then(|read| {
+        sink.flush()
+            .map(|()| read)
+            .map_err(|e| DfError::io(archive, e))
+    });
     // Closing stdin is the end of the input; the compressor finishes the
     // stream and exits.
     drop(sink);
@@ -678,11 +728,11 @@ fn piped(
         }
     };
     match wrote {
-        Ok(()) => {
+        Ok(read) => {
             let status = child.wait().map_err(|e| DfError::io(tool, e))?;
             let text = said(stderr);
             if status.success() {
-                return Ok(());
+                return Ok(read);
             }
             Err(DfError::Op(why(&text, Some(status))))
         }

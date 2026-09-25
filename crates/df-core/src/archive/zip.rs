@@ -201,7 +201,7 @@ fn central<R: Read + Seek>(reader: &mut R, len: u64) -> Result<(Vec<Record>, boo
         let name = decode_name(name_bytes, utf8_flag);
         let mut mtime = dos_datetime(dos_date, dos_time);
 
-        if let Some(unix) = extended_timestamp(extra) {
+        if let Some(unix) = extended_timestamp(extra, mtime) {
             // A real unix timestamp beats DOS's two-second, no-timezone
             // approximation whenever a writer bothered to include one.
             mtime = Some(unix);
@@ -356,13 +356,23 @@ fn zip64_extra(
 
 /// The unix mtime from an extended timestamp extra (header id 0x5455), if it
 /// carries one. Byte zero is a bitmask; bit 0 means a modification time follows.
-fn extended_timestamp(extra: &[u8]) -> Option<i64> {
+///
+/// The field is 32 bits. Read signed it ends in 2038; read unsigned — as
+/// libarchive and 7-Zip read it, and as this crate's own writer writes a
+/// later time — it runs to 2106 but loses 1901–1969. The DOS time beside it,
+/// which every writer pins to 1980–2107, settles which half a value with the
+/// top bit set belongs to: past 2038, the unsigned reading.
+fn extended_timestamp(extra: &[u8], dos: Option<i64>) -> Option<i64> {
     for (id, data) in ExtraFields(extra) {
         if id != 0x5455 || data.len() < 5 || data[0] & 0x01 == 0 {
             continue;
         }
-        let secs = i32::from_le_bytes([data[1], data[2], data[3], data[4]]);
-        return Some(secs as i64);
+        let raw = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+        let signed = raw as i32 as i64;
+        if signed < 0 && dos.is_some_and(|dos| dos > i64::from(i32::MAX)) {
+            return Some(i64::from(raw));
+        }
+        return Some(signed);
     }
     None
 }

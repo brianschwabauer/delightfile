@@ -144,7 +144,12 @@ struct Central {
     len: u64,
     offset: u64,
     external: u32,
-    mtime: Option<i32>,
+    /// The extended timestamp's 32 bits, when the time has a spelling in
+    /// them ([`timestamp_bits`]).
+    mtime: Option<u32>,
+    /// The local header carries a zip64 extra, so this entry does too: the
+    /// two headers agree on the version they need and on where the sizes are.
+    wide: bool,
 }
 
 /// A zip being written. [`ZipWriter::add`] each member, then
@@ -158,6 +163,9 @@ pub(super) struct ZipWriter<'a, W: Write + Seek> {
     limits: Limits,
     deflater: Option<Deflater>,
     buf: Vec<u8>,
+    /// Bytes of file contents read so far — what went in, whatever the walk
+    /// expected.
+    read: u64,
     /// The archive, for the error messages.
     archive: &'a Path,
 }
@@ -171,6 +179,7 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
             limits,
             deflater: None,
             buf: Vec::new(),
+            read: 0,
             archive,
         }
     }
@@ -203,9 +212,8 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
             len: 0,
             offset: self.at,
             external: 0,
-            // A time outside `i32` has no extended timestamp; the DOS one,
-            // pinned to its range, is what is left.
-            mtime: i32::try_from(member.mtime).ok(),
+            mtime: timestamp_bits(member.mtime),
+            wide: false,
         };
         let perms = member.mode & 0o7777;
 
@@ -229,6 +237,7 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
                     entry.method = METHOD_DEFLATE;
                 }
                 let wide = *expected >= self.limits.wide / 2;
+                entry.wide = wide;
                 let blanks = self.local(&entry, wide)?;
                 let data_at = self.at;
                 let (crc, len) = self.data(member, entry.method, ctx)?;
@@ -277,7 +286,7 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
         };
         let mut h = Vec::with_capacity(30 + entry.name.len() + extra.len());
         h.extend_from_slice(&LOCAL_SIG.to_le_bytes());
-        h.extend_from_slice(&needed(entry.method, wide).to_le_bytes());
+        h.extend_from_slice(&needed(entry, wide).to_le_bytes());
         h.extend_from_slice(&entry.flags.to_le_bytes());
         h.extend_from_slice(&entry.method.to_le_bytes());
         h.extend_from_slice(&entry.dos_time.to_le_bytes());
@@ -285,8 +294,8 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
         h.extend_from_slice(&entry.crc.to_le_bytes());
         h.extend_from_slice(&compressed.to_le_bytes());
         h.extend_from_slice(&len.to_le_bytes());
-        h.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
-        h.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        h.extend_from_slice(&len16(entry.name.len(), &entry.name)?.to_le_bytes());
+        h.extend_from_slice(&len16(extra.len(), &entry.name)?.to_le_bytes());
         h.extend_from_slice(&entry.name);
         h.extend_from_slice(&extra);
         self.put(&h)?;
@@ -345,6 +354,7 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
             let last = n < self.buf.len();
             crc.update(&self.buf[..n]);
             len += n as u64;
+            self.read += n as u64;
             if deflating {
                 let ZipWriter {
                     out,
@@ -385,12 +395,13 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
     }
 
     /// The central directory and the end records. Hands the writer back so
-    /// its owner can flush it and see the flush fail.
-    pub(super) fn finish(mut self) -> Result<W> {
+    /// its owner can flush it and see the flush fail, with the bytes of file
+    /// contents that went in.
+    pub(super) fn finish(mut self) -> Result<(W, u64)> {
         let cd_start = self.at;
         let central = std::mem::take(&mut self.central);
         for entry in &central {
-            let h = self.central_header(entry);
+            let h = self.central_header(entry)?;
             self.put(&h)?;
         }
         let cd_size = self.at - cd_start;
@@ -442,25 +453,27 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
         e.extend_from_slice(&narrow(cd_start).to_le_bytes());
         e.extend_from_slice(&0u16.to_le_bytes());
         self.put(&e)?;
-        Ok(self.out)
+        Ok((self.out, self.read))
     }
 
-    fn central_header(&self, entry: &Central) -> Vec<u8> {
+    fn central_header(&self, entry: &Central) -> Result<Vec<u8>> {
         let limits = self.limits;
         // The zip64 extra holds only the fields that saturated, in this fixed
-        // order — the positional rule the reader's `zip64_extra` follows.
+        // order — the positional rule the reader's `zip64_extra` follows. The
+        // sizes also go through it whenever the local header's did, so both
+        // headers of one member say 4.5 and carry the extra, or neither does.
         let mut wide_values = Vec::new();
-        let mut narrow = |value: u64| -> u32 {
-            if value >= limits.wide {
+        let mut narrow = |value: u64, force: bool| -> u32 {
+            if force || value >= limits.wide {
                 wide_values.extend_from_slice(&value.to_le_bytes());
                 u32::MAX
             } else {
                 value as u32
             }
         };
-        let len = narrow(entry.len);
-        let compressed = narrow(entry.compressed);
-        let offset = narrow(entry.offset);
+        let len = narrow(entry.len, entry.wide);
+        let compressed = narrow(entry.compressed, entry.wide);
+        let offset = narrow(entry.offset, false);
         let wide = !wide_values.is_empty();
 
         let mut extra = Vec::new();
@@ -476,7 +489,7 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
         let mut h = Vec::with_capacity(46 + entry.name.len() + extra.len());
         h.extend_from_slice(&CENTRAL_SIG.to_le_bytes());
         h.extend_from_slice(&MADE_BY.to_le_bytes());
-        h.extend_from_slice(&needed(entry.method, wide).to_le_bytes());
+        h.extend_from_slice(&needed(entry, wide).to_le_bytes());
         h.extend_from_slice(&entry.flags.to_le_bytes());
         h.extend_from_slice(&entry.method.to_le_bytes());
         h.extend_from_slice(&entry.dos_time.to_le_bytes());
@@ -484,8 +497,8 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
         h.extend_from_slice(&entry.crc.to_le_bytes());
         h.extend_from_slice(&compressed.to_le_bytes());
         h.extend_from_slice(&len.to_le_bytes());
-        h.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
-        h.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        h.extend_from_slice(&len16(entry.name.len(), &entry.name)?.to_le_bytes());
+        h.extend_from_slice(&len16(extra.len(), &entry.name)?.to_le_bytes());
         // Comment length, disk number start, internal attributes.
         h.extend_from_slice(&0u16.to_le_bytes());
         h.extend_from_slice(&0u16.to_le_bytes());
@@ -494,27 +507,55 @@ impl<'a, W: Write + Seek> ZipWriter<'a, W> {
         h.extend_from_slice(&offset.to_le_bytes());
         h.extend_from_slice(&entry.name);
         h.extend_from_slice(&extra);
-        h
+        Ok(h)
     }
 }
 
-/// The "version needed to extract": 4.5 for anything with a zip64 field, 2.0
-/// for deflate (and for directories, which the spec puts there too), 1.0 for a
-/// stored file.
-fn needed(method: u16, wide: bool) -> u16 {
+/// A name's or an extra field's length, which the headers hold in 16 bits.
+/// Past that the entry cannot be written, and saying so beats a length that
+/// wrapped and a header that points into the middle of its own name.
+fn len16(len: usize, name: &[u8]) -> Result<u16> {
+    u16::try_from(len).map_err(|_| {
+        DfError::Op(format!(
+            "{}…: {len} bytes is too long for a name in a zip",
+            String::from_utf8_lossy(&name[..name.len().min(64)])
+        ))
+    })
+}
+
+/// The "version needed to extract" (APPNOTE 4.4.3.2): 4.5 for anything with
+/// a zip64 field, 2.0 for deflate and for a directory, 1.0 for a stored file
+/// or link.
+fn needed(entry: &Central, wide: bool) -> u16 {
     if wide {
         45
-    } else if method == METHOD_DEFLATE {
+    } else if entry.method == METHOD_DEFLATE || entry.name.ends_with(b"/") {
         20
     } else {
         10
     }
 }
 
+/// The extended timestamp's 32 bits for `mtime`.
+///
+/// The field is 32 bits and the spec says signed, which ends in 2038; the
+/// readers that have thought about it (libarchive, 7-Zip, Info-ZIP with a
+/// 64-bit `time_t`) read it unsigned, which runs to 2106. So a time from 1970
+/// to 2106 goes in as its low 32 bits, one before 1970 as the signed value
+/// (back to 1901), and only a time outside both is left with the DOS time
+/// alone — which readers take as local, and which is why the extra is kept
+/// wherever it can be.
+fn timestamp_bits(mtime: i64) -> Option<u32> {
+    match i32::try_from(mtime) {
+        Ok(signed) => Some(signed as u32),
+        Err(_) => u32::try_from(mtime).ok(),
+    }
+}
+
 /// The extended-timestamp extra with the modification time only: flags bit 0,
 /// then the seconds. The central and local forms are the same when mtime is
 /// all they carry.
-fn timestamp_extra(out: &mut Vec<u8>, mtime: i32) {
+fn timestamp_extra(out: &mut Vec<u8>, mtime: u32) {
     out.extend_from_slice(&0x5455u16.to_le_bytes());
     out.extend_from_slice(&5u16.to_le_bytes());
     out.push(1);
