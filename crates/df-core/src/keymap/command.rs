@@ -143,6 +143,9 @@ commands! {
     Unyank => "unyank",
     Paste => "paste",
     PasteForce => "paste-force",
+    // `alt+p`: the yank, synced rather than pasted — only what differs is
+    // copied, flushed to the disk, and read back to prove it (`df_core::sync`).
+    PasteSync => "paste-sync",
     CopyToClipboard => "copy-to-clipboard",
     // The three link operations. **Unbound by default**: `-` and `_` are the
     // view-scale keys now (PLAN §4.1), and a symlink is a thing people do

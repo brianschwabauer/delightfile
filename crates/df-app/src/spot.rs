@@ -108,7 +108,7 @@ const HASH_WRAP: usize = 32;
 /// Sixty milliseconds is about four frames: fast enough that the bar looks
 /// continuous, slow enough that hashing a gigabyte rings the wake bell a few
 /// hundred times rather than four thousand. The chunk size is
-/// [`crate::sha256`]'s and is far smaller, so this is the throttle that
+/// [`df_core::sha256`]'s and is far smaller, so this is the throttle that
 /// actually decides the wake rate.
 const PROGRESS_TICK: Duration = Duration::from_millis(60);
 
@@ -597,14 +597,14 @@ impl Spot {
                     set(&worker_shared, Checksum::Running { done, total });
                     wake();
                 };
-                let result = crate::sha256::hash_file(&path, &mut chunk, &worker_cancel);
+                let result = df_core::sha256::hash_file(&path, &mut chunk, &worker_cancel);
                 let end = match result {
-                    Ok(crate::sha256::Scan::Done(digest)) => {
-                        Checksum::Done(crate::sha256::hex(&digest))
+                    Ok(df_core::sha256::Scan::Done(digest)) => {
+                        Checksum::Done(df_core::sha256::hex(&digest))
                     }
                     // A cancel is not a failure and not a result: the row goes
                     // back to offering the chip, which is where it started.
-                    Ok(crate::sha256::Scan::Cancelled) => Checksum::Idle,
+                    Ok(df_core::sha256::Scan::Cancelled) => Checksum::Idle,
                     Err(e) => Checksum::Failed(e),
                 };
                 set(&worker_shared, end);

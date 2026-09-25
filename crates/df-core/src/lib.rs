@@ -21,7 +21,9 @@ pub mod keymap;
 pub mod ops;
 pub mod preview;
 pub mod rename;
+pub mod sha256;
 pub mod state;
+pub mod sync;
 pub mod tasks;
 /// The shared test fixtures (PLAN §9). `#[cfg(test)]` here, and a real `pub`
 /// module for anyone who turns on the `test-support` feature — which is how

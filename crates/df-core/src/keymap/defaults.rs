@@ -193,6 +193,7 @@ pub(super) fn build() -> Registry {
         (Files, "x",      C::YankCut,           "Yank (cut)",                          Always),
         (Files, "p",      C::Paste,             "Paste",                               Always),
         (Files, "P",      C::PasteForce,        "Paste, overwriting",                  Always),
+        (Files, "alt+p",  C::PasteSync,         "Sync what is yanked into this folder", Always),
         (Files, "Y",      C::CopyToClipboard,   "Copy to the system clipboard",        Always),
         (Files, "X",      C::Unyank,            "Cancel the yank",                     Always),
         // No symlink or hardlink row. `-`/`_`/`Ctrl+-` were yazi's, and all

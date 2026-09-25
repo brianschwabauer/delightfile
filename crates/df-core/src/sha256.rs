@@ -1,11 +1,14 @@
 //! SHA-256, written out by hand.
 //!
-//! The spot panel shows a checksum row, and a checksum needs a hash. This
-//! project defaults to zero dependencies, and SHA-256 is the case where that
-//! default is easy to keep: the whole algorithm is a page and a half of
-//! shifts and additions, fully specified by FIPS 180-4 and pinned forever by
-//! published test vectors, while a crate would be a supply chain to watch for
-//! the rest of the program's life. So it lives here.
+//! Two things in the program need a hash. The spot panel shows a checksum row,
+//! and a sync ([`crate::sync`]) proves a copy arrived by reading both sides back
+//! and comparing digests. This project defaults to zero dependencies, and
+//! SHA-256 is the case where that default is easy to keep: the whole algorithm
+//! is a page and a half of shifts and additions, fully specified by FIPS 180-4
+//! and pinned forever by published test vectors, while a crate would be a
+//! supply chain to watch for the rest of the program's life. So it lives here,
+//! in the core rather than the app, because the sync that needs it is headless
+//! and the crate boundary only runs one way.
 //!
 //! The other decision that matters is that hashing streams. Somebody will
 //! point this at a 40 GB disk image, and that hash has to be interruptible —
@@ -13,7 +16,9 @@
 //! work stops on the next chunk boundary instead of holding a worker for
 //! several minutes. It also means the UI thread never touches a file: the
 //! caller runs [`hash_file`] on a worker, watches the byte count come back
-//! through the progress callback, and flips an [`AtomicBool`] to stop it.
+//! through the progress callback, and flips an [`AtomicBool`] to stop it. The
+//! sync feeds [`Sha256`] itself, a chunk at a time, because its reads have to
+//! stop at the task's own checkpoints rather than at a flag of their own.
 
 use std::fs::File;
 use std::io::{ErrorKind, Read};

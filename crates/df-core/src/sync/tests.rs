@@ -1,0 +1,669 @@
+#![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
+
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+
+use super::*;
+use crate::ops::copy::{syncs, without_reflink};
+use crate::ops::fixture::TempTree;
+use crate::ops::COPY_CHUNK;
+use crate::tasks::{ProgressSink, TaskCtx, TaskFlags};
+
+fn quick(sources: &[PathBuf], dest: &Path) -> SyncPlan {
+    plan(sources, dest, SyncOptions::default(), &|| false, &|_| {}).unwrap()
+}
+
+fn thorough(sources: &[PathBuf], dest: &Path) -> SyncPlan {
+    plan(
+        sources,
+        dest,
+        SyncOptions { content: true },
+        &|| false,
+        &|_| {},
+    )
+    .unwrap()
+}
+
+/// Every classified path as `(label, class)`, in plan order.
+fn classes(plan: &SyncPlan) -> Vec<(String, Class)> {
+    plan.items
+        .iter()
+        .map(|item| (plan.label(item), item.class))
+        .collect()
+}
+
+fn class_of(plan: &SyncPlan, label: &str) -> Class {
+    plan.items
+        .iter()
+        .find(|item| plan.label(item) == label)
+        .map(|item| item.class)
+        .unwrap_or_else(|| panic!("{label} is not in the plan: {:?}", classes(plan)))
+}
+
+fn set_mtime(path: &Path, when: SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+fn mtime(path: &Path) -> SystemTime {
+    std::fs::symlink_metadata(path).unwrap().modified().unwrap()
+}
+
+/// A source file and its destination copy with the same bytes and date.
+fn twin(t: &TempTree, rel: &str, body: &[u8]) -> (PathBuf, PathBuf) {
+    let src = t.file(Path::new("src").join(rel), body);
+    let dst = t.file(Path::new("dst").join(rel), body);
+    set_mtime(&dst, mtime(&src));
+    (src, dst)
+}
+
+fn tmp_names(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in walk(dir) {
+        let name = entry.file_name().unwrap().to_string_lossy().into_owned();
+        if name.starts_with(".df-tmp-") {
+            found.push(entry.display().to_string());
+        }
+    }
+    found
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if std::fs::symlink_metadata(&path).unwrap().is_dir() {
+            out.extend(walk(&path));
+        }
+        out.push(path);
+    }
+    out
+}
+
+/// A sink that remembers the declared total and adds up what was reported.
+#[derive(Default)]
+struct Record {
+    total: Mutex<(u64, u64)>,
+    done: Mutex<(u64, u64)>,
+}
+
+impl ProgressSink for Record {
+    fn set_total(&self, bytes: u64, files: u64) {
+        *self.total.lock().unwrap() = (bytes, files);
+    }
+    fn advance(&self, bytes: u64, files: u64) {
+        let mut done = self.done.lock().unwrap();
+        done.0 += bytes;
+        done.1 += files;
+    }
+}
+
+/// A sink that cancels the task once `after` bytes have gone by, so "cancel
+/// mid-copy" is a deterministic assertion rather than a sleep.
+struct CancelAfter {
+    flags: Arc<TaskFlags>,
+    after: u64,
+    seen: AtomicU64,
+}
+
+impl ProgressSink for CancelAfter {
+    fn set_total(&self, _bytes: u64, _files: u64) {}
+    fn advance(&self, bytes: u64, _files: u64) {
+        if self.seen.fetch_add(bytes, Ordering::SeqCst) + bytes >= self.after {
+            self.flags.cancel();
+        }
+    }
+}
+
+// ── The planner ─────────────────────────────────────────────────────────────
+
+#[test]
+fn the_planner_sorts_every_path_into_new_changed_unchanged_and_extra() {
+    let t = TempTree::new("sync-classes");
+    let photos = t.dir("src/photos");
+    t.file("src/photos/new.jpg", b"brand new");
+    t.file("src/photos/2024/a.jpg", b"aaaa");
+    twin(&t, "photos/same.jpg", b"same bytes");
+    t.file("src/photos/grew.jpg", b"longer now");
+    t.file("dst/photos/grew.jpg", b"short");
+    t.file("dst/photos/only-here.jpg", b"extra");
+    let dest = t.join("dst");
+
+    let plan = quick(&[photos], &dest);
+    assert_eq!(
+        classes(&plan),
+        vec![
+            ("photos/".to_string(), Class::Unchanged),
+            ("photos/2024/".to_string(), Class::New),
+            ("photos/2024/a.jpg".to_string(), Class::New),
+            ("photos/grew.jpg".to_string(), Class::Changed),
+            ("photos/new.jpg".to_string(), Class::New),
+            ("photos/same.jpg".to_string(), Class::Unchanged),
+            ("photos/only-here.jpg".to_string(), Class::Extra),
+        ]
+    );
+    // The counts are of things, not folders: `2024/` is structure for `a.jpg`.
+    assert_eq!(
+        plan.new,
+        Tally {
+            count: 2,
+            bytes: 13
+        }
+    );
+    assert_eq!(
+        plan.changed,
+        Tally {
+            count: 1,
+            bytes: 10
+        }
+    );
+    assert_eq!(
+        plan.unchanged,
+        Tally {
+            count: 1,
+            bytes: 10
+        }
+    );
+    assert_eq!(plan.extra, Tally { count: 1, bytes: 5 });
+    assert_eq!(plan.bytes_to_copy(), 23);
+    assert_eq!(
+        plan.listed()
+            .map(|item| plan.label(item))
+            .collect::<Vec<_>>(),
+        [
+            "photos/2024/",
+            "photos/2024/a.jpg",
+            "photos/grew.jpg",
+            "photos/new.jpg"
+        ]
+    );
+}
+
+#[test]
+fn a_file_lands_under_its_own_name_and_a_folder_under_its_own() {
+    let t = TempTree::new("sync-roots");
+    let file = t.file("src/notes.txt", b"n");
+    let folder = t.dir("src/photos");
+    let dest = t.dir("dst");
+    let plan = quick(&[file, folder], &dest);
+    assert_eq!(plan.roots[0].dst, dest.join("notes.txt"));
+    assert_eq!(plan.roots[1].dst, dest.join("photos"));
+    assert_eq!(
+        classes(&plan),
+        vec![
+            ("notes.txt".to_string(), Class::New),
+            ("photos/".to_string(), Class::New),
+        ]
+    );
+    // An empty new folder is one new thing; nothing else stands for it.
+    assert_eq!(plan.new.count, 2);
+}
+
+#[test]
+fn modification_times_two_seconds_apart_are_the_same_time() {
+    let t = TempTree::new("sync-slack");
+    let (src, dst) = twin(&t, "a.jpg", b"body");
+    let base = mtime(&src);
+    let dest = t.join("dst");
+
+    // FAT's two-second step, from either side.
+    for apart in [Duration::from_millis(1500), Duration::from_secs(2)] {
+        set_mtime(&dst, base + apart);
+        assert_eq!(
+            class_of(&quick(std::slice::from_ref(&src), &dest), "a.jpg"),
+            Class::Unchanged
+        );
+        set_mtime(&dst, base - apart);
+        assert_eq!(
+            class_of(&quick(std::slice::from_ref(&src), &dest), "a.jpg"),
+            Class::Unchanged
+        );
+    }
+    set_mtime(&dst, base + Duration::from_secs(3));
+    assert_eq!(
+        class_of(&quick(std::slice::from_ref(&src), &dest), "a.jpg"),
+        Class::Changed
+    );
+}
+
+#[test]
+fn a_content_comparison_catches_what_size_and_date_cannot() {
+    let t = TempTree::new("sync-content");
+    let src = t.file("src/a.bin", b"the right bytes");
+    let dst = t.file("dst/a.bin", b"the wrong bytes");
+    set_mtime(&dst, mtime(&src));
+    let dest = t.join("dst");
+
+    assert_eq!(
+        class_of(&quick(std::slice::from_ref(&src), &dest), "a.bin"),
+        Class::Unchanged
+    );
+    assert_eq!(
+        class_of(&thorough(std::slice::from_ref(&src), &dest), "a.bin"),
+        Class::Changed
+    );
+    // …and agrees when the bytes really are the same.
+    std::fs::write(&dst, b"the right bytes").unwrap();
+    set_mtime(&dst, mtime(&src));
+    assert_eq!(
+        class_of(&thorough(&[src], &dest), "a.bin"),
+        Class::Unchanged
+    );
+}
+
+#[test]
+fn a_link_is_compared_by_where_it_points() {
+    let t = TempTree::new("sync-links");
+    let dir = t.dir("src/d");
+    t.symlink("a", "src/d/same");
+    t.symlink("a", "dst/d/same");
+    t.symlink("a", "src/d/moved");
+    t.symlink("b", "dst/d/moved");
+    let plan = quick(&[dir], &t.join("dst"));
+    assert_eq!(class_of(&plan, "d/same"), Class::Unchanged);
+    assert_eq!(class_of(&plan, "d/moved"), Class::Changed);
+}
+
+#[test]
+fn another_kind_of_thing_under_the_same_name_is_a_change() {
+    let t = TempTree::new("sync-kinds");
+    let dir = t.dir("src/d");
+    t.file("src/d/was-a-folder", b"now a file");
+    t.file("dst/d/was-a-folder/inside", b"x");
+    t.file("src/d/was-a-file/inside", b"now a folder");
+    t.file("dst/d/was-a-file", b"x");
+    let plan = quick(&[dir], &t.join("dst"));
+    assert_eq!(class_of(&plan, "d/was-a-folder"), Class::Changed);
+    assert_eq!(class_of(&plan, "d/was-a-file/"), Class::Changed);
+    // Below a folder that replaces a file, everything is new.
+    assert_eq!(class_of(&plan, "d/was-a-file/inside"), Class::New);
+    // What is inside the folder being replaced is not an extra of anything.
+    assert!(!classes(&plan)
+        .iter()
+        .any(|(label, _)| label.contains("was-a-folder/")));
+}
+
+#[test]
+fn extras_are_found_at_every_depth_with_everything_under_them() {
+    let t = TempTree::new("sync-extras");
+    let dir = t.dir("src/d");
+    t.dir("src/d/a/b");
+    t.dir("dst/d/a/b");
+    t.file("dst/d/a/b/deep-extra.txt", b"12");
+    t.file("dst/d/gone/one.txt", b"123");
+    t.file("dst/d/gone/two/three.txt", b"1234");
+    let plan = quick(&[dir], &t.join("dst"));
+    for label in [
+        "d/a/b/deep-extra.txt",
+        "d/gone/",
+        "d/gone/one.txt",
+        "d/gone/two/",
+        "d/gone/two/three.txt",
+    ] {
+        assert_eq!(class_of(&plan, label), Class::Extra, "{label}");
+    }
+    // Three things, not five: the folders are how they are arranged.
+    assert_eq!(plan.extra, Tally { count: 3, bytes: 9 });
+    assert!(plan.in_sync(), "extras alone are nothing to copy");
+}
+
+#[test]
+fn a_socket_is_skipped_by_name_rather_than_silently() {
+    let t = TempTree::new("sync-special");
+    let dir = t.dir("src/d");
+    let socket = dir.join("sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    t.file("src/d/real.txt", b"x");
+    let plan = quick(&[dir], &t.dir("dst"));
+    assert_eq!(plan.skipped.len(), 1);
+    assert_eq!(plan.skipped[0].0, socket);
+    assert!(!classes(&plan)
+        .iter()
+        .any(|(label, _)| label.ends_with("sock")));
+}
+
+#[test]
+fn the_rails_refuse_what_no_sync_can_do_safely() {
+    let t = TempTree::new("sync-rails");
+    let project = t.dir("project");
+    let inner = t.dir("project/inner");
+    let err = roots(std::slice::from_ref(&project), &inner).unwrap_err();
+    assert_eq!(err.to_string(), "cannot sync a folder into itself");
+    let err = roots(std::slice::from_ref(&project), &project).unwrap_err();
+    assert_eq!(err.to_string(), "cannot sync a folder into itself");
+
+    // Through a symlink, it is still itself.
+    let link = t.symlink(&project, "link");
+    let err = roots(std::slice::from_ref(&project), &link).unwrap_err();
+    assert_eq!(err.to_string(), "cannot sync a folder into itself");
+
+    // Onto itself: the folder's own parent.
+    let err = roots(std::slice::from_ref(&project), t.path()).unwrap_err();
+    assert!(err.to_string().contains("onto itself"), "{err}");
+
+    // A destination that holds the source.
+    let nested = t.dir("x/photos/photos");
+    let err = roots(&[nested], &t.join("x")).unwrap_err();
+    assert!(err.to_string().contains("holds it"), "{err}");
+
+    // Two sources with one name.
+    let a = t.file("a/notes.txt", b"a");
+    let b = t.file("b/notes.txt", b"b");
+    let err = roots(&[a, b], &t.dir("out")).unwrap_err();
+    assert!(err.to_string().contains("called notes.txt"), "{err}");
+}
+
+#[test]
+fn a_stopped_walk_is_cancelled_not_a_short_plan() {
+    let t = TempTree::new("sync-stop");
+    let dir = t.dir("src/d");
+    t.file("src/d/a", b"a");
+    let seen = AtomicU64::new(0);
+    let result = plan(
+        &[dir],
+        &t.dir("dst"),
+        SyncOptions::default(),
+        &|| seen.load(Ordering::SeqCst) >= 1,
+        &|n| {
+            seen.fetch_add(n, Ordering::SeqCst);
+        },
+    );
+    assert!(
+        matches!(result, Err(crate::DfError::Cancelled)),
+        "{result:?}"
+    );
+}
+
+// ── The executor ────────────────────────────────────────────────────────────
+
+#[test]
+fn a_sync_copies_the_new_and_the_changed_and_touches_nothing_else() {
+    let t = TempTree::new("sync-exec");
+    let photos = t.dir("src/photos");
+    t.file("src/photos/new.jpg", b"brand new");
+    t.file("src/photos/2024/a.jpg", b"aaaa");
+    let (_, same) = twin(&t, "photos/same.jpg", b"same bytes");
+    t.file("src/photos/grew.jpg", b"longer now");
+    t.file("dst/photos/grew.jpg", b"short");
+    let extra = t.file("dst/photos/only-here.jpg", b"extra");
+    let dest = t.join("dst");
+    let same_before = std::fs::metadata(&same).unwrap();
+
+    let plan = quick(&[photos], &dest);
+    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!(report.copied, 3);
+    assert_eq!(report.copied_bytes, 9 + 4 + 10);
+    assert_eq!(report.made, 1);
+    assert_eq!(report.verified, 3);
+    assert_eq!(
+        std::fs::read(dest.join("photos/2024/a.jpg")).unwrap(),
+        b"aaaa"
+    );
+    assert_eq!(
+        std::fs::read(dest.join("photos/grew.jpg")).unwrap(),
+        b"longer now"
+    );
+    // The unchanged file is the same file: same inode, same date, not rewritten.
+    let same_after = std::fs::metadata(&same).unwrap();
+    assert_eq!(same_after.ino(), same_before.ino());
+    assert_eq!(
+        same_after.modified().unwrap(),
+        same_before.modified().unwrap()
+    );
+    // And an extra is left exactly where it was.
+    assert_eq!(std::fs::read(&extra).unwrap(), b"extra");
+
+    // A second plan finds nothing left to do.
+    let again = quick(&[t.join("src/photos")], &dest);
+    assert!(again.in_sync(), "{:?}", classes(&again));
+    assert_eq!(again.unchanged.count, 4);
+}
+
+#[test]
+fn a_new_folder_gets_its_mode_and_date_after_its_children() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TempTree::new("sync-dir-meta");
+    let dir = t.dir("src/locked");
+    t.file("src/locked/inside.txt", b"x");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let dest = t.dir("dst");
+
+    let plan = quick(std::slice::from_ref(&dir), &dest);
+    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let copy = dest.join("locked");
+    let mode = std::fs::metadata(&copy).unwrap().permissions().mode();
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(
+        report.problems(),
+        0,
+        "a read-only folder still takes its children: {report:?}"
+    );
+    assert_eq!(mode & 0o777, 0o555);
+    assert_eq!(std::fs::read(copy.join("inside.txt")).unwrap(), b"x");
+    assert_eq!(
+        mtime(&copy),
+        mtime(&dir),
+        "the date is the source's, not the copy's"
+    );
+}
+
+#[test]
+fn a_sync_flushes_every_file_and_every_name_it_writes() {
+    let t = TempTree::new("sync-fsync");
+    let dir = t.dir("src/d");
+    t.file("src/d/a", b"a");
+    t.file("src/d/sub/b", b"b");
+    t.symlink("a", "src/d/link");
+    let plan = quick(&[dir], &t.dir("dst"));
+
+    let before = syncs();
+    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    let after = syncs();
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!(
+        after.0 - before.0,
+        2,
+        "each file flushed before it is named"
+    );
+    // `d/`, `d/sub/`, `a`, `sub/b` and `link`: five names, each flushed into
+    // the directory that holds it.
+    assert_eq!(after.1 - before.1, 5);
+}
+
+#[test]
+fn the_verify_pass_catches_a_copy_damaged_after_it_was_written() {
+    let t = TempTree::new("sync-corrupt");
+    let dir = t.dir("src/d");
+    t.file("src/d/good.bin", &vec![1u8; 3000]);
+    t.file("src/d/bad.bin", &vec![2u8; 3000]);
+    t.file("src/d/also-bad.bin", &[3u8; 10]);
+    let dest = t.dir("dst");
+    let plan = quick(&[dir], &dest);
+
+    let bad = dest.join("d/bad.bin");
+    let also = dest.join("d/also-bad.bin");
+    let (b, a) = (bad.clone(), also.clone());
+    execute::before_verify(move || {
+        // One byte flipped in place, as a failing card would; and one file
+        // gone, as a card pulled too early would.
+        let mut bytes = std::fs::read(&b).unwrap();
+        bytes[1234] ^= 0xff;
+        std::fs::write(&b, bytes).unwrap();
+        std::fs::remove_file(&a).unwrap();
+    });
+    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+
+    assert_eq!(report.copied, 3);
+    assert_eq!(report.verified, 1);
+    assert!(report.errors.is_empty(), "{report:?}");
+    let mut failures = report.verify_failures.clone();
+    failures.sort();
+    assert_eq!(
+        failures,
+        vec![
+            (also, "missing at the destination".to_string()),
+            (bad, "contents differ from the source".to_string()),
+        ],
+        "every bad file is named, not only the first"
+    );
+    assert_eq!(report.problems(), 2);
+}
+
+#[test]
+fn verifying_everything_reads_back_what_was_not_copied_too() {
+    let t = TempTree::new("sync-verify-all");
+    let dir = t.dir("src/d");
+    t.file("src/d/fine.txt", b"fine");
+    // Rotted in place: same size, same date, other bytes. A quick plan calls
+    // it unchanged, and only reading it back can say otherwise.
+    let (_, rotted) = twin(&t, "d/rotted.txt", b"rotten");
+    std::fs::write(&rotted, b"R0tten").unwrap();
+    set_mtime(&rotted, mtime(&t.join("src/d/rotted.txt")));
+    let plan = quick(&[dir], &t.join("dst"));
+
+    let copied = execute(&plan, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(
+        (copied.copied, copied.verified, copied.problems()),
+        (1, 1, 0)
+    );
+
+    let again = quick(&[t.join("src/d")], &t.join("dst"));
+    assert!(again.in_sync());
+    let everything = execute(&again, Verify::Everything, &TaskCtx::detached());
+    assert_eq!(everything.verified, 1, "{everything:?}");
+    assert_eq!(
+        everything.verify_failures,
+        vec![(rotted, "contents differ from the source".to_string())]
+    );
+}
+
+#[test]
+fn an_in_sync_plan_still_verifies_everything_it_is_asked_to() {
+    let t = TempTree::new("sync-verify-only");
+    let dir = t.dir("src/d");
+    twin(&t, "d/a", b"aa");
+    twin(&t, "d/b", b"bbb");
+    let plan = quick(&[dir], &t.join("dst"));
+    assert!(plan.in_sync());
+    let report = execute(&plan, Verify::Everything, &TaskCtx::detached());
+    assert_eq!(
+        (report.copied, report.verified, report.problems()),
+        (0, 2, 0)
+    );
+}
+
+#[test]
+fn the_progress_total_is_every_byte_copied_plus_both_sides_read_back() {
+    let t = TempTree::new("sync-progress");
+    let dir = t.dir("src/d");
+    t.file("src/d/a", &vec![0u8; 3 * COPY_CHUNK + 7]);
+    t.file("src/d/b", b"12345");
+    twin(&t, "d/c", b"unchanged");
+    let plan = quick(&[dir], &t.join("dst"));
+    let copy_bytes = 3 * COPY_CHUNK as u64 + 7 + 5;
+
+    for (verify, read, files) in [
+        (Verify::Copied, copy_bytes, 2 + 2),
+        (Verify::Everything, copy_bytes + 9, 2 + 3),
+    ] {
+        // The plan was made before either run: put the destination back the
+        // way it saw it.
+        let _ = std::fs::remove_file(t.join("dst/d/a"));
+        let _ = std::fs::remove_file(t.join("dst/d/b"));
+        let record = Arc::new(Record::default());
+        let ctx = TaskCtx::with_sink(Arc::new(TaskFlags::new()), record.clone());
+        let report = execute(&plan, verify, &ctx);
+        assert_eq!(report.problems(), 0, "{report:?}");
+        let total = *record.total.lock().unwrap();
+        assert_eq!(total, (copy_bytes + 2 * read, files), "{verify:?}");
+        assert_eq!(
+            *record.done.lock().unwrap(),
+            total,
+            "{verify:?}: the bar ends full"
+        );
+    }
+}
+
+#[test]
+fn a_cancelled_sync_leaves_no_temporary_files_and_no_half_written_one() {
+    let t = TempTree::new("sync-cancel");
+    let dir = t.dir("src/d");
+    t.file("src/d/big.bin", &vec![5u8; 6 * COPY_CHUNK]);
+    t.file("dst/d/big.bin", b"the old one, whole");
+    t.file("src/d/later.bin", b"never reached");
+    let plan = quick(&[dir], &t.join("dst"));
+
+    let flags = Arc::new(TaskFlags::new());
+    let sink = Arc::new(CancelAfter {
+        flags: Arc::clone(&flags),
+        after: COPY_CHUNK as u64,
+        seen: AtomicU64::new(0),
+    });
+    let ctx = TaskCtx::with_sink(flags, sink);
+    let report = without_reflink(|| execute(&plan, Verify::Copied, &ctx));
+
+    assert!(report.cancelled);
+    assert!(
+        report.verify_failures.is_empty(),
+        "no verify after a cancel"
+    );
+    assert_eq!(tmp_names(&t.join("dst")), Vec::<String>::new());
+    assert_eq!(
+        std::fs::read(t.join("dst/d/big.bin")).unwrap(),
+        b"the old one, whole",
+        "an interrupted overwrite leaves the old file as it was"
+    );
+    assert!(!t.join("dst/d/later.bin").exists());
+}
+
+#[test]
+fn a_folder_in_the_way_of_a_file_is_refused_and_a_file_in_the_way_of_a_folder_is_replaced() {
+    let t = TempTree::new("sync-in-the-way");
+    let dir = t.dir("src/d");
+    t.file("src/d/was-a-folder", b"now a file");
+    let kept = t.file("dst/d/was-a-folder/precious", b"keep me");
+    t.file("src/d/was-a-file/inside", b"now a folder");
+    t.file("dst/d/was-a-file", b"old file");
+    t.file("src/d/after", b"still copied");
+    let plan = quick(&[dir], &t.join("dst"));
+    let report = execute(&plan, Verify::Copied, &TaskCtx::detached());
+
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].0, t.join("dst/d/was-a-folder"));
+    assert_eq!(std::fs::read(&kept).unwrap(), b"keep me");
+    assert_eq!(
+        std::fs::read(t.join("dst/d/was-a-file/inside")).unwrap(),
+        b"now a folder"
+    );
+    assert_eq!(
+        std::fs::read(t.join("dst/d/after")).unwrap(),
+        b"still copied"
+    );
+}
+
+#[test]
+fn a_folder_that_cannot_be_made_fails_once_not_once_per_file_in_it() {
+    let t = TempTree::new("sync-failed-dir");
+    let dir = t.dir("src/d");
+    t.file("src/d/new/a", b"a");
+    t.file("src/d/new/b", b"b");
+    t.file("src/d/new/deeper/c", b"c");
+    let plan = quick(&[dir], &t.dir("dst"));
+    // Something takes the name between the plan and the run.
+    t.file("dst/d/new", b"a file now");
+    let report = execute(&plan, Verify::Everything, &TaskCtx::detached());
+    assert_eq!(report.errors.len(), 1, "{report:?}");
+    assert_eq!(report.errors[0].0, t.join("dst/d/new"));
+    assert!(report.verify_failures.is_empty(), "{report:?}");
+}

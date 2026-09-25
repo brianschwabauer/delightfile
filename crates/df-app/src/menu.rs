@@ -608,6 +608,7 @@ pub fn app_items(
         run("Copy", C::Yank, acts).after_gap(),
         run("Cut", C::YankCut, acts),
         run("Paste", C::Paste, facts.clipboard),
+        run("Sync here…", C::PasteSync, facts.clipboard),
         run("Rename", C::Rename, acts),
         run("New file or folder…", C::Create, true),
         run("Move to trash", C::Trash, acts),
@@ -690,6 +691,7 @@ pub fn folder_items(
             facts.clipboard && !refused(C::Paste),
         )
         .after_gap(),
+        run("Sync here…", C::PasteSync, facts.clipboard),
         run("Select all", C::SelectAll, facts.rows),
         // Hidden files are View's "Show hidden files", as in the app menu: a
         // second row for the one toggle would be two names for one thing.
@@ -1908,6 +1910,7 @@ mod tests {
                 ("Copy", "y", true),
                 ("Cut", "x", false),
                 ("Paste", "p", false),
+                ("Sync here…", "Alt+p", false),
                 ("Rename", "r", false),
                 ("New file or folder…", "a", false),
                 ("Move to trash", "d", false),
@@ -1935,6 +1938,7 @@ mod tests {
         assert_eq!(command("Go to path…"), C::GotoPath);
         assert_eq!(command("Copy"), C::Yank);
         assert_eq!(command("Cut"), C::YankCut);
+        assert_eq!(command("Sync here…"), C::PasteSync);
         assert_eq!(command("New file or folder…"), C::Create);
         assert_eq!(command("Trash"), C::OpenTrash);
         assert_eq!(command("Keyboard shortcuts"), C::Help);
@@ -2117,6 +2121,14 @@ mod tests {
                 ("New file…", "a", Action::Run(C::Create), true, false, None),
                 ("New folder…", "", Action::CreateFolder, true, false, None),
                 ("Paste", "p", Action::Paste, true, true, None),
+                (
+                    "Sync here…",
+                    "Alt+p",
+                    Action::Run(C::PasteSync),
+                    true,
+                    false,
+                    None
+                ),
                 (
                     "Select all",
                     "Ctrl+a",

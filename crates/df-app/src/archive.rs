@@ -480,6 +480,7 @@ pub fn inert_in_archive(command: df_core::keymap::Command) -> bool {
             | C::YankCut
             | C::Paste
             | C::PasteForce
+            | C::PasteSync
             | C::CopyToClipboard
             | C::CopyFileText
             | C::SymlinkAbsolute

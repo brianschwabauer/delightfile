@@ -32,11 +32,11 @@ use crate::theme::mix;
 use crate::ui::{Control, Painting, ROW_RADIUS};
 
 /// A dialog row's height. The same 20 pt every other card list uses.
-const ROW: f32 = 20.0;
+pub(crate) const ROW: f32 = 20.0;
 
 /// The action buttons' height. Taller than a row: they are the things being
 /// pressed, and `delightful-ui` §1 wants a real hit target under them.
-const BUTTON_HEIGHT: f32 = 26.0;
+pub(crate) const BUTTON_HEIGHT: f32 = 26.0;
 
 /// Between two buttons: the card's padding, so every gap beside a button —
 /// the card's edge, its neighbour, the content above — is the same width.
@@ -48,7 +48,7 @@ const BUTTON_MIN_WIDTH: f32 = 64.0;
 
 /// The widest either dialog gets. Past this a two-column comparison stops being
 /// a comparison — the eye cannot hold both halves at once.
-const MAX_WIDTH: f32 = 620.0;
+pub(crate) const MAX_WIDTH: f32 = 620.0;
 
 /// How many body lines a confirm shows before it scrolls. Six names is enough
 /// to recognise the set you selected; past that the count in the title is the
@@ -68,7 +68,7 @@ const TITLE_GAP: f32 = 8.0;
 /// because the buttons are a different kind of thing — the answer, not more
 /// of the question — and the card's padding, so the gap above a button is the
 /// gap beside it.
-const ANSWER_GAP: f32 = CARD_PAD;
+pub(crate) const ANSWER_GAP: f32 = CARD_PAD;
 
 /// How many conflicts the resolver lists at once, for the same reason.
 const CONFLICT_VISIBLE: usize = 5;
@@ -538,7 +538,7 @@ impl Geometry {
 /// centre — `delightful-ui` §16: content centred in a big region reads as
 /// sitting low. Never wider than [`MAX_WIDTH`] or than the window can hold
 /// with its margins, whatever was asked for.
-fn card_rect(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
+pub(crate) fn card_rect(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
     let width = width.min(MAX_WIDTH).min(area.width() - CARD_MARGIN * 2.0);
     let height = height.min((area.height() - CARD_MARGIN * 2.0).max(0.0));
     // 40 % of the free space above, 60 % below.
@@ -551,7 +551,7 @@ fn card_rect(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
 
 /// The confirm's title face: a step over the body, because the title is the
 /// question and the names are only what it is about.
-fn title_font() -> egui::FontId {
+pub(crate) fn title_font() -> egui::FontId {
     egui::FontId::proportional(FONT + 2.0)
 }
 
@@ -699,7 +699,12 @@ fn button_width(painter: &egui::Painter, label: &str) -> f32 {
 }
 
 /// Buttons laid right-to-left from `right`, returned left-to-right.
-fn button_row(painter: &egui::Painter, right: f32, top: f32, labels: &[&str]) -> Vec<egui::Rect> {
+pub(crate) fn button_row(
+    painter: &egui::Painter,
+    right: f32,
+    top: f32,
+    labels: &[&str],
+) -> Vec<egui::Rect> {
     let mut rects = Vec::new();
     let mut x = right;
     for label in labels.iter().rev() {

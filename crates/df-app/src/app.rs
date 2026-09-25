@@ -77,6 +77,8 @@ use crate::whichkey::WhichKey;
 mod compress;
 /// Pinned places (`g b`, `g space`): a child, so its half of `App` lives there.
 mod places;
+/// `alt+p`: the sync card, the comparison it waits on, and the syncs it starts.
+mod syncing;
 
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
 /// columns (PLAN §2) to each be usable at once — the middle column is the one
@@ -434,6 +436,8 @@ enum Dialog {
     /// `r` on a multi-selection: the two-column rename diff (PLAN §5). Boxed
     /// for the same reason — it carries a line editor per row.
     Bulk(Box<crate::bulk::Bulk>),
+    /// `alt+p`: what a sync would do, or what one did ([`crate::sync`]).
+    Sync(Box<crate::sync::SyncCard>),
 }
 
 /// How long a top-row chip takes to leave after the thing it is about is gone
@@ -498,6 +502,7 @@ enum OverlayGeom {
     Confirm(dialog::Geometry),
     Conflict(dialog::Geometry),
     Bulk(Box<dialog::BulkGeometry>),
+    Sync(Box<crate::sync::Geometry>),
     Picker(egui::Rect, Vec<egui::Rect>),
     Panel(egui::Rect, Vec<egui::Rect>, Vec<TaskRow>),
     Spot(spot::Geometry),
@@ -518,6 +523,7 @@ impl OverlayGeom {
         match self {
             OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g.card,
             OverlayGeom::Bulk(g) => g.card,
+            OverlayGeom::Sync(g) => g.card,
             OverlayGeom::Picker(card, _) | OverlayGeom::Panel(card, _, _) => *card,
             OverlayGeom::Spot(g) => g.card,
             OverlayGeom::Finder(g) => g.card,
@@ -545,6 +551,7 @@ impl OverlayGeom {
         match self {
             OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g.close,
             OverlayGeom::Bulk(g) => Some(g.close),
+            OverlayGeom::Sync(g) => Some(g.close),
             OverlayGeom::Picker(..) => None,
             OverlayGeom::Panel(card, _, _) => Some(chrome::close_button_rect(*card)),
             OverlayGeom::Spot(g) => g.close,
@@ -571,6 +578,7 @@ impl OverlayGeom {
             // The rename card has a field, rows, a scrollbar and a popover, so it
             // does its own hit test.
             OverlayGeom::Bulk(g) => g.hit(pos),
+            OverlayGeom::Sync(g) => g.hit(pos),
             OverlayGeom::Conflict(g) => g
                 .action_at(pos)
                 .map(Control::Action)
@@ -624,6 +632,7 @@ impl OverlayGeom {
             (OverlayGeom::Mounts(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
             (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
             (OverlayGeom::Bulk(geometry), control) => geometry.rect_of(control),
+            (OverlayGeom::Sync(geometry), control) => geometry.rect_of(control),
             _ => None,
         }
     }
@@ -1348,6 +1357,9 @@ pub struct App {
     mounts: Option<crate::mounts::Card>,
     /// Connections to servers in flight, from the card's connect prompt.
     connects: Vec<PendingConnect>,
+    /// Syncs on the pool, and what each owes the window when it lands
+    /// (`app/syncing.rs`).
+    syncs: Vec<crate::sync::Running>,
     /// Whether the yank tray is out (PLAN §7.1, [`crate::tray`]). Closed by
     /// [`App::clamp_tray`] the moment the clipboard has nothing to list.
     tray_open: bool,
@@ -2008,6 +2020,7 @@ impl App {
             udisks: None,
             mounts: None,
             connects: Vec::new(),
+            syncs: Vec::new(),
             tray_open: false,
             tray_first: 0,
             tray_carry: 0.0,
@@ -2356,6 +2369,10 @@ impl App {
         }
         // …and whatever a connection to a server came to.
         if self.poll_connects(now) {
+            changed = true;
+        }
+        // The sync card's comparison, and the syncs it started.
+        if self.poll_sync(now) {
             changed = true;
         }
 
@@ -5788,6 +5805,9 @@ impl App {
     /// pausing a task. They are matched literally here and are noted so the
     /// keymap can grow rows for them without this code changing shape.
     fn overlay_literal(&mut self, chord: Chord, now: Instant) -> bool {
+        if self.sync_key(chord, now) {
+            return true;
+        }
         let plain = chord.mods.is_none() || chord.mods == df_core::keymap::Mods::SHIFT;
         // The mount card's own verbs. Matched literally for the same reason
         // the conflict resolver's answers were: `[pick]` is the shared "choose
@@ -5940,6 +5960,10 @@ impl App {
             // The rename card's arrows belong to its editors, which take them
             // before the registry is asked (`bulk_key`).
             Some(Dialog::Bulk(_)) => return,
+            Some(Dialog::Sync(card)) => {
+                card.scroll_by(delta);
+                return;
+            }
             None => {}
         }
         if let Some(card) = &mut self.mounts {
@@ -5983,6 +6007,10 @@ impl App {
         // `Rename` button and its `Enter` hint — and it is the same submit.
         if let Some(Dialog::Bulk(_)) = &self.dialog {
             self.submit_bulk(now);
+            return;
+        }
+        if let Some(Dialog::Sync(_)) = &self.dialog {
+            self.submit_sync(now);
             return;
         }
         if let Some(Dialog::Confirm(_)) = &self.dialog {
@@ -6048,6 +6076,7 @@ impl App {
                 }
                 self.toasts.notice("Rename cancelled", now);
             }
+            Some(Dialog::Sync(card)) => self.sync_closed(&card, now),
             Some(Dialog::Confirm(_)) | None => {}
         }
         self.picker = None;
@@ -8498,6 +8527,11 @@ impl App {
         if self.tab().trash.is_some() && inert_in_trash(command) {
             return Some("Not in the trash — Enter restores, D destroys");
         }
+        // A sync with nothing to sync has no card to open, so its menu rows
+        // grey rather than opening one to say so.
+        if command == Command::PasteSync && self.clipboard.is_empty() {
+            return Some("Nothing yanked");
+        }
         None
     }
 
@@ -8988,6 +9022,7 @@ impl App {
             C::Unyank => self.unyank(now),
             C::Paste => self.paste(false, now),
             C::PasteForce => self.paste(true, now),
+            C::PasteSync => self.paste_sync(now),
             // ── The *system* clipboard (PLAN §7.4) ──────────────────────────
             C::CopyToClipboard => self.yank_to_system(now),
             C::CopyFileText => self.copy_file_text(now),
@@ -9894,6 +9929,11 @@ impl App {
                     painter, area, bulk,
                 ))))
             }
+            Some(Dialog::Sync(card)) => {
+                return Some(OverlayGeom::Sync(Box::new(crate::sync::geometry(
+                    painter, area, card,
+                ))))
+            }
             None => {}
         }
         if let Some(picker) = &self.picker {
@@ -10096,7 +10136,7 @@ impl App {
                         None => conflict.toggle_apply_all(),
                     }
                 }
-                Some(Dialog::Bulk(_)) => {
+                Some(Dialog::Bulk(_)) | Some(Dialog::Sync(_)) => {
                     if index == 0 {
                         self.close_overlay(now);
                     } else {
@@ -13833,6 +13873,13 @@ impl App {
         if self.bulk_layout(&pointer, &overlay, over_bulk) {
             overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
         }
+        // …and over the sync card, which scrolls its list.
+        if pointer.wheel != 0.0
+            && matches!(&overlay, Some(surface @ OverlayGeom::Sync(_))
+                if pointer.at.is_some_and(|at| surface.covers(at)))
+        {
+            self.sync_wheel(pointer.wheel);
+        }
 
         // The breadcrumb is measured once and used by both the hit test and the
         // paint, for the reason `tab_rects` is: two functions computing this
@@ -15660,6 +15707,9 @@ impl App {
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
                 dialog::paint_confirm(&paint, area, confirm, geometry, &self.hovers, &self.ripples);
             }
+            (Some(OverlayGeom::Sync(geometry)), Some(Dialog::Sync(card))) => {
+                crate::sync::paint(&paint, area, card, geometry, &self.hovers, &self.ripples);
+            }
             (Some(OverlayGeom::Conflict(geometry)), Some(Dialog::Conflict(conflict))) => {
                 dialog::paint_conflict(
                     &paint,
@@ -16442,7 +16492,10 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
             Hint::new("Enter", "inspect", C::TaskInspect),
             Hint::inert("w / Esc", "close"),
         ],
-        OverlayGeom::Confirm(_) | OverlayGeom::Conflict(_) | OverlayGeom::Bulk(_) => match dialog {
+        OverlayGeom::Confirm(_)
+        | OverlayGeom::Conflict(_)
+        | OverlayGeom::Bulk(_)
+        | OverlayGeom::Sync(_) => match dialog {
             // The one card with no strip. It is a question and two buttons,
             // and its keys are the ones every yes/no in every program has —
             // `Enter` is the lit button, `Esc` is the other. A footer spelling
@@ -16454,6 +16507,8 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
             // says the one thing that matters: what `Enter` will do, or why
             // it will not.
             Some(Dialog::Bulk(_)) => Vec::new(),
+            // The sync card's switches say what pressing them will do.
+            Some(Dialog::Sync(card)) => card.hints(),
             Some(Dialog::Conflict(_)) => vec![
                 Hint::inert("↑↓", "choose"),
                 Hint::inert("o s r", "overwrite / skip / rename"),
@@ -16578,6 +16633,7 @@ fn inert_in_trash(command: Command) -> bool {
             | C::YankCut
             | C::Paste
             | C::PasteForce
+            | C::PasteSync
             | C::SymlinkAbsolute
             | C::SymlinkRelative
             | C::Hardlink

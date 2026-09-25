@@ -6,6 +6,11 @@
 //! filesystem, a kernel that says no — it silently degrades to a chunked
 //! read/write loop that reports progress and stops when cancelled.
 //!
+//! A copy can also be *durable* ([`CopyOptions::durable`]): every file is
+//! flushed to the medium before it is renamed into place, and its directory
+//! after, so "done" means on the disk rather than in the page cache. A paste
+//! does not ask for it; a sync ([`crate::sync`]) always does.
+//!
 //! Move is `rename(2)` first, because within one filesystem that is atomic and
 //! costs nothing. Across filesystems `rename` returns `EXDEV` and there is no
 //! choice but copy-then-delete — and the delete happens only after the copy has
@@ -54,6 +59,26 @@ const FICLONE: libc::c_ulong = 0x4004_9409;
 /// delightfile with the same pid — impossible — or a directory somebody is
 /// filling with matching names. Sixteen tries is a formality either way.
 const MAX_TEMP_ATTEMPTS: u32 = 16;
+
+/// How a copy writes: whether it may replace what is in the way, and whether
+/// it waits for the disk before calling a file done.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyOptions {
+    /// Replace an existing destination. See [`copy_tree`].
+    pub overwrite: bool,
+    /// `fsync` each written file before it is renamed into place, and the
+    /// directory it lands in after — the same for a new directory or symlink,
+    /// whose name is only as durable as the directory holding it.
+    ///
+    /// Off for a paste. The page cache is the kernel's promise, a paste is
+    /// something the user watches land and can repeat, and an `fsync` per file
+    /// on a thousand small ones is a paste that takes ten times as long for a
+    /// guarantee nobody asked for. On for a sync, whose whole point is that the
+    /// card can be pulled out afterwards: a copy that reports done while its
+    /// bytes are still in RAM is the exact failure a sync exists to rule out,
+    /// and a verify pass reading them back would read the same RAM and agree.
+    pub durable: bool,
+}
 
 /// What a copy did, for the toast and for the journal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -112,6 +137,24 @@ pub fn measure(path: &Path) -> Result<(u64, u64)> {
 /// removed again: a half-copied file is worse than no file, since it looks
 /// complete in a listing.
 pub fn copy_tree(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Result<CopyStats> {
+    copy_tree_with(
+        src,
+        dst,
+        ctx,
+        CopyOptions {
+            overwrite,
+            durable: false,
+        },
+    )
+}
+
+/// [`copy_tree`], with the durability choice as well as the overwrite one.
+pub fn copy_tree_with(
+    src: &Path,
+    dst: &Path,
+    ctx: &TaskCtx,
+    options: CopyOptions,
+) -> Result<CopyStats> {
     if same_file(src, dst) {
         return Err(DfError::Op(format!(
             "{} and {} are the same file",
@@ -127,7 +170,7 @@ pub fn copy_tree(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
         )));
     }
     let created_top = !exists(dst);
-    match copy_entry(src, dst, ctx, overwrite) {
+    match copy_entry(src, dst, ctx, options) {
         Ok(stats) => Ok(stats),
         Err(e) => {
             if created_top && exists(dst) {
@@ -142,12 +185,12 @@ pub fn copy_tree(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
     }
 }
 
-fn copy_entry(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Result<CopyStats> {
+fn copy_entry(src: &Path, dst: &Path, ctx: &TaskCtx, options: CopyOptions) -> Result<CopyStats> {
     ctx.checkpoint()?;
     let meta = std::fs::symlink_metadata(src).map_err(|e| DfError::io(src, e))?;
 
     if meta.is_symlink() {
-        copy_symlink(src, dst, overwrite)?;
+        copy_symlink(src, dst, options)?;
         ctx.advance(0, 1);
         return Ok(CopyStats {
             files: 1,
@@ -155,10 +198,10 @@ fn copy_entry(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Result<
         });
     }
     if meta.is_dir() {
-        return copy_dir(src, dst, ctx, overwrite, &meta);
+        return copy_dir(src, dst, ctx, options, &meta);
     }
     if meta.is_file() {
-        let bytes = copy_file(src, dst, ctx, overwrite, &meta)?;
+        let bytes = copy_file(src, dst, ctx, options, &meta)?;
         // Bytes were reported chunk by chunk inside the copy; only the file
         // count is left to add.
         ctx.advance(0, 1);
@@ -182,26 +225,33 @@ fn copy_entry(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Result<
 /// Recreate a symlink, target text and all. Never followed: copying a link to
 /// `/etc/passwd` copies the link, not the file — following it would be a
 /// surprise with security consequences.
-fn copy_symlink(src: &Path, dst: &Path, overwrite: bool) -> Result<()> {
+///
+/// An overwrite removes whatever is in the way *whole*, directory included —
+/// the caller has already decided that is what the user asked for.
+pub(crate) fn copy_symlink(src: &Path, dst: &Path, options: CopyOptions) -> Result<()> {
     let target = std::fs::read_link(src).map_err(|e| DfError::io(src, e))?;
     if exists(dst) {
-        if !overwrite {
+        if !options.overwrite {
             return Err(already_exists(dst));
         }
         super::delete::remove_tree_unchecked(dst)?;
     }
-    std::os::unix::fs::symlink(&target, dst).map_err(|e| DfError::io(dst, e))
+    std::os::unix::fs::symlink(&target, dst).map_err(|e| DfError::io(dst, e))?;
+    if options.durable {
+        sync_parent(dst)?;
+    }
+    Ok(())
 }
 
 fn copy_dir(
     src: &Path,
     dst: &Path,
     ctx: &TaskCtx,
-    overwrite: bool,
+    options: CopyOptions,
     meta: &std::fs::Metadata,
 ) -> Result<CopyStats> {
     if exists(dst) {
-        if !overwrite {
+        if !options.overwrite {
             // Including a destination directory: merging into one the caller
             // did not know was there is a silent overwrite of every name that
             // collides inside it.
@@ -216,6 +266,9 @@ fn copy_dir(
         // manager does and what "overwrite" means for a folder.
     } else {
         std::fs::create_dir_all(dst).map_err(|e| DfError::io(dst, e))?;
+        if options.durable {
+            sync_parent(dst)?;
+        }
     }
     ctx.advance(0, 1);
 
@@ -228,7 +281,7 @@ fn copy_dir(
         ctx.checkpoint()?;
         let entry = entry.map_err(|e| DfError::io(src, e))?;
         let child_dst = dst.join(entry.file_name());
-        stats.merge(copy_entry(&entry.path(), &child_dst, ctx, overwrite)?);
+        stats.merge(copy_entry(&entry.path(), &child_dst, ctx, options)?);
     }
 
     // Mode and mtime last: creating the children bumped the directory's mtime,
@@ -240,8 +293,6 @@ fn copy_dir(
 
 /// Copy one regular file's contents, then its mode and mtime. Returns the byte
 /// count actually moved.
-/// Copy one regular file's contents, then its mode and mtime. Returns the byte
-/// count actually moved.
 ///
 /// An *overwrite* is written to a temporary file beside the destination and
 /// renamed over it at the end. That costs one extra name in the directory and
@@ -249,16 +300,23 @@ fn copy_dir(
 /// killed half-way through leaves the destination exactly as it was, rather
 /// than truncated to the length the copy reached. `rename(2)` over an existing
 /// file is atomic, so there is no instant at which the destination is missing.
+///
+/// Durable ([`CopyOptions::durable`]), the mode and times are set while the
+/// file is still open and the file is `fsync`ed after them, so the flush
+/// covers the metadata as well as the bytes; then it is renamed into place and
+/// the directory is `fsync`ed, which is what makes the *name* survive a pulled
+/// card. A flush that fails is a failed copy, cleaned up like any other: a
+/// disk that cannot say the bytes are down has not got them.
 fn copy_file(
     src: &Path,
     dst: &Path,
     ctx: &TaskCtx,
-    overwrite: bool,
+    options: CopyOptions,
     meta: &std::fs::Metadata,
 ) -> Result<u64> {
     let replacing = exists(dst);
     if replacing {
-        if !overwrite {
+        if !options.overwrite {
             return Err(already_exists(dst));
         }
         if same_file(src, dst) {
@@ -288,17 +346,26 @@ fn copy_file(
         (dst.to_path_buf(), file)
     };
 
-    let result = write_contents(&mut reader, &mut writer, src, &write_path, ctx, meta.len());
+    let result = write_contents(&mut reader, &mut writer, src, &write_path, ctx, meta.len())
+        .and_then(|bytes| {
+            apply_mode(&write_path, meta);
+            apply_times(&write_path, meta);
+            if options.durable {
+                sync_file(&writer, &write_path)?;
+            }
+            Ok(bytes)
+        });
     match result {
         Ok(bytes) => {
             drop(writer);
-            apply_mode(&write_path, meta);
-            apply_times(&write_path, meta);
             if write_path != dst {
                 if let Err(e) = std::fs::rename(&write_path, dst) {
                     let _ignored = std::fs::remove_file(&write_path);
                     return Err(DfError::io(dst, e));
                 }
+            }
+            if options.durable {
+                sync_parent(dst)?;
             }
             Ok(bytes)
         }
@@ -317,6 +384,78 @@ fn copy_file(
             Err(e)
         }
     }
+}
+
+/// Copy one regular file and nothing else: the entry point for a caller that
+/// walks the tree itself and decides, file by file, what to carry — a sync
+/// ([`crate::sync`]) copies only what differs, where [`copy_tree`] copies
+/// everything under a path.
+///
+/// The same code as a file inside a tree copy — reflink first, chunked with a
+/// checkpoint per chunk, an overwrite written beside the destination and
+/// renamed over it — so the two cannot drift apart. Bytes are reported as they
+/// move; the file count is the caller's to add.
+pub(crate) fn copy_file_with(
+    src: &Path,
+    dst: &Path,
+    ctx: &TaskCtx,
+    options: CopyOptions,
+) -> Result<u64> {
+    ctx.checkpoint()?;
+    let meta = std::fs::metadata(src).map_err(|e| DfError::io(src, e))?;
+    copy_file(src, dst, ctx, options, &meta)
+}
+
+/// `fsync(2)` one open file: its bytes and its metadata, down to the medium.
+///
+/// `File::sync_all` is exactly `fsync` on Linux, spelled without `unsafe`.
+fn sync_file(file: &File, path: &Path) -> Result<()> {
+    #[cfg(test)]
+    SYNCS.with(|c| c.set((c.get().0 + 1, c.get().1)));
+    file.sync_all().map_err(|e| DfError::io(path, e))
+}
+
+/// `fsync(2)` the directory `path` is in, so the name it was just given — a
+/// rename, a `mkdir`, a `symlink` — is on the medium too.
+pub(crate) fn sync_parent(path: &Path) -> Result<()> {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => sync_dir(dir),
+        _ => sync_dir(Path::new(".")),
+    }
+}
+
+/// `fsync(2)` a directory: open it read-only, flush, close.
+///
+/// A filesystem that cannot flush a directory at all (`EINVAL`: some FUSE and
+/// network mounts, where the server decides) is logged and let through. The
+/// name is as safe there as that filesystem ever makes one, and failing every
+/// sync onto such a mount would make it a place a sync can never reach.
+pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
+    #[cfg(test)]
+    SYNCS.with(|c| c.set((c.get().0, c.get().1 + 1)));
+    let handle = File::open(dir).map_err(|e| DfError::io(dir, e))?;
+    match handle.sync_all() {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
+            log::debug!("{} cannot be flushed as a directory: {e}", dir.display());
+            Ok(())
+        }
+        Err(e) => Err(DfError::io(dir, e)),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `(files, directories)` flushed on this thread, for the tests that prove
+    /// a durable copy really does call `fsync` — the one effect of it no
+    /// assertion on the files themselves can see.
+    static SYNCS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// How many files and directories this thread has flushed so far.
+#[cfg(test)]
+pub(crate) fn syncs() -> (u64, u64) {
+    SYNCS.with(|c| c.get())
 }
 
 /// A free `.df-tmp-…` name in the destination's own directory — the same
@@ -430,7 +569,7 @@ pub(crate) fn without_reflink<T>(f: impl FnOnce() -> T) -> T {
 /// Copy the permission bits. A failure is logged, never fatal: a copy onto a
 /// filesystem without Unix modes (FAT, some network mounts) still succeeded at
 /// the part the user asked for.
-fn apply_mode(path: &Path, meta: &std::fs::Metadata) {
+pub(crate) fn apply_mode(path: &Path, meta: &std::fs::Metadata) {
     use std::os::unix::fs::PermissionsExt;
     let mode = meta.permissions().mode();
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
@@ -439,7 +578,7 @@ fn apply_mode(path: &Path, meta: &std::fs::Metadata) {
 }
 
 /// Copy access and modification times. Same rule as [`apply_mode`]: advisory.
-fn apply_times(path: &Path, meta: &std::fs::Metadata) {
+pub(crate) fn apply_times(path: &Path, meta: &std::fs::Metadata) {
     let mtime = meta.modified().ok();
     let atime = meta.accessed().ok();
     if let Err(e) = set_times(path, atime, mtime) {
@@ -974,6 +1113,48 @@ mod tests {
         // means for a folder.
         copy_tree(&src, &dst, &ctx(), true).unwrap();
         assert_eq!(std::fs::read(dst.join("a")).unwrap(), b"new");
+    }
+
+    #[test]
+    fn a_durable_copy_flushes_every_file_and_every_directory_it_names() {
+        let t = TempTree::new("copy-durable");
+        let src = t.dir("src");
+        std::fs::write(src.join("a"), b"aaa").unwrap();
+        std::fs::create_dir(src.join("d")).unwrap();
+        std::fs::write(src.join("d/b"), b"bbb").unwrap();
+        std::os::unix::fs::symlink("a", src.join("link")).unwrap();
+
+        let before = syncs();
+        copy_tree(&src, &t.join("plain"), &ctx(), false).unwrap();
+        assert_eq!(syncs(), before, "a paste waits for nobody");
+
+        let options = CopyOptions {
+            overwrite: false,
+            durable: true,
+        };
+        copy_tree_with(&src, &t.join("durable"), &ctx(), options).unwrap();
+        let (files, dirs) = syncs();
+        assert_eq!(files - before.0, 2, "each of the two files, once");
+        // Two directories made (the top and `d`), two files and a link named:
+        // five names, each flushed in the directory that holds it.
+        assert_eq!(dirs - before.1, 5);
+        assert_eq!(std::fs::read(t.join("durable/d/b")).unwrap(), b"bbb");
+    }
+
+    #[test]
+    fn a_durable_overwrite_flushes_before_the_rename_and_after_it() {
+        let t = TempTree::new("copy-durable-overwrite");
+        let src = t.file("src.bin", &vec![4u8; COPY_CHUNK + 5]);
+        let dst = t.file("dst.bin", b"old");
+        let before = syncs();
+        let options = CopyOptions {
+            overwrite: true,
+            durable: true,
+        };
+        let bytes = without_reflink(|| copy_file_with(&src, &dst, &ctx(), options)).unwrap();
+        assert_eq!(bytes, COPY_CHUNK as u64 + 5);
+        assert_eq!(syncs(), (before.0 + 1, before.1 + 1));
+        assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&src).unwrap());
     }
 
     #[test]

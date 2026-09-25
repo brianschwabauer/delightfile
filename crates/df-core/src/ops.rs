@@ -44,7 +44,10 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::{DfError, Result};
 
-pub use copy::{copy_tree, measure, move_cross_device, move_path, CopyStats, COPY_CHUNK};
+pub use copy::{
+    copy_tree, copy_tree_with, measure, move_cross_device, move_path, CopyOptions, CopyStats,
+    COPY_CHUNK,
+};
 pub use create::{create, rename, Created};
 pub use delete::{check_deletable, check_deletable_here, delete_permanent, remove_tree};
 pub use jobs::{DeleteJob, ExtractJob, OpOutcome, Outcome, PasteJob, TrashJob};
