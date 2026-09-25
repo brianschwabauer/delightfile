@@ -13804,7 +13804,13 @@ impl App {
     /// visual language (PLAN §8) is hand-drawn — rows, ripples, scrims — and
     /// mixing in a widget theme would only be a second set of rules to fight.
     fn frame(&mut self, ui: &mut egui::Ui) {
-        let now = Instant::now();
+        self.frame_at(ui, Instant::now());
+    }
+
+    /// [`App::frame`] at `now`, which is the clock every animation in it is
+    /// sampled at. Apart so a test can step an animation a frame at a time
+    /// without sleeping through it.
+    fn frame_at(&mut self, ui: &mut egui::Ui, now: Instant) {
         let area = ui.max_rect();
         let painter = ui.painter().clone();
         painter.rect_filled(area, 0, self.palette.crust);
@@ -14870,8 +14876,9 @@ impl App {
             list_grid: metrics,
             scale: self.scale,
             list_rows: self.tab().cwd.dir.len(),
-            parent_pane: layout.parent,
-            parent_content,
+            // Not while it folds or is folded ([`dnd::parent_zone`]).
+            parent_pane: dnd::parent_zone(&layout).0,
+            parent_content: dnd::parent_zone(&layout).1,
             parent_scroll,
             parent_rows: parent_len,
         };
@@ -20971,17 +20978,28 @@ mod tests {
     fn a_folding_pane_paints_all_the_way_down_and_back() {
         let mut app = long_listing("panes-fold-frames");
         let ctx = egui::Context::default();
-        run_frame(&mut app, &ctx, Vec::new());
+        let frame_at = |app: &mut App, now: Instant| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen()),
+                focused: true,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| app.frame_at(ui, now));
+        };
+        // A clock of the test's own, a 60 Hz frame at a time.
+        let mut now = Instant::now();
+        let tick = Duration::from_micros(16_667);
+        frame_at(&mut app, now);
         for command in [Command::ToggleParent, Command::TogglePreview] {
             for _ in 0..2 {
-                app.run(command, 10, Instant::now());
-                let until = Instant::now() + crate::divider::FOLD;
-                while Instant::now() < until {
-                    run_frame(&mut app, &ctx, Vec::new());
-                    std::thread::sleep(Duration::from_millis(15));
+                app.run(command, 10, now);
+                let until = now + crate::divider::FOLD;
+                while now < until {
+                    frame_at(&mut app, now);
+                    now += tick;
                 }
-                run_frame(&mut app, &ctx, Vec::new());
-                assert!(!app.dividers.animating(Instant::now()));
+                frame_at(&mut app, now);
+                assert!(!app.dividers.animating(now));
             }
         }
     }

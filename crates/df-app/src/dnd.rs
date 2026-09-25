@@ -151,6 +151,22 @@ pub struct Zones {
     pub parent_rows: usize,
 }
 
+/// The parent column's pane and content rects as a drop zone: the layout's,
+/// or [`egui::Rect::NOTHING`] for both while the parent is folded or folding.
+///
+/// Not the layout's zero-width rect, which egui's inclusive `contains` still
+/// finds a point on — a drag along the window's left margin would land in a
+/// column nobody can see. `NOTHING` contains no point, rings nothing, and
+/// scrolls nothing, which is [`crate::ui::Layout::in_parent`]'s answer given
+/// as rects.
+pub fn parent_zone(layout: &crate::ui::Layout) -> (egui::Rect, egui::Rect) {
+    if layout.collapsed[0] {
+        (egui::Rect::NOTHING, egui::Rect::NOTHING)
+    } else {
+        (layout.parent, crate::ui::content_rect(layout.parent))
+    }
+}
+
 impl Zones {
     /// Where a target was drawn — what the ring goes around.
     ///
@@ -165,6 +181,13 @@ impl Zones {
                 index,
                 self.scale,
             )),
+            // Nothing for a parent that has folded away ([`parent_zone`]): a
+            // ring left fading on it would be drawn around nowhere.
+            Target::Row(Column::Parent, _) | Target::Pane(Column::Parent)
+                if !self.parent_pane.is_positive() =>
+            {
+                None
+            }
             Target::Row(Column::Parent, index) => Some(crate::ui::row_rect(
                 self.parent_content,
                 self.parent_scroll,
@@ -709,6 +732,7 @@ mod tests {
     }
 
     fn zones(crumbs: &[egui::Rect], layout: &crate::ui::Layout) -> Zones {
+        let (parent_pane, parent_content) = parent_zone(layout);
         Zones {
             list_grid: None,
             scale: crate::ui::Scale::default(),
@@ -719,11 +743,54 @@ mod tests {
             list_content: crate::ui::content_rect(layout.list),
             list_scroll: 0.0,
             list_rows: 20,
-            parent_pane: layout.parent,
-            parent_content: crate::ui::content_rect(layout.parent),
+            parent_pane,
+            parent_content,
             parent_scroll: 0.0,
             parent_rows: 20,
         }
+    }
+
+    /// A folded parent takes no drop, however close to its edge — the margin
+    /// its zero-width rect sits on is the list's edge and the window's — and
+    /// neither does one still folding: nothing in it is a place any more.
+    #[test]
+    fn a_folded_parent_is_not_a_drop_target() {
+        let (area, crumbs) = zones_area();
+        let dirs = |_: Column, _: usize| true;
+        for open in [0.0, 0.5] {
+            let split = crate::ui::Split {
+                open: [open, 1.0],
+                collapsed: [true, false],
+                ..crate::ui::Split::at([1, 4, 3])
+            };
+            let layout = crate::ui::layout(area, &split, false, 1);
+            let z = zones(&crumbs, &layout);
+            let y = layout.list.center().y;
+            for x in [
+                layout.parent.left(),
+                layout.parent.center().x,
+                area.left() + 2.0,
+            ] {
+                let target = target_at(&z, egui::pos2(x, y), dirs);
+                assert!(
+                    !matches!(
+                        target,
+                        Some(Target::Row(Column::Parent, _) | Target::Pane(Column::Parent))
+                    ),
+                    "open {open}, x {x}: {target:?}"
+                );
+            }
+            assert_eq!(z.rect_of(Target::Pane(Column::Parent)), None);
+            assert_eq!(z.rect_of(Target::Row(Column::Parent, 0)), None);
+            assert_eq!(autoscroll(z.parent_content, layout.parent.center()), 0.0);
+        }
+        // Open, it is one.
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), false, 1);
+        let z = zones(&crumbs, &layout);
+        assert!(matches!(
+            target_at(&z, layout.parent.center(), dirs),
+            Some(Target::Row(Column::Parent, _) | Target::Pane(Column::Parent))
+        ));
     }
 
     /// The modifier table, including the both-held case.
