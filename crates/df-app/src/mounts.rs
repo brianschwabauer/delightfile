@@ -1342,12 +1342,20 @@ impl Card {
         self.follow();
     }
 
-    /// `↑`/`↓`, clamping. A list of disks has a top and a bottom, and running
-    /// off the end of it would be the cursor landing on a different disk from
-    /// the one the eye is on.
+    /// `↑`/`↓`, **wrapping**: `↑` on the first row is the last row, and `↓`
+    /// on the last row is the first.
+    ///
+    /// The palette's rule ([`crate::finder`]), not the file panes'. A pane
+    /// clamps because a directory is a place with a top and a bottom, and
+    /// running off the end of it would lose your place. `M` is a short menu
+    /// you step around — a few places, a disk or two, a share, the connect
+    /// row — and `↑` from the Places to reach the connect row is the move a
+    /// hand expects of a menu.
     pub fn move_cursor(&mut self, delta: isize) {
-        let last = self.items().len().saturating_sub(1);
-        self.cursor = (self.cursor as isize + delta).clamp(0, last as isize) as usize;
+        // Never empty (the connect row is always there); a zero would be a
+        // division by it.
+        let len = self.items().len().max(1) as isize;
+        self.cursor = (self.cursor as isize + delta).rem_euclid(len) as usize;
         self.follow();
     }
 
@@ -2746,7 +2754,7 @@ Mount(3): backup -> file:///mnt/backup
         assert!(devices_from(&[]).is_empty());
     }
 
-    /// The cursor clamps, and a refresh keeps it on the row it was on.
+    /// The cursor wraps, and a refresh keeps it on the row it was on.
     #[test]
     fn the_cursor_holds_its_place_across_a_refresh() {
         let mut card = Card::new();
@@ -2767,10 +2775,10 @@ Mount(3): backup -> file:///mnt/backup
             card.selected_device().map(|d| d.node.as_str()),
             Some("/dev/nvme0n1p2")
         );
-        // Clamped, not wrapped: a list of disks has a bottom.
-        card.move_cursor(9);
+        // Wrapped, not clamped: `↓` off the connect row is the first disk.
+        card.move_cursor(2);
         assert_eq!(card.selected(), Some(Item::Connect));
-        card.move_cursor(-9);
+        card.move_cursor(1);
         assert_eq!(card.cursor, 0);
 
         // The USB stick is now mounted and sorts the same way; the cursor is on
@@ -2910,7 +2918,7 @@ Mount(3): backup -> file:///mnt/backup
         let (last, top) = *long.visible().last().expect("lines");
         assert!(top + last.height() <= WINDOW + 0.01, "a row is cut off");
         assert!(long.visible().len() < long.lines().len());
-        long.move_cursor(-100);
+        long.select(Item::Place(0));
         assert_eq!(long.selected(), Some(Item::Place(0)));
         assert_eq!(long.visible()[0].0, Line::Section("Places"));
     }
@@ -2925,7 +2933,7 @@ Mount(3): backup -> file:///mnt/backup
 
         // Down to the connect row, the last line: it is wholly inside the
         // window, and the view went no further than that.
-        card.move_cursor(100);
+        card.select(Item::Connect);
         assert_eq!(card.selected(), Some(Item::Connect));
         let (last, top) = *card.visible().last().expect("lines");
         assert_eq!(last, Line::Item(Item::Connect));
@@ -2950,7 +2958,7 @@ Mount(3): backup -> file:///mnt/backup
 
         // All the way up: the card's top is back — the Places section over
         // the Disks one, though the cursor is on a disk.
-        card.move_cursor(-100);
+        card.select(Item::Disk(0));
         assert_eq!(card.first, 0);
         assert_eq!(card.visible()[0].0, Line::Section("Places"));
 
@@ -2959,6 +2967,65 @@ Mount(3): backup -> file:///mnt/backup
             scroll(3, 1, &[Line::Section("Disks"), Line::Item(Item::Connect)]),
             0
         );
+    }
+
+    /// `↑` on the first row is the connect row and `↓` on the connect row is
+    /// the first place, with the view following the cursor round either way.
+    #[test]
+    fn the_arrows_wrap_at_both_ends() {
+        let mut card = Card::with_places(places(2));
+        card.update(devices_from(&objects()), share_rows(1));
+        let last = card.items().len() - 1;
+        assert_eq!(card.selected(), Some(Item::Disk(0)));
+
+        card.move_cursor(-2);
+        assert_eq!(card.selected(), Some(Item::Place(0)));
+        card.move_cursor(-1);
+        assert_eq!(card.cursor, last, "↑ on the first row is the last");
+        assert_eq!(card.selected(), Some(Item::Connect));
+        card.move_cursor(1);
+        assert_eq!(card.cursor, 0, "↓ on the last row is the first");
+        assert_eq!(card.selected(), Some(Item::Place(0)));
+
+        // A stride longer than the list goes round as many times as it says.
+        card.move_cursor(last as isize + 1);
+        assert_eq!(card.cursor, 0);
+        card.move_cursor(-(last as isize + 2));
+        assert_eq!(card.cursor, last);
+
+        // On a card that scrolls, the view goes round with the cursor: the
+        // connect row whole at the bottom, then the top of the card back.
+        let mut long = Card::new();
+        long.update(many_devices(12), share_rows(12));
+        assert_eq!(long.selected(), Some(Item::Disk(0)));
+        long.move_cursor(-1);
+        assert_eq!(long.selected(), Some(Item::Connect));
+        let (bottom, top) = *long.visible().last().expect("lines");
+        assert_eq!(bottom, Line::Item(Item::Connect));
+        assert!(top + ROW <= WINDOW + 0.01, "the cursor's row is cut off");
+        assert!(long.first > 0);
+        long.move_cursor(1);
+        assert_eq!(long.selected(), Some(Item::Disk(0)));
+        assert_eq!(long.first, 0);
+        assert_eq!(long.visible()[0].0, Line::Section("Places"));
+    }
+
+    /// The card has no empty case: the connect row is always there, before
+    /// udisks2 has answered and after it has answered nothing. That one row
+    /// is both ends, so either arrow leaves the cursor on it.
+    #[test]
+    fn a_card_with_one_row_stays_on_it() {
+        let mut waiting = Card::new();
+        let mut empty = Card::new();
+        empty.update(Vec::new(), Vec::new());
+        for card in [&mut waiting, &mut empty] {
+            assert_eq!(card.items(), [Item::Connect]);
+            for delta in [1, -1, 2, -7] {
+                card.move_cursor(delta);
+                assert_eq!(card.cursor, 0, "{delta}");
+            }
+            assert_eq!(card.selected(), Some(Item::Connect));
+        }
     }
 
     fn clouds() -> Vec<Cloud> {

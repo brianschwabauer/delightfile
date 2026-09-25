@@ -432,12 +432,12 @@ impl Finder {
 
     /// `↑` / `↓`, **wrapping**.
     ///
-    /// Wrapping rather than clamping, and this is the one list in delightfile
-    /// that does. The file panes clamp because a directory is a place with a
-    /// top and a bottom and running off the end of it would lose your place. A
-    /// palette is a short ranked menu you are stepping around, and `↑` from the
-    /// first row meaning "the last one" is what every palette does and what the
-    /// hand expects.
+    /// Wrapping rather than clamping, which only this list and the `M` card
+    /// ([`crate::mounts::Card::move_cursor`]) do. The file panes clamp because
+    /// a directory is a place with a top and a bottom and running off the end
+    /// of it would lose your place. A palette is a short ranked menu you are
+    /// stepping around, and `↑` from the first row meaning "the last one" is
+    /// what every palette does and what the hand expects.
     pub fn move_cursor(&mut self, delta: isize) {
         let len = self.hits.len();
         if len == 0 {
