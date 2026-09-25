@@ -36,6 +36,11 @@ use super::{Class, Item, Kind, Removal, Root, SyncOptions, SyncPlan, MTIME_SLACK
 /// Resolved rather than lexical, as [`crate::ops::paste`]'s rails are: a
 /// destination spelled through a symlink is still inside the source.
 pub fn roots(sources: &[PathBuf], dest_dir: &Path) -> Result<Vec<Root>> {
+    if crate::ops::is_url(dest_dir) || sources.iter().any(|src| crate::ops::is_url(src)) {
+        return Err(DfError::Op(
+            "a sync with a server goes through rsync, not this walk".to_string(),
+        ));
+    }
     let dest_dir = normalize(dest_dir);
     if !dest_dir.is_dir() {
         return Err(DfError::Op(format!(

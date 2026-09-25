@@ -154,6 +154,11 @@ impl App {
             // which is what an `sftp://` service name is everywhere else.
             None => (Host::alias(service.clone()), ".".to_string()),
         };
+        #[cfg(test)]
+        let host = Host {
+            program: TEST_SHELL.with(|shell| shell.borrow().clone()),
+            ..host
+        };
         remote_sync(sources, dest, direction, host, &root)
     }
 
@@ -395,6 +400,14 @@ impl App {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A stand-in for `ssh` in this thread's syncs with a server: df-core's
+    /// [`Host::program`] seam, reached from a test of the window, so `y` on a
+    /// remote row and `alt+p` can run real `rsync` with no server.
+    static TEST_SHELL: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 /// A path in a `sftp://` display path, as the server's `rsync` must be handed
 /// it: the vfs's own rule (`vfs::conn`'s `wire_path`). Empty is the service's
 /// root — the login directory, unless `vfs.toml` names another; absolute is
@@ -477,7 +490,7 @@ mod tests {
     use df_core::test_support::TempTree;
 
     use super::super::*;
-    use super::{remote_sync, server_path, SyncCard};
+    use super::{remote_sync, server_path, SyncCard, TEST_SHELL};
     use df_core::sync::rsync::{Direction, Host};
 
     /// An `App` opened on `dir`, with nothing read from this machine: the
@@ -820,6 +833,90 @@ mod tests {
             ".",
         );
         assert!(twice.unwrap_err().contains("called shoot"));
+    }
+
+    /// `y` on a row of a remote pane, then `alt+p` in a local folder: the
+    /// clipboard carries the row's `sftp://` path as it is, the sync takes the
+    /// rsync branch, the card fills from rsync's dry run, and `Enter` brings
+    /// the folder down and verifies it against the server's `sha256sum` —
+    /// the server being this machine, through a stand-in for `ssh`.
+    #[test]
+    fn y_on_a_server_row_then_alt_p_syncs_it_down_through_rsync() {
+        use std::os::unix::fs::PermissionsExt;
+        if !df_core::sync::rsync::available() {
+            eprintln!("rsync is not installed; skipping");
+            return;
+        }
+        let now = Instant::now();
+        let tree = TempTree::new("sync-app-remote-yank");
+        tree.file("server/photos/a.jpg", b"aa");
+        let dest = tree.dir("dest");
+        let shell = tree.file("bin/fake-ssh", b"#!/bin/sh\nshift\nexec sh -c \"$*\"\n");
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut app = app_on(&tree, &dest);
+        // A vfs with no services, so nothing reads this machine's vfs.toml:
+        // `fake` is then an ssh alias, and the stand-in answers for it.
+        app.vfs = Some(Arc::new(df_core::vfs::Vfs::with_config(
+            Default::default(),
+            Vec::new(),
+            Arc::new(|| {}),
+        )));
+
+        // A remote pane on the server folder, its listing from the cache.
+        let at = df_core::vfs::VfsPath::new("fake", tree.join("server").to_string_lossy());
+        let row = at.join("photos");
+        let mut session = crate::remote::Session::new(at.clone(), dest.clone());
+        session.store(
+            &at,
+            vec![df_core::fs::Entry {
+                is_hidden: false,
+                name: "photos".to_string(),
+                path: crate::remote::display(&row),
+                kind: df_core::fs::Kind::Dir,
+                len: 0,
+                mtime: None,
+                btime: None,
+                mode: 0o040_755,
+                uid: 0,
+                gid: 0,
+                mime: df_core::fs::mime::DIR_MIME,
+                file_kind: df_core::fs::classify(
+                    df_core::fs::Kind::Dir,
+                    "photos",
+                    df_core::fs::mime::DIR_MIME,
+                    0o040_755,
+                ),
+            }],
+        );
+        let (mgr, sort) = (app.mgr.clone(), app.sort());
+        let _ = app.tabs.active_mut().show_remote(session, &mgr, sort, now);
+
+        app.run(Command::Yank, 10, now);
+        let url = crate::remote::display(&row);
+        assert!(url.starts_with("sftp://fake/"), "{}", url.display());
+        assert_eq!(app.clipboard.paths, [url], "the row's URL, as it is");
+
+        app.navigate(dest.clone(), now);
+        assert!(app.tab().remote.is_none());
+        TEST_SHELL.with(|slot| *slot.borrow_mut() = Some(shell));
+        app.run(Command::PasteSync, 10, now);
+        let opened = card(&app);
+        let remote = opened.remote.as_ref().expect("the rsync branch");
+        assert_eq!(remote.transfer.direction, Direction::Download);
+        assert_eq!(remote.transfer.sources, [tree.join("server/photos")]);
+
+        compared(&mut app);
+        assert_eq!(
+            card(&app).summary(),
+            "1 new · 0 changed · 0 unchanged · 2 B to copy"
+        );
+        key(&mut app, Key::Enter);
+        synced(&mut app);
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Synced 1 file · 2 B · verified")
+        );
+        assert_eq!(std::fs::read(dest.join("photos/a.jpg")).unwrap(), b"aa");
     }
 
     #[test]

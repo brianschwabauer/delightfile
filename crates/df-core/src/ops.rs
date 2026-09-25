@@ -97,6 +97,28 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// Is this a URL — `sftp://host/photos`, `trash://` — rather than a path?
+///
+/// The panes address places that are not on this machine by URL, carried in a
+/// `PathBuf` like any other row's path. Such a path is *relative* as far as
+/// `Path` can tell, so [`normalize`] would put the process's working directory
+/// in front of it: `sftp://host/photos` became `<cwd>/sftp:/host/photos`, a
+/// local path that does not exist. A URL is one when its first component is a
+/// scheme — a letter, then letters, digits, `+`, `-` or `.` — followed by
+/// `://`, which no path a person types into a file manager starts with.
+pub fn is_url(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    let Some(colon) = bytes.windows(3).position(|w| w == b"://") else {
+        return false;
+    };
+    let scheme = &bytes[..colon];
+    scheme.first().is_some_and(u8::is_ascii_alphabetic)
+        && scheme
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+}
+
 /// Is `ancestor` at or above `path` in the tree? Lexical, over normalized
 /// paths, so `/a/b` is an ancestor of `/a/b/c` but not of `/a/bc`.
 pub fn is_ancestor(ancestor: &Path, path: &Path) -> bool {
@@ -237,6 +259,23 @@ mod tests {
         let n = normalize(Path::new("relative/thing"));
         assert!(n.is_absolute(), "{}", n.display());
         assert!(n.ends_with("relative/thing"));
+    }
+
+    #[test]
+    fn a_url_is_told_from_a_path() {
+        assert!(is_url(Path::new("sftp://showandtour1/photos")));
+        assert!(is_url(Path::new("sftp://showandtour1")));
+        assert!(is_url(Path::new("trash://")));
+        assert!(
+            !is_url(Path::new("/home/brian/sftp://x")),
+            "not a scheme first"
+        );
+        assert!(!is_url(Path::new("relative/dir")));
+        assert!(
+            !is_url(Path::new("2024://odd")),
+            "a scheme starts with a letter"
+        );
+        assert!(!is_url(Path::new("://nothing")));
     }
 
     #[test]

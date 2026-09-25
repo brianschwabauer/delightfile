@@ -43,7 +43,23 @@ use crate::{DfError, Result};
 
 use super::journal::{CopyManifest, MovedPath, OpRecord};
 use super::trash::{suffixed, MAX_TRASH_COLLISIONS};
-use super::{exists, file_name, is_ancestor_resolved, is_real_dir, normalize, same_file};
+use super::{exists, file_name, is_ancestor_resolved, is_real_dir, is_url, normalize, same_file};
+
+/// A path as the clipboard carries it: absolute and lexically clean
+/// ([`normalize`]) — unless it is a URL, which is kept exactly as given.
+///
+/// `y` on a row of a remote pane carries that row's `sftp://host/…` display
+/// path, and everything downstream — [`crate::vfs::VfsPath::parse`], the
+/// download a `p` starts, a sync's `rsync` — reads the URL. Normalized, it was
+/// `<cwd>/sftp:/host/…`: a local path to nothing, which a `p` then refused as
+/// missing and a sync treated as local.
+fn carried(path: &Path) -> PathBuf {
+    if is_url(path) {
+        path.to_path_buf()
+    } else {
+        normalize(path)
+    }
+}
 
 /// What `p` will do with the clipboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -83,7 +99,7 @@ impl Clipboard {
     pub fn yank(paths: impl IntoIterator<Item = PathBuf>) -> Clipboard {
         Clipboard {
             mode: PasteMode::Copy,
-            paths: paths.into_iter().map(|p| normalize(&p)).collect(),
+            paths: paths.into_iter().map(|p| carried(&p)).collect(),
         }
     }
 
@@ -91,7 +107,7 @@ impl Clipboard {
     pub fn cut(paths: impl IntoIterator<Item = PathBuf>) -> Clipboard {
         Clipboard {
             mode: PasteMode::Cut,
-            paths: paths.into_iter().map(|p| normalize(&p)).collect(),
+            paths: paths.into_iter().map(|p| carried(&p)).collect(),
         }
     }
 
@@ -110,7 +126,7 @@ impl Clipboard {
 
     /// Whether `path` is being carried, however it is spelled.
     pub fn contains(&self, path: &Path) -> bool {
-        let path = normalize(path);
+        let path = carried(path);
         self.paths.contains(&path)
     }
 
@@ -129,7 +145,7 @@ impl Clipboard {
     /// clipboard has no verb worth keeping — `X` leaves the old one behind — so
     /// a pile started from nothing is a copy, the verb that cannot lose a file.
     pub fn toggle(&mut self, paths: &[PathBuf]) -> Toggled {
-        let offered: Vec<PathBuf> = paths.iter().map(|p| normalize(p)).collect();
+        let offered: Vec<PathBuf> = paths.iter().map(|p| carried(p)).collect();
         if offered.is_empty() {
             return Toggled::default();
         }
@@ -313,7 +329,7 @@ impl PastePlan {
 /// safe: a destination that is not a directory, and the two self-destruction
 /// rails. Everything else comes back as data.
 pub fn plan_paste(clip: &Clipboard, dest_dir: &Path, force: bool) -> Result<PastePlan> {
-    let dest_dir = normalize(dest_dir);
+    let dest_dir = carried(dest_dir);
     if !exists(&dest_dir) {
         return Err(DfError::Op(format!(
             "{} does not exist",
@@ -339,7 +355,7 @@ pub fn plan_paste(clip: &Clipboard, dest_dir: &Path, force: bool) -> Result<Past
     let mut claimed: Vec<PathBuf> = Vec::new();
 
     for src in &clip.paths {
-        let src = normalize(src);
+        let src = carried(src);
         if !exists(&src) {
             return Err(DfError::io(
                 &src,
@@ -579,6 +595,29 @@ mod tests {
 
     fn ctx() -> TaskCtx {
         TaskCtx::detached()
+    }
+
+    #[test]
+    fn a_yanked_url_is_carried_exactly_as_given() {
+        let remote = PathBuf::from("sftp://host/a");
+        let local = PathBuf::from("/home/brian/./b/../c");
+        for clip in [
+            Clipboard::yank([remote.clone(), local.clone()]),
+            Clipboard::cut([remote.clone(), local.clone()]),
+        ] {
+            assert_eq!(clip.paths, [remote.clone(), PathBuf::from("/home/brian/c")]);
+            assert!(clip.contains(&remote));
+            assert!(clip.contains(Path::new("/home/brian/c")));
+        }
+        // `b` on a remote row adds the URL, and a second `b` takes it back.
+        let mut clip = Clipboard::default();
+        assert_eq!(clip.toggle(std::slice::from_ref(&remote)).added, 1);
+        assert_eq!(clip.paths, std::slice::from_ref(&remote));
+        assert_eq!(clip.toggle(std::slice::from_ref(&remote)).removed, 1);
+        // A URL and its neighbour share a parent, so one listing's pile does
+        // not read as spanning directories.
+        let pile = Clipboard::yank([remote, PathBuf::from("sftp://host/b")]);
+        assert!(!pile.spans_directories());
     }
 
     #[test]
