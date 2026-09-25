@@ -1,5 +1,5 @@
 //! Remote filesystems over SFTP — PLAN §7.6's `g 1`/`g 2`, without an ssh
-//! library.
+//! library — and cloud storage through rclone, without a cloud SDK.
 //!
 //! ## The design in one sentence
 //!
@@ -18,6 +18,20 @@
 //! a prompt nobody will ever see; that sentence is collected and becomes the
 //! error the user reads.
 //!
+//! ## Cloud storage: the same design, with rclone in the place of ssh
+//!
+//! A service of `type = "rclone"` — or any remote in the user's
+//! `rclone.conf`, which is read for them (see `config`) — is reached by
+//! running `rclone rcd` on a private unix socket and asking it, in rclone's
+//! remote-control API, to list, stat, copy and move. The app's connection *is*
+//! the user's `rclone config`, so it never holds a token: Google Drive's OAuth,
+//! Dropbox's refresh, S3's signing and every provider's quirks belong to
+//! rclone, exactly as keys and `known_hosts` belong to `ssh`. Places on such a
+//! service are `rclone://service/path`, they arrive in the same batches as
+//! [`Entry`] rows, and the [`Vfs`] API is the same API; a worker simply holds
+//! an rclone daemon where an sftp worker holds a session. See `rclone` for the
+//! daemon, the jobs a transfer runs as, and what a cloud remote cannot do.
+//!
 //! ## The pieces
 //!
 //! - [`wire`] — the pure codec: bytes ↔ messages, every length checked, no I/O.
@@ -27,7 +41,10 @@
 //!   transfers, request-id matching, teardown.
 //! - `config` — `vfs.toml`, read from yazi's file first and delightfile's
 //!   second (per-service override), so the machines `g 1`/`g 2` already reach
-//!   in yazi work on day one.
+//!   in yazi work on day one; then the remotes in `rclone.conf`.
+//! - `rclone` — one `rclone rcd` child per cloud service and the calls made to
+//!   it, over [`json`], `http` (one `POST` per call on a unix socket) and
+//!   `rfc3339` (rclone's dates).
 //! - [`Vfs`] (this file) — the manager: one worker thread per service, lazy
 //!   connect, reconnect after a drop, and the channel-and-token listing API.
 //!
@@ -65,12 +82,16 @@ mod http;
 /// this format, and the codec is a small, tested thing a reader may want.
 pub mod json;
 mod poll;
+mod rclone;
+mod rfc3339;
 /// Public because the codec *is* a documented artifact: df-app never speaks
 /// it, but the message-level types ([`wire::Request`], [`wire::Reply`]) and
 /// the protocol constants are the reference for anyone reading a pcap or
 /// extending the client, and the tests exercise both directions of it.
 pub mod wire;
 
+#[cfg(test)]
+mod rclone_tests;
 #[cfg(test)]
 mod tests;
 
@@ -115,6 +136,11 @@ pub const OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// hostname. The config owns the mapping from name to machine.
 pub const URL_SCHEME: &str = "sftp://";
 
+/// The scheme of a place on an rclone service: `rclone://r2/bucket/photos`,
+/// where `r2` is the service (usually a remote in `rclone.conf` of the same
+/// name) and the rest is the path inside it.
+pub const RCLONE_URL_SCHEME: &str = "rclone://";
+
 // ── Addressing ──────────────────────────────────────────────────────────────
 
 /// One place on one service: the vfs's `PathBuf`.
@@ -124,25 +150,66 @@ pub const URL_SCHEME: &str = "sftp://";
 /// otherwise; an absolute path is absolute on the server; a relative one is
 /// resolved against the login directory. The string is not canonicalised
 /// here, because only the server knows what `..` means through its symlinks.
+///
+/// On an rclone service there is no login directory and no "absolute": every
+/// path is inside the remote (and inside the service's `root`), so an
+/// `rclone://` path is kept without its leading and trailing slashes —
+/// `rclone://r2/a/b` and a row joined down to `a/b` from the root are the same
+/// value, which is what lets a listing's rows and a typed URL agree.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VfsPath {
+    /// Which backend the service is, and so which scheme the URL has.
+    pub kind: ServiceKind,
     /// The `[services.<name>]` name, never a hostname.
     pub service: String,
     pub path: String,
 }
 
 impl VfsPath {
+    /// A place on an sftp service.
     pub fn new(service: impl Into<String>, path: impl Into<String>) -> VfsPath {
+        VfsPath::of(ServiceKind::Sftp, service, path)
+    }
+
+    /// A place on an rclone service.
+    pub fn rclone(service: impl Into<String>, path: impl Into<String>) -> VfsPath {
+        VfsPath::of(ServiceKind::Rclone, service, path)
+    }
+
+    /// A place on `service`, whichever kind it is.
+    pub fn for_service(service: &Service, path: impl Into<String>) -> VfsPath {
+        VfsPath::of(service.kind, service.name.clone(), path)
+    }
+
+    /// The one constructor: the kind decides how `path` is kept (see the type's
+    /// note on rclone paths).
+    fn of(kind: ServiceKind, service: impl Into<String>, path: impl Into<String>) -> VfsPath {
+        let path = path.into();
+        let path = match kind {
+            ServiceKind::Sftp => path,
+            ServiceKind::Rclone => path.trim_matches('/').to_string(),
+        };
         VfsPath {
+            kind,
             service: service.into(),
-            path: path.into(),
+            path,
         }
     }
 
-    /// Parse an `sftp://service/path` URL. `None` if it is not one — which is
-    /// how callers ask "is this path remote at all?".
+    /// The service's root, on the same service.
+    pub fn service_root(&self) -> VfsPath {
+        VfsPath::of(self.kind, &self.service, "")
+    }
+
+    /// Parse an `sftp://service/path` or `rclone://service/path` URL. `None`
+    /// if it is neither — which is how callers ask "is this path remote at
+    /// all?".
     pub fn parse(url: &str) -> Option<VfsPath> {
-        let rest = url.strip_prefix(URL_SCHEME)?;
+        let (kind, rest) = if let Some(rest) = url.strip_prefix(URL_SCHEME) {
+            (ServiceKind::Sftp, rest)
+        } else {
+            (ServiceKind::Rclone, url.strip_prefix(RCLONE_URL_SCHEME)?)
+        };
         let (service, path) = match rest.find('/') {
             Some(slash) => (&rest[..slash], &rest[slash..]),
             None => (rest, ""),
@@ -150,7 +217,8 @@ impl VfsPath {
         if service.is_empty() {
             return None;
         }
-        Some(VfsPath::new(
+        Some(VfsPath::of(
+            kind,
             service,
             // A bare `/` is the root, same as no path at all; storing them
             // identically keeps `parse(to_url(p)) == p` honest.
@@ -160,13 +228,14 @@ impl VfsPath {
 
     /// The URL form, which is what [`Entry::path`] carries for a remote row.
     pub fn to_url(&self) -> String {
+        let scheme = self.kind.scheme();
         let path = self.path.trim_end_matches('/');
         if path.is_empty() {
-            format!("{URL_SCHEME}{}", self.service)
+            format!("{scheme}{}", self.service)
         } else if path.starts_with('/') {
-            format!("{URL_SCHEME}{}{path}", self.service)
+            format!("{scheme}{}{path}", self.service)
         } else {
-            format!("{URL_SCHEME}{}/{path}", self.service)
+            format!("{scheme}{}/{path}", self.service)
         }
     }
 
@@ -176,9 +245,9 @@ impl VfsPath {
         if base.is_empty() {
             // Children of the root are relative paths — resolved against the
             // login directory, which is what the root *is*.
-            VfsPath::new(&self.service, name)
+            VfsPath::of(self.kind, &self.service, name)
         } else {
-            VfsPath::new(&self.service, format!("{base}/{name}"))
+            VfsPath::of(self.kind, &self.service, format!("{base}/{name}"))
         }
     }
 
@@ -189,9 +258,9 @@ impl VfsPath {
             return None;
         }
         match trimmed.rsplit_once('/') {
-            Some(("", _)) => Some(VfsPath::new(&self.service, "/")),
-            Some((parent, _)) => Some(VfsPath::new(&self.service, parent)),
-            None => Some(VfsPath::new(&self.service, "")),
+            Some(("", _)) => Some(VfsPath::of(self.kind, &self.service, "/")),
+            Some((parent, _)) => Some(VfsPath::of(self.kind, &self.service, parent)),
+            None => Some(self.service_root()),
         }
     }
 
@@ -227,13 +296,22 @@ pub enum VfsError {
     #[error("no service named \"{service}\" in vfs.toml")]
     UnknownService { service: String },
 
-    /// `ssh` (or the configured program) would not start at all.
-    #[error("{service}: could not start ssh: {source}")]
+    /// `ssh`, `rclone` (or the configured program, or the worker thread
+    /// itself) would not start at all. `program` is what was being started,
+    /// in the words the sentence needs.
+    #[error("{service}: could not start {program}: {source}")]
     Spawn {
         service: String,
+        program: String,
         #[source]
         source: std::io::Error,
     },
+
+    /// An operation this kind of service has no way to perform — a symlink
+    /// in a Google Drive, a `chmod` on an S3 bucket. Not a failure of the
+    /// connection, and not something a retry could change.
+    #[error("{service}: {op} is not something rclone can do")]
+    Unsupported { service: String, op: &'static str },
 
     /// `ssh` could not log in — keys, agent, host key. The detail is ssh's own
     /// stderr, which names the actual reason ("Permission denied (publickey)").
@@ -311,6 +389,7 @@ impl VfsError {
                 | VfsError::Io { .. }
                 | VfsError::Cancelled
                 | VfsError::UnknownService { .. }
+                | VfsError::Unsupported { .. }
         )
     }
 }
@@ -343,14 +422,15 @@ pub struct VfsToken(pub u64);
 /// Batch size is the server's own `READDIR` granularity (OpenSSH sends up to
 /// 100 entries per reply) rather than a re-buffered constant: each reply is
 /// already one round trip's worth, which is the natural "paint something now"
-/// unit on a link with real latency.
+/// unit on a link with real latency. rclone answers a listing whole, so an
+/// rclone service cuts it into `rclone::LIST_BATCH`-row pieces instead.
 #[derive(Debug)]
 pub enum VfsUpdate {
     /// The directory opened on the server. Sent before any entries, so the
     /// pane can clear its old listing exactly when a new one is coming.
     Started { token: VfsToken, dir: VfsPath },
     /// Some entries, in server order (sorting is the model's job). `Entry.path`
-    /// is the `sftp://…` URL of the row.
+    /// is the `sftp://…` or `rclone://…` URL of the row.
     Batch {
         token: VfsToken,
         dir: VfsPath,
@@ -699,9 +779,7 @@ impl Vfs {
         if !self.exists(remote, ctx)? {
             return Ok(remote.clone());
         }
-        let parent = remote
-            .parent()
-            .unwrap_or_else(|| VfsPath::new(&remote.service, ""));
+        let parent = remote.parent().unwrap_or_else(|| remote.service_root());
         let name = std::ffi::OsString::from(remote.name());
         for n in 1..crate::ops::trash::MAX_TRASH_COLLISIONS {
             let candidate = parent.join(&crate::ops::trash::suffixed(&name, n).to_string_lossy());
@@ -826,6 +904,7 @@ impl Vfs {
             }
             Err(e) => Err(VfsError::Spawn {
                 service: service.to_string(),
+                program: "its worker thread".to_string(),
                 source: e,
             }),
         }
@@ -862,10 +941,21 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 // ── The worker ──────────────────────────────────────────────────────────────
 
-/// One service's thread: owns the connection (and so the `ssh` child), runs
-/// commands in arrival order, reconnects lazily after any connection-fatal
-/// error. Ends when the command channel closes; ending drops the connection,
-/// which kills and reaps the child.
+/// What a worker holds while its service is reachable: an SFTP session on an
+/// `ssh` child, or an `rclone rcd` child and the socket it answers on.
+///
+/// Both are "the connection" as far as the worker is concerned — made lazily,
+/// dropped on a connection-fatal error, remade on the next command — and both
+/// kill and reap their child when dropped.
+enum Backend {
+    Sftp(Connection),
+    Rclone(rclone::Daemon),
+}
+
+/// One service's thread: owns the connection (and so the `ssh` or `rclone`
+/// child), runs commands in arrival order, reconnects lazily after any
+/// connection-fatal error. Ends when the command channel closes; ending drops
+/// the connection, which kills and reaps the child.
 fn worker_loop(
     service: Arc<Service>,
     commands: Receiver<Cmd>,
@@ -873,7 +963,7 @@ fn worker_loop(
     live: Live,
     notify: Notifier,
 ) {
-    let mut connection: Option<Connection> = None;
+    let mut connection: Option<Backend> = None;
 
     for cmd in commands {
         match cmd {
@@ -894,7 +984,12 @@ fn worker_loop(
                         continue;
                     }
                 };
-                let fatal = run_list(conn, token, &dir, &updates, &live, &notify);
+                let fatal = match conn {
+                    Backend::Sftp(conn) => run_list(conn, token, &dir, &updates, &live, &notify),
+                    Backend::Rclone(daemon) => {
+                        run_rclone_list(daemon, token, &dir, &updates, &live, &notify)
+                    }
+                };
                 if fatal {
                     connection = None;
                 }
@@ -905,7 +1000,8 @@ fn worker_loop(
                     continue;
                 }
                 let outcome = match ensure_connected(&mut connection, &service) {
-                    Ok(conn) => run_op(conn, op, &ctx),
+                    Ok(Backend::Sftp(conn)) => run_op(conn, op, &ctx),
+                    Ok(Backend::Rclone(daemon)) => daemon.run_op(op, &ctx),
                     Err(e) => Err(e),
                 };
                 if outcome
@@ -924,14 +1020,20 @@ fn worker_loop(
 }
 
 /// The lazy connect. On success the existing or fresh connection; on failure
-/// the classified error (auth vs. unreachable — see `conn`).
+/// the classified error (auth vs. unreachable — see `conn`; not installed vs.
+/// would not start — see `rclone`).
 fn ensure_connected<'a>(
-    connection: &'a mut Option<Connection>,
+    connection: &'a mut Option<Backend>,
     service: &Arc<Service>,
-) -> Result<&'a mut Connection, VfsError> {
+) -> Result<&'a mut Backend, VfsError> {
     if connection.is_none() {
         log::info!("vfs {}: connecting", service.name);
-        *connection = Some(Connection::connect(Arc::clone(service))?);
+        *connection = Some(match service.kind {
+            ServiceKind::Sftp => Backend::Sftp(Connection::connect(Arc::clone(service))?),
+            ServiceKind::Rclone => {
+                Backend::Rclone(rclone::Daemon::spawn(Arc::clone(service), &[])?)
+            }
+        });
     }
     match connection.as_mut() {
         Some(conn) => Ok(conn),
@@ -1056,6 +1158,71 @@ fn run_list(
     false
 }
 
+/// [`run_list`] for an rclone service. Returns whether the daemon must be
+/// dropped.
+///
+/// rclone answers a listing in one reply rather than a `READDIR` at a time, so
+/// the batching the pane expects is done here: [`rclone::LIST_BATCH`] rows per
+/// update, with the same "is this still wanted?" check between batches that
+/// the SFTP loop makes between round trips. `Started` goes out only once the
+/// listing is in hand, so a directory that cannot be read ends in `Failed`
+/// without ever having cleared the pane.
+fn run_rclone_list(
+    daemon: &mut rclone::Daemon,
+    token: VfsToken,
+    dir: &VfsPath,
+    updates: &Sender<VfsUpdate>,
+    live: &Live,
+    notify: &Notifier,
+) -> bool {
+    let send = |update: VfsUpdate| {
+        if updates.send(update).is_ok() {
+            notify();
+        }
+    };
+    let still_wanted = || lock(live).contains_key(&token);
+
+    let mut rest = match daemon.list(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            let fatal = error.is_connection_fatal();
+            lock(live).remove(&token);
+            send(VfsUpdate::Failed {
+                token,
+                dir: dir.clone(),
+                error,
+            });
+            return fatal;
+        }
+    };
+
+    send(VfsUpdate::Started {
+        token,
+        dir: dir.clone(),
+    });
+    let mut total = 0usize;
+    while !rest.is_empty() {
+        if !still_wanted() {
+            return false;
+        }
+        let tail = rest.split_off(rest.len().min(rclone::LIST_BATCH));
+        let entries = std::mem::replace(&mut rest, tail);
+        total += entries.len();
+        send(VfsUpdate::Batch {
+            token,
+            dir: dir.clone(),
+            entries,
+        });
+    }
+    lock(live).remove(&token);
+    send(VfsUpdate::Done {
+        token,
+        dir: dir.clone(),
+        total,
+    });
+    false
+}
+
 /// Turn one `READDIR` reply into rows, resolving symlink targets with
 /// pipelined `STAT`s while the budget lasts.
 fn convert_batch(
@@ -1106,9 +1273,7 @@ fn convert_batch(
 /// kind and the date coming off the wire rather than from a local `stat` that
 /// would find nothing at all.
 pub fn stat_entry(path: &VfsPath, attrs: Attrs) -> Entry {
-    let parent = path
-        .parent()
-        .unwrap_or_else(|| VfsPath::new(&path.service, ""));
+    let parent = path.parent().unwrap_or_else(|| path.service_root());
     let entry = wire::NameEntry {
         filename: path.name().as_bytes().to_vec(),
         longname: Vec::new(),

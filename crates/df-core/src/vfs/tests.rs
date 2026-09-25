@@ -41,12 +41,12 @@ const T: Duration = Duration::from_secs(10);
 
 /// A directory under `$TMPDIR` that removes itself — same twelve lines as
 /// `fs::tests`, because `tempfile` would be a dependency for them (PLAN §1).
-struct TempDir {
-    path: PathBuf,
+pub(super) struct TempDir {
+    pub(super) path: PathBuf,
 }
 
 impl TempDir {
-    fn new(tag: &str) -> TempDir {
+    pub(super) fn new(tag: &str) -> TempDir {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path =
@@ -56,7 +56,7 @@ impl TempDir {
         TempDir { path }
     }
 
-    fn file(&self, name: &str, contents: &[u8]) -> PathBuf {
+    pub(super) fn file(&self, name: &str, contents: &[u8]) -> PathBuf {
         let path = self.path.join(name);
         std::fs::write(&path, contents).expect("write a fixture file");
         path
@@ -1162,9 +1162,9 @@ fn find_sftp_server() -> Option<PathBuf> {
 
 /// A sink that counts, for asserting transfer progress actually reports.
 #[derive(Default)]
-struct CountingSink {
-    total: AtomicU64,
-    advanced: AtomicU64,
+pub(super) struct CountingSink {
+    pub(super) total: AtomicU64,
+    pub(super) advanced: AtomicU64,
 }
 
 impl ProgressSink for CountingSink {
@@ -1177,7 +1177,7 @@ impl ProgressSink for CountingSink {
 }
 
 /// Drain listing updates until `Done`/`Failed` for `token`, or the deadline.
-fn collect_listing(vfs: &Vfs, token: super::VfsToken) -> Vec<VfsUpdate> {
+pub(super) fn collect_listing(vfs: &Vfs, token: super::VfsToken) -> Vec<VfsUpdate> {
     let deadline = Instant::now() + T;
     let mut updates = Vec::new();
     loop {

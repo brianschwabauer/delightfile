@@ -53,12 +53,16 @@ use crate::toml::{self, ConfigWarning, Table, Value};
 /// instead of being overridden by a default nobody wrote down.
 pub const DEFAULT_SSH_PORT: u16 = 22;
 
-/// What a service speaks. One variant today; an enum anyway, because the parser
-/// has to *recognise* the types it does not implement in order to skip them
-/// with a useful warning rather than a confusing one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a service speaks. An enum rather than a flag, because the parser has
+/// to *recognise* the types it does not implement in order to skip them with a
+/// useful warning rather than a confusing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ServiceKind {
+    /// `ssh -s <host> sftp`, spoken to by `super::conn`.
     Sftp,
+    /// A remote in the user's `rclone config`, reached through `rclone rcd`
+    /// (`super::rclone`).
+    Rclone,
 }
 
 impl ServiceKind {
@@ -66,6 +70,16 @@ impl ServiceKind {
         match text {
             "sftp" | "ssh" => Some(ServiceKind::Sftp),
             _ => None,
+        }
+    }
+
+    /// The URL scheme a place on this kind of service is written with —
+    /// `sftp://` or `rclone://` — which is how a path in a pane says which
+    /// backend it belongs to.
+    pub fn scheme(self) -> &'static str {
+        match self {
+            ServiceKind::Sftp => super::URL_SCHEME,
+            ServiceKind::Rclone => super::RCLONE_URL_SCHEME,
         }
     }
 }
@@ -91,6 +105,10 @@ pub struct Service {
     pub root: Option<String>,
     /// Run this program instead of `ssh`, and speak SFTP to its stdio.
     ///
+    /// For a [`ServiceKind::Rclone`] service it is the program run instead of
+    /// `rclone`, and its arguments are added *after* `rcd`'s own — which is how
+    /// the tests point a daemon at a scratch `--config` rather than the user's.
+    ///
     /// The seam that makes the whole client testable without a network: OpenSSH's
     /// `sftp-server` binary *is* the other end of the protocol, and spawning it
     /// directly against a temp directory exercises every byte of framing,
@@ -103,6 +121,16 @@ pub struct Service {
     /// because a test seam that only exists under `cfg(test)` is a seam the
     /// shipping code does not have.
     pub program: Option<(PathBuf, Vec<String>)>,
+    /// The rclone remote a [`ServiceKind::Rclone`] service reaches: the
+    /// `[section]` name in `rclone.conf`. `None` means "the same as the
+    /// service's name". It may also be a whole rclone path — `r2:bucket` — or,
+    /// as the tests use it, a local directory, which rclone accepts anywhere
+    /// it accepts a remote.
+    pub remote: Option<String>,
+    /// rclone's `type` for the remote (`drive`, `dropbox`, `s3`…), when it is
+    /// known. Informational: the mount card's second line. Nothing is decided
+    /// by it — rclone knows what its remotes are.
+    pub provider: Option<String>,
 }
 
 impl Service {
@@ -117,6 +145,18 @@ impl Service {
             key_file: None,
             root: None,
             program: None,
+            remote: None,
+            provider: None,
+        }
+    }
+
+    /// An rclone service called `name` that reaches `remote` — a section of
+    /// `rclone.conf`, an rclone path, or a local directory.
+    pub fn rclone(name: impl Into<String>, remote: impl Into<String>) -> Service {
+        Service {
+            kind: ServiceKind::Rclone,
+            remote: Some(remote.into()),
+            ..Service::new(name, "")
         }
     }
 
@@ -148,6 +188,32 @@ impl Service {
         };
         let home = std::env::var_os("HOME")?;
         Some(PathBuf::from(format!("{}{rest}", home.to_string_lossy())))
+    }
+
+    /// The rclone "fs" every call on this service is made against: the remote
+    /// and the service's `root` inside it, the way rclone writes one on its
+    /// own command line.
+    ///
+    /// `r2` with no root is `r2:`, the top of the remote, and with `root =
+    /// "photos"` it is `r2:photos`. A remote that is already an rclone path
+    /// (`r2:bucket`) or a local directory (`/tmp/x`) has the root joined on
+    /// with a `/` instead, because a second `:` there would name a different
+    /// place — and for a local directory, a directory with a colon in its
+    /// name.
+    pub fn rclone_fs(&self) -> String {
+        let remote = self.remote.as_deref().unwrap_or(&self.name);
+        let root = self.root.as_deref().unwrap_or("").trim_matches('/');
+        if remote.starts_with('/') || remote.contains(':') {
+            if root.is_empty() {
+                remote.to_string()
+            } else if remote.ends_with(':') || remote.ends_with('/') {
+                format!("{remote}{root}")
+            } else {
+                format!("{remote}/{root}")
+            }
+        } else {
+            format!("{remote}:{root}")
+        }
     }
 
     /// The path a bare `/` means for this service.
@@ -391,6 +457,8 @@ fn parse_service(name: &str, table: &Table) -> Result<Service, String> {
         key_file,
         root,
         program: None,
+        remote: None,
+        provider: None,
     })
 }
 

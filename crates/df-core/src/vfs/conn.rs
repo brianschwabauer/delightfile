@@ -160,6 +160,7 @@ impl Transport {
             .stderr(Stdio::piped());
         let mut child = command.spawn().map_err(|source| VfsError::Spawn {
             service: service.name.clone(),
+            program: command.get_program().to_string_lossy().into_owned(),
             source,
         })?;
 
