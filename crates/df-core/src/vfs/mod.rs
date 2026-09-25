@@ -1169,7 +1169,9 @@ fn run_list(
 /// update, with the same "is this still wanted?" check between batches that
 /// the SFTP loop makes between round trips. `Started` goes out only once the
 /// listing is in hand, so a directory that cannot be read ends in `Failed`
-/// without ever having cleared the pane.
+/// without ever having cleared the pane. The same check is made while rclone is
+/// still paging the folder, on every poll of its job, so a listing abandoned
+/// before rclone has finished is stopped rather than waited out.
 fn run_rclone_list(
     daemon: &mut rclone::Daemon,
     token: VfsToken,
@@ -1185,8 +1187,11 @@ fn run_rclone_list(
     };
     let still_wanted = || lock(live).contains_key(&token);
 
-    let mut rest = match daemon.list(dir) {
-        Ok(entries) => entries,
+    let mut rest = match daemon.list(dir, &still_wanted) {
+        Ok(Some(entries)) => entries,
+        // Nobody wants it any more, and rclone has been told to stop: the
+        // same quiet end the SFTP loop takes between round trips.
+        Ok(None) => return false,
         Err(error) => {
             let fatal = error.is_connection_fatal();
             lock(live).remove(&token);

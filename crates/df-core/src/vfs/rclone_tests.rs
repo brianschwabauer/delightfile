@@ -879,3 +879,141 @@ fn a_killed_daemon_is_replaced_on_the_next_request() {
     drop(vfs);
     assert!(sockets_in(&scratch).is_empty());
 }
+
+/// What the stand-in server saw.
+#[derive(Debug)]
+enum Seen {
+    /// A request arrived; its first line.
+    Asked(String),
+    /// The client closed the connection without an answer.
+    Abandoned,
+    /// Nothing happened within the server's own deadline.
+    Nothing,
+}
+
+/// Accept on a non-blocking `listener` until `deadline`, or `None`.
+fn accept_by(listener: &std::net::TcpListener, deadline: Instant) -> Option<std::net::TcpStream> {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).ok()?;
+                return Some(stream);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// **A listing is a job, and one nobody wants is stopped.** rclone's `:http`
+/// backend is pointed at a server on the loopback that takes the request and
+/// never answers — the shape of a cloud folder that takes minutes to page —
+/// so the listing's job runs until something ends it. Cancelling the listing
+/// must end it: rclone drops the request (the server sees the close), and the
+/// worker is free for the next command rather than stuck behind the hang.
+#[test]
+fn a_listing_nobody_wants_is_stopped_rather_than_waited_out() {
+    use std::io::{Read, Write};
+    let Some(rclone) = find_rclone() else {
+        eprintln!(
+            "skipping a_listing_nobody_wants_is_stopped_rather_than_waited_out: \
+             no rclone on $PATH"
+        );
+        return;
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (seen, events) = std::sync::mpsc::channel::<Seen>();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_done = Arc::clone(&done);
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + T;
+        // The first request is the listing: take it and say nothing.
+        let Some(mut held) = accept_by(&listener, deadline) else {
+            let _ = seen.send(Seen::Nothing);
+            return;
+        };
+        held.set_read_timeout(Some(T)).unwrap();
+        let mut buffer = [0u8; 4096];
+        let n = held.read(&mut buffer).unwrap_or(0);
+        let first = String::from_utf8_lossy(&buffer[..n])
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let _ = seen.send(Seen::Asked(first));
+        loop {
+            match held.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = seen.send(Seen::Abandoned);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    let _ = seen.send(Seen::Nothing);
+                    return;
+                }
+            }
+        }
+        // Everything after it is answered at once: nothing here.
+        while !server_done.load(Ordering::SeqCst) {
+            let Some(mut next) = accept_by(&listener, Instant::now() + Duration::from_millis(50))
+            else {
+                continue;
+            };
+            let _ = next.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = next.read(&mut buffer);
+            let _ = next.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+
+    let scratch = TempDir::new("rclone-slow-scratch");
+    let name = unique_name("slow");
+    let service = scratch_service(
+        Service::rclone(&name, format!(":http,url='http://127.0.0.1:{port}/':")),
+        &scratch,
+        &rclone,
+    );
+    let vfs = vfs_over(service);
+    let root = VfsPath::rclone(&name, "");
+
+    let token = vfs.scan(root.clone());
+    match events.recv_timeout(T) {
+        Ok(Seen::Asked(line)) => assert!(line.starts_with("GET /"), "{line}"),
+        other => panic!("the listing never reached the server: {other:?}"),
+    }
+    // Several polls' worth of waiting: the job is running and has not ended.
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        vfs.drain().is_empty(),
+        "nothing can have arrived: the server has not answered"
+    );
+
+    vfs.cancel(token);
+    match events.recv_timeout(T) {
+        Ok(Seen::Abandoned) => {}
+        other => panic!("rclone kept the request open after the listing was cancelled: {other:?}"),
+    }
+
+    // The worker is free, and the daemon is the same healthy daemon: the next
+    // listing is answered — here, that there is nothing there.
+    let token = vfs.scan(root.clone());
+    let updates = collect_listing(&vfs, token);
+    assert!(
+        matches!(
+            updates.last(),
+            Some(VfsUpdate::Failed { .. } | VfsUpdate::Done { .. })
+        ),
+        "{updates:?}"
+    );
+    assert_eq!(sockets_in(&scratch).len(), 1, "no respawn was needed");
+
+    done.store(true, Ordering::SeqCst);
+    drop(vfs);
+    server.join().unwrap();
+}

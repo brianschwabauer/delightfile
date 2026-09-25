@@ -59,6 +59,14 @@
 //! cancelled transfer leaves the destination exactly as it was: the same
 //! promise the SFTP upload's scratch file keeps, kept by rclone.
 //!
+//! **A listing is a job too.** Paging through a big cloud folder can take
+//! rclone longer than [`super::OP_TIMEOUT`], and a synchronous `operations/list`
+//! that ran past it would be a timeout — fatal, so the daemon would be killed
+//! and the same listing would die the same way on every retry. As a job it has
+//! no deadline of its own (each poll still has one), and it has the thing a
+//! long listing needs instead: the pane's "is this still wanted?", checked on
+//! every poll, and a `job/stop` when the answer is no.
+//!
 //! **Pause holds the polling, not the transfer.** rclone has no way to pause
 //! one job, so a paused task stops reporting and rclone keeps moving bytes; the
 //! bar catches up on resume. Cancel is immediate.
@@ -167,9 +175,17 @@ pub(super) struct Daemon {
     /// closes, and a drop that waited for that would hang on any grandchild
     /// that inherited the pipe.
     reader: Option<JoinHandle<()>>,
-    /// The next stats group's number: one group per transfer, so a transfer's
-    /// bytes are its own and not the sum of everything the daemon has done.
+    /// The next stats group's number: one group per job, so a transfer's bytes
+    /// are its own and not the sum of everything the daemon has done.
     next_group: u64,
+}
+
+/// A started async job, as the two request bodies that ask about it.
+struct Job {
+    /// `{"jobid": N}` — for `job/status` and `job/stop`.
+    id: Json,
+    /// `{"group": "df/N"}` — for `core/stats` and `core/stats-delete`.
+    group: Json,
 }
 
 impl Daemon {
@@ -352,8 +368,19 @@ impl Daemon {
         }
     }
 
-    /// Every row of `dir`, in rclone's order.
-    pub(super) fn list(&mut self, dir: &VfsPath) -> Result<Vec<Entry>, VfsError> {
+    /// Every row of `dir`, in rclone's order — or `None` if `wanted` said
+    /// no before rclone finished, in which case the listing job has been
+    /// stopped.
+    ///
+    /// Run as a job with no deadline of its own (see the module note on why a
+    /// slow listing must not be a timeout); `wanted` is asked on every poll,
+    /// and is the pane's live-listing set, so arrowing away from a folder that
+    /// is still being paged stops the paging.
+    pub(super) fn list(
+        &mut self,
+        dir: &VfsPath,
+        wanted: &dyn Fn() -> bool,
+    ) -> Result<Option<Vec<Entry>>, VfsError> {
         let mut params = self.at(dir);
         // The MIME type is a per-object lookup on some providers and is
         // guessed from the name here anyway (`mime::hint_for_name`); the
@@ -365,25 +392,45 @@ impl Daemon {
                 ("noModTime", Json::from(false)),
             ]),
         );
-        let reply = self.call("operations/list", &params, dir)?;
+        let job = self.start_job("operations/list", params, dir)?;
+        let outcome = loop {
+            if !wanted() {
+                self.stop(&job.id, dir);
+                break Ok(None);
+            }
+            let status = match self.call("job/status", &job.id, dir) {
+                Ok(status) => status,
+                Err(e) => break Err(self.abandon(&job, e, dir)),
+            };
+            if status.get("finished").and_then(Json::as_bool) == Some(true) {
+                break self.job_result(&status, dir).map(Some);
+            }
+            std::thread::sleep(POLL);
+        };
+        self.end_job(&job, &outcome, dir);
+        let Some(reply) = outcome? else {
+            return Ok(None);
+        };
         let Some(items) = reply.get("list").and_then(Json::as_array) else {
             return Err(self.garbled("operations/list"));
         };
-        Ok(items
-            .iter()
-            .filter_map(|item| {
-                let name = item.get("Name").and_then(Json::as_str)?;
-                if name.is_empty() {
-                    return None;
-                }
-                let entry = wire::NameEntry {
-                    filename: name.as_bytes().to_vec(),
-                    longname: Vec::new(),
-                    attrs: attrs_of(item),
-                };
-                Some(remote_entry(dir, &entry, None))
-            })
-            .collect())
+        Ok(Some(
+            items
+                .iter()
+                .filter_map(|item| {
+                    let name = item.get("Name").and_then(Json::as_str)?;
+                    if name.is_empty() {
+                        return None;
+                    }
+                    let entry = wire::NameEntry {
+                        filename: name.as_bytes().to_vec(),
+                        longname: Vec::new(),
+                        attrs: attrs_of(item),
+                    };
+                    Some(remote_entry(dir, &entry, None))
+                })
+                .collect(),
+        ))
     }
 
     /// `operations/stat`. An `item` of `null` is rclone's "there is nothing
@@ -566,84 +613,103 @@ impl Daemon {
     fn run_job(
         &mut self,
         method: &'static str,
-        mut params: Json,
+        params: Json,
         ctx: &TaskCtx,
         total: Option<u64>,
         about: &VfsPath,
     ) -> Result<u64, VfsError> {
+        if let Some(total) = total {
+            ctx.set_total(total, 1);
+        }
+        let job = self.start_job(method, params, about)?;
+        let report = total.is_some();
+        let mut moved = 0u64;
+        let outcome = loop {
+            if let Err(crate::DfError::Cancelled) = ctx.checkpoint() {
+                self.stop(&job.id, about);
+                break Err(VfsError::Cancelled);
+            }
+            match self.call("core/stats", &job.group, about) {
+                Ok(now) => moved = self.advance(&now, moved, report, ctx),
+                Err(e) => break Err(self.abandon(&job, e, about)),
+            }
+            let status = match self.call("job/status", &job.id, about) {
+                Ok(status) => status,
+                Err(e) => break Err(self.abandon(&job, e, about)),
+            };
+            if status.get("finished").and_then(Json::as_bool) == Some(true) {
+                // The bytes of the job's last moments landed between the two
+                // calls above; one more look so the bar ends at the truth.
+                if let Ok(last) = self.call("core/stats", &job.group, about) {
+                    moved = self.advance(&last, moved, report, ctx);
+                }
+                break self.job_result(&status, about).map(|_| moved);
+            }
+            std::thread::sleep(POLL);
+        };
+        self.end_job(&job, &outcome, about);
+        outcome
+    }
+
+    /// Send `method` with `_async`, in a stats group named for this daemon's
+    /// next job, and return the handles the polling needs.
+    fn start_job(
+        &mut self,
+        method: &'static str,
+        mut params: Json,
+        about: &VfsPath,
+    ) -> Result<Job, VfsError> {
         let group = format!("df/{}", self.next_group);
         self.next_group += 1;
         params.insert("_async", Json::from(true));
         params.insert("_group", Json::from(group.as_str()));
-        if let Some(total) = total {
-            ctx.set_total(total, 1);
-        }
         let started = self.call(method, &params, about)?;
         let Some(jobid) = started.get("jobid").and_then(Json::as_i64) else {
             return Err(self.garbled(method));
         };
-        let job = Json::object([("jobid", Json::from(jobid))]);
-        let stats = Json::object([("group", Json::from(group.as_str()))]);
+        Ok(Job {
+            id: Json::object([("jobid", Json::from(jobid))]),
+            group: Json::object([("group", Json::from(group.as_str()))]),
+        })
+    }
 
-        let outcome = self.follow_job(&job, &stats, ctx, total.is_some(), about);
-        match &outcome {
-            // Stopped already, inside `follow_job`.
-            Err(VfsError::Cancelled) | Ok(_) => {}
-            // Asking about the job failed while the daemon is still up: stop
-            // the job rather than leave it running unwatched. A fatal error
-            // takes the daemon down with it, which stops everything anyway.
-            Err(e) if !e.is_connection_fatal() => self.stop(&job, about),
-            Err(_) => {}
+    /// A finished job's answer: its `output` when it succeeded, rclone's
+    /// sentence as a status error when it did not.
+    fn job_result(&self, status: &Json, about: &VfsPath) -> Result<Json, VfsError> {
+        if status.get("success").and_then(Json::as_bool) == Some(true) {
+            return Ok(status.get("output").cloned().unwrap_or(Json::Null));
         }
+        let message = status
+            .get("error")
+            .and_then(Json::as_str)
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or("rclone reported a failure and gave no reason");
+        Err(status_error(about, message.to_string()))
+    }
+
+    /// Asking about a running job failed. While the daemon is still up, stop
+    /// the job rather than leave it running unwatched; a fatal error takes the
+    /// daemon down with it, which stops everything anyway. Returns the error.
+    fn abandon(&mut self, job: &Job, error: VfsError, about: &VfsPath) -> VfsError {
+        if !error.is_connection_fatal() {
+            self.stop(&job.id, about);
+        }
+        error
+    }
+
+    /// Delete a finished job's stats group — one per job would otherwise pile
+    /// up in the daemon for as long as it runs — unless the daemon is on its
+    /// way out, when there is nobody to ask.
+    fn end_job<T>(&mut self, job: &Job, outcome: &Result<T, VfsError>, about: &VfsPath) {
         if outcome
             .as_ref()
             .err()
-            .is_none_or(|e| !e.is_connection_fatal())
+            .is_some_and(VfsError::is_connection_fatal)
         {
-            // One group per transfer would otherwise pile up in the daemon for
-            // as long as it runs.
-            if let Err(e) = self.call("core/stats-delete", &stats, about) {
-                log::debug!("vfs {}: core/stats-delete: {e}", self.service.name);
-            }
+            return;
         }
-        outcome
-    }
-
-    /// Poll a started job until it finishes or `ctx` cancels it.
-    fn follow_job(
-        &mut self,
-        job: &Json,
-        stats: &Json,
-        ctx: &TaskCtx,
-        report: bool,
-        about: &VfsPath,
-    ) -> Result<u64, VfsError> {
-        let mut moved = 0u64;
-        loop {
-            if let Err(crate::DfError::Cancelled) = ctx.checkpoint() {
-                self.stop(job, about);
-                return Err(VfsError::Cancelled);
-            }
-            let now = self.call("core/stats", stats, about)?;
-            moved = self.advance(&now, moved, report, ctx);
-            let status = self.call("job/status", job, about)?;
-            if status.get("finished").and_then(Json::as_bool) == Some(true) {
-                // The bytes of the job's last moments landed between the two
-                // calls above; one more look so the bar ends at the truth.
-                if let Ok(last) = self.call("core/stats", stats, about) {
-                    moved = self.advance(&last, moved, report, ctx);
-                }
-                if status.get("success").and_then(Json::as_bool) == Some(true) {
-                    return Ok(moved);
-                }
-                let message = status
-                    .get("error")
-                    .and_then(Json::as_str)
-                    .filter(|m| !m.trim().is_empty())
-                    .unwrap_or("rclone reported a failure and gave no reason");
-                return Err(status_error(about, message.to_string()));
-            }
-            std::thread::sleep(POLL);
+        if let Err(e) = self.call("core/stats-delete", &job.group, about) {
+            log::debug!("vfs {}: core/stats-delete: {e}", self.service.name);
         }
     }
 
