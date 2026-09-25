@@ -741,7 +741,7 @@ mod tests {
     #[test]
     fn a_point_resolves_to_the_thing_drawn_under_it() {
         let (area, crumbs) = zones_area();
-        let layout = crate::ui::layout(area, [1, 4, 3], true, 1);
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), true, 1);
         let z = zones(&crumbs, &layout);
         let dirs = |_: Column, index: usize| index.is_multiple_of(2);
 
@@ -786,7 +786,7 @@ mod tests {
     #[test]
     fn the_space_below_the_rows_is_the_directory_itself() {
         let (area, crumbs) = zones_area();
-        let layout = crate::ui::layout(area, [1, 4, 3], false, 1);
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), false, 1);
         let mut z = zones(&crumbs, &layout);
         z.list_rows = 2;
         let below = crate::ui::row_rect(z.list_content, 0.0, 9, z.scale.row_height).center();
@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn every_target_can_be_drawn_around() {
         let (area, crumbs) = zones_area();
-        let layout = crate::ui::layout(area, [1, 4, 3], true, 1);
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), true, 1);
         let z = zones(&crumbs, &layout);
         for target in [
             Target::Row(Column::List, 3),

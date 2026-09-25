@@ -3,9 +3,10 @@
 //! PLAN §2 calls for "a small state db (`~/.local/state/delightfile/`)", and
 //! this is it: the per-directory overrides — a sort you chose *here*, a
 //! linemode you chose *here*, hidden files you turned on *here* — plus the tab
-//! list, so session restore later has somewhere to read from, and the pinned
+//! list, so session restore later has somewhere to read from, the pinned
 //! places ([`pins`], `g b`), which are here and not in config because a
-//! keystroke makes them and the program never writes config.
+//! keystroke makes them and the program never writes config, and the panes'
+//! widths ([`panes`]), which are here for the same reason: a drag made them.
 //!
 //! **The view scale is not in here** (the list steps and the grid). It was, as
 //! `view=` and `scale=` on a directory's line, until 2026-09-23; since then it
@@ -24,13 +25,14 @@
 //! /home/brian/Pictures\tlinemode=none\thidden=1\tt=1756598400
 //! /home/brian/src\tsort=mtime\tsort_reverse=1\tt=1756598000
 //! !tabs\t0=/home/brian\t1=/tmp\tactive=1\tt=1756598400
+//! !panes\tratio=0.125,0.5,0.375\tparent_collapsed=0\tpreview_collapsed=0\tparent_before=0.125\tpreview_before=0.375
 //! !pin\tpath=~/Work\tkey=w
 //! ```
 //!
 //! - Fields are separated by **tabs**. The first field is the record's key: an
-//!   absolute path, `!tabs` for the one tab record, or `!pin` for each pinned
-//!   place ([`pins`]). Paths are absolute and `!` is not a path, so the two can
-//!   never collide.
+//!   absolute path, `!tabs` for the one tab record, `!panes` for the panes'
+//!   widths ([`panes`]), or `!pin` for each pinned place ([`pins`]). Paths
+//!   are absolute and `!` is not a path, so the two can never collide.
 //! - Every later field is `key=value`, split at the **first** `=` so a value may
 //!   contain one.
 //! - Escaping, applied to keys and values alike: `\\` for a backslash, `\t` for
@@ -79,7 +81,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::config::{LineMode, SortBy};
 use crate::{DfError, Result};
 
+pub mod panes;
 pub mod pins;
+pub use panes::{Panes, Side};
 pub use pins::{Pin, PinRefusal};
 
 #[cfg(test)]
@@ -205,6 +209,9 @@ pub struct StateStore {
     tabs_touched: u64,
     /// The pinned places, in the order they were pinned ([`pins`]).
     pins: Vec<Pin>,
+    /// The panes' widths as they were last left ([`panes`]), or `None` while
+    /// they are the config's.
+    panes: Option<Panes>,
     dirty: bool,
 }
 
@@ -272,6 +279,7 @@ impl StateStore {
             active_tab: 0,
             tabs_touched: 0,
             pins: Vec::new(),
+            panes: None,
             dirty: false,
         }
     }
@@ -503,6 +511,9 @@ impl StateStore {
             push_field(&mut out, "t", self.tabs_touched.to_string().as_bytes());
             out.push(b'\n');
         }
+        // Beside the tabs: the other record about the window rather than
+        // about a directory in it.
+        self.render_panes(&mut out);
         // Last, in the order they were pinned — the one record kind whose
         // order is data rather than something to sort for stability.
         self.render_pins(&mut out);
@@ -527,6 +538,10 @@ impl StateStore {
             };
             if key.as_slice() == TABS_KEY.as_bytes() {
                 self.parse_tabs(fields, index + 1);
+                continue;
+            }
+            if key.as_slice() == panes::PANES_KEY.as_bytes() {
+                self.parse_panes(fields, index + 1);
                 continue;
             }
             if key.as_slice() == pins::PIN_KEY.as_bytes() {

@@ -32,7 +32,7 @@ use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord};
 use df_core::ops::paste::{plan_paste, Clipboard, PasteMode};
 use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
 use df_core::preview::PreviewKind;
-use df_core::state::{StateStore, View};
+use df_core::state::{Panes, StateStore, View};
 use df_core::tasks::{FnJob, Lane, TaskCtx, TaskEngine, TaskEvent, TaskId, TaskState};
 use df_core::text::grouped;
 
@@ -1308,6 +1308,9 @@ pub struct App {
     /// How many lines the top row is showing, a high-water mark for the life of
     /// one prompt (see [`App::sync_path_lines`]).
     path_lines: usize,
+    /// How wide the panes are, as the state file keeps them: from there when
+    /// it has a record, from the config's `ratio` when it does not.
+    panes: Panes,
     /// The one-at-a-time toast.
     toasts: Toasts,
     /// The modal card, when one is up. While it is, keys are matched against
@@ -1905,6 +1908,12 @@ impl App {
         }
         let task_events = engine.events();
 
+        // The panes' widths: the state file's, when a drag has ever left one
+        // there, and the config's ratio otherwise.
+        let panes = state
+            .panes()
+            .unwrap_or_else(|| Panes::from_ratio(config.mgr.ratio));
+
         let mut mgr = config.mgr.clone();
         // A file dialog that offered type filters opens on its active one with
         // the dotfiles hidden, whatever `show_hidden` says ([`Showing`]'s first
@@ -2033,6 +2042,7 @@ impl App {
             yank: None,
             filter_chip: None,
             path_lines: 1,
+            panes,
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
             window_focused: true,
@@ -10543,7 +10553,7 @@ impl App {
         if rows == 0.0 {
             return;
         }
-        if layout.preview.contains(at) {
+        if layout.in_preview(at) {
             // A text body scrolls by lines with the same coast. Every *picture*
             // takes the wheel as a zoom instead, and that pass runs later in
             // the frame (`App::preview_gesture`) — where the video frame's own
@@ -10554,7 +10564,7 @@ impl App {
             }
             return;
         }
-        if layout.parent.contains(at) {
+        if layout.in_parent(at) {
             if let Some(parent) = &mut self.tabs.active_mut().parent {
                 parent.dir.cancel_aim();
                 parent.wheel(rows, parent_page, 1, now);
@@ -11741,7 +11751,7 @@ impl App {
         if layout.list.contains(at) {
             return true;
         }
-        if layout.parent.contains(at) {
+        if layout.in_parent(at) {
             // **Below the parent's rows only.** A row there is clicked to go
             // somewhere, on mouse-down, so a drag cannot start from one — and
             // the thin margins beside a row are too close to it to be a place
@@ -11759,7 +11769,7 @@ impl App {
             };
             return at.y >= below;
         }
-        if layout.preview.contains(at) {
+        if layout.in_preview(at) {
             // The transport strip, while it is up. The press site has already
             // given the scrubber and the button to `media_pointer`; the rest of
             // the strip (its timecodes) is still the strip, and a band that
@@ -13704,6 +13714,11 @@ impl App {
 
     // ── The frame ───────────────────────────────────────────────────────────
 
+    /// How the panes share the window this frame ([`ui::Split`]).
+    fn split(&self) -> ui::Split {
+        ui::Split::resting(&self.panes)
+    }
+
     /// Everything this frame draws. One `&mut Ui` covering the window; painting
     /// is done through the painter rather than egui widgets, because the whole
     /// visual language (PLAN §8) is hand-drawn — rows, ripples, scrims — and
@@ -13721,7 +13736,7 @@ impl App {
         // the pre-keystroke geometry would leave the strip a frame behind the
         // key that asked for it, on a frame nothing would follow.
         self.sync_path_lines(&painter, area);
-        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1, self.path_lines);
+        let layout = ui::layout(area, &self.split(), self.tabs.len() > 1, self.path_lines);
         // How the list pane is drawn, published to the two things that run
         // *before* the pane is measured: the cursor commands and the wheel.
         let first_metrics = self
@@ -13767,7 +13782,7 @@ impl App {
         self.sync_prompt_hint();
         self.sync_path_lines(&painter, area);
 
-        let layout = ui::layout(area, self.mgr.ratio, self.tabs.len() > 1, self.path_lines);
+        let layout = ui::layout(area, &self.split(), self.tabs.len() > 1, self.path_lines);
         let list_content = ui::content_rect(layout.list);
         // Which geometry this tab draws its directory in, decided once and
         // threaded everywhere through `grid::pane_*` (PLAN §2). `None` is the
@@ -13898,12 +13913,15 @@ impl App {
         };
         let list_bar =
             crate::scrollbar::geometry(layout.list, scroll_rows, page as f32, list_rows as f32);
+        // None for a folded parent: its band would hang in the window's
+        // margin, where the divider is, over rows nobody can see.
         let parent_bar = crate::scrollbar::geometry(
             layout.parent,
             parent_scroll,
             parent_page as f32,
             parent_len as f32,
-        );
+        )
+        .filter(|_| !layout.collapsed[0]);
         // The chips are measured once, here, and every reading of the strip
         // this frame — the hit test, the drag, the paint — is laid out from
         // the same numbers, for the reason `tab_rects` gives.
@@ -14264,6 +14282,11 @@ impl App {
                 .or_else(|| {
                     // The parent column is clickable too (PLAN §7.5): a click
                     // on it is "go there", which is what the column is showing.
+                    // Not while it folds away: a row on its way out of the
+                    // window is not a place anybody is pointing.
+                    if layout.collapsed[0] {
+                        return None;
+                    }
                     ui::row_at(
                         parent_content,
                         parent_scroll,
@@ -14850,7 +14873,7 @@ impl App {
         } else if self.preview.is_zoomed()
             && overlay.is_none()
             && !menu_live
-            && pointer.at.is_some_and(|at| layout.preview.contains(at))
+            && pointer.at.is_some_and(|at| layout.in_preview(at))
         {
             // A zoomed picture can be dragged, so it says so — and says it
             // harder while it is being dragged (`delightful-ui` §2). Only while
@@ -15050,9 +15073,7 @@ impl App {
                 .pointer_moved_at
                 .is_some_and(|at| now.saturating_duration_since(at) < POINTER_PARKED);
         self.preview.set_pointer_over(
-            overlay.is_none()
-                && looking
-                && pointer.at.is_some_and(|at| layout.preview.contains(at)),
+            overlay.is_none() && looking && pointer.at.is_some_and(|at| layout.in_preview(at)),
         );
         // …and whether anybody can see the pane at all, which is the animated
         // image's switch (see [`crate::preview::Pane::visible`]). A modal
@@ -15274,11 +15295,21 @@ impl App {
         // always in the list now (PLAN §2.1), so a mark saying so would be a
         // mark that never moves.
         let list_ground = self.palette.base;
-        paint.pane(layout.parent, self.palette.mantle);
+        // A folded pane is not painted at all, rather than painted at no
+        // width: a plate's feathered edge is a hairline even when the plate is
+        // nothing, and a hairline in the margin is a pane that is not quite
+        // gone.
+        let parent_shown = layout.parent.width() > 0.0;
+        let preview_shown = layout.preview.width() > 0.0;
+        if parent_shown {
+            paint.pane(layout.parent, self.palette.mantle);
+        }
         paint.pane(layout.list, self.palette.base);
-        paint.pane(layout.preview, self.palette.mantle);
+        if preview_shown {
+            paint.pane(layout.preview, self.palette.mantle);
+        }
 
-        if let Some(parent) = &self.tab().parent {
+        if let Some(parent) = self.tab().parent.as_ref().filter(|_| parent_shown) {
             paint.listing(ListView {
                 pane: layout.parent,
                 ground: self.palette.mantle,
@@ -15414,6 +15445,8 @@ impl App {
         // (PLAN §7.3), because there is no file on the disk for the preview
         // pipeline to open.
         match self.tab().archive.as_ref() {
+            // …and a folded pane is nothing, whatever it would have shown.
+            _ if !preview_shown => {}
             Some(browse) => {
                 let entry = self
                     .tab()
@@ -15530,7 +15563,7 @@ impl App {
                 // pointer).
                 pointer
                     .at
-                    .filter(|at| self.gesture().is_none() && layout.preview.contains(*at)),
+                    .filter(|at| self.gesture().is_none() && layout.in_preview(*at)),
                 crate::playback::strip::Grab {
                     scrubbing: self.scrubbing,
                     down: pointer.down,
@@ -18572,7 +18605,7 @@ mod tests {
 
     /// The layout the frame draws in, from the frame's own inputs.
     fn layout_of(app: &App) -> ui::Layout {
-        ui::layout(screen(), app.mgr.ratio, app.tabs.len() > 1, app.path_lines)
+        ui::layout(screen(), &app.split(), app.tabs.len() > 1, app.path_lines)
     }
 
     /// Where list row `index` is drawn, by the geometry the frame uses.

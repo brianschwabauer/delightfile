@@ -271,6 +271,27 @@ pub const TOP_HEIGHT: f32 = CHROME_HEIGHT + GAP;
 /// another chip's worth of padding, only somewhere to put a sentence.
 pub const PROMPT_ERROR_LINE: f32 = 17.0;
 
+/// The narrowest each pane is laid out at while it is open, in logical points:
+/// parent, list, preview.
+///
+/// The parent's is a column of short names — an icon and a word or two —
+/// which is what it is for: saying where you came from. The list's is the
+/// one a name and its linemode can still share a row at. The preview's is
+/// the one a page, a picture or a transport strip is still worth drawing
+/// at. Below these a pane is not narrow, it is broken, so a divider stops
+/// here (and folds a side pane past it — see [`crate::divider`]), and a
+/// window resized under a ratio that would go below one takes the width
+/// from the list first, which is the pane with the most to spare.
+pub const PARENT_MIN: f32 = 96.0;
+pub const LIST_MIN: f32 = 160.0;
+pub const PREVIEW_MIN: f32 = 180.0;
+
+/// How far a divider's grab zone reaches onto the plate either side of its
+/// gap, in logical points. The gap alone is [`GAP`] wide, which is a target
+/// the hand has to aim at; two points either side makes it twelve, and costs
+/// no row a click, because rows are inset [`ROW_INSET`] from the plate's edge.
+pub const DIVIDER_OVERLAP: f32 = 2.0;
+
 /// A drop target's ring, in logical points. Two: the same weight as the accent
 /// rules the chrome wears elsewhere, because it is the same kind of statement —
 /// "this is the one" — and a second thickness would be a second vocabulary for
@@ -554,6 +575,63 @@ pub enum Control {
     BulkScrollbar,
 }
 
+/// How the three panes share the window this frame: what [`layout`] is asked
+/// to lay out.
+///
+/// Built once a frame by the app from the widths the state file keeps, a
+/// divider in the hand, and whatever is folding or springing back. Three
+/// numbers rather than one ratio because the panes move in three different
+/// ways — a share that follows a drag, an opening that folds a pane and its
+/// gap together, and a rubber band that is points, not a share, because it is
+/// bounded in points — and folding them into one set of widths before the
+/// layout had seen the window would lose the minimums.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Split {
+    /// Parent, list, preview: each pane's share of the width the panes have
+    /// between them — the window less its margins and **both** gaps, so the
+    /// shares mean the same thing whichever panes are open. A folded pane is
+    /// here at the share it would open to, and [`Split::open`] is what folds
+    /// it.
+    pub fractions: [f32; 3],
+    /// How open the parent and the preview are: 1 open, 0 folded away. A
+    /// pane's width *and the gap beside it* are both scaled by this, and what
+    /// they give up is the list's — so a folded pane leaves the list at the
+    /// window's margin rather than a gap away from it.
+    pub open: [f32; 2],
+    /// How far past its share each divider is being pulled, in points added
+    /// to the parent's and the preview's width: the rubber band past a
+    /// minimum and the lag of a snap. The list pays for it; the third pane
+    /// never does.
+    pub overshoot: [f32; 2],
+    /// Whether the parent and the preview are folded, as the rest of the
+    /// window means it: a folded pane's divider is grabbed at the window's
+    /// margin, and nothing in the pane is pointed at. True from the moment a
+    /// pane starts folding, false from the moment it starts to open.
+    pub collapsed: [bool; 2],
+}
+
+impl Split {
+    /// The panes as `panes` keeps them, at rest: nothing folding, nothing
+    /// pulled, and a folded pane's share already the list's.
+    pub fn resting(panes: &df_core::state::Panes) -> Split {
+        Split {
+            fractions: panes.ratio,
+            open: [
+                if panes.parent_collapsed { 0.0 } else { 1.0 },
+                if panes.preview_collapsed { 0.0 } else { 1.0 },
+            ],
+            overshoot: [0.0; 2],
+            collapsed: [panes.parent_collapsed, panes.preview_collapsed],
+        }
+    }
+
+    /// The config's `ratio`, at rest: what the tests lay out.
+    #[cfg(test)]
+    pub fn at(ratio: [u16; 3]) -> Split {
+        Split::resting(&df_core::state::Panes::from_ratio(ratio))
+    }
+}
+
 /// Where the panes and the chrome go.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
@@ -569,17 +647,52 @@ pub struct Layout {
     /// changed height when a second tab opened would move rows under the
     /// pointer.
     pub path: egui::Rect,
+    /// The three panes. A folded one is a rect of no width at the edge it
+    /// folded to — never inverted, so everything measured off it stays sane —
+    /// but a zero-width rect still *contains* the points on its edge, so ask
+    /// [`Layout::in_parent`] and [`Layout::in_preview`] rather than the rects
+    /// whether the pointer is in one.
     pub parent: egui::Rect,
     pub list: egui::Rect,
     pub preview: egui::Rect,
+    /// Where each divider is taken hold of: parent|list, then list|preview.
+    ///
+    /// The gap between the two plates, the panes' full height, and
+    /// [`DIVIDER_OVERLAP`] onto each plate. A folded pane's divider is the
+    /// window's margin on that side instead, reaching the same two points
+    /// onto the list — the only place left to take hold of a pane that is not
+    /// there.
+    pub dividers: [egui::Rect; 2],
+    /// Where the hairline a held divider draws goes: the middle of its gap,
+    /// or of the margin once the pane beside it has folded, and between the
+    /// two while it folds, so the line never jumps.
+    pub hairlines: [f32; 2],
+    /// [`Split::collapsed`], carried for the two questions below.
+    pub collapsed: [bool; 2],
 }
 
-/// Split the window into miller columns at `ratio` (PLAN §2), with the tab
+impl Layout {
+    /// Whether `at` is over the parent pane, and there is a parent pane to be
+    /// over.
+    pub fn in_parent(&self, at: egui::Pos2) -> bool {
+        !self.collapsed[0] && self.parent.contains(at)
+    }
+
+    /// Whether `at` is over the preview pane, and it is open.
+    pub fn in_preview(&self, at: egui::Pos2) -> bool {
+        !self.collapsed[1] && self.preview.contains(at)
+    }
+}
+
+/// Split the window into miller columns at `split` (PLAN §2), with the tab
 /// strip and the top row above them.
 ///
-/// The gaps come out of the total *before* the ratio is applied, so `[1, 4, 3]`
-/// describes the panes themselves rather than the panes plus the spaces between
-/// them — otherwise the middle column would quietly shrink as the gap grew.
+/// The gaps come out of the total *before* the shares are applied, so
+/// `[1, 4, 3]` describes the panes themselves rather than the panes plus the
+/// spaces between them — otherwise the middle column would quietly shrink as
+/// the gap grew. Both gaps, always: a folded pane's gap goes to the list along
+/// with its width, so a share means the same number of points whether the
+/// pane beside it is open or not.
 ///
 /// `path_lines` is how many lines the top row needs: one in browse mode and
 /// while most prompts are open, two only while a prompt is showing an error
@@ -588,7 +701,7 @@ pub struct Layout {
 /// is an error message clipped to three characters, and a prompt that cannot
 /// say what is wrong with what you typed is worse than a list that moved a row
 /// while you were typing.
-pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool, path_lines: usize) -> Layout {
+pub fn layout(area: egui::Rect, split: &Split, tab_strip: bool, path_lines: usize) -> Layout {
     let outer = area.shrink(GAP);
     // A window narrower or shorter than two gaps shrinks to an *inverted* rect,
     // and every rect derived from it inherits the inversion. Collapsing it to
@@ -631,27 +744,136 @@ pub fn layout(area: egui::Rect, ratio: [u16; 3], tab_strip: bool, path_lines: us
         egui::pos2(outer.left(), top),
         egui::pos2(outer.right(), outer.bottom().max(top)),
     );
-    let total: f32 = ratio.iter().map(|r| *r as f32).sum();
-    // `read_ratio` in df-core rejects an all-zero ratio, so this cannot divide
-    // by zero; the guard is here because this function is also reachable from a
-    // test with a hand-made ratio.
-    let total = if total <= 0.0 { 1.0 } else { total };
     let usable = (inner.width() - GAP * 2.0).max(0.0);
-    let width = |r: u16| usable * r as f32 / total;
+    let widths = pane_widths(usable, split);
+    let open = split.open.map(|o| o.clamp(0.0, 1.0));
 
     let mut x = inner.left();
-    let mut next = |w: f32| {
+    let mut next = |w: f32, gap: f32| {
         let rect =
             egui::Rect::from_min_size(egui::pos2(x, inner.top()), egui::vec2(w, inner.height()));
-        x += w + GAP;
+        x += w + gap;
         rect
     };
+    let parent = next(widths[0], GAP * open[0]);
+    let list = next(widths[1], GAP * open[1]);
+    let preview = next(widths[2], 0.0);
+
+    let band = |left: f32, right: f32| {
+        egui::Rect::from_min_max(
+            egui::pos2(left, inner.top()),
+            egui::pos2(right.max(left), inner.bottom()),
+        )
+    };
+    let dividers = [
+        if split.collapsed[0] {
+            band(area.left(), inner.left() + DIVIDER_OVERLAP)
+        } else {
+            band(
+                parent.right() - DIVIDER_OVERLAP,
+                list.left() + DIVIDER_OVERLAP,
+            )
+        },
+        if split.collapsed[1] {
+            band(inner.right() - DIVIDER_OVERLAP, area.right())
+        } else {
+            band(
+                list.right() - DIVIDER_OVERLAP,
+                preview.left() + DIVIDER_OVERLAP,
+            )
+        },
+    ];
+    // The middle of the gap, blended towards the middle of the margin by how
+    // far the pane has folded. At either end it is exactly one of the two.
+    let margin = [area.left() + GAP / 2.0, area.right() - GAP / 2.0];
+    let gap_mid = [
+        (parent.right() + list.left()) / 2.0,
+        (list.right() + preview.left()) / 2.0,
+    ];
+    let hairlines = [0, 1].map(|i| gap_mid[i] * open[i] + margin[i] * (1.0 - open[i]));
     Layout {
         strip,
         path,
-        parent: next(width(ratio[0])),
-        list: next(width(ratio[1])),
-        preview: next(width(ratio[2])),
+        parent,
+        list,
+        preview,
+        dividers,
+        hairlines,
+        collapsed: split.collapsed,
+    }
+}
+
+/// The three panes' widths across `usable` points, with the list holding
+/// whatever a folding pane and its gap have given up — so the returned widths
+/// and the two gaps still standing add up to the row.
+///
+/// In this order, and the order is the point: the shares; the minimums, paid
+/// for by the list first; the dividers' pull; the folding. The minimums come
+/// before the pull so a rubber band can draw a pane *under* its minimum — that
+/// is what a rubber band is — and before the folding so a pane shrinks to
+/// nothing from the width it was drawn at rather than from a share nobody saw.
+fn pane_widths(usable: f32, split: &Split) -> [f32; 3] {
+    let fractions = split
+        .fractions
+        .map(|f| if f.is_finite() { f.max(0.0) } else { 0.0 });
+    let total: f32 = fractions.iter().sum();
+    let mut widths = if total > 0.0 {
+        fractions.map(|f| usable * f / total)
+    } else {
+        [usable / 3.0; 3]
+    };
+    let open = split.open.map(|o| o.clamp(0.0, 1.0));
+    // A pane folded all the way has no minimum: holding room for it would be
+    // width the list could never have back. And the list's is what it will
+    // be *drawn* at, so whatever a folding pane and its gap are about to hand
+    // it counts towards it.
+    let handed = (widths[0] + GAP) * (1.0 - open[0]) + (widths[2] + GAP) * (1.0 - open[1]);
+    let minimums = [
+        if open[0] > 0.0 { PARENT_MIN } else { 0.0 },
+        (LIST_MIN - handed).max(0.0),
+        if open[1] > 0.0 { PREVIEW_MIN } else { 0.0 },
+    ];
+    with_minimums(&mut widths, minimums, usable);
+    // The pull, traded with the list alone, and never past nothing.
+    for (i, pull) in [(0, split.overshoot[0]), (2, split.overshoot[1])] {
+        let pull = if pull.is_finite() { pull } else { 0.0 };
+        let pull = pull.max(-widths[i]).min(widths[1]);
+        widths[i] += pull;
+        widths[1] -= pull;
+    }
+    for (i, open) in [(0, open[0]), (2, open[1])] {
+        widths[1] += (widths[i] + GAP) * (1.0 - open);
+        widths[i] *= open;
+    }
+    widths
+}
+
+/// Raise every pane under its minimum to it, paid for by the list first —
+/// the pane with the most to spare, and the one whose width is not a choice
+/// anybody made by dragging — and then by the side panes, each by how far it
+/// is over its own. A window too narrow for all three minimums at once is
+/// left at its shares: there is no fair way to break two promises.
+fn with_minimums(widths: &mut [f32; 3], minimums: [f32; 3], usable: f32) {
+    if minimums.iter().sum::<f32>() > usable {
+        return;
+    }
+    let mut owed = 0.0;
+    for (width, minimum) in widths.iter_mut().zip(minimums) {
+        if *width < minimum {
+            owed += minimum - *width;
+            *width = minimum;
+        }
+    }
+    let list_spare = (widths[1] - minimums[1]).max(0.0);
+    let from_list = list_spare.min(owed);
+    widths[1] -= from_list;
+    owed -= from_list;
+    let spare = [0, 2].map(|i| (widths[i] - minimums[i]).max(0.0));
+    let total_spare = spare[0] + spare[1];
+    if owed > 0.0 && total_spare > 0.0 {
+        let owed = owed.min(total_spare);
+        widths[0] -= owed * spare[0] / total_spare;
+        widths[2] -= owed * spare[1] / total_spare;
     }
 }
 
@@ -1761,7 +1983,7 @@ mod tests {
     /// The ratio describes the panes, not the panes plus the gaps.
     #[test]
     fn the_panes_split_at_the_configured_ratio() {
-        let l = layout(area(), [1, 4, 3], false, 1);
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1);
         let usable = 1408.0 - GAP * 2.0 - GAP * 2.0;
         assert!((l.parent.width() - usable / 8.0).abs() < 1e-3);
         assert!((l.list.width() - usable * 4.0 / 8.0).abs() < 1e-3);
@@ -1781,20 +2003,219 @@ mod tests {
     }
 
     /// A window too narrow for three panes must not produce negative widths —
-    /// nor a negative *height* once the strip and the bar have taken theirs.
+    /// nor a negative *height* once the strip and the bar have taken theirs —
+    /// and neither may a folded pane, a divider or a pull.
     #[test]
     fn a_tiny_window_does_not_produce_negative_panes() {
-        for strip in [false, true] {
-            let l = layout(
-                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0)),
-                [1, 4, 3],
-                strip,
-                1,
-            );
-            for rect in [l.parent, l.list, l.preview, l.path] {
-                assert!(rect.width() >= 0.0 && rect.height() >= 0.0, "{rect:?}");
+        let mut splits = vec![Split::at([1, 4, 3])];
+        for collapsed in [[true, false], [false, true], [true, true]] {
+            splits.push(Split {
+                open: collapsed.map(|c| if c { 0.0 } else { 1.0 }),
+                collapsed,
+                ..Split::at([1, 4, 3])
+            });
+        }
+        splits.push(Split {
+            overshoot: [-24.0, 24.0],
+            open: [0.5, 0.5],
+            ..Split::at([1, 4, 3])
+        });
+        for size in [10.0, 40.0, 300.0] {
+            for split in &splits {
+                for strip in [false, true] {
+                    let l = layout(
+                        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(size, 10.0)),
+                        split,
+                        strip,
+                        1,
+                    );
+                    for rect in [
+                        l.parent,
+                        l.list,
+                        l.preview,
+                        l.path,
+                        l.dividers[0],
+                        l.dividers[1],
+                    ] {
+                        assert!(
+                            rect.width() >= 0.0 && rect.height() >= 0.0,
+                            "{size} {split:?}: {rect:?}"
+                        );
+                    }
+                }
             }
         }
+    }
+
+    /// The fractions a split is made of, as widths across `usable`.
+    fn usable() -> f32 {
+        1408.0 - GAP * 2.0 - GAP * 2.0
+    }
+
+    fn folded(parent: bool, preview: bool) -> Split {
+        Split {
+            open: [
+                if parent { 0.0 } else { 1.0 },
+                if preview { 0.0 } else { 1.0 },
+            ],
+            collapsed: [parent, preview],
+            ..Split::at([1, 4, 3])
+        }
+    }
+
+    /// A folded pane is a rect of no width, and **its gap goes with it**: the
+    /// list runs to the window's margin, not a gap short of it, and the pane
+    /// on the other side does not move.
+    #[test]
+    fn a_folded_pane_gives_its_width_and_its_gap_to_the_list() {
+        let open = layout(area(), &Split::at([1, 4, 3]), false, 1);
+
+        let l = layout(area(), &folded(true, false), false, 1);
+        assert_eq!(l.parent.width(), 0.0);
+        assert!((l.list.left() - GAP).abs() < 1e-3, "{:?}", l.list);
+        assert!(
+            (l.parent.left() - GAP).abs() < 1e-3,
+            "folded at its own edge"
+        );
+        assert!((l.list.width() - (usable() * 5.0 / 8.0 + GAP)).abs() < 1e-3);
+        assert_eq!(l.preview, open.preview, "the other side never moves");
+
+        let l = layout(area(), &folded(false, true), false, 1);
+        assert_eq!(l.preview.width(), 0.0);
+        assert!((area().right() - l.list.right() - GAP).abs() < 1e-3);
+        assert!((l.preview.left() - l.list.right()).abs() < 1e-3);
+        assert!((l.list.width() - (usable() * 7.0 / 8.0 + GAP)).abs() < 1e-3);
+        assert_eq!(l.parent, open.parent);
+
+        // Both: the list is the whole row.
+        let l = layout(area(), &folded(true, true), false, 1);
+        assert!((l.list.left() - GAP).abs() < 1e-3);
+        assert!((area().right() - l.list.right() - GAP).abs() < 1e-3);
+
+        // And the pointer is never in a folded pane, even on the edge a
+        // zero-width rect still contains.
+        let edge = egui::pos2(l.parent.left(), l.list.center().y);
+        assert!(l.parent.contains(edge), "the rect alone would say yes");
+        assert!(!l.in_parent(edge) && !l.in_preview(l.preview.center()));
+        assert!(open.in_parent(open.parent.center()));
+        assert!(open.in_preview(open.preview.center()));
+    }
+
+    /// Half folded is half the pane and half the gap, and the row still adds
+    /// up: nothing jumps at either end of a fold.
+    #[test]
+    fn a_folding_pane_takes_its_gap_down_with_it() {
+        let l = layout(
+            area(),
+            &Split {
+                open: [1.0, 0.5],
+                ..Split::at([1, 4, 3])
+            },
+            false,
+            1,
+        );
+        assert!((l.preview.width() - usable() * 3.0 / 16.0).abs() < 1e-3);
+        assert!((l.preview.left() - l.list.right() - GAP / 2.0).abs() < 1e-3);
+        assert!((area().right() - l.preview.right() - GAP).abs() < 1e-3);
+    }
+
+    /// The grab zones: the gap and two points onto each plate while the pane
+    /// is open, the window's margin and two points onto the list once it is
+    /// folded — and the hairline in the middle of whichever it is.
+    #[test]
+    fn the_dividers_are_the_gaps_widened_onto_each_plate() {
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let [left, right] = l.dividers;
+        assert!((left.left() - (l.parent.right() - DIVIDER_OVERLAP)).abs() < 1e-3);
+        assert!((left.right() - (l.list.left() + DIVIDER_OVERLAP)).abs() < 1e-3);
+        assert!((left.width() - (GAP + 2.0 * DIVIDER_OVERLAP)).abs() < 1e-3);
+        assert!((right.left() - (l.list.right() - DIVIDER_OVERLAP)).abs() < 1e-3);
+        assert!((right.right() - (l.preview.left() + DIVIDER_OVERLAP)).abs() < 1e-3);
+        for zone in l.dividers {
+            assert_eq!(zone.top(), l.list.top(), "the panes' full height");
+            assert_eq!(zone.bottom(), l.list.bottom());
+        }
+        // The overlap stays clear of the rows, which are inset past it.
+        assert!(left.right() < content_rect(l.list).left());
+        assert!(right.left() > content_rect(l.list).right());
+        assert!((l.hairlines[0] - (l.parent.right() + GAP / 2.0)).abs() < 1e-3);
+        assert!((l.hairlines[1] - (l.list.right() + GAP / 2.0)).abs() < 1e-3);
+
+        let l = layout(area(), &folded(true, true), false, 1);
+        let [left, right] = l.dividers;
+        assert_eq!(left.left(), area().left());
+        assert!((left.right() - (GAP + DIVIDER_OVERLAP)).abs() < 1e-3);
+        assert!((left.right() - (l.list.left() + DIVIDER_OVERLAP)).abs() < 1e-3);
+        assert_eq!(right.right(), area().right());
+        assert!((right.left() - (l.list.right() - DIVIDER_OVERLAP)).abs() < 1e-3);
+        assert!((l.hairlines[0] - GAP / 2.0).abs() < 1e-3);
+        assert!((l.hairlines[1] - (area().right() - GAP / 2.0)).abs() < 1e-3);
+    }
+
+    /// No open pane is laid out under its minimum while the window has room
+    /// for all three, and the list pays for it first — so a narrow parent
+    /// does not cost the preview anything.
+    #[test]
+    fn a_pane_is_never_laid_out_under_its_minimum() {
+        let at = |fractions: [f32; 3]| {
+            layout(
+                area(),
+                &Split {
+                    fractions,
+                    ..Split::at([1, 4, 3])
+                },
+                false,
+                1,
+            )
+        };
+        let l = at([0.01, 0.6, 0.39]);
+        assert!((l.parent.width() - PARENT_MIN).abs() < 1e-3);
+        assert!((l.preview.width() - usable() * 0.39).abs() < 1e-2);
+        let l = at([0.2, 0.75, 0.05]);
+        assert!((l.preview.width() - PREVIEW_MIN).abs() < 1e-3);
+        assert!((l.parent.width() - usable() * 0.2).abs() < 1e-2);
+        // A list with no share is given its minimum by the side panes, each
+        // paying by how far it is over its own.
+        let l = at([0.5, 0.0, 0.5]);
+        assert!((l.list.width() - LIST_MIN).abs() < 1e-3);
+        let spare = [usable() / 2.0 - PARENT_MIN, usable() / 2.0 - PREVIEW_MIN];
+        let paid = LIST_MIN * spare[0] / (spare[0] + spare[1]);
+        assert!((l.parent.width() - (usable() / 2.0 - paid)).abs() < 1e-2);
+        for l in [at([0.01, 0.6, 0.39]), at([0.5, 0.0, 0.5])] {
+            let row = l.parent.width() + l.list.width() + l.preview.width();
+            assert!((row - usable()).abs() < 1e-2, "the row still adds up");
+        }
+        // …but a folded pane has none, and gives the list everything.
+        let l = layout(
+            area(),
+            &Split {
+                fractions: [0.0, 0.625, 0.375],
+                ..folded(true, false)
+            },
+            false,
+            1,
+        );
+        assert_eq!(l.parent.width(), 0.0);
+        assert!((l.preview.width() - usable() * 0.375).abs() < 1e-2);
+    }
+
+    /// A divider's pull trades with the list and nothing else.
+    #[test]
+    fn the_pull_is_traded_with_the_list_alone() {
+        let rest = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let pulled = layout(
+            area(),
+            &Split {
+                overshoot: [-10.0, 6.0],
+                ..Split::at([1, 4, 3])
+            },
+            false,
+            1,
+        );
+        assert!((pulled.parent.width() - (rest.parent.width() - 10.0)).abs() < 1e-3);
+        assert!((pulled.preview.width() - (rest.preview.width() + 6.0)).abs() < 1e-3);
+        assert!((pulled.list.width() - (rest.list.width() + 4.0)).abs() < 1e-3);
+        assert_eq!(pulled.preview.right(), rest.preview.right());
     }
 
     /// The top row is always reserved, the strip only takes space when it is
@@ -1802,7 +2223,7 @@ mod tests {
     /// the window's own bottom edge now that there is no bar under them.
     #[test]
     fn the_chrome_sits_above_the_panes() {
-        let bare = layout(area(), [1, 4, 3], false, 1);
+        let bare = layout(area(), &Split::at([1, 4, 3]), false, 1);
         assert_eq!(bare.strip, None);
         assert!((bare.list.bottom() - (area().bottom() - GAP)).abs() < 1e-3);
         // The top row is always there, and the panes start below it.
@@ -1810,7 +2231,7 @@ mod tests {
         assert!((bare.path.height() - TOP_HEIGHT).abs() < 1e-3);
         assert!((bare.list.top() - (bare.path.bottom() + GAP)).abs() < 1e-3);
 
-        let with_strip = layout(area(), [1, 4, 3], true, 1);
+        let with_strip = layout(area(), &Split::at([1, 4, 3]), true, 1);
         let strip = with_strip.strip.expect("a strip was asked for");
         assert!((strip.height() - CHROME_HEIGHT).abs() < 1e-3);
         // Flush: the active tab is drawn joined to the top row, so there is no
@@ -1827,18 +2248,21 @@ mod tests {
     /// back when it closes: the top row is the only chrome that moves them.
     #[test]
     fn a_two_line_prompt_reflows_the_panes() {
-        let one = layout(area(), [1, 4, 3], false, 1);
-        let two = layout(area(), [1, 4, 3], false, 2);
+        let one = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let two = layout(area(), &Split::at([1, 4, 3]), false, 2);
         assert!((two.path.height() - one.path.height() - PROMPT_ERROR_LINE).abs() < 1e-3);
         assert!((one.list.height() - two.list.height() - PROMPT_ERROR_LINE).abs() < 1e-3);
         assert!((two.list.top() - (two.path.bottom() + GAP)).abs() < 1e-3);
         // Zero lines is one line: the row is never absent.
-        assert_eq!(layout(area(), [1, 4, 3], false, 0).path, one.path);
+        assert_eq!(
+            layout(area(), &Split::at([1, 4, 3]), false, 0).path,
+            one.path
+        );
     }
 
     #[test]
     fn rows_stack_downwards_from_the_scroll_position() {
-        let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
+        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1).list);
         let top = row_rect(content, 0.0, 0, ROW_HEIGHT);
         assert!((top.top() - content.top()).abs() < 1e-3);
         assert!((top.height() - ROW_HEIGHT).abs() < 1e-3);
@@ -1855,7 +2279,7 @@ mod tests {
     /// and the hit test still lands on the row that was drawn.
     #[test]
     fn a_scaled_row_stacks_and_hit_tests_at_its_own_height() {
-        let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
+        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1).list);
         for step in df_core::config::VIEW_SCALES {
             let scale = Scale::new(step);
             assert!(
@@ -1883,7 +2307,7 @@ mod tests {
 
     #[test]
     fn hit_testing_finds_the_row_under_the_pointer() {
-        let content = content_rect(layout(area(), [1, 4, 3], false, 1).list);
+        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1).list);
         let inside = |index: usize| row_rect(content, 0.0, index, ROW_HEIGHT).center();
         assert_eq!(row_at(content, 0.0, 40, inside(0), ROW_HEIGHT), Some(0));
         assert_eq!(row_at(content, 0.0, 40, inside(7), ROW_HEIGHT), Some(7));
