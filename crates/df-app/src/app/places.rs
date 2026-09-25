@@ -558,8 +558,8 @@ impl App {
         self.navigate(target, now);
     }
 
-    /// The app menu's Go list, with the pin row under it.
-    pub(super) fn go_item(&self) -> crate::menu::Item {
+    /// The places in the app menu's Go list, with the pin row under them.
+    pub(super) fn place_rows(&self) -> Vec<crate::menu::Item> {
         let home = home();
         let rows: Vec<crate::menu::GoRow> = self
             .places_pool()
@@ -569,7 +569,7 @@ impl App {
                 keys: place.key(&self.keymap).unwrap_or_default(),
             })
             .collect();
-        crate::menu::go_item(&rows, self.here_pinned(), &self.keymap, |command| {
+        crate::menu::place_rows(&rows, self.here_pinned(), &self.keymap, |command| {
             self.refusal(command).is_some()
         })
     }

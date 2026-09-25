@@ -767,19 +767,21 @@ pub struct GoRow {
     pub keys: String,
 }
 
-/// The app menu's "Go" row as the places make it: every place and, last, the
-/// row that pins the folder on screen or takes it off — so the list and the
-/// way onto it are in one place.
+/// The places half of the app menu's Go list: every place and, last, the row
+/// that pins the folder on screen or takes it off — so the list and the way
+/// onto it are in one place. The places are always live, even where the pin
+/// row is refused: they can still be gone to, which is most of what the list
+/// is for.
 ///
-/// Built apart from [`app_items`], which has no Places list to read, and
-/// folded into the Go row it builds by [`insert_go`], so the app menu's own
-/// rows, and the tests that hold them, are the same with or without it.
-pub fn go_item(
+/// Built apart from [`app_items`], which has no Places list to read, and put
+/// into the Go row it builds by [`insert_go`], so the app menu's own rows,
+/// and the tests that hold them, are the same with or without them.
+pub fn place_rows(
     places: &[GoRow],
     pinned: bool,
     keymap: &Registry,
     refused: impl Fn(Command) -> bool,
-) -> Item {
+) -> Vec<Item> {
     let mut rows: Vec<Item> = places
         .iter()
         .enumerate()
@@ -796,15 +798,13 @@ pub fn go_item(
         keymap,
         &refused,
     ));
-    // Live even when the pin row is refused: the places under it can still
-    // be gone to, which is most of what the list is for.
-    Item::new("Go", "", Action::Nothing, true).with_submenu(rows)
+    rows
 }
 
-/// Put [`go_item`]'s places into the app menu's own Go list, after a gap
-/// under the two rows [`app_items`] gave it: the ways of typing where to go,
-/// then the places that need no typing.
-pub fn insert_go(rows: &mut [Item], go: Item) {
+/// Put [`place_rows`] into the app menu's own Go list, after a gap under the
+/// two rows [`app_items`] gave it: the ways of typing where to go, then the
+/// places that need no typing.
+pub fn insert_go(rows: &mut [Item], mut places: Vec<Item>) {
     let Some(list) = rows
         .iter_mut()
         .find(|item| item.label == "Go")
@@ -812,7 +812,6 @@ pub fn insert_go(rows: &mut [Item], go: Item) {
     else {
         return;
     };
-    let mut places = go.submenu.unwrap_or_default();
     if let Some(first) = places.first_mut() {
         first.gap_before = true;
     }
@@ -1316,11 +1315,17 @@ pub fn height(items: &[Item]) -> f32 {
     items.len() as f32 * ROW + gaps * SEPARATOR + CARD_PAD * 2.0
 }
 
+/// The tallest a card gets in `area`: the window less a [`MARGIN`] at the
+/// top and the bottom.
+pub fn max_card_height(area: egui::Rect) -> f32 {
+    (area.height() - MARGIN * 2.0).max(0.0)
+}
+
 /// How tall the card for `items` is in `area`: the list's own [`height`], or
-/// the window less a [`MARGIN`] at the top and the bottom when the list is
-/// taller than that — and the rest of it scrolls.
+/// [`max_card_height`] when the list is taller than that — and the rest of it
+/// scrolls.
 fn card_height(items: &[Item], area: egui::Rect) -> f32 {
-    height(items).min((area.height() - MARGIN * 2.0).max(0.0))
+    height(items).min(max_card_height(area))
 }
 
 /// How far `items` scroll in a card in `area`: what the list is taller than
@@ -1840,8 +1845,7 @@ mod tests {
             label: "~/Work".to_string(),
             keys: "g w".to_string(),
         }];
-        let go = go_item(&places, false, &keymap, |_| true);
-        let list = go.submenu.as_deref().expect("a list");
+        let list = place_rows(&places, false, &keymap, |_| true);
         assert_eq!(list.len(), 2);
         assert!(list[0].enabled, "a place is never refused");
         assert_eq!(
@@ -1854,7 +1858,7 @@ mod tests {
         );
         let mut rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
         let before = rows.len();
-        insert_go(&mut rows, go);
+        insert_go(&mut rows, place_rows(&places, false, &keymap, |_| false));
         assert_eq!(rows.len(), before);
         let list = row(&rows, "Go").submenu.as_deref().expect("a list");
         assert_eq!(

@@ -4876,7 +4876,7 @@ impl App {
             return;
         }
         // One menu at a time: this replaces whichever was up.
-        self.menu = Some(Menu::types(chip, items));
+        self.show_menu(Menu::types(chip, items));
         self.clicks.reset();
     }
 
@@ -11397,7 +11397,7 @@ impl App {
             |command| self.refusal(command).is_some(),
         ));
         // One menu at a time: this replaces an app menu that was up.
-        self.menu = Some(Menu::context(at, items));
+        self.show_menu(Menu::context(at, items));
         // The click that opened the menu is not half of a double click on
         // whatever is underneath it.
         self.clicks.reset();
@@ -11441,7 +11441,7 @@ impl App {
             menu::insert_pin_row(&mut items, self.row_pinned(), pinnable);
         }
         // One menu at a time: this replaces an app menu that was up.
-        self.menu = Some(Menu::context(at, items));
+        self.show_menu(Menu::context(at, items));
         // The click that opened the menu is not half of a double click on
         // whatever is underneath it.
         self.clicks.reset();
@@ -11471,10 +11471,19 @@ impl App {
         let mut items = menu::app_items(facts, self.type_items(), &self.keymap, |command| {
             self.refusal(command).is_some()
         });
-        menu::insert_go(&mut items, self.go_item());
+        menu::insert_go(&mut items, self.place_rows());
         // One menu at a time: this replaces a context menu that was up.
-        self.menu = Some(Menu::app(self.menu_button, items));
+        self.show_menu(Menu::app(self.menu_button, items));
         self.clicks.reset();
+    }
+
+    /// Put `menu` up, in place of any that was. Its rows answer the pointer
+    /// from the start: a park the last menu's arrows left behind was about
+    /// that menu's rows, and carried over it would leave the row under a
+    /// resting pointer dark in a menu no key has touched.
+    fn show_menu(&mut self, menu: Menu) {
+        self.menu = Some(menu);
+        self.menu_hover = Default::default();
     }
 
     /// Dismiss it. The menu is *gone* now; only its pixels fade.
@@ -19970,8 +19979,9 @@ mod tests {
     /// on row 3, two `↓` put the keyboard on row 5, and it stays there on the
     /// frame after — the row under the pointer neither takes the cursor back
     /// nor stays lit, and the compositor sending the same position again is
-    /// not the hand moving. The first real movement gives the cursor back to
-    /// the pointer.
+    /// not the hand moving. The park is that menu's: one opened after it
+    /// under the same resting pointer answers the pointer at once. The first
+    /// real movement gives the cursor back to the pointer.
     #[test]
     fn the_menus_arrows_park_the_row_under_a_resting_pointer() {
         let mut app = Fixture::new("menu-park", &["a.txt", "b.txt", "c.txt"]);
@@ -20018,6 +20028,20 @@ mod tests {
         assert!(app.hovers.hover(Control::MenuItem(3)) < 1.0, "row 3 is lit");
         run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(rest)]);
         assert_eq!(cursor(&app), Some(5), "a re-sent position woke the hover");
+
+        // Put away and opened again where it was, the pointer not moved: the
+        // park was the last menu's, and the new one's row under the pointer
+        // takes the cursor and lights like any row the pointer rests on.
+        press_key(&mut app, &ctx, Key::Escape);
+        assert_eq!(live_menu(&app), None);
+        app.open_folder_menu(below);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(live_menu(&app), Some(menu::Kind::Context));
+        assert_eq!(cursor(&app), Some(3), "the last menu's park carried over");
+        assert_eq!(app.hovers.hover(Control::MenuItem(3)), 1.0);
+        press_key(&mut app, &ctx, Key::ArrowDown);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(cursor(&app), Some(4), "the new menu's arrows park too");
 
         let moved = menu_geometry(&app, &ctx).rows[1].center();
         run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(moved)]);
@@ -20078,7 +20102,7 @@ mod tests {
         assert_eq!(live_menu(&app), Some(menu::Kind::App));
         let g = laid_out(&app);
         assert!(
-            g.card.height() <= short.height() - 12.0 + 1e-3,
+            g.card.height() <= menu::max_card_height(short) + 1e-3,
             "{:?}",
             g.card
         );
