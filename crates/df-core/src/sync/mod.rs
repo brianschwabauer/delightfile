@@ -27,10 +27,15 @@
 //!    SHA-256 digests. Every mismatch is collected rather than the first one
 //!    stopping the run, so the result names every bad file.
 //!
+//! A remote endpoint (`sftp://…`) is not walked here at all: [`rsync`] builds
+//! the same plan from `rsync`'s own dry run and carries it out with `rsync`,
+//! because a tree walk over SFTP is a round trip per file.
+//!
 //! [`CopyOptions::durable`]: crate::ops::CopyOptions::durable
 
 mod execute;
 mod plan;
+pub mod rsync;
 
 #[cfg(test)]
 mod tests;
@@ -198,6 +203,9 @@ pub struct SyncPlan {
     /// sync that silently skipped a folder it could not open would report a
     /// copy that is not one.
     pub skipped: Vec<(PathBuf, String)>,
+    /// When one end is a server, the `rsync` run that carries the plan out.
+    /// `None` for a sync on this machine, which this module does itself.
+    pub remote: Option<rsync::Transfer>,
 }
 
 impl SyncPlan {
@@ -214,6 +222,7 @@ impl SyncPlan {
             extra: Tally::default(),
             removal: Removal::Trash,
             skipped: Vec::new(),
+            remote: None,
         }
     }
 

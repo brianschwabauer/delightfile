@@ -7,20 +7,27 @@
 //! layout, its paint — is [`crate::sync`], beside [`crate::dialog`]; `app.rs`
 //! only hands it the keyboard, the pointer and a frame.
 //!
+//! With a server at either end the comparison and the run are `rsync`'s
+//! ([`df_core::sync::rsync`]); what is built here is the transfer, from the
+//! display paths the clipboard and the pane carry and the vfs's own service
+//! table, so a host that the remote pane reaches is reached the same way.
+//!
 //! Nothing here is journalled. The card is the confirmation, an update only
 //! adds, and a mirror's removals go to the trash — whose own view is where
 //! they are put back — or were announced on the card's button as deletes.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use df_core::keymap::{Chord, Key};
 use df_core::ops::paste::PasteMode;
-use df_core::sync::{SyncOptions, SyncReport};
+use df_core::sync::rsync::{Direction, Host, Transfer};
+use df_core::sync::{Root, SyncOptions, SyncReport};
 
-use super::{home, plural, App, Dialog};
-use crate::sync::{self, Running, SyncCard};
+use super::{home, plural, App, Dialog, RemoteDone};
+use crate::sync::{self, Remote, Running, SyncCard};
 
 impl App {
     /// `alt+p`, and the menus' "Sync here…": sync what is yanked into the
@@ -28,7 +35,8 @@ impl App {
     ///
     /// The gate in [`App::run`] has already turned away an empty clipboard,
     /// an archive and the trash. What is left to refuse is what only the paths
-    /// can say: a folder synced into itself, and a server at either end.
+    /// can say: a folder synced into itself, two servers at once, and a server
+    /// with no `rsync` here to reach it.
     pub(super) fn paste_sync(&mut self, now: Instant) {
         if self.clipboard.is_empty() {
             self.toasts.notice("Nothing yanked", now);
@@ -36,23 +44,49 @@ impl App {
         }
         let sources = self.clipboard.paths.clone();
         let dest = self.cwd();
-        if !matches!(
-            crate::remote::Transfer::of(&sources, &dest),
-            crate::remote::Transfer::Local
-        ) {
-            self.toasts
-                .notice("Sync works between folders on this machine", now);
-            return;
-        }
-        // Lexical, and so instant; the planner asks again with every symlink
-        // resolved, and says so from the pool if that is what catches it.
-        if sources
-            .iter()
-            .any(|src| df_core::ops::is_ancestor(src, &dest))
-        {
-            self.toasts.notice("cannot sync a folder into itself", now);
-            return;
-        }
+        use crate::remote::Transfer as T;
+        let direction = match T::of(&sources, &dest) {
+            T::Local => None,
+            T::Download => Some(Direction::Download),
+            T::Upload => Some(Direction::Upload),
+            // The paste's two refusals, in the sync's words.
+            T::Across => {
+                self.toasts.notice(
+                    "Server to server would come through this machine — download it first",
+                    now,
+                );
+                return;
+            }
+            T::Mixed => {
+                self.toasts.notice(
+                    "Local and remote files in one sync — yank one or the other",
+                    now,
+                );
+                return;
+            }
+        };
+        let remote = match direction {
+            None => {
+                // Lexical, and so instant; the planner asks again with every
+                // symlink resolved, and says so from the pool if that is what
+                // catches it.
+                if sources
+                    .iter()
+                    .any(|src| df_core::ops::is_ancestor(src, &dest))
+                {
+                    self.toasts.notice("cannot sync a folder into itself", now);
+                    return;
+                }
+                None
+            }
+            Some(direction) => match self.remote_sync(&sources, &dest, direction) {
+                Ok(remote) => Some(remote),
+                Err(message) => {
+                    self.toasts.notice(message, now);
+                    return;
+                }
+            },
+        };
         // A sync never removes a source, so a cut is synced as though it were
         // a yank — and said so, since `x` promised a move.
         if self.clipboard.mode == PasteMode::Cut {
@@ -69,23 +103,81 @@ impl App {
             sources.clone(),
             dest.clone(),
             SyncOptions::default(),
+            remote.clone(),
         );
-        let card = SyncCard::new(sources, dest, title, id, slot);
+        let mut card = SyncCard::new(sources, dest, title, id, slot);
+        card.remote = remote;
         self.dialog = Some(Dialog::Sync(Box::new(card)));
         self.sync_context();
     }
 
-    /// Start the planner on the pool, named for the `w` panel after the card.
+    /// The `rsync` transfer a sync with a server is, or why there cannot be
+    /// one: no `rsync` here, two servers in one clipboard, or a service the
+    /// vfs reaches with something other than `ssh`.
+    fn remote_sync(
+        &mut self,
+        sources: &[PathBuf],
+        dest: &Path,
+        direction: Direction,
+    ) -> Result<Remote, String> {
+        if !df_core::sync::rsync::available() {
+            return Err("Sync to a server needs rsync".to_string());
+        }
+        let far: Vec<df_core::vfs::VfsPath> = match direction {
+            Direction::Upload => crate::remote::at_of(dest).into_iter().collect(),
+            Direction::Download => sources
+                .iter()
+                .filter_map(|source| crate::remote::at_of(source))
+                .collect(),
+        };
+        let Some(service) = far.first().map(|at| at.service.clone()) else {
+            return Err("Nothing here is on a server".to_string());
+        };
+        if far.iter().any(|at| at.service != service) {
+            return Err("Sync with one server at a time — yank from one".to_string());
+        }
+        let vfs = self.vfs();
+        let (host, root) = match vfs.service(&service) {
+            Some(found) if found.program.is_some() => {
+                return Err(format!("Sync needs ssh to reach {service}"));
+            }
+            Some(found) => (
+                Host {
+                    destination: found.destination(),
+                    port: (found.port != df_core::vfs::DEFAULT_SSH_PORT).then_some(found.port),
+                    key: found.key_path(),
+                    program: None,
+                },
+                found.root_path().to_string(),
+            ),
+            // Not in `vfs.toml`: the name is an alias `~/.ssh/config` knows,
+            // which is what an `sftp://` service name is everywhere else.
+            None => (Host::alias(service.clone()), ".".to_string()),
+        };
+        remote_sync(sources, dest, direction, host, &root)
+    }
+
+    /// Start the planner on the pool, named for the `w` panel after the card:
+    /// the walk here, or `rsync`'s dry run when a server is at one end.
     fn compare(
         &mut self,
         title: &str,
         sources: Vec<PathBuf>,
         dest: PathBuf,
         options: SyncOptions,
+        remote: Option<Remote>,
     ) -> (df_core::tasks::TaskId, sync::PlanSlot) {
         let name = title.replacen("Sync", "Compare", 1);
-        let (job, slot) = sync::plan_job(name, sources, dest, options);
-        (self.engine.spawn(job), slot)
+        match remote {
+            Some(remote) => {
+                let (job, slot) = sync::remote_plan_job(name, remote, dest, options);
+                (self.engine.spawn(job), slot)
+            }
+            None => {
+                let (job, slot) = sync::plan_job(name, sources, dest, options);
+                (self.engine.spawn(job), slot)
+            }
+        }
     }
 
     /// The card's own keys: `m`, `v` and `c`. Matched by hand, as the disks card's
@@ -135,6 +227,7 @@ impl App {
             card.sources.clone(),
             card.dest.clone(),
             card.options(),
+            card.remote.clone(),
         );
         card.compare_again(id, slot);
         self.dialog = Some(Dialog::Sync(card));
@@ -260,12 +353,28 @@ impl App {
     /// wrote, and say how it went — in a toast when it went well, and on the
     /// card again, naming every problem, when it did not.
     fn sync_landed(&mut self, running: Running, report: SyncReport, now: Instant) {
-        self.rescan(&running.dest, now);
-        let focus: Vec<PathBuf> = running
-            .focus
-            .into_iter()
-            .filter(|path| path.symlink_metadata().is_ok())
-            .collect();
+        let remote = crate::remote::at_of(&running.dest);
+        let focus: Vec<PathBuf> = match &remote {
+            // A server's listing is stale until it is fetched again.
+            Some(at) => {
+                self.apply_remote_done(
+                    RemoteDone {
+                        invalidate: Some(at.clone()),
+                        ..RemoteDone::default()
+                    },
+                    now,
+                );
+                running.focus
+            }
+            None => {
+                self.rescan(&running.dest, now);
+                running
+                    .focus
+                    .into_iter()
+                    .filter(|path| path.symlink_metadata().is_ok())
+                    .collect()
+            }
+        };
         if !focus.is_empty() {
             self.land_on(&focus);
         }
@@ -286,6 +395,74 @@ impl App {
     }
 }
 
+/// A path in a `sftp://` display path, as the server's `rsync` must be handed
+/// it: the vfs's own rule (`vfs::conn`'s `wire_path`). Empty is the service's
+/// root — the login directory, unless `vfs.toml` names another; absolute is
+/// absolute; relative is under the root.
+fn server_path(path: &str, root: &str) -> PathBuf {
+    let raw = path.trim();
+    if raw.is_empty() || raw == "/" {
+        return PathBuf::from(root);
+    }
+    if raw.starts_with('/') || root == "." {
+        return PathBuf::from(raw);
+    }
+    PathBuf::from(format!("{}/{raw}", root.trim_end_matches('/')))
+}
+
+/// The transfer and the card's roots for a sync with `host`: each source
+/// lands at `dest/<its name>`, named on the card by display path, and handed
+/// to `rsync` by the path its own side knows it by.
+fn remote_sync(
+    sources: &[PathBuf],
+    dest: &Path,
+    direction: Direction,
+    host: Host,
+    root: &str,
+) -> Result<Remote, String> {
+    let far = |path: &Path| crate::remote::at_of(path).map(|at| server_path(&at.path, root));
+    let (paths, into) = match direction {
+        Direction::Upload => (
+            sources.to_vec(),
+            far(dest).ok_or_else(|| format!("{} is not on a server", dest.display()))?,
+        ),
+        Direction::Download => (
+            sources
+                .iter()
+                .map(|source| far(source))
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| "Some of what is yanked is not on a server".to_string())?,
+            dest.to_path_buf(),
+        ),
+    };
+    let mut names = HashSet::new();
+    let mut roots = Vec::with_capacity(sources.len());
+    for source in sources {
+        let name = source
+            .file_name()
+            .ok_or_else(|| format!("{} has no name to sync under", source.display()))?;
+        if !names.insert(name.to_os_string()) {
+            return Err(format!(
+                "two of the yanked items are called {}, and a sync would put both in one place",
+                name.to_string_lossy()
+            ));
+        }
+        roots.push(Root {
+            src: source.clone(),
+            dst: dest.join(name),
+        });
+    }
+    Ok(Remote {
+        transfer: Transfer {
+            host,
+            direction,
+            sources: paths,
+            dest: into,
+        },
+        roots,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)] // tests: a broken fixture should panic
@@ -300,7 +477,8 @@ mod tests {
     use df_core::test_support::TempTree;
 
     use super::super::*;
-    use super::SyncCard;
+    use super::{remote_sync, server_path, SyncCard};
+    use df_core::sync::rsync::{Direction, Host};
 
     /// An `App` opened on `dir`, with nothing read from this machine: the
     /// default config, keymap and theme, and a state file inside `tree`.
@@ -576,6 +754,91 @@ mod tests {
         assert_eq!(
             toast(&app).as_deref(),
             Some("Sync copies; the cut stays where it is")
+        );
+    }
+
+    #[test]
+    fn a_server_path_is_what_the_remote_pane_would_have_read() {
+        assert_eq!(server_path("", "."), PathBuf::from("."));
+        assert_eq!(server_path("/", "/srv"), PathBuf::from("/srv"));
+        assert_eq!(
+            server_path("/home/brian/photos", "."),
+            PathBuf::from("/home/brian/photos")
+        );
+        assert_eq!(server_path("photos", "."), PathBuf::from("photos"));
+        assert_eq!(server_path("photos", "/srv/"), PathBuf::from("/srv/photos"));
+    }
+
+    #[test]
+    fn a_sync_with_a_server_is_an_rsync_transfer_named_like_the_panes() {
+        let host = Host::alias("showandtour1");
+        let up = remote_sync(
+            &[
+                PathBuf::from("/home/brian/Photos"),
+                PathBuf::from("/home/brian/notes.txt"),
+            ],
+            Path::new("sftp://showandtour1/backups"),
+            Direction::Upload,
+            host.clone(),
+            ".",
+        )
+        .unwrap();
+        assert_eq!(up.transfer.dest, PathBuf::from("/backups"));
+        assert_eq!(up.transfer.sources[0], PathBuf::from("/home/brian/Photos"));
+        assert_eq!(
+            up.roots[0].dst,
+            PathBuf::from("sftp://showandtour1/backups/Photos")
+        );
+        assert_eq!(
+            up.roots[1].dst,
+            PathBuf::from("sftp://showandtour1/backups/notes.txt")
+        );
+
+        let down = remote_sync(
+            &[PathBuf::from("sftp://showandtour1/srv/shoot")],
+            Path::new("/home/brian/Pictures"),
+            Direction::Download,
+            host.clone(),
+            ".",
+        )
+        .unwrap();
+        assert_eq!(down.transfer.sources, [PathBuf::from("/srv/shoot")]);
+        assert_eq!(down.transfer.dest, PathBuf::from("/home/brian/Pictures"));
+        assert_eq!(
+            down.roots[0].dst,
+            PathBuf::from("/home/brian/Pictures/shoot")
+        );
+
+        let twice = remote_sync(
+            &[
+                PathBuf::from("sftp://a/x/shoot"),
+                PathBuf::from("sftp://a/y/shoot"),
+            ],
+            Path::new("/tmp"),
+            Direction::Download,
+            host,
+            ".",
+        );
+        assert!(twice.unwrap_err().contains("called shoot"));
+    }
+
+    #[test]
+    fn a_clipboard_that_is_half_on_a_server_is_refused() {
+        let (tree, mut app) = yanked("sync-app-mixed");
+        // Built by hand: `Clipboard::yank` normalizes its paths, which turns a
+        // `sftp://` display path into a local one.
+        app.clipboard = Clipboard {
+            mode: PasteMode::Copy,
+            paths: vec![
+                tree.join("src/photos"),
+                PathBuf::from("sftp://showandtour1/photos"),
+            ],
+        };
+        app.run(Command::PasteSync, 10, Instant::now());
+        assert!(app.dialog.is_none());
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some("Local and remote files in one sync — yank one or the other")
         );
     }
 

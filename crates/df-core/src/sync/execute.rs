@@ -40,6 +40,11 @@ pub struct SyncReport {
     pub removal: Removal,
     /// Files and links read back on both sides and found the same.
     pub verified: u64,
+    /// A sync with a server whose far side could not be hashed — no
+    /// `sha256sum` there, no shell — so nothing was compared: the copy is only
+    /// as verified as `rsync`'s own transfer checks make it, and the toast
+    /// says so rather than "verified".
+    pub local_only: bool,
     /// Each file the verify pass found wrong, and how.
     pub verify_failures: Vec<(PathBuf, String)>,
     /// Each path that could not be copied or removed, and why.
@@ -61,6 +66,9 @@ impl SyncReport {
 /// file count is every path to copy, remove and verify. Pause and cancel are
 /// the task's own, asked at every chunk of every copy and read.
 pub fn execute(plan: &SyncPlan, mode: Mode, verify: Verify, ctx: &TaskCtx) -> SyncReport {
+    if let Some(transfer) = &plan.remote {
+        return super::rsync::execute(plan, transfer, mode, verify, ctx);
+    }
     let mut run = Run {
         plan,
         ctx,
@@ -406,7 +414,7 @@ fn same_target(src: &Path, dst: &Path) -> Result<Option<String>> {
 /// lies about flushing, would read back perfect. `POSIX_FADV_DONTNEED` only
 /// drops clean pages, which is why the copy flushed first; after it, a read
 /// has to go to the device.
-fn read_back(path: &Path, ctx: &TaskCtx, buf: &mut [u8]) -> Result<[u8; 32]> {
+pub(super) fn read_back(path: &Path, ctx: &TaskCtx, buf: &mut [u8]) -> Result<[u8; 32]> {
     let mut file = File::open(path).map_err(|e| DfError::io(path, e))?;
     forget_cached(&file, path);
     let mut hasher = crate::sha256::Sha256::new();

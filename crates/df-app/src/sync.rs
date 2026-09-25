@@ -20,7 +20,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use df_core::keymap::{Chord, Command, Key};
-use df_core::sync::{Class, Kind, Mode, Removal, SyncOptions, SyncPlan, SyncReport, Verify};
+use df_core::sync::rsync::Transfer;
+use df_core::sync::{Class, Kind, Mode, Removal, Root, SyncOptions, SyncPlan, SyncReport, Verify};
 use df_core::tasks::{FnJob, Job, Lane, TaskCtx, TaskId};
 use df_core::text::grouped;
 use df_core::DfError;
@@ -103,6 +104,14 @@ pub struct Row {
     pub detail: String,
 }
 
+/// A sync with a server: the `rsync` run it is, and where each source lands
+/// as the card names it (`sftp://…` at one end).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Remote {
+    pub transfer: Transfer,
+    pub roots: Vec<Root>,
+}
+
 /// The card.
 pub struct SyncCard {
     /// What is being synced: the clipboard's paths when the card opened.
@@ -125,6 +134,8 @@ pub struct SyncCard {
     /// card holds its size while `c` compares again instead of shrinking and
     /// growing back a moment later.
     reserved: usize,
+    /// When one end is a server: what `c` compares again with.
+    pub remote: Option<Remote>,
 }
 
 impl SyncCard {
@@ -148,6 +159,7 @@ impl SyncCard {
             carry: 0.0,
             rows: Vec::new(),
             reserved: 0,
+            remote: None,
         }
     }
 
@@ -166,6 +178,7 @@ impl SyncCard {
             carry: 0.0,
             rows,
             reserved: 0,
+            remote: None,
         }
     }
 
@@ -540,6 +553,10 @@ pub fn outcome(report: &SyncReport) -> String {
     }
     if report.cancelled {
         parts.push("cancelled".to_string());
+    } else if report.local_only {
+        // The server could not hash its side, so nothing was compared, and
+        // the toast must not say otherwise.
+        parts.push("verified locally only".to_string());
     } else if report.verify_failures.is_empty() && report.verified > 0 {
         let everything = report.verify == Verify::Everything || report.copied == 0;
         parts.push(if everything {
@@ -580,6 +597,34 @@ pub fn plan_job(
         let result = df_core::sync::plan(&sources, &dest, options, &|| ctx.is_cancelled(), &|n| {
             ctx.advance(0, n)
         });
+        let result = match result {
+            Err(DfError::Cancelled) => return Err(DfError::Cancelled),
+            other => other.map_err(|e| e.to_string()),
+        };
+        store(&landing, result);
+        Ok(())
+    });
+    (job, slot)
+}
+
+/// The comparison with a server — `rsync`'s dry run — as a job for the pool.
+/// The same lane, slot and cancel as [`plan_job`]; a cancel kills the `rsync`.
+pub fn remote_plan_job(
+    name: String,
+    remote: Remote,
+    dest: PathBuf,
+    options: SyncOptions,
+) -> (impl Job, PlanSlot) {
+    let slot: PlanSlot = Arc::new(Mutex::new(None));
+    let landing = Arc::clone(&slot);
+    let job = FnJob::new(name, Lane::Micro, move |ctx: &TaskCtx| {
+        let result = df_core::sync::rsync::plan(
+            remote.transfer.clone(),
+            remote.roots.clone(),
+            dest.clone(),
+            options,
+            &|| ctx.is_cancelled(),
+        );
         let result = match result {
             Err(DfError::Cancelled) => return Err(DfError::Cancelled),
             other => other.map_err(|e| e.to_string()),
@@ -940,6 +985,7 @@ mod tests {
             extra: Tally::default(),
             removal: Removal::Trash,
             skipped: Vec::new(),
+            remote: None,
         }
     }
 
@@ -1275,6 +1321,20 @@ mod tests {
         card.toggle_mode();
         assert_eq!(card.labels(), ["Cancel", "Sync and trash 3"]);
         assert_eq!(card.run_verify(), Verify::Copied);
+    }
+
+    #[test]
+    fn a_server_that_could_not_hash_its_side_is_not_called_verified() {
+        let report = SyncReport {
+            copied: 3,
+            copied_bytes: 30,
+            local_only: true,
+            ..SyncReport::default()
+        };
+        assert_eq!(
+            outcome(&report),
+            "Synced 3 files · 30 B · verified locally only"
+        );
     }
 
     #[test]
