@@ -917,6 +917,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let paint = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
@@ -1109,6 +1110,7 @@ mod tests {
                 show_symlink: true,
                 now: Instant::now(),
                 tips: None,
+                held: None,
             };
             let state = TransportState {
                 position_us: 12_300_000,

@@ -2003,6 +2003,7 @@ mod tests {
             let now = Instant::now();
             let paint = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
@@ -2109,6 +2110,7 @@ mod tests {
             let now = Instant::now();
             let paint = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
@@ -2162,6 +2164,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let paint = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

@@ -1027,6 +1027,7 @@ mod tests {
         let _ = ctx.run_ui(Default::default(), |ui| {
             let paint = crate::ui::Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

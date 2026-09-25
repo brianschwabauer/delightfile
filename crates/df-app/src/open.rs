@@ -330,6 +330,12 @@ impl Picker {
     pub fn scrolled_at(&self) -> Option<std::time::Instant> {
         self.bar.scrolled_at()
     }
+
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: std::time::Instant) {
+        self.bar.let_go(now);
+    }
 }
 
 /// The picker's card and its rows, anchored under (or over) the row it is
@@ -488,8 +494,14 @@ pub fn paint_picker(
         );
     }
     if let Some(bar) = picker_bar(card, rects, picker) {
-        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Picker));
-        crate::scrollbar::paint_card(paint, &bar, lit, picker.scrolled_at(), 1.0);
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Picker,
+            hovers,
+            picker.scrolled_at(),
+            1.0,
+        );
     }
 }
 
@@ -746,6 +758,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let painting = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

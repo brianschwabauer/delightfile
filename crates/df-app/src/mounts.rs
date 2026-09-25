@@ -1468,6 +1468,21 @@ impl Card {
         self.bar.scrolled_at()
     }
 
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: std::time::Instant) {
+        self.bar.let_go(now);
+    }
+
+    /// Start the view `points` down the lines, for a hand on the bar, which
+    /// is measured in points since the lines are not one height ([`bar`]):
+    /// at the line whose top is nearest, off the cursor until a key or a
+    /// click moves it. Returns whether the lines moved.
+    pub fn scroll_to(&mut self, points: f32, now: std::time::Instant) -> bool {
+        let heights: Vec<f32> = self.lines().iter().map(|line| line.height()).collect();
+        self.scroll_to_line(nearest(&heights, points), now)
+    }
+
     /// The lines drawn from [`Card::first`], each with its top measured from
     /// the top of the body, stopping at the bottom of the window.
     ///
@@ -1618,6 +1633,18 @@ fn scroll(first: usize, at: usize, lines: &[Line], window: f32) -> usize {
         first += 1;
     }
     first.min(deepest(&heights, window))
+}
+
+/// The line of these `heights` whose top is nearest `points` down them.
+fn nearest(heights: &[f32], points: f32) -> usize {
+    let mut top = 0.0;
+    for (index, height) in heights.iter().enumerate() {
+        if points < top + height / 2.0 {
+            return index;
+        }
+        top += height;
+    }
+    heights.len()
 }
 
 /// The furthest the view goes down lines of these `heights` in a body
@@ -2001,10 +2028,14 @@ pub fn paint(
         );
     }
     if let Some(bar) = bar(geometry, card) {
-        let lit = hovers.hover(crate::ui::Control::CardBar(
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
             crate::scrollbar::Surface::Mounts,
-        ));
-        crate::scrollbar::paint_card(paint, &bar, lit, card.scrolled_at(), 1.0);
+            hovers,
+            card.scrolled_at(),
+            1.0,
+        );
     }
 }
 
@@ -2741,6 +2772,7 @@ Mount(3): backup -> file:///mnt/backup
         let _ = ctx.run_ui(Default::default(), |ui| {
             let painting = crate::ui::Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

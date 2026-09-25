@@ -219,10 +219,9 @@ pub enum Gesture {
     /// A selection being dragged out of the top-bar prompt's text, or out of
     /// the bulk rename card's template or one of its rows.
     Text,
-    /// A pane's scrollbar thumb, held and dragged ([`crate::scrollbar`]).
-    Scrollbar(Column),
-    /// The bulk rename card's scrollbar thumb, held and dragged.
-    BulkScrollbar,
+    /// A scrollbar's thumb, held and dragged, whichever bar it is — a
+    /// pane's, a card's, a menu's ([`crate::scrollbar::Bar`]).
+    Bar(crate::scrollbar::Bar),
     /// A divider between two panes, held and dragged ([`crate::divider`]).
     Divider(crate::divider::Divider),
 }
@@ -260,8 +259,7 @@ pub fn gesture_filter(
             control,
             Control::PromptField | Control::BulkTemplate | Control::BulkRow(_)
         ),
-        Some(Gesture::Scrollbar(column)) => *control == Control::Scrollbar(column),
-        Some(Gesture::BulkScrollbar) => *control == Control::BulkScrollbar,
+        Some(Gesture::Bar(bar)) => *control == Control::Bar(bar),
         Some(Gesture::Divider(which)) => *control == Control::Divider(which),
     })
 }
@@ -269,6 +267,7 @@ pub fn gesture_filter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scrollbar::Bar;
 
     /// Mid-band only a list row answers the pointer, mid-selection only the
     /// prompt's text; with no gesture, everything does exactly as it did.
@@ -303,8 +302,10 @@ mod tests {
             for gesture in [
                 Gesture::Band,
                 Gesture::Text,
-                Gesture::Scrollbar(Column::List),
-                Gesture::BulkScrollbar,
+                Gesture::Bar(Bar::Pane(Column::List)),
+                Gesture::Bar(Bar::Bulk),
+                Gesture::Bar(Bar::Card(crate::scrollbar::Surface::Mounts)),
+                Gesture::Bar(Bar::Menu),
             ] {
                 assert_eq!(
                     gesture_filter(Some(gesture), Some((control, at))),
@@ -319,13 +320,17 @@ mod tests {
             );
         }
         // A thumb in the hand keeps its own bar lit, and lights no row it
-        // is dragged across, nor the other pane's bar.
-        let list_bar = Some((Control::Scrollbar(Column::List), at));
-        let held = Some(Gesture::Scrollbar(Column::List));
+        // is dragged across, nor another bar.
+        let list_bar = Some((Control::Bar(Bar::Pane(Column::List)), at));
+        let held = Some(Gesture::Bar(Bar::Pane(Column::List)));
         assert_eq!(gesture_filter(held, list_bar), list_bar);
         assert_eq!(gesture_filter(held, row), None);
         assert_eq!(
-            gesture_filter(held, Some((Control::Scrollbar(Column::Parent), at))),
+            gesture_filter(held, Some((Control::Bar(Bar::Pane(Column::Parent)), at))),
+            None
+        );
+        assert_eq!(
+            gesture_filter(held, Some((Control::Bar(Bar::Menu), at))),
             None
         );
         // Outside every pane there was nothing to begin with.

@@ -556,6 +556,29 @@ impl Spot {
         self.bar.scrolled_at()
     }
 
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: Instant) {
+        self.bar.let_go(now);
+    }
+
+    /// Start the view `points` down the rows, for a hand on the bar, which
+    /// is measured in points since the rows are not one height ([`bar`]):
+    /// at the row whose top is nearest, off the cursor until a key, a click
+    /// or a swipe moves it. Returns whether the rows moved.
+    pub fn scroll_to(&mut self, points: f32, now: Instant) -> bool {
+        let mut top = 0.0;
+        let mut first = self.rows.len();
+        for (index, height) in self.heights().into_iter().enumerate() {
+            if points < top + height / 2.0 {
+                first = index;
+                break;
+            }
+            top += height;
+        }
+        self.scroll_to_row(first, now)
+    }
+
     /// Swap in a different file, keeping the panel open — `←`/`→`.
     ///
     /// The row cursor is kept where it was when the new card is at least that
@@ -778,7 +801,9 @@ impl Geometry {
     /// the pointer either way.
     pub fn hit(&self, pos: egui::Pos2) -> Option<Control> {
         if self.band.is_some_and(|band| band.contains(pos)) {
-            return Some(Control::CardBar(crate::scrollbar::Surface::Spot));
+            return Some(Control::Bar(crate::scrollbar::Bar::Card(
+                crate::scrollbar::Surface::Spot,
+            )));
         }
         // Only what is on the body: a row scrolled off it, or a chip pushed
         // past the edge of a card squeezed narrow, is not there to be pressed.
@@ -802,7 +827,7 @@ impl Geometry {
             Control::Action(i) if i < BITS.len() => self.bits.get(i).copied(),
             Control::Action(_) => self.action,
             Control::PanelRow(i) => self.rows.get(i).copied(),
-            Control::CardBar(_) => self.band,
+            Control::Bar(crate::scrollbar::Bar::Card(_)) => self.band,
             _ => None,
         }
     }
@@ -1120,8 +1145,14 @@ pub fn paint(
         }
     }
     if let Some(bar) = bar(geometry, spot) {
-        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Spot));
-        crate::scrollbar::paint_card(paint, &bar, lit, spot.scrolled_at(), 1.0);
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Spot,
+            hovers,
+            spot.scrolled_at(),
+            1.0,
+        );
     }
 }
 
@@ -1636,6 +1667,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let painting = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
@@ -1726,7 +1758,9 @@ mod tests {
         let band = g.band.expect("a band beside the rows");
         assert_eq!(
             g.hit(band.center()),
-            Some(Control::CardBar(crate::scrollbar::Surface::Spot))
+            Some(Control::Bar(crate::scrollbar::Bar::Card(
+                crate::scrollbar::Surface::Spot
+            )))
         );
         for _ in 0..spot.rows.len() {
             spot.move_cursor(1);

@@ -8,12 +8,14 @@
 //! looks like.
 //!
 //! The floating cards whose lists can outgrow a short window — the palette,
-//! the task panel, the dialogs, the tray, the which-key card — wear it too
-//! ([`card`], [`paint_card`]), for the same reason: a list cut off at a card's
-//! edge has to say that it goes on, and the one bar in the window is how
-//! anything here says that. Theirs is only ever read — the keys and the wheel
-//! move a card's list — but it comes and goes by the panes' rule, the linger
-//! after a scroll or the pointer on its band, and by nothing else.
+//! the task panel, the dialogs, the tray, the which-key card, the menus — wear
+//! it too ([`card`], [`paint_card`]), for the same reason: a list cut off at a
+//! card's edge has to say that it goes on, and the one bar in the window is
+//! how anything here says that. It is one bar in the hand as well as to the
+//! eye: every one of them is taken by its thumb and paged by its track as a
+//! pane's is ([`Bar`]), and comes and goes by the panes' rule — the linger
+//! after a scroll, the pointer on its band, a hand on its thumb — and by
+//! nothing else.
 //!
 //! ## Why the hit band is wider than the thumb
 //!
@@ -68,6 +70,10 @@ pub struct Geometry {
     /// The last row the view can start at — what the bottom of the travel
     /// stands for.
     max_first: f32,
+    /// Where the view starts, and how much of the list it shows, in the
+    /// bar's own units: what a press on the track pages from and by.
+    first: f32,
+    visible: f32,
 }
 
 /// The bar for a pane showing rows from `first` (fractional mid-slide), with
@@ -102,6 +108,8 @@ pub fn geometry(pane: egui::Rect, first: f32, visible: f32, total: f32) -> Optio
         thumb,
         hit,
         max_first,
+        first,
+        visible,
     })
 }
 
@@ -124,6 +132,14 @@ impl Geometry {
             return 0.0;
         }
         ((top - self.track.top()) / travel).clamp(0.0, 1.0) * self.max_first
+    }
+
+    /// Where a press on the track sends the view: a view's worth towards the
+    /// press — up when `up` — and no further than either end, in the units
+    /// the bar was measured in.
+    pub fn page(&self, up: bool) -> f32 {
+        let step = if up { -self.visible } else { self.visible };
+        (self.first + step).clamp(0.0, self.max_first)
     }
 }
 
@@ -229,10 +245,30 @@ impl Linger {
     pub fn scrolled_at(&self) -> Option<Instant> {
         self.scrolled_at
     }
+
+    /// A hand let go of the bar: it lingers from now, as it would after a
+    /// scroll, rather than from wherever the drag last moved the list — a
+    /// thumb held still and then let go would otherwise leave at once.
+    pub fn let_go(&mut self, now: Instant) {
+        self.scrolled_at = Some(now);
+    }
 }
 
-/// Which floating card a bar belongs to, so the hover on its band
-/// ([`crate::ui::Control::CardBar`]) is that card's and no other's.
+/// A bar, whichever it is: a pane's, a floating card's, the app menu's or its
+/// submenu's, or the bulk rename card's. The one name its band's hover, the
+/// press on its thumb or its track, the drag and the release all go by
+/// ([`crate::ui::Control::Bar`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bar {
+    Pane(crate::ui::Column),
+    Card(Surface),
+    Menu,
+    Submenu,
+    Bulk,
+}
+
+/// Which floating card a bar belongs to, so the hover on its band and the
+/// hand on its thumb ([`Bar::Card`]) are that card's and no other's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
     Palette,
@@ -312,21 +348,24 @@ pub fn band(card: egui::Rect, body: egui::Rect, visible: f32, total: f32) -> Opt
     self::card(card, body, 0.0, visible, total).map(|bar| bar.hit)
 }
 
-/// Draw a card's bar by the panes' rule: up for the [`LINGER`] after its list
-/// last moved and while the pointer is on its band (`lit`, the band's hover,
-/// which fades on its own when the pointer leaves), faded over [`FADE`].
-/// Never held: no hand takes hold of a card's bar.
+/// Draw `surface`'s bar by the panes' rule: up for the [`LINGER`] after its
+/// list last moved, while the pointer is on its band (its hover in `hovers`,
+/// which fades on its own when the pointer leaves), and while a hand is on
+/// its thumb ([`Painting::held`]), faded over [`FADE`].
 ///
 /// `fade` is the card's own, for a card on its way out.
 pub fn paint_card(
     painting: &Painting<'_>,
     bar: &Geometry,
-    lit: f32,
+    surface: Surface,
+    hovers: &crate::hover::Hovers<crate::ui::Control>,
     scrolled_at: Option<Instant>,
     fade: f32,
 ) {
-    let alpha = visibility(scrolled_at, lit, false, painting.now);
-    self::paint(painting, bar, alpha * fade, lit, false);
+    let lit = hovers.hover(crate::ui::Control::Bar(Bar::Card(surface)));
+    let held = painting.held == Some(Bar::Card(surface));
+    let alpha = visibility(scrolled_at, lit, held, painting.now);
+    self::paint(painting, bar, alpha * fade, lit, held);
 }
 
 #[cfg(test)]
@@ -368,6 +407,34 @@ mod tests {
         // A drag past either end holds at that end.
         assert_eq!(half.first_at(half.track.top() - 50.0), 0.0);
         assert_eq!(half.first_at(half.track.bottom() + 50.0), last);
+    }
+
+    /// A press on the track pages a view's worth towards it, and stops at
+    /// either end.
+    #[test]
+    fn the_track_pages_a_view_at_a_time_and_stops_at_the_ends() {
+        let bar = geometry(pane(), 30.0, 20.0, 100.0).expect("overflows");
+        assert_eq!(bar.page(false), 50.0);
+        assert_eq!(bar.page(true), 10.0);
+        let near_top = geometry(pane(), 5.0, 20.0, 100.0).expect("overflows");
+        assert_eq!(near_top.page(true), 0.0);
+        let near_end = geometry(pane(), 75.0, 20.0, 100.0).expect("overflows");
+        assert_eq!(near_end.page(false), 80.0, "the last view");
+    }
+
+    /// A hand let go of a bar holds it for the linger from the moment it let
+    /// go, however long ago the list last moved.
+    #[test]
+    fn letting_go_of_a_bar_starts_its_linger() {
+        let at = Instant::now();
+        let mut linger = Linger::default();
+        linger.saw(0.0, at);
+        linger.saw(3.0, at);
+        let later = at + LINGER * 3;
+        assert_eq!(alpha(linger.scrolled_at(), later), 0.0);
+        linger.let_go(later);
+        assert_eq!(linger.scrolled_at(), Some(later));
+        assert_eq!(alpha(linger.scrolled_at(), later), 1.0);
     }
 
     /// A short overflow gets a long thumb: its height is the share of the

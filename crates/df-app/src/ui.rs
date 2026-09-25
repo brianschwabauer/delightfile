@@ -468,9 +468,12 @@ pub enum Column {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Control {
     Row(Column, usize),
-    /// A pane's scrollbar: the band down its right edge, thumb and track
-    /// alike ([`crate::scrollbar`]). The thumb is dragged, the track pages.
-    Scrollbar(Column),
+    /// A scrollbar's band, thumb and track alike, whichever bar it is — a
+    /// pane's, a floating card's, a menu's, the bulk rename card's
+    /// ([`crate::scrollbar::Bar`]), and only while its list is longer than
+    /// it shows. The thumb is dragged, the track pages, and the pointer on
+    /// the band brings the bar up.
+    Bar(crate::scrollbar::Bar),
     /// A divider between two panes ([`crate::divider`]): dragged to trade
     /// width between them, double-clicked to fold the side pane away or open
     /// it again.
@@ -525,12 +528,6 @@ pub enum Control {
     /// row of the submenu it has flown out (PLAN §7.5).
     MenuItem(usize),
     SubmenuItem(usize),
-    /// The band down the right edge of a menu's card, and of its submenu's,
-    /// while the list is taller than the card ([`crate::menu`]): hovered, it
-    /// brings the bar up as a pane's band does. A press on it does nothing —
-    /// the wheel and the arrows are how a menu scrolls.
-    MenuBar,
-    SubmenuBar,
     /// The three bars at the top row's leading end, which drop the app menu
     /// out: every command a person might not know the key for, where the
     /// pointer can find it.
@@ -581,13 +578,6 @@ pub enum Control {
     BulkRow(usize),
     /// A candidate in the rename card's `{` list, by its index in the list.
     BulkCandidate(usize),
-    /// The rename card's scrollbar: the thumb is dragged, the track pages.
-    BulkScrollbar,
-    /// The band at a floating card's edge where its bar is drawn, while the
-    /// card's list is longer than it shows ([`crate::scrollbar::band`]). The
-    /// pointer on it brings the bar up, as it does a pane's; a press does
-    /// nothing, since nothing takes hold of a card's bar.
-    CardBar(crate::scrollbar::Surface),
 }
 
 /// How the three panes share the window this frame: what [`layout`] is asked
@@ -1066,6 +1056,10 @@ pub struct Painting<'a> {
     /// over inside a row. `None` everywhere the answer is not wanted — the
     /// preview's directory body, the tests.
     pub tips: Option<&'a RowTips>,
+    /// The bar a hand is on this frame, which whatever paints that bar draws
+    /// held: a card's ([`crate::scrollbar::paint_card`]), a menu's, the bulk
+    /// rename card's.
+    pub held: Option<crate::scrollbar::Bar>,
 }
 
 /// One of the small marks at the right-hand end of a row that is worth a word
@@ -2355,6 +2349,7 @@ mod tests {
             let theme = Theme::default();
             let paint = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

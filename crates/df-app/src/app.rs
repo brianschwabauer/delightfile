@@ -63,6 +63,7 @@ use crate::panel::{self, TaskPanel, TaskRow};
 use crate::playback::{Player, Prober, TemporalInfo};
 use crate::preview::Pane as PreviewPane;
 use crate::ripple::Ripples;
+use crate::scrollbar::Bar;
 use crate::search::{self, Search};
 use crate::select::{self, Visual};
 use crate::spot::{self, Spot};
@@ -615,9 +616,9 @@ impl OverlayGeom {
         }
     }
 
-    /// The band at the card's edge its bar is pointed at by, and whose card it
-    /// is, while the card's list is longer than it shows. The rename card's
-    /// bar is taken hold of, and it hit-tests its own.
+    /// The band at the card's edge its bar is pointed at and taken by, and
+    /// whose card it is, while the card's list is longer than it shows. The
+    /// bulk rename card hit-tests its own.
     fn band(&self) -> Option<(egui::Rect, crate::scrollbar::Surface)> {
         use crate::scrollbar::Surface;
         match self {
@@ -645,7 +646,7 @@ impl OverlayGeom {
         // The bar's band, ahead of the rows it overlaps by a hair, as a
         // pane's is ahead of its rows.
         if let Some((_, surface)) = self.band().filter(|(band, _)| band.contains(pos)) {
-            return Some(Control::CardBar(surface));
+            return Some(Control::Bar(Bar::Card(surface)));
         }
         match self {
             // The confirm card's rows are *not* in this list. They are the
@@ -690,7 +691,7 @@ impl OverlayGeom {
     fn rect_of(&self, control: Control) -> Option<egui::Rect> {
         match (self, control) {
             (_, Control::Close) => self.close_rect(),
-            (_, Control::CardBar(_)) => self.band().map(|(band, _)| band),
+            (_, Control::Bar(Bar::Card(_))) => self.band().map(|(band, _)| band),
             (OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g), Control::Action(i)) => {
                 g.actions.get(i).copied().or(g.apply_all)
             }
@@ -901,19 +902,17 @@ struct PressStart {
     /// does ([`select::Gesture::Text`]). Which line is the card's to say: the
     /// press gave that field the keyboard.
     in_bulk: Option<u8>,
-    /// The press landed on the rename card's scrollbar thumb, this far below
-    /// the thumb's top: the card's [`PressStart::scrollbar`].
-    bulk_bar: Option<f32>,
-    /// The press landed on a pane's scrollbar thumb: which pane, and how far
-    /// below the thumb's top the hand took hold of it.
+    /// The press landed on a scrollbar's thumb — a pane's, a card's, a
+    /// menu's, the bulk rename card's — which bar, and how far below the
+    /// thumb's top the hand took hold of it.
     ///
     /// The offset is what keeps the thumb under the hand. Without it the first
     /// frame of the drag would jump the thumb's top to the pointer. While it is
     /// set the drag is the thumb's from the first point of travel, with no
     /// threshold (the view follows the hand, and a hand that has not moved has
-    /// moved nothing), and nothing else answers the pointer
-    /// ([`select::Gesture::Scrollbar`]).
-    scrollbar: Option<(Column, f32)>,
+    /// moved nothing), wherever the hand goes, on the card or off it; and
+    /// nothing else answers the pointer ([`select::Gesture::Bar`]).
+    scrollbar: Option<(Bar, f32)>,
     /// Whether the drag threshold has already been crossed, so the decision is
     /// made once rather than re-made every frame.
     dragging: bool,
@@ -10445,7 +10444,6 @@ impl App {
                 // while a modal card is up — the hit test above never
                 // produces them — and the `×` is closed by `click` itself.
                 Control::Row(..)
-                | Control::Scrollbar(_)
                 | Control::Divider(_)
                 | Control::Tab(_)
                 | Control::TabClose(_)
@@ -10458,8 +10456,6 @@ impl App {
                 | Control::YankChip
                 | Control::MenuItem(_)
                 | Control::SubmenuItem(_)
-                | Control::MenuBar
-                | Control::SubmenuBar
                 | Control::MenuButton
                 | Control::YankClear
                 | Control::YankRow(_)
@@ -10480,8 +10476,7 @@ impl App {
                 | Control::BulkTemplate
                 | Control::BulkRow(_)
                 | Control::BulkCandidate(_)
-                | Control::BulkScrollbar
-                | Control::CardBar(_) => {}
+                | Control::Bar(_) => {}
             }
             return;
         }
@@ -10550,7 +10545,6 @@ impl App {
                 }
             }
             Control::Row(..)
-            | Control::Scrollbar(_)
             | Control::Divider(_)
             | Control::Tab(_)
             | Control::TabClose(_)
@@ -10563,8 +10557,6 @@ impl App {
             | Control::YankChip
             | Control::MenuItem(_)
             | Control::SubmenuItem(_)
-            | Control::MenuBar
-            | Control::SubmenuBar
             | Control::MenuButton
             | Control::YankClear
             | Control::YankRow(_)
@@ -10585,8 +10577,7 @@ impl App {
             | Control::BulkTemplate
             | Control::BulkRow(_)
             | Control::BulkCandidate(_)
-            | Control::BulkScrollbar
-            | Control::CardBar(_) => {}
+            | Control::Bar(_) => {}
         }
     }
 
@@ -11024,11 +11015,8 @@ impl App {
             Column::List => self.tab().cwd.scrolled_at(),
             Column::Parent => self.tab().parent.as_ref().and_then(|p| p.scrolled_at()),
         };
-        let lit = self.hovers.hover(Control::Scrollbar(column));
-        let held = self
-            .press
-            .and_then(|press| press.scrollbar)
-            .is_some_and(|(held, _)| held == column);
+        let lit = self.hovers.hover(Control::Bar(Bar::Pane(column)));
+        let held = self.held_bar() == Some(Bar::Pane(column));
         let alpha = crate::scrollbar::visibility(scrolled_at, lit, held, now);
         crate::scrollbar::paint(paint, &bar, alpha, lit, held);
     }
@@ -11054,6 +11042,205 @@ impl App {
         };
         if listing.scroll_to(target, visible, columns, crate::mouse::WHEEL_GLIDE, now) {
             listing.dir.cancel_aim();
+        }
+    }
+
+    /// The bar a hand is on, while it is on one.
+    fn held_bar(&self) -> Option<Bar> {
+        self.press
+            .and_then(|press| press.scrollbar)
+            .map(|(bar, _)| bar)
+    }
+
+    /// Where `bar` is this frame, from the geometry the frame measured: what
+    /// the press on it and the paging from it read.
+    fn bar_geometry(&self, bar: Bar, geom: &Geom<'_>) -> Option<crate::scrollbar::Geometry> {
+        match bar {
+            Bar::Pane(column) => geom.bar(column),
+            Bar::Bulk => match geom.overlay {
+                Some(OverlayGeom::Bulk(geometry)) => geometry.bar,
+                _ => None,
+            },
+            Bar::Menu => geom.menu.as_ref().and_then(|menu| menu.bar),
+            Bar::Submenu => geom.menu.as_ref().and_then(|menu| menu.sub_bar),
+            Bar::Card(surface) => self.card_bar(surface, geom.overlay, geom.tray, geom.which),
+        }
+    }
+
+    /// Where a card's bar is, from the card's geometry and its list: the
+    /// function each card's paint draws its bar from, asked here for the
+    /// hand.
+    fn card_bar(
+        &self,
+        surface: crate::scrollbar::Surface,
+        overlay: &Option<OverlayGeom>,
+        tray: &crate::tray::Geometry,
+        which: Option<&crate::whichkey::Geometry>,
+    ) -> Option<crate::scrollbar::Geometry> {
+        use crate::scrollbar::Surface;
+        match (surface, overlay, &self.dialog) {
+            (Surface::Palette, Some(OverlayGeom::Finder(geometry)), _) => {
+                overlay::finder_bar(geometry, self.finder.as_ref()?)
+            }
+            (Surface::Tasks, Some(OverlayGeom::Panel(card, rects, rows)), _) => {
+                panel::bar(*card, rects, self.panel.as_ref()?, rows.len())
+            }
+            (Surface::Mounts, Some(OverlayGeom::Mounts(geometry)), _) => {
+                crate::mounts::bar(geometry, self.mounts.as_ref()?)
+            }
+            (Surface::Confirm, Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(c))) => {
+                dialog::names_bar(geometry, c)
+            }
+            (
+                Surface::Conflict,
+                Some(OverlayGeom::Conflict(geometry)),
+                Some(Dialog::Conflict(conflict)),
+            ) => dialog::conflicts_bar(geometry, conflict),
+            (Surface::Sync, Some(OverlayGeom::Sync(geometry)), Some(Dialog::Sync(card))) => {
+                crate::sync::bar(geometry, card)
+            }
+            (Surface::Picker, Some(OverlayGeom::Picker(card, rows, _)), _) => {
+                open::picker_bar(*card, rows, self.picker.as_ref()?)
+            }
+            (Surface::Spot, Some(OverlayGeom::Spot(geometry)), _) => {
+                spot::bar(geometry, self.spot.as_ref()?)
+            }
+            (Surface::Tray, _, _) => crate::tray::bar(tray, self.tray_first, self.clipboard.len()),
+            (Surface::WhichKey, _, _) => crate::whichkey::bar(which?),
+            _ => None,
+        }
+    }
+
+    /// Put the list `bar` scrolls at `first`, in the bar's own units — rows,
+    /// or points for a list whose rows are not one height — for a hand on
+    /// its thumb or its track, with no slide: the list is where the hand put
+    /// it. Not a pane's, whose view slides for a page and is moved by
+    /// [`App::hold_scrollbar`] and [`App::page_scrollbar`]. `which` is the
+    /// which-key card as the frame laid it out. Returns whether the list
+    /// moved, so a card is measured again before anything reads it.
+    fn scroll_bar_to(
+        &mut self,
+        bar: Bar,
+        first: f32,
+        which: Option<&crate::whichkey::Geometry>,
+        now: Instant,
+    ) -> bool {
+        use crate::scrollbar::Surface;
+        let row = first.round() as usize;
+        match bar {
+            Bar::Pane(_) => false,
+            Bar::Bulk => match &mut self.dialog {
+                Some(Dialog::Bulk(bulk)) => {
+                    let before = bulk.first;
+                    bulk.scroll_to(row);
+                    bulk.first != before
+                }
+                _ => false,
+            },
+            Bar::Menu | Bar::Submenu => {
+                let area = self.menu_area;
+                self.menu
+                    .as_mut()
+                    .is_some_and(|menu| menu.scroll_to(bar == Bar::Submenu, first, area, now))
+            }
+            Bar::Card(Surface::Palette) => self
+                .finder
+                .as_mut()
+                .is_some_and(|finder| finder.scroll_to(row, now)),
+            Bar::Card(Surface::Tasks) => {
+                let rows = self.task_rows().len();
+                self.panel
+                    .as_mut()
+                    .is_some_and(|panel| panel.scroll_to(row, rows, now))
+            }
+            Bar::Card(Surface::Mounts) => self
+                .mounts
+                .as_mut()
+                .is_some_and(|card| card.scroll_to(first, now)),
+            Bar::Card(Surface::Picker) => self
+                .picker
+                .as_mut()
+                .is_some_and(|picker| picker.scroll_to(row, now)),
+            Bar::Card(Surface::Spot) => self
+                .spot
+                .as_mut()
+                .is_some_and(|spot| spot.scroll_to(first, now)),
+            Bar::Card(Surface::Confirm | Surface::Conflict | Surface::Sync) => {
+                match &mut self.dialog {
+                    Some(Dialog::Confirm(confirm)) => confirm.scroll_to(row, now),
+                    Some(Dialog::Conflict(conflict)) => conflict.scroll_to(row, now),
+                    Some(Dialog::Sync(card)) => card.scroll_to(row),
+                    _ => false,
+                }
+            }
+            // Clamped by the bar it was read off, whose travel ends at the
+            // last windowful.
+            Bar::Card(Surface::Tray) => {
+                let moved = row != self.tray_first;
+                self.tray_first = row;
+                moved
+            }
+            Bar::Card(Surface::WhichKey) => {
+                let Some(which) = which else { return false };
+                let before = self.which.first();
+                self.which.scroll_to(row, which);
+                self.which.first() != before
+            }
+        }
+    }
+
+    /// A hand let go of `bar`: it lingers from now, as after a scroll, rather
+    /// than leaving at once because the drag held still before the release.
+    fn let_go_bar(&mut self, bar: Bar, now: Instant) {
+        use crate::scrollbar::Surface;
+        match bar {
+            Bar::Pane(column) => {
+                if let Some(listing) = self.scroll_listing(column) {
+                    listing.let_go(now);
+                }
+            }
+            // Its bar is always up while its list is longer than it shows.
+            Bar::Bulk => {}
+            Bar::Menu | Bar::Submenu => {
+                if let Some(menu) = &mut self.menu {
+                    menu.let_go(bar == Bar::Submenu, now);
+                }
+            }
+            Bar::Card(Surface::Palette) => {
+                if let Some(finder) = &mut self.finder {
+                    finder.let_go(now);
+                }
+            }
+            Bar::Card(Surface::Tasks) => {
+                if let Some(panel) = &mut self.panel {
+                    panel.let_go(now);
+                }
+            }
+            Bar::Card(Surface::Mounts) => {
+                if let Some(card) = &mut self.mounts {
+                    card.let_go(now);
+                }
+            }
+            Bar::Card(Surface::Picker) => {
+                if let Some(picker) = &mut self.picker {
+                    picker.let_go(now);
+                }
+            }
+            Bar::Card(Surface::Spot) => {
+                if let Some(spot) = &mut self.spot {
+                    spot.let_go(now);
+                }
+            }
+            Bar::Card(Surface::Confirm | Surface::Conflict | Surface::Sync) => {
+                match &mut self.dialog {
+                    Some(Dialog::Confirm(confirm)) => confirm.let_go(now),
+                    Some(Dialog::Conflict(conflict)) => conflict.let_go(now),
+                    Some(Dialog::Sync(card)) => card.let_go(now),
+                    _ => {}
+                }
+            }
+            Bar::Card(Surface::Tray) => self.tray_bar.let_go(now),
+            Bar::Card(Surface::WhichKey) => self.which.let_go(now),
         }
     }
 
@@ -11124,19 +11311,29 @@ impl App {
                 }
                 rect
             }
-            // A press on the track pages towards it, as every scrollbar does.
-            // A press on the thumb does nothing yet: it is the start of a drag,
-            // which the press site records ([`PressStart::scrollbar`]).
-            Control::Scrollbar(column) => {
-                let Some(bar) = geom.bar(column) else {
+            // A press on the track pages towards it, as every scrollbar does,
+            // whichever bar it is. A press on the thumb does nothing yet: it
+            // is the start of a drag, which the press site records
+            // ([`PressStart::scrollbar`]). A menu's bar is on the menu, so a
+            // press there dismisses nothing either.
+            Control::Bar(pressed) => {
+                let Some(bar) = self.bar_geometry(pressed, geom) else {
                     return egui::Rect::ZERO;
                 };
                 if let Some(at) = pointer.at.filter(|at| !bar.on_thumb(*at)) {
-                    let (visible, columns) = match column {
-                        Column::List => (geom.page, geom.grid.map_or(1, |m| m.columns)),
-                        Column::Parent => (geom.parent_page, 1),
-                    };
-                    self.page_scrollbar(column, at.y < bar.thumb.top(), visible, columns, now);
+                    let up = at.y < bar.thumb.top();
+                    match pressed {
+                        Bar::Pane(column) => {
+                            let (visible, columns) = match column {
+                                Column::List => (geom.page, geom.grid.map_or(1, |m| m.columns)),
+                                Column::Parent => (geom.parent_page, 1),
+                            };
+                            self.page_scrollbar(column, up, visible, columns, now);
+                        }
+                        _ => {
+                            self.scroll_bar_to(pressed, bar.page(up), geom.which, now);
+                        }
+                    }
                 }
                 bar.track
             }
@@ -11296,10 +11493,6 @@ impl App {
                 self.menu_click(control, geom.page, now);
                 rect
             }
-            // A menu's bar band takes the pointer to light the bar and does
-            // nothing when pressed: the wheel and the arrows scroll a menu. A
-            // press there is on the menu, so it dismisses nothing either.
-            Control::MenuBar | Control::SubmenuBar => egui::Rect::ZERO,
             // Only ever reached with no menu up: while one is, the hit test
             // answers for the menu alone, so a second press on the button is
             // spent closing its menu rather than opening it again.
@@ -11320,9 +11513,6 @@ impl App {
                 self.overlay_click(control, double, geom.page, now);
                 rect
             }
-            // A card's bar is only read: the pointer on its band brings it up,
-            // and a press there does nothing.
-            Control::CardBar(_) => egui::Rect::ZERO,
             // The `×`: `Esc` for the card it is on. A modal card is hit-tested
             // before the help sheet, so when both are up it is the card's.
             Control::Close => match geom.overlay {
@@ -11431,29 +11621,6 @@ impl App {
                 .as_ref()
                 .and_then(|o| o.rect_of(control))
                 .unwrap_or(egui::Rect::ZERO),
-            // The rename card's scrollbar: a press on the track pages towards
-            // it, and one on the thumb is the start of a drag the press site
-            // has recorded ([`PressStart::bulk_bar`]).
-            Control::BulkScrollbar => {
-                let bar = match geom.overlay {
-                    Some(OverlayGeom::Bulk(geometry)) => geometry.bar,
-                    _ => None,
-                };
-                if let (Some(bar), Some(at), Some(Dialog::Bulk(bulk))) =
-                    (bar, pointer.at, &mut self.dialog)
-                {
-                    if !bar.on_thumb(at) {
-                        let page = bulk.visible;
-                        let first = if at.y < bar.thumb.top() {
-                            bulk.first.saturating_sub(page)
-                        } else {
-                            bulk.first + page
-                        };
-                        bulk.scroll_to(first);
-                    }
-                }
-                egui::Rect::ZERO
-            }
         }
     }
 
@@ -12051,7 +12218,11 @@ impl App {
         let before = bulk.first;
         // The thumb follows the hand with no slide, as a pane's does: the
         // offset it was taken at keeps it under the pointer.
-        let grab = self.press.and_then(|press| press.bulk_bar);
+        let grab = self
+            .press
+            .and_then(|press| press.scrollbar)
+            .filter(|(bar, _)| *bar == Bar::Bulk)
+            .map(|(_, grab)| grab);
         if let (true, Some(at), Some(grab), Some(bar)) =
             (pointer.down, pointer.at, grab, geometry.bar)
         {
@@ -12148,14 +12319,10 @@ impl App {
             .is_some_and(|press| press.in_prompt.is_some() || press.in_bulk.is_some())
         {
             Some(select::Gesture::Text)
-        } else if self.press.is_some_and(|press| press.bulk_bar.is_some()) {
-            Some(select::Gesture::BulkScrollbar)
         } else if let Some(which) = self.dividers.dragging() {
             Some(select::Gesture::Divider(which))
         } else {
-            self.press
-                .and_then(|press| press.scrollbar)
-                .map(|(column, _)| select::Gesture::Scrollbar(column))
+            self.held_bar().map(select::Gesture::Bar)
         }
     }
 
@@ -12264,14 +12431,15 @@ impl App {
             }
             return;
         }
-        // …and the rename card's text and thumb, which are moved where the
-        // painter is to hand ([`App::drag_bulk`], [`App::bulk_layout`]).
-        if press.in_bulk.is_some() || press.bulk_bar.is_some() {
+        // …and the rename card's text, which is moved where the painter is
+        // to hand ([`App::drag_bulk`]).
+        if press.in_bulk.is_some() {
             return;
         }
         // …and so does a scrollbar's thumb, which has already been moved this
-        // frame, before the rows were measured ([`App::hold_scrollbar`]). No
-        // band and no file drag from the bar, whichever way the hand goes.
+        // frame, before the rows were measured ([`App::hold_scrollbar`],
+        // [`App::hold_bar`]). No band and no file drag from the bar, whichever
+        // way the hand goes.
         if press.scrollbar.is_some() {
             return;
         }
@@ -14386,7 +14554,7 @@ impl App {
         // Measured after, the rows would trail the thumb by a frame — and a
         // hand that stopped would leave them a step short of it, since a view
         // that did not slide asks for no frame to catch up in.
-        if let (true, Some(at), Some((column, grab))) = (
+        if let (true, Some(at), Some((Bar::Pane(column), grab))) = (
             pointer.down,
             pointer.at,
             self.press.and_then(|press| press.scrollbar),
@@ -14629,6 +14797,69 @@ impl App {
             }
         }
 
+        // ── A card's or a menu's thumb in the hand ([`crate::scrollbar`]) ───
+        // Moved here, before the hit test, for the reason a pane's is moved
+        // before its rows are measured: the list follows the hand with no
+        // slide, so the frame that reads the pointer has to draw the rows
+        // where it put them. Wherever the hand has wandered, on the card or
+        // off it. A pane's thumb and the bulk rename card's are moved where
+        // their rows are measured ([`App::hold_scrollbar`],
+        // [`App::bulk_layout`]).
+        if let (true, Some(at), Some((bar, grab))) = (
+            pointer.down,
+            pointer.at,
+            self.press.and_then(|press| press.scrollbar),
+        ) {
+            let geometry = match bar {
+                Bar::Pane(_) | Bar::Bulk => None,
+                Bar::Menu => menu_geometry.as_ref().and_then(|menu| menu.bar),
+                Bar::Submenu => menu_geometry.as_ref().and_then(|menu| menu.sub_bar),
+                Bar::Card(surface) => {
+                    self.card_bar(surface, &overlay, &tray_geometry, which_geometry.as_ref())
+                }
+            };
+            let first = geometry.map(|geometry| geometry.first_at(at.y - grab));
+            if let Some(first) = first {
+                if self.scroll_bar_to(bar, first, which_geometry.as_ref(), now) {
+                    match bar {
+                        Bar::Menu | Bar::Submenu => {
+                            menu_geometry = self
+                                .menu
+                                .as_ref()
+                                .map(|menu| menu::geometry(area, menu, &painter));
+                        }
+                        Bar::Card(crate::scrollbar::Surface::Tray) => {
+                            tray_geometry = crate::tray::geometry(
+                                area,
+                                tray_chip,
+                                layout.path,
+                                &self.clipboard,
+                                self.tray_open,
+                                self.tray_first,
+                            );
+                        }
+                        Bar::Card(crate::scrollbar::Surface::WhichKey) => {
+                            which_geometry = Some(crate::whichkey::geometry(
+                                &painter,
+                                area,
+                                area.bottom(),
+                                &self.which_rows,
+                                self.which.first(),
+                            ));
+                        }
+                        _ => {
+                            overlay = self.overlay_geometry(
+                                &painter,
+                                area,
+                                &layout,
+                                area.bottom() - ui::GAP,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // The hint strips along the bottoms of the open card and the sheet,
         // measured before the hit test for the reason the breadcrumb is: the
         // press and the paint read one set of rects.
@@ -14672,7 +14903,7 @@ impl App {
             // is the one on top.
             if let Some(which) = &which_geometry {
                 if which.band.is_some_and(|band| band.contains(p)) {
-                    let bar = Control::CardBar(crate::scrollbar::Surface::WhichKey);
+                    let bar = Control::Bar(Bar::Card(crate::scrollbar::Surface::WhichKey));
                     return Some((bar, p));
                 }
                 if which.card.contains(p) {
@@ -14721,12 +14952,13 @@ impl App {
                     .remove_at(p)
                     .map(Control::YankRemove)
                     // The bar's band, after the `×` it touches by a hair: the
-                    // `×` is a button, and the band only lights the bar.
+                    // `×` is a button, and a press meant for it is not the
+                    // start of a drag.
                     .or_else(|| {
                         tray_geometry
                             .band
                             .filter(|band| band.contains(p))
-                            .map(|_| Control::CardBar(crate::scrollbar::Surface::Tray))
+                            .map(|_| Control::Bar(Bar::Card(crate::scrollbar::Surface::Tray)))
                     })
                     .or_else(|| tray_geometry.row_at(p).map(Control::YankRow))
                     .or_else(|| {
@@ -14825,7 +15057,7 @@ impl App {
                     [(Column::List, list_bar), (Column::Parent, parent_bar)]
                         .into_iter()
                         .find(|(_, bar)| bar.is_some_and(|bar| bar.contains(p)))
-                        .map(|(column, _)| Control::Scrollbar(column))
+                        .map(|(column, _)| Control::Bar(Bar::Pane(column)))
                 })
                 .or_else(|| {
                     grid::pane_at(
@@ -15176,16 +15408,8 @@ impl App {
             let rect = self.click(control, double, &pointer, &geom, now);
             // Not on a scrollbar: the bar answers by moving the rows, and it
             // draws no splash — one spawned there would only be frames asked
-            // for a ripple nothing paints. A menu's bar and a card's answer
-            // nothing at all.
-            if !matches!(
-                control,
-                Control::Scrollbar(_)
-                    | Control::BulkScrollbar
-                    | Control::MenuBar
-                    | Control::SubmenuBar
-                    | Control::CardBar(_)
-            ) {
+            // for a ripple nothing paints.
+            if !matches!(control, Control::Bar(_)) {
                 self.ripples.spawn(control, position, rect, now);
             }
         }
@@ -15227,7 +15451,11 @@ impl App {
         // select of the rows beside the preview pane. …and not from the
         // which-key card, which is a keystroke by hand and nothing more: a
         // drag that began on it is not a band of the rows it was covering.
-        if pointer.pressed && !dismissing && !menu_live && !scrubbing && !on_which {
+        // A press on a bar is the one press either of them keeps: the start
+        // of the bar's own drag, a menu's and the which-key card's as much
+        // as a pane's.
+        let on_bar = matches!(over, Some((Control::Bar(_), _)));
+        if pointer.pressed && !dismissing && !scrubbing && (on_bar || (!menu_live && !on_which)) {
             let on_row = matches!(over, Some((Control::Row(Column::List, _), _)));
             self.press = pointer.at.map(|at| PressStart {
                 at,
@@ -15258,22 +15486,13 @@ impl App {
                     scrolling: false,
                 }),
                 in_bulk: bulk_clicks,
-                bulk_bar: match (over, &overlay) {
-                    (Some((Control::BulkScrollbar, _)), Some(OverlayGeom::Bulk(geometry))) => {
-                        geometry
-                            .bar
-                            .filter(|bar| bar.on_thumb(at))
-                            .map(|bar| at.y - bar.thumb.top())
-                    }
-                    _ => None,
-                },
                 // The thumb, taken where the hand took it. A press on the
                 // track below or above it has already paged, in `click`.
                 scrollbar: match over {
-                    Some((Control::Scrollbar(column), _)) => geom
-                        .bar(column)
-                        .filter(|bar| bar.on_thumb(at))
-                        .map(|bar| (column, at.y - bar.thumb.top())),
+                    Some((Control::Bar(bar), _)) => self
+                        .bar_geometry(bar, &geom)
+                        .filter(|geometry| geometry.on_thumb(at))
+                        .map(|geometry| (bar, at.y - geometry.thumb.top())),
                     _ => None,
                 },
                 dragging: false,
@@ -15303,6 +15522,10 @@ impl App {
                     self.spring_tab_home(drag, at, now);
                 }
             }
+            // A bar let go lingers from the release.
+            if let Some(bar) = self.held_bar() {
+                self.let_go_bar(bar, now);
+            }
             // …but *not* the file drag: `tick_drag` reads the release as the
             // drop, and clearing the press here only stops the gesture
             // re-arming.
@@ -15313,6 +15536,38 @@ impl App {
         if pointer.down {
             self.drag(pointer.at, &geom, now);
             self.drag_bulk(&painter, pointer.at, &overlay);
+        }
+        // A press on a card's track or a menu's has paged the list since it
+        // was measured for the hit test, and the cards whose rows sit where
+        // their scroll puts them — a menu, the tray, the mount card, the
+        // file-info card — are measured again, so the page is drawn on the
+        // frame the press made it. A pane's view slides there on its own, the
+        // bulk rename card and the which-key card are laid out again for
+        // their paint, and the other cards draw their rows in fixed places.
+        if let (true, Some((Control::Bar(bar), _))) = (pointer.pressed, over) {
+            match bar {
+                Bar::Menu | Bar::Submenu => {
+                    menu_geometry = self
+                        .menu
+                        .as_ref()
+                        .map(|menu| menu::geometry(area, menu, &painter));
+                }
+                Bar::Card(crate::scrollbar::Surface::Tray) => {
+                    tray_geometry = crate::tray::geometry(
+                        area,
+                        tray_chip,
+                        layout.path,
+                        &self.clipboard,
+                        self.tray_open,
+                        self.tray_first,
+                    );
+                }
+                Bar::Card(crate::scrollbar::Surface::Mounts | crate::scrollbar::Surface::Spot) => {
+                    overlay =
+                        self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+                }
+                Bar::Pane(_) | Bar::Bulk | Bar::Card(_) => {}
+            }
         }
         // …and once more now that the drag has run, because a band *begins*
         // inside it, on the frame the pointer crosses the threshold — after the
@@ -15522,12 +15777,9 @@ impl App {
                 // hover, and a hand over either would promise a click that
                 // never happens (`delightful-ui` §2).
                 Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
-                // …and a menu's bar band, which lights the bar and takes no
-                // press.
-                Control::MenuBar | Control::SubmenuBar => egui::CursorIcon::Default,
-                // …and a card's bar, which the pointer brings up and a press
-                // does nothing to.
-                Control::CardBar(_) => egui::CursorIcon::Default,
+                // …and a card's bar and a menu's, taken and paged as a
+                // pane's is, but with the plain arrow they have always worn.
+                Control::Bar(Bar::Card(_) | Bar::Menu | Bar::Submenu) => egui::CursorIcon::Default,
                 // A divider moves sideways, and says so.
                 Control::Divider(_) => egui::CursorIcon::ResizeHorizontal,
                 // …and a pick button with nothing to pick is a third, for the
@@ -15544,7 +15796,7 @@ impl App {
                 Control::Row(..)
                 | Control::TabClose(_)
                 | Control::TabNew
-                | Control::Scrollbar(_)
+                | Control::Bar(Bar::Pane(_) | Bar::Bulk)
                 | Control::Crumb(_)
                 | Control::SearchNames
                 | Control::SearchContents
@@ -15569,8 +15821,7 @@ impl App {
                 | Control::YankRow(_)
                 | Control::YankRemove(_)
                 | Control::YankClear
-                | Control::BulkCandidate(_)
-                | Control::BulkScrollbar => egui::CursorIcon::PointingHand,
+                | Control::BulkCandidate(_) => egui::CursorIcon::PointingHand,
             });
         }
 
@@ -15936,6 +16187,7 @@ impl App {
             show_symlink: self.mgr.show_symlink,
             now,
             tips: row_tips.as_ref(),
+            held: self.held_bar(),
         };
 
         // The three panes, all painted alike. There used to be a 2 pt accent
@@ -16331,10 +16583,14 @@ impl App {
             self.tray_bar = crate::scrollbar::Linger::default();
         }
         if let Some(bar) = crate::tray::bar(&tray_geometry, self.tray_first, self.clipboard.len()) {
-            let lit = self
-                .hovers
-                .hover(Control::CardBar(crate::scrollbar::Surface::Tray));
-            crate::scrollbar::paint_card(&paint, &bar, lit, self.tray_bar.scrolled_at(), 1.0);
+            crate::scrollbar::paint_card(
+                &paint,
+                &bar,
+                crate::scrollbar::Surface::Tray,
+                &self.hovers,
+                self.tray_bar.scrolled_at(),
+                1.0,
+            );
         }
         // ── The top row (PLAN §2) ───────────────────────────────────────────
         // A non-anchored prompt takes the crumbs' place, in the same row: the
@@ -16476,8 +16732,7 @@ impl App {
                 }
             }
             (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) => {
-                let held = pointer.down && self.press.is_some_and(|p| p.bulk_bar.is_some());
-                dialog::paint_bulk(&paint, bulk, geometry, &self.hovers, &self.ripples, held);
+                dialog::paint_bulk(&paint, bulk, geometry, &self.hovers, &self.ripples);
             }
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
                 dialog::paint_confirm(&paint, confirm, geometry, &self.hovers, &self.ripples);
@@ -16675,11 +16930,14 @@ impl App {
             );
             // …and its bar, by the panes' rule, fading with the card.
             if let Some(bar) = crate::whichkey::bar(&geometry) {
-                let lit = self
-                    .hovers
-                    .hover(Control::CardBar(crate::scrollbar::Surface::WhichKey));
-                let scrolled_at = self.which.scrolled_at();
-                crate::scrollbar::paint_card(&paint, &bar, lit, scrolled_at, self.which.alpha(now));
+                crate::scrollbar::paint_card(
+                    &paint,
+                    &bar,
+                    crate::scrollbar::Surface::WhichKey,
+                    &self.hovers,
+                    self.which.scrolled_at(),
+                    self.which.alpha(now),
+                );
             }
         }
 
@@ -18186,6 +18444,9 @@ mod tests {
 
     /// Whose wheel it is: the cards', the scrim's, or the panes'.
     mod wheel;
+
+    /// Every bar's thumb and track in the hand.
+    mod bars;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the
@@ -20525,7 +20786,7 @@ mod tests {
         frame(&mut app, vec![egui::Event::PointerMoved(on_card)]);
         frame(&mut app, Vec::new());
         let menu = app.menu.as_ref().expect("still up");
-        assert_eq!(app.hovers.hover(Control::MenuBar), 0.0);
+        assert_eq!(app.hovers.hover(Control::Bar(Bar::Menu)), 0.0);
         assert_eq!(menu.bar_alpha(false, &app.hovers, Instant::now()), 0.0);
 
         // A roll there scrolls the card, and the bar is up for the linger.
@@ -20538,7 +20799,8 @@ mod tests {
         assert_eq!(app.tab().cwd.first(), 0, "the wheel went through the card");
 
         // The pointer on the band lights the bar through the hover, as a
-        // pane's does; a press there does nothing, and closes nothing.
+        // pane's does; a press on the thumb that does not move scrolls
+        // nothing, and closes nothing.
         let g = laid_out(&app);
         let bar = g.bar.expect("still scrolls");
         let cursor = app.menu.as_ref().and_then(|m| m.cursor);
@@ -20546,7 +20808,7 @@ mod tests {
             &mut app,
             vec![egui::Event::PointerMoved(bar.thumb.center())],
         );
-        assert_eq!(app.hovers.hover(Control::MenuBar), 1.0);
+        assert_eq!(app.hovers.hover(Control::Bar(Bar::Menu)), 1.0);
         let lit = app.menu.as_ref().expect("up");
         assert_eq!(lit.bar_alpha(false, &app.hovers, Instant::now()), 1.0);
         click_on(&mut app, bar.thumb.center());
@@ -20555,7 +20817,7 @@ mod tests {
         assert_eq!(menu.cursor, cursor, "the band moved the cursor");
         assert!(app
             .ripples
-            .splashes(Control::MenuBar, Instant::now())
+            .splashes(Control::Bar(Bar::Menu), Instant::now())
             .next()
             .is_none());
 
@@ -22011,7 +22273,7 @@ mod tests {
         run_frame(&mut app, &ctx, Vec::new());
         assert!(app.tab().cwd.first() > 0, "the cursor did not scroll");
         let at = app.tab().cwd.scrolled_at().expect("the keyboard scrolled");
-        let lit = app.hovers.hover(Control::Scrollbar(Column::List));
+        let lit = app.hovers.hover(Control::Bar(Bar::Pane(Column::List)));
         assert_eq!(lit, 0.0, "nothing is hovering the bar");
         let alpha = |now| crate::scrollbar::visibility(Some(at), lit, false, now);
         assert_eq!(alpha(at), 1.0);
@@ -22078,7 +22340,7 @@ mod tests {
         // band: a pointer elsewhere on the card lights nothing.
         let lit = |app: &App| {
             app.hovers
-                .hover(Control::CardBar(crate::scrollbar::Surface::Palette))
+                .hover(Control::Bar(Bar::Card(crate::scrollbar::Surface::Palette)))
         };
         let geometry = overlay::finder_geometry(short, hits);
         let band = geometry.band.expect("the rows overflow the card");

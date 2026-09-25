@@ -257,6 +257,12 @@ impl TaskPanel {
         self.bar.scrolled_at()
     }
 
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: Instant) {
+        self.bar.let_go(now);
+    }
+
     /// The task the keys act on.
     pub fn selected(&self, rows: &[TaskRow]) -> Option<TaskId> {
         rows.get(self.cursor).map(|r| r.id)
@@ -542,8 +548,14 @@ pub fn paint(
         );
     }
     if let Some(bar) = bar(card, rects, panel, rows.len()) {
-        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Tasks));
-        crate::scrollbar::paint_card(paint, &bar, lit, panel.scrolled_at(), 1.0);
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Tasks,
+            hovers,
+            panel.scrolled_at(),
+            1.0,
+        );
     }
 }
 
@@ -816,6 +828,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let painting = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

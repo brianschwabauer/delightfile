@@ -258,6 +258,13 @@ impl Listing {
         true
     }
 
+    /// A hand let go of the pane's bar: it lingers from now, rather than from
+    /// wherever the drag last moved the view — a thumb held still and then
+    /// let go would otherwise leave at once.
+    pub fn let_go(&mut self, now: Instant) {
+        self.scrolled_at = Some(now);
+    }
+
     /// Whether a scroll towards `direction` (negative is up) has anywhere left
     /// to go, counted the way [`Listing::wheel`] counts.
     ///

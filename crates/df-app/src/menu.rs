@@ -1045,6 +1045,25 @@ impl Menu {
         self.scroll_list(sub, area, now, |from| from - points)
     }
 
+    /// Put one list — the submenu's when `sub` — `to` points down itself,
+    /// kept inside the list, for a hand on its bar: the thumb dragged, or
+    /// the track pressed ([`scrollbar::Geometry::page`]). Points, because a
+    /// menu's rows are not one height and its bar is measured in points.
+    /// Returns whether the rows moved.
+    pub fn scroll_to(&mut self, sub: bool, to: f32, area: egui::Rect, now: Instant) -> bool {
+        self.scroll_list(sub, area, now, |_| to)
+    }
+
+    /// A hand let go of one card's bar — the submenu's when `sub` — so it
+    /// lingers from now ([`scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, sub: bool, now: Instant) {
+        if sub {
+            self.sub_scrolled_at = Some(now);
+        } else {
+            self.scrolled_at = Some(now);
+        }
+    }
+
     /// Scroll the list the keyboard is in just far enough that its cursor's
     /// row is whole on the card: up to it when it is above the part shown,
     /// down to it when below, and not at all when it is already there. Called
@@ -1118,9 +1137,9 @@ impl Menu {
     /// a pointer that was only choosing a row.
     pub fn bar_alpha(&self, sub: bool, hovers: &Hovers<Control>, now: Instant) -> f32 {
         let (scrolled_at, band) = if sub {
-            (self.sub_scrolled_at, Control::SubmenuBar)
+            (self.sub_scrolled_at, Control::Bar(scrollbar::Bar::Submenu))
         } else {
-            (self.scrolled_at, Control::MenuBar)
+            (self.scrolled_at, Control::Bar(scrollbar::Bar::Menu))
         };
         scrollbar::visibility(scrolled_at, hovers.hover(band), false, now)
     }
@@ -1196,14 +1215,14 @@ impl Geometry {
     pub fn hit(&self, pos: egui::Pos2) -> Option<Control> {
         if let Some((card, rows)) = &self.sub {
             if self.sub_bar.is_some_and(|bar| bar.contains(pos)) {
-                return Some(Control::SubmenuBar);
+                return Some(Control::Bar(scrollbar::Bar::Submenu));
             }
             if let Some(index) = row_at(*card, rows, pos) {
                 return Some(Control::SubmenuItem(index));
             }
         }
         if self.bar.is_some_and(|bar| bar.contains(pos)) {
-            return Some(Control::MenuBar);
+            return Some(Control::Bar(scrollbar::Bar::Menu));
         }
         row_at(self.card, &self.rows, pos).map(Control::MenuItem)
     }
@@ -1221,8 +1240,8 @@ impl Geometry {
                 .sub
                 .as_ref()
                 .and_then(|(_, rows)| rows.get(index).copied()),
-            Control::MenuBar => self.bar.map(|bar| bar.hit),
-            Control::SubmenuBar => self.sub_bar.map(|bar| bar.hit),
+            Control::Bar(scrollbar::Bar::Menu) => self.bar.map(|bar| bar.hit),
+            Control::Bar(scrollbar::Bar::Submenu) => self.sub_bar.map(|bar| bar.hit),
             _ => None,
         }
     }
@@ -1510,9 +1529,14 @@ pub fn paint(
         now,
     );
     if let Some(bar) = &geometry.bar {
-        let lit = hovers.hover(Control::MenuBar);
-        let shown = menu.bar_alpha(false, hovers, now);
-        scrollbar::paint(paint, bar, shown * alpha, lit, false);
+        let lit = hovers.hover(Control::Bar(scrollbar::Bar::Menu));
+        let held = paint.held == Some(scrollbar::Bar::Menu);
+        let shown = if held {
+            1.0
+        } else {
+            menu.bar_alpha(false, hovers, now)
+        };
+        scrollbar::paint(paint, bar, shown * alpha, lit, held);
     }
 
     let (Some((sub_card, sub_rows)), Some(items)) = (&geometry.sub, menu.sub_items()) else {
@@ -1534,9 +1558,14 @@ pub fn paint(
         now,
     );
     if let Some(bar) = &geometry.sub_bar {
-        let lit = hovers.hover(Control::SubmenuBar);
-        let shown = menu.bar_alpha(true, hovers, now);
-        scrollbar::paint(paint, bar, shown * alpha, lit, false);
+        let lit = hovers.hover(Control::Bar(scrollbar::Bar::Submenu));
+        let held = paint.held == Some(scrollbar::Bar::Submenu);
+        let shown = if held {
+            1.0
+        } else {
+            menu.bar_alpha(true, hovers, now)
+        };
+        scrollbar::paint(paint, bar, shown * alpha, lit, held);
     }
 }
 
@@ -2369,19 +2398,32 @@ mod tests {
         let g = laid_out(window, &menu);
         let bar = g.bar.expect("a list that scrolls has a bar");
         assert_eq!(bar.hit.right(), view(g.card).right());
-        assert_eq!(g.hit(bar.thumb.center()), Some(Control::MenuBar));
+        assert_eq!(
+            g.hit(bar.thumb.center()),
+            Some(Control::Bar(scrollbar::Bar::Menu))
+        );
         let row = g.rows[2];
         let edge = egui::pos2(row.right() - 1.0, row.center().y);
-        assert_eq!(g.hit(edge), Some(Control::MenuBar), "the band is the bar's");
+        assert_eq!(
+            g.hit(edge),
+            Some(Control::Bar(scrollbar::Bar::Menu)),
+            "the band is the bar's"
+        );
         assert_eq!(g.hit(row.center()), Some(Control::MenuItem(2)));
-        assert_eq!(g.rect_of(Control::MenuBar), Some(bar.hit));
+        assert_eq!(g.rect_of(Control::Bar(scrollbar::Bar::Menu)), Some(bar.hit));
 
         menu.cursor = Some(28);
         assert!(menu.open_submenu());
         let g = laid_out(window, &menu);
         let bar = g.sub_bar.expect("forty rows scroll");
-        assert_eq!(g.hit(bar.thumb.center()), Some(Control::SubmenuBar));
-        assert_eq!(g.rect_of(Control::SubmenuBar), Some(bar.hit));
+        assert_eq!(
+            g.hit(bar.thumb.center()),
+            Some(Control::Bar(scrollbar::Bar::Submenu))
+        );
+        assert_eq!(
+            g.rect_of(Control::Bar(scrollbar::Bar::Submenu)),
+            Some(bar.hit)
+        );
 
         let menu = Menu::context(egui::pos2(200.0, 200.0), items(facts(), &openers()));
         let g = laid_out(area(), &menu);
@@ -2389,7 +2431,7 @@ mod tests {
         let row = g.rows[2];
         let edge = egui::pos2(row.right() - 1.0, row.center().y);
         assert_eq!(g.hit(edge), Some(Control::MenuItem(2)));
-        assert_eq!(g.rect_of(Control::MenuBar), None);
+        assert_eq!(g.rect_of(Control::Bar(scrollbar::Bar::Menu)), None);
     }
 
     /// The bar is up by a pane's rule and no other: for the linger after the
@@ -2408,7 +2450,7 @@ mod tests {
         hovers.tick(Some(Control::MenuItem(3)), None, t0);
         assert_eq!(menu.bar_alpha(false, &hovers, t0), 0.0);
         // On the band: up at once.
-        hovers.tick(Some(Control::MenuBar), None, at(10));
+        hovers.tick(Some(Control::Bar(scrollbar::Bar::Menu)), None, at(10));
         assert_eq!(menu.bar_alpha(false, &hovers, at(10)), 1.0);
         assert_eq!(menu.bar_alpha(true, &hovers, at(10)), 0.0, "not the sub's");
         // Off it onto a row: the hover's own fade takes it away.

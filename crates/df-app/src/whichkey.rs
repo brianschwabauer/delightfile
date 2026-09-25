@@ -159,6 +159,18 @@ impl WhichKey {
         self.bar.scrolled_at()
     }
 
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: Instant) {
+        self.bar.let_go(now);
+    }
+
+    /// Start the columns at row `first`, for a hand on the bar, in the card
+    /// laid out as `geometry`, kept inside them.
+    pub fn scroll_to(&mut self, first: usize, geometry: &Geometry) {
+        self.first = first.min(geometry.total.saturating_sub(geometry.per));
+    }
+
     /// When the next frame is owed, or `None` when the card is settled — either
     /// fully up (a static card costs nothing) or fully gone.
     pub fn deadline(&self, due: Option<Instant>) -> Option<Instant> {

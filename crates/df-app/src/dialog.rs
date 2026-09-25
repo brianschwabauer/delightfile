@@ -230,6 +230,12 @@ impl Confirm {
         self.bar.scrolled_at()
     }
 
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: std::time::Instant) {
+        self.bar.let_go(now);
+    }
+
     /// The wheel over the card, in points: whole names at a time
     /// ([`crate::mouse::roll`]). Returns whether the names moved.
     pub fn wheel(&mut self, points: f32, now: std::time::Instant) -> bool {
@@ -608,6 +614,12 @@ impl ConflictDialog {
     pub fn scrolled_at(&self) -> Option<std::time::Instant> {
         self.bar.scrolled_at()
     }
+
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: std::time::Instant) {
+        self.bar.let_go(now);
+    }
 }
 
 // ── Geometry, shared by the paint and the hit test ──────────────────────────
@@ -972,8 +984,14 @@ pub fn paint_confirm(
         );
     }
     if let Some(bar) = names_bar(geometry, confirm) {
-        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Confirm));
-        crate::scrollbar::paint_card(paint, &bar, lit, confirm.scrolled_at(), 1.0);
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Confirm,
+            hovers,
+            confirm.scrolled_at(),
+            1.0,
+        );
     }
 
     let labels = ["Cancel", confirm_verb(confirm.kind)];
@@ -1110,7 +1128,7 @@ impl BulkGeometry {
             return Some(Control::Action(i));
         }
         if self.bar.is_some_and(|bar| bar.contains(pos)) {
-            return Some(Control::BulkScrollbar);
+            return Some(Control::Bar(crate::scrollbar::Bar::Bulk));
         }
         if self.template.contains(pos) {
             return Some(Control::BulkTemplate);
@@ -1128,7 +1146,7 @@ impl BulkGeometry {
             Control::Action(i) => self.actions.get(i).copied(),
             Control::BulkTemplate => Some(self.template),
             Control::BulkRow(i) => self.rows.get(i).map(|row| row.new),
-            Control::BulkScrollbar => self.bar.map(|bar| bar.hit),
+            Control::Bar(crate::scrollbar::Bar::Bulk) => self.bar.map(|bar| bar.hit),
             Control::BulkCandidate(i) => self
                 .popover
                 .as_ref()
@@ -1411,17 +1429,14 @@ fn popover_geometry(
 }
 
 /// Draw the rename card: the heading, the template field, the two columns,
-/// the answers, and the `{` popover over all of it.
-///
-/// `held` is whether the list's scrollbar thumb is in the hand.
-#[allow(clippy::too_many_arguments)]
+/// the answers, and the `{` popover over all of it. The list's bar is drawn
+/// held while a hand is on its thumb ([`Painting::held`]).
 pub fn paint_bulk(
     paint: &Painting<'_>,
     bulk: &Bulk,
     geometry: &BulkGeometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
-    held: bool,
 ) {
     let palette = paint.palette;
     let painter = paint.painter;
@@ -1504,7 +1519,9 @@ pub fn paint_bulk(
         paint_name(paint, bulk, row, old, line, rows_focused.then_some(carets));
     }
     if let Some(bar) = &geometry.bar {
-        crate::scrollbar::paint(paint, bar, 1.0, hovers.hover(Control::BulkScrollbar), held);
+        let lit = hovers.hover(Control::Bar(crate::scrollbar::Bar::Bulk));
+        let held = paint.held == Some(crate::scrollbar::Bar::Bulk);
+        crate::scrollbar::paint(paint, bar, 1.0, lit, held);
     }
 
     // The status, with how many carets are typing at once while they are: a
@@ -2022,8 +2039,14 @@ pub fn paint_conflict(
         );
     }
     if let Some(bar) = conflicts_bar(geometry, dialog) {
-        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Conflict));
-        crate::scrollbar::paint_card(paint, &bar, lit, dialog.scrolled_at(), 1.0);
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Conflict,
+            hovers,
+            dialog.scrolled_at(),
+            1.0,
+        );
     }
 
     // The comparison: what is coming in, and what is already there.
@@ -2711,6 +2734,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let paint = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
@@ -2748,17 +2772,17 @@ mod tests {
             )
             .expect("a local directory builds a card");
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples);
 
             bulk.insert_text("-x");
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples);
 
             bulk.insert_text("{");
             assert!(bulk.live_popover().is_some());
             let g = bulk_geometry(ui.painter(), area, &bulk);
             assert!(g.popover.is_some(), "the list is measured");
-            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples);
 
             // Two rows wanting the same name, so the refusal treatment draws.
             for script in ["esc", "tab", "ctrl+a", "ctrl+k"] {
@@ -2772,12 +2796,16 @@ mod tests {
             bulk.key(chord("ctrl+shift+down"));
             assert!(!bulk.valid());
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, true);
+            let held = Painting {
+                held: Some(crate::scrollbar::Bar::Bulk),
+                ..paint
+            };
+            paint_bulk(&held, &bulk, &g, &hovers, &ripples);
 
             // …and a window with no room for a card at all.
             let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 60.0));
             let g = bulk_geometry(ui.painter(), tiny, &bulk);
-            paint_bulk(&paint, &bulk, &g, &hovers, &ripples, false);
+            paint_bulk(&paint, &bulk, &g, &hovers, &ripples);
         });
     }
 
@@ -2850,7 +2878,10 @@ mod tests {
                 "the old name is history"
             );
             let bar = g.bar.expect("measured above");
-            assert_eq!(g.hit(bar.thumb.center()), Some(Control::BulkScrollbar));
+            assert_eq!(
+                g.hit(bar.thumb.center()),
+                Some(Control::Bar(crate::scrollbar::Bar::Bulk))
+            );
 
             // A short card is only as tall as it needs to be, with no bar:
             // the pad, the title, the field, two rows, the buttons' line.

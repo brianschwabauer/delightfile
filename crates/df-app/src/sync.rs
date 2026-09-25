@@ -313,6 +313,21 @@ impl SyncCard {
         self.bar.scrolled_at()
     }
 
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: std::time::Instant) {
+        self.bar.let_go(now);
+    }
+
+    /// Start the list at `first`, kept inside it, for a hand on the bar.
+    /// Returns whether the rows moved; the linger is stamped where the card
+    /// is told its view ([`SyncCard::fit`]).
+    pub fn scroll_to(&mut self, first: usize) -> bool {
+        let before = self.first;
+        self.first = first.min(self.rows.len().saturating_sub(self.visible()));
+        self.first != before
+    }
+
     /// `↑`/`↓`: a row at a time.
     pub fn scroll_by(&mut self, delta: isize) {
         let last = self.rows.len().saturating_sub(self.visible()) as isize;
@@ -806,7 +821,9 @@ impl Geometry {
             return Some(Control::Close);
         }
         if self.band.is_some_and(|band| band.contains(pos)) {
-            return Some(Control::CardBar(crate::scrollbar::Surface::Sync));
+            return Some(Control::Bar(crate::scrollbar::Bar::Card(
+                crate::scrollbar::Surface::Sync,
+            )));
         }
         self.actions
             .iter()
@@ -818,7 +835,7 @@ impl Geometry {
         match control {
             Control::Close => Some(self.close),
             Control::Action(i) => self.actions.get(i).copied(),
-            Control::CardBar(_) => self.band,
+            Control::Bar(crate::scrollbar::Bar::Card(_)) => self.band,
             _ => None,
         }
     }
@@ -1009,8 +1026,14 @@ pub fn paint(
         );
     }
     if let Some(bar) = bar(geometry, card) {
-        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Sync));
-        crate::scrollbar::paint_card(paint, &bar, lit, card.scrolled_at(), 1.0);
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Sync,
+            hovers,
+            card.scrolled_at(),
+            1.0,
+        );
     }
 
     let status = card.status();
@@ -1557,7 +1580,9 @@ mod tests {
             let band = g.band.expect("a band beside the list");
             assert_eq!(
                 g.hit(band.center()),
-                Some(Control::CardBar(crate::scrollbar::Surface::Sync))
+                Some(Control::Bar(crate::scrollbar::Bar::Card(
+                    crate::scrollbar::Surface::Sync
+                )))
             );
             let g = geometry(ui.painter(), tall, &few);
             assert_eq!(bar(&g, &few), None, "three rows fit");

@@ -331,8 +331,14 @@ pub fn paint_finder(
         );
     }
     if let Some(bar) = finder_bar(geometry, finder) {
-        let lit = hovers.hover(Control::CardBar(crate::scrollbar::Surface::Palette));
-        crate::scrollbar::paint_card(paint, &bar, lit, finder.scrolled_at(), 1.0);
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Palette,
+            hovers,
+            finder.scrolled_at(),
+            1.0,
+        );
     }
 }
 
@@ -992,12 +998,16 @@ mod tests {
         finder.scroll_into_view(geometry.rows.len(), 0, now);
         let mut hovers: Hovers<Control> = Hovers::new();
         hovers.tick(Some(Control::PanelRow(3)), None, now);
-        let lit = hovers.hover(Control::CardBar(Surface::Palette));
+        let lit = hovers.hover(Control::Bar(crate::scrollbar::Bar::Card(Surface::Palette)));
         assert_eq!(lit, 0.0, "the pointer is on a row, not the band");
         assert_eq!(visibility(finder.scrolled_at(), lit, false, now), 0.0);
 
-        hovers.tick(Some(Control::CardBar(Surface::Palette)), None, now);
-        let lit = hovers.hover(Control::CardBar(Surface::Palette));
+        hovers.tick(
+            Some(Control::Bar(crate::scrollbar::Bar::Card(Surface::Palette))),
+            None,
+            now,
+        );
+        let lit = hovers.hover(Control::Bar(crate::scrollbar::Bar::Card(Surface::Palette)));
         assert_eq!(visibility(finder.scrolled_at(), lit, false, now), 1.0);
 
         finder.move_cursor(30);
@@ -1095,6 +1105,7 @@ mod tests {
             let theme = df_core::config::Theme::default();
             let paint = Painting {
                 tips: None,
+                held: None,
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,

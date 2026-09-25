@@ -538,6 +538,12 @@ impl Finder {
     pub fn scrolled_at(&self) -> Option<Instant> {
         self.bar.scrolled_at()
     }
+
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: Instant) {
+        self.bar.let_go(now);
+    }
 }
 
 #[cfg(test)]
