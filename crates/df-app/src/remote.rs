@@ -276,6 +276,9 @@ pub fn inert_remotely(command: df_core::keymap::Command) -> bool {
             | C::YankToggle
             | C::ArchiveExtractHere
             | C::ArchiveExtractSubfolder
+            // The writers read files from this machine's disk, and write the
+            // archive beside them.
+            | C::ArchiveCreate
             // `O` hands the row's path to a child process as an argument; a
             // URL there opens nothing, or creates a file with a colon in its
             // name. `o` downloads first and is deliberately still live.

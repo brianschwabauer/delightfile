@@ -161,6 +161,9 @@ commands! {
     // browsed when the list pane is inside one.
     ArchiveExtractHere => "archive-extract-here",
     ArchiveExtractSubfolder => "archive-extract-subfolder",
+    // The other direction: the selection packed into one new archive, its
+    // format chosen by the extension typed into the prompt.
+    ArchiveCreate => "archive-create",
     // The trash, browsed as a directory (PLAN §7.4). `OpenTrash` is `g t` — the
     // slot yazi spent on `/tmp`, which this plan dropped. Restore and purge are
     // *not* commands of their own: inside the trash view `Enter`/`r` restore and

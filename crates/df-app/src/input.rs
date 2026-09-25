@@ -51,6 +51,9 @@ pub enum PromptKind {
     /// A save dialog's Save button: the name to save under, in the directory
     /// on screen.
     SaveAs,
+    /// `A`: the name of the archive the selection is packed into. Its
+    /// extension is the format.
+    Archive,
 }
 
 impl PromptKind {
@@ -68,6 +71,7 @@ impl PromptKind {
             PromptKind::Path => "Go to:",
             PromptKind::Connect => "Connect to:",
             PromptKind::SaveAs => "Save as:",
+            PromptKind::Archive => "Archive as:",
         }
     }
 
@@ -143,9 +147,62 @@ pub fn click_outside_action(kind: PromptKind) -> ClickOutside {
         | PromptKind::Shell
         | PromptKind::ShellBlock
         | PromptKind::Connect
-        | PromptKind::SaveAs => ClickOutside::Cancel,
+        | PromptKind::SaveAs
+        | PromptKind::Archive => ClickOutside::Cancel,
         PromptKind::Filter | PromptKind::FindNext | PromptKind::FindPrev => ClickOutside::Commit,
         PromptKind::ConflictRename | PromptKind::HelpFilter => ClickOutside::Keep,
+    }
+}
+
+/// How one run of an [`InkedHint`] is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ink {
+    /// The hint's own quiet colour.
+    Quiet,
+    /// The part the hint is about: the format the typed name picks.
+    Strong,
+    /// Something that is not available here: a format whose program is not
+    /// installed.
+    Absent,
+    /// The part the hint is warning about: the picked format cannot be
+    /// written, and why.
+    Warn,
+}
+
+/// A hint made of runs in different inks. One string, so it is measured,
+/// truncated and laid out exactly as a plain hint is; the runs only say which
+/// bytes of it take which colour.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InkedHint {
+    text: String,
+    runs: Vec<(std::ops::Range<usize>, Ink)>,
+}
+
+impl InkedHint {
+    pub fn push(&mut self, text: &str, ink: Ink) {
+        let start = self.text.len();
+        self.text.push_str(text);
+        self.runs.push((start..self.text.len(), ink));
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Byte ranges of [`InkedHint::text`], in order, covering all of it.
+    pub fn runs(&self) -> &[(std::ops::Range<usize>, Ink)] {
+        &self.runs
+    }
+
+    /// The text of the runs in `ink`, for a test that wants to know what is
+    /// lit without measuring anything.
+    #[cfg(test)]
+    pub fn inked(&self, ink: Ink) -> Vec<&str> {
+        self.runs
+            .iter()
+            .filter(|(_, i)| *i == ink)
+            .map(|(range, _)| &self.text[range.clone()])
+            .collect()
     }
 }
 
@@ -175,6 +232,11 @@ pub struct Prompt {
     /// does not clear it: it is about the listing behind the prompt, and the
     /// app sets it afresh every frame from what that listing shows.
     pub hint: Option<&'static str>,
+    /// A hint in more than one ink, said where [`Prompt::hint`] would be when
+    /// that has nothing to say: the archive prompt's list of formats, the one
+    /// the name picks lit and the ones this machine cannot write dimmed. Set
+    /// every frame by the app, like the plain hint.
+    pub inked: Option<InkedHint>,
     /// How far the field's text is scrolled to the left, in points, as it
     /// was last drawn: what [`crate::chrome::caret_scroll`] starts from, so the
     /// text holds still while the caret moves inside the field and scrolls
@@ -194,6 +256,7 @@ impl Prompt {
             origin,
             error: None,
             hint: None,
+            inked: None,
             scroll: 0.0,
         }
     }
@@ -208,8 +271,17 @@ impl Prompt {
         match (&self.error, self.hint) {
             (Some(error), _) => Some((error.as_str(), true)),
             (None, Some(hint)) => Some((hint, false)),
-            (None, None) => None,
+            (None, None) => self.inked.as_ref().map(|inked| (inked.text(), false)),
         }
+    }
+
+    /// The inked hint, when it is what [`Prompt::message`] is saying — so the
+    /// painter can colour the words it has already measured.
+    pub fn inked_message(&self) -> Option<&InkedHint> {
+        if self.error.is_some() || self.hint.is_some() {
+            return None;
+        }
+        self.inked.as_ref()
     }
 
     /// The caret as a byte offset, which is what the painter measures with.
@@ -325,9 +397,14 @@ mod tests {
             PromptKind::Path,
             PromptKind::Connect,
             PromptKind::SaveAs,
+            PromptKind::Archive,
         ] {
             assert!(kind.title().ends_with(':'), "{kind:?}");
         }
+        assert!(
+            !PromptKind::Archive.is_live() && !PromptKind::Archive.anchored(),
+            "an archive name packs nothing until Enter, and it is typed in the bar"
+        );
         assert!(
             !PromptKind::SaveAs.is_live() && !PromptKind::SaveAs.anchored(),
             "a save name picks nothing until Enter, and it is typed in the bar"
@@ -372,6 +449,7 @@ mod tests {
             (PromptKind::Path, Cancel),
             (PromptKind::Connect, Cancel),
             (PromptKind::SaveAs, Cancel),
+            (PromptKind::Archive, Cancel),
         ] {
             assert_eq!(click_outside_action(kind), expected, "{kind:?}");
             // The rule the table is written from: a prompt that waits for
@@ -500,6 +578,30 @@ mod tests {
         prompt.error = Some("no such command".to_string());
         prompt.click(0, 0, 1, false);
         assert!(prompt.error.is_some());
+    }
+
+    /// An inked hint is one string with colours on it, said only when there
+    /// is no error and no plain hint to say instead.
+    #[test]
+    fn an_inked_hint_is_said_when_nothing_else_is() {
+        let mut prompt = Prompt::with(PromptKind::Archive, 0, InputBuffer::new("a.zip", 1));
+        let mut inked = InkedHint::default();
+        inked.push("zip", Ink::Strong);
+        inked.push(" · ", Ink::Quiet);
+        inked.push("7z", Ink::Absent);
+        // Byte ranges: the middle dot is two bytes.
+        assert_eq!(inked.runs()[2].0, 7..9);
+        assert_eq!(inked.inked(Ink::Strong), ["zip"]);
+        prompt.inked = Some(inked);
+        assert_eq!(prompt.message(), Some(("zip · 7z", false)));
+        assert!(prompt.inked_message().is_some());
+
+        prompt.error = Some("bad".to_string());
+        assert_eq!(prompt.message(), Some(("bad", true)));
+        assert!(
+            prompt.inked_message().is_none(),
+            "the error is what is said"
+        );
     }
 
     /// An error is about the text as it stands, so editing the text takes it

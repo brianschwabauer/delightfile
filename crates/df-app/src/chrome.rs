@@ -2449,8 +2449,10 @@ enum Furniture {
     /// The inline error, laid out to the room it has.
     Error(Arc<egui::text::Galley>),
     /// The prompt's hint ([`Prompt::hint`]), laid out exactly as the error is
-    /// and drawn in a quiet colour instead of the error's.
-    Hint(Arc<egui::text::Galley>),
+    /// and drawn in a quiet colour instead of the error's — and the room it
+    /// was cut to, so an inked hint ([`Prompt::inked`]) can be laid out again
+    /// in its colours at exactly the same width.
+    Hint(Arc<egui::text::Galley>, f32),
     /// The smart-case indicator on a live prompt, and whether it is lit.
     Case(Arc<egui::text::Galley>, bool),
 }
@@ -2498,7 +2500,7 @@ fn field_layout(
             let furniture = if error {
                 Furniture::Error(galley)
             } else {
-                Furniture::Hint(galley)
+                Furniture::Hint(galley, room)
             };
             Some((furniture, right))
         }
@@ -2678,28 +2680,42 @@ fn prompt_field(
         // The row grew for this: the error gets a line of its own, under the
         // query it is about, rather than being squeezed into three characters
         // beside it.
-        painter.text(
-            egui::pos2(line.left(), line.center().y),
-            egui::Align2::LEFT_CENTER,
-            message,
-            egui::FontId::proportional(FONT),
-            if error {
-                palette.red
-            } else {
-                hint_ink(palette)
-            },
-        );
+        match prompt.inked_message() {
+            Some(inked) => {
+                let galley = painter.layout_job(inked_job(inked, palette, line.width()));
+                painter.galley(
+                    egui::pos2(line.left(), line.center().y - galley.size().y / 2.0),
+                    galley,
+                    hint_ink(palette),
+                );
+            }
+            None => {
+                painter.text(
+                    egui::pos2(line.left(), line.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    message,
+                    egui::FontId::proportional(FONT),
+                    if error {
+                        palette.red
+                    } else {
+                        hint_ink(palette)
+                    },
+                );
+            }
+        }
     }
     match &layout.furniture {
         Some((Furniture::Error(galley), left)) => {
             painter.galley(egui::pos2(*left, top(galley)), galley.clone(), palette.red);
         }
-        Some((Furniture::Hint(galley), left)) => {
-            painter.galley(
-                egui::pos2(*left, top(galley)),
-                galley.clone(),
-                hint_ink(palette),
-            );
+        Some((Furniture::Hint(galley, room), left)) => {
+            // The same words at the same width, so the same place — only the
+            // colours differ from the galley the layout measured.
+            let galley = match prompt.inked_message() {
+                Some(inked) => painter.layout_job(inked_job(inked, palette, *room)),
+                None => galley.clone(),
+            };
+            painter.galley(egui::pos2(*left, top(&galley)), galley, hint_ink(palette));
         }
         Some((Furniture::Case(galley, lit), left)) => {
             let color = if *lit {
@@ -2761,6 +2777,35 @@ fn prompt_field(
 /// own full-strength ink.
 fn hint_ink(palette: &crate::theme::Palette) -> egui::Color32 {
     palette.overlay1
+}
+
+/// An inked hint laid out in its colours, cut to `room` the way a plain hint
+/// is. The quiet runs are the hint's own ink; the lit one is the text's, a
+/// dimmed one sinks towards the ground as a disabled menu row does, and a
+/// warning is the yellow the smart-case indicator lights in.
+fn inked_job(
+    inked: &crate::input::InkedHint,
+    palette: &crate::theme::Palette,
+    room: f32,
+) -> egui::text::LayoutJob {
+    use crate::input::Ink;
+    let font = egui::FontId::proportional(FONT);
+    let mut job = egui::text::LayoutJob::default();
+    for (range, ink) in inked.runs() {
+        let color = match ink {
+            Ink::Quiet => hint_ink(palette),
+            Ink::Strong => palette.text,
+            Ink::Absent => palette.surface2,
+            Ink::Warn => palette.yellow,
+        };
+        job.append(
+            &inked.text()[range.clone()],
+            0.0,
+            egui::TextFormat::simple(font.clone(), color),
+        );
+    }
+    job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+    job
 }
 
 /// The insert caret's width, in points. One-and-a-half rather than one: a
@@ -4844,6 +4889,23 @@ mod tests {
             assert_eq!(prompt.message(), Some(("bad", true)));
             prompt.error = None;
             prompt.hint = None;
+            // The archive prompt's inked hint, measured as a hint is and
+            // painted in its colours, beside the query and on its own line.
+            let mut inked = crate::input::InkedHint::default();
+            inked.push("zip", crate::input::Ink::Strong);
+            inked.push(" · tar · ", crate::input::Ink::Quiet);
+            inked.push("tar.zst needs zstd", crate::input::Ink::Warn);
+            inked.push(" · ", crate::input::Ink::Quiet);
+            inked.push("7z", crate::input::Ink::Absent);
+            prompt.inked = Some(inked);
+            assert_eq!(prompt_lines(paint.painter, &prompt, 1200.0, None), 1);
+            prompt_row(&paint, path_rect, &prompt, Some("delightfile"), false);
+            assert_eq!(
+                prompt_lines(paint.painter, &prompt, 220.0, Some("delightfile")),
+                2
+            );
+            prompt_row(&paint, tall, &prompt, Some("delightfile"), false);
+            prompt.inked = None;
             let mut rename = Prompt::with(
                 PromptKind::Rename,
                 0,

@@ -778,9 +778,17 @@ fn a_typed_name_chooses_the_format() {
         Named::Unwritable("tar.bz2".to_string())
     );
     assert_eq!(named("notes.gz"), Named::Unwritable("gz".to_string()));
-    for empty in ["", "   ", ".zip", "out/", "out/.tar.gz"] {
+    for empty in ["", "   ", ".zip", "out/", "out/.tar.gz", ".rar"] {
         assert_eq!(named(empty), Named::Empty, "{empty:?}");
     }
+    // The extension alone, for a hint that lights up before there is a name.
+    assert_eq!(extension(".tar.gz"), Extension::Writes(Format::TarGz));
+    assert_eq!(extension("x.7Z"), Extension::Writes(Format::SevenZip));
+    assert_eq!(extension("photos"), Extension::Bare);
+    assert_eq!(
+        extension("photos.RAR"),
+        Extension::Unwritable("rar".to_string())
+    );
 }
 
 #[test]

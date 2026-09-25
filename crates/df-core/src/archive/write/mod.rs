@@ -168,39 +168,65 @@ pub enum Named {
     Empty,
 }
 
+/// What a name's extension says, whether or not there is a name in front of
+/// it yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Extension {
+    /// A format this writes.
+    Writes(Format),
+    /// No archive extension: the name will get `.zip`.
+    Bare,
+    /// An archive this cannot write, spelled as its extension: `rar`.
+    Unwritable(String),
+}
+
+/// The extension of the last component of `text`, and how many bytes of
+/// that component it takes.
+fn extension_of(text: &str) -> (Extension, usize) {
+    let text = text.trim();
+    let leaf = text.rsplit('/').next().unwrap_or(text);
+    let lower = leaf.to_ascii_lowercase();
+    if let Some((suffix, format)) = WRITABLE.iter().find(|(s, _)| lower.ends_with(s)) {
+        return (Extension::Writes(*format), suffix.len());
+    }
+    UNWRITABLE
+        .iter()
+        .find(|ext| {
+            lower
+                .strip_suffix(**ext)
+                .is_some_and(|rest| rest.ends_with('.'))
+        })
+        .map(|ext| (Extension::Unwritable((*ext).to_string()), ext.len() + 1))
+        .unwrap_or((Extension::Bare, 0))
+}
+
+/// The format a typed name's extension picks — what the prompt's hint lights
+/// up while the name is still being typed.
+pub fn extension(text: &str) -> Extension {
+    extension_of(text).0
+}
+
 /// Read a typed name: `photos` is `photos.zip`, `photos.tar.zst` is a
 /// `.tar.zst`, `photos.rar` is a refusal.
 pub fn named(text: &str) -> Named {
     let text = text.trim();
     let leaf = text.rsplit('/').next().unwrap_or(text);
-    if leaf.is_empty() {
+    let (extension, suffix) = extension_of(text);
+    // An extension with nothing in front of it is not a name: `.zip` would be
+    // a hidden file that is also an archive, which nobody means.
+    if leaf.len() == suffix {
         return Named::Empty;
     }
-    let lower = leaf.to_ascii_lowercase();
-    for (suffix, format) in WRITABLE {
-        if let Some(stem) = lower.strip_suffix(suffix) {
-            if stem.is_empty() {
-                return Named::Empty;
-            }
-            return Named::Archive {
-                name: text.to_string(),
-                format: *format,
-            };
-        }
-    }
-    for extension in UNWRITABLE {
-        if let Some(stem) = lower
-            .strip_suffix(extension)
-            .and_then(|rest| rest.strip_suffix('.'))
-        {
-            if !stem.is_empty() {
-                return Named::Unwritable((*extension).to_string());
-            }
-        }
-    }
-    Named::Archive {
-        name: format!("{text}.zip"),
-        format: Format::Zip,
+    match extension {
+        Extension::Writes(format) => Named::Archive {
+            name: text.to_string(),
+            format,
+        },
+        Extension::Unwritable(ext) => Named::Unwritable(ext),
+        Extension::Bare => Named::Archive {
+            name: format!("{text}.zip"),
+            format: Format::Zip,
+        },
     }
 }
 

@@ -72,6 +72,10 @@ use crate::toast::Toasts;
 use crate::ui::{self, ClipMark, Column, Control, ListView};
 use crate::whichkey::WhichKey;
 
+/// `A`: the selection packed into a new archive — its prompt, the prompt's
+/// format hint, the Replace card's yes, and the job.
+mod compress;
+
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
 /// columns (PLAN §2) to each be usable at once — the middle column is the one
 /// being read, and at much under this the preview stops being worth its share.
@@ -1530,6 +1534,10 @@ pub struct App {
     /// other selection discards it ([`crate::bulk::Bulk::reopen`]); a rename
     /// that goes through clears it.
     bulk_draft: Option<Box<crate::bulk::Bulk>>,
+    /// What `A` was pressed on, from the moment its prompt opens until the
+    /// archive is queued — including while the Replace card asks about the
+    /// name. See [`compress::Draft`].
+    archive_draft: Option<compress::Draft>,
     /// The files in the hand, while there are any.
     drag: Option<Drag>,
     /// A tab chip being pulled out of the strip (PLAN §2's "drag a tab out to
@@ -2051,6 +2059,7 @@ impl App {
             paste_seq: 0,
             prompt_opened: 0,
             bulk_draft: None,
+            archive_draft: None,
             drag: None,
             tab_drag: None,
             tab_land: None,
@@ -4419,9 +4428,12 @@ impl App {
                 return;
             }
             // A save's "Replace" is not an operation here at all: the program
-            // that asked for the name does the writing. The yes is the pick.
+            // that asked for the name does the writing. The yes is the pick —
+            // unless the name was an archive's, and the yes is to write it.
             ConfirmKind::Replace => {
-                self.pick(confirm.paths);
+                if !self.archive_replace(&confirm.paths) {
+                    self.pick(confirm.paths);
+                }
                 return;
             }
             // Both resolve the items from `confirm.paths` — the list the dialog
@@ -7583,8 +7595,10 @@ impl App {
     /// to go the moment it does.
     fn sync_prompt_hint(&mut self) {
         let hint = self.filter_ran_out().map(RanOut::hint);
+        let inked = self.archive_hint();
         if let Some(prompt) = &mut self.prompt {
             prompt.hint = hint;
+            prompt.inked = inked;
         }
     }
 
@@ -7706,6 +7720,11 @@ impl App {
                 // A toast has said why; the field stays exactly as typed,
                 // because the fix is a different name and it is one edit away.
                 SaveAs::Kept => return,
+            },
+            PromptKind::Archive => match self.archive_submit(&text, now) {
+                compress::Answer::Done => None,
+                compress::Answer::Refused(message) => Some(message),
+                compress::Answer::Kept => return,
             },
         };
         match error {
@@ -9012,6 +9031,7 @@ impl App {
             }
             C::ArchiveExtractHere => self.extract(ExtractMode::Here, now),
             C::ArchiveExtractSubfolder => self.extract(ExtractMode::Folder, now),
+            C::ArchiveCreate => self.open_archive_prompt(now),
             C::OpenInteractive => self.open_picker(now),
             // The primary button, from the keyboard: exactly what a click on
             // it does, dimmed-and-silent included. Outside a picker there is
@@ -16506,6 +16526,7 @@ fn inert_in_trash(command: Command) -> bool {
             | C::YankToggle
             | C::ArchiveExtractHere
             | C::ArchiveExtractSubfolder
+            | C::ArchiveCreate
             // Nested trash is not a place.
             | C::OpenTrash
     )
@@ -17146,6 +17167,9 @@ mod tests {
 
     use df_core::input::InputOp;
     use df_core::keymap::{Key, Mods};
+
+    /// `A`, driven through the prompt, the card and the job.
+    mod compress;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the

@@ -338,6 +338,25 @@ pub fn items(facts: Facts, openers: &[String]) -> Vec<Item> {
         }
         items.splice(at..at, extract);
     }
+    // The other direction, on every row — anything can go into an archive —
+    // under the extract rows when there are some and under "Open with" when
+    // not. The command itself, so the menu reaches it through `A`'s door.
+    let after = items
+        .iter()
+        .rposition(|item| {
+            matches!(
+                item.action,
+                Action::OpenWithMenu
+                    | Action::ExtractSubfolder
+                    | Action::ExtractHere
+                    | Action::ExtractMerged
+            )
+        })
+        .map_or(1, |i| i + 1);
+    items.insert(
+        after,
+        Item::new("Compress…", "A", Action::Run(Command::ArchiveCreate), acts),
+    );
     // Empty pane space has a menu of its own ([`folder_items`]), about the
     // folder rather than a row, so this one always opens on something.
     items.retain(|item| item.action != Action::OpenWithMenu || !openers.is_empty());
@@ -584,6 +603,7 @@ pub fn app_items(
         run("Rename", C::Rename, acts),
         run("New file or folder…", C::Create, true),
         run("Move to trash", C::Trash, acts),
+        run("Compress…", C::ArchiveCreate, acts),
         run("Undo", C::Undo, true),
         // Always live: a parent row only opens a list, and a grey one would
         // hide the rows under it that *can* act.
@@ -1313,6 +1333,7 @@ mod tests {
             vec![
                 ("Open", "Enter", Action::Open, false),
                 ("Open with", "O", Action::OpenWithMenu, false),
+                ("Compress…", "A", Action::Run(Command::ArchiveCreate), false),
                 ("Copy", "y", Action::Yank, true),
                 ("Cut", "x", Action::Cut, false),
                 ("Paste", "p", Action::Paste, false),
@@ -1739,6 +1760,7 @@ mod tests {
                 ("Rename", "r", false),
                 ("New file or folder…", "a", false),
                 ("Move to trash", "d", false),
+                ("Compress…", "A", false),
                 ("Undo", "u", false),
                 ("View", "", true),
                 ("Sort", "", false),

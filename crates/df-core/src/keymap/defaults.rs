@@ -214,6 +214,7 @@ pub(super) fn build() -> Registry {
         (Files, "B",      C::YankShow,          "Show what is yanked",                 Always),
         (Files, "e",      C::ArchiveExtractHere,      "Extract here",                  Always),
         (Files, "E",      C::ArchiveExtractSubfolder, "Extract to folder",             Always),
+        (Files, "A",      C::ArchiveCreate,           "Archive the selection",         Always),
 
         // ── Files: what is shown ────────────────────────────────────────────
         (Files, ".",   C::ToggleHidden,        "Toggle hidden files",   Always),
