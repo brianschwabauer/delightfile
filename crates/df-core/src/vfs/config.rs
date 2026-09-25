@@ -445,18 +445,43 @@ pub fn config_paths() -> Vec<PathBuf> {
 }
 
 /// Where rclone keeps its config, by rclone's own rule: `$RCLONE_CONFIG` when
-/// it is set, else `$XDG_CONFIG_HOME/rclone/rclone.conf`, else
-/// `~/.config/rclone/rclone.conf`.
+/// it is set; else `$XDG_CONFIG_HOME/rclone/rclone.conf` (or
+/// `~/.config/rclone/rclone.conf`) when that file exists; else the legacy
+/// `~/.rclone.conf` when *that* exists; else the XDG path again, where rclone
+/// would create one and where finding nothing is silence.
 ///
 /// The same answer `rclone` itself reaches, which matters because the daemon
 /// that does the work reads the file this function names — a service
 /// discovered from one file and served from another would be a remote that
 /// lists and then cannot be reached.
 pub fn rclone_config_path() -> Option<PathBuf> {
-    if let Some(explicit) = std::env::var_os("RCLONE_CONFIG").filter(|v| !v.is_empty()) {
+    rclone_config_path_from(
+        std::env::var_os("RCLONE_CONFIG"),
+        xdg_config_home(),
+        std::env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+/// [`rclone_config_path`]'s rule over explicit inputs — `$RCLONE_CONFIG`, the
+/// XDG config home, `$HOME` — so it can be tested against a temp directory
+/// rather than the environment.
+pub(super) fn rclone_config_path_from(
+    explicit: Option<std::ffi::OsString>,
+    config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(explicit) = explicit.filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(explicit));
     }
-    xdg_config_home().map(|base| base.join("rclone").join("rclone.conf"))
+    let xdg = config_home.map(|base| base.join("rclone").join("rclone.conf"));
+    let legacy = home.map(|home| home.join(".rclone.conf"));
+    if xdg.as_deref().is_some_and(Path::exists) {
+        return xdg;
+    }
+    if legacy.as_deref().is_some_and(Path::exists) {
+        return legacy;
+    }
+    xdg.or(legacy)
 }
 
 /// The line an encrypted `rclone.conf` carries instead of its sections.

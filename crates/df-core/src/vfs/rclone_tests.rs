@@ -117,6 +117,48 @@ fn an_encrypted_rclone_conf_warns_once_and_discovers_nothing() {
     }
 }
 
+/// rclone's own search: `$RCLONE_CONFIG`, then the XDG file if it exists,
+/// then the legacy `~/.rclone.conf` if *it* exists, then the XDG path.
+#[test]
+fn the_legacy_rclone_conf_is_the_last_place_looked() {
+    use super::config::rclone_config_path_from as path_from;
+    let home = TempDir::new("rclone-home");
+    let config_home = home.path.join(".config");
+    let xdg = config_home.join("rclone").join("rclone.conf");
+    let legacy = home.path.join(".rclone.conf");
+    let find = || path_from(None, Some(config_home.clone()), Some(home.path.clone()));
+
+    // Neither: the XDG path, where finding nothing is silence.
+    assert_eq!(find(), Some(xdg.clone()));
+    // Only the legacy file: that.
+    std::fs::write(&legacy, "[old]\ntype = s3\n").unwrap();
+    assert_eq!(find(), Some(legacy.clone()));
+    // Both: the XDG file wins.
+    std::fs::create_dir_all(xdg.parent().unwrap()).unwrap();
+    std::fs::write(&xdg, "[new]\ntype = drive\n").unwrap();
+    assert_eq!(find(), Some(xdg.clone()));
+    // `$RCLONE_CONFIG` beats both, and an empty one is no setting at all.
+    let explicit = home.path.join("elsewhere.conf");
+    assert_eq!(
+        path_from(
+            Some(explicit.clone().into_os_string()),
+            Some(config_home.clone()),
+            Some(home.path.clone())
+        ),
+        Some(explicit)
+    );
+    assert_eq!(
+        path_from(
+            Some(std::ffi::OsString::new()),
+            Some(config_home.clone()),
+            Some(home.path.clone())
+        ),
+        Some(xdg)
+    );
+    // No home at all: nowhere to look.
+    assert_eq!(path_from(None, None, None), None);
+}
+
 #[test]
 fn a_missing_rclone_conf_is_silence() {
     let (config, warnings) =
