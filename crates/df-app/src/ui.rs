@@ -471,6 +471,10 @@ pub enum Control {
     /// A pane's scrollbar: the band down its right edge, thumb and track
     /// alike ([`crate::scrollbar`]). The thumb is dragged, the track pages.
     Scrollbar(Column),
+    /// A divider between two panes ([`crate::divider`]): dragged to trade
+    /// width between them, double-clicked to fold the side pane away or open
+    /// it again.
+    Divider(crate::divider::Divider),
     /// A chip in the tab strip, by tab index.
     Tab(usize),
     /// The `×` a chip wears in its numeral's slot while the pointer is on it,
@@ -611,9 +615,11 @@ pub struct Split {
 }
 
 impl Split {
-    /// The panes as `panes` keeps them, at rest: nothing folding, nothing
-    /// pulled, and a folded pane's share already the list's.
-    pub fn resting(panes: &df_core::state::Panes) -> Split {
+    /// The config's `ratio`, at rest — nothing folding, nothing pulled, and
+    /// a folded pane's share already the list's: what the tests lay out.
+    #[cfg(test)]
+    pub fn at(ratio: [u16; 3]) -> Split {
+        let panes = df_core::state::Panes::from_ratio(ratio);
         Split {
             fractions: panes.ratio,
             open: [
@@ -623,12 +629,6 @@ impl Split {
             overshoot: [0.0; 2],
             collapsed: [panes.parent_collapsed, panes.preview_collapsed],
         }
-    }
-
-    /// The config's `ratio`, at rest: what the tests lay out.
-    #[cfg(test)]
-    pub fn at(ratio: [u16; 3]) -> Split {
-        Split::resting(&df_core::state::Panes::from_ratio(ratio))
     }
 }
 
@@ -669,6 +669,9 @@ pub struct Layout {
     pub hairlines: [f32; 2],
     /// [`Split::collapsed`], carried for the two questions below.
     pub collapsed: [bool; 2],
+    /// The width the panes have between them — the window less its margins
+    /// and both gaps — which is what a [`Split`]'s shares are shares of.
+    pub usable: f32,
 }
 
 impl Layout {
@@ -800,6 +803,7 @@ pub fn layout(area: egui::Rect, split: &Split, tab_strip: bool, path_lines: usiz
         dividers,
         hairlines,
         collapsed: split.collapsed,
+        usable,
     }
 }
 

@@ -32,7 +32,7 @@ use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord};
 use df_core::ops::paste::{plan_paste, Clipboard, PasteMode};
 use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
 use df_core::preview::PreviewKind;
-use df_core::state::{Panes, StateStore, View};
+use df_core::state::{Panes, Side, StateStore, View};
 use df_core::tasks::{FnJob, Lane, TaskCtx, TaskEngine, TaskEvent, TaskId, TaskState};
 use df_core::text::grouped;
 
@@ -46,6 +46,7 @@ use crate::archive::ExtractMode;
 use crate::chrome;
 use crate::cli::PickMode;
 use crate::dialog::{self, Confirm, ConfirmKind, ConflictDialog, Step};
+use crate::divider::{Divider, Dividers};
 use crate::dnd;
 use crate::finder::{self, Choice, Finder, Source};
 use crate::flip::{self, Flip, Snapshot};
@@ -1308,9 +1309,11 @@ pub struct App {
     /// How many lines the top row is showing, a high-water mark for the life of
     /// one prompt (see [`App::sync_path_lines`]).
     path_lines: usize,
-    /// How wide the panes are, as the state file keeps them: from there when
-    /// it has a record, from the config's `ratio` when it does not.
-    panes: Panes,
+    /// How wide the panes are, and the two dividers between them
+    /// ([`crate::divider`]): the widths as the state file keeps them — from
+    /// there when it has a record, from the config's `ratio` when it does
+    /// not — and everything moving between those and the screen.
+    dividers: Dividers,
     /// The one-at-a-time toast.
     toasts: Toasts,
     /// The modal card, when one is up. While it is, keys are matched against
@@ -1910,9 +1913,8 @@ impl App {
 
         // The panes' widths: the state file's, when a drag has ever left one
         // there, and the config's ratio otherwise.
-        let panes = state
-            .panes()
-            .unwrap_or_else(|| Panes::from_ratio(config.mgr.ratio));
+        let home_panes = Panes::from_ratio(config.mgr.ratio);
+        let panes = state.panes().unwrap_or(home_panes);
 
         let mut mgr = config.mgr.clone();
         // A file dialog that offered type filters opens on its active one with
@@ -2042,7 +2044,7 @@ impl App {
             yank: None,
             filter_chip: None,
             path_lines: 1,
-            panes,
+            dividers: Dividers::new(panes, home_panes, now),
             pending_keys: Vec::new(),
             modifiers: ModifiersState::empty(),
             window_focused: true,
@@ -8434,6 +8436,13 @@ impl App {
             self.press = None;
             return;
         }
+        // …and so does a divider in the hand: `Esc` puts the panes back where
+        // the press found them, and nothing is written.
+        if self.dividers.dragging().is_some() {
+            self.dividers.cancel(Instant::now());
+            self.press = None;
+            return;
+        }
         // The tray is the smallest thing on screen that `Esc` can take back,
         // so it goes first: closing it is never what somebody meant `Esc` to
         // do *instead* of something bigger.
@@ -10137,6 +10146,7 @@ impl App {
                 // produces them — and the `×` is closed by `click` itself.
                 Control::Row(..)
                 | Control::Scrollbar(_)
+                | Control::Divider(_)
                 | Control::Tab(_)
                 | Control::TabClose(_)
                 | Control::TabNew
@@ -10234,6 +10244,7 @@ impl App {
             }
             Control::Row(..)
             | Control::Scrollbar(_)
+            | Control::Divider(_)
             | Control::Tab(_)
             | Control::TabClose(_)
             | Control::TabNew
@@ -10819,6 +10830,9 @@ impl App {
                 }
                 bar.track
             }
+            // A divider takes its press at the press site, with a click count
+            // of its own, and never comes here.
+            Control::Divider(_) => egui::Rect::ZERO,
             Control::Crumb(index) => {
                 let rect = geom.crumbs.get(index).copied().unwrap_or(egui::Rect::ZERO);
                 if let Some(crumb) = self.path_bar.1.get(index) {
@@ -11715,6 +11729,8 @@ impl App {
             Some(select::Gesture::Text)
         } else if self.press.is_some_and(|press| press.bulk_bar.is_some()) {
             Some(select::Gesture::BulkScrollbar)
+        } else if let Some(which) = self.dividers.dragging() {
+            Some(select::Gesture::Divider(which))
         } else {
             self.press
                 .and_then(|press| press.scrollbar)
@@ -11812,6 +11828,11 @@ impl App {
         // not drawing a band and not holding files.
         if self.tab_drag.is_some() {
             self.carry_tab(at, geom.layout.strip, now);
+            return;
+        }
+        // …and so does a divider, which has already been moved this frame,
+        // before the panes were measured.
+        if self.dividers.dragging().is_some() {
             return;
         }
         // A press in the prompt's text owns it too (see
@@ -13715,8 +13736,18 @@ impl App {
     // ── The frame ───────────────────────────────────────────────────────────
 
     /// How the panes share the window this frame ([`ui::Split`]).
-    fn split(&self) -> ui::Split {
-        ui::Split::resting(&self.panes)
+    fn split(&self, now: Instant) -> ui::Split {
+        self.dividers.split(now)
+    }
+
+    /// Fold `side` away, or open it again: a double click on its divider.
+    /// Written through the state file's debounce, like everything else it
+    /// keeps.
+    fn toggle_pane(&mut self, side: Side, now: Instant) {
+        if let Some(panes) = self.dividers.toggle(side, now) {
+            self.state.set_panes(panes);
+            self.state_changed(now);
+        }
     }
 
     /// Everything this frame draws. One `&mut Ui` covering the window; painting
@@ -13736,7 +13767,7 @@ impl App {
         // the pre-keystroke geometry would leave the strip a frame behind the
         // key that asked for it, on a frame nothing would follow.
         self.sync_path_lines(&painter, area);
-        let layout = ui::layout(area, &self.split(), self.tabs.len() > 1, self.path_lines);
+        let layout = ui::layout(area, &self.split(now), self.tabs.len() > 1, self.path_lines);
         // How the list pane is drawn, published to the two things that run
         // *before* the pane is measured: the cursor commands and the wheel.
         let first_metrics = self
@@ -13782,7 +13813,20 @@ impl App {
         self.sync_prompt_hint();
         self.sync_path_lines(&painter, area);
 
-        let layout = ui::layout(area, &self.split(), self.tabs.len() > 1, self.path_lines);
+        // ── A divider in the hand ([`crate::divider`]) ──────────────────────
+        // Moved before the panes are measured, for the scrollbar thumb's
+        // reason: the panes follow the hand with no slide of their own, so
+        // the frame that reads the pointer has to be the frame that draws
+        // them where it put them. Measured after, every pane would trail the
+        // divider by a frame.
+        self.dividers.settle(now);
+        if self.dividers.dragging().is_some() {
+            if let Some(at) = ui.input(|i| i.pointer.interact_pos()) {
+                self.dividers.drag_to(at.x, layout.usable, now);
+            }
+        }
+
+        let layout = ui::layout(area, &self.split(now), self.tabs.len() > 1, self.path_lines);
         let list_content = ui::content_rect(layout.list);
         // Which geometry this tab draws its directory in, decided once and
         // threaded everywhere through `grid::pane_*` (PLAN §2). `None` is the
@@ -14259,6 +14303,16 @@ impl App {
                             hit(top_geom.filter.filter(|_| filter_live), Control::FilterChip)
                         })
                 })
+                // The dividers, before the scrollbars and the rows: their zones
+                // reach two points onto each plate, and those two points are
+                // the divider's — a scrollbar's band starts at the plate's
+                // edge, and it can spare them.
+                .or_else(|| {
+                    [Divider::Left, Divider::Right]
+                        .into_iter()
+                        .find(|which| layout.dividers[which.index()].contains(p))
+                        .map(Control::Divider)
+                })
                 // The scrollbars, before the rows they sit beside: the band is
                 // wider than the thumb so the hand need not aim, and the few
                 // points of it that overlap a row's end are the bar's.
@@ -14570,7 +14624,23 @@ impl App {
         // press the same way: a caret, a word or a line by the click count,
         // and no ripple.
         let mut bulk_clicks = None;
-        if let Some((control @ (Control::BulkTemplate | Control::BulkRow(_)), position)) =
+        if let Some((Control::Divider(which), position)) =
+            over.filter(|_| pointer.pressed && !dismissing)
+        {
+            // A divider is not a button: no ripple and no press to draw. Two
+            // clicks fold its side pane away or open it again; anything else
+            // takes hold of it, from the width the pane is drawn at now.
+            if self.clicks.count(Control::Divider(which), position, now) == 2 {
+                self.toggle_pane(which.side(), now);
+            } else {
+                let width = match which {
+                    Divider::Left => layout.parent.width(),
+                    Divider::Right => layout.preview.width(),
+                };
+                self.dividers
+                    .press(which, position.x, width, layout.usable, now);
+            }
+        } else if let Some((control @ (Control::BulkTemplate | Control::BulkRow(_)), position)) =
             over.filter(|_| pointer.pressed && !dismissing)
         {
             let clicks = self.clicks.count(control, position, now);
@@ -14693,6 +14763,16 @@ impl App {
                 },
                 dragging: false,
             });
+        }
+        // A divider let go keeps where it was left, and the state file hears
+        // about it. Also when the button is simply no longer down — a release
+        // that happened somewhere this window was not told about must not
+        // leave a divider stuck to the pointer.
+        if self.dividers.dragging().is_some() && (pointer.released || !pointer.down) {
+            if let Some(panes) = self.dividers.release(now) {
+                self.state.set_panes(panes);
+                self.state_changed(now);
+            }
         }
         if pointer.released {
             // A tab in the hand is decided *here*, unlike a file drag: there is
@@ -14830,10 +14910,15 @@ impl App {
         // back over the press's own release when the menu goes (see
         // [`chrome::path_bar`], which also holds it down outright). The type
         // chip's list holds the type chip down the same way.
+        // …and nor is a divider, which says it can be taken hold of with the
+        // cursor and nothing else.
         let hot = over.map(|(control, _)| control).filter(|control| {
             !matches!(
                 control,
-                Control::PromptField | Control::BulkTemplate | Control::BulkRow(_)
+                Control::PromptField
+                    | Control::BulkTemplate
+                    | Control::BulkRow(_)
+                    | Control::Divider(_)
             )
         });
         let held = self
@@ -14861,6 +14946,11 @@ impl App {
         // the hand is holding files, not pointing at a link.
         if dragging.is_some() || self.tab_drag.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if self.dividers.dragging().is_some() {
+            // A divider in the hand keeps saying so wherever the hand wanders
+            // — off its zone, over a row, out past a stretched minimum — for
+            // as long as the button is down.
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         } else if pointer.down
             && self
                 .press
@@ -14908,6 +14998,8 @@ impl App {
                 // hover, and a hand over either would promise a click that
                 // never happens (`delightful-ui` §2).
                 Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
+                // A divider moves sideways, and says so.
+                Control::Divider(_) => egui::CursorIcon::ResizeHorizontal,
                 // …and a pick button with nothing to pick is a third, for the
                 // same reason.
                 Control::PickButton if !pick_live => egui::CursorIcon::Default,
@@ -15611,6 +15703,24 @@ impl App {
             }
         }
 
+        // The divider in the hand: a hairline down the middle of its gap, in
+        // the accent every live thing in the window wears. Only while it is
+        // held — at rest a divider is the gap, and the gap needs no line.
+        if let Some(which) = self.dividers.dragging() {
+            let zone = layout.dividers[which.index()];
+            // One point wide, its left edge on a pixel, so it is one crisp
+            // line rather than two half-lit ones.
+            let left = ((layout.hairlines[which.index()] - 0.5) * ppp).round() / ppp;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(left, zone.top()),
+                    egui::pos2(left + 1.0, zone.bottom()),
+                ),
+                0,
+                self.palette.blue,
+            );
+        }
+
         // ── The chrome ──────────────────────────────────────────────────────
         // How far the top row's ground is tinted towards the filter's blue,
         // which is the *only* mark a committed filter leaves on the chrome
@@ -16024,6 +16134,10 @@ impl App {
                     .any(|at| crate::scrollbar::fading(Some(at), now)),
             ),
             ("preview", self.preview.animating(now)),
+            // A pane folding or opening, a reset's slide, a stretched divider
+            // springing back. All three end, and `Dividers::settle` drops them
+            // when they do.
+            ("dividers", self.dividers.animating(now)),
             // The picture's zoom and pan: a wheel blend, a double-click, a
             // fling, the spring back to fit. Named apart from "preview" so
             // `DF_FRAME_LOG` says *which* half of the pane is holding the frame
@@ -18605,7 +18719,12 @@ mod tests {
 
     /// The layout the frame draws in, from the frame's own inputs.
     fn layout_of(app: &App) -> ui::Layout {
-        ui::layout(screen(), &app.split(), app.tabs.len() > 1, app.path_lines)
+        ui::layout(
+            screen(),
+            &app.split(Instant::now()),
+            app.tabs.len() > 1,
+            app.path_lines,
+        )
     }
 
     /// Where list row `index` is drawn, by the geometry the frame uses.
@@ -20497,6 +20616,157 @@ mod tests {
         assert!(!bar.on_thumb(above), "the thumb is at the top");
         click_at(&mut app, &ctx, above);
         assert_eq!(app.tab().cwd.first(), 2 * page);
+    }
+
+    // ── The dividers ([`crate::divider`]) ──────────────────────────────────
+
+    /// The cursor the window asks for after one frame with `events`.
+    fn cursor_after(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::CursorIcon {
+        let input = egui::RawInput {
+            screen_rect: Some(screen()),
+            events,
+            focused: true,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| app.frame(ui))
+            .platform_output
+            .cursor_icon
+    }
+
+    /// Pressed and pulled, the parent|list divider trades width between
+    /// those two panes and nothing else, the panes following the hand on the
+    /// frame it moved; let go, the widths are the state file's. No band, no
+    /// file drag, no cursor move, and the resize cursor throughout — even
+    /// with the hand well off the divider.
+    #[test]
+    fn a_divider_is_dragged_and_kept() {
+        let mut app = long_listing("divider-drag");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let before = layout_of(&app);
+        let grab = before.dividers[0].center();
+        assert_eq!(
+            cursor_after(&mut app, &ctx, vec![egui::Event::PointerMoved(grab)]),
+            egui::CursorIcon::ResizeHorizontal
+        );
+
+        drag_to(&mut app, &ctx, grab, grab + egui::vec2(120.0, 200.0));
+        assert_eq!(app.dividers.dragging(), Some(Divider::Left));
+        let during = layout_of(&app);
+        assert!(
+            (during.parent.width() - (before.parent.width() + 120.0)).abs() < 0.5,
+            "{} → {}",
+            before.parent.width(),
+            during.parent.width()
+        );
+        assert_eq!(during.preview, before.preview, "the far pane never moves");
+        assert!(app.band.is_none() && app.drag.is_none());
+        assert_eq!(app.tab().cwd.dir.cursor(), 0);
+        assert!(app.state.panes().is_none(), "nothing written mid-drag");
+        let away = grab + egui::vec2(400.0, 100.0);
+        assert!(!during.dividers[0].contains(away));
+        assert_eq!(
+            cursor_after(&mut app, &ctx, vec![egui::Event::PointerMoved(away)]),
+            egui::CursorIcon::ResizeHorizontal
+        );
+
+        let left_at = layout_of(&app);
+        assert!((left_at.parent.width() - (before.parent.width() + 400.0)).abs() < 0.5);
+
+        release_at(&mut app, &ctx, away);
+        assert_eq!(app.dividers.dragging(), None);
+        let kept = app.state.panes().expect("the widths were kept");
+        let usable = before.usable;
+        assert!((kept.ratio[0] * usable - left_at.parent.width()).abs() < 0.5);
+        assert_eq!(kept.ratio[2], 0.375, "the preview's share is untouched");
+        assert!(
+            app.state_due.deadline(Instant::now()).is_some(),
+            "the write is armed"
+        );
+    }
+
+    /// The divider's two points onto the list plate are the divider's, not
+    /// the scrollbar's whose band starts at the same edge.
+    #[test]
+    fn the_divider_wins_its_overlap_with_the_scrollbar() {
+        let mut app = long_listing("divider-overlap");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let layout = layout_of(&app);
+        let (bar, _) = list_bar(&app);
+        let at = egui::pos2(layout.list.right() - 1.0, bar.thumb.center().y);
+        assert!(bar.contains(at) && layout.dividers[1].contains(at));
+        drag_to(&mut app, &ctx, at, at + egui::vec2(-60.0, 0.0));
+        assert_eq!(app.dividers.dragging(), Some(Divider::Right));
+        assert!(app.press.is_some_and(|press| press.scrollbar.is_none()));
+        release_at(&mut app, &ctx, at + egui::vec2(-60.0, 0.0));
+    }
+
+    /// `Esc` with a divider in the hand puts the panes back and writes
+    /// nothing, and the release that follows does nothing either.
+    #[test]
+    fn escape_puts_a_dragged_divider_back() {
+        let mut app = long_listing("divider-escape");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let before = layout_of(&app);
+        let grab = before.dividers[1].center();
+        drag_to(&mut app, &ctx, grab, grab + egui::vec2(-200.0, 0.0));
+        assert!(layout_of(&app).preview.width() > before.preview.width() + 150.0);
+        press_key(&mut app, &ctx, Key::Escape);
+        assert_eq!(app.dividers.dragging(), None);
+        release_at(&mut app, &ctx, grab + egui::vec2(-200.0, 0.0));
+        assert!(app.state.panes().is_none());
+        let settled = ui::layout(
+            screen(),
+            &app.split(Instant::now() + crate::divider::FOLD),
+            false,
+            1,
+        );
+        assert!((settled.preview.width() - before.preview.width()).abs() < 1e-3);
+    }
+
+    /// A double click on a divider folds its side pane away, and a double
+    /// click on the margin it left opens it again; both are written.
+    #[test]
+    fn a_double_click_folds_a_side_pane_and_opens_it() {
+        let mut app = long_listing("divider-fold");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let open = layout_of(&app);
+        let zone = open.dividers[1].center();
+        click_at(&mut app, &ctx, zone);
+        assert!(
+            !app.dividers.collapsed(Side::Preview),
+            "one click is not two"
+        );
+        click_at(&mut app, &ctx, zone);
+        assert!(app.dividers.collapsed(Side::Preview));
+        assert!(app.state.panes().is_some_and(|p| p.preview_collapsed));
+
+        let later = Instant::now() + crate::divider::FOLD;
+        let folded = ui::layout(screen(), &app.split(later), false, 1);
+        assert_eq!(folded.preview.width(), 0.0);
+        assert!((screen().right() - folded.list.right() - ui::GAP).abs() < 1e-3);
+        assert_eq!(folded.parent, open.parent);
+
+        // The margin is where it is taken hold of now.
+        let margin = folded.dividers[1].center();
+        assert!(margin.x > folded.list.right());
+        click_at(&mut app, &ctx, margin);
+        click_at(&mut app, &ctx, margin);
+        assert!(!app.dividers.collapsed(Side::Preview));
+        let reopened = ui::layout(
+            screen(),
+            &app.split(Instant::now() + crate::divider::FOLD),
+            false,
+            1,
+        );
+        assert!((reopened.preview.width() - open.preview.width()).abs() < 1e-3);
     }
 
     /// The bar is up for the linger after the view moves — by the keyboard as

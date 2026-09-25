@@ -223,6 +223,8 @@ pub enum Gesture {
     Scrollbar(Column),
     /// The bulk rename card's scrollbar thumb, held and dragged.
     BulkScrollbar,
+    /// A divider between two panes, held and dragged ([`crate::divider`]).
+    Divider(crate::divider::Divider),
 }
 
 /// What the pointer is over, as far as anything is allowed to answer it while
@@ -260,6 +262,7 @@ pub fn gesture_filter(
         ),
         Some(Gesture::Scrollbar(column)) => *control == Control::Scrollbar(column),
         Some(Gesture::BulkScrollbar) => *control == Control::BulkScrollbar,
+        Some(Gesture::Divider(which)) => *control == Control::Divider(which),
     })
 }
 

@@ -15,6 +15,7 @@ mod cli;
 mod clipboard;
 mod dbus;
 mod dialog;
+mod divider;
 mod dnd;
 mod finder;
 mod flip;
