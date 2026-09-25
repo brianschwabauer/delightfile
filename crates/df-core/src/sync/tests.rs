@@ -325,14 +325,32 @@ fn a_socket_is_skipped_by_name_rather_than_silently() {
     let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     t.file("src/d/real.txt", b"x");
     let plan = quick(&[dir], &t.dir("dst"));
-    assert_eq!(plan.skipped.len(), 1);
-    assert_eq!(plan.skipped[0].0, socket);
+    assert_eq!(plan.specials, [socket]);
+    assert!(plan.skipped.is_empty(), "a socket is not unreadable");
     assert!(!classes(&plan)
         .iter()
         .any(|(label, _)| label.ends_with("sock")));
-    // …and the run says so too, rather than reporting a clean copy.
+    // …and the run counts it without calling it a problem.
     let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
-    assert_eq!(report.skipped, plan.skipped);
+    assert_eq!(report.specials, 1);
+    assert_eq!(report.problems(), 0, "{report:?}");
+}
+
+#[test]
+fn a_folder_that_could_not_be_read_is_a_problem() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TempTree::new("sync-unreadable");
+    let dir = t.dir("src/d");
+    t.file("src/d/fine.txt", b"x");
+    let locked = t.dir("src/d/locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let plan = quick(&[dir], &t.dir("dst"));
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(plan.skipped.len(), 1, "{:?}", plan.skipped);
+    assert_eq!(plan.skipped[0].0, locked);
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(report.copied, 1);
+    assert_eq!(report.problems(), 1, "the card must say so: {report:?}");
 }
 
 #[test]

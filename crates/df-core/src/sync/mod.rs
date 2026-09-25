@@ -202,11 +202,15 @@ pub struct SyncPlan {
     /// mirror removes each to make room, and counts it as removed, so the
     /// progress total needs them before the run starts.
     pub folders_in_the_way: u64,
-    /// Source paths the sync leaves alone, and why: special files, and
-    /// anything that could not be read. Named rather than dropped, because a
-    /// sync that silently skipped a folder it could not open would report a
-    /// copy that is not one.
+    /// Paths that could not be read, and why — so were never compared or
+    /// copied. A **problem**, like a failed copy: the whole promise of a sync
+    /// that ends without its card is that the source can now be wiped, and a
+    /// file it could not read is a file that would go with it.
     pub skipped: Vec<(PathBuf, String)>,
+    /// Sockets, fifos and device nodes in the source: nothing a file manager
+    /// can reproduce, so left out by name — and *not* a problem, since there
+    /// is nothing on a camera card or in a backup that one of them holds.
+    pub specials: Vec<PathBuf>,
     /// When one end is a server, the `rsync` run that carries the plan out.
     /// `None` for a sync on this machine, which this module does itself.
     pub remote: Option<rsync::Transfer>,
@@ -227,6 +231,7 @@ impl SyncPlan {
             removal: Removal::Trash,
             folders_in_the_way: 0,
             skipped: Vec::new(),
+            specials: Vec::new(),
             remote: None,
         }
     }

@@ -384,13 +384,7 @@ impl App {
             self.land_on(&focus);
         }
         if report.problems() == 0 {
-            // Files the plan could not read were never copied: not a failed
-            // run, but not one to read past either.
-            if report.skipped.is_empty() {
-                self.toasts.notice(sync::outcome(&report), now);
-            } else {
-                self.toasts.error(sync::outcome(&report), now);
-            }
+            self.toasts.notice(sync::outcome(&report), now);
             return;
         }
         let card = SyncCard::result(running.dest, running.title.clone(), report);
@@ -765,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn a_folder_that_could_not_be_read_is_in_the_toast() {
+    fn a_folder_that_could_not_be_read_opens_the_card_and_fails_the_task() {
         use std::os::unix::fs::PermissionsExt;
         let (tree, mut app) = yanked("sync-app-unreadable");
         let locked = tree.dir("src/photos/locked");
@@ -773,11 +767,40 @@ mod tests {
         app.run(Command::PasteSync, 10, Instant::now());
         compared(&mut app);
         key(&mut app, Key::Enter);
+        let id = app.syncs[0].id;
         synced(&mut app);
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shown = card(&app);
+        assert_eq!(shown.heading(), "Sync finished with 1 problem");
+        assert_eq!(
+            shown.summary(),
+            "Synced 2 files · 3 B · 2 files verified · 1 could not be read"
+        );
+        assert!(shown.rows().iter().any(|row| row.text.ends_with("locked")));
+        assert!(matches!(
+            app.engine.task(id).map(|task| task.state),
+            Some(TaskState::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn a_socket_is_left_out_in_the_toast_and_is_no_problem() {
+        let (tree, mut app) = yanked("sync-app-special");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(tree.join("src/photos/sock")).unwrap();
+        app.run(Command::PasteSync, 10, Instant::now());
+        compared(&mut app);
+        key(&mut app, Key::Enter);
+        let id = app.syncs[0].id;
+        synced(&mut app);
+        assert!(app.dialog.is_none(), "no card for a socket");
         assert_eq!(
             toast(&app).as_deref(),
-            Some("Synced 2 files · 3 B · 2 files verified · 1 could not be read")
+            Some("Synced 2 files · 3 B · verified · 1 special file left out")
+        );
+        assert_eq!(
+            app.engine.join(id, Duration::from_secs(10)),
+            Some(TaskState::Done)
         );
     }
 

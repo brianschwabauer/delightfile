@@ -76,9 +76,11 @@ pub enum Mark {
     Changed,
     /// Only at the destination, and a mirror will remove it.
     Extra,
-    /// A source path the sync will not copy — a socket, a folder it could not
-    /// read — or, on the result card, a path that failed.
+    /// A source path the sync could not read, or, on the result card, a path
+    /// that failed.
     Problem,
+    /// A special file — socket, fifo, device — left out, which is no problem.
+    Left,
     /// The "… and N more" line at the foot of a capped list.
     More,
 }
@@ -90,6 +92,7 @@ impl Mark {
             Mark::Changed => "~",
             Mark::Extra => "−",
             Mark::Problem => "!",
+            Mark::Left => "·",
             Mark::More => "",
         }
     }
@@ -335,7 +338,13 @@ impl SyncCard {
                     ]
                 };
                 if !plan.skipped.is_empty() {
-                    parts.push(format!("{} skipped", grouped(plan.skipped.len() as u64)));
+                    parts.push(format!(
+                        "{} could not be read",
+                        grouped(plan.skipped.len() as u64)
+                    ));
+                }
+                if !plan.specials.is_empty() {
+                    parts.push(left_out(plan.specials.len() as u64));
                 }
                 parts.join(" · ")
             }
@@ -499,6 +508,16 @@ fn plan_rows(plan: &SyncPlan, mode: Mode) -> Vec<Row> {
             });
         }
     }
+    for path in &plan.specials {
+        total += 1;
+        if rows.len() < LIST_CAP {
+            rows.push(Row {
+                mark: Mark::Left,
+                text: path.display().to_string(),
+                detail: "special file, left out".to_string(),
+            });
+        }
+    }
     if total > rows.len() {
         rows.push(Row {
             mark: Mark::More,
@@ -578,7 +597,15 @@ pub fn outcome(report: &SyncReport) -> String {
             grouped(report.skipped.len() as u64)
         ));
     }
+    if report.specials > 0 {
+        parts.push(left_out(report.specials));
+    }
     parts.join(" · ")
+}
+
+/// "1 special file left out" — the archive card's words for the same thing.
+fn left_out(n: u64) -> String {
+    format!("{} left out", plural(n, "special file", "special files"))
 }
 
 /// "1 file" / "1,204 files".
@@ -896,7 +923,7 @@ pub fn paint(
             Mark::Changed => (palette.peach, palette.subtext0),
             Mark::Extra => (palette.red, palette.subtext0),
             Mark::Problem => (palette.red, palette.subtext0),
-            Mark::More => (palette.overlay0, palette.overlay0),
+            Mark::Left | Mark::More => (palette.overlay0, palette.overlay0),
         };
         let y = rect.center().y;
         clipped.text(
@@ -999,6 +1026,7 @@ mod tests {
             removal: Removal::Trash,
             folders_in_the_way: 0,
             skipped: Vec::new(),
+            specials: Vec::new(),
             remote: None,
         }
     }
@@ -1377,13 +1405,11 @@ mod tests {
                     PathBuf::from("/src/photos/locked"),
                     "Permission denied".into(),
                 ),
-                (
-                    PathBuf::from("/src/photos/sock"),
-                    "not a file, folder or link".into(),
-                ),
+                (PathBuf::from("/src/photos/gone"), "No such file".into()),
             ],
             ..SyncReport::default()
         };
+        assert_eq!(report.problems(), 2, "each is a problem");
         assert_eq!(
             outcome(&report),
             "Synced 3 files · 30 B · 3 files verified · 2 could not be read"
@@ -1402,7 +1428,29 @@ mod tests {
                 .iter()
                 .map(|row| row.text.as_str())
                 .collect::<Vec<_>>(),
-            ["photos/a", "/src/photos/locked", "/src/photos/sock"]
+            ["photos/a", "/src/photos/locked", "/src/photos/gone"]
+        );
+        assert_eq!(card.heading(), "Sync finished with 3 problems");
+    }
+
+    #[test]
+    fn a_special_file_left_out_is_counted_and_is_no_problem() {
+        let report = SyncReport {
+            copied: 2,
+            copied_bytes: 20,
+            verified: 2,
+            specials: 1,
+            ..SyncReport::default()
+        };
+        assert_eq!(report.problems(), 0);
+        assert_eq!(
+            outcome(&report),
+            "Synced 2 files · 20 B · verified · 1 special file left out"
+        );
+        assert_eq!(
+            left_out(3),
+            "3 special files left out",
+            "the archive card's words"
         );
     }
 

@@ -172,9 +172,7 @@ impl Walk<'_> {
         };
         let kind = Kind::of(&src_meta);
         if kind == Kind::Special {
-            self.plan
-                .skipped
-                .push((src.to_path_buf(), "not a file, folder or link".to_string()));
+            self.plan.specials.push(src.to_path_buf());
             return Ok(());
         }
         let dst_meta = if absent {

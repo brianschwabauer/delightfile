@@ -50,9 +50,11 @@ pub struct SyncReport {
     /// copy there is as durable as that server's page cache.
     pub unflushed: bool,
     /// What the plan could not read and so never copied
-    /// ([`SyncPlan::skipped`]), carried here so the result says it: a run
-    /// that left files behind must not read as a clean "verified".
+    /// ([`SyncPlan::skipped`]): problems, on the result card with the rest.
     pub skipped: Vec<(PathBuf, String)>,
+    /// Special files left out ([`SyncPlan::specials`]): counted in the toast,
+    /// never a problem.
+    pub specials: u64,
     /// Each file the verify pass found wrong, and how.
     pub verify_failures: Vec<(PathBuf, String)>,
     /// Each path that could not be copied or removed, and why.
@@ -61,9 +63,11 @@ pub struct SyncReport {
 }
 
 impl SyncReport {
-    /// Everything that went wrong: the count the result card's title gives.
+    /// Everything that went wrong: the count the result card's title gives,
+    /// and what makes the task end failed. A path that could not be read is
+    /// one; a special file left out is not.
     pub fn problems(&self) -> usize {
-        self.errors.len() + self.verify_failures.len()
+        self.errors.len() + self.verify_failures.len() + self.skipped.len()
     }
 }
 
@@ -86,6 +90,7 @@ pub fn execute(plan: &SyncPlan, mode: Mode, verify: Verify, ctx: &TaskCtx) -> Sy
             verify,
             removal: plan.removal,
             skipped: plan.skipped.clone(),
+            specials: plan.specials.len() as u64,
             ..SyncReport::default()
         },
         copied: HashSet::new(),

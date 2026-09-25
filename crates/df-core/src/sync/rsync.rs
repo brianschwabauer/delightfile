@@ -712,6 +712,7 @@ pub(crate) fn execute(
         verify,
         removal: Removal::Delete,
         skipped: plan.skipped.clone(),
+        specials: plan.specials.len() as u64,
         ..SyncReport::default()
     };
     let to_copy = plan.bytes_to_copy();
