@@ -732,6 +732,13 @@ impl Pane {
         ));
     }
 
+    /// The path the live request is for, if any: what the pane has been asked
+    /// to show, whether or not it has arrived.
+    #[cfg(test)]
+    pub fn wanted(&self) -> Option<&Path> {
+        self.wanted.as_deref()
+    }
+
     /// Stop previewing anything — a tab switch, a directory with nothing in it.
     pub fn cancel(&mut self) {
         // A tab switch is leaving the file, not losing it: the position is

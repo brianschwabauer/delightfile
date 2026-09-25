@@ -3161,6 +3161,16 @@ impl App {
     /// and a held `↓` costs one read per row it stops on rather than one per
     /// frame (PLAN §1).
     fn sync_archive_preview(&mut self) -> bool {
+        // A folded preview has no card to put a body under: what was being
+        // read for it is retired, and nothing more is asked for until it
+        // opens again — at which point the slot is empty and this asks anew.
+        if !self.preview_open() {
+            let had = self.archive_preview.take().is_some();
+            if had {
+                self.bodies.cancel(crate::preview::body::Which::Entry);
+            }
+            return had;
+        }
         let Some(browse) = &self.tab().archive else {
             let had = self.archive_preview.is_some();
             self.archive_preview = None;
@@ -3570,7 +3580,9 @@ impl App {
     // `w` panel must stay empty — not one download per row — and a pause of a
     // beat on one row must produce exactly one "Preview …" task.
     fn sync_remote_preview(&mut self, now: Instant) -> bool {
-        if self.tab().remote.is_none() {
+        // The same for a folded preview as for leaving the service: no card,
+        // no body, and — this one above all — no download.
+        if self.tab().remote.is_none() || !self.preview_open() {
             let had = self.remote_preview.is_some() || self.remote_hover.is_some();
             self.remote_preview = None;
             self.remote_hover = None;
@@ -5430,9 +5442,13 @@ impl App {
     /// own `sync`, so a held `↓` mounts where it stopped rather than at every
     /// row it passed.
     fn sync_playback(&mut self, now: Instant) {
+        // A folded preview is off a playable file as far as the transport is
+        // concerned: the sound stops now and the source goes with the grace,
+        // exactly as it does when the cursor leaves a clip. Nothing is probed
+        // for it either.
         let hovered = self
             .hovered_kind()
-            .filter(|(_, kind)| is_temporal(kind))
+            .filter(|(_, kind)| is_temporal(kind) && self.preview_open())
             .map(|(path, _)| path);
 
         match hovered {
@@ -5519,6 +5535,12 @@ impl App {
     /// `self.player` directly: a `k` that reached a controller still holding
     /// the *previous* file would play a file nobody is looking at.
     fn transport(&mut self) -> Option<&mut Player> {
+        // …and none at all behind a folded preview: its strip is not drawn,
+        // and a key that reached a player there would play a file nobody can
+        // see or stop.
+        if !self.preview_open() {
+            return None;
+        }
         let hovered = self.tab().cwd.dir.cursor_entry().map(|e| e.path.clone())?;
         let player = self.player.as_mut()?;
         (player.path() == Some(hovered.as_path())).then_some(player)
@@ -8573,6 +8595,12 @@ impl App {
     /// with an answer: a row that is live only to toast "not here" when it is
     /// clicked is a row that lied about being clickable.
     fn refusal(&self, command: Command) -> Option<&'static str> {
+        // A folded preview is not there to scroll, zoom, page or play, and a
+        // key that silently did nothing to it would be pressed again — or,
+        // worse, would start a clip playing behind a pane nobody can see.
+        if drives_preview(command) && !self.preview_open() {
+            return Some("Preview is closed");
+        }
         // `g b` is about the folder on screen, and two of the places the list
         // can be are not folders anybody can come back to.
         if let Some(notice) = places::refusal(command, self.tab().virtual_kind()) {
@@ -9135,6 +9163,9 @@ impl App {
             C::ViewScaleComfortable => self.set_scale_step(ViewScale::Comfortable, now),
             C::ViewScaleRoomy => self.set_scale_step(ViewScale::Roomy, now),
             C::ViewScaleGrid => self.set_scale_step(ViewScale::Grid, now),
+            C::ToggleParent => self.toggle_pane(Side::Parent, now),
+            C::TogglePreview => self.toggle_pane(Side::Preview, now),
+            C::ResetPanes => self.reset_panes(now),
             C::Spot => self.toggle_spot(),
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
@@ -11354,6 +11385,8 @@ impl App {
             linemode: self.mgr.linemode,
             sort: self.mgr.sort_by,
             reverse: self.mgr.sort_reverse,
+            parent_open: !self.dividers.collapsed(Side::Parent),
+            preview_open: self.preview_open(),
         };
         let mut items = menu::app_items(facts, self.type_items(), &self.keymap, |command| {
             self.refusal(command).is_some()
@@ -13740,14 +13773,30 @@ impl App {
         self.dividers.split(now)
     }
 
-    /// Fold `side` away, or open it again: a double click on its divider.
-    /// Written through the state file's debounce, like everything else it
-    /// keeps.
+    /// Fold `side` away, or open it again: a double click on its divider,
+    /// or `toggle-parent` / `toggle-preview`. Written through the state
+    /// file's debounce, like everything else it keeps.
     fn toggle_pane(&mut self, side: Side, now: Instant) {
         if let Some(panes) = self.dividers.toggle(side, now) {
             self.state.set_panes(panes);
             self.state_changed(now);
         }
+    }
+
+    /// `reset-panes`: both dividers back where the config's `ratio` puts
+    /// them and both side panes open, sliding there — and written, so the
+    /// next window opens there too.
+    fn reset_panes(&mut self, now: Instant) {
+        let panes = self.dividers.reset(now);
+        self.state.set_panes(panes);
+        self.state_changed(now);
+    }
+
+    /// Whether the preview pane is open. A folded one does no work at all —
+    /// nothing is read, decoded, probed or played for it — and the keys that
+    /// drive it say so rather than acting on a pane nobody can see.
+    fn preview_open(&self) -> bool {
+        !self.dividers.collapsed(Side::Preview)
     }
 
     /// Everything this frame draws. One `&mut Ui` covering the window; painting
@@ -15127,7 +15176,11 @@ impl App {
         // files inside `…/Trash/files/`, so the ordinary preview pipeline
         // opens them and a trashed photo looks like a photo (PLAN §7.4).
         let in_archive = self.tab().archive.is_some() || self.tab().remote.is_some();
-        if in_archive {
+        // A folded preview is asked for nothing, which cancels whatever it
+        // was reading, decoding or rendering; opened again, it is asked for
+        // the cursor's row like any other change of row.
+        let preview_open = self.preview_open();
+        if in_archive || !preview_open {
             self.preview.sync(None, target, now);
         } else {
             self.preview.sync(hovered.as_deref(), target, now);
@@ -15136,7 +15189,7 @@ impl App {
         // when something changed — the cursor moved, or the preview finished
         // loading — so a settled panel is not re-scrolling the pane sixty times
         // a second and holding the window awake.
-        if let (true, Some((_, Some(line)))) = (self.search_follow, &searched) {
+        if let (true, true, Some((_, Some(line)))) = (self.search_follow, preview_open, &searched) {
             self.preview.scroll_to(line.saturating_sub(1), now);
             self.search_follow = false;
         }
@@ -15173,8 +15226,9 @@ impl App {
         // unfocused window is one nobody is watching — the same three facts the
         // turntable is retired by, minus the pointer, because a GIF plays
         // whether or not the mouse is over it.
-        self.preview
-            .set_visible(self.window_focused && overlay.is_none() && self.help.is_none());
+        self.preview.set_visible(
+            preview_open && self.window_focused && overlay.is_none() && self.help.is_none(),
+        );
         // The wheel's coast over the document, sampled once a frame (PLAN §7.5).
         self.preview.tick_fling(now);
         // …and the animated image's playhead, by the same rule and in the same
@@ -15247,7 +15301,8 @@ impl App {
         // Not while a modal, a menu or the seek bar owns the pointer — the same
         // three things that take the press away from everything else over this
         // pane.
-        let gesture_allowed = overlay.is_none() && !menu_live && !scrubbing && !dismissing;
+        let gesture_allowed =
+            preview_open && overlay.is_none() && !menu_live && !scrubbing && !dismissing;
         self.preview_gesture(&pointer, gesture_allowed, now);
         // …and *then* the document worker is asked for a page, because the
         // gesture is what decides how many pixels that page wants: a settled
@@ -15537,8 +15592,10 @@ impl App {
         // (PLAN §7.3), because there is no file on the disk for the preview
         // pipeline to open.
         match self.tab().archive.as_ref() {
-            // …and a folded pane is nothing, whatever it would have shown.
-            _ if !preview_shown => {}
+            // …and a folded pane is nothing, whatever it would have shown —
+            // from the moment it starts folding, so what slides away is an
+            // empty plate rather than a card squeezed to nothing.
+            _ if !preview_shown || !preview_open => {}
             Some(browse) => {
                 let entry = self
                     .tab()
@@ -16829,6 +16886,43 @@ fn menu_command(action: menu::Action) -> Option<Command> {
 /// contradiction, and pasting into `trash://` is a directory that does not
 /// exist. `Enter`/`r` restore, `D` destroys, and everything about *looking* —
 /// the sorts, the filter, the selection, `Tab`, `Ctrl+p` — is untouched.
+/// The commands that act on the preview pane: its scroll, its pages, its
+/// zoom, and the transport of whatever it is playing. With the pane folded
+/// away each is refused out loud ([`App::refusal`]).
+fn drives_preview(command: Command) -> bool {
+    use Command as C;
+    matches!(
+        command,
+        C::SeekPreviewUp
+            | C::SeekPreviewDown
+            | C::PreviewUp
+            | C::PreviewDown
+            | C::PreviewLeft
+            | C::PreviewRight
+            | C::PreviewHalfPageUp
+            | C::PreviewHalfPageDown
+            | C::PreviewPageDown
+            | C::PreviewTop
+            | C::PreviewBottom
+            | C::PreviewZoomIn
+            | C::PreviewZoomOut
+            | C::PreviewZoomReset
+            | C::PlayPause
+            | C::ShuttleReverse
+            | C::ShuttleForward
+            | C::ToggleLoop
+            | C::PrevEdge
+            | C::NextEdge
+            | C::SkipBack
+            | C::SkipForward
+            | C::VolumeUp
+            | C::VolumeDown
+            | C::FrameStepBack
+            | C::FrameStepForward
+            | C::Mute
+    )
+}
+
 fn inert_in_trash(command: Command) -> bool {
     use Command as C;
     matches!(
@@ -19519,7 +19613,10 @@ mod tests {
                 .map(|i| i.label.clone())
                 .collect()
         };
-        assert_eq!(ticked("View"), vec!["Compact", "Modified"]);
+        assert_eq!(
+            ticked("View"),
+            vec!["Compact", "Modified", "Parent pane", "Preview pane"]
+        );
         assert_eq!(ticked("Sort"), vec!["Size", "Reverse"]);
         let row = |label: &str| {
             menu.items
@@ -20767,6 +20864,214 @@ mod tests {
             1,
         );
         assert!((reopened.preview.width() - open.preview.width()).abs() < 1e-3);
+    }
+
+    /// The three pane commands: each side folds and opens by its own, and a
+    /// reset sends both dividers home with both panes open — each written to
+    /// the state file as it happens.
+    #[test]
+    fn the_pane_commands_fold_open_and_reset() {
+        let mut app = Fixture::new("panes-commands", &["a.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let home = layout_of(&app);
+        let now = Instant::now();
+        let settled = |app: &App| {
+            ui::layout(
+                screen(),
+                &app.split(Instant::now() + crate::divider::FOLD),
+                false,
+                1,
+            )
+        };
+
+        app.run(Command::ToggleParent, 10, now);
+        assert!(app.state.panes().is_some_and(|p| p.parent_collapsed));
+        assert_eq!(settled(&app).parent.width(), 0.0);
+        assert!((settled(&app).list.left() - ui::GAP).abs() < 1e-3);
+        app.run(Command::TogglePreview, 10, now);
+        assert!(app
+            .state
+            .panes()
+            .is_some_and(|p| p.parent_collapsed && p.preview_collapsed));
+        assert!(app.state_due.deadline(now).is_some(), "the write is armed");
+
+        app.run(Command::ResetPanes, 10, now);
+        assert_eq!(
+            app.state.panes(),
+            Some(Panes::from_ratio(app.config.mgr.ratio))
+        );
+        let back = settled(&app);
+        for (got, want) in [
+            (back.parent, home.parent),
+            (back.list, home.list),
+            (back.preview, home.preview),
+        ] {
+            assert!((got.left() - want.left()).abs() < 1e-3, "{got:?} {want:?}");
+            assert!(
+                (got.width() - want.width()).abs() < 1e-3,
+                "{got:?} {want:?}"
+            );
+        }
+    }
+
+    // ── A folded preview does no work ───────────────────────────────────────
+
+    /// Folded, the preview is asked for nothing: what it was reading is
+    /// cancelled, and a new row under the cursor asks for nothing either.
+    /// Its keys say it is closed instead of acting. Opened again, it asks for
+    /// the row the cursor is on now.
+    #[test]
+    fn a_folded_preview_asks_for_nothing() {
+        let mut app = Fixture::new("preview-folded", &["a.txt", "b.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let a = app.files.join("a.txt");
+        let b = app.files.join("b.txt");
+        assert_eq!(app.preview.wanted(), Some(a.as_path()));
+
+        let now = Instant::now();
+        app.run(Command::TogglePreview, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.preview.wanted(), None, "the read was not cancelled");
+        app.run(Command::CursorDown, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.tab().cwd.dir.cursor(), 1);
+        assert_eq!(app.preview.wanted(), None, "the new row was asked for");
+
+        for command in [
+            Command::PreviewDown,
+            Command::PreviewLeft,
+            Command::PreviewZoomIn,
+            Command::SeekPreviewDown,
+            Command::PlayPause,
+            Command::FrameStepForward,
+        ] {
+            assert_eq!(
+                app.refusal(command),
+                Some("Preview is closed"),
+                "{command:?}"
+            );
+        }
+        app.run(Command::PreviewDown, 10, now);
+        assert_eq!(toast_text(&app), Some("Preview is closed"));
+        // The list's own keys are not the preview's.
+        assert_eq!(app.refusal(Command::CursorDown), None);
+
+        app.run(Command::TogglePreview, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(app.preview.wanted(), Some(b.as_path()));
+        assert_eq!(app.refusal(Command::PreviewDown), None);
+    }
+
+    /// Every frame of a fold paints, both ways, at every width the panes
+    /// pass through — a pane squeezed to a few points is still a pane to
+    /// draw a listing in until it is gone.
+    #[test]
+    fn a_folding_pane_paints_all_the_way_down_and_back() {
+        let mut app = long_listing("panes-fold-frames");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        for command in [Command::ToggleParent, Command::TogglePreview] {
+            for _ in 0..2 {
+                app.run(command, 10, Instant::now());
+                let until = Instant::now() + crate::divider::FOLD;
+                while Instant::now() < until {
+                    run_frame(&mut app, &ctx, Vec::new());
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                run_frame(&mut app, &ctx, Vec::new());
+                assert!(!app.dividers.animating(Instant::now()));
+            }
+        }
+    }
+
+    /// A zip holding `entries`, each stored as it is: the smallest archive
+    /// the reader lists, written by hand so the test needs no writer job.
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let le16 = |out: &mut Vec<u8>, v: u16| out.extend_from_slice(&v.to_le_bytes());
+        let le32 = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in entries {
+            let crc = df_core::archive::write::crc32::crc32(data);
+            let offset = out.len() as u32;
+            // The local header: signature, version 2.0, no flags, stored,
+            // 1980-01-01 00:00, the sizes, and the name.
+            le32(&mut out, 0x0403_4b50);
+            for v in [20, 0, 0, 0, 0x21] {
+                le16(&mut out, v);
+            }
+            le32(&mut out, crc);
+            le32(&mut out, data.len() as u32);
+            le32(&mut out, data.len() as u32);
+            le16(&mut out, name.len() as u16);
+            le16(&mut out, 0);
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+
+            le32(&mut central, 0x0201_4b50);
+            for v in [20, 20, 0, 0, 0, 0x21] {
+                le16(&mut central, v);
+            }
+            le32(&mut central, crc);
+            le32(&mut central, data.len() as u32);
+            le32(&mut central, data.len() as u32);
+            le16(&mut central, name.len() as u16);
+            for v in [0, 0, 0, 0] {
+                le16(&mut central, v);
+            }
+            le32(&mut central, 0);
+            le32(&mut central, offset);
+            central.extend_from_slice(name.as_bytes());
+        }
+        let at = out.len() as u32;
+        out.extend_from_slice(&central);
+        le32(&mut out, 0x0605_4b50);
+        le16(&mut out, 0);
+        le16(&mut out, 0);
+        le16(&mut out, entries.len() as u16);
+        le16(&mut out, entries.len() as u16);
+        le32(&mut out, central.len() as u32);
+        le32(&mut out, at);
+        le16(&mut out, 0);
+        out
+    }
+
+    /// Inside an archive the preview is the entry's card, and its body is a
+    /// job on the card worker: asked for while the preview is open, retired
+    /// the moment it folds, never asked for a row the cursor reaches while it
+    /// is folded, and asked for again when it opens.
+    #[test]
+    fn a_folded_preview_reads_no_archive_entry() {
+        let mut app = Fixture::new("preview-folded-zip", &["a.txt"]);
+        let zip = app.files.join("notes.zip");
+        std::fs::write(
+            &zip,
+            stored_zip(&[("one.txt", b"first"), ("two.txt", b"second")]),
+        )
+        .expect("write the zip");
+        let tree = df_core::archive::list(&zip).expect("the zip lists");
+        let now = Instant::now();
+        app.enter_archive(zip.clone(), Arc::new(tree), now);
+        app.poll_workers();
+        let asked = |app: &App| {
+            app.archive_preview
+                .as_ref()
+                .map(|(archive, inner, _)| (archive.clone(), inner.clone()))
+        };
+        assert_eq!(asked(&app), Some((zip.clone(), "one.txt".to_string())));
+
+        app.run(Command::TogglePreview, 10, now);
+        app.poll_workers();
+        assert_eq!(asked(&app), None, "the read was not retired");
+        app.run(Command::CursorDown, 10, now);
+        app.poll_workers();
+        assert_eq!(asked(&app), None, "the next row's body was asked for");
+
+        app.run(Command::TogglePreview, 10, now);
+        app.poll_workers();
+        assert_eq!(asked(&app), Some((zip, "two.txt".to_string())));
     }
 
     /// The bar is up for the linger after the view moves — by the keyboard as

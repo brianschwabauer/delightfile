@@ -535,6 +535,27 @@ impl Dividers {
         Some(self.panes)
     }
 
+    /// Every pane back to home, sliding there: the config's ratio, with both
+    /// side panes open unless the ratio gives one nothing. A drag in the hand
+    /// is let go of without committing anything — the reset is the more
+    /// deliberate act — and a stretch it had springs back rather than
+    /// vanishing.
+    pub fn reset(&mut self, now: Instant) -> Panes {
+        let open = [self.open[0].value(now), self.open[1].value(now)];
+        let from = self.fractions(open);
+        if let Some(drag) = self.drag.take() {
+            if !drag.reading.folded {
+                self.spring_from(drag.which, drag.shown.overshoot, now);
+            }
+        }
+        self.panes = self.home;
+        self.slide = Some((from, Tween::new(0.0, 1.0, FOLD, Easing::OutQuint, now)));
+        for side in [Side::Parent, Side::Preview] {
+            self.fold(side, self.home.collapsed(side), now);
+        }
+        self.panes
+    }
+
     /// Start `side` folding (or opening) from wherever it is now.
     fn fold(&mut self, side: Side, folded: bool, now: Instant) {
         let k = match side {
@@ -831,9 +852,10 @@ mod tests {
     }
 
     /// A toggle folds and opens a side pane in the list's width, animated —
-    /// but not out from under a divider in the hand.
+    /// but not out from under a divider in the hand — and a reset sends
+    /// everything home and open, the hand's divider included.
     #[test]
-    fn a_toggle_folds_and_opens() {
+    fn toggles_and_reset() {
         let t0 = Instant::now();
         let mut d = dividers(t0);
         let folded = d.toggle(Side::Preview, t0).expect("no drag");
@@ -845,7 +867,15 @@ mod tests {
         assert!(!opened.preview_collapsed);
         assert_eq!(opened.ratio, Panes::from_ratio([1, 4, 3]).ratio);
 
+        d.toggle(Side::Parent, t0);
         d.press(Divider::Right, 900.0, 0.375 * USABLE, USABLE, t0);
         assert_eq!(d.toggle(Side::Preview, t0), None, "the hand owns it");
+        d.drag_to(700.0, USABLE, t0);
+        let home = d.reset(t0);
+        assert_eq!(home, Panes::from_ratio([1, 4, 3]));
+        assert_eq!(d.dragging(), None);
+        let settled = d.split(t0 + FOLD);
+        assert_eq!(settled.open, [1.0, 1.0]);
+        assert_eq!(settled.fractions, home.ratio);
     }
 }

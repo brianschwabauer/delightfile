@@ -207,6 +207,16 @@ commands! {
     ViewScaleComfortable => "view-scale-comfortable",
     ViewScaleRoomy => "view-scale-roomy",
     ViewScaleGrid => "view-scale-grid",
+    // The panes (PLAN §2): fold the parent or the preview away, or open it
+    // again, and put both dividers back where the config's `ratio` has them.
+    // The pointer's own way to all three is the dividers themselves — a
+    // double click folds, a drag past a pane's minimum folds, and a drag back
+    // to home snaps there — so these are **unbound by default**, as the view
+    // steps are: they are the app menu's View rows, and commands so that a
+    // `keymap.toml` can put any of them on a key.
+    ToggleParent => "toggle-parent",
+    TogglePreview => "toggle-preview",
+    ResetPanes => "reset-panes",
 
     // ── Copy the path, in its four useful shapes, plus the contents ───────
     CopyPath => "copy-path",

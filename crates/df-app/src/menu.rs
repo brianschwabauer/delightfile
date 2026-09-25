@@ -432,6 +432,9 @@ pub struct AppFacts {
     pub linemode: LineMode,
     pub sort: SortBy,
     pub reverse: bool,
+    /// Whether the parent and the preview are open, for View's two ticks.
+    pub parent_open: bool,
+    pub preview_open: bool,
 }
 
 /// The sort command that orders by `by`, in the direction `reverse` says — or
@@ -479,7 +482,8 @@ fn command_row(
 
 /// The "View" list: the scale ladder, hidden files, and the linemode, each
 /// ticked where the pane is now. One builder for the app menu and the folder
-/// menu, so the two lists cannot drift apart.
+/// menu, so the two lists cannot drift apart — the app menu then adds the
+/// panes' group, which is about the window rather than the folder.
 fn view_items(
     scale: ViewScale,
     hidden: bool,
@@ -592,7 +596,17 @@ pub fn app_items(
     let run = |label: &str, command: Command, enabled: bool| {
         command_row(label, command, enabled, keymap, &refused)
     };
-    let view = view_items(facts.scale, facts.hidden, facts.linemode, keymap, &refused);
+    // The app menu's View is the folder menu's, and then the panes: the one
+    // group that is about the window rather than the folder in it, so the
+    // folder menu, which is about the folder, has no business carrying it.
+    let mut view = view_items(facts.scale, facts.hidden, facts.linemode, keymap, &refused);
+    view.push(
+        run("Parent pane", C::ToggleParent, true)
+            .check(facts.parent_open)
+            .after_gap(),
+    );
+    view.push(run("Preview pane", C::TogglePreview, true).check(facts.preview_open));
+    view.push(run("Reset pane widths", C::ResetPanes, true));
     let sort = sort_items(facts.sort, facts.reverse, keymap, &refused);
 
     let mut rows = vec![
@@ -1865,6 +1879,8 @@ mod tests {
             linemode: LineMode::Size,
             sort: SortBy::Alphabetical,
             reverse: false,
+            parent_open: true,
+            preview_open: true,
         }
     }
 
@@ -1953,6 +1969,21 @@ mod tests {
         assert_eq!(parents, vec!["View", "Sort"]);
         assert!(rows.iter().all(|i| i.checked.is_none()));
         assert!(rows.iter().all(|i| i.enabled), "everything can act here");
+        // View ends with a group of its own for the panes: the two side
+        // panes as ticks, and the reset.
+        let view = row(&rows, "View").submenu.as_ref().expect("a list");
+        let tail: Vec<(&str, bool)> = view[view.len() - 3..]
+            .iter()
+            .map(|i| (i.label.as_str(), i.gap_before))
+            .collect();
+        assert_eq!(
+            tail,
+            vec![
+                ("Parent pane", true),
+                ("Preview pane", false),
+                ("Reset pane widths", false),
+            ]
+        );
     }
 
     /// A rebound key is taught where it was moved to, and an unbound command
@@ -2158,7 +2189,15 @@ mod tests {
                     })
                     .collect()
             };
-            assert_eq!(list(&rows), list(&app), "the two {label} lists differ");
+            let mut app_list = list(&app);
+            // The app menu's View ends with the panes' group, which is about
+            // the window rather than the folder, and is the one part of it
+            // the folder menu leaves out.
+            if label == "View" {
+                let panes = app_list.split_off(app_list.len() - 3);
+                assert_eq!(panes[0].0, "Parent pane");
+            }
+            assert_eq!(list(&rows), app_list, "the two {label} lists differ");
         }
         // Hidden files are toggled in View, and only there.
         let view = row(&rows, "View").submenu.as_deref().expect("a list");
@@ -2215,14 +2254,15 @@ mod tests {
     }
 
     /// The View list: the ladder's four steps as one radio group, hidden files
-    /// as a check, and the linemodes as a second radio group — separated, every
-    /// row in the check column, and the tick on whatever is true now.
+    /// as a check, the linemodes as a second radio group, and the panes —
+    /// separated, and the tick on whatever is true now.
     #[test]
     fn the_view_submenu_ticks_what_is_on() {
         let rows = app(AppFacts {
             scale: ViewScale::Roomy,
             hidden: true,
             linemode: LineMode::Mtime,
+            preview_open: false,
             ..app_facts()
         });
         let view = row(&rows, "View").submenu.as_ref().expect("a list");
@@ -2244,10 +2284,36 @@ mod tests {
                 ("Modified", false),
                 ("Owner", false),
                 ("None", false),
+                ("Parent pane", true),
+                ("Preview pane", false),
+                ("Reset pane widths", false),
             ]
         );
-        assert!(view.iter().all(|i| i.checked.is_some() && i.enabled));
-        assert_eq!(ticked(view), vec!["Roomy", "Show hidden files", "Modified"]);
+        assert!(view.iter().all(|i| i.enabled));
+        assert!(view
+            .iter()
+            .all(|i| i.checked.is_some() || i.label == "Reset pane widths"));
+        assert_eq!(
+            ticked(view),
+            vec!["Roomy", "Show hidden files", "Modified", "Parent pane"]
+        );
+        // The panes' rows run their commands, which are unbound by default
+        // and teach no key.
+        assert_eq!(
+            row(view, "Parent pane").action,
+            Action::Run(C::ToggleParent)
+        );
+        assert_eq!(
+            row(view, "Preview pane").action,
+            Action::Run(C::TogglePreview)
+        );
+        assert_eq!(
+            row(view, "Reset pane widths").action,
+            Action::Run(C::ResetPanes)
+        );
+        for label in ["Parent pane", "Preview pane", "Reset pane widths"] {
+            assert_eq!(row(view, label).keys, "", "{label} is unbound");
+        }
         use Command as C;
         assert_eq!(row(view, "Grid").action, Action::Run(C::ViewScaleGrid));
         assert_eq!(
@@ -2261,7 +2327,10 @@ mod tests {
 
         let rows = app(app_facts());
         let view = row(&rows, "View").submenu.as_ref().expect("a list");
-        assert_eq!(ticked(view), vec!["Compact", "Size"]);
+        assert_eq!(
+            ticked(view),
+            vec!["Compact", "Size", "Parent pane", "Preview pane"]
+        );
     }
 
     /// The Sort list: the keys as a radio group that keeps the direction the
