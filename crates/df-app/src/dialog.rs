@@ -16,12 +16,15 @@
 //! than a thing somebody clicks through once.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use df_core::fs::Entry;
 use df_core::ops::paste::{Conflict, PastePlan, Resolution};
+use df_core::rename::template::{Missing, Template};
 use df_core::text::grouped;
 
+use crate::bulk::{Bulk, Focus, Problem};
 use crate::chrome::{self, CARD_MARGIN, CARD_PAD, FONT, PAD_X};
 use crate::hover::{pressed_rect, Hovers};
 use crate::ripple::Ripples;
@@ -810,105 +813,478 @@ pub fn paint_confirm(
 
 // ── Bulk rename (PLAN §5) ───────────────────────────────────────────────────
 
-/// The gap between the two columns of the diff.
+/// The gap between the two columns of the diff, where the arrow goes.
 const BULK_ARROW: f32 = 22.0;
-/// The old-name column's share of the card's inner width.
+/// The old-name column's share of the list's width.
 const BULK_SPLIT: f32 = 0.42;
 /// One editable line's height. Taller than a body row: it is a *field*, and a
 /// field the caret sits in needs room around the text (`delightful-ui` §1).
-const BULK_ROW: f32 = 24.0;
+pub const BULK_ROW: f32 = 24.0;
+/// The widest the rename card gets. Past [`MAX_WIDTH`] on purpose: the other
+/// cards here are questions, and this one is a workspace. Two columns of long
+/// names side by side need the room, and a name cut off with `…` is a name
+/// that cannot be checked.
+const BULK_MAX_WIDTH: f32 = 960.0;
+/// Between the title and the template field.
+const BULK_FIELD_GAP: f32 = 8.0;
+/// Between the template field and the first row: a little more than above it,
+/// because the field is the rule and the rows are what it made.
+const BULK_LIST_GAP: f32 = 10.0;
+/// The template field's label.
+const TEMPLATE_LABEL: &str = "Name";
+/// The `{` popover's width, before the window has a say.
+const POPOVER_WIDTH: f32 = 520.0;
+/// The padding around the popover's rows. Its corner radius is a row's plus
+/// this, so a highlighted row's corner is concentric with the plate's
+/// (`delightful-ui` §15).
+const POPOVER_PAD: f32 = 4.0;
+/// How far the popover hangs clear of the line it completes.
+const POPOVER_OFFSET: f32 = 2.0;
+/// How much of a popover row the inserted text may take before the detail
+/// beside it gets the rest.
+const POPOVER_INSERT_SHARE: f32 = 0.42;
+/// …and the preview at the row's far end.
+const POPOVER_PREVIEW_SHARE: f32 = 0.3;
+
+/// One visible row of the rename card, measured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BulkRowGeom {
+    /// Which row of the card this is, counting the ones scrolled off.
+    pub index: usize,
+    /// The whole row.
+    pub rect: egui::Rect,
+    /// The old name's column.
+    pub old: egui::Rect,
+    /// The new name's plate: what a press lands on.
+    pub new: egui::Rect,
+    /// Where the new name is drawn and clipped: the plate less its padding and
+    /// less the refusal at its right end, when there is one.
+    pub text: egui::Rect,
+    /// The x of the new name's first character, scrolled.
+    pub origin: f32,
+    /// What is wrong with the row, measured into `text`'s width.
+    pub problem: Option<crate::bulk::Problem>,
+}
+
+/// The `{` popover, measured.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PopoverGeom {
+    pub card: egui::Rect,
+    /// The candidate rows drawn, top to bottom.
+    pub rows: Vec<egui::Rect>,
+    /// The candidate the first row shows.
+    pub first: usize,
+}
+
+/// Where the rename card's pieces are: the one measurement the hit test, the
+/// press and the paint all read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BulkGeometry {
+    pub card: egui::Rect,
+    /// The `×`, top right.
+    pub close: egui::Rect,
+    /// The template field's plate.
+    pub template: egui::Rect,
+    /// Where its text is drawn and clipped, after the label.
+    pub template_text: egui::Rect,
+    /// The x of the template's first character, scrolled.
+    pub template_origin: f32,
+    /// How far the template is scrolled, for the card to keep.
+    pub template_scroll: f32,
+    /// The list, every visible row's rect inside it.
+    pub body: egui::Rect,
+    pub rows: Vec<BulkRowGeom>,
+    /// How far the primary caret's row is scrolled, for the card to keep.
+    pub row_scroll: f32,
+    /// The list's scrollbar, when it has more rows than it shows.
+    pub bar: Option<crate::scrollbar::Geometry>,
+    /// Cancel, Rename.
+    pub actions: Vec<egui::Rect>,
+    /// Where the status goes: the rest of the buttons' line, from the card's
+    /// padding to a [`GAP`](crate::ui::GAP) short of `Cancel`.
+    pub status: egui::Rect,
+    pub popover: Option<PopoverGeom>,
+    /// How many rows the list has room for.
+    pub visible: usize,
+}
+
+impl BulkGeometry {
+    /// What the pointer is over. The popover first, because it is drawn over
+    /// everything else on the card; a press on its padding is the popover's,
+    /// and lands on nothing under it.
+    pub fn hit(&self, pos: egui::Pos2) -> Option<Control> {
+        if let Some(popover) = &self.popover {
+            if popover.card.contains(pos) {
+                return popover
+                    .rows
+                    .iter()
+                    .position(|rect| rect.contains(pos))
+                    .map(|i| Control::BulkCandidate(popover.first + i));
+            }
+        }
+        if self.close.contains(pos) {
+            return Some(Control::Close);
+        }
+        if let Some(i) = self.actions.iter().position(|rect| rect.contains(pos)) {
+            return Some(Control::Action(i));
+        }
+        if self.bar.is_some_and(|bar| bar.contains(pos)) {
+            return Some(Control::BulkScrollbar);
+        }
+        if self.template.contains(pos) {
+            return Some(Control::BulkTemplate);
+        }
+        self.rows
+            .iter()
+            .position(|row| row.new.contains(pos))
+            .map(Control::BulkRow)
+    }
+
+    /// Where a control was drawn, for the ripple to start from.
+    pub fn rect_of(&self, control: Control) -> Option<egui::Rect> {
+        match control {
+            Control::Close => Some(self.close),
+            Control::Action(i) => self.actions.get(i).copied(),
+            Control::BulkTemplate => Some(self.template),
+            Control::BulkRow(i) => self.rows.get(i).map(|row| row.new),
+            Control::BulkScrollbar => self.bar.map(|bar| bar.hit),
+            Control::BulkCandidate(i) => self
+                .popover
+                .as_ref()
+                .and_then(|popover| popover.rows.get(i.checked_sub(popover.first)?).copied()),
+            _ => None,
+        }
+    }
+
+    /// The measured row that shows row `index` of the card, if it is on screen.
+    pub fn row(&self, index: usize) -> Option<&BulkRowGeom> {
+        self.rows.iter().find(|row| row.index == index)
+    }
+}
+
+/// The face every name on the card is set in: the template, both columns,
+/// and what the `{` list inserts and makes.
+///
+/// Monospace, because the card is read down its columns as much as along its
+/// rows. A stack of carets at column 12 is a vertical line only when column 12
+/// is at the same x on every row, and in a proportional face it is not: an
+/// `m` and an `i` before it put it in two places, so forty carets that are all
+/// in the same place in the text looked scattered. The same goes for the diff.
+/// The old name and the new one are meant to be compared letter by letter, and
+/// in one face with one advance the letters that did not change sit at the
+/// same offset in both columns. The words about the names (the label, the
+/// title, the status, the reasons and the buttons) stay in the proportional
+/// face, which is what marks them as words rather than names.
+///
+/// egui's own monospace family at the card's size, as every other monospace
+/// run in the app is.
+fn bulk_font() -> egui::FontId {
+    egui::FontId::monospace(FONT)
+}
+
+/// A line laid out in [`bulk_font`], uncoloured: what every caret, selection
+/// and click on the card is measured against.
+fn bulk_galley(painter: &egui::Painter, text: &str) -> std::sync::Arc<egui::Galley> {
+    painter.layout_no_wrap(text.to_string(), bulk_font(), egui::Color32::PLACEHOLDER)
+}
+
+/// The x of char boundary `col` along a laid-out line.
+fn x_of(galley: &egui::Galley, col: usize) -> f32 {
+    galley.pos_from_cursor(egui::text::CCursor::new(col)).min.x
+}
+
+/// The char boundary nearest `x` in `text` drawn from `x_origin`: where a click
+/// puts the caret and how far a drag has reached. Asked at the line's own
+/// height, so a pointer a little above or below the row still reads along it.
+pub fn bulk_col_at(painter: &egui::Painter, text: &str, x_origin: f32, x: f32) -> usize {
+    let galley = bulk_galley(painter, text);
+    let y = galley.size().y / 2.0;
+    let cursor = galley.cursor_from_pos(egui::vec2(x - x_origin, y));
+    cursor.index.0.min(text.chars().count())
+}
+
+/// The character under `x`, for a double click: the one whose box `x` is in,
+/// so a click on the right half of a letter is still on that letter.
+pub fn bulk_char_at(painter: &egui::Painter, text: &str, x_origin: f32, x: f32) -> usize {
+    let at = bulk_col_at(painter, text, x_origin, x);
+    let galley = bulk_galley(painter, text);
+    if at > 0 && x < x_origin + x_of(&galley, at) {
+        at - 1
+    } else {
+        at
+    }
+}
+
+/// A card of `width` × `height` placed as [`card_rect`] places one, without
+/// its [`MAX_WIDTH`]: the caller has already sized it to the window.
+fn bulk_card_rect(area: egui::Rect, width: f32, height: f32) -> egui::Rect {
+    let width = width.min(area.width() - CARD_MARGIN * 2.0).max(0.0);
+    let height = height.min((area.height() - CARD_MARGIN * 2.0).max(0.0));
+    let top = area.top() + (area.height() - height).max(0.0) * chrome::OPTICAL_CENTRE;
+    egui::Rect::from_min_size(
+        egui::pos2(area.center().x - width / 2.0, top),
+        egui::vec2(width, height),
+    )
+}
 
 /// Lay out the bulk-rename card.
 ///
-/// [`Geometry::rows`] is one rect per *visible* name row, and
-/// [`Geometry::apply_all`] is borrowed to carry the find/replace strip — the
-/// struct is the shape every modal here reports, and growing a variant of it for
-/// one dialog would mean a second hit-test path for the same three questions.
-pub fn bulk_geometry(
-    painter: &egui::Painter,
-    area: egui::Rect,
-    bulk: &crate::bulk::Bulk,
-) -> Geometry {
-    let visible = bulk.rows.len().min(crate::bulk::ROWS);
-    let height = CARD_PAD * 2.0
-        + ROW * 2.0                       // title and subtitle
-        + 8.0
-        + BULK_ROW                        // the find / replace strip
-        + 10.0
-        + visible as f32 * BULK_ROW
+/// As wide as the window allows up to [`BULK_MAX_WIDTH`], and as tall as its
+/// rows need up to what the window can hold, which is also how many rows the
+/// list shows at once ([`BulkGeometry::visible`]). Top to bottom: the pad, the
+/// title, the template field, the rows, [`ANSWER_GAP`], the status and the
+/// buttons on one line, the pad. No hint strip: the card's keys are an
+/// editor's, and the status says the one thing that matters, which is what
+/// `Enter` will do.
+///
+/// The status is on the buttons' line rather than under the title because it
+/// is about them: "3 files will be renamed" is what `Rename` does, and "fix
+/// the names in red to continue" is why it is veiled. Read beside the button,
+/// it answers the question at the moment the hand is on its way there. The
+/// line under the title it used to have goes to the list, one more name.
+///
+/// The buttons sit exactly [`CARD_PAD`] in from the card's right and bottom
+/// edges, so the last one's corner is concentric with the card's.
+pub fn bulk_geometry(painter: &egui::Painter, area: egui::Rect, bulk: &Bulk) -> BulkGeometry {
+    let count = bulk.len();
+    let fixed = CARD_PAD * 2.0
+        + ROW // the title
+        + BULK_FIELD_GAP
+        + BULK_ROW // the template
+        + BULK_LIST_GAP
         + ANSWER_GAP
-        + BUTTON_HEIGHT
-        + chrome::HINT_ROW; // the card's own hint strip
-    let card = card_rect(area, MAX_WIDTH, height);
+        + BUTTON_HEIGHT;
+    let room = (area.height() - CARD_MARGIN * 2.0 - fixed).max(0.0);
+    let fit = ((room / BULK_ROW).floor() as usize).max(1);
+    let visible = count.min(fit).max(1);
+    let width = (area.width() - CARD_MARGIN * 2.0).min(BULK_MAX_WIDTH);
+    let card = bulk_card_rect(area, width, fixed + visible as f32 * BULK_ROW);
     let inner_left = card.left() + CARD_PAD;
     let inner_right = card.right() - CARD_PAD;
+    let font = egui::FontId::proportional(FONT);
 
-    let strip_top = card.top() + CARD_PAD + ROW * 2.0 + 8.0;
-    let apply_all = Some(egui::Rect::from_min_max(
-        egui::pos2(inner_left, strip_top),
-        egui::pos2(inner_right, strip_top + BULK_ROW),
-    ));
+    // ── The template field ──────────────────────────────────────────────────
+    let field_top = card.top() + CARD_PAD + ROW + BULK_FIELD_GAP;
+    let template = egui::Rect::from_min_max(
+        egui::pos2(inner_left, field_top),
+        egui::pos2(inner_right, field_top + BULK_ROW),
+    );
+    let label = chrome::text_width(painter, TEMPLATE_LABEL, font.clone());
+    let template_text = egui::Rect::from_min_max(
+        egui::pos2(template.left() + PAD_X + label + PAD_X, template.top()),
+        egui::pos2(
+            (template.right() - PAD_X).max(template.left() + PAD_X + label + PAD_X),
+            template.bottom(),
+        ),
+    );
+    let galley = bulk_galley(painter, bulk.template.text());
+    let template_scroll = if bulk.focus == Focus::Template {
+        chrome::caret_scroll(
+            template_text.width(),
+            x_of(&galley, bulk.template.cursor()),
+            galley.size().x,
+            bulk.template_scroll,
+        )
+    } else {
+        let most = (galley.size().x + chrome::CARET_WIDTH - template_text.width()).max(0.0);
+        bulk.template_scroll.clamp(0.0, most)
+    };
+    let template_origin = template_text.left() - template_scroll;
 
-    let body_top = strip_top + BULK_ROW + 10.0;
+    // ── The rows ────────────────────────────────────────────────────────────
+    let body_top = template.bottom() + BULK_LIST_GAP;
     let body = egui::Rect::from_min_max(
         egui::pos2(inner_left, body_top),
         egui::pos2(inner_right, body_top + visible as f32 * BULK_ROW),
     );
-    let rows = (0..visible)
-        .map(|i| {
-            egui::Rect::from_min_size(
-                egui::pos2(inner_left, body_top + i as f32 * BULK_ROW),
-                egui::vec2(body.width(), BULK_ROW),
-            )
-        })
-        .collect();
-    let actions = button_row(
-        painter,
-        inner_right,
-        card.bottom() - CARD_PAD - chrome::HINT_ROW - BUTTON_HEIGHT,
-        &["Cancel", "Rename"],
+    let bar = crate::scrollbar::geometry(body, bulk.first as f32, visible as f32, count as f32);
+    // The rows stop short of the bar's band, so a press on the band is the
+    // bar's and the end of a name is never under the thumb.
+    let rows_right = match bar {
+        Some(_) => body.right() - crate::scrollbar::HIT_WIDTH,
+        None => body.right(),
+    };
+    let split = (rows_right - body.left()) * BULK_SPLIT;
+    let problems = bulk.problems();
+    let primary = bulk.editor.primary().head;
+    let mut row_scroll = 0.0;
+    let mut rows = Vec::with_capacity(visible);
+    for slot in 0..visible {
+        let index = bulk.first + slot;
+        let Some(line) = bulk.editor.line(index) else {
+            break;
+        };
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(body.left(), body_top + slot as f32 * BULK_ROW),
+            egui::pos2(rows_right, body_top + (slot + 1) as f32 * BULK_ROW),
+        );
+        let old = egui::Rect::from_min_size(rect.min, egui::vec2(split, BULK_ROW));
+        let new =
+            egui::Rect::from_min_max(egui::pos2(old.right() + BULK_ARROW, rect.top()), rect.max);
+        let problem = problems.get(index).copied().flatten();
+        // The refusal takes its room from the right end, up to half the plate:
+        // a long reason must not leave no name to read beside it.
+        let mut right = new.right() - PAD_X;
+        if let Some(problem) = problem {
+            let reason =
+                chrome::text_width(painter, problem.message(), font.clone()).min(new.width() / 2.0);
+            right -= reason + PAD_X;
+        }
+        let text = egui::Rect::from_min_max(
+            egui::pos2(new.left() + PAD_X, new.top()),
+            egui::pos2(right.max(new.left() + PAD_X), new.bottom()),
+        );
+        // Only the primary caret's row scrolls: it is the one the keyboard is
+        // in, and every other row reads from its start.
+        let scroll = if bulk.focus == Focus::Rows && primary.row == index {
+            let galley = bulk_galley(painter, line);
+            row_scroll = chrome::caret_scroll(
+                text.width(),
+                x_of(&galley, primary.col),
+                galley.size().x,
+                bulk.row_scroll,
+            );
+            row_scroll
+        } else {
+            0.0
+        };
+        rows.push(BulkRowGeom {
+            index,
+            rect,
+            old,
+            new,
+            text,
+            origin: text.left() - scroll,
+            problem,
+        });
+    }
+
+    let buttons_top = card.bottom() - CARD_PAD - BUTTON_HEIGHT;
+    let actions = button_row(painter, inner_right, buttons_top, &["Cancel", "Rename"]);
+    let cancel_left = actions.first().map_or(inner_right, egui::Rect::left);
+    let status = egui::Rect::from_min_max(
+        egui::pos2(inner_left, buttons_top),
+        egui::pos2(
+            (cancel_left - crate::ui::GAP).max(inner_left),
+            buttons_top + BUTTON_HEIGHT,
+        ),
     );
-    Geometry {
+    let popover = popover_geometry(painter, area, bulk, &template, template_origin, &rows);
+    BulkGeometry {
         card,
+        close: chrome::close_button_rect(card),
+        template,
+        template_text,
+        template_origin,
+        template_scroll,
         body,
         rows,
+        row_scroll,
+        bar,
         actions,
-        apply_all,
-        close: None,
+        status,
+        popover,
+        visible,
     }
 }
 
-/// Draw the two-column diff.
+/// Where the popover goes: under the line it completes, its text lined up
+/// with the `{` that opened it, kept inside the window, and above the line
+/// instead when there is no room below.
+fn popover_geometry(
+    painter: &egui::Painter,
+    area: egui::Rect,
+    bulk: &Bulk,
+    template: &egui::Rect,
+    template_origin: f32,
+    rows: &[BulkRowGeom],
+) -> Option<PopoverGeom> {
+    let popover = bulk.live_popover()?;
+    let (line, origin, text) = match popover.anchor_row {
+        None => (*template, template_origin, bulk.template.text()),
+        Some(index) => {
+            let row = rows.iter().find(|row| row.index == index)?;
+            (row.new, row.origin, bulk.editor.line(index)?)
+        }
+    };
+    let brace = origin + x_of(&bulk_galley(painter, text), popover.open_at);
+    let shown = popover.candidates.len().min(crate::bulk::POPOVER_ROWS);
+    let height = shown as f32 * ROW + POPOVER_PAD * 2.0;
+    let width = POPOVER_WIDTH
+        .min(area.width() - crate::ui::GAP * 2.0)
+        .max(0.0);
+    let lowest = area.left() + crate::ui::GAP;
+    let highest = (area.right() - crate::ui::GAP - width).max(lowest);
+    let left = (brace - POPOVER_PAD - PAD_X).clamp(lowest, highest);
+    let below = line.bottom() + POPOVER_OFFSET;
+    let top = if below + height <= area.bottom() - crate::ui::GAP {
+        below
+    } else {
+        (line.top() - POPOVER_OFFSET - height).max(area.top())
+    };
+    let card = egui::Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, height));
+    let rows = (0..shown)
+        .map(|i| {
+            egui::Rect::from_min_size(
+                egui::pos2(
+                    card.left() + POPOVER_PAD,
+                    card.top() + POPOVER_PAD + i as f32 * ROW,
+                ),
+                egui::vec2(card.width() - POPOVER_PAD * 2.0, ROW),
+            )
+        })
+        .collect();
+    Some(PopoverGeom {
+        card,
+        rows,
+        first: popover.first,
+    })
+}
+
+/// Draw the rename card: the heading, the template field, the two columns,
+/// the answers, and the `{` popover over all of it.
+///
+/// `held` is whether the list's scrollbar thumb is in the hand.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_bulk(
     paint: &Painting<'_>,
     area: egui::Rect,
-    bulk: &crate::bulk::Bulk,
-    geometry: &Geometry,
+    bulk: &Bulk,
+    geometry: &BulkGeometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
+    held: bool,
 ) {
-    use crate::bulk::Field;
     let palette = paint.palette;
     let painter = paint.painter;
     painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
     chrome::card(paint, geometry.card, 1.0);
 
     let problems = bulk.problems();
-    let valid = problems.iter().all(Option::is_none);
+    let settled = problems
+        .iter()
+        .any(|problem| problem.is_some_and(|p| p != Problem::Pending));
+    let waiting = problems.contains(&Some(Problem::Pending));
     let changes = bulk.changes();
     let left = geometry.card.left() + CARD_PAD;
-    painter.text(
+
+    // The title stops short of the `×` that shares its row.
+    chrome::close_button(paint, geometry.close, hovers, ripples);
+    chrome::truncated_in(
+        painter,
         egui::pos2(left, geometry.card.top() + CARD_PAD + ROW / 2.0),
-        egui::Align2::LEFT_CENTER,
         "Rename files",
-        egui::FontId::proportional(FONT + 2.0),
         palette.text,
+        (geometry.close.left() - crate::ui::GAP - left).max(0.0),
+        egui::FontId::proportional(FONT + 2.0),
     );
-    // The subtitle is the answer to "what will Enter do", and it is the one
+    // The status is the answer to "what will Enter do", and it is the one
     // place the card says *no* — a disabled button with no reason beside it is
-    // a dead end (`delightful-ui` §9).
-    let (subtitle, tint) = if !valid {
+    // a dead end (`delightful-ui` §9). It is drawn beside the buttons, below.
+    let (status, tint) = if settled {
         ("fix the names in red to continue".to_string(), palette.red)
+    } else if waiting {
+        ("reading photo data…".to_string(), palette.overlay1)
     } else if changes == 0 {
         ("nothing has changed yet".to_string(), palette.overlay1)
     } else {
@@ -924,104 +1300,82 @@ pub fn paint_bulk(
             palette.green,
         )
     };
-    painter.text(
-        egui::pos2(left, geometry.card.top() + CARD_PAD + ROW + ROW / 2.0),
-        egui::Align2::LEFT_CENTER,
-        subtitle,
-        egui::FontId::proportional(FONT),
-        tint,
-    );
+    let font = egui::FontId::proportional(FONT);
 
-    // ── The find / replace strip ────────────────────────────────────────────
-    if let Some(strip) = geometry.apply_all {
-        let half = (strip.width() - BULK_ARROW) / 2.0;
-        let find = egui::Rect::from_min_size(strip.min, egui::vec2(half, strip.height()));
-        let replace = egui::Rect::from_min_size(
-            egui::pos2(strip.left() + half + BULK_ARROW, strip.top()),
-            egui::vec2(half, strip.height()),
-        );
-        bulk_field(
-            paint,
-            find,
-            "Find",
-            bulk.find.text(),
-            bulk.find.cursor_byte(),
-            bulk.field == Field::Find,
-            None,
-        );
-        painter.text(
-            egui::pos2(strip.left() + half + BULK_ARROW / 2.0, strip.center().y),
-            egui::Align2::CENTER_CENTER,
-            "→",
-            egui::FontId::proportional(FONT),
-            palette.overlay0,
-        );
-        bulk_field(
-            paint,
-            replace,
-            "Replace",
-            bulk.replace.text(),
-            bulk.replace.cursor_byte(),
-            bulk.field == Field::Replace,
-            None,
-        );
-    }
+    paint_template(paint, bulk, geometry);
 
     // ── The rows ────────────────────────────────────────────────────────────
     let clipped = painter.with_clip_rect(geometry.body);
-    let split = geometry.body.width() * BULK_SPLIT;
-    for (i, rect) in geometry.rows.iter().enumerate() {
-        let index = bulk.first + i;
-        let Some(row) = bulk.rows.get(index) else {
+    let rows_focused = bulk.focus == Focus::Rows;
+    for row in &geometry.rows {
+        let (Some(old), Some(line)) = (bulk.olds.get(row.index), bulk.editor.line(row.index))
+        else {
             break;
         };
-        let problem = problems.get(index).copied().flatten();
-        let old = egui::Rect::from_min_size(rect.min, egui::vec2(split, rect.height()));
-        chrome::truncated(
+        chrome::truncated_in(
             &clipped,
-            egui::pos2(old.left() + PAD_X, old.center().y),
-            &row.old,
+            egui::pos2(row.old.left() + PAD_X, row.old.center().y),
+            old,
             // The old name is history: it is here to be compared against, not
             // read, so it is a step quieter than the name being typed.
-            if row.changed() {
+            if old != line {
                 palette.overlay1
             } else {
                 palette.subtext0
             },
-            (old.width() - PAD_X * 2.0).max(0.0),
+            (row.old.width() - PAD_X * 2.0).max(0.0),
+            bulk_font(),
         );
         clipped.text(
-            egui::pos2(old.right() + BULK_ARROW / 2.0, rect.center().y),
+            egui::pos2(row.old.right() + BULK_ARROW / 2.0, row.rect.center().y),
             egui::Align2::CENTER_CENTER,
             "→",
-            egui::FontId::proportional(FONT),
+            font.clone(),
             palette.overlay0,
         );
-        let new =
-            egui::Rect::from_min_max(egui::pos2(old.right() + BULK_ARROW, rect.top()), rect.max);
-        bulk_field(
-            paint,
-            new,
-            "",
-            row.new_name(),
-            row.buffer.cursor_byte(),
-            bulk.field == Field::Row(index),
-            problem,
-        );
+        let carets = bulk.editor.cursors_on(row.index).next().is_some();
+        paint_name(paint, bulk, row, old, line, rows_focused.then_some(carets));
     }
-    if bulk.rows.len() > geometry.rows.len() {
-        let more = bulk.rows.len() - geometry.rows.len() - bulk.first;
-        if more > 0 {
-            painter.text(
-                egui::pos2(geometry.body.right(), geometry.body.bottom() + 5.0),
-                egui::Align2::RIGHT_TOP,
-                format!("+{} more", grouped(more as u64)),
-                egui::FontId::proportional(FONT - 1.0),
-                palette.overlay0,
-            );
-        }
+    if let Some(bar) = &geometry.bar {
+        crate::scrollbar::paint(paint, bar, 1.0, hovers.hover(Control::BulkScrollbar), held);
     }
 
+    // The status, with how many carets are typing at once while they are: a
+    // word typed at forty of them lands forty times, and that should never be
+    // a surprise. One run cut to the room left of `Cancel`, so a long status
+    // on a narrow card ends in `…` rather than under the button.
+    let carets = bulk.editor.cursors().len();
+    let inked = |color: egui::Color32| egui::text::TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(&status, 0.0, inked(tint));
+    if carets > 1 && bulk.focus == Focus::Rows {
+        job.append(
+            &format!(" · {} carets", grouped(carets as u64)),
+            0.0,
+            inked(palette.overlay0),
+        );
+    }
+    job.wrap = egui::text::TextWrapping {
+        max_width: geometry.status.width().max(0.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    let said = painter.layout_job(job);
+    painter.galley(
+        egui::pos2(
+            geometry.status.left(),
+            geometry.status.center().y - said.size().y / 2.0,
+        ),
+        said,
+        palette.text,
+    );
+
+    let valid = problems.iter().all(Option::is_none);
     for (i, rect) in geometry.actions.iter().enumerate() {
         button(
             paint,
@@ -1035,94 +1389,369 @@ pub fn paint_bulk(
         );
         // A disabled commit is drawn as a veil over the button rather than as a
         // different button, so it stays in the same place and at the same size
-        // (`delightful-ui` §8) and the reason is in the subtitle above.
+        // (`delightful-ui` §8) and the reason is in the status beside it.
         if i == 1 && (!valid || changes == 0) {
             painter.rect_filled(*rect, ROW_RADIUS, chrome::fade(palette.crust, 0.55));
         }
     }
+
+    if let Some(popover) = &geometry.popover {
+        paint_popover(paint, bulk, popover, hovers, ripples);
+    }
 }
 
-/// One editable line: a plate, an optional label, the text, the caret, and the
-/// inline reason when the name is refused.
-fn bulk_field(
-    paint: &Painting<'_>,
-    rect: egui::Rect,
-    label: &str,
-    text: &str,
-    caret: usize,
-    focused: bool,
-    problem: Option<crate::bulk::Problem>,
-) {
+/// The template field: its label, the template with every value in the accent
+/// and every stretch that did not parse underlined, and the caret and
+/// selection while it has the keyboard.
+fn paint_template(paint: &Painting<'_>, bulk: &Bulk, geometry: &BulkGeometry) {
     let palette = paint.palette;
     let painter = paint.painter;
-    if !rect.is_positive() {
-        return;
-    }
-    let font = egui::FontId::proportional(FONT);
-    // The focused field is lit; a refused one is washed in red. Both at once is
-    // possible and correct — the field you are in is the one you are fixing.
-    let ground = match (focused, problem) {
-        (_, Some(_)) => mix(palette.crust, palette.red, 0.14),
-        (true, None) => palette.surface0,
-        (false, None) => mix(palette.crust, palette.surface0, 0.45),
-    };
-    painter.rect_filled(rect.shrink(1.0), ROW_RADIUS, ground);
+    let focused = bulk.focus == Focus::Template;
+    let plate = geometry.template;
+    painter.rect_filled(
+        plate.shrink(1.0),
+        ROW_RADIUS,
+        if focused {
+            palette.surface0
+        } else {
+            mix(palette.crust, palette.surface0, 0.45)
+        },
+    );
+    painter.text(
+        egui::pos2(plate.left() + PAD_X, plate.center().y),
+        egui::Align2::LEFT_CENTER,
+        TEMPLATE_LABEL,
+        egui::FontId::proportional(FONT),
+        palette.overlay1,
+    );
 
-    let mut x = rect.left() + PAD_X;
-    if !label.is_empty() {
-        let galley = painter.layout_no_wrap(label.to_string(), font.clone(), palette.overlay1);
-        painter.galley(
-            egui::pos2(x, rect.center().y - galley.size().y / 2.0),
-            galley.clone(),
-            palette.overlay1,
-        );
-        x += galley.size().x + PAD_X;
+    let text = bulk.template.text();
+    let clip = painter.with_clip_rect(geometry.template_text);
+    let origin = geometry.template_origin;
+    let galley = bulk_galley(painter, text);
+    let caret_top = plate.top() + 4.0;
+    let caret_height = (plate.height() - 8.0).max(0.0);
+    if focused {
+        if let Some(range) = bulk.template.selection() {
+            clip.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(origin + x_of(&galley, range.start), caret_top),
+                    egui::pos2(origin + x_of(&galley, range.end), caret_top + caret_height),
+                ),
+                2,
+                chrome::fade(palette.blue, 0.3),
+            );
+        }
     }
-
-    // The reason, right-aligned, taking room from the text rather than
-    // overlapping it.
-    let mut right = rect.right() - PAD_X;
-    if let Some(problem) = problem {
-        let galley =
-            painter.layout_no_wrap(problem.message().to_string(), font.clone(), palette.red);
-        let width = galley.size().x.min((right - x).max(0.0));
-        painter.galley(
-            egui::pos2(right - width, rect.center().y - galley.size().y / 2.0),
-            galley,
-            palette.red,
-        );
-        right -= width + PAD_X;
-    }
-
-    let room = (right - x).max(0.0);
-    let clipped = painter.with_clip_rect(egui::Rect::from_min_max(
-        egui::pos2(x, rect.top()),
-        egui::pos2(x + room, rect.bottom()),
-    ));
-    chrome::truncated(
-        &clipped,
-        egui::pos2(x, rect.center().y),
-        text,
+    let job = template_job(text, bulk.parsed(), palette);
+    let shaped = painter.layout_job(job);
+    clip.galley(
+        egui::pos2(origin, plate.center().y - shaped.size().y / 2.0),
+        shaped,
         palette.text,
-        room,
     );
     if focused {
-        let upto = caret.min(text.len());
-        let upto = (0..=upto)
-            .rev()
-            .find(|i| text.is_char_boundary(*i))
-            .unwrap_or(0);
-        let before = clipped
-            .layout_no_wrap(text[..upto].to_string(), font, palette.text)
-            .size()
-            .x;
-        clipped.rect_filled(
+        clip.rect_filled(
             egui::Rect::from_min_size(
-                egui::pos2(x + before, rect.top() + 4.0),
-                egui::vec2(crate::chrome::CARET_WIDTH, (rect.height() - 8.0).max(0.0)),
+                egui::pos2(origin + x_of(&galley, bulk.template.cursor()), caret_top),
+                egui::vec2(chrome::CARET_WIDTH, caret_height),
             ),
             0,
             palette.blue,
+        );
+    }
+}
+
+/// The template as coloured runs: plain text in the body colour, each value in
+/// the accent, and each stretch [`Template::parse`] could not read underlined
+/// in red with its literal text left as it is.
+///
+/// `parsed` is `text` parsed, which the card keeps from the last edit
+/// ([`Bulk::parsed`]), so a frame paints without parsing.
+fn template_job(
+    text: &str,
+    parsed: &Template,
+    palette: &crate::theme::Palette,
+) -> egui::text::LayoutJob {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Ink {
+        Plain,
+        Value,
+        Problem,
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut inks = vec![Ink::Plain; chars.len()];
+    for token in parsed.tokens() {
+        for ink in inks.iter_mut().take(token.span.end).skip(token.span.start) {
+            *ink = Ink::Value;
+        }
+    }
+    for problem in parsed.problems() {
+        for ink in inks
+            .iter_mut()
+            .take(problem.span.end)
+            .skip(problem.span.start)
+        {
+            *ink = Ink::Problem;
+        }
+    }
+    let format = |ink: Ink| egui::text::TextFormat {
+        font_id: bulk_font(),
+        color: match ink {
+            Ink::Plain | Ink::Problem => palette.text,
+            Ink::Value => palette.blue,
+        },
+        underline: match ink {
+            Ink::Problem => egui::Stroke::new(1.0, palette.red),
+            _ => egui::Stroke::NONE,
+        },
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    let mut start = 0;
+    while start < chars.len() {
+        let ink = inks[start];
+        let end = (start..chars.len())
+            .find(|&i| inks[i] != ink)
+            .unwrap_or(chars.len());
+        let run: String = chars[start..end].iter().collect();
+        job.append(&run, 0.0, format(ink));
+        start = end;
+    }
+    job
+}
+
+/// One row's new name: its plate, the stretch that differs from the old name,
+/// the selections, the text, the carets, and the refusal at its right end.
+///
+/// `lit` is `None` while the template has the keyboard (no row is lit and no
+/// caret drawn), else whether this row has a caret on it.
+fn paint_name(
+    paint: &Painting<'_>,
+    bulk: &Bulk,
+    row: &BulkRowGeom,
+    old: &str,
+    line: &str,
+    lit: Option<bool>,
+) {
+    let palette = paint.palette;
+    let painter = paint.painter;
+    let rect = row.new;
+    if !rect.is_positive() {
+        return;
+    }
+    let pending = row.problem == Some(Problem::Pending);
+    // A row with a caret on it is lit; a refused one is washed in red. Both at
+    // once is possible and correct — the row you are in is the one you are
+    // fixing. A row waiting on the photo reader is not refused, only not yet
+    // answered, so it keeps the quiet ground.
+    let ground = match (lit, row.problem) {
+        (_, Some(problem)) if problem != Problem::Pending => mix(palette.crust, palette.red, 0.14),
+        (Some(true), _) => palette.surface0,
+        _ => mix(palette.crust, palette.surface0, 0.45),
+    };
+    painter.rect_filled(rect.shrink(1.0), ROW_RADIUS, ground);
+
+    if let Some(problem) = row.problem {
+        let color = if pending {
+            palette.overlay1
+        } else {
+            palette.red
+        };
+        let right = rect.right() - PAD_X;
+        chrome::truncated(
+            painter,
+            egui::pos2(row.text.right() + PAD_X, rect.center().y),
+            problem.message(),
+            color,
+            (right - row.text.right() - PAD_X).max(0.0),
+        );
+    }
+
+    let clip = painter.with_clip_rect(row.text);
+    let galley = bulk_galley(painter, line);
+    let origin = row.origin;
+    let top = rect.top() + 4.0;
+    let height = (rect.height() - 8.0).max(0.0);
+    let span = |range: Range<usize>| {
+        egui::Rect::from_min_max(
+            egui::pos2(origin + x_of(&galley, range.start), top),
+            egui::pos2(origin + x_of(&galley, range.end), top + height),
+        )
+    };
+    // What the new name adds over the old one, faintly: a diff read at a
+    // glance down a column of forty names.
+    for range in changed_spans(old, line) {
+        clip.rect_filled(span(range), 2, chrome::fade(palette.green, 0.18));
+    }
+    let focused = lit.is_some();
+    if focused {
+        for cursor in bulk.editor.cursors_on(row.index) {
+            if cursor.is_selection() {
+                clip.rect_filled(span(cursor.range()), 2, chrome::fade(palette.blue, 0.3));
+            }
+        }
+    }
+    // The measuring galley is uncoloured, so it is drawn in the body colour.
+    clip.galley(
+        egui::pos2(origin, rect.center().y - galley.size().y / 2.0),
+        galley.clone(),
+        palette.text,
+    );
+    if focused {
+        for cursor in bulk.editor.cursors_on(row.index) {
+            clip.rect_filled(
+                egui::Rect::from_min_size(
+                    egui::pos2(origin + x_of(&galley, cursor.head.col), top),
+                    egui::vec2(chrome::CARET_WIDTH, height),
+                ),
+                0,
+                palette.blue,
+            );
+        }
+    }
+}
+
+/// The stretches of `new` the rename adds, in chars, left to right. Empty
+/// when it only takes something away, or changes nothing.
+///
+/// When the old name is still there, whole, somewhere in the new one, what
+/// was added is everything around it: nothing, one side or both. Only when it
+/// is not does the diff fall back to what is left between the common start
+/// and the common end.
+///
+/// The fallback alone reads the most common template wrong. A date put in
+/// front of a name that starts with a date, `2026-01-01_x.mp4` becoming
+/// `2026-08-05_2026-01-01_x.mp4`, shares its first six characters with the
+/// old name by accident, and the stretch between the common ends is
+/// `8-05_2026-0`: the middle of two dates, which is neither the part added
+/// nor the part kept. Finding the old name first gives `2026-08-05_`, which
+/// is what the template wrote. Where the old name occurs more than once, as
+/// `{name}_{name}` makes it, the first is the one taken as kept.
+fn changed_spans(old: &str, new: &str) -> Vec<Range<usize>> {
+    let old: Vec<char> = old.chars().collect();
+    let new: Vec<char> = new.chars().collect();
+    let kept = if old.is_empty() {
+        None
+    } else {
+        new.windows(old.len()).position(|window| window == old)
+    };
+    if let Some(at) = kept {
+        let (before, after) = (0..at, at + old.len()..new.len());
+        return [before, after]
+            .into_iter()
+            .filter(|range| !range.is_empty())
+            .collect();
+    }
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let room = old.len().min(new.len()) - prefix;
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let middle = prefix..new.len() - suffix;
+    if middle.is_empty() {
+        Vec::new()
+    } else {
+        vec![middle]
+    }
+}
+
+/// The `{` popover: a small plate over everything, one row per candidate —
+/// what it inserts, what it is, and what it would make of the row it is about.
+fn paint_popover(
+    paint: &Painting<'_>,
+    bulk: &Bulk,
+    geometry: &PopoverGeom,
+    hovers: &Hovers<Control>,
+    ripples: &Ripples<Control>,
+) {
+    let Some(popover) = bulk.live_popover() else {
+        return;
+    };
+    let palette = paint.palette;
+    let painter = paint.painter;
+    let radius = ROW_RADIUS + POPOVER_PAD as u8;
+    painter.rect_filled(geometry.card, radius, palette.surface0);
+    painter.rect_stroke(
+        geometry.card,
+        radius,
+        egui::Stroke::new(1.0, palette.surface1),
+        egui::StrokeKind::Inside,
+    );
+    // What a candidate inserts and what it makes are names, in the names'
+    // face; what it is, and why it cannot make one, are words.
+    let mono = bulk_font();
+    let font = egui::FontId::proportional(FONT);
+    let small = egui::FontId::proportional(FONT - 1.0);
+    for (slot, rect) in geometry.rows.iter().enumerate() {
+        let index = geometry.first + slot;
+        let Some(candidate) = popover.candidates.get(index) else {
+            break;
+        };
+        let key = Control::BulkCandidate(index);
+        let hover = hovers.hover(key);
+        let selected = index == popover.selected;
+        let rect_now = pressed_rect(*rect, hovers.press(key));
+        if selected || hover > 0.0 {
+            let fill = if selected {
+                palette.surface1
+            } else {
+                mix(palette.surface0, palette.surface1, hover * 0.6)
+            };
+            painter.rect_filled(rect_now, ROW_RADIUS, fill);
+        }
+        let inside = painter.with_clip_rect(rect_now);
+        for splash in ripples.splashes(key, paint.now) {
+            inside.circle_filled(
+                splash.center,
+                splash.radius,
+                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            );
+        }
+
+        let inner = rect.shrink2(egui::vec2(PAD_X, 0.0));
+        let y = rect.center().y;
+        let insert_room = inner.width() * POPOVER_INSERT_SHARE;
+        let insert = chrome::text_width(painter, &candidate.insert, mono.clone()).min(insert_room);
+        // A point of slack: a run measured to fit exactly must not be cut to
+        // `…` by the rounding of the second measurement.
+        chrome::truncated_in(
+            painter,
+            egui::pos2(inner.left(), y),
+            &candidate.insert,
+            palette.text,
+            insert + 1.0,
+            mono.clone(),
+        );
+        let (preview, preview_color, preview_font) = match bulk.preview(candidate) {
+            Ok(name) => (name, palette.blue, mono.clone()),
+            Err(Missing::Pending) => ("reading photo…".to_string(), palette.overlay0, font.clone()),
+            Err(Missing::Because(why)) => (why.to_string(), palette.overlay0, font.clone()),
+        };
+        let preview_room = inner.width() * POPOVER_PREVIEW_SHARE;
+        let preview_width =
+            chrome::text_width(painter, &preview, preview_font.clone()).min(preview_room);
+        chrome::truncated_in(
+            painter,
+            egui::pos2(inner.right() - preview_width, y),
+            &preview,
+            preview_color,
+            preview_width + 1.0,
+            preview_font,
+        );
+        let detail_left = inner.left() + insert + PAD_X * 1.5;
+        let detail_room = inner.right() - preview_width - PAD_X * 1.5 - detail_left;
+        chrome::truncated_in(
+            painter,
+            egui::pos2(detail_left, y),
+            candidate.detail,
+            palette.overlay1,
+            detail_room.max(0.0),
+            small.clone(),
         );
     }
 }
@@ -1821,61 +2450,264 @@ mod tests {
             let g = confirm_geometry(ui.painter(), area, &long);
             paint_confirm(&paint, area, &long, &g, &hovers, &ripples);
 
-            // The rename card, in the three states it has: clean, refused, and
-            // longer than it can show at once.
-            let many: Vec<String> = (0..30).map(|i| format!("file-{i}.txt")).collect();
-            let mut bulk = crate::bulk::Bulk::new(tree.path.clone(), many.clone(), &many)
-                .expect("a local directory builds a card");
+            // The rename card, in the states it has: clean, rewritten by the
+            // template, with the `{` list open, refused with carets on two
+            // rows, and longer than it can show at once.
+            let many: Vec<String> = (0..60).map(|i| format!("file-{i}.txt")).collect();
+            let mut bulk = Bulk::new(
+                tree.path.clone(),
+                many.clone(),
+                &many,
+                df_core::fs::no_notifier(),
+            )
+            .expect("a local directory builds a card");
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
+            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, false);
 
-            bulk.field = crate::bulk::Field::Find;
-            bulk.find = df_core::input::InputBuffer::new("file-".to_string(), 5);
-            bulk.apply_replace();
+            bulk.insert_text("-x");
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
+            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, false);
+
+            bulk.insert_text("{");
+            assert!(bulk.live_popover().is_some());
+            let g = bulk_geometry(ui.painter(), area, &bulk);
+            assert!(g.popover.is_some(), "the list is measured");
+            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, false);
 
             // Two rows wanting the same name, so the refusal treatment draws.
-            bulk.rows[0].buffer = df_core::input::InputBuffer::new("same".to_string(), 0);
-            bulk.rows[1].buffer = df_core::input::InputBuffer::new("same".to_string(), 0);
-            bulk.field = crate::bulk::Field::Row(1);
+            for script in ["esc", "tab", "ctrl+a", "ctrl+k"] {
+                bulk.key(chord(script));
+            }
+            bulk.insert_text("same");
+            for script in ["down", "ctrl+a", "ctrl+k"] {
+                bulk.key(chord(script));
+            }
+            bulk.insert_text("same");
+            bulk.key(chord("ctrl+shift+down"));
             assert!(!bulk.valid());
             let g = bulk_geometry(ui.painter(), area, &bulk);
-            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples);
+            paint_bulk(&paint, area, &bulk, &g, &hovers, &ripples, true);
 
             // …and a window with no room for a card at all.
             let tiny = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 60.0));
             let g = bulk_geometry(ui.painter(), tiny, &bulk);
-            paint_bulk(&paint, tiny, &bulk, &g, &hovers, &ripples);
+            paint_bulk(&paint, tiny, &bulk, &g, &hovers, &ripples, false);
         });
     }
 
-    /// The card's geometry: as many rows as it can show, the strip above them,
-    /// and a card that fits the window it is given.
+    fn chord(script: &str) -> df_core::keymap::Chord {
+        df_core::keymap::parse_chord(script).unwrap()
+    }
+
+    fn names(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("f{i}")).collect()
+    }
+
+    fn rename_card(count: usize) -> Bulk {
+        Bulk::new(
+            PathBuf::from("/tmp"),
+            names(count),
+            &[],
+            df_core::fs::no_notifier(),
+        )
+        .expect("local")
+    }
+
+    /// The card's geometry: as many rows as the window has room for, a
+    /// scrollbar for the rest, the template field above them, and the answers
+    /// in the corner, the card's padding in from both edges.
     #[test]
     fn the_rename_card_shows_what_it_can_and_scrolls_the_rest() {
-        let names: Vec<String> = (0..30).map(|i| format!("f{i}")).collect();
-        let bulk = crate::bulk::Bulk::new(PathBuf::from("/tmp"), names, &[]).expect("local");
+        let bulk = rename_card(60);
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
         with_painter(|painter| {
             let g = bulk_geometry(painter, area, &bulk);
-            assert_eq!(g.rows.len(), crate::bulk::ROWS);
-            assert!(g.apply_all.is_some(), "the find/replace strip is there");
-            assert!(g.actions.len() == 2);
-            assert!(g.card.width() <= MAX_WIDTH + 1e-3);
-            // Every row is inside the body, and the strip is above all of them.
-            for rect in &g.rows {
-                assert!(g.body.contains_rect(*rect));
-                assert!(g.apply_all.unwrap().bottom() <= rect.top());
+            assert_eq!(g.rows.len(), g.visible);
+            assert!(g.visible < 60, "sixty rows do not fit in 900 points");
+            assert!(g.bar.is_some(), "the rest are a scroll away");
+            assert!((g.card.width() - BULK_MAX_WIDTH).abs() < 1e-3);
+            assert!(g.card.width() > MAX_WIDTH, "a workspace, not a question");
+            assert!(g.card.bottom() <= area.bottom() - CARD_MARGIN + 1e-3);
+            // Every row is inside the body, and the field is above all of them.
+            for row in &g.rows {
+                assert!(g.body.contains_rect(row.rect));
+                assert!(g.template.bottom() <= row.rect.top());
+                assert!(row.new.left() > row.old.right());
             }
-            // A short card is only as tall as it needs to be.
-            let two = crate::bulk::Bulk::new(
-                PathBuf::from("/tmp"),
-                vec!["a".to_string(), "b".to_string()],
-                &[],
-            )
-            .expect("local");
-            assert!(bulk_geometry(painter, area, &two).card.height() < g.card.height());
+            // The answers sit the card's padding in from the right and the
+            // bottom: concentric with its corner.
+            let rename = g.actions[1];
+            assert!((g.card.right() - rename.right() - CARD_PAD).abs() < 1e-3);
+            assert!((g.card.bottom() - rename.bottom() - CARD_PAD).abs() < 1e-3);
+            assert_eq!(g.close, chrome::close_button_rect(g.card));
+
+            // One line of title and then the field: the status is not under
+            // the title any more.
+            let field_top = g.card.top() + CARD_PAD + ROW + BULK_FIELD_GAP;
+            assert!((g.template.top() - field_top).abs() < 1e-3);
+            // It shares the buttons' line instead, from the card's padding to
+            // a gap short of `Cancel`, centred on the buttons.
+            let cancel = g.actions[0];
+            assert!((g.status.left() - (g.card.left() + CARD_PAD)).abs() < 1e-3);
+            assert!((g.status.right() - (cancel.left() - crate::ui::GAP)).abs() < 1e-3);
+            assert!((g.status.center().y - cancel.center().y).abs() < 1e-3);
+            assert!(!g.status.intersects(cancel), "the status runs under Cancel");
+
+            // What the pointer finds where.
+            assert_eq!(g.hit(g.close.center()), Some(Control::Close));
+            assert_eq!(g.hit(rename.center()), Some(Control::Action(1)));
+            assert_eq!(g.hit(g.template.center()), Some(Control::BulkTemplate));
+            assert_eq!(g.hit(g.rows[2].new.center()), Some(Control::BulkRow(2)));
+            assert_eq!(
+                g.hit(g.rows[2].old.center()),
+                None,
+                "the old name is history"
+            );
+            let bar = g.bar.expect("measured above");
+            assert_eq!(g.hit(bar.thumb.center()), Some(Control::BulkScrollbar));
+
+            // A short card is only as tall as it needs to be, with no bar:
+            // the pad, the title, the field, two rows, the buttons' line.
+            let two = bulk_geometry(painter, area, &rename_card(2));
+            assert!(two.card.height() < g.card.height());
+            assert!(two.bar.is_none());
+            assert_eq!(two.visible, 2);
+            let needed = CARD_PAD * 2.0
+                + ROW
+                + BULK_FIELD_GAP
+                + BULK_ROW
+                + BULK_LIST_GAP
+                + 2.0 * BULK_ROW
+                + ANSWER_GAP
+                + BUTTON_HEIGHT;
+            assert!((two.card.height() - needed).abs() < 1e-3);
+
+            // A small window still gets a row, and a card inside it.
+            let small = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(500.0, 260.0));
+            let s = bulk_geometry(painter, small, &bulk);
+            assert!(s.visible >= 1);
+            assert!(small.contains_rect(s.card));
         });
+    }
+
+    /// The popover hangs under the line it completes, its text in line with
+    /// the `{`, and its rows answer the pointer by candidate.
+    #[test]
+    fn the_popover_hangs_under_its_brace() {
+        let mut bulk = rename_card(3);
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+        bulk.insert_text("{");
+        with_painter(|painter| {
+            let g = bulk_geometry(painter, area, &bulk);
+            let popover = g.popover.clone().expect("a `{` opens the list");
+            assert!(popover.card.top() >= g.template.bottom());
+            let brace = g.template_origin + x_of(&bulk_galley(painter, "{name}{ext}{"), 11);
+            assert!((popover.card.left() + POPOVER_PAD + PAD_X - brace).abs() < 1.0);
+            assert_eq!(popover.rows.len(), crate::bulk::POPOVER_ROWS);
+            assert_eq!(
+                g.hit(popover.rows[3].center()),
+                Some(Control::BulkCandidate(3))
+            );
+            assert_eq!(g.rect_of(Control::BulkCandidate(3)), Some(popover.rows[3]));
+        });
+    }
+
+    /// A click lands on the boundary nearest it, and a double click on the
+    /// character it is over.
+    ///
+    /// The boundary is read off the card's own galley rather than measured
+    /// as the width of `a`: egui snaps each glyph to a whole pixel, and in the
+    /// monospace face that puts the first boundary half a point short of the
+    /// advance.
+    #[test]
+    fn a_pointer_x_is_a_column() {
+        with_painter(|painter| {
+            assert_eq!(bulk_col_at(painter, "abc", 100.0, 50.0), 0);
+            assert_eq!(bulk_col_at(painter, "abc", 100.0, 900.0), 3);
+            let after_a = 100.0 + x_of(&bulk_galley(painter, "abc"), 1);
+            assert_eq!(bulk_col_at(painter, "abc", 100.0, after_a + 0.5), 1);
+            assert_eq!(bulk_char_at(painter, "abc", 100.0, after_a - 0.5), 0);
+            assert_eq!(bulk_char_at(painter, "abc", 100.0, after_a + 0.5), 1);
+        });
+    }
+
+    /// The reason the names are monospace: a caret at the same column is at
+    /// the same x on every row, whatever the letters before it, so a stack of
+    /// carets is a straight line and the old and new columns line up letter
+    /// for letter.
+    #[test]
+    fn a_column_is_the_same_x_on_every_row() {
+        with_painter(|painter| {
+            let narrow = bulk_galley(painter, "iiii_1.txt");
+            let wide = bulk_galley(painter, "MMMM_W.JPG");
+            for col in 0..=10 {
+                assert_eq!(x_of(&narrow, col), x_of(&wide, col), "column {col}");
+            }
+            assert!(x_of(&wide, 4) > 0.0, "the columns really are apart");
+        });
+    }
+
+    /// [`changed_spans`] as `(start, end)` char offsets, which is how the
+    /// expectations below are counted.
+    fn added(old: &str, new: &str) -> Vec<(usize, usize)> {
+        changed_spans(old, new)
+            .into_iter()
+            .map(|range| (range.start, range.end))
+            .collect()
+    }
+
+    /// The diff highlight is what the new name adds.
+    #[test]
+    fn the_changed_span_is_what_was_added() {
+        assert_eq!(added("a.txt", "a-2.txt"), [(1, 3)]);
+        assert_eq!(added("aaa", "aaaa"), [(3, 4)]);
+        assert_eq!(added("IMG_1", "2024"), [(0, 4)]);
+        assert!(added("abc", "abc").is_empty());
+    }
+
+    /// A date put in front of a name that starts with a date shares its first
+    /// characters with the old name by accident. The highlight is the date
+    /// that was added, not the stretch between the two names' common ends.
+    #[test]
+    fn a_prefix_insertion_highlights_only_the_prefix() {
+        assert_eq!(
+            added("2026-01-01_x.mp4", "2026-08-05_2026-01-01_x.mp4"),
+            [(0, 11)]
+        );
+        assert_eq!(added("a.txt", "x-a.txt"), [(0, 2)]);
+    }
+
+    #[test]
+    fn a_suffix_insertion_highlights_only_the_suffix() {
+        assert_eq!(added("photo.jpg", "photo.jpg.bak"), [(9, 13)]);
+        assert_eq!(
+            added("x.mp4", "x.mp4_x.mp4"),
+            [(5, 11)],
+            "the first x.mp4 is kept"
+        );
+    }
+
+    #[test]
+    fn an_insertion_on_both_sides_highlights_both() {
+        assert_eq!(added("a.txt", "x-a.txt-y"), [(0, 2), (7, 9)]);
+        assert_eq!(
+            added("IMG_0001.jpg", "2026-IMG_0001.jpg.bak"),
+            [(0, 5), (17, 21)]
+        );
+    }
+
+    /// With the old name no longer in the new one, the diff is what lies
+    /// between their common start and common end.
+    #[test]
+    fn an_edit_in_the_middle_still_highlights_the_middle() {
+        assert_eq!(added("abc", "abXc"), [(2, 3)]);
+        assert_eq!(added("IMG_0001.jpg", "IMG-0001.jpg"), [(3, 4)]);
+    }
+
+    #[test]
+    fn a_pure_deletion_highlights_nothing() {
+        assert!(changed_spans("abc", "ab").is_empty());
+        assert!(changed_spans("2026-08-05_x.mp4", "x.mp4").is_empty());
+        assert!(changed_spans("IMG_0001.jpg", "0001.jpg").is_empty());
     }
 }

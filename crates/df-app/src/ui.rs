@@ -540,6 +540,18 @@ pub enum Control {
     /// press of its own to draw, and no ripple — but it is under the pointer
     /// like one, and the click counter keys on it.
     PromptField,
+    /// The bulk rename card's template field: text like
+    /// [`Control::PromptField`], taking its press at the press site with a
+    /// click count, and no hover, press or ripple of its own.
+    BulkTemplate,
+    /// The new name on one of the rename card's rows, by its place among the
+    /// rows drawn (the card's `first` turns it into a row of the card). Text,
+    /// as the template is.
+    BulkRow(usize),
+    /// A candidate in the rename card's `{` list, by its index in the list.
+    BulkCandidate(usize),
+    /// The rename card's scrollbar: the thumb is dragged, the track pages.
+    BulkScrollbar,
 }
 
 /// Where the panes and the chrome go.

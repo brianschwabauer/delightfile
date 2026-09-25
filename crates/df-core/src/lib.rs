@@ -20,6 +20,7 @@ pub mod keymap;
 /// Thread priority: how a background walk gets out of the UI thread's way.
 pub mod ops;
 pub mod preview;
+pub mod rename;
 pub mod state;
 pub mod tasks;
 /// The shared test fixtures (PLAN §9). `#[cfg(test)]` here, and a real `pub`

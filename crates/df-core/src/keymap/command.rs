@@ -334,6 +334,12 @@ commands! {
     InputSelectEol => "input-select-eol",
     InputSelectWordForward => "input-select-word-forward",
     InputSelectWordBackward => "input-select-word-backward",
+    // The smaller word, which stops at `_` as well (see `crate::input`'s
+    // header on the two sizes of word).
+    InputSubwordForward => "input-subword-forward",
+    InputSubwordBackward => "input-subword-backward",
+    InputSelectSubwordForward => "input-select-subword-forward",
+    InputSelectSubwordBackward => "input-select-subword-backward",
     InputBackspace => "input-backspace",
     InputDeleteUnder => "input-delete-under",
     InputKillBol => "input-kill-bol",

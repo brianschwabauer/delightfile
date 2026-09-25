@@ -32,6 +32,8 @@
 //! * `Ctrl+a` / `Home` and `Ctrl+e` / `End` — the ends of the line.
 //! * `Ctrl+b` / `Ctrl+f` and the arrows — one character.
 //! * `Alt+b` / `Alt+f` and `Ctrl+`arrow — one word.
+//! * `Alt+`arrow — one word, with `_` splitting words as a space does (see
+//!   below).
 //! * `Ctrl+w` kills the word behind, `Alt+d` the word ahead, `Ctrl+u` back to
 //!   the start of the line, `Ctrl+k` on to its end.
 //! * `Ctrl+h` / `Backspace` and `Ctrl+d` / `Delete` — one character.
@@ -54,6 +56,25 @@
 //! Word motions are class-based over `char::is_alphanumeric`, so `naïve_café`
 //! is one word and `日本語` is one word — the multibyte case is handled by
 //! asking the character what it is, never by counting bytes.
+//!
+//! # Two sizes of word
+//!
+//! `Ctrl+←/→` reads `_` as part of a word, as a code editor does, because in
+//! an identifier it is: `file_name` is one thing. A filename often uses it
+//! the other way round, as the space it cannot have, and
+//! `2024_holiday_DSC_0198` is four things a person might want to change one
+//! of. Stepping through it by that word goes from one end to the other in one
+//! press, past every part somebody might have been aiming for.
+//!
+//! So there is a second, smaller word on `Alt+←/→` (with Shift, a selection
+//! by it), which is the same motion with `_` read as a space. The point of
+//! the key is to jump between the words an underscore joins, so it stops once
+//! per word: `naïve_café_photo` is three stops from end to end, where `Ctrl+→`
+//! makes it one. Reading `_` as punctuation instead would stop on both sides
+//! of every one, as the larger word does at a `.`, and double the presses in
+//! exactly the names this key is for. Other punctuation is still a stop on
+//! each side, as it is for `Ctrl`. `Alt+b` and `Alt+f` keep the larger word,
+//! as they always have here.
 //!
 //! # The pointer
 //!
@@ -97,6 +118,10 @@ pub fn action_of(command: Command) -> Option<InputAction> {
         C::InputSelectEol => Edit(O::SelectEol),
         C::InputSelectWordForward => Edit(O::SelectWordForward),
         C::InputSelectWordBackward => Edit(O::SelectWordBackward),
+        C::InputSubwordForward => Edit(O::SubwordForward),
+        C::InputSubwordBackward => Edit(O::SubwordBackward),
+        C::InputSelectSubwordForward => Edit(O::SelectSubwordForward),
+        C::InputSelectSubwordBackward => Edit(O::SelectSubwordBackward),
         C::InputBackspace => Edit(O::Backspace),
         C::InputDeleteUnder => Edit(O::DeleteUnder),
         C::InputKillBol => Edit(O::KillBol),
@@ -156,6 +181,12 @@ pub enum InputOp {
     SelectEol,
     SelectWordForward,
     SelectWordBackward,
+    /// The word motions with `_` read as a space: see the module header on
+    /// the two sizes of word.
+    SubwordForward,
+    SubwordBackward,
+    SelectSubwordForward,
+    SelectSubwordBackward,
     Backspace,
     DeleteUnder,
     KillBol,
@@ -195,6 +226,7 @@ enum CharKind {
     Word,
 }
 
+/// `c`'s class for the word motions (`Ctrl+←/→`, `Alt+b/f`, the kills).
 fn kind(c: char) -> CharKind {
     if c.is_whitespace() {
         CharKind::Space
@@ -202,6 +234,16 @@ fn kind(c: char) -> CharKind {
         CharKind::Word
     } else {
         CharKind::Punct
+    }
+}
+
+/// `c`'s class for the smaller word on `Alt+←/→`: [`kind`], with `_` read as
+/// a space (see the module header on the two sizes of word).
+fn subword_kind(c: char) -> CharKind {
+    if c == '_' {
+        CharKind::Space
+    } else {
+        kind(c)
     }
 }
 
@@ -440,6 +482,7 @@ impl InputBuffer {
         let ctrl = m == Mods::CTRL;
         let ctrl_shift = m.ctrl && m.shift && !m.alt && !m.super_key;
         let alt = m == Mods::ALT;
+        let alt_shift = m.alt && m.shift && !m.ctrl && !m.super_key;
         use InputAction::{Cancel, Edit, Submit};
         use InputOp as O;
 
@@ -462,6 +505,11 @@ impl InputBuffer {
             Key::ArrowRight if ctrl => Edit(O::WordForward),
             Key::Char('b') if alt => Edit(O::WordBackward),
             Key::Char('f') if alt => Edit(O::WordForward),
+            // The smaller word, which stops at `_` too.
+            Key::ArrowLeft if alt_shift => Edit(O::SelectSubwordBackward),
+            Key::ArrowRight if alt_shift => Edit(O::SelectSubwordForward),
+            Key::ArrowLeft if alt => Edit(O::SubwordBackward),
+            Key::ArrowRight if alt => Edit(O::SubwordForward),
 
             // ── Character-wise movement ─────────────────────────────────────
             Key::ArrowLeft if shift => Edit(O::SelectLeft),
@@ -510,20 +558,24 @@ impl InputBuffer {
             O::MoveRight => self.move_to(self.right(false), false),
             O::MoveBol => self.move_to(0, false),
             O::MoveEol => self.move_to(self.len(), false),
-            O::WordBackward => self.move_to(self.backward(), false),
-            O::WordForward => self.move_to(self.forward(), false),
+            O::WordBackward => self.move_to(self.backward(kind), false),
+            O::WordForward => self.move_to(self.forward(kind), false),
             O::SelectLeft => self.move_to(self.left(true), true),
             O::SelectRight => self.move_to(self.right(true), true),
             O::SelectBol => self.move_to(0, true),
             O::SelectEol => self.move_to(self.len(), true),
-            O::SelectWordBackward => self.move_to(self.backward(), true),
-            O::SelectWordForward => self.move_to(self.forward(), true),
+            O::SelectWordBackward => self.move_to(self.backward(kind), true),
+            O::SelectWordForward => self.move_to(self.forward(kind), true),
+            O::SubwordBackward => self.move_to(self.backward(subword_kind), false),
+            O::SubwordForward => self.move_to(self.forward(subword_kind), false),
+            O::SelectSubwordBackward => self.move_to(self.backward(subword_kind), true),
+            O::SelectSubwordForward => self.move_to(self.forward(subword_kind), true),
             O::Backspace => self.backspace(false),
             O::DeleteUnder => self.backspace(true),
             O::KillBol => self.kill(0),
             O::KillEol => self.kill(self.len()),
-            O::KillWordBackward => self.kill(self.backward()),
-            O::KillWordForward => self.kill(self.forward()),
+            O::KillWordBackward => self.kill(self.backward(kind)),
+            O::KillWordForward => self.kill(self.forward(kind)),
             O::Undo => self.undo(),
             O::Redo => self.redo(),
         }
@@ -664,8 +716,9 @@ impl InputBuffer {
     }
 
     /// One word back: the start of the word the caret is in, or of the
-    /// previous one if it is already there.
-    fn backward(&self) -> usize {
+    /// previous one if it is already there. `kind` is which size of word:
+    /// [`kind`] or [`subword_kind`] (see the module header).
+    fn backward(&self, kind: fn(char) -> CharKind) -> usize {
         let chars: Vec<char> = self.text.chars().collect();
         let mut i = self.cursor.min(chars.len());
         if i == 0 {
@@ -687,8 +740,8 @@ impl InputBuffer {
 
     /// One word forward: over any space under the caret, then past the end of
     /// the word after it — readline's `Alt+f`, which is also the span `Alt+d`
-    /// deletes.
-    fn forward(&self) -> usize {
+    /// deletes. `kind` as for [`InputBuffer::backward`].
+    fn forward(&self, kind: fn(char) -> CharKind) -> usize {
         let chars: Vec<char> = self.text.chars().collect();
         let n = chars.len();
         let mut i = self.cursor;

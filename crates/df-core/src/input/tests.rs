@@ -223,6 +223,120 @@ fn word_motions_walk_by_character_class() {
     }
 }
 
+/// A snake-case filename, for the two sizes of word:
+///
+/// ```text
+/// n a ï v e _ c a f é _  p  h  o  t  o
+/// 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15   (16 is the end)
+/// ```
+const SNAKE: &str = "naïve_café_photo";
+
+/// Press `script` from `from` until the caret stops moving, and answer every
+/// place it stopped on the way.
+fn stops(script: &str, from: usize) -> Vec<usize> {
+    let mut buf = InputBuffer::new(SNAKE, from);
+    let mut out = Vec::new();
+    loop {
+        let before = buf.cursor();
+        run(&mut buf, script);
+        if buf.cursor() == before {
+            return out;
+        }
+        out.push(buf.cursor());
+    }
+}
+
+/// `Alt+←/→` step by the smaller word, reading `_` as a space: one stop per
+/// word, not one on each side of every `_`. `Ctrl+←/→` and `Alt+b/f` still
+/// take the whole name in one press.
+#[test]
+fn alt_arrows_stop_at_the_underscores_and_ctrl_arrows_do_not() {
+    assert_eq!(stops("<alt+right>", 0), [5, 10, 16]);
+    assert_eq!(stops("<alt+left>", 16), [11, 6, 0]);
+    // Other punctuation is still a stop on each side, as it is for `Ctrl`.
+    let mut buf = InputBuffer::new("a-b_c", 0);
+    let seen: Vec<usize> = (0..4)
+        .map(|_| {
+            run(&mut buf, "<alt+right>");
+            buf.cursor()
+        })
+        .collect();
+    assert_eq!(seen, [1, 2, 3, 5]);
+    for script in ["<ctrl+right>", "<alt+f>"] {
+        assert_eq!(stops(script, 0), [16], "{script}");
+    }
+    for script in ["<ctrl+left>", "<alt+b>"] {
+        assert_eq!(stops(script, 16), [0], "{script}");
+    }
+}
+
+/// Shift on the smaller word selects by it, and grows the selection one word
+/// at a time, as Shift on the larger one does.
+#[test]
+fn alt_shift_arrows_select_up_to_the_underscores() {
+    let mut buf = InputBuffer::new(SNAKE, 0);
+    run(&mut buf, "<alt+shift+right>");
+    assert_eq!(buf.selection(), Some(0..5));
+    run(&mut buf, "<alt+shift+right>");
+    assert_eq!(buf.selection(), Some(0..10));
+    assert_eq!(buf.cursor(), 10);
+
+    let mut buf = InputBuffer::new(SNAKE, 16);
+    run(&mut buf, "<alt+shift+left>");
+    assert_eq!(buf.selection(), Some(11..16));
+    assert_eq!(buf.cursor(), 11);
+
+    let mut buf = InputBuffer::new(SNAKE, 0);
+    run(&mut buf, "<ctrl+shift+right>");
+    assert_eq!(buf.selection(), Some(0..16), "the larger word is the name");
+}
+
+/// The keymap's `[input]` table names the four, so a prompt that asks the
+/// table first (as the app does) still gets the smaller word on `Alt+←/→`.
+#[test]
+fn the_input_table_sends_the_alt_arrows_to_the_smaller_word() {
+    use crate::keymap::{Context, Registry};
+    let keymap = Registry::defaults();
+    for (keys, command, op) in [
+        (
+            "alt+left",
+            Command::InputSubwordBackward,
+            InputOp::SubwordBackward,
+        ),
+        (
+            "alt+right",
+            Command::InputSubwordForward,
+            InputOp::SubwordForward,
+        ),
+        (
+            "alt+shift+left",
+            Command::InputSelectSubwordBackward,
+            InputOp::SelectSubwordBackward,
+        ),
+        (
+            "alt+shift+right",
+            Command::InputSelectSubwordForward,
+            InputOp::SelectSubwordForward,
+        ),
+    ] {
+        let chord = parse_chord(keys).unwrap_or_else(|e| panic!("{keys}: {e}"));
+        assert_eq!(
+            keymap.lookup(Context::Input, chord),
+            Some(command),
+            "{keys}"
+        );
+        assert_eq!(action_of(command), Some(InputAction::Edit(op)), "{keys}");
+        assert_eq!(
+            InputBuffer::binding(chord),
+            Some(InputAction::Edit(op)),
+            "{keys}"
+        );
+    }
+    let mut buf = InputBuffer::new(SNAKE, 0);
+    buf.apply(InputOp::SubwordForward);
+    assert_eq!(buf.cursor(), 5);
+}
+
 // ── Selection ───────────────────────────────────────────────────────────────
 
 #[test]

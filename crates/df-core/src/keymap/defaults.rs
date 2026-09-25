@@ -325,6 +325,13 @@ pub(super) fn build() -> Registry {
         (Input, "shift+end",   C::InputSelectEol,        "Select to the end of the line",      Always),
         (Input, "ctrl+shift+left",  C::InputSelectWordBackward, "Select a word back",          Always),
         (Input, "ctrl+shift+right", C::InputSelectWordForward,  "Select a word forward",       Always),
+        // The smaller word: the same motions, stopping at every `_` too. A
+        // prompt takes every key before the browser sees it, so these do not
+        // collide with `[files]`'s history on the same chords.
+        (Input, "alt+left",    C::InputSubwordBackward,  "Back a word, stopping at _",         Always),
+        (Input, "alt+right",   C::InputSubwordForward,   "Forward a word, stopping at _",      Always),
+        (Input, "alt+shift+left",  C::InputSelectSubwordBackward, "Select a word back, stopping at _",    Always),
+        (Input, "alt+shift+right", C::InputSelectSubwordForward,  "Select a word forward, stopping at _", Always),
         (Input, "backspace",   C::InputBackspace,        "Delete the character before",        Always),
         (Input, "delete",      C::InputDeleteUnder,      "Delete the character under",         Always),
         (Input, "ctrl+h",      C::InputBackspace,        "Delete the character before",        Always),

@@ -778,6 +778,7 @@ dependencies = [
  "libc",
  "log",
  "miniz_oxide 0.8.9",
+ "regex",
  "thiserror 2.0.20",
 ]
 

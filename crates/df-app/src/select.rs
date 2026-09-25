@@ -216,10 +216,13 @@ impl Band {
 pub enum Gesture {
     /// A band select, drawing a rectangle over the listing.
     Band,
-    /// A selection being dragged out of the top-bar prompt's text.
+    /// A selection being dragged out of the top-bar prompt's text, or out of
+    /// the bulk rename card's template or one of its rows.
     Text,
     /// A pane's scrollbar thumb, held and dragged ([`crate::scrollbar`]).
     Scrollbar(Column),
+    /// The bulk rename card's scrollbar thumb, held and dragged.
+    BulkScrollbar,
 }
 
 /// What the pointer is over, as far as anything is allowed to answer it while
@@ -251,8 +254,12 @@ pub fn gesture_filter(
     over.filter(|(control, _)| match gesture {
         None => true,
         Some(Gesture::Band) => matches!(control, Control::Row(Column::List, _)),
-        Some(Gesture::Text) => matches!(control, Control::PromptField),
+        Some(Gesture::Text) => matches!(
+            control,
+            Control::PromptField | Control::BulkTemplate | Control::BulkRow(_)
+        ),
         Some(Gesture::Scrollbar(column)) => *control == Control::Scrollbar(column),
+        Some(Gesture::BulkScrollbar) => *control == Control::BulkScrollbar,
     })
 }
 
@@ -294,6 +301,7 @@ mod tests {
                 Gesture::Band,
                 Gesture::Text,
                 Gesture::Scrollbar(Column::List),
+                Gesture::BulkScrollbar,
             ] {
                 assert_eq!(
                     gesture_filter(Some(gesture), Some((control, at))),

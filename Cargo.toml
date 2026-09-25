@@ -63,6 +63,15 @@ egui-winit = "0.35.0"
 winit = "0.30.13"
 pollster = "1.0.1"
 miniz_oxide = "0.8"
+# The bulk-rename template's `re` transform (df-core `rename::template`). No
+# default features: `std` plus the two Unicode tables a filename pattern
+# actually reaches for — `\d`/`\w`/`\s` and `(?i)` — and none of the
+# rest. df-app's `env_logger` already builds this crate with `perf` on top.
+regex = { version = "1", default-features = false, features = [
+    "std",
+    "unicode-perl",
+    "unicode-case",
+] }
 image = { version = "0.25", default-features = false, features = [
     "jpeg",
     "png",

@@ -491,7 +491,7 @@ impl FilterChip {
 enum OverlayGeom {
     Confirm(dialog::Geometry),
     Conflict(dialog::Geometry),
-    Bulk(dialog::Geometry),
+    Bulk(Box<dialog::BulkGeometry>),
     Picker(egui::Rect, Vec<egui::Rect>),
     Panel(egui::Rect, Vec<egui::Rect>, Vec<TaskRow>),
     Spot(spot::Geometry),
@@ -510,7 +510,8 @@ impl OverlayGeom {
     /// (PLAN §4: the hints belong to the surface that owns the keyboard).
     fn card(&self) -> egui::Rect {
         match self {
-            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g.card,
+            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g.card,
+            OverlayGeom::Bulk(g) => g.card,
             OverlayGeom::Picker(card, _) | OverlayGeom::Panel(card, _, _) => *card,
             OverlayGeom::Spot(g) => g.card,
             OverlayGeom::Finder(g) => g.card,
@@ -519,11 +520,25 @@ impl OverlayGeom {
         }
     }
 
-    /// The card's `×`. None on the two cards with a `Cancel` button of their
-    /// own and on the opener picker, a popover with no heading to put one in.
+    /// Whether `pos` is on the surface: its card, or the rename card's `{`
+    /// list, which may hang past the card's edge. A press there is not a
+    /// press on the backdrop.
+    fn covers(&self, pos: egui::Pos2) -> bool {
+        let popover = match self {
+            OverlayGeom::Bulk(g) => g.popover.as_ref().map(|popover| popover.card),
+            _ => None,
+        };
+        self.card().contains(pos) || popover.is_some_and(|card| card.contains(pos))
+    }
+
+    /// The card's `×`. None on the confirm, which has a `Cancel` button of its
+    /// own and says nothing else, and on the opener picker, a popover with no
+    /// heading to put one in. The rename card wears one beside its `Cancel`:
+    /// it is a workspace, and a workspace's way out belongs in its corner.
     fn close_rect(&self) -> Option<egui::Rect> {
         match self {
-            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g.close,
+            OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g.close,
+            OverlayGeom::Bulk(g) => Some(g.close),
             OverlayGeom::Picker(..) => None,
             OverlayGeom::Panel(card, _, _) => Some(chrome::close_button_rect(*card)),
             OverlayGeom::Spot(g) => g.close,
@@ -547,7 +562,10 @@ impl OverlayGeom {
             // hover lift for an action that resolves to nothing
             // (`delightful-ui` §2: a wrong cursor reads as broken).
             OverlayGeom::Confirm(g) => g.action_at(pos).map(Control::Action),
-            OverlayGeom::Conflict(g) | OverlayGeom::Bulk(g) => g
+            // The rename card has a field, rows, a scrollbar and a popover, so it
+            // does its own hit test.
+            OverlayGeom::Bulk(g) => g.hit(pos),
+            OverlayGeom::Conflict(g) => g
                 .action_at(pos)
                 .map(Control::Action)
                 .or_else(|| {
@@ -599,6 +617,7 @@ impl OverlayGeom {
             }
             (OverlayGeom::Mounts(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
             (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
+            (OverlayGeom::Bulk(geometry), control) => geometry.rect_of(control),
             _ => None,
         }
     }
@@ -679,6 +698,18 @@ struct PressStart {
     /// While it is set, nothing but the field answers the pointer
     /// ([`select::Gesture::Text`]).
     in_prompt: Option<FieldPress>,
+    /// The press landed in the bulk rename card's template field or on one of
+    /// its rows, with this many clicks of a quick run (1, 2 or 3).
+    ///
+    /// The card's own [`PressStart::in_prompt`]: a drag from a single press
+    /// selects along the line the press put the caret in, from the first point
+    /// of travel, and nothing but the card's text answers the pointer while it
+    /// does ([`select::Gesture::Text`]). Which line is the card's to say: the
+    /// press gave that field the keyboard.
+    in_bulk: Option<u8>,
+    /// The press landed on the rename card's scrollbar thumb, this far below
+    /// the thumb's top: the card's [`PressStart::scrollbar`].
+    bulk_bar: Option<f32>,
     /// The press landed on a pane's scrollbar thumb: which pane, and how far
     /// below the thumb's top the hand took hold of it.
     ///
@@ -1488,11 +1519,17 @@ pub struct App {
     /// one counter for both, so no answer can ever be mistaken for the other's.
     /// See [`PendingPaste::seq`].
     paste_seq: u64,
-    /// How many prompts this window has opened. Stamped into a
-    /// [`PendingTextPaste`] so that bytes which arrive after the field they
-    /// were asked for closed are dropped rather than typed into whatever
+    /// How many text fields this window has opened: the prompts, and the bulk
+    /// rename card, whose template and rows take a paste the same way. Stamped
+    /// into a [`PendingTextPaste`] so that bytes which arrive after the field
+    /// they were asked for closed are dropped rather than typed into whatever
     /// replaced it.
     prompt_opened: u64,
+    /// A bulk rename closed with names changed in it, kept so that `r` on the
+    /// same selection brings the work back rather than starting it again. Any
+    /// other selection discards it ([`crate::bulk::Bulk::reopen`]); a rename
+    /// that goes through clears it.
+    bulk_draft: Option<Box<crate::bulk::Bulk>>,
     /// The files in the hand, while there are any.
     drag: Option<Drag>,
     /// A tab chip being pulled out of the strip (PLAN §2's "drag a tab out to
@@ -1692,10 +1729,11 @@ struct PendingTextPaste {
     /// Echoed back on [`crate::wayland::Event::Pasted`], drawn from the same
     /// counter [`PendingPaste::seq`] is.
     seq: u64,
-    /// Which prompt asked. Both halves are checked on arrival: a field that has
-    /// closed and re-opened is a different field, and text typed into it would
-    /// be text appearing in a box nobody pasted into.
-    kind: PromptKind,
+    /// Which prompt asked, or `None` for the bulk rename card. Both halves are
+    /// checked on arrival: a field that has closed and re-opened is a
+    /// different field, and text typed into it would be text appearing in a
+    /// box nobody pasted into.
+    kind: Option<PromptKind>,
     opened: u64,
     /// When `Ctrl+v` was pressed. See [`CLIPBOARD_ANSWER`].
     asked: Instant,
@@ -2012,6 +2050,7 @@ impl App {
             wl_copy: None,
             paste_seq: 0,
             prompt_opened: 0,
+            bulk_draft: None,
             drag: None,
             tab_drag: None,
             tab_land: None,
@@ -2289,6 +2328,14 @@ impl App {
         // Whatever udisks2 has said (PLAN §7.4).
         if self.poll_mounts(now) {
             changed = true;
+        }
+        // The photos the bulk rename card's reader has got through, and the
+        // rows they answer. A draft's reader is not asked: the card is not on
+        // screen, and its answers wait in the channel for it to come back.
+        if let Some(Dialog::Bulk(bulk)) = &mut self.dialog {
+            if bulk.poll() {
+                changed = true;
+            }
         }
         // …and whatever a connection to a server came to.
         if self.poll_connects(now) {
@@ -5455,6 +5502,14 @@ impl App {
                     continue;
                 }
             }
+            // …and into the bulk rename card's focused field, by the same door
+            // on the editor that holds its rows.
+            if press.chord.is_none() && matches!(self.dialog, Some(Dialog::Bulk(_))) {
+                if let Some(text) = press.text.as_deref().filter(|t| t.chars().count() > 1) {
+                    self.bulk_text(text);
+                    continue;
+                }
+            }
             // The chord is the binding; the text is the fallback for a key the
             // chord table cannot name — a composed character, a layout's own
             // letter — which still has to be typeable into a prompt.
@@ -5858,10 +5913,9 @@ impl App {
                 dialog.move_cursor(delta);
                 return;
             }
-            Some(Dialog::Bulk(bulk)) => {
-                bulk.step(delta);
-                return;
-            }
+            // The rename card's arrows belong to its editors, which take them
+            // before the registry is asked (`bulk_key`).
+            Some(Dialog::Bulk(_)) => return,
             None => {}
         }
         if let Some(card) = &mut self.mounts {
@@ -5962,7 +6016,12 @@ impl App {
                 // clipboard is untouched, so `p` starts it again.
                 self.toasts.notice("Paste cancelled", now);
             }
-            Some(Dialog::Bulk(_)) => {
+            Some(Dialog::Bulk(bulk)) => {
+                // A card with work in it is kept, so the same `r` brings it
+                // back: closing is not the same as throwing thirty names away.
+                if bulk.changes() > 0 {
+                    self.bulk_draft = Some(bulk);
+                }
                 self.toasts.notice("Rename cancelled", now);
             }
             Some(Dialog::Confirm(_)) | None => {}
@@ -7252,15 +7311,30 @@ impl App {
     fn open_bulk(&mut self, now: Instant) {
         let dir = self.cwd();
         let listing = &self.tab().cwd.dir;
-        // The selection in *listing* order, not in the order it was made: the
-        // card is read against the pane behind it, and rows in a different
-        // order from the pane would be a puzzle.
-        let names: Vec<String> = listing
-            .entries()
-            .iter()
-            .filter(|entry| listing.is_selected(&entry.name))
-            .map(|entry| entry.name.clone())
+        // The selection in the order the pane draws it, not in the order it
+        // was made and not in scan order. `entries()` is `read_dir` order,
+        // which is whatever the filesystem keeps; `rows()` is the sort on
+        // screen. The card is read against the pane behind it, and rows in a
+        // different order from the pane would be a puzzle.
+        let mut names: Vec<String> = listing
+            .rows()
+            .filter(|(entry, _)| listing.is_selected(&entry.name))
+            .map(|(entry, _)| entry.name.clone())
             .collect();
+        // A row the `f` query has hidden stays selected, and `r` acts on the
+        // whole selection whether or not it is on screen. So those names come
+        // after the drawn ones, in scan order, since there is no drawn order
+        // to follow. The alternative is a card that silently leaves out files
+        // the person selected.
+        let drawn: HashSet<usize> = listing.view().iter().copied().collect();
+        names.extend(
+            listing
+                .entries()
+                .iter()
+                .enumerate()
+                .filter(|(index, entry)| !drawn.contains(index) && listing.is_selected(&entry.name))
+                .map(|(_, entry)| entry.name.clone()),
+        );
         if names.len() < 2 {
             return;
         }
@@ -7271,12 +7345,27 @@ impl App {
             .iter()
             .map(|entry| entry.name.clone())
             .collect();
+        // A card closed with work in it comes back for the same selection, in
+        // the order it was left; any other selection starts afresh.
+        if let Some(draft) = self.bulk_draft.take() {
+            if let Some(card) = crate::bulk::Bulk::reopen(draft, &dir, &names, &siblings) {
+                self.prompt_opened += 1;
+                self.dialog = Some(Dialog::Bulk(card));
+                self.sync_context();
+                return;
+            }
+        }
         // A card that cannot be built is a card that would have renamed the
         // wrong thing — the constructor is the guard, and this is its sentence
         // (a remote pane: `r` on one row is a `RENAME` over the link, which
         // works, and a card of them is not implemented).
-        match crate::bulk::Bulk::new(dir, names, &siblings) {
+        let waker = self.waker.named("exif");
+        let notify: df_core::fs::Notifier = Arc::new(move || waker.wake());
+        match crate::bulk::Bulk::new(dir, names, &siblings, notify) {
             Ok(card) => {
+                // A field opened: a paste still on its way to the last one
+                // must not land in this one.
+                self.prompt_opened += 1;
                 self.dialog = Some(Dialog::Bulk(Box::new(card)));
                 self.sync_context();
             }
@@ -7286,58 +7375,47 @@ impl App {
 
     /// One keystroke into the bulk-rename card.
     ///
-    /// Returns whether it was taken. The card is a grid of line editors, so
-    /// almost every key goes to whichever one has the caret — the same rule the
-    /// bottom-bar prompt follows, and the reason a `q` typed into a name is a
-    /// `q`. Only the keys the vi editor has no use for are intercepted:
-    /// `Tab`/`Shift+Tab` and the two arrows, which move between fields.
+    /// Returns whether it was taken. The card is two editors and a popover, so
+    /// almost every key goes to whichever has the keyboard — the rule the
+    /// top-row prompt follows, and the reason a `q` typed into a name is a
+    /// `q`. The card decides ([`crate::bulk::Bulk::key`]); this carries out
+    /// what it asks for. The clipboard is the part it cannot serve itself: a
+    /// paste has to fetch the text from another application first, and a
+    /// copy or a cut hands its text to [`App::offer`], as every other copy in
+    /// the program does.
     fn bulk_key(&mut self, chord: Chord, now: Instant) -> bool {
+        if !matches!(self.dialog, Some(Dialog::Bulk(_))) {
+            return false;
+        }
+        if self.keymap.lookup(Context::Input, chord) == Some(Command::InputPaste) {
+            self.paste_into_prompt(now);
+            return true;
+        }
         let Some(Dialog::Bulk(bulk)) = &mut self.dialog else {
             return false;
         };
-        let plain = chord.mods.is_none();
-        match chord.key {
-            Key::Tab if plain => {
-                bulk.step(1);
-                return true;
-            }
-            Key::Tab if chord.mods == df_core::keymap::Mods::SHIFT => {
-                bulk.step(-1);
-                return true;
-            }
-            Key::ArrowUp if plain => {
-                bulk.step(-1);
-                return true;
-            }
-            Key::ArrowDown if plain => {
-                bulk.step(1);
-                return true;
-            }
-            _ => {}
-        }
-        let field = bulk.field;
-        let Some(buffer) = bulk.buffer_mut() else {
-            return false;
-        };
-        match buffer.feed(chord) {
-            InputEvent::Consumed => {
-                match field {
-                    // The two top fields rewrite every row that has not been
-                    // hand-edited, live, as you type.
-                    crate::bulk::Field::Find | crate::bulk::Field::Replace => bulk.apply_replace(),
-                    // …and typing in a row is what exempts it from that.
-                    crate::bulk::Field::Row(_) => bulk.touched(),
-                }
-                true
-            }
-            InputEvent::Submit(_) => {
+        match bulk.key(chord) {
+            crate::bulk::Outcome::Consumed => true,
+            crate::bulk::Outcome::Ignored => false,
+            crate::bulk::Outcome::Submit => {
                 self.submit_bulk(now);
                 true
             }
-            InputEvent::Cancel => {
+            crate::bulk::Outcome::Close => {
                 self.close_overlay(now);
                 true
             }
+            crate::bulk::Outcome::Copy(text) => {
+                self.offer(None, text.as_bytes(), "Copied text".to_string(), now);
+                true
+            }
+        }
+    }
+
+    /// Composed text or a paste, into the card's focused field.
+    fn bulk_text(&mut self, text: &str) {
+        if let Some(Dialog::Bulk(bulk)) = &mut self.dialog {
+            bulk.insert_text(text);
         }
     }
 
@@ -7357,12 +7435,10 @@ impl App {
         }
         let renames = bulk.renames();
         let dir = bulk.dir.clone();
-        let cursor_on = bulk
-            .rows
-            .iter()
-            .find(|row| row.changed())
-            .map(|row| row.new_name().to_string());
+        let cursor_on = bulk.first_change();
         self.dialog = None;
+        // The work is done, so there is no draft of it to come back to.
+        self.bulk_draft = None;
         self.sync_context();
         self.run_bulk(renames, dir, cursor_on, now);
     }
@@ -9752,9 +9828,9 @@ impl App {
                 )))
             }
             Some(Dialog::Bulk(bulk)) => {
-                return Some(OverlayGeom::Bulk(dialog::bulk_geometry(
+                return Some(OverlayGeom::Bulk(Box::new(dialog::bulk_geometry(
                     painter, area, bulk,
-                )))
+                ))))
             }
             None => {}
         }
@@ -9924,8 +10000,19 @@ impl App {
                 | Control::WhichKey(_)
                 | Control::Toast
                 | Control::ToastAction
-                | Control::PromptField => {}
+                | Control::PromptField
+                | Control::BulkTemplate
+                | Control::BulkRow(_)
+                | Control::BulkCandidate(_)
+                | Control::BulkScrollbar => {}
             }
+            return;
+        }
+        // A candidate in the rename card's `{` list: the pointer's `Tab`.
+        if let (Control::BulkCandidate(index), Some(Dialog::Bulk(bulk))) =
+            (control, &mut self.dialog)
+        {
+            bulk.pick(index);
             return;
         }
         match control {
@@ -10010,7 +10097,11 @@ impl App {
             | Control::WhichKey(_)
             | Control::Toast
             | Control::ToastAction
-            | Control::PromptField => {}
+            | Control::PromptField
+            | Control::BulkTemplate
+            | Control::BulkRow(_)
+            | Control::BulkCandidate(_)
+            | Control::BulkScrollbar => {}
         }
     }
 
@@ -10727,7 +10818,8 @@ impl App {
             Control::Action(_)
             | Control::PanelRow(_)
             | Control::SearchNames
-            | Control::SearchContents => {
+            | Control::SearchContents
+            | Control::BulkCandidate(_) => {
                 let rect = geom
                     .overlay
                     .as_ref()
@@ -10835,6 +10927,35 @@ impl App {
             // The prompt's text takes its press at the press site, with a click
             // count rather than a double flag, and is never routed here.
             Control::PromptField => geom.prompt.map_or(egui::Rect::ZERO, |field| field.rect),
+            // …and so does the rename card's text.
+            Control::BulkTemplate | Control::BulkRow(_) => geom
+                .overlay
+                .as_ref()
+                .and_then(|o| o.rect_of(control))
+                .unwrap_or(egui::Rect::ZERO),
+            // The rename card's scrollbar: a press on the track pages towards
+            // it, and one on the thumb is the start of a drag the press site
+            // has recorded ([`PressStart::bulk_bar`]).
+            Control::BulkScrollbar => {
+                let bar = match geom.overlay {
+                    Some(OverlayGeom::Bulk(geometry)) => geometry.bar,
+                    _ => None,
+                };
+                if let (Some(bar), Some(at), Some(Dialog::Bulk(bulk))) =
+                    (bar, pointer.at, &mut self.dialog)
+                {
+                    if !bar.on_thumb(at) {
+                        let page = bulk.visible;
+                        let first = if at.y < bar.thumb.top() {
+                            bulk.first.saturating_sub(page)
+                        } else {
+                            bulk.first + page
+                        };
+                        bulk.scroll_to(first);
+                    }
+                }
+                egui::Rect::ZERO
+            }
         }
     }
 
@@ -11292,6 +11413,117 @@ impl App {
         prompt.drag_to(scrolled.boundary_at(x));
     }
 
+    /// Hand the rename card what this frame measured (how many rows fit, how
+    /// far its two caret lines are scrolled), then let the wheel over the card
+    /// and a thumb in the hand scroll its list. Returns whether the list
+    /// moved, so the card is measured again before anything reads it.
+    fn bulk_layout(
+        &mut self,
+        pointer: &Pointer,
+        overlay: &Option<OverlayGeom>,
+        wheel: bool,
+    ) -> bool {
+        let (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) =
+            (overlay, &mut self.dialog)
+        else {
+            return false;
+        };
+        bulk.settle_layout(
+            geometry.visible,
+            geometry.template_scroll,
+            geometry.row_scroll,
+        );
+        let before = bulk.first;
+        if wheel {
+            bulk.wheel(crate::mouse::wheel_rows(pointer.wheel, dialog::BULK_ROW));
+        }
+        // The thumb follows the hand with no slide, as a pane's does: the
+        // offset it was taken at keeps it under the pointer.
+        let grab = self.press.and_then(|press| press.bulk_bar);
+        if let (true, Some(at), Some(grab), Some(bar)) =
+            (pointer.down, pointer.at, grab, geometry.bar)
+        {
+            bulk.scroll_to(bar.first_at(at.y - grab).round() as usize);
+        }
+        bulk.first != before
+    }
+
+    /// A press in the rename card's template field or on one of its rows,
+    /// turned from a point into a character by the painter that drew the line.
+    fn bulk_press(
+        &mut self,
+        control: Control,
+        at: egui::Pos2,
+        clicks: u8,
+        pointer: &Pointer,
+        painter: &egui::Painter,
+        overlay: &Option<OverlayGeom>,
+    ) {
+        let (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) =
+            (overlay, &mut self.dialog)
+        else {
+            return;
+        };
+        match control {
+            Control::BulkTemplate => {
+                let text = bulk.template.text();
+                let origin = geometry.template_origin;
+                let col = dialog::bulk_col_at(painter, text, origin, at.x);
+                let under = dialog::bulk_char_at(painter, text, origin, at.x);
+                bulk.click_template(col, under, clicks, pointer.shift);
+            }
+            Control::BulkRow(slot) => {
+                let Some(row) = geometry.rows.get(slot) else {
+                    return;
+                };
+                let line = bulk.editor.line(row.index).unwrap_or("");
+                let col = dialog::bulk_col_at(painter, line, row.origin, at.x);
+                let under = dialog::bulk_char_at(painter, line, row.origin, at.x);
+                let pos = df_core::rename::editor::Pos {
+                    row: row.index,
+                    col,
+                };
+                bulk.click_row(pos, under, clicks, pointer.shift, pointer.alt);
+            }
+            _ => {}
+        }
+    }
+
+    /// One frame of a selection dragged from a single press in the rename
+    /// card: along the template, or along the row the press was on, whatever
+    /// row the pointer has wandered over since.
+    fn drag_bulk(
+        &mut self,
+        painter: &egui::Painter,
+        at: Option<egui::Pos2>,
+        overlay: &Option<OverlayGeom>,
+    ) {
+        let (Some(at), Some(1)) = (at, self.press.and_then(|press| press.in_bulk)) else {
+            return;
+        };
+        let (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) =
+            (overlay, &mut self.dialog)
+        else {
+            return;
+        };
+        match bulk.focus {
+            crate::bulk::Focus::Template => {
+                let origin = geometry.template_origin;
+                let col = dialog::bulk_col_at(painter, bulk.template.text(), origin, at.x);
+                bulk.drag_template(col);
+            }
+            crate::bulk::Focus::Rows => {
+                let index = bulk.editor.primary().anchor.row;
+                let Some(row) = geometry.row(index) else {
+                    return;
+                };
+                let line = bulk.editor.line(index).unwrap_or("");
+                let col = dialog::bulk_col_at(painter, line, row.origin, at.x);
+                bulk.drag_row(col);
+            }
+        }
+    }
+
     /// The drag that owns the pointer until the button comes up, if one does:
     /// a band select, a text selection from the prompt, or a scrollbar's thumb
     /// in the hand. While one does, nothing but its own target answers the
@@ -11299,8 +11531,13 @@ impl App {
     fn gesture(&self) -> Option<select::Gesture> {
         if self.band.is_some() {
             Some(select::Gesture::Band)
-        } else if self.press.is_some_and(|press| press.in_prompt.is_some()) {
+        } else if self
+            .press
+            .is_some_and(|press| press.in_prompt.is_some() || press.in_bulk.is_some())
+        {
             Some(select::Gesture::Text)
+        } else if self.press.is_some_and(|press| press.bulk_bar.is_some()) {
+            Some(select::Gesture::BulkScrollbar)
         } else {
             self.press
                 .and_then(|press| press.scrollbar)
@@ -11406,6 +11643,11 @@ impl App {
             if field.clicks == 1 {
                 self.drag_text(at, geom, now);
             }
+            return;
+        }
+        // …and the rename card's text and thumb, which are moved where the
+        // painter is to hand ([`App::drag_bulk`], [`App::bulk_layout`]).
+        if press.in_bulk.is_some() || press.bulk_bar.is_some() {
             return;
         }
         // …and so does a scrollbar's thumb, which has already been moved this
@@ -13034,8 +13276,8 @@ impl App {
         }
     }
 
-    /// `Ctrl+v` in a prompt: the system clipboard's **text**, typed into the
-    /// field.
+    /// `Ctrl+v` in a prompt, or in the bulk rename card: the system
+    /// clipboard's **text**, typed into the field.
     ///
     /// The same two paths `p` takes and for the same reasons — the native data
     /// device when there is one, `wl-paste` when there is not — because the
@@ -13045,8 +13287,11 @@ impl App {
     /// becomes of it: text only (see [`crate::clipboard::text_offer`]), and it
     /// is inserted at the caret rather than written anywhere.
     fn paste_into_prompt(&mut self, now: Instant) {
-        let Some(kind) = self.prompt.as_ref().map(|p| p.kind) else {
-            return;
+        // The prompt, or failing that the bulk rename card's focused field.
+        let kind = match &self.prompt {
+            Some(prompt) => Some(prompt.kind),
+            None if matches!(self.dialog, Some(Dialog::Bulk(_))) => None,
+            None => return,
         };
         let native = self.clipboard_seen && self.data_device.as_ref().is_some_and(|d| d.ready());
         if native {
@@ -13100,10 +13345,11 @@ impl App {
     /// appearing in it would be a paste nobody made into a box nobody pasted
     /// into.
     fn take_pasted_text(&mut self, pending: PendingTextPaste, bytes: Vec<u8>) {
-        let still_open = self
-            .prompt
-            .as_ref()
-            .is_some_and(|p| p.kind == pending.kind && self.prompt_opened == pending.opened);
+        let same = self.prompt_opened == pending.opened;
+        let still_open = match pending.kind {
+            Some(kind) => self.prompt.as_ref().is_some_and(|p| p.kind == kind && same),
+            None => self.prompt.is_none() && matches!(self.dialog, Some(Dialog::Bulk(_))) && same,
+        };
         if !still_open {
             log::debug!("clipboard: the prompt the paste was for is gone");
             return;
@@ -13135,7 +13381,11 @@ impl App {
         if text.is_empty() {
             return;
         }
-        self.prompt_text(&text);
+        if self.prompt.is_some() {
+            self.prompt_text(&text);
+        } else {
+            self.bulk_text(&text);
+        }
     }
 
     /// The bytes the clipboard finally handed over, whichever path fetched
@@ -13496,6 +13746,18 @@ impl App {
         // The floating cards that used to sit above the bottom bar now sit
         // above the window's own bottom edge, which is where the panes end.
         let mut overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+        // **The wheel over the rename card is the card's**, as the tray's is:
+        // it scrolls the names, not the pane under the scrim. Taken here, with
+        // a thumb in the hand, before anything reads the card, so the rows
+        // drawn are the rows the wheel just asked for. "Over the card" is the
+        // press's test (`covers`): the `{` list can hang past the card's
+        // edge, and a wheel there is still on the card, not on the pane.
+        let over_bulk = pointer.wheel != 0.0
+            && matches!(&overlay, Some(surface @ OverlayGeom::Bulk(_))
+                if pointer.at.is_some_and(|at| surface.covers(at)));
+        if self.bulk_layout(&pointer, &overlay, over_bulk) {
+            overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+        }
 
         // The breadcrumb is measured once and used by both the hit test and the
         // paint, for the reason `tab_rects` is: two functions computing this
@@ -13922,7 +14184,7 @@ impl App {
         if !stepping {
             self.scale_wheel = 0.0;
         }
-        if pointer.wheel != 0.0 && self.help.is_none() && !over_tray {
+        if pointer.wheel != 0.0 && self.help.is_none() && !over_tray && !over_bulk {
             if let Some(at) = pointer.at {
                 if stepping {
                     self.wheel_scale(&pointer.wheel_raw, page, now);
@@ -13979,15 +14241,16 @@ impl App {
         // at the row the card was covering. A toast over the scrim keeps its
         // own click, and a press inside the card on nothing stays inert.
         //
-        // The bulk rename with names typed into it is the exception: a stray
-        // click must not throw away thirty of them. Its `Esc` and its `Cancel`
-        // still close it.
+        // The bulk rename with names typed into it closes the same way. It
+        // used to be kept up, so that a stray click could not throw thirty
+        // names away, but closing it throws nothing away: a card with work in
+        // it is kept as a draft ([`App::close_overlay`]), and `r` over the same
+        // selection brings it back as it was left. A backdrop that closed
+        // every card but one was a rule to learn for no loss avoided.
         if any_press && !menu_live && over.is_none() {
             if let Some(p) = pointer.at {
-                let unsaved =
-                    matches!(&self.dialog, Some(Dialog::Bulk(bulk)) if bulk.changes() > 0);
                 if let Some(open) = &overlay {
-                    if !open.card().contains(p) && !unsaved {
+                    if !open.covers(p) {
                         self.close_overlay(now);
                         // Measured again, closed: the hints and the anchored
                         // prompt below read this geometry, and a card that
@@ -14106,7 +14369,17 @@ impl App {
         // double-or-not, because two and three clicks are two different verbs
         // in a text field. Recorded for the drag, below.
         let mut field_clicks = None;
-        if let Some((Control::PromptField, position)) =
+        // The rename card's template and rows are text too, and take their
+        // press the same way: a caret, a word or a line by the click count,
+        // and no ripple.
+        let mut bulk_clicks = None;
+        if let Some((control @ (Control::BulkTemplate | Control::BulkRow(_)), position)) =
+            over.filter(|_| pointer.pressed && !dismissing)
+        {
+            let clicks = self.clicks.count(control, position, now);
+            self.bulk_press(control, position, clicks, &pointer, &painter, &overlay);
+            bulk_clicks = Some(clicks);
+        } else if let Some((Control::PromptField, position)) =
             over.filter(|_| pointer.pressed && !dismissing)
         {
             let clicks = self.clicks.count(Control::PromptField, position, now);
@@ -14130,7 +14403,7 @@ impl App {
             // Not on a scrollbar: the bar answers by moving the rows, and it
             // draws no splash — one spawned there would only be frames asked
             // for a ripple nothing paints.
-            if !matches!(control, Control::Scrollbar(_)) {
+            if !matches!(control, Control::Scrollbar(_) | Control::BulkScrollbar) {
                 self.ripples.spawn(control, position, rect, now);
             }
         }
@@ -14202,6 +14475,16 @@ impl App {
                     ticked: now,
                     scrolling: false,
                 }),
+                in_bulk: bulk_clicks,
+                bulk_bar: match (over, &overlay) {
+                    (Some((Control::BulkScrollbar, _)), Some(OverlayGeom::Bulk(geometry))) => {
+                        geometry
+                            .bar
+                            .filter(|bar| bar.on_thumb(at))
+                            .map(|bar| at.y - bar.thumb.top())
+                    }
+                    _ => None,
+                },
                 // The thumb, taken where the hand took it. A press on the
                 // track below or above it has already paged, in `click`.
                 scrollbar: match over {
@@ -14237,6 +14520,7 @@ impl App {
         }
         if pointer.down {
             self.drag(pointer.at, &geom, now);
+            self.drag_bulk(&painter, pointer.at, &overlay);
         }
         // …and once more now that the drag has run, because a band *begins*
         // inside it, on the frame the pointer crosses the threshold — after the
@@ -14349,9 +14633,12 @@ impl App {
         // back over the press's own release when the menu goes (see
         // [`chrome::path_bar`], which also holds it down outright). The type
         // chip's list holds the type chip down the same way.
-        let hot = over
-            .map(|(control, _)| control)
-            .filter(|control| *control != Control::PromptField);
+        let hot = over.map(|(control, _)| control).filter(|control| {
+            !matches!(
+                control,
+                Control::PromptField | Control::BulkTemplate | Control::BulkRow(_)
+            )
+        });
         let held = self
             .menu
             .as_ref()
@@ -14377,7 +14664,11 @@ impl App {
         // the hand is holding files, not pointing at a link.
         if dragging.is_some() || self.tab_drag.is_some() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-        } else if pointer.down && self.press.is_some_and(|press| press.in_prompt.is_some()) {
+        } else if pointer.down
+            && self
+                .press
+                .is_some_and(|press| press.in_prompt.is_some() || press.in_bulk.is_some())
+        {
             // A selection being dragged out of the prompt keeps the text
             // cursor wherever the hand takes it, as it does in every field:
             // the gesture is still about the text.
@@ -14428,7 +14719,9 @@ impl App {
                 control if Some(control) == lit_half => egui::CursorIcon::Default,
                 // Text is pointed at with the text cursor: it says "the caret
                 // goes here", which is exactly what a click will do.
-                Control::PromptField => egui::CursorIcon::Text,
+                Control::PromptField | Control::BulkTemplate | Control::BulkRow(_) => {
+                    egui::CursorIcon::Text
+                }
                 Control::Row(..)
                 | Control::TabClose(_)
                 | Control::TabNew
@@ -14456,7 +14749,9 @@ impl App {
                 | Control::MenuButton
                 | Control::YankRow(_)
                 | Control::YankRemove(_)
-                | Control::YankClear => egui::CursorIcon::PointingHand,
+                | Control::YankClear
+                | Control::BulkCandidate(_)
+                | Control::BulkScrollbar => egui::CursorIcon::PointingHand,
             });
         }
 
@@ -15262,6 +15557,13 @@ impl App {
         let anchored = self.prompt.as_ref().filter(|prompt| prompt.kind.anchored());
 
         // ── The modal surfaces, over the panes and the top row ─────────────
+        // The rename card is measured again for its paint: a press this frame
+        // may have moved a caret, opened or closed the `{` list or scrolled a
+        // line, and the hit test has had its use of the measurement from
+        // before it. Its hints are none, so nothing else needs the new one.
+        if matches!(self.dialog, Some(Dialog::Bulk(_))) {
+            overlay = self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
+        }
         match (&overlay, &self.dialog) {
             (Some(OverlayGeom::Mounts(geometry)), _) => {
                 if let Some(card) = &self.mounts {
@@ -15269,7 +15571,16 @@ impl App {
                 }
             }
             (Some(OverlayGeom::Bulk(geometry)), Some(Dialog::Bulk(bulk))) => {
-                dialog::paint_bulk(&paint, area, bulk, geometry, &self.hovers, &self.ripples);
+                let held = pointer.down && self.press.is_some_and(|p| p.bulk_bar.is_some());
+                dialog::paint_bulk(
+                    &paint,
+                    area,
+                    bulk,
+                    geometry,
+                    &self.hovers,
+                    &self.ripples,
+                    held,
+                );
             }
             (Some(OverlayGeom::Confirm(geometry)), Some(Dialog::Confirm(confirm))) => {
                 dialog::paint_confirm(&paint, area, confirm, geometry, &self.hovers, &self.ripples);
@@ -16056,11 +16367,11 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
             // that out was the most crowded line on the smallest card. The
             // keys themselves (`y`, `n`, the arrows) all still work.
             Some(Dialog::Confirm(_)) => Vec::new(),
-            Some(Dialog::Bulk(_)) => vec![
-                Hint::inert("Tab / ↑↓", "next field"),
-                Hint::new("Enter", "rename", C::OverlaySubmit),
-                Hint::new("Esc", "cancel", C::OverlayClose),
-            ],
+            // Nor has the rename card. Its keys are an editor's, which no
+            // footer could list, and the status beside its buttons already
+            // says the one thing that matters: what `Enter` will do, or why
+            // it will not.
+            Some(Dialog::Bulk(_)) => Vec::new(),
             Some(Dialog::Conflict(_)) => vec![
                 Hint::inert("↑↓", "choose"),
                 Hint::inert("o s r", "overwrite / skip / rename"),
@@ -16929,6 +17240,64 @@ mod tests {
         );
     }
 
+    /// `Alt+←/→` are the browser's history keys and, while a field is open,
+    /// the field's smaller word, which reads `_` as a space. A prompt takes the
+    /// keyboard before the browser does, and so does the bulk card, so the
+    /// chords reach the editor in the rename prompt, the card's template
+    /// field and its rows alike, and the folder stays where it is.
+    #[test]
+    fn alt_arrows_step_by_the_smaller_word_in_every_field() {
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("subword", &["big_red_car.txt", "old_blue_van.txt"]);
+        let now = Instant::now();
+        run_frame(&mut app, &ctx, Vec::new());
+        let here = app.cwd();
+        let press = |app: &mut App, mods: Mods, key: Key| {
+            app.pending_keys.push(Press {
+                repeat: false,
+                chord: Some(Chord::new(mods, key)),
+                text: None,
+            });
+            run_frame(app, &ctx, Vec::new());
+        };
+
+        // The rename prompt on `big_red_car.txt` opens before `.txt`, at 11.
+        app.run(Command::Rename, 10, now);
+        let caret = |app: &App| app.prompt.as_ref().expect("the prompt").buffer.cursor();
+        assert_eq!(caret(&app), 11);
+        press(&mut app, Mods::ALT, Key::ArrowLeft);
+        assert_eq!(caret(&app), 8, "back to `car`");
+        press(&mut app, Mods::ALT, Key::ArrowLeft);
+        assert_eq!(caret(&app), 4, "then over the `_` to `red`");
+        press(&mut app, Mods::ALT, Key::ArrowRight);
+        assert_eq!(caret(&app), 7, "the end of `red`");
+        press(&mut app, Mods::CTRL, Key::ArrowLeft);
+        assert_eq!(caret(&app), 0, "`Ctrl+←` takes the whole stem");
+        assert_eq!(app.cwd(), here, "the key went to the history");
+        press(&mut app, Mods::NONE, Key::Escape);
+        assert!(app.prompt.is_none());
+
+        // The bulk card: the template field first, then the rows.
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Rename, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        let card = |app: &App| -> (usize, df_core::rename::editor::Pos) {
+            let Some(Dialog::Bulk(bulk)) = &app.dialog else {
+                panic!("the card went");
+            };
+            (bulk.template.cursor(), bulk.editor.primary().head)
+        };
+        assert_eq!(card(&app).0, "{name}{ext}".chars().count());
+        press(&mut app, Mods::ALT, Key::ArrowLeft);
+        assert_eq!(card(&app).0, 10, "the field took the key");
+        press(&mut app, Mods::NONE, Key::Tab);
+        assert_eq!(card(&app).1.col, 11, "row 0 opens before `.txt`");
+        press(&mut app, Mods::ALT, Key::ArrowLeft);
+        press(&mut app, Mods::ALT, Key::ArrowLeft);
+        assert_eq!(card(&app).1.col, 4, "two stops back is `red`");
+        assert_eq!(app.cwd(), here, "the key went to the history");
+    }
+
     /// The temporary leg of a swap is an implementation detail of running the
     /// renames one at a time, and the journal must not see it: `u` has to put
     /// the file back where it *started*, not to a name that was only ever a
@@ -17595,7 +17964,8 @@ mod tests {
 
     /// Every modal surface says what its keys do, and never claims a key the
     /// surface does not have — except the confirm, which is a question and two
-    /// buttons and says nothing else at all.
+    /// buttons and says nothing else at all, and the rename card, whose keys
+    /// are an editor's and whose status says what `Enter` will do.
     #[test]
     fn each_overlay_teaches_its_own_keys() {
         let nowhere = egui::Rect::ZERO;
@@ -17615,15 +17985,22 @@ mod tests {
             ))),
         );
         assert!(confirm.is_empty(), "the confirm grew a footer: {confirm:?}");
-        // …while the other two cards keep theirs.
-        let bulk = crate::bulk::Bulk::new(PathBuf::from("/tmp"), vec!["a".to_string()], &[])
-            .expect("a local directory builds a card");
+        let bulk = crate::bulk::Bulk::new(
+            PathBuf::from("/tmp"),
+            vec!["a".to_string(), "b".to_string()],
+            &[],
+            df_core::fs::no_notifier(),
+        )
+        .expect("a local directory builds a card");
+        let mut measured = None;
+        let _ = egui::Context::default().run_ui(Default::default(), |ui| {
+            measured = Some(dialog::bulk_geometry(ui.painter(), screen(), &bulk));
+        });
         let bulk = overlay_hints(
-            &OverlayGeom::Bulk(empty.clone()),
+            &OverlayGeom::Bulk(Box::new(measured.expect("measured"))),
             &Some(Dialog::Bulk(Box::new(bulk))),
         );
-        assert!(bulk.iter().any(|hint| hint.keys.contains("Enter")));
-        assert!(bulk.iter().any(|hint| hint.keys.contains("Esc")));
+        assert!(bulk.is_empty(), "the rename card grew a footer: {bulk:?}");
         // A card with no dialog behind it says nothing rather than somebody
         // else's keys.
         assert!(overlay_hints(&OverlayGeom::Confirm(empty), &None).is_empty());
@@ -20373,7 +20750,8 @@ mod tests {
     /// corner, [`chrome::CARD_PAD`] in from the right edge, and the card's hit
     /// test answers it before anything else. The finder and the search panel
     /// sit theirs beside the query field, centred on the field's taller row.
-    /// The confirm and the bulk rename have a `Cancel`, and no `×`.
+    /// The confirm has a `Cancel`, and no `×`; the bulk rename, a workspace
+    /// rather than a question, has both.
     #[test]
     fn every_card_without_a_cancel_has_a_close_in_its_corner() {
         let now = Instant::now();
@@ -20478,10 +20856,9 @@ mod tests {
 
         app.run(Command::SelectAll, 10, now);
         app.run(Command::Rename, 10, now);
-        match overlay_of(&app) {
-            Some(OverlayGeom::Bulk(geometry)) => assert_eq!(geometry.close, None),
-            _ => panic!("no bulk rename"),
-        }
+        let geometry = overlay_of(&app).expect("the bulk rename");
+        assert!(matches!(geometry, OverlayGeom::Bulk(_)));
+        corner(&geometry, "bulk");
     }
 
     /// A press on the scrim is the pointer's `Esc`: the confirm goes, and the
@@ -20603,11 +20980,13 @@ mod tests {
         assert_eq!(app.cwd(), app.files, "the crumb is not the parent's");
     }
 
-    /// The bulk rename with a name typed into it keeps its card through a
-    /// press on the scrim: a stray click must not throw thirty names away.
-    /// Untouched, it closes like any other card, and says so.
+    /// A press on the scrim closes the bulk rename like any other card, names
+    /// typed into it or not, and renames nothing. The typed names are not
+    /// lost: they are kept as a draft, and the same `r` over the same
+    /// selection brings the card back as it was left. Untouched, it closes,
+    /// says so, and keeps nothing.
     #[test]
-    fn a_bulk_rename_with_typed_names_ignores_the_scrim() {
+    fn a_press_on_the_scrim_closes_the_bulk_rename_and_keeps_its_draft() {
         let ctx = egui::Context::default();
         let names = ["a.txt", "b.txt", "c.txt"];
         let mut app = Fixture::new("close-bulk", &names);
@@ -20617,24 +20996,214 @@ mod tests {
         app.run(Command::Rename, 10, now);
         assert!(app.bulk_key(Chord::from_char('z').expect("z"), now));
         run_frame(&mut app, &ctx, Vec::new());
+        let typed: Vec<String> = match &app.dialog {
+            Some(Dialog::Bulk(bulk)) => bulk.editor.lines().to_vec(),
+            _ => panic!("no card"),
+        };
+        assert!(typed.iter().any(|line| line.contains('z')), "{typed:?}");
         let card = overlay_of(&app).expect("the bulk card").card();
 
         click_at(&mut app, &ctx, below(card));
-        let Some(Dialog::Bulk(bulk)) = &app.dialog else {
-            panic!("a press on the scrim threw the typed names away");
-        };
-        assert!(bulk.changes() > 0);
+        assert!(
+            app.dialog.is_none(),
+            "the press on the scrim left the card up"
+        );
+        assert_eq!(toast_text(&app), Some("Rename cancelled"));
         for name in names {
             assert!(app.files.join(name).exists(), "{name} was renamed");
         }
+        assert!(app.bulk_draft.is_some(), "the typed names were thrown away");
 
-        app.close_overlay(now);
         app.run(Command::Rename, 10, now);
         run_frame(&mut app, &ctx, Vec::new());
-        assert!(matches!(app.dialog, Some(Dialog::Bulk(_))));
+        let Some(Dialog::Bulk(bulk)) = &app.dialog else {
+            panic!("no card");
+        };
+        assert_eq!(
+            bulk.editor.lines(),
+            typed.as_slice(),
+            "the same selection brings the draft back"
+        );
+
+        // Taking the typing back leaves an untouched card.
+        assert!(app.bulk_key(Chord::plain(Key::Backspace), now));
+        run_frame(&mut app, &ctx, Vec::new());
         click_at(&mut app, &ctx, below(card));
         assert!(app.dialog.is_none(), "an untouched card stayed up");
+        assert!(app.bulk_draft.is_none(), "an untouched card left a draft");
         assert_eq!(toast_text(&app), Some("Rename cancelled"));
+    }
+
+    /// The card lists the selection in the order the pane draws it, not in
+    /// the directory's scan order. A selected row the `f` query has hidden is
+    /// still in the card, after the drawn ones, rather than silently left out.
+    #[test]
+    fn the_bulk_card_lists_the_selection_in_the_panes_order() {
+        // Created out of order, so that neither the order they were made in
+        // nor its reverse (tmpfs's `read_dir` order) is the sorted one.
+        let mut app = Fixture::new("bulk-order", &["b.txt", "d.txt", "a.txt", "c.txt"]);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        let drawn: Vec<String> = app
+            .tab()
+            .cwd
+            .dir
+            .rows()
+            .map(|(entry, _)| entry.name.clone())
+            .collect();
+        assert_eq!(drawn, ["a.txt", "b.txt", "c.txt", "d.txt"]);
+        app.run(Command::Rename, 10, now);
+        let Some(Dialog::Bulk(bulk)) = &app.dialog else {
+            panic!("no card");
+        };
+        assert_eq!(bulk.olds, drawn, "the pane's order");
+
+        // All but `a` hidden by the `f` query and still selected: they follow
+        // the row that is drawn, in scan order.
+        app.close_overlay(now);
+        app.dir().set_filter("a");
+        let listing = &app.tab().cwd.dir;
+        let shown: Vec<String> = listing.rows().map(|(e, _)| e.name.clone()).collect();
+        let hidden: Vec<String> = listing
+            .entries()
+            .iter()
+            .filter(|entry| !shown.contains(&entry.name))
+            .map(|entry| entry.name.clone())
+            .collect();
+        assert!(
+            !hidden.is_empty() && hidden.iter().all(|name| listing.is_selected(name)),
+            "the fixture needs a hidden row that is still selected: {shown:?}"
+        );
+        let expected: Vec<String> = shown.iter().chain(&hidden).cloned().collect();
+        app.run(Command::Rename, 10, now);
+        let Some(Dialog::Bulk(bulk)) = &app.dialog else {
+            panic!("no card");
+        };
+        assert_eq!(bulk.olds, expected);
+        assert_eq!(bulk.len(), 4, "nothing selected is left out");
+    }
+
+    /// The rename card answers the pointer through the frame: a press on a
+    /// row's new name is a caret there, a press on the template is a caret in
+    /// it, the wheel over the card scrolls the card's rows and not the pane,
+    /// the thumb follows a drag, and a click on a candidate in the `{` list
+    /// takes it.
+    #[test]
+    fn the_bulk_card_answers_the_pointer() {
+        use crate::bulk::Focus;
+        use df_core::rename::editor::Pos;
+        let ctx = egui::Context::default();
+        let names: Vec<String> = (0..60).map(|i| format!("file-{i:02}.txt")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = Fixture::new("bulk-pointer", &refs);
+        let now = Instant::now();
+        run_frame(&mut app, &ctx, Vec::new());
+        app.run(Command::SelectAll, 10, now);
+        app.run(Command::Rename, 10, now);
+        run_frame(&mut app, &ctx, Vec::new());
+        let bulk = |app: &App| -> (Focus, Pos, usize, String) {
+            let Some(Dialog::Bulk(bulk)) = &app.dialog else {
+                panic!("the card went");
+            };
+            (
+                bulk.focus,
+                bulk.editor.primary().head,
+                bulk.first,
+                bulk.template.text().to_string(),
+            )
+        };
+        let Some(OverlayGeom::Bulk(geometry)) = overlay_of(&app) else {
+            panic!("no bulk card");
+        };
+        assert!(geometry.bar.is_some(), "sixty rows do not fit");
+
+        let row = &geometry.rows[3];
+        click_at(
+            &mut app,
+            &ctx,
+            egui::pos2(row.text.left() + 1.0, row.new.center().y),
+        );
+        let (focus, head, _, _) = bulk(&app);
+        assert_eq!(focus, Focus::Rows);
+        assert_eq!(head, Pos { row: 3, col: 0 });
+
+        let end = geometry.template_text.right_center() - egui::vec2(1.0, 0.0);
+        click_at(&mut app, &ctx, end);
+        let (focus, _, _, _) = bulk(&app);
+        assert_eq!(focus, Focus::Template);
+        let Some(Dialog::Bulk(card)) = &app.dialog else {
+            panic!("the card went");
+        };
+        assert_eq!(card.template.cursor(), "{name}{ext}".chars().count());
+
+        let list_scroll = app.tab().cwd.scroll_rows(Instant::now());
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(geometry.body.center()),
+                roll(egui::MouseWheelUnit::Line, -2.0, egui::Modifiers::NONE),
+            ],
+        );
+        let (_, _, first, _) = bulk(&app);
+        assert!(first > 0, "the wheel did not scroll the card's rows");
+        assert_eq!(
+            app.tab().cwd.scroll_rows(Instant::now()),
+            list_scroll,
+            "the wheel went through the card to the pane"
+        );
+
+        // The thumb, taken and pulled down.
+        let Some(OverlayGeom::Bulk(geometry)) = overlay_of(&app) else {
+            panic!("no bulk card");
+        };
+        let thumb = geometry.bar.expect("a bar").thumb.center();
+        let button = |pressed, at| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(thumb), button(true, thumb)],
+        );
+        let lower = thumb + egui::vec2(0.0, 120.0);
+        run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(lower)]);
+        run_frame(&mut app, &ctx, vec![button(false, lower)]);
+        let (_, _, dragged, _) = bulk(&app);
+        assert!(dragged > first, "the thumb did not carry the rows");
+
+        // `{` at the end of the template opens the list, and a click takes
+        // the candidate it lands on.
+        assert!(app.bulk_key(Chord::from_char('{').expect("{"), now));
+        run_frame(&mut app, &ctx, Vec::new());
+        let Some(OverlayGeom::Bulk(geometry)) = overlay_of(&app) else {
+            panic!("no bulk card");
+        };
+        let popover = geometry.popover.clone().expect("the list is up");
+        let Some(Dialog::Bulk(card)) = &app.dialog else {
+            panic!("the card went");
+        };
+        let second = card.live_popover().expect("up").candidates[1]
+            .insert
+            .clone();
+        click_at(&mut app, &ctx, popover.rows[1].center());
+        let (_, _, _, template) = bulk(&app);
+        assert_eq!(template, format!("{{name}}{{ext}}{second}"));
+        let Some(Dialog::Bulk(card)) = &app.dialog else {
+            panic!("the card went");
+        };
+        assert!(card.popover.is_none(), "taking a candidate closes the list");
+
+        // The `×` is the pointer's `Esc`, and a card with work in it is kept.
+        let Some(OverlayGeom::Bulk(geometry)) = overlay_of(&app) else {
+            panic!("no bulk card");
+        };
+        click_at(&mut app, &ctx, geometry.close.center());
+        assert!(app.dialog.is_none(), "the × left the card up");
+        assert!(app.bulk_draft.is_some(), "the × threw the work away");
     }
 
     /// The `×` closes what it is on — the help sheet, and a card — and
@@ -21420,11 +21989,10 @@ mod tests {
         );
     }
 
-    /// The bulk rename's `Enter` hint renames, and so does its `Rename`
-    /// button: the pointer's two ways of saying what the keyboard's `Enter`
-    /// says.
+    /// The bulk rename's `Enter` renames, and so does its `Rename` button: the
+    /// pointer's way of saying what the keyboard's `Enter` says.
     #[test]
-    fn the_bulk_cards_enter_hint_and_rename_button_both_rename() {
+    fn the_bulk_cards_enter_and_rename_button_both_rename() {
         let ctx = egui::Context::default();
         let names = ["a.txt", "b.txt"];
         let mut app = Fixture::new("hint-bulk", &names);
@@ -21434,12 +22002,11 @@ mod tests {
         app.run(Command::Rename, 10, now);
         assert!(app.bulk_key(Chord::from_char('z').expect("z"), now));
         run_frame(&mut app, &ctx, Vec::new());
-        let (_, enter) = card_hint(&app, "Enter");
-        click_at(&mut app, &ctx, enter.center());
-        assert!(app.dialog.is_none(), "the Enter hint left the card up");
+        assert!(app.bulk_key(Chord::plain(Key::Enter), now));
+        assert!(app.dialog.is_none(), "Enter left the card up");
         assert!(
             names.iter().any(|name| !app.files.join(name).exists()),
-            "the Enter hint renamed nothing"
+            "Enter renamed nothing"
         );
 
         // The listing the second card is built from is the one the rename

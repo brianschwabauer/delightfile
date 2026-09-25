@@ -38,6 +38,13 @@ libc.workspace = true
 # from-scratch inflate is exactly the "rewriting is impractical" the dependency
 # rule reserves an exception for. No zlib, no C, no feature flags.
 miniz_oxide.workspace = true
+# The bulk-rename template's `re` transform (`rename::template`). A regex engine
+# is the textbook case of "rewriting is impractical": the parser, the
+# automata and the Unicode classes are years of someone else's work, and a
+# homemade one would be the slow, subtly wrong version of it. Pure Rust, no
+# display, and already in the tree — df-app's `env_logger` compiles this same
+# crate — so the build gains a few features rather than a dependency.
+regex.workspace = true
 
 [lints]
 workspace = true

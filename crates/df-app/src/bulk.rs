@@ -1,5 +1,6 @@
-//! The bulk-rename diff view — PLAN §5's "in-app two-column editable diff
-//! (old → new) with live validation, instead of shelling to an editor".
+//! The bulk-rename card: PLAN §5's "in-app two-column editable diff (old →
+//! new) with live validation, instead of shelling to an editor", grown a
+//! template field and a column that edits like a text editor.
 //!
 //! ## Why not `$EDITOR`
 //!
@@ -17,48 +18,136 @@
 //! takes it all back. The opener path to `bulk-rename.txt` stays in the config
 //! for anyone who wants the old way.
 //!
-//! ## The three ways a name can be wrong
+//! ## Two ways to say what the names should be
 //!
-//! They are different problems and they read differently, so they are three
-//! variants and not one "invalid":
+//! The field at the top holds a template, `{name}{ext}` to begin with, which is
+//! every name as it is ([`template::DEFAULT`]). Each keystroke there re-resolves
+//! it for every row and writes the results into the right column. That is the
+//! bulk of the work: `{date}-{name}{ext}`, `holiday-{nnn}{ext}`.
 //!
-//! - **Unusable** — empty, `.`/`..`, or containing a `/`. Nothing can be named
+//! The right column is the exceptions. It is one [`NamesEditor`] over every new
+//! name, with Zed's carets, so a fix to four names is four clicks with `Alt` held
+//! and one word typed. A template edit **rewrites every row**, hand edits
+//! included. Merging a new template into rows a person has already changed by
+//! hand has no answer anyone could predict, and a card that sometimes kept an
+//! edit and sometimes did not would be a card nobody could trust. That holds
+//! for a row the template cannot fill as well: it shows what the file is called
+//! now and says why, rather than keeping a hand edit that the wipe spared only
+//! because this one template failed on it.
+//!
+//! What makes the wipe safe is that it is one undo step in the rows, and what
+//! `Ctrl+z` in the column brings back is the rows somebody had typed into. The
+//! rows nobody typed into keep following the template, because the field still
+//! says it: a row that follows the template shows what the field says, so the
+//! field is where it changes (`Ctrl+z` in the field undoes the field, which is
+//! the same as retyping it). One step for the whole of a spell of typing in the
+//! field, not one per keystroke: while nothing has been done in the rows since
+//! the last rewrite, the next one takes that one back before it writes (see
+//! `rewrite_on_top`), so a template typed a letter at a time is still one
+//! `Ctrl+z` away from the hand edits it wiped.
+//!
+//! A row is **untouched** while nobody has changed its text since the template
+//! last wrote the column. It then holds what the template made of it: the
+//! resolved name, which is [`Bulk::derived`]'s `Ok`, or the file's old name
+//! where the template could not resolve. Untouched rows are the ones the photo
+//! reader and a row move may rewrite on their own; a row somebody typed into
+//! is theirs.
+//!
+//! The editor keeps the flag
+//! ([`NamesEditor::touched`](df_core::rename::editor::NamesEditor::touched)),
+//! in its undo history, so `Ctrl+z` puts back whose line a row was along with
+//! the line. The card used to decide instead by comparing each row with the
+//! line it had last written there. That record had no history, so an undo
+//! could restore a line the card had since rewritten, and the row then looked
+//! typed-in with nobody having typed in it. After an undo or a redo in the
+//! rows, the untouched rows are resolved again. The line put back may have
+//! been written under an older template or before a photo arrived, and an
+//! untouched row shows the template in the field applied to what the card
+//! knows now.
+//!
+//! ## Photos arrive late
+//!
+//! `{date}`, `{taken}`, `{camera}` and the pixel sizes need the photo's EXIF,
+//! and reading a hundred JPEGs off an SD card is a real read. So the card opens
+//! on the stat alone ([`Facts::stat`]), and a worker thread reads the photos
+//! behind it. A value that needs a photo not yet read answers
+//! [`Missing::Pending`] rather than guessing, the row shows the file's old name
+//! and says "reading photo…", and `Enter` waits. As each photo lands
+//! ([`Bulk::poll`]) the untouched rows are resolved again.
+//!
+//! That second resolution is not an undo step, and it does not interrupt a word
+//! being typed in another row
+//! ([`NamesEditor::set_lines_quietly`](df_core::rename::editor::NamesEditor::set_lines_quietly)).
+//! Nobody did it, so `Ctrl+z` is not spent on it, and `Ctrl+z` never takes back
+//! only the photo. It takes back the last thing a person did. Then the rows
+//! nobody typed into are filled in again from what the card knows now, photo
+//! included.
+//!
+//! ## The five ways a name can be wrong
+//!
+//! They are different problems and they read differently, so they are variants
+//! and not one "invalid":
+//!
+//! - **Unusable**: empty, `.`/`..`, or containing a `/`. Nothing can be named
 //!   this; the row is wrong on its own terms.
-//! - **Duplicate** — two rows in *this card* want the same name. Neither row is
+//! - **TooLong**: over [`NAME_MAX`] bytes.
+//! - **Duplicate**: two rows in *this card* want the same name. Neither row is
 //!   wrong by itself, which is why both are marked: the fix is a choice between
 //!   them.
-//! - **Taken** — something already on disk has that name, and it is not one of
+//! - **Taken**: something already on disk has that name, and it is not one of
 //!   the files being renamed. A file that is being renamed *away* does not
 //!   count, which is what makes swapping two names (`a`→`b`, `b`→`a`) legal
 //!   here even though doing it by hand needs a temporary.
+//! - **Missing**: the template asked this file for something it does not have
+//!   (a PNG's taken date), or not yet ([`Problem::Pending`]). Only on an
+//!   untouched row: a row typed by hand has said what it wants to be called.
+//!
+//! Braces in a row are not a problem. `{` and `}` are legal in a filename, and a
+//! row that says `{taken}` because the PNG had no taken date is a name like any
+//! other; the card says why on the row as long as the template put it there.
 //!
 //! The swap case is also why the rename runs in two passes; see
 //! [`ordered_renames`].
-//!
-//! ## Find and replace
-//!
-//! The field at the top rewrites every row that has not been touched by hand.
-//! Hand-edited rows are left alone on purpose: the field is for the bulk of the
-//! work and the rows are for the exceptions, and a replace that silently threw
-//! away an exception you had just typed would make the two fight.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use df_core::input::InputBuffer;
-
-/// How many rows the card shows at once before it scrolls.
-///
-/// Twelve: enough that a normal selection is on screen whole, few enough that
-/// the card stays a card rather than becoming a second file pane. Past this the
-/// list scrolls under the cursor by the same scrolloff rule the panes use.
-pub const ROWS: usize = 12;
+use crossbeam_channel::{unbounded, Receiver, TryRecvError};
+use df_core::fs::Notifier;
+use df_core::input::{is_word_char, segment_at, InputBuffer, InputEvent, InputOp};
+use df_core::keymap::{Chord, Key, Mods};
+use df_core::rename::complete::{self, Candidate};
+use df_core::rename::editor::{EditorEvent, EditorOp, NamesEditor, Pos};
+use df_core::rename::exif;
+use df_core::rename::facts::{Civil, Facts, Photo, PhotoFacts};
+use df_core::rename::template::{self, Missing, Part, Template};
 
 /// The longest name this card will accept, in bytes.
 ///
 /// Linux's own `NAME_MAX`. Refusing at 255 with a readable message beats letting
 /// the rename fail with `ENAMETOOLONG` half way through a batch.
 pub const NAME_MAX: usize = 255;
+
+/// How many candidates the `{` popover shows before it scrolls. Eight is the
+/// whole first stage of the catalogue's most-wanted end, and short enough that
+/// the popover stays a hint under the caret rather than a second list.
+pub const POPOVER_ROWS: usize = 8;
+
+/// Rows kept between the caret and the list's edge, as the panes keep them.
+const SCROLLOFF: usize = 2;
+
+/// How many rows the list is assumed to show until the card has been measured
+/// ([`Bulk::settle_layout`]). The old card's fixed height, which is about what a
+/// normal window gives it.
+const FIRST_GUESS_VISIBLE: usize = 12;
+
+/// The extensions worth opening for EXIF: the JPEG family and the TIFF-built
+/// raws [`exif::read`] understands. Anything else is not read at all, so a
+/// folder of PDFs costs no reads and no worker.
+const PHOTO_EXTENSIONS: [&str; 13] = [
+    "jpg", "jpeg", "jpe", "tif", "tiff", "nef", "cr2", "dng", "arw", "orf", "rw2", "pef", "srw",
+];
 
 /// What is wrong with one row, if anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +160,12 @@ pub enum Problem {
     Taken,
     /// Over [`NAME_MAX`] bytes.
     TooLong,
+    /// The template needs something this file does not have, in the words of
+    /// [`Missing::Because`]: "no date taken", "no camera".
+    Missing(&'static str),
+    /// The template needs this file's photo facts and the reader has not got
+    /// to it yet. Not an error, a wait: `Enter` holds until it clears.
+    Pending,
 }
 
 impl Problem {
@@ -81,65 +176,133 @@ impl Problem {
             Problem::Duplicate => "two rows want this name",
             Problem::Taken => "already exists here",
             Problem::TooLong => "too long",
+            Problem::Missing(why) => why,
+            Problem::Pending => "reading photo…",
         }
     }
 }
 
-/// Which field the keyboard is in.
+/// Which of the card's two fields has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Field {
-    /// The find/replace field at the top.
-    Find,
-    Replace,
-    /// One of the name rows.
-    Row(usize),
+pub enum Focus {
+    /// The template at the top.
+    Template,
+    /// The right column's editor.
+    Rows,
 }
 
-/// One line of the diff: the old name, and the new one being edited.
-pub struct Row {
-    pub old: String,
-    pub buffer: InputBuffer,
-    /// Whether this row has been typed into by hand, and so is exempt from
-    /// find/replace. See the module essay.
-    pub edited: bool,
+/// The `{` completion list, while it is up.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Popover {
+    /// The row whose `{` opened it, or `None` for the template field.
+    pub anchor_row: Option<usize>,
+    /// The char index of that `{` in its line.
+    pub open_at: usize,
+    /// What [`complete::candidates`] offers for the text typed after the `{`.
+    pub candidates: Vec<Candidate>,
+    /// The highlighted candidate, an index into `candidates`.
+    pub selected: usize,
+    /// The first candidate drawn: the list shows [`POPOVER_ROWS`] and scrolls
+    /// the selection into view.
+    pub first: usize,
 }
 
-impl Row {
-    fn new(old: String) -> Row {
-        let buffer = InputBuffer::for_rename_stem(&old);
-        Row {
-            old,
-            buffer,
-            edited: false,
+/// What a keystroke asks of whoever owns the card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// Handled inside the card. Repaint.
+    Consumed,
+    /// Nothing on the card uses this chord.
+    Ignored,
+    /// Carry the renames out ([`Bulk::renames`]).
+    Submit,
+    /// Close the card.
+    Close,
+    /// `Ctrl+c`, or `Ctrl+x` whose delete the card has already made: put this
+    /// text on the clipboard. The card cannot do that itself, because the
+    /// clipboard belongs to the window.
+    Copy(String),
+}
+
+/// The photo worker's end of the channel. Dropping it is how the worker is
+/// told to stop: its next send fails and it returns.
+struct PhotoReader {
+    replies: Receiver<(usize, Option<PhotoFacts>)>,
+}
+
+impl PhotoReader {
+    /// Read `jobs` (a row's id and its name) in order on a worker, ringing
+    /// `notify` after each. `None` if the thread could not be started, in which
+    /// case the caller must not leave anything waiting on it.
+    fn start(dir: PathBuf, jobs: Vec<(usize, String)>, notify: Notifier) -> Option<PhotoReader> {
+        let (tx, rx) = unbounded();
+        let spawned = std::thread::Builder::new()
+            .name("df-exif".to_string())
+            .spawn(move || {
+                df_core::thread::lower_priority(df_core::thread::NICE_INTERACTIVE);
+                for (id, name) in jobs {
+                    let facts = exif::read(&dir.join(&name));
+                    if tx.send((id, facts)).is_err() {
+                        // The card is gone; so is anybody to tell.
+                        return;
+                    }
+                    notify();
+                }
+            });
+        match spawned {
+            Ok(_) => Some(PhotoReader { replies: rx }),
+            Err(e) => {
+                log::warn!("the photo reader did not start: {e}");
+                None
+            }
         }
     }
-
-    pub fn new_name(&self) -> &str {
-        self.buffer.text()
-    }
-
-    /// Whether this row would actually do anything.
-    pub fn changed(&self) -> bool {
-        self.new_name() != self.old
-    }
 }
 
-/// The card, while it is up.
+/// The card, while it is up (or kept as a draft, see `App::bulk_draft`).
 pub struct Bulk {
     /// The directory every one of these names is in. One directory, always: a
     /// selection spans one listing, and a card that renamed across directories
     /// would be a move with a text field for a destination.
     pub dir: PathBuf,
-    pub rows: Vec<Row>,
-    pub find: InputBuffer,
-    pub replace: InputBuffer,
-    pub field: Field,
-    /// The first row drawn, for the scroll.
+    /// Old names, in row order: parallel to the editor's lines and to
+    /// [`Bulk::facts`] and [`Bulk::derived`], and swapped with them when a row
+    /// moves.
+    pub olds: Vec<String>,
+    pub facts: Vec<Facts>,
+    /// What the template made of each row, or why it could not.
+    pub derived: Vec<Result<String, Missing>>,
+    pub template: InputBuffer,
+    /// The template's text, parsed. Every row resolves against it, and the
+    /// field paints its values and its mistakes from it, so it is parsed once
+    /// per edit rather than once per row and again every frame. Private
+    /// because it must stay in step with `template` (see [`Bulk::parsed`]).
+    parsed: Template,
+    pub editor: NamesEditor,
+    pub focus: Focus,
+    pub popover: Option<Popover>,
+    /// The first row drawn.
     pub first: usize,
-    /// Names already in the directory that are not part of this card — the
+    /// How many rows the card has room for, as the last layout measured it.
+    pub visible: usize,
+    /// How far the template field's text is scrolled to keep its caret in view.
+    pub template_scroll: f32,
+    /// …and the primary caret's row's.
+    pub row_scroll: f32,
+    /// Each row's position when the card opened, swapped with the rows, so a
+    /// photo the worker read for "row 7" finds that file after a row move.
+    ids: Vec<usize>,
+    /// Names already in the directory that are not part of this card: the
     /// "taken" test, snapshotted when the card opened rather than re-read per
     /// keystroke.
     others: HashSet<String>,
+    photos: Option<PhotoReader>,
+    /// A wheel's fractions of a row, until they add up to one.
+    carry: f32,
+    /// Whether the editor's newest undo step is the template's own rewrite,
+    /// with nothing done in the rows since. While it is, the next rewrite
+    /// replaces that step rather than stacking another on it.
+    rewrite_on_top: bool,
 }
 
 impl Bulk {
@@ -147,7 +310,8 @@ impl Bulk {
     ///
     /// `siblings` is every name in the directory; the ones being renamed are
     /// removed from it here, so a row keeping its own name is not reported as
-    /// colliding with itself.
+    /// colliding with itself. `notify` rings the event loop when the photo
+    /// reader has something to say.
     ///
     /// **The directory has to be one on this machine.** This card commits with
     /// [`df_core::ops::rename`] — a `rename(2)` against `dir.join(name)` — and
@@ -160,109 +324,156 @@ impl Bulk {
         dir: PathBuf,
         names: Vec<String>,
         siblings: &[String],
+        notify: Notifier,
     ) -> Result<Bulk, &'static str> {
         if crate::remote::is_remote(&dir) {
             return Err("Rename one at a time over the link — r renames the row under the cursor");
         }
-        Ok(Bulk::local(dir, names, siblings))
+        let mut facts: Vec<Facts> = names.iter().map(|name| Facts::stat(&dir, name)).collect();
+        let mut jobs = Vec::new();
+        for (id, row) in facts.iter_mut().enumerate() {
+            if could_be_photo(row) {
+                jobs.push((id, row.name.clone()));
+            } else {
+                row.photo = Photo::None;
+            }
+        }
+        let photos = if jobs.is_empty() {
+            None
+        } else {
+            PhotoReader::start(dir.clone(), jobs, notify)
+        };
+        if photos.is_none() {
+            // No reader, so nothing may wait on one: a `Pending` with no
+            // worker behind it is an `Enter` that never comes back.
+            for row in &mut facts {
+                if row.photo == Photo::Pending {
+                    row.photo = Photo::None;
+                }
+            }
+        }
+        let mut bulk = Bulk::from_facts(dir, facts, siblings);
+        bulk.photos = photos;
+        Ok(bulk)
     }
 
-    /// The card itself, once the directory has been vouched for.
-    fn local(dir: PathBuf, names: Vec<String>, siblings: &[String]) -> Bulk {
-        let chosen: HashSet<&str> = names.iter().map(String::as_str).collect();
+    /// The card over facts already gathered, with no photo reader: what
+    /// [`Bulk::new`] builds on, and what the tests build directly so that a
+    /// photo arrives exactly when they say.
+    fn from_facts(dir: PathBuf, facts: Vec<Facts>, siblings: &[String]) -> Bulk {
+        let olds: Vec<String> = facts.iter().map(|row| row.name.clone()).collect();
+        let chosen: HashSet<&str> = olds.iter().map(String::as_str).collect();
         let others = siblings
             .iter()
             .filter(|name| !chosen.contains(name.as_str()))
             .cloned()
             .collect();
+        let parsed = Template::parse(template::DEFAULT);
+        let now = Civil::now();
+        let derived: Vec<Result<String, Missing>> = facts
+            .iter()
+            .enumerate()
+            .map(|(index, row)| parsed.resolve(row, index, now))
+            .collect();
+        let lines: Vec<String> = derived
+            .iter()
+            .zip(&olds)
+            .map(|(name, old)| name.clone().unwrap_or_else(|_| old.clone()))
+            .collect();
+        let rows = olds.len();
         Bulk {
             dir,
-            rows: names.into_iter().map(Row::new).collect(),
-            find: InputBuffer::new(String::new(), 0),
-            replace: InputBuffer::new(String::new(), 0),
-            field: Field::Row(0),
+            editor: NamesEditor::new(lines),
+            olds,
+            facts,
+            derived,
+            template: InputBuffer::new(template::DEFAULT, template::DEFAULT.chars().count()),
+            parsed,
+            // The template first: it is the tool for the bulk of the work, and
+            // a keystroke that landed in row 0 alone would be the one row the
+            // card is least about.
+            focus: Focus::Template,
+            popover: None,
             first: 0,
+            visible: FIRST_GUESS_VISIBLE,
+            template_scroll: 0.0,
+            row_scroll: 0.0,
+            ids: (0..rows).collect(),
             others,
+            photos: None,
+            carry: 0.0,
+            rewrite_on_top: false,
         }
     }
 
-    /// The buffer the keyboard is typing into.
-    pub fn buffer_mut(&mut self) -> Option<&mut InputBuffer> {
-        match self.field {
-            Field::Find => Some(&mut self.find),
-            Field::Replace => Some(&mut self.replace),
-            Field::Row(index) => self.rows.get_mut(index).map(|row| &mut row.buffer),
+    /// Take a draft kept from an earlier card back, if it was over this same
+    /// selection: the same directory and the same set of names, in whatever
+    /// order. The draft's own order wins, because it may be the order somebody
+    /// arranged with `Alt+↑↓`. What else is in the directory is read again, as
+    /// it may have changed while the card was closed.
+    pub fn reopen(
+        draft: Box<Bulk>,
+        dir: &Path,
+        names: &[String],
+        siblings: &[String],
+    ) -> Option<Box<Bulk>> {
+        if draft.dir != dir || draft.olds.len() != names.len() {
+            return None;
         }
-    }
-
-    /// Move between fields: the two at the top, then the rows, wrapping.
-    ///
-    /// Wrapping, like the palette and unlike the file panes: this is a short
-    /// ranked-by-position menu of fields you are stepping around, not a place
-    /// with a top and a bottom to lose your position in.
-    pub fn step(&mut self, delta: isize) {
-        let fields = self.rows.len() + 2;
-        let at = match self.field {
-            Field::Find => 0isize,
-            Field::Replace => 1,
-            Field::Row(index) => index as isize + 2,
-        };
-        let next = (at + delta).rem_euclid(fields as isize) as usize;
-        self.field = match next {
-            0 => Field::Find,
-            1 => Field::Replace,
-            n => Field::Row(n - 2),
-        };
-        self.scroll_into_view();
-    }
-
-    /// Keep the edited row on screen, by the panes' own scrolloff rule.
-    pub fn scroll_into_view(&mut self) {
-        let Field::Row(index) = self.field else {
-            // Editing the find field shows the *top* of the list, because that
-            // is where the eye goes to check what the replace did.
-            self.first = 0;
-            return;
-        };
-        self.first = crate::viewport::first_visible(self.first, index, self.rows.len(), ROWS, 2);
-    }
-
-    /// Mark the row the keyboard is in as hand-edited, so find/replace leaves
-    /// it alone from now on.
-    pub fn touched(&mut self) {
-        if let Field::Row(index) = self.field {
-            if let Some(row) = self.rows.get_mut(index) {
-                row.edited = true;
-            }
+        let ours: HashSet<&str> = draft.olds.iter().map(String::as_str).collect();
+        if names.iter().any(|name| !ours.contains(name.as_str())) {
+            return None;
         }
+        let others: HashSet<String> = siblings
+            .iter()
+            .filter(|name| !ours.contains(name.as_str()))
+            .cloned()
+            .collect();
+        let mut draft = draft;
+        draft.others = others;
+        // The draft's own parse would do. Parsing again costs nothing and means
+        // a card never comes back painting one template and resolving another.
+        draft.parsed = Template::parse(draft.template.text());
+        // A list left open by a click on the `×` is not what anyone comes back
+        // for.
+        draft.popover = None;
+        Some(draft)
     }
 
-    /// Re-run find/replace over every row that has not been hand-edited.
-    ///
-    /// Called after a keystroke in either of the top two fields. An empty find
-    /// puts the original names back, which is what makes the field undoable by
-    /// deleting it.
-    pub fn apply_replace(&mut self) {
-        let find = self.find.text().to_string();
-        let with = self.replace.text().to_string();
-        for row in &mut self.rows {
-            if row.edited {
-                continue;
-            }
-            let next = replaced(&row.old, &find, &with);
-            if row.buffer.text() != next {
-                // A fresh buffer rather than an edit: the caret belongs at the
-                // stem of the *new* name, and carrying the old caret over would
-                // put it inside a word that is no longer there.
-                row.buffer = InputBuffer::for_rename_stem(&next);
-            }
-        }
+    // ── What the card says ──────────────────────────────────────────────────
+
+    /// How many rows the card has.
+    pub fn len(&self) -> usize {
+        self.olds.len()
+    }
+
+    /// The template field's text, parsed: what every row resolves against
+    /// and what the field paints its values and mistakes from.
+    pub fn parsed(&self) -> &Template {
+        &self.parsed
+    }
+
+    /// Whether row `row` is still the template's: nobody has changed its text
+    /// since the template last wrote the column (see the module notes).
+    pub fn untouched(&self, row: usize) -> bool {
+        !self.editor.touched(row)
     }
 
     /// What is wrong with each row, in row order.
     pub fn problems(&self) -> Vec<Option<Problem>> {
-        let names: Vec<&str> = self.rows.iter().map(Row::new_name).collect();
-        problems(&names, &self.others)
+        let names: Vec<&str> = self.editor.lines().iter().map(String::as_str).collect();
+        let mut found = problems(&names, &self.others);
+        for (row, problem) in found.iter_mut().enumerate() {
+            if problem.is_some() || !self.untouched(row) {
+                continue;
+            }
+            *problem = match self.derived.get(row) {
+                Some(Err(Missing::Pending)) => Some(Problem::Pending),
+                Some(Err(Missing::Because(why))) => Some(Problem::Missing(why)),
+                _ => None,
+            };
+        }
+        found
     }
 
     /// Whether `Enter` is allowed.
@@ -272,32 +483,824 @@ impl Bulk {
 
     /// How many rows would actually change.
     pub fn changes(&self) -> usize {
-        self.rows.iter().filter(|row| row.changed()).count()
+        self.olds
+            .iter()
+            .zip(self.editor.lines())
+            .filter(|(old, new)| old != new)
+            .count()
+    }
+
+    /// The new name of the first row that changes, which is where the cursor
+    /// goes once the card has done its work.
+    pub fn first_change(&self) -> Option<String> {
+        self.olds
+            .iter()
+            .zip(self.editor.lines())
+            .find(|(old, new)| old != new)
+            .map(|(_, new)| new.clone())
     }
 
     /// The renames to carry out, in an order that is safe to run one at a time.
     pub fn renames(&self) -> Vec<(PathBuf, PathBuf)> {
         let pairs: Vec<(String, String)> = self
-            .rows
+            .olds
             .iter()
-            .filter(|row| row.changed())
-            .map(|row| (row.old.clone(), row.new_name().to_string()))
+            .zip(self.editor.lines())
+            .filter(|(old, new)| old != new)
+            .map(|(old, new)| (old.clone(), new.clone()))
             .collect();
         ordered_renames(&self.dir, &pairs)
     }
+
+    /// What a candidate would make of the row the popover is about (row 0 for
+    /// the template field): the popover's right-hand column.
+    pub fn preview(&self, candidate: &Candidate) -> Result<String, Missing> {
+        let row = self
+            .popover
+            .as_ref()
+            .and_then(|popover| popover.anchor_row)
+            .unwrap_or(0);
+        let Some(facts) = self.facts.get(row) else {
+            return Err(Missing::Because("no file"));
+        };
+        Template::parse(&candidate.insert).resolve(facts, row, Civil::now())
+    }
+
+    /// The popover's candidates, if it is up and has any. A popover whose
+    /// query matches nothing draws nothing and takes no keys, so a typo inside
+    /// braces cannot swallow `Enter`.
+    pub fn live_popover(&self) -> Option<&Popover> {
+        self.popover
+            .as_ref()
+            .filter(|popover| !popover.candidates.is_empty())
+    }
+
+    // ── The photo reader ────────────────────────────────────────────────────
+
+    /// Take whatever the photo reader has read since the last frame, and bring
+    /// the untouched rows up to date with it in one edit. Returns whether
+    /// anything changed, so the frame repaints.
+    pub fn poll(&mut self) -> bool {
+        let Some(reader) = &self.photos else {
+            return false;
+        };
+        let mut arrived = Vec::new();
+        let mut gone = false;
+        loop {
+            match reader.replies.try_recv() {
+                Ok(reply) => arrived.push(reply),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    gone = true;
+                    break;
+                }
+            }
+        }
+        if gone {
+            // The worker has finished, or died. Either way nothing more is
+            // coming, and a row still waiting would wait for ever.
+            self.photos = None;
+            for row in &mut self.facts {
+                if row.photo == Photo::Pending {
+                    row.photo = Photo::None;
+                }
+            }
+        }
+        if arrived.is_empty() && !gone {
+            return false;
+        }
+        for (id, photo) in arrived {
+            self.photo_arrived(id, photo);
+        }
+        self.refresh();
+        true
+    }
+
+    /// One photo's facts, for the row that was `id` when the card opened.
+    fn photo_arrived(&mut self, id: usize, photo: Option<PhotoFacts>) {
+        if let Some(row) = self.ids.iter().position(|&i| i == id) {
+            self.facts[row].photo = photo.map_or(Photo::None, Photo::Some);
+        }
+    }
+
+    // ── Resolving ───────────────────────────────────────────────────────────
+
+    /// The template changed: parse it again, resolve it for every row and
+    /// rewrite the column, hand edits and all, as one undo step.
+    ///
+    /// A row the template cannot resolve shows the file's old name and says
+    /// why. It does not keep the line it had. A template edit wipes the
+    /// column, and a row it cannot fill starts from what the file is called
+    /// now. A hand edit that happened to be on that row is one `Ctrl+z` away,
+    /// like the hand edits on every other row. Keeping it would make the wipe
+    /// depend on whether this template happened to fail on that row.
+    fn rewrite(&mut self) {
+        if self.rewrite_on_top {
+            // The rows still show the last rewrite and nothing else, so it is
+            // taken back first: a spell of typing in the field is one step of
+            // the rows' undo, not one per letter.
+            self.editor.apply(EditorOp::Undo);
+        }
+        self.parsed = Template::parse(self.template.text());
+        let now = Civil::now();
+        let before = self.editor.lines().to_vec();
+        let mut lines = Vec::with_capacity(self.facts.len());
+        for (row, facts) in self.facts.iter().enumerate() {
+            let result = self.parsed.resolve(facts, row, now);
+            let line = match &result {
+                Ok(name) => name.clone(),
+                Err(_) => self.olds[row].clone(),
+            };
+            self.derived[row] = result;
+            lines.push(line);
+        }
+        self.editor.set_lines(lines);
+        // Identical lines push no step, and then there is nothing on top to
+        // take back next time.
+        self.rewrite_on_top = self.editor.lines() != before.as_slice();
+    }
+
+    /// Resolve the template again for the untouched rows only: a photo has
+    /// arrived, rows have moved and the counter numbers by position, or an
+    /// undo or a redo has put back lines written against other facts or
+    /// another template. Rows somebody has typed into are left as they are.
+    ///
+    /// Not an undo step, and not the end of a word being typed. The template
+    /// has not changed; the facts under it have, or the rows' order. Nobody
+    /// asked for that with a keystroke, so a keystroke must not be spent on
+    /// taking it back (see
+    /// [`NamesEditor::set_lines_quietly`](df_core::rename::editor::NamesEditor::set_lines_quietly)).
+    fn refresh(&mut self) {
+        // Nothing has been done in the rows since the template wrote them, so
+        // every row is untouched and a refresh is a rewrite, which folds into
+        // the step already there.
+        if self.rewrite_on_top {
+            self.rewrite();
+            return;
+        }
+        let now = Civil::now();
+        let mut lines = self.editor.lines().to_vec();
+        for (row, line) in lines.iter_mut().enumerate() {
+            if !self.untouched(row) {
+                continue;
+            }
+            let result = self.parsed.resolve(&self.facts[row], row, now);
+            if let Ok(name) = &result {
+                line.clone_from(name);
+            }
+            self.derived[row] = result;
+        }
+        self.editor.set_lines_quietly(lines);
+    }
+
+    /// `}` was typed (or a completion accepted, or text pasted) in the rows:
+    /// every caret that now sits just after a whole `{…}` value has that value
+    /// resolved for its own row, as one edit. A value that cannot resolve for
+    /// that row stays as the literal text it is; a value never outlives the
+    /// keystroke that closed it.
+    fn expand_tokens(&mut self) {
+        let now = Civil::now();
+        let mut edits: Vec<(usize, Range<usize>, String)> = Vec::new();
+        for cursor in self.editor.cursors() {
+            if cursor.is_selection() {
+                continue;
+            }
+            let Pos { row, col } = cursor.head;
+            let chars: Vec<char> = self.editor.line(row).unwrap_or("").chars().collect();
+            let Some(open) = open_brace(&chars, col) else {
+                continue;
+            };
+            let slice: String = chars[open..col].iter().collect();
+            let (Some(token), Some(facts)) = (single_value(&slice), self.facts.get(row)) else {
+                continue;
+            };
+            let Ok(name) = token.resolve(facts, row, now) else {
+                continue;
+            };
+            // Ranges on one row must not overlap; carets are sorted, so the
+            // only one this could overlap is the last one taken.
+            if edits
+                .last()
+                .is_some_and(|(last, range, _)| *last == row && range.end > open)
+            {
+                continue;
+            }
+            edits.push((row, open..col, name));
+        }
+        if !edits.is_empty() {
+            self.editor.replace_ranges(edits);
+        }
+    }
+
+    /// Follow every row move the editor has made since the last look: the old
+    /// names, the facts and what the template made of each row travel with
+    /// their line. Answers whether anything moved, because then the untouched
+    /// rows have to be resolved again: the counter numbers rows by position,
+    /// and a moved row has a new one.
+    fn mirror_swaps(&mut self) -> bool {
+        let mut moved = false;
+        while let Some((a, b)) = self.editor.take_swap() {
+            if a.max(b) >= self.len() {
+                continue;
+            }
+            self.olds.swap(a, b);
+            self.facts.swap(a, b);
+            self.derived.swap(a, b);
+            self.ids.swap(a, b);
+            moved = true;
+        }
+        moved
+    }
+
+    // ── Keys ────────────────────────────────────────────────────────────────
+
+    /// One keystroke, to the popover if it is up, else to whichever field has
+    /// the keyboard.
+    pub fn key(&mut self, chord: Chord) -> Outcome {
+        if let Some(outcome) = self.popover_key(chord) {
+            return outcome;
+        }
+        match self.focus {
+            Focus::Template => self.template_key(chord),
+            Focus::Rows => self.rows_key(chord),
+        }
+    }
+
+    /// The popover's own keys: move, accept, dismiss. Everything else goes on
+    /// to the field and narrows the list.
+    fn popover_key(&mut self, chord: Chord) -> Option<Outcome> {
+        let count = self.live_popover()?.candidates.len();
+        if !chord.mods.is_none() {
+            return None;
+        }
+        match chord.key {
+            Key::ArrowUp => self.move_selection(count - 1, count),
+            Key::ArrowDown => self.move_selection(1, count),
+            Key::Tab | Key::Enter => self.accept(),
+            Key::Escape => self.popover = None,
+            _ => return None,
+        }
+        Some(Outcome::Consumed)
+    }
+
+    /// Move the highlight by `step` (mod `count`, so `count - 1` is one up),
+    /// wrapping, and scroll it into view.
+    fn move_selection(&mut self, step: usize, count: usize) {
+        if let Some(popover) = &mut self.popover {
+            popover.selected = (popover.selected + step) % count.max(1);
+            if popover.selected < popover.first {
+                popover.first = popover.selected;
+            } else if popover.selected >= popover.first + POPOVER_ROWS {
+                popover.first = popover.selected + 1 - POPOVER_ROWS;
+            }
+        }
+    }
+
+    fn template_key(&mut self, chord: Chord) -> Outcome {
+        let plain = chord.mods.is_none();
+        match chord.key {
+            Key::Tab if plain || chord.mods == Mods::SHIFT => {
+                self.focus_rows();
+                return Outcome::Consumed;
+            }
+            Key::ArrowDown if plain => {
+                self.focus_rows();
+                return Outcome::Consumed;
+            }
+            Key::Enter if plain => return self.enter(false),
+            Key::Escape if plain => return Outcome::Close,
+            // The field's own map reads `Ctrl+c` as cancel, which on this card
+            // would close it on a person reaching for copy. Without a
+            // selection there is nothing to copy, and the press does nothing.
+            Key::Char('c') if chord.mods == Mods::CTRL => {
+                return match self.template_selection() {
+                    Some(text) => Outcome::Copy(text),
+                    None => Outcome::Consumed,
+                };
+            }
+            Key::Char('x') if chord.mods == Mods::CTRL => {
+                let Some(text) = self.template_selection() else {
+                    return Outcome::Consumed;
+                };
+                // A delete with a selection takes the selection, as one step
+                // of the field's undo.
+                self.template.apply(InputOp::Backspace);
+                self.rewrite();
+                self.sync_popover(false);
+                return Outcome::Copy(text);
+            }
+            _ => {}
+        }
+        let before = self.template.text().to_string();
+        match self.template.feed(chord) {
+            InputEvent::Consumed => {
+                // Only a change to the text rewrites the rows: a caret moving
+                // along the template must not throw a hand edit away.
+                if self.template.text() != before {
+                    self.rewrite();
+                }
+                self.sync_popover(typed(chord) == Some('{'));
+                Outcome::Consumed
+            }
+            InputEvent::Submit(_) => self.enter(false),
+            InputEvent::Cancel => Outcome::Close,
+        }
+    }
+
+    /// The template field's selected text, if it has a selection.
+    fn template_selection(&self) -> Option<String> {
+        let range = self.template.selection_bytes()?;
+        self.template.text().get(range).map(str::to_string)
+    }
+
+    fn rows_key(&mut self, chord: Chord) -> Outcome {
+        let plain = chord.mods.is_none();
+        let ctrl = chord.mods == Mods::CTRL;
+        match chord.key {
+            Key::Tab if plain || chord.mods == Mods::SHIFT => {
+                self.focus_template();
+                return Outcome::Consumed;
+            }
+            // Up off the top row is up into the field above it, as it is in
+            // every form. Only with one caret: a stack of carets pressing up
+            // is moving the stack. And only with nothing selected: `↑` drops
+            // a selection first, as it does on every other row, so the press
+            // that leaves the rows is the next one.
+            Key::ArrowUp
+                if plain
+                    && self.editor.cursors().len() == 1
+                    && self.editor.primary().head.row == 0
+                    && !self.editor.primary().is_selection() =>
+            {
+                self.focus_template();
+                return Outcome::Consumed;
+            }
+            Key::ArrowUp if ctrl => {
+                self.jump_to_problem(false);
+                return Outcome::Consumed;
+            }
+            Key::ArrowDown if ctrl => {
+                self.jump_to_problem(true);
+                return Outcome::Consumed;
+            }
+            Key::Enter if plain => return self.enter(true),
+            // Copy and cut are the card's, not the editor's: the editor does
+            // not own the clipboard (see its module header). With nothing
+            // selected they do nothing. They are never `Esc`, because a
+            // `Ctrl+c` meant as copy must not throw the card away.
+            Key::Char('c') if ctrl => {
+                let text = self.editor.selected_text();
+                return if text.is_empty() {
+                    Outcome::Consumed
+                } else {
+                    Outcome::Copy(text)
+                };
+            }
+            Key::Char('x') if ctrl => {
+                let text = self.editor.selected_text();
+                if text.is_empty() {
+                    return Outcome::Consumed;
+                }
+                self.rewrite_on_top = false;
+                self.editor.delete_selections();
+                self.follow_primary();
+                self.sync_popover(false);
+                return Outcome::Copy(text);
+            }
+            _ => {}
+        }
+        self.rewrite_on_top = false;
+        match self.editor.feed(chord) {
+            EditorEvent::Consumed => {
+                let typed = typed(chord);
+                if typed == Some('}') {
+                    self.expand_tokens();
+                }
+                // A row move renumbers the rows. An undo or a redo can put back
+                // lines from before a photo arrived, on rows it has just made
+                // untouched again. Either way the untouched rows are resolved
+                // against what the card knows now.
+                let moved = self.mirror_swaps();
+                if moved || self.editor.last_was_history() {
+                    self.refresh();
+                }
+                self.follow_primary();
+                self.sync_popover(typed == Some('{'));
+                Outcome::Consumed
+            }
+            EditorEvent::Submit => self.enter(true),
+            EditorEvent::Cancel => Outcome::Close,
+            EditorEvent::Ignored => Outcome::Ignored,
+        }
+    }
+
+    /// Composed text (an IME commit, a dead-key sequence) or a paste, into
+    /// whichever field has the keyboard.
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match self.focus {
+            Focus::Template => {
+                let before = self.template.text().to_string();
+                self.template.insert_text(text);
+                if self.template.text() != before {
+                    self.rewrite();
+                }
+            }
+            Focus::Rows => {
+                self.rewrite_on_top = false;
+                self.editor.insert_text(text);
+                if text.contains('}') {
+                    self.expand_tokens();
+                }
+                self.follow_primary();
+            }
+        }
+        self.sync_popover(text.ends_with('{'));
+    }
+
+    /// `Enter`. A card with a settled problem refuses, and from the rows the
+    /// caret goes to the first row that has one (the status beside the
+    /// buttons has already said why). A card waiting only on the photo reader refuses without moving
+    /// anything: the wait ends on its own. A card with nothing changed closes,
+    /// and anything else is submitted.
+    fn enter(&mut self, jump: bool) -> Outcome {
+        let problems = self.problems();
+        let settled = problems
+            .iter()
+            .position(|problem| problem.is_some_and(|p| p != Problem::Pending));
+        if let Some(row) = settled {
+            if jump {
+                self.rewrite_on_top = false;
+                self.editor.go_to_row(row);
+                self.follow_primary();
+                self.popover = None;
+            }
+            return Outcome::Consumed;
+        }
+        if problems.iter().any(Option::is_some) {
+            return Outcome::Consumed;
+        }
+        if self.changes() == 0 {
+            return Outcome::Close;
+        }
+        Outcome::Submit
+    }
+
+    /// `Ctrl+↑` / `Ctrl+↓`: one caret on the previous or next row that has a
+    /// problem, wrapping. Nothing to jump to is nothing done.
+    ///
+    /// A row waiting on the photo reader is not a problem to go to, as it is
+    /// not one for `Enter` to go to: there is nothing to fix there, and the
+    /// wait ends on its own.
+    fn jump_to_problem(&mut self, forward: bool) {
+        let rows: Vec<usize> = self
+            .problems()
+            .iter()
+            .enumerate()
+            .filter_map(|(row, problem)| {
+                problem
+                    .filter(|&problem| problem != Problem::Pending)
+                    .map(|_| row)
+            })
+            .collect();
+        let here = self.editor.primary().head.row;
+        let target = if forward {
+            rows.iter().find(|&&row| row > here).or(rows.first())
+        } else {
+            rows.iter().rev().find(|&&row| row < here).or(rows.last())
+        };
+        if let Some(&row) = target {
+            self.rewrite_on_top = false;
+            self.editor.go_to_row(row);
+            self.follow_primary();
+            self.sync_popover(false);
+        }
+    }
+
+    fn focus_template(&mut self) {
+        self.focus = Focus::Template;
+        self.popover = None;
+    }
+
+    /// Into the rows. The carets stay where they were left, unless none of
+    /// them is on screen, in which case there is one on the first row shown:
+    /// the keyboard must land somewhere the eye can see.
+    fn focus_rows(&mut self) {
+        self.focus = Focus::Rows;
+        self.popover = None;
+        let shown = self.first..self.first + self.visible.max(1);
+        if !self
+            .editor
+            .cursors()
+            .iter()
+            .any(|cursor| shown.contains(&cursor.head.row))
+        {
+            self.rewrite_on_top = false;
+            self.editor.go_to_row(self.first);
+        }
+    }
+
+    /// Keep the primary caret's row on screen, by the panes' scrolloff rule.
+    fn follow_primary(&mut self) {
+        let row = self.editor.primary().head.row;
+        self.first =
+            crate::viewport::first_visible(self.first, row, self.len(), self.visible, SCROLLOFF);
+    }
+
+    // ── The popover ─────────────────────────────────────────────────────────
+
+    /// The focused field's primary caret: which row (`None` for the template),
+    /// where, and the line it is on.
+    fn caret(&self) -> (Option<usize>, usize, Vec<char>) {
+        match self.focus {
+            Focus::Template => (
+                None,
+                self.template.cursor(),
+                self.template.text().chars().collect(),
+            ),
+            Focus::Rows => {
+                let head = self.editor.primary().head;
+                let line = self.editor.line(head.row).unwrap_or("");
+                (Some(head.row), head.col, line.chars().collect())
+            }
+        }
+    }
+
+    /// Bring the popover in line with the caret after anything that may have
+    /// moved it. An open popover stays while the caret is still after its `{`
+    /// with no brace typed since, and re-filters on what has been typed; any
+    /// other caret closes it. `opened` is whether the edit just made typed a
+    /// `{`, which is the only thing that opens one: arrowing past a `{` that
+    /// was already there is not asking for a list.
+    ///
+    /// The `{` just typed opens the list only if it opens a value, by the same
+    /// rule [`open_brace`] reads a value back with. `{{` is a literal brace
+    /// and asks for nothing, and `{{{` is a literal brace followed by an
+    /// opener, which does.
+    fn sync_popover(&mut self, opened: bool) {
+        let (row, caret, chars) = self.caret();
+        let rows = self.len();
+        if let Some(popover) = &mut self.popover {
+            let typed = (popover.anchor_row == row)
+                .then(|| token_typed(&chars, popover.open_at, caret))
+                .flatten();
+            if let Some(typed) = typed {
+                let candidates = complete::candidates(&typed, rows);
+                if candidates != popover.candidates {
+                    popover.candidates = candidates;
+                    popover.selected = 0;
+                    popover.first = 0;
+                }
+                return;
+            }
+            self.popover = None;
+        }
+        let opens = caret >= 1 && opens_value(&chars, caret - 1);
+        if opened && opens {
+            self.popover = Some(Popover {
+                anchor_row: row,
+                open_at: caret - 1,
+                candidates: complete::candidates("", rows),
+                selected: 0,
+                first: 0,
+            });
+        }
+    }
+
+    /// Put the highlighted candidate in place of the `{` and what was typed
+    /// after it.
+    ///
+    /// In the template it goes in as written, placeholders and all: the field
+    /// is where values live. In the rows a value never stays a value, so each
+    /// caret that has the same `{…` before it gets the candidate resolved for
+    /// its own row, in one edit; a row it cannot resolve for keeps the literal
+    /// text.
+    fn accept(&mut self) {
+        let Some(popover) = self.popover.take() else {
+            return;
+        };
+        let Some(candidate) = popover.candidates.get(popover.selected) else {
+            return;
+        };
+        let (_, caret, chars) = self.caret();
+        if caret <= popover.open_at {
+            return;
+        }
+        match popover.anchor_row {
+            None => {
+                self.template.set_selection(popover.open_at, caret);
+                self.template.insert_text(&candidate.insert);
+                self.rewrite();
+            }
+            Some(_) => {
+                let typed = &chars[popover.open_at..caret];
+                let value = single_value(&candidate.insert);
+                let now = Civil::now();
+                let mut edits: Vec<(usize, Range<usize>, String)> = Vec::new();
+                for cursor in self.editor.cursors() {
+                    if cursor.is_selection() {
+                        continue;
+                    }
+                    let Pos { row, col } = cursor.head;
+                    let line: Vec<char> = self.editor.line(row).unwrap_or("").chars().collect();
+                    let Some(start) = col.checked_sub(typed.len()) else {
+                        continue;
+                    };
+                    if line.get(start..col) != Some(typed) {
+                        continue;
+                    }
+                    if edits
+                        .last()
+                        .is_some_and(|(last, range, _)| *last == row && range.end > start)
+                    {
+                        continue;
+                    }
+                    let name = value
+                        .as_ref()
+                        .zip(self.facts.get(row))
+                        .and_then(|(value, facts)| value.resolve(facts, row, now).ok())
+                        .unwrap_or_else(|| candidate.insert.clone());
+                    edits.push((row, start..col, name));
+                }
+                self.rewrite_on_top = false;
+                self.editor.replace_ranges(edits);
+                self.follow_primary();
+            }
+        }
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────────────
+
+    /// A press in the template field: `at` is the boundary nearest the
+    /// pointer, `under` the character it is on, `clicks` how many quick
+    /// presses the run has made (a caret, a word, the line).
+    pub fn click_template(&mut self, at: usize, under: usize, clicks: u8, shift: bool) {
+        self.focus = Focus::Template;
+        let text = self.template.text();
+        match clicks {
+            2 => {
+                let run = segment_at(text, under, |c| !is_word_char(c));
+                self.template.set_selection(run.start, run.end);
+            }
+            3.. => {
+                let len = text.chars().count();
+                self.template.set_selection(0, len);
+            }
+            _ => self.template.move_to(at, shift),
+        }
+        self.sync_popover(false);
+    }
+
+    /// A drag from a single press in the template field has reached `at`.
+    pub fn drag_template(&mut self, at: usize) {
+        self.template.move_to(at, true);
+        self.sync_popover(false);
+    }
+
+    /// A press on a row's new name. `at` is the boundary nearest the pointer
+    /// and `under` the character it is on. `Alt` adds a caret, `Shift` grows
+    /// the primary's selection; two presses take a word and three the line.
+    pub fn click_row(&mut self, at: Pos, under: usize, clicks: u8, shift: bool, alt: bool) {
+        self.focus = Focus::Rows;
+        self.rewrite_on_top = false;
+        match clicks {
+            2 => self.editor.double_click(Pos {
+                row: at.row,
+                col: under,
+            }),
+            3.. => {
+                self.editor.click(at, false, false);
+                self.editor.apply(EditorOp::SelectLine);
+            }
+            _ => self.editor.click(at, shift, alt),
+        }
+        self.sync_popover(false);
+    }
+
+    /// A drag from a single press on a row has reached column `col` of the
+    /// row it started on.
+    pub fn drag_row(&mut self, col: usize) {
+        self.rewrite_on_top = false;
+        let row = self.editor.primary().anchor.row;
+        self.editor.drag_to(Pos { row, col });
+        self.sync_popover(false);
+    }
+
+    /// A click on candidate `index`: the same as arrowing to it and `Tab`.
+    pub fn pick(&mut self, index: usize) {
+        if let Some(popover) = &mut self.popover {
+            if index < popover.candidates.len() {
+                popover.selected = index;
+            }
+        }
+        self.accept();
+    }
+
+    /// A wheel over the list, in rows (fractional; positive is down). Whole
+    /// rows at a time, with the fractions carried, as the tray scrolls.
+    pub fn wheel(&mut self, rows: f32) {
+        self.carry += rows;
+        let whole = self.carry.trunc();
+        self.carry -= whole;
+        let last = self.len().saturating_sub(self.visible) as i64;
+        let moved = (self.first as i64 + whole as i64).clamp(0, last);
+        if (moved == 0 && self.carry < 0.0) || (moved == last && self.carry > 0.0) {
+            self.carry = 0.0;
+        }
+        self.first = moved as usize;
+    }
+
+    /// Show the list from row `first` (the scrollbar's thumb, or its track).
+    pub fn scroll_to(&mut self, first: usize) {
+        self.first = first.min(self.len().saturating_sub(self.visible));
+    }
+
+    /// What the layout measured this frame: how many rows fit, and how far the
+    /// two lines with a caret in them are scrolled. `PgUp`/`PgDn` move a card's
+    /// worth, and a card that has grown keeps no gap under its last row.
+    pub fn settle_layout(&mut self, visible: usize, template_scroll: f32, row_scroll: f32) {
+        self.visible = visible.max(1);
+        self.editor.set_page(self.visible);
+        self.first = self.first.min(self.len().saturating_sub(self.visible));
+        self.template_scroll = template_scroll;
+        self.row_scroll = row_scroll;
+    }
 }
 
-/// `find` → `with` over `text`, or `text` unchanged when `find` is empty.
-///
-/// Plain substring replacement, every occurrence. Not a regex: the field is
-/// there so that renaming forty `IMG_` files to `holiday_` is one gesture, and
-/// a regex engine would be a dependency and a syntax to learn for a job that is
-/// almost always a literal.
-pub fn replaced(text: &str, find: &str, with: &str) -> String {
-    if find.is_empty() {
-        return text.to_string();
+/// Whether a row is worth handing to the photo reader: a file (not a folder)
+/// whose extension is one [`exif::read`] could have something to say about.
+fn could_be_photo(facts: &Facts) -> bool {
+    if facts.is_dir {
+        return false;
     }
-    text.replace(find, with)
+    let ext = facts.ext().trim_start_matches('.').to_ascii_lowercase();
+    PHOTO_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// The character a chord types, if it types one: the editors' rule, where a
+/// key is stored unshifted and Shift is applied here.
+fn typed(chord: Chord) -> Option<char> {
+    let m = chord.mods;
+    if m.ctrl || m.alt || m.super_key {
+        return None;
+    }
+    match chord.key {
+        Key::Space => Some(' '),
+        Key::Char(c) if m.shift => chord.key.shifted_glyph().or(Some(c)),
+        Key::Char(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// What has been typed after the `{` at `open_at`, while the caret is still
+/// inside that value: after the `{`, with no brace in between.
+fn token_typed(chars: &[char], open_at: usize, caret: usize) -> Option<String> {
+    if caret <= open_at || chars.get(open_at) != Some(&'{') {
+        return None;
+    }
+    let typed: String = chars.get(open_at + 1..caret)?.iter().collect();
+    (!typed.contains(['{', '}'])).then_some(typed)
+}
+
+/// Where the value that ends just before `caret` opens: the nearest `{` back
+/// along the line with no `}` between, when the character before the caret is
+/// the `}` that closes it. An escaped `{{` opens nothing.
+fn open_brace(chars: &[char], caret: usize) -> Option<usize> {
+    if caret < 2 || chars.get(caret - 1) != Some(&'}') {
+        return None;
+    }
+    let mut i = caret - 1;
+    while i > 0 {
+        i -= 1;
+        match chars[i] {
+            '{' => return opens_value(chars, i).then_some(i),
+            '}' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether the `{` at `at` opens a value rather than being half of an escaped
+/// `{{`. The template reads a run of braces in pairs from its left end, so the
+/// last brace of a run opens a value when the run is odd: `{` and `{{{` do,
+/// `{{` does not.
+fn opens_value(chars: &[char], at: usize) -> bool {
+    let Some(before) = at.checked_add(1).and_then(|end| chars.get(..end)) else {
+        return false;
+    };
+    let run = before.iter().rev().take_while(|&&c| c == '{').count();
+    run % 2 == 1
+}
+
+/// `text` as a template, if it is exactly one well-formed value and nothing
+/// else.
+fn single_value(text: &str) -> Option<Template> {
+    let parsed = Template::parse(text);
+    let one = matches!(parsed.parts(), [Part::Token(_)]);
+    (one && parsed.problems().is_empty()).then_some(parsed)
 }
 
 /// The validation, as a pure function of the names and what else is in the
@@ -399,6 +1402,120 @@ pub fn ordered_renames(dir: &Path, pairs: &[(String, String)]) -> Vec<(PathBuf, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use df_core::keymap::parse_chord;
+
+    // ── Driving ─────────────────────────────────────────────────────────────
+
+    /// Bare characters are themselves; anything in angle brackets goes
+    /// through the keymap's own parser, as in the editors' tests: `"cat"`,
+    /// `"<ctrl+shift+down>"`, `"<tab>"`.
+    fn chords(script: &str) -> Vec<Chord> {
+        let mut out = Vec::new();
+        let mut rest = script;
+        while let Some(c) = rest.chars().next() {
+            if c == '<' {
+                let Some(end) = rest.find('>') else {
+                    panic!("unterminated `<` in {script:?}");
+                };
+                let name = &rest[1..end];
+                out.push(parse_chord(name).unwrap_or_else(|e| panic!("{name:?}: {e}")));
+                rest = &rest[end + 1..];
+            } else {
+                out.push(
+                    Chord::from_char(c)
+                        .unwrap_or_else(|| panic!("{c:?} is not a chord in {script:?}")),
+                );
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        out
+    }
+
+    /// Feed a script, returning the last outcome.
+    fn run(bulk: &mut Bulk, script: &str) -> Outcome {
+        let mut last = Outcome::Consumed;
+        for chord in chords(script) {
+            last = bulk.key(chord);
+        }
+        last
+    }
+
+    fn lines(bulk: &Bulk) -> Vec<&str> {
+        bulk.editor.lines().iter().map(String::as_str).collect()
+    }
+
+    fn civil(year: i32, month: u32, day: u32) -> Civil {
+        Civil {
+            year,
+            month,
+            day,
+            hour: 12,
+            minute: 0,
+            second: 0,
+        }
+    }
+
+    /// A file that is not a photo, modified on the given day.
+    fn file(name: &str, modified: Option<Civil>) -> Facts {
+        Facts {
+            name: name.to_string(),
+            is_dir: false,
+            size: 1,
+            modified,
+            created: None,
+            parent: "x".to_string(),
+            photo: Photo::None,
+        }
+    }
+
+    /// A photo the reader has not got to yet.
+    fn pending(name: &str) -> Facts {
+        Facts {
+            photo: Photo::Pending,
+            ..file(name, Some(civil(2020, 1, 1)))
+        }
+    }
+
+    fn taken(year: i32, month: u32, day: u32) -> Option<PhotoFacts> {
+        Some(PhotoFacts {
+            taken: Some(civil(year, month, day)),
+            ..PhotoFacts::default()
+        })
+    }
+
+    /// A photo the reader has already read, taken on the given day.
+    fn read_photo(name: &str, year: i32, month: u32, day: u32) -> Facts {
+        Facts {
+            photo: taken(year, month, day).map_or(Photo::None, Photo::Some),
+            ..file(name, Some(civil(2020, 1, 1)))
+        }
+    }
+
+    fn card_of(facts: Vec<Facts>, siblings: &[&str]) -> Bulk {
+        let siblings: Vec<String> = siblings.iter().map(|s| s.to_string()).collect();
+        Bulk::from_facts(PathBuf::from("/tmp/x"), facts, &siblings)
+    }
+
+    fn card(names: &[&str], siblings: &[&str]) -> Bulk {
+        card_of(
+            names.iter().map(|name| file(name, None)).collect(),
+            siblings,
+        )
+    }
+
+    /// Replace the template's text as a person would: select it all, type.
+    fn retype(bulk: &mut Bulk, template: &str) {
+        bulk.focus = Focus::Template;
+        run(bulk, "<ctrl+a><ctrl+k>");
+        bulk.insert_text(template);
+        bulk.popover = None;
+    }
+
+    fn set(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── Opening ─────────────────────────────────────────────────────────────
 
     /// **The bug this fixes**: `r` with two rows selected opened the bulk card
     /// wherever the pane was — including on a remote service, where `dir` is
@@ -413,31 +1530,98 @@ mod tests {
             PathBuf::from("sftp://showandtour1/srv/www"),
             names.clone(),
             &[],
+            df_core::fs::no_notifier(),
         );
         let why = refused
             .err()
             .expect("a remote directory has no bulk rename");
         assert!(why.contains('r'), "the notice names the way out: {why}");
 
-        // A local directory is unaffected, and the card it builds is the one
-        // the rest of these tests exercise.
-        let ok = Bulk::new(PathBuf::from("/tmp/somewhere"), names, &[]).expect("a local card");
-        assert_eq!(ok.rows.len(), 2);
-    }
-
-    fn card(names: &[&str], siblings: &[&str]) -> Bulk {
-        Bulk::local(
-            PathBuf::from("/tmp/x"),
-            names.iter().map(|s| s.to_string()).collect(),
-            &siblings.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        // A local directory is unaffected.
+        let ok = Bulk::new(
+            PathBuf::from("/tmp/somewhere"),
+            names,
+            &[],
+            df_core::fs::no_notifier(),
         )
+        .expect("a local card");
+        assert_eq!(ok.len(), 2);
+        assert_eq!(
+            lines(&ok),
+            ["a.txt", "b.txt"],
+            "the default is the identity"
+        );
     }
 
-    fn set(names: &[&str]) -> HashSet<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    /// Only a file with a photo's extension waits on the reader; a folder and a
+    /// text file are settled the moment the card opens, so a card of them
+    /// starts no worker at all.
+    #[test]
+    fn only_photos_wait_for_the_reader() {
+        let tree = df_core::test_support::TempTree::new("bulk-photos");
+        for name in ["notes.txt", "IMG_1.JPG", "raw.nef"] {
+            std::fs::write(tree.path().join(name), b"not really").expect("write");
+        }
+        tree.dir("album.jpg");
+        let names: Vec<String> = ["notes.txt", "album.jpg"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let plain = Bulk::new(
+            tree.path().to_path_buf(),
+            names,
+            &[],
+            df_core::fs::no_notifier(),
+        )
+        .expect("local");
+        assert!(plain.facts.iter().all(|f| f.photo == Photo::None));
+        assert!(plain.photos.is_none(), "no photos, no worker");
+
+        let names: Vec<String> = ["IMG_1.JPG", "raw.nef", "notes.txt"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut photos = Bulk::new(
+            tree.path().to_path_buf(),
+            names,
+            &[],
+            df_core::fs::no_notifier(),
+        )
+        .expect("local");
+        assert_eq!(photos.facts[0].photo, Photo::Pending);
+        assert_eq!(photos.facts[1].photo, Photo::Pending);
+        assert_eq!(photos.facts[2].photo, Photo::None);
+        // Facts change only when the card polls, so this is not a race.
+        retype(&mut photos, "{taken}{ext}");
+        assert_eq!(
+            photos.problems(),
+            vec![
+                Some(Problem::Pending),
+                Some(Problem::Pending),
+                Some(Problem::Missing("no date taken"))
+            ]
+        );
+        // Neither file is really a photo, and the reader says so; the rows it
+        // was holding up say what they are missing instead.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while photos.facts.iter().any(|f| f.photo == Photo::Pending) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reader never answered"
+            );
+            photos.poll();
+            std::thread::yield_now();
+        }
+        assert!(photos.facts.iter().all(|f| f.photo == Photo::None));
+        assert_eq!(
+            photos.problems(),
+            vec![Some(Problem::Missing("no date taken")); 3]
+        );
     }
 
-    /// The three ways a name can be wrong, each reported as itself.
+    // ── Validation ──────────────────────────────────────────────────────────
+
+    /// The ways a name can be wrong, each reported as itself.
     #[test]
     fn every_kind_of_bad_name_is_caught_and_named() {
         let others = set(&["taken.txt"]);
@@ -476,57 +1660,648 @@ mod tests {
         assert_eq!(problems(&names, &set(&["c.txt"]))[0], Some(Problem::Taken));
     }
 
-    /// Find/replace rewrites the untouched rows and leaves the hand-edited one
-    /// alone.
+    // ── The template ────────────────────────────────────────────────────────
+
+    /// Every row is the template resolved for its own file, and a row the
+    /// template wrote is untouched.
     #[test]
-    fn replace_rewrites_every_row_it_has_not_been_told_to_leave() {
-        let mut bulk = card(&["IMG_1.jpg", "IMG_2.jpg", "IMG_3.jpg"], &[]);
-        // Row 1 is edited by hand before the replace runs.
-        bulk.field = Field::Row(1);
-        bulk.touched();
-        bulk.rows[1].buffer = InputBuffer::new("keeper.jpg".to_string(), 0);
-
-        bulk.find = InputBuffer::new("IMG_".to_string(), 0);
-        bulk.replace = InputBuffer::new("holiday_".to_string(), 0);
-        bulk.apply_replace();
-
-        assert_eq!(bulk.rows[0].new_name(), "holiday_1.jpg");
-        assert_eq!(bulk.rows[1].new_name(), "keeper.jpg", "hand edits survive");
-        assert_eq!(bulk.rows[2].new_name(), "holiday_3.jpg");
+    fn the_template_rewrites_every_row_and_leaves_them_untouched() {
+        let mut bulk = card(&["IMG_1.jpg", "IMG_2.jpg", "notes.txt"], &[]);
+        assert_eq!(bulk.focus, Focus::Template, "the card opens in the field");
+        // Typing at the end of `{name}{ext}`.
+        run(&mut bulk, "<home>x-");
+        assert_eq!(bulk.template.text(), "x-{name}{ext}");
+        assert_eq!(lines(&bulk), ["x-IMG_1.jpg", "x-IMG_2.jpg", "x-notes.txt"]);
+        assert!((0..3).all(|row| bulk.untouched(row)));
+        assert_eq!(bulk.derived[2], Ok("x-notes.txt".to_string()));
         assert_eq!(bulk.changes(), 3);
         assert!(bulk.valid());
 
-        // Deleting the find text puts the untouched rows back — the field is
-        // undoable by emptying it.
-        bulk.find = InputBuffer::new(String::new(), 0);
-        bulk.apply_replace();
-        assert_eq!(bulk.rows[0].new_name(), "IMG_1.jpg");
-        assert_eq!(bulk.rows[1].new_name(), "keeper.jpg");
+        // Undo in the field takes the rows back with it.
+        run(&mut bulk, "<ctrl+z>");
+        assert_eq!(
+            bulk.template.text(),
+            "{name}{ext}",
+            "the field undoes itself"
+        );
+        assert_eq!(lines(&bulk), ["IMG_1.jpg", "IMG_2.jpg", "notes.txt"]);
     }
 
+    /// A photo landing rewrites the rows it can, but not one somebody has
+    /// typed into; a template edit rewrites that one too.
     #[test]
-    fn replacing_nothing_changes_nothing() {
-        assert_eq!(replaced("a.txt", "", "z"), "a.txt");
-        assert_eq!(replaced("aa.txt", "a", "b"), "bb.txt");
-        assert_eq!(replaced("a.txt", "zzz", "b"), "a.txt");
+    fn a_hand_edit_survives_a_photo_arriving_but_not_a_template_edit() {
+        let mut bulk = card_of(vec![pending("a.jpg"), pending("b.jpg")], &[]);
+        retype(&mut bulk, "{taken}{ext}");
+        assert_eq!(
+            lines(&bulk),
+            ["a.jpg", "b.jpg"],
+            "waiting keeps the old lines"
+        );
+        assert_eq!(bulk.derived[0], Err(Missing::Pending));
+
+        // Row 1 by hand: `End`, then a word.
+        run(&mut bulk, "<tab><down><end>-mine");
+        assert_eq!(lines(&bulk)[1], "b.jpg-mine");
+        assert!(!bulk.untouched(1));
+
+        bulk.photo_arrived(0, taken(2024, 5, 6));
+        bulk.photo_arrived(1, taken(2023, 1, 2));
+        bulk.refresh();
+        assert_eq!(lines(&bulk), ["2024-05-06.jpg", "b.jpg-mine"]);
+
+        run(&mut bulk, "<tab>");
+        assert_eq!(bulk.focus, Focus::Template);
+        run(&mut bulk, "<home>x");
+        assert_eq!(lines(&bulk), ["x2024-05-06.jpg", "x2023-01-02.jpg"]);
     }
 
-    /// The keyboard walks find → replace → every row → back to find.
+    /// The template's rewrite is one step of the rows' undo, so the hand
+    /// edits it threw away come back with `Ctrl+z` in the rows.
     #[test]
-    fn the_fields_step_in_order_and_wrap() {
-        let mut bulk = card(&["a", "b"], &[]);
-        bulk.field = Field::Find;
-        bulk.step(1);
-        assert_eq!(bulk.field, Field::Replace);
-        bulk.step(1);
-        assert_eq!(bulk.field, Field::Row(0));
-        bulk.step(1);
-        assert_eq!(bulk.field, Field::Row(1));
-        bulk.step(1);
-        assert_eq!(bulk.field, Field::Find, "wraps at the end");
-        bulk.step(-1);
-        assert_eq!(bulk.field, Field::Row(1), "and at the start");
+    fn ctrl_z_in_the_rows_brings_back_what_a_template_edit_replaced() {
+        let mut bulk = card(&["a.txt", "b.txt", "c.txt"], &[]);
+        run(
+            &mut bulk,
+            "<tab><ctrl+shift+down><ctrl+shift+down><home>old-<esc>",
+        );
+        assert_eq!(lines(&bulk), ["old-a.txt", "old-b.txt", "old-c.txt"]);
+        run(&mut bulk, "<tab><home>new-");
+        assert_eq!(lines(&bulk), ["new-a.txt", "new-b.txt", "new-c.txt"]);
+        run(&mut bulk, "<tab><ctrl+z>");
+        assert_eq!(lines(&bulk), ["old-a.txt", "old-b.txt", "old-c.txt"]);
     }
+
+    /// A row the new template cannot fill shows what the file is called now,
+    /// not a hand edit the wipe would otherwise have spared, and the hand
+    /// edit is one `Ctrl+z` away.
+    #[test]
+    fn a_row_the_template_cannot_fill_shows_its_old_name() {
+        let mut bulk = card(&["a.png", "b.png"], &[]);
+        run(&mut bulk, "<tab><end>-mine");
+        assert_eq!(lines(&bulk), ["a.png-mine", "b.png"]);
+        retype(&mut bulk, "{taken}{ext}");
+        assert_eq!(lines(&bulk), ["a.png", "b.png"], "the old names");
+        assert!(bulk.untouched(0), "the card put the old name there");
+        assert_eq!(
+            bulk.problems(),
+            vec![Some(Problem::Missing("no date taken")); 2],
+            "and says why"
+        );
+        run(&mut bulk, "<tab><ctrl+z>");
+        assert_eq!(lines(&bulk), ["a.png-mine", "b.png"]);
+    }
+
+    /// A photo landing mid-word is in no undo step and does not split the
+    /// word. So `Ctrl+z` never takes back only the photo: it takes back the
+    /// whole word, and the row the photo filled in keeps its taken date.
+    #[test]
+    fn undo_after_a_photo_arrives_takes_back_the_word_and_keeps_the_photo() {
+        let mut bulk = card_of(vec![pending("a.jpg"), read_photo("b.jpg", 2023, 1, 2)], &[]);
+        retype(&mut bulk, "{taken}{ext}");
+        assert_eq!(lines(&bulk), ["a.jpg", "2023-01-02.jpg"]);
+
+        run(&mut bulk, "<tab><down><end>ab");
+        bulk.photo_arrived(0, taken(2024, 5, 6));
+        bulk.refresh();
+        assert_eq!(lines(&bulk), ["2024-05-06.jpg", "2023-01-02.jpgab"]);
+        run(&mut bulk, "cd");
+        assert_eq!(lines(&bulk)[1], "2023-01-02.jpgabcd");
+
+        run(&mut bulk, "<ctrl+z>");
+        assert_eq!(
+            lines(&bulk),
+            ["2024-05-06.jpg", "2023-01-02.jpg"],
+            "the word went in one step, and the photo's name stayed"
+        );
+        assert!(bulk.untouched(0) && bulk.untouched(1));
+    }
+
+    /// `Ctrl+z` in the rows after a template edit brings back what a person
+    /// had typed into the rows. The rows nobody typed into keep following the
+    /// template, because the field still says it: they show what it makes of
+    /// them now, photo included. That holds whether the photo landed as part
+    /// of the template's rewrite or quietly after a caret moved in the rows.
+    #[test]
+    fn undo_after_a_template_edit_brings_back_only_the_hand_typed_rows() {
+        for visit in ["<tab>", "<tab><down>"] {
+            let mut bulk = card_of(
+                vec![
+                    pending("a.jpg"),
+                    read_photo("b.jpg", 2023, 1, 2),
+                    file("c.txt", None),
+                ],
+                &[],
+            );
+            run(&mut bulk, "<tab><down><down><end>-mine");
+            assert_eq!(lines(&bulk)[2], "c.txt-mine");
+            retype(&mut bulk, "{taken}{ext}");
+            assert_eq!(lines(&bulk), ["a.jpg", "2023-01-02.jpg", "c.txt"]);
+            run(&mut bulk, visit);
+            bulk.photo_arrived(0, taken(2024, 5, 6));
+            bulk.refresh();
+            assert_eq!(
+                lines(&bulk),
+                ["2024-05-06.jpg", "2023-01-02.jpg", "c.txt"],
+                "{visit}"
+            );
+
+            run(&mut bulk, "<ctrl+z>");
+            assert_eq!(
+                lines(&bulk),
+                ["2024-05-06.jpg", "2023-01-02.jpg", "c.txt-mine"],
+                "{visit}: the hand edit is back, the template's rows follow it"
+            );
+            assert!(bulk.untouched(0) && bulk.untouched(1), "{visit}");
+            assert!(!bulk.untouched(2), "{visit}");
+            assert_eq!(bulk.problems(), vec![None, None, None], "{visit}");
+
+            run(&mut bulk, "<ctrl+y>");
+            assert_eq!(
+                lines(&bulk),
+                ["2024-05-06.jpg", "2023-01-02.jpg", "c.txt"],
+                "{visit}"
+            );
+            assert_eq!(
+                bulk.problems()[2],
+                Some(Problem::Missing("no date taken")),
+                "{visit}: the template's again"
+            );
+        }
+    }
+
+    /// An undo that reaches back past a photo's arrival puts back a line
+    /// written while the row was still waiting. The row is the template's
+    /// again, so the card fills in the taken date it now knows rather than
+    /// leaving the old name standing as if somebody had typed it.
+    #[test]
+    fn undo_past_a_photo_arriving_fills_the_row_in_again() {
+        let mut bulk = card_of(vec![pending("a.jpg"), read_photo("b.jpg", 2023, 1, 2)], &[]);
+        retype(&mut bulk, "{taken}{ext}");
+        run(&mut bulk, "<tab><down><end>ab");
+        bulk.photo_arrived(0, taken(2024, 5, 6));
+        bulk.refresh();
+        assert_eq!(lines(&bulk), ["2024-05-06.jpg", "2023-01-02.jpgab"]);
+
+        run(&mut bulk, "<ctrl+z>");
+        assert_eq!(lines(&bulk), ["2024-05-06.jpg", "2023-01-02.jpg"]);
+        assert!(bulk.untouched(0) && bulk.untouched(1));
+        assert_eq!(bulk.problems(), vec![None, None]);
+        assert!(bulk.valid());
+
+        run(&mut bulk, "<ctrl+y>");
+        assert_eq!(lines(&bulk), ["2024-05-06.jpg", "2023-01-02.jpgab"]);
+        assert!(bulk.untouched(0) && !bulk.untouched(1));
+    }
+
+    /// Undoing a row move puts the rows, their old names and their numbers
+    /// back, and leaves them the template's rows rather than hand edits.
+    #[test]
+    fn undoing_a_row_move_leaves_the_rows_untouched() {
+        let mut bulk = card(&["a.txt", "b.txt", "c.txt"], &[]);
+        retype(&mut bulk, "{n}-{name}{ext}");
+        run(&mut bulk, "<tab><alt+down>");
+        assert_eq!(lines(&bulk), ["1-b.txt", "2-a.txt", "3-c.txt"]);
+        run(&mut bulk, "<ctrl+z>");
+        assert_eq!(lines(&bulk), ["1-a.txt", "2-b.txt", "3-c.txt"]);
+        assert_eq!(bulk.olds, ["a.txt", "b.txt", "c.txt"]);
+        assert!((0..3).all(|row| bulk.untouched(row)));
+
+        // A photo or a template edit after it still reaches every row.
+        run(&mut bulk, "<tab><home>x");
+        assert_eq!(lines(&bulk), ["x1-a.txt", "x2-b.txt", "x3-c.txt"]);
+    }
+
+    /// The card resolves every row against one parse of the field, kept from
+    /// the last edit. Every way the text can change parses it again.
+    #[test]
+    fn the_parsed_template_follows_the_field() {
+        fn in_step(bulk: &Bulk) -> bool {
+            format!("{:?}", bulk.parsed()) == format!("{:?}", Template::parse(bulk.template.text()))
+        }
+        let mut bulk = card_of(vec![file("a.txt", Some(civil(2021, 3, 4)))], &[]);
+        assert!(in_step(&bulk), "on opening");
+        run(&mut bulk, "<home>x-");
+        assert!(in_step(&bulk), "typing");
+        run(&mut bulk, "<ctrl+z>");
+        assert!(in_step(&bulk), "undo");
+        run(&mut bulk, "<home>{mod<tab>");
+        assert_eq!(bulk.template.text(), "{modified}{name}{ext}");
+        assert!(in_step(&bulk), "a completion");
+        run(&mut bulk, "<home><shift+right><ctrl+x>");
+        assert!(in_step(&bulk), "a cut");
+        bulk.insert_text("{");
+        assert!(in_step(&bulk), "a paste");
+        let back = Bulk::reopen(
+            Box::new(bulk),
+            Path::new("/tmp/x"),
+            &["a.txt".to_string()],
+            &[],
+        )
+        .expect("the same selection");
+        assert!(in_step(&back), "a draft taken back");
+    }
+
+    // ── Values typed into the rows ──────────────────────────────────────────
+
+    /// A `}` closing a value in the rows resolves it at every caret, each for
+    /// its own file, and the braces do not stay.
+    #[test]
+    fn a_closing_brace_resolves_the_value_per_row() {
+        let mut bulk = card_of(
+            vec![
+                file("a.txt", Some(civil(2021, 3, 4))),
+                file("b.txt", Some(civil(2022, 5, 6))),
+                file("c.txt", None),
+            ],
+            &[],
+        );
+        run(&mut bulk, "<tab><ctrl+shift+down><ctrl+shift+down><home>");
+        bulk.popover = None;
+        run(&mut bulk, "{date<esc>}_");
+        assert_eq!(
+            lines(&bulk),
+            ["2021-03-04_a.txt", "2022-05-06_b.txt", "{date}_c.txt"],
+            "a file with no date keeps the literal text"
+        );
+    }
+
+    /// `{n}` counts rows by where they are, so a row moved with `Alt+↓` takes
+    /// the number of its new place, and its old name, facts and template
+    /// result travel with it.
+    #[test]
+    fn the_counter_numbers_by_row_and_follows_a_row_move() {
+        let mut bulk = card(&["a.txt", "b.txt", "c.txt"], &[]);
+        retype(&mut bulk, "{n}-{name}{ext}");
+        assert_eq!(lines(&bulk), ["1-a.txt", "2-b.txt", "3-c.txt"]);
+        run(&mut bulk, "<tab><alt+down>");
+        assert_eq!(bulk.olds, ["b.txt", "a.txt", "c.txt"]);
+        assert_eq!(bulk.facts[1].name, "a.txt");
+        assert_eq!(lines(&bulk), ["1-b.txt", "2-a.txt", "3-c.txt"]);
+        assert_eq!(bulk.derived[1], Ok("2-a.txt".to_string()));
+        let renames = bulk.renames();
+        assert!(renames.contains(&(
+            PathBuf::from("/tmp/x/a.txt"),
+            PathBuf::from("/tmp/x/2-a.txt")
+        )));
+        assert!(renames.contains(&(
+            PathBuf::from("/tmp/x/b.txt"),
+            PathBuf::from("/tmp/x/1-b.txt")
+        )));
+    }
+
+    // ── Missing and pending ─────────────────────────────────────────────────
+
+    /// A value the file cannot answer marks the rows the template wrote, and
+    /// not a row somebody has since named by hand.
+    #[test]
+    fn missing_marks_only_untouched_rows() {
+        let mut bulk = card(&["a.png", "b.png", "c.png"], &[]);
+        retype(&mut bulk, "{taken}{ext}");
+        let found = bulk.problems();
+        assert_eq!(found, vec![Some(Problem::Missing("no date taken")); 3]);
+        assert_eq!(found[0].map(Problem::message), Some("no date taken"));
+        run(&mut bulk, "<tab><down><end>2");
+        let found = bulk.problems();
+        assert_eq!(found[1], None, "a row named by hand says what it wants");
+        assert_eq!(found[0], Some(Problem::Missing("no date taken")));
+        assert!(!bulk.valid());
+    }
+
+    /// `Enter` waits for the photo reader, without moving anything, and goes
+    /// once it is done.
+    #[test]
+    fn a_pending_photo_holds_enter() {
+        let mut bulk = card_of(
+            vec![pending("a.jpg"), file("b.txt", Some(civil(2021, 1, 1)))],
+            &[],
+        );
+        retype(&mut bulk, "{date}{ext}");
+        assert_eq!(bulk.problems(), vec![Some(Problem::Pending), None]);
+        assert_eq!(
+            bulk.problems()[0].map(Problem::message),
+            Some("reading photo…")
+        );
+        assert_eq!(run(&mut bulk, "<enter>"), Outcome::Consumed);
+        run(&mut bulk, "<tab><down>");
+        let before = bulk.editor.primary();
+        assert_eq!(run(&mut bulk, "<enter>"), Outcome::Consumed);
+        assert_eq!(bulk.editor.primary(), before, "a wait moves no caret");
+        bulk.photo_arrived(0, taken(2024, 5, 6));
+        bulk.refresh();
+        assert_eq!(lines(&bulk), ["2024-05-06.jpg", "2021-01-01.txt"]);
+        assert_eq!(run(&mut bulk, "<enter>"), Outcome::Submit);
+    }
+
+    // ── The popover ─────────────────────────────────────────────────────────
+
+    /// `{` opens the list, typing narrows it, `Tab` takes the highlighted
+    /// value: literally in the template, resolved in the rows.
+    #[test]
+    fn the_popover_opens_on_a_brace_filters_and_accepts() {
+        let mut bulk = card_of(
+            vec![
+                file("a.txt", Some(civil(2021, 3, 4))),
+                file("b.txt", Some(civil(2022, 5, 6))),
+            ],
+            &[],
+        );
+        run(&mut bulk, "<home>{");
+        let popover = bulk.live_popover().expect("a `{` opens the list");
+        assert_eq!(popover.anchor_row, None);
+        assert_eq!(popover.open_at, 0);
+        assert_eq!(popover.candidates[0].insert, "{name}");
+        run(&mut bulk, "mod");
+        let popover = bulk.live_popover().expect("still open");
+        assert_eq!(popover.candidates[0].insert, "{modified}");
+        assert_eq!(
+            bulk.preview(&popover.candidates[0]),
+            Ok("2021-03-04".to_string()),
+            "the preview is row 0's"
+        );
+        run(&mut bulk, "<tab>");
+        assert!(bulk.popover.is_none(), "accepting closes it");
+        assert_eq!(bulk.template.text(), "{modified}{name}{ext}");
+        assert_eq!(lines(&bulk), ["2021-03-04a.txt", "2022-05-06b.txt"]);
+
+        // `{{` is a literal brace and asks for nothing.
+        run(&mut bulk, "<home>{{");
+        assert!(bulk.popover.is_none());
+        run(&mut bulk, "<backspace><backspace>");
+
+        // In the rows: every caret, each resolved for its own row.
+        run(&mut bulk, "<tab><ctrl+shift+down><home>{da");
+        let popover = bulk.live_popover().expect("a `{` in the rows");
+        assert_eq!(
+            popover.anchor_row,
+            Some(1),
+            "the primary is the newest caret"
+        );
+        assert_eq!(popover.candidates[0].insert, "{date}");
+        run(&mut bulk, "<down><up><tab>");
+        assert_eq!(
+            lines(&bulk),
+            ["2021-03-042021-03-04a.txt", "2022-05-062022-05-06b.txt"]
+        );
+
+        // Moving out of the value closes the list.
+        run(&mut bulk, "{<left>");
+        assert!(bulk.popover.is_none());
+        // …and `Esc` closes only the list.
+        run(&mut bulk, "<right><backspace>{");
+        assert!(bulk.live_popover().is_some());
+        assert_eq!(run(&mut bulk, "<esc>"), Outcome::Consumed);
+        assert!(bulk.popover.is_none());
+    }
+
+    /// `{{` is a literal brace, so the third `{` of `{{{` is an opener and
+    /// asks for the list, in the field and in the rows.
+    #[test]
+    fn three_braces_are_a_literal_brace_and_an_opener() {
+        let mut bulk = card(&["a.txt", "b.txt"], &[]);
+        run(&mut bulk, "<home>{{");
+        assert!(bulk.popover.is_none(), "{{{{ asks for nothing");
+        run(&mut bulk, "{");
+        let popover = bulk.live_popover().expect("the third brace opens");
+        assert_eq!(popover.open_at, 2);
+        run(&mut bulk, "{");
+        assert!(bulk.popover.is_none(), "and a fourth is literal again");
+
+        let mut bulk = card(&["a.txt", "b.txt"], &[]);
+        run(&mut bulk, "<tab><home>{{{");
+        let popover = bulk.live_popover().expect("in the rows too");
+        assert_eq!((popover.anchor_row, popover.open_at), (Some(0), 2));
+    }
+
+    /// The popover's arrows wrap and keep the highlight on screen.
+    #[test]
+    fn the_popover_selection_wraps_and_scrolls() {
+        let mut bulk = card(&["a.txt", "b.txt"], &[]);
+        run(&mut bulk, "{");
+        let count = bulk.live_popover().expect("open").candidates.len();
+        assert!(count > POPOVER_ROWS);
+        run(&mut bulk, "<up>");
+        let popover = bulk.live_popover().expect("open");
+        assert_eq!(popover.selected, count - 1, "up from the top is the bottom");
+        assert_eq!(popover.first, count - POPOVER_ROWS);
+        run(&mut bulk, "<down>");
+        let popover = bulk.live_popover().expect("open");
+        assert_eq!((popover.selected, popover.first), (0, 0));
+    }
+
+    // ── Moving about ────────────────────────────────────────────────────────
+
+    /// `Ctrl+↓` and `Ctrl+↑` go to the next and previous rows with something
+    /// wrong, wrapping; with nothing wrong they do nothing.
+    #[test]
+    fn ctrl_arrows_jump_between_problem_rows() {
+        let mut bulk = card(&["a", "b", "c", "d", "e"], &[]);
+        run(&mut bulk, "<tab>");
+        run(&mut bulk, "<ctrl+down>");
+        assert_eq!(bulk.editor.primary().head.row, 0, "nothing to jump to");
+        // Rows 1 and 3 both become `x`.
+        run(
+            &mut bulk,
+            "<down><ctrl+a><ctrl+k>x<down><down><ctrl+a><ctrl+k>x",
+        );
+        run(&mut bulk, "<ctrl+home>");
+        run(&mut bulk, "<ctrl+down>");
+        assert_eq!(bulk.editor.primary().head.row, 1);
+        run(&mut bulk, "<ctrl+down>");
+        assert_eq!(bulk.editor.primary().head.row, 3);
+        run(&mut bulk, "<ctrl+down>");
+        assert_eq!(bulk.editor.primary().head.row, 1, "wraps to the first");
+        run(&mut bulk, "<ctrl+up>");
+        assert_eq!(bulk.editor.primary().head.row, 3, "and back to the last");
+    }
+
+    /// A row waiting on the photo reader is not somewhere `Ctrl+↑/↓` goes:
+    /// nothing there needs fixing.
+    #[test]
+    fn ctrl_arrows_skip_rows_waiting_on_a_photo() {
+        let mut bulk = card_of(
+            vec![
+                pending("a.jpg"),
+                file("b.txt", None),
+                pending("c.jpg"),
+                file("d.txt", None),
+            ],
+            &[],
+        );
+        retype(&mut bulk, "{taken}{ext}");
+        assert_eq!(bulk.problems()[0], Some(Problem::Pending));
+        assert_eq!(bulk.problems()[2], Some(Problem::Pending));
+        run(&mut bulk, "<tab>");
+        assert_eq!(bulk.editor.primary().head.row, 0);
+        run(&mut bulk, "<ctrl+down>");
+        assert_eq!(bulk.editor.primary().head.row, 1);
+        run(&mut bulk, "<ctrl+down>");
+        assert_eq!(bulk.editor.primary().head.row, 3, "past the wait on 2");
+        run(&mut bulk, "<ctrl+down>");
+        assert_eq!(bulk.editor.primary().head.row, 1, "wraps past 0");
+        run(&mut bulk, "<ctrl+up>");
+        assert_eq!(bulk.editor.primary().head.row, 3);
+    }
+
+    /// `↑` on the top row with a selection drops the selection, as it would
+    /// on any row; the press after it leaves for the field.
+    #[test]
+    fn up_on_the_top_row_collapses_a_selection_before_leaving() {
+        let mut bulk = card(&["abc", "def"], &[]);
+        run(&mut bulk, "<tab><shift+home>");
+        assert!(bulk.editor.primary().is_selection());
+        run(&mut bulk, "<up>");
+        assert_eq!(bulk.focus, Focus::Rows, "the first press stays");
+        assert!(!bulk.editor.primary().is_selection());
+        run(&mut bulk, "<up>");
+        assert_eq!(bulk.focus, Focus::Template);
+    }
+
+    /// `Tab` and `↓` go down into the rows, `Tab` and `↑` from the top row
+    /// come back, and `Enter` from the rows goes to a problem instead of
+    /// submitting.
+    #[test]
+    fn the_keyboard_moves_between_the_field_and_the_rows() {
+        let mut bulk = card(&["a", "b"], &["taken"]);
+        run(&mut bulk, "<down>");
+        assert_eq!(bulk.focus, Focus::Rows);
+        run(&mut bulk, "<up>");
+        assert_eq!(bulk.focus, Focus::Template);
+        run(&mut bulk, "<tab><down><ctrl+a><ctrl+k>taken<up>");
+        assert_eq!(bulk.focus, Focus::Rows, "only from the top row");
+        assert_eq!(run(&mut bulk, "<enter>"), Outcome::Consumed);
+        assert_eq!(
+            bulk.editor.primary().head.row,
+            1,
+            "Enter goes to the problem"
+        );
+        run(&mut bulk, "<ctrl+a><ctrl+k>c");
+        assert_eq!(run(&mut bulk, "<enter>"), Outcome::Submit);
+        assert_eq!(run(&mut bulk, "<esc>"), Outcome::Close);
+    }
+
+    // ── Copy and cut ────────────────────────────────────────────────────────
+
+    /// `Ctrl+c` at two carets copies both selections, one to a line, and
+    /// changes nothing. `Ctrl+x` copies the same and deletes them as one step.
+    #[test]
+    fn copy_and_cut_in_the_rows_take_every_selection() {
+        let mut bulk = card(&["cat.jpg", "dog.jpg"], &[]);
+        run(
+            &mut bulk,
+            "<tab><home><ctrl+shift+down><shift+right><shift+right><shift+right>",
+        );
+        assert_eq!(
+            run(&mut bulk, "<ctrl+c>"),
+            Outcome::Copy("cat\ndog".to_string())
+        );
+        assert_eq!(lines(&bulk), ["cat.jpg", "dog.jpg"]);
+        assert_eq!(bulk.editor.cursors().len(), 2, "the carets are still there");
+        assert!(
+            bulk.editor.primary().is_selection(),
+            "and so are the selections"
+        );
+
+        assert_eq!(
+            run(&mut bulk, "<ctrl+x>"),
+            Outcome::Copy("cat\ndog".to_string())
+        );
+        assert_eq!(lines(&bulk), [".jpg", ".jpg"]);
+        assert!(!bulk.untouched(0), "a cut is a hand edit");
+        run(&mut bulk, "<ctrl+z>");
+        assert_eq!(lines(&bulk), ["cat.jpg", "dog.jpg"], "in one step");
+    }
+
+    /// With nothing selected there is nothing to copy. The press does nothing
+    /// at all, and above all it does not close the card, which is what
+    /// `Ctrl+c` used to do.
+    #[test]
+    fn copy_and_cut_with_nothing_selected_do_nothing() {
+        let mut bulk = card(&["cat.jpg", "dog.jpg"], &[]);
+        for key in ["<ctrl+c>", "<ctrl+x>"] {
+            assert_eq!(run(&mut bulk, key), Outcome::Consumed, "field {key}");
+            assert_eq!(bulk.template.text(), "{name}{ext}");
+        }
+        run(&mut bulk, "<tab><ctrl+shift+down>");
+        for key in ["<ctrl+c>", "<ctrl+x>"] {
+            assert_eq!(run(&mut bulk, key), Outcome::Consumed, "rows {key}");
+            assert_eq!(lines(&bulk), ["cat.jpg", "dog.jpg"]);
+            assert_eq!(bulk.editor.cursors().len(), 2, "rows {key}");
+        }
+    }
+
+    /// The template field copies and cuts its own selection. A cut changes
+    /// the template, so the rows follow it, and the field's undo brings both
+    /// back.
+    #[test]
+    fn copy_and_cut_in_the_field_take_its_selection() {
+        let mut bulk = card(&["cat.jpg"], &[]);
+        run(
+            &mut bulk,
+            "<home><shift+right><shift+right><shift+right><shift+right><shift+right><shift+right>",
+        );
+        assert_eq!(
+            run(&mut bulk, "<ctrl+c>"),
+            Outcome::Copy("{name}".to_string())
+        );
+        assert_eq!(bulk.template.text(), "{name}{ext}");
+        assert_eq!(
+            run(&mut bulk, "<ctrl+x>"),
+            Outcome::Copy("{name}".to_string())
+        );
+        assert_eq!(bulk.template.text(), "{ext}");
+        assert_eq!(lines(&bulk), [".jpg"]);
+        run(&mut bulk, "<ctrl+z>");
+        assert_eq!(bulk.template.text(), "{name}{ext}");
+        assert_eq!(lines(&bulk), ["cat.jpg"]);
+    }
+
+    // ── The draft ───────────────────────────────────────────────────────────
+
+    /// A card closed with names in it comes back for the same selection, in
+    /// the order it was left, with the directory read again; a different
+    /// selection starts fresh.
+    #[test]
+    fn a_draft_comes_back_for_the_same_selection_only() {
+        let mut bulk = card(&["a.txt", "b.txt"], &[]);
+        run(&mut bulk, "<tab><alt+down><tab><home>x");
+        let draft = Box::new(bulk);
+        let names = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+
+        let other_dir = Bulk::reopen(
+            draft,
+            Path::new("/tmp/elsewhere"),
+            &names(&["a.txt", "b.txt"]),
+            &[],
+        );
+        assert!(other_dir.is_none());
+
+        let mut bulk = card(&["a.txt", "b.txt"], &[]);
+        run(&mut bulk, "<tab><alt+down><tab><home>x");
+        let draft = Box::new(bulk);
+        let fewer = Bulk::reopen(draft, Path::new("/tmp/x"), &names(&["a.txt"]), &[]);
+        assert!(fewer.is_none());
+
+        let mut bulk = card(&["a.txt", "b.txt"], &[]);
+        run(&mut bulk, "<tab><alt+down><tab><home>x");
+        let draft = Box::new(bulk);
+        let back = Bulk::reopen(
+            draft,
+            Path::new("/tmp/x"),
+            &names(&["a.txt", "b.txt"]),
+            &names(&["a.txt", "b.txt", "xa.txt"]),
+        )
+        .expect("the same selection");
+        assert_eq!(back.olds, ["b.txt", "a.txt"], "the draft's own order");
+        assert_eq!(lines(&back), ["xb.txt", "xa.txt"]);
+        assert_eq!(
+            back.problems()[1],
+            Some(Problem::Taken),
+            "the directory is read again"
+        );
+    }
+
+    // ── The commit ──────────────────────────────────────────────────────────
 
     /// A plain batch runs in an order where nothing lands on an occupied name.
     #[test]
@@ -609,16 +2384,17 @@ mod tests {
         );
     }
 
-    /// Rows that did not change are not renamed at all.
+    /// Rows that did not change are not renamed at all, and a swap of two
+    /// names in the card is legal.
     #[test]
     fn unchanged_rows_produce_no_work() {
         let mut bulk = card(&["a.txt", "b.txt"], &[]);
-        bulk.rows[0].buffer = InputBuffer::new("z.txt".to_string(), 0);
-        let renames = bulk.renames();
+        run(&mut bulk, "<tab><ctrl+a><ctrl+k>z.txt");
         assert_eq!(
-            renames,
+            bulk.renames(),
             vec![(PathBuf::from("/tmp/x/a.txt"), PathBuf::from("/tmp/x/z.txt"))]
         );
         assert_eq!(bulk.changes(), 1);
+        assert_eq!(bulk.first_change(), Some("z.txt".to_string()));
     }
 }
