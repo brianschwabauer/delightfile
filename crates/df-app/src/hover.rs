@@ -258,6 +258,14 @@ impl Parking {
     pub fn parked(&self) -> bool {
         self.parked
     }
+
+    /// Let the hover back in without forgetting where the pointer was: a menu
+    /// opening under a resting pointer must not inherit the last menu's park,
+    /// but starting from `Default` would also forget the position, and the
+    /// next re-sent, unchanged position would then read as a hand moving.
+    pub fn unpark(&mut self) {
+        self.parked = false;
+    }
 }
 
 /// How far a fully pressed control's edges move, in logical pixels. Small

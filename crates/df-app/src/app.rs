@@ -11483,7 +11483,7 @@ impl App {
     /// resting pointer dark in a menu no key has touched.
     fn show_menu(&mut self, menu: Menu) {
         self.menu = Some(menu);
-        self.menu_hover = Default::default();
+        self.menu_hover.unpark();
     }
 
     /// Dismiss it. The menu is *gone* now; only its pixels fade.
