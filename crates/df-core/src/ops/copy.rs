@@ -301,12 +301,22 @@ fn copy_dir(
 /// than truncated to the length the copy reached. `rename(2)` over an existing
 /// file is atomic, so there is no instant at which the destination is missing.
 ///
-/// Durable ([`CopyOptions::durable`]), the mode and times are set while the
-/// file is still open and the file is `fsync`ed after them, so the flush
-/// covers the metadata as well as the bytes; then it is renamed into place and
-/// the directory is `fsync`ed, which is what makes the *name* survive a pulled
-/// card. A flush that fails is a failed copy, cleaned up like any other: a
-/// disk that cannot say the bytes are down has not got them.
+/// Durable ([`CopyOptions::durable`]), **every** file goes through a temporary
+/// name, a new one as much as an overwrite. The mode and times are set while
+/// it is still open and it is `fsync`ed after them, so the flush covers the
+/// metadata as well as the bytes; only then is it renamed into place, and the
+/// directory `fsync`ed, which is what makes the *name* survive a pulled card.
+/// Written straight to its final name, a new file could be left by a crash or
+/// a pulled card at full length with the source's date and bytes that never
+/// reached the medium — which the next sync's size-and-date comparison would
+/// call unchanged, and its toast "Already in sync". With the rename after the
+/// flush, no final name exists without its bytes behind it. A flush that fails
+/// is a failed copy, cleaned up like any other: a disk that cannot say the
+/// bytes are down has not got them.
+///
+/// A paste is not durable and keeps writing a new file straight to its name:
+/// it has no later comparison to fool, and the extra rename would be a cost for
+/// nothing.
 fn copy_file(
     src: &Path,
     dst: &Path,
@@ -328,7 +338,7 @@ fn copy_file(
     }
 
     let mut reader = File::open(src).map_err(|e| DfError::io(src, e))?;
-    let (write_path, mut writer) = if replacing {
+    let (write_path, mut writer) = if replacing || options.durable {
         let temp = temp_beside(dst)?;
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -359,10 +369,20 @@ fn copy_file(
         Ok(bytes) => {
             drop(writer);
             if write_path != dst {
+                // A new file's name must still be free: something that took it
+                // while the bytes were being written is not this copy's to
+                // replace. The window is the rename's, as it always was the
+                // `create`'s; a lock would not close it on a shared mount.
+                if !options.overwrite && exists(dst) {
+                    let _ignored = std::fs::remove_file(&write_path);
+                    return Err(already_exists(dst));
+                }
                 if let Err(e) = std::fs::rename(&write_path, dst) {
                     let _ignored = std::fs::remove_file(&write_path);
                     return Err(DfError::io(dst, e));
                 }
+                #[cfg(test)]
+                note(format!("rename {}", dst.display()));
             }
             if options.durable {
                 sync_parent(dst)?;
@@ -411,7 +431,10 @@ pub(crate) fn copy_file_with(
 /// `File::sync_all` is exactly `fsync` on Linux, spelled without `unsafe`.
 fn sync_file(file: &File, path: &Path) -> Result<()> {
     #[cfg(test)]
-    SYNCS.with(|c| c.set((c.get().0 + 1, c.get().1)));
+    {
+        SYNCS.with(|c| c.set((c.get().0 + 1, c.get().1)));
+        note(format!("fsync {}", path.display()));
+    }
     file.sync_all().map_err(|e| DfError::io(path, e))
 }
 
@@ -432,7 +455,10 @@ pub(crate) fn sync_parent(path: &Path) -> Result<()> {
 /// sync onto such a mount would make it a place a sync can never reach.
 pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     #[cfg(test)]
-    SYNCS.with(|c| c.set((c.get().0, c.get().1 + 1)));
+    {
+        SYNCS.with(|c| c.set((c.get().0, c.get().1 + 1)));
+        note(format!("fsync-dir {}", dir.display()));
+    }
     let handle = File::open(dir).map_err(|e| DfError::io(dir, e))?;
     match handle.sync_all() {
         Ok(()) => Ok(()),
@@ -458,6 +484,29 @@ pub(crate) fn syncs() -> (u64, u64) {
     SYNCS.with(|c| c.get())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The flushes and renames on this thread, in the order they happened:
+    /// what proves a durable file is flushed *before* it gets its name.
+    static EVENTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn note(event: String) {
+    EVENTS.with(|events| events.borrow_mut().push(event));
+}
+
+/// This thread's flushes and renames since the last call.
+#[cfg(test)]
+pub(crate) fn take_events() -> Vec<String> {
+    EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+/// How every temporary name a copy makes begins. Public to the crate because
+/// a sync reads it back: a name like this at a destination is a copy that was
+/// killed before its rename, never anybody's file.
+pub(crate) const TEMP_PREFIX: &str = ".df-tmp-";
+
 /// A free `.df-tmp-…` name in the destination's own directory — the same
 /// directory, so the final `rename` cannot cross a filesystem and fail.
 fn temp_beside(dst: &Path) -> Result<PathBuf> {
@@ -467,7 +516,7 @@ fn temp_beside(dst: &Path) -> Result<PathBuf> {
     let dir = dst.parent().unwrap_or(Path::new("."));
     for _ in 0..MAX_TEMP_ATTEMPTS {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let candidate = dir.join(format!(".df-tmp-{}-{n}", std::process::id()));
+        let candidate = dir.join(format!("{TEMP_PREFIX}{}-{n}", std::process::id()));
         if !exists(&candidate) {
             return Ok(candidate);
         }
@@ -1139,6 +1188,44 @@ mod tests {
         // five names, each flushed in the directory that holds it.
         assert_eq!(dirs - before.1, 5);
         assert_eq!(std::fs::read(t.join("durable/d/b")).unwrap(), b"bbb");
+    }
+
+    #[test]
+    fn a_durable_new_file_has_no_name_until_its_bytes_are_flushed() {
+        let t = TempTree::new("copy-durable-new");
+        let src = t.file("src.bin", &vec![6u8; COPY_CHUNK + 9]);
+        let dst = t.join("out/new.bin");
+        std::fs::create_dir(t.join("out")).unwrap();
+        take_events();
+        let options = CopyOptions {
+            overwrite: false,
+            durable: true,
+        };
+        without_reflink(|| copy_file_with(&src, &dst, &ctx(), options)).unwrap();
+        let events = take_events();
+        assert_eq!(events.len(), 3, "{events:?}");
+        // The bytes are flushed under a temporary name beside the file…
+        let flushed = events[0].strip_prefix("fsync ").expect("the file first");
+        let flushed = Path::new(flushed);
+        assert_eq!(flushed.parent(), dst.parent());
+        assert!(
+            flushed
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".df-tmp-"),
+            "{events:?}"
+        );
+        // …then it is named, then the name is flushed.
+        assert_eq!(events[1], format!("rename {}", dst.display()));
+        assert_eq!(events[2], format!("fsync-dir {}", t.join("out").display()));
+        assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&src).unwrap());
+        assert!(!flushed.exists());
+
+        // A paste writes a new file straight to its name, and waits for nothing.
+        let pasted = t.join("out/pasted.bin");
+        copy_tree(&src, &pasted, &ctx(), false).unwrap();
+        assert!(take_events().is_empty());
     }
 
     #[test]

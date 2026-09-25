@@ -7,7 +7,7 @@
 //! before every entry and every chunk it hashes, the way
 //! [`crate::archive::list_until`] asks before every read.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{File, Metadata};
 use std::io::Read;
@@ -99,11 +99,25 @@ pub fn plan(
     stop: &dyn Fn() -> bool,
     seen: &dyn Fn(u64),
 ) -> Result<SyncPlan> {
+    walk(sources, dest_dir, options, stop, seen, &children)
+}
+
+/// [`plan`], reading the destination's folders through `list`: the seam a test
+/// uses to be a case-folding card on a case-sensitive disk.
+pub(super) fn walk(
+    sources: &[PathBuf],
+    dest_dir: &Path,
+    options: SyncOptions,
+    stop: &dyn Fn() -> bool,
+    seen: &dyn Fn(u64),
+    list: &dyn Fn(&Path) -> Result<Vec<OsString>>,
+) -> Result<SyncPlan> {
     let roots = roots(sources, dest_dir)?;
     let mut walk = Walk {
         plan: SyncPlan::empty(roots.clone(), normalize(dest_dir), options),
         stop,
         seen,
+        list,
     };
     for (index, root) in roots.iter().enumerate() {
         walk.visit(index, PathBuf::new(), &root.src, &root.dst, false)?;
@@ -122,6 +136,8 @@ struct Walk<'a> {
     plan: SyncPlan,
     stop: &'a dyn Fn() -> bool,
     seen: &'a dyn Fn(u64),
+    /// How a destination folder is listed.
+    list: &'a dyn Fn(&Path) -> Result<Vec<OsString>>,
 }
 
 impl Walk<'_> {
@@ -209,7 +225,10 @@ impl Walk<'_> {
         // Below a new folder — or one that replaces a file — nothing exists
         // yet, so nothing below needs asking about.
         let below_absent = class != Class::Unchanged;
+        // Where each child's own item went, for a case twin to find it.
+        let mut placed: HashMap<OsString, usize> = HashMap::new();
         for name in &names {
+            let at = self.plan.items.len();
             self.visit(
                 root,
                 rel.join(name),
@@ -217,9 +236,12 @@ impl Walk<'_> {
                 &dst.join(name),
                 below_absent,
             )?;
+            if self.plan.items.len() > at {
+                placed.insert(name.clone(), at);
+            }
         }
         if class == Class::Unchanged {
-            self.extras_in(root, &rel, dst, &names)?;
+            self.extras_in(root, &rel, dst, &names, &placed)?;
         }
         Ok(())
     }
@@ -257,9 +279,22 @@ impl Walk<'_> {
     }
 
     /// The names in `dst` that the source's `names` does not have, each an
-    /// extra with everything under it.
-    fn extras_in(&mut self, root: usize, rel: &Path, dst: &Path, names: &[OsString]) -> Result<()> {
-        let theirs = match children(dst) {
+    /// extra with everything under it — except a source name listed in the
+    /// destination's own case ([`case_twins`]), which is the same file.
+    ///
+    /// A twin is never an extra, and its source item is marked changed, so the
+    /// run rewrites it: the copy goes to a temporary name and is renamed over
+    /// the folded one, and the file comes out spelled the way the source
+    /// spells it — which is also what makes the next plan find it unchanged.
+    fn extras_in(
+        &mut self,
+        root: usize,
+        rel: &Path,
+        dst: &Path,
+        names: &[OsString],
+        placed: &HashMap<OsString, usize>,
+    ) -> Result<()> {
+        let theirs = match (self.list)(dst) {
             Ok(theirs) => theirs,
             Err(e) => {
                 self.plan.skipped.push((dst.to_path_buf(), e.to_string()));
@@ -267,7 +302,17 @@ impl Walk<'_> {
             }
         };
         let ours: HashSet<&OsString> = names.iter().collect();
+        let twins = case_twins(names, &theirs);
         for name in theirs.iter().filter(|name| !ours.contains(name)) {
+            if let Some(twin) = twins.get(name) {
+                if let Some(&index) = placed.get(twin) {
+                    let item = &mut self.plan.items[index];
+                    if item.kind != Kind::Dir && item.class == Class::Unchanged {
+                        item.class = Class::Changed;
+                    }
+                }
+                continue;
+            }
             self.extra(root, rel.join(name), &dst.join(name))?;
         }
         Ok(())
@@ -299,6 +344,79 @@ impl Walk<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// The destination names that are a source name in other case, each mapped to
+/// that source name: what a disk that folds case — FAT, exFAT, every camera
+/// card — lists for a file the source spells differently.
+///
+/// Such a disk answers a `stat` of `photo.jpg` with its `Photo.JPG`, so the
+/// pair compares as one file; then it lists only `Photo.JPG`, which is nowhere
+/// in the source's names. Read as an extra, a mirror would trash the one copy
+/// of the file it had just called unchanged. So a destination name is a twin
+/// when it is not a source name itself, it folds ([`fold`]) to the same text
+/// as one, and that source name's own spelling is *not* in the destination's
+/// listing — a case-sensitive disk holding both `photo.jpg` and `Photo.JPG`
+/// has two files, and the second is a real extra. Two source names that fold
+/// alike twin nothing: there is no telling which one the disk is holding.
+pub(super) fn case_twins(ours: &[OsString], theirs: &[OsString]) -> HashMap<OsString, OsString> {
+    let listed: HashSet<&OsString> = theirs.iter().collect();
+    let mut folded: HashMap<String, Option<&OsString>> = HashMap::new();
+    for name in ours {
+        let Some(text) = name.to_str() else { continue };
+        folded
+            .entry(fold(text))
+            .and_modify(|seen| *seen = None)
+            .or_insert(Some(name));
+    }
+    let mut twins = HashMap::new();
+    for name in theirs.iter().filter(|name| !ours.contains(name)) {
+        let Some(text) = name.to_str() else { continue };
+        if let Some(Some(source)) = folded.get(&fold(text)) {
+            if !listed.contains(source) {
+                twins.insert(name.clone(), (*source).clone());
+            }
+        }
+    }
+    twins
+}
+
+/// A name under Unicode simple case folding: each character mapped on its own,
+/// never to more than one — `ß` stays `ß` rather than becoming `ss`, which is
+/// how the filesystems that fold at all compare names.
+pub(super) fn fold(name: &str) -> String {
+    name.chars().map(fold_char).collect()
+}
+
+/// One character's simple case fold.
+///
+/// Lowercasing is the fold for almost every character, and where lowercase
+/// would be more than one character (`İ` is `i` and a combining dot) simple
+/// folding leaves the character alone, as this does. The table is the rest:
+/// characters that are already lowercase and still fold to another — final
+/// sigma, long s, the micro sign and the Greek symbol variants.
+pub(super) fn fold_char(c: char) -> char {
+    match c {
+        'ς' => 'σ',
+        'ſ' => 's',
+        'µ' => 'μ',
+        '\u{1FBE}' => 'ι',
+        'ϐ' => 'β',
+        'ϑ' => 'θ',
+        'ϕ' => 'φ',
+        'ϖ' => 'π',
+        'ϰ' => 'κ',
+        'ϱ' => 'ρ',
+        'ϵ' => 'ε',
+        'ẛ' => 'ṡ',
+        _ => {
+            let mut lower = c.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(one), None) => one,
+                _ => c,
+            }
+        }
     }
 }
 

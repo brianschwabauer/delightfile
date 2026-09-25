@@ -705,7 +705,7 @@ fn removals_are_the_topmost_extras_deepest_first_with_what_each_takes() {
     let t = TempTree::new("sync-removals");
     let plan = with_extras(&t);
     let removals: Vec<(String, u64)> = plan
-        .removals()
+        .removals(Mode::Mirror)
         .into_iter()
         .map(|(index, leaves)| (plan.label(&plan.items[index]), leaves))
         .collect();
@@ -828,6 +828,130 @@ fn a_mirrors_progress_counts_each_removal() {
     let total = *record.total.lock().unwrap();
     assert_eq!(total, (4 + 8, 1 + 2 + 1));
     assert_eq!(*record.done.lock().unwrap(), total);
+}
+
+// ── Debris and case ─────────────────────────────────────────────────────────
+
+#[test]
+fn a_killed_copys_leftover_is_cleared_even_by_an_update() {
+    let t = TempTree::new("sync-debris");
+    let dir = t.dir("src/d");
+    twin(&t, "d/a.jpg", b"aa");
+    let debris = t.file("dst/d/.df-tmp-4242-7", b"half a photo");
+    let kept = t.file("dst/d/theirs.txt", b"only there");
+    let plan = quick(&[dir], &t.join("dst"));
+
+    let item = plan
+        .items
+        .iter()
+        .find(|item| plan.label(item) == "d/.df-tmp-4242-7")
+        .unwrap();
+    assert_eq!(item.class, Class::Extra);
+    assert!(plan.is_debris(item));
+    assert!(!plan.in_sync(Mode::Update), "there is something to clear");
+    assert_eq!(
+        plan.listed(Mode::Update)
+            .map(|item| plan.label(item))
+            .collect::<Vec<_>>(),
+        ["d/.df-tmp-4242-7"],
+        "an update lists the debris and no other extra"
+    );
+    assert_eq!(plan.removals(Mode::Update).len(), 1);
+
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!(report.removed, 1);
+    assert!(!debris.exists(), "our own leftover is gone");
+    assert_eq!(
+        std::fs::read(&kept).unwrap(),
+        b"only there",
+        "theirs is not"
+    );
+}
+
+#[test]
+fn simple_case_folding_is_one_character_for_one() {
+    for (a, b) in [
+        ("Photo.JPG", "photo.jpg"),
+        ("ΣΊΣΥΦΟΣ", "σίσυφος"),
+        ("ẞ", "ß"),
+        ("\u{212A}elvin", "kelvin"),
+        ("µs", "μs"),
+        ("ſtraight", "straight"),
+        ("ÅNGSTRÖM", "ångström"),
+    ] {
+        assert_eq!(plan::fold(a), plan::fold(b), "{a} and {b}");
+    }
+    for (a, b) in [
+        ("STRASSE", "straße"),
+        ("İstanbul", "istanbul"),
+        ("photo.jpg", "photo.jpeg"),
+    ] {
+        assert_ne!(plan::fold(a), plan::fold(b), "{a} and {b}");
+    }
+}
+
+#[test]
+fn a_twin_is_a_source_name_listed_only_in_the_destinations_case() {
+    let names = |list: &[&str]| -> Vec<std::ffi::OsString> {
+        list.iter().map(std::ffi::OsString::from).collect()
+    };
+    let ours = names(&["photo.jpg", "notes.txt", "A.txt", "a.txt"]);
+    let theirs = names(&["Photo.JPG", "notes.txt", "NOTES.TXT", "Other.JPG", "A.TXT"]);
+    let twins = plan::case_twins(&ours, &theirs);
+    assert_eq!(twins.len(), 1, "{twins:?}");
+    assert_eq!(twins[std::ffi::OsStr::new("Photo.JPG")], "photo.jpg");
+    // `NOTES.TXT` beside an exact `notes.txt` is a second file; `Other.JPG`
+    // is nobody's; `A.TXT` folds to two source names and twins neither.
+}
+
+#[test]
+fn a_file_a_case_folding_card_lists_in_its_own_case_is_rewritten_not_trashed() {
+    let t = TempTree::new("sync-case");
+    let dir = t.dir("src/d");
+    twin(&t, "d/photo.jpg", b"the only copy");
+    t.file("dst/d/stray.txt", b"a real extra");
+    let listed_dir = t.join("dst/d");
+    // A FAT card lists what it stores, `Photo.JPG`, while a `stat` of
+    // `photo.jpg` finds the same file — which the real file here gives.
+    let list = |dir: &Path| -> crate::Result<Vec<std::ffi::OsString>> {
+        if dir == listed_dir {
+            Ok(vec!["Photo.JPG".into(), "stray.txt".into()])
+        } else {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            Ok(names)
+        }
+    };
+    let mut plan = plan::walk(
+        &[dir],
+        &t.join("dst"),
+        SyncOptions::default(),
+        &|| false,
+        &|_| {},
+        &list,
+    )
+    .unwrap();
+    assert_eq!(class_of(&plan, "d/photo.jpg"), Class::Changed, "rewritten");
+    let extras: Vec<String> = plan
+        .items
+        .iter()
+        .filter(|item| item.class == Class::Extra)
+        .map(|item| plan.label(item))
+        .collect();
+    assert_eq!(extras, ["d/stray.txt"], "the twin is no extra");
+
+    plan.removal = Removal::Delete;
+    let report = execute(&plan, Mode::Mirror, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!((report.copied, report.removed), (1, 1));
+    assert_eq!(
+        std::fs::read(t.join("dst/d/photo.jpg")).unwrap(),
+        b"the only copy"
+    );
 }
 
 #[test]

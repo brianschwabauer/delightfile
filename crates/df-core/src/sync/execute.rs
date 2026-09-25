@@ -91,7 +91,7 @@ pub fn execute(plan: &SyncPlan, mode: Mode, verify: Verify, ctx: &TaskCtx) -> Sy
     };
     run.set_totals(verify);
     run.copy_all();
-    if mode == Mode::Mirror && !run.report.cancelled {
+    if (mode == Mode::Mirror || plan.has_debris()) && !run.report.cancelled {
         run.remove_extras();
     }
     #[cfg(test)]
@@ -157,9 +157,7 @@ impl Run<'_> {
             bytes += item.bytes * 2;
             files += 1;
         }
-        if self.mode == Mode::Mirror {
-            files += self.plan.removals().len() as u64;
-        }
+        files += self.plan.removals(self.mode).len() as u64;
         self.ctx.set_total(bytes, files);
     }
 
@@ -275,17 +273,23 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// A mirror's removal pass: the topmost extras, deepest first, each to
-    /// the trash or for good as the plan said.
+    /// The removal pass: a mirror's topmost extras, deepest first, each to
+    /// the trash or for good as the plan said — and, in either mode, a killed
+    /// copy's debris, which goes for good.
     fn remove_extras(&mut self) {
         let plan = self.plan;
-        for (index, leaves) in plan.removals() {
+        for (index, leaves) in plan.removals(self.mode) {
             if self.ctx.checkpoint().is_err() {
                 self.report.cancelled = true;
                 break;
             }
             let path = plan.dst_of(&plan.items[index]);
-            match self.remove(&path) {
+            let removed = if plan.is_debris(&plan.items[index]) {
+                crate::ops::delete_permanent(&path, &self.quiet)
+            } else {
+                self.remove(&path)
+            };
+            match removed {
                 Ok(()) => self.report.removed += leaves,
                 Err(DfError::Cancelled) => {
                     self.report.cancelled = true;

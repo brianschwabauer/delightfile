@@ -289,28 +289,53 @@ impl SyncPlan {
         self.items.iter().any(|item| item.class == Class::Extra)
     }
 
-    /// Nothing for `mode` to do: nothing to copy and, for a mirror, nothing to
-    /// remove. The card says "Already in sync" and offers to verify instead.
-    pub fn in_sync(&self, mode: Mode) -> bool {
-        !self.has_copies() && (mode == Mode::Update || !self.has_extras())
+    /// Whether `item` is debris: a `.df-tmp-…` name at the destination, left
+    /// by a copy that was killed before its rename.
+    ///
+    /// It is our own leftover, never the user's file — every temporary name a
+    /// copy makes starts that way, and nothing else does — so even an update,
+    /// which removes nothing of the user's, clears it, and for good: a partial
+    /// copy is not worth a place in the trash. Only for a sync on this
+    /// machine; `rsync` keeps its own temporary names and its own house.
+    pub fn is_debris(&self, item: &Item) -> bool {
+        use std::os::unix::ffi::OsStrExt;
+        self.remote.is_none()
+            && item.class == Class::Extra
+            && item.rel.file_name().is_some_and(|name| {
+                name.as_bytes()
+                    .starts_with(crate::ops::copy::TEMP_PREFIX.as_bytes())
+            })
     }
 
-    /// What the card lists for `mode`: the new and the changed, then — for a
-    /// mirror — the extras. Unchanged paths are the ones nobody needs to read.
+    /// Whether the destination holds any of a killed copy's leftovers.
+    pub fn has_debris(&self) -> bool {
+        self.items.iter().any(|item| self.is_debris(item))
+    }
+
+    /// Nothing for `mode` to do: nothing to copy, no debris to clear and, for
+    /// a mirror, nothing to remove. The card says "Already in sync" and offers
+    /// to verify instead.
+    pub fn in_sync(&self, mode: Mode) -> bool {
+        !self.has_copies() && !self.has_debris() && (mode == Mode::Update || !self.has_extras())
+    }
+
+    /// What the card lists for `mode`: the new and the changed, then what goes
+    /// — every extra for a mirror, the debris for an update. Unchanged paths
+    /// are the ones nobody needs to read.
     pub fn listed(&self, mode: Mode) -> impl Iterator<Item = &Item> {
         let copies = self
             .items
             .iter()
             .filter(|item| matches!(item.class, Class::New | Class::Changed));
-        let extras = self
-            .items
-            .iter()
-            .filter(move |item| mode == Mode::Mirror && item.class == Class::Extra);
+        let extras = self.items.iter().filter(move |item| {
+            item.class == Class::Extra && (mode == Mode::Mirror || self.is_debris(item))
+        });
         copies.chain(extras)
     }
 
-    /// What a mirror removes: the topmost extras, deepest first, each with how
-    /// many of the counted extras it takes with it.
+    /// What a run in `mode` removes: for a mirror the topmost extras, deepest
+    /// first, each with how many of the counted extras it takes with it; for
+    /// an update only the debris ([`SyncPlan::is_debris`]).
     ///
     /// Only the topmost of each run of extras is removed, and its subtree goes
     /// with it — one trashed folder the trash view can put back whole, rather
@@ -318,8 +343,17 @@ impl SyncPlan {
     /// that however the list was built a child never outlives the removal of
     /// the directory holding it. One pass over the items, and a lookup per
     /// ancestor: a card full of extras must not be quadratic in them.
-    pub fn removals(&self) -> Vec<(usize, u64)> {
+    pub fn removals(&self, mode: Mode) -> Vec<(usize, u64)> {
         use std::collections::HashMap;
+        if mode == Mode::Update {
+            return self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| self.is_debris(item))
+                .map(|(index, item)| (index, u64::from(item.leaf)))
+                .collect();
+        }
         let extras: HashMap<(usize, &Path), usize> = self
             .items
             .iter()
