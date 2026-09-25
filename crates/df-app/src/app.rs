@@ -1260,6 +1260,12 @@ pub struct App {
     /// what the menu hangs from when `F10` opens it rather than a click, which
     /// has no geometry of its own to hand over.
     menu_button: egui::Rect,
+    /// The window the menu is laid out in, for the keys that scroll it: an
+    /// arrow onto a row the card has scrolled out of view has to know how
+    /// tall the card can be to bring the row back. The whole plane until the
+    /// first frame has measured one, which is a window nothing is too tall
+    /// for.
+    menu_area: egui::Rect,
     /// The last `/` or `?`, so `n` and `N` have something to repeat.
     last_find: Option<(String, FindDirection)>,
 
@@ -2071,6 +2077,7 @@ impl App {
             band: None,
             menu: None,
             menu_button: egui::Rect::NOTHING,
+            menu_area: egui::Rect::EVERYTHING,
             last_find: None,
             help: None,
             help_query: String::new(),
@@ -11533,15 +11540,20 @@ impl App {
             return;
         }
         let plain = chord.mods.is_none();
+        let area = self.menu_area;
         let action = {
             let Some(menu) = &mut self.menu else { return };
             match chord.key {
+                // A row the card has scrolled out of view is brought whole
+                // into it: the keyboard's row is always one you can see.
                 Key::ArrowUp if plain => {
                     menu.move_cursor(-1);
+                    menu.reveal(area, now);
                     None
                 }
                 Key::ArrowDown if plain => {
                     menu.move_cursor(1);
+                    menu.reveal(area, now);
                     None
                 }
                 Key::ArrowRight if plain => {
@@ -13896,8 +13908,10 @@ impl App {
         self.pane_step = grid::pane_step(first_metrics.as_ref(), self.scale);
         let page =
             crate::viewport::visible_rows(ui::content_rect(layout.list).height(), self.pane_step);
-        // …and where the app menu's button is, for an `F10` among them.
+        // …and where the app menu's button is, for an `F10` among them, and
+        // the window its card is capped to, for an arrow that scrolls it.
         self.menu_button = chrome::menu_button_rect(layout.path);
+        self.menu_area = area;
         // How many lines the help sheet is showing, measured before the keys
         // are routed and off the same rect the paint uses: its `PageDown` is a
         // page of the sheet, not of the pane behind it.
@@ -14195,12 +14209,36 @@ impl App {
             Some(_) => Some(layout.path),
             None => None,
         };
-        let menu_geometry = self
+        let mut menu_geometry = self
             .menu
             .as_ref()
             .map(|menu| menu::geometry(area, menu, &painter));
         // A menu that is fading is pixels, not a surface: it takes no pointer.
         let menu_live = self.menu.as_ref().is_some_and(Menu::live);
+        // **The wheel over the menu is the menu's**, as the tray's is the
+        // tray's: a card too tall for the window scrolls its rows, and one
+        // that fits stands still rather than letting the pane behind it slide
+        // by. Asked of the card the pointer was over as it stood — the
+        // submenu first, since it is drawn over its parent — and taken before
+        // the hit test, so the row under the pointer is the row the wheel
+        // just brought there.
+        let over_menu = pointer.wheel != 0.0
+            && menu_live
+            && pointer
+                .at
+                .zip(menu_geometry.as_ref())
+                .is_some_and(|(at, g)| g.contains(at));
+        if over_menu {
+            let on_sub = pointer
+                .at
+                .zip(menu_geometry.as_ref().and_then(|g| g.sub.as_ref()))
+                .is_some_and(|(at, (card, _))| card.contains(at));
+            if let Some(menu) = &mut self.menu {
+                if menu.wheel(on_sub, pointer.wheel, area, now) {
+                    menu_geometry = Some(menu::geometry(area, menu, &painter));
+                }
+            }
+        }
 
         // The yank tray (PLAN §7.1), hung from the yank chip and measured
         // before the hit test for the reason the breadcrumb is: two functions
@@ -14543,7 +14581,7 @@ impl App {
         // is aimed with the hand, and scrolling the pane the keyboard happens
         // to be in would be the one control in the program that ignores where
         // it was pointed.
-        // A roll over the tray has already been spent on it.
+        // A roll over the tray, or over the menu, has already been spent on it.
         //
         // With `Ctrl` held over the list the wheel is `=` and `-` instead
         // ([`App::wheel_scale`]) — the zoom it is everywhere else — but only
@@ -14561,7 +14599,7 @@ impl App {
         if !stepping {
             self.scale_wheel = 0.0;
         }
-        if pointer.wheel != 0.0 && self.help.is_none() && !over_tray && !over_bulk {
+        if pointer.wheel != 0.0 && self.help.is_none() && !over_tray && !over_bulk && !over_menu {
             if let Some(at) = pointer.at {
                 if stepping {
                     self.wheel_scale(&pointer.wheel_raw, page, now);
@@ -16217,7 +16255,15 @@ impl App {
         // the user asked for — and under the which-key card, which is an answer
         // to a key being held down right now.
         if let (Some(menu), Some(geometry)) = (&self.menu, &menu_geometry) {
-            menu::paint(&paint, menu, geometry, &self.hovers, &self.ripples, now);
+            menu::paint(
+                &paint,
+                menu,
+                geometry,
+                &self.hovers,
+                &self.ripples,
+                pointer.at,
+                now,
+            );
         }
 
         // Last, and over everything: the card is an answer to a key that is
@@ -16307,6 +16353,13 @@ impl App {
             // drops it — an option that is never `None` is a window that never
             // stops asking for frames (PLAN §1).
             ("menu", self.menu.as_ref().is_some_and(|menu| !menu.live())),
+            // A scrolled menu's bar on its way out, by the panes' rule: the
+            // fade only, the linger before it being one wake-up
+            // (`next_deadline`), and a card that fits having no bar to fade.
+            (
+                "menu-bar",
+                self.menu.as_ref().is_some_and(|menu| menu.bar_fading(now)),
+            ),
             ("toast", self.toasts.animating(now)),
             // The FLIP's travel and the fades either side of it. It is dropped
             // the moment it arrives (see the frame), so this can never be
@@ -16466,6 +16519,8 @@ impl App {
             self.scrolled_at()
                 .filter_map(|at| crate::scrollbar::deadline(Some(at), now))
                 .min(),
+            // …and a scrolled menu's, by the same rule.
+            self.menu.as_ref().and_then(|menu| menu.bar_deadline(now)),
         ]
         .into_iter()
         .flatten()
@@ -19853,6 +19908,103 @@ mod tests {
         click_at(&mut app, &ctx, at);
         assert_eq!(live_menu(&app), None);
         assert_eq!(app.scale_here(), ViewScale::Roomy);
+    }
+
+    /// In a window too short for the app menu the card stops a margin short
+    /// of its edges, the wheel over the card scrolls the card's rows and not
+    /// the list behind it, and an arrow onto a row out of view brings it in.
+    #[test]
+    fn a_menu_too_tall_for_the_window_scrolls_under_the_wheel_and_the_arrows() {
+        let names: Vec<String> = (0..80).map(|i| format!("{i:02}.txt")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let mut app = Fixture::new("menu-scroll", &names);
+        let ctx = egui::Context::default();
+        let short = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 360.0));
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(short),
+                events,
+                focused: true,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| app.frame(ui));
+        };
+        let key = |app: &mut App, key: Key| {
+            app.pending_keys.push(Press {
+                repeat: false,
+                chord: Some(Chord::plain(key)),
+                text: None,
+            });
+            frame(app, Vec::new());
+        };
+        let laid_out = |app: &App| {
+            let mut out = None;
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                let menu = app.menu.as_ref().expect("a menu is up");
+                out = Some(menu::geometry(short, menu, ui.painter()));
+            });
+            out.expect("measured")
+        };
+        frame(&mut app, Vec::new());
+        key(&mut app, Key::F(10));
+        assert_eq!(live_menu(&app), Some(menu::Kind::App));
+        let g = laid_out(&app);
+        assert!(
+            g.card.height() <= short.height() - 12.0 + 1e-3,
+            "{:?}",
+            g.card
+        );
+        assert!(g.bar.is_some(), "the menu fits a 360-point window");
+
+        let roll = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -2.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let on_card = egui::pos2(g.card.right() - 30.0, g.card.center().y);
+        frame(
+            &mut app,
+            vec![egui::Event::PointerMoved(on_card), roll.clone()],
+        );
+        let menu = app.menu.as_ref().expect("still up");
+        assert!(menu.live());
+        assert!(menu.scroll > 0.0, "the wheel did not scroll the card");
+        assert!(menu.scrolled_at.is_some());
+        assert_eq!(app.tab().cwd.first(), 0, "the wheel went through the card");
+
+        // The keyboard, in the menu opened again with the pointer off it: `↑`
+        // from nothing lands on the last row, which the card scrolls to show
+        // whole; `↓` wraps back to the first, and the card to its top.
+        let away = egui::pos2(short.right() - 20.0, short.center().y);
+        assert!(!g.card.contains(away));
+        frame(&mut app, vec![egui::Event::PointerMoved(away)]);
+        key(&mut app, Key::F(10));
+        key(&mut app, Key::F(10));
+        let menu = app.menu.as_ref().expect("up again");
+        assert_eq!((menu.cursor, menu.scroll), (None, 0.0));
+        key(&mut app, Key::ArrowUp);
+        let menu = app.menu.as_ref().expect("still up");
+        let last = menu.items.len() - 1;
+        assert_eq!(menu.cursor, Some(last));
+        let g = laid_out(&app);
+        let shown = menu::view(g.card);
+        assert!(
+            g.rows[last].top() >= shown.top() - 1e-3
+                && g.rows[last].bottom() <= shown.bottom() + 1e-3,
+            "{:?} is not whole on the card",
+            g.rows[last]
+        );
+        key(&mut app, Key::ArrowDown);
+        let menu = app.menu.as_ref().expect("still up");
+        assert_eq!((menu.cursor, menu.scroll), (Some(0), 0.0));
+
+        // With the menu gone, the same roll at the same place is the list's:
+        // the card was covering the list, not some pane that could not move.
+        key(&mut app, Key::Escape);
+        assert_eq!(live_menu(&app), None);
+        frame(&mut app, vec![egui::Event::PointerMoved(on_card), roll]);
+        assert!(app.tab().cwd.first() > 0, "the list did not scroll");
     }
 
     /// The View radios go straight to their step, with `-`/`=`'s bookkeeping:

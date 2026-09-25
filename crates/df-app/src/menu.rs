@@ -28,6 +28,16 @@
 //! slid on the way in would put an animation between the click and the answer;
 //! on the way out there is nothing left to wait for, so it fades over
 //! [`FADE`] and the app drops it when the fade is spent.
+//!
+//! ## Taller than the window
+//!
+//! A card stops growing at the window's height less a [`MARGIN`] at either
+//! end, and its list scrolls inside it: by the wheel over the card, and by the
+//! keyboard, which brings the row it moves to whole into view. Sliding the
+//! card off the edge instead would leave rows nobody can reach, which is the
+//! one thing [`place`] exists to prevent. The bar that says the list goes on
+//! is the list panes' own ([`crate::scrollbar`]), so a menu that scrolls looks
+//! like everything else here that scrolls, and a menu that fits has none.
 
 use std::time::{Duration, Instant};
 
@@ -39,6 +49,7 @@ use crate::chrome::{
 };
 use crate::hover::{pressed_rect, Hovers};
 use crate::ripple::Ripples;
+use crate::scrollbar;
 use crate::theme::mix;
 use crate::ui::{Control, Painting};
 
@@ -861,6 +872,19 @@ pub struct Menu {
     /// submenu's own cursor is.
     pub submenu: Option<usize>,
     pub sub_cursor: Option<usize>,
+    /// How far the card's list has scrolled, in points: 0 with its first row
+    /// at the top of the card. Only ever not 0 for a list taller than the card
+    /// can be ([`overflow`]), and kept within it by whatever moves it.
+    pub scroll: f32,
+    /// …and the submenu's, which starts at the top each time a list flies
+    /// out: a different parent's list scrolled to where the last one was left
+    /// would open on rows nobody chose.
+    pub sub_scroll: f32,
+    /// When each of the two lists last moved, for its bar's linger and fade
+    /// ([`crate::scrollbar::alpha`]). Stamped only by a scroll that moved the
+    /// rows, as a pane's is.
+    pub scrolled_at: Option<Instant>,
+    pub sub_scrolled_at: Option<Instant>,
     /// Set when the menu is dismissed; it is drawn fading until [`FADE`] is up.
     pub closing: Option<Instant>,
 }
@@ -889,6 +913,10 @@ impl Menu {
             cursor: None,
             submenu: None,
             sub_cursor: None,
+            scroll: 0.0,
+            sub_scroll: 0.0,
+            scrolled_at: None,
+            sub_scrolled_at: None,
             closing: None,
         }
     }
@@ -968,6 +996,8 @@ impl Menu {
         if self.submenu != Some(index) {
             self.submenu = Some(index);
             self.sub_cursor = None;
+            self.sub_scroll = 0.0;
+            self.sub_scrolled_at = None;
         }
         true
     }
@@ -979,7 +1009,100 @@ impl Menu {
         }
         self.submenu = None;
         self.sub_cursor = None;
+        // Its bar goes with it, and asks for no frames to fade on a card
+        // that is no longer drawn.
+        self.sub_scroll = 0.0;
+        self.sub_scrolled_at = None;
         true
+    }
+
+    /// The wheel over one of the cards — the submenu's when `sub` — by
+    /// `points`, read as the panes read it: positive is a roll that brings
+    /// the rows down, the view up the list ([`crate::mouse::wheel_rows`]).
+    ///
+    /// Returns whether the rows moved. A roll against either end moves
+    /// nothing, and is no scroll to linger a bar for.
+    pub fn wheel(&mut self, sub: bool, points: f32, area: egui::Rect, now: Instant) -> bool {
+        self.scroll_list(sub, area, now, |from| from - points)
+    }
+
+    /// Scroll the list the keyboard is in just far enough that its cursor's
+    /// row is whole on the card: up to it when it is above the part shown,
+    /// down to it when below, and not at all when it is already there. Called
+    /// after `↑`/`↓`, never for the pointer — a row under the pointer is the
+    /// row the hand is on, and scrolling it would move it out from under the
+    /// hand.
+    pub fn reveal(&mut self, area: egui::Rect, now: Instant) -> bool {
+        let (items, cursor, sub) = match self.sub_items() {
+            Some(rows) => (rows, self.sub_cursor, true),
+            None => (self.items.as_slice(), self.cursor, false),
+        };
+        let Some(index) = cursor.filter(|&index| index < items.len()) else {
+            return false;
+        };
+        let top = row_top(items, index);
+        let shown = card_height(items, area) - CARD_PAD * 2.0;
+        self.scroll_list(sub, area, now, |from| {
+            if top < from {
+                top
+            } else if top + ROW > from + shown {
+                // A window too short for one row shows its top.
+                (top + ROW - shown).min(top)
+            } else {
+                from
+            }
+        })
+    }
+
+    /// Move one list's scroll to where `to` says from where it is, kept
+    /// inside the list; stamps the bar's linger when the rows moved.
+    ///
+    /// Where it is is clamped first, so a window made taller since the last
+    /// scroll (and the list's end nearer) moves on from where the rows are
+    /// drawn rather than from a number past it.
+    fn scroll_list(
+        &mut self,
+        sub: bool,
+        area: egui::Rect,
+        now: Instant,
+        to: impl FnOnce(f32) -> f32,
+    ) -> bool {
+        let items = if sub {
+            self.sub_items()
+        } else {
+            Some(self.items.as_slice())
+        };
+        let Some(max) = items.map(|items| overflow(items, area)) else {
+            return false;
+        };
+        let (scroll, at) = if sub {
+            (&mut self.sub_scroll, &mut self.sub_scrolled_at)
+        } else {
+            (&mut self.scroll, &mut self.scrolled_at)
+        };
+        let from = scroll.clamp(0.0, max);
+        let next = to(from).clamp(0.0, max);
+        *scroll = next;
+        if next == from {
+            return false;
+        }
+        *at = Some(now);
+        true
+    }
+
+    /// Whether either card's bar is mid-fade and owed frames — the fade only,
+    /// as a pane's ([`scrollbar::fading`]).
+    pub fn bar_fading(&self, now: Instant) -> bool {
+        scrollbar::fading(self.scrolled_at, now) || scrollbar::fading(self.sub_scrolled_at, now)
+    }
+
+    /// How long until a card's bar has lingered its time and the fade is owed
+    /// its first frame ([`scrollbar::deadline`]).
+    pub fn bar_deadline(&self, now: Instant) -> Option<Duration> {
+        [self.scrolled_at, self.sub_scrolled_at]
+            .into_iter()
+            .filter_map(|at| scrollbar::deadline(at, now))
+            .min()
     }
 }
 
@@ -1015,24 +1138,28 @@ fn wrap(at: isize, len: usize) -> usize {
 /// Where the card and its rows are.
 pub struct Geometry {
     pub card: egui::Rect,
-    /// One rect per item, in `items` order.
+    /// One rect per item, in `items` order, where the list's scroll puts it —
+    /// on the card or not. Only the part of a row inside [`view`] is drawn,
+    /// or answers the pointer.
     pub rows: Vec<egui::Rect>,
+    /// The bar down the card's inner right edge, while the list is taller
+    /// than the card; `None` for a list that fits.
+    pub bar: Option<scrollbar::Geometry>,
     /// The submenu's card and rows, when it is out.
     pub sub: Option<(egui::Rect, Vec<egui::Rect>)>,
+    /// …and its bar, by the same rule.
+    pub sub_bar: Option<scrollbar::Geometry>,
 }
 
 impl Geometry {
     /// What the pointer is over.
     pub fn hit(&self, pos: egui::Pos2) -> Option<Control> {
-        if let Some((_, rows)) = &self.sub {
-            if let Some(index) = rows.iter().position(|r| r.contains(pos)) {
+        if let Some((card, rows)) = &self.sub {
+            if let Some(index) = row_at(*card, rows, pos) {
                 return Some(Control::SubmenuItem(index));
             }
         }
-        self.rows
-            .iter()
-            .position(|r| r.contains(pos))
-            .map(Control::MenuItem)
+        row_at(self.card, &self.rows, pos).map(Control::MenuItem)
     }
 
     /// Is the pointer anywhere on the menu at all — including the card's
@@ -1051,6 +1178,27 @@ impl Geometry {
             _ => None,
         }
     }
+}
+
+/// The part of a card its rows are drawn in and answer the pointer in: the
+/// card less its padding.
+///
+/// A row scrolled partly past it is cut square at its edge, for the pointer
+/// as for the eye — a click on the sliver of a row that is not drawn would be
+/// a click on something nobody could see. And the cut is inside the padding,
+/// where the card's corner, rounded at the row's radius plus that padding
+/// (`delightful-ui` §15), has not begun to turn, so no row passing under it
+/// is drawn over it.
+pub fn view(card: egui::Rect) -> egui::Rect {
+    card.shrink(CARD_PAD)
+}
+
+/// The row of a card at `pos`, counting only the part of it the card shows.
+fn row_at(card: egui::Rect, rows: &[egui::Rect], pos: egui::Pos2) -> Option<usize> {
+    if !view(card).contains(pos) {
+        return None;
+    }
+    rows.iter().position(|r| r.contains(pos))
 }
 
 /// A card of `size` placed from `anchor`, kept inside `area`.
@@ -1119,6 +1267,27 @@ pub fn height(items: &[Item]) -> f32 {
     items.len() as f32 * ROW + gaps * SEPARATOR + CARD_PAD * 2.0
 }
 
+/// How tall the card for `items` is in `area`: the list's own [`height`], or
+/// the window less a [`MARGIN`] at the top and the bottom when the list is
+/// taller than that — and the rest of it scrolls.
+fn card_height(items: &[Item], area: egui::Rect) -> f32 {
+    height(items).min((area.height() - MARGIN * 2.0).max(0.0))
+}
+
+/// How far `items` scroll in a card in `area`: what the list is taller than
+/// its card, and exactly 0 for a list that fits.
+pub fn overflow(items: &[Item], area: egui::Rect) -> f32 {
+    height(items) - card_height(items, area)
+}
+
+/// Where row `index` of `items` starts, down from where the first row's
+/// would: the rows above it, and the gaps their separators and its own open.
+fn row_top(items: &[Item], index: usize) -> f32 {
+    let gap = |item: &Item| if item.gap_before { SEPARATOR } else { 0.0 };
+    let above: f32 = items.iter().take(index).map(|item| gap(item) + ROW).sum();
+    above + items.get(index).map_or(0.0, gap)
+}
+
 /// How wide a card for `items` has to be, measured from the text.
 ///
 /// A top-level list reserves the key column and the chevron's on every row, so
@@ -1149,10 +1318,11 @@ fn width(items: &[Item], painter: &egui::Painter, top_level: bool) -> f32 {
         + CARD_PAD * 2.0
 }
 
-/// The rows of `items` stacked down `card`, separators opening their gaps.
-fn stack(card: egui::Rect, items: &[Item]) -> Vec<egui::Rect> {
+/// The rows of `items` stacked down `card` from `scroll` points above its
+/// first row's place, separators opening their gaps.
+fn stack(card: egui::Rect, items: &[Item], scroll: f32) -> Vec<egui::Rect> {
     let mut rows = Vec::with_capacity(items.len());
-    let mut y = card.top() + CARD_PAD;
+    let mut y = card.top() + CARD_PAD - scroll;
     for item in items {
         if item.gap_before {
             y += SEPARATOR;
@@ -1171,22 +1341,26 @@ fn stack(card: egui::Rect, items: &[Item]) -> Vec<egui::Rect> {
 pub fn geometry(area: egui::Rect, menu: &Menu, painter: &egui::Painter) -> Geometry {
     let size = egui::vec2(
         width(&menu.items, painter, true).min((area.width() - MARGIN * 2.0).max(MIN_WIDTH)),
-        height(&menu.items),
+        card_height(&menu.items, area),
     );
     let card = place(area, menu.anchor, size);
-    let rows = stack(card, &menu.items);
+    let (rows, bar) = scrolled(card, &menu.items, menu.scroll, area);
 
+    let mut sub_bar = None;
     let sub = menu.submenu.and_then(|parent| {
         let items = menu.sub_items()?;
         let parent = rows.get(parent).copied().unwrap_or(card);
         let sub_size = egui::vec2(
             width(items, painter, false).min((area.width() - MARGIN * 2.0).max(MIN_WIDTH)),
-            height(items),
+            card_height(items, area),
         );
         // Anchored at the parent row's outer corner, so `place` flips it to the
         // *left* of the card near the right edge of the window — which is where
-        // every submenu on every platform goes.
-        let anchor = egui::pos2(card.right() - SUBMENU_OVERLAP, parent.top() - CARD_PAD);
+        // every submenu on every platform goes. The corner of the row as it is
+        // on the card: one scrolled partly out of view flies its list from the
+        // part of it still showing, not from where its hidden top would be.
+        let top = parent.top().max(view(card).top()).min(view(card).bottom());
+        let anchor = egui::pos2(card.right() - SUBMENU_OVERLAP, top - CARD_PAD);
         let sub_card = if anchor.x + sub_size.x <= area.right() - MARGIN {
             place(area, Anchor::Point(anchor), sub_size)
         } else {
@@ -1196,10 +1370,41 @@ pub fn geometry(area: egui::Rect, menu: &Menu, painter: &egui::Painter) -> Geome
                 sub_size,
             )
         };
-        Some((sub_card, stack(sub_card, items)))
+        let (sub_rows, bar) = scrolled(sub_card, items, menu.sub_scroll, area);
+        sub_bar = bar;
+        Some((sub_card, sub_rows))
     });
 
-    Geometry { card, rows, sub }
+    Geometry {
+        card,
+        rows,
+        bar,
+        sub,
+        sub_bar,
+    }
+}
+
+/// A card's rows, `scroll` points down its list, and the bar that says how
+/// far down that is — `None` for a list that fits.
+///
+/// The scroll is held inside the list here too, so a window made taller
+/// since the last roll draws the rows where they can be rather than past the
+/// list's end. The bar counts in points of the list, the rows of a pane: the
+/// part the card shows of all there is. That part is the whole list less its
+/// [`overflow`], which is exactly 0 for a list that fits — so a list that fits
+/// has no bar, where a height measured back off the card's rect could come out
+/// a hair short of the list's and draw one.
+fn scrolled(
+    card: egui::Rect,
+    items: &[Item],
+    scroll: f32,
+    area: egui::Rect,
+) -> (Vec<egui::Rect>, Option<scrollbar::Geometry>) {
+    let overflow = overflow(items, area);
+    let scroll = scroll.clamp(0.0, overflow);
+    let list = height(items) - CARD_PAD * 2.0;
+    let bar = scrollbar::geometry(view(card), scroll, list - overflow, list);
+    (stack(card, items, scroll), bar)
 }
 
 /// The room the `▸` gets at a row's right-hand end: the glyph, seven and a
@@ -1221,13 +1426,16 @@ fn keys_right(row: egui::Rect, chevrons: bool) -> f32 {
 
 // ── Paint ───────────────────────────────────────────────────────────────────
 
-/// Draw the menu and its submenu.
+/// Draw the menu and its submenu. `pointer` is where the pointer is, for the
+/// bars: a card's is up while the pointer is on it.
+#[allow(clippy::too_many_arguments)] // a painter's arguments are its inputs
 pub fn paint(
     paint: &Painting<'_>,
     menu: &Menu,
     geometry: &Geometry,
     hovers: &Hovers<Control>,
     ripples: &Ripples<Control>,
+    pointer: Option<egui::Pos2>,
     now: Instant,
 ) {
     let alpha = menu.alpha(now);
@@ -1236,8 +1444,12 @@ pub fn paint(
     }
     card(paint, geometry.card, alpha);
     let selected = menu.cursor.filter(|_| menu.submenu.is_none());
+    let clipped = paint.painter.with_clip_rect(view(geometry.card));
     list(
-        paint,
+        &Painting {
+            painter: &clipped,
+            ..*paint
+        },
         &menu.items,
         &geometry.rows,
         Control::MenuItem,
@@ -1246,13 +1458,26 @@ pub fn paint(
         alpha,
         now,
     );
+    bar(
+        paint,
+        geometry.bar.as_ref(),
+        geometry.card,
+        menu.scrolled_at,
+        pointer,
+        alpha,
+        now,
+    );
 
     let (Some((sub_card, sub_rows)), Some(items)) = (&geometry.sub, menu.sub_items()) else {
         return;
     };
     card(paint, *sub_card, alpha);
+    let clipped = paint.painter.with_clip_rect(view(*sub_card));
     list(
-        paint,
+        &Painting {
+            painter: &clipped,
+            ..*paint
+        },
         items,
         sub_rows,
         Control::SubmenuItem,
@@ -1261,6 +1486,39 @@ pub fn paint(
         alpha,
         now,
     );
+    bar(
+        paint,
+        geometry.sub_bar.as_ref(),
+        *sub_card,
+        menu.sub_scrolled_at,
+        pointer,
+        alpha,
+        now,
+    );
+}
+
+/// One card's scrollbar, the list panes' own ([`crate::scrollbar`]): up while
+/// the pointer is on the card, or for the linger after its list last moved,
+/// then faded — and none at all on a list that fits (`bar` is `None`).
+///
+/// Drawn as a pane's is when the pointer is nowhere near its band: the thumb
+/// alone, at rest. The band here takes no hand — the wheel and the arrows are
+/// how a menu scrolls — so the lit plate a pane's band shows under the
+/// pointer, which says "this can be taken hold of", would be a promise the
+/// card does not keep.
+fn bar(
+    paint: &Painting<'_>,
+    bar: Option<&scrollbar::Geometry>,
+    card: egui::Rect,
+    scrolled_at: Option<Instant>,
+    pointer: Option<egui::Pos2>,
+    alpha: f32,
+    now: Instant,
+) {
+    let Some(bar) = bar else { return };
+    let over = pointer.is_some_and(|at| card.contains(at));
+    let shown = scrollbar::visibility(scrolled_at, f32::from(over), false, now);
+    scrollbar::paint(paint, bar, shown * alpha, 0.0, false);
 }
 
 /// One card's rows and the separators between them.
@@ -1864,6 +2122,267 @@ mod tests {
             assert!(sub.left() > g.card.left());
             assert_eq!(g.hit(rows[1].center()), Some(Control::SubmenuItem(1)));
         });
+    }
+
+    // ── Taller than the window ──────────────────────────────────────────────
+
+    /// A window 400 points tall: too short for a long menu.
+    fn short() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 400.0))
+    }
+
+    /// `n` live rows, a separator opening before every sixth.
+    fn tall(n: usize) -> Vec<Item> {
+        (0..n)
+            .map(|i| {
+                let item = Item::new(&format!("Row {i}"), "", Action::Nothing, true);
+                if i % 6 == 5 {
+                    item.after_gap()
+                } else {
+                    item
+                }
+            })
+            .collect()
+    }
+
+    /// `menu` laid out in `area`, with a painter to measure its text.
+    fn laid_out(area: egui::Rect, menu: &Menu) -> Geometry {
+        let ctx = egui::Context::default();
+        let mut out = None;
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            out = Some(geometry(area, menu, ui.painter()));
+        });
+        out.expect("measured")
+    }
+
+    /// Is `row` whole inside `shown`, to a rounding error?
+    fn whole(shown: egui::Rect, row: egui::Rect) -> bool {
+        row.top() >= shown.top() - 1e-3 && row.bottom() <= shown.bottom() + 1e-3
+    }
+
+    /// Twenty-nine rows in a window 400 points tall: the card stops a margin
+    /// short of the window's edges, the rows past it are laid out below the
+    /// part it shows and answer no pointer there, and a scroll by the
+    /// overflow brings the last row whole onto the card.
+    #[test]
+    fn a_menu_taller_than_the_window_scrolls_inside_its_card() {
+        let area = short();
+        let mut menu = Menu::context(egui::pos2(200.0, 100.0), tall(29));
+        let g = laid_out(area, &menu);
+        assert!(
+            g.card.height() <= area.height() - MARGIN * 2.0 + 1e-3,
+            "{:?}",
+            g.card
+        );
+        assert!(g.card.top() >= area.top() + MARGIN - 1e-3);
+        assert!(g.card.bottom() <= area.bottom() - MARGIN + 1e-3);
+        let last = *g.rows.last().expect("rows");
+        assert!(
+            last.top() > view(g.card).bottom(),
+            "{last:?} is on the card"
+        );
+        assert_eq!(g.hit(last.center()), None, "a row off the card was hit");
+        assert!(g.bar.is_some(), "a list that scrolls has no bar");
+
+        let overflow = overflow(&menu.items, area);
+        assert!(overflow > 0.0);
+        assert!(menu.wheel(false, -overflow, area, Instant::now()));
+        assert_eq!(menu.scroll, overflow);
+        let g = laid_out(area, &menu);
+        let last = *g.rows.last().expect("rows");
+        assert!(
+            whole(view(g.card), last),
+            "{last:?} is not whole on the card"
+        );
+        assert_eq!(g.hit(last.center()), Some(Control::MenuItem(28)));
+        assert!(g.rows[0].bottom() < view(g.card).top(), "row 0 is still up");
+    }
+
+    /// A row the scroll has cut at the card's edge answers the pointer in the
+    /// part the card shows and nowhere else, at the top and at the bottom.
+    #[test]
+    fn a_row_cut_by_the_edge_answers_only_where_it_is_drawn() {
+        let area = short();
+        let mut menu = Menu::context(egui::pos2(200.0, 100.0), tall(29));
+        assert!(menu.wheel(false, -ROW / 2.0, area, Instant::now()));
+        let g = laid_out(area, &menu);
+        let shown = view(g.card);
+        let first = g.rows[0];
+        assert!(first.top() < shown.top() && first.bottom() > shown.top());
+        let x = first.center().x;
+        let drawn = (shown.top() + first.bottom()) / 2.0;
+        let hidden = (first.top() + shown.top()) / 2.0;
+        assert_eq!(g.hit(egui::pos2(x, drawn)), Some(Control::MenuItem(0)));
+        assert_eq!(g.hit(egui::pos2(x, hidden)), None);
+
+        let cut = g
+            .rows
+            .iter()
+            .position(|r| r.top() < shown.bottom() && r.bottom() > shown.bottom())
+            .expect("a row cut at the bottom");
+        let row = g.rows[cut];
+        let drawn = (row.top() + shown.bottom()) / 2.0;
+        let hidden = (shown.bottom() + row.bottom()) / 2.0;
+        assert_eq!(g.hit(egui::pos2(x, drawn)), Some(Control::MenuItem(cut)));
+        assert_eq!(g.hit(egui::pos2(x, hidden)), None);
+    }
+
+    /// The keyboard's row is always whole on the card: `↑` from nothing onto
+    /// the last row scrolls to the end, `↓` round onto the first scrolls back
+    /// to the top, and a step onto a row cut at the bottom scrolls just far
+    /// enough to show it — and no step before it scrolls at all.
+    #[test]
+    fn the_keyboard_scrolls_its_row_into_view() {
+        let area = short();
+        let now = Instant::now();
+        let mut menu = Menu::context(egui::pos2(200.0, 100.0), tall(29));
+        let overflow = overflow(&menu.items, area);
+        menu.move_cursor(-1);
+        assert_eq!(menu.cursor, Some(28));
+        assert!(menu.reveal(area, now));
+        assert_eq!(menu.scroll, overflow);
+        assert_eq!(menu.scrolled_at, Some(now));
+        let g = laid_out(area, &menu);
+        assert!(whole(view(g.card), g.rows[28]));
+
+        menu.move_cursor(1);
+        assert_eq!(menu.cursor, Some(0));
+        assert!(menu.reveal(area, now));
+        assert_eq!(menu.scroll, 0.0);
+
+        let mut moved = false;
+        for _ in 0..28 {
+            menu.move_cursor(1);
+            moved = menu.reveal(area, now);
+            let g = laid_out(area, &menu);
+            let row = g.rows[menu.cursor.expect("a row")];
+            assert!(whole(view(g.card), row), "{row:?} is not whole on the card");
+            if moved {
+                assert!(
+                    (row.bottom() - view(g.card).bottom()).abs() < 1e-3,
+                    "{row:?} went further than the card's edge"
+                );
+                break;
+            }
+        }
+        assert!(moved, "no step scrolled the card");
+    }
+
+    /// A menu that fits the window neither scrolls nor has a bar: the wheel
+    /// and the keyboard move nothing, and nothing lingers or asks for frames
+    /// — in a window with room to spare or one exactly as tall as the card
+    /// and its margins.
+    #[test]
+    fn a_menu_that_fits_has_no_scroll_and_no_bar() {
+        let now = Instant::now();
+        let mut menu = Menu::context(egui::pos2(200.0, 200.0), items(facts(), &openers()));
+        assert_eq!(overflow(&menu.items, area()), 0.0);
+        assert!(!menu.wheel(false, -120.0, area(), now));
+        menu.move_cursor(-1);
+        assert!(!menu.reveal(area(), now));
+        assert_eq!(menu.scroll, 0.0);
+        assert_eq!(menu.scrolled_at, None);
+        assert!(!menu.bar_fading(now + scrollbar::LINGER + scrollbar::FADE / 2));
+        assert_eq!(menu.bar_deadline(now), None);
+        let g = laid_out(area(), &menu);
+        assert!(g.bar.is_none(), "a bar on a menu that fits");
+        assert!((g.card.height() - height(&menu.items)).abs() < 1e-3);
+
+        let snug = egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1400.0, height(&menu.items) + MARGIN * 2.0),
+        );
+        assert_eq!(overflow(&menu.items, snug), 0.0);
+        assert!(laid_out(snug, &menu).bar.is_none());
+    }
+
+    /// The wheel stops at both ends: a roll up at the top and a roll down at
+    /// the bottom move nothing, however hard, and stamp no linger. The bar
+    /// lingers after a roll that moved, with one wake-up for the moment it
+    /// starts to fade and frames only for the fade.
+    #[test]
+    fn the_wheel_stops_at_both_ends() {
+        let area = short();
+        let t0 = Instant::now();
+        let mut menu = Menu::context(egui::pos2(200.0, 100.0), tall(29));
+        let overflow = overflow(&menu.items, area);
+        assert!(
+            !menu.wheel(false, 500.0, area, t0),
+            "rolled up past the top"
+        );
+        assert_eq!(menu.scroll, 0.0);
+        assert_eq!(menu.scrolled_at, None);
+        assert!(menu.wheel(false, -50.0, area, t0));
+        assert_eq!(menu.scroll, 50.0);
+        assert!(menu.wheel(false, -10_000.0, area, t0));
+        assert_eq!(menu.scroll, overflow);
+        let t1 = t0 + Duration::from_millis(500);
+        assert!(!menu.wheel(false, -50.0, area, t1), "rolled past the end");
+        assert_eq!(menu.scroll, overflow);
+        assert_eq!(menu.scrolled_at, Some(t0), "a roll that moved nothing");
+        assert!(menu.wheel(false, 10_000.0, area, t1));
+        assert_eq!(menu.scroll, 0.0);
+
+        assert_eq!(menu.bar_deadline(t1), Some(scrollbar::LINGER));
+        assert!(!menu.bar_fading(t1));
+        assert!(menu.bar_fading(t1 + scrollbar::LINGER + scrollbar::FADE / 2));
+        assert!(!menu.bar_fading(t1 + scrollbar::LINGER + scrollbar::FADE));
+    }
+
+    /// A submenu too tall for the window scrolls in a card of its own, apart
+    /// from its parent's, and from its top each time a list flies out; and a
+    /// parent row the card has scrolled to the bottom flies its list out from
+    /// where that row is on screen.
+    #[test]
+    fn a_submenu_scrolls_on_its_own_and_hangs_from_its_row_on_screen() {
+        let area = short();
+        let now = Instant::now();
+        let mut rows = tall(28);
+        rows.push(Item::new("Long", "", Action::Nothing, true).with_submenu(tall(40)));
+        rows.push(Item::new("Short", "", Action::Nothing, true).with_submenu(tall(3)));
+        let mut menu = Menu::context(egui::pos2(200.0, 100.0), rows);
+
+        // `↑` onto the last row scrolls the card to its end; `→` flies it out.
+        menu.move_cursor(-1);
+        assert!(menu.reveal(area, now));
+        assert!(menu.open_submenu());
+        let g = laid_out(area, &menu);
+        let parent = g.rows[29];
+        assert!(whole(view(g.card), parent));
+        let (sub, _) = g.sub.as_ref().expect("the short list is out");
+        assert!(
+            (sub.bottom() - (parent.top() - CARD_PAD)).abs() < 1e-3,
+            "{sub:?} is not hung from {parent:?}"
+        );
+        assert!(g.sub_bar.is_none(), "three rows fit");
+
+        // The long list: capped, scrolled by the wheel over it alone.
+        menu.close_submenu();
+        menu.move_cursor(-1);
+        assert_eq!(menu.cursor, Some(28));
+        assert!(menu.open_submenu());
+        let card_scroll = menu.scroll;
+        let g = laid_out(area, &menu);
+        let (sub, sub_rows) = g.sub.as_ref().expect("the long list is out");
+        assert!(sub.height() <= area.height() - MARGIN * 2.0 + 1e-3);
+        assert!(g.sub_bar.is_some());
+        let last = *sub_rows.last().expect("rows");
+        assert_eq!(g.hit(last.center()), None, "a row off the card was hit");
+        assert!(menu.wheel(true, -100.0, area, now));
+        assert_eq!((menu.sub_scroll, menu.scroll), (100.0, card_scroll));
+        assert_eq!(menu.sub_scrolled_at, Some(now));
+        // The keyboard in the submenu brings its own rows into view.
+        menu.move_cursor(-1);
+        assert!(menu.reveal(area, now));
+        assert_eq!(menu.sub_scroll, overflow(&tall(40), area));
+        let g = laid_out(area, &menu);
+        let (_, sub_rows) = g.sub.as_ref().expect("out");
+        assert_eq!(g.hit(sub_rows[39].center()), Some(Control::SubmenuItem(39)));
+
+        // Another parent's list starts at its top, with no bar lingering.
+        menu.cursor = Some(29);
+        assert!(menu.open_submenu());
+        assert_eq!((menu.sub_scroll, menu.sub_scrolled_at), (0.0, None));
     }
 
     // ── The app menu ────────────────────────────────────────────────────────
