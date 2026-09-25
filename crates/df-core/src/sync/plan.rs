@@ -191,7 +191,12 @@ impl Walk<'_> {
         };
         let class = match &dst_meta {
             None => Class::New,
-            Some(meta) if Kind::of(meta) != kind => Class::Changed,
+            Some(meta) if Kind::of(meta) != kind => {
+                if Kind::of(meta) == Kind::Dir {
+                    self.plan.folders_in_the_way += 1;
+                }
+                Class::Changed
+            }
             Some(meta) => self.compare(kind, src, &src_meta, dst, meta)?,
         };
         let index = self.plan.items.len();

@@ -198,6 +198,10 @@ pub struct SyncPlan {
     pub extra: Tally,
     /// Where [`Mode::Mirror`] would put the extras.
     pub removal: Removal,
+    /// Folders at the destination where the source has a file or a link: a
+    /// mirror removes each to make room, and counts it as removed, so the
+    /// progress total needs them before the run starts.
+    pub folders_in_the_way: u64,
     /// Source paths the sync leaves alone, and why: special files, and
     /// anything that could not be read. Named rather than dropped, because a
     /// sync that silently skipped a folder it could not open would report a
@@ -221,6 +225,7 @@ impl SyncPlan {
             unchanged: Tally::default(),
             extra: Tally::default(),
             removal: Removal::Trash,
+            folders_in_the_way: 0,
             skipped: Vec::new(),
             remote: None,
         }

@@ -167,6 +167,9 @@ impl Run<'_> {
             files += 1;
         }
         files += self.plan.removals(self.mode).len() as u64;
+        if self.mode == Mode::Mirror {
+            files += self.plan.folders_in_the_way;
+        }
         self.ctx.set_total(bytes, files);
     }
 
@@ -270,7 +273,10 @@ impl Run<'_> {
         }
         if theirs == Kind::Dir {
             if self.mode == Mode::Mirror {
-                return self.remove(dst);
+                self.remove(dst)?;
+                self.report.removed += 1;
+                self.ctx.advance(0, 1);
+                return Ok(());
             }
             return Err(DfError::Op(
                 "a folder with that name is in the way".to_string(),
@@ -358,6 +364,12 @@ impl Run<'_> {
                 Err(DfError::Cancelled) => {
                     self.report.cancelled = true;
                     break;
+                }
+                // Filed under the file that could not be read — the source,
+                // when it is the source that went unreadable, so the card
+                // does not send anybody looking at a copy that is fine.
+                Err(DfError::Io { path, source }) => {
+                    self.report.verify_failures.push((path, source.to_string()))
                 }
                 Err(e) => self.report.verify_failures.push((dst, e.to_string())),
             }

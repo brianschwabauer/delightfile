@@ -789,8 +789,15 @@ fn a_mirror_moves_a_folder_in_the_way_to_the_trash_and_copies_the_file() {
     trash_at(t.join("Trash"));
     let mut plan = quick(&[dir], &t.join("dst"));
     plan.removal = Removal::Trash;
-    let report = execute(&plan, Mode::Mirror, Verify::Copied, &TaskCtx::detached());
+    assert_eq!(plan.folders_in_the_way, 1);
+    let record = Arc::new(Record::default());
+    let ctx = TaskCtx::with_sink(Arc::new(TaskFlags::new()), record.clone());
+    let report = execute(&plan, Mode::Mirror, Verify::Copied, &ctx);
     assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!(report.removed, 1, "the folder that made room is counted");
+    // One copy, one folder out of its way, one verify — and all of them done.
+    assert_eq!(record.total.lock().unwrap().1, 3);
+    assert_eq!(*record.done.lock().unwrap(), *record.total.lock().unwrap());
     assert_eq!(
         std::fs::read(t.join("dst/d/was-a-folder")).unwrap(),
         b"now a file"
@@ -954,6 +961,27 @@ fn a_file_a_case_folding_card_lists_in_its_own_case_is_rewritten_not_trashed() {
     assert_eq!(
         std::fs::read(t.join("dst/d/photo.jpg")).unwrap(),
         b"the only copy"
+    );
+}
+
+#[test]
+fn a_source_that_cannot_be_read_back_is_named_as_itself() {
+    use std::os::unix::fs::PermissionsExt;
+    let t = TempTree::new("sync-verify-source");
+    let dir = t.dir("src/d");
+    let src = t.file("src/d/a.bin", b"aaaa");
+    let plan = quick(&[dir], &t.dir("dst"));
+    let locked = src.clone();
+    execute::before_verify(move || {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    });
+    let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(report.verify_failures.len(), 1, "{report:?}");
+    assert_eq!(report.verify_failures[0].0, src, "the source, not its copy");
+    assert!(
+        report.verify_failures[0].1.contains("ermission"),
+        "{report:?}"
     );
 }
 

@@ -997,6 +997,7 @@ mod tests {
             },
             extra: Tally::default(),
             removal: Removal::Trash,
+            folders_in_the_way: 0,
             skipped: Vec::new(),
             remote: None,
         }

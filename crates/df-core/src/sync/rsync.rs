@@ -79,7 +79,8 @@ pub fn available() -> bool {
 /// How to reach the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
-    /// `user@host`, or an alias `~/.ssh/config` knows — what `ssh` is handed.
+    /// `user@host`, or an alias `~/.ssh/config` knows. The user, when there is
+    /// one, goes to `ssh` as `-l`, so the host can come after a `--`.
     pub destination: String,
     /// `None` leaves the port to `~/.ssh/config`.
     pub port: Option<u16>,
@@ -108,22 +109,38 @@ impl Host {
         }
     }
 
-    /// The command that runs `script` on the server.
-    fn shell(&self, script: String) -> Command {
-        let mut command = match &self.program {
-            Some(program) => Command::new(program),
-            None => {
-                let mut ssh = Command::new("ssh");
-                ssh.args(self.ssh_options());
-                ssh
-            }
-        };
-        command.arg(&self.destination).arg(script);
-        command
+    /// The machine, without the user: what goes after `--` and before `:`.
+    pub fn host(&self) -> &str {
+        match self.destination.rsplit_once('@') {
+            Some((_, host)) => host,
+            None => &self.destination,
+        }
     }
 
-    /// The options every `ssh` this module starts gets, before the
-    /// destination.
+    /// The user, when the destination names one.
+    fn user(&self) -> Option<&str> {
+        self.destination.rsplit_once('@').map(|(user, _)| user)
+    }
+
+    /// The command that runs `script` on the server.
+    fn shell(&self, script: String) -> Command {
+        match &self.program {
+            Some(program) => {
+                let mut command = Command::new(program);
+                command.arg(&self.destination).arg(script);
+                command
+            }
+            None => {
+                let mut ssh = Command::new("ssh");
+                ssh.args(self.ssh_options()).arg(self.host()).arg(script);
+                ssh
+            }
+        }
+    }
+
+    /// The options every `ssh` this module starts gets, ending in `--`: the
+    /// host that follows is a host even if a hostile `vfs.toml` or alias made
+    /// it start with a dash.
     fn ssh_options(&self) -> Vec<OsString> {
         let mut options: Vec<OsString> = ["-x", "-o", "BatchMode=yes", "-o"]
             .iter()
@@ -138,28 +155,42 @@ impl Host {
             options.push("-i".into());
             options.push(key.clone().into_os_string());
         }
+        if let Some(user) = self.user() {
+            options.push("-l".into());
+            options.push(user.into());
+        }
+        options.push("--".into());
         options
     }
 
-    /// The same options as the one string `rsync -e` takes. The key is single
-    /// quoted, which `rsync` honours inside `-e`, so a key under a folder with
-    /// a space in its name still reaches `ssh` whole.
+    /// The same options as the one string `rsync -e` takes, `rsync` appending
+    /// the host and its own command after them.
+    ///
+    /// Every word is single-quoted, with a quote inside it doubled. That is
+    /// `rsync`'s own rule for `-e`: it splits the string itself rather than
+    /// through a shell, it knows no backslash, and the shell's `'\''` is a
+    /// syntax error to it ("Missing trailing-' in remote-shell command").
     pub fn rsh(&self) -> String {
-        if let Some(program) = &self.program {
-            return format!("'{}'", program.display());
-        }
-        let mut rsh = "ssh".to_string();
-        for option in self.ssh_options() {
-            let option = option.to_string_lossy().into_owned();
-            rsh.push(' ');
-            if option.contains(' ') {
-                rsh.push_str(&format!("'{option}'"));
-            } else {
-                rsh.push_str(&option);
-            }
-        }
-        rsh
+        self.rsh_with("ssh")
     }
+
+    fn rsh_with(&self, ssh: &str) -> String {
+        if let Some(program) = &self.program {
+            return rsync_quote(&program.to_string_lossy());
+        }
+        let mut words = vec![rsync_quote(ssh)];
+        words.extend(
+            self.ssh_options()
+                .iter()
+                .map(|option| rsync_quote(&option.to_string_lossy())),
+        );
+        words.join(" ")
+    }
+}
+
+/// One word for `rsync -e`: single-quoted, a quote inside doubled.
+fn rsync_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "''"))
 }
 
 /// Which way the bytes go.
@@ -206,7 +237,7 @@ impl Transfer {
         }
         let mut out = OsString::new();
         if remote {
-            out.push(format!("{}:", self.host.destination));
+            out.push(format!("{}:", self.host.host()));
         }
         out.push(OsStr::from_bytes(&bytes));
         out
@@ -248,13 +279,20 @@ impl Transfer {
 
     /// The run itself. `--no-inc-recursive` makes `rsync` count the whole
     /// transfer before it starts, so the progress line is about all of it
-    /// rather than about what has been found so far; `fsync` asks the
-    /// receiving side to flush each file it writes ([`fsync_for`]).
+    /// rather than about what has been found so far; each path it writes or
+    /// deletes is itemized as the dry run's are, which is how the report
+    /// counts what really landed; `fsync` asks the receiving side to flush
+    /// each file it writes ([`fsync_for`]).
     pub fn run_args(&self, mode: Mode, content: bool, fsync: bool) -> Vec<OsString> {
-        let mut args: Vec<OsString> = ["-a", "--info=progress2", "--no-inc-recursive"]
-            .iter()
-            .map(OsString::from)
-            .collect();
+        let mut args: Vec<OsString> = [
+            "-a",
+            "--info=progress2",
+            "--no-inc-recursive",
+            "--out-format=%i %l %n",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
         if mode == Mode::Mirror {
             args.push("--delete-after".into());
         }
@@ -677,7 +715,7 @@ pub(crate) fn execute(
         ..SyncReport::default()
     };
     let to_copy = plan.bytes_to_copy();
-    let checks = files_to_verify(plan, verify);
+    let checks = files_to_verify(plan, verify, None);
     let copies = plan
         .items
         .iter()
@@ -729,24 +767,15 @@ pub(crate) fn execute(
             .push((plan.dest_dir.clone(), failure_line(&ran.stderr, status)));
         return report;
     }
-    // What the plan said would be written, was — all of it, or all but what
-    // `rsync` names on stderr, which is listed.
-    for item in plan
-        .items
-        .iter()
-        .filter(|item| matches!(item.class, Class::New | Class::Changed))
-    {
-        if item.kind == Kind::Dir {
-            report.made += 1;
-        } else {
-            report.copied += 1;
-        }
-    }
-    report.copied_bytes = to_copy;
+    // What landed is what `rsync` itemized as it went, not what the plan
+    // said would: after an exit 23 the two differ by exactly the files it
+    // could not send, which it names on stderr instead.
+    let landed = landed(plan, &ran.lines);
+    report.copied = landed.copied;
+    report.copied_bytes = landed.copied_bytes;
+    report.made = landed.made;
+    report.removed = landed.removed;
     ctx.advance(to_copy.saturating_sub(ran.moved), copies);
-    if mode == Mode::Mirror {
-        report.removed = plan.extra.count;
-    }
     report.errors.extend(complaints(&ran.stderr));
     if partial && report.errors.is_empty() {
         report
@@ -756,14 +785,81 @@ pub(crate) fn execute(
     if transfer.direction == Direction::Download {
         flush_here(
             plan,
-            plan.items
-                .iter()
-                .filter(|item| matches!(item.class, Class::New | Class::Changed)),
+            landed.items.iter().map(|&index| &plan.items[index]),
             &mut report,
         );
     }
+    // Only what landed is read back: a file `rsync` could not send is on the
+    // result card once, as the failure it is, not again as missing.
+    let checks = files_to_verify(plan, verify, Some(&landed.items));
     verify_remote(plan, transfer, &checks, ctx, &mut report);
     report
+}
+
+/// What a run really did, read off its itemized lines.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Landed {
+    /// The plan's items that were written, by index.
+    items: HashSet<usize>,
+    copied: u64,
+    copied_bytes: u64,
+    made: u64,
+    /// Removed, counted as the plan counts extras: files, and folders with
+    /// nothing else removed under them.
+    removed: u64,
+}
+
+fn landed(plan: &SyncPlan, lines: &[Itemized]) -> Landed {
+    let roots: HashMap<&OsStr, usize> = plan
+        .roots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, root)| Some((root.dst.file_name()?, index)))
+        .collect();
+    let items: HashMap<(usize, &Path), usize> = plan
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| ((item.root, item.rel.as_path()), index))
+        .collect();
+    let mut out = Landed::default();
+    let mut deleted: Vec<(&Itemized, PathBuf)> = Vec::new();
+    for line in lines {
+        let mut components = line.name.components();
+        let Some(&root) = components
+            .next()
+            .and_then(|first| roots.get(first.as_os_str()))
+        else {
+            continue;
+        };
+        let rel = components.as_path();
+        match line.class {
+            Class::New | Class::Changed => {
+                if let Some(&index) = items.get(&(root, rel)) {
+                    out.items.insert(index);
+                }
+                match line.kind {
+                    Kind::Dir => out.made += 1,
+                    Kind::File => {
+                        out.copied += 1;
+                        out.copied_bytes += line.len;
+                    }
+                    _ => out.copied += 1,
+                }
+            }
+            Class::Extra => deleted.push((line, line.name.clone())),
+            Class::Unchanged => {}
+        }
+    }
+    let parents: HashSet<&Path> = deleted
+        .iter()
+        .flat_map(|(_, name)| name.ancestors().skip(1))
+        .collect();
+    out.removed = deleted
+        .iter()
+        .filter(|(line, name)| line.kind != Kind::Dir || !parents.contains(name.as_path()))
+        .count() as u64;
+    out
 }
 
 /// Whether a run was refused for `--fsync` alone: it failed, before any
@@ -803,11 +899,13 @@ fn flush_here<'a>(plan: &SyncPlan, items: impl Iterator<Item = &'a Item>, report
     }
 }
 
-/// What the run came to, and how many bytes the progress line had counted.
+/// What the run came to: how it ended, what it said, how many bytes the
+/// progress line had counted, and every path it itemized.
 struct Ran {
     status: Option<ExitStatus>,
     stderr: String,
     moved: u64,
+    lines: Vec<Itemized>,
 }
 
 /// Run `rsync`, turning its progress line into the task's bar: stopped while
@@ -828,15 +926,20 @@ fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCt
         std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
             let mut line = Vec::new();
+            let mut itemized = Vec::new();
             loop {
                 match pipe.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         for &byte in &buf[..n] {
                             if byte == b'\r' || byte == b'\n' {
+                                // The progress line is rewritten in place with
+                                // `\r`; an itemized path ends its own line.
                                 if let Some(bytes) = progress_bytes(&String::from_utf8_lossy(&line))
                                 {
                                     counted.fetch_max(bytes, Ordering::Relaxed);
+                                } else if byte == b'\n' {
+                                    itemized.extend(parse_line(&line));
                                 }
                                 line.clear();
                             } else {
@@ -846,6 +949,7 @@ fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCt
                     }
                 }
             }
+            itemized
         })
     });
     let stderr = child.stderr.take().map(drain_stderr);
@@ -870,9 +974,9 @@ fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCt
             );
         }
     })?;
-    if let Some(handle) = stdout {
-        let _ = handle.join();
-    }
+    let lines = stdout
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default();
     let last = counted.load(Ordering::Relaxed);
     if last > reported {
         ctx.advance(last - reported, 0);
@@ -882,6 +986,7 @@ fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCt
         status,
         stderr: stderr.and_then(|h| h.join().ok()).unwrap_or_default(),
         moved: reported,
+        lines,
     })
 }
 
@@ -890,14 +995,23 @@ fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCt
 /// The files a verify of `plan` reads, by index: what was copied, or every
 /// file of the source. Regular files only — `sha256sum` follows links, and a
 /// link's target text is not something it can be asked about.
-fn files_to_verify(plan: &SyncPlan, verify: Verify) -> Vec<usize> {
+///
+/// `landed`, once the run is over, is what it really wrote: before it, the
+/// plan's own list stands in, which is what the progress total is sized by.
+fn files_to_verify(plan: &SyncPlan, verify: Verify, landed: Option<&HashSet<usize>>) -> Vec<usize> {
     plan.items
         .iter()
         .enumerate()
         .filter(|(_, item)| item.kind == Kind::File)
-        .filter(|(_, item)| match verify {
-            Verify::Copied => matches!(item.class, Class::New | Class::Changed),
-            Verify::Everything => item.class != Class::Extra,
+        .filter(|(index, item)| {
+            let copied = match landed {
+                Some(landed) => landed.contains(index),
+                None => matches!(item.class, Class::New | Class::Changed),
+            };
+            match verify {
+                Verify::Copied => copied,
+                Verify::Everything => copied || item.class == Class::Unchanged,
+            }
         })
         .map(|(index, _)| index)
         .collect()
@@ -1057,6 +1171,13 @@ fn remote_digests(
 /// every name read from stdin. The folder is single-quoted for that shell —
 /// the one string here that passes through one.
 fn remote_script(folder: &Path) -> String {
+    if folder.to_str().is_none() {
+        log::warn!(
+            "{} is not UTF-8; the server is asked about {} instead",
+            folder.display(),
+            folder.to_string_lossy()
+        );
+    }
     let quoted = folder.to_string_lossy().replace('\'', r"'\''");
     format!("cd -- '{quoted}' && xargs -0 sha256sum --")
 }
@@ -1146,8 +1267,7 @@ mod tests {
             .collect()
     }
 
-    const RSH: &str =
-        "ssh -x -o BatchMode=yes -o ConnectTimeout=15 -p 2222 -i '/home/brian/my keys/id_ed25519'";
+    const RSH: &str = "'ssh' '-x' '-o' 'BatchMode=yes' '-o' 'ConnectTimeout=15' '-p' '2222' '-i' '/home/brian/my keys/id_ed25519' '-l' 'brian' '--'";
 
     #[test]
     fn the_run_is_rsync_archive_with_the_whole_transfer_counted_up_front() {
@@ -1158,16 +1278,17 @@ mod tests {
                 "-a",
                 "--info=progress2",
                 "--no-inc-recursive",
+                "--out-format=%i %l %n",
                 "-e",
                 RSH,
                 "--",
                 "/home/brian/Photos/2024",
                 "/home/brian/notes.txt",
-                "brian@showandtour1:backups/photos/",
+                "showandtour1:backups/photos/",
             ]
         );
         let mirror = strings(&t.run_args(Mode::Mirror, true, true));
-        assert_eq!(mirror[3..6], ["--delete-after", "--checksum", "--fsync"]);
+        assert_eq!(mirror[4..7], ["--delete-after", "--checksum", "--fsync"]);
         assert!(
             !mirror.contains(&"--delete".to_string()),
             "after, not during"
@@ -1214,7 +1335,7 @@ mod tests {
         );
         assert_eq!(
             Host::alias("showandtour1").rsh(),
-            "ssh -x -o BatchMode=yes -o ConnectTimeout=15"
+            "'ssh' '-x' '-o' 'BatchMode=yes' '-o' 'ConnectTimeout=15' '--'"
         );
     }
 
@@ -1755,6 +1876,123 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
             super::super::execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
         assert_eq!(report.problems(), 0, "{report:?}");
         assert!(!report.unflushed);
+    }
+
+    /// What `rsync` really hands its remote shell for our `-e`: every option
+    /// whole, a key with a space and a quote in its name included, the user
+    /// as `-l`, then `--`, then the host.
+    #[test]
+    fn rsync_hands_ssh_exactly_the_options_given() {
+        use std::os::unix::fs::PermissionsExt;
+        if !rsync_here() {
+            return;
+        }
+        let t = TempTree::new("rsync-rsh");
+        let src = t.file("src/a.txt", b"a");
+        let show = t.file(
+            "bin/show",
+            b"#!/bin/sh\nfor a in \"$@\"; do printf '[%s]\\n' \"$a\" >&2; done\nexit 1\n",
+        );
+        std::fs::set_permissions(&show, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = Host {
+            destination: "brian@showandtour1".to_string(),
+            port: Some(2222),
+            key: Some(PathBuf::from("/keys/brian's key")),
+            program: None,
+        };
+        let out = Command::new("rsync")
+            .arg("-e")
+            .arg(host.rsh_with(&show.to_string_lossy()))
+            .arg("-n")
+            .arg(&src)
+            .arg(format!("{}:x", host.host()))
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let words: Vec<&str> = stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix('[')?.strip_suffix(']'))
+            .take_while(|word| *word != "rsync")
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "-x",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=15",
+                "-p",
+                "2222",
+                "-i",
+                "/keys/brian's key",
+                "-l",
+                "brian",
+                "--",
+                "showandtour1",
+            ],
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn a_file_rsync_could_not_send_is_one_problem_not_two() {
+        use std::os::unix::fs::PermissionsExt;
+        if !rsync_here() {
+            return;
+        }
+        let t = TempTree::new("rsync-partial");
+        let photos = t.dir("src/photos");
+        t.file("src/photos/a.jpg", b"aaaa");
+        let locked = t.file("src/photos/locked.jpg", b"locked away");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let transfer = Transfer {
+            host: server(&t, false),
+            direction: Direction::Upload,
+            sources: vec![photos],
+            dest: t.dir("server"),
+        };
+        let plan = remote_plan(&transfer, &t);
+        assert_eq!(plan.new.count, 2, "the dry run cannot tell");
+        let report =
+            super::super::execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!((report.copied, report.copied_bytes), (1, 4), "{report:?}");
+        assert_eq!(report.verified, 1);
+        assert!(report.verify_failures.is_empty(), "{report:?}");
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert_eq!(report.errors[0].0, locked);
+    }
+
+    #[test]
+    fn what_landed_is_counted_from_the_run_itself() {
+        let roots = vec![Root {
+            src: PathBuf::from("/src/photos"),
+            dst: PathBuf::from("sftp://h/dst/photos"),
+        }];
+        let plan = plan_from(
+            parse_itemized(DRY_RUN.as_bytes()),
+            roots,
+            PathBuf::from("sftp://h/dst"),
+            SyncOptions::default(),
+            upload(),
+        );
+        // A run that sent one of the new files, made the new folder, and
+        // deleted a folder with a file in it.
+        let lines = parse_itemized(
+            b"cd+++++++++ 40 photos/empty/\n>f+++++++++ 4 photos/2024/a.jpg\n*deleting   0 photos/old/gone.jpg\n*deleting   0 photos/old/\n",
+        );
+        let landed = landed(&plan, &lines);
+        assert_eq!(
+            (
+                landed.copied,
+                landed.copied_bytes,
+                landed.made,
+                landed.removed
+            ),
+            (1, 4, 1, 1)
+        );
+        assert_eq!(landed.items.len(), 2);
     }
 
     #[test]
