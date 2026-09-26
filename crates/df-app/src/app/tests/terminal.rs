@@ -266,10 +266,12 @@ fn a_folder_rows_menu_opens_a_terminal_in_that_folder() {
 
 /// A search's hits are a listing, not a folder: `Ctrl+t` over them is
 /// refused with the sentence the other virtual listings get, the folder
-/// menu greys its row, and nothing is started.
+/// menu greys its row, and nothing is started. A folder *among* the hits is
+/// a real folder at its own path, though: its row menu's "Open terminal
+/// here" is live and opens the terminal in it.
 #[test]
-fn ctrl_t_is_refused_in_a_search_s_hits() {
-    let mut app = Fixture::with_folders("terminal-hits", &["a.txt"], &["src"]);
+fn ctrl_t_is_refused_in_a_search_s_hits_and_a_folder_row_s_terminal_is_not() {
+    let mut app = Fixture::with_folders("terminal-hits", &["a.txt"], &["src/deep"]);
     std::fs::write(app.files.join("src/foo.txt"), b"foo\n").expect("write the tree");
     let out = stub_terminal(&mut app);
     let ctx = egui::Context::default();
@@ -281,13 +283,12 @@ fn ctrl_t_is_refused_in_a_search_s_hits() {
     let search = app.search.as_mut().expect("the panel opened");
     search.seed("foo", now);
     let feed = search.feed();
-    feed.hits(vec![search::parse(
-        search::Mode::Names,
-        &root,
-        "foo",
-        "src/foo.txt",
-    )
-    .expect("a hit")]);
+    feed.hits(
+        ["src/foo.txt", "src/deep"]
+            .iter()
+            .map(|name| search::parse(search::Mode::Names, &root, "foo", name).expect("a hit"))
+            .collect(),
+    );
     feed.done(false);
     app.poll_workers();
     app.overlay_key(Chord::plain(Key::Enter), 10, now);
@@ -312,4 +313,33 @@ fn ctrl_t_is_refused_in_a_search_s_hits() {
 
     std::thread::sleep(Duration::from_millis(50));
     assert!(!out.exists(), "a terminal was opened over the hits");
+
+    let deep = root.join("src/deep");
+    let index = app
+        .tab()
+        .cwd
+        .dir
+        .position_of("src/deep")
+        .expect("the folder's row");
+    app.dir().set_cursor(index);
+    app.open_menu(egui::pos2(300.0, 300.0));
+    let items = &app.menu.as_ref().expect("up").items;
+    let terminal = items
+        .iter()
+        .find(|item| item.action == menu::Action::TerminalRow)
+        .expect("the folder row's terminal");
+    assert!(terminal.enabled, "greyed on a real folder among the hits");
+
+    app.menu_action(menu::Action::TerminalRow, 10, now);
+    let (argument, cwd) = opened_in(&out);
+    assert_eq!(argument, deep, "the row's folder, at its real path");
+    assert_eq!(
+        cwd.canonicalize().expect("real"),
+        deep.canonicalize().expect("real")
+    );
+    assert_eq!(
+        app.tab().virtual_kind(),
+        Some(Virtual::Hits),
+        "still the hits"
+    );
 }

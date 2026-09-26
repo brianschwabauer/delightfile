@@ -9782,6 +9782,19 @@ impl App {
     /// context menu is a second dispatch over the same verbs (see
     /// [`menu_command`]), and it used to reach them with only a hand-written
     /// branch for `d` standing between a remote row and a local trash job.
+    /// Whether a folder *row*'s "Open terminal here" is turned away, and
+    /// why: where `Ctrl+t` is — a folder in an archive, on a server or in the
+    /// trash is not on this disk — but not over a search's hits. There the
+    /// listing is not a folder, so `Ctrl+t` and the folder menu's row are
+    /// refused, while each folder row is a real folder at its own path
+    /// ([`Virtual::real_rows`]) and a terminal can open in it.
+    fn row_terminal_refusal(&self) -> Option<&'static str> {
+        match self.tab().virtual_kind() {
+            Some(kind) if kind.real_rows() => None,
+            _ => self.refusal(Command::TerminalHere),
+        }
+    }
+
     fn refuse_where_we_are(&mut self, command: Command, now: Instant) -> bool {
         match self.refusal(command) {
             Some(notice) => {
@@ -13063,7 +13076,7 @@ impl App {
         if facts.is_dir && !facts.trash {
             let pinnable = self.refusal(Command::PinToggle).is_none();
             menu::insert_pin_row(&mut items, self.row_pinned(), pinnable);
-            let local = self.refusal(Command::TerminalHere).is_none();
+            let local = self.row_terminal_refusal().is_none();
             menu::insert_terminal_row(&mut items, local);
         }
         // Grey where the gate would turn it away, rather than live to toast
@@ -13302,6 +13315,10 @@ impl App {
             // The row the menu opened on is the cursor by now (see
             // `right_click`), and a folder: the row is only offered on one.
             A::TerminalRow => {
+                if let Some(notice) = self.row_terminal_refusal() {
+                    self.toasts.notice(notice.to_string(), now);
+                    return;
+                }
                 if let Some(entry) = self.tab().cwd.dir.cursor_entry() {
                     let dir = entry.path.clone();
                     self.terminal_in(dir, now);
@@ -19323,16 +19340,22 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         // Pinning a row's folder is refused where pinning this one is: an
         // archive's folder is not somewhere to come back to.
         A::PinRow => C::PinToggle,
-        // A terminal in a row's folder is refused where one in this folder
-        // is: a folder in an archive or on a server is not on this disk.
-        A::TerminalRow => C::TerminalHere,
         A::Run(command) => command,
         // Choosing what a file dialog shows acts on no file, so no gate has
         // anything to refuse it: it works in an archive as it does anywhere.
         // Going to a place is going, which every door allows.
-        A::Restore | A::EmptyTrash | A::Nothing | A::FileType(_) | A::AllFiles | A::Place(_) => {
-            return None
-        }
+        //
+        // A terminal in a row's folder has a gate of its own
+        // ([`App::row_terminal_refusal`]): not `Ctrl+t`'s, which is about the
+        // folder on screen, and a search's hits are not one while each
+        // folder among them is.
+        A::Restore
+        | A::EmptyTrash
+        | A::Nothing
+        | A::FileType(_)
+        | A::AllFiles
+        | A::Place(_)
+        | A::TerminalRow => return None,
     })
 }
 
