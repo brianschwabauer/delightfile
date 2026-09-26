@@ -614,25 +614,33 @@ impl Bulk {
             .map(|(_, new)| new.clone())
     }
 
-    /// The same row's new file, in its folder — what a card over several
-    /// folders lands the cursor on.
-    pub fn first_change_path(&self) -> Option<PathBuf> {
+    /// The file the first row that changes names, *before* the card renames
+    /// it — what a card over several folders follows to land the cursor on,
+    /// through the renames as they ran (a folder it is in may be renamed too).
+    pub fn first_changed(&self) -> Option<PathBuf> {
         self.olds
             .iter()
             .zip(self.editor.lines())
             .zip(&self.folders)
             .find(|((old, new), _)| old != new)
-            .map(|((_, new), folder)| folder.join(new))
+            .map(|((old, _), folder)| folder.join(old))
     }
 
     /// The renames to carry out, in an order that is safe to run one at a time.
     ///
     /// Ordered folder by folder: a rename never crosses one, so the only
     /// collisions (and the only swaps) are between rows in the same folder.
+    ///
+    /// **The deepest folders first.** Over a search's hits a card can hold a
+    /// folder and files inside it, and a file whose folder has already been
+    /// renamed is not at the path the card knows it by any more. Renamed
+    /// before its folder, it is — and then goes with the folder.
     pub fn renames(&self) -> Vec<(PathBuf, PathBuf)> {
         let lines = self.editor.lines();
         let mut out = Vec::new();
-        for (folder, rows) in self.by_folder() {
+        let mut groups = self.by_folder();
+        groups.sort_by_key(|(folder, _)| std::cmp::Reverse(folder.components().count()));
+        for (folder, rows) in groups {
             let pairs: Vec<(String, String)> = rows
                 .iter()
                 .filter_map(|&row| Some((self.olds.get(row)?, lines.get(row)?)))
@@ -1511,6 +1519,7 @@ pub fn problems(names: &[&str], others: &HashSet<String>) -> Vec<Option<Problem>
     names
         .iter()
         .map(|name| {
+            // `/` only: see plans/other-platforms/03-paths.md for the port.
             if name.is_empty() || *name == "." || *name == ".." || name.contains('/') {
                 return Some(Problem::Unusable);
             }
@@ -2627,7 +2636,7 @@ mod tests {
                 (two.join("a.txt"), two.join("b.txt"))
             ]
         );
-        assert_eq!(bulk.first_change_path(), Some(one.join("b.txt")));
+        assert_eq!(bulk.first_changed(), Some(one.join("a.txt")));
 
         run(&mut bulk, "<ctrl+u>taken.txt");
         assert_eq!(bulk.problems(), vec![Some(Problem::Taken), None]);

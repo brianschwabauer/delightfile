@@ -63,16 +63,29 @@
 //!
 //! A directory listing is watched; a set of hits spread over a tree is not,
 //! because a watch per folder the search touched is a watch per folder in the
-//! tree. The rows are re-read instead whenever this program's own operations
-//! touch the tree — a rename renames its row, a trash or a move elsewhere takes
-//! the row out ([`View::refresh`]) — the way the trash view re-reads itself
-//! after a restore. A change another program makes shows after the next
-//! operation here, or after searching again.
+//! tree. The rows are re-read instead when this program's own operations touch
+//! them, the way the trash view re-reads itself after a restore: a rename
+//! renames its row and every row beneath it ([`View::follow`]), a trash or a
+//! move elsewhere takes the row out when its folder is re-read
+//! ([`View::reread`]), and `u` on a trash puts the rows it took out back
+//! ([`View::restore`]). Only the rows in the folder an operation touched are
+//! read again, never the whole set.
+//!
+//! The one folder that *is* watched is the root, for the parent column beside
+//! the hits. Its events, and a tab coming back on screen, do not re-read
+//! anything on the spot: the folders are marked and their rows are read again
+//! once the tree has been quiet for [`crate::folders::RESTALE_QUIET`], the
+//! quiet period the size column waits out for the same reason. A build writing
+//! into the root is a stream of events, and a synchronous stat of up to two
+//! thousand rows per event would be the window stalling for the length of the
+//! build. A change another program makes elsewhere in the tree shows after the
+//! next operation that touches its folder, or after searching again.
 //!
 //! ## What is refused
 //!
 //! The verbs that make something *in* the folder on screen — `a`, `p` and its
-//! variants, the links — have no folder here to make it in, and `g b` has no
+//! variants, the links, `A` and extract-here — have no folder here to make it
+//! in (and the row they made would never be one of these), and `g b` has no
 //! folder to pin. `.` is refused as well: which files the search saw is a
 //! property of the search, and the dotfiles it did not return are not hidden
 //! here, they were never found. Each says so, and the menus grey them
@@ -81,8 +94,9 @@
 //! An empty query in names mode lists everything under the root: the folder,
 //! flattened.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use df_core::fs::{DirState, Entry};
 use df_core::keymap::Command;
@@ -107,6 +121,25 @@ struct Found {
     count: usize,
 }
 
+/// A row an operation took out of the listing because its file went: what
+/// [`View::restore`] needs to put it back when `u` brings the file back.
+#[derive(Debug, Clone)]
+struct Gone {
+    name: String,
+    found: Option<Found>,
+}
+
+/// Which folders' rows are owed a re-read once the tree is quiet.
+#[derive(Debug, Clone, Default)]
+enum Stale {
+    #[default]
+    Nothing,
+    /// The rows in these folders.
+    In(HashSet<PathBuf>),
+    /// Every row: events were lost, or the tab has been off screen.
+    All,
+}
+
 /// The hits a tab is showing as its listing.
 pub struct View {
     /// The search the rows came from — still running when `Enter` came before
@@ -123,6 +156,12 @@ pub struct View {
     /// The row the root folder's cursor was on when the search was
     /// committed, which is where `←` puts it back.
     pub origin: Option<String>,
+    /// The rows taken out because their files went, by path.
+    gone: HashMap<PathBuf, Gone>,
+    /// What the watcher has said since the last re-read, and when it last
+    /// said it (see the module note's "No watcher").
+    stale: Stale,
+    stale_since: Option<Instant>,
 }
 
 impl View {
@@ -133,6 +172,9 @@ impl View {
             found: HashMap::new(),
             notes: HashMap::new(),
             origin,
+            gone: HashMap::new(),
+            stale: Stale::Nothing,
+            stale_since: None,
         }
     }
 
@@ -159,6 +201,12 @@ impl View {
     /// A names hit is a row. A content hit is a *line*, and a file with three
     /// matching lines is one row: the first line it arrives with is the one
     /// the column shows and the preview opens at, and the rest are counted.
+    ///
+    /// A hit whose file is no longer at its path is dropped. The walk read it
+    /// a moment ago, but the listing may have renamed or trashed it since —
+    /// and a late batch naming the old path would otherwise put the old name
+    /// back as a second, stale row beside the renamed one. One `lstat` per new
+    /// row, never per counted line.
     pub fn take(&mut self) -> Vec<Entry> {
         let mut rows = Vec::new();
         let fresh = self.search.hits.get(self.taken..).unwrap_or_default();
@@ -169,6 +217,9 @@ impl View {
                     self.notes.insert(hit.relative.clone(), note(found));
                     continue;
                 }
+            }
+            if hit.path.symlink_metadata().is_err() {
+                continue;
             }
             let Some(entry) = row(hit) else { continue };
             if self.search.mode == Mode::Content {
@@ -208,22 +259,134 @@ impl View {
         chip_query(self.mode(), self.query())
     }
 
-    /// Re-read every row after an operation touched the tree: `moved` renames
-    /// the rows it names first (old path to new), then each row is read from
-    /// the disk again and a row whose file is gone is taken out — its mark
-    /// with it, as a finished scan drops a mark on a file that went.
+    /// Follow renames this program made: every row at or beneath a `from` is
+    /// re-pathed, renamed, and read again — a folder's rename takes the hits
+    /// inside it along, rather than leaving them at a path that is gone.
     ///
-    /// The trash view's answer to a restore, for a listing that has no
-    /// directory to re-read: its rows are the only record of what it holds.
-    pub fn refresh(&mut self, dir: &mut DirState, moved: &[(PathBuf, PathBuf)]) {
+    /// `moved` is the renames in the order they ran, and each is applied to
+    /// where the previous ones left a row: a bulk rename renames a folder's
+    /// files before the folder, and a swap goes through a temporary name, and
+    /// both come out right only played in that order.
+    pub fn follow(&mut self, dir: &mut DirState, moved: &[(PathBuf, PathBuf)]) {
+        self.revise(dir, moved, |_| false);
+    }
+
+    /// Read the rows in `folders` again (every row, for `None`), taking out
+    /// the ones whose files went — and every row beneath a folder row that
+    /// went with them.
+    pub fn reread(&mut self, dir: &mut DirState, folders: Option<&HashSet<PathBuf>>) {
+        let gone = self.revise(dir, &[], |entry| match folders {
+            Some(folders) => entry.path.parent().is_some_and(|p| folders.contains(p)),
+            None => true,
+        });
+        if !gone.is_empty() {
+            self.revise(dir, &[], |entry| {
+                gone.iter().any(|folder| entry.path.starts_with(folder))
+            });
+        }
+    }
+
+    /// `u` brought `paths` back: the rows this listing took out when they
+    /// went are put back — and the rows beneath a folder that came back —
+    /// under the names they had, unmarked. A path the listing never had a row
+    /// for is not added: an undo of something done before the search is not a
+    /// hit. Returns whether any row came back.
+    pub fn restore(&mut self, dir: &mut DirState, paths: &[PathBuf]) -> bool {
+        let back: Vec<PathBuf> = self
+            .gone
+            .keys()
+            .filter(|gone| paths.iter().any(|path| gone.starts_with(path)))
+            .cloned()
+            .collect();
+        let mut rows = Vec::new();
+        for path in back {
+            let Some(gone) = self.gone.remove(&path) else {
+                continue;
+            };
+            let Ok(entry) = Entry::read(&path) else {
+                continue;
+            };
+            if dir.entries().iter().any(|row| row.name == gone.name) {
+                continue;
+            }
+            if let Some(found) = gone.found {
+                self.notes.insert(gone.name.clone(), note(&found));
+                self.found.insert(gone.name.clone(), found);
+            }
+            rows.push(Entry {
+                name: gone.name,
+                ..entry
+            });
+        }
+        if rows.is_empty() {
+            return false;
+        }
+        dir.extend_external(rows);
+        true
+    }
+
+    /// The watcher saw `folder` change: its rows are owed a re-read once the
+    /// tree has been quiet for [`crate::folders::RESTALE_QUIET`].
+    pub fn mark_stale(&mut self, folder: &Path, now: Instant) {
+        match &mut self.stale {
+            Stale::All => {}
+            Stale::In(folders) => {
+                folders.insert(folder.to_path_buf());
+            }
+            Stale::Nothing => self.stale = Stale::In(HashSet::from([folder.to_path_buf()])),
+        }
+        self.stale_since = Some(now);
+    }
+
+    /// Every row is owed a re-read, on the same quiet period.
+    pub fn mark_all_stale(&mut self, now: Instant) {
+        self.stale = Stale::All;
+        self.stale_since = Some(now);
+    }
+
+    /// The instant the owed re-read is due, when one is — a deadline for the
+    /// frame loop, never a poll (PLAN §1).
+    pub fn due_at(&self) -> Option<Instant> {
+        self.stale_since
+            .map(|since| since + crate::folders::RESTALE_QUIET)
+    }
+
+    /// Re-read what the watcher marked, if the tree has been quiet long
+    /// enough. Returns whether it did.
+    pub fn reread_due(&mut self, dir: &mut DirState, now: Instant) -> bool {
+        if self.due_at().is_none_or(|at| now < at) {
+            return false;
+        }
+        self.stale_since = None;
+        match std::mem::take(&mut self.stale) {
+            Stale::Nothing => return false,
+            Stale::In(folders) => self.reread(dir, Some(&folders)),
+            Stale::All => self.reread(dir, None),
+        }
+        true
+    }
+
+    /// Re-read the rows `wanted` picks and every row `moved` re-paths, taking
+    /// out the ones whose files went. Returns the folder rows that went, whose
+    /// contents' rows are going too.
+    fn revise(
+        &mut self,
+        dir: &mut DirState,
+        moved: &[(PathBuf, PathBuf)],
+        mut wanted: impl FnMut(&Entry) -> bool,
+    ) -> Vec<PathBuf> {
         let root = self.root().to_path_buf();
         let mut renamed: Vec<(String, String)> = Vec::new();
-        let mut gone: Vec<String> = Vec::new();
+        let mut gone: Vec<(PathBuf, String, bool)> = Vec::new();
         dir.retain_entries(|entry| {
-            if let Some((_, to)) = moved.iter().find(|(from, _)| *from == entry.path) {
-                let name = name_under(&root, to);
+            let to = moved_to(&entry.path, moved);
+            if to.is_none() && !wanted(entry) {
+                return true;
+            }
+            if let Some(to) = to {
+                let name = name_under(&root, &to);
                 renamed.push((entry.name.clone(), name.clone()));
-                entry.path = to.clone();
+                entry.path = to;
                 entry.name = name;
             }
             match Entry::read(&entry.path) {
@@ -233,7 +396,7 @@ impl View {
                     true
                 }
                 Err(_) => {
-                    gone.push(entry.name.clone());
+                    gone.push((entry.path.clone(), entry.name.clone(), entry.is_dir()));
                     false
                 }
             }
@@ -246,11 +409,35 @@ impl View {
                 self.notes.insert(new, note);
             }
         }
-        for name in gone {
-            self.found.remove(&name);
+        let mut folders = Vec::new();
+        for (path, name, is_dir) in gone {
             self.notes.remove(&name);
+            let found = self.found.remove(&name);
+            if is_dir {
+                folders.push(path.clone());
+            }
+            self.gone.insert(path, Gone { name, found });
+        }
+        folders
+    }
+}
+
+/// Where the renames in `moved`, run in order, leave the file at `path` — or
+/// `None` when none of them touched it. A rename of the file itself moves it,
+/// and so does a rename of any folder it is in.
+pub fn moved_to(path: &Path, moved: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
+    let mut at = path.to_path_buf();
+    for (from, to) in moved {
+        // Component by component, so `src2` is not taken for a file in `src`.
+        if let Ok(rest) = at.strip_prefix(from) {
+            at = if rest.as_os_str().is_empty() {
+                to.clone()
+            } else {
+                to.join(rest)
+            };
         }
     }
+    (at != path).then_some(at)
 }
 
 /// One hit as a row: the entry its worker read, named by its path from the
@@ -266,6 +453,7 @@ pub fn row(hit: &Hit) -> Option<Entry> {
 /// What a row at `path` is called in a listing rooted at `root`: the path
 /// from the root, or — for a file renamed out of it — the whole path, which
 /// `root.join` leaves as it is.
+// `/`-separated only: see plans/other-platforms/03-paths.md for the port.
 pub fn name_under(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .ok()
@@ -339,7 +527,12 @@ pub fn chip_crumb(label: String) -> crate::chrome::Crumb {
 pub fn refusal(command: Command) -> Option<&'static str> {
     use Command as C;
     Some(match command {
-        C::Create => "Search results are not a folder — ← goes back to make something there",
+        // …and `A` and extract-here, which make a file or a folder the way
+        // `a` does, in a folder that is not on screen: what they made would
+        // never be one of these rows, so nobody would see it land.
+        C::Create | C::ArchiveCreate | C::ArchiveExtractHere => {
+            "Search results are not a folder — ← goes back to make something there"
+        }
         C::Paste
         | C::PasteForce
         | C::PasteSync
@@ -360,8 +553,16 @@ mod tests {
         std::sync::Arc::new(|| {})
     }
 
+    /// A hit for `relative`, with the file made under `root` if it is not
+    /// there: a row is only taken for a file that is still at its path.
     fn hit(root: &Path, relative: &str, line: Option<usize>, text: &str) -> Hit {
         let path = root.join(relative);
+        if path.symlink_metadata().is_err() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the hit's folder");
+            }
+            std::fs::write(&path, b"x").expect("the hit's file");
+        }
         Hit {
             entry: Some(entry(&path)),
             path,
@@ -400,7 +601,8 @@ mod tests {
     /// path under it — the two facts the whole module rests on.
     #[test]
     fn a_names_hit_is_a_row_named_from_the_root() {
-        let root = PathBuf::from("/r");
+        let tree = df_core::test_support::TempTree::new("hits-names");
+        let root = tree.path().to_path_buf();
         let mut search = Search::new(Mode::Names, &root, false, silent());
         search.hits = vec![
             hit(&root, "src/app/foo.rs", None, ""),
@@ -419,7 +621,8 @@ mod tests {
     /// line — trimmed — and, past one, how many.
     #[test]
     fn content_hits_fold_into_one_row_per_file() {
-        let root = PathBuf::from("/r");
+        let tree = df_core::test_support::TempTree::new("hits-content");
+        let root = tree.path().to_path_buf();
         let mut search = Search::new(Mode::Content, &root, false, silent());
         search.hits = vec![
             hit(&root, "a.rs", Some(12), "\tlet x = 1;"),
@@ -485,7 +688,8 @@ mod tests {
         );
     }
 
-    /// The four refusals the brief names, and a verb that works.
+    /// What makes something here is refused — `A` and extract-here with the
+    /// same sentence as `a` — and a verb on the rows works.
     #[test]
     fn making_something_here_is_refused_and_acting_on_rows_is_not() {
         for command in [
@@ -494,16 +698,54 @@ mod tests {
             Command::PasteForce,
             Command::PasteSync,
             Command::ToggleHidden,
+            Command::ArchiveCreate,
+            Command::ArchiveExtractHere,
         ] {
             assert!(refusal(command).is_some(), "{}", command.id());
         }
-        for command in [
-            Command::Rename,
-            Command::Trash,
-            Command::Yank,
-            Command::ArchiveCreate,
-        ] {
+        assert_eq!(refusal(Command::ArchiveCreate), refusal(Command::Create));
+        assert_eq!(
+            refusal(Command::ArchiveExtractHere),
+            refusal(Command::Create)
+        );
+        for command in [Command::Rename, Command::Trash, Command::Yank] {
             assert_eq!(refusal(command), None, "{}", command.id());
         }
+    }
+
+    /// Renames run in order carry every row beneath them: a folder's rename
+    /// moves the hits inside it, a file renamed before its folder ends up in
+    /// the renamed folder, `src2` is not inside `src`, and a swap through a
+    /// temporary name comes out swapped.
+    #[test]
+    fn a_rename_carries_the_rows_beneath_it() {
+        let p = PathBuf::from;
+        let folder = [(p("/r/src/deep"), p("/r/src/deeper"))];
+        assert_eq!(
+            moved_to(Path::new("/r/src/deep/a.txt"), &folder),
+            Some(p("/r/src/deeper/a.txt"))
+        );
+        assert_eq!(
+            moved_to(Path::new("/r/src/deep"), &folder),
+            Some(p("/r/src/deeper"))
+        );
+        assert_eq!(moved_to(Path::new("/r/src/deep2/a.txt"), &folder), None);
+
+        let child_then_folder = [
+            (p("/r/src/deep/a.txt"), p("/r/src/deep/b.txt")),
+            (p("/r/src/deep"), p("/r/src/deeper")),
+        ];
+        assert_eq!(
+            moved_to(Path::new("/r/src/deep/a.txt"), &child_then_folder),
+            Some(p("/r/src/deeper/b.txt"))
+        );
+
+        let swap = [
+            (p("/r/a"), p("/r/b.df-rename-1")),
+            (p("/r/b"), p("/r/a")),
+            (p("/r/b.df-rename-1"), p("/r/b")),
+        ];
+        assert_eq!(moved_to(Path::new("/r/a"), &swap), Some(p("/r/b")));
+        assert_eq!(moved_to(Path::new("/r/b"), &swap), Some(p("/r/a")));
     }
 }

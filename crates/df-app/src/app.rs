@@ -2563,10 +2563,19 @@ impl App {
         // behind the rows they have already put there. Every tab, as the
         // scanner's updates below are: a search committed in a tab now behind
         // the strip is still filling it.
-        for tab in self.tabs.iter_mut() {
-            if tab.poll_hits() {
-                changed = true;
-            }
+        let active = self.tabs.active_index();
+        let mut landed_here = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let polled = tab.poll_hits(now);
+            changed |= polled.changed;
+            landed_here |= polled.landed && index == active;
+        }
+        // A batch re-sorts the rows, and a visual run is anchored to a
+        // *position*: left standing, it would stretch over whatever rows the
+        // batch pushed under it. It ends, as it ends when the hits are
+        // committed.
+        if landed_here {
+            self.visual = None;
         }
         if let Some(thumbs) = &mut self.thumbs {
             if thumbs.poll(ctx.as_ref()) {
@@ -2667,7 +2676,7 @@ impl App {
         for event in self.watcher.drain() {
             changed = true;
             match event {
-                WatchEvent::Changed(dir) => self.rescan(&dir, now),
+                WatchEvent::Changed(dir) => self.rescan_from(&dir, RescanBy::Watcher, now),
                 // The directory we are in stopped existing. Walking up to the
                 // nearest ancestor that still does is what a person would do
                 // by hand, and leaving the pane showing a listing of a deleted
@@ -2685,7 +2694,17 @@ impl App {
         changed
     }
 
+    /// Re-read `dir` after this program changed something in it.
     fn rescan(&mut self, dir: &Path, now: Instant) {
+        self.rescan_from(dir, RescanBy::Operation, now);
+    }
+
+    /// Re-read `dir`, saying who is asking: an operation of this program, or
+    /// the watcher. The two differ only over a search's hits
+    /// ([`crate::hits`]'s "No watcher"): an operation's folder has its rows
+    /// read again at once, and the watcher's is marked, to be read once the
+    /// tree has been quiet for [`crate::folders::RESTALE_QUIET`].
+    fn rescan_from(&mut self, dir: &Path, source: RescanBy, now: Instant) {
         // **A listing is only ever re-read from a real directory.** `dir` comes
         // from watcher events, from an operation's touched paths and from a
         // finished remote job, and one of those used to be able to carry an
@@ -2725,11 +2744,14 @@ impl App {
         let tab = self.tabs.active_mut();
         // A search's hits have the root as their path and are not its
         // listing: a scan of it would replace them with the root's own rows.
-        // They are re-read row by row instead, for any change inside the
-        // tree they came from (PLAN §7.2, `crate::hits`'s "No watcher").
-        if let Some(root) = tab.hits.as_ref().map(|view| view.root().to_path_buf()) {
-            if dir.starts_with(&root) {
-                tab.refresh_hits(&[]);
+        // Only the rows in `dir` are read again, and only an operation's
+        // folder on the spot (PLAN §7.2, `crate::hits`'s "No watcher").
+        if tab.hits.is_some() {
+            match source {
+                RescanBy::Operation => {
+                    tab.reread_hits(Some(&HashSet::from([dir.to_path_buf()])));
+                }
+                RescanBy::Watcher => tab.hits_changed(dir, now),
             }
         } else if dir == tab.cwd.path() {
             tab.cwd.begin_scan(scanner, now);
@@ -4918,9 +4940,11 @@ impl App {
         // Asked before the undo, because afterwards the record is gone and the
         // report only says which paths it touched, not what kind of touch.
         let restores = self.journal.peek().is_some_and(undo_restores);
-        // A rename taken back, in a search's hits: the rows it renamed are
-        // renamed back, the way they followed it forward — a row re-read
-        // under the name it no longer has would simply go.
+        // What the undo does to a search's hits, read off the record before it
+        // is gone. A rename taken back renames its rows back, in the order the
+        // journal moves the files (its record order), the way they followed it
+        // forward — a row re-read under the name it no longer has would simply
+        // go. A trash taken back brings back the rows the trash took out.
         let back_again: Vec<(PathBuf, PathBuf)> = match self.journal.peek() {
             Some(OpRecord::Rename { moved }) => vec![(moved.to.clone(), moved.from.clone())],
             Some(OpRecord::Renames { moved }) => moved
@@ -4929,26 +4953,43 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
+        let untrashed: Vec<PathBuf> = match self.journal.peek() {
+            Some(OpRecord::Trash { items }) => {
+                items.iter().map(|item| item.original.clone()).collect()
+            }
+            _ => Vec::new(),
+        };
         match self.journal.undo(&TaskCtx::detached()) {
             Ok(report) => {
                 // The refusal *and* the success are the user's words: df-core
                 // writes these to be read, so they are shown verbatim.
                 self.toasts.notice(report.description.clone(), now);
-                // Only the ones that really went back: an undo refused
-                // part way leaves the rest where they were.
-                let back_again: Vec<(PathBuf, PathBuf)> = back_again
-                    .into_iter()
-                    .filter(|(now_at, back)| {
-                        now_at.symlink_metadata().is_err() && back.symlink_metadata().is_ok()
-                    })
-                    .collect();
-                if self.tab().hits.is_some() && !back_again.is_empty() {
-                    self.tabs.active_mut().refresh_hits(&back_again);
+                // An `Ok` is the whole record undone: a move that stops part
+                // way comes back as an error and a record of what is left.
+                let hits = self.tab().hits.as_ref().map(|v| v.root().to_path_buf());
+                if hits.is_some() {
+                    let tab = self.tabs.active_mut();
+                    tab.follow_hits(&back_again);
+                    tab.restore_hits(&untrashed);
                 }
                 for dir in Self::affected(&report.touched, None) {
                     self.rescan(&dir, now);
                 }
                 self.refresh_all(now);
+                // In a search's hits the row that came back is named by its
+                // path from the root, and it is the cursor's.
+                if let (true, Some(root)) = (restores, hits) {
+                    let back = report
+                        .touched
+                        .iter()
+                        .map(|path| crate::hits::name_under(&root, path))
+                        .find(|name| self.tab().cwd.dir.position_of(name).is_some());
+                    if let Some(name) = back {
+                        self.dir().cursor_to_name(&name);
+                        self.attach_view();
+                    }
+                    return;
+                }
                 // A rename taken back, or a trash restored, is a row coming
                 // back — the old name, the file out of the trash — and the
                 // cursor goes to it: the first of them that is in this
@@ -5319,7 +5360,17 @@ impl App {
             .map(|entry| entry.path.clone())
             .collect();
         if folders.is_empty() {
-            folders.push(self.cwd());
+            // The folder on screen — which over a search's hits is not the
+            // root they are named from but the folder the cursor's row is in,
+            // the one a pick of that row answers with too (`pick_row`).
+            let here = match &self.tab().hits {
+                Some(_) => dir
+                    .cursor_entry()
+                    .and_then(|entry| entry.path.parent())
+                    .map(Path::to_path_buf),
+                None => None,
+            };
+            folders.push(here.unwrap_or_else(|| self.cwd()));
         }
         if folders.len() > 1 && self.single_pick() {
             self.toasts.notice(self.one_only(), now);
@@ -8203,11 +8254,13 @@ impl App {
         }
         let renames = bulk.renames();
         let dir = bulk.dir.clone();
-        // In a search's hits a row is named by its path from the root, so the
-        // cursor goes to that; in a folder, to the new name.
+        // In a search's hits a row is named by its path from the root, and
+        // the cursor follows the first changed file's row by its name before
+        // the card (`run_bulk` follows it through the renames); in a folder it
+        // goes to the new name.
         let cursor_on = match &self.tab().hits {
             Some(_) => bulk
-                .first_change_path()
+                .first_changed()
                 .map(|path| crate::hits::name_under(&dir, &path)),
             None => bulk.first_change(),
         };
@@ -8238,11 +8291,14 @@ impl App {
     ) {
         let mut moved: Vec<MovedPath> = Vec::new();
         let mut failed: Option<String> = None;
+        // How many of the renames ran, temporaries and all.
+        let mut ran = 0;
         for (from, to) in &renames {
             if let Err(e) = df_core::ops::create::rename(from, to, false) {
                 failed = Some(e.to_string());
                 break;
             }
+            ran += 1;
             match MovedPath::record(from, to) {
                 Ok(record) => moved.push(record),
                 // The rename happened but cannot be described, so it cannot be
@@ -8260,14 +8316,21 @@ impl App {
         let moved = collapse_renames(moved);
         let count = moved.len();
         // A search's hits have no scan to bring the new names: the rows are
-        // renamed where they stand, before anything is re-read.
-        if self.tab().hits.is_some() {
-            let pairs: Vec<(PathBuf, PathBuf)> = moved
-                .iter()
-                .map(|record| (record.from.clone(), record.to.clone()))
-                .collect();
-            self.tabs.active_mut().refresh_hits(&pairs);
-        }
+        // renamed where they stand. Followed through the renames *as they
+        // ran*, temporaries included — a swap only comes out swapped played in
+        // that order, and a file renamed before its folder only lands in the
+        // renamed folder that way.
+        let cursor_on = match &self.tab().hits {
+            Some(_) => {
+                self.tabs.active_mut().follow_hits(&renames[..ran]);
+                cursor_on.map(|name| {
+                    let was = dir.join(&name);
+                    let now_at = crate::hits::moved_to(&was, &renames[..ran]).unwrap_or(was);
+                    crate::hits::name_under(&dir, &now_at)
+                })
+            }
+            None => cursor_on,
+        };
         if !moved.is_empty() {
             self.journal.record(OpRecord::Renames { moved });
         }
@@ -8671,7 +8734,7 @@ impl App {
         if let Some(root) = self.tab().hits.as_ref().map(|v| v.root().to_path_buf()) {
             self.tabs
                 .active_mut()
-                .refresh_hits(&[(from.clone(), to.clone())]);
+                .follow_hits(&[(from.clone(), to.clone())]);
             // The folder it is in may be the root, which the parent column
             // is listing.
             if let Some(folder) = to.parent() {
@@ -9714,7 +9777,7 @@ impl App {
                     search.cancel();
                 }
                 // …and one still filling a listing, which keeps what it found.
-                self.tabs.active_mut().stop_hits();
+                self.tabs.active_mut().stop_hits(now);
             }
 
             // ── Windows (PLAN §2) ───────────────────────────────────────────
@@ -17894,6 +17957,15 @@ impl App {
             .folders
             .due_at()
             .map(|at| at.saturating_duration_since(now));
+        // …and a search's hits, whose folders the watcher marked: their rows
+        // are read again at one instant known in advance, on the same quiet
+        // period (`crate::hits`'s "No watcher").
+        let hits = self
+            .tabs
+            .iter()
+            .filter_map(Tab::hits_due_at)
+            .min()
+            .map(|at| at.saturating_duration_since(now));
         // …and the clipboard's patience. A native copy or paste that is never
         // answered has to fail *out loud*, and it cannot do that on a frame
         // nothing asked for (see [`CLIPBOARD_ANSWER`]).
@@ -17925,6 +17997,7 @@ impl App {
             search,
             state,
             folders,
+            hits,
             clipboard,
             wl_copy,
             // …and the trash's clock. Nothing before the first frame; after
@@ -18949,6 +19022,16 @@ fn extract_focus<'a>(dests: impl IntoIterator<Item = &'a Path>, into: &Path) -> 
 /// rest take something *away* — the copies a paste made, a created file, a
 /// link — or move it somewhere else entirely, and there is no row left to land
 /// on.
+/// Who asked for a directory to be re-read ([`App::rescan_from`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RescanBy {
+    /// An operation of this program finished, and changed what it names.
+    Operation,
+    /// The watcher saw the directory change — something else, or this
+    /// program's own write arriving a second time as an event.
+    Watcher,
+}
+
 fn undo_restores(record: &OpRecord) -> bool {
     matches!(
         record,

@@ -448,12 +448,7 @@ fn making_something_in_the_hits_is_refused() {
     ] {
         assert!(app.refusal(command).is_some(), "{} is live", command.id());
     }
-    for command in [
-        Command::Rename,
-        Command::Trash,
-        Command::Yank,
-        Command::ArchiveCreate,
-    ] {
+    for command in [Command::Rename, Command::Trash, Command::Yank] {
         assert_eq!(app.refusal(command), None, "{} is refused", command.id());
     }
 }
@@ -598,4 +593,228 @@ fn a_content_hit_shows_its_line_and_opens_there() {
         Some(root.join("docs/foo.txt").as_path())
     );
     assert_eq!(app.preview.scroll(), 1, "opened at line 2");
+}
+
+/// `src/deep` and `src/deep/foo.txt` as hits, finished.
+fn commit_folder_and_child(app: &mut App) {
+    let feed = panel(app, search::Mode::Names, "deep");
+    feed.hits(vec![named(app, "src/deep"), named(app, "src/deep/foo.txt")]);
+    feed.done(false);
+    poll(app);
+    app.overlay_key(Chord::plain(Key::Enter), 10, Instant::now());
+}
+
+/// **Review 1.** Renaming a folder's row takes every hit inside it along —
+/// they used to be re-read at the old path and dropped.
+#[test]
+fn renaming_a_folder_hit_carries_the_hits_inside_it() {
+    let mut app = tree("hits-rename-folder");
+    let root = app.files.clone();
+    commit_folder_and_child(&mut app);
+    let now = Instant::now();
+    app.dir().cursor_to_name("src/deep");
+    app.run(Command::Rename, 10, now);
+    app.submit_prompt("deeper".to_string(), now);
+
+    let mut names = rows(&app);
+    names.sort();
+    assert_eq!(names, ["src/deeper", "src/deeper/foo.txt"]);
+    let child = app.tab().cwd.dir.row(
+        app.tab()
+            .cwd
+            .dir
+            .position_of("src/deeper/foo.txt")
+            .expect("the child's row"),
+    );
+    assert_eq!(
+        child.map(|e| e.path.clone()),
+        Some(root.join("src/deeper/foo.txt"))
+    );
+    assert_eq!(cursor(&app).as_deref(), Some("src/deeper"));
+}
+
+/// **Review 1, the card.** A bulk rename of a folder and a file inside it
+/// renames the file first — or the folder's rename would leave it at a path
+/// that is gone — and both rows follow.
+#[test]
+fn the_bulk_card_renames_a_file_before_its_folder() {
+    let mut app = tree("hits-bulk-nested");
+    let root = app.files.clone();
+    commit_folder_and_child(&mut app);
+    let now = Instant::now();
+    app.run(Command::SelectAll, 10, now);
+    app.run(Command::Rename, 10, now);
+    let Some(Dialog::Bulk(bulk)) = &mut app.dialog else {
+        panic!("no card");
+    };
+    for chord in [
+        Chord::plain(Key::Home),
+        Chord::plain(Key::Char('x')),
+        Chord::plain(Key::Char('-')),
+    ] {
+        bulk.key(chord);
+    }
+    assert!(bulk.valid(), "{:?}", bulk.problems());
+    app.submit_bulk(now);
+
+    assert!(
+        root.join("src/x-deep/x-foo.txt").exists(),
+        "the file was left behind"
+    );
+    let mut names = rows(&app);
+    names.sort();
+    assert_eq!(names, ["src/x-deep", "src/x-deep/x-foo.txt"]);
+}
+
+/// **Review 2.** A watcher event does not re-read anything on the spot: the
+/// folder is marked, and its rows — only its — are read again once the tree
+/// has been quiet for `RESTALE_QUIET`. An operation's folder is read at
+/// once, and only that folder.
+#[test]
+fn the_watcher_is_coalesced_and_only_the_touched_folder_is_read() {
+    let mut app = tree("hits-coalesce");
+    let root = app.files.clone();
+    commit_three(&mut app);
+    std::fs::remove_file(root.join("src/foo.txt")).expect("remove");
+    std::fs::remove_file(root.join("docs/foo.txt")).expect("remove");
+
+    // An operation in `docs`: that folder's row goes now, `src`'s stays.
+    let now = Instant::now();
+    app.rescan(&root.join("docs"), now);
+    let mut names = rows(&app);
+    names.sort();
+    assert_eq!(names, ["src/deep/foo.txt", "src/foo.txt"]);
+
+    // The watcher on `src`: nothing yet, and a deadline rather than a poll.
+    app.rescan_from(&root.join("src"), RescanBy::Watcher, now);
+    assert!(rows(&app).contains(&"src/foo.txt".to_string()));
+    let due = app.tab().hits_due_at().expect("a re-read is owed");
+    assert_eq!(due, now + crate::folders::RESTALE_QUIET);
+    // A second event pushes it out rather than reading.
+    let later = now + crate::folders::RESTALE_QUIET / 2;
+    app.rescan_from(&root.join("src"), RescanBy::Watcher, later);
+    assert!(
+        !app.tabs.active_mut().poll_hits(due).changed,
+        "not quiet yet"
+    );
+    assert!(rows(&app).contains(&"src/foo.txt".to_string()));
+
+    let quiet = later + crate::folders::RESTALE_QUIET;
+    assert!(app.tabs.active_mut().poll_hits(quiet).changed);
+    assert_eq!(rows(&app), ["src/deep/foo.txt"]);
+    assert_eq!(app.tab().hits_due_at(), None, "nothing more is owed");
+}
+
+/// **Review 3.** `d` then `u`: the row comes back, under its name and without
+/// its mark. The trash is the sandbox's own, so nothing reaches the real one:
+/// the file is trashed there and journalled as `d`'s job journals it, and the
+/// folder is re-read as the job's end re-reads it.
+#[test]
+fn undoing_a_trash_brings_the_row_back_unmarked() {
+    let mut app = tree("hits-untrash");
+    let root = app.files.clone();
+    commit_three(&mut app);
+    let now = Instant::now();
+    app.dir().cursor_to_name("docs/foo.txt");
+    app.run(Command::ToggleSelect, 10, now);
+    assert!(app.tab().cwd.dir.is_selected("docs/foo.txt"));
+
+    let trash = df_core::ops::Trash::at(root.join("..").join("Trash"));
+    let item = trash
+        .trash(&root.join("docs/foo.txt"), &TaskCtx::detached())
+        .expect("trashed");
+    app.journal.record(OpRecord::Trash { items: vec![item] });
+    app.rescan(&root.join("docs"), now);
+    assert!(!rows(&app).contains(&"docs/foo.txt".to_string()));
+
+    app.run(Command::Undo, 10, now);
+    assert!(root.join("docs/foo.txt").exists());
+    assert!(
+        rows(&app).contains(&"docs/foo.txt".to_string()),
+        "the row stayed gone"
+    );
+    assert!(
+        !app.tab().cwd.dir.is_selected("docs/foo.txt"),
+        "the mark came back"
+    );
+    assert_eq!(cursor(&app).as_deref(), Some("docs/foo.txt"));
+}
+
+/// **Review 4.** `A` and extract-here are refused with `a`'s sentence: what
+/// they make would land in a folder that is not on screen.
+#[test]
+fn archive_and_extract_here_are_refused_in_the_hits() {
+    let mut app = tree("hits-archive");
+    commit_three(&mut app);
+    let now = Instant::now();
+    app.run(Command::ArchiveCreate, 10, now);
+    assert!(app.prompt.is_none(), "`A` opened its prompt");
+    let said = toast_text(&app).map(str::to_string);
+    assert_eq!(said.as_deref(), app.refusal(Command::Create));
+    app.run(Command::ArchiveExtractHere, 10, now);
+    assert_eq!(toast_text(&app), app.refusal(Command::Create));
+}
+
+/// **Review 5.** A folder dialog's button with nothing selected picks the
+/// folder the cursor's row is in, as a pick of that row does — not the root
+/// the hits are named from.
+#[test]
+fn a_folder_dialog_over_hits_picks_the_cursor_rows_folder() {
+    let mut app = tree("hits-pick-folder");
+    let root = app.files.clone();
+    app.chooser = Some(crate::cli::Chooser {
+        directory: true,
+        ..crate::cli::Chooser::new(root.join("..").join("out"))
+    });
+    commit_three(&mut app);
+    assert_eq!(cursor(&app).as_deref(), Some("src/deep/foo.txt"));
+    app.press_pick(Instant::now());
+    assert_eq!(app.chosen, [root.join("src/deep")]);
+}
+
+/// **Review 6.** A batch the walk read before a row was renamed, landing
+/// after it, does not put the old name back beside the new one.
+#[test]
+fn a_late_hit_for_a_renamed_file_is_dropped() {
+    let mut app = tree("hits-late");
+    let now = Instant::now();
+    let feed = panel(&mut app, search::Mode::Names, "foo");
+    // Read by the "worker" while the file was still called that.
+    let late = named(&app, "docs/foo.txt");
+    feed.hits(vec![named(&app, "src/foo.txt")]);
+    poll(&mut app);
+    app.overlay_key(Chord::plain(Key::Enter), 10, now);
+    std::fs::rename(
+        app.files.join("docs/foo.txt"),
+        app.files.join("docs/bar.txt"),
+    )
+    .expect("rename");
+
+    feed.hits(vec![late]);
+    poll(&mut app);
+    assert_eq!(
+        rows(&app),
+        ["src/foo.txt"],
+        "a row for a file that is not there"
+    );
+}
+
+/// **Review 7.** A batch landing in the hits re-sorts them, so a visual run
+/// anchored to a position ends rather than stretching over other rows.
+#[test]
+fn a_batch_landing_ends_a_visual_run() {
+    let mut app = tree("hits-visual");
+    let now = Instant::now();
+    let feed = panel(&mut app, search::Mode::Names, "foo");
+    feed.hits(vec![named(&app, "src/foo.txt")]);
+    poll(&mut app);
+    app.overlay_key(Chord::plain(Key::Enter), 10, now);
+    app.run(Command::VisualMode, 10, now);
+    assert!(app.visual.is_some());
+
+    poll(&mut app);
+    assert!(app.visual.is_some(), "nothing landed, and the run ended");
+    feed.hits(vec![named(&app, "docs/foo.txt")]);
+    poll(&mut app);
+    assert!(app.visual.is_none());
 }

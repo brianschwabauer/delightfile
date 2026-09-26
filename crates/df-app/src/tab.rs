@@ -372,6 +372,17 @@ impl Listing {
     }
 }
 
+/// What [`Tab::poll_hits`] found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HitsPolled {
+    /// Anything on screen changed: rows, the loading state, a re-read.
+    pub changed: bool,
+    /// A batch of new rows landed — which re-sorts the listing, and so
+    /// moves every row a position-anchored gesture (a visual run) was
+    /// counting from.
+    pub landed: bool,
+}
+
 /// A tab's identity, stable for as long as the tab is open.
 ///
 /// Not its index: tabs are reordered with `{`/`}`, closed from anywhere in the
@@ -893,43 +904,77 @@ impl Tab {
     }
 
     /// Whatever the running search has found since the last look, into the
-    /// rows. Returns whether anything changed.
+    /// rows — and the re-read the watcher's marks are owed, once it is due.
     ///
     /// Through [`DirState::extend_external`], the rebuild a scanner's batch
     /// goes through: the rows are sorted as they land and the cursor stays on
     /// its name, so a list still filling never moves under the hand. The walk
     /// ending — or `Ctrl+s` ending it — finishes the listing.
-    pub fn poll_hits(&mut self) -> bool {
+    pub fn poll_hits(&mut self, now: Instant) -> HitsPolled {
         let Some(view) = &mut self.hits else {
-            return false;
+            return HitsPolled::default();
         };
         let polled = view.search.poll();
         let rows = view.take();
         let running = view.running();
-        let changed = polled || !rows.is_empty();
-        if !rows.is_empty() {
+        let landed = !rows.is_empty();
+        let mut changed = polled || landed;
+        if landed {
             self.cwd.dir.extend_external(rows);
         }
         if !running && self.cwd.dir.state() == df_core::fs::LoadState::Loading {
             self.cwd.dir.finish_external();
-            return true;
+            changed = true;
         }
-        changed
+        if view.reread_due(&mut self.cwd.dir, now) {
+            changed = true;
+        }
+        HitsPolled { changed, landed }
+    }
+
+    /// When the hits' owed re-read is due, if one is ([`crate::hits::View::due_at`]).
+    pub fn hits_due_at(&self) -> Option<Instant> {
+        self.hits.as_ref().and_then(crate::hits::View::due_at)
     }
 
     /// `Ctrl+s` in the listing: stop the walk and keep what it found.
-    pub fn stop_hits(&mut self) {
+    pub fn stop_hits(&mut self, now: Instant) {
         if let Some(view) = &mut self.hits {
             view.search.cancel();
         }
-        self.poll_hits();
+        self.poll_hits(now);
     }
 
-    /// Re-read the rows after an operation touched the tree, renaming the ones
-    /// `moved` names first ([`crate::hits::View::refresh`]).
-    pub fn refresh_hits(&mut self, moved: &[(PathBuf, PathBuf)]) {
+    /// Carry the rows along renames this program made, in the order it made
+    /// them ([`crate::hits::View::follow`]).
+    pub fn follow_hits(&mut self, moved: &[(PathBuf, PathBuf)]) {
         if let Some(view) = &mut self.hits {
-            view.refresh(&mut self.cwd.dir, moved);
+            view.follow(&mut self.cwd.dir, moved);
+        }
+    }
+
+    /// Read the rows in `folders` again, now — every row for `None`
+    /// ([`crate::hits::View::reread`]).
+    pub fn reread_hits(&mut self, folders: Option<&std::collections::HashSet<PathBuf>>) {
+        if let Some(view) = &mut self.hits {
+            view.reread(&mut self.cwd.dir, folders);
+        }
+    }
+
+    /// Put back the rows for files an undo brought back
+    /// ([`crate::hits::View::restore`]).
+    pub fn restore_hits(&mut self, paths: &[PathBuf]) -> bool {
+        match &mut self.hits {
+            Some(view) => view.restore(&mut self.cwd.dir, paths),
+            None => false,
+        }
+    }
+
+    /// The watcher saw `folder` change: its rows are re-read once the tree is
+    /// quiet ([`crate::hits::View::mark_stale`]).
+    pub fn hits_changed(&mut self, folder: &Path, now: Instant) {
+        if let Some(view) = &mut self.hits {
+            view.mark_stale(folder, now);
         }
     }
 
@@ -997,10 +1042,12 @@ impl Tab {
         }
         // A search's hits are re-read row by row rather than scanned: their
         // path is the root, and a scan of it would replace the hits with the
-        // root's own listing. The column beside them is the root, which is a
-        // folder and is re-read as one.
-        if self.hits.is_some() {
-            self.refresh_hits(&[]);
+        // root's own listing. Not on the spot — this is also the watcher's
+        // "events were lost" path — but once the tree is quiet
+        // ([`crate::hits`]'s "No watcher"). The column beside them is the
+        // root, which is a folder and is re-read as one.
+        if let Some(view) = &mut self.hits {
+            view.mark_all_stale(now);
             if let Some(parent) = &mut self.parent {
                 parent.begin_scan(scanner, now);
             }
@@ -1040,10 +1087,10 @@ impl Tab {
     /// (PLAN §2 watches the active tab's directories), so what it is showing may
     /// be minutes old, but it is showing the right *place* and should not jump.
     pub fn rescan(&mut self, scanner: &Scanner, now: Instant) {
-        // Hits are re-read row by row, and the root beside them is a folder
-        // (see [`Tab::rescan_all`]).
-        if self.hits.is_some() {
-            self.refresh_hits(&[]);
+        // Hits are re-read row by row once the tree is quiet, and the root
+        // beside them is a folder (see [`Tab::rescan_all`]).
+        if let Some(view) = &mut self.hits {
+            view.mark_all_stale(now);
             if let Some(parent) = &mut self.parent {
                 parent.begin_scan(scanner, now);
             }

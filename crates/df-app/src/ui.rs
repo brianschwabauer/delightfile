@@ -1746,6 +1746,7 @@ impl Painting<'_> {
     ) -> f32 {
         use egui::text::{LayoutJob, TextFormat, TextWrapping};
         let font_id = egui::FontId::proportional(font);
+        // `/`-separated only: see plans/other-platforms/03-paths.md for the port.
         let segments: Vec<&str> = text.split('/').collect();
         let shown = crate::chrome::elide_segments(&segments, |candidate| {
             painter
