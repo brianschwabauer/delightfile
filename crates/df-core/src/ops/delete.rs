@@ -95,20 +95,48 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
 
     // A symlink to a directory is unlinked, never descended into: deleting a
     // link to ~/Pictures must not delete ~/Pictures.
+    //
+    // Every step below takes "already gone" as done, as the `lstat` above
+    // does: the tree can be emptied by somebody else while this walks it — a
+    // second delightfile purging the same trash, `rm -r` in a terminal — and a
+    // directory that vanished between the `lstat` and the `read_dir`, or a
+    // file between the `lstat` and the `unlink`, is the outcome that was asked
+    // for, not a failure to report.
     if meta.is_dir() && !meta.is_symlink() {
-        for entry in std::fs::read_dir(path).map_err(|e| DfError::io(path, e))? {
-            let entry = entry.map_err(|e| DfError::io(path, e))?;
+        let entries = match std::fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(e) if gone(&e) => return Ok(()),
+            Err(e) => return Err(DfError::io(path, e)),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) if gone(&e) => continue,
+                Err(e) => return Err(DfError::io(path, e)),
+            };
             remove_tree(&entry.path(), ctx)?;
         }
-        std::fs::remove_dir(path).map_err(|e| DfError::io(path, e))?;
-        ctx.advance(0, 1);
+        match std::fs::remove_dir(path) {
+            Ok(()) => ctx.advance(0, 1),
+            Err(e) if gone(&e) => {}
+            Err(e) => return Err(DfError::io(path, e)),
+        }
         return Ok(());
     }
 
     let len = if meta.is_symlink() { 0 } else { meta.len() };
-    std::fs::remove_file(path).map_err(|e| DfError::io(path, e))?;
-    ctx.advance(len, 1);
+    match std::fs::remove_file(path) {
+        Ok(()) => ctx.advance(len, 1),
+        Err(e) if gone(&e) => {}
+        Err(e) => return Err(DfError::io(path, e)),
+    }
     Ok(())
+}
+
+/// Whether an io error says the thing is not there — which, to a delete, is
+/// the thing having been deleted.
+fn gone(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
 }
 
 /// Remove a tree with no cancellation and no rails.
@@ -197,6 +225,38 @@ mod tests {
     fn deleting_a_missing_path_is_not_an_error() {
         let t = TempTree::new("delete-missing");
         remove_tree(&t.join("never-existed"), &ctx()).unwrap();
+    }
+
+    /// Two deletes of one tree at once — two delightfiles purging the same
+    /// trash — both succeed: whatever one finds already gone, the other took,
+    /// and a directory that vanished between being seen and being opened, or
+    /// being emptied and being removed, is not a failure.
+    #[test]
+    fn a_tree_emptied_by_somebody_else_meanwhile_is_not_a_failure() {
+        for round in 0..20 {
+            let t = TempTree::new(&format!("delete-race-{round}"));
+            let victim = t.dir("victim");
+            for a in 0..8 {
+                for b in 0..8 {
+                    let dir = victim.join(format!("{a}/{b}"));
+                    std::fs::create_dir_all(&dir).unwrap();
+                    for c in 0..4 {
+                        std::fs::write(dir.join(format!("{c}.txt")), b"x").unwrap();
+                    }
+                }
+            }
+            let racers: Vec<_> = (0..2)
+                .map(|_| {
+                    let victim = victim.clone();
+                    std::thread::spawn(move || remove_tree(&victim, &TaskCtx::detached()))
+                })
+                .collect();
+            for racer in racers {
+                let result = racer.join().expect("the delete panicked");
+                assert!(result.is_ok(), "round {round}: {result:?}");
+            }
+            assert!(!exists(&victim));
+        }
     }
 
     #[test]
