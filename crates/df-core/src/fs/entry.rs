@@ -8,6 +8,10 @@
 //! data, [`Clone`], no handles, no lazy fields — and everything downstream
 //! (sorting, filtering, linemodes) is a pure function over it.
 //!
+//! The one fact read beyond the `statx` is the file's tags — one `lgetxattr`
+//! per row (see [`super::tags`]) — and it is read here for the same reason:
+//! the tag dots are drawn, and the `#tag` filter asked, of every visible row.
+//!
 //! Symlinks get read twice on purpose: `lstat` to know it *is* a link, then a
 //! follow to learn what it points at. The size, times and mode reported are the
 //! **target's** when the link resolves, because "how big is this file" is a
@@ -95,6 +99,13 @@ pub struct Entry {
     /// three lowercase `String`s per row per frame; a `Copy` byte on the row
     /// costs the scan one table walk it was already doing for the mime hint.
     pub file_kind: super::FileKind,
+    /// The file's tags ([`super::tags`]), as it carries them: read here, with
+    /// the one `lgetxattr` a row costs, because the list pane draws a dot per
+    /// coloured tag on every visible row of every frame, and `f #red` filters
+    /// by them. Empty for a file with none, and always for an archive's,
+    /// a remote service's and the trash's rows, which are not files on this
+    /// disk that could carry any.
+    pub tags: Vec<String>,
 }
 
 impl Entry {
@@ -162,6 +173,10 @@ impl Entry {
             mime::hint_for_name(&name)
         };
         let file_kind = super::kind::classify(kind, &name, mime, meta.mode());
+        // The link's own attributes, never its target's: a symlink carries no
+        // `user.*` attribute on Linux, so a link row has no tags even when the
+        // file it points at does — tagging the row tags the thing the row is.
+        let tags = super::tags::read(&path);
 
         Entry {
             name,
@@ -176,6 +191,7 @@ impl Entry {
             is_hidden,
             mime,
             file_kind,
+            tags,
         }
     }
 

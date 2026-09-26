@@ -56,6 +56,7 @@ pub mod mime;
 pub mod owner;
 mod scan;
 mod sort;
+pub mod tags;
 mod typefilter;
 mod watch;
 

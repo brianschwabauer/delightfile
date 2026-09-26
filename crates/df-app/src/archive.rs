@@ -169,6 +169,7 @@ pub fn row(entry: &ArchiveEntry, archive: &Path) -> Entry {
         gid: 0,
         mime,
         file_kind: df_core::fs::classify(kind, &entry.name, mime, mode),
+        tags: Vec::new(),
     }
 }
 

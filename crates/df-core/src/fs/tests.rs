@@ -69,6 +69,7 @@ fn entry(name: &str, kind: Kind, len: u64, mtime: Option<SystemTime>) -> Entry {
         is_hidden: name.starts_with('.'),
         mime: mime::hint_for_name(name),
         file_kind: crate::fs::classify(kind, name, mime::hint_for_name(name), 0o644),
+        tags: Vec::new(),
     }
 }
 
@@ -369,6 +370,143 @@ fn hidden_files_are_filtered_before_the_query_is() {
     assert_eq!(entries[matched[0].index].name, "git-notes.md");
     assert_eq!(matched[0].spans, vec![(0, 3)]);
     assert_eq!(filter_indices(&entries, &order, "git", true).len(), 2);
+}
+
+/// `f #red` filters by tag: a prefix of any tag, in any case, with no span on
+/// the name; `#` alone keeps every tagged row; and the hidden toggle still
+/// goes first.
+#[test]
+fn a_hash_query_filters_by_tag() {
+    let tagged = |name: &str, tags: &[&str]| Entry {
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        ..file(name)
+    };
+    let entries = vec![
+        tagged("red-notes.txt", &[]),
+        tagged("invoice.pdf", &["Red", "work"]),
+        tagged("photo.jpg", &["redo"]),
+        tagged(".hidden-red", &["red"]),
+        tagged("plain.txt", &["blue"]),
+    ];
+    let order: Vec<usize> = (0..entries.len()).collect();
+    let names = |query: &str, hidden: bool| -> Vec<&str> {
+        filter_indices(&entries, &order, query, hidden)
+            .iter()
+            .map(|m| {
+                assert!(m.spans.is_empty(), "a tag match marks no part of the name");
+                entries[m.index].name.as_str()
+            })
+            .collect()
+    };
+    assert_eq!(names("#red", false), ["invoice.pdf", "photo.jpg"]);
+    assert_eq!(
+        names("#RED", true),
+        ["invoice.pdf", "photo.jpg", ".hidden-red"]
+    );
+    assert_eq!(names("#wo", false), ["invoice.pdf"]);
+    assert!(names("#green", true).is_empty());
+    assert_eq!(
+        names("#", false),
+        ["invoice.pdf", "photo.jpg", "plain.txt"],
+        "a bare # is every tagged row"
+    );
+    // Without the `#` it is a name again.
+    let by_name = filter_indices(&entries, &order, "red", false);
+    assert_eq!(entries[by_name[0].index].name, "red-notes.txt");
+}
+
+/// A scan reads each file's tags with it, so a row can draw its dots and be
+/// filtered by them without going back to the disk — a link's own (none),
+/// never its target's.
+#[test]
+fn a_scan_carries_each_entry_s_tags() {
+    let tmp = TempDir::new("scan-tags");
+    let probe = tmp.file("probe", b"");
+    if !tags::supported_here(&probe) {
+        return;
+    }
+    let red = tmp.file("red.txt", b"x");
+    tags::write(&red, &["red".to_string(), "work".to_string()]).expect("tag it");
+    let folder = tmp.dir("folder");
+    tags::write(&folder, &["blue".to_string()]).expect("tag the folder");
+    std::os::unix::fs::symlink(&red, tmp.path.join("link")).expect("link");
+
+    let entries = scan_blocking(&tmp.path).expect("scan");
+    let tags_of = |name: &str| {
+        entries
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.tags.clone())
+            .expect("listed")
+    };
+    assert_eq!(tags_of("red.txt"), ["red", "work"]);
+    assert_eq!(tags_of("folder"), ["blue"]);
+    assert!(tags_of("probe").is_empty());
+    assert!(tags_of("link").is_empty(), "a link's tags are its own");
+    assert_eq!(
+        Entry::read(&red).expect("read").tags,
+        ["red", "work"],
+        "one entry read alone carries them too"
+    );
+}
+
+/// What reading tags costs a scan, measured rather than guessed: 10,000
+/// files, a tenth of them tagged, scanned with the `lgetxattr` a row costs
+/// and — as the scan read them before tags — with the `statx` alone.
+///
+/// Ignored because it is a measurement and not a check: run it with
+/// `cargo test -p df-core scan_cost -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn scan_cost_of_reading_tags() {
+    let tmp = TempDir::new("scan-cost");
+    let probe = tmp.file("probe", b"");
+    if !tags::supported_here(&probe) {
+        return;
+    }
+    for n in 0..10_000 {
+        let path = tmp.file(&format!("file-{n:05}.txt"), b"x");
+        if n % 10 == 0 {
+            tags::write(&path, &["red".to_string()]).expect("tag");
+        }
+    }
+    let stat_only = || {
+        let mut rows = 0usize;
+        for item in std::fs::read_dir(&tmp.path).expect("read").flatten() {
+            if item.metadata().is_ok() {
+                rows += 1;
+            }
+        }
+        rows
+    };
+    let entries = scan_blocking(&tmp.path).expect("scan");
+    assert_eq!(entries.iter().filter(|e| !e.tags.is_empty()).count(), 1000);
+    let tag_reads = || {
+        let mut rows = 0;
+        for entry in &entries {
+            std::hint::black_box(tags::read(&entry.path));
+            rows += 1;
+        }
+        rows
+    };
+    let scan = || scan_blocking(&tmp.path).expect("scan").len();
+    // Interleaved and the best of each kept, so a busy machine slows all
+    // three alike rather than whichever happened to run during a build.
+    let runs: [&dyn Fn() -> usize; 3] = [&scan, &stat_only, &tag_reads];
+    let mut best = [Duration::MAX; 3];
+    for _ in 0..15 {
+        for (slot, run) in best.iter_mut().zip(runs) {
+            let started = Instant::now();
+            assert!(run() >= 10_000);
+            *slot = (*slot).min(started.elapsed());
+        }
+    }
+    let [with_tags, without, tags_alone] = best;
+    eprintln!(
+        "10,000 entries: scan with tags {with_tags:?}, read_dir + statx alone {without:?}, \
+         10,000 tag reads alone {tags_alone:?} ({:.2} µs a row)",
+        tags_alone.as_secs_f64() * 1e6 / 10_000.0
+    );
 }
 
 #[test]

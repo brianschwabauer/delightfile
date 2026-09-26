@@ -194,6 +194,7 @@ mod tests {
             is_hidden: name.starts_with('.'),
             mime: hint_for_name(name),
             file_kind: crate::fs::classify(kind, name, hint_for_name(name), 0o644),
+            tags: Vec::new(),
         }
     }
 

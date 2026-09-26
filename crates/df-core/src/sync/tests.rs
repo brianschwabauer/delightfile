@@ -336,6 +336,32 @@ fn a_socket_is_skipped_by_name_rather_than_silently() {
     assert_eq!(report.problems(), 0, "{report:?}");
 }
 
+/// A sync's durable copies carry the tags as a paste's do: the folder's own
+/// as well as the files'.
+#[test]
+fn a_sync_carries_the_tags() {
+    use crate::fs::tags;
+    let t = TempTree::new("sync-tags");
+    let dir = t.dir("src/photos");
+    if !tags::supported_here(&dir) {
+        return;
+    }
+    let red = t.file("src/photos/a.jpg", b"aaa");
+    tags::write(&dir, &["holiday".to_string()]).unwrap();
+    tags::write(&red, &["red".to_string(), "print".to_string()]).unwrap();
+    let dst = t.dir("dst");
+    let plan = quick(std::slice::from_ref(&dir), &dst);
+    let report =
+        without_reflink(|| execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached()));
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!(tags::read(&dst.join("photos")), ["holiday"]);
+    assert_eq!(tags::read(&dst.join("photos/a.jpg")), ["red", "print"]);
+    assert!(
+        tmp_names(&dst).is_empty(),
+        "no temporary name was left behind"
+    );
+}
+
 #[test]
 fn a_folder_that_could_not_be_read_is_a_problem() {
     use std::os::unix::fs::PermissionsExt;

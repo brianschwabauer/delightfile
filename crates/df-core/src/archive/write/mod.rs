@@ -42,6 +42,14 @@
 //!
 //! The walk happens first and in full, inside the job, so the progress bar has
 //! its total before the first byte is written.
+//!
+//! **Tags do not go in.** A file's tags are its `user.xdg.tags` extended
+//! attribute ([`crate::fs::tags`]), and neither writer stores one: the zip
+//! format has no field every unzipper reads back as an attribute, and the
+//! PAX `SCHILY.xattr` records a tar could carry are read by GNU tar only when
+//! asked with `--xattrs`. An archive is the one copy the tags do not travel
+//! with, and it says nothing either way — nothing is lost from the files
+//! being archived, which keep theirs.
 
 pub mod crc32;
 mod deflate;

@@ -781,6 +781,7 @@ mod tests {
                 mime,
                 0o100_644,
             ),
+            tags: Vec::new(),
         }
     }
 

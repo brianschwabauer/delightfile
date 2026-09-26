@@ -247,6 +247,7 @@ pub fn row_from(
         // …and the kind follows the original name for the same reason.
         file_kind: df_core::fs::classify(kind, &original_name, mime, mode),
         name,
+        tags: Vec::new(),
     }
 }
 

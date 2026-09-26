@@ -524,6 +524,7 @@ mod tests {
             is_hidden: name.starts_with('.'),
             mime,
             file_kind: classify(k, name, mime, 0o644),
+            tags: Vec::new(),
         }
     }
 

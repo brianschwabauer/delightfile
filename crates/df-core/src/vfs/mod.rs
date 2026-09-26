@@ -1374,5 +1374,6 @@ fn remote_entry(dir: &VfsPath, entry: &wire::NameEntry, resolved: Option<&Option
         mime,
         file_kind: crate::fs::classify(kind, &name, mime, shown.permissions.unwrap_or(0)),
         name,
+        tags: Vec::new(),
     }
 }

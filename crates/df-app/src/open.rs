@@ -672,6 +672,7 @@ mod tests {
             is_hidden: false,
             mime,
             file_kind: df_core::fs::classify(Kind::File, name, mime, 0o644),
+            tags: Vec::new(),
         }
     }
 

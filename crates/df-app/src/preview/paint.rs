@@ -1856,6 +1856,7 @@ mod tests {
             is_hidden: false,
             mime: "text/plain",
             file_kind: df_core::fs::classify(kind, name, "text/plain", 0o644),
+            tags: Vec::new(),
         };
         let entries = vec![
             entry("a", Kind::Dir),
@@ -1893,6 +1894,7 @@ mod tests {
             is_hidden: false,
             mime: "text/plain",
             file_kind: df_core::fs::classify(kind, name, "text/plain", 0o644),
+            tags: Vec::new(),
         };
         let source = "/* open\nfn main() {\n\tlet s = \"héllo\";\n}\n";
         let lines: Vec<String> = source.split('\n').map(str::to_string).collect();

@@ -951,6 +951,7 @@ mod tests {
                     df_core::fs::mime::DIR_MIME,
                     0o040_755,
                 ),
+                tags: Vec::new(),
             }],
         );
         let (mgr, sort) = (app.mgr.clone(), app.sort());

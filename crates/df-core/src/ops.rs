@@ -24,9 +24,17 @@
 //!   means carrying an inode map for the whole tree and is only correct if the
 //!   copy is one atomic operation; `cp -a` does it, and so will v2. Nothing is
 //!   lost by not doing it, only disk.
-//! - **Extended attributes, ACLs and ownership.** `chown` needs privileges we
-//!   do not have; xattrs need per-filesystem support. Mode and mtime are
-//!   preserved, which is what a file manager's user sees.
+//! - **ACLs, ownership, and every extended attribute outside `user.*`.**
+//!   `chown` needs privileges we do not have, and `security.*`, `trusted.*`
+//!   and the ACLs in `system.*` belong to the kernel and to root. Mode and
+//!   mtime are preserved, which is what a file manager's user sees — and so
+//!   are the `user.*` attributes, the file's tags among them
+//!   ([`crate::fs::tags`]): every copy of bytes (a paste, a move or a trash
+//!   across drives, a sync) carries them after the contents and before the
+//!   rename into place. A destination that holds none, a FAT card, gets the
+//!   file without them and the paste says so; a same-drive rename keeps them
+//!   for nothing, since it keeps the inode. The archive writers do not store
+//!   them (see [`crate::archive::write`]).
 //! - **Redo.** Undo is a stack that only pops (PLAN §5).
 //! - **Queue reordering** in the task engine — that is the `w` panel's half of
 //!   the phase.

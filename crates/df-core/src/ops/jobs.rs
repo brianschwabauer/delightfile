@@ -110,11 +110,19 @@ impl Job for PasteJob {
             PasteMode::Copy => "Copied",
             PasteMode::Cut => "Moved",
         };
+        // The one thing a paste can lose without failing: the destination
+        // took the files and refused their tags (a FAT card). Said on the
+        // same line, because the files are there and the toast is about them.
+        let dropped = if report.tags_dropped {
+            " · tags not kept on this drive"
+        } else {
+            ""
+        };
         store(
             &self.outcome,
             OpOutcome {
                 record: report.record,
-                message: format!("{verb} {}", plural(done, "item", "items")),
+                message: format!("{verb} {}{dropped}", plural(done, "item", "items")),
                 errors: report.errors,
                 cancelled: report.cancelled,
                 made: Vec::new(),
@@ -404,6 +412,52 @@ mod tests {
         journal.undo(&TaskCtx::detached()).unwrap();
         assert!(!super::super::exists(&dest.join("a.txt")));
         assert_eq!(std::fs::read(&src).unwrap(), b"body");
+    }
+
+    /// A paste onto a drive that keeps no tags lands every file and says, on
+    /// the same line, that the tags stayed behind — a copy and a cut alike;
+    /// onto one that keeps them it says nothing more than it always did.
+    #[test]
+    fn a_paste_onto_a_drive_without_tags_says_so() {
+        use crate::fs::tags;
+        let t = TempTree::new("job-paste-tags");
+        let probe = t.file("probe", b"");
+        if !tags::supported_here(&probe) {
+            return;
+        }
+        let red = t.file("src/red.txt", b"x");
+        tags::write(&red, &["red".to_string()]).unwrap();
+
+        let run = |plan, refused: bool| {
+            let mut job = PasteJob::new(plan);
+            let slot = job.outcome();
+            let ctx = TaskCtx::detached();
+            if refused {
+                tags::refusing(|| job.run(&ctx)).unwrap();
+            } else {
+                job.run(&ctx).unwrap();
+            }
+            taken(&slot).message
+        };
+        let card = t.dir("card");
+        let plan = plan_paste(&Clipboard::yank([red.clone()]), &card, false).unwrap();
+        assert_eq!(
+            run(plan, true),
+            "Copied 1 item · tags not kept on this drive"
+        );
+        assert!(tags::read(&card.join("red.txt")).is_empty());
+
+        let disk = t.dir("disk");
+        let plan = plan_paste(&Clipboard::yank([red.clone()]), &disk, false).unwrap();
+        assert_eq!(run(plan, false), "Copied 1 item");
+        assert_eq!(tags::read(&disk.join("red.txt")), ["red"]);
+
+        // A cut within one drive is a rename, which keeps the tags whatever
+        // the refusal says, so there is nothing to report.
+        let moved = t.dir("moved");
+        let plan = plan_paste(&Clipboard::cut([red]), &moved, false).unwrap();
+        assert_eq!(run(plan, true), "Moved 1 item");
+        assert_eq!(tags::read(&moved.join("red.txt")), ["red"]);
     }
 
     #[test]

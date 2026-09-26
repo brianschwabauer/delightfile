@@ -13,6 +13,12 @@
 //! capital means the capital. Typing `readme` finds `README.md`; typing
 //! `README` finds only the shouting one.
 //!
+//! **`#` asks for a tag.** A query beginning with `#` is not a name at all:
+//! `#red` keeps the rows carrying a tag that starts with `red`, in any case,
+//! and `#` alone keeps every row that carries a tag (see
+//! [`super::tags::matches`]). No span is drawn for one — the name is not why
+//! the row is there, and the dots at the end of it already say what is.
+//!
 //! The spans are byte ranges into the original name, and getting them right
 //! through a case fold is the reason this file is longer than a `contains`
 //! call: lowercasing can change a string's length (`İ` folds to two chars), so
@@ -111,7 +117,8 @@ fn fold_str(s: &str) -> String {
 ///
 /// Hidden files are dropped *before* the query is applied, so `.` and `f`
 /// compose the way you would expect: filtering for `git` with hidden off does
-/// not surface `.gitignore`.
+/// not surface `.gitignore`. A query beginning with `#` matches tags rather
+/// than names (see the module header).
 pub fn filter_indices(
     entries: &[Entry],
     candidates: &[usize],
@@ -125,7 +132,10 @@ pub fn filter_indices(
             if entry.is_hidden && !show_hidden {
                 return None;
             }
-            let spans = match_name(&entry.name, query)?;
+            let spans = match query.strip_prefix('#') {
+                Some(tag) => super::tags::matches(&entry.tags, tag).then(Vec::new)?,
+                None => match_name(&entry.name, query)?,
+            };
             Some(Matched { index, spans })
         })
         .collect()

@@ -606,6 +606,7 @@ mod tests {
                 df_core::fs::mime::hint_for_name(name),
                 0o644,
             ),
+            tags: Vec::new(),
         }
     }
 

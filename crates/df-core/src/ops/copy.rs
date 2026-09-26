@@ -11,6 +11,12 @@
 //! after, so "done" means on the disk rather than in the page cache. A paste
 //! does not ask for it; a sync ([`crate::sync`]) always does.
 //!
+//! Every `user.*` extended attribute travels with the bytes — the file's tags
+//! ([`crate::fs::tags`]) above all — copied after the contents and before the
+//! rename out of the temporary name, so no final name exists without them. A
+//! destination that keeps no attributes (a FAT card) still gets the file; the
+//! copy only notes that the tags did not land ([`CopyStats::tags_dropped`]).
+//!
 //! Move is `rename(2)` first, because within one filesystem that is atomic and
 //! costs nothing. Across filesystems `rename` returns `EXDEV` and there is no
 //! choice but copy-then-delete — and the delete happens only after the copy has
@@ -89,6 +95,10 @@ pub struct CopyStats {
     /// file manager cannot meaningfully duplicate them and silently skipping
     /// them would be a lie by omission.
     pub skipped: Vec<PathBuf>,
+    /// A source carried tags and the destination would not hold them — a FAT
+    /// card, a network mount without attributes. The copy itself succeeded;
+    /// this is what the paste toast's "tags not kept on this drive" says.
+    pub tags_dropped: bool,
 }
 
 impl CopyStats {
@@ -96,6 +106,7 @@ impl CopyStats {
         self.files += other.files;
         self.bytes += other.bytes;
         self.skipped.extend(other.skipped);
+        self.tags_dropped |= other.tags_dropped;
     }
 }
 
@@ -201,7 +212,7 @@ fn copy_entry(src: &Path, dst: &Path, ctx: &TaskCtx, options: CopyOptions) -> Re
         return copy_dir(src, dst, ctx, options, &meta);
     }
     if meta.is_file() {
-        let bytes = copy_file(src, dst, ctx, options, &meta)?;
+        let (bytes, tags_dropped) = copy_file(src, dst, ctx, options, &meta)?;
         // Bytes were reported chunk by chunk inside the copy; only the file
         // count is left to add.
         ctx.advance(0, 1);
@@ -209,6 +220,7 @@ fn copy_entry(src: &Path, dst: &Path, ctx: &TaskCtx, options: CopyOptions) -> Re
             files: 1,
             bytes,
             skipped: Vec::new(),
+            tags_dropped,
         });
     }
 
@@ -284,15 +296,24 @@ fn copy_dir(
         stats.merge(copy_entry(&entry.path(), &child_dst, ctx, options)?);
     }
 
-    // Mode and mtime last: creating the children bumped the directory's mtime,
-    // so setting it before the recursion would achieve nothing.
+    // The folder's own tags, then mode and mtime last: creating the children
+    // bumped the directory's mtime, so setting it before the recursion would
+    // achieve nothing — and the attributes go before the mode, because a
+    // read-only mode would refuse them.
+    stats.tags_dropped |= crate::fs::tags::carry(src, dst);
     apply_mode(dst, meta);
     apply_times(dst, meta);
     Ok(stats)
 }
 
-/// Copy one regular file's contents, then its mode and mtime. Returns the byte
-/// count actually moved.
+/// Copy one regular file's contents, then its `user.*` attributes, then its
+/// mode and mtime. Returns the byte count actually moved, and whether the
+/// file's tags were refused by the destination ([`CopyStats::tags_dropped`]).
+///
+/// The attributes go before the mode for the reason the mode goes before the
+/// flush: a `0444` mode set first would refuse the `setxattr` that follows,
+/// since a `user.*` attribute is written under the file's own write
+/// permission.
 ///
 /// An *overwrite* is written to a temporary file beside the destination and
 /// renamed over it at the end. That costs one extra name in the directory and
@@ -323,7 +344,7 @@ fn copy_file(
     ctx: &TaskCtx,
     options: CopyOptions,
     meta: &std::fs::Metadata,
-) -> Result<u64> {
+) -> Result<(u64, bool)> {
     let replacing = exists(dst);
     if replacing {
         if !options.overwrite {
@@ -358,15 +379,16 @@ fn copy_file(
 
     let result = write_contents(&mut reader, &mut writer, src, &write_path, ctx, meta.len())
         .and_then(|bytes| {
+            let dropped = crate::fs::tags::carry(src, &write_path);
             apply_mode(&write_path, meta);
             apply_times(&write_path, meta);
             if options.durable {
                 sync_file(&writer, &write_path)?;
             }
-            Ok(bytes)
+            Ok((bytes, dropped))
         });
     match result {
-        Ok(bytes) => {
+        Ok(copied) => {
             drop(writer);
             if write_path != dst {
                 // A new file's name must still be free: something that took it
@@ -387,7 +409,7 @@ fn copy_file(
             if options.durable {
                 sync_parent(dst)?;
             }
-            Ok(bytes)
+            Ok(copied)
         }
         Err(e) => {
             drop(writer);
@@ -423,7 +445,7 @@ pub(crate) fn copy_file_with(
 ) -> Result<u64> {
     ctx.checkpoint()?;
     let meta = std::fs::metadata(src).map_err(|e| DfError::io(src, e))?;
-    copy_file(src, dst, ctx, options, &meta)
+    copy_file(src, dst, ctx, options, &meta).map(|(bytes, _)| bytes)
 }
 
 /// `fsync(2)` one open file: its bytes and its metadata, down to the medium.
@@ -696,7 +718,11 @@ fn already_exists(dst: &Path) -> DfError {
 
 /// Move `src` to `dst`: `rename(2)`, falling back to copy-verify-delete across
 /// filesystems.
-pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Result<()> {
+///
+/// Returns what the copy did when the move had to be one — which is how a
+/// cut pasted onto a FAT card learns its tags did not come along — and
+/// nothing for a rename, which keeps the inode and every attribute on it.
+pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Result<CopyStats> {
     if same_file(src, dst) {
         return Err(DfError::Op(format!(
             "{} and {} are the same file",
@@ -736,7 +762,7 @@ pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
     // rename went on to fail for an unrelated reason — a read-only source
     // directory, a vanished mount — and there was nothing left to put back.
     match std::fs::rename(src, dst) {
-        Ok(()) => return Ok(()),
+        Ok(()) => return Ok(CopyStats::default()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             // Across filesystems the copy overwrites in place, temp-file and
             // all; an existing destination *directory* is merged into rather
@@ -750,7 +776,7 @@ pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
     // The conflict dialog has already been through; this is the user's answer.
     super::delete::remove_tree_unchecked(dst)?;
     match std::fs::rename(src, dst) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(CopyStats::default()),
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => move_cross_device(src, dst, ctx),
         Err(e) => Err(DfError::io(src, e)),
     }
@@ -776,7 +802,7 @@ fn in_the_way(e: &std::io::Error) -> bool {
 /// Split out and public so the `EXDEV` path is reachable from a test without
 /// two filesystems to hand — the branch that deletes the user's data is not one
 /// to leave untested because the fixture is inconvenient.
-pub fn move_cross_device(src: &Path, dst: &Path, ctx: &TaskCtx) -> Result<()> {
+pub fn move_cross_device(src: &Path, dst: &Path, ctx: &TaskCtx) -> Result<CopyStats> {
     let stats = copy_tree(src, dst, ctx, true)?;
     verify_copy(src, dst)?;
     if !stats.skipped.is_empty() {
@@ -789,7 +815,8 @@ pub fn move_cross_device(src: &Path, dst: &Path, ctx: &TaskCtx) -> Result<()> {
             stats.skipped.len()
         )));
     }
-    super::delete::remove_tree(src, ctx)
+    super::delete::remove_tree(src, ctx)?;
+    Ok(stats)
 }
 
 /// Prove that `dst` reproduces `src`: same kinds, same sizes, same link
@@ -1355,6 +1382,124 @@ mod tests {
             std::fs::read_link(dst.join("d/link")).unwrap(),
             Path::new("../a")
         );
+    }
+
+    // ── Tags and the other `user.*` attributes ─────────────────────────────
+
+    use crate::fs::tags;
+
+    fn tagged(path: &Path, names: &[&str]) {
+        let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        tags::write(path, &names).unwrap();
+    }
+
+    /// A tree whose files can hold attributes, or `None` on a `$TMPDIR` that
+    /// cannot (said on stderr, so the skip is visible).
+    fn tag_tree(label: &str) -> Option<TempTree> {
+        let t = TempTree::new(label);
+        let probe = t.file("probe", b"");
+        let ok = tags::supported_here(&probe);
+        std::fs::remove_file(probe).unwrap();
+        ok.then_some(t)
+    }
+
+    /// Tags travel with every shape of copy: a new file, a file written over
+    /// another through its temporary name, a durable copy, a folder and what
+    /// is inside it — and a read-only file, whose mode would refuse them if it
+    /// were set first.
+    #[test]
+    fn a_copy_carries_the_tags() {
+        let Some(t) = tag_tree("copy-tags") else {
+            return;
+        };
+        let src = t.dir("src");
+        let file = t.file("src/notes.txt", b"x");
+        tagged(&src, &["blue"]);
+        tagged(&file, &["red", "invoice 2026"]);
+        let locked = t.file("src/locked.txt", b"x");
+        tagged(&locked, &["green"]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let dst = t.join("dst");
+        let stats = without_reflink(|| copy_tree(&src, &dst, &ctx(), false)).unwrap();
+        assert!(!stats.tags_dropped);
+        assert_eq!(tags::read(&dst), ["blue"]);
+        assert_eq!(tags::read(&dst.join("notes.txt")), ["red", "invoice 2026"]);
+        assert_eq!(tags::read(&dst.join("locked.txt")), ["green"]);
+
+        // Written over an existing file, by way of `.df-tmp-…`.
+        let over = t.file("over.txt", b"old");
+        tagged(&over, &["stale"]);
+        copy_tree(&file, &over, &ctx(), true).unwrap();
+        assert_eq!(tags::read(&over), ["red", "invoice 2026"]);
+
+        // Durable, as a sync copies.
+        let durable = t.join("durable.txt");
+        let options = CopyOptions {
+            overwrite: false,
+            durable: true,
+        };
+        copy_file_with(&file, &durable, &ctx(), options).unwrap();
+        assert_eq!(tags::read(&durable), ["red", "invoice 2026"]);
+    }
+
+    /// A move across drives is a copy and a delete, and the tags are in the
+    /// copy — the one kind of move that does not keep the inode.
+    #[test]
+    fn a_cross_device_move_keeps_the_tags() {
+        let Some(t) = tag_tree("move-xdev-tags") else {
+            return;
+        };
+        let src = t.dir("src");
+        let inner = t.file("src/d/b.txt", b"b");
+        tagged(&src, &["work"]);
+        tagged(&inner, &["red"]);
+        let dst = t.join("dst");
+        let stats = move_cross_device(&src, &dst, &ctx()).unwrap();
+        assert!(!stats.tags_dropped);
+        assert!(!exists(&src));
+        assert_eq!(tags::read(&dst), ["work"]);
+        assert_eq!(tags::read(&dst.join("d/b.txt")), ["red"]);
+
+        // A plain rename keeps them for nothing, and has no copy to report.
+        let renamed = t.join("renamed");
+        let stats = move_path(&dst, &renamed, &ctx(), false).unwrap();
+        assert_eq!(stats, CopyStats::default());
+        assert_eq!(tags::read(&renamed.join("d/b.txt")), ["red"]);
+    }
+
+    /// A drive that holds no attributes (a FAT card) still gets every file;
+    /// the copy only says the tags did not come along — and only when there
+    /// were tags to lose.
+    #[test]
+    fn a_drive_that_refuses_tags_still_gets_the_files() {
+        let Some(t) = tag_tree("copy-tags-refused") else {
+            return;
+        };
+        let src = t.dir("src");
+        let file = t.file("src/a.txt", b"aaa");
+        tagged(&file, &["red"]);
+        let plain = t.file("plain.txt", b"x");
+
+        let dst = t.join("card");
+        let stats = tags::refusing(|| copy_tree(&src, &dst, &ctx(), false)).unwrap();
+        assert!(stats.tags_dropped);
+        assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"aaa");
+        assert!(tags::read(&dst.join("a.txt")).is_empty());
+
+        let stats = tags::refusing(|| copy_tree(&plain, &t.join("p.txt"), &ctx(), false));
+        assert!(
+            !stats.unwrap().tags_dropped,
+            "nothing to lose, nothing lost"
+        );
+
+        // A move onto it keeps nothing back either: the source goes, as it
+        // would with any other move, and the report says what was not kept.
+        let moved = t.join("moved");
+        let stats = tags::refusing(|| move_cross_device(&src, &moved, &ctx())).unwrap();
+        assert!(stats.tags_dropped);
+        assert!(!exists(&src));
+        assert_eq!(std::fs::read(moved.join("a.txt")).unwrap(), b"aaa");
     }
 
     #[test]

@@ -1460,6 +1460,7 @@ mod tests {
             } else {
                 df_core::fs::FileKind::Text
             },
+            tags: Vec::new(),
         }
     }
 

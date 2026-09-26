@@ -249,6 +249,9 @@ impl Run<'_> {
         match item.kind {
             Kind::Dir => {
                 make_dir(dst)?;
+                // A folder's tags come across with it, as a file's come
+                // across inside its copy ([`copy::copy_file_with`]).
+                crate::fs::tags::carry(src, dst);
                 Ok(0)
             }
             Kind::File => copy::copy_file_with(src, dst, self.ctx, options),

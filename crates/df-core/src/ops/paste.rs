@@ -486,6 +486,10 @@ pub struct PasteReport {
     pub skipped: Vec<PathBuf>,
     pub errors: Vec<(PathBuf, String)>,
     pub cancelled: bool,
+    /// Some item carried tags the destination would not hold (see
+    /// [`super::CopyStats::tags_dropped`]): everything landed, the tags did
+    /// not, and the toast says so.
+    pub tags_dropped: bool,
 }
 
 /// Carry out a settled plan.
@@ -532,13 +536,14 @@ pub fn execute(plan: &PastePlan, ctx: &TaskCtx) -> Result<PasteReport> {
         // finishing the job rather than reversing it.
         let fresh = !exists(&item.dst);
         let outcome = match plan.mode {
-            PasteMode::Copy => {
-                super::copy::copy_tree(&item.src, &item.dst, ctx, item.overwrite).map(|_stats| ())
-            }
+            PasteMode::Copy => super::copy::copy_tree(&item.src, &item.dst, ctx, item.overwrite),
             PasteMode::Cut => super::copy::move_path(&item.src, &item.dst, ctx, item.overwrite),
         };
+        if let Ok(stats) = &outcome {
+            report.tags_dropped |= stats.tags_dropped;
+        }
         match outcome {
-            Ok(()) => match plan.mode {
+            Ok(_) => match plan.mode {
                 PasteMode::Copy => {
                     if fresh {
                         // Recorded now, item by item: what is at `item.dst` is

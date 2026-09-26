@@ -178,7 +178,7 @@ impl Trash {
         let moved = match std::fs::rename(path, &dst) {
             Ok(()) => Ok(()),
             Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-                super::copy::move_cross_device(path, &dst, ctx)
+                super::copy::move_cross_device(path, &dst, ctx).map(|_stats| ())
             }
             Err(e) => Err(DfError::io(path, e)),
         };
