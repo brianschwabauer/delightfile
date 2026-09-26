@@ -46,6 +46,8 @@ open.
   walks it back. `U` walks forward again, checking first that nothing has changed
   underneath, and the app menu's Edit ▸ Undo history… lists every step either way and
   walks to any of them.
+- **Permissions.** `C` sets a selection's bits as boxes or a typed `755`, inside folders
+  too, and `u` puts them back.
 - **Tags.** `T` tags a file or a selection, stored in the freedesktop `user.xdg.tags`
   extended attribute, so the tags live on the file and other programs can read them. The
   seven Finder colours (and any tag `[tags]` gives a colour) show as overlapping dots after
@@ -243,6 +245,7 @@ it without leaving the list.
 | `Y` `c t` | copy the file to the clipboard, copy its text |
 | `d` `D` | trash, delete for good |
 | `a` `r` `R` | create, rename, rename the stem |
+| `C` | permissions: the selection's nine bits, or everything inside a folder |
 | `T` | tags, comma-separated. `Tab` completes one |
 | `u` `U` | undo, redo |
 | `f` `/` `n` `N` | filter, find, next, previous. `f #red` filters by tag |
