@@ -2,6 +2,7 @@
 //! it, the card's rows and its walk, and the app menu's greys.
 
 use super::*;
+use df_core::ops::journal::CopyManifest;
 
 /// One key, pressed and handed to a frame.
 fn press(app: &mut App, ctx: &egui::Context, chord: Chord) {
@@ -180,6 +181,108 @@ fn a_copy_is_redone_as_a_task_and_round_trips() {
     app.run(Command::Undo, 10, now);
     assert!(!copy.exists(), "and `u` takes it back again");
     assert!(app.journal.can_redo());
+}
+
+/// A copy redone whose paste fails — its folder can no longer be written to —
+/// goes back on the redo stack, and `u` and `U` work again.
+#[test]
+fn a_copy_redo_that_cannot_land_goes_back_and_undo_works_again() {
+    use std::os::unix::fs::PermissionsExt;
+    let ctx = egui::Context::default();
+    let mut app = Fixture::with_folders("redo-copy-refused", &["a.txt"], &["dst"]);
+    run_frame(&mut app, &ctx, Vec::new());
+    let now = Instant::now();
+    let (src, dst) = (app.files.join("a.txt"), app.files.join("dst/a.txt"));
+    std::fs::copy(&src, &dst).expect("the paste's copy");
+    let manifest = CopyManifest::of_tree(&dst)
+        .expect("manifested")
+        .copied_from(&src);
+    app.journal.record(OpRecord::Copy {
+        created: vec![manifest],
+    });
+    app.run(Command::Undo, 10, now);
+    assert!(!dst.exists());
+
+    let folder = app.files.join("dst");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+    app.run(Command::Redo, 10, now);
+    assert!(app.journal.busy());
+    land(&mut app, |_| true);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    assert!(!dst.exists(), "nothing landed");
+    assert!(!app.journal.busy(), "no longer set aside");
+    assert_eq!((app.journal.len(), app.journal.redo_len()), (0, 1));
+    // `U` again, with the way clear: it lands, and `u` takes it back.
+    app.run(Command::Redo, 10, now);
+    land(&mut app, |_| true);
+    assert!(dst.is_file());
+    assert_eq!(app.refusal(Command::Undo), None);
+    app.run(Command::Undo, 10, now);
+    assert!(!dst.exists(), "u works again");
+}
+
+/// The same when the job itself ends failed, for good, rather than done with
+/// its item's error: the engine's final `Failed` finishes the redo as a cancel
+/// would, so `u` and `U` are not left waiting for the rest of the session.
+#[test]
+fn a_copy_redo_whose_job_fails_goes_back_and_undo_works_again() {
+    let ctx = egui::Context::default();
+    let mut app = Fixture::new("redo-copy-failed", &["a.txt"]);
+    run_frame(&mut app, &ctx, Vec::new());
+    let now = Instant::now();
+    let (src, dst) = (app.files.join("a.txt"), app.files.join("b.txt"));
+    std::fs::copy(&src, &dst).expect("the paste's copy");
+    let manifest = CopyManifest::of_tree(&dst)
+        .expect("manifested")
+        .copied_from(&src);
+    app.journal.record(OpRecord::Copy {
+        created: vec![manifest],
+    });
+    app.create("later.txt", now).expect("made");
+    app.run(Command::Undo, 10, now);
+    app.run(Command::Undo, 10, now);
+
+    // The copy handed back, and run as a job that fails outright — which a
+    // paste's does not today, and which must not leave `u` waiting if it
+    // ever does.
+    let Ok(Redo::Copy(copy)) = app.journal.redo(&TaskCtx::detached()) else {
+        panic!("a copy is handed back");
+    };
+    let id = app
+        .engine
+        .spawn(FnJob::new("Copy 1 item", Lane::Macro, |_ctx| {
+            Err(df_core::DfError::Op("the disk went away".to_string()))
+        }));
+    app.ops.push(PendingOp {
+        id,
+        slot: Arc::new(Mutex::new(None)),
+        dirs: Vec::new(),
+        focus: Vec::new(),
+        group: None,
+        redo: Some(copy.description),
+    });
+    assert!(app.journal.busy());
+    assert!(app.refusal(Command::Undo).is_some());
+    land(&mut app, |_| true);
+
+    assert!(
+        matches!(
+            app.engine.task(id).map(|task| task.state),
+            Some(TaskState::Failed { .. })
+        ),
+        "the job failed rather than finishing"
+    );
+    assert!(!app.journal.busy(), "no longer set aside");
+    assert_eq!((app.journal.len(), app.journal.redo_len()), (0, 2));
+    assert!(!dst.exists());
+    assert_eq!(app.refusal(Command::Redo), None, "U works again");
+    app.run(Command::Redo, 10, now);
+    land(&mut app, |_| true);
+    assert!(dst.is_file(), "and this time it lands");
+    assert_eq!(app.refusal(Command::Undo), None, "u works again");
+    app.run(Command::Undo, 10, now);
+    assert!(!dst.exists(), "and takes it back");
 }
 
 /// The card lists the journal newest first, the cursor on the newest thing

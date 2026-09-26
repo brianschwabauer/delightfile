@@ -2915,6 +2915,20 @@ impl App {
             // pending and only the message goes out now.
             TaskState::Failed { ref error, .. } if self.ops.iter().any(|op| op.id == event.id) => {
                 self.toasts.error(format!("{}: {error}", event.name), now);
+                // …except for `U`'s copy, once the engine says the failure is
+                // final: the journal is holding its entry aside with `u` and
+                // `U` waiting, and an op left pending would leave them waiting
+                // for the rest of the session. It is over the way a cancelled
+                // one is — what landed, if anything, undoable, the rest back
+                // on the redo stack ([`Journal::finish_redo`]).
+                let redo = self
+                    .ops
+                    .iter()
+                    .any(|op| op.id == event.id && op.redo.is_some());
+                let over = self.engine.task(event.id).is_some_and(|task| task.terminal);
+                if redo && over {
+                    self.finish_op(event.id, now);
+                }
             }
             _ => {}
         }
