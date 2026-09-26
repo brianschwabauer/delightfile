@@ -35,8 +35,12 @@ use crate::input::PromptKind;
 
 /// What `T` was pressed on, kept from the prompt opening to `Enter`.
 pub(crate) struct Draft {
-    /// The selection, or the row under the cursor.
+    /// The selection, or the row under the cursor — less its links, which
+    /// cannot hold tags.
     targets: Vec<PathBuf>,
+    /// How many links the selection held and `Enter` will leave alone, for
+    /// the toast to say so.
+    links: usize,
     /// The tags every target carried when the prompt opened — what the field
     /// was filled with, and what `Enter`'s line is compared against.
     shared: Vec<String>,
@@ -49,10 +53,24 @@ pub(crate) struct Draft {
 impl App {
     /// `T`: open `Tags:` on the selection, or on the row under the cursor,
     /// with the tags they share in the field and the caret after them.
+    ///
+    /// A link in a selection is left out — Linux lets no link carry a
+    /// `user.*` attribute — so the field opens on what the *files* share, and
+    /// the toast after `Enter` says how many links were skipped. A selection
+    /// of nothing but links has nothing to tag and says so now, before
+    /// anything is typed.
     pub(super) fn open_tag_prompt(&mut self, now: Instant) {
-        let targets = self.targets();
-        if targets.is_empty() {
+        let all = self.targets();
+        if all.is_empty() {
             self.toasts.notice("Nothing here to tag", now);
+            return;
+        }
+        let (links, targets): (Vec<PathBuf>, Vec<PathBuf>) = all
+            .iter()
+            .cloned()
+            .partition(|path| std::fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink()));
+        if targets.is_empty() {
+            self.toasts.error(TagError::Link.to_string(), now);
             return;
         }
         let sets: Vec<Vec<String>> = targets.iter().map(|path| tags::read(path)).collect();
@@ -64,7 +82,7 @@ impl App {
         } else {
             format!("{}, ", shared.join(", "))
         };
-        let label = match targets.as_slice() {
+        let label = match all.as_slice() {
             [one] => format!(
                 "Tags of {}:",
                 one.file_name().unwrap_or_default().to_string_lossy()
@@ -74,6 +92,7 @@ impl App {
         let caret = text.chars().count();
         self.tag_draft = Some(Draft {
             targets,
+            links: links.len(),
             shared,
             cycle: None,
         });
@@ -130,10 +149,16 @@ impl App {
         if !changes.is_empty() {
             self.journal.record(OpRecord::Tags { changes });
         }
+        // The links the selection held were never tried, and the files were
+        // tagged all the same: said after what happened, not instead of it.
+        let skipped = match draft.links {
+            0 => String::new(),
+            n => format!(" · {} skipped", super::plural(n, "link", "links")),
+        };
         match (failure, message) {
-            (Some(failure), _) => self.toasts.error(failure, now),
-            (None, Some(message)) => self.toasts.undo(message, now),
-            (None, None) => self.toasts.notice("Tags unchanged", now),
+            (Some(failure), _) => self.toasts.error(format!("{failure}{skipped}"), now),
+            (None, Some(message)) => self.toasts.undo(format!("{message}{skipped}"), now),
+            (None, None) => self.toasts.notice(format!("Tags unchanged{skipped}"), now),
         }
     }
 

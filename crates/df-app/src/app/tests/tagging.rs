@@ -168,6 +168,51 @@ fn a_selection_is_tagged_by_the_difference() {
     assert_eq!(toast(&app), "Untagged 2 items");
 }
 
+/// A link in a selection is skipped rather than failing the rest: the files
+/// are tagged and journaled, and the undo toast says how many links were
+/// left. A selection of nothing but links is refused before a prompt opens.
+#[test]
+fn links_in_a_selection_are_skipped_and_counted() {
+    let Some(mut app) = fixture("tags-links", &["a.txt", "b.txt"]) else {
+        return;
+    };
+    let a = app.files.join("a.txt");
+    std::os::unix::fs::symlink(&a, app.files.join("link")).expect("link");
+    app.refresh_all(Instant::now());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while app.tab().cwd.dir.position_of("link").is_none() && Instant::now() < deadline {
+        for update in app.scanner.drain() {
+            app.tabs.active_mut().apply(&update);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    at(&mut app, "a.txt", true);
+    at(&mut app, "link", true);
+
+    let (title, line) = press_t(&mut app);
+    assert_eq!(title, "Tags of 2 items:");
+    assert_eq!(line, "");
+    enter(&mut app, "red");
+    assert_eq!(file_tags::read(&a), ["red"]);
+    assert_eq!(toast(&app), "Tagged a.txt red · 1 link skipped");
+    assert_eq!(
+        app.toasts.current().map(|t| t.kind),
+        Some(crate::toast::ToastKind::Undo)
+    );
+    app.run(Command::Undo, 10, Instant::now());
+    assert!(
+        file_tags::read(&a).is_empty(),
+        "the file's change was journaled"
+    );
+
+    // Only the link: nothing to tag, said at once.
+    app.dir().clear_selection();
+    at(&mut app, "link", false);
+    app.run(Command::Tag, 10, Instant::now());
+    assert!(app.prompt.is_none(), "no prompt for a link alone");
+    assert_eq!(toast(&app), "Links can't hold tags");
+}
+
 /// `u` after `T` on one file restores what it had, and refuses — with the
 /// entry kept — once somebody else has changed its tags since.
 #[test]
