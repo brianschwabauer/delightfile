@@ -17,6 +17,7 @@ use crate::tasks::{Job, Lane, TaskCtx};
 use crate::{DfError, Result};
 
 use super::journal::OpRecord;
+use super::mode::Grid;
 use super::paste::{PasteMode, PastePlan};
 
 /// What an operation left behind for the UI to pick up.
@@ -282,6 +283,104 @@ impl Job for DeleteJob {
     }
 }
 
+/// `C`'s Apply: the card's bits set on a selection, or on everything inside
+/// one ([`super::mode`]).
+///
+/// One task however big the tree: the walk and the change both run here, on
+/// the pool, so a folder of two hundred thousand files is a row in the `w`
+/// panel with a count and a cancel rather than a window that stops. Progress
+/// is by count, since a mode change moves no bytes. A cancel keeps what was
+/// already set, recorded, so `u` takes back exactly that.
+pub struct ModeJob {
+    targets: Vec<PathBuf>,
+    grid: Grid,
+    recursive: bool,
+    outcome: Outcome,
+}
+
+impl ModeJob {
+    pub fn new(targets: Vec<PathBuf>, grid: Grid, recursive: bool) -> ModeJob {
+        ModeJob {
+            targets,
+            grid,
+            recursive,
+            outcome: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub fn outcome(&self) -> Outcome {
+        Arc::clone(&self.outcome)
+    }
+}
+
+impl Job for ModeJob {
+    fn name(&self) -> String {
+        let what = plural(self.targets.len(), "item", "items");
+        if self.recursive {
+            format!("Set permissions inside {what}")
+        } else {
+            format!("Set permissions on {what}")
+        }
+    }
+
+    fn lane(&self) -> Lane {
+        // A handful of `chmod`s is over before anybody could look at the
+        // panel, and the user is waiting to see the column change. A walk of
+        // a tree is disk work of the kind the macro lane is for.
+        if self.recursive {
+            Lane::Macro
+        } else {
+            Lane::Micro
+        }
+    }
+
+    fn run(&mut self, ctx: &TaskCtx) -> Result<()> {
+        let plan = match super::mode::plan(&self.targets, &self.grid, self.recursive, ctx) {
+            Ok(plan) => plan,
+            Err(DfError::Cancelled) => {
+                store(
+                    &self.outcome,
+                    OpOutcome {
+                        message: "Permissions unchanged".to_string(),
+                        cancelled: true,
+                        ..OpOutcome::default()
+                    },
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        ctx.set_total(0, plan.pairs.len() as u64);
+        let report = super::mode::chmod(&plan.pairs, ctx);
+        let mut errors = plan.errors;
+        errors.extend(report.errors);
+        let message = if report.changed == 0 {
+            "Permissions unchanged".to_string()
+        } else if report.unrecorded {
+            format!(
+                "Permissions set on {} · too many to undo",
+                plural(report.changed, "item", "items")
+            )
+        } else {
+            format!(
+                "Permissions set on {}",
+                plural(report.changed, "item", "items")
+            )
+        };
+        store(
+            &self.outcome,
+            OpOutcome {
+                record: report.record,
+                message,
+                errors,
+                cancelled: report.cancelled,
+                made: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+}
+
 /// Unpack an archive (PLAN §7.3). The runner behind "Extract here" and
 /// "Extract to folder" on one archive the reader can list, and behind `Enter`
 /// on a selection inside an archive. Everything else — several archives at
@@ -524,6 +623,53 @@ mod tests {
         let outcome = taken(&slot);
         assert_eq!(outcome.errors.len(), 1);
         assert!(outcome.errors[0].1.contains("refusing"), "{outcome:?}");
+    }
+
+    /// `C`'s Apply on the pool: a folder and what is in it, the X rule for
+    /// the folder, one record for the lot, and `u` putting all of it back.
+    #[test]
+    fn a_mode_job_goes_inside_and_can_be_undone() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().mode() & 0o7777;
+        let set = |path: &std::path::Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let t = TempTree::new("job-mode");
+        let dir = t.dir("photos");
+        let file = t.file("photos/a.jpg", b"x");
+        set(&file, 0o600);
+        set(&dir, 0o700);
+
+        let engine = engine();
+        let job = ModeJob::new(vec![dir.clone()], Grid::of_mode(0o644), true);
+        assert_eq!(job.name(), "Set permissions inside 1 item");
+        assert_eq!(job.lane(), Lane::Macro);
+        let slot = job.outcome();
+        let id = engine.spawn(job);
+        assert_eq!(engine.join(id, T), Some(TaskState::Done));
+
+        let outcome = taken(&slot);
+        assert_eq!(outcome.message, "Permissions set on 2 items");
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        assert_eq!(mode(&dir), 0o755);
+        assert_eq!(mode(&file), 0o644);
+
+        let mut journal = Journal::default();
+        journal.record(outcome.record.expect("a mode change is undoable"));
+        let report = journal.undo(&TaskCtx::detached()).unwrap();
+        assert_eq!(report.description, "Restored permissions of 2 items");
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&file), 0o600);
+
+        // One level only, and a file already right is no change at all.
+        let job = ModeJob::new(vec![file.clone()], Grid::of_mode(0o600), false);
+        assert_eq!(job.lane(), Lane::Micro);
+        let slot = job.outcome();
+        let id = engine.spawn(job);
+        engine.join(id, T);
+        let outcome = taken(&slot);
+        assert_eq!(outcome.message, "Permissions unchanged");
+        assert!(outcome.record.is_none());
     }
 
     #[test]

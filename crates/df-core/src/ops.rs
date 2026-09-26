@@ -1,7 +1,8 @@
 //! File operations and the op journal that makes them reversible.
 //!
-//! Every mutation — move, rename, copy, trash, symlink, create — records its
-//! inverse before it runs, and `u` replays it backwards (PLAN §5). Trash goes
+//! Every mutation — move, rename, copy, trash, symlink, create, a change of
+//! permissions — records its inverse before it runs, and `u` replays it
+//! backwards (PLAN §5). Trash goes
 //! through the freedesktop trash spec, hand-rolled, precisely so that `d` is
 //! always undoable; permanent delete is the one operation with no inverse, and
 //! it is the only one that gets a confirm dialog. `U` walks forward again: an
@@ -46,6 +47,7 @@ pub mod delete;
 pub mod jobs;
 pub mod journal;
 pub mod link;
+pub mod mode;
 pub mod paste;
 pub mod trash;
 
@@ -59,7 +61,7 @@ pub use copy::{
 };
 pub use create::{create, rename, Created};
 pub use delete::{check_deletable, check_deletable_here, delete_permanent, remove_tree};
-pub use jobs::{DeleteJob, ExtractJob, OpOutcome, Outcome, PasteJob, TrashJob};
+pub use jobs::{DeleteJob, ExtractJob, ModeJob, OpOutcome, Outcome, PasteJob, TrashJob};
 pub use journal::{
     undo_attempt, undo_record, CopyManifest, CopySource, CreatedLink, FileKind, Fingerprint,
     Journal, MovedPath, OpRecord, Redo, RedoCopy, RedoReport, TagChange, UndoAttempt, UndoReport,

@@ -576,6 +576,17 @@ pub enum OpRecord {
     /// Inverse: put each file's old tags back — all of them, and only once
     /// every file is checked to still carry exactly what the prompt wrote.
     Tags { changes: Vec<TagChange> },
+    /// `C`'s Apply, or a chip on the spot panel: the permissions of every path
+    /// it changed, before and after ([`super::mode`]). Inverse: put each
+    /// `before` back, once every path is seen to still have its `after`.
+    ///
+    /// One record for the whole card, a folder's tree included, for the
+    /// reason [`OpRecord::Renames`] is one: it was one Apply. The shape is
+    /// the plain pair per path so the way forward again is as obvious as the
+    /// way back: `after` where `before` is found.
+    Mode {
+        changes: Vec<super::mode::ModeChange>,
+    },
 }
 
 /// "1 item" / "3 items" / "1,234 items".
@@ -651,6 +662,10 @@ impl OpRecord {
                 ),
                 many => format!("tagged {}", plural(many.len(), "item", "items")),
             },
+            OpRecord::Mode { changes } => format!(
+                "changed permissions of {}",
+                plural(changes.len(), "item", "items")
+            ),
         }
     }
 
@@ -699,6 +714,10 @@ impl OpRecord {
                 [one] => format!("tagged {} again", name_of(&one.path)),
                 many => format!("tagged {} again", plural(many.len(), "item", "items")),
             },
+            OpRecord::Mode { changes } => format!(
+                "changed permissions of {} again",
+                plural(changes.len(), "item", "items")
+            ),
         }
     }
 }
@@ -1170,6 +1189,7 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
         } => whole(undo_link(link, target.as_deref(), fingerprint)),
         OpRecord::Links { links } => undo_links(links, ctx),
         OpRecord::Tags { changes } => undo_tags(changes),
+        OpRecord::Mode { changes } => super::mode::undo(changes, ctx),
     }
 }
 
@@ -1611,6 +1631,9 @@ fn redo_attempt(undone: &Undone, ctx: &TaskCtx) -> RedoAttempt {
         OpRecord::Links { links } => redo_links(undone, links, ctx),
         OpRecord::Tags { .. } => RedoAttempt::refused(DfError::Op(
             "cannot redo a change of tags — T sets them again".to_string(),
+        )),
+        OpRecord::Mode { .. } => RedoAttempt::refused(DfError::Op(
+            "cannot redo a change of permissions — C sets them again".to_string(),
         )),
     }
 }
