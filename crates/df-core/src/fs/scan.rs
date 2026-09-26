@@ -310,6 +310,9 @@ fn run_scan(request: Request, updates: &Sender<ScanUpdate>, live: &Live, notify:
     let mut batch: Vec<Entry> = Vec::with_capacity(FIRST_BATCH);
     let mut limit = FIRST_BATCH;
     let mut total = 0usize;
+    // One `statfs` for the whole directory: whether its rows' tags are read
+    // at all, which on a network or FUSE mount they are not.
+    let tags = super::tags::read_here(&dir);
 
     for item in reader {
         // Checked per entry rather than per batch: a directory of 200k entries
@@ -326,7 +329,7 @@ fn run_scan(request: Request, updates: &Sender<ScanUpdate>, live: &Live, notify:
         };
         let Ok(meta) = item.metadata() else { continue };
         let name = item.file_name().to_string_lossy().into_owned();
-        batch.push(Entry::from_parts(name, item.path(), meta));
+        batch.push(Entry::from_parts(name, item.path(), meta, tags));
         total += 1;
 
         if batch.len() >= limit {
@@ -363,11 +366,12 @@ fn run_scan(request: Request, updates: &Sender<ScanUpdate>, live: &Live, notify:
 /// yet. Entries come back in `read_dir` order, unsorted.
 pub fn scan_blocking(dir: &Path) -> Result<Vec<Entry>> {
     let reader = std::fs::read_dir(dir).map_err(|e| DfError::io(dir, e))?;
+    let tags = super::tags::read_here(dir);
     let mut entries = Vec::new();
     for item in reader.flatten() {
         let Ok(meta) = item.metadata() else { continue };
         let name = item.file_name().to_string_lossy().into_owned();
-        entries.push(Entry::from_parts(name, item.path(), meta));
+        entries.push(Entry::from_parts(name, item.path(), meta, tags));
     }
     Ok(entries)
 }

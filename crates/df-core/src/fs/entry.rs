@@ -11,6 +11,9 @@
 //! The one fact read beyond the `statx` is the file's tags — one `lgetxattr`
 //! per row (see [`super::tags`]) — and it is read here for the same reason:
 //! the tag dots are drawn, and the `#tag` filter asked, of every visible row.
+//! Only on a local filesystem, though: the scanner asks `statfs` once per
+//! directory ([`super::tags::read_here`]), and on a network or FUSE mount,
+//! where each read would be a round trip, the rows carry none.
 //!
 //! Symlinks get read twice on purpose: `lstat` to know it *is* a link, then a
 //! follow to learn what it points at. The size, times and mode reported are the
@@ -102,7 +105,8 @@ pub struct Entry {
     /// The file's tags ([`super::tags`]), as it carries them: read here, with
     /// the one `lgetxattr` a row costs, because the list pane draws a dot per
     /// coloured tag on every visible row of every frame, and `f #red` filters
-    /// by them. Empty for a file with none, and always for an archive's,
+    /// by them. Empty for a file with none, for every row on a network or
+    /// FUSE mount ([`super::tags::read_here`]), and always for an archive's,
     /// a remote service's and the trash's rows, which are not files on this
     /// disk that could carry any.
     pub tags: Vec<String>,
@@ -110,6 +114,7 @@ pub struct Entry {
 
 impl Entry {
     /// Read one entry, given its path. The name is the path's last component.
+    /// Its tags are read when its directory is on a local filesystem.
     pub fn read(path: impl Into<PathBuf>) -> Result<Entry> {
         let path = path.into();
         let name = path
@@ -120,13 +125,21 @@ impl Entry {
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
         let link_meta =
             std::fs::symlink_metadata(&path).map_err(|e| DfError::io(path.clone(), e))?;
-        Ok(Entry::from_parts(name, path, link_meta))
+        let tags = path.parent().is_none_or(super::tags::read_here);
+        Ok(Entry::from_parts(name, path, link_meta, tags))
     }
 
     /// Build from a name, a path and the result of an `lstat`, following the
     /// link if it is one. Split out from [`Entry::read`] so the scanner can
-    /// reuse the `DirEntry` it already has instead of re-`lstat`ing.
-    pub(crate) fn from_parts(name: String, path: PathBuf, link_meta: std::fs::Metadata) -> Entry {
+    /// reuse the `DirEntry` it already has instead of re-`lstat`ing. `tags`
+    /// says whether to read the file's tags — the scanner's one answer for
+    /// the whole directory ([`super::tags::read_here`]).
+    pub(crate) fn from_parts(
+        name: String,
+        path: PathBuf,
+        link_meta: std::fs::Metadata,
+        tags: bool,
+    ) -> Entry {
         use std::os::unix::fs::MetadataExt;
 
         let is_hidden = name.starts_with('.');
@@ -176,7 +189,11 @@ impl Entry {
         // The link's own attributes, never its target's: a symlink carries no
         // `user.*` attribute on Linux, so a link row has no tags even when the
         // file it points at does — tagging the row tags the thing the row is.
-        let tags = super::tags::read(&path);
+        let tags = if tags {
+            super::tags::read(&path)
+        } else {
+            Vec::new()
+        };
 
         Entry {
             name,

@@ -82,6 +82,27 @@ pub enum TagError {
     Io(DfError),
 }
 
+/// Whether tags are read on a filesystem of this `f_type` (`statfs`'s magic
+/// number).
+///
+/// Not on a network or FUSE one ([`crate::du::REMOTE_FS_MAGIC`]: NFS, SMB and
+/// CIFS, FUSE, 9p, AFS and the rest). A tag read there is a round trip per
+/// file — a share of ten thousand files that lists in one `READDIRPLUS` would
+/// cost ten thousand more on every scan and every rescan the watcher asks for
+/// — so rows there carry no tags, and `T` says why. Every local filesystem
+/// reads them; one that keeps no attributes answers with nothing, which costs
+/// the one syscall and no more.
+pub fn read_on(magic: i64) -> bool {
+    !crate::du::REMOTE_FS_MAGIC.contains(&magic)
+}
+
+/// Whether tags are read in the directory `dir`: one `statfs`, asked once per
+/// scanned directory. A directory that cannot be asked is read as local —
+/// the tag reads that follow fail as quietly as the question did.
+pub fn read_here(dir: &Path) -> bool {
+    crate::du::magic_of(dir).is_none_or(read_on)
+}
+
 /// The tags on `path`, in the order they are stored. Empty when it has none,
 /// when the filesystem keeps no attributes, or when it cannot be read — the
 /// list pane asks for every row, and one unreadable attribute is a row with no
@@ -283,6 +304,10 @@ fn quiet(e: &io::Error) -> bool {
 /// entries, and everything under a hidden folder, are left out unless `hidden`
 /// says otherwise — the manager's own `.` toggle, as the name search has it.
 ///
+/// A folder on a network or FUSE filesystem ([`read_here`]) is not walked
+/// into at all: its tags are not read anywhere else either, and walking a
+/// share to read none would be the round trips the gate exists to save.
+///
 /// Lazy, and stopped by `cancel` between any two entries: the caller pulls
 /// matches off it on a worker thread as they are found, as the name search
 /// reads `fd`'s lines, and a query that changes stops the walk rather than
@@ -318,6 +343,9 @@ impl Iterator for Find {
             }
             let Some(reader) = &mut self.reading else {
                 let dir = self.pending.pop()?;
+                if !read_here(&dir) {
+                    continue;
+                }
                 // A folder that cannot be read is one the walk cannot see
                 // into, not a reason to stop looking everywhere else.
                 self.reading = std::fs::read_dir(&dir).ok();
@@ -586,6 +614,40 @@ mod tests {
         let dir = t.dir("folder");
         write(&dir, &list(&["green"])).unwrap();
         assert_eq!(read(&dir), ["green"]);
+    }
+
+    /// Tags are read on every local filesystem, the ones that keep no
+    /// attributes included, and on no network or FUSE one.
+    #[test]
+    fn tags_are_read_on_local_filesystems_only() {
+        for (magic, name) in [
+            (0xEF53, "ext4"),
+            (0x9123_683E, "btrfs"),
+            (0x5846_5342, "xfs"),
+            (0x0102_1994, "tmpfs"),
+            (0xF2F5_2010, "f2fs"),
+            (0x2011_BAB0, "exfat"),
+            (0x4D44, "vfat"),
+        ] {
+            assert!(read_on(magic), "{name} is local");
+        }
+        for (magic, name) in [
+            (0x6969, "NFS"),
+            (0xFF53_4D42, "CIFS"),
+            (0xFE53_4D42, "SMB2"),
+            (0x517B, "SMBFS"),
+            (0x6573_5546, "FUSE"),
+            (0x0102_1997, "9p"),
+            (0x5346_414F, "AFS"),
+            (0x6B6C, "kAFS"),
+        ] {
+            assert!(!read_on(magic), "{name} is not read");
+        }
+        assert!(read_here(Path::new(env!("CARGO_MANIFEST_DIR"))));
+        assert!(
+            read_here(Path::new("/nonexistent-df-tags-probe")),
+            "a directory that cannot be asked is read as local"
+        );
     }
 
     /// A comma would be read back as two tags, so it is refused before

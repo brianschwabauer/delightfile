@@ -9026,6 +9026,12 @@ impl App {
         if command == Command::Tag && self.tab().virtual_kind().is_some() {
             return Some("Tags live on local files");
         }
+        // …and on a network or FUSE mount the rows are listed without their
+        // tags, a read per file being a round trip (`df_core::fs::tags::
+        // read_here`), so a prompt there would open on tags it cannot see.
+        if command == Command::Tag && !df_core::fs::tags::read_here(self.tab().cwd.path()) {
+            return Some("Tags are read on local drives only");
+        }
         // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
         // the commands that would write into one are inert *out loud*. A key
         // that silently does nothing is a key the user presses twice — and the

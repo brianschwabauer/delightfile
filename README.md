@@ -48,8 +48,10 @@ open.
   extended attribute, so the tags live on the file and other programs can read them. The
   seven Finder colours (and any tag `[tags]` gives a colour) show as overlapping dots after
   the name. `f #red` filters a folder by tag and `s #red` finds tagged files anywhere
-  below it. Copies, moves across drives, the trash and syncs carry the tags along; a drive
-  that cannot hold them, like a FAT card, gets the files without them and says so.
+  below it. Copies, moves across drives and the trash carry the tags along, and so does
+  a sync for every file it copies (one whose only change is its tags is not copied again);
+  a drive that cannot hold them, like a FAT card, gets the files without them and says so.
+  Tags are read on local drives only, not over NFS, SMB or FUSE mounts.
 - **Git awareness.** Status dots per row, dimmed hidden files, branch and dirty count in
   the top bar.
 - **Disk usage.** A background `du` streams folder sizes into the size column and settles
