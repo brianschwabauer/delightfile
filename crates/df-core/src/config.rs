@@ -9,9 +9,11 @@
 //! custom directory icons from `theme.toml` (PLAN §3 says twenty; the file has
 //! nineteen, and the file wins). So the constants below are not
 //! "sensible defaults" chosen in the abstract — they are a transcription, and
-//! the tests assert they still match. The one place the transcription was
-//! departed from on purpose is the opener rules, where a window is not a
-//! terminal: see `DEFAULT_RULES` for what changed and why.
+//! the tests assert they still match. Two places depart from it on purpose:
+//! the opener rules, where a window is not a terminal (see `DEFAULT_RULES` for
+//! what changed and why), and the light side, which yazi never had — it follows
+//! the desktop by default and starts from catppuccin-latte, where the yazi
+//! config pinned mocha for both (see [`Theme`]).
 //!
 //! **A missing file is silence.** Not a warning, not an error: the shipped
 //! config *is* the config, and a user who has never written one has not done
@@ -88,10 +90,21 @@
 //!
 //! ```toml
 //! [flavor]
-//! dark = "catppuccin-mocha"
+//! mode = "auto"               # auto dark light — auto follows the desktop
+//! dark = "catppuccin-mocha"   # catppuccin-mocha -macchiato -frappe -latte
+//! light = "catppuccin-latte"
 //!
+//! # Overrides for both sides…
 //! [palette]
 //! accent = "#89b4fa"
+//!
+//! # …and for one. A side's own table wins over `[palette]`, wherever in the
+//! # file either is written.
+//! [palette.dark]
+//! base = "#1a1a28"
+//!
+//! [palette.light]
+//! base = "#f4f5f8"
 //!
 //! [[icon.dir]]
 //! name = "Work"          # a glob; matched against the full path if it has a `/`
@@ -388,33 +401,55 @@ const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
     ("glob", "*", &["open", "terminal-at"]),
 ];
 
-/// The twenty directory icons from `theme.toml`: glob, glyph, colour.
-const DEFAULT_DIR_ICONS: &[(&str, char, Option<&str>)] = &[
-    ("Audio Books", '\u{f0067}', Some("#68e0cc")),
+/// The twenty directory icons from `theme.toml`: glob, glyph, colour — and,
+/// beside the colour, the catppuccin accent of the same hue that stands in for
+/// it on the light side ([`DirIcon::light`]).
+type DirIconRow = (&'static str, char, Option<(&'static str, &'static str)>);
+const DEFAULT_DIR_ICONS: &[DirIconRow] = &[
+    ("Audio Books", '\u{f0067}', Some(("#68e0cc", "teal"))),
     ("Archives", '\u{f174f}', None),
     ("Backup", '\u{f174f}', None),
     ("brian", '\u{f015}', None),
-    ("Code", '\u{e70c}', Some("#f7768e")),
+    ("Code", '\u{e70c}', Some(("#f7768e", "red"))),
     ("Documents", '\u{f0219}', None),
-    ("Final Media", '\u{f00f}', Some("#d16d9e")),
-    ("Films", '\u{f0fce}', Some("#68e0cc")),
-    ("Games", '\u{f1393}', Some("#68e0cc")),
-    ("Media", '\u{f00f}', Some("#e0af68")),
-    ("Music", '\u{f025}', Some("#e0af68")),
-    ("Pictures", '\u{f03e}', Some("#e0af68")),
-    ("plex", '\u{f06ba}', Some("#68e0cc")),
-    ("Projects", '\u{f0a98}', Some("#acf776")),
+    ("Final Media", '\u{f00f}', Some(("#d16d9e", "pink"))),
+    ("Films", '\u{f0fce}', Some(("#68e0cc", "teal"))),
+    ("Games", '\u{f1393}', Some(("#68e0cc", "teal"))),
+    ("Media", '\u{f00f}', Some(("#e0af68", "yellow"))),
+    ("Music", '\u{f025}', Some(("#e0af68", "yellow"))),
+    ("Pictures", '\u{f03e}', Some(("#e0af68", "yellow"))),
+    ("plex", '\u{f06ba}', Some(("#68e0cc", "teal"))),
+    ("Projects", '\u{f0a98}', Some(("#acf776", "green"))),
     ("Templates", '\u{f4d0}', None),
-    ("TV Shows", '\u{f0448}', Some("#68e0cc")),
-    ("Videos", '\u{f03d}', Some("#e0af68")),
+    ("TV Shows", '\u{f0448}', Some(("#68e0cc", "teal"))),
+    ("Videos", '\u{f03d}', Some(("#e0af68", "yellow"))),
     ("Windows", '\u{e70f}', None),
-    ("Work", '\u{f0b1}', Some("#f7768e")),
+    ("Work", '\u{f0b1}', Some(("#f7768e", "red"))),
 ];
 
-/// catppuccin-mocha, which PLAN §3 pins for both the dark and the light flavor
-/// (§1: no light theme initially). Named so `theme.toml` can override a single
-/// colour without restating the palette.
-const DEFAULT_PALETTE: &[(&str, &str)] = &[
+/// The flavour `[flavor] dark` starts from when it says nothing, and the one
+/// `[flavor] light` does: catppuccin's darkest and its only light flavour.
+pub const DEFAULT_DARK: &str = "catppuccin-mocha";
+pub const DEFAULT_LIGHT: &str = "catppuccin-latte";
+
+/// The four catppuccin flavours, by the names `[flavor]` takes them by.
+///
+/// Every table is catppuccin's published palette (v1), the same twenty-six
+/// names in the same order, so a `[palette]` override means the same thing on
+/// either side and a flavour swapped under it keeps every name the painter
+/// asks for. Mocha is the one the yazi config this replaces sat on (PLAN §3),
+/// and so the dark default; latte is catppuccin's only light flavour, and so
+/// the light one. Frappé and macchiato are the two dark flavours between them,
+/// shipped so that choosing one is a line in `theme.toml` rather than
+/// twenty-six.
+const FLAVORS: &[(&str, &[(&str, &str)])] = &[
+    ("catppuccin-mocha", MOCHA),
+    ("catppuccin-macchiato", MACCHIATO),
+    ("catppuccin-frappe", FRAPPE),
+    ("catppuccin-latte", LATTE),
+];
+
+const MOCHA: &[(&str, &str)] = &[
     ("rosewater", "#f5e0dc"),
     ("flamingo", "#f2cdcd"),
     ("pink", "#f5c2e7"),
@@ -441,6 +476,93 @@ const DEFAULT_PALETTE: &[(&str, &str)] = &[
     ("base", "#1e1e2e"),
     ("mantle", "#181825"),
     ("crust", "#11111b"),
+];
+
+const MACCHIATO: &[(&str, &str)] = &[
+    ("rosewater", "#f4dbd6"),
+    ("flamingo", "#f0c6c6"),
+    ("pink", "#f5bde6"),
+    ("mauve", "#c6a0f6"),
+    ("red", "#ed8796"),
+    ("maroon", "#ee99a0"),
+    ("peach", "#f5a97f"),
+    ("yellow", "#eed49f"),
+    ("green", "#a6da95"),
+    ("teal", "#8bd5ca"),
+    ("sky", "#91d7e3"),
+    ("sapphire", "#7dc4e4"),
+    ("blue", "#8aadf4"),
+    ("lavender", "#b7bdf8"),
+    ("text", "#cad3f5"),
+    ("subtext1", "#b8c0e0"),
+    ("subtext0", "#a5adcb"),
+    ("overlay2", "#939ab7"),
+    ("overlay1", "#8087a2"),
+    ("overlay0", "#6e738d"),
+    ("surface2", "#5b6078"),
+    ("surface1", "#494d64"),
+    ("surface0", "#363a4f"),
+    ("base", "#24273a"),
+    ("mantle", "#1e2030"),
+    ("crust", "#181926"),
+];
+
+const FRAPPE: &[(&str, &str)] = &[
+    ("rosewater", "#f2d5cf"),
+    ("flamingo", "#eebebe"),
+    ("pink", "#f4b8e4"),
+    ("mauve", "#ca9ee6"),
+    ("red", "#e78284"),
+    ("maroon", "#ea999c"),
+    ("peach", "#ef9f76"),
+    ("yellow", "#e5c890"),
+    ("green", "#a6d189"),
+    ("teal", "#81c8be"),
+    ("sky", "#99d1db"),
+    ("sapphire", "#85c1dc"),
+    ("blue", "#8caaee"),
+    ("lavender", "#babbf1"),
+    ("text", "#c6d0f5"),
+    ("subtext1", "#b5bfe2"),
+    ("subtext0", "#a5adce"),
+    ("overlay2", "#949cbb"),
+    ("overlay1", "#838ba7"),
+    ("overlay0", "#737994"),
+    ("surface2", "#626880"),
+    ("surface1", "#51576d"),
+    ("surface0", "#414559"),
+    ("base", "#303446"),
+    ("mantle", "#292c3c"),
+    ("crust", "#232634"),
+];
+
+const LATTE: &[(&str, &str)] = &[
+    ("rosewater", "#dc8a78"),
+    ("flamingo", "#dd7878"),
+    ("pink", "#ea76cb"),
+    ("mauve", "#8839ef"),
+    ("red", "#d20f39"),
+    ("maroon", "#e64553"),
+    ("peach", "#fe640b"),
+    ("yellow", "#df8e1d"),
+    ("green", "#40a02b"),
+    ("teal", "#179299"),
+    ("sky", "#04a5e5"),
+    ("sapphire", "#209fb5"),
+    ("blue", "#1e66f5"),
+    ("lavender", "#7287fd"),
+    ("text", "#4c4f69"),
+    ("subtext1", "#5c5f77"),
+    ("subtext0", "#6c6f85"),
+    ("overlay2", "#7c7f93"),
+    ("overlay1", "#8c8fa1"),
+    ("overlay0", "#9ca0b0"),
+    ("surface2", "#acb0be"),
+    ("surface1", "#bcc0cc"),
+    ("surface0", "#ccd0da"),
+    ("base", "#eff1f5"),
+    ("mantle", "#e6e9ef"),
+    ("crust", "#dce0e8"),
 ];
 
 // ── The model ───────────────────────────────────────────────────────────────
@@ -1239,6 +1361,14 @@ pub struct DirIcon {
     pub pattern: Glob,
     pub text: char,
     pub fg: Option<Color>,
+    /// For a shipped rule, the palette name its `fg` stands for on the light
+    /// side; `None` for a rule somebody wrote, whose colour is theirs on both.
+    ///
+    /// yazi's colours were picked for a dark ground, and on latte's `base`
+    /// the palest of them is not there at all (`#acf776` is 1.2:1). So on the
+    /// light side a shipped rule wears the flavour's own accent of the same
+    /// hue, and the dark side keeps the transcription exactly.
+    pub light: Option<&'static str>,
 }
 
 /// A file that gets its own icon, written as `[[icon.file]]` (PLAN §3, §8).
@@ -1265,12 +1395,84 @@ pub struct FileIcon {
     pub fg: Option<Color>,
 }
 
+/// Which half of the theme is on screen: the flavour `[flavor] dark` names, or
+/// the one `[flavor] light` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Appearance {
+    Dark,
+    Light,
+}
+
+impl Appearance {
+    /// The word `theme.toml` spells it with: `[palette.dark]`, `dark = …`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Appearance::Dark => "dark",
+            Appearance::Light => "light",
+        }
+    }
+}
+
+/// `[flavor] mode`: which side the window is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThemeMode {
+    /// Whichever the desktop prefers (the XDG portal's `color-scheme`), and
+    /// dark when it prefers neither or cannot be asked.
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+impl ThemeMode {
+    pub fn parse(text: &str) -> Option<ThemeMode> {
+        match text {
+            "auto" => Some(ThemeMode::Auto),
+            "dark" => Some(ThemeMode::Dark),
+            "light" => Some(ThemeMode::Light),
+            _ => None,
+        }
+    }
+}
+
+/// A shipped flavour's table, by the name `[flavor]` takes. `frappé` is
+/// accepted as catppuccin spells it as well as `frappe` as a keyboard does.
+fn flavor_table(name: &str) -> Option<(&'static str, &'static [(&'static str, &'static str)])> {
+    let name = name.trim().to_lowercase().replace('é', "e");
+    FLAVORS
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(known, table)| (*known, *table))
+}
+
+/// The names of the flavours `[flavor]` can name, in the order catppuccin
+/// lists them.
+pub fn flavor_names() -> impl Iterator<Item = &'static str> {
+    FLAVORS.iter().map(|(name, _)| *name)
+}
+
+/// A flavour's table as the palette a side starts from.
+fn palette_of(table: &[(&str, &str)]) -> Vec<(String, Color)> {
+    table
+        .iter()
+        .filter_map(|(name, hex)| Color::parse(hex).map(|c| ((*name).to_string(), c)))
+        .collect()
+}
+
 /// Everything `theme.toml` says.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
-    pub flavor: String,
-    /// Named colours, in declaration order so the theme browser can list them.
-    pub palette: Vec<(String, Color)>,
+    /// `[flavor] mode`: auto, dark or light.
+    pub mode: ThemeMode,
+    /// `[flavor] dark` and `[flavor] light`: the flavour each side starts
+    /// from, by its canonical name.
+    pub dark: String,
+    pub light: String,
+    /// Each side's named colours, in declaration order so a theme browser can
+    /// list them: its flavour's table, then `[palette]` over it, then the
+    /// side's own `[palette.dark]` or `[palette.light]` over that.
+    pub dark_palette: Vec<(String, Color)>,
+    pub light_palette: Vec<(String, Color)>,
     pub dir_icons: Vec<DirIcon>,
     /// User `[[icon.file]]` rules, in declaration order. Empty by default; see
     /// [`FileIcon`].
@@ -1280,17 +1482,18 @@ pub struct Theme {
 impl Default for Theme {
     fn default() -> Theme {
         Theme {
-            flavor: "catppuccin-mocha".to_string(),
-            palette: DEFAULT_PALETTE
-                .iter()
-                .filter_map(|(name, hex)| Color::parse(hex).map(|c| ((*name).to_string(), c)))
-                .collect(),
+            mode: ThemeMode::default(),
+            dark: DEFAULT_DARK.to_string(),
+            light: DEFAULT_LIGHT.to_string(),
+            dark_palette: palette_of(MOCHA),
+            light_palette: palette_of(LATTE),
             dir_icons: DEFAULT_DIR_ICONS
                 .iter()
                 .map(|(pattern, text, fg)| DirIcon {
                     pattern: Glob::new(*pattern),
                     text: *text,
-                    fg: fg.and_then(Color::parse),
+                    fg: fg.and_then(|(hex, _)| Color::parse(hex)),
+                    light: fg.map(|(_, accent)| accent),
                 })
                 .collect(),
             file_icons: Vec::new(),
@@ -1299,8 +1502,24 @@ impl Default for Theme {
 }
 
 impl Theme {
-    pub fn color(&self, name: &str) -> Option<Color> {
-        self.palette
+    /// One side's named colours.
+    pub fn palette(&self, side: Appearance) -> &[(String, Color)] {
+        match side {
+            Appearance::Dark => &self.dark_palette,
+            Appearance::Light => &self.light_palette,
+        }
+    }
+
+    fn palette_mut(&mut self, side: Appearance) -> &mut Vec<(String, Color)> {
+        match side {
+            Appearance::Dark => &mut self.dark_palette,
+            Appearance::Light => &mut self.light_palette,
+        }
+    }
+
+    /// One named colour on one side.
+    pub fn color(&self, side: Appearance, name: &str) -> Option<Color> {
+        self.palette(side)
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, c)| *c)
@@ -1330,36 +1549,90 @@ impl Theme {
         let mut theme = Theme::default();
         let mut warnings = std::mem::take(&mut doc.warnings);
 
+        // `[flavor]` first, because it decides the table each side's
+        // overrides are laid over. Read in file order, so a key written twice
+        // ends at its last value, as every other table here does.
         if let Some(flavor) = doc.table("flavor") {
-            if let Some(entry) = flavor.entry("dark") {
-                match entry.value.as_str() {
-                    Some(name) => theme.flavor = name.to_string(),
-                    None => warnings.push(ConfigWarning::new(
-                        file,
-                        entry.line,
-                        "flavor.dark: expected a flavor name (a string)",
+            for entry in &flavor.entries {
+                let said = match entry.key.as_str() {
+                    "mode" => match entry.value.as_str().and_then(ThemeMode::parse) {
+                        Some(mode) => {
+                            theme.mode = mode;
+                            None
+                        }
+                        None => Some(
+                            "flavor.mode: expected \"auto\", \"dark\" or \"light\"".to_string(),
+                        ),
+                    },
+                    key @ ("dark" | "light") => {
+                        let side = if key == "dark" {
+                            Appearance::Dark
+                        } else {
+                            Appearance::Light
+                        };
+                        match entry.value.as_str() {
+                            Some(name) => match flavor_table(name) {
+                                Some((known, table)) => {
+                                    match side {
+                                        Appearance::Dark => theme.dark = known.to_string(),
+                                        Appearance::Light => theme.light = known.to_string(),
+                                    }
+                                    *theme.palette_mut(side) = palette_of(table);
+                                    None
+                                }
+                                // Unknown is a warning and the side keeps its
+                                // default, rather than a side with no colours.
+                                None => Some(format!(
+                                    "flavor.{key}: no flavor called \"{name}\" — the four are {}",
+                                    flavor_names().collect::<Vec<_>>().join(", ")
+                                )),
+                            },
+                            None => {
+                                Some(format!("flavor.{key}: expected a flavor name (a string)"))
+                            }
+                        }
+                    }
+                    other => Some(format!(
+                        "unknown key `{other}` in [flavor] — it takes mode, dark and light"
                     )),
+                };
+                if let Some(message) = said {
+                    warnings.push(ConfigWarning::new(file, entry.line, message));
                 }
             }
         }
 
-        if let Some(palette) = doc.table("palette") {
-            for entry in &palette.entries {
-                let parsed = entry.value.as_str().and_then(Color::parse);
-                match parsed {
-                    Some(color) => match theme.palette.iter().position(|(n, _)| *n == entry.key) {
-                        Some(i) => theme.palette[i].1 = color,
-                        None => theme.palette.push((entry.key.clone(), color)),
-                    },
-                    None => warnings.push(ConfigWarning::new(
-                        file,
-                        entry.line,
-                        format!(
-                            "palette `{}`: expected a colour like \"#89b4fa\"",
-                            entry.key
-                        ),
-                    )),
+        // Then the overrides: `[palette]` on both sides, and a side's own
+        // table after it, so `[palette.light] base` beats `[palette] base` on
+        // the light side whichever of the two the file wrote first. Each table
+        // is read once, so a bad colour in `[palette]` is one warning rather
+        // than one per side it would have landed on.
+        let shared = palette_entries(doc.table("palette"), file, &mut warnings);
+        for side in [Appearance::Dark, Appearance::Light] {
+            let own = palette_entries(
+                doc.table(&format!("palette.{}", side.name())),
+                file,
+                &mut warnings,
+            );
+            let palette = theme.palette_mut(side);
+            for (name, color) in shared.iter().chain(&own) {
+                match palette.iter().position(|(n, _)| n == name) {
+                    Some(i) => palette[i].1 = *color,
+                    None => palette.push((name.clone(), *color)),
                 }
+            }
+        }
+        // A `[palette.dim]` is a table nothing reads, which is a typo for one
+        // of the two that are.
+        for (rest, table) in doc.tables_under("palette") {
+            if rest != "dark" && rest != "light" {
+                warnings.push(ConfigWarning::new(
+                    file,
+                    table.line,
+                    format!(
+                        "unknown table [palette.{rest}] — the palette tables are [palette], [palette.dark] and [palette.light]"
+                    ),
+                ));
             }
         }
 
@@ -1398,9 +1671,43 @@ impl Theme {
     }
 }
 
+/// The colours one palette table sets, in file order, with a warning for each
+/// line that is not a colour. `None` — the table is not in the file — sets
+/// nothing.
+fn palette_entries(
+    table: Option<&Table>,
+    file: &Path,
+    warnings: &mut Vec<ConfigWarning>,
+) -> Vec<(String, Color)> {
+    let Some(table) = table else {
+        return Vec::new();
+    };
+    let mut colors = Vec::new();
+    for entry in &table.entries {
+        match entry.value.as_str().and_then(Color::parse) {
+            Some(color) => colors.push((entry.key.clone(), color)),
+            None => warnings.push(ConfigWarning::new(
+                file,
+                entry.line,
+                format!(
+                    "{} `{}`: expected a colour like \"#89b4fa\"",
+                    table.name, entry.key
+                ),
+            )),
+        }
+    }
+    colors
+}
+
 fn parse_dir_icon(table: &Table, said: &mut Vec<String>) -> Result<DirIcon, String> {
     let (pattern, text, fg) = parse_icon_fields(table, "icon.dir", said)?;
-    Ok(DirIcon { pattern, text, fg })
+    // A rule somebody wrote keeps its colour on both sides: it is theirs.
+    Ok(DirIcon {
+        pattern,
+        text,
+        fg,
+        light: None,
+    })
 }
 
 fn parse_file_icon(table: &Table, said: &mut Vec<String>) -> Result<FileIcon, String> {
@@ -1968,11 +2275,14 @@ mod tests {
     #[test]
     fn theme_defaults_carry_the_custom_directory_icons() {
         let t = Theme::default();
-        assert_eq!(t.flavor, "catppuccin-mocha");
+        assert_eq!(t.dark, "catppuccin-mocha");
+        assert_eq!(t.light, "catppuccin-latte");
+        assert_eq!(t.mode, ThemeMode::Auto);
         assert_eq!(t.dir_icons.len(), 19); // the yazi table, verbatim
         let work = t.dir_icon("/home/brian/Work", "Work").expect("Work");
         assert_eq!(work.fg, Color::parse("#f7768e"));
-        assert_eq!(t.color("base"), Color::parse("#1e1e2e"));
+        assert_eq!(t.color(Appearance::Dark, "base"), Color::parse("#1e1e2e"));
+        assert_eq!(t.color(Appearance::Light, "base"), Color::parse("#eff1f5"));
         // Matching is case-insensitive, so `work` finds it too.
         assert!(t.dir_icon("/home/brian/work", "work").is_some());
         assert!(t.dir_icon("/home/brian/Nope", "Nope").is_none());
@@ -2400,12 +2710,165 @@ mod tests {
             Path::new("theme.toml"),
         );
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(t.color("base"), Some(Color { r: 0, g: 0, b: 0 }));
-        assert_eq!(t.color("accent"), Color::parse("#89b4fa"));
+        for side in [Appearance::Dark, Appearance::Light] {
+            assert_eq!(t.color(side, "base"), Some(Color { r: 0, g: 0, b: 0 }));
+            assert_eq!(t.color(side, "accent"), Color::parse("#89b4fa"));
+        }
         // The rest of catppuccin survived the one override.
-        assert_eq!(t.color("mauve"), Color::parse("#cba6f7"));
+        assert_eq!(t.color(Appearance::Dark, "mauve"), Color::parse("#cba6f7"));
+        assert_eq!(t.color(Appearance::Light, "mauve"), Color::parse("#8839ef"));
         let work = t.dir_icon("/x/Work", "Work").expect("Work");
         assert_eq!(work.text, 'W');
+        // Written, so its colour is the writer's on both sides.
+        assert_eq!(work.light, None);
+    }
+
+    /// `[flavor]`: the mode, and a flavour for each side, by name — with
+    /// catppuccin's own spelling of frappé as well as the keyboard's.
+    #[test]
+    fn the_flavor_table_says_which_side_is_on_and_from_what() {
+        let parse = |text: &str| Theme::parse(text, Path::new("theme.toml"));
+
+        for (word, mode) in [
+            ("auto", ThemeMode::Auto),
+            ("dark", ThemeMode::Dark),
+            ("light", ThemeMode::Light),
+        ] {
+            let (t, warnings) = parse(&format!("[flavor]\nmode = \"{word}\"\n"));
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(t.mode, mode);
+        }
+
+        let (t, warnings) =
+            parse("[flavor]\ndark = \"catppuccin-frappé\"\nlight = \"catppuccin-latte\"\n");
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(t.dark, "catppuccin-frappe");
+        assert_eq!(t.color(Appearance::Dark, "base"), Color::parse("#303446"));
+        assert_eq!(t.color(Appearance::Light, "base"), Color::parse("#eff1f5"));
+        let (t, _) = parse("[flavor]\ndark = \"catppuccin-macchiato\"\n");
+        assert_eq!(t.color(Appearance::Dark, "base"), Color::parse("#24273a"));
+        // A side can be any of the four, a dark flavour included.
+        let (t, _) = parse("[flavor]\nlight = \"catppuccin-mocha\"\n");
+        assert_eq!(t.light, "catppuccin-mocha");
+        assert_eq!(t.color(Appearance::Light, "base"), Color::parse("#1e1e2e"));
+
+        // Each mistake is one warning on its own line, and the side it was
+        // about keeps its default rather than losing its colours.
+        let (t, warnings) =
+            parse("[flavor]\nmode = \"dusk\"\ndark = \"gruvbox\"\nlight = 3\nfollow = true\n");
+        assert_eq!(warnings.len(), 4, "{warnings:?}");
+        assert_eq!(
+            warnings.iter().map(|w| w.line).collect::<Vec<_>>(),
+            vec![2, 3, 4, 5]
+        );
+        assert!(
+            warnings[1].message.contains("catppuccin-latte"),
+            "{warnings:?}"
+        );
+        assert_eq!(t.mode, ThemeMode::Auto);
+        assert_eq!(t.dark, DEFAULT_DARK);
+        assert_eq!(t.light, DEFAULT_LIGHT);
+        assert_eq!(t.color(Appearance::Dark, "base"), Color::parse("#1e1e2e"));
+    }
+
+    /// `[palette]` is both sides, `[palette.dark]` and `[palette.light]` one
+    /// each, and a side's own table wins over the shared one — whichever the
+    /// file wrote first, and over whichever flavour the side is.
+    #[test]
+    fn a_side_s_own_palette_wins_over_the_shared_one() {
+        let (t, warnings) = Theme::parse(
+            "[palette.light]\nbase = \"#ffffff\"\n\n\
+             [palette]\nbase = \"#000000\"\nblue = \"#0000ff\"\n\n\
+             [palette.dark]\nred = \"#ff0000\"\n\n\
+             [flavor]\ndark = \"catppuccin-frappe\"\n",
+            Path::new("theme.toml"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (dark, light) = (Appearance::Dark, Appearance::Light);
+        // The shared table on the dark side, the light side's own over it.
+        assert_eq!(t.color(dark, "base"), Color::parse("#000000"));
+        assert_eq!(t.color(light, "base"), Color::parse("#ffffff"));
+        // The shared table everywhere its side said nothing.
+        assert_eq!(t.color(dark, "blue"), Color::parse("#0000ff"));
+        assert_eq!(t.color(light, "blue"), Color::parse("#0000ff"));
+        // A side's table stays on its side.
+        assert_eq!(t.color(dark, "red"), Color::parse("#ff0000"));
+        assert_eq!(t.color(light, "red"), Color::parse("#d20f39"));
+        // And the overrides lie over the flavour `[flavor]` chose, written
+        // after them or not: frappé's mauve under a dark side nobody touched.
+        assert_eq!(t.color(dark, "mauve"), Color::parse("#ca9ee6"));
+
+        // A bad colour in a side's table names the table, and a palette table
+        // nothing reads is a typo worth saying.
+        let (_, warnings) = Theme::parse(
+            "[palette.dark]\nbase = \"black\"\n\n[palette.dim]\nbase = \"#000000\"\n",
+            Path::new("theme.toml"),
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0].message.starts_with("palette.dark `base`"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[1].message.contains("[palette.dim]"),
+            "{warnings:?}"
+        );
+    }
+
+    /// The four tables are catppuccin's twenty-six names each, in one order,
+    /// every one a colour — so a flavour swapped under a `[palette]` override
+    /// keeps every name the painter asks for.
+    #[test]
+    fn every_flavor_names_the_same_twenty_six_colours() {
+        fn names(table: &[(&'static str, &str)]) -> Vec<&'static str> {
+            table.iter().map(|(n, _)| *n).collect()
+        }
+        assert_eq!(FLAVORS.len(), 4);
+        for (flavor, table) in FLAVORS {
+            assert_eq!(table.len(), 26, "{flavor}");
+            assert_eq!(names(table), names(MOCHA), "{flavor}");
+            for (name, hex) in *table {
+                assert!(Color::parse(hex).is_some(), "{flavor} {name} = {hex}");
+            }
+            assert!(flavor_table(flavor).is_some(), "{flavor}");
+        }
+        // Spot checks against catppuccin's published values.
+        let hex = |flavor: &str, name: &str| {
+            flavor_table(flavor)
+                .and_then(|(_, table)| table.iter().find(|(n, _)| *n == name))
+                .map(|(_, h)| *h)
+        };
+        assert_eq!(hex("catppuccin-latte", "text"), Some("#4c4f69"));
+        assert_eq!(hex("catppuccin-latte", "crust"), Some("#dce0e8"));
+        assert_eq!(hex("catppuccin-frappe", "crust"), Some("#232634"));
+        assert_eq!(hex("catppuccin-macchiato", "lavender"), Some("#b7bdf8"));
+        assert_eq!(hex("Catppuccin-Frappé", "base"), Some("#303446"));
+        assert!(flavor_table("catppuccin").is_none());
+    }
+
+    /// The shipped directory colours each name the accent that stands in for
+    /// them on the light side; the ones with no colour name none.
+    #[test]
+    fn shipped_directory_colours_name_their_light_accent() {
+        let t = Theme::default();
+        let light = |name: &str| {
+            t.dir_icon(&format!("/x/{name}"), name)
+                .and_then(|i| i.light)
+        };
+        assert_eq!(light("Work"), Some("red"));
+        assert_eq!(light("Projects"), Some("green"));
+        assert_eq!(light("Films"), Some("teal"));
+        assert_eq!(light("Music"), Some("yellow"));
+        assert_eq!(light("Final Media"), Some("pink"));
+        assert_eq!(light("Documents"), None);
+        for icon in &t.dir_icons {
+            assert_eq!(
+                icon.fg.is_some(),
+                icon.light.is_some(),
+                "{:?}",
+                icon.pattern
+            );
+        }
     }
 
     #[test]

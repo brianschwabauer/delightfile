@@ -17,7 +17,7 @@
 //! blue" in the width of two letters. Three at most, because a fourth
 //! overlapping dot is a smudge rather than a colour.
 
-use df_core::config::{TagColor, Theme};
+use df_core::config::{Appearance, TagColor, Theme};
 
 use crate::icons::to_color32;
 use crate::theme::Palette;
@@ -42,7 +42,7 @@ const RING: f32 = 1.0;
 pub const DOT_GAP: f32 = 5.0;
 
 /// The tag colours this window paints with: the seven built in, and whatever
-/// `[tags]` adds, resolved once against the theme.
+/// `[tags]` adds, resolved once against the side of the theme on screen.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TagColors {
     /// `[tags]`, each tag lowercased, with the colour its line resolved to.
@@ -55,10 +55,11 @@ pub struct TagColors {
 pub static BUILT_IN: TagColors = TagColors { custom: Vec::new() };
 
 impl TagColors {
-    /// Resolve `[tags]` against the theme. A line whose palette name the
-    /// theme does not have is left out, with a warning: a tag painted in a
-    /// made-up grey would be a colour nobody asked for.
-    pub fn new(tags: &[(String, TagColor)], theme: &Theme) -> TagColors {
+    /// Resolve `[tags]` against `side` of the theme. A line whose palette
+    /// name the theme does not have is left out, with a warning: a tag
+    /// painted in a made-up grey would be a colour nobody asked for. A hex
+    /// is the same on either side; a palette name is that side's colour.
+    pub fn new(tags: &[(String, TagColor)], theme: &Theme, side: Appearance) -> TagColors {
         let mut custom = Vec::new();
         for (tag, color) in tags {
             let resolved = match color {
@@ -67,8 +68,8 @@ impl TagColors {
                     let name = name.trim();
                     let lower = name.to_lowercase();
                     theme
-                        .color(palette_name(&lower).unwrap_or(&lower))
-                        .or_else(|| theme.color(name))
+                        .color(side, palette_name(&lower).unwrap_or(&lower))
+                        .or_else(|| theme.color(side, name))
                         .map(to_color32)
                 }
             };
@@ -198,7 +199,7 @@ mod tests {
                 TagColor::Named("ultraviolet".to_string()),
             ),
         ];
-        let colors = TagColors::new(&lines, &theme);
+        let colors = TagColors::new(&lines, &theme, Appearance::Dark);
         assert_eq!(colors.color("work", &palette), Some(palette.blue));
         assert_eq!(colors.color("LATER", &palette), Some(palette.peach));
         assert_eq!(

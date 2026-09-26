@@ -14,7 +14,7 @@
 //! number somebody eyeballed — which is also what makes a user's `[palette]`
 //! override in `theme.toml` do something coherent instead of half of one.
 
-use df_core::config::{Color, Theme};
+use df_core::config::{Appearance, Color, Theme};
 
 use crate::icons::to_color32;
 
@@ -67,7 +67,7 @@ impl Palette {
         // flavour that is missing a name. Falling back to a mid grey makes that
         // visible without crashing.
         let pick = |name: &str| {
-            to_color32(theme.color(name).unwrap_or(Color {
+            to_color32(theme.color(Appearance::Dark, name).unwrap_or(Color {
                 r: 0x7f,
                 g: 0x84,
                 b: 0x9c,

@@ -2248,7 +2248,11 @@ impl App {
             logged_first_frame: false,
             logged_first_listing: false,
             palette: Palette::from_theme(&theme),
-            tag_colors: crate::tags::TagColors::new(&config.tags, &theme),
+            tag_colors: crate::tags::TagColors::new(
+                &config.tags,
+                &theme,
+                df_core::config::Appearance::Dark,
+            ),
             tag_draft: None,
             config,
             theme,
