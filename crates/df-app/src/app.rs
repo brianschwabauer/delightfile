@@ -5400,8 +5400,20 @@ impl App {
         open::for_archives(choices, archives)
     }
 
-    /// Run one opener over `paths`.
+    /// Run one opener over `paths`, in the folder on screen.
     fn launch(&mut self, choice: &open::Choice, paths: Vec<PathBuf>, now: Instant) {
+        let cwd = self.child_cwd();
+        self.launch_in(choice, paths, cwd, now);
+    }
+
+    /// Run one opener over `paths`, with `cwd` as its working directory.
+    fn launch_in(
+        &mut self,
+        choice: &open::Choice,
+        paths: Vec<PathBuf>,
+        cwd: PathBuf,
+        now: Instant,
+    ) {
         if let Some(builtin) = choice.builtin() {
             // The shipped built-ins are the three extracts (PLAN §6's "fix the
             // yazi gap"), and they are the same verb `e` and `E` are — through
@@ -5421,10 +5433,9 @@ impl App {
             return;
         }
         if choice.block {
-            self.run_shell(&choice.command.clone(), paths, true, now);
+            self.run_shell_in(&choice.command.clone(), paths, true, cwd, now);
             return;
         }
-        let cwd = self.child_cwd();
         if let Err(e) = open::spawn_detached(&choice.command, &paths, &cwd) {
             self.toasts.error(format!("{}: {e}", choice.name), now);
         }
@@ -5439,9 +5450,16 @@ impl App {
     /// lookup the folder menu was missing. The gate has already turned away
     /// the places that are not folders on this disk
     /// (`"Terminals open on local folders"`).
+    ///
+    /// Started *in* `dir` as well as handed it: a row's folder is not the
+    /// folder on screen, and an opener that trusts `$PWD` rather than `$1` has
+    /// to land in the same place. A `dir` that has gone since it was drawn
+    /// falls back to where a child would otherwise start
+    /// ([`spawnable_cwd`]), and the opener says what it makes of its `$1`.
     fn terminal_in(&mut self, dir: PathBuf, now: Instant) {
+        let cwd = spawnable_cwd(&dir, &self.child_cwd());
         match open::named(&self.config, open::TERMINAL_OPENER) {
-            Some(choice) => self.launch(&choice, vec![dir], now),
+            Some(choice) => self.launch_in(&choice, vec![dir], cwd, now),
             None => self.toasts.notice(
                 format!("No {} opener in delightfile.toml", open::TERMINAL_OPENER),
                 now,
@@ -5457,6 +5475,18 @@ impl App {
     /// comes back as a toast.
     fn run_shell(&mut self, snippet: &str, paths: Vec<PathBuf>, block: bool, now: Instant) {
         let cwd = self.child_cwd();
+        self.run_shell_in(snippet, paths, block, cwd, now);
+    }
+
+    /// [`App::run_shell`] with its working directory named.
+    fn run_shell_in(
+        &mut self,
+        snippet: &str,
+        paths: Vec<PathBuf>,
+        block: bool,
+        cwd: PathBuf,
+        now: Instant,
+    ) {
         if !block {
             match open::spawn_detached(snippet, &paths, &cwd) {
                 Ok(()) => self

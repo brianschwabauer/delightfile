@@ -216,7 +216,8 @@ fn the_folder_menu_opens_a_terminal_and_greys_it_in_the_trash() {
 }
 
 /// A folder row's menu opens the terminal in *that* folder, from under Pin
-/// folder — not in the folder on screen, which is `Ctrl+t`'s.
+/// folder — not in the folder on screen, which is `Ctrl+t`'s — as its `$1`
+/// and as its working directory both.
 #[test]
 fn a_folder_rows_menu_opens_a_terminal_in_that_folder() {
     let mut app = Fixture::with_folders("terminal-row", &["a.txt"], &["sub"]);
@@ -238,8 +239,14 @@ fn a_folder_rows_menu_opens_a_terminal_in_that_folder() {
     assert_eq!((terminal.keys.as_str(), terminal.enabled), ("", true));
 
     app.menu_action(menu::Action::TerminalRow, 10, now);
-    let (argument, _) = opened_in(&out);
+    let (argument, cwd) = opened_in(&out);
     assert_eq!(argument, sub);
+    // …and started there, for an opener that trusts `$PWD` over `$1`.
+    assert_eq!(
+        cwd.canonicalize().expect("real"),
+        sub.canonicalize().expect("real"),
+        "the row's terminal ran in the folder on screen"
+    );
 
     // A file's row has no such row: its terminal is `terminal-at`, under
     // Open with.
