@@ -292,6 +292,9 @@ impl Job for DeleteJob {
 /// is by count, since a mode change moves no bytes. A cancel keeps what was
 /// already set, recorded, so `u` takes back exactly that.
 pub struct ModeJob {
+    /// The folder the change is asked in — the listing's own — which every
+    /// target has to be below, and which everything is looked up from.
+    anchor: PathBuf,
     targets: Vec<PathBuf>,
     grid: Grid,
     recursive: bool,
@@ -299,8 +302,9 @@ pub struct ModeJob {
 }
 
 impl ModeJob {
-    pub fn new(targets: Vec<PathBuf>, grid: Grid, recursive: bool) -> ModeJob {
+    pub fn new(anchor: PathBuf, targets: Vec<PathBuf>, grid: Grid, recursive: bool) -> ModeJob {
         ModeJob {
+            anchor,
             targets,
             grid,
             recursive,
@@ -335,7 +339,9 @@ impl Job for ModeJob {
     }
 
     fn run(&mut self, ctx: &TaskCtx) -> Result<()> {
-        let plan = match super::mode::plan(&self.targets, &self.grid, self.recursive, ctx) {
+        let planned =
+            super::mode::plan(&self.anchor, &self.targets, &self.grid, self.recursive, ctx);
+        let plan = match planned {
             Ok(plan) => plan,
             Err(DfError::Cancelled) => {
                 store(
@@ -351,28 +357,15 @@ impl Job for ModeJob {
             Err(e) => return Err(e),
         };
         ctx.set_total(0, plan.pairs.len() as u64);
-        let report = super::mode::chmod(&plan.pairs, ctx);
-        let mut errors = plan.errors;
-        errors.extend(report.errors);
-        let message = if report.changed == 0 {
-            "Permissions unchanged".to_string()
-        } else if report.unrecorded {
-            format!(
-                "Permissions set on {} · too many to undo",
-                plural(report.changed, "item", "items")
-            )
-        } else {
-            format!(
-                "Permissions set on {}",
-                plural(report.changed, "item", "items")
-            )
-        };
+        let mut report = super::mode::chmod(&self.anchor, &plan.pairs, ctx);
+        report.absorb(plan);
+        let message = report.message();
         store(
             &self.outcome,
             OpOutcome {
                 record: report.record,
                 message,
-                errors,
+                errors: report.errors,
                 cancelled: report.cancelled,
                 made: Vec::new(),
             },
@@ -641,7 +634,12 @@ mod tests {
         set(&dir, 0o700);
 
         let engine = engine();
-        let job = ModeJob::new(vec![dir.clone()], Grid::of_mode(0o644), true);
+        let job = ModeJob::new(
+            t.path().to_path_buf(),
+            vec![dir.clone()],
+            Grid::of_mode(0o644),
+            true,
+        );
         assert_eq!(job.name(), "Set permissions inside 1 item");
         assert_eq!(job.lane(), Lane::Macro);
         let slot = job.outcome();
@@ -662,7 +660,7 @@ mod tests {
         assert_eq!(mode(&file), 0o600);
 
         // One level only, and a file already right is no change at all.
-        let job = ModeJob::new(vec![file.clone()], Grid::of_mode(0o600), false);
+        let job = ModeJob::new(dir.clone(), vec![file.clone()], Grid::of_mode(0o600), false);
         assert_eq!(job.lane(), Lane::Micro);
         let slot = job.outcome();
         let id = engine.spawn(job);

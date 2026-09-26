@@ -188,7 +188,9 @@ impl App {
         // `IN_ATTRIB` usually gets there first. The cursor is not aimed at
         // anything: the rows are where they were, and so is it.
         let dirs = Self::affected(&paths, None);
-        let job = ModeJob::new(paths, card.grid, card.recursive);
+        // Found from the folder on screen, which every row is below — directly,
+        // or further down for a listing whose rows are hits inside it.
+        let job = ModeJob::new(self.cwd(), paths, card.grid, card.recursive);
         let slot = job.outcome();
         let id = self.engine.spawn(job);
         self.track(id, slot, dirs);

@@ -31,9 +31,10 @@
 //! near here. A link is skipped wherever it is met, in the selection or in a
 //! tree, and never followed — including one put where a folder was between
 //! the plan and the change, or the change and its undo. Nothing below the
-//! folder the change was asked in is reached by its path: each component is
-//! opened from the one above it without following it, and the mode is set on
-//! what was opened (see "Finding a path without following a link" below).
+//! folder the change was asked in (the listing's, however far below it a row
+//! is) is reached by its path: each component is opened from the one above
+//! it without following it, and the mode is set on what was opened (see
+//! "Finding a path without following a link" below).
 //!
 //! ## Order
 //!
@@ -48,10 +49,12 @@
 //!
 //! [`OpRecord::Mode`] keeps each path's mode before and after, the after read
 //! back from the disk rather than assumed: the kernel quietly drops setgid on
-//! a file whose group the caller is not in. The inverse checks that every
-//! path still has exactly the mode the change left before it restores any of
-//! them, the journal's refusal-before-touching rule, and a forward re-apply is
-//! the same walk with `before` and `after` swapped.
+//! a file whose group the caller is not in. It keeps the inode too, so a file
+//! deleted and made again is not mistaken for the one that was changed. The
+//! inverse checks that every path is still that file with exactly the mode
+//! the change left before it restores any of them, the journal's
+//! refusal-before-touching rule, and a forward re-apply is the same walk with
+//! `before` and `after` swapped.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -229,23 +232,29 @@ pub fn searchable(mode: u32) -> u32 {
 }
 
 /// One path's mode before and after a change: the whole `st_mode` each time,
-/// file type and all, and how to find the path again.
+/// file type and all, which inode it was, and how to find the path again.
 ///
-/// The whole of it rather than the twelve bits `chmod` sets, for two reasons.
+/// The whole mode rather than the twelve bits `chmod` sets, for two reasons.
 /// Comparing it notices a file that was replaced by a folder of the same name
 /// as well as one whose bits moved. And it says which paths are folders
 /// without asking the disk, which the undo needs for a folder the change
 /// shut: nothing under it can be asked anything until it is open again.
+///
+/// The inode (`dev`, `ino`) is the file's identity: a file deleted and made
+/// again with the same mode is a different file, and neither an undo nor a
+/// redo may give it a mode that was meant for the one before it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeChange {
     pub path: PathBuf,
     pub before: u32,
     pub after: u32,
     /// How many of `path`'s last components are below the folder the change
-    /// was asked in: 1 for an item that was selected, one more for each
-    /// folder down inside one. The undo looks each of them up from that
-    /// folder without following a link, as the change did ([`Planned::depth`]).
+    /// was asked in: 1 for a row of it, more for a row further down or for
+    /// what a change found inside a folder. The undo looks each of them up
+    /// from that folder without following a link, as the change did.
     pub depth: usize,
+    pub dev: u64,
+    pub ino: u64,
 }
 
 impl ModeChange {
@@ -253,37 +262,32 @@ impl ModeChange {
     fn is_dir(&self) -> bool {
         self.after & FILE_TYPE == DIRECTORY
     }
+
+    /// The folder the change was asked in: `path` less its last `depth`
+    /// components.
+    fn anchor(&self) -> io::Result<PathBuf> {
+        let components: Vec<Component<'_>> = self.path.components().collect();
+        if self.depth == 0 || self.depth >= components.len() {
+            return Err(outside());
+        }
+        Ok(components[..components.len() - self.depth].iter().collect())
+    }
 }
 
 /// `st_mode`'s file-type field, and its value for a folder.
 const FILE_TYPE: u32 = 0o170000;
 const DIRECTORY: u32 = 0o040000;
 
-/// One path a change will set, and how to find it again when it does.
+/// One path a change will set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Planned {
+    /// Somewhere below the folder the change is asked in ([`chmod`]'s
+    /// `anchor`), which is what it is looked up from.
     pub path: PathBuf,
     /// The mode to set, with the file type the plan found at the path: the
     /// kind of file it must still be when it is set. With no file type in it,
     /// any kind will do but a link.
     pub mode: u32,
-    /// How many of `path`'s last components are below the folder the change
-    /// was asked in — the folder on screen, as the person reached it, links
-    /// and all. 1 is an item that was selected in it; each folder down inside
-    /// one adds 1. Those components are looked up one at a time from that
-    /// folder, and none of them is followed if it is a link.
-    pub depth: usize,
-}
-
-impl Planned {
-    /// An item that was selected, by its path in the folder on screen.
-    pub fn item(path: impl Into<PathBuf>, mode: u32) -> Planned {
-        Planned {
-            path: path.into(),
-            mode,
-            depth: 1,
-        }
-    }
 }
 
 /// What a change is about to do, worked out before any of it is done.
@@ -294,6 +298,13 @@ pub struct ModePlan {
     pub pairs: Vec<Planned>,
     /// Links met and left alone.
     pub links: usize,
+    /// Targets, or entries of a folder being walked, that were gone by the
+    /// time the plan looked.
+    pub gone: usize,
+    /// Folders that could not be listed because the change itself is what
+    /// will open them: a folder of mode 000 given one its owner can read and
+    /// enter. A second Apply reaches inside.
+    pub again: Vec<PathBuf>,
     /// Paths that could not be read: the item itself, or a folder the walk
     /// could not list.
     pub errors: Vec<(PathBuf, String)>,
@@ -305,11 +316,16 @@ pub struct ModePlan {
 // the kernel reads again each time: between the two, any folder on it can
 // be renamed and a link to somewhere else put in its place, and a `chmod`
 // by path would follow that link out of the tree — the same swap the trash
-// and the undo already close. So nothing below the folder the change was
-// asked in is reached by its path. Each component is opened from the folder
-// above it, open already, with `O_PATH | O_NOFOLLOW` (and `O_DIRECTORY` for
-// a folder), `fstat` says what was opened, and the mode is set through
-// `/proc/self/fd/<n>`, a name that leads to that inode and no other.
+// and the undo already close. So a change is asked in one folder, the
+// **anchor** — the listing's own folder, the one on screen, as the person
+// reached it, links and all — and nothing below it is reached by its path.
+// Each component is opened from the folder above it, open already, with
+// `O_PATH | O_NOFOLLOW` (and `O_DIRECTORY` for a folder), `fstat` says what
+// was opened, and the mode is set through `/proc/self/fd/<n>`, a name that
+// leads to that inode and no other. A row of a listing that is not a direct
+// child of its folder — a search hit three folders down — is found the same
+// way, all three folders looked up and none followed; a path that is not
+// below the anchor at all is refused.
 //
 // No `unsafe`: `open` with those flags is std's `OpenOptions` with
 // `custom_flags`, `fstat` is `File::metadata`, and `openat(dir, name)` is an
@@ -323,6 +339,9 @@ pub struct ModePlan {
 const PROC_FD: &str = "/proc/self/fd";
 const NO_PROC: &str =
     "/proc is not mounted, and without it permissions cannot be set without following links";
+
+/// What a path outside the anchor, or one that is the anchor itself, says.
+const NOT_BELOW: &str = "not inside the folder the change was asked in";
 
 /// Whether descriptors can be named: `/proc` is mounted.
 fn proc_ready() -> std::result::Result<(), String> {
@@ -368,83 +387,97 @@ fn stat_in(dir: &File, name: &OsStr) -> io::Result<std::fs::Metadata> {
     std::fs::symlink_metadata(named(dir).join(name))
 }
 
-/// Finds a planned or recorded path again: the folder the change was asked
-/// in by its path, links followed, since that is where the person is; then
-/// each component below it from the one above, none followed.
+fn outside() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, NOT_BELOW)
+}
+
+/// The names that lead from `anchor` down to `path`, one per component, or
+/// [`NOT_BELOW`] when `path` is not strictly below it. Compared component by
+/// component, so `/a/bc` is not below `/a/b`, and a `..` anywhere below the
+/// anchor is refused rather than walked.
+fn below<'a>(anchor: &Path, path: &'a Path) -> io::Result<Vec<&'a OsStr>> {
+    let rest = path.strip_prefix(anchor).map_err(|_| outside())?;
+    let names = rest
+        .components()
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name),
+            _ => Err(outside()),
+        })
+        .collect::<io::Result<Vec<&OsStr>>>()?;
+    if names.is_empty() {
+        return Err(outside());
+    }
+    Ok(names)
+}
+
+/// Finds paths below an anchor: the anchor by its path, links followed,
+/// since that is where the person is; then each component below it from
+/// the one above, none followed.
 ///
-/// Keeps the last folder it opened. Paths come a folder's worth at a time,
-/// so most lookups are one `open` and not one per component.
+/// Keeps the anchor and the last folder it found, the latter keyed by the
+/// anchor **and** the path from it — never by the folder's path alone, since
+/// one folder reached as an anchor (followed) and the same folder reached
+/// from an anchor above it (not followed) are two different lookups. Paths
+/// come a folder's worth at a time, so most lookups are one `open`.
 #[derive(Default)]
 struct Finder {
-    parent: Option<(PathBuf, Rc<File>)>,
+    anchor: Option<(PathBuf, Rc<File>)>,
+    folder: Option<((PathBuf, PathBuf), Rc<File>)>,
 }
 
 impl Finder {
-    /// The folder `path` is in, open, reached as [`Planned::depth`] says.
-    fn parent(&mut self, path: &Path, depth: usize) -> io::Result<Rc<File>> {
-        let components: Vec<Component<'_>> = path.components().collect();
-        if depth == 0 || depth > components.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a path this change can find",
-            ));
-        }
-        let parent: PathBuf = components[..components.len() - 1].iter().collect();
-        if let Some((cached, dir)) = &self.parent {
-            if *cached == parent {
+    /// The anchor, open, by its path.
+    fn anchor(&mut self, anchor: &Path) -> io::Result<Rc<File>> {
+        if let Some((path, dir)) = &self.anchor {
+            if path == anchor {
                 return Ok(Rc::clone(dir));
             }
         }
-        let split = components.len() - depth;
-        let anchor: PathBuf = components[..split].iter().collect();
-        let anchor = if anchor.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
-            anchor
-        };
-        let mut dir = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
-            .open(&anchor)?;
-        for component in &components[split..components.len() - 1] {
-            let Component::Normal(name) = component else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "not a path this change can find",
-                ));
-            };
-            dir = open_in(&dir, name, true)?;
-            if !dir.metadata()?.is_dir() {
-                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
-            }
-        }
-        let dir = Rc::new(dir);
-        self.parent = Some((parent, Rc::clone(&dir)));
+        let dir = Rc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_DIRECTORY)
+                .open(anchor)?,
+        );
+        self.anchor = Some((anchor.to_path_buf(), Rc::clone(&dir)));
         Ok(dir)
     }
 
-    /// `path` itself, opened to name it and not followed, and what it is.
+    /// The folder `names` lead to from `anchor`, each looked up in the one
+    /// before it and none followed.
+    fn folder(&mut self, anchor: &Path, names: &[&OsStr]) -> io::Result<Rc<File>> {
+        let key = (anchor.to_path_buf(), names.iter().collect::<PathBuf>());
+        if let Some((cached, dir)) = &self.folder {
+            if *cached == key {
+                return Ok(Rc::clone(dir));
+            }
+        }
+        let mut dir = self.anchor(anchor)?;
+        for name in names {
+            let next = open_in(&dir, name, true)?;
+            if !next.metadata()?.is_dir() {
+                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+            }
+            dir = Rc::new(next);
+        }
+        self.folder = Some((key, Rc::clone(&dir)));
+        Ok(dir)
+    }
+
+    /// `path`, below `anchor`, opened to name it and not followed; what it
+    /// is; and how many components below the anchor it is.
     fn open(
         &mut self,
+        anchor: &Path,
         path: &Path,
-        depth: usize,
         want_dir: bool,
-    ) -> io::Result<(File, std::fs::Metadata)> {
-        let name = file_name_of(path)?;
-        let dir = self.parent(path, depth)?;
-        let file = open_in(&dir, name, want_dir)?;
+    ) -> io::Result<(File, std::fs::Metadata, usize)> {
+        let names = below(anchor, path)?;
+        let (last, up) = names.split_last().ok_or_else(outside)?;
+        let dir = self.folder(anchor, up)?;
+        let file = open_in(&dir, last, want_dir)?;
         let meta = file.metadata()?;
-        Ok((file, meta))
-    }
-}
-
-fn file_name_of(path: &Path) -> io::Result<&OsStr> {
-    match path.components().next_back() {
-        Some(Component::Normal(name)) => Ok(name),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "not a path this change can find",
-        )),
+        Ok((file, meta, names.len()))
     }
 }
 
@@ -483,54 +516,76 @@ fn set_mode_of(file: &File, mode: u32) -> std::result::Result<(), String> {
 
 /// Work out the new mode of every path the change is about: each of
 /// `targets`, and with `recursive`, everything inside the folders among them
-/// ([`searchable`] for every folder). Links are counted and skipped.
+/// ([`searchable`] for every folder). Links are counted and skipped, and so
+/// are targets already gone.
 ///
-/// Each target is looked up in the folder it is in without following it, and
-/// the walk goes down by descriptors (see "Finding a path without following
-/// a link" above): a folder renamed or swapped for a link after it was seen
-/// cannot send the walk anywhere else. It walks with an explicit stack, so a
-/// deep tree is a long `Vec` and not a stack overflow, and each pending
-/// folder holds only the folder it is in open, so what is open at once is the
-/// folders on the way down rather than every folder met. It asks `ctx`
-/// between entries: the only error is [`DfError::Cancelled`], and everything
-/// it cannot read is in [`ModePlan::errors`].
-pub fn plan(targets: &[PathBuf], grid: &Grid, recursive: bool, ctx: &TaskCtx) -> Result<ModePlan> {
+/// `anchor` is the folder the change is asked in — the listing's own — and
+/// every target has to be below it: one that is not is refused, with an
+/// error, rather than looked up some other way. Each target is found from the
+/// anchor without following anything below it, and the walk goes down by
+/// descriptors (see "Finding a path without following a link" above), so a
+/// folder renamed or swapped for a link after it was seen cannot send the walk
+/// anywhere else. It walks with an explicit stack, so a deep tree is a long
+/// `Vec` and not a stack overflow, and each pending folder holds only the
+/// folder it is in open, so what is open at once is the folders on the way
+/// down rather than every folder met. It asks `ctx` between entries: the only
+/// error is [`DfError::Cancelled`], and everything it cannot read is in
+/// [`ModePlan::errors`] — or, for a folder only this change will open, in
+/// [`ModePlan::again`].
+pub fn plan(
+    anchor: &Path,
+    targets: &[PathBuf],
+    grid: &Grid,
+    recursive: bool,
+    ctx: &TaskCtx,
+) -> Result<ModePlan> {
     let mut plan = ModePlan::default();
     if let Err(why) = proc_ready() {
         plan.errors = targets.iter().map(|t| (t.clone(), why.clone())).collect();
         return Ok(plan);
     }
-    // Folders still to be listed: the folder each is in, open, and its path
-    // for the record — never the path to open.
-    let mut folders: Vec<(Rc<File>, PathBuf, usize)> = Vec::new();
+    // Folders still to be listed: the folder each is in, open, its path for
+    // the record — never the path to open — and the mode it is to be given.
+    let mut folders: Vec<(Rc<File>, PathBuf, u32)> = Vec::new();
     let mut finder = Finder::default();
     for target in targets {
         ctx.checkpoint()?;
-        let looked = file_name_of(target).and_then(|name| {
-            let dir = finder.parent(target, 1)?;
-            let meta = stat_in(&dir, name)?;
+        let looked = below(anchor, target).and_then(|names| {
+            let (last, up) = names.split_last().ok_or_else(outside)?;
+            let dir = finder.folder(anchor, up)?;
+            let meta = stat_in(&dir, last)?;
             Ok((dir, meta))
         });
         match looked {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => plan.gone += 1,
             Err(e) => plan.errors.push((target.clone(), lookup_failed(&e))),
             Ok((_, meta)) if meta.file_type().is_symlink() => plan.links += 1,
             Ok((dir, meta)) if recursive && meta.is_dir() => {
-                plan.pairs.push(Planned::item(
-                    target.clone(),
-                    searchable(grid.apply(meta.mode())),
-                ));
-                folders.push((dir, target.clone(), 1));
+                let mode = searchable(grid.apply(meta.mode()));
+                plan.pairs.push(Planned {
+                    path: target.clone(),
+                    mode,
+                });
+                folders.push((dir, target.clone(), mode));
             }
-            Ok((_, meta)) => plan
-                .pairs
-                .push(Planned::item(target.clone(), grid.apply(meta.mode()))),
+            Ok((_, meta)) => plan.pairs.push(Planned {
+                path: target.clone(),
+                mode: grid.apply(meta.mode()),
+            }),
         }
     }
-    while let Some((parent, folder, depth)) = folders.pop() {
-        let opened = file_name_of(&folder).and_then(|name| open_in(&parent, name, true));
+    while let Some((parent, folder, mode)) = folders.pop() {
+        let opened = folder
+            .file_name()
+            .ok_or_else(outside)
+            .and_then(|name| open_in(&parent, name, true));
         drop(parent);
         let dir = match opened {
             Ok(dir) => Rc::new(dir),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                plan.gone += 1;
+                continue;
+            }
             Err(e) => {
                 plan.errors.push((folder, lookup_failed(&e)));
                 continue;
@@ -538,6 +593,15 @@ pub fn plan(targets: &[PathBuf], grid: &Grid, recursive: bool, ctx: &TaskCtx) ->
         };
         let listing = match std::fs::read_dir(named(&dir)) {
             Ok(listing) => listing,
+            // Shut to its owner now, and opened to them by this very change:
+            // the second Apply lists it. Said as that, not as an error.
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && mode & OWNER_READ_SEARCH == OWNER_READ_SEARCH =>
+            {
+                plan.again.push(folder);
+                continue;
+            }
             Err(e) => {
                 plan.errors.push((folder, e.to_string()));
                 continue;
@@ -554,20 +618,20 @@ pub fn plan(targets: &[PathBuf], grid: &Grid, recursive: bool, ctx: &TaskCtx) ->
             };
             let path = folder.join(&name);
             match stat_in(&dir, &name) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => plan.gone += 1,
                 Err(e) => plan.errors.push((path, e.to_string())),
                 Ok(meta) if meta.file_type().is_symlink() => plan.links += 1,
                 Ok(meta) if meta.is_dir() => {
+                    let mode = searchable(grid.apply(meta.mode()));
                     plan.pairs.push(Planned {
                         path: path.clone(),
-                        mode: searchable(grid.apply(meta.mode())),
-                        depth: depth + 1,
+                        mode,
                     });
-                    folders.push((Rc::clone(&dir), path, depth + 1));
+                    folders.push((Rc::clone(&dir), path, mode));
                 }
                 Ok(meta) => plan.pairs.push(Planned {
                     path,
                     mode: grid.apply(meta.mode()),
-                    depth: depth + 1,
                 }),
             }
         }
@@ -575,7 +639,12 @@ pub fn plan(targets: &[PathBuf], grid: &Grid, recursive: bool, ctx: &TaskCtx) ->
     Ok(plan)
 }
 
-/// What [`chmod`] did.
+/// The owner's read and execute: what a folder needs for its owner to list
+/// what is in it.
+const OWNER_READ_SEARCH: u32 = 0o500;
+
+/// What [`chmod`] did — and, once [`ModeReport::absorb`] has taken it in,
+/// what the plan before it found.
 #[derive(Debug, Default)]
 pub struct ModeReport {
     /// The inverse, when anything changed and the change was small enough to
@@ -587,26 +656,83 @@ pub struct ModeReport {
     pub unchanged: usize,
     /// Links met and left alone.
     pub links: usize,
+    /// Planned paths that were gone when their turn came: counted, not
+    /// reported one by one. Something else deleted them, and there is
+    /// nothing to do about it.
+    pub gone: usize,
+    /// Folders a second Apply will reach inside ([`ModePlan::again`]).
+    pub again: Vec<PathBuf>,
     /// More changed than a record holds: done, and not undoable.
     pub unrecorded: bool,
     pub errors: Vec<(PathBuf, String)>,
     pub cancelled: bool,
 }
 
+impl ModeReport {
+    /// Take in what the plan found, so one report says the whole of it.
+    pub fn absorb(&mut self, plan: ModePlan) {
+        self.links += plan.links;
+        self.gone += plan.gone;
+        self.again = plan.again;
+        let mut errors = plan.errors;
+        errors.append(&mut self.errors);
+        self.errors = errors;
+    }
+
+    /// The toast's line: what changed, and then what did not and why, each
+    /// said once however many paths it covers. Failures are the toast's to
+    /// add (`op_toast` counts them), since they name a file.
+    pub fn message(&self) -> String {
+        let mut line = if self.changed == 0 {
+            "Permissions unchanged".to_string()
+        } else {
+            format!(
+                "Permissions set on {}",
+                plural(self.changed, "item", "items")
+            )
+        };
+        if self.unrecorded {
+            line.push_str(" · too many to undo");
+        }
+        if self.gone > 0 {
+            line.push_str(&format!(" · {} no longer there", grouped(self.gone as u64)));
+        }
+        match self.again.as_slice() {
+            [] => {}
+            [one] => line.push_str(&format!(
+                " · Apply again to reach inside {}",
+                one.file_name().unwrap_or_default().to_string_lossy()
+            )),
+            many => line.push_str(&format!(
+                " · Apply again to reach inside {} folders",
+                grouped(many.len() as u64)
+            )),
+        }
+        line
+    }
+}
+
 /// Set each path's mode, in the order that keeps every folder searchable
 /// until what is under it has been set ([`safe_order`]).
 ///
-/// Each path is found again as the plan found it — from the folder the change
-/// was asked in, one component at a time, following no link — opened, and
-/// `fstat`ed: a path that is no longer the kind of file the plan recorded,
-/// or that has a link or a file where a folder on the way was, is left alone
-/// and reported. The nine bits come from the pair; the special bits are kept
-/// as the inode has them now, whatever the pair says. A link is skipped, and
-/// a path that already has its mode is left untouched and not recorded.
-/// Failures are collected rather than returned, and a cancel stops between
-/// two paths with everything set so far recorded, so a `u` takes back
-/// exactly the part that happened.
-pub fn chmod(pairs: &[Planned], ctx: &TaskCtx) -> ModeReport {
+/// `anchor` is the folder the change was asked in, and every path is found
+/// from it: each component below it opened from the one above, following no
+/// link, then `fstat`ed. A path not below the anchor is refused; one that is
+/// no longer the kind of file the plan recorded, or that has a link or a
+/// file where a folder on the way was, is left alone and reported; one that
+/// is gone is counted as gone. The nine bits come from the pair; the special
+/// bits are kept as the inode has them now, whatever the pair says. A link is
+/// skipped, and a path that already has its mode is left untouched and not
+/// recorded. Failures are collected rather than returned, and a cancel stops
+/// between two paths with everything set so far recorded, so a `u` takes
+/// back exactly the part that happened.
+pub fn chmod(anchor: &Path, pairs: &[Planned], ctx: &TaskCtx) -> ModeReport {
+    chmod_capped(anchor, pairs, ctx, MAX_MANIFEST_ENTRIES)
+}
+
+/// [`chmod`] with the record's bound spelled out, so the bound is testable
+/// without fifty thousand files.
+fn chmod_capped(anchor: &Path, pairs: &[Planned], ctx: &TaskCtx, cap: usize) -> ModeReport {
     let mut report = ModeReport::default();
     if let Err(why) = proc_ready() {
         report.errors = pairs
@@ -637,26 +763,19 @@ pub fn chmod(pairs: &[Planned], ctx: &TaskCtx) -> ModeReport {
         let pair = &pairs[index];
         // The errors say what happened without the path: whoever shows them
         // names the file (`op_toast`), and a path in both would say it twice.
-        match set_one(&mut finder, pair) {
-            Err(why) => report.errors.push((pair.path.clone(), why)),
+        match set_one(&mut finder, anchor, pair) {
+            Err(Missed::Gone) => report.gone += 1,
+            Err(Missed::Failed(why)) => report.errors.push((pair.path.clone(), why)),
             Ok(Set::Link) => report.links += 1,
             Ok(Set::Unchanged) => report.unchanged += 1,
-            Ok(Set::Changed { before, after }) => {
+            Ok(Set::Changed(change)) => {
                 report.changed += 1;
                 if !report.unrecorded {
-                    changes.push((
-                        index,
-                        ModeChange {
-                            path: pair.path.clone(),
-                            before,
-                            after,
-                            depth: pair.depth,
-                        },
-                    ));
+                    changes.push((index, change));
                     // Past the bound a record would be megabytes of paths
                     // held for a `u` nobody expects to cover a whole disk:
                     // the change stands, unrecorded, and the toast says so.
-                    if changes.len() > MAX_MANIFEST_ENTRIES {
+                    if changes.len() > cap {
                         report.unrecorded = true;
                         changes = Vec::new();
                     }
@@ -680,19 +799,27 @@ pub fn chmod(pairs: &[Planned], ctx: &TaskCtx) -> ModeReport {
 enum Set {
     Link,
     Unchanged,
-    Changed { before: u32, after: u32 },
+    Changed(ModeChange),
+}
+
+/// Why one planned path was not set.
+enum Missed {
+    Gone,
+    Failed(String),
 }
 
 /// Find one planned path again, check it is what the plan saw, and set it.
-fn set_one(finder: &mut Finder, pair: &Planned) -> std::result::Result<Set, String> {
+fn set_one(finder: &mut Finder, anchor: &Path, pair: &Planned) -> std::result::Result<Set, Missed> {
     let expected = pair.mode & FILE_TYPE;
-    let (file, meta) = finder
-        .open(&pair.path, pair.depth, expected == DIRECTORY)
+    let (file, meta, depth) = finder
+        .open(anchor, &pair.path, expected == DIRECTORY)
         .map_err(|e| {
-            if expected == DIRECTORY && e.raw_os_error() == Some(libc::ENOTDIR) {
-                NOT_THE_SAME_KIND.to_string()
+            if e.kind() == io::ErrorKind::NotFound {
+                Missed::Gone
+            } else if expected == DIRECTORY && e.raw_os_error() == Some(libc::ENOTDIR) {
+                Missed::Failed(NOT_THE_SAME_KIND.to_string())
             } else {
-                lookup_failed(&e)
+                Missed::Failed(lookup_failed(&e))
             }
         })?;
     let before = meta.mode();
@@ -700,15 +827,22 @@ fn set_one(finder: &mut Finder, pair: &Planned) -> std::result::Result<Set, Stri
         return Ok(Set::Link);
     }
     if (expected != 0 && before & FILE_TYPE != expected) || meta.file_type().is_symlink() {
-        return Err(NOT_THE_SAME_KIND.to_string());
+        return Err(Missed::Failed(NOT_THE_SAME_KIND.to_string()));
     }
     let target = (before & !PERMISSIONS) | (pair.mode & PERMISSIONS);
     if target == before {
         return Ok(Set::Unchanged);
     }
-    set_mode_of(&file, target)?;
+    set_mode_of(&file, target).map_err(Missed::Failed)?;
     let after = file.metadata().map(|meta| meta.mode()).unwrap_or(target);
-    Ok(Set::Changed { before, after })
+    Ok(Set::Changed(ModeChange {
+        path: pair.path.clone(),
+        before,
+        after,
+        depth,
+        dev: meta.dev(),
+        ino: meta.ino(),
+    }))
 }
 
 /// The order to set `items` in, each `(path, is a folder, the mode it is
@@ -730,8 +864,8 @@ pub fn safe_order(items: &[(&Path, bool, u32)]) -> Vec<usize> {
     first
 }
 
-/// Put every path's mode back, if every one of them still has the mode the
-/// change left.
+/// Put every path's mode back, if every one of them is still the file the
+/// change set, with the mode the change left.
 ///
 /// Checked in full first: a change to forty files that can put back
 /// thirty-nine should put back none, and say which one is in the way. The
@@ -763,7 +897,7 @@ pub(super) fn undo(changes: &[ModeChange], ctx: &TaskCtx) -> UndoAttempt {
         .collect();
     let mut finder = Finder::default();
     for change in changes {
-        match finder.open(&change.path, change.depth, change.is_dir()) {
+        match find(&mut finder, change) {
             Ok((_, meta)) => {
                 if let Err(e) = still_as_left(change, &meta) {
                     return refuse(e);
@@ -795,8 +929,7 @@ pub(super) fn undo(changes: &[ModeChange], ctx: &TaskCtx) -> UndoAttempt {
     let mut finder = Finder::default();
     for index in order {
         let change = &changes[index];
-        let step = finder
-            .open(&change.path, change.depth, change.is_dir())
+        let step = find(&mut finder, change)
             .map_err(|e| unreachable(change, &e))
             .and_then(|(file, meta)| still_as_left(change, &meta).map(|()| file))
             .and_then(|file| ctx.checkpoint().map(|()| file))
@@ -826,12 +959,25 @@ pub(super) fn undo(changes: &[ModeChange], ctx: &TaskCtx) -> UndoAttempt {
     }
 }
 
-/// Whether a path's `st_mode` is still the one the change left, and the
-/// sentence that says what moved if not.
+/// A recorded path, found again from the folder its change was asked in.
+fn find(finder: &mut Finder, change: &ModeChange) -> io::Result<(File, std::fs::Metadata)> {
+    let anchor = change.anchor()?;
+    let (file, meta, _) = finder.open(&anchor, &change.path, change.is_dir())?;
+    Ok((file, meta))
+}
+
+/// Whether a path is still the file the change set, with the `st_mode` it
+/// left, and the sentence that says what moved if not.
 fn still_as_left(change: &ModeChange, now: &std::fs::Metadata) -> Result<()> {
     if now.file_type().is_symlink() || now.mode() & FILE_TYPE != change.after & FILE_TYPE {
         return Err(DfError::Op(format!(
             "cannot undo: {} is not the same kind of file any more",
+            change.path.display()
+        )));
+    }
+    if (now.dev(), now.ino()) != (change.dev, change.ino) {
+        return Err(DfError::Op(format!(
+            "cannot undo: {} is not the file that was changed — it was replaced since",
             change.path.display()
         )));
     }
@@ -972,6 +1118,19 @@ mod tests {
         assert_eq!(searchable(0o2644), 0o2755);
     }
 
+    /// One selected item, below `anchor`.
+    fn item(path: &Path, mode: u32) -> Planned {
+        Planned {
+            path: path.to_path_buf(),
+            mode,
+        }
+    }
+
+    fn inode(path: &Path) -> (u64, u64) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        (meta.dev(), meta.ino())
+    }
+
     #[test]
     fn chmod_sets_each_mode_and_journals_before_and_after() {
         let t = TempTree::new("mode-apply");
@@ -983,10 +1142,11 @@ mod tests {
         set(&same, 0o640);
 
         let report = chmod(
+            t.path(),
             &[
-                Planned::item(a.clone(), 0o100755),
-                Planned::item(b.clone(), 0o100640),
-                Planned::item(same.clone(), 0o100640),
+                item(&a, 0o100755),
+                item(&b, 0o100640),
+                item(&same, 0o100640),
             ],
             &ctx(),
         );
@@ -997,6 +1157,8 @@ mod tests {
         let Some(OpRecord::Mode { changes }) = &report.record else {
             panic!("no mode record: {:?}", report.record);
         };
+        let (a_dev, a_ino) = inode(&a);
+        let (b_dev, b_ino) = inode(&b);
         assert_eq!(
             changes,
             &vec![
@@ -1005,12 +1167,16 @@ mod tests {
                     before: 0o100644,
                     after: 0o100755,
                     depth: 1,
+                    dev: a_dev,
+                    ino: a_ino,
                 },
                 ModeChange {
                     path: b.clone(),
                     before: 0o100600,
                     after: 0o100640,
                     depth: 1,
+                    dev: b_dev,
+                    ino: b_ino,
                 },
             ],
             "an item already right is not in the record"
@@ -1019,6 +1185,7 @@ mod tests {
             report.record.as_ref().unwrap().describe(),
             "changed permissions of 2 items"
         );
+        assert_eq!(report.message(), "Permissions set on 2 items");
 
         let mut journal = Journal::default();
         journal.record(report.record.unwrap());
@@ -1035,7 +1202,7 @@ mod tests {
         let t = TempTree::new("mode-special");
         let dir = t.dir("shared");
         set(&dir, 0o1777);
-        let report = chmod(&[Planned::item(dir.clone(), 0o755)], &ctx());
+        let report = chmod(t.path(), &[item(&dir, 0o755)], &ctx());
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(mode_of(&dir), 0o1755, "the sticky bit went");
     }
@@ -1047,13 +1214,7 @@ mod tests {
         let b = t.file("b.txt", b"b");
         set(&a, 0o644);
         set(&b, 0o644);
-        let report = chmod(
-            &[
-                Planned::item(a.clone(), 0o600),
-                Planned::item(b.clone(), 0o600),
-            ],
-            &ctx(),
-        );
+        let report = chmod(t.path(), &[item(&a, 0o600), item(&b, 0o600)], &ctx());
         let record = report.record.unwrap();
 
         // Somebody else changes one of them.
@@ -1076,6 +1237,28 @@ mod tests {
         assert_eq!(mode_of(&b), 0o600);
     }
 
+    /// A file deleted and made again with the mode the change left is not
+    /// the file the change set: the undo refuses rather than give it a mode
+    /// meant for the one before it.
+    #[test]
+    fn undo_refuses_a_file_replaced_by_another_with_the_same_mode() {
+        let t = TempTree::new("mode-identity");
+        let a = t.file("a.txt", b"a");
+        set(&a, 0o644);
+        let record = chmod(t.path(), &[item(&a, 0o600)], &ctx()).record.unwrap();
+        // Made while the first still exists, so it cannot be given its inode
+        // number, and moved over it.
+        let other = t.file("a.new", b"another");
+        set(&other, 0o600);
+        std::fs::rename(&other, &a).unwrap();
+        let error = undo_attempt(&record, &ctx())
+            .result
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("replaced"), "{error}");
+        assert_eq!(mode_of(&a), 0o600, "the new file was given the old mode");
+    }
+
     #[test]
     fn a_recursive_plan_gives_folders_the_x_rule_and_skips_links() {
         let t = TempTree::new("mode-plan");
@@ -1095,26 +1278,22 @@ mod tests {
         }
 
         let grid = Grid::of_mode(0o644);
-        let planned = plan(std::slice::from_ref(&top), &grid, true, &ctx()).unwrap();
+        let planned = plan(t.path(), std::slice::from_ref(&top), &grid, true, &ctx()).unwrap();
         assert!(planned.errors.is_empty(), "{:?}", planned.errors);
         assert_eq!(planned.links, 2);
-        let mut pairs: Vec<(PathBuf, u32, usize)> = planned
-            .pairs
-            .iter()
-            .map(|p| (p.path.clone(), p.mode, p.depth))
-            .collect();
-        pairs.sort();
+        let mut pairs = planned.pairs.clone();
+        pairs.sort_by(|a, b| a.path.cmp(&b.path));
         let mut expected = vec![
-            (top.clone(), 0o40755, 1),
-            (inner.clone(), 0o40755, 2),
-            (file.clone(), 0o100644, 2),
-            (deep.clone(), 0o100644, 3),
+            item(&top, 0o40755),
+            item(&inner, 0o40755),
+            item(&file, 0o100644),
+            item(&deep, 0o100644),
         ];
-        expected.sort();
-        assert_eq!(pairs, expected, "path, mode and how far below the folder");
-        assert!(!pairs.iter().any(|(p, ..)| p == &link || p == &dir_link));
+        expected.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(pairs, expected);
+        assert!(!pairs.iter().any(|p| p.path == link || p.path == dir_link));
 
-        let report = chmod(&planned.pairs, &ctx());
+        let report = chmod(t.path(), &planned.pairs, &ctx());
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.changed, 4);
         assert_eq!(mode_of(&top), 0o755);
@@ -1122,19 +1301,29 @@ mod tests {
         assert_eq!(mode_of(&file), 0o644);
         assert_eq!(mode_of(&deep), 0o644);
         assert_eq!(mode_of(&outside), 0o600, "a link was followed");
+        let Some(OpRecord::Mode { changes }) = &report.record else {
+            panic!("no record");
+        };
+        let depth = |path: &Path| changes.iter().find(|c| c.path == path).map(|c| c.depth);
+        assert_eq!(
+            [depth(&top), depth(&inner), depth(&deep)],
+            [Some(1), Some(2), Some(3)],
+            "each recorded as far below the folder as it is"
+        );
 
         // Not recursive: the folder gets the grid exactly, and nothing in it
         // is touched.
         let flat = plan(
+            t.path(),
             std::slice::from_ref(&top),
             &Grid::of_mode(0o700),
             false,
             &ctx(),
         )
         .unwrap();
-        assert_eq!(flat.pairs, vec![Planned::item(top.clone(), 0o40700)]);
+        assert_eq!(flat.pairs, vec![item(&top, 0o40700)]);
         // A link in the selection itself is skipped too.
-        let linked = plan(&[link], &grid, false, &ctx()).unwrap();
+        let linked = plan(t.path(), &[link], &grid, false, &ctx()).unwrap();
         assert!(linked.pairs.is_empty());
         assert_eq!(linked.links, 1);
     }
@@ -1166,8 +1355,15 @@ mod tests {
         // Nothing for anybody: the folder is shut, and the X rule has no
         // read to give execute to. Setting the folder first would leave the
         // file out of reach.
-        let planned = plan(std::slice::from_ref(&top), &Grid::of_mode(0), true, &ctx()).unwrap();
-        let report = chmod(&planned.pairs, &ctx());
+        let planned = plan(
+            t.path(),
+            std::slice::from_ref(&top),
+            &Grid::of_mode(0),
+            true,
+            &ctx(),
+        )
+        .unwrap();
+        let report = chmod(t.path(), &planned.pairs, &ctx());
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(report.changed, 2);
         assert_eq!(mode_of(&top), 0);
@@ -1186,12 +1382,12 @@ mod tests {
         let flags = std::sync::Arc::new(crate::tasks::TaskFlags::new());
         flags.cancel();
         let cancelled = TaskCtx::with_sink(flags, std::sync::Arc::new(crate::tasks::NullSink));
-        let report = chmod(&[Planned::item(a.clone(), 0o600)], &cancelled);
+        let report = chmod(t.path(), &[item(&a, 0o600)], &cancelled);
         assert!(report.cancelled);
         assert!(report.record.is_none(), "nothing happened, nothing to undo");
         assert_eq!(mode_of(&a), 0o644);
         assert!(matches!(
-            plan(&[a], &Grid::of_mode(0), false, &cancelled),
+            plan(t.path(), &[a], &Grid::of_mode(0), false, &cancelled),
             Err(DfError::Cancelled)
         ));
     }
@@ -1210,6 +1406,7 @@ mod tests {
     #[test]
     fn a_folder_swapped_for_a_link_after_the_plan_sends_nothing_outside() {
         let t = TempTree::new("mode-swap");
+        let anchor = t.dir("tree");
         let top = t.dir("tree/top");
         let sub = t.dir("tree/top/sub");
         let inner = t.file("tree/top/sub/inner.txt", b"i");
@@ -1224,6 +1421,7 @@ mod tests {
             set(dir, 0o755);
         }
         let planned = plan(
+            &anchor,
             std::slice::from_ref(&top),
             &Grid::of_mode(0o600),
             true,
@@ -1234,7 +1432,7 @@ mod tests {
 
         // A link to a file where the folder was.
         swap_for_link(&sub, &outside);
-        let report = chmod(&planned.pairs, &ctx());
+        let report = chmod(&anchor, &planned.pairs, &ctx());
         assert_eq!(mode_of(&outside), 0o644, "the change followed the link");
         let failed: Vec<&PathBuf> = report.errors.iter().map(|(path, _)| path).collect();
         assert!(failed.contains(&&sub), "{:?}", report.errors);
@@ -1246,7 +1444,7 @@ mod tests {
         // going down the link would find `inner.txt` and set it.
         std::fs::remove_file(&sub).unwrap();
         std::os::unix::fs::symlink(&far, &sub).unwrap();
-        let report = chmod(&planned.pairs, &ctx());
+        let report = chmod(&anchor, &planned.pairs, &ctx());
         assert_eq!(mode_of(&far_inner), 0o644, "the change went down the link");
         assert_eq!(mode_of(&far), 0o755, "the change set the link's target");
         let failed: Vec<&PathBuf> = report.errors.iter().map(|(path, _)| path).collect();
@@ -1262,6 +1460,106 @@ mod tests {
         );
     }
 
+    /// A row two folders below the one on screen — a search hit — is found
+    /// from the folder on screen, both folders on the way looked up and
+    /// neither followed: the middle one swapped for a link to a copy of the
+    /// same tree outside sends the change nowhere.
+    #[test]
+    fn a_row_two_folders_down_is_found_without_following_either() {
+        let t = TempTree::new("mode-deep-row");
+        let anchor = t.dir("project");
+        let hit = t.file("project/src/app/foo.rs", b"f");
+        let decoy = t.file("elsewhere/app/foo.rs", b"d");
+        set(&hit, 0o644);
+        set(&decoy, 0o644);
+        let planned = plan(
+            &anchor,
+            std::slice::from_ref(&hit),
+            &Grid::of_mode(0o600),
+            false,
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(planned.pairs, vec![item(&hit, 0o100600)]);
+
+        // Straight through, it is set and recorded three components down.
+        let report = chmod(&anchor, &planned.pairs, &ctx());
+        assert_eq!(mode_of(&hit), 0o600);
+        let record = report.record.unwrap();
+        let OpRecord::Mode { changes } = &record else {
+            panic!("not a mode record");
+        };
+        assert_eq!(changes[0].depth, 3);
+        undo_attempt(&record, &ctx()).result.unwrap();
+        assert_eq!(mode_of(&hit), 0o644);
+
+        // The middle folder swapped for a link to the decoy's tree.
+        swap_for_link(&t.join("project/src"), &t.join("elsewhere"));
+        let report = chmod(&anchor, &planned.pairs, &ctx());
+        assert_eq!(mode_of(&decoy), 0o644, "the change followed src");
+        assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+        assert!(
+            report.errors[0].1.contains("not where it was"),
+            "{:?}",
+            report.errors
+        );
+    }
+
+    /// A target that is not below the folder the change is asked in is
+    /// refused, out loud, and not looked up some other way.
+    #[test]
+    fn a_target_outside_the_folder_is_refused() {
+        let t = TempTree::new("mode-outside");
+        let anchor = t.dir("here");
+        let there = t.file("there/a.txt", b"a");
+        let sibling = t.file("here-and-more/b.txt", b"b");
+        set(&there, 0o644);
+        set(&sibling, 0o644);
+        let grid = Grid::of_mode(0o600);
+        let planned = plan(
+            &anchor,
+            &[there.clone(), sibling.clone(), anchor.clone()],
+            &grid,
+            false,
+            &ctx(),
+        )
+        .unwrap();
+        assert!(planned.pairs.is_empty());
+        assert_eq!(planned.errors.len(), 3, "{:?}", planned.errors);
+        assert!(planned
+            .errors
+            .iter()
+            .all(|(_, why)| why.contains("not inside the folder")));
+        // …and a pair handed straight to the change, the same.
+        let report = chmod(&anchor, &[item(&there, 0o100600)], &ctx());
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(mode_of(&there), 0o644);
+    }
+
+    /// The finder's cache is keyed by the anchor as well as the folder: the
+    /// same folder reached as an anchor (followed) and from an anchor above
+    /// it (not followed) are two lookups, and the second must not borrow the
+    /// first's descriptor.
+    #[test]
+    fn a_folder_found_as_an_anchor_is_not_lent_to_a_deeper_lookup() {
+        let t = TempTree::new("mode-cache");
+        let root = t.dir("root");
+        let far = t.dir("far");
+        t.file("far/a.txt", b"a");
+        t.file("far/b.txt", b"b");
+        let sub = t.symlink(&far, "root/sub");
+        let mut finder = Finder::default();
+        // As an anchor, `sub` is where the person is, and it is followed.
+        assert!(finder.open(&sub, &sub.join("a.txt"), false).is_ok());
+        // From `root`, `sub` is a component below the anchor, and a link.
+        let deeper = finder.open(&root, &sub.join("b.txt"), false);
+        assert!(
+            deeper.as_ref().is_err_and(swapped),
+            "{:?}",
+            deeper.map(|_| ())
+        );
+    }
+
     /// The same swap at the top: an item selected, planned, and replaced by
     /// a link before the change runs.
     #[test]
@@ -1272,6 +1570,7 @@ mod tests {
         set(&a, 0o644);
         set(&outside, 0o644);
         let planned = plan(
+            t.path(),
             std::slice::from_ref(&a),
             &Grid::of_mode(0o666),
             false,
@@ -1280,7 +1579,7 @@ mod tests {
         .unwrap();
         std::fs::remove_file(&a).unwrap();
         std::os::unix::fs::symlink(&outside, &a).unwrap();
-        let report = chmod(&planned.pairs, &ctx());
+        let report = chmod(t.path(), &planned.pairs, &ctx());
         assert_eq!(mode_of(&outside), 0o644);
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
         assert!(
@@ -1297,6 +1596,7 @@ mod tests {
     #[test]
     fn an_undo_does_not_follow_a_folder_swapped_for_a_link() {
         let t = TempTree::new("mode-swap-undo");
+        let anchor = t.dir("tree");
         let top = t.dir("tree/top");
         let sub = t.dir("tree/top/sub");
         let inner = t.file("tree/top/sub/inner.txt", b"i");
@@ -1306,13 +1606,14 @@ mod tests {
         set(&top, 0o755);
         set(&sub, 0o755);
         let planned = plan(
+            &anchor,
             std::slice::from_ref(&top),
             &Grid::of_mode(0o600),
             true,
             &ctx(),
         )
         .unwrap();
-        let record = chmod(&planned.pairs, &ctx()).record.unwrap();
+        let record = chmod(&anchor, &planned.pairs, &ctx()).record.unwrap();
         // Outside, a file with the mode the change left, where the link leads.
         set(&far_inner, 0o600);
         set(&far, 0o700);
@@ -1333,9 +1634,10 @@ mod tests {
         let t = TempTree::new("mode-anchor");
         let real = t.file("real/a.txt", b"a");
         set(&real, 0o644);
-        let through = t.symlink(t.join("real"), "shortcut").join("a.txt");
-        let planned = plan(&[through], &Grid::of_mode(0o600), false, &ctx()).unwrap();
-        let report = chmod(&planned.pairs, &ctx());
+        let shortcut = t.symlink(t.join("real"), "shortcut");
+        let through = shortcut.join("a.txt");
+        let planned = plan(&shortcut, &[through], &Grid::of_mode(0o600), false, &ctx()).unwrap();
+        let report = chmod(&shortcut, &planned.pairs, &ctx());
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(mode_of(&real), 0o600);
         undo_attempt(&report.record.unwrap(), &ctx())
@@ -1352,25 +1654,150 @@ mod tests {
         let a = t.file("locked.txt", b"l");
         set(&a, 0);
         let planned = plan(
+            t.path(),
             std::slice::from_ref(&a),
             &Grid::of_mode(0o644),
             false,
             &ctx(),
         )
         .unwrap();
-        let report = chmod(&planned.pairs, &ctx());
+        let report = chmod(t.path(), &planned.pairs, &ctx());
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         assert_eq!(mode_of(&a), 0o644);
+    }
+
+    /// A folder of mode 000 with "everything inside": this change opens it,
+    /// but could not list it to plan, so the toast says a second Apply
+    /// reaches inside — which it does.
+    #[test]
+    fn a_shut_folder_asks_for_a_second_apply_and_the_second_goes_inside() {
+        let t = TempTree::new("mode-again");
+        let locked = t.dir("locked");
+        let inside = t.file("locked/a.txt", b"a");
+        set(&inside, 0o600);
+        set(&locked, 0);
+        if std::fs::read_dir(&locked).is_ok() {
+            // Root reads a folder of mode 000; there is nothing to test.
+            eprintln!("skipped: this user can list a folder of mode 000");
+            set(&locked, 0o755);
+            return;
+        }
+        let grid = Grid::of_mode(0o644);
+        let first = plan(t.path(), std::slice::from_ref(&locked), &grid, true, &ctx()).unwrap();
+        assert!(first.errors.is_empty(), "{:?}", first.errors);
+        assert_eq!(first.again, vec![locked.clone()]);
+        let mut report = chmod(t.path(), &first.pairs, &ctx());
+        report.absorb(first);
+        assert_eq!(
+            report.message(),
+            "Permissions set on 1 item · Apply again to reach inside locked"
+        );
+        assert_eq!(mode_of(&locked), 0o755);
+        assert_eq!(mode_of(&inside), 0o600, "untouched until the second Apply");
+
+        let second = plan(t.path(), std::slice::from_ref(&locked), &grid, true, &ctx()).unwrap();
+        assert!(second.again.is_empty());
+        let report = chmod(t.path(), &second.pairs, &ctx());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(mode_of(&inside), 0o644);
+    }
+
+    /// A planned path that is gone when its turn comes is counted, once, not
+    /// reported as an error per file — at the plan or at the change.
+    #[test]
+    fn paths_that_vanished_are_counted_as_gone() {
+        let t = TempTree::new("mode-gone");
+        let a = t.file("a.txt", b"a");
+        let b = t.file("b.txt", b"b");
+        let c = t.file("c.txt", b"c");
+        for f in [&a, &b, &c] {
+            set(f, 0o644);
+        }
+        let grid = Grid::of_mode(0o600);
+        std::fs::remove_file(&c).unwrap();
+        let planned = plan(
+            t.path(),
+            &[a.clone(), b.clone(), c.clone()],
+            &grid,
+            false,
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!((planned.pairs.len(), planned.gone), (2, 1));
+        std::fs::remove_file(&b).unwrap();
+        let mut report = chmod(t.path(), &planned.pairs, &ctx());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!((report.changed, report.gone), (1, 1));
+        report.absorb(planned);
+        assert_eq!(
+            report.message(),
+            "Permissions set on 1 item · 2 no longer there"
+        );
+    }
+
+    /// A file that appears after the plan is not in it, and the change
+    /// leaves it as it was made.
+    #[test]
+    fn a_file_that_appears_after_the_plan_is_left_alone() {
+        let t = TempTree::new("mode-late");
+        let dir = t.dir("dir");
+        let early = t.file("dir/early.txt", b"e");
+        set(&early, 0o644);
+        let planned = plan(
+            t.path(),
+            std::slice::from_ref(&dir),
+            &Grid::of_mode(0o600),
+            true,
+            &ctx(),
+        )
+        .unwrap();
+        let late = t.file("dir/late.txt", b"l");
+        set(&late, 0o644);
+        let report = chmod(t.path(), &planned.pairs, &ctx());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(mode_of(&early), 0o600);
+        assert_eq!(mode_of(&late), 0o644, "a file nobody planned was changed");
+        let Some(OpRecord::Mode { changes }) = &report.record else {
+            panic!("no record");
+        };
+        assert!(!changes.iter().any(|change| change.path == late));
+    }
+
+    /// Past the bound, the change is made and left unrecorded, and the toast
+    /// says it cannot be undone.
+    #[test]
+    fn a_change_past_the_bound_is_made_and_says_it_cannot_be_undone() {
+        let t = TempTree::new("mode-cap");
+        let files: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let f = t.file(format!("f{i}.txt"), b"x");
+                set(&f, 0o644);
+                f
+            })
+            .collect();
+        let pairs: Vec<Planned> = files.iter().map(|f| item(f, 0o100600)).collect();
+        let report = chmod_capped(t.path(), &pairs, &ctx(), 2);
+        assert!(report.unrecorded);
+        assert!(report.record.is_none());
+        assert_eq!(report.changed, 3);
+        assert!(files.iter().all(|f| mode_of(f) == 0o600));
+        assert_eq!(
+            report.message(),
+            "Permissions set on 3 items · too many to undo"
+        );
+        // The real bound is the copy manifest's.
+        let within = chmod(t.path(), &pairs, &ctx());
+        assert!(within.record.is_none() && within.unchanged == 3);
     }
 
     /// Without `/proc` there is no name for a descriptor, and the change
     /// says so rather than falling back to the path.
     #[test]
     fn without_proc_the_change_refuses_in_words() {
-        assert!(
-            ready_at(Path::new(PROC_FD)).is_ok(),
-            "the test machine has /proc"
-        );
+        if ready_at(Path::new(PROC_FD)).is_err() {
+            eprintln!("skipped: /proc is not mounted here, which is the case this test describes");
+            return;
+        }
         let why = ready_at(Path::new("/nonexistent/df-proc")).unwrap_err();
         assert!(why.contains("/proc is not mounted"), "{why}");
     }

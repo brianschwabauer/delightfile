@@ -8269,9 +8269,14 @@ impl App {
             return;
         }
         // The panel's mode is the whole `st_mode`, file type and all, so the
-        // change checks the path is still the kind of file the panel showed.
+        // change checks the path is still the kind of file the panel showed;
+        // and it is found from the folder on screen, as the card's is.
         let report = df_core::ops::mode::chmod(
-            &[df_core::ops::mode::Planned::item(path.clone(), mode)],
+            &self.cwd(),
+            &[df_core::ops::mode::Planned {
+                path: path.clone(),
+                mode,
+            }],
             &TaskCtx::detached(),
         );
         if let Some((_, error)) = report.errors.first() {
@@ -8279,6 +8284,11 @@ impl App {
             // which file rather than only which errno.
             self.toasts
                 .error(format!("{}: {error}", path.display()), now);
+            return;
+        }
+        if report.gone > 0 {
+            self.toasts
+                .notice(format!("{} is no longer there", facts.name), now);
             return;
         }
         if let Some(spot) = &mut self.spot {
