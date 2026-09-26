@@ -33,6 +33,8 @@
 //! cannot be read out of anything. The unit test below is the substitute: it
 //! pins the wording, so a legend that drifts from the painter drifts loudly.
 
+use std::time::Instant;
+
 use df_core::fs::match_name;
 use df_core::keymap::{Context, ContextStack, Registry, WhenFlags};
 
@@ -305,6 +307,11 @@ pub struct Help {
     /// the wheel left it until a key moves the cursor: the panes' rule
     /// ([`crate::tab::Listing::attach`]).
     detached: bool,
+    /// When the lines last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
+    /// How many lines the sheet showed when it was last drawn, so a window
+    /// made taller or shorter under it is told from a scroll.
+    shown: usize,
 }
 
 impl Help {
@@ -341,38 +348,75 @@ impl Help {
 
     /// Put the cursor on the first binding — where it goes when the overlay
     /// opens and every time the filter changes what is in it.
+    ///
+    /// A sheet opened or narrowed is a new list, not the old one scrolled
+    /// back to its top, so its bar has nothing to linger for
+    /// ([`crate::scrollbar::Linger`]).
     pub fn reset(&mut self, lines: &[HelpLine]) {
         self.cursor = lines.iter().position(HelpLine::selectable).unwrap_or(0);
         self.first = 0;
         self.carry = 0.0;
         self.detached = false;
+        self.bar = crate::scrollbar::Linger::default();
     }
 
     /// Where the sheet starts for `lines` lines in a `page` of them: by the
     /// panes' scrolloff rule around the cursor, or — while the wheel has
     /// taken it off the cursor — where the wheel left it, inside the lines,
-    /// which a filter may have made fewer.
-    pub fn settle(&mut self, lines: usize, page: usize, scrolloff: usize) {
+    /// which a filter may have made fewer. Asked once a frame, so a start
+    /// that moved since the last is a scroll, and the bar lingers from it.
+    ///
+    /// Not when the page itself changed: a window made taller or shorter
+    /// turns the sheet under the cursor, and that is the sheet laid out
+    /// again, not scrolled, so the bar starts afresh rather than flashing up
+    /// for a scroll nobody made.
+    pub fn settle(&mut self, lines: usize, page: usize, scrolloff: usize, now: Instant) {
+        if page != self.shown {
+            self.shown = page;
+            self.bar = crate::scrollbar::Linger::default();
+        }
         self.first = if self.detached {
             self.first.min(lines.saturating_sub(page))
         } else {
             crate::viewport::first_visible(self.first, self.cursor, lines, page, scrolloff)
         };
+        self.bar.saw(self.first as f32, now);
     }
 
     /// The wheel over the sheet, in points, with `lines` lines in a `page` of
     /// them: whole lines at a time ([`crate::mouse::roll`]), the sheet
     /// leaving the cursor where it was. Returns whether the lines moved.
-    pub fn wheel(&mut self, points: f32, lines: usize, page: usize) -> bool {
+    pub fn wheel(&mut self, points: f32, lines: usize, page: usize, now: Instant) -> bool {
         let rows = crate::mouse::wheel_rows(points, crate::chrome::HELP_ROW);
         let last = lines.saturating_sub(page);
         let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        self.scroll_to(first, lines, page, now)
+    }
+
+    /// Start the sheet at line `first` of `lines`, kept inside them for a
+    /// `page` of them, off the cursor until a key moves it: the wheel's
+    /// scroll and the bar's, one setter for both, as the palette's is.
+    /// Returns whether the lines moved.
+    pub fn scroll_to(&mut self, first: usize, lines: usize, page: usize, now: Instant) -> bool {
+        let first = first.min(lines.saturating_sub(page));
         if first == self.first {
             return false;
         }
         self.first = first;
         self.detached = true;
+        self.bar.saw(first as f32, now);
         true
+    }
+
+    /// When the lines last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.bar.scrolled_at()
+    }
+
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: Instant) {
+        self.bar.let_go(now);
     }
 }
 
@@ -594,6 +638,55 @@ mod tests {
         help.reset(&[]);
         help.move_cursor(&[], 1);
         assert_eq!(help.cursor, 0);
+    }
+
+    /// The sheet's bar lingers from the frame its lines moved — under the
+    /// wheel, or under a cursor a key carried past the page — and not for the
+    /// sheet opening, narrowing, or a window made shorter turning its page.
+    #[test]
+    fn the_sheet_lingers_from_a_scroll_and_not_from_a_new_page() {
+        use std::time::Duration;
+        let rows: Vec<HelpRow> = (0..60)
+            .map(|n| row(Context::Files, "x", &format!("Thing {n}"), "thing"))
+            .collect();
+        let lines = lines(&rows, "");
+        let (count, page, scrolloff) = (lines.len(), 10, 3);
+        let at = Instant::now();
+        let mut help = Help::default();
+        help.reset(&lines);
+        help.settle(count, page, scrolloff, at);
+        assert_eq!(help.scrolled_at(), None, "opening is not a scroll");
+
+        // A notch down is fifty points up the page, and a line twenty.
+        let t1 = at + Duration::from_millis(16);
+        assert!(help.wheel(-50.0, count, page, t1));
+        assert_eq!(help.first, 2);
+        assert_eq!(help.scrolled_at(), Some(t1));
+        help.settle(count, page, scrolloff, t1 + Duration::from_secs(1));
+        assert_eq!(help.first, 2, "the scrolloff rule took the view back");
+        assert_eq!(help.scrolled_at(), Some(t1), "standing still stamped");
+
+        let t2 = t1 + Duration::from_secs(5);
+        help.move_cursor(&lines, 20);
+        help.settle(count, page, scrolloff, t2);
+        assert!(help.first > 2, "the cursor left the page");
+        assert_eq!(help.scrolled_at(), Some(t2));
+
+        let t3 = t2 + Duration::from_secs(5);
+        let before = help.first;
+        help.settle(count, 4, scrolloff, t3);
+        assert_ne!(help.first, before, "a shorter window turned no page");
+        assert_eq!(help.scrolled_at(), None, "a resize is not a scroll");
+
+        let t4 = t3 + Duration::from_secs(5);
+        assert!(help.scroll_to(30, count, 4, t4));
+        assert_eq!(help.scrolled_at(), Some(t4));
+        help.reset(&lines);
+        help.settle(count, 4, scrolloff, t4 + Duration::from_secs(1));
+        assert_eq!(help.scrolled_at(), None, "a narrowed sheet scrolled");
+        // Past the last page the setter holds at the last page.
+        assert!(help.scroll_to(count * 2, count, 4, t4));
+        assert_eq!(help.first, count - 4);
     }
 
     /// The rows really do come from the registry, keys and ids and all.

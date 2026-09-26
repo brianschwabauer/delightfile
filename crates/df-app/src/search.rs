@@ -227,6 +227,11 @@ pub struct Search {
     /// left them until a key moves the cursor: the panes' rule
     /// ([`crate::tab::Listing::attach`]).
     detached: bool,
+    /// When the hits last scrolled, for their bar.
+    bar: crate::scrollbar::Linger,
+    /// How many hits the panel showed when it was last drawn, so a window
+    /// made taller or shorter under it is told from a scroll.
+    shown: usize,
     /// The search was cut off at [`MAX_HITS`].
     pub capped: bool,
     /// The process has ended, so the list is final.
@@ -259,6 +264,8 @@ impl Search {
             first: 0,
             carry: 0.0,
             detached: false,
+            bar: crate::scrollbar::Linger::default(),
+            shown: 0,
             capped: false,
             done: false,
             error: None,
@@ -303,6 +310,7 @@ impl Search {
             self.first = 0;
             self.carry = 0.0;
             self.detached = false;
+            self.bar = crate::scrollbar::Linger::default();
             self.done = true;
             self.capped = false;
             self.error = None;
@@ -359,6 +367,7 @@ impl Search {
         self.first = 0;
         self.carry = 0.0;
         self.detached = false;
+        self.bar = crate::scrollbar::Linger::default();
         self.capped = false;
         self.done = false;
         self.error = None;
@@ -475,7 +484,19 @@ impl Search {
 
     /// Keep the cursor on screen, by the same scrolloff rule the panes use —
     /// or, while the wheel has taken the view off it, only inside the list.
-    pub fn scroll_into_view(&mut self, rows: usize, scrolloff: usize) {
+    /// Asked once a frame with the `rows` the panel was laid out with, so a
+    /// start that moved since the last is a scroll, and the bar lingers from
+    /// it.
+    ///
+    /// Not when the rows themselves changed: a window made taller or shorter
+    /// turns the page under the cursor, and that is the panel laid out again,
+    /// not scrolled, so the bar starts afresh rather than flashing up for a
+    /// scroll nobody made.
+    pub fn scroll_into_view(&mut self, rows: usize, scrolloff: usize, now: Instant) {
+        if rows != self.shown {
+            self.shown = rows;
+            self.bar = crate::scrollbar::Linger::default();
+        }
         self.first = if self.detached {
             self.first.min(self.hits.len().saturating_sub(rows))
         } else {
@@ -487,20 +508,42 @@ impl Search {
                 scrolloff,
             )
         };
+        self.bar.saw(self.first as f32, now);
     }
 
     /// The wheel over the panel, `rows` of the `page` it shows
     /// ([`crate::mouse::wheel_rows`]): whole hits at a time, the view leaving
     /// the cursor where it was. Returns whether the hits moved.
-    pub fn wheel(&mut self, rows: f32, page: usize) -> bool {
+    pub fn wheel(&mut self, rows: f32, page: usize, now: Instant) -> bool {
         let last = self.hits.len().saturating_sub(page);
         let first = crate::mouse::roll(self.first, last, &mut self.carry, rows);
+        self.scroll_to(first, page, now)
+    }
+
+    /// Start the hits at `first`, kept inside the list for a `page` of them,
+    /// off the cursor until a key moves it: the wheel's scroll and the bar's,
+    /// one setter for both, as the palette's is. Returns whether the hits
+    /// moved.
+    pub fn scroll_to(&mut self, first: usize, page: usize, now: Instant) -> bool {
+        let first = first.min(self.hits.len().saturating_sub(page));
         if first == self.first {
             return false;
         }
         self.first = first;
         self.detached = true;
+        self.bar.saw(first as f32, now);
         true
+    }
+
+    /// When the hits last scrolled, for their bar's linger.
+    pub fn scrolled_at(&self) -> Option<Instant> {
+        self.bar.scrolled_at()
+    }
+
+    /// A hand let go of the bar: it lingers from now
+    /// ([`crate::scrollbar::Linger::let_go`]).
+    pub fn let_go(&mut self, now: Instant) {
+        self.bar.let_go(now);
     }
 
     /// Kill whatever is running and start a process for `query`.
@@ -512,6 +555,10 @@ impl Search {
         self.first = 0;
         self.carry = 0.0;
         self.detached = false;
+        // The new query's hits are a new list, not the old one scrolled back
+        // to its top: its bar has nothing to linger for
+        // ([`crate::scrollbar::Linger`]).
+        self.bar = crate::scrollbar::Linger::default();
         self.capped = false;
         self.done = false;
         self.error = None;
@@ -1079,6 +1126,50 @@ mod tests {
         // Once. A toast raised on every frame is not a toast.
         assert_eq!(search.take_notice(), None);
         assert!(search.error.is_some(), "the panel still says it");
+    }
+
+    /// The hits' bar lingers from the frame they moved, and not for a list
+    /// rebuilt under the panel — the field emptied, the mode switched — nor
+    /// for a window made shorter turning the page under the cursor.
+    #[test]
+    fn a_rebuilt_list_or_a_new_page_is_not_a_scroll() {
+        let at = Instant::now();
+        let later = |n: u32| at + Duration::from_secs(n.into());
+        let mut search = Search::new(Mode::Names, "/tmp", false, silent());
+        let _ = search.buffer.insert_text("needle");
+        search.hits = (0..50).map(|n| hit(&format!("needle-{n}"))).collect();
+        search.scroll_into_view(10, 3, at);
+        assert_eq!(search.scrolled_at(), None, "opening is not a scroll");
+
+        assert!(search.wheel(2.0, 10, later(1)));
+        assert_eq!(search.first, 2);
+        assert_eq!(search.scrolled_at(), Some(later(1)));
+        search.scroll_into_view(10, 3, later(2));
+        assert_eq!(search.first, 2, "the scrolloff rule took the view back");
+        assert_eq!(search.scrolled_at(), Some(later(1)));
+
+        search.move_cursor(20);
+        search.scroll_into_view(10, 3, later(3));
+        assert!(search.first > 2, "the cursor left the page");
+        assert_eq!(search.scrolled_at(), Some(later(3)));
+
+        let before = search.first;
+        search.scroll_into_view(4, 3, later(4));
+        assert_ne!(search.first, before, "a shorter window turned no page");
+        assert_eq!(search.scrolled_at(), None, "a resize is not a scroll");
+
+        assert!(search.scroll_to(30, 4, later(5)));
+        assert_eq!(search.scrolled_at(), Some(later(5)));
+        search.toggle(later(6));
+        search.scroll_into_view(4, 3, later(6));
+        assert_eq!(search.scrolled_at(), None, "a mode switch scrolled");
+
+        search.hits = (0..50).map(|n| hit(&format!("needle-{n}"))).collect();
+        assert!(search.scroll_to(30, 4, later(7)));
+        search.buffer = InputBuffer::new(String::new(), 0);
+        search.changed(later(8));
+        search.scroll_into_view(4, 3, later(8));
+        assert_eq!(search.scrolled_at(), None, "an emptied field scrolled");
     }
 
     /// The cursor clamps at both ends — unlike the palette's, and the reason is

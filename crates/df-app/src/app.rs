@@ -583,7 +583,7 @@ impl OverlayGeom {
             OverlayGeom::Spot(_) => WheelOwner::Card(Surface::Spot),
             OverlayGeom::Finder(_) => WheelOwner::Card(Surface::Palette),
             OverlayGeom::Mounts(_) => WheelOwner::Card(Surface::Mounts),
-            OverlayGeom::Search(_) => WheelOwner::Search,
+            OverlayGeom::Search(_) => WheelOwner::Card(Surface::Search),
         }
     }
 
@@ -632,7 +632,8 @@ impl OverlayGeom {
             OverlayGeom::Mounts(g) => g.band.map(|band| (band, Surface::Mounts)),
             OverlayGeom::Sync(g) => g.band.map(|band| (band, Surface::Sync)),
             OverlayGeom::Spot(g) => g.band.map(|band| (band, Surface::Spot)),
-            OverlayGeom::Bulk(_) | OverlayGeom::Search(_) => None,
+            OverlayGeom::Search(g) => g.band.map(|band| (band, Surface::Search)),
+            OverlayGeom::Bulk(_) => None,
         }
     }
 
@@ -732,14 +733,11 @@ enum WheelOwner {
     Submenu,
     /// A card whose list wears a bar ([`crate::scrollbar::Surface`]): the
     /// dialogs, the palette, the task panel, the mount card, the opener
-    /// picker, the file-info card, the tray and the which-key card.
+    /// picker, the file-info card, the tray, the which-key card, the search
+    /// panel and the help sheet.
     Card(crate::scrollbar::Surface),
     /// The bulk rename card, whose bar is its own.
     Bulk,
-    /// The search panel's hits.
-    Search,
-    /// The help sheet.
-    Help,
 }
 
 /// What floats over the panes this frame, each measured as the hit test
@@ -804,7 +802,7 @@ fn wheel_owner(pointer: &Pointer, floating: &Floating<'_>) -> WheelOwner {
     }
     if let Some(help) = floating.help {
         return if help.contains(at) {
-            WheelOwner::Help
+            WheelOwner::Card(crate::scrollbar::Surface::Help)
         } else {
             WheelOwner::Spent
         };
@@ -10322,6 +10320,7 @@ impl App {
                 layout.parent.top(),
                 bar_top - crate::ui::GAP,
                 search.mode,
+                search.hits.len(),
             ))));
         }
         None
@@ -11063,19 +11062,22 @@ impl App {
             },
             Bar::Menu => geom.menu.as_ref().and_then(|menu| menu.bar),
             Bar::Submenu => geom.menu.as_ref().and_then(|menu| menu.sub_bar),
-            Bar::Card(surface) => self.card_bar(surface, geom.overlay, geom.tray, geom.which),
+            Bar::Card(surface) => {
+                self.card_bar(surface, geom.overlay, geom.tray, geom.which, geom.help)
+            }
         }
     }
 
     /// Where a card's bar is, from the card's geometry and its list: the
     /// function each card's paint draws its bar from, asked here for the
-    /// hand.
+    /// hand. `help` is the help sheet's card, while it is up.
     fn card_bar(
         &self,
         surface: crate::scrollbar::Surface,
         overlay: &Option<OverlayGeom>,
         tray: &crate::tray::Geometry,
         which: Option<&crate::whichkey::Geometry>,
+        help: Option<egui::Rect>,
     ) -> Option<crate::scrollbar::Geometry> {
         use crate::scrollbar::Surface;
         match (surface, overlay, &self.dialog) {
@@ -11105,8 +11107,14 @@ impl App {
             (Surface::Spot, Some(OverlayGeom::Spot(geometry)), _) => {
                 spot::bar(geometry, self.spot.as_ref()?)
             }
+            (Surface::Search, Some(OverlayGeom::Search(geometry)), _) => {
+                overlay::search_bar(geometry, self.search.as_ref()?)
+            }
             (Surface::Tray, _, _) => crate::tray::bar(tray, self.tray_first, self.clipboard.len()),
             (Surface::WhichKey, _, _) => crate::whichkey::bar(which?),
+            (Surface::Help, _, _) => {
+                chrome::help_bar(help?, self.help.as_ref()?, self.help_lines().len())
+            }
             _ => None,
         }
     }
@@ -11186,6 +11194,20 @@ impl App {
                 self.which.scroll_to(row, which);
                 self.which.first() != before
             }
+            // A page of hits as the frame measured it before the keys, as
+            // the page keys read it.
+            Bar::Card(Surface::Search) => {
+                let page = self.search_rows;
+                self.search
+                    .as_mut()
+                    .is_some_and(|search| search.scroll_to(row, page, now))
+            }
+            Bar::Card(Surface::Help) => {
+                let (lines, page) = (self.help_lines().len(), self.help_rows);
+                self.help
+                    .as_mut()
+                    .is_some_and(|help| help.scroll_to(row, lines, page, now))
+            }
         }
     }
 
@@ -11199,8 +11221,9 @@ impl App {
     /// slide, so the frame that reads the pointer has to draw the rows where
     /// it put them. A pane's thumb and the bulk rename card's are moved where
     /// their rows are measured instead ([`App::hold_scrollbar`],
-    /// [`App::bulk_layout`]). `menu`, `overlay`, `tray` and `which` are the
-    /// floating cards as the frame measured them.
+    /// [`App::bulk_layout`]). `menu`, `overlay`, `tray`, `which` and `help`
+    /// are the floating cards as the frame measured them.
+    #[allow(clippy::too_many_arguments)] // one argument a floating card
     fn hold_bar(
         &mut self,
         pointer: &Pointer,
@@ -11208,6 +11231,7 @@ impl App {
         overlay: &Option<OverlayGeom>,
         tray: &crate::tray::Geometry,
         which: Option<&crate::whichkey::Geometry>,
+        help: Option<egui::Rect>,
         now: Instant,
     ) -> Option<Bar> {
         let (true, Some(at), Some((bar, grab))) = (
@@ -11221,7 +11245,7 @@ impl App {
             Bar::Pane(_) | Bar::Bulk => None,
             Bar::Menu => menu.and_then(|menu| menu.bar),
             Bar::Submenu => menu.and_then(|menu| menu.sub_bar),
-            Bar::Card(surface) => self.card_bar(surface, overlay, tray, which),
+            Bar::Card(surface) => self.card_bar(surface, overlay, tray, which, help),
         }?;
         let first = geometry.first_at(at.y - grab);
         self.scroll_bar_to(bar, first, which, now).then_some(bar)
@@ -11279,6 +11303,16 @@ impl App {
             }
             Bar::Card(Surface::Tray) => self.tray_bar.let_go(now),
             Bar::Card(Surface::WhichKey) => self.which.let_go(now),
+            Bar::Card(Surface::Search) => {
+                if let Some(search) = &mut self.search {
+                    search.let_go(now);
+                }
+            }
+            Bar::Card(Surface::Help) => {
+                if let Some(help) = &mut self.help {
+                    help.let_go(now);
+                }
+            }
         }
     }
 
@@ -12210,20 +12244,20 @@ impl App {
                     _ => false,
                 }
             }
-            WheelOwner::Search => match (&mut self.search, overlay) {
+            WheelOwner::Card(Surface::Search) => match (&mut self.search, overlay) {
                 (Some(search), Some(OverlayGeom::Search(geometry))) => {
                     let rows = crate::mouse::wheel_rows(points, geometry.row_height());
-                    search.wheel(rows, geometry.page())
+                    search.wheel(rows, geometry.page(), now)
                 }
                 _ => false,
             },
             // The sheet is laid out from its own state further down the
             // frame, and is not measured for the hit test by its lines.
-            WheelOwner::Help => {
+            WheelOwner::Card(Surface::Help) => {
                 let lines = self.help_lines().len();
                 let page = self.help_rows;
                 if let Some(help) = &mut self.help {
-                    help.wheel(points, lines, page);
+                    help.wheel(points, lines, page, now);
                 }
                 false
             }
@@ -14773,6 +14807,9 @@ impl App {
                 area.bottom() - ui::GAP,
             )
         });
+        // …and the band its bar is pointed at and taken by, while its lines
+        // run past a page. It does not move as the sheet scrolls.
+        let help_band = help_card.and_then(|card| chrome::help_band(card, self.help_lines().len()));
         // The which-key card, from the function its paint lays it out with.
         // Only while it is fully up: a card on its way out is pixels about a
         // chord that has already resolved, and takes no pointer.
@@ -14844,6 +14881,7 @@ impl App {
             &overlay,
             &tray_geometry,
             which_geometry.as_ref(),
+            help_card,
             now,
         );
         if let Some(bar) = held {
@@ -14873,6 +14911,9 @@ impl App {
                         self.which.first(),
                     ));
                 }
+                // The sheet is laid out from its own state further down the
+                // frame, and is not measured for the hit test by its lines.
+                Bar::Card(crate::scrollbar::Surface::Help) => {}
                 _ => {
                     overlay =
                         self.overlay_geometry(&painter, area, &layout, area.bottom() - ui::GAP);
@@ -14940,19 +14981,23 @@ impl App {
                     .or_else(|| card_hints.as_ref().and_then(|strip| strip.hit(p)))
                     .map(|control| (control, p));
             }
-            // The help sheet is a surface like any other: its `×` and its
-            // strip's `Esc` are the things in it to click, and everything else
-            // under its scrim — the top row included, now that its filter is
-            // typed in the card's own heading — is inert while it is up.
-            // Without this the pointer reached straight through the card and
-            // moved the cursor in the listing behind it.
+            // The help sheet is a surface like any other: its `×`, its
+            // strip's `Esc` and its bar are the things in it to take hold of,
+            // and everything else under its scrim — the top row included, now
+            // that its filter is typed in the card's own heading — is inert
+            // while it is up. Without this the pointer reached straight
+            // through the card and moved the cursor in the listing behind it.
+            // The bar's band is under the heading and over the strip, and
+            // where it touches either by a hair the button is the button's.
             if let Some(card) = help_card {
                 if chrome::close_button_rect(card).contains(p) {
                     return Some((Control::Close, p));
                 }
+                let bar = Control::Bar(Bar::Card(crate::scrollbar::Surface::Help));
                 return help_hints
                     .as_ref()
                     .and_then(|strip| strip.hit(p))
+                    .or_else(|| help_band.filter(|band| band.contains(p)).map(|_| bar))
                     .map(|control| (control, p));
             }
             // The rename card floats over the row it renames and over part of
@@ -16092,8 +16137,9 @@ impl App {
                 let lines = self.help_lines();
                 let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE).len();
                 // The same scrolloff rule the panes use, on the same numbers:
-                // one list-scrolling behaviour in the program, not two.
-                help.settle(lines.len(), chrome::help_page(rect), scrolloff);
+                // one list-scrolling behaviour in the program, not two. Where
+                // its bar's linger is stamped from, too.
+                help.settle(lines.len(), chrome::help_page(rect), scrolloff, now);
                 self.help = Some(help);
                 Some((rect, lines, total, help))
             }
@@ -16107,7 +16153,7 @@ impl App {
             finder.scroll_into_view(geometry.rows.len(), scrolloff, now);
         }
         if let (Some(search), Some(OverlayGeom::Search(geometry))) = (&mut self.search, &overlay) {
-            search.scroll_into_view(geometry.page(), scrolloff);
+            search.scroll_into_view(geometry.page(), scrolloff, now);
         }
         // …and the other cards whose lists a short window cuts down, told
         // how many rows they were laid out with: what their keys scroll by
@@ -17258,6 +17304,8 @@ impl App {
             (Surface::Confirm | Surface::Conflict | Surface::Sync, _) => None,
             (Surface::Picker, _) => self.picker.as_ref().and_then(Picker::scrolled_at),
             (Surface::Spot, _) => self.spot.as_ref().and_then(Spot::scrolled_at),
+            (Surface::Search, _) => self.search.as_ref().and_then(Search::scrolled_at),
+            (Surface::Help, _) => self.help.as_ref().and_then(Help::scrolled_at),
             // The tray forgets its linger while it is shut.
             (Surface::Tray, _) => self.tray_bar.scrolled_at(),
             // Only while the card is up: one on its way out fades its bar
@@ -20227,6 +20275,7 @@ mod tests {
                 layout.parent.top(),
                 screen().bottom() - ui::GAP * 2.0,
                 search::Mode::Names,
+                0,
             );
             halves = Some(geometry.switch);
         });

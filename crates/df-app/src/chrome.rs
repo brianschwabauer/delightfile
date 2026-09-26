@@ -3173,13 +3173,39 @@ pub fn help_rect(area: egui::Rect, top: f32, bottom: f32) -> egui::Rect {
     )
 }
 
+/// Where the help card's lines are drawn, and clipped: the card less its
+/// padding, its heading row and its hint strip.
+pub fn help_body(rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(rect.left() + CARD_PAD, rect.top() + CARD_PAD + CARD_ROW),
+        egui::pos2(rect.right() - CARD_PAD, rect.bottom() - CARD_PAD - HINT_ROW),
+    )
+}
+
 /// How many help lines fit in the card — its own heading row and its hint strip
 /// come out of the height first.
 pub fn help_page(rect: egui::Rect) -> usize {
-    crate::viewport::visible_rows(
-        rect.height() - CARD_PAD * 2.0 - CARD_ROW - HINT_ROW,
-        HELP_ROW,
+    crate::viewport::visible_rows(help_body(rect).height(), HELP_ROW)
+}
+
+/// The sheet's bar, down the card's right padding beside its lines, while
+/// the `lines` it has run past a page — measured in lines, as its keys and
+/// its wheel count them.
+pub fn help_bar(rect: egui::Rect, help: &Help, lines: usize) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        rect,
+        help_body(rect),
+        help.first as f32,
+        help_page(rect) as f32,
+        lines as f32,
     )
+}
+
+/// Where the sheet's bar can be pointed at, while its `lines` run past a
+/// page ([`crate::scrollbar::band`]): below the heading, so the `×` in the
+/// heading's corner is the `×`'s, and above the hint strip.
+pub fn help_band(rect: egui::Rect, lines: usize) -> Option<egui::Rect> {
+    crate::scrollbar::band(rect, help_body(rect), help_page(rect) as f32, lines as f32)
 }
 
 /// Draw the help overlay: every live binding, grouped by context.
@@ -3302,10 +3328,7 @@ pub fn help_overlay(
         );
     }
 
-    let content = egui::Rect::from_min_max(
-        egui::pos2(rect.left() + CARD_PAD, rect.top() + CARD_PAD + CARD_ROW),
-        egui::pos2(rect.right() - CARD_PAD, rect.bottom() - CARD_PAD - HINT_ROW),
-    );
+    let content = help_body(rect);
     let painter = painter.with_clip_rect(content);
     let page = help_page(rect);
     for (offset, line) in lines.iter().skip(help.first).take(page + 1).enumerate() {
@@ -3409,6 +3432,16 @@ pub fn help_overlay(
             "No binding matches. Backspace to widen the filter.",
             egui::FontId::proportional(FONT),
             palette.overlay0,
+        );
+    }
+    if let Some(bar) = help_bar(rect, help, lines.len()) {
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Help,
+            hovers,
+            help.scrolled_at(),
+            1.0,
         );
     }
 }
@@ -4557,6 +4590,37 @@ mod tests {
             assert!(rect.left() >= area.left() && rect.right() <= area.right() + 1e-3);
             assert!(rect.top() >= area.top());
         }
+    }
+
+    /// The sheet's bar sits in the card's right padding beside its lines,
+    /// between the heading and the hint strip, so the `×` in the heading's
+    /// corner and the hints keep their own rects; a sheet whose lines fit a
+    /// page has none.
+    #[test]
+    fn the_help_sheets_bar_is_beside_its_lines_and_clear_of_the_close() {
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+        let rect = help_rect(area, area.top() + TOP_HEIGHT + GAP, area.bottom() - GAP);
+        let page = help_page(rect);
+        let help = Help::default();
+        assert_eq!(
+            help_bar(rect, &help, page),
+            None,
+            "a page of lines has a bar"
+        );
+        assert_eq!(help_band(rect, page), None);
+
+        let bar = help_bar(rect, &help, page * 3).expect("three pages overflow");
+        let body = help_body(rect);
+        assert!(
+            bar.thumb.left() >= body.right(),
+            "the thumb is over the lines"
+        );
+        assert!(rect.contains_rect(bar.thumb));
+        assert_eq!(help_band(rect, page * 3), Some(bar.hit));
+        assert_eq!(bar.hit.right(), rect.right(), "flush with the card's edge");
+        let close = close_button_rect(rect);
+        assert!(bar.hit.top() >= close.bottom(), "the band is over the ×");
+        assert!(bar.hit.bottom() <= hint_rect(rect).top(), "over the hints");
     }
 
     /// The pointer and the paint read one layout: the boundary the paint puts

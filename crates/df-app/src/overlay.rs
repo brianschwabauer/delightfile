@@ -366,7 +366,13 @@ pub struct SearchGeom {
     /// The **Names | Contents** switch at the head of the field: one plate per
     /// [`Mode::ALL`], in that order, side by side.
     pub switch: [Rect; 2],
+    /// Where the hits go: the part of the panel under the field, as tall as
+    /// the rows it has room for.
+    pub body: Rect,
     pub rows: Vec<Rect>,
+    /// The band the hits' bar is pointed at and taken by, while there are
+    /// more hits than rows ([`crate::scrollbar::band`]).
+    pub band: Option<Rect>,
 }
 
 impl SearchGeom {
@@ -444,6 +450,10 @@ fn switch_radius() -> u8 {
 /// sized to: each half is as wide as its word plus a chip's padding, so
 /// **Names** and **Contents** are not stretched to one width that would leave
 /// the short word floating in the middle of a wide plate.
+///
+/// `hits` is how many the search has found, for the band its bar is pointed
+/// at by, beside the rows and under the field — clear of the switch, which
+/// heads the field.
 pub fn search_geometry(
     painter: &egui::Painter,
     left: f32,
@@ -451,6 +461,7 @@ pub fn search_geometry(
     top: f32,
     bottom: f32,
     mode: Mode,
+    hits: usize,
 ) -> SearchGeom {
     let card = Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom));
     let field = Rect::from_min_size(
@@ -479,11 +490,15 @@ pub fn search_geometry(
         card.bottom() - CARD_PAD - chrome::HINT_ROW - body_top,
         row_height,
     );
+    let body = Rect::from_min_size(
+        egui::pos2(card.left() + CARD_PAD, body_top),
+        egui::vec2(card.width() - CARD_PAD * 2.0, count as f32 * row_height),
+    );
     let rows = (0..count)
         .map(|n| {
             Rect::from_min_size(
-                egui::pos2(card.left() + CARD_PAD, body_top + n as f32 * row_height),
-                egui::vec2(card.width() - CARD_PAD * 2.0, row_height),
+                egui::pos2(body.left(), body.top() + n as f32 * row_height),
+                egui::vec2(body.width(), row_height),
             )
         })
         .collect();
@@ -492,8 +507,21 @@ pub fn search_geometry(
         field,
         close: Some(close_beside(card, field)),
         switch,
+        body,
         rows,
+        band: crate::scrollbar::band(card, body, count as f32, hits as f32),
     }
+}
+
+/// The panel's bar, beside its hits, while it shows fewer than it has.
+pub fn search_bar(geometry: &SearchGeom, search: &Search) -> Option<crate::scrollbar::Geometry> {
+    crate::scrollbar::card(
+        geometry.card,
+        geometry.body,
+        search.first as f32,
+        geometry.page() as f32,
+        search.hits.len() as f32,
+    )
 }
 
 /// Draw the `s` / `S` panel.
@@ -697,6 +725,16 @@ pub fn paint_search(
                 );
             }
         }
+    }
+    if let Some(bar) = search_bar(geometry, search) {
+        crate::scrollbar::paint_card(
+            paint,
+            &bar,
+            crate::scrollbar::Surface::Search,
+            hovers,
+            search.scrolled_at(),
+            1.0,
+        );
     }
 }
 
@@ -1030,7 +1068,7 @@ mod tests {
     #[test]
     fn the_search_panel_leaves_the_preview_pane_alone() {
         with_painter(|painter| {
-            let geometry = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Content);
+            let geometry = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Content, 0);
             assert_eq!(geometry.card.right(), 800.0);
             assert!(geometry.page() > 0);
             for (n, rect) in geometry.rows.iter().enumerate() {
@@ -1039,9 +1077,47 @@ mod tests {
             }
             // A content row is taller than a name row, because it carries two
             // lines rather than one.
-            let names = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names);
+            let names = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names, 0);
             assert!(names.rows[0].height() < geometry.rows[0].height());
             assert!(names.page() > geometry.page());
+        });
+    }
+
+    /// The panel's bar sits in its right padding beside the hits, below the
+    /// field — clear of the switch, the query and the `×` — and only while
+    /// there are more hits than rows.
+    #[test]
+    fn the_search_panels_bar_is_beside_its_hits_and_clear_of_the_switch() {
+        with_painter(|painter| {
+            let fits = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names, 5);
+            assert!(fits.page() > 5);
+            assert_eq!(fits.band, None, "five hits have a band");
+
+            let hits = 200;
+            let geometry = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names, hits);
+            let band = geometry.band.expect("two hundred hits overflow");
+            let close = geometry.close.expect("a ×");
+            for rect in geometry.switch.into_iter().chain([geometry.field, close]) {
+                assert!(!band.intersects(rect), "the band is over {rect:?}");
+            }
+            assert_eq!(band.right(), geometry.card.right(), "flush with the edge");
+            assert!(band.top() >= geometry.body.top() && band.bottom() <= geometry.body.bottom());
+            let notify: df_core::fs::Notifier = std::sync::Arc::new(|| {});
+            let mut search = Search::new(Mode::Names, "/tmp", false, notify);
+            search.hits = (0..hits)
+                .map(|n| crate::search::Hit {
+                    path: format!("/tmp/{n}").into(),
+                    relative: n.to_string(),
+                    entry: None,
+                    line: None,
+                    text: String::new(),
+                    span: None,
+                })
+                .collect();
+            let bar = search_bar(&geometry, &search).expect("the hits overflow");
+            assert_eq!(bar.hit, band, "the band the frame hit-tests is the bar's");
+            assert!(bar.thumb.left() >= geometry.body.right(), "over the hits");
+            assert!(geometry.card.contains_rect(bar.thumb));
         });
     }
 
@@ -1052,7 +1128,7 @@ mod tests {
     #[test]
     fn the_switch_heads_the_field_and_each_half_is_its_own_target() {
         with_painter(|painter| {
-            let geometry = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names);
+            let geometry = search_geometry(painter, 0.0, 800.0, 30.0, 870.0, Mode::Names, 0);
             let [names, contents] = geometry.switch;
             let field = geometry.field;
             for rect in [names, contents] {
@@ -1147,6 +1223,7 @@ mod tests {
                         area.top(),
                         area.bottom(),
                         mode,
+                        30,
                     );
                     // Empty, then failed, then full — every state the panel has.
                     paint_search(&paint, &geometry, &search, &hovers, &ripples);
@@ -1176,7 +1253,7 @@ mod tests {
     #[test]
     fn a_panel_with_no_room_has_no_rows() {
         with_painter(|painter| {
-            let geometry = search_geometry(painter, 0.0, 400.0, 0.0, 30.0, Mode::Names);
+            let geometry = search_geometry(painter, 0.0, 400.0, 0.0, 30.0, Mode::Names, 0);
             assert_eq!(geometry.page(), 0);
             assert!(geometry.row_at(egui::pos2(10.0, 10.0)).is_none());
         });

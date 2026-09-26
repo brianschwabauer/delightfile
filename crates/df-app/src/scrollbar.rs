@@ -8,8 +8,8 @@
 //! looks like.
 //!
 //! The floating cards whose lists can outgrow a short window — the palette,
-//! the task panel, the dialogs, the tray, the which-key card, the menus — wear
-//! it too ([`card`], [`paint_card`]), for the same reason: a list cut off at a
+//! the task panel, the dialogs, the tray, the which-key card, the menus, the
+//! search panel and the help sheet — wear it too ([`card`], [`paint_card`]), for the same reason: a list cut off at a
 //! card's edge has to say that it goes on, and the one bar in the window is
 //! how anything here says that. It is one bar in the hand as well as to the
 //! eye: every one of them is taken by its thumb and paged by its track as a
@@ -281,12 +281,16 @@ pub enum Surface {
     Spot,
     Tray,
     WhichKey,
+    /// The `s` / `S` panel's hits.
+    Search,
+    /// The `~` / `F1` sheet's lines.
+    Help,
 }
 
 impl Surface {
     /// Every card with a bar, for the frame-request list and the wake-ups
     /// to walk: a card added here is asked about by both.
-    pub const ALL: [Surface; 10] = [
+    pub const ALL: [Surface; 12] = [
         Surface::Palette,
         Surface::Tasks,
         Surface::Mounts,
@@ -297,6 +301,8 @@ impl Surface {
         Surface::Spot,
         Surface::Tray,
         Surface::WhichKey,
+        Surface::Search,
+        Surface::Help,
     ];
 
     /// The bar's name in `DF_FRAME_LOG`, which says whose fade is holding
@@ -313,6 +319,8 @@ impl Surface {
             Surface::Spot => "spot-bar",
             Surface::Tray => "tray-bar",
             Surface::WhichKey => "which-bar",
+            Surface::Search => "search-bar",
+            Surface::Help => "help-bar",
         }
     }
 }
