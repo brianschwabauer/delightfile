@@ -15,23 +15,38 @@
 //! any, and then removes exactly those paths, children first. There is no
 //! recursive delete anywhere in an undo.
 //!
-//! Two things are deliberately absent:
+//! ## Redo
 //!
-//! - **Permanent delete is not journalled.** There is nothing to record: the
-//!   bytes are gone. It is the one irreversible operation, which is why it is
-//!   the one with a confirm dialog (PLAN §5).
-//! - **Redo.** Not required for v1 (PLAN §5). The stack only pops.
+//! `U` walks forward again. An undo that took its entry back whole keeps it —
+//! the record, and the state of every path it put back ([`Undone`]) — on a
+//! second stack, and a redo repeats the operation from there *after the same
+//! kind of check*: every path the undo restored must still be what the undo
+//! left, and every path the operation will make must still be free. A mismatch
+//! is an error the user reads, exactly as it is for `u`. What was done again
+//! goes back on the undo stack, so `u`, `U`, `u` walks back and forth over one
+//! step for as long as nothing else happens.
+//!
+//! The redo stack is a line, not a tree. Recording anything new clears it: a
+//! redo of something undone before today's rename would replay it onto a
+//! world it was never made in. So does an undo that stopped part way, whose
+//! remainder is still on the undo stack and whose half that went has no
+//! forward form of its own to be redone from.
+//!
+//! One thing is deliberately absent: **permanent delete is not journalled.**
+//! There is nothing to record — the bytes are gone. It is the one
+//! irreversible operation, which is why it is the one with a confirm dialog
+//! (PLAN §5).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use crate::tasks::TaskCtx;
 use crate::text::grouped;
 use crate::{DfError, Result};
 
-use super::trash::TrashedItem;
+use super::trash::{Trash, TrashedItem};
 use super::{exists, normalize};
 
 /// How many operations `u` can walk back.
@@ -103,15 +118,21 @@ impl Fingerprint {
     /// Is `path` still what it was? The error text says what changed, because
     /// "cannot undo" without a reason is a dead end.
     pub fn verify(&self, path: &Path) -> Result<()> {
+        self.check(path, "undo")
+    }
+
+    /// [`Fingerprint::verify`], for the step named by `verb` — `"undo"` or
+    /// `"redo"` — which is the word the refusal starts with.
+    pub fn check(&self, path: &Path, verb: &str) -> Result<()> {
         let now = Fingerprint::of(path).map_err(|_| {
             DfError::Op(format!(
-                "cannot undo: {} is no longer there",
+                "cannot {verb}: {} is no longer there",
                 path.display()
             ))
         })?;
         if now.kind != self.kind {
             return Err(DfError::Op(format!(
-                "cannot undo: {} is not the same kind of file any more",
+                "cannot {verb}: {} is not the same kind of file any more",
                 path.display()
             )));
         }
@@ -119,7 +140,7 @@ impl Fingerprint {
             FileKind::Dir => {
                 if now.entries != self.entries {
                     return Err(DfError::Op(format!(
-                        "cannot undo: {} has different contents now",
+                        "cannot {verb}: {} has different contents now",
                         path.display()
                     )));
                 }
@@ -127,14 +148,14 @@ impl Fingerprint {
             FileKind::File => {
                 if now.len != self.len {
                     return Err(DfError::Op(format!(
-                        "cannot undo: {} has changed size",
+                        "cannot {verb}: {} has changed size",
                         path.display()
                     )));
                 }
                 if let (Some(a), Some(b)) = (self.mtime, now.mtime) {
                     if a != b {
                         return Err(DfError::Op(format!(
-                            "cannot undo: {} has been modified since",
+                            "cannot {verb}: {} has been modified since",
                             path.display()
                         )));
                     }
@@ -182,6 +203,24 @@ pub struct CopyManifest {
     /// children. The root itself is the first entry, with an empty relative
     /// path.
     entries: Vec<(PathBuf, Fingerprint)>,
+    /// What the copy was made from, which is what `U` copies again once `u`
+    /// has taken the copy away. A paste records it
+    /// ([`CopyManifest::copied_from`]); an extraction has none — what it
+    /// copied was inside an archive — and so cannot be redone.
+    source: Option<CopySource>,
+}
+
+/// Where one copied item came from, and the state it was in when it was
+/// copied.
+///
+/// Checked before a redo copies it again, for the reason every step in this
+/// module checks what it is about to act on: a source edited since the paste
+/// would be copied as it is *now*, and a redo that made something other than
+/// what the undo took away would not be a redo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopySource {
+    pub path: PathBuf,
+    pub fingerprint: Fingerprint,
 }
 
 impl CopyManifest {
@@ -207,7 +246,27 @@ impl CopyManifest {
         let root = normalize(root);
         let mut entries = Vec::new();
         walk(&root, PathBuf::new(), &mut entries, cap)?;
-        Ok(CopyManifest { root, entries })
+        Ok(CopyManifest {
+            root,
+            entries,
+            source: None,
+        })
+    }
+
+    /// The same manifest, remembering that the copy was made from `source`
+    /// ([`CopySource`]). A source that can no longer be read is left out, and
+    /// with it the chance to redo this copy; the undo is unaffected.
+    pub fn copied_from(mut self, source: &Path) -> CopyManifest {
+        self.source = Fingerprint::of(source).ok().map(|fingerprint| CopySource {
+            path: source.to_path_buf(),
+            fingerprint,
+        });
+        self
+    }
+
+    /// What the copy was made from, when that is known.
+    pub fn source(&self) -> Option<&CopySource> {
+        self.source.as_ref()
     }
 
     /// How many paths the copy created.
@@ -332,6 +391,7 @@ impl CopyManifest {
         Some(CopyManifest {
             root: self.root.clone(),
             entries,
+            source: self.source.clone(),
         })
     }
 }
@@ -390,6 +450,10 @@ pub struct CreatedLink {
     pub link: PathBuf,
     /// The link text, for a symlink. `None` for a hard link.
     pub target: Option<PathBuf>,
+    /// For a hard link, the file it is a second name for — what `U` links
+    /// again once `u` has taken it away. `None` for a symlink, whose text says
+    /// where it points, and for a hard link made without saying.
+    pub original: Option<PathBuf>,
     pub fingerprint: Fingerprint,
 }
 
@@ -400,7 +464,17 @@ impl CreatedLink {
         Ok(CreatedLink {
             link: normalize(link),
             target: target.map(PathBuf::from),
+            original: None,
             fingerprint: Fingerprint::of(link)?,
+        })
+    }
+
+    /// Fingerprint a hard link that has just been made to `original`, keeping
+    /// `original` so that the link can be made again.
+    pub fn record_hard(link: &Path, original: &Path) -> Result<CreatedLink> {
+        Ok(CreatedLink {
+            original: Some(original.to_path_buf()),
+            ..CreatedLink::record(link, None)?
         })
     }
 }
@@ -463,6 +537,9 @@ pub enum OpRecord {
         link: PathBuf,
         /// The link text, for a symlink. `None` for a hard link.
         target: Option<PathBuf>,
+        /// For a hard link, the file it is a second name for: what `U` links
+        /// again. `None` for a symlink ([`CreatedLink::original`]).
+        original: Option<PathBuf>,
         fingerprint: Fingerprint,
     },
     /// `-` / `_` / `Ctrl+-` over a yank of several files. Inverse: unlink every
@@ -487,16 +564,37 @@ pub enum OpRecord {
     Tags { changes: Vec<TagChange> },
 }
 
+/// "1 item" / "3 items" / "1,234 items".
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{} {many}", grouped(n as u64))
+    }
+}
+
+/// A path's last component, for a sentence.
+fn name_of(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The sentence with its first letter raised, for a toast: the records
+/// describe themselves in the lower case a history row or a clause wants.
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 impl OpRecord {
-    /// One line for the `u` toast, in the past tense of what would happen.
+    /// One line for what the operation did, in the past tense: the undo
+    /// history's name for a row `u` can take back.
     pub fn describe(&self) -> String {
-        fn plural(n: usize, one: &str, many: &str) -> String {
-            if n == 1 {
-                format!("1 {one}")
-            } else {
-                format!("{} {many}", grouped(n as u64))
-            }
-        }
         match self {
             OpRecord::Move { moves } => format!("moved {}", plural(moves.len(), "item", "items")),
             OpRecord::Rename { moved } => format!(
@@ -541,6 +639,54 @@ impl OpRecord {
             },
         }
     }
+
+    /// The same for doing it again, in the past tense of having done it: the
+    /// `U` toast, and the undo history's name for a row `U` can redo.
+    pub fn describe_redo(&self) -> String {
+        match self {
+            OpRecord::Move { moves } => match moves.as_slice() {
+                [one] => format!("moved {} again", name_of(&one.to)),
+                many => format!("moved {} again", plural(many.len(), "item", "items")),
+            },
+            OpRecord::Rename { moved } => {
+                format!(
+                    "renamed {} → {} again",
+                    name_of(&moved.from),
+                    name_of(&moved.to)
+                )
+            }
+            OpRecord::Renames { moved } => match moved.as_slice() {
+                [one] => format!(
+                    "renamed {} → {} again",
+                    name_of(&one.from),
+                    name_of(&one.to)
+                ),
+                many => format!("renamed {} again", plural(many.len(), "item", "items")),
+            },
+            OpRecord::Copy { created } => match created.as_slice() {
+                [one] => format!("copied {} again", name_of(&one.root)),
+                many => format!("copied {} again", plural(many.len(), "item", "items")),
+            },
+            OpRecord::Trash { items } => match items.as_slice() {
+                [one] => format!("trashed {} again", name_of(&one.original)),
+                many => format!("trashed {} again", plural(many.len(), "item", "items")),
+            },
+            OpRecord::Create { path, is_dir, .. } => format!(
+                "created {} {} again",
+                if *is_dir { "folder" } else { "file" },
+                name_of(path)
+            ),
+            OpRecord::Link { link, .. } => format!("linked {} again", name_of(link)),
+            OpRecord::Links { links } => match links.as_slice() {
+                [one] => format!("linked {} again", name_of(&one.link)),
+                many => format!("linked {} again", plural(many.len(), "item", "items")),
+            },
+            OpRecord::Tags { changes } => match changes.as_slice() {
+                [one] => format!("tagged {} again", name_of(&one.path)),
+                many => format!("tagged {} again", plural(many.len(), "item", "items")),
+            },
+        }
+    }
 }
 
 /// What an undo did, for the toast (PLAN §5: every op lands with an 8 s undo
@@ -553,10 +699,91 @@ pub struct UndoReport {
     pub touched: Vec<PathBuf>,
 }
 
-/// The bounded stack of inverses.
+/// What a redo did, for the toast: the sentence, and the paths it made,
+/// moved or trashed again — whatever the UI should move the cursor to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedoReport {
+    pub description: String,
+    pub touched: Vec<PathBuf>,
+}
+
+/// An operation `u` took back, kept so that `U` can do it again.
+///
+/// The record is the operation as it was first done, which is what a redo
+/// repeats and what the undo history names. `restored` is the other half of
+/// the check every step in this module makes before it touches anything: each
+/// path the undo *put back* — a file moved back to where it came from, one
+/// restored out of the trash — and the state the undo left it in. A redo that
+/// finds one of them changed refuses, as an undo does, rather than moving the
+/// user's newer work somewhere they did not ask for it to go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Undone {
+    pub record: OpRecord,
+    restored: Vec<(PathBuf, Fingerprint)>,
+}
+
+impl Undone {
+    /// What `u` leaves for `U` after taking `record` back and reporting
+    /// `touched`: the fingerprint of every path it put back. Only the kinds
+    /// whose undo restores something have any; a copy's, a create's and a
+    /// link's undo only removed things, and their redo checks instead that the
+    /// names are still free.
+    fn after(record: OpRecord, touched: &[PathBuf]) -> Undone {
+        let restores = matches!(
+            record,
+            OpRecord::Move { .. }
+                | OpRecord::Rename { .. }
+                | OpRecord::Renames { .. }
+                | OpRecord::Trash { .. }
+        );
+        let restored = if restores {
+            touched
+                .iter()
+                .filter_map(|path| Fingerprint::of(path).ok().map(|fp| (path.clone(), fp)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Undone { record, restored }
+    }
+
+    /// The state the undo left `path` in, if it was one it put back.
+    fn restored(&self, path: &Path) -> Option<&Fingerprint> {
+        self.restored
+            .iter()
+            .find(|(restored, _)| restored == path)
+            .map(|(_, fingerprint)| fingerprint)
+    }
+
+    /// The part of this still to be redone after a redo stopped part way: the
+    /// same fingerprints, for a record covering only what is left.
+    fn rest(&self, record: OpRecord) -> Undone {
+        Undone {
+            record,
+            restored: self.restored.clone(),
+        }
+    }
+}
+
+/// One entry on either stack, and when it was first done — for the undo
+/// history's "3 min ago".
+///
+/// The stamp travels with the entry from one stack to the other and back, so
+/// the history reads as one timeline whichever side of the line an entry is
+/// on: an operation undone and redone happened when it happened.
+#[derive(Debug, Clone)]
+struct Stamped<T> {
+    item: T,
+    at: Instant,
+}
+
+/// The bounded stack of inverses, and the stack of what they took back.
 #[derive(Debug, Clone)]
 pub struct Journal {
-    entries: VecDeque<OpRecord>,
+    entries: VecDeque<Stamped<OpRecord>>,
+    /// What `u` has taken back, the most recently undone last: `U` repeats
+    /// from the back. Bounded by the same depth.
+    undone: VecDeque<Stamped<Undone>>,
     depth: usize,
 }
 
@@ -570,6 +797,7 @@ impl Journal {
     pub fn new(depth: usize) -> Journal {
         Journal {
             entries: VecDeque::new(),
+            undone: VecDeque::new(),
             // A depth of 0 would silently make `u` do nothing; one step of undo
             // is the minimum that is not a lie.
             depth: depth.max(1),
@@ -577,20 +805,53 @@ impl Journal {
     }
 
     /// Push a completed operation. The oldest entry falls off the bottom once
-    /// the journal is full.
+    /// the journal is full, and whatever was undone before it can no longer
+    /// be redone (see the module header).
     pub fn record(&mut self, record: OpRecord) {
-        self.entries.push_back(record);
+        self.record_at(record, Instant::now());
+    }
+
+    /// [`Journal::record`], stamped `at` rather than now — for a caller that
+    /// has to say how long ago.
+    pub fn record_at(&mut self, record: OpRecord, at: Instant) {
+        self.undone.clear();
+        self.push(record, at);
+    }
+
+    /// Onto the undo stack, leaving the redo stack alone: what a redo did
+    /// again is not something new.
+    fn push(&mut self, record: OpRecord, at: Instant) {
+        self.entries.push_back(Stamped { item: record, at });
         while self.entries.len() > self.depth {
             self.entries.pop_front();
         }
     }
 
+    fn push_undone(&mut self, undone: Undone, at: Instant) {
+        self.undone.push_back(Stamped { item: undone, at });
+        while self.undone.len() > self.depth {
+            self.undone.pop_front();
+        }
+    }
+
+    /// How many operations `u` can take back.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Whether there is nothing for `u` to take back.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// How many operations `U` can do again.
+    pub fn redo_len(&self) -> usize {
+        self.undone.len()
+    }
+
+    /// Whether there is anything for `U` to do again.
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
     }
 
     pub fn depth(&self) -> usize {
@@ -599,11 +860,35 @@ impl Journal {
 
     /// What `u` would take back next, without taking it back.
     pub fn peek(&self) -> Option<&OpRecord> {
-        self.entries.back()
+        self.entries.back().map(|entry| &entry.item)
+    }
+
+    /// What `U` would do again next, without doing it.
+    pub fn peek_redo(&self) -> Option<&OpRecord> {
+        self.undone.back().map(|entry| &entry.item.record)
+    }
+
+    /// What `u` can take back, the next one first, each with when it was
+    /// done.
+    pub fn undoable(&self) -> impl Iterator<Item = (&OpRecord, Instant)> + '_ {
+        self.entries
+            .iter()
+            .rev()
+            .map(|entry| (&entry.item, entry.at))
+    }
+
+    /// What `U` can do again, the next one first, each with when it was first
+    /// done.
+    pub fn redoable(&self) -> impl Iterator<Item = (&OpRecord, Instant)> + '_ {
+        self.undone
+            .iter()
+            .rev()
+            .map(|entry| (&entry.item.record, entry.at))
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.undone.clear();
     }
 
     /// Undo the most recent operation.
@@ -614,20 +899,59 @@ impl Journal {
     /// entry, the entry is rewritten to cover only what has not been taken back
     /// yet — otherwise the second `u` would trip over its own first half ("that
     /// file exists again") and the rest could never be undone at all.
+    ///
+    /// Taken back whole, the entry moves to the redo stack for `U`
+    /// ([`Undone`]). Taken back half way, it clears that stack instead: the
+    /// half that went has no forward form of its own, and nothing undone
+    /// before it can be redone past it.
     pub fn undo(&mut self, ctx: &TaskCtx) -> Result<UndoReport> {
         let Some(entry) = self.entries.back().cloned() else {
             return Err(DfError::Op("nothing to undo".to_string()));
         };
-        let attempt = undo_attempt(&entry, ctx);
+        let attempt = undo_attempt(&entry.item, ctx);
         match attempt.result {
             Ok(report) => {
                 self.entries.pop_back();
+                self.push_undone(Undone::after(entry.item, &report.touched), entry.at);
                 Ok(report)
             }
             Err(e) => {
                 if let Some(remaining) = attempt.remaining {
                     if let Some(back) = self.entries.back_mut() {
-                        *back = remaining;
+                        back.item = remaining;
+                    }
+                    self.undone.clear();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Do the most recently undone operation again.
+    ///
+    /// Checked in full before anything is touched, as an undo is, and the
+    /// entry stays if the redo is refused, so the user can clear the way and
+    /// press `U` again. What was done again goes back on the undo stack —
+    /// without clearing this one, since it is not something new — so `u`
+    /// takes it back. A redo that fails part way puts what did land on the
+    /// undo stack and keeps the rest here, so neither half is lost.
+    pub fn redo(&mut self, ctx: &TaskCtx) -> Result<RedoReport> {
+        let Some(entry) = self.undone.back().cloned() else {
+            return Err(DfError::Op("nothing to redo".to_string()));
+        };
+        let attempt = redo_attempt(&entry.item, ctx);
+        if let Some(done) = attempt.done {
+            self.push(done, entry.at);
+        }
+        match attempt.result {
+            Ok(report) => {
+                self.undone.pop_back();
+                Ok(report)
+            }
+            Err(e) => {
+                if let Some(rest) = attempt.remaining {
+                    if let Some(back) = self.undone.back_mut() {
+                        back.item = rest;
                     }
                 }
                 Err(e)
@@ -692,6 +1016,7 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
             link,
             target,
             fingerprint,
+            ..
         } => whole(undo_link(link, target.as_deref(), fingerprint)),
         OpRecord::Links { links } => undo_links(links, ctx),
         OpRecord::Tags { changes } => undo_tags(changes),
@@ -1048,6 +1373,421 @@ fn undo_tags(changes: &[TagChange]) -> UndoAttempt {
             },
             touched,
         }),
+        remaining: None,
+    }
+}
+
+// ── Redo ────────────────────────────────────────────────────────────────────
+
+/// The result of doing one undone operation again.
+#[derive(Debug)]
+struct RedoAttempt {
+    result: Result<RedoReport>,
+    /// What was done again, as a record for the undo stack: all of it on
+    /// success, and the part that landed when it stopped part way. `None`
+    /// when nothing was done.
+    done: Option<OpRecord>,
+    /// What is left to redo, when it stopped part way. `None` when nothing
+    /// changed, and the entry as it stands is still the truth.
+    remaining: Option<Undone>,
+}
+
+impl RedoAttempt {
+    /// Refused before anything was touched.
+    fn refused(e: DfError) -> RedoAttempt {
+        RedoAttempt {
+            result: Err(e),
+            done: None,
+            remaining: None,
+        }
+    }
+}
+
+/// Do one undone operation again, having checked all of it first.
+fn redo_attempt(undone: &Undone, ctx: &TaskCtx) -> RedoAttempt {
+    match &undone.record {
+        OpRecord::Move { moves } => redo_moves(undone, moves, ctx),
+        OpRecord::Rename { moved } => redo_moves(undone, std::slice::from_ref(moved), ctx),
+        OpRecord::Renames { moved } => redo_moves(undone, moved, ctx),
+        OpRecord::Trash { items } => redo_trash(undone, items, ctx),
+        OpRecord::Copy { created } => redo_copy(undone, created, ctx),
+        OpRecord::Create {
+            path,
+            is_dir,
+            fingerprint,
+            ..
+        } => redo_create(undone, path, *is_dir, fingerprint),
+        OpRecord::Link {
+            link,
+            target,
+            original,
+            fingerprint,
+        } => {
+            let one = CreatedLink {
+                link: link.clone(),
+                target: target.clone(),
+                original: original.clone(),
+                fingerprint: fingerprint.clone(),
+            };
+            redo_links(undone, std::slice::from_ref(&one), ctx)
+        }
+        OpRecord::Links { links } => redo_links(undone, links, ctx),
+        OpRecord::Tags { .. } => RedoAttempt::refused(DfError::Op(
+            "cannot redo a change of tags — T sets them again".to_string(),
+        )),
+    }
+}
+
+/// The record a redo of `record` leaves on the undo stack for `moves`: the
+/// same kind, so the toast after the next `u` still says "renamed".
+fn moved_as(record: &OpRecord, mut moves: Vec<MovedPath>) -> OpRecord {
+    match record {
+        OpRecord::Rename { .. } if moves.len() == 1 => OpRecord::Rename {
+            moved: moves.remove(0),
+        },
+        OpRecord::Renames { .. } => OpRecord::Renames { moved: moves },
+        _ => OpRecord::Move { moves },
+    }
+}
+
+/// Refuse unless `path`'s directory is still there to put something in.
+fn parent_exists(path: &Path) -> Result<()> {
+    match path.parent() {
+        Some(parent) if exists(parent) => Ok(()),
+        Some(parent) => Err(DfError::Op(format!(
+            "cannot redo: {} no longer exists",
+            parent.display()
+        ))),
+        None => Err(DfError::Op(format!("{} has no parent", path.display()))),
+    }
+}
+
+/// Refuse unless `path` is free for the redo to make again.
+fn free(path: &Path) -> Result<()> {
+    if exists(path) {
+        return Err(DfError::Op(format!(
+            "cannot redo: {} is taken now",
+            path.display()
+        )));
+    }
+    parent_exists(path)
+}
+
+/// Move everything to where the operation took it, again.
+///
+/// All-or-nothing on the check, as [`undo_moves`] is: every leg's source must
+/// be the file the undo put back, untouched since, and every destination
+/// free, before the first one moves.
+fn redo_moves(undone: &Undone, moves: &[MovedPath], ctx: &TaskCtx) -> RedoAttempt {
+    for m in moves {
+        let Some(fingerprint) = undone.restored(&m.from) else {
+            return RedoAttempt::refused(DfError::Op(format!(
+                "cannot redo: {} was not recorded when it was put back",
+                m.from.display()
+            )));
+        };
+        if let Err(e) = fingerprint
+            .check(&m.from, "redo")
+            .and_then(|()| free(&m.to))
+        {
+            return RedoAttempt::refused(e);
+        }
+    }
+
+    let mut done = Vec::new();
+    let mut touched = Vec::new();
+    for (i, m) in moves.iter().enumerate() {
+        if let Err(e) = super::copy::move_path(&m.from, &m.to, ctx, false) {
+            // What moved is real and goes on the undo stack; what did not is
+            // still to be redone, and nothing before it has to be done twice.
+            return RedoAttempt {
+                result: Err(e),
+                done: (!done.is_empty()).then(|| moved_as(&undone.record, done)),
+                remaining: (i > 0)
+                    .then(|| undone.rest(moved_as(&undone.record, moves[i..].to_vec()))),
+            };
+        }
+        match MovedPath::record(&m.from, &m.to) {
+            Ok(leg) => done.push(leg),
+            Err(e) => log::warn!("no undo record for {}: {e}", m.to.display()),
+        }
+        touched.push(m.to.clone());
+    }
+    RedoAttempt {
+        result: Ok(RedoReport {
+            description: capitalised(&undone.record.describe_redo()),
+            touched,
+        }),
+        done: (!done.is_empty()).then(|| moved_as(&undone.record, done)),
+        remaining: None,
+    }
+}
+
+/// Put everything the undo restored back in the trash it came out of.
+///
+/// The same trash, not whichever [`super::trash::for_path`] would pick now:
+/// it is the one the file went into the first time, and the one `u` will
+/// look in to restore it again.
+fn redo_trash(undone: &Undone, items: &[TrashedItem], ctx: &TaskCtx) -> RedoAttempt {
+    for item in items {
+        let Some(fingerprint) = undone.restored(&item.original) else {
+            return RedoAttempt::refused(DfError::Op(format!(
+                "cannot redo: {} was not recorded when it was restored",
+                item.original.display()
+            )));
+        };
+        if let Err(e) = fingerprint.check(&item.original, "redo") {
+            return RedoAttempt::refused(e);
+        }
+    }
+
+    let mut done = Vec::new();
+    let mut touched = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        match Trash::at(&item.trash_root).trash(&item.original, ctx) {
+            Ok(again) => done.push(again),
+            Err(e) => {
+                return RedoAttempt {
+                    result: Err(e),
+                    done: (!done.is_empty()).then_some(OpRecord::Trash { items: done }),
+                    remaining: (i > 0).then(|| {
+                        undone.rest(OpRecord::Trash {
+                            items: items[i..].to_vec(),
+                        })
+                    }),
+                }
+            }
+        }
+        touched.push(item.original.clone());
+    }
+    RedoAttempt {
+        result: Ok(RedoReport {
+            description: capitalised(&undone.record.describe_redo()),
+            touched,
+        }),
+        done: (!done.is_empty()).then_some(OpRecord::Trash { items: done }),
+        remaining: None,
+    }
+}
+
+/// Copy every item again, from the source it was first copied from.
+///
+/// Checked in full first: each item has to have a recorded source
+/// ([`CopySource`]) that is still the file it was when it was copied, and a
+/// destination that is still free. The copy goes through
+/// [`super::copy::copy_tree`], the machinery a paste uses, and each item is
+/// manifested afresh as it lands, as a paste's are — so `u` after `U` deletes
+/// exactly what this copy made.
+fn redo_copy(undone: &Undone, created: &[CopyManifest], ctx: &TaskCtx) -> RedoAttempt {
+    let mut sources = Vec::with_capacity(created.len());
+    for manifest in created {
+        let Some(source) = manifest.source() else {
+            return RedoAttempt::refused(DfError::Op(format!(
+                "cannot redo: nothing records where {} came from",
+                manifest.root.display()
+            )));
+        };
+        if let Err(e) = source
+            .fingerprint
+            .check(&source.path, "redo")
+            .and_then(|()| free(&manifest.root))
+        {
+            return RedoAttempt::refused(e);
+        }
+        sources.push(source);
+    }
+
+    let mut done = Vec::new();
+    let mut touched = Vec::new();
+    for (i, (manifest, source)) in created.iter().zip(&sources).enumerate() {
+        // `copy_tree` takes back a destination it made and could not finish,
+        // so a failure here leaves this item as it was before the redo.
+        if let Err(e) = super::copy::copy_tree(&source.path, &manifest.root, ctx, false) {
+            return RedoAttempt {
+                result: Err(e),
+                done: (!done.is_empty()).then_some(OpRecord::Copy { created: done }),
+                remaining: (i > 0).then(|| {
+                    undone.rest(OpRecord::Copy {
+                        created: created[i..].to_vec(),
+                    })
+                }),
+            };
+        }
+        match CopyManifest::of_tree(&manifest.root) {
+            Ok(again) => done.push(again.copied_from(&source.path)),
+            // Landed, and too big to describe: not undoable, as the paste
+            // that made it the first time would not have been either.
+            Err(e) => log::warn!("no undo record for {}: {e}", manifest.root.display()),
+        }
+        touched.push(manifest.root.clone());
+    }
+    RedoAttempt {
+        result: Ok(RedoReport {
+            description: capitalised(&undone.record.describe_redo()),
+            touched,
+        }),
+        done: (!done.is_empty()).then_some(OpRecord::Copy { created: done }),
+        remaining: None,
+    }
+}
+
+/// Make the empty file or folder again, and whatever parents it needs.
+///
+/// Only an *empty* one: `a` makes something with nothing in it, and that is
+/// the one kind of create there is a way to repeat. A file that was written as
+/// it was made — an archive, the system clipboard pasted into a file — is
+/// recorded as a create so that `u` can take it away, and nothing here holds
+/// what was written into it.
+fn redo_create(
+    undone: &Undone,
+    path: &Path,
+    is_dir: bool,
+    fingerprint: &Fingerprint,
+) -> RedoAttempt {
+    let empty = if is_dir {
+        fingerprint.entries.unwrap_or(0) == 0
+    } else {
+        fingerprint.len == 0
+    };
+    if !empty {
+        return RedoAttempt::refused(DfError::Op(format!(
+            "cannot redo: {} was made with something in it, and only an empty one can be made again",
+            name_of(path)
+        )));
+    }
+    if exists(path) {
+        return RedoAttempt::refused(DfError::Op(format!(
+            "cannot redo: {} is taken now",
+            path.display()
+        )));
+    }
+    // `create`'s own spelling of "a directory": a trailing `/`. It makes the
+    // parents that are missing, and says which, so `u` peels exactly those.
+    let typed = if is_dir {
+        let mut text = path.as_os_str().to_owned();
+        text.push("/");
+        PathBuf::from(text)
+    } else {
+        path.to_path_buf()
+    };
+    let made = match super::create::create(&typed) {
+        Ok(made) => made,
+        Err(e) => return RedoAttempt::refused(e),
+    };
+    let done = match Fingerprint::of(&made.path) {
+        Ok(fingerprint) => Some(OpRecord::Create {
+            path: made.path.clone(),
+            is_dir: made.is_dir,
+            fingerprint,
+            created_parents: made.created_parents.clone(),
+        }),
+        Err(e) => {
+            log::warn!("no undo record for {}: {e}", made.path.display());
+            None
+        }
+    };
+    // The parents first: the shallowest one made is the row a listing of the
+    // directory above it shows.
+    let mut touched = made.created_parents;
+    touched.push(made.path);
+    RedoAttempt {
+        result: Ok(RedoReport {
+            description: capitalised(&undone.record.describe_redo()),
+            touched,
+        }),
+        done,
+        remaining: None,
+    }
+}
+
+/// The record a redo of `record` leaves on the undo stack for `links`: one
+/// link stays a [`OpRecord::Link`], a gesture's worth stays one
+/// [`OpRecord::Links`].
+fn linked_as(record: &OpRecord, mut links: Vec<CreatedLink>) -> OpRecord {
+    match record {
+        OpRecord::Link { .. } if links.len() == 1 => {
+            let one = links.remove(0);
+            OpRecord::Link {
+                link: one.link,
+                target: one.target,
+                original: one.original,
+                fingerprint: one.fingerprint,
+            }
+        }
+        _ => OpRecord::Links { links },
+    }
+}
+
+/// Make every link again: a symlink with the text it had, a hard link to the
+/// file it was a second name for.
+///
+/// All-or-nothing on the check: every name free, and every hard link's
+/// original still there, before the first link is made.
+fn redo_links(undone: &Undone, links: &[CreatedLink], ctx: &TaskCtx) -> RedoAttempt {
+    if links.is_empty() {
+        return RedoAttempt::refused(DfError::Op("nothing to redo".to_string()));
+    }
+    for l in links {
+        if let Err(e) = free(&l.link) {
+            return RedoAttempt::refused(e);
+        }
+        match (&l.target, &l.original) {
+            (Some(_), _) => {}
+            (None, Some(original)) if exists(original) => {}
+            (None, Some(original)) => {
+                return RedoAttempt::refused(DfError::Op(format!(
+                    "cannot redo: {} is no longer there to link to",
+                    original.display()
+                )))
+            }
+            (None, None) => {
+                return RedoAttempt::refused(DfError::Op(format!(
+                    "cannot redo: nothing records what {} was a hard link to",
+                    l.link.display()
+                )))
+            }
+        }
+    }
+
+    let mut done = Vec::new();
+    let mut touched = Vec::new();
+    for (i, l) in links.iter().enumerate() {
+        let made =
+            ctx.checkpoint()
+                .and_then(|()| match (&l.target, &l.original) {
+                    (Some(text), _) => std::os::unix::fs::symlink(text, &l.link)
+                        .map_err(|e| DfError::io(&l.link, e)),
+                    (None, Some(original)) => super::link::hardlink(original, &l.link),
+                    (None, None) => Err(DfError::Op(format!(
+                        "cannot redo: nothing records what {} was a hard link to",
+                        l.link.display()
+                    ))),
+                });
+        if let Err(e) = made {
+            return RedoAttempt {
+                result: Err(e),
+                done: (!done.is_empty()).then(|| linked_as(&undone.record, done)),
+                remaining: (i > 0)
+                    .then(|| undone.rest(linked_as(&undone.record, links[i..].to_vec()))),
+            };
+        }
+        ctx.advance(0, 1);
+        let again = match (&l.target, &l.original) {
+            (None, Some(original)) => CreatedLink::record_hard(&l.link, original),
+            _ => CreatedLink::record(&l.link, l.target.as_deref()),
+        };
+        match again {
+            Ok(again) => done.push(again),
+            Err(e) => log::warn!("no undo record for {}: {e}", l.link.display()),
+        }
+        touched.push(l.link.clone());
+    }
+    RedoAttempt {
+        result: Ok(RedoReport {
+            description: capitalised(&undone.record.describe_redo()),
+            touched,
+        }),
+        done: (!done.is_empty()).then(|| linked_as(&undone.record, done)),
         remaining: None,
     }
 }
@@ -1676,6 +2416,7 @@ mod tests {
         j.record(OpRecord::Link {
             link: l.clone(),
             target: Some(text),
+            original: None,
             fingerprint: Fingerprint::of(&l).unwrap(),
         });
         j.undo(&ctx()).unwrap();
@@ -1693,6 +2434,7 @@ mod tests {
         j.record(OpRecord::Link {
             link: l.clone(),
             target: Some(text),
+            original: None,
             fingerprint: Fingerprint::of(&l).unwrap(),
         });
 
@@ -1713,6 +2455,7 @@ mod tests {
         j.record(OpRecord::Link {
             link: l.clone(),
             target: None,
+            original: None,
             fingerprint: Fingerprint::of(&l).unwrap(),
         });
         j.undo(&ctx()).unwrap();
@@ -1898,5 +2641,617 @@ mod tests {
         std::fs::remove_file(&p).unwrap();
         let err = fp.verify(&p).unwrap_err();
         assert!(err.to_string().contains("no longer there"), "{err}");
+    }
+
+    // ── Redo ────────────────────────────────────────────────────────────────
+
+    /// A fingerprint for a record whose paths are never touched: the
+    /// sentences only.
+    fn untouched() -> Fingerprint {
+        Fingerprint {
+            kind: FileKind::File,
+            len: 0,
+            mtime: None,
+            entries: None,
+        }
+    }
+
+    /// A rename of `from` to `to` in `t`, carried out and recorded.
+    fn renamed(j: &mut Journal, t: &TempTree, from: &str, to: &str) -> (PathBuf, PathBuf) {
+        let from = t.file(from, b"x");
+        let to = t.join(to);
+        create::rename(&from, &to, false).unwrap();
+        j.record(OpRecord::Rename {
+            moved: MovedPath::record(&from, &to).unwrap(),
+        });
+        (from, to)
+    }
+
+    /// `u`, `U`, `u`: the same step, back and forth, for as long as nothing
+    /// else happens.
+    #[test]
+    fn redo_of_a_rename_round_trips() {
+        let t = TempTree::new("j-redo-rename");
+        let mut j = Journal::default();
+        let (from, to) = renamed(&mut j, &t, "a.txt", "b.txt");
+
+        j.undo(&ctx()).unwrap();
+        assert!(from.is_file() && !super::exists(&to));
+        assert_eq!((j.len(), j.redo_len()), (0, 1));
+
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Renamed a.txt → b.txt again");
+        assert_eq!(report.touched, vec![to.clone()]);
+        assert!(to.is_file() && !super::exists(&from));
+        assert_eq!((j.len(), j.redo_len()), (1, 0));
+        assert!(
+            matches!(j.peek(), Some(OpRecord::Rename { .. })),
+            "still a rename, so the next toast still says renamed"
+        );
+
+        j.undo(&ctx()).unwrap();
+        assert!(from.is_file() && !super::exists(&to), "and back again");
+        assert!(j.can_redo());
+    }
+
+    #[test]
+    fn redo_of_a_move_round_trips() {
+        let t = TempTree::new("j-redo-move");
+        let a = t.file("src/a.txt", b"a");
+        let b = t.file("src/b.txt", b"b");
+        t.dir("dst");
+        let (a2, b2) = (t.join("dst/a.txt"), t.join("dst/b.txt"));
+        copy::move_path(&a, &a2, &ctx(), false).unwrap();
+        copy::move_path(&b, &b2, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Move {
+            moves: vec![
+                MovedPath::record(&a, &a2).unwrap(),
+                MovedPath::record(&b, &b2).unwrap(),
+            ],
+        });
+
+        j.undo(&ctx()).unwrap();
+        assert!(a.is_file() && b.is_file());
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Moved 2 items again");
+        assert_eq!(std::fs::read(&a2).unwrap(), b"a");
+        assert_eq!(std::fs::read(&b2).unwrap(), b"b");
+        assert!(!super::exists(&a) && !super::exists(&b));
+
+        j.undo(&ctx()).unwrap();
+        assert!(a.is_file() && b.is_file() && !super::exists(&a2));
+    }
+
+    /// A bulk rename done again is still one gesture: one `U`, and one `u`
+    /// to take it back.
+    #[test]
+    fn redo_of_a_bulk_rename_is_one_step_again() {
+        let t = TempTree::new("j-redo-bulk");
+        let mut moved = Vec::new();
+        for (old, new) in [("a.txt", "1.txt"), ("b.txt", "2.txt"), ("c.txt", "3.txt")] {
+            let from = t.file(old, b"x");
+            let to = t.join(new);
+            create::rename(&from, &to, false).unwrap();
+            moved.push(MovedPath::record(&from, &to).unwrap());
+        }
+        let mut j = Journal::default();
+        j.record(OpRecord::Renames { moved });
+
+        j.undo(&ctx()).unwrap();
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Renamed 3 items again");
+        assert_eq!(j.len(), 1);
+        match j.peek() {
+            Some(OpRecord::Renames { moved }) => assert_eq!(moved.len(), 3),
+            other => panic!("{other:?}"),
+        }
+        for name in ["1.txt", "2.txt", "3.txt"] {
+            assert!(t.join(name).is_file(), "{name} was not renamed again");
+        }
+        j.undo(&ctx()).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            assert!(t.join(name).is_file(), "{name} is not back");
+        }
+    }
+
+    /// A redo of `d` puts the file back in the trash it was restored from,
+    /// which is the one `u` will look in next.
+    #[test]
+    fn redo_of_a_trash_trashes_it_again_into_the_same_trash() {
+        let t = TempTree::new("j-redo-trash");
+        let bin = trash::Trash::at(t.join("Trash"));
+        let file = t.file("work/notes.txt", b"contents");
+        let item = bin.trash(&file, &ctx()).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Trash { items: vec![item] });
+
+        j.undo(&ctx()).unwrap();
+        assert!(file.is_file());
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Trashed notes.txt again");
+        assert!(!super::exists(&file));
+        match j.peek() {
+            Some(OpRecord::Trash { items }) => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].trash_root, t.join("Trash"));
+                assert!(items[0].files_path().is_file());
+            }
+            other => panic!("{other:?}"),
+        }
+
+        j.undo(&ctx()).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"contents");
+    }
+
+    /// A redo of a paste copies the source again, through the copy a paste
+    /// uses, and records the copy afresh, so `u` after it deletes exactly what
+    /// it made.
+    #[test]
+    fn redo_of_a_copy_copies_it_again() {
+        let t = TempTree::new("j-redo-copy");
+        let src = t.dir("src");
+        std::fs::write(src.join("a"), b"a").unwrap();
+        let dst = t.join("dst");
+        copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![CopyManifest::of_tree(&dst).unwrap().copied_from(&src)],
+        });
+
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&dst));
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Copied dst again");
+        assert_eq!(std::fs::read(dst.join("a")).unwrap(), b"a");
+        match j.peek() {
+            Some(OpRecord::Copy { created }) => {
+                assert_eq!(created[0].len(), 2, "dst and a");
+                assert_eq!(
+                    created[0].source().map(|s| s.path.clone()),
+                    Some(src.clone())
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&dst));
+        assert_eq!(
+            std::fs::read(src.join("a")).unwrap(),
+            b"a",
+            "the source stays"
+        );
+    }
+
+    /// The source is checked before it is copied again: one edited since the
+    /// paste would be copied as it is now, which is not what was undone.
+    #[test]
+    fn redo_of_a_copy_refuses_a_source_edited_since() {
+        let t = TempTree::new("j-redo-copy-edited");
+        let src = t.file("a.txt", b"one");
+        let dst = t.join("b.txt");
+        copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![CopyManifest::of_tree(&dst).unwrap().copied_from(&src)],
+        });
+        j.undo(&ctx()).unwrap();
+
+        std::fs::write(&src, b"a different length").unwrap();
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("cannot redo"), "{err}");
+        assert!(!super::exists(&dst), "nothing was copied");
+        assert_eq!(j.redo_len(), 1, "the entry stays for another try");
+    }
+
+    /// An extraction is recorded as a copy with no source, because what it
+    /// copied was inside an archive: there is nothing to copy again.
+    #[test]
+    fn a_copy_with_no_source_cannot_be_redone() {
+        let t = TempTree::new("j-redo-copy-sourceless");
+        let src = t.file("a.txt", b"a");
+        let dst = t.join("b.txt");
+        copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(copied(&dst));
+        j.undo(&ctx()).unwrap();
+
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("nothing records where"), "{err}");
+        assert!(!super::exists(&dst));
+        assert_eq!(j.redo_len(), 1);
+    }
+
+    #[test]
+    fn redo_of_a_create_makes_it_again_with_its_parents() {
+        let t = TempTree::new("j-redo-create");
+        let made = create::create(&t.join("a/b/notes.md")).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Create {
+            path: made.path.clone(),
+            is_dir: false,
+            fingerprint: Fingerprint::of(&made.path).unwrap(),
+            created_parents: made.created_parents.clone(),
+        });
+
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&t.join("a")));
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Created file notes.md again");
+        assert!(made.path.is_file());
+        assert_eq!(
+            report.touched.first(),
+            Some(&t.join("a")),
+            "the shallowest thing it made first, the row the listing shows"
+        );
+        match j.peek() {
+            Some(OpRecord::Create {
+                created_parents, ..
+            }) => assert_eq!(created_parents, &made.created_parents),
+            other => panic!("{other:?}"),
+        }
+
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&t.join("a")), "the parents go again too");
+    }
+
+    #[test]
+    fn redo_of_a_created_folder_makes_the_folder() {
+        let t = TempTree::new("j-redo-create-dir");
+        let made = create::create(&t.join("folder/")).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Create {
+            path: made.path.clone(),
+            is_dir: true,
+            fingerprint: Fingerprint::of(&made.path).unwrap(),
+            created_parents: Vec::new(),
+        });
+        j.undo(&ctx()).unwrap();
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Created folder folder again");
+        assert!(made.path.is_dir());
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&made.path));
+    }
+
+    /// An archive, or the system clipboard pasted into a file, is recorded as
+    /// a create so that `u` can take it away — and nothing holds what was
+    /// written into it, so `U` says so rather than making an empty one.
+    #[test]
+    fn a_create_that_was_written_cannot_be_redone() {
+        let t = TempTree::new("j-redo-create-written");
+        let path = t.file("photos.zip", b"archive bytes");
+        let mut j = Journal::default();
+        j.record(OpRecord::Create {
+            path: path.clone(),
+            is_dir: false,
+            fingerprint: Fingerprint::of(&path).unwrap(),
+            created_parents: Vec::new(),
+        });
+        j.undo(&ctx()).unwrap();
+
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("only an empty one"), "{err}");
+        assert!(!super::exists(&path), "no empty stand-in was made");
+        assert_eq!(j.redo_len(), 1);
+    }
+
+    #[test]
+    fn redo_of_a_symlink_links_it_again_with_the_same_text() {
+        let t = TempTree::new("j-redo-symlink");
+        let target = t.file("target.txt", b"x");
+        let l = t.join("link");
+        let text = link::symlink(&target, &l, LinkKind::Relative).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Link {
+            link: l.clone(),
+            target: Some(text.clone()),
+            original: None,
+            fingerprint: Fingerprint::of(&l).unwrap(),
+        });
+
+        j.undo(&ctx()).unwrap();
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Linked link again");
+        assert_eq!(std::fs::read_link(&l).unwrap(), text);
+        assert!(matches!(j.peek(), Some(OpRecord::Link { .. })));
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&l));
+        assert!(target.is_file());
+    }
+
+    #[test]
+    fn redo_of_a_hard_link_links_the_same_file_again() {
+        use std::os::unix::fs::MetadataExt;
+        let t = TempTree::new("j-redo-hardlink");
+        let target = t.file("target.txt", b"x");
+        let hard = t.join("hard");
+        link::hardlink(&target, &hard).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Link {
+            link: hard.clone(),
+            target: None,
+            original: Some(target.clone()),
+            fingerprint: Fingerprint::of(&hard).unwrap(),
+        });
+
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&hard));
+        j.redo(&ctx()).unwrap();
+        assert_eq!(
+            std::fs::metadata(&hard).unwrap().ino(),
+            std::fs::metadata(&target).unwrap().ino(),
+            "a second name for the same file"
+        );
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&hard));
+    }
+
+    #[test]
+    fn redo_of_a_batch_of_links_is_one_step_again() {
+        let t = TempTree::new("j-redo-links");
+        let mut links = Vec::new();
+        for name in ["a.txt", "ünïcödé — 日本語 🎬.txt"] {
+            let target = t.file(name, b"x");
+            let l = t.join(format!("link-{name}"));
+            let text = link::symlink(&target, &l, LinkKind::Absolute).unwrap();
+            links.push(CreatedLink::record(&l, Some(&text)).unwrap());
+        }
+        let original = t.file("hard-target", b"x");
+        let hard = t.join("hard-link");
+        link::hardlink(&original, &hard).unwrap();
+        links.push(CreatedLink::record_hard(&hard, &original).unwrap());
+        let mut j = Journal::default();
+        j.record(OpRecord::Links {
+            links: links.clone(),
+        });
+
+        j.undo(&ctx()).unwrap();
+        let report = j.redo(&ctx()).unwrap();
+        assert_eq!(report.description, "Linked 3 items again");
+        for l in &links {
+            assert!(super::exists(&l.link), "{}", l.link.display());
+        }
+        assert_eq!(j.len(), 1, "one gesture, one entry");
+        j.undo(&ctx()).unwrap();
+        for l in &links {
+            assert!(!super::exists(&l.link), "{}", l.link.display());
+        }
+    }
+
+    /// A hard link recorded without its original has nothing to be linked to
+    /// again, and the whole batch refuses before any of it is made.
+    #[test]
+    fn a_hard_link_with_no_original_cannot_be_redone() {
+        let t = TempTree::new("j-redo-hardlink-unknown");
+        let original = t.file("target.txt", b"x");
+        let hard = t.join("hard");
+        link::hardlink(&original, &hard).unwrap();
+        let sym = t.join("sym");
+        let text = link::symlink(&original, &sym, LinkKind::Absolute).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Links {
+            links: vec![
+                CreatedLink::record(&sym, Some(&text)).unwrap(),
+                CreatedLink::record(&hard, None).unwrap(),
+            ],
+        });
+        j.undo(&ctx()).unwrap();
+
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("hard link to"), "{err}");
+        assert!(!super::exists(&sym), "nothing was made");
+    }
+
+    /// Something new happened, so what was undone before it cannot be redone
+    /// on top of it.
+    #[test]
+    fn a_new_record_clears_the_redo_stack() {
+        let t = TempTree::new("j-redo-cleared");
+        let mut j = Journal::default();
+        renamed(&mut j, &t, "a.txt", "b.txt");
+        j.undo(&ctx()).unwrap();
+        assert!(j.can_redo());
+
+        renamed(&mut j, &t, "c.txt", "d.txt");
+        assert!(!j.can_redo());
+        assert_eq!(j.peek_redo(), None);
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("nothing to redo"), "{err}");
+        assert!(t.join("a.txt").is_file(), "the undone rename stayed undone");
+    }
+
+    /// An undo that stopped half way has no forward form for the half that
+    /// went, so the line of redos behind it goes with it. One that was
+    /// refused outright changed nothing, and leaves the line alone.
+    #[test]
+    fn a_partial_undo_clears_the_redo_stack_and_a_refused_one_does_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = TempTree::new("j-redo-partial");
+        let a = t.file("one/a.txt", b"a");
+        let b = t.file("two/b.txt", b"b");
+        let dest = t.dir("dst");
+        let (a2, b2) = (dest.join("a.txt"), dest.join("b.txt"));
+        copy::move_path(&a, &a2, &ctx(), false).unwrap();
+        copy::move_path(&b, &b2, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Move {
+            moves: vec![
+                MovedPath::record(&a, &a2).unwrap(),
+                MovedPath::record(&b, &b2).unwrap(),
+            ],
+        });
+        renamed(&mut j, &t, "c.txt", "d.txt");
+        j.undo(&ctx()).unwrap();
+        assert!(j.can_redo());
+
+        // Refused outright: the way back to one/ is taken. Nothing moved.
+        std::fs::write(&a, b"newer").unwrap();
+        assert!(j.undo(&ctx()).is_err());
+        assert!(j.can_redo(), "a refusal changes nothing");
+        std::fs::remove_file(&a).unwrap();
+
+        // Half way: a.txt goes back, b.txt cannot.
+        std::fs::set_permissions(t.join("two"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let partial = j.undo(&ctx());
+        std::fs::set_permissions(t.join("two"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(partial.is_err());
+        assert!(a.is_file(), "the first leg went back");
+        assert!(!j.can_redo(), "the redo line went with it");
+        assert_eq!(j.len(), 1, "the remainder is still there to undo");
+    }
+
+    /// The world moved between the undo and the redo: the file the undo put
+    /// back has been edited since, and moving it again would carry the edit
+    /// somewhere the user did not ask it to go. Refused, untouched, kept.
+    #[test]
+    fn redo_refuses_a_file_edited_between_the_undo_and_the_redo() {
+        let t = TempTree::new("j-redo-edited");
+        let mut j = Journal::default();
+        let (from, to) = renamed(&mut j, &t, "a.txt", "b.txt");
+        j.undo(&ctx()).unwrap();
+
+        std::fs::write(&from, b"edited after the undo").unwrap();
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().starts_with("cannot redo"), "{err}");
+        assert!(err.to_string().contains("changed size"), "{err}");
+        assert_eq!(std::fs::read(&from).unwrap(), b"edited after the undo");
+        assert!(!super::exists(&to), "nothing was moved");
+        assert_eq!((j.len(), j.redo_len()), (0, 1), "the entry stays");
+    }
+
+    #[test]
+    fn redo_refuses_a_name_taken_since() {
+        let t = TempTree::new("j-redo-taken");
+        let mut j = Journal::default();
+        let (from, to) = renamed(&mut j, &t, "a.txt", "b.txt");
+        j.undo(&ctx()).unwrap();
+
+        std::fs::write(&to, b"somebody else's b.txt").unwrap();
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("taken now"), "{err}");
+        assert!(from.is_file());
+        assert_eq!(std::fs::read(&to).unwrap(), b"somebody else's b.txt");
+    }
+
+    #[test]
+    fn redo_with_nothing_undone_says_so() {
+        let mut j = Journal::default();
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().contains("nothing to redo"), "{err}");
+        assert!(!j.can_redo());
+    }
+
+    /// Both sides of the history newest first, and a stamp that is the
+    /// operation's own wherever the entry is: undone and redone, it happened
+    /// when it happened.
+    #[test]
+    fn the_history_reads_newest_first_and_keeps_each_entrys_time() {
+        let t = TempTree::new("j-history");
+        let t0 = Instant::now();
+        let mut j = Journal::default();
+        let mut paths = Vec::new();
+        for (i, name) in ["one", "two", "three"].iter().enumerate() {
+            let made = create::create(&t.join(name)).unwrap();
+            j.record_at(
+                OpRecord::Create {
+                    path: made.path.clone(),
+                    is_dir: false,
+                    fingerprint: Fingerprint::of(&made.path).unwrap(),
+                    created_parents: Vec::new(),
+                },
+                t0 + std::time::Duration::from_secs(i as u64),
+            );
+            paths.push(made.path);
+        }
+        let names = |rows: Vec<(&OpRecord, Instant)>| -> Vec<(String, Instant)> {
+            rows.into_iter()
+                .map(|(record, at)| (record.describe(), at))
+                .collect()
+        };
+        let secs = |n: u64| t0 + std::time::Duration::from_secs(n);
+
+        j.undo(&ctx()).unwrap();
+        j.undo(&ctx()).unwrap();
+        assert_eq!(
+            names(j.undoable().collect()),
+            vec![("created file one".to_string(), secs(0))]
+        );
+        assert_eq!(
+            names(j.redoable().collect()),
+            vec![
+                ("created file two".to_string(), secs(1)),
+                ("created file three".to_string(), secs(2)),
+            ],
+            "the next redo first"
+        );
+
+        j.redo(&ctx()).unwrap();
+        assert_eq!(
+            names(j.undoable().collect()),
+            vec![
+                ("created file two".to_string(), secs(1)),
+                ("created file one".to_string(), secs(0)),
+            ]
+        );
+        assert_eq!(
+            j.peek_redo().map(OpRecord::describe_redo).as_deref(),
+            Some("created file three again")
+        );
+    }
+
+    #[test]
+    fn records_describe_what_a_redo_does() {
+        let leg = |from: &str, to: &str| MovedPath {
+            from: PathBuf::from(from),
+            to: PathBuf::from(to),
+            fingerprint: untouched(),
+        };
+        assert_eq!(
+            OpRecord::Rename {
+                moved: leg("/w/a.txt", "/w/b.txt")
+            }
+            .describe_redo(),
+            "renamed a.txt → b.txt again"
+        );
+        assert_eq!(
+            OpRecord::Move {
+                moves: vec![leg("/w/a.txt", "/x/a.txt")]
+            }
+            .describe_redo(),
+            "moved a.txt again"
+        );
+        assert_eq!(
+            OpRecord::Renames {
+                moved: vec![leg("/w/a", "/w/b"); 4]
+            }
+            .describe_redo(),
+            "renamed 4 items again"
+        );
+        assert_eq!(
+            OpRecord::Create {
+                path: PathBuf::from("/w/docs"),
+                is_dir: true,
+                fingerprint: untouched(),
+                created_parents: Vec::new(),
+            }
+            .describe_redo(),
+            "created folder docs again"
+        );
+        assert_eq!(
+            OpRecord::Copy { created: vec![] }.describe_redo(),
+            "copied 0 items again"
+        );
+        assert_eq!(
+            OpRecord::Link {
+                link: PathBuf::from("/w/l"),
+                target: None,
+                original: Some(PathBuf::from("/w/t")),
+                fingerprint: untouched(),
+            }
+            .describe_redo(),
+            "linked l again"
+        );
     }
 }

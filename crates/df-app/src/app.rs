@@ -4893,19 +4893,24 @@ impl App {
                 continue;
             };
             let link = cwd.join(name);
+            // A symlink's record carries the text `symlink` wrote, which is
+            // what `u` reads back to check it and `U` writes again — for a
+            // relative link that is not the yanked path. A hard link's carries
+            // the file it is a second name for, which `U` links again.
             let result = match kind {
-                Some(kind) => df_core::ops::symlink(target, &link, kind).map(|_| ()),
-                None => df_core::ops::hardlink(target, &link),
+                Some(kind) => df_core::ops::symlink(target, &link, kind).map(Some),
+                None => df_core::ops::hardlink(target, &link).map(|()| None),
             };
             match result {
-                Ok(()) => {
+                Ok(text) => {
                     made.push(link.clone());
                     // One record per link: `OpRecord::Link` describes a single
                     // one, so `u` takes them back one at a time.
                     if let Ok(fingerprint) = Fingerprint::of(&link) {
                         self.journal.record(OpRecord::Link {
                             link,
-                            target: kind.map(|_| target.clone()),
+                            original: text.is_none().then(|| target.clone()),
+                            target: text,
                             fingerprint,
                         });
                     }

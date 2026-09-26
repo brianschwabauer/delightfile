@@ -551,7 +551,9 @@ pub fn execute(plan: &PastePlan, ctx: &TaskCtx) -> Result<PasteReport> {
                         // cancelled after this item manifests this item whole
                         // and the ones it never started not at all.
                         match CopyManifest::of_tree(&item.dst) {
-                            Ok(manifest) => created.push(manifest),
+                            // …and where it came from, which is what `U`
+                            // copies again once `u` has taken this away.
+                            Ok(manifest) => created.push(manifest.copied_from(&item.src)),
                             // The copy landed but cannot be manifested — too
                             // big to record, or unreadable. Leaving it out of
                             // the journal is the safe half: undo never deletes
@@ -643,6 +645,37 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("a.txt")).unwrap(), b"a");
         assert_eq!(std::fs::read(&a).unwrap(), b"a", "a yank leaves the source");
         assert!(matches!(report.record, Some(OpRecord::Copy { .. })));
+    }
+
+    /// A copy's record says where each item came from, so that `U` after `u`
+    /// can copy it again.
+    #[test]
+    fn a_copy_record_carries_each_items_source() {
+        let t = TempTree::new("paste-sources");
+        let a = t.file("src/a.txt", b"a");
+        let b = t.dir("src/b");
+        let dest = t.dir("dst");
+        let plan = plan_paste(&Clipboard::yank([a.clone(), b.clone()]), &dest, false).unwrap();
+        let report = execute(&plan, &ctx()).unwrap();
+        let Some(OpRecord::Copy { created }) = report.record else {
+            panic!("{report:?}");
+        };
+        let pairs: Vec<(PathBuf, Option<PathBuf>)> = created
+            .iter()
+            .map(|m| (m.root.clone(), m.source().map(|s| s.path.clone())))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                (dest.join("a.txt"), Some(a.clone())),
+                (dest.join("b"), Some(b.clone())),
+            ]
+        );
+        let source = created[0].source().expect("a source");
+        assert!(
+            source.fingerprint.check(&a, "redo").is_ok(),
+            "as it was when copied"
+        );
     }
 
     #[test]

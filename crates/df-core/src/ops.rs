@@ -4,7 +4,9 @@
 //! inverse before it runs, and `u` replays it backwards (PLAN §5). Trash goes
 //! through the freedesktop trash spec, hand-rolled, precisely so that `d` is
 //! always undoable; permanent delete is the one operation with no inverse, and
-//! it is the only one that gets a confirm dialog. Copies are reflink-first
+//! it is the only one that gets a confirm dialog. `U` walks forward again: an
+//! undo keeps what it took back, and a redo repeats it after checking the
+//! world the way an undo does ([`journal`]'s header). Copies are reflink-first
 //! (`FICLONE`) with a read/write fallback, so duplicating a 40 GB file on btrfs
 //! is instant and on ext4 is merely a copy.
 //!
@@ -35,7 +37,6 @@
 //!   file without them and the paste says so; a same-drive rename keeps them
 //!   for nothing, since it keeps the inode. The archive writers do not store
 //!   them (see [`crate::archive::write`]).
-//! - **Redo.** Undo is a stack that only pops (PLAN §5).
 //! - **Queue reordering** in the task engine — that is the `w` panel's half of
 //!   the phase.
 
@@ -60,8 +61,9 @@ pub use create::{create, rename, Created};
 pub use delete::{check_deletable, check_deletable_here, delete_permanent, remove_tree};
 pub use jobs::{DeleteJob, ExtractJob, OpOutcome, Outcome, PasteJob, TrashJob};
 pub use journal::{
-    undo_attempt, undo_record, CopyManifest, CreatedLink, FileKind, Fingerprint, Journal,
-    MovedPath, OpRecord, TagChange, UndoAttempt, UndoReport, JOURNAL_DEPTH, MAX_MANIFEST_ENTRIES,
+    undo_attempt, undo_record, CopyManifest, CopySource, CreatedLink, FileKind, Fingerprint,
+    Journal, MovedPath, OpRecord, RedoReport, TagChange, UndoAttempt, UndoReport, Undone,
+    JOURNAL_DEPTH, MAX_MANIFEST_ENTRIES,
 };
 pub use link::{hardlink, relative_to, symlink, LinkKind};
 pub use paste::{
