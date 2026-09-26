@@ -986,10 +986,10 @@ pub fn paint(
             (row.detail.clone(), palette.quiet)
         };
         let (mark_tint, text_tint) = match row.mark {
-            Mark::New => (palette.green, palette.subtext0),
-            Mark::Changed => (palette.peach, palette.subtext0),
-            Mark::Extra => (palette.red, palette.subtext0),
-            Mark::Problem => (palette.red, palette.subtext0),
+            Mark::New => (palette.green, crate::theme::louder(palette)),
+            Mark::Changed => (palette.peach, crate::theme::louder(palette)),
+            Mark::Extra => (palette.red, crate::theme::louder(palette)),
+            Mark::Problem => (palette.red, crate::theme::louder(palette)),
             Mark::Left | Mark::More => (palette.faint, palette.faint),
         };
         let y = rect.center().y;

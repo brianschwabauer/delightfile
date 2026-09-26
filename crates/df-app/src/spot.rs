@@ -1156,7 +1156,7 @@ pub fn paint(
                     if on_cursor {
                         palette.text
                     } else {
-                        palette.subtext0
+                        crate::theme::louder(palette)
                     },
                     room,
                 );
@@ -1307,7 +1307,7 @@ fn permissions(
             egui::Align2::LEFT_CENTER,
             format!("{}  {}", octal(spot.facts.mode), rwx(spot.facts.mode)),
             egui::FontId::monospace(FONT),
-            palette.subtext0,
+            crate::theme::louder(palette),
         );
     }
 }
