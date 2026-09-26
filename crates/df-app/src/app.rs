@@ -8268,7 +8268,12 @@ impl App {
             );
             return;
         }
-        let report = df_core::ops::mode::chmod(&[(path.clone(), mode)], &TaskCtx::detached());
+        // The panel's mode is the whole `st_mode`, file type and all, so the
+        // change checks the path is still the kind of file the panel showed.
+        let report = df_core::ops::mode::chmod(
+            &[df_core::ops::mode::Planned::item(path.clone(), mode)],
+            &TaskCtx::detached(),
+        );
         if let Some((_, error)) = report.errors.first() {
             // The common one is somebody else's file, and the message says
             // which file rather than only which errno.
