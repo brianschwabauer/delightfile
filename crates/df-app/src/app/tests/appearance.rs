@@ -381,3 +381,200 @@ fn a_ghost_in_the_hand_turns_with_the_rows() {
     assert_eq!(ghost_icon(&app), row_icon(&app));
     assert_eq!(ghost_icon(&app).color, latte().red);
 }
+
+/// A white splash — a dark side's ripple — anywhere on a light frame, where
+/// a ripple darkens in the text colour instead ([`crate::theme::splash`]).
+fn no_white_splash(what: &str, colours: &[egui::Color32]) {
+    for colour in colours {
+        let white =
+            colour.r() == colour.a() && colour.g() == colour.a() && colour.b() == colour.a();
+        assert!(
+            !(white && colour.a() > 0 && colour.a() < 255),
+            "{what} painted a white splash on the light side: {colour:?}"
+        );
+    }
+}
+
+/// Every named colour of a palette.
+fn named(palette: &Palette) -> Vec<egui::Color32> {
+    let p = palette;
+    vec![
+        p.crust, p.mantle, p.base, p.surface0, p.surface1, p.surface2, p.overlay0, p.overlay1,
+        p.overlay2, p.subtext0, p.subtext1, p.text, p.blue, p.sky, p.red, p.yellow, p.mauve,
+        p.green, p.peach, p.teal, p.lavender, p.maroon, p.pink,
+    ]
+}
+
+/// One frame of `app`, and what it painted: every fill, stroke and text
+/// colour, and each text with the colour it was set in.
+fn painted(
+    app: &mut App,
+    ctx: &egui::Context,
+) -> (Vec<egui::Color32>, Vec<(String, egui::Color32)>) {
+    fn walk(
+        shape: &egui::Shape,
+        colours: &mut Vec<egui::Color32>,
+        texts: &mut Vec<(String, egui::Color32)>,
+    ) {
+        match shape {
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, colours, texts)),
+            egui::Shape::Rect(rect) => colours.extend([rect.fill, rect.stroke.color]),
+            egui::Shape::Circle(circle) => colours.extend([circle.fill, circle.stroke.color]),
+            egui::Shape::LineSegment { stroke, .. } => colours.push(stroke.color),
+            egui::Shape::Text(text) => {
+                let ink = text
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map_or(text.fallback_color, |section| section.format.color);
+                colours.push(ink);
+                texts.push((text.galley.text().to_string(), ink));
+            }
+            _ => {}
+        }
+    }
+    let input = egui::RawInput {
+        screen_rect: Some(screen()),
+        focused: true,
+        ..Default::default()
+    };
+    let output = ctx.run_ui(input, |ui| app.frame(ui));
+    let (mut colours, mut texts) = (Vec::new(), Vec::new());
+    for clipped in &output.shapes {
+        walk(&clipped.shape, &mut colours, &mut texts);
+    }
+    (colours, texts)
+}
+
+/// **The surfaces the other features brought** paint from the palette on
+/// the light side as the rest of the window does: a row's tag dots, the
+/// permissions card, the undo history card, the trash view's chip, and a
+/// search's hits with the chip at the end of the breadcrumb — each painted
+/// on latte, in latte's own colours where it sets one (the dot's red, the
+/// history's faint "just now", the card's quiet column headings, the chip's
+/// label), and with nothing on any of those frames in a colour only mocha
+/// has.
+#[test]
+fn the_newer_surfaces_paint_from_the_light_palette() {
+    let mut app = Fixture::with_folders("theme-light-surfaces", &["a.txt", "b.txt"], &["src"]);
+    std::fs::write(app.files.join("src/foo.txt"), b"foo\n").expect("write the tree");
+    let tagged = df_core::fs::tags::write(&app.files.join("a.txt"), &["red".to_string()]).is_ok();
+    app.refresh_all(Instant::now());
+    settle_here(&mut app);
+    let ctx = egui::Context::default();
+    run_frame(&mut app, &ctx, Vec::new());
+    app.run(Command::ThemeLight, 10, Instant::now());
+    let light = latte();
+    assert_eq!(app.palette, light);
+    let mocha_only: Vec<egui::Color32> = named(&mocha())
+        .into_iter()
+        .filter(|colour| !named(&light).contains(colour))
+        .collect();
+    let on_latte = |what: &str, colours: &[egui::Color32]| {
+        for colour in colours {
+            assert!(
+                !mocha_only.contains(colour),
+                "{what} painted {colour:?}, which only mocha has"
+            );
+        }
+    };
+    let set_in = |texts: &[(String, egui::Color32)], text: &str| -> egui::Color32 {
+        texts
+            .iter()
+            .find(|(drawn, _)| drawn == text)
+            .map(|(_, ink)| *ink)
+            .unwrap_or_else(|| panic!("`{text}` is not painted: {texts:?}"))
+    };
+
+    // The rows, a tagged one wearing its dot.
+    let (colours, _) = painted(&mut app, &ctx);
+    on_latte("the list", &colours);
+    if tagged {
+        assert!(
+            colours.contains(&light.red),
+            "the red tag's dot is latte's red"
+        );
+    }
+
+    // The permissions card over b.txt.
+    let b = app.tab().cwd.dir.position_of("b.txt").expect("a row");
+    app.dir().set_cursor(b);
+    app.run(Command::Permissions, 10, Instant::now());
+    assert!(matches!(app.dialog, Some(Dialog::Permissions(_))));
+    let (colours, texts) = painted(&mut app, &ctx);
+    on_latte("the permissions card", &colours);
+    assert_eq!(set_in(&texts, "Execute"), light.quiet);
+    // A box pressed, so its ripple is on the frame.
+    let mut cell = None;
+    let _ = ctx.run_ui(Default::default(), |ui| {
+        if let Some(Dialog::Permissions(card)) = &app.dialog {
+            cell =
+                Some(crate::permissions::geometry(ui.painter(), screen(), card).cells[0].center());
+        }
+    });
+    click_at(&mut app, &ctx, cell.expect("a box"));
+    let (colours, _) = painted(&mut app, &ctx);
+    on_latte("the permissions card's ripple", &colours);
+    no_white_splash("the permissions card's ripple", &colours);
+    app.close_overlay(Instant::now());
+
+    // The undo history card, over a rename.
+    app.rename("z.txt", Instant::now()).expect("the rename");
+    settle_here(&mut app);
+    app.run(Command::UndoHistory, 10, Instant::now());
+    assert!(app.undo_history.is_some());
+    let (colours, texts) = painted(&mut app, &ctx);
+    on_latte("the undo history", &colours);
+    assert_eq!(set_in(&texts, "just now"), light.faint);
+    // Its row pressed, so its ripple is on the frame.
+    let card = app.undo_history.as_ref().expect("up");
+    let rows = history::rows(&app.journal);
+    let row =
+        history::geometry(screen(), screen().bottom() - ui::GAP, card, rows).rects[0].center();
+    click_at(&mut app, &ctx, row);
+    let (colours, _) = painted(&mut app, &ctx);
+    on_latte("the undo history's ripple", &colours);
+    no_white_splash("the undo history's ripple", &colours);
+    app.run(Command::UndoHistory, 10, Instant::now());
+    assert!(app.undo_history.is_none());
+
+    // The trash view and its chip, over a trash in the sandbox.
+    let trash = df_core::ops::Trash::at(app.files.join("..").join("Trash"));
+    trash.ensure().expect("the trash");
+    trash
+        .trash(&app.files.join("z.txt"), &TaskCtx::detached())
+        .expect("trashed");
+    app.trash_home = Some(trash.root().to_path_buf());
+    app.run(Command::OpenTrash, 10, Instant::now());
+    let label = app.cluster(Instant::now()).trash.expect("the chip").label;
+    let (colours, texts) = painted(&mut app, &ctx);
+    on_latte("the trash view", &colours);
+    assert_eq!(set_in(&texts, &label), light.subtext0);
+    app.run(Command::Leave, 10, Instant::now());
+    settle_here(&mut app);
+
+    // A search's hits, and the chip that ends the breadcrumb.
+    let root = app.cwd();
+    app.run(Command::SearchName, 10, Instant::now());
+    let search = app.search.as_mut().expect("the panel opened");
+    search.seed("foo", Instant::now());
+    let feed = search.feed();
+    feed.hits(vec![search::parse(
+        search::Mode::Names,
+        &root,
+        "foo",
+        "src/foo.txt",
+    )
+    .expect("a hit")]);
+    feed.done(false);
+    app.poll_workers();
+    app.overlay_key(Chord::plain(Key::Enter), 10, Instant::now());
+    assert_eq!(app.tab().virtual_kind(), Some(Virtual::Hits));
+    let (colours, texts) = painted(&mut app, &ctx);
+    on_latte("the hits", &colours);
+    assert!(
+        texts.iter().any(|(text, _)| text.starts_with("s foo")),
+        "the chip is painted: {texts:?}"
+    );
+}

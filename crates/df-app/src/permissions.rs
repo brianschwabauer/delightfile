@@ -652,7 +652,7 @@ pub fn paint(
             egui::Align2::CENTER_CENTER,
             heading,
             small.clone(),
-            palette.overlay1,
+            palette.quiet,
         );
     }
     for (row, label) in ROWS.iter().enumerate() {
@@ -698,7 +698,7 @@ pub fn paint(
         painter,
         egui::pos2(left + LABEL, geometry.owner.center().y),
         &card.owner_line(),
-        palette.overlay1,
+        palette.quiet,
         (geometry.owner.right() - left - LABEL).max(0.0),
         font.clone(),
     );
@@ -729,7 +729,7 @@ pub fn paint(
                 painter,
                 egui::pos2(tick.right() + PAD_X, note.center().y),
                 RECURSIVE_NOTE,
-                palette.overlay1,
+                palette.quiet,
                 (note.right() - tick.right() - PAD_X).max(0.0),
                 small.clone(),
             );
@@ -742,9 +742,9 @@ pub fn paint(
             egui::pos2(geometry.status.left(), geometry.status.center().y),
             &status,
             if warning {
-                palette.peach
+                crate::theme::ink(palette, palette.peach)
             } else {
-                palette.overlay1
+                palette.quiet
             },
             geometry.status.width().max(0.0),
             font,
@@ -793,7 +793,7 @@ fn plate(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
 }
@@ -889,7 +889,7 @@ fn field(paint: &Painting<'_>, card: &PermCard, rect: egui::Rect, hovers: &Hover
         card.field.clone(),
         mono,
         if card.partial() {
-            palette.peach
+            crate::theme::ink(palette, palette.peach)
         } else {
             palette.text
         },

@@ -401,7 +401,7 @@ pub fn paint(
         egui::Align2::RIGHT_CENTER,
         counts,
         egui::FontId::proportional(FONT),
-        palette.overlay0,
+        palette.faint,
     );
 
     if rows.is_empty() {
@@ -411,7 +411,7 @@ pub fn paint(
             egui::Align2::CENTER_CENTER,
             "Nothing to undo",
             egui::FontId::proportional(FONT),
-            palette.overlay0,
+            palette.faint,
         );
         return;
     }
@@ -447,7 +447,7 @@ pub fn paint(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
         // When, quietly on the right, where it can be found but is not what
@@ -455,7 +455,7 @@ pub fn paint(
         let when = inside.layout_no_wrap(
             ago(row.at, paint.now),
             egui::FontId::proportional(FONT - 1.0),
-            palette.overlay0,
+            palette.faint,
         );
         let when_width = when.size().x;
         inside.galley(
@@ -464,7 +464,7 @@ pub fn paint(
                 rect.center().y - when.size().y / 2.0,
             ),
             when,
-            palette.overlay0,
+            palette.faint,
         );
         // Above the line is what is not done any more: dimmed, the way a
         // step that has been taken back reads everywhere.
@@ -491,7 +491,7 @@ pub fn paint(
             painter.hline(
                 (under.left() + PAD_X)..=(under.right() - PAD_X),
                 under.top(),
-                egui::Stroke::new(1.0, palette.surface1),
+                egui::Stroke::new(1.0, crate::theme::hairline(palette)),
             );
         }
     }

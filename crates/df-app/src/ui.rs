@@ -2168,7 +2168,7 @@ impl Painting<'_> {
             return;
         }
         use egui::text::{LayoutJob, TextFormat, TextWrapping};
-        let color = self.palette.overlay0;
+        let color = self.palette.faint;
         let mut job = LayoutJob::single_section(
             note.to_string(),
             TextFormat {
