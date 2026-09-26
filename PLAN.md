@@ -62,7 +62,9 @@ delightfile/
 
 - No Lua/plugin scripting. The three plugin needs (piper/eza dir preview, AVIF stills,
   office docs) become built-ins or openers.
-- No light theme initially (yazi config pins catppuccin-mocha for both).
+- ~~No light theme initially (yazi config pins catppuccin-mocha for both).~~ Reversed
+  2026-09-26: the window follows the desktop's light/dark preference (the XDG portal's
+  `color-scheme`), catppuccin-latte on the light side and mocha on the dark (§3).
 - Wayland-first. X11 only if it falls out of winit for free.
 - Not a terminal: `;`/`:` shell commands spawn in `$TERMINAL` or run headless with
   output in a toast/panel — no embedded terminal emulator in v1.
@@ -150,8 +152,10 @@ are silent; invalid lines warn human-readably while valid ones still apply.
 - `keymap.toml` — user overrides on top of built-in defaults (delightviewer's model:
   defaults in code, file amends). Transport keys `j k l [ ]` are hard-reserved
   globally (delightviewer's `RESERVED_TRANSPORT_KEYS` rule), rejected on override.
-- `theme.toml` — palette overrides, per-directory icon/color rules (port the 20 custom
-  dir icons from yazi's theme.toml as defaults).
+- `theme.toml` — `[flavor] mode` (auto/dark/light) and a flavour per side, palette
+  overrides for both sides (`[palette]`) or one (`[palette.dark]`, `[palette.light]`),
+  per-directory icon/color rules (port the 20 custom dir icons from yazi's theme.toml as
+  defaults).
 - `vfs.toml` — read yazi's format directly for SFTP services (§7.6).
 - **Defaults ARE Brian's current yazi config.** Ship with the keymap in §4, the opener
   rules in §6, ratio `[1,4,3]`, catppuccin-mocha. A fresh install is day-one home.

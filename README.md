@@ -89,6 +89,10 @@ open.
   everything below the folder as one flat list.
 - **Tabs.** Folder tabs joined to the bar below them, reorderable by dragging, and
   detachable into their own window.
+- **Light and dark.** The window follows the desktop's light or dark preference through
+  the XDG desktop portal and turns the moment it changes: catppuccin-mocha on the dark
+  side, catppuccin-latte on the light. The app menu's Appearance list holds one side for
+  the session instead.
 
 It shares a thumbnail cache with yazi and with
 [delightviewer](https://github.com/brianschwabauer/delightviewer), so all three hand off
@@ -270,7 +274,33 @@ Hold a prefix key and a which-key card lists what follows it.
 `~/.config/delightfile/delightfile.toml`, `keymap.toml` and `theme.toml`. All three are
 optional. The defaults are a port of my yazi config, so they carry its opener rules (with
 delightfile's own edits), the same `[1, 4, 3]` column ratio, catppuccin-mocha, and the
-nineteen custom directory icons.
+nineteen custom directory icons. The one thing yazi never had is a light side, and that
+follows the desktop.
+
+`theme.toml` picks the flavour for each side and overrides single colours, on both sides
+or on one:
+
+```toml
+[flavor]
+mode = "auto"               # auto (follow the desktop), dark or light
+dark = "catppuccin-mocha"   # catppuccin-mocha, -macchiato, -frappe or -latte
+light = "catppuccin-latte"
+
+[palette]                   # both sides
+blue = "#8aadf4"
+
+[palette.dark]              # the dark side only
+base = "#1a1a28"
+
+[palette.light]             # the light side only
+base = "#f4f5f8"
+```
+
+A side's own table wins over `[palette]`, wherever either is written in the file. `auto`
+asks the desktop portal for `org.freedesktop.appearance color-scheme` and keeps listening;
+no preference, or no portal, is dark. `theme-auto`, `theme-dark` and `theme-light` (the
+Appearance list in the app menu, unbound by default) change the side for the session
+without touching the file.
 
 `[mgr] trash_keep_days` is how many days the trash keeps things before they go for good,
 counted from the deletion date each item's record carries. It defaults to 30, and `0`
@@ -347,8 +377,8 @@ implementation of each.
 
 ## Non-goals
 
-No Lua or plugin scripting. No embedded terminal. No light theme yet. X11 only if it falls
-out of winit for free.
+No Lua or plugin scripting. No embedded terminal. X11 only if it falls out of winit for
+free.
 
 ## License
 
