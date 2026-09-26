@@ -12,9 +12,15 @@
 //!
 //! A step never moves a row: undoing the newest operation turns the row just
 //! under the line into the row just over it, and redoing turns it back. The
-//! cursor is an index, and stays on the operation it was on — except for a
-//! copy being redone, which is on neither stack while its job runs: its row
-//! is missing until it lands, and a walk stops at it.
+//! cursor is an index, and stays on the operation it was on.
+//!
+//! Except when the list is rebuilt rather than stepped along. An undo that
+//! stops part way clears every row above the line (the journal's header says
+//! why), and so does anything new journalled while the card is up — a paste
+//! landing. The rows below move up under the cursor then, and the cursor is
+//! only kept inside the list ([`HistoryCard::tick`]), not on the operation it
+//! was on. And a copy being redone is on neither stack while its job runs, so
+//! its row is missing until it lands, and a walk stops at it.
 //!
 //! The rows are a pure function of the journal ([`rows`]), what `Enter` does
 //! on one is a pure function of the rows ([`walk`]), and "how long ago" is a

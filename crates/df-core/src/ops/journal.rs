@@ -224,6 +224,13 @@ pub struct CopyManifest {
 /// module checks what it is about to act on: a source edited since the paste
 /// would be copied as it is *now*, and a redo that made something other than
 /// what the undo took away would not be a redo.
+///
+/// The check is the source's own [`Fingerprint`] and no deeper: its kind, a
+/// file's size and mtime, a folder's count of entries. A file edited, replaced
+/// or truncated is caught; a file changed somewhere *inside* a copied folder
+/// is not, and the redo copies that folder as it is now. A manifest of the
+/// source, as a copy keeps of what it made, would catch it, at the cost of
+/// walking the whole source at paste time for a redo that is rarely asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopySource {
     pub path: PathBuf,
@@ -1148,7 +1155,7 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
             OpRecord::Renames { moved: rest }
         }),
         OpRecord::Copy { created } => undo_copy(created, ctx),
-        OpRecord::Trash { items } => whole(undo_trash(items, ctx)),
+        OpRecord::Trash { items } => undo_trash(items, ctx),
         OpRecord::Create {
             path,
             is_dir,
@@ -1284,28 +1291,48 @@ fn undo_copy(created: &[CopyManifest], ctx: &TaskCtx) -> UndoAttempt {
     }
 }
 
-fn undo_trash(items: &[TrashedItem], ctx: &TaskCtx) -> Result<UndoReport> {
-    // `restore` already refuses to overwrite; check every item first so a
-    // multi-file `d` is put back all at once or not at all.
+/// Restore everything a `d` trashed.
+///
+/// `restore` already refuses to overwrite; every item is checked first so a
+/// multi-file `d` is put back all at once or not at all. If a restore fails
+/// *after* some have gone back — a folder the file belongs in that can no
+/// longer be written to — the items still in the trash are handed back as the
+/// remainder, as [`undo_moves`] hands back its legs, so the entry stops
+/// listing files that are no longer in the trash and a second `u` finishes.
+fn undo_trash(items: &[TrashedItem], ctx: &TaskCtx) -> UndoAttempt {
+    let refuse = |e: DfError| UndoAttempt {
+        result: Err(e),
+        remaining: None,
+    };
     for item in items {
         if !exists(&item.files_path()) {
-            return Err(DfError::Op(format!(
+            return refuse(DfError::Op(format!(
                 "cannot undo: {} is no longer in the trash",
                 item.original.display()
             )));
         }
         if exists(&item.original) {
-            return Err(DfError::Op(format!(
+            return refuse(DfError::Op(format!(
                 "cannot undo: {} exists again",
                 item.original.display()
             )));
         }
     }
     let mut touched = Vec::new();
-    for item in items {
-        touched.push(super::trash::restore(item, ctx)?);
+    for (i, item) in items.iter().enumerate() {
+        match super::trash::restore(item, ctx) {
+            Ok(back) => touched.push(back),
+            Err(e) => {
+                return UndoAttempt {
+                    result: Err(e),
+                    remaining: (i > 0).then(|| OpRecord::Trash {
+                        items: items[i..].to_vec(),
+                    }),
+                }
+            }
+        }
     }
-    Ok(UndoReport {
+    let result = Ok(UndoReport {
         description: if items.len() == 1 {
             format!(
                 "Restored {}",
@@ -1322,7 +1349,11 @@ fn undo_trash(items: &[TrashedItem], ctx: &TaskCtx) -> Result<UndoReport> {
             )
         },
         touched,
-    })
+    });
+    UndoAttempt {
+        result,
+        remaining: None,
+    }
 }
 
 fn undo_create(
@@ -2952,10 +2983,11 @@ mod tests {
         );
     }
 
-    /// The source is checked before it is copied again: one edited since the
-    /// paste would be copied as it is now, which is not what was undone.
+    /// The source's fingerprint is checked before it is copied again: a file
+    /// that has changed size since the paste would be copied as it is now,
+    /// which is not what was undone.
     #[test]
-    fn redo_of_a_copy_refuses_a_source_edited_since() {
+    fn redo_of_a_copy_refuses_a_source_file_that_changed_size() {
         let t = TempTree::new("j-redo-copy-edited");
         let src = t.file("a.txt", b"one");
         let dst = t.join("b.txt");
@@ -3369,6 +3401,146 @@ mod tests {
         assert!(!j.busy());
         assert!(!j.can_redo(), "the line went with the new record");
         assert_eq!(j.len(), 1, "only the rename");
+    }
+
+    /// The source check is the source's own fingerprint and no deeper: a file
+    /// changed inside a copied folder is not seen, and the folder is copied
+    /// again as it is now ([`CopySource`]).
+    #[test]
+    fn a_copy_redo_copies_a_folder_as_it_is_now() {
+        let t = TempTree::new("j-redo-copy-deep");
+        let src = t.dir("src");
+        std::fs::write(src.join("notes.txt"), b"before").unwrap();
+        let dst = t.join("dst");
+        copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![CopyManifest::of_tree(&dst).unwrap().copied_from(&src)],
+        });
+        j.undo(&ctx()).unwrap();
+
+        std::fs::write(src.join("notes.txt"), b"after, and longer").unwrap();
+        redone(&mut j);
+        assert_eq!(
+            std::fs::read(dst.join("notes.txt")).unwrap(),
+            b"after, and longer"
+        );
+    }
+
+    /// A trash undo that fails part way hands back what is still in the trash,
+    /// as a move's does: the entry stops listing the file that went back, a
+    /// second `u` finishes, and the redo line — which has no forward form for
+    /// the half that went — is cleared.
+    #[test]
+    fn a_partly_undone_trash_leaves_only_the_remainder_and_clears_the_redo_stack() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = TempTree::new("j-trash-partial");
+        let bin = trash::Trash::at(t.join("Trash"));
+        let a = t.file("one/a.txt", b"a");
+        let b = t.file("two/b.txt", b"b");
+        let items = vec![
+            bin.trash(&a, &ctx()).unwrap(),
+            bin.trash(&b, &ctx()).unwrap(),
+        ];
+        let mut j = Journal::default();
+        j.record(OpRecord::Trash { items });
+        renamed(&mut j, &t, "c.txt", "d.txt");
+        j.undo(&ctx()).unwrap();
+        assert!(j.can_redo());
+
+        // `two/` cannot be written to, so `b.txt` cannot go back into it —
+        // but `a.txt` already has.
+        std::fs::set_permissions(t.join("two"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let partial = j.undo(&ctx());
+        std::fs::set_permissions(t.join("two"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(partial.is_err());
+        assert!(a.is_file(), "the first went back");
+        assert!(!super::exists(&b), "the second did not");
+        assert!(!j.can_redo(), "the redo line went with it");
+        match j.peek() {
+            Some(OpRecord::Trash { items }) => {
+                assert_eq!(items.len(), 1, "only what is still in the trash");
+                assert_eq!(items[0].original, b);
+            }
+            other => panic!("{other:?}"),
+        }
+
+        j.undo(&ctx()).unwrap();
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        assert!(j.is_empty());
+    }
+
+    /// A redo that fails part way is split across the stacks: what moved is on
+    /// the undo stack, what did not is on the redo stack — and `u`, `U`, `U`
+    /// walks both halves.
+    #[test]
+    fn a_partial_redo_splits_and_both_halves_can_be_walked() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = TempTree::new("j-redo-split");
+        let a = t.file("one/a.txt", b"a");
+        let b = t.file("two/b.txt", b"b");
+        let (a2, b2) = (t.dir("dst1").join("a.txt"), t.dir("dst2").join("b.txt"));
+        copy::move_path(&a, &a2, &ctx(), false).unwrap();
+        copy::move_path(&b, &b2, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Move {
+            moves: vec![
+                MovedPath::record(&a, &a2).unwrap(),
+                MovedPath::record(&b, &b2).unwrap(),
+            ],
+        });
+        j.undo(&ctx()).unwrap();
+
+        // `dst2/` cannot be written to: `a.txt` moves again, `b.txt` cannot.
+        std::fs::set_permissions(t.join("dst2"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let partial = j.redo(&ctx());
+        std::fs::set_permissions(t.join("dst2"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(partial.is_err());
+        assert!(a2.is_file() && b.is_file());
+        match (j.peek(), j.peek_redo()) {
+            (Some(OpRecord::Move { moves: done }), Some(OpRecord::Move { moves: rest })) => {
+                assert_eq!(done.len(), 1);
+                assert_eq!(done[0].to, a2, "what moved can be undone");
+                assert_eq!(rest.len(), 1);
+                assert_eq!(rest[0].to, b2, "what did not can be redone");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // `u` takes the half that moved back; `U` does it again; `U` does the
+        // other half.
+        j.undo(&ctx()).unwrap();
+        assert!(a.is_file() && !super::exists(&a2));
+        assert_eq!(j.redo_len(), 2);
+        redone(&mut j);
+        assert!(a2.is_file());
+        redone(&mut j);
+        assert!(b2.is_file() && !super::exists(&b));
+        assert_eq!((j.len(), j.redo_len()), (2, 0));
+    }
+
+    /// The name a redo of `d` would trash again now belongs to a different
+    /// file: refused, and the new file stays where it is.
+    #[test]
+    fn redo_of_a_trash_refuses_a_file_replaced_under_the_same_name() {
+        let t = TempTree::new("j-redo-trash-replaced");
+        let bin = trash::Trash::at(t.join("Trash"));
+        let file = t.file("work/notes.txt", b"the old notes");
+        let item = bin.trash(&file, &ctx()).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Trash { items: vec![item] });
+        j.undo(&ctx()).unwrap();
+
+        std::fs::remove_file(&file).unwrap();
+        std::fs::write(&file, b"somebody else's notes, longer").unwrap();
+        let err = j.redo(&ctx()).unwrap_err();
+        assert!(err.to_string().starts_with("cannot redo"), "{err}");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"somebody else's notes, longer"
+        );
+        assert_eq!(j.redo_len(), 1, "the entry stays");
+        assert!(j.is_empty());
     }
 
     #[test]
