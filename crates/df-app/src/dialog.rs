@@ -1478,9 +1478,9 @@ pub fn paint_bulk(
     let (status, tint) = if settled {
         ("fix the names in red to continue".to_string(), palette.red)
     } else if waiting {
-        ("reading photo data…".to_string(), palette.overlay1)
+        ("reading photo data…".to_string(), palette.quiet)
     } else if changes == 0 {
-        ("nothing has changed yet".to_string(), palette.overlay1)
+        ("nothing has changed yet".to_string(), palette.quiet)
     } else {
         (
             format!(
@@ -1515,9 +1515,9 @@ pub fn paint_bulk(
             // The old name is history: it is here to be compared against, not
             // read, so it is a step quieter than the name being typed.
             if old != line {
-                palette.overlay1
+                palette.quiet
             } else {
-                palette.subtext0
+                crate::theme::louder(palette)
             },
             (row.old.width() - PAD_X * 2.0).max(0.0),
             bulk_font(),
@@ -1620,7 +1620,7 @@ fn paint_template(paint: &Painting<'_>, bulk: &Bulk, geometry: &BulkGeometry) {
         egui::Align2::LEFT_CENTER,
         TEMPLATE_LABEL,
         egui::FontId::proportional(FONT),
-        palette.overlay1,
+        palette.quiet,
     );
 
     let text = bulk.template.text();
@@ -1751,11 +1751,7 @@ fn paint_name(
     painter.rect_filled(rect.shrink(1.0), ROW_RADIUS, ground);
 
     if let Some(problem) = row.problem {
-        let color = if pending {
-            palette.overlay1
-        } else {
-            palette.red
-        };
+        let color = if pending { palette.quiet } else { palette.red };
         let right = rect.right() - PAD_X;
         chrome::truncated(
             painter,
@@ -1947,7 +1943,7 @@ fn paint_popover(
             painter,
             egui::pos2(detail_left, y),
             candidate.detail,
-            palette.overlay1,
+            palette.quiet,
             detail_room.max(0.0),
             small.clone(),
         );
@@ -1999,7 +1995,7 @@ pub fn paint_conflict(
         if dialog.error.is_some() {
             palette.red
         } else {
-            palette.overlay1
+            palette.quiet
         },
     );
 
@@ -2102,7 +2098,7 @@ pub fn paint_conflict(
         let color = if dialog.apply_all {
             palette.yellow
         } else {
-            mix(palette.overlay1, palette.text, hover)
+            mix(palette.quiet, palette.text, hover)
         };
         let box_rect = egui::Rect::from_center_size(
             egui::pos2(rect.left() + 8.0, rect.center().y),
@@ -2197,7 +2193,7 @@ fn paint_facts(
         egui::Align2::RIGHT_CENTER,
         &facts.mtime,
         egui::FontId::proportional(FONT - 1.0),
-        palette.overlay1,
+        palette.quiet,
     );
 }
 

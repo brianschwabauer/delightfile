@@ -542,7 +542,7 @@ pub fn paint(
             if panel.inspect && on_cursor && row.error.is_some() {
                 palette.red
             } else {
-                palette.overlay1
+                palette.quiet
             },
             (rect.width() - PAD_X * 2.0).max(0.0),
         );
@@ -562,7 +562,7 @@ pub fn paint(
 fn tone_color(tone: Tone, palette: &crate::theme::Palette) -> egui::Color32 {
     match tone {
         Tone::Running => palette.blue,
-        Tone::Waiting => palette.overlay1,
+        Tone::Waiting => palette.quiet,
         Tone::Paused => palette.peach,
         Tone::Good => palette.green,
         Tone::Bad => palette.red,

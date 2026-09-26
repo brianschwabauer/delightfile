@@ -1097,7 +1097,7 @@ pub fn paint(
         egui::Align2::RIGHT_CENTER,
         octal(spot.facts.mode),
         egui::FontId::monospace(FONT),
-        palette.overlay1,
+        palette.quiet,
     );
 
     for (index, rect) in geometry.rows.iter().enumerate() {
@@ -1144,7 +1144,7 @@ pub fn paint(
             &inside,
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             row.label,
-            palette.overlay1,
+            palette.quiet,
             (label_end - crate::ui::GAP - rect.left() - PAD_X).max(0.0),
         );
         match &row.value {
@@ -1418,7 +1418,7 @@ fn checksum(
                     egui::Align2::RIGHT_CENTER,
                     format!("{} / {}", human_size(*done), human_size(*total)),
                     egui::FontId::proportional(FONT - 1.0),
-                    palette.overlay1,
+                    palette.quiet,
                 );
             }
         }

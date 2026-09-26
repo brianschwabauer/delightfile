@@ -106,6 +106,18 @@ pub struct Palette {
     /// this with it. Not for a line: a rule is [`hairline`]'s, and a mark is
     /// its own colour.
     pub faint: egui::Color32,
+    /// Quiet text, a step louder than [`Palette::faint`]: a hint with an
+    /// instruction in it, a card's detail line, a status, a code comment, a
+    /// row's size column, an inactive tab's title — read second, but read
+    /// through.
+    ///
+    /// `overlay1` on a dark palette, exactly as it always was (4.4:1 on
+    /// mocha's `base`). On a light one it is the first step of the ramp from
+    /// `overlay1` towards `text` that is louder than `faint` and reaches
+    /// [`QUIET_CONTRAST`] on `base` — on latte that is `subtext0`, 4.4:1,
+    /// where latte's `overlay1` is 2.8:1. Measured when the palette is
+    /// resolved, as `faint` is.
+    pub quiet: egui::Color32,
 }
 
 /// The contrast a light palette's [`Palette::faint`] has to reach on its
@@ -113,6 +125,12 @@ pub struct Palette {
 /// parts of a control that have to be seen — which is what secondary text in
 /// a file manager is, and what mocha's `overlay0` already gives (3.4:1).
 pub const FAINT_CONTRAST: f32 = 3.0;
+
+/// The contrast a light palette's [`Palette::quiet`] has to reach on its
+/// `base`: 4:1, what mocha's `overlay1` gives on its own `base` (4.4:1) —
+/// quiet text is read through, a sentence at a time, and has to sit near the
+/// line body copy is held to rather than at the floor faint text is.
+pub const QUIET_CONTRAST: f32 = 4.0;
 
 impl Palette {
     /// Every name [`Palette::from_theme`] reads, in the order of the fields.
@@ -138,18 +156,26 @@ impl Palette {
         };
         let (base, text) = (pick("base"), pick("text"));
         let light = luminance(base) > luminance(text);
-        // The dark side's faint text is `overlay0`, untouched. The light
-        // side's is the first step along the ramp towards `text` that reads
-        // on `base` (see [`Palette::faint`]), and `text` itself if none of
-        // the quieter ones does.
-        let faint = if light {
-            ["overlay0", "overlay1", "overlay2", "subtext0", "subtext1"]
-                .into_iter()
-                .map(pick)
-                .find(|step| contrast(*step, base) >= FAINT_CONTRAST)
-                .unwrap_or(text)
+        // The dark side's faint and quiet text are `overlay0` and `overlay1`,
+        // untouched. The light side's are measured along the ramp towards
+        // `text`: faint is the first step that reads on `base`, quiet the
+        // first after it that reads through (see [`Palette::faint`] and
+        // [`Palette::quiet`]), and `text` itself when the ramp runs out.
+        let (faint, quiet) = if light {
+            let ramp = [
+                "overlay0", "overlay1", "overlay2", "subtext0", "subtext1", "text",
+            ]
+            .map(|name| if name == "text" { text } else { pick(name) });
+            let reads = |from: usize, floor: f32| {
+                (from..ramp.len())
+                    .find(|&i| contrast(ramp[i], base) >= floor)
+                    .unwrap_or(ramp.len() - 1)
+            };
+            let faint = reads(0, FAINT_CONTRAST);
+            let quiet = reads((faint + 1).clamp(1, ramp.len() - 1), QUIET_CONTRAST);
+            (ramp[faint], ramp[quiet])
         } else {
-            pick("overlay0")
+            (pick("overlay0"), pick("overlay1"))
         };
         Palette {
             crust: pick("crust"),
@@ -177,6 +203,7 @@ impl Palette {
             pink: pick("pink"),
             light,
             faint,
+            quiet,
         }
     }
 
@@ -444,6 +471,24 @@ pub fn ink(palette: &Palette, accent: egui::Color32) -> egui::Color32 {
     }
 }
 
+/// The grey one step louder than [`Palette::quiet`], for where the two stand
+/// side by side as two states of one thing — an archive's folders and its
+/// files, a bulk rename's old name changed and unchanged, a chip at rest and
+/// under the pointer — and have to stay two.
+///
+/// `subtext0` on a dark palette, as those places always had it. On latte
+/// `quiet` *is* `subtext0`, so the louder of the pair is the next step,
+/// `subtext1` (5.5:1 on `base`).
+pub fn louder(palette: &Palette) -> egui::Color32 {
+    if palette.quiet == palette.subtext0 {
+        palette.subtext1
+    } else if palette.quiet == palette.subtext1 {
+        palette.text
+    } else {
+        palette.subtext0
+    }
+}
+
 /// A one-point rule: a card's edge, a menu's separators, the hairline between
 /// two quiet tabs.
 ///
@@ -568,6 +613,46 @@ mod tests {
         assert!(grey.light);
         assert!(contrast(grey.faint, grey.base) >= FAINT_CONTRAST);
         assert_ne!(grey.faint, l.faint);
+    }
+
+    /// Quiet text is `overlay1` on every dark flavour, and on latte the first
+    /// step louder than faint that reads at 4:1 on `base`, which is
+    /// `subtext0`; the step above it keeps a pair of states apart on both.
+    #[test]
+    fn quiet_text_is_overlay1_in_the_dark_and_reads_in_the_light() {
+        for flavour in [
+            "catppuccin-mocha",
+            "catppuccin-macchiato",
+            "catppuccin-frappe",
+        ] {
+            let (theme, _) = Theme::parse(
+                &format!("[flavor]\ndark = \"{flavour}\"\n"),
+                std::path::Path::new("theme.toml"),
+            );
+            let dark = Palette::from_theme(&theme, Appearance::Dark);
+            assert_eq!(dark.quiet, dark.overlay1, "{flavour}");
+            assert_eq!(louder(&dark), dark.subtext0, "{flavour}");
+        }
+        let l = latte();
+        assert_eq!(l.quiet, l.subtext0);
+        assert!(contrast(l.quiet, l.base) >= QUIET_CONTRAST);
+        assert!(contrast(l.quiet, l.base) > contrast(l.faint, l.base));
+        // overlay2 is louder than faint's step only by being faint's step.
+        assert!(contrast(l.overlay2, l.base) < QUIET_CONTRAST);
+        assert_eq!(louder(&l), l.subtext1);
+        let at = |a, b| (contrast(a, b) * 100.0).round() / 100.0;
+        assert_eq!(at(Palette::default().quiet, Palette::default().base), 4.44);
+        assert_eq!(at(l.quiet, l.base), 4.37);
+
+        // A light ground dark enough that faint is already `subtext1`
+        // leaves quiet the only louder step there is.
+        let (theme, _) = Theme::parse(
+            "[palette.light]\nbase = \"#c0c4d0\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        let grey = Palette::from_theme(&theme, Appearance::Light);
+        assert_eq!(grey.faint, grey.subtext1);
+        assert_eq!(grey.quiet, grey.text);
     }
 
     /// A `[palette]` override in `theme.toml` reaches the painter, on both

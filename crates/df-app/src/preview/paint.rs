@@ -279,7 +279,7 @@ fn tok_color(tok: highlight::Tok, palette: &crate::theme::Palette) -> egui::Colo
         T::Text => palette.text,
         // A step above the quiet-label grey: a comment must be skimmable past
         // and still readable when it is the thing you came for.
-        T::Comment => palette.overlay1,
+        T::Comment => palette.quiet,
         T::Str => palette.green,
         T::Number => palette.peach,
         T::Keyword => palette.mauve,
@@ -1057,9 +1057,9 @@ fn archive_row(
     let name_left = rect.left() + crate::ui::ROW_PAD_X;
     let room = right - columns.size - crate::ui::LINEMODE_GAP - lock_slot - name_left;
     let (name, color) = if entry.is_dir {
-        (format!("{}/", entry.name), palette.overlay1)
+        (format!("{}/", entry.name), palette.quiet)
     } else {
-        (entry.name.clone(), palette.subtext0)
+        (entry.name.clone(), crate::theme::louder(palette))
     };
     // Shortened from the front, a directory at a time, so the column keeps
     // what tells its rows apart — the last component — instead of forty

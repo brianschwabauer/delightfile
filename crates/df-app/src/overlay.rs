@@ -286,7 +286,7 @@ pub fn paint_finder(
         // A glyph saying what kind of thing this is, in the colour that kind
         // already wears everywhere else in the program.
         let (glyph, tint) = match row.kind {
-            Kind::Command => ("›", palette.overlay1),
+            Kind::Command => ("›", palette.quiet),
             Kind::Place => ("/", palette.blue),
             Kind::Tab => ("▣", palette.teal),
             // `▦` is not in the stock faces; `⊞` is the same idea and is.
@@ -683,7 +683,7 @@ pub fn paint_search(
                     egui::pos2(text_left, rect.center().y),
                     &hit.relative,
                     palette.text,
-                    palette.overlay1,
+                    palette.quiet,
                     rect.right() - PAD_X - text_left,
                 );
             }
@@ -703,7 +703,7 @@ pub fn paint_search(
                     egui::pos2(text_left, top),
                     &hit.relative,
                     palette.text,
-                    palette.overlay1,
+                    palette.quiet,
                     HIT_PATH_COLUMN,
                 );
                 inside.text(
@@ -776,7 +776,7 @@ fn paint_switch(
             if hover > 0.0 {
                 painter.rect_filled(rect, switch_radius(), chrome::fade(palette.surface0, hover));
             }
-            (rect, mix(palette.overlay1, palette.text, hover))
+            (rect, mix(palette.quiet, palette.text, hover))
         };
         let inside = painter.with_clip_rect(rect);
         for splash in ripples.splashes(key, paint.now) {

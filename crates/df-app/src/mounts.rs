@@ -1869,7 +1869,7 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
             } else if device.is_mounted() {
                 (device.status(), palette.green)
             } else {
-                (device.status(), palette.overlay1)
+                (device.status(), palette.quiet)
             };
             Face {
                 icon: None,

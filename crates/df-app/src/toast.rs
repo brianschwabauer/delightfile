@@ -482,7 +482,7 @@ impl Toasts {
                 egui::Align2::LEFT_CENTER,
                 what,
                 egui::FontId::proportional(FONT),
-                fade(mix(palette.overlay1, palette.text, action_warm)),
+                fade(mix(palette.quiet, palette.text, action_warm)),
             );
             inside.text(
                 egui::pos2(what_x - 6.0, rect.center().y),

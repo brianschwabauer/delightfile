@@ -1156,7 +1156,7 @@ impl Painting<'_> {
             .into_iter()
             .map(|text| {
                 painter
-                    .layout_no_wrap(text, font.clone(), self.palette.overlay1)
+                    .layout_no_wrap(text, font.clone(), self.palette.quiet)
                     .size()
                     .x
             })
@@ -1174,7 +1174,7 @@ impl Painting<'_> {
                     growth: 0.0,
                 };
                 painter
-                    .layout_no_wrap(widest.label(), font.clone(), self.palette.overlay1)
+                    .layout_no_wrap(widest.label(), font.clone(), self.palette.quiet)
                     .size()
                     .x
             })
@@ -1537,7 +1537,7 @@ impl Painting<'_> {
                         mode_text.clone(),
                         TextFormat {
                             font_id: font,
-                            color: fade(self.palette.overlay1),
+                            color: fade(self.palette.quiet),
                             ..Default::default()
                         },
                     );
@@ -1549,9 +1549,7 @@ impl Painting<'_> {
                     };
                     painter.layout_job(job)
                 }
-                None => {
-                    painter.layout_no_wrap(mode_text.clone(), font, fade(self.palette.overlay1))
-                }
+                None => painter.layout_no_wrap(mode_text.clone(), font, fade(self.palette.quiet)),
             };
             let width = galley.size().x;
             // Right-aligned inside the reserved column, which for a column
@@ -1563,7 +1561,7 @@ impl Painting<'_> {
                     rect.center().y - galley.size().y / 2.0,
                 ),
                 galley,
-                fade(self.palette.overlay1),
+                fade(self.palette.quiet),
             );
             // A number that is still moving is worth a word: `~` is the mark
             // and "still counting" is what it means, and the mark is the only

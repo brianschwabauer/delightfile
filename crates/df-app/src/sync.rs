@@ -943,8 +943,8 @@ pub fn paint(
         dialog::title_font(),
     );
     let summary_tint = match &card.stage {
-        Stage::Comparing { .. } => palette.overlay1,
-        _ => palette.subtext0,
+        Stage::Comparing { .. } => palette.quiet,
+        _ => crate::theme::louder(palette),
     };
     chrome::truncated_in(
         painter,
@@ -983,7 +983,7 @@ pub fn paint(
         } else if row.mark == Mark::Problem {
             (row.detail.clone(), palette.red)
         } else {
-            (row.detail.clone(), palette.overlay1)
+            (row.detail.clone(), palette.quiet)
         };
         let (mark_tint, text_tint) = match row.mark {
             Mark::New => (palette.green, palette.subtext0),
@@ -1042,7 +1042,7 @@ pub fn paint(
             painter,
             egui::pos2(geometry.status.left(), geometry.status.center().y),
             &status,
-            palette.overlay1,
+            palette.quiet,
             geometry.status.width().max(0.0),
             font,
         );

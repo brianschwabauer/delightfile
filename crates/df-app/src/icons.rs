@@ -271,8 +271,8 @@ fn kind_color(kind: FileKind, palette: &Palette) -> egui::Color32 {
         // The neutrals, on the palette's own grey ramp: markdown and prose sit
         // one step brighter than configuration, which sits one step brighter
         // than "we could not say".
-        FileKind::Markdown | FileKind::Text => palette.subtext0,
-        FileKind::Config => palette.overlay1,
+        FileKind::Markdown | FileKind::Text => crate::theme::louder(palette),
+        FileKind::Config => palette.quiet,
         FileKind::Binary | FileKind::Special => palette.overlay2,
     }
 }
@@ -683,7 +683,7 @@ mod tests {
             ("Zed.AppImage", p.green),
             ("package.json", p.sky),
             ("notes.txt", p.subtext0),
-            (".zshrc", p.overlay1),
+            (".zshrc", p.quiet),
         ];
         let mut glyphs = std::collections::HashSet::new();
         for (name, colour) in cases {

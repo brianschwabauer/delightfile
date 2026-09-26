@@ -690,7 +690,7 @@ pub fn card(
             egui::Align2::LEFT_CENTER,
             &label,
             egui::FontId::proportional(CARD_FONT),
-            palette.overlay1,
+            palette.quiet,
         );
         let room = content.right() - CARD_PAD - (content.left() + CARD_PAD + CARD_LABEL);
         let mut job = egui::text::LayoutJob::single_section(

@@ -738,7 +738,7 @@ fn tab_chip(
     let color = if is_active {
         palette.text
     } else {
-        palette.overlay1
+        palette.quiet
     };
     // The number is what `1`–`9` press, so it is on the chip rather than in
     // the help sheet: the strip teaches its own shortcut. Under the pointer it
@@ -1349,7 +1349,7 @@ fn paint_cluster(
         egui::Align2::RIGHT_CENTER,
         &geom.labels.counter,
         egui::FontId::proportional(FONT),
-        mix(palette.overlay1, palette.text, counter_hover),
+        mix(palette.quiet, palette.text, counter_hover),
     );
     if let (Some(rect), Some(types)) = (geom.types, &cluster.types) {
         type_chip(paint, rect, types, hovers, ripples);
@@ -1494,7 +1494,7 @@ fn type_chip(
     } else {
         (
             palette.overlay1,
-            mix(palette.overlay1, palette.subtext0, hover),
+            mix(palette.quiet, crate::theme::louder(palette), hover),
         )
     };
     plate(paint, rect, accent, 1.0 + hover * 0.9);
@@ -1551,7 +1551,7 @@ fn pick_button(
             egui::Align2::CENTER_CENTER,
             &pick.label,
             egui::FontId::proportional(FONT),
-            palette.overlay1,
+            palette.quiet,
         );
         return;
     }
@@ -2048,7 +2048,7 @@ fn menu_button(
         egui::Align2::CENTER_CENTER,
         crate::icons::glyph(paint.nerd, MENU_ICON, MENU_GLYPH),
         egui::FontId::proportional(FONT),
-        mix(palette.overlay1, palette.text, lit),
+        mix(palette.quiet, palette.text, lit),
     );
 }
 
@@ -2140,7 +2140,7 @@ pub fn path_bar(
         } else if index == last {
             palette.text
         } else {
-            mix(palette.overlay1, palette.text, hover)
+            mix(palette.quiet, palette.text, hover)
         };
         inside.text(
             egui::pos2(rect.left() + PAD_X, rect.center().y),
@@ -2841,7 +2841,7 @@ fn prompt_field(
 /// in the text, so it stays well clear of the error's red and of the query's
 /// own full-strength ink.
 fn hint_ink(palette: &crate::theme::Palette) -> egui::Color32 {
-    palette.overlay1
+    palette.quiet
 }
 
 /// An inked hint laid out in its colours, cut to `room` the way a plain hint
