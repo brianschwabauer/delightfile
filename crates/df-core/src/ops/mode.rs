@@ -959,6 +959,167 @@ pub(super) fn undo(changes: &[ModeChange], ctx: &TaskCtx) -> UndoAttempt {
     }
 }
 
+/// What [`redo`] did: its report, the changes it set again, and the ones
+/// still to set when it stopped part way.
+pub(super) struct Redone {
+    /// `Ok` when every path was set again; the journal words the toast.
+    pub result: Result<()>,
+    /// Set again, each with the `st_mode` read back after it was set — what
+    /// the next undo will find.
+    pub done: Vec<ModeChange>,
+    /// Not set yet, when it stopped part way; empty when it finished or was
+    /// refused before touching anything.
+    pub rest: Vec<ModeChange>,
+}
+
+/// Set every path's `after` again, if every one of them is still the file
+/// the change set, with the mode the undo put back.
+///
+/// [`undo`] read backwards, and checked the same way: in full before
+/// anything is set, each path found from the folder the change was asked in
+/// without following a link — the anchored walk — and checked to be the same
+/// inode (`dev`, `ino`) with exactly its `before`. A path inside a folder the
+/// undo shut again is checked the moment the redo has opened that folder.
+/// A step that fails after some paths are set hands back both halves, so
+/// what landed can be undone and the rest redone.
+pub(super) fn redo(changes: &[ModeChange], ctx: &TaskCtx) -> Redone {
+    let refuse = |e: DfError| Redone {
+        result: Err(e),
+        done: Vec::new(),
+        rest: Vec::new(),
+    };
+    if changes.is_empty() {
+        return refuse(DfError::Op("nothing to redo".to_string()));
+    }
+    if let Err(why) = proc_ready() {
+        return refuse(DfError::Op(format!("cannot redo: {why}")));
+    }
+    // The folders the undo left shut to their owner, which the redo opens.
+    let shut: HashSet<&Path> = changes
+        .iter()
+        .filter(|change| change.is_dir() && change.before & OWNER_SEARCH == 0)
+        .map(|change| change.path.as_path())
+        .collect();
+    let mut finder = Finder::default();
+    for change in changes {
+        match find(&mut finder, change) {
+            Ok((_, meta)) => {
+                if let Err(e) = still_as_put_back(change, &meta) {
+                    return refuse(e);
+                }
+            }
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && change.path.ancestors().skip(1).any(|up| shut.contains(up)) => {}
+            Err(e) => return refuse(redo_unreachable(change, &e)),
+        }
+    }
+
+    let order = safe_order(
+        &changes
+            .iter()
+            .map(|change| (change.path.as_path(), change.is_dir(), change.after))
+            .collect::<Vec<_>>(),
+    );
+    let mut set: Vec<Option<ModeChange>> = vec![None; changes.len()];
+    let halves = |set: Vec<Option<ModeChange>>| {
+        let mut done = Vec::new();
+        let mut rest = Vec::new();
+        for (change, again) in changes.iter().zip(set) {
+            match again {
+                Some(again) => done.push(again),
+                None => rest.push(change.clone()),
+            }
+        }
+        (done, rest)
+    };
+    let mut finder = Finder::default();
+    for index in order {
+        let change = &changes[index];
+        let step = find(&mut finder, change)
+            .map_err(|e| redo_unreachable(change, &e))
+            .and_then(|(file, meta)| still_as_put_back(change, &meta).map(|()| file))
+            .and_then(|file| ctx.checkpoint().map(|()| file))
+            .and_then(|file| {
+                set_mode_of(&file, change.after)
+                    .map_err(|why| {
+                        DfError::Op(format!("cannot redo: {}: {why}", change.path.display()))
+                    })
+                    .map(|()| file)
+            });
+        match step {
+            Ok(file) => {
+                let after = file
+                    .metadata()
+                    .map(|meta| meta.mode())
+                    .unwrap_or(change.after);
+                set[index] = Some(ModeChange {
+                    after,
+                    ..change.clone()
+                });
+            }
+            Err(e) => {
+                let (done, rest) = halves(set);
+                // Nothing set yet is a refusal, which keeps the entry whole.
+                let rest = if done.is_empty() { Vec::new() } else { rest };
+                return Redone {
+                    result: Err(e),
+                    done,
+                    rest,
+                };
+            }
+        }
+        ctx.advance(0, 1);
+    }
+    let (done, _) = halves(set);
+    Redone {
+        result: Ok(()),
+        done,
+        rest: Vec::new(),
+    }
+}
+
+/// Whether a path is still the file the change set, with the `st_mode` the
+/// undo put back, and the sentence that says what moved if not.
+fn still_as_put_back(change: &ModeChange, now: &std::fs::Metadata) -> Result<()> {
+    if now.file_type().is_symlink() || now.mode() & FILE_TYPE != change.before & FILE_TYPE {
+        return Err(DfError::Op(format!(
+            "cannot redo: {} is not the same kind of file any more",
+            change.path.display()
+        )));
+    }
+    if (now.dev(), now.ino()) != (change.dev, change.ino) {
+        return Err(DfError::Op(format!(
+            "cannot redo: {} is not the file that was changed — it was replaced since",
+            change.path.display()
+        )));
+    }
+    if now.mode() != change.before {
+        return Err(DfError::Op(format!(
+            "cannot redo: the permissions of {} have changed since",
+            change.path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// [`unreachable`], for a redo.
+fn redo_unreachable(change: &ModeChange, e: &io::Error) -> DfError {
+    if e.kind() == io::ErrorKind::NotFound {
+        DfError::Op(format!(
+            "cannot redo: {} is no longer there",
+            change.path.display()
+        ))
+    } else if swapped(e) {
+        DfError::Op(format!(
+            "cannot redo: {} is not where it was — a link or a file is in the way",
+            change.path.display()
+        ))
+    } else {
+        DfError::Op(format!("cannot redo: {}: {e}", change.path.display()))
+    }
+}
+
 /// A recorded path, found again from the folder its change was asked in.
 fn find(finder: &mut Finder, change: &ModeChange) -> io::Result<(File, std::fs::Metadata)> {
     let anchor = change.anchor()?;
@@ -1800,5 +1961,113 @@ mod tests {
         }
         let why = ready_at(Path::new("/nonexistent/df-proc")).unwrap_err();
         assert!(why.contains("/proc is not mounted"), "{why}");
+    }
+
+    // ── Redo ────────────────────────────────────────────────────────────────
+
+    /// What `U` did, when it did it here and now.
+    fn redone(journal: &mut Journal) -> crate::ops::journal::RedoReport {
+        match journal.redo(&ctx()).unwrap() {
+            crate::ops::journal::Redo::Done(report) => report,
+            crate::ops::journal::Redo::Copy(_) => panic!("a mode is not a copy"),
+        }
+    }
+
+    /// `u`, `U`, `u`: the change is taken back, made again with its own
+    /// words, and taken back again, the journal moving between its stacks as
+    /// it does for a rename.
+    #[test]
+    fn a_change_undone_is_redone_and_undone_again() {
+        let t = TempTree::new("mode-redo");
+        let a = t.file("a.txt", b"a");
+        let b = t.file("b.txt", b"b");
+        set(&a, 0o644);
+        set(&b, 0o640);
+        let report = chmod(t.path(), &[item(&a, 0o600), item(&b, 0o600)], &ctx());
+        let mut journal = Journal::default();
+        journal.record(report.record.unwrap());
+
+        journal.undo(&ctx()).unwrap();
+        assert_eq!((mode_of(&a), mode_of(&b)), (0o644, 0o640));
+        assert_eq!((journal.len(), journal.redo_len()), (0, 1));
+        assert_eq!(
+            journal.peek_redo().unwrap().describe_redo(),
+            "changed permissions of 2 items again"
+        );
+
+        let report = redone(&mut journal);
+        assert_eq!(report.description, "Changed permissions of 2 items again");
+        assert_eq!(report.touched, vec![a.clone(), b.clone()]);
+        assert_eq!((mode_of(&a), mode_of(&b)), (0o600, 0o600));
+        assert_eq!((journal.len(), journal.redo_len()), (1, 0));
+        assert!(matches!(journal.peek(), Some(OpRecord::Mode { .. })));
+
+        let undone = journal.undo(&ctx()).unwrap();
+        assert_eq!(undone.description, "Restored permissions of 2 items");
+        assert_eq!((mode_of(&a), mode_of(&b)), (0o644, 0o640));
+        assert!(journal.can_redo());
+    }
+
+    /// A change that opened a shut folder, undone, leaves it shut again: the
+    /// redo cannot look inside it until it has opened it, and does so first.
+    #[test]
+    fn a_redo_opens_a_folder_the_undo_shut_before_it_reaches_inside() {
+        let t = TempTree::new("mode-redo-shut");
+        let top = t.dir("top");
+        let file = t.file("top/f.txt", b"f");
+        set(&file, 0o644);
+        set(&top, 0);
+        let report = chmod(
+            t.path(),
+            &[item(&top, 0o40755), item(&file, 0o100600)],
+            &ctx(),
+        );
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let mut journal = Journal::default();
+        journal.record(report.record.unwrap());
+        journal.undo(&ctx()).unwrap();
+        assert_eq!(mode_of(&top), 0, "shut again");
+
+        redone(&mut journal);
+        assert_eq!(mode_of(&top), 0o755);
+        assert_eq!(mode_of(&file), 0o600);
+        journal.undo(&ctx()).unwrap();
+        assert_eq!(mode_of(&top), 0);
+        set(&top, 0o755);
+        assert_eq!(mode_of(&file), 0o644);
+    }
+
+    /// A mode changed between the undo and the redo, or a file replaced by
+    /// another with the mode the undo left, refuses the whole redo — nothing
+    /// set, the entry kept for another `U`.
+    #[test]
+    fn a_redo_refuses_a_mode_changed_since_and_a_replaced_file() {
+        let t = TempTree::new("mode-redo-refuse");
+        let a = t.file("a.txt", b"a");
+        let b = t.file("b.txt", b"b");
+        set(&a, 0o644);
+        set(&b, 0o644);
+        let report = chmod(t.path(), &[item(&a, 0o600), item(&b, 0o600)], &ctx());
+        let mut journal = Journal::default();
+        journal.record(report.record.unwrap());
+        journal.undo(&ctx()).unwrap();
+
+        set(&b, 0o640);
+        let error = journal.redo(&ctx()).unwrap_err().to_string();
+        assert!(
+            error.contains("b.txt") && error.contains("changed since"),
+            "{error}"
+        );
+        assert_eq!(mode_of(&a), 0o644, "a was set though b was in the way");
+        assert_eq!((journal.len(), journal.redo_len()), (0, 1));
+
+        set(&b, 0o644);
+        let other = t.file("a.new", b"another");
+        set(&other, 0o644);
+        std::fs::rename(&other, &a).unwrap();
+        let error = journal.redo(&ctx()).unwrap_err().to_string();
+        assert!(error.contains("replaced"), "{error}");
+        assert_eq!(mode_of(&a), 0o644, "the new file was given the change");
+        assert_eq!(journal.redo_len(), 1);
     }
 }

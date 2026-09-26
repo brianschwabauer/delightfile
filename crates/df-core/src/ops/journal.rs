@@ -26,6 +26,12 @@
 //! goes back on the undo stack, so `u`, `U`, `u` walks back and forth over one
 //! step for as long as nothing else happens.
 //!
+//! A change of tags or of permissions changes nothing's name, so there its
+//! check is the value itself: every file still carries exactly the tags the
+//! undo put back, or every path still has exactly the `st_mode` it did — and
+//! is still the same inode, found from the folder the change was asked in
+//! without following a link, as [`super::mode`] finds it.
+//!
 //! A copy is the one redo that is not done here. It can take minutes, so it is
 //! checked here and handed back as a plan ([`RedoCopy`]) for the caller to run
 //! as the job a paste is, with its row in the task panel, its progress and its
@@ -1629,12 +1635,24 @@ fn redo_attempt(undone: &Undone, ctx: &TaskCtx) -> RedoAttempt {
             redo_links(undone, std::slice::from_ref(&one), ctx)
         }
         OpRecord::Links { links } => redo_links(undone, links, ctx),
-        OpRecord::Tags { .. } => RedoAttempt::refused(DfError::Op(
-            "cannot redo a change of tags — T sets them again".to_string(),
-        )),
-        OpRecord::Mode { .. } => RedoAttempt::refused(DfError::Op(
-            "cannot redo a change of permissions — C sets them again".to_string(),
-        )),
+        OpRecord::Tags { changes } => redo_tags(undone, changes),
+        OpRecord::Mode { changes } => {
+            let redone = super::mode::redo(changes, ctx);
+            RedoAttempt {
+                result: redone.result.map(|()| RedoReport {
+                    description: capitalised(&undone.record.describe_redo()),
+                    touched: redone.done.iter().map(|c| c.path.clone()).collect(),
+                }),
+                done: (!redone.done.is_empty()).then_some(OpRecord::Mode {
+                    changes: redone.done,
+                }),
+                remaining: (!redone.rest.is_empty()).then(|| {
+                    undone.rest(OpRecord::Mode {
+                        changes: redone.rest,
+                    })
+                }),
+            }
+        }
     }
 }
 
@@ -1879,6 +1897,65 @@ fn linked_as(record: &OpRecord, mut links: Vec<CreatedLink>) -> OpRecord {
             }
         }
         _ => OpRecord::Links { links },
+    }
+}
+
+/// Write every file's new tags again, all-or-nothing on the check.
+///
+/// [`undo_tags`] read forwards: each file must still carry exactly the tags
+/// the undo put back — a set somebody has changed since is an edit this redo
+/// knows nothing about — and one that does not refuses the whole redo before
+/// any tag is written. A write that fails part way leaves what was written
+/// undoable and the rest redoable.
+fn redo_tags(undone: &Undone, changes: &[TagChange]) -> RedoAttempt {
+    use crate::fs::tags;
+    if changes.is_empty() {
+        return RedoAttempt::refused(DfError::Op("nothing to redo".to_string()));
+    }
+    for change in changes {
+        let now = match tags::try_read(&change.path) {
+            Ok(now) if exists(&change.path) => now,
+            _ => {
+                return RedoAttempt::refused(DfError::Op(format!(
+                    "cannot redo: {} is no longer there",
+                    change.path.display()
+                )))
+            }
+        };
+        if now != change.before {
+            return RedoAttempt::refused(DfError::Op(format!(
+                "cannot redo: the tags of {} have changed since",
+                change.path.display()
+            )));
+        }
+    }
+    let mut touched = Vec::new();
+    for (i, change) in changes.iter().enumerate() {
+        if let Err(e) = tags::write(&change.path, &change.after) {
+            return RedoAttempt {
+                result: Err(DfError::Op(format!(
+                    "cannot redo: {}: {e}",
+                    change.path.display()
+                ))),
+                done: (i > 0).then(|| OpRecord::Tags {
+                    changes: changes[..i].to_vec(),
+                }),
+                remaining: (i > 0).then(|| {
+                    undone.rest(OpRecord::Tags {
+                        changes: changes[i..].to_vec(),
+                    })
+                }),
+            };
+        }
+        touched.push(change.path.clone());
+    }
+    RedoAttempt {
+        result: Ok(RedoReport {
+            description: capitalised(&undone.record.describe_redo()),
+            touched,
+        }),
+        done: Some(undone.record.clone()),
+        remaining: None,
     }
 }
 
@@ -2567,6 +2644,78 @@ mod tests {
         };
         let err = undo_record(&gone, &ctx()).unwrap_err().to_string();
         assert!(err.contains("no longer there"), "{err}");
+    }
+
+    /// `u`, `U`, `u` over a change of tags: each file gets the tags the
+    /// prompt wrote again, the toast says so forwards, and `u` takes them
+    /// off once more. A set changed between the undo and the redo refuses
+    /// the whole redo, and the entry waits for the next `U`.
+    #[test]
+    fn redo_of_tags_round_trips_and_refuses_a_set_changed_since() {
+        use crate::fs::tags;
+        let t = TempTree::new("redo-tags");
+        let a = t.file("a.txt", b"a");
+        if !tags::supported_here(&a) {
+            return;
+        }
+        let b = t.file("b.txt", b"b");
+        tags::write(&a, &tag_list(&["Work"])).unwrap();
+        let changes = vec![
+            TagChange {
+                path: a.clone(),
+                before: tag_list(&["Work"]),
+                after: tag_list(&["Work", "red"]),
+            },
+            TagChange {
+                path: b.clone(),
+                before: Vec::new(),
+                after: tag_list(&["red"]),
+            },
+        ];
+        for change in &changes {
+            tags::write(&change.path, &change.after).unwrap();
+        }
+        let mut journal = Journal::default();
+        journal.record(OpRecord::Tags { changes });
+        journal.undo(&ctx()).unwrap();
+        assert_eq!(tags::read(&a), ["Work"]);
+        assert!(tags::read(&b).is_empty());
+        assert_eq!(
+            journal.peek_redo().unwrap().describe_redo(),
+            "tagged 2 items again"
+        );
+
+        let report = redone(&mut journal);
+        assert_eq!(report.description, "Tagged 2 items again");
+        assert_eq!(report.touched, vec![a.clone(), b.clone()]);
+        assert_eq!(tags::read(&a), ["Work", "red"]);
+        assert_eq!(tags::read(&b), ["red"]);
+        assert_eq!((journal.len(), journal.redo_len()), (1, 0));
+
+        journal.undo(&ctx()).unwrap();
+        assert_eq!(tags::read(&a), ["Work"]);
+        assert!(tags::read(&b).is_empty());
+
+        tags::write(&b, &tag_list(&["blue"])).unwrap();
+        let err = journal.redo(&ctx()).unwrap_err().to_string();
+        assert!(
+            err.contains("b.txt") && err.contains("changed since"),
+            "{err}"
+        );
+        assert_eq!(
+            tags::read(&a),
+            ["Work"],
+            "not even the first file was touched"
+        );
+        assert_eq!(
+            (journal.len(), journal.redo_len()),
+            (0, 1),
+            "the entry waits"
+        );
+
+        tags::write(&b, &[]).unwrap();
+        redone(&mut journal);
+        assert_eq!(tags::read(&b), ["red"]);
     }
 
     #[test]

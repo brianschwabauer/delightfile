@@ -5227,6 +5227,9 @@ impl App {
                     self.rescan(&dir, now);
                 }
                 self.refresh_all(now);
+                // A mode set again may be the one the spot panel is showing,
+                // as a mode put back may be (see `undo`).
+                self.refresh_spot_mode();
                 // What the redo made — the new name, the copy, the link — is
                 // where the cursor goes, when it is in this listing: aimed,
                 // because the rescan above has not landed.

@@ -231,6 +231,58 @@ fn enter_applies_and_u_restores() {
     assert_eq!(cursor_name(&app).as_deref(), Some("b.txt"));
 }
 
+/// `u`, `U`, `u` after `C`: the mode is put back, set again with the toast
+/// an operation lands with, and put back again, the row's mode following
+/// each time; the undo history names the change on either side of its line.
+#[test]
+fn a_change_undone_is_redone_and_the_history_names_it() {
+    let mut app = Fixture::new("perm-redo", &["a.txt", "b.txt"]);
+    let b = app.files.join("b.txt");
+    set(&b, 0o640);
+    reread(&mut app);
+    at(&mut app, "b.txt", false);
+    press_c(&mut app);
+    typed(&mut app, "600");
+    press(&mut app, key(Key::Enter));
+    land(&mut app, |app| row_mode(app, "b.txt") == Some(0o600));
+    let history = |app: &App| -> Vec<(String, bool)> {
+        crate::history::rows(&app.journal)
+            .into_iter()
+            .map(|row| (row.label, row.redo))
+            .collect()
+    };
+    assert_eq!(
+        history(&app),
+        [("Changed permissions of 1 item".to_string(), false)]
+    );
+
+    app.run(Command::Undo, 10, Instant::now());
+    assert_eq!(mode_of(&b), 0o640);
+    land(&mut app, |app| row_mode(app, "b.txt") == Some(0o640));
+    assert_eq!(
+        history(&app),
+        [("Changed permissions of 1 item again".to_string(), true)]
+    );
+
+    app.run(Command::Redo, 10, Instant::now());
+    assert_eq!(mode_of(&b), 0o600);
+    assert_eq!(
+        toast_text(&app),
+        Some("Changed permissions of 1 item again")
+    );
+    assert_eq!(
+        app.toasts.current().map(|toast| toast.kind),
+        Some(crate::toast::ToastKind::Undo)
+    );
+    land(&mut app, |app| row_mode(app, "b.txt") == Some(0o600));
+    assert_eq!(cursor_name(&app).as_deref(), Some("b.txt"));
+
+    app.run(Command::Undo, 10, Instant::now());
+    assert_eq!(mode_of(&b), 0o640);
+    assert_eq!(toast_text(&app), Some("Restored permissions of 1 item"));
+    land(&mut app, |app| row_mode(app, "b.txt") == Some(0o640));
+}
+
 #[test]
 fn two_files_that_differ_show_a_dash_and_keep_it() {
     let mut app = Fixture::new("perm-mixed", &["a.txt", "b.txt"]);

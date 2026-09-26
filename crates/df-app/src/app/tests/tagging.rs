@@ -380,6 +380,52 @@ fn the_menus_offer_tags_on_local_files() {
     assert_eq!(tags.action, menu::Action::Run(Command::Tag));
 }
 
+/// The undo history's rows, top to bottom: each label, and whether `U`
+/// would do it again.
+fn history(app: &App) -> Vec<(String, bool)> {
+    crate::history::rows(&app.journal)
+        .into_iter()
+        .map(|row| (row.label, row.redo))
+        .collect()
+}
+
+/// `u`, `U`, `u` after `T`: the tag comes off, goes back on with the toast
+/// an operation lands with, and comes off again, the row wearing it or not
+/// each time; the undo history names the change on either side of its line.
+#[test]
+fn t_undone_is_redone_and_the_history_names_it() {
+    let Some(mut app) = fixture("tags-redo", &["a.txt", "b.txt"]) else {
+        return;
+    };
+    let a = app.files.join("a.txt");
+    at(&mut app, "a.txt", false);
+    press_t(&mut app);
+    enter(&mut app, "red");
+    assert_eq!(history(&app), [("Tagged a.txt".to_string(), false)]);
+
+    app.run(Command::Undo, 10, Instant::now());
+    assert!(file_tags::read(&a).is_empty());
+    assert_eq!(history(&app), [("Tagged a.txt again".to_string(), true)]);
+
+    app.run(Command::Redo, 10, Instant::now());
+    assert_eq!(file_tags::read(&a), ["red"]);
+    assert_eq!(toast(&app), "Tagged a.txt again");
+    assert_eq!(
+        app.toasts.current().map(|toast| toast.kind),
+        Some(crate::toast::ToastKind::Undo),
+        "a redo is an operation u takes back"
+    );
+    settle_here(&mut app);
+    assert_eq!(entry_tags(&app, "a.txt"), ["red"]);
+    assert_eq!(history(&app), [("Tagged a.txt".to_string(), false)]);
+
+    app.run(Command::Undo, 10, Instant::now());
+    assert!(file_tags::read(&a).is_empty());
+    assert_eq!(toast(&app), "Restored tags of a.txt");
+    settle_here(&mut app);
+    assert!(entry_tags(&app, "a.txt").is_empty());
+}
+
 // ── In a search's hits ──────────────────────────────────────────────────────
 
 /// One name in three folders: what a names search for `foo` finds in
