@@ -23,8 +23,9 @@
 //! One thread, in the shape of every other worker here: it connects, subscribes
 //! to `SettingChanged` for exactly this key (`AddMatch`, with the portal's name
 //! as the sender, so the bus drops a forgery from anybody else before it is
-//! sent here), asks `ReadOne` — or `Read`, which is what portals before version
-//! 2 of the interface answer — and then blocks on the socket. Each answer goes
+//! sent here), starts the portal by name if it is not running yet, asks
+//! `ReadOne` — or `Read`, which is what portals before version 2 of the
+//! interface answer — and then blocks on the socket. Each answer goes
 //! down a channel and rings the [`crate::Wake`] bell, and the app takes it on
 //! its next pass through `poll_workers`. Nothing polls: a desktop that never
 //! changes its mind costs one blocked thread and no frames.
@@ -193,6 +194,11 @@ impl Desktop {
         newest
     }
 
+    /// Whether the desktop has said anything yet.
+    pub fn heard(&self) -> bool {
+        self.heard
+    }
+
     /// Wait up to `within` for the first answer, if it has not come yet.
     ///
     /// For the first frame only: the window should open on the side the
@@ -323,8 +329,49 @@ fn add_match(bus: &mut Bus) -> Result<(), String> {
     .map(|_| ())
 }
 
+/// Make sure the portal is running before it is called, starting it the way
+/// the call itself would have, when it is not.
+///
+/// Asked first, by name and of the bus itself, because [`Bus::call`] checks a
+/// reply's sender against the destination's owner and says out loud when it
+/// cannot find one — which, for a session with no portal at all, would be a
+/// warning in the log on every start about a setup that is working as
+/// intended. Here that session is an error from `StartServiceByName`, and the
+/// caller hears it as dark, quietly.
+fn start_portal(bus: &mut Bus) -> Result<(), String> {
+    let name = marshal_body("s", &[crate::dbus::Value::Str(PORTAL.to_string())])?;
+    let running = bus.call(
+        BUS_DRIVER,
+        "/org/freedesktop/DBus",
+        BUS_DRIVER,
+        "NameHasOwner",
+        Some("s"),
+        &name,
+    )?;
+    if Reader::new(&running).value("b")?.as_bool() == Some(true) {
+        return Ok(());
+    }
+    let start = marshal_body(
+        "su",
+        &[
+            crate::dbus::Value::Str(PORTAL.to_string()),
+            crate::dbus::Value::U32(0),
+        ],
+    )?;
+    bus.call(
+        BUS_DRIVER,
+        "/org/freedesktop/DBus",
+        BUS_DRIVER,
+        "StartServiceByName",
+        Some("su"),
+        &start,
+    )
+    .map(|_| ())
+}
+
 /// `ReadOne`, and `Read` when the portal is too old to have it.
 fn ask(bus: &mut Bus) -> Result<Scheme, String> {
+    start_portal(bus)?;
     let body = marshal_body(
         "ss",
         &[

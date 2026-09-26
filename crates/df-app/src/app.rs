@@ -15611,8 +15611,15 @@ impl App {
         self.theme_mode = mode;
         self.follow_desktop();
         self.apply_appearance();
+        // The side is named only once the desktop has said which: a watcher
+        // started by this very command has not heard yet, and "dark" would be
+        // a guess the next frame might contradict.
+        let heard = self.desktop.as_ref().is_some_and(|d| d.heard());
         let message = match mode {
-            ThemeMode::Auto => format!("Following the desktop ({})", self.appearance().name()),
+            ThemeMode::Auto if heard => {
+                format!("Following the desktop ({})", self.appearance().name())
+            }
+            ThemeMode::Auto => "Following the desktop".to_string(),
             ThemeMode::Dark => "Dark theme".to_string(),
             ThemeMode::Light => "Light theme".to_string(),
         };

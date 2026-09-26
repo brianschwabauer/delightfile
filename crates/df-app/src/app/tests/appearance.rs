@@ -67,6 +67,13 @@ fn theme_light_turns_the_window_and_every_surface_still_paints() {
     assert_eq!(app.palette, mocha());
     assert_eq!(toast_text(&app), Some("Dark theme"));
     run_frame(&mut app, &ctx, Vec::new());
+
+    // Following a desktop that has not said anything is dark, and the toast
+    // does not guess which side it will turn out to be.
+    app.run(Command::ThemeLight, 10, Instant::now());
+    app.run(Command::ThemeAuto, 10, Instant::now());
+    assert_eq!(app.palette, mocha());
+    assert_eq!(toast_text(&app), Some("Following the desktop"));
 }
 
 /// Following the desktop: a `SettingChanged` turns the window the next time
