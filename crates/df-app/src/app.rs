@@ -8236,6 +8236,11 @@ impl App {
     /// permissions card's job makes — so it is journalled like everything
     /// else, with the undo toast, and keeps the special bits as they were.
     fn set_mode(&mut self, mode: u32, now: Instant) {
+        // The chips are the card's change one bit at a time, so they are
+        // refused wherever the card is: the trash, an archive, cloud storage.
+        if self.refuse_where_we_are(Command::Permissions, now) {
+            return;
+        }
         let Some(facts) = self.spot.as_ref().map(|s| s.facts.clone()) else {
             return;
         };
@@ -8245,10 +8250,8 @@ impl App {
         // own directory. The chips act on this machine only; over the link
         // it is the card, whose change is a `SETSTAT` on the server.
         if crate::remote::at_of(&path).is_some() {
-            let notice = self
-                .refusal(Command::Permissions)
-                .unwrap_or("Press C to set permissions on the server");
-            self.toasts.notice(notice, now);
+            self.toasts
+                .notice("Press C to set permissions on the server", now);
             return;
         }
         // `chmod` follows a symlink, and there is no `lchmod` on Linux. So

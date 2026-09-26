@@ -500,6 +500,42 @@ fn the_spots_strip_keeps_every_hint_it_has() {
         .any(|binding| binding.command == Command::Permissions));
 }
 
+/// The spot's chips are refused where `C` is: in the trash view a press on
+/// one says why, changes nothing and journals nothing.
+#[test]
+fn a_spot_chip_in_the_trash_view_is_refused_and_journals_nothing() {
+    let mut app = Fixture::new("perm-spot-trash", &["a.txt"]);
+    let a = app.files.join("a.txt");
+    set(&a, 0o644);
+    reread(&mut app);
+    app.run(Command::Spot, 10, Instant::now());
+    let row = app
+        .spot
+        .as_ref()
+        .and_then(Spot::perm_row)
+        .expect("a permissions row");
+    if let Some(spot) = &mut app.spot {
+        spot.select(row);
+    }
+    let origin = app.files.clone();
+    app.tabs.active_mut().trash = Some(crate::trashview::View {
+        items: Vec::new(),
+        origin,
+    });
+    let journal = app.journal.len();
+    press(&mut app, key(Key::Space));
+    assert_eq!(
+        toast_text(&app),
+        Some("Not in the trash — Enter restores, D destroys")
+    );
+    assert_eq!(
+        app.journal.len(),
+        journal,
+        "the refused press was journalled"
+    );
+    assert_eq!(mode_of(&a), 0o644);
+}
+
 #[test]
 fn a_link_has_no_permissions_of_its_own_to_set() {
     let mut app = Fixture::new("perm-link", &["a.txt"]);
