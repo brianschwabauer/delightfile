@@ -502,6 +502,9 @@ pub fn inert_in_archive(command: df_core::keymap::Command) -> bool {
             // The rows are not files on the disk, and the archive `A` would
             // write goes into a directory this one only looks like.
             | C::ArchiveCreate
+            // An entry's mode is what extraction will give it, and nothing
+            // here can write it back into the archive.
+            | C::Permissions
     )
 }
 

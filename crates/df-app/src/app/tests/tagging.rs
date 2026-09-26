@@ -362,8 +362,9 @@ fn the_menus_offer_tags_on_local_files() {
         .expect("an Edit list");
     let labels: Vec<&str> = edit.iter().map(|item| item.label.as_str()).collect();
     let rename = labels.iter().position(|l| *l == "Rename").expect("Rename");
-    assert_eq!(labels[rename + 1], "Tags…");
-    assert!(edit[rename + 1].enabled);
+    // After Permissions…, the other thing a file carries that is set here.
+    assert_eq!(labels[rename + 1..rename + 3], ["Permissions…", "Tags…"]);
+    assert!(edit[rename + 2].enabled);
 
     let ctx = egui::Context::default();
     run_frame(&mut app, &ctx, Vec::new());

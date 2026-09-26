@@ -131,6 +131,10 @@ pub enum Action {
     Cut,
     Paste,
     Rename,
+    /// The permissions card over the row the menu opened on — and the rest
+    /// of the selection when that row is part of it. Not `Run(Permissions)`,
+    /// which is about the selection whatever row the pointer was on.
+    Permissions,
     Trash,
     /// Unpack the hovered archive into this directory (PLAN §7.3).
     ExtractHere,
@@ -330,6 +334,10 @@ pub fn items(facts: Facts, openers: &[String]) -> Vec<Item> {
         Item::new("Cut", "x", Action::Cut, acts),
         Item::new("Paste", "p", Action::Paste, facts.clipboard),
         Item::new("Rename", "r", Action::Rename, facts.has_row),
+        // Greyed by the app where the gate would refuse it — an archive, a
+        // cloud remote — as the pin row is: whether it can act is a question
+        // about where the pane is, which these facts do not describe.
+        Item::new("Permissions…", "C", Action::Permissions, facts.has_row),
         // The command itself, so the row goes through `T`'s door and its
         // gate; the app greys it where that gate would refuse.
         Item::new("Tags…", "T", Action::Run(Command::Tag), acts),
@@ -659,6 +667,7 @@ pub fn app_items(
         run("Paste", C::Paste, facts.clipboard),
         run("Sync here…", C::PasteSync, facts.clipboard),
         run("Rename", C::Rename, acts),
+        run("Permissions…", C::Permissions, acts),
         run("Tags…", C::Tag, acts),
         run("New file or folder…", C::Create, true),
         run("Move to trash", C::Trash, acts),
@@ -1800,6 +1809,7 @@ mod tests {
                 ("Cut", "x", Action::Cut, false),
                 ("Paste", "p", Action::Paste, false),
                 ("Rename", "r", Action::Rename, false),
+                ("Permissions…", "C", Action::Permissions, false),
                 ("Tags…", "T", Action::Run(Command::Tag), false),
                 ("Move to trash", "d", Action::Trash, false),
                 ("Copy path", "c c", Action::CopyPath, true),
@@ -2727,6 +2737,7 @@ mod tests {
                 ("Paste", "p", false),
                 ("Sync here…", "Alt+p", false),
                 ("Rename", "r", false),
+                ("Permissions…", "C", false),
                 ("Tags…", "T", false),
                 ("New file or folder…", "a", false),
                 ("Move to trash", "d", false),
@@ -2751,6 +2762,7 @@ mod tests {
         assert_eq!(command("Cut"), C::YankCut);
         assert_eq!(command("Sync here…"), C::PasteSync);
         assert_eq!(command("New file or folder…"), C::Create);
+        assert_eq!(command("Permissions…"), C::Permissions);
         assert_eq!(command("Tags…"), C::Tag);
         assert_eq!(command("Trash"), C::OpenTrash);
         assert_eq!(command("Clipboard"), C::YankShow);

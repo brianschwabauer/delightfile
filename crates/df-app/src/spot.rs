@@ -6,10 +6,12 @@
 //! panel exists here rather than being a wider status bar.
 //!
 //! **Permissions are an editor, not a readout.** Nine chips and an octal
-//! number; clicking one flips that bit on disk immediately. A file manager that
-//! can *show* you `-rw-r--r--` and cannot change it is asking you to open a
-//! terminal, and the whole premise of this program is that you should not have
-//! to.
+//! number; clicking one flips that bit on disk immediately, as one change `u`
+//! takes back. A file manager that can *show* you `-rw-r--r--` and cannot
+//! change it is asking you to open a terminal, and the whole premise of this
+//! program is that you should not have to. `Enter` on the row, or `C`
+//! anywhere on the card, opens the permissions card for the rest — a typed
+//! `755`, several bits at once ([`crate::permissions`]).
 //!
 //! **The checksum is on demand.** Hashing is the one thing on this card that
 //! costs real time, so it is a chip you press rather than a row that appears —
@@ -463,6 +465,8 @@ pub enum Action {
     None,
     /// Write this mode to the file.
     SetMode(u32),
+    /// Open the permissions card on the file.
+    EditPermissions,
     StartChecksum,
     CancelChecksum,
 }
@@ -638,7 +642,7 @@ impl Spot {
         self.bit = (self.bit as isize + delta).rem_euclid(n) as usize;
     }
 
-    /// `Space` or `Enter` on the focused row.
+    /// `Space` on the focused row: the chosen chip's bit, or the checksum.
     pub fn activate(&self) -> Action {
         match self.rows.get(self.cursor).map(|r| &r.value) {
             Some(Value::Permissions) => Action::SetMode(toggle(self.facts.mode, self.bit)),
@@ -650,6 +654,16 @@ impl Spot {
                 }
             }
             _ => Action::None,
+        }
+    }
+
+    /// `Enter` on the focused row. On the permissions row it opens the card
+    /// that edits them whole, where `Space` flips the one chip; everywhere
+    /// else it is `Space`.
+    pub fn enter(&self) -> Action {
+        match self.rows.get(self.cursor).map(|r| &r.value) {
+            Some(Value::Permissions) => Action::EditPermissions,
+            _ => self.activate(),
         }
     }
 
@@ -1624,6 +1638,22 @@ mod tests {
         assert_eq!(octal(0o4755), "4755");
         // An index off the end is a no-op rather than a panic.
         assert_eq!(toggle(0o644, 99), 0o644);
+    }
+
+    /// `Enter` on the permissions row asks for the card; `Space` there
+    /// flips the chip, and on the checksum row the two are one key.
+    #[test]
+    fn enter_on_the_permissions_row_asks_for_the_card() {
+        let mut spot = Spot::new(facts());
+        let perm = spot.perm_row().expect("a permissions row");
+        spot.select(perm);
+        assert_eq!(spot.enter(), Action::EditPermissions);
+        assert!(matches!(spot.activate(), Action::SetMode(_)));
+        let hash = spot.hash_row().expect("a checksum row");
+        spot.select(hash);
+        assert_eq!(spot.enter(), spot.activate());
+        spot.select(0);
+        assert_eq!(spot.enter(), Action::None);
     }
 
     #[test]

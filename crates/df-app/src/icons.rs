@@ -916,6 +916,8 @@ mod glyph_tests {
         let plain = [
             'Y', 'f', '⊞', '☰', '✓', '☐', '•', '◂', '▣', '▸', '›', '…', '×', '·', '→', '↑', '↓',
             '←', '⇧', '≈', '🗝', '≡', '⟷',
+            // The permissions card's mixed octal digit, and its `0–7` hint.
+            '–',
         ];
         let patched = [
             '\u{f418}',

@@ -196,6 +196,121 @@ fn a_sync_with_a_cloud_remote_is_refused_by_name() {
     }
 }
 
+/// `C` on a cloud remote is refused before a card goes up, in the same
+/// words wherever it is asked from, and its menu row is grey.
+#[test]
+fn permissions_are_refused_on_cloud_storage() {
+    let mut app = Fixture::new("cloud-permissions", &["a.txt"]);
+    with_services(&mut app, vec![cloud("r2", Some("s3"))]);
+    let now = Instant::now();
+    app.navigate(PathBuf::from("rclone://r2/bucket"), now);
+    assert_eq!(
+        app.refusal(Command::Permissions),
+        Some("Permissions can't be set on cloud storage")
+    );
+    app.run(Command::Permissions, 10, now);
+    assert!(app.dialog.is_none());
+    assert_eq!(
+        toast(&app).as_deref(),
+        Some("Permissions can't be set on cloud storage")
+    );
+    app.run(Command::AppMenu, 10, now);
+    let row = app
+        .menu
+        .as_ref()
+        .expect("up")
+        .items
+        .iter()
+        .flat_map(|item| item.submenu.iter().flatten())
+        .find(|item| item.label == "Permissions…")
+        .map(|item| item.enabled);
+    assert_eq!(row, Some(false));
+}
+
+/// On a server the card goes up over the rows the listing has, one level
+/// only — a folder there has no checkbox — and says there is no undo before
+/// the key lands. Its Apply is a remote job named for the `w` panel, and
+/// nothing is journalled.
+#[test]
+fn permissions_on_a_server_are_one_level_and_journal_nothing() {
+    use df_core::fs::{Entry, Kind};
+    let mut app = Fixture::new("cloud-permissions-sftp", &["a.txt"]);
+    with_services(&mut app, vec![server("box")]);
+    let now = Instant::now();
+    let at = VfsPath::new("box", "/srv");
+    let row = |name: &str, kind: Kind, mode: u32| {
+        let mime = if kind == Kind::Dir {
+            "inode/directory"
+        } else {
+            "text/plain"
+        };
+        Entry {
+            name: name.to_string(),
+            path: PathBuf::from(at.join(name).to_url()),
+            kind,
+            len: 1,
+            mtime: None,
+            btime: None,
+            mode,
+            uid: 1000,
+            gid: 100,
+            is_hidden: false,
+            mime,
+            file_kind: df_core::fs::classify(kind, name, mime, mode),
+            tags: Vec::new(),
+        }
+    };
+    let mut session = crate::remote::Session::new(at.clone(), app.files.clone());
+    session.store(
+        &at,
+        vec![
+            row("notes.txt", Kind::File, 0o100644),
+            row("www", Kind::Dir, 0o40755),
+        ],
+    );
+    let (mgr, sort) = (app.mgr.clone(), app.sort());
+    let _cached = app.tabs.active_mut().show_remote(session, &mgr, sort, now);
+    assert_eq!(
+        app.tab().cwd.dir.len(),
+        2,
+        "the rows did not come from the cache"
+    );
+    assert_eq!(app.refusal(Command::Permissions), None);
+
+    app.dir().select_all();
+    app.run(Command::Permissions, 10, now);
+    let Some(Dialog::Permissions(card)) = &app.dialog else {
+        panic!("no card over the server's rows");
+    };
+    assert_eq!(card.host.as_deref(), Some("box"));
+    assert!(!card.has_folder(), "a folder on a server has no checkbox");
+    assert_eq!(
+        card.owner_line(),
+        "1000 · 100",
+        "a server's owner is its number"
+    );
+    assert!(card
+        .status()
+        .is_some_and(|(line, _)| line.contains("no undo on a server")));
+
+    let journal = app.journal.len();
+    for digit in ['7', '0', '0'] {
+        app.route_chord(Chord::plain(Key::Char(digit)), 10, now);
+    }
+    app.route_chord(Chord::plain(Key::Enter), 10, now);
+    assert!(app.dialog.is_none());
+    assert!(app
+        .engine
+        .snapshot()
+        .iter()
+        .any(|task| task.name == "Set permissions on 2 remote items"));
+    assert_eq!(
+        app.journal.len(),
+        journal,
+        "a server's change was journalled"
+    );
+}
+
 /// Remote to remote is refused in words that fit a cloud at either end —
 /// including the case of one of each.
 #[test]

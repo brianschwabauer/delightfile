@@ -79,6 +79,8 @@ use crate::whichkey::WhichKey;
 /// `A`: the selection packed into a new archive — its prompt, the prompt's
 /// format hint, the Replace card's yes, and the job.
 mod compress;
+/// `C`: the permissions card — opening it, its keys and clicks, and the change.
+mod permissions;
 /// Pinned places (`g b`, `g space`): a child, so its half of `App` lives there.
 mod places;
 /// `alt+p`: the sync card, the comparison it waits on, and the syncs it starts.
@@ -459,6 +461,9 @@ enum Dialog {
     Bulk(Box<crate::bulk::Bulk>),
     /// `alt+p`: what a sync would do, or what one did ([`crate::sync`]).
     Sync(Box<crate::sync::SyncCard>),
+    /// `C`: the nine bits of the selection, and the octal under them
+    /// ([`crate::permissions`]).
+    Permissions(Box<crate::permissions::PermCard>),
 }
 
 /// How long a top-row chip takes to leave after the thing it is about is gone
@@ -524,6 +529,7 @@ enum OverlayGeom {
     Conflict(dialog::Geometry),
     Bulk(Box<dialog::BulkGeometry>),
     Sync(Box<crate::sync::Geometry>),
+    Permissions(Box<crate::permissions::Geometry>),
     /// The card, its rows, and its bar's band while it has more choices than
     /// rows.
     Picker(egui::Rect, Vec<egui::Rect>, Option<egui::Rect>),
@@ -549,6 +555,7 @@ impl OverlayGeom {
             OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g.card,
             OverlayGeom::Bulk(g) => g.card,
             OverlayGeom::Sync(g) => g.card,
+            OverlayGeom::Permissions(g) => g.card,
             OverlayGeom::Picker(card, ..) | OverlayGeom::Panel(card, _, _) => *card,
             OverlayGeom::Spot(g) => g.card,
             OverlayGeom::Finder(g) => g.card,
@@ -575,6 +582,7 @@ impl OverlayGeom {
             | OverlayGeom::Conflict(_)
             | OverlayGeom::Bulk(_)
             | OverlayGeom::Sync(_)
+            | OverlayGeom::Permissions(_)
             | OverlayGeom::Finder(_)
             | OverlayGeom::Mounts(_) => true,
             OverlayGeom::Picker(..)
@@ -593,6 +601,8 @@ impl OverlayGeom {
             OverlayGeom::Conflict(_) => WheelOwner::Card(Surface::Conflict),
             OverlayGeom::Bulk(_) => WheelOwner::Bulk,
             OverlayGeom::Sync(_) => WheelOwner::Card(Surface::Sync),
+            // No list on it to roll, and the scrim makes the rest scenery.
+            OverlayGeom::Permissions(_) => WheelOwner::Spent,
             OverlayGeom::Picker(..) => WheelOwner::Card(Surface::Picker),
             OverlayGeom::Panel(..) => WheelOwner::Card(Surface::Tasks),
             OverlayGeom::Spot(_) => WheelOwner::Card(Surface::Spot),
@@ -623,6 +633,8 @@ impl OverlayGeom {
             OverlayGeom::Confirm(g) | OverlayGeom::Conflict(g) => g.close,
             OverlayGeom::Bulk(g) => Some(g.close),
             OverlayGeom::Sync(g) => Some(g.close),
+            // A question with a Cancel of its own, as the confirm is.
+            OverlayGeom::Permissions(_) => None,
             OverlayGeom::Picker(..) => None,
             OverlayGeom::Panel(card, _, _) => Some(chrome::close_button_rect(*card)),
             OverlayGeom::Spot(g) => g.close,
@@ -651,7 +663,7 @@ impl OverlayGeom {
             OverlayGeom::Spot(g) => g.band.map(|band| (band, Surface::Spot)),
             OverlayGeom::Search(g) => g.band.map(|band| (band, Surface::Search)),
             OverlayGeom::History(g) => g.band.map(|band| (band, Surface::History)),
-            OverlayGeom::Bulk(_) => None,
+            OverlayGeom::Bulk(_) | OverlayGeom::Permissions(_) => None,
         }
     }
 
@@ -678,6 +690,8 @@ impl OverlayGeom {
             // does its own hit test.
             OverlayGeom::Bulk(g) => g.hit(pos),
             OverlayGeom::Sync(g) => g.hit(pos),
+            // Nine boxes, a field, a checkbox and two buttons.
+            OverlayGeom::Permissions(g) => g.hit(pos),
             OverlayGeom::Conflict(g) => g
                 .action_at(pos)
                 .map(Control::Action)
@@ -737,6 +751,7 @@ impl OverlayGeom {
             (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
             (OverlayGeom::Bulk(geometry), control) => geometry.rect_of(control),
             (OverlayGeom::Sync(geometry), control) => geometry.rect_of(control),
+            (OverlayGeom::Permissions(geometry), control) => geometry.rect_of(control),
             _ => None,
         }
     }
@@ -2974,6 +2989,9 @@ impl App {
         for dir in &op.dirs {
             self.rescan(dir, now);
         }
+        // A mode the permissions card changed is on the spot panel it was
+        // opened from, which is back up by now and showing the old one.
+        self.refresh_spot_mode();
         // After the rescans, so the aim is waiting for the scan that will
         // bring the rows rather than for one that started before they existed.
         if let Some(focus) = landing(op.focus, made, op.group, &self.ops) {
@@ -5032,6 +5050,9 @@ impl App {
                     self.rescan(&dir, now);
                 }
                 self.refresh_all(now);
+                // A mode put back may be the one the spot panel is showing —
+                // the undo toast's chip can be pressed with the panel up.
+                self.refresh_spot_mode();
                 // In a search's hits the row that came back is named by its
                 // path from the root, and it is the cursor's.
                 if let (true, Some(root)) = (restores, hits) {
@@ -6425,6 +6446,12 @@ impl App {
         if self.bulk_key(chord, now) {
             return;
         }
+        // The permissions card's arrows, `Space`, `Tab` and digits are its
+        // own, for the same reason: `↑` in `[confirm]` scrolls a list the
+        // card does not have, and a digit there is nothing at all.
+        if self.permissions_key(chord, now) {
+            return;
+        }
         if self.overlay_literal(chord, now) {
             return;
         }
@@ -6521,6 +6548,8 @@ impl App {
             // The card's own `c c`: the focused row's value, not the file's
             // path — the browser's `c c` is the one that copies that.
             C::SpotCopyCell => self.copy_spot_cell(now),
+            // `C` over the spot panel: the card about the spotted file.
+            C::Permissions if self.spot.is_some() => self.spot_permissions(now),
             // Three rows whose keys never reach this match: `overlay_literal`
             // takes `Ctrl+s`, `p` and `a` before the registry is asked. A hint
             // names them by the command their row gives them, so each is done
@@ -6707,6 +6736,9 @@ impl App {
                 card.scroll_by(delta);
                 return;
             }
+            // Its arrows are its own, taken before the registry
+            // (`permissions_key`).
+            Some(Dialog::Permissions(_)) => return,
             None => {}
         }
         if let Some(card) = &mut self.mounts {
@@ -6768,6 +6800,12 @@ impl App {
 
     /// `Enter` on whatever is up.
     fn submit_overlay(&mut self, page: usize, now: Instant) {
+        // First: a card opened from the spot panel holds the panel while it
+        // is up, and must be what `Enter` answers.
+        if matches!(self.dialog, Some(Dialog::Permissions(_))) {
+            self.submit_permissions(now);
+            return;
+        }
         if self.finder.is_some() {
             self.finder_submit(page, now);
             return;
@@ -6781,7 +6819,7 @@ impl App {
             return;
         }
         if self.spot.is_some() {
-            self.spot_action(now);
+            self.spot_enter(now);
             return;
         }
         if self.undo_history.is_some() && self.dialog.is_none() && self.picker.is_none() {
@@ -6863,6 +6901,14 @@ impl App {
                 self.toasts.notice("Rename cancelled", now);
             }
             Some(Dialog::Sync(card)) => self.sync_closed(&card, now),
+            // Nothing was changed, so nothing is said; the spot panel the
+            // card was opened from comes back, and it is the one surface the
+            // clearing below must not take with it.
+            Some(Dialog::Permissions(mut card)) => {
+                self.permissions_closed(&mut card);
+                self.sync_context();
+                return;
+            }
             Some(Dialog::Confirm(_)) | None => {}
         }
         self.picker = None;
@@ -8150,13 +8196,24 @@ impl App {
         changed
     }
 
-    /// `Space` / `Enter` on the card's focused row.
+    /// `Space` on the card's focused row.
     fn spot_action(&mut self, now: Instant) {
-        let Some(action) = self.spot.as_ref().map(Spot::activate) else {
-            return;
-        };
+        if let Some(action) = self.spot.as_ref().map(Spot::activate) {
+            self.spot_act(action, now);
+        }
+    }
+
+    /// `Enter` on it, which on the permissions row opens their card.
+    fn spot_enter(&mut self, now: Instant) {
+        if let Some(action) = self.spot.as_ref().map(Spot::enter) {
+            self.spot_act(action, now);
+        }
+    }
+
+    fn spot_act(&mut self, action: spot::Action, now: Instant) {
         match action {
             spot::Action::SetMode(mode) => self.set_mode(mode, now),
+            spot::Action::EditPermissions => self.spot_permissions(now),
             spot::Action::StartChecksum => {
                 let waker = self.waker.named("checksum");
                 if let Some(spot) = &mut self.spot {
@@ -8172,29 +8229,26 @@ impl App {
         }
     }
 
-    /// Write a new mode to the spotted file.
+    /// Write a new mode to the spotted file: one chip, one change.
     ///
-    /// **Not undoable, and the toast says so.** PLAN §5's journal has records
-    /// for every operation that moves bytes around — copy, rename, trash,
-    /// create, link — and none for a mode change, because df-core has no chmod
-    /// operation at all. So this goes straight to `set_permissions` and raises a
-    /// plain notice rather than the undo toast every other mutation gets: a
-    /// toast that offered `u` and then did nothing would be worse than no offer.
-    /// When df-core grows `ops::chmod` and an `OpRecord::Chmod`, this is the one
-    /// call site that changes.
+    /// On this thread, because the chip has to show its new state on the
+    /// next frame, and through [`df_core::ops::mode::chmod`] — the change the
+    /// permissions card's job makes — so it is journalled like everything
+    /// else, with the undo toast, and keeps the special bits as they were.
     fn set_mode(&mut self, mode: u32, now: Instant) {
-        use std::os::unix::fs::PermissionsExt;
         let Some(facts) = self.spot.as_ref().map(|s| s.facts.clone()) else {
             return;
         };
         let path = facts.path;
         // A remote row's `path` is an `sftp://…` URL, which is a *relative*
         // `PathBuf` — `set_permissions` would resolve it against the process's
-        // own directory. The vfs has a `chmod`; until this call site uses it,
-        // the card's chips do not act remotely.
+        // own directory. The chips act on this machine only; over the link
+        // it is the card, whose change is a `SETSTAT` on the server.
         if crate::remote::at_of(&path).is_some() {
-            self.toasts
-                .notice("Permissions cannot be changed remotely yet", now);
+            let notice = self
+                .refusal(Command::Permissions)
+                .unwrap_or("Press C to set permissions on the server");
+            self.toasts.notice(notice, now);
             return;
         }
         // `chmod` follows a symlink, and there is no `lchmod` on Linux. So
@@ -8214,24 +8268,29 @@ impl App {
             );
             return;
         }
-        match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)) {
-            Ok(()) => {
-                if let Some(spot) = &mut self.spot {
-                    spot.facts.mode = mode;
-                }
-                self.toasts
-                    .notice(format!("Permissions are now {}", spot::octal(mode)), now);
-                // The list's permissions linemode is showing the old string
-                // until the directory is read again.
-                if let Some(dir) = path.parent().map(Path::to_path_buf) {
-                    self.rescan(&dir, now);
-                }
+        let report = df_core::ops::mode::chmod(&[(path.clone(), mode)], &TaskCtx::detached());
+        if let Some((_, error)) = report.errors.first() {
+            // The common one is somebody else's file, and the message says
+            // which file rather than only which errno.
+            self.toasts
+                .error(format!("{}: {error}", path.display()), now);
+            return;
+        }
+        if let Some(spot) = &mut self.spot {
+            spot.facts.mode = mode;
+        }
+        let message = format!("Permissions are now {}", spot::octal(mode));
+        match report.record {
+            Some(record) => {
+                self.journal.record(record);
+                self.toasts.undo(message, now);
             }
-            Err(e) => {
-                // The common one is somebody else's file, and the message says
-                // which file rather than only which errno.
-                self.toasts.error(format!("{}: {e}", path.display()), now);
-            }
+            None => self.toasts.notice(message, now),
+        }
+        // The list's permissions linemode is showing the old string until
+        // the directory is read again, if inotify has not got there first.
+        if let Some(dir) = path.parent().map(Path::to_path_buf) {
+            self.rescan(&dir, now);
         }
     }
 
@@ -9623,6 +9682,18 @@ impl App {
         if self.tab().archive.is_some() && crate::archive::inert_in_archive(command) {
             return Some("Archives are read-only — press e to extract");
         }
+        // A server has permissions and `SETSTAT` sets them; a bucket or a
+        // drive has none that rclone can reach, so the card is not offered
+        // there at all rather than put up to fail on Apply.
+        if command == Command::Permissions
+            && self
+                .tab()
+                .remote
+                .as_ref()
+                .is_some_and(|session| session.at.kind == df_core::vfs::ServiceKind::Rclone)
+        {
+            return Some("Permissions can't be set on cloud storage");
+        }
         // PLAN §7.6: the same rule for a remote service, with a different list
         // and a different sentence. What is missing is missing for a reason the
         // notice names, so the key is not simply dead.
@@ -10264,6 +10335,7 @@ impl App {
             C::ArchiveExtractHere => self.extract(ExtractMode::Here, now),
             C::ArchiveExtractSubfolder => self.extract(ExtractMode::Folder, now),
             C::ArchiveCreate => self.open_archive_prompt(now),
+            C::Permissions => self.open_permissions(now),
             C::OpenInteractive => self.open_picker(now),
             // The primary button, from the keyboard: exactly what a click on
             // it does, dimmed-and-silent included. Outside a picker there is
@@ -11098,6 +11170,11 @@ impl App {
                     painter, area, card,
                 ))))
             }
+            Some(Dialog::Permissions(card)) => {
+                return Some(OverlayGeom::Permissions(Box::new(
+                    crate::permissions::geometry(painter, area, card),
+                )))
+            }
             None => {}
         }
         if let Some(picker) = &self.picker {
@@ -11156,6 +11233,7 @@ impl App {
             OverlayGeom::Conflict(_) => matches!(self.dialog, Some(Dialog::Conflict(_))),
             OverlayGeom::Bulk(_) => matches!(self.dialog, Some(Dialog::Bulk(_))),
             OverlayGeom::Sync(_) => matches!(self.dialog, Some(Dialog::Sync(_))),
+            OverlayGeom::Permissions(_) => matches!(self.dialog, Some(Dialog::Permissions(_))),
             OverlayGeom::Picker(..) => self.picker.is_some(),
             OverlayGeom::Panel(..) => self.panel.is_some(),
             OverlayGeom::Spot(_) => self.spot.is_some(),
@@ -11339,6 +11417,7 @@ impl App {
                         self.submit_overlay(page, now);
                     }
                 }
+                Some(Dialog::Permissions(_)) => self.permissions_click(index, now),
                 None => {}
             },
             // The offset among the rows drawn, which is what the hit test
@@ -12823,6 +12902,16 @@ impl App {
             let local = self.refusal(Command::TerminalHere).is_none();
             menu::insert_terminal_row(&mut items, local);
         }
+        // Grey where the gate would turn it away, rather than live to toast
+        // "not here" when clicked — the app menu's rule for its rows.
+        if self.refusal(Command::Permissions).is_some() {
+            for item in items
+                .iter_mut()
+                .filter(|item| item.action == menu::Action::Permissions)
+            {
+                item.enabled = false;
+            }
+        }
         // One menu at a time: this replaces an app menu that was up.
         self.show_menu(Menu::context(at, items));
         // The click that opened the menu is not half of a double click on
@@ -13079,6 +13168,7 @@ impl App {
             A::Cut => self.set_clipboard(true, now),
             A::Paste => self.paste(false, now),
             A::Rename => self.open_rename(false, now),
+            A::Permissions => self.row_permissions(now),
             // The same door `d` goes through, and it has to be that one:
             // `Trash` is deliberately *not* inert remotely — it becomes a
             // `RemoteDelete` — so the gate above lets it through, and a plain
@@ -17861,6 +17951,9 @@ impl App {
             (Some(OverlayGeom::Sync(geometry)), Some(Dialog::Sync(card))) => {
                 crate::sync::paint(&paint, card, geometry, &self.hovers, &self.ripples);
             }
+            (Some(OverlayGeom::Permissions(geometry)), Some(Dialog::Permissions(card))) => {
+                crate::permissions::paint(&paint, card, geometry, &self.hovers, &self.ripples);
+            }
             (Some(OverlayGeom::Conflict(geometry)), Some(Dialog::Conflict(conflict))) => {
                 dialog::paint_conflict(&paint, conflict, geometry, &self.hovers, &self.ripples);
             }
@@ -18776,7 +18869,8 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
         OverlayGeom::Confirm(_)
         | OverlayGeom::Conflict(_)
         | OverlayGeom::Bulk(_)
-        | OverlayGeom::Sync(_) => match dialog {
+        | OverlayGeom::Sync(_)
+        | OverlayGeom::Permissions(_) => match dialog {
             // The one card with no strip. It is a question and two buttons,
             // and its keys are the ones every yes/no in every program has —
             // `Enter` is the lit button, `Esc` is the other. A footer spelling
@@ -18790,6 +18884,7 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
             Some(Dialog::Bulk(_)) => Vec::new(),
             // The sync card's switches say what pressing them will do.
             Some(Dialog::Sync(card)) => card.hints(),
+            Some(Dialog::Permissions(card)) => card.hints(),
             Some(Dialog::Conflict(_)) => vec![
                 Hint::inert("↑↓", "choose"),
                 Hint::inert("o s r", "overwrite / skip / rename"),
@@ -18873,6 +18968,7 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         A::Cut => C::YankCut,
         A::Paste => C::Paste,
         A::Rename => C::Rename,
+        A::Permissions => C::Permissions,
         A::Trash => C::Trash,
         A::ExtractHere => C::ArchiveExtractHere,
         // "All into one folder" is the same verb as "to folder", behind the
@@ -18972,6 +19068,9 @@ fn inert_in_trash(command: Command) -> bool {
             | C::ArchiveExtractHere
             | C::ArchiveExtractSubfolder
             | C::ArchiveCreate
+            // A trashed file's mode is the trash's business until it is put
+            // back, and a restore brings it back with the mode it had.
+            | C::Permissions
             // Nested trash is not a place.
             | C::OpenTrash
     )
@@ -19662,6 +19761,9 @@ mod tests {
 
     /// `U`, and the undo history card.
     mod undo;
+
+    /// `C`: the permissions card, its job, `u`, and the doors to it.
+    mod permissions;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the
@@ -25177,6 +25279,8 @@ mod tests {
         app.run(Command::SelectAll, 10, now);
         app.run(Command::Rename, 10, now);
         card(&mut app, "bulk");
+        app.run(Command::Permissions, 10, now);
+        card(&mut app, "permissions");
         std::fs::write(app.files.join("sub").join("a.txt"), b"y").expect("write the source");
         let plan = plan_paste(
             &Clipboard::yank([app.files.join("sub").join("a.txt")]),

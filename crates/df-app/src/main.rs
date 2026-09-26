@@ -40,6 +40,7 @@ mod mouse;
 mod open;
 mod overlay;
 mod panel;
+mod permissions;
 mod playback;
 /// `--portal`: the xdg-desktop-portal file-chooser backend.
 mod portal;

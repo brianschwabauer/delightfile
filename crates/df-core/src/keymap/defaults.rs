@@ -228,6 +228,9 @@ pub(super) fn build() -> Registry {
         (Files, "e",      C::ArchiveExtractHere,      "Extract here",                  Always),
         (Files, "E",      C::ArchiveExtractSubfolder, "Extract to folder",             Always),
         (Files, "A",      C::ArchiveCreate,           "Archive the selection",         Always),
+        // No yazi ancestor. `C` for chmod, one key from `c`'s copy chords,
+        // which it cannot be mistaken for: those are two keys long.
+        (Files, "C",      C::Permissions,             "Permissions…",                  Always),
 
         // ── Files: what is shown ────────────────────────────────────────────
         (Files, ".",   C::ToggleHidden,        "Toggle hidden files",   Always),
@@ -437,6 +440,13 @@ pub(super) fn build() -> Registry {
         (Spot, "left",   C::SpotSwipePrev, "Swipe to the previous file", Always),
         (Spot, "right",  C::SpotSwipeNext, "Swipe to the next file",     Always),
         (Spot, "c c",    C::SpotCopyCell,  "Copy the selected cell",     Always),
+        // `Enter` on the focused row: the permissions card on the Permissions
+        // row, the checksum on its row, and nothing where a row is only read.
+        // `Space` does the smaller thing where there is one — a chip's bit —
+        // and is matched by hand (the app's `overlay_literal`).
+        (Spot, "enter",  C::OverlaySubmit, "Edit the permissions, or start the checksum", Always),
+        // The card from anywhere on the panel, as `C` opens it from the list.
+        (Spot, "C",      C::Permissions,   "Permissions…",               Always),
 
         // ── Help (`~` / `F1`) ───────────────────────────────────────────────
         // The sheet takes the keyboard whole while it is up, so every key that

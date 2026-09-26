@@ -188,6 +188,10 @@ commands! {
     // The other direction: the selection packed into one new archive, its
     // format chosen by the extension typed into the prompt.
     ArchiveCreate => "archive-create",
+    // `C`: the permissions card over the selection, or the row under the
+    // cursor — the nine bits as a grid, the octal under it, and for a
+    // folder, everything inside it too (`ops::mode`).
+    Permissions => "permissions",
     // The trash, browsed as a directory (PLAN §7.4). `OpenTrash` is `g t` — the
     // slot yazi spent on `/tmp`, which this plan dropped. Restore and purge are
     // *not* commands of their own: inside the trash view `Enter`/`r` restore and
