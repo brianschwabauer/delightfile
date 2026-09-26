@@ -757,6 +757,158 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+// ── Keeping the trash from growing for ever (`[mgr] trash_keep_days`) ───────
+
+/// One day, in the unit a `SystemTime` is compared in.
+const DAY_SECS: u64 = 86_400;
+
+/// How far a `DeletionDate` may be from UTC, which is how it is read.
+///
+/// The spec writes the date in *local* time and delightfile writes UTC (see
+/// [`iso8601_utc`]); the record does not say which, so a date written by a
+/// desktop west of Greenwich reads up to twelve hours older than it is. The
+/// widest offset any zone has is fourteen hours, and an item has to be that
+/// much past its keep before a purge will touch it — so "removed for good
+/// after 30 days" can mean thirty days and a few hours, and never twenty-nine
+/// and a half.
+pub const DATE_SLACK_SECS: u64 = 14 * 3600;
+
+/// `YYYY-MM-DDThh:mm:ss` — a `.trashinfo`'s `DeletionDate` — as a
+/// [`SystemTime`], read as UTC.
+///
+/// Hand-rolled for the same reason the writer is: parsing a fixed-width ini
+/// field is arithmetic, and the alternative is a date crate for one line.
+/// Anything that does not parse is `None`, and every reader takes that as "no
+/// date" rather than as an error: the trash view still lists the item, and the
+/// automatic purge never touches it ([`expired`]).
+pub fn parse_deletion_date(text: &str) -> Option<SystemTime> {
+    let bytes = text.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
+        return None;
+    }
+    let num = |from: usize, to: usize| text.get(from..to)?.parse::<i64>().ok();
+    let (year, month, day) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
+    let (hour, minute, second) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month as u32, day as u32);
+    let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
+    if secs >= 0 {
+        SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(secs as u64))
+    } else {
+        SystemTime::UNIX_EPOCH.checked_sub(std::time::Duration::from_secs(secs.unsigned_abs()))
+    }
+}
+
+/// Howard Hinnant's `days_from_civil` — the inverse of [`civil_from_days`],
+/// for the same reason: no lookup tables, no leap-year special cases.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = month as i64;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The items a trash kept for `keep_days` days may lose at `now`: every one
+/// with a record whose `DeletionDate` reads, and reads at least that many days
+/// (and [`DATE_SLACK_SECS`]) ago.
+///
+/// Pure, because it is the one decision in the program that destroys files
+/// nobody pointed at, and the rules have to be a table rather than a hope.
+/// **Never** chosen:
+///
+/// - anything at all when `keep_days` is `0`, which is "never purge";
+/// - an orphan ([`TrashedItem::is_orphan`]) — bytes with no record, whose age
+///   nobody wrote down;
+/// - a record whose date is missing or does not parse — its age is unknown,
+///   and unknown is not old;
+/// - a date in the future, which is a clock that was wrong rather than an item
+///   that is old;
+/// - and anything newer than the keep.
+///
+/// An info file that cannot be read or parsed at all never gets this far:
+/// [`Trash::list`] skips it, and [`Trash::orphans`] will not claim its file.
+pub fn expired(items: &[TrashedItem], now: SystemTime, keep_days: u64) -> Vec<TrashedItem> {
+    if keep_days == 0 {
+        return Vec::new();
+    }
+    let keep = keep_days
+        .saturating_mul(DAY_SECS)
+        .saturating_add(DATE_SLACK_SECS);
+    let Some(cutoff) = now.checked_sub(std::time::Duration::from_secs(keep)) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|item| !item.is_orphan())
+        .filter(|item| parse_deletion_date(&item.deleted_at).is_some_and(|at| at <= cutoff))
+        .cloned()
+        .collect()
+}
+
+/// What a purge of old items came to: how many went, and how many would not.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Purged {
+    pub removed: usize,
+    pub failed: usize,
+    /// The first refusal, word for word, for the task panel and the toast.
+    pub first_error: Option<String>,
+}
+
+/// Destroy every item in `trash` that [`expired`] chooses.
+///
+/// An item that will not go is counted and stepped over — one unreadable
+/// directory must not keep a year of other deletions on the disk — and the
+/// first reason is kept for whoever reports it. A cancel stops between items
+/// (or inside one, through [`purge`]'s own tree walk) and is the only error
+/// that ends the run early; a trash that cannot be listed at all is the only
+/// other one.
+pub fn purge_expired(
+    trash: &Trash,
+    keep_days: u64,
+    now: SystemTime,
+    ctx: &TaskCtx,
+) -> Result<Purged> {
+    let old = expired(&trash.list()?, now, keep_days);
+    let mut report = Purged::default();
+    for item in &old {
+        ctx.checkpoint()?;
+        // Asked again at the last moment, because the listing is a moment
+        // old: a record restored, and its name taken by a newer deletion in
+        // between, would otherwise be the newer file destroyed under the old
+        // one's date.
+        if !still_recorded(item) {
+            continue;
+        }
+        match purge(item, ctx) {
+            Ok(()) => report.removed += 1,
+            Err(DfError::Cancelled) => return Err(DfError::Cancelled),
+            Err(e) => {
+                report.failed += 1;
+                report.first_error.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Whether `item`'s record still says what it said when it was listed.
+fn still_recorded(item: &TrashedItem) -> bool {
+    std::fs::read_to_string(item.info_path())
+        .ok()
+        .and_then(|text| parse_trashinfo(&text).ok())
+        .is_some_and(|(original, deleted_at)| {
+            original == item.original && deleted_at == item.deleted_at
+        })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
@@ -1284,5 +1436,192 @@ mod tests {
             out.to_str().is_some(),
             "the clipped name is still valid UTF-8"
         );
+    }
+
+    // ── `[mgr] trash_keep_days` ─────────────────────────────────────────────
+
+    /// A record with the given date, in a trash that is never touched.
+    fn dated(name: &str, deleted_at: &str) -> TrashedItem {
+        TrashedItem {
+            trash_root: PathBuf::from("/nonexistent/Trash"),
+            name: OsString::from(name),
+            original: PathBuf::from(format!("/home/someone/{name}")),
+            deleted_at: deleted_at.to_string(),
+        }
+    }
+
+    /// `days` whole days before `now`, as a `.trashinfo` writes it.
+    fn days_before(now: SystemTime, days: u64) -> String {
+        iso8601_utc(now - Duration::from_secs(days * DAY_SECS))
+    }
+
+    fn names(items: &[TrashedItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| i.name.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The whole table: old enough goes, and nothing else ever does — not a
+    /// newer item, not one a few hours short of its keep, not an orphan, not a
+    /// date that does not read, not one from the future, and nothing at all
+    /// when the keep is zero.
+    #[test]
+    fn only_what_is_older_than_the_keep_expires() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        let orphan = TrashedItem {
+            original: PathBuf::new(),
+            deleted_at: String::new(),
+            ..dated("orphan", "")
+        };
+        let items = vec![
+            dated("ancient", &days_before(now, 400)),
+            dated("old", &days_before(now, 31)),
+            // Thirty days to the second is inside the zone slack: a desktop
+            // west of Greenwich wrote that date in local time, and it may
+            // really be twenty-nine and a half days old.
+            dated("exactly", &days_before(now, 30)),
+            dated("new", &days_before(now, 2)),
+            dated("today", &iso8601_utc(now)),
+            dated(
+                "tomorrow",
+                &iso8601_utc(now + Duration::from_secs(DAY_SECS)),
+            ),
+            dated("unreadable", "last tuesday"),
+            dated("undated", ""),
+            orphan,
+        ];
+        assert_eq!(names(&expired(&items, now, 30)), vec!["ancient", "old"]);
+        // A day past the keep and the slack, "exactly" goes too.
+        let later = now + Duration::from_secs(DAY_SECS);
+        assert_eq!(
+            names(&expired(&items, later, 30)),
+            vec!["ancient", "old", "exactly"]
+        );
+        // A shorter keep reaches further, and still never the unknowable.
+        assert_eq!(
+            names(&expired(&items, now, 1)),
+            vec!["ancient", "old", "exactly", "new"]
+        );
+        // Zero is "never purge", however old the trash is.
+        assert!(expired(&items, now, 0).is_empty());
+        // A keep longer than the clock has been running chooses nothing
+        // rather than wrapping round.
+        assert!(expired(&items, SystemTime::UNIX_EPOCH, 30).is_empty());
+        assert!(expired(&items, now, u64::MAX).is_empty());
+    }
+
+    /// The date parser reads back exactly what the writer wrote, and turns
+    /// everything else into "no date" rather than a panic.
+    #[test]
+    fn a_deletion_date_round_trips_and_nonsense_is_none() {
+        for stamp in [0u64, 1, 951_827_696, 1_756_598_400, 4_102_444_800] {
+            let t = SystemTime::UNIX_EPOCH + Duration::from_secs(stamp);
+            assert_eq!(parse_deletion_date(&iso8601_utc(t)), Some(t));
+        }
+        for text in [
+            "",
+            "yesterday",
+            "2026-13-01T00:00:00",
+            "2026-08-31T25:00:00",
+            "2026/08/31T00:00:00",
+        ] {
+            assert_eq!(parse_deletion_date(text), None, "{text}");
+        }
+    }
+
+    /// Write an item straight into a trash, with the date its record says —
+    /// the way another program's trash, or last month's, looks on disk.
+    fn plant(trash: &Trash, name: &str, deleted_at: &str, dir: bool) {
+        trash.ensure().unwrap();
+        let file = trash.files_dir().join(name);
+        if dir {
+            std::fs::create_dir_all(file.join("inner")).unwrap();
+            std::fs::write(file.join("inner/deep.txt"), b"deep").unwrap();
+        } else {
+            std::fs::write(&file, b"body").unwrap();
+        }
+        let info = trash.info_dir().join(format!("{name}.{TRASHINFO_EXT}"));
+        let original = PathBuf::from(format!("/home/someone/{name}"));
+        std::fs::write(info, trashinfo_text(&original, deleted_at)).unwrap();
+    }
+
+    /// Against a real trash: the old items go, file and record both, and
+    /// every item the table protects is still there afterwards — including an
+    /// orphan and a record that cannot be read at all.
+    #[test]
+    fn purging_the_old_leaves_everything_else_where_it_was() {
+        let t = TempTree::new("trash-keep");
+        let trash = trash_in(&t);
+        let now = SystemTime::now();
+        plant(&trash, "old.txt", &days_before(now, 45), false);
+        plant(&trash, "old-folder", &days_before(now, 90), true);
+        plant(&trash, "recent.txt", &days_before(now, 3), false);
+        plant(&trash, "undated.txt", "", false);
+        // A record that is not a record: no `Path=`, so it never lists.
+        plant(&trash, "broken.txt", &days_before(now, 400), false);
+        std::fs::write(
+            trash.info_dir().join(format!("broken.txt.{TRASHINFO_EXT}")),
+            "[Trash Info]\nDeletionDate=2001-01-01T00:00:00\n",
+        )
+        .unwrap();
+        // Bytes with no record at all.
+        std::fs::write(trash.files_dir().join("orphan.bin"), b"?").unwrap();
+
+        let report = purge_expired(&trash, 30, now, &ctx()).unwrap();
+        assert_eq!(
+            report,
+            Purged {
+                removed: 2,
+                failed: 0,
+                first_error: None
+            }
+        );
+        for gone in ["old.txt", "old-folder"] {
+            assert!(!exists(&trash.files_dir().join(gone)), "{gone} survived");
+            assert!(
+                !exists(&trash.info_dir().join(format!("{gone}.{TRASHINFO_EXT}"))),
+                "{gone}'s record survived"
+            );
+        }
+        for kept in ["recent.txt", "undated.txt", "broken.txt", "orphan.bin"] {
+            assert!(exists(&trash.files_dir().join(kept)), "{kept} was purged");
+        }
+        let left: Vec<String> = names(&trash.list().unwrap());
+        assert_eq!(left, vec!["orphan.bin", "recent.txt", "undated.txt"]);
+
+        // Run again and there is nothing old left to take.
+        assert_eq!(
+            purge_expired(&trash, 30, now, &ctx()).unwrap(),
+            Purged::default()
+        );
+        // …and a keep of zero never takes anything.
+        assert_eq!(
+            purge_expired(
+                &trash,
+                0,
+                now + Duration::from_secs(9_000 * DAY_SECS),
+                &ctx()
+            )
+            .unwrap(),
+            Purged::default()
+        );
+        assert_eq!(trash.list().unwrap().len(), 3);
+    }
+
+    /// A record that changed between the listing and the purge is not the
+    /// item the listing chose, and is left alone.
+    #[test]
+    fn a_record_that_changed_since_the_listing_is_not_purged() {
+        let t = TempTree::new("trash-keep-race");
+        let trash = trash_in(&t);
+        let now = SystemTime::now();
+        plant(&trash, "notes.txt", &days_before(now, 45), false);
+        let listed = expired(&trash.list().unwrap(), now, 30);
+        assert_eq!(listed.len(), 1);
+        // Restored and trashed again under the same name, a moment ago.
+        plant(&trash, "notes.txt", &iso8601_utc(now), false);
+        assert!(!still_recorded(&listed[0]));
+        assert!(still_recorded(&trash.list().unwrap()[0]));
     }
 }

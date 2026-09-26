@@ -38,6 +38,7 @@
 //! view_scale = "compact"     # compact comfortable roomy — the step every tab starts at
 //! folder_sizes = true      # recursive directory sizes in the size column
 //! folder_size_ttl = 600    # seconds a walked size is reused before re-walking
+//! trash_keep_days = 30     # days before a trashed item goes for good; 0 = never
 //!
 //! [tasks]
 //! micro_workers = 10
@@ -119,6 +120,11 @@ pub const DEFAULT_SCROLLOFF: usize = 5;
 /// this is a config file and `600` is what somebody types. The essay on why ten
 /// minutes lives on the constant it mirrors.
 pub const DEFAULT_FOLDER_SIZE_TTL: u64 = 600;
+
+/// Days a trashed item is kept before the automatic purge removes it for good.
+/// The argument for a month is on [`MgrConfig::trash_keep_days`]; `0` in the
+/// file turns the purge off.
+pub const DEFAULT_TRASH_KEEP_DAYS: u64 = 30;
 
 /// Workers for the small, latency-sensitive jobs (stat, mime, thumbnails) and
 /// for the big ones (copies, moves, deletes). 10/10 as configured: enough
@@ -654,6 +660,18 @@ pub struct MgrConfig {
     /// the old behaviour and is only right on a directory somebody else is
     /// writing to continuously.
     pub folder_size_ttl: u64,
+    /// How many days a trashed item is kept before it is removed for good,
+    /// counted from the `DeletionDate` its record carries (PLAN §7.4).
+    ///
+    /// Thirty, because a trash that is never emptied is a second copy of
+    /// every mistake and every download, growing until the disk is full, and
+    /// a month is longer than anybody takes to notice a file is missing. The
+    /// purge runs at startup and once a day after, on the home trash only,
+    /// and never touches an item whose age it cannot read (see
+    /// [`crate::ops::trash::expired`]).
+    ///
+    /// `0` is "never": the trash keeps everything until it is emptied by hand.
+    pub trash_keep_days: u64,
     /// The file-type filter every listing is narrowed to, when this session is
     /// a file dialog that offered some (see [`crate::fs::TypeFilter`]).
     ///
@@ -680,6 +698,7 @@ impl Default for MgrConfig {
             view_scale: ViewScale::Compact,
             folder_sizes: true,
             folder_size_ttl: DEFAULT_FOLDER_SIZE_TTL,
+            trash_keep_days: DEFAULT_TRASH_KEEP_DAYS,
             types: None,
         }
     }
@@ -930,6 +949,12 @@ impl Config {
                         let mut seconds = config.mgr.folder_size_ttl as usize;
                         let r = read_usize(value, &mut seconds);
                         config.mgr.folder_size_ttl = seconds as u64;
+                        r
+                    }
+                    "trash_keep_days" => {
+                        let mut days = config.mgr.trash_keep_days as usize;
+                        let r = read_usize(value, &mut days);
+                        config.mgr.trash_keep_days = days as u64;
                         r
                     }
                     _ => Err(format!("unknown key `{}` in [mgr]", entry.key)),
@@ -1814,6 +1839,26 @@ mod tests {
         let (config, warnings) = parse("[mgr]\nview_scale = \"grid\"\n");
         assert_eq!(config.mgr.view_scale, ViewScale::Compact);
         assert_eq!(warnings.len(), 1);
+    }
+
+    /// `[mgr] trash_keep_days` is a whole number of days, thirty unless said
+    /// otherwise; `0` is "never purge" and parses as itself, not as a typo;
+    /// anything that is not a whole number warns and leaves the thirty.
+    #[test]
+    fn trash_keep_days_is_days_and_zero_means_never() {
+        assert_eq!(Config::default().mgr.trash_keep_days, 30);
+        assert_eq!(DEFAULT_TRASH_KEEP_DAYS, 30);
+        let (config, warnings) = parse("[mgr]\ntrash_keep_days = 7\n");
+        assert_eq!(config.mgr.trash_keep_days, 7);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (config, warnings) = parse("[mgr]\ntrash_keep_days = 0\n");
+        assert_eq!(config.mgr.trash_keep_days, 0);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        for bad in ["-1", "\"30\"", "2.5", "true"] {
+            let (config, warnings) = parse(&format!("[mgr]\ntrash_keep_days = {bad}\n"));
+            assert_eq!(config.mgr.trash_keep_days, 30, "{bad}");
+            assert_eq!(warnings.len(), 1, "{bad}: {warnings:?}");
+        }
     }
 
     /// `[input]` is an empty table now, and a config that still sets
