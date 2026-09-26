@@ -31,7 +31,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
@@ -870,6 +870,10 @@ pub struct Purged {
 /// (or inside one, through [`purge`]'s own tree walk) and is the only error
 /// that ends the run early; a trash that cannot be listed at all is the only
 /// other one.
+///
+/// Age is `now` less the recorded date, and nothing else: a machine whose
+/// clock has jumped years ahead will purge everything as old, and there is no
+/// defence here against a wrong clock.
 pub fn purge_expired(
     trash: &Trash,
     keep_days: u64,
@@ -897,6 +901,113 @@ pub fn purge_expired(
         }
     }
     Ok(report)
+}
+
+// ── Once a day per user, not per window ─────────────────────────────────────
+
+/// The file in a trash's root that says when delightfile last purged it: its
+/// mtime is the purge, and its being non-empty is what says one has happened
+/// (a purge that has only ever *locked* it leaves it empty).
+///
+/// **Per user, not per window.** Every window is its own process (see
+/// df-app's `window`), and each keeps its own daily check — so without a
+/// shared record every launch purged at once, a window opened beside one
+/// that had the trash on screen purged its rows out from under it, and two
+/// windows launched together purged side by side, the second counting what
+/// the first had just taken as failures. The stamp is the one record they
+/// share, and an `flock` on it is the one purge at a time.
+///
+/// A dotfile beside `files/` and `info/`: the spec gives the root no other
+/// entries a program should trip over, and every other implementation lists
+/// only those two directories.
+pub const PURGE_STAMP: &str = ".delightfile-purge";
+
+/// How long until a trash stamped at `stamped` is owed a purge, `every` apart
+/// — `None` when it is owed one now.
+///
+/// Pure, over the stamp's reading. Never stamped is owed now; a stamp in the
+/// future (a clock that went backwards) is not owed anything until the clock
+/// has passed it, which errs, as everything here does, towards keeping.
+pub fn purge_wait(
+    stamped: Option<SystemTime>,
+    every: Duration,
+    now: SystemTime,
+) -> Option<Duration> {
+    let stamped = stamped?;
+    match now.duration_since(stamped) {
+        Ok(since) if since >= every => None,
+        Ok(since) => Some(every - since),
+        Err(_) => Some(every),
+    }
+}
+
+/// When `trash` was last purged, by its stamp — `None` for never.
+fn read_stamp(meta: &std::fs::Metadata) -> Option<SystemTime> {
+    (meta.len() > 0).then(|| meta.modified().ok()).flatten()
+}
+
+/// How long until `trash` is owed a purge, asked without taking the lock —
+/// the cheap question a window asks before it queues one. `None` is now.
+///
+/// A trash that does not exist yet has nothing to purge and is asked again in
+/// `every`.
+pub fn purge_due_in(trash: &Trash, every: Duration, now: SystemTime) -> Option<Duration> {
+    if !exists(trash.root()) {
+        return Some(every);
+    }
+    let stamp = trash.root().join(PURGE_STAMP);
+    let stamped = std::fs::metadata(stamp)
+        .ok()
+        .and_then(|meta| read_stamp(&meta));
+    purge_wait(stamped, every, now)
+}
+
+/// [`purge_expired`], at most once per `every` for everybody who purges this
+/// trash: `None` when it stood down — another process holds the purge, or
+/// the stamp says the last one was less than `every` ago.
+///
+/// The stamp is locked (`flock`, exclusive, never waiting) for the whole run
+/// and read *under* the lock, so a process that loses the race to one that
+/// has just finished sees the fresh stamp and stands down too. It is written
+/// only when the run completes — a cancelled purge leaves it as it was, and
+/// the next check runs it again.
+pub fn purge_expired_if_due(
+    trash: &Trash,
+    keep_days: u64,
+    every: Duration,
+    now: SystemTime,
+    ctx: &TaskCtx,
+) -> Result<Option<Purged>> {
+    use std::io::Write;
+    if !exists(trash.root()) {
+        return Ok(None);
+    }
+    let path = trash.root().join(PURGE_STAMP);
+    let mut stamp = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|e| DfError::io(&path, e))?;
+    match stamp.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => return Err(DfError::io(&path, e)),
+    }
+    let meta = stamp.metadata().map_err(|e| DfError::io(&path, e))?;
+    if purge_wait(read_stamp(&meta), every, now).is_some() {
+        return Ok(None);
+    }
+    let report = purge_expired(trash, keep_days, now, ctx)?;
+    // Written, not only touched: the content is what tells a stamp from a
+    // lock file somebody else created and never finished with.
+    stamp
+        .set_len(0)
+        .and_then(|()| stamp.write_all(b"delightfile purged this trash; the mtime says when\n"))
+        .and_then(|()| stamp.set_modified(now))
+        .map_err(|e| DfError::io(&path, e))?;
+    Ok(Some(report))
 }
 
 /// Whether `item`'s record still says what it said when it was listed.
@@ -1623,5 +1734,119 @@ mod tests {
         plant(&trash, "notes.txt", &iso8601_utc(now), false);
         assert!(!still_recorded(&listed[0]));
         assert!(still_recorded(&trash.list().unwrap()[0]));
+    }
+
+    const DAY: Duration = Duration::from_secs(DAY_SECS);
+
+    /// Never stamped is owed now; a stamp a day old is owed now; a younger one
+    /// waits out the rest of its day; one from the future waits a whole day.
+    #[test]
+    fn a_stamp_says_how_long_until_the_next_purge() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        let hour = Duration::from_secs(3600);
+        assert_eq!(purge_wait(None, DAY, now), None);
+        assert_eq!(purge_wait(Some(now - DAY), DAY, now), None);
+        assert_eq!(purge_wait(Some(now - DAY * 3), DAY, now), None);
+        assert_eq!(purge_wait(Some(now - hour), DAY, now), Some(DAY - hour));
+        assert_eq!(purge_wait(Some(now), DAY, now), Some(DAY));
+        assert_eq!(purge_wait(Some(now + hour), DAY, now), Some(DAY));
+    }
+
+    /// Once a day for everybody: the first run purges and stamps, a second
+    /// the same day stands down whatever has aged since, and a day on it runs
+    /// again — and the quick question a window asks agrees throughout.
+    #[test]
+    fn a_purge_runs_once_a_day_whoever_asks() {
+        let t = TempTree::new("trash-keep-stamp");
+        let trash = trash_in(&t);
+        let now = SystemTime::now();
+        // Nothing to purge in a trash that is not there, and nothing made.
+        assert_eq!(
+            purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap(),
+            None
+        );
+        assert_eq!(purge_due_in(&trash, DAY, now), Some(DAY));
+        assert!(!exists(trash.root()));
+
+        plant(&trash, "old.txt", &days_before(now, 45), false);
+        assert_eq!(purge_due_in(&trash, DAY, now), None, "never purged");
+        let first = purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap();
+        assert_eq!(first.map(|r| r.removed), Some(1));
+        // Stamped with the purge's own `now` — to the filesystem's grain.
+        let stamp = trash.root().join(PURGE_STAMP);
+        let stamped = std::fs::metadata(&stamp).unwrap().modified().unwrap();
+        let off = now.duration_since(stamped).unwrap_or_else(|e| e.duration());
+        assert!(off < Duration::from_secs(1), "stamped {off:?} away");
+        let wait = purge_due_in(&trash, DAY, now).expect("not owed again today");
+        assert!(wait > DAY - Duration::from_secs(1));
+
+        // Another process, later the same day: stands down, and the item that
+        // has become old since is left for tomorrow's.
+        plant(&trash, "older.txt", &days_before(now, 60), false);
+        let later = now + Duration::from_secs(3600);
+        assert_eq!(
+            purge_expired_if_due(&trash, 30, DAY, later, &ctx()).unwrap(),
+            None
+        );
+        assert!(exists(&trash.files_dir().join("older.txt")));
+
+        let tomorrow = now + DAY + Duration::from_secs(1);
+        assert_eq!(purge_due_in(&trash, DAY, tomorrow), None);
+        let next = purge_expired_if_due(&trash, 30, DAY, tomorrow, &ctx()).unwrap();
+        assert_eq!(next.map(|r| r.removed), Some(1));
+        assert!(!exists(&trash.files_dir().join("older.txt")));
+    }
+
+    /// A purge another process is running is not run twice: the second
+    /// stands down silently while the lock is held — and a stamp file that
+    /// has only ever been locked, never written, is not a purge.
+    #[test]
+    fn a_second_purger_stands_down_while_the_first_holds_the_stamp() {
+        let t = TempTree::new("trash-keep-lock");
+        let trash = trash_in(&t);
+        let now = SystemTime::now();
+        plant(&trash, "old.txt", &days_before(now, 45), false);
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(trash.root().join(PURGE_STAMP))
+            .unwrap();
+        held.lock().unwrap();
+        assert_eq!(
+            purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap(),
+            None
+        );
+        assert!(
+            exists(&trash.files_dir().join("old.txt")),
+            "purged under a lock"
+        );
+        // Empty, so still owed: the other process never finished.
+        assert_eq!(purge_due_in(&trash, DAY, now), None);
+        held.unlock().unwrap();
+        let report = purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap();
+        assert_eq!(report.map(|r| r.removed), Some(1));
+    }
+
+    /// A cancelled purge does not stamp: it has not happened, and the next
+    /// check runs it.
+    #[test]
+    fn a_cancelled_purge_is_still_owed() {
+        use crate::tasks::{NullSink, TaskFlags};
+        use std::sync::Arc;
+        let t = TempTree::new("trash-keep-cancel");
+        let trash = trash_in(&t);
+        let now = SystemTime::now();
+        plant(&trash, "old.txt", &days_before(now, 45), false);
+        let flags = Arc::new(TaskFlags::new());
+        flags.cancel();
+        let cancelled = TaskCtx::with_sink(flags, Arc::new(NullSink));
+        assert!(matches!(
+            purge_expired_if_due(&trash, 30, DAY, now, &cancelled),
+            Err(DfError::Cancelled)
+        ));
+        assert!(exists(&trash.files_dir().join("old.txt")));
+        assert_eq!(purge_due_in(&trash, DAY, now), None);
     }
 }
