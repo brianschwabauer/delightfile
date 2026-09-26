@@ -12,7 +12,9 @@
 //!
 //! A step never moves a row: undoing the newest operation turns the row just
 //! under the line into the row just over it, and redoing turns it back. The
-//! cursor is an index, and stays on the operation it was on.
+//! cursor is an index, and stays on the operation it was on — except for a
+//! copy being redone, which is on neither stack while its job runs: its row
+//! is missing until it lands, and a walk stops at it.
 //!
 //! The rows are a pure function of the journal ([`rows`]), what `Enter` does
 //! on one is a pure function of the rows ([`walk`]), and "how long ago" is a

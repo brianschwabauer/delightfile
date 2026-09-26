@@ -102,6 +102,86 @@ fn a_rename_undone_and_redone_lands_the_cursor_on_the_new_name() {
     );
 }
 
+/// Let every queued job finish and land: the engine's events handed to the
+/// app as the frame loop hands them, then the scanner drained until `done`
+/// says the listing has caught up. The compress tests' helper, for the same
+/// reason.
+fn land(app: &mut App, done: impl Fn(&App) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !app.ops.is_empty() && Instant::now() < deadline {
+        let events: Vec<TaskEvent> = app.task_events.try_iter().collect();
+        for event in events {
+            app.task_event(event, Instant::now());
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(app.ops.is_empty(), "the job never finished");
+    while !done(app) && Instant::now() < deadline {
+        for update in app.scanner.drain() {
+            app.tabs.active_mut().apply(&update);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(done(app), "the listing never caught up");
+}
+
+fn cursor_name(app: &App) -> Option<String> {
+    app.tab().cwd.dir.cursor_entry().map(|e| e.name.clone())
+}
+
+/// A copy redone is a task, as the paste it repeats was — not a copy made in
+/// the keystroke — with `u` and `U` waiting for it; it lands with its own
+/// sentence and the cursor on what it made, and `u`, `U`, `u` walks it.
+#[test]
+fn a_copy_is_redone_as_a_task_and_round_trips() {
+    let ctx = egui::Context::default();
+    let mut app = Fixture::new("redo-copy", &["a.txt"]);
+    run_frame(&mut app, &ctx, Vec::new());
+    let now = Instant::now();
+    // `y` and `p` in the same folder: a copy beside it.
+    app.run(Command::Yank, 10, now);
+    app.run(Command::Paste, 10, now);
+    let copy = app.files.join("a_1.txt");
+    land(&mut app, |app| {
+        app.tab().cwd.dir.position_of("a_1.txt").is_some()
+    });
+    assert!(matches!(app.journal.peek(), Some(OpRecord::Copy { .. })));
+
+    app.run(Command::Undo, 10, now);
+    assert!(!copy.exists());
+
+    app.run(Command::Redo, 10, now);
+    assert_eq!(app.ops.len(), 1, "a job, like the paste");
+    let copies = |app: &App| {
+        app.engine
+            .snapshot()
+            .iter()
+            .filter(|task| task.name.starts_with("Copy 1 item"))
+            .count()
+    };
+    assert_eq!(
+        copies(&app),
+        2,
+        "a row in the task panel beside the paste's"
+    );
+    assert!(app.journal.busy());
+    assert!(app.refusal(Command::Undo).is_some(), "u waits for it");
+    assert!(app.refusal(Command::Redo).is_some(), "and so does U");
+
+    land(&mut app, |app| {
+        cursor_name(app).as_deref() == Some("a_1.txt")
+    });
+    assert!(copy.is_file());
+    assert_eq!(toast_text(&app), Some("Copied a_1.txt again"));
+    assert!(!app.journal.busy());
+    assert_eq!((app.journal.len(), app.journal.redo_len()), (1, 0));
+    assert!(matches!(app.journal.peek(), Some(OpRecord::Copy { .. })));
+
+    app.run(Command::Undo, 10, now);
+    assert!(!copy.exists(), "and `u` takes it back again");
+    assert!(app.journal.can_redo());
+}
+
 /// The card lists the journal newest first, the cursor on the newest thing
 /// to take back; `Enter` on the second row undoes two, the card stays up,
 /// and the two rows it walked past are over the line, where `U` would redo

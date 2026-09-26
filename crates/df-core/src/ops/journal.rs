@@ -26,6 +26,12 @@
 //! goes back on the undo stack, so `u`, `U`, `u` walks back and forth over one
 //! step for as long as nothing else happens.
 //!
+//! A copy is the one redo that is not done here. It can take minutes, so it is
+//! checked here and handed back as a plan ([`RedoCopy`]) for the caller to run
+//! as the job a paste is, with its row in the task panel, its progress and its
+//! cancel; the journal holds the entry aside while it runs, refuses `u` and
+//! `U` until it is over, and is told how it went ([`Journal::finish_redo`]).
+//!
 //! The redo stack is a line, not a tree. Recording anything new clears it: a
 //! redo of something undone before today's rename would replay it onto a
 //! world it was never made in. So does an undo that stopped part way, whose
@@ -46,6 +52,7 @@ use crate::tasks::TaskCtx;
 use crate::text::grouped;
 use crate::{DfError, Result};
 
+use super::paste::{PasteItem, PasteMode, PastePlan};
 use super::trash::{Trash, TrashedItem};
 use super::{exists, normalize};
 
@@ -784,8 +791,79 @@ pub struct Journal {
     /// What `u` has taken back, the most recently undone last: `U` repeats
     /// from the back. Bounded by the same depth.
     undone: VecDeque<Stamped<Undone>>,
+    /// A redo of a copy that is running as a job ([`RedoCopy`]), off the redo
+    /// stack until it is over.
+    copying: Option<Copying>,
     depth: usize,
 }
+
+/// A redo stack entry whose copy is running, held aside until the caller says
+/// how it went ([`Journal::finish_redo`]).
+#[derive(Debug, Clone)]
+struct Copying {
+    entry: Stamped<Undone>,
+    /// Whether the redo stack it came off is still there to put it back on.
+    /// Something new recorded while it ran clears that stack, and whatever of
+    /// the copy does not land has no line left to wait in.
+    line: bool,
+}
+
+/// What `U` did, or has handed back to be done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Redo {
+    /// Done, here and now.
+    Done(RedoReport),
+    /// A copy, checked and ready for the caller to run as a job.
+    Copy(RedoCopy),
+}
+
+/// A copy `U` is to make again: checked — every source still the file it was
+/// when it was copied, every destination still free — and handed back to be
+/// run rather than run here, because a copy is the one redo that can take
+/// minutes. The caller runs [`RedoCopy::plan`] as the job a paste is and then
+/// tells the journal what landed ([`Journal::finish_redo`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedoCopy {
+    /// Each item's source, and the destination it is copied to again.
+    pub items: Vec<(PathBuf, PathBuf)>,
+    /// What to say once it has landed: "Copied a.txt again".
+    pub description: String,
+}
+
+impl RedoCopy {
+    /// The copy as a settled paste: every item ready, none overwriting — each
+    /// destination was checked free — and nothing left to ask about. The
+    /// paste's own `execute` manifests each item as it lands, with its source,
+    /// so what it records is what `u` takes back and `U` makes again.
+    pub fn plan(&self) -> PastePlan {
+        let dest_dir = self
+            .items
+            .first()
+            .and_then(|(_, dst)| dst.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        PastePlan {
+            mode: PasteMode::Copy,
+            dest_dir,
+            ready: self
+                .items
+                .iter()
+                .map(|(src, dst)| PasteItem {
+                    src: src.clone(),
+                    dst: dst.clone(),
+                    overwrite: false,
+                })
+                .collect(),
+            conflicts: Vec::new(),
+            no_ops: Vec::new(),
+        }
+    }
+}
+
+/// Why `u` and `U` wait while a redo's copy runs: the copy lands on the undo
+/// stack when it is over, and a step taken meanwhile would put it there out
+/// of order.
+const COPYING: &str = "a copy being redone is still running";
 
 impl Default for Journal {
     fn default() -> Journal {
@@ -798,6 +876,7 @@ impl Journal {
         Journal {
             entries: VecDeque::new(),
             undone: VecDeque::new(),
+            copying: None,
             // A depth of 0 would silently make `u` do nothing; one step of undo
             // is the minimum that is not a lie.
             depth: depth.max(1),
@@ -815,6 +894,9 @@ impl Journal {
     /// has to say how long ago.
     pub fn record_at(&mut self, record: OpRecord, at: Instant) {
         self.undone.clear();
+        if let Some(copying) = &mut self.copying {
+            copying.line = false;
+        }
         self.push(record, at);
     }
 
@@ -854,6 +936,12 @@ impl Journal {
         !self.undone.is_empty()
     }
 
+    /// Whether a redo's copy is running ([`RedoCopy`]), and `u` and `U` are
+    /// waiting for it.
+    pub fn busy(&self) -> bool {
+        self.copying.is_some()
+    }
+
     pub fn depth(&self) -> usize {
         self.depth
     }
@@ -889,6 +977,7 @@ impl Journal {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.undone.clear();
+        self.copying = None;
     }
 
     /// Undo the most recent operation.
@@ -905,6 +994,9 @@ impl Journal {
     /// half that went has no forward form of its own, and nothing undone
     /// before it can be redone past it.
     pub fn undo(&mut self, ctx: &TaskCtx) -> Result<UndoReport> {
+        if self.busy() {
+            return Err(DfError::Op(COPYING.to_string()));
+        }
         let Some(entry) = self.entries.back().cloned() else {
             return Err(DfError::Op("nothing to undo".to_string()));
         };
@@ -935,10 +1027,23 @@ impl Journal {
     /// without clearing this one, since it is not something new — so `u`
     /// takes it back. A redo that fails part way puts what did land on the
     /// undo stack and keeps the rest here, so neither half is lost.
-    pub fn redo(&mut self, ctx: &TaskCtx) -> Result<RedoReport> {
+    ///
+    /// A copy is checked here and handed back ([`Redo::Copy`]) rather than
+    /// made: the entry comes off this stack and is held aside until the caller
+    /// has run it and said what landed ([`Journal::finish_redo`]).
+    pub fn redo(&mut self, ctx: &TaskCtx) -> Result<Redo> {
+        if self.busy() {
+            return Err(DfError::Op(COPYING.to_string()));
+        }
         let Some(entry) = self.undone.back().cloned() else {
             return Err(DfError::Op("nothing to redo".to_string()));
         };
+        if let OpRecord::Copy { created } = &entry.item.record {
+            let copy = redo_copy(&entry.item, created)?;
+            self.undone.pop_back();
+            self.copying = Some(Copying { entry, line: true });
+            return Ok(Redo::Copy(copy));
+        }
         let attempt = redo_attempt(&entry.item, ctx);
         if let Some(done) = attempt.done {
             self.push(done, entry.at);
@@ -946,7 +1051,7 @@ impl Journal {
         match attempt.result {
             Ok(report) => {
                 self.undone.pop_back();
-                Ok(report)
+                Ok(Redo::Done(report))
             }
             Err(e) => {
                 if let Some(rest) = attempt.remaining {
@@ -956,6 +1061,44 @@ impl Journal {
                 }
                 Err(e)
             }
+        }
+    }
+
+    /// A redo's copy is over — landed, failed or cancelled — and `landed` is
+    /// the record of what it made: the paste's record, one manifest per item
+    /// that landed whole, or `None` when nothing did.
+    ///
+    /// What landed goes on the undo stack, stamped with when the copy was
+    /// first done, so `u` takes it back. What did not goes back on the redo
+    /// stack to be tried again — the whole entry when nothing landed — unless
+    /// something new was recorded while the copy ran, which has cleared the
+    /// line it would have waited in.
+    pub fn finish_redo(&mut self, landed: Option<OpRecord>) {
+        let copying = self.copying.take();
+        let at = copying
+            .as_ref()
+            .map_or_else(Instant::now, |copying| copying.entry.at);
+        let roots: Vec<PathBuf> = match &landed {
+            Some(OpRecord::Copy { created }) => created.iter().map(|m| m.root.clone()).collect(),
+            _ => Vec::new(),
+        };
+        if let Some(record) = landed {
+            self.push(record, at);
+        }
+        let Some(Copying { entry, line: true }) = copying else {
+            return;
+        };
+        let OpRecord::Copy { created } = &entry.item.record else {
+            return;
+        };
+        let rest: Vec<CopyManifest> = created
+            .iter()
+            .filter(|manifest| !roots.contains(&manifest.root))
+            .cloned()
+            .collect();
+        if !rest.is_empty() {
+            let undone = entry.item.rest(OpRecord::Copy { created: rest });
+            self.push_undone(undone, entry.at);
         }
     }
 }
@@ -1410,7 +1553,10 @@ fn redo_attempt(undone: &Undone, ctx: &TaskCtx) -> RedoAttempt {
         OpRecord::Rename { moved } => redo_moves(undone, std::slice::from_ref(moved), ctx),
         OpRecord::Renames { moved } => redo_moves(undone, moved, ctx),
         OpRecord::Trash { items } => redo_trash(undone, items, ctx),
-        OpRecord::Copy { created } => redo_copy(undone, created, ctx),
+        // `Journal::redo` hands a copy back as a plan before it gets here.
+        OpRecord::Copy { .. } => RedoAttempt::refused(DfError::Op(
+            "cannot redo: a copy is made again as a job".to_string(),
+        )),
         OpRecord::Create {
             path,
             is_dir,
@@ -1570,65 +1716,29 @@ fn redo_trash(undone: &Undone, items: &[TrashedItem], ctx: &TaskCtx) -> RedoAtte
     }
 }
 
-/// Copy every item again, from the source it was first copied from.
+/// Check that every item can be copied again, from the source it was first
+/// copied from, and say how.
 ///
-/// Checked in full first: each item has to have a recorded source
-/// ([`CopySource`]) that is still the file it was when it was copied, and a
-/// destination that is still free. The copy goes through
-/// [`super::copy::copy_tree`], the machinery a paste uses, and each item is
-/// manifested afresh as it lands, as a paste's are — so `u` after `U` deletes
-/// exactly what this copy made.
-fn redo_copy(undone: &Undone, created: &[CopyManifest], ctx: &TaskCtx) -> RedoAttempt {
-    let mut sources = Vec::with_capacity(created.len());
+/// Checked in full: each item has to have a recorded source ([`CopySource`])
+/// whose fingerprint still matches, and a destination that is still free. The
+/// copy itself is the caller's to run ([`RedoCopy`]).
+fn redo_copy(undone: &Undone, created: &[CopyManifest]) -> Result<RedoCopy> {
+    let mut items = Vec::with_capacity(created.len());
     for manifest in created {
         let Some(source) = manifest.source() else {
-            return RedoAttempt::refused(DfError::Op(format!(
+            return Err(DfError::Op(format!(
                 "cannot redo: nothing records where {} came from",
                 manifest.root.display()
             )));
         };
-        if let Err(e) = source
-            .fingerprint
-            .check(&source.path, "redo")
-            .and_then(|()| free(&manifest.root))
-        {
-            return RedoAttempt::refused(e);
-        }
-        sources.push(source);
+        source.fingerprint.check(&source.path, "redo")?;
+        free(&manifest.root)?;
+        items.push((source.path.clone(), manifest.root.clone()));
     }
-
-    let mut done = Vec::new();
-    let mut touched = Vec::new();
-    for (i, (manifest, source)) in created.iter().zip(&sources).enumerate() {
-        // `copy_tree` takes back a destination it made and could not finish,
-        // so a failure here leaves this item as it was before the redo.
-        if let Err(e) = super::copy::copy_tree(&source.path, &manifest.root, ctx, false) {
-            return RedoAttempt {
-                result: Err(e),
-                done: (!done.is_empty()).then_some(OpRecord::Copy { created: done }),
-                remaining: (i > 0).then(|| {
-                    undone.rest(OpRecord::Copy {
-                        created: created[i..].to_vec(),
-                    })
-                }),
-            };
-        }
-        match CopyManifest::of_tree(&manifest.root) {
-            Ok(again) => done.push(again.copied_from(&source.path)),
-            // Landed, and too big to describe: not undoable, as the paste
-            // that made it the first time would not have been either.
-            Err(e) => log::warn!("no undo record for {}: {e}", manifest.root.display()),
-        }
-        touched.push(manifest.root.clone());
-    }
-    RedoAttempt {
-        result: Ok(RedoReport {
-            description: capitalised(&undone.record.describe_redo()),
-            touched,
-        }),
-        done: (!done.is_empty()).then_some(OpRecord::Copy { created: done }),
-        remaining: None,
-    }
+    Ok(RedoCopy {
+        items,
+        description: capitalised(&undone.record.describe_redo()),
+    })
 }
 
 /// Make the empty file or folder again, and whatever parents it needs.
@@ -2656,6 +2766,24 @@ mod tests {
         }
     }
 
+    /// `U`, carried out as the app carries it out: done here, or — for a copy
+    /// — the plan run the way a paste's job runs it, and the journal told what
+    /// landed.
+    fn redone(j: &mut Journal) -> RedoReport {
+        match j.redo(&ctx()).unwrap() {
+            Redo::Done(report) => report,
+            Redo::Copy(copy) => {
+                assert!(j.busy(), "held aside while it runs");
+                let report = crate::ops::paste::execute(&copy.plan(), &ctx()).unwrap();
+                j.finish_redo(report.record);
+                RedoReport {
+                    description: copy.description,
+                    touched: copy.items.into_iter().map(|(_, dst)| dst).collect(),
+                }
+            }
+        }
+    }
+
     /// A rename of `from` to `to` in `t`, carried out and recorded.
     fn renamed(j: &mut Journal, t: &TempTree, from: &str, to: &str) -> (PathBuf, PathBuf) {
         let from = t.file(from, b"x");
@@ -2679,7 +2807,7 @@ mod tests {
         assert!(from.is_file() && !super::exists(&to));
         assert_eq!((j.len(), j.redo_len()), (0, 1));
 
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Renamed a.txt → b.txt again");
         assert_eq!(report.touched, vec![to.clone()]);
         assert!(to.is_file() && !super::exists(&from));
@@ -2713,7 +2841,7 @@ mod tests {
 
         j.undo(&ctx()).unwrap();
         assert!(a.is_file() && b.is_file());
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Moved 2 items again");
         assert_eq!(std::fs::read(&a2).unwrap(), b"a");
         assert_eq!(std::fs::read(&b2).unwrap(), b"b");
@@ -2739,7 +2867,7 @@ mod tests {
         j.record(OpRecord::Renames { moved });
 
         j.undo(&ctx()).unwrap();
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Renamed 3 items again");
         assert_eq!(j.len(), 1);
         match j.peek() {
@@ -2768,7 +2896,7 @@ mod tests {
 
         j.undo(&ctx()).unwrap();
         assert!(file.is_file());
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Trashed notes.txt again");
         assert!(!super::exists(&file));
         match j.peek() {
@@ -2801,7 +2929,7 @@ mod tests {
 
         j.undo(&ctx()).unwrap();
         assert!(!super::exists(&dst));
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Copied dst again");
         assert_eq!(std::fs::read(dst.join("a")).unwrap(), b"a");
         match j.peek() {
@@ -2877,7 +3005,7 @@ mod tests {
 
         j.undo(&ctx()).unwrap();
         assert!(!super::exists(&t.join("a")));
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Created file notes.md again");
         assert!(made.path.is_file());
         assert_eq!(
@@ -2908,7 +3036,7 @@ mod tests {
             created_parents: Vec::new(),
         });
         j.undo(&ctx()).unwrap();
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Created folder folder again");
         assert!(made.path.is_dir());
         j.undo(&ctx()).unwrap();
@@ -2952,7 +3080,7 @@ mod tests {
         });
 
         j.undo(&ctx()).unwrap();
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Linked link again");
         assert_eq!(std::fs::read_link(&l).unwrap(), text);
         assert!(matches!(j.peek(), Some(OpRecord::Link { .. })));
@@ -2978,7 +3106,7 @@ mod tests {
 
         j.undo(&ctx()).unwrap();
         assert!(!super::exists(&hard));
-        j.redo(&ctx()).unwrap();
+        redone(&mut j);
         assert_eq!(
             std::fs::metadata(&hard).unwrap().ino(),
             std::fs::metadata(&target).unwrap().ino(),
@@ -3008,7 +3136,7 @@ mod tests {
         });
 
         j.undo(&ctx()).unwrap();
-        let report = j.redo(&ctx()).unwrap();
+        let report = redone(&mut j);
         assert_eq!(report.description, "Linked 3 items again");
         for l in &links {
             assert!(super::exists(&l.link), "{}", l.link.display());
@@ -3135,6 +3263,114 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"somebody else's b.txt");
     }
 
+    /// A copy is not made by `U` itself: it is checked, handed back as a
+    /// paste's plan, and held aside — `u` and `U` waiting — until the caller
+    /// says what landed. Nothing landing puts it back to be redone.
+    #[test]
+    fn a_copy_is_redone_as_a_plan_the_caller_runs() {
+        let t = TempTree::new("j-redo-copy-plan");
+        let src = t.file("a.txt", b"a");
+        let dst = t.join("b.txt");
+        copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![CopyManifest::of_tree(&dst).unwrap().copied_from(&src)],
+        });
+        j.undo(&ctx()).unwrap();
+
+        let Redo::Copy(copy) = j.redo(&ctx()).unwrap() else {
+            panic!("a copy is handed back");
+        };
+        assert_eq!(copy.items, vec![(src.clone(), dst.clone())]);
+        assert_eq!(copy.description, "Copied b.txt again");
+        let plan = copy.plan();
+        assert_eq!(plan.mode, PasteMode::Copy);
+        assert_eq!(Some(plan.dest_dir.as_path()), dst.parent());
+        assert!(plan.is_settled() && plan.ready.iter().all(|item| !item.overwrite));
+        assert!(!super::exists(&dst), "nothing copied yet");
+        assert!(j.busy());
+        assert_eq!((j.len(), j.redo_len()), (0, 0), "held aside");
+        for err in [j.undo(&ctx()).unwrap_err(), j.redo(&ctx()).unwrap_err()] {
+            assert!(err.to_string().contains("still running"), "{err}");
+        }
+
+        // Cancelled before it ran: back on the redo stack, whole.
+        j.finish_redo(None);
+        assert!(!j.busy());
+        assert_eq!((j.len(), j.redo_len()), (0, 1));
+
+        // Run this time: on the undo stack, and `u` takes it back.
+        redone(&mut j);
+        assert_eq!(std::fs::read(&dst).unwrap(), b"a");
+        assert_eq!((j.len(), j.redo_len()), (1, 0));
+        j.undo(&ctx()).unwrap();
+        assert!(!super::exists(&dst));
+        assert!(j.can_redo());
+    }
+
+    /// A copy that lands in part — cancelled after its first item — puts that
+    /// item on the undo stack and the rest back on the redo stack.
+    #[test]
+    fn a_copy_redo_that_lands_in_part_splits_across_the_stacks() {
+        let t = TempTree::new("j-redo-copy-part");
+        let a = t.file("src/a.txt", b"a");
+        let b = t.file("src/b.txt", b"b");
+        let dest = t.dir("dst");
+        let (a2, b2) = (dest.join("a.txt"), dest.join("b.txt"));
+        copy::copy_tree(&a, &a2, &ctx(), false).unwrap();
+        copy::copy_tree(&b, &b2, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![
+                CopyManifest::of_tree(&a2).unwrap().copied_from(&a),
+                CopyManifest::of_tree(&b2).unwrap().copied_from(&b),
+            ],
+        });
+        j.undo(&ctx()).unwrap();
+
+        let Redo::Copy(_) = j.redo(&ctx()).unwrap() else {
+            panic!("a copy is handed back");
+        };
+        // The job copied `a.txt` and was cancelled before `b.txt`.
+        copy::copy_tree(&a, &a2, &ctx(), false).unwrap();
+        j.finish_redo(Some(OpRecord::Copy {
+            created: vec![CopyManifest::of_tree(&a2).unwrap().copied_from(&a)],
+        }));
+        match (j.peek(), j.peek_redo()) {
+            (Some(OpRecord::Copy { created: done }), Some(OpRecord::Copy { created: rest })) => {
+                assert_eq!(done[0].root, a2);
+                assert_eq!(rest.len(), 1);
+                assert_eq!(rest[0].root, b2);
+            }
+            other => panic!("{other:?}"),
+        }
+        redone(&mut j);
+        assert_eq!(std::fs::read(&b2).unwrap(), b"b", "the rest, redone");
+    }
+
+    /// Something new recorded while a redo's copy runs clears the line it came
+    /// off: what does not land is not put back on a stack that is gone.
+    #[test]
+    fn a_copy_redo_that_fails_after_something_new_is_not_put_back() {
+        let t = TempTree::new("j-redo-copy-orphan");
+        let src = t.file("a.txt", b"a");
+        let dst = t.join("b.txt");
+        copy::copy_tree(&src, &dst, &ctx(), false).unwrap();
+        let mut j = Journal::default();
+        j.record(OpRecord::Copy {
+            created: vec![CopyManifest::of_tree(&dst).unwrap().copied_from(&src)],
+        });
+        j.undo(&ctx()).unwrap();
+        let Redo::Copy(_) = j.redo(&ctx()).unwrap() else {
+            panic!("a copy is handed back");
+        };
+        renamed(&mut j, &t, "c.txt", "d.txt");
+        j.finish_redo(None);
+        assert!(!j.busy());
+        assert!(!j.can_redo(), "the line went with the new record");
+        assert_eq!(j.len(), 1, "only the rename");
+    }
+
     #[test]
     fn redo_with_nothing_undone_says_so() {
         let mut j = Journal::default();
@@ -3187,7 +3423,7 @@ mod tests {
             "the next redo first"
         );
 
-        j.redo(&ctx()).unwrap();
+        redone(&mut j);
         assert_eq!(
             names(j.undoable().collect()),
             vec![

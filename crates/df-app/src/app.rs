@@ -28,7 +28,7 @@ use df_core::input::{InputAction, InputBuffer, InputEvent};
 use df_core::keymap::{
     Chord, Command, Context, ContextStack, Dispatch, Key, KeymapState, Registry, WhenFlags,
 };
-use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord};
+use df_core::ops::journal::{Fingerprint, Journal, MovedPath, OpRecord, Redo, RedoCopy};
 use df_core::ops::paste::{plan_paste, Clipboard, PasteMode};
 use df_core::ops::{DeleteJob, LinkKind, Outcome, PasteJob, TrashJob};
 use df_core::preview::PreviewKind;
@@ -334,6 +334,11 @@ struct PendingOp {
     /// when the last of them does, rather than dragging the cursor about as
     /// each one finishes.
     group: Option<TaskId>,
+    /// `U`'s copy ([`RedoCopy`]), and the sentence it lands with. What it
+    /// made goes back on the undo stack through [`Journal::finish_redo`],
+    /// which leaves the redo stack standing, rather than through `record`,
+    /// which is for something new and clears it.
+    redo: Option<String>,
 }
 
 /// An `archive::list` running on the pool, and what its result is for.
@@ -2930,12 +2935,27 @@ impl App {
             for (path, error) in &outcome.errors {
                 log::warn!("{}: {error}", path.display());
             }
+            // A redo that landed whole says what was done again, as a redo
+            // done here does; one that did not keeps the paste's own count,
+            // which is what its failure or its cancel is about.
+            if let Some(sentence) = &op.redo {
+                if outcome.errors.is_empty() && !outcome.cancelled {
+                    outcome.message = sentence.clone();
+                }
+            }
             let (message, kind) = op_toast(&outcome);
-            if let Some(record) = outcome.record.take() {
-                self.journal.record(record);
+            let record = outcome.record.take();
+            match (&op.redo, record) {
+                (Some(_), record) => self.journal.finish_redo(record),
+                (None, Some(record)) => self.journal.record(record),
+                (None, None) => {}
             }
             self.toasts.show(message, kind, now);
             made = std::mem::take(&mut outcome.made);
+        } else if op.redo.is_some() {
+            // Cancelled before it ran: nothing landed, and the redo goes back
+            // to wait for another `U`.
+            self.journal.finish_redo(None);
         }
         for dir in &op.dirs {
             self.rescan(dir, now);
@@ -2962,6 +2982,7 @@ impl App {
             dirs,
             focus,
             group: None,
+            redo: None,
         });
     }
 
@@ -5036,13 +5057,12 @@ impl App {
     }
 
     /// `U`: do again what `u` last took back ([`Journal::redo`]). Returns
-    /// whether it took a step forward, for the undo history's walk.
+    /// whether it took a step forward — or, for a copy, started one — for the
+    /// undo history's walk.
     ///
-    /// Synchronous, as [`App::undo`] is and for its reason — and the same
-    /// deferral one step further: a redone paste is a copy, made here on this
-    /// thread through the copy a paste uses (reflinked where the filesystem
-    /// can), so a big one on a filesystem that cannot holds the window until
-    /// it lands.
+    /// Synchronous, as [`App::undo`] is and for its reason, except for a
+    /// copy: that can take minutes, so the journal checks it and hands it
+    /// back, and it runs as the job a paste is ([`App::spawn_redo_copy`]).
     fn redo(&mut self, now: Instant) -> bool {
         if !self.journal.can_redo() {
             self.toasts.notice("Nothing to redo", now);
@@ -5052,7 +5072,11 @@ impl App {
         // report says which paths it touched, not what kind of touch.
         let lands = self.journal.peek_redo().is_some_and(redo_lands);
         match self.journal.redo(&TaskCtx::detached()) {
-            Ok(report) => {
+            Ok(Redo::Copy(copy)) => {
+                self.spawn_redo_copy(copy);
+                true
+            }
+            Ok(Redo::Done(report)) => {
                 // An operation again, and one `u` takes back: the toast an
                 // operation lands with, which says so.
                 self.toasts.undo(report.description.clone(), now);
@@ -5081,6 +5105,35 @@ impl App {
                 false
             }
         }
+    }
+
+    /// `U` on a copy: the plan the journal checked, run as the job a paste
+    /// is — its row in the task panel, its progress and its cancel — with the
+    /// cursor landing on what it made when that is in this listing. The
+    /// journal holds the entry aside, with `u` and `U` waiting, until
+    /// [`App::finish_op`] tells it what landed.
+    fn spawn_redo_copy(&mut self, copy: RedoCopy) {
+        let plan = copy.plan();
+        let dirs = Self::affected(
+            &plan.ready.iter().map(|i| i.src.clone()).collect::<Vec<_>>(),
+            Some(&plan.dest_dir),
+        );
+        let focus = if plan.dest_dir == self.cwd() {
+            plan.ready.iter().map(|item| item.dst.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        let job = PasteJob::new(plan);
+        let slot = job.outcome();
+        let id = self.engine.spawn(job);
+        self.ops.push(PendingOp {
+            id,
+            slot,
+            dirs,
+            focus,
+            group: None,
+            redo: Some(copy.description),
+        });
     }
 
     /// The undo history card, which the same command closes again.
@@ -5125,6 +5178,17 @@ impl App {
                 break;
             }
             taken += 1;
+            // A copy being redone runs as a job, and every step after it has
+            // to wait for it to land: the walk stops here and says so.
+            if self.journal.busy() {
+                if taken < steps {
+                    self.toasts.notice(
+                        "A copy is being redone — the rest waits until it lands",
+                        now,
+                    );
+                }
+                return;
+            }
         }
         // One step's own toast says what it did. Several say how many, since
         // the last one's sentence would read as the whole walk — and as a
@@ -9570,6 +9634,12 @@ impl App {
         // grey rather than opening one to say so.
         if command == Command::PasteSync && self.clipboard.is_empty() {
             return Some("Nothing yanked");
+        }
+        // `u` and `U` while a redo's copy runs: it lands on the undo stack
+        // when it is over, and a step taken meanwhile would put it there out
+        // of order.
+        if matches!(command, Command::Undo | Command::Redo) && self.journal.busy() {
+            return Some("A copy is being redone — wait for it to land");
         }
         // `u` and `U` with nothing on their stack: the key says so, and the
         // app menu's Undo and Redo grey rather than wait to.
@@ -20119,6 +20189,7 @@ mod tests {
             dirs: Vec::new(),
             focus: Vec::new(),
             group,
+            redo: None,
         };
         let folders = vec![a.clone(), b.clone()];
 
