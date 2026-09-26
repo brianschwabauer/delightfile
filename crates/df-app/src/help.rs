@@ -408,6 +408,15 @@ impl Help {
         true
     }
 
+    /// The lines were rebuilt under the sheet — the keymap they are read
+    /// out of changed — and a view their new count clamps is the sheet laid
+    /// out again, not scrolled: the bar starts afresh
+    /// ([`crate::scrollbar::Linger`]). The cursor and the view stay where
+    /// they are, as far as the new lines let them.
+    pub fn lines_changed(&mut self) {
+        self.bar = crate::scrollbar::Linger::default();
+    }
+
     /// When the lines last scrolled, for their bar's linger.
     pub fn scrolled_at(&self) -> Option<Instant> {
         self.bar.scrolled_at()
@@ -687,6 +696,17 @@ mod tests {
         // Past the last page the setter holds at the last page.
         assert!(help.scroll_to(count * 2, count, 4, t4));
         assert_eq!(help.first, count - 4);
+
+        // A keymap rebuilt under the sheet with fewer lines: the clamp moves
+        // the view, and that is no scroll either.
+        let t5 = t4 + Duration::from_secs(5);
+        assert!(help.scroll_to(0, count, 4, t5));
+        assert!(help.scroll_to(count, count, 4, t5));
+        assert_eq!(help.scrolled_at(), Some(t5));
+        help.lines_changed();
+        help.settle(count - 10, 4, scrolloff, t5 + Duration::from_secs(1));
+        assert_eq!(help.first, count - 14, "the clamp moved nothing");
+        assert_eq!(help.scrolled_at(), None, "a rebuilt keymap scrolled");
     }
 
     /// The rows really do come from the registry, keys and ids and all.

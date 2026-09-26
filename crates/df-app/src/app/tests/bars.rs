@@ -842,3 +842,32 @@ fn a_new_search_query_is_not_a_scroll() {
     assert_eq!(panel(&app).first, 0);
     assert_eq!(app.card_scrolled_at(Surface::Search), None);
 }
+
+/// A pin made while the sheet is up rebuilds the keymap its lines are read
+/// out of: the sheet is laid out again, not scrolled, and a bar that was
+/// lingering for the wheel does not go on lingering for the rebuild.
+#[test]
+fn a_keymap_rebuilt_under_the_help_sheet_is_not_a_scroll() {
+    let ctx = egui::Context::default();
+    let t0 = Instant::now();
+    let mut app = Fixture::with_folders("bar-help-pins", &["a.txt"], &["kept"]);
+    frame(&mut app, &ctx, screen(), Vec::new(), t0);
+    app.run(Command::Help, 10, t0);
+    frame(&mut app, &ctx, screen(), Vec::new(), t0);
+    let t1 = t0 + Duration::from_millis(16);
+    let card = help_card(&app);
+    wheel_at(&mut app, &ctx, card.center(), 1.0, t1);
+    assert_eq!(app.card_scrolled_at(Surface::Help), Some(t1));
+    let on_folder = app.tab().cwd.dir.cursor_entry().is_some_and(|e| e.is_dir());
+    assert!(on_folder, "the cursor is not on the folder");
+
+    app.pin_row(t1);
+    assert_eq!(
+        app.card_scrolled_at(Surface::Help),
+        None,
+        "the pin scrolled"
+    );
+    frame(&mut app, &ctx, screen(), Vec::new(), t1 + LINGER);
+    assert_eq!(sheet(&app).first, 2, "the pin moved the sheet");
+    assert_eq!(app.card_scrolled_at(Surface::Help), None);
+}

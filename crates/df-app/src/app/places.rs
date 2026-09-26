@@ -449,9 +449,14 @@ impl App {
 
     /// Everything a change to the pins has to reach: the goto table and the
     /// keymap (so `g`'s card and `Goto(n)` agree with the list at once), the
-    /// state file's write-behind, and the mount card if it is up.
+    /// state file's write-behind, the mount card if it is up, and the help
+    /// sheet if it is, whose lines are read out of that keymap: a view the
+    /// new count moves is the sheet laid out again, not scrolled.
     fn pins_changed(&mut self, now: Instant) {
         self.keymap = self.places.rebuild(&self.config.goto, self.state.pins());
+        if let Some(help) = &mut self.help {
+            help.lines_changed();
+        }
         self.state_changed(now);
         if self.mounts.is_some() {
             let places = self.card_places();

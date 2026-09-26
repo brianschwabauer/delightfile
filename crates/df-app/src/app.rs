@@ -1451,6 +1451,13 @@ pub struct App {
     /// out so that `PageDown` in the sheet moves by a page *of the sheet*
     /// rather than by a page of the pane behind it.
     help_rows: usize,
+    /// How many lines the sheet has this frame, read out of the registry
+    /// once, beside its card, for its bar and its wheel: what they clamp the
+    /// sheet's scroll to, without reading the registry again for it. Written
+    /// every frame before either reads it, and never read in a frame that
+    /// did not write it: it is not a cache, the lines being rebuilt each frame
+    /// for the reason [`App::move_help_cursor`] gives.
+    help_line_count: usize,
     /// `Ctrl+p`, `z` and `Z` — the one fuzzy card, whichever of the three
     /// opened it (PLAN §4.4, §7.2). One field because they are one surface:
     /// two of them open at once is not a state that exists.
@@ -2258,6 +2265,7 @@ impl App {
             help: None,
             help_query: String::new(),
             help_rows: 0,
+            help_line_count: 0,
             finder: None,
             mru: finder::Mru::default(),
             zoxide: None,
@@ -11062,9 +11070,13 @@ impl App {
             },
             Bar::Menu => geom.menu.as_ref().and_then(|menu| menu.bar),
             Bar::Submenu => geom.menu.as_ref().and_then(|menu| menu.sub_bar),
-            Bar::Card(surface) => {
-                self.card_bar(surface, geom.overlay, geom.tray, geom.which, geom.help)
-            }
+            Bar::Card(surface) => self.card_bar(
+                surface,
+                geom.overlay.as_ref(),
+                geom.tray,
+                geom.which,
+                geom.help,
+            ),
         }
     }
 
@@ -11074,7 +11086,7 @@ impl App {
     fn card_bar(
         &self,
         surface: crate::scrollbar::Surface,
-        overlay: &Option<OverlayGeom>,
+        overlay: Option<&OverlayGeom>,
         tray: &crate::tray::Geometry,
         which: Option<&crate::whichkey::Geometry>,
         help: Option<egui::Rect>,
@@ -11113,7 +11125,7 @@ impl App {
             (Surface::Tray, _, _) => crate::tray::bar(tray, self.tray_first, self.clipboard.len()),
             (Surface::WhichKey, _, _) => crate::whichkey::bar(which?),
             (Surface::Help, _, _) => {
-                chrome::help_bar(help?, self.help.as_ref()?, self.help_lines().len())
+                chrome::help_bar(help?, self.help.as_ref()?, self.help_line_count)
             }
             _ => None,
         }
@@ -11203,7 +11215,7 @@ impl App {
                     .is_some_and(|search| search.scroll_to(row, page, now))
             }
             Bar::Card(Surface::Help) => {
-                let (lines, page) = (self.help_lines().len(), self.help_rows);
+                let (lines, page) = (self.help_line_count, self.help_rows);
                 self.help
                     .as_mut()
                     .is_some_and(|help| help.scroll_to(row, lines, page, now))
@@ -11221,17 +11233,12 @@ impl App {
     /// slide, so the frame that reads the pointer has to draw the rows where
     /// it put them. A pane's thumb and the bulk rename card's are moved where
     /// their rows are measured instead ([`App::hold_scrollbar`],
-    /// [`App::bulk_layout`]). `menu`, `overlay`, `tray`, `which` and `help`
-    /// are the floating cards as the frame measured them.
-    #[allow(clippy::too_many_arguments)] // one argument a floating card
+    /// [`App::bulk_layout`]). `floating` is everything floating as the frame
+    /// measured it, the wheel's scroll included.
     fn hold_bar(
         &mut self,
         pointer: &Pointer,
-        menu: Option<&menu::Geometry>,
-        overlay: &Option<OverlayGeom>,
-        tray: &crate::tray::Geometry,
-        which: Option<&crate::whichkey::Geometry>,
-        help: Option<egui::Rect>,
+        floating: &Floating<'_>,
         now: Instant,
     ) -> Option<Bar> {
         let (true, Some(at), Some((bar, grab))) = (
@@ -11243,12 +11250,19 @@ impl App {
         };
         let geometry = match bar {
             Bar::Pane(_) | Bar::Bulk => None,
-            Bar::Menu => menu.and_then(|menu| menu.bar),
-            Bar::Submenu => menu.and_then(|menu| menu.sub_bar),
-            Bar::Card(surface) => self.card_bar(surface, overlay, tray, which, help),
+            Bar::Menu => floating.menu.and_then(|menu| menu.bar),
+            Bar::Submenu => floating.menu.and_then(|menu| menu.sub_bar),
+            Bar::Card(surface) => self.card_bar(
+                surface,
+                floating.overlay,
+                floating.tray,
+                floating.which,
+                floating.help,
+            ),
         }?;
         let first = geometry.first_at(at.y - grab);
-        self.scroll_bar_to(bar, first, which, now).then_some(bar)
+        self.scroll_bar_to(bar, first, floating.which, now)
+            .then_some(bar)
     }
 
     /// A hand let go of `bar`: it lingers from now, as after a scroll, rather
@@ -12254,7 +12268,7 @@ impl App {
             // The sheet is laid out from its own state further down the
             // frame, and is not measured for the hit test by its lines.
             WheelOwner::Card(Surface::Help) => {
-                let lines = self.help_lines().len();
+                let lines = self.help_line_count;
                 let page = self.help_rows;
                 if let Some(help) = &mut self.help {
                     help.wheel(points, lines, page, now);
@@ -14807,9 +14821,21 @@ impl App {
                 area.bottom() - ui::GAP,
             )
         });
+        // …and its lines, read out of the registry once a frame, after the
+        // keys so a filter keystroke is in them. Its band, its bar in the
+        // hand, its wheel and its layout further down all go by these: the
+        // read is a few hundred allocations, and a drag frame used to make
+        // it four times. The bar and the wheel have no frame to hand them
+        // down through, so they read the count off `help_line_count`.
+        let help_read = self.help.is_some().then(|| {
+            let rows = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE);
+            let lines = help::lines(&rows, &self.help_query);
+            (self.help_query.clone(), rows.len(), lines)
+        });
+        self.help_line_count = help_read.as_ref().map_or(0, |(_, _, lines)| lines.len());
         // …and the band its bar is pointed at and taken by, while its lines
         // run past a page. It does not move as the sheet scrolls.
-        let help_band = help_card.and_then(|card| chrome::help_band(card, self.help_lines().len()));
+        let help_band = help_card.and_then(|card| chrome::help_band(card, self.help_line_count));
         // The which-key card, from the function its paint lays it out with.
         // Only while it is fully up: a card on its way out is pixels about a
         // chord that has already resolved, and takes no pointer.
@@ -14875,15 +14901,18 @@ impl App {
         // ── A card's or a menu's thumb in the hand ([`App::hold_bar`]) ──────
         // Moved here, before the hit test, and the card it moved measured
         // again, so the rows pressed are the rows the hand put there.
-        let held = self.hold_bar(
-            &pointer,
-            menu_geometry.as_ref(),
-            &overlay,
-            &tray_geometry,
-            which_geometry.as_ref(),
-            help_card,
-            now,
-        );
+        // Everything floating as the wheel left it: the same list the wheel
+        // was decided from, measured again where the wheel moved a card.
+        let floating = Floating {
+            menu: menu_geometry.as_ref().filter(|_| menu_live),
+            toast: toast_geom.as_ref().map(|toast| toast.rect),
+            which: which_geometry.as_ref(),
+            overlay: overlay.as_ref(),
+            help: help_card,
+            rename: rename_card,
+            tray: &tray_geometry,
+        };
+        let held = self.hold_bar(&pointer, &floating, now);
         if let Some(bar) = held {
             match bar {
                 Bar::Menu | Bar::Submenu => {
@@ -16134,8 +16163,18 @@ impl App {
                     layout.path.bottom() + ui::GAP,
                     area.bottom() - ui::GAP,
                 );
-                let lines = self.help_lines();
-                let total = help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE).len();
+                // The lines read beside the card, unless a press since has
+                // changed what they are — the strip's `Esc` clearing the
+                // filter, or a click opening the sheet — and then read again.
+                let (lines, total) = match help_read {
+                    Some((query, total, lines)) if query == self.help_query => (lines, total),
+                    _ => {
+                        let rows =
+                            help::all_rows(&self.keymap, &self.help_stack(), WhenFlags::NONE);
+                        (help::lines(&rows, &self.help_query), rows.len())
+                    }
+                };
+                self.help_line_count = lines.len();
                 // The same scrolloff rule the panes use, on the same numbers:
                 // one list-scrolling behaviour in the program, not two. Where
                 // its bar's linger is stamped from, too.

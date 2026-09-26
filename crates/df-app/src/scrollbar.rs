@@ -9,13 +9,13 @@
 //!
 //! The floating cards whose lists can outgrow a short window — the palette,
 //! the task panel, the dialogs, the tray, the which-key card, the menus, the
-//! search panel and the help sheet — wear it too ([`card`], [`paint_card`]), for the same reason: a list cut off at a
-//! card's edge has to say that it goes on, and the one bar in the window is
-//! how anything here says that. It is one bar in the hand as well as to the
-//! eye: every one of them is taken by its thumb and paged by its track as a
-//! pane's is ([`Bar`]), and comes and goes by the panes' rule — the linger
-//! after a scroll, the pointer on its band, a hand on its thumb — and by
-//! nothing else.
+//! search panel and the help sheet — wear it too ([`card`], [`paint_card`]),
+//! for the same reason: a list cut off at a card's edge has to say that it
+//! goes on, and the one bar in the window is how anything here says that. It
+//! is one bar in the hand as well as to the eye: every one of them is taken
+//! by its thumb and paged by its track as a pane's is ([`Bar`]), and comes and
+//! goes by the panes' rule — the linger after a scroll, the pointer on its
+//! band, a hand on its thumb — and by nothing else.
 //!
 //! ## Why the hit band is wider than the thumb
 //!
