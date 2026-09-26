@@ -82,6 +82,9 @@ mod compress;
 mod places;
 /// `alt+p`: the sync card, the comparison it waits on, and the syncs it starts.
 mod syncing;
+/// The trash's weight (its chip, the Empty trash card) and its clock
+/// (`[mgr] trash_keep_days`).
+mod trash;
 
 /// Opening size, in logical pixels. Wide enough for the `[1, 4, 3]` miller
 /// columns (PLAN §2) to each be usable at once — the middle column is the one
@@ -1620,6 +1623,16 @@ pub struct App {
     /// directory, by name. Rebuilt with the listing, so it cannot describe rows
     /// that are no longer there.
     trash_notes: HashMap<String, String>,
+    /// What the trash weighs, for its chip and the Empty trash card
+    /// ([`trash`]).
+    trash_weight: crate::trashview::Weight,
+    /// The du scanner's messages the trash's walk drained and left for the
+    /// size column and "what's big" to read — see [`trash`] on why the one
+    /// channel is drained through one door ([`App::drain_du`]).
+    du_backlog: Vec<df_core::du::DuMessage>,
+    /// When the trash next purges what `[mgr] trash_keep_days` has aged out,
+    /// and the purge in flight ([`trash`]).
+    trash_clock: trash::Clock,
     /// The repository the current directory is in, recomputed only when the
     /// directory changes.
     ///
@@ -2038,7 +2051,21 @@ impl App {
         // (see below).
         let state = StateStore::load();
 
-        App::assemble(waker, args, config, theme, keymap, state)
+        let mut app = App::assemble(waker, args, config, theme, keymap, state);
+        // The home trash's clock, read from the environment here with the rest
+        // of what `assemble` does not read (PLAN §7.4). A file dialog's never
+        // runs: it is somebody else's window for a few seconds, and no time to
+        // be deleting things.
+        let home = df_core::ops::Trash::home()
+            .ok()
+            .map(|trash| trash.root().to_path_buf());
+        app.trash_clock = trash::Clock::starting(
+            app.chooser.is_some(),
+            home,
+            app.config.mgr.trash_keep_days,
+            Instant::now(),
+        );
+        app
     }
 
     /// Everything [`App::new`] does after reading this machine's config,
@@ -2223,6 +2250,12 @@ impl App {
             remote_hover: None,
             remote_connected: HashSet::new(),
             trash_notes: HashMap::new(),
+            trash_weight: crate::trashview::Weight::default(),
+            du_backlog: Vec::new(),
+            // Wound by `App::new`, which knows whether this window is a file
+            // dialog and where the home trash is; a test's `App` never purges
+            // a trash it did not make.
+            trash_clock: trash::Clock::default(),
             du: None,
             usage: None,
             folders: crate::folders::Folders::default(),
@@ -2564,6 +2597,12 @@ impl App {
         if self.sync_remote_preview(now) {
             changed = true;
         }
+        // What the trash weighs (PLAN §7.4) — first of the scanner's three
+        // readers, because the other two drop what is not theirs, and what
+        // this one leaves is put back for them (`App::drain_du`).
+        if self.poll_trash_weight() {
+            changed = true;
+        }
         // The size column's recursive directory sizes, counting up (PLAN §7.3).
         if self.poll_folders(now) {
             changed = true;
@@ -2590,6 +2629,13 @@ impl App {
         // The sync card's comparison, and the syncs it started.
         if self.poll_sync(now) {
             changed = true;
+        }
+        // The trash's clock: a purge owed at startup waits for the first
+        // frame to be on screen — nothing about the window's first
+        // appearance should queue behind it — and after that the frame it is
+        // owed on is woken by `next_deadline`, once a day.
+        if self.logged_first_frame {
+            self.tick_trash_clock(now);
         }
 
         for event in self.watcher.drain() {
@@ -2757,6 +2803,10 @@ impl App {
     /// One task transition. The stream is for *reacting*; the panel renders
     /// from [`TaskEngine::snapshot`], never from this.
     fn task_event(&mut self, event: TaskEvent, now: Instant) {
+        // The trash's own purge says what it came to when it is over — which
+        // for a failure it reads off the engine, since `Failed` is sometimes a
+        // retry.
+        self.trash_purge_event(&event, now);
         match event.state {
             TaskState::Done | TaskState::Cancelled => {
                 self.finish_op(event.id, now);
@@ -4313,6 +4363,9 @@ impl App {
         self.visual = None;
         self.close_player();
         self.rewatch();
+        // The rows have changed, so what they weigh has: walked again behind
+        // the chip, which keeps its last number under a `~` meanwhile.
+        self.weigh_trash(trash.files_dir());
     }
 
     /// Rebuild the trash listing from disk, keeping the cursor.
@@ -4664,7 +4717,13 @@ impl App {
             );
             return;
         }
-        self.dialog = Some(Dialog::Confirm(Confirm::new(kind, paths)));
+        let mut confirm = Confirm::new(kind, paths);
+        if kind == ConfirmKind::EmptyTrash {
+            // The chip's number, and kept in step with it as the walk settles
+            // (`App::drain_du`).
+            confirm.size = self.trash_weight.size();
+        }
+        self.dialog = Some(Dialog::Confirm(confirm));
         self.sync_context();
     }
 
@@ -9767,10 +9826,14 @@ impl App {
         // channel is shared with every other `request`, and a frame that
         // returned without emptying it would leave the messages of a cancelled
         // walk sitting in front of the ones this pane is waiting for.
-        let messages = match &self.du {
-            Some(du) => du.drain(),
-            None => return changed,
-        };
+        //
+        // Through [`App::drain_du`], the door the trash's weight is read at
+        // too: a channel with three readers loses one's answers to whichever
+        // other drains it first.
+        if self.du.is_none() {
+            return changed;
+        }
+        let messages = self.drain_du();
         let token = self.folders.token();
         for message in messages {
             if Some(message.token()) != token {
@@ -10180,10 +10243,11 @@ impl App {
             self.leave_usage(now);
             return true;
         }
-        let messages = match &self.du {
-            Some(du) => du.drain(),
-            None => return false,
-        };
+        // Through the one door, for the reason `poll_folders` gives.
+        if self.du.is_none() {
+            return false;
+        }
+        let messages = self.drain_du();
         let mut changed = false;
         for message in messages {
             let Some(usage) = &mut self.usage else { break };
@@ -10499,6 +10563,7 @@ impl App {
                 | Control::CrumbEllipsis
                 | Control::Counter
                 | Control::GitChip
+                | Control::TrashChip
                 | Control::SelectedChip
                 | Control::VisualChip
                 | Control::PickButton
@@ -10600,6 +10665,7 @@ impl App {
             | Control::CrumbEllipsis
             | Control::Counter
             | Control::GitChip
+            | Control::TrashChip
             | Control::SelectedChip
             | Control::VisualChip
             | Control::PickButton
@@ -10721,6 +10787,7 @@ impl App {
             rows: dir.len(),
             pick: self.pick_button(),
             types: self.type_chip(),
+            trash: self.trash_chip(),
         }
     }
 
@@ -11532,6 +11599,10 @@ impl App {
             // returned so the ripple has somewhere to be, but the press router
             // never gets this far: see the guard at the call site.
             Control::GitChip => geom.top.cluster.git.unwrap_or(egui::Rect::ZERO),
+            // The trash's weight is the same kind of chip: a fact, and a
+            // tooltip for how long the trash keeps things. Inert, by the same
+            // guard.
+            Control::TrashChip => geom.top.cluster.trash.unwrap_or(egui::Rect::ZERO),
             // A picker's two answers. A disabled pick never gets this far —
             // the press site treats it as inert — but `press_pick` asks again,
             // because a button that is only guarded by where it was clicked
@@ -15161,6 +15232,7 @@ impl App {
                         .or_else(|| hit(cluster.visual, Control::VisualChip))
                         .or_else(|| hit(cluster.types, Control::TypeChip))
                         .or_else(|| hit(cluster.git, Control::GitChip))
+                        .or_else(|| hit(cluster.trash, Control::TrashChip))
                         .or_else(|| hit(Some(cluster.counter), Control::Counter))
                         .or_else(|| hit(top_geom.ellipsis, Control::CrumbEllipsis))
                         .or_else(|| {
@@ -15481,7 +15553,7 @@ impl App {
             .as_ref()
             .map(|search| overlay::switch_control(search.mode));
         let inert = match over {
-            Some((Control::GitChip | Control::CrumbEllipsis, _)) => true,
+            Some((Control::GitChip | Control::TrashChip | Control::CrumbEllipsis, _)) => true,
             Some((Control::PickButton, _)) => !pick_live,
             Some((control, _)) => Some(control) == lit_half,
             None => false,
@@ -15916,7 +15988,9 @@ impl App {
                 // branch chip and the `…`. Both exist to *say* something on
                 // hover, and a hand over either would promise a click that
                 // never happens (`delightful-ui` §2).
-                Control::GitChip | Control::CrumbEllipsis => egui::CursorIcon::Default,
+                Control::GitChip | Control::TrashChip | Control::CrumbEllipsis => {
+                    egui::CursorIcon::Default
+                }
                 // …and every scrollbar, a pane's and the bulk rename card's as
                 // much as a card's or a menu's. A bar is not a button: the
                 // hand says one click does one thing (`delightful-ui` §2),
@@ -16410,9 +16484,16 @@ impl App {
                 // The walk measures the directory you are in, not the one
                 // above it — and the parent column's linemode is off anyway.
                 folders: None,
+                // The parent is a real folder, never the trash.
+                empty_note: None,
             });
         }
         self.paint_scrollbar(&paint, Column::Parent, parent_bar, now);
+        let keep_note = self
+            .tab()
+            .trash
+            .as_ref()
+            .and_then(|_| crate::trashview::keep_text(self.config.mgr.trash_keep_days));
         let list_view = ListView {
             pane: layout.list,
             ground: list_ground,
@@ -16446,6 +16527,9 @@ impl App {
                 .is_about(&cwd_now, self.tabs.active_index())
                 .then_some(&self.folders)
                 .filter(|f| !f.is_empty()),
+            // An empty trash says how long it keeps things, since there is no
+            // chip to hover while there is nothing in it.
+            empty_note: keep_note.as_deref(),
         };
         match (&metrics, &self.thumbs) {
             // PLAN §2's grid. Same directory, same cursor, same selection and
@@ -16468,6 +16552,7 @@ impl App {
                     flip: list_view.flip,
                     slow_load: list_view.slow_load,
                     git: list_view.git,
+                    empty_note: list_view.empty_note,
                 },
             ),
             // The list, and the impossible case where a grid is wanted but its
@@ -17335,6 +17420,10 @@ impl App {
             folders,
             clipboard,
             wl_copy,
+            // …and the trash's clock: one instant a day, known in advance.
+            // At startup it is already due, which is the frame after the
+            // first one (`App::tick_trash_clock`).
+            self.trash_clock.deadline(now),
             // …and the panes' scrollbars, the instant their linger ends and
             // the fade is owed its first frame.
             self.scrolled_at()
@@ -18611,6 +18700,9 @@ mod tests {
     /// "Open terminal here", from the key and every menu, and where it is
     /// refused.
     mod terminal;
+
+    /// The trash's weight and its clock.
+    mod trash;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the

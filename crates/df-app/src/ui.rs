@@ -548,6 +548,9 @@ pub enum Control {
     Counter,
     /// The branch chip. Hover-only — see [`crate::app`]'s click routing.
     GitChip,
+    /// The trash's `37 items · 1.2 GB`, whose tooltip says how long the trash
+    /// keeps things (PLAN §7.4). Hover-only, as the branch chip is.
+    TrashChip,
     /// `4 selected`, which clears the selection: the pointer's `Esc`.
     SelectedChip,
     /// `visual` / `visual unset`, which leaves the run.
@@ -1039,6 +1042,11 @@ pub struct ListView<'a> {
     /// column first — the three are the same strip of pixels and the one that
     /// was asked for most explicitly wins.
     pub folders: Option<&'a crate::folders::Folders>,
+    /// A quieter line under the pane's "empty", when the place has something
+    /// to say about why it is — the trash's clock (PLAN §7.4). Only under a
+    /// truly empty listing: "no matches" and "3 hidden" are about the filter
+    /// and `.`, not about the place.
+    pub empty_note: Option<&'a str>,
 }
 
 /// The shared state a paint pass needs. Bundled because every function below
@@ -1187,10 +1195,12 @@ impl Painting<'_> {
             usage,
             notes,
             folders,
+            empty_note,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
             self.quiet_label(content, &message);
+            self.empty_note(content, dir, empty_note);
             return;
         }
         // Rows are clipped to the pane's content box so a row half-scrolled off
@@ -1940,6 +1950,43 @@ impl Painting<'_> {
             egui::FontId::proportional(FONT_SIZE),
             self.palette.overlay0,
         );
+    }
+
+    /// The line under an empty pane's "empty", when the place has one
+    /// ([`ListView::empty_note`]): a step smaller and a row lower, in the same
+    /// quiet ink, so it reads as the footnote to the word above it. Nothing
+    /// under "loading…", "no matches", "3 hidden" or a failed read, which are
+    /// all about something other than the place.
+    pub fn empty_note(&self, content: egui::Rect, dir: &DirState, note: Option<&str>) {
+        let Some(note) = note else { return };
+        if dir.state() != LoadState::Loaded || dir.total() > 0 || !dir.filter().is_empty() {
+            return;
+        }
+        use egui::text::{LayoutJob, TextFormat, TextWrapping};
+        let color = self.palette.overlay0;
+        let mut job = LayoutJob::single_section(
+            note.to_string(),
+            TextFormat {
+                font_id: egui::FontId::proportional(FONT_SIZE - 1.0),
+                color,
+                ..Default::default()
+            },
+        );
+        // One line, cut short with `…` in a pane too narrow for it, rather
+        // than running out over the panes beside this one.
+        job.wrap = TextWrapping {
+            max_width: (content.width() - GAP * 2.0).max(0.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = self.painter.layout_job(job);
+        let centre = egui::pos2(
+            content.center().x,
+            content.top() + content.height() * crate::chrome::OPTICAL_BASELINE + FONT_SIZE * 1.6,
+        );
+        self.painter
+            .galley(centre - galley.size() / 2.0, galley, color);
     }
 }
 

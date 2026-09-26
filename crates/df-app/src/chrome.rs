@@ -1042,6 +1042,19 @@ pub struct Cluster<'a> {
     pub pick: Option<Pick>,
     /// The dialog's type-filter chip, when the dialog offered filters.
     pub types: Option<Types<'a>>,
+    /// What the trash holds, while the list pane is showing it (PLAN §7.4).
+    pub trash: Option<TrashChip>,
+}
+
+/// The trash view's chip: how many things, and what they weigh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrashChip {
+    /// `37 items · 1.2 GB`, with the size column's `~` while the walk counts
+    /// ([`crate::trashview::weight_text`]).
+    pub label: String,
+    /// What the pointer on the chip is told: how long the trash keeps things.
+    /// `None` when it keeps them for ever, and then the chip is only a label.
+    pub tip: Option<String>,
 }
 
 /// Which of a file dialog's type filters the listing is narrowed to, as the
@@ -1132,6 +1145,8 @@ pub struct ClusterGeom {
     /// The type-filter chip, beside the counter. `None` unless the session is
     /// a dialog with filters.
     pub types: Option<egui::Rect>,
+    /// The trash's chip, beside the counter. `None` outside the trash view.
+    pub trash: Option<egui::Rect>,
     /// The three strings the measuring already built, kept rather than built a
     /// second time by the painter a few lines later. Measuring text means
     /// laying it out, which means having the string; formatting each of them
@@ -1242,6 +1257,12 @@ pub fn cluster_geometry(
             + ICON_GAP;
         chip_at(width, &mut right)
     });
+    // The trash's weight, beside the counter for the type filter's reason:
+    // it is about the same rows the counter counts — all of them, weighed.
+    let trash = cluster.trash.as_ref().map(|chip| {
+        let width = text_width(painter, &chip.label, font.clone()) + PAD_X * 2.0;
+        chip_at(width, &mut right)
+    });
     let mut git_text = None;
     let git = cluster.branch.map(|branch| {
         let label = branch_label(branch, cluster.dirty);
@@ -1289,6 +1310,7 @@ pub fn cluster_geometry(
         pick,
         cancel,
         types,
+        trash,
         labels: ClusterLabels {
             counter: counter_label,
             yank: yank_text,
@@ -1331,6 +1353,25 @@ fn paint_cluster(
     );
     if let (Some(rect), Some(types)) = (geom.types, &cluster.types) {
         type_chip(paint, rect, types, hovers, ripples);
+    }
+    if let (Some(rect), Some(chip)) = (geom.trash, &cluster.trash) {
+        // A statement of fact, quiet as the type chip is at "All files": the
+        // trash's weight is worth a glance, not an accent. It lifts under the
+        // pointer only when there is a tooltip to answer it with — how long
+        // the trash keeps things — and only as far as the branch chip does.
+        let hover = if chip.tip.is_some() {
+            hovers.hover(Control::TrashChip)
+        } else {
+            0.0
+        };
+        plate(paint, rect, palette.overlay1, 1.0 + hover * 0.4);
+        painter.with_clip_rect(rect).text(
+            egui::pos2(rect.left() + PAD_X, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &chip.label,
+            egui::FontId::proportional(FONT),
+            mix(palette.subtext0, palette.text, hover),
+        );
     }
     if let (Some(rect), Some(branch)) = (geom.git, geom.labels.git.as_deref()) {
         let font = egui::FontId::proportional(FONT);
@@ -2184,6 +2225,21 @@ pub fn path_bar(
     if let Some((rect, branch)) = geom.cluster.git.zip(cluster.branch) {
         let lines = branch_tooltip(branch, cluster.dirty);
         tip(paint, area, rect, &lines, 1, hovers.hover(Control::GitChip));
+    }
+    // The trash's clock, under its weight: the one line a non-empty trash has
+    // to say it, since the pane only has room for it while it is empty.
+    if let (Some(rect), Some(line)) = (
+        geom.cluster.trash,
+        cluster.trash.as_ref().and_then(|chip| chip.tip.clone()),
+    ) {
+        tip(
+            paint,
+            area,
+            rect,
+            &[line],
+            1,
+            hovers.hover(Control::TrashChip),
+        );
     }
     if let (Some(rect), Some(yank)) = (geom.cluster.yank, &cluster.yank) {
         // …and the card leaves with the chip it hangs off, rather than
@@ -3978,6 +4034,7 @@ mod tests {
                 rows: 0,
                 pick: None,
                 types: None,
+                trash: None,
             };
             let wide =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
@@ -4321,6 +4378,7 @@ mod tests {
                 rows: 0,
                 pick: None,
                 types: None,
+                trash: None,
             };
             let geom = top_geometry(ui.painter(), row, &path, "", &bare, false);
             assert_eq!(geom.menu, button);
@@ -4380,6 +4438,7 @@ mod tests {
                 rows: 340,
                 pick: None,
                 types: None,
+                trash: None,
             };
             let geom = cluster_geometry(ui.painter(), row, &full, false);
             let chips = [
@@ -4412,6 +4471,7 @@ mod tests {
                 rows: 0,
                 pick: None,
                 types: None,
+                trash: None,
             };
             let quiet = cluster_geometry(ui.painter(), row, &bare, false);
             assert!(quiet.git.is_none() && quiet.yank.is_none());
@@ -4455,6 +4515,7 @@ mod tests {
                 rows: 4,
                 pick: None,
                 types: None,
+                trash: None,
             };
             let picking = Cluster {
                 selected: 0,
@@ -4469,6 +4530,7 @@ mod tests {
                     enabled: true,
                 }),
                 types: None,
+                trash: None,
             };
             let plain = cluster_geometry(ui.painter(), row, &bare, false);
             assert!(plain.pick.is_none() && plain.cancel.is_none());
@@ -4540,6 +4602,7 @@ mod tests {
                     enabled: true,
                 }),
                 types,
+                trash: None,
             };
             let images = Types {
                 label: "Images",
@@ -4955,6 +5018,12 @@ mod tests {
                         narrowing: true,
                         open: true,
                     }),
+                    // …and the trash's weight, still counting, with a clock
+                    // for its tooltip.
+                    trash: branch.map(|_| TrashChip {
+                        label: "37 items · ~1.2 GB".to_string(),
+                        tip: Some("Items are removed for good after 30 days".to_string()),
+                    }),
                 };
                 let geom = top_geometry(paint.painter, path_rect, &path, filter, &cluster, false);
                 path_bar(
@@ -4993,6 +5062,11 @@ mod tests {
                     label: crate::menu::ALL_FILES,
                     narrowing: false,
                     open: false,
+                }),
+                // …and a trash that keeps things for ever: a label, no tip.
+                trash: Some(TrashChip {
+                    label: "1 item".to_string(),
+                    tip: None,
                 }),
             };
             let geom = top_geometry(paint.painter, narrow, &path, "", &cluster, false);

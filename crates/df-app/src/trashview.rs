@@ -63,10 +63,14 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
+use df_core::du::{DuMessage, DuToken};
 use df_core::fs::{mime, Entry, Kind};
+use df_core::ops::trash::Purged;
 use df_core::ops::TrashedItem;
+
+use crate::folders::Size;
 
 /// The path the pane's `DirState` is called while the trash is on screen.
 ///
@@ -295,45 +299,15 @@ fn shorten(path: &str) -> String {
 /// `YYYY-MM-DDThh:mm:ss` (UTC, as [`df_core::ops::trash`] writes it) as a
 /// [`SystemTime`].
 ///
-/// Hand-rolled for the same reason the writer is: parsing a fixed-width ini
-/// field is arithmetic, and the alternative is a date crate for one line.
-/// Anything that does not parse comes back `None`, which the mtime linemode and
-/// the mtime sort already tolerate — an item with an unreadable date is still
-/// listed and still restorable, which is the only thing that matters.
+/// df-core's parser ([`df_core::ops::trash::parse_deletion_date`]), because the
+/// automatic purge reads the same field to decide what is old, and the date a
+/// row shows and the date that decides whether it is destroyed must be one
+/// reading. Anything that does not parse comes back `None`, which the mtime
+/// linemode and the mtime sort already tolerate — an item with an unreadable
+/// date is still listed and still restorable, which is the only thing that
+/// matters.
 pub fn deleted_at(text: &str) -> Option<SystemTime> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' {
-        return None;
-    }
-    let num = |from: usize, to: usize| text.get(from..to)?.parse::<i64>().ok();
-    let (year, month, day) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
-    let (hour, minute, second) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    if hour > 23 || minute > 59 || second > 60 {
-        return None;
-    }
-    let days = days_from_civil(year, month as u32, day as u32);
-    let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
-    if secs >= 0 {
-        UNIX_EPOCH.checked_add(Duration::from_secs(secs as u64))
-    } else {
-        UNIX_EPOCH.checked_sub(Duration::from_secs(secs.unsigned_abs()))
-    }
-}
-
-/// Howard Hinnant's `days_from_civil` — the inverse of the `civil_from_days`
-/// [`df_core::ops::trash`] already carries, and the same reason for it: no
-/// lookup tables, no leap-year special cases.
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let m = month as i64;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + day as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+    df_core::ops::trash::parse_deletion_date(text)
 }
 
 /// Why a restore was refused, in the words the toast shows.
@@ -386,10 +360,167 @@ fn name_of(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+// ── What the trash weighs, and how long it keeps things ─────────────────────
+
+/// What the trash weighs, for the chip beside the position counter and the
+/// Empty trash card.
+///
+/// The du scanner's walk of the trash's `files/` directory, in the background,
+/// asked for again every time the view's rows change — the same walk, the same
+/// niced workers and the same `~` the size column has. The last answer is kept
+/// across walks: a re-walk after a restore shows the old number wearing its `~`
+/// until the new count passes it or settles, rather than counting up from
+/// nothing each time a row goes.
+#[derive(Debug, Default)]
+pub struct Weight {
+    /// The walk being read, while there is one.
+    token: Option<DuToken>,
+    /// What is known so far.
+    size: Option<Size>,
+}
+
+impl Weight {
+    /// A walk has been asked for. What was known stays, unsettled.
+    pub fn begin(&mut self, token: DuToken) {
+        self.token = Some(token);
+        if let Some(size) = &mut self.size {
+            size.settled = false;
+        }
+    }
+
+    /// The walk being read, if any.
+    pub fn token(&self) -> Option<DuToken> {
+        self.token
+    }
+
+    /// Stop reading the walk. Returns its token, so the scanner can be told to
+    /// stop it too.
+    pub fn stop(&mut self) -> Option<DuToken> {
+        self.token.take()
+    }
+
+    /// What is known, if anything.
+    pub fn size(&self) -> Option<Size> {
+        self.size
+    }
+
+    /// Take one message from the walk. Returns whether the number moved.
+    ///
+    /// Only the root's own total is read — nothing deeper is asked for — and
+    /// a running total only replaces a larger number when it is the final one,
+    /// so the `~` keeps meaning what it means in the size column: still
+    /// counting, and only going up.
+    pub fn apply(&mut self, message: DuMessage) -> bool {
+        if Some(message.token()) != self.token {
+            return false;
+        }
+        match message {
+            DuMessage::Progress { updates, .. } => {
+                let mut moved = false;
+                for update in updates.iter().filter(|update| update.depth == 0) {
+                    let known = self.size.map(|size| size.bytes);
+                    if known.is_none_or(|bytes| update.total_bytes > bytes) {
+                        self.size = Some(Size {
+                            bytes: update.total_bytes,
+                            settled: false,
+                        });
+                        moved = true;
+                    }
+                }
+                moved
+            }
+            DuMessage::Done { totals, .. } => {
+                self.token = None;
+                self.size = Some(Size {
+                    bytes: totals.total_bytes,
+                    settled: true,
+                });
+                true
+            }
+            // A `files/` that cannot be walked leaves the count to speak for
+            // itself, rather than a number nobody could have counted.
+            DuMessage::Failed { .. } => {
+                self.token = None;
+                self.size = None;
+                true
+            }
+            DuMessage::Started { .. } | DuMessage::Counts { .. } => false,
+        }
+    }
+}
+
+/// `37 items · 1.2 GB` — or `37 items · ~1.2 GB` while the walk is counting,
+/// or `37 items` before it has said anything. The chip's words, and the middle
+/// of the Empty trash card's question.
+///
+/// The bytes in the size column's own words ([`crate::format::folder_size_text`])
+/// so a `~` here means what a `~` there does.
+pub fn weight_text(count: usize, size: Option<Size>) -> String {
+    let items = format!(
+        "{} {}",
+        df_core::text::grouped(count as u64),
+        if count == 1 { "item" } else { "items" }
+    );
+    match crate::format::folder_size_text(size, None) {
+        Some(bytes) => format!("{items} · {bytes}"),
+        None => items,
+    }
+}
+
+/// What the trash says about its own clock — or nothing, when it has none
+/// (`[mgr] trash_keep_days = 0`).
+pub fn keep_text(keep_days: u64) -> Option<String> {
+    (keep_days > 0).then(|| format!("Items are removed for good after {}", days(keep_days)))
+}
+
+/// `30 days`, `1 day`.
+pub fn days(n: u64) -> String {
+    if n == 1 {
+        "1 day".to_string()
+    } else {
+        format!("{} days", df_core::text::grouped(n))
+    }
+}
+
+/// What an automatic purge says when it is over: the words, and whether they
+/// are an error — or `None` when there is nothing to say, which is most days:
+/// nothing was old enough.
+///
+/// Items that would not go are the error, counted and with the first reason,
+/// and the same words are the task's failure in `w`.
+pub fn purged_text(report: &Purged, keep_days: u64) -> Option<(String, bool)> {
+    let count = |n: usize, what: &str| match n {
+        1 => format!("1 {what}"),
+        n => format!("{} {what}s", df_core::text::grouped(n as u64)),
+    };
+    let emptied = format!(
+        "Emptied {} older than {} from the trash",
+        count(report.removed, "item"),
+        days(keep_days)
+    );
+    if report.failed == 0 {
+        return (report.removed > 0).then_some((emptied, false));
+    }
+    let stuck = format!(
+        "{} could not be removed: {}",
+        count(report.failed, "old item"),
+        report.first_error.as_deref().unwrap_or("no reason given")
+    );
+    Some((
+        if report.removed > 0 {
+            format!("{emptied} — {stuck}")
+        } else {
+            stuck
+        },
+        true,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsString;
+    use std::time::{Duration, UNIX_EPOCH};
 
     fn item(name: &str, original: &str, deleted_at: &str) -> TrashedItem {
         TrashedItem {
@@ -622,5 +753,156 @@ mod tests {
         let items = view.items_for(&picked);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].original, PathBuf::from("/home/brian/a.txt"));
+    }
+
+    /// The chip's words: the count alone before the walk has said anything,
+    /// then the bytes wearing the size column's `~` until they settle.
+    #[test]
+    fn the_weight_reads_like_the_size_column() {
+        let gb = 1_288_490_189; // 1.2 GB, in the size column's 1024s
+        assert_eq!(weight_text(37, None), "37 items");
+        assert_eq!(
+            weight_text(
+                37,
+                Some(Size {
+                    bytes: gb,
+                    settled: false
+                })
+            ),
+            "37 items · ~1.2 GB"
+        );
+        assert_eq!(
+            weight_text(
+                1_234,
+                Some(Size {
+                    bytes: gb,
+                    settled: true
+                })
+            ),
+            "1,234 items · 1.2 GB"
+        );
+        assert_eq!(
+            weight_text(
+                1,
+                Some(Size {
+                    bytes: 512,
+                    settled: true
+                })
+            ),
+            "1 item · 512 B"
+        );
+    }
+
+    /// A re-walk keeps the last number up, unsettled, until the new count
+    /// passes it or the walk settles — and a walk that cannot be done leaves
+    /// the count to speak for itself.
+    #[test]
+    fn a_weight_only_counts_up_until_it_settles() {
+        use df_core::du::{DuTotals, DuUpdate};
+        let root = PathBuf::from("/t/Trash/files");
+        let progress = |token: DuToken, bytes: u64| DuMessage::Progress {
+            token,
+            root: root.clone(),
+            updates: vec![DuUpdate {
+                dir: root.clone(),
+                depth: 0,
+                total_bytes: bytes,
+                apparent_bytes: bytes,
+                files: 1,
+                dirs: 1,
+                done: false,
+                entries: 1,
+            }],
+        };
+        let done = |token: DuToken, bytes: u64| DuMessage::Done {
+            token,
+            root: root.clone(),
+            totals: DuTotals {
+                total_bytes: bytes,
+                apparent_bytes: bytes,
+                files: 1,
+                dirs: 1,
+            },
+        };
+        let size = |bytes, settled| Some(Size { bytes, settled });
+
+        let mut weight = Weight::default();
+        let first = DuToken(1);
+        weight.begin(first);
+        assert!(weight.apply(progress(first, 100)));
+        assert_eq!(weight.size(), size(100, false));
+        assert!(weight.apply(done(first, 4096)));
+        assert_eq!(weight.size(), size(4096, true));
+        assert_eq!(weight.token(), None, "a settled walk is not read any more");
+
+        // Again, after a restore: the old number stays until it is passed.
+        let second = DuToken(2);
+        weight.begin(second);
+        assert_eq!(weight.size(), size(4096, false));
+        assert!(!weight.apply(progress(second, 10)));
+        assert_eq!(weight.size(), size(4096, false));
+        // A message from the walk that was replaced changes nothing.
+        assert!(!weight.apply(done(first, 1)));
+        assert!(weight.apply(done(second, 1024)));
+        assert_eq!(weight.size(), size(1024, true));
+
+        let third = DuToken(3);
+        weight.begin(third);
+        assert!(weight.apply(DuMessage::Failed {
+            token: third,
+            root: root.clone(),
+            error: df_core::DfError::Op("gone".to_string()),
+        }));
+        assert_eq!(weight.size(), None);
+        assert_eq!(weight_text(2, weight.size()), "2 items");
+    }
+
+    /// What the trash says about its clock, and what the purge says when it
+    /// is over — nothing at all on the days nothing was old enough.
+    #[test]
+    fn the_clock_says_how_long_and_the_purge_says_how_many() {
+        assert_eq!(
+            keep_text(30).as_deref(),
+            Some("Items are removed for good after 30 days")
+        );
+        assert_eq!(
+            keep_text(1).as_deref(),
+            Some("Items are removed for good after 1 day")
+        );
+        assert_eq!(keep_text(0), None, "never purging has nothing to say");
+
+        let report = |removed, failed, why: Option<&str>| Purged {
+            removed,
+            failed,
+            first_error: why.map(str::to_string),
+        };
+        assert_eq!(purged_text(&report(0, 0, None), 30), None);
+        assert_eq!(
+            purged_text(&report(12, 0, None), 30),
+            Some((
+                "Emptied 12 items older than 30 days from the trash".to_string(),
+                false
+            ))
+        );
+        assert_eq!(
+            purged_text(&report(1, 0, None), 7).map(|(text, _)| text),
+            Some("Emptied 1 item older than 7 days from the trash".to_string())
+        );
+        assert_eq!(
+            purged_text(&report(10, 2, Some("x: Permission denied")), 30),
+            Some((
+                "Emptied 10 items older than 30 days from the trash — \
+                 2 old items could not be removed: x: Permission denied"
+                    .to_string(),
+                true
+            ))
+        );
+        assert_eq!(
+            purged_text(&report(0, 1, Some("x: Permission denied")), 30),
+            Some((
+                "1 old item could not be removed: x: Permission denied".to_string(),
+                true
+            ))
+        );
     }
 }

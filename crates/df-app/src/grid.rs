@@ -778,6 +778,9 @@ pub struct GridView<'a> {
     /// list and bright in the grid is the same directory telling you two
     /// different things depending on which key you last pressed.
     pub git: Option<&'a df_core::git::RepoStatus>,
+    /// The line under "empty", as the list has it
+    /// ([`crate::ui::ListView::empty_note`]).
+    pub empty_note: Option<&'a str>,
 }
 
 /// Draw a directory as a wall of tiles.
@@ -806,6 +809,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         flip,
         slow_load,
         git,
+        empty_note,
     } = view;
     let content = crate::ui::content_rect(pane);
     // The same sentence the list would show — "empty", "still reading", the
@@ -813,6 +817,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
     // the same fact and must not be two different messages.
     if let Some(message) = paint.pane_state_message(dir, slow_load) {
         paint.quiet_label(content, &message);
+        paint.empty_note(content, dir, empty_note);
         return;
     }
     let painter = paint.painter.with_clip_rect(content);
@@ -1493,6 +1498,7 @@ mod tests {
                             flip: flip.as_ref(),
                             slow_load: false,
                             git: None,
+                            empty_note: None,
                         },
                     );
                 }

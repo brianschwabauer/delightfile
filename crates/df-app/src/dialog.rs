@@ -131,11 +131,17 @@ pub struct Confirm {
     /// The wheel's roll that has not come to a whole name yet
     /// ([`crate::mouse::roll`]).
     carry: f32,
+    /// What emptying the trash frees, for [`ConfirmKind::EmptyTrash`]'s
+    /// question: the trash chip's number, `~` and all, kept in step with it by
+    /// the app while the card is up. `None` for every other kind, and for a
+    /// trash whose walk has said nothing yet.
+    pub size: Option<crate::folders::Size>,
 }
 
 impl Confirm {
     pub fn new(kind: ConfirmKind, paths: Vec<PathBuf>) -> Confirm {
         Confirm {
+            size: None,
             kind,
             paths,
             scroll: 0,
@@ -164,7 +170,12 @@ impl Confirm {
             ConfirmKind::Delete => format!("Delete {count} selected {noun} permanently?"),
             ConfirmKind::RemoteDelete => format!("Delete {count} remote {noun} permanently?"),
             ConfirmKind::Purge => format!("Destroy {count} trashed {noun}?"),
-            ConfirmKind::EmptyTrash => format!("Empty the trash — all {count} {noun}?"),
+            // The count *and* the weight, in the trash chip's own words: what
+            // is about to go, and what going frees.
+            ConfirmKind::EmptyTrash => format!(
+                "Empty the trash? {} will be deleted for good.",
+                crate::trashview::weight_text(n, self.size)
+            ),
             // One file, by name: the question is about *that* file, and a
             // count of one would be the card not saying which.
             ConfirmKind::Replace => format!("Replace {}?", self.body().join(", ")),
@@ -2326,12 +2337,34 @@ mod tests {
                 "Delete 2 remote files permanently?",
             ),
             (ConfirmKind::Purge, "Destroy 2 trashed files?"),
-            (ConfirmKind::EmptyTrash, "Empty the trash — all 2 files?"),
+            (
+                ConfirmKind::EmptyTrash,
+                "Empty the trash? 2 items will be deleted for good.",
+            ),
         ] {
             let confirm = Confirm::new(kind, two.clone());
             assert_eq!(confirm.title(), title);
             assert!(confirm.danger(), "{kind:?} is red");
         }
+        // Emptying the trash says what it frees, in the trash chip's words:
+        // counting, then settled.
+        let mut empty = Confirm::new(ConfirmKind::EmptyTrash, two.clone());
+        empty.size = Some(crate::folders::Size {
+            bytes: 1_288_490_189,
+            settled: false,
+        });
+        assert_eq!(
+            empty.title(),
+            "Empty the trash? 2 items · ~1.2 GB will be deleted for good."
+        );
+        empty.size = Some(crate::folders::Size {
+            bytes: 1_288_490_189,
+            settled: true,
+        });
+        assert_eq!(
+            empty.title(),
+            "Empty the trash? 2 items · 1.2 GB will be deleted for good."
+        );
 
         // A save's replace names its one file in the question, and lists
         // nothing under it: the name once, where it is being asked about.

@@ -54,6 +54,13 @@ open.
 - **Trash and mounts.** The freedesktop trash browsed as a directory with restore on
   `Enter`, udisks2 mount/unmount over a hand-rolled D-Bus client, and gvfs network
   shares (SMB, SFTP, FTP, WebDAV, NFS) listed beside the disks, with a connect prompt.
+
+  A chip beside the position counter weighs the trash (`37 items · 1.2 GB`, counted in
+  the background like the size column), and "Empty trash" asks with the same numbers.
+  Anything in the home trash longer than `trash_keep_days` (30 by default) is removed for
+  good, once at startup and once a day after. It runs as a task you can cancel from `w`,
+  waits while the trash is open in a tab, never runs from a file dialog, and never touches
+  an item whose deletion date it cannot read.
 - **SFTP.** Hosts from yazi's `vfs.toml` browse as directories, with download-on-open and
   upload-on-drop.
 - **Cloud storage.** Every remote in `rclone.conf` (Google Drive, Dropbox, S3, R2, anything
@@ -239,6 +246,15 @@ Hold a prefix key and a which-key card lists what follows it.
 optional. The defaults are a port of my yazi config, so they carry its opener rules (with
 delightfile's own edits), the same `[1, 4, 3]` column ratio, catppuccin-mocha, and the
 nineteen custom directory icons.
+
+`[mgr] trash_keep_days` is how many days the trash keeps things before they go for good,
+counted from the deletion date each item's record carries. It defaults to 30, and `0`
+keeps everything until the trash is emptied by hand.
+
+```toml
+[mgr]
+trash_keep_days = 30
+```
 
 SFTP hosts come from `~/.config/yazi/vfs.toml` first and
 `~/.config/delightfile/vfs.toml` second, so an existing yazi setup needs no second copy.
