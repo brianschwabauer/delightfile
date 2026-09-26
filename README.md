@@ -42,10 +42,10 @@ open.
 - **Drag and drop.** Drag rows out to Chrome's upload box or to an editor over
   `text/uri-list`. Drop files in from anywhere. Drag between panes, tabs and windows, with
   a stacked-card ghost and a count badge.
-- **Undo.** Every move, copy, rename, trash, link and tag goes through a journal, and `u`
-  walks it back. `U` walks forward again, checking first that nothing has changed
-  underneath, and the app menu's Edit ▸ Undo history… lists every step either way and
-  walks to any of them.
+- **Undo.** Every move, copy, rename, trash, link, tag and permission change goes through a
+  journal, and `u` walks it back. `U` walks forward again, checking first that nothing has
+  changed underneath, and the app menu's Edit ▸ Undo history… lists every step either way
+  and walks to any of them.
 - **Permissions.** `C` sets a selection's bits as boxes or a typed `755`, inside folders
   too, and `u` puts them back.
 - **Tags.** `T` tags a file or a selection, stored in the freedesktop `user.xdg.tags`
@@ -313,7 +313,8 @@ trash_keep_days = 30
 
 Tags named `red`, `orange`, `yellow`, `green`, `blue`, `purple` and `grey` are coloured
 with the theme's colours of those names. `[tags]` in `delightfile.toml` colours any other
-tag, by palette name or hex:
+tag, by palette name or hex. A palette name is that colour on whichever side is showing,
+so it turns with the window; a hex is the same on both:
 
 ```toml
 [tags]
