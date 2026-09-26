@@ -1289,7 +1289,7 @@ fn permissions(
             egui::Align2::CENTER_CENTER,
             if on { *letter } else { '·' },
             egui::FontId::monospace(FONT),
-            if on { palette.text } else { palette.overlay0 },
+            if on { palette.text } else { palette.faint },
         );
         let inside = painter.with_clip_rect(rect);
         for splash in ripples.splashes(key, now) {

@@ -1979,7 +1979,7 @@ pub fn paint(
                     egui::Align2::LEFT_CENTER,
                     message,
                     egui::FontId::proportional(FONT),
-                    palette.overlay0,
+                    palette.faint,
                 );
             }
             Line::Item(item) => {
@@ -2035,7 +2035,7 @@ pub fn paint(
             egui::Align2::RIGHT_BOTTOM,
             format!("+{more} more"),
             egui::FontId::proportional(FONT - 1.0),
-            palette.overlay0,
+            palette.faint,
         );
     }
     if let Some(bar) = bar(geometry, card) {

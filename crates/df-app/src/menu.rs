@@ -1724,11 +1724,11 @@ fn row(
     let text_color = if enabled {
         fade_color(palette.text, alpha)
     } else {
-        // Dim, not hidden — see [`Item::enabled`] — and in the ramp's quiet
-        // ink, which steps along on a light palette ([`crate::theme::quiet`]).
-        fade_color(crate::theme::quiet(palette), alpha)
+        // Dim, not hidden — see [`Item::enabled`] — in the faint ink, which
+        // reads on either side ([`crate::theme::Palette::faint`]).
+        fade_color(palette.faint, alpha)
     };
-    let key_color = fade_color(crate::theme::quiet(palette), alpha);
+    let key_color = fade_color(palette.faint, alpha);
     let keys_width = if item.keys.is_empty() {
         0.0
     } else {

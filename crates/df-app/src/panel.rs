@@ -431,7 +431,7 @@ pub fn paint(
             format!("{active} running · {} listed", rows.len())
         },
         egui::FontId::proportional(FONT),
-        palette.overlay0,
+        palette.faint,
     );
 
     if rows.is_empty() {
@@ -442,7 +442,7 @@ pub fn paint(
             egui::Align2::CENTER_CENTER,
             "Nothing running. Copies and deletes show up here.",
             egui::FontId::proportional(FONT),
-            palette.overlay0,
+            palette.faint,
         );
         return;
     }
@@ -566,7 +566,7 @@ fn tone_color(tone: Tone, palette: &crate::theme::Palette) -> egui::Color32 {
         Tone::Paused => palette.peach,
         Tone::Good => palette.green,
         Tone::Bad => palette.red,
-        Tone::Quiet => palette.overlay0,
+        Tone::Quiet => palette.faint,
     }
 }
 

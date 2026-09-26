@@ -375,7 +375,7 @@ pub fn paint(
             egui::Align2::CENTER_CENTER,
             "×",
             egui::FontId::proportional(TRAY_FONT + 3.0),
-            crate::theme::mix(palette.overlay0, palette.red, lit),
+            crate::theme::mix(palette.faint, palette.red, lit),
         );
     }
 }

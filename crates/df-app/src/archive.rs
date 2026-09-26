@@ -644,7 +644,7 @@ pub fn card(
                 egui::Align2::LEFT_TOP,
                 why,
                 egui::FontId::proportional(CARD_FONT),
-                palette.overlay0,
+                palette.faint,
             );
         }
         None => {}

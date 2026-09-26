@@ -203,7 +203,7 @@ pub fn preview(
 }
 
 fn quiet(paint: &Painting<'_>, content: egui::Rect, text: &str, alpha: f32) {
-    let color = paint.palette.overlay0.gamma_multiply(alpha);
+    let color = paint.palette.faint.gamma_multiply(alpha);
     paint.painter.text(
         egui::pos2(
             content.center().x,
@@ -221,7 +221,7 @@ fn quiet(paint: &Painting<'_>, content: egui::Rect, text: &str, alpha: f32) {
 /// width with an ellipsis rather than wrapped — it is a reason, not a message.
 fn quiet_note(paint: &Painting<'_>, content: egui::Rect, text: &str, alpha: f32) {
     use egui::text::{LayoutJob, TextFormat, TextWrapping};
-    let color = paint.palette.overlay0.gamma_multiply(alpha);
+    let color = paint.palette.faint.gamma_multiply(alpha);
     let mut job = LayoutJob::single_section(
         text.to_string(),
         TextFormat {
@@ -319,7 +319,7 @@ fn text_body(
             .layout_no_wrap(
                 "0".repeat(digits + 1),
                 egui::FontId::monospace(MONO),
-                paint.palette.overlay0,
+                paint.palette.faint,
             )
             .size()
             .x
@@ -342,7 +342,7 @@ fn text_body(
                 egui::Align2::RIGHT_TOP,
                 format!("{} ", index + 1),
                 egui::FontId::monospace(MONO),
-                paint.palette.overlay0.gamma_multiply(alpha),
+                paint.palette.faint.gamma_multiply(alpha),
             );
         }
 
@@ -369,7 +369,7 @@ fn text_body(
                 egui::Align2::LEFT_TOP,
                 "… the rest was not read",
                 egui::FontId::monospace(MONO),
-                paint.palette.overlay0.gamma_multiply(alpha),
+                paint.palette.faint.gamma_multiply(alpha),
             );
         }
     }
@@ -478,7 +478,7 @@ fn markdown_body(
             egui::Align2::LEFT_TOP,
             "… the rest was not read",
             egui::FontId::proportional(BODY),
-            paint.palette.overlay0.gamma_multiply(alpha),
+            paint.palette.faint.gamma_multiply(alpha),
         );
         y += LINE;
     }
@@ -790,7 +790,7 @@ fn directory_body(
         egui::Align2::LEFT_TOP,
         summary,
         egui::FontId::proportional(BODY - 1.0),
-        paint.palette.overlay0.gamma_multiply(alpha),
+        paint.palette.faint.gamma_multiply(alpha),
     );
     entries.len().saturating_sub(rows)
 }
@@ -996,7 +996,7 @@ fn archive_body(
                     egui::Align2::LEFT_CENTER,
                     archive_footer(*total, *shown, *complete),
                     font.clone(),
-                    palette.overlay0.gamma_multiply(alpha),
+                    palette.faint.gamma_multiply(alpha),
                 );
             }
         }
@@ -1030,7 +1030,7 @@ fn archive_row(
     };
     let mut size_left = right;
     if let Some(text) = size {
-        let color = palette.overlay0.gamma_multiply(alpha);
+        let color = palette.faint.gamma_multiply(alpha);
         let galley = painter.layout_no_wrap(text, font.clone(), color);
         size_left = right - galley.size().x;
         painter.galley(
@@ -1163,11 +1163,7 @@ fn hex_body(
     // The three columns are measured from the font rather than guessed, so a
     // different monospace face does not shear the layout.
     let offset_width = painter
-        .layout_no_wrap(
-            "00000000  ".to_string(),
-            font.clone(),
-            paint.palette.overlay0,
-        )
+        .layout_no_wrap("00000000  ".to_string(), font.clone(), paint.palette.faint)
         .size()
         .x;
     let hex_width = painter
@@ -1190,7 +1186,7 @@ fn hex_body(
             egui::Align2::LEFT_TOP,
             offset,
             font.clone(),
-            paint.palette.overlay0.gamma_multiply(alpha),
+            paint.palette.faint.gamma_multiply(alpha),
         );
         painter.text(
             egui::pos2(content.left() + offset_width, y),
@@ -1216,7 +1212,7 @@ fn hex_body(
                 egui::Align2::LEFT_TOP,
                 "… the rest was not read",
                 font,
-                paint.palette.overlay0.gamma_multiply(alpha),
+                paint.palette.faint.gamma_multiply(alpha),
             );
         }
     }
@@ -1667,7 +1663,7 @@ fn scrollbar(
     paint.painter.rect_filled(
         rect,
         scrollbar::RADIUS,
-        paint.palette.overlay0.gamma_multiply(alpha),
+        crate::theme::thumb(paint.palette, 0.0).gamma_multiply(alpha),
     );
 }
 

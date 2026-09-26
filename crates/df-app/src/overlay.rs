@@ -190,7 +190,7 @@ pub fn paint_finder(
         Align2::LEFT_CENTER,
         finder.source.title(),
         FontId::proportional(FONT),
-        palette.overlay0,
+        palette.faint,
     );
     let title_width =
         chrome::text_width(painter, finder.source.title(), FontId::proportional(FONT));
@@ -202,7 +202,7 @@ pub fn paint_finder(
             Align2::LEFT_CENTER,
             finder.source.placeholder(),
             FontId::proportional(FONT),
-            palette.overlay0,
+            palette.faint,
         );
     } else {
         painter.text(
@@ -237,7 +237,7 @@ pub fn paint_finder(
             Align2::RIGHT_CENTER,
             format!("{} of {}", finder.cursor + 1, finder.hits.len()),
             FontId::proportional(FONT - 1.0),
-            palette.overlay0,
+            palette.faint,
         );
     }
 
@@ -249,7 +249,7 @@ pub fn paint_finder(
                 Align2::CENTER_CENTER,
                 finder.source.empty_message(),
                 FontId::proportional(FONT),
-                palette.overlay0,
+                palette.faint,
             );
         }
         return;
@@ -312,7 +312,7 @@ pub fn paint_finder(
             &inside,
             egui::pos2(rect.right() - PAD_X - detail_width, rect.center().y),
             &row.detail,
-            palette.overlay0,
+            palette.faint,
             crate::theme::ink(palette, palette.sky),
             &hit.detail,
             detail_font,
@@ -555,7 +555,7 @@ pub fn paint_search(
         },
         FontId::proportional(FONT),
         if query.is_empty() {
-            palette.overlay0
+            palette.faint
         } else {
             palette.text
         },
@@ -597,7 +597,7 @@ pub fn paint_search(
         if search.error.is_some() {
             palette.red
         } else {
-            palette.overlay0
+            palette.faint
         },
     );
 
@@ -620,7 +620,7 @@ pub fn paint_search(
                 Align2::CENTER_CENTER,
                 message,
                 FontId::proportional(FONT),
-                palette.overlay0,
+                palette.faint,
             );
         }
         return;
@@ -661,7 +661,7 @@ pub fn paint_search(
                 let icon = icon_for(entry, paint.theme, palette, paint.nerd);
                 (icon.glyph.to_string(), icon.color)
             }
-            None => (" ".to_string(), palette.overlay0),
+            None => (" ".to_string(), palette.faint),
         };
         let icon_family = if paint.nerd {
             egui::FontFamily::Name(crate::icons::ICON_FAMILY.into())

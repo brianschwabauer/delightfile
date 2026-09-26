@@ -979,7 +979,7 @@ pub fn paint(
             break;
         };
         let (detail_text, detail_tint) = if i == last && below > 0 {
-            (format!("+{} more", grouped(below as u64)), palette.overlay0)
+            (format!("+{} more", grouped(below as u64)), palette.faint)
         } else if row.mark == Mark::Problem {
             (row.detail.clone(), palette.red)
         } else {
@@ -990,7 +990,7 @@ pub fn paint(
             Mark::Changed => (palette.peach, palette.subtext0),
             Mark::Extra => (palette.red, palette.subtext0),
             Mark::Problem => (palette.red, palette.subtext0),
-            Mark::Left | Mark::More => (palette.overlay0, palette.overlay0),
+            Mark::Left | Mark::More => (palette.faint, palette.faint),
         };
         let y = rect.center().y;
         clipped.text(

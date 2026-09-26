@@ -637,7 +637,7 @@ fn tab_new(
         egui::Align2::CENTER_CENTER,
         "+",
         egui::FontId::proportional(FONT + 3.0),
-        mix(palette.overlay0, palette.text, hover),
+        mix(palette.faint, palette.text, hover),
     );
 }
 
@@ -751,7 +751,7 @@ fn tab_chip(
         egui::Align2::LEFT_CENTER,
         format!("{}", index + 1),
         key_font(FONT - 1.0),
-        fade(palette.overlay0, 1.0 - hover),
+        fade(palette.faint, 1.0 - hover),
     );
     if hover > 0.0 {
         inside.text(
@@ -759,7 +759,7 @@ fn tab_chip(
             egui::Align2::CENTER_CENTER,
             "×",
             egui::FontId::proportional(FONT + 2.0),
-            fade(mix(palette.overlay0, palette.text, close), hover),
+            fade(mix(palette.faint, palette.text, close), hover),
         );
     }
     let text_left = rect.left() + PAD_X + FONT;
@@ -1752,7 +1752,7 @@ pub fn tip(
                 if i < dim_from {
                     palette.subtext0
                 } else {
-                    palette.overlay0
+                    palette.faint
                 },
                 warm,
             ),
@@ -2096,7 +2096,7 @@ pub fn path_bar(
             CRUMB_ELLIPSIS,
             font.clone(),
             mix(
-                palette.overlay0,
+                palette.faint,
                 palette.text,
                 hovers.hover(Control::CrumbEllipsis),
             ),
@@ -2158,7 +2158,7 @@ pub fn path_bar(
                 egui::Align2::CENTER_CENTER,
                 CRUMB_SEPARATOR,
                 font.clone(),
-                palette.overlay0,
+                palette.faint,
             );
         }
     }
@@ -2292,7 +2292,7 @@ pub fn prompt_row(
             egui::Align2::LEFT_CENTER,
             tail,
             font.clone(),
-            palette.overlay0,
+            palette.faint,
         );
         paint.painter.text(
             egui::pos2(
@@ -2302,7 +2302,7 @@ pub fn prompt_row(
             egui::Align2::CENTER_CENTER,
             CRUMB_SEPARATOR,
             font,
-            palette.overlay0,
+            palette.faint,
         );
     }
     prompt_field(paint, boxes.field, prompt, boxes.error);
@@ -2787,11 +2787,7 @@ fn prompt_field(
             painter.galley(egui::pos2(*left, top(&galley)), galley, hint_ink(palette));
         }
         Some((Furniture::Case(galley, lit), left)) => {
-            let color = if *lit {
-                palette.yellow
-            } else {
-                palette.overlay0
-            };
+            let color = if *lit { palette.yellow } else { palette.faint };
             painter.galley(egui::pos2(*left, top(galley)), galley.clone(), color);
         }
         None => {}
@@ -3041,7 +3037,7 @@ pub fn hints(
             }
         }
         let painter = paint.painter.with_clip_rect(*rect);
-        let label_colour = mix(palette.overlay0, palette.text, hover);
+        let label_colour = mix(palette.faint, palette.text, hover);
         let key_galley =
             painter.layout_no_wrap(hint.keys.to_string(), key_font(HINT_FONT), palette.subtext0);
         let label_galley = painter.layout_no_wrap(
@@ -3321,12 +3317,12 @@ pub fn help_overlay(
         egui::Align2::RIGHT_CENTER,
         &count,
         egui::FontId::proportional(FONT),
-        palette.overlay0,
+        palette.faint,
     );
 
     // The filter, between the title and the count: what has been typed, with
     // the caret in it while the field is open, and an invitation when it is
-    // empty. The invitation is in `overlay0` and the query in `text`, so the
+    // empty. The invitation is in the faint ink and the query in `text`, so the
     // two never read as the same thing.
     let filter_left = heading.x + text_width(painter, "Keys", title) + GAP * 2.0;
     let filter_width = (count_right - count_width - GAP * 2.0 - filter_left).max(0.0);
@@ -3347,7 +3343,7 @@ pub fn help_overlay(
             &clipped,
             egui::pos2(filter_left + caret_room, heading.y),
             "type to filter",
-            palette.overlay0,
+            palette.faint,
             (filter_width - caret_room).max(0.0),
             font.clone(),
         );
@@ -3420,7 +3416,7 @@ pub fn help_overlay(
                 let id_galley = painter.layout_no_wrap(
                     binding.id.clone(),
                     egui::FontId::proportional(FONT - 1.0),
-                    palette.overlay0,
+                    palette.faint,
                 );
                 painter.galley(
                     egui::pos2(
@@ -3428,7 +3424,7 @@ pub fn help_overlay(
                         row.center().y - id_galley.size().y / 2.0,
                     ),
                     id_galley.clone(),
-                    palette.overlay0,
+                    palette.faint,
                 );
                 truncated(
                     &painter,
@@ -3488,7 +3484,7 @@ pub fn help_overlay(
             egui::Align2::CENTER_CENTER,
             "No binding matches. Backspace to widen the filter.",
             egui::FontId::proportional(FONT),
-            palette.overlay0,
+            palette.faint,
         );
     }
     if let Some(bar) = help_bar(rect, help, lines.len()) {
@@ -3610,7 +3606,7 @@ pub fn close_button(
         // in its corner, and at the row size it read as a speck beside the
         // heading's count.
         egui::FontId::proportional(FONT + 5.0),
-        mix(palette.overlay0, palette.text, hover),
+        mix(palette.faint, palette.text, hover),
     );
 }
 

@@ -1707,7 +1707,7 @@ impl Painting<'_> {
                         egui::pos2(name_end, rect.center().y),
                         &format!(" → {}", target.to_string_lossy()),
                         scale.font,
-                        fade(self.palette.overlay0),
+                        fade(self.palette.faint),
                         room,
                     );
                 }
@@ -2140,7 +2140,7 @@ impl Painting<'_> {
                 painter,
                 egui::pos2(rect.left() + ROW_PAD_X + ICON_COLUMN, rect.center().y),
                 &name,
-                crate::chrome::fade(self.palette.overlay0, alpha),
+                crate::chrome::fade(self.palette.faint, alpha),
                 (rect.width() - ROW_PAD_X * 2.0 - ICON_COLUMN).max(0.0),
             );
         }
@@ -2155,7 +2155,7 @@ impl Painting<'_> {
             egui::Align2::CENTER_CENTER,
             text,
             egui::FontId::proportional(FONT_SIZE),
-            self.palette.overlay0,
+            self.palette.faint,
         );
     }
 

@@ -443,7 +443,7 @@ pub fn paint_picker(
             egui::Align2::CENTER_CENTER,
             "No opener rule matches",
             egui::FontId::proportional(FONT),
-            palette.overlay0,
+            palette.faint,
         );
         return;
     }
@@ -486,7 +486,7 @@ pub fn paint_picker(
         let name = inside.layout_no_wrap(
             choice.name.clone(),
             egui::FontId::monospace(FONT - 1.0),
-            palette.overlay0,
+            palette.faint,
         );
         inside.galley(
             egui::pos2(
@@ -494,7 +494,7 @@ pub fn paint_picker(
                 rect.center().y - name.size().y / 2.0,
             ),
             name.clone(),
-            palette.overlay0,
+            palette.faint,
         );
         chrome::truncated(
             &inside,

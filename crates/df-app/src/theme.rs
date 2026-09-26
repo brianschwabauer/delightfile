@@ -33,8 +33,8 @@
 //!   carries less weight ([`splash`], [`scrim`], [`shadow`]).
 //! - **Where latte's ramp is too close together to read** — its whole range,
 //!   crust to text, is 6:1 where mocha's is 13:1, so the few places that sat
-//!   on the ramp's quiet end take one step further along it on the light side
-//!   ([`quiet`], [`hairline`], [`thumb`]), and an accent that has to be read
+//!   on the ramp's quiet end take a step further along it on the light side
+//!   ([`Palette::faint`], [`hairline`], [`thumb`]), and an accent that has to be read
 //!   *as text* on a light ground is taken halfway to the text ([`ink`]).
 //!
 //! Every number those helpers use for the light side is measured against what
@@ -92,7 +92,27 @@ pub struct Palette {
     /// light side — is painted as the dark flavour it is, splashes and scrims
     /// included.
     pub light: bool,
+    /// Secondary text: a tooltip's second line, a hint strip's words, a
+    /// card's detail column, a count, an empty state, a greyed menu row and
+    /// its keys, a line number — everything that is read, but read second.
+    ///
+    /// `overlay0` on a dark palette, exactly as it always was (3.4:1 on
+    /// mocha's `base`, 3.8:1 on a card's `crust`). On a light one it is the
+    /// first step of the ramp from `overlay0` towards `text` that reaches
+    /// [`FAINT_CONTRAST`] on the palette's `base` — on latte that is
+    /// `overlay2`, 3.5:1, where latte's `overlay0` is 2.3:1 and `overlay1`
+    /// 2.8:1. Measured when the palette is resolved rather than named here,
+    /// so a `[palette.light]` override that moves `base` or the ramp moves
+    /// this with it. Not for a line: a rule is [`hairline`]'s, and a mark is
+    /// its own colour.
+    pub faint: egui::Color32,
 }
+
+/// The contrast a light palette's [`Palette::faint`] has to reach on its
+/// `base`: 3:1, WCAG's floor for text that is not body copy and for the
+/// parts of a control that have to be seen — which is what secondary text in
+/// a file manager is, and what mocha's `overlay0` already gives (3.4:1).
+pub const FAINT_CONTRAST: f32 = 3.0;
 
 impl Palette {
     /// Every name [`Palette::from_theme`] reads, in the order of the fields.
@@ -117,6 +137,20 @@ impl Palette {
             }))
         };
         let (base, text) = (pick("base"), pick("text"));
+        let light = luminance(base) > luminance(text);
+        // The dark side's faint text is `overlay0`, untouched. The light
+        // side's is the first step along the ramp towards `text` that reads
+        // on `base` (see [`Palette::faint`]), and `text` itself if none of
+        // the quieter ones does.
+        let faint = if light {
+            ["overlay0", "overlay1", "overlay2", "subtext0", "subtext1"]
+                .into_iter()
+                .map(pick)
+                .find(|step| contrast(*step, base) >= FAINT_CONTRAST)
+                .unwrap_or(text)
+        } else {
+            pick("overlay0")
+        };
         Palette {
             crust: pick("crust"),
             mantle: pick("mantle"),
@@ -141,7 +175,8 @@ impl Palette {
             lavender: pick("lavender"),
             maroon: pick("maroon"),
             pink: pick("pink"),
-            light: luminance(base) > luminance(text),
+            light,
+            faint,
         }
     }
 
@@ -240,6 +275,12 @@ fn luminance(color: egui::Color32) -> f32 {
         }
     };
     0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+}
+
+/// The WCAG contrast ratio of two opaque colours, 1 to 21.
+pub fn contrast(a: egui::Color32, b: egui::Color32) -> f32 {
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 /// The same colour at `alpha` of its own opacity.
@@ -403,17 +444,6 @@ pub fn ink(palette: &Palette, accent: egui::Color32) -> egui::Color32 {
     }
 }
 
-/// The quiet ink of a menu: the keys beside its rows, and the rows it will
-/// not run.
-///
-/// `overlay0` on a dark palette, where it is 3.8:1 on a card's `crust`; two
-/// steps further along the ramp on a light one, `overlay2`, because latte's
-/// `overlay0` on its crust is 2.0:1 — and a greyed row is still one somebody
-/// has to be able to read to learn why it is grey.
-pub fn quiet(palette: &Palette) -> egui::Color32 {
-    palette.sided(palette.overlay0, palette.overlay2)
-}
-
 /// A one-point rule: a card's edge, a menu's separators, the hairline between
 /// two quiet tabs.
 ///
@@ -499,6 +529,47 @@ mod tests {
         }
     }
 
+    /// Faint text is `overlay0` on every dark flavour — so the dark side paints
+    /// every place it is used exactly as before — and on latte the first step
+    /// of the ramp that reads at 3:1 on `base`, which is `overlay2`.
+    #[test]
+    fn faint_text_is_overlay0_in_the_dark_and_reads_in_the_light() {
+        for flavour in [
+            "catppuccin-mocha",
+            "catppuccin-macchiato",
+            "catppuccin-frappe",
+        ] {
+            let (theme, _) = Theme::parse(
+                &format!("[flavor]\ndark = \"{flavour}\"\n"),
+                std::path::Path::new("theme.toml"),
+            );
+            let dark = Palette::from_theme(&theme, Appearance::Dark);
+            assert_eq!(dark.faint, dark.overlay0, "{flavour}");
+        }
+        let l = latte();
+        assert_eq!(l.faint, l.overlay2);
+        assert!(contrast(l.faint, l.base) >= FAINT_CONTRAST);
+        // …and it is the *first* that does: the two quieter steps do not.
+        assert!(contrast(l.overlay0, l.base) < FAINT_CONTRAST);
+        assert!(contrast(l.overlay1, l.base) < FAINT_CONTRAST);
+        // The measurement, as the docs quote it.
+        let at = |a, b| (contrast(a, b) * 100.0).round() / 100.0;
+        assert_eq!(at(Palette::default().faint, Palette::default().base), 3.36);
+        assert_eq!(at(l.faint, l.base), 3.49);
+
+        // Measured, not named: a light side whose ground is darker needs a
+        // stronger step to read on it, and gets one.
+        let (theme, warnings) = Theme::parse(
+            "[palette.light]\nbase = \"#c0c4d0\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let grey = Palette::from_theme(&theme, Appearance::Light);
+        assert!(grey.light);
+        assert!(contrast(grey.faint, grey.base) >= FAINT_CONTRAST);
+        assert_ne!(grey.faint, l.faint);
+    }
+
     /// A `[palette]` override in `theme.toml` reaches the painter, on both
     /// sides; a side's own table reaches only its side.
     #[test]
@@ -545,7 +616,7 @@ mod tests {
             egui::Color32::from_black_alpha(crate::chrome::HELP_SCRIM)
         );
         assert_eq!(ink(&p, p.yellow), p.yellow);
-        assert_eq!(quiet(&p), p.overlay0);
+        assert_eq!(p.faint, p.overlay0);
         assert_eq!(hairline(&p), p.surface1);
         assert_eq!(thumb(&p, 0.0), p.overlay0);
         assert_eq!(thumb(&p, 1.0), p.overlay1);
@@ -577,7 +648,7 @@ mod tests {
         assert!(edge.a() < egui::Color32::from_black_alpha(153).a());
         assert!(lum(edge) < lum(l.surface1), "{edge:?}");
         assert!(lum(ink(&l, l.yellow)) < lum(l.yellow));
-        assert_eq!(quiet(&l), l.overlay2);
+        assert_eq!(l.faint, l.overlay2);
         assert_eq!(hairline(&l), l.surface2);
         assert_eq!(thumb(&l, 0.0), l.overlay1);
         assert_ne!(select_fill(&l, l.base), mix(l.base, l.yellow, 0.10));

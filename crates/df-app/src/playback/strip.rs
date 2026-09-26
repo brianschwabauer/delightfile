@@ -827,7 +827,7 @@ pub fn audio_card(
             if i == 0 {
                 paint.palette.text.gamma_multiply(alpha)
             } else {
-                paint.palette.overlay0.gamma_multiply(alpha)
+                paint.palette.faint.gamma_multiply(alpha)
             },
         );
     }

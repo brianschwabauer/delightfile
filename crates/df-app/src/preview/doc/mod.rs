@@ -80,7 +80,7 @@ impl Ink {
             // the pane rather than on a rectangle of some other grey.
             bg: rgba(palette.mantle),
             fg: rgba(palette.text),
-            dim: rgba(palette.overlay0),
+            dim: rgba(palette.faint),
             accent: rgba(palette.blue),
         }
     }

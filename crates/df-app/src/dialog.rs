@@ -964,7 +964,7 @@ pub fn paint_confirm(
         painter.layout_no_wrap(
             format!("+{} more", grouped(more as u64)),
             egui::FontId::proportional(FONT - 1.0),
-            palette.overlay0,
+            palette.faint,
         )
     });
     let clipped = painter.with_clip_rect(geometry.body);
@@ -992,7 +992,7 @@ pub fn paint_confirm(
                 row.center().y - marker.size().y / 2.0,
             ),
             marker,
-            palette.overlay0,
+            palette.faint,
         );
     }
     if let Some(bar) = names_bar(geometry, confirm) {
@@ -1527,7 +1527,7 @@ pub fn paint_bulk(
             egui::Align2::CENTER_CENTER,
             "→",
             font.clone(),
-            palette.overlay0,
+            palette.faint,
         );
         let carets = bulk.editor.cursors_on(row.index).next().is_some();
         paint_name(paint, bulk, row, old, line, rows_focused.then_some(carets));
@@ -1554,7 +1554,7 @@ pub fn paint_bulk(
         job.append(
             &format!(" · {} carets", grouped(carets as u64)),
             0.0,
-            inked(palette.overlay0),
+            inked(palette.faint),
         );
     }
     job.wrap = egui::text::TextWrapping {
@@ -1927,8 +1927,8 @@ fn paint_popover(
         );
         let (preview, preview_color, preview_font) = match bulk.preview(candidate) {
             Ok(name) => (name, palette.blue, mono.clone()),
-            Err(Missing::Pending) => ("reading photo…".to_string(), palette.overlay0, font.clone()),
-            Err(Missing::Because(why)) => (why.to_string(), palette.overlay0, font.clone()),
+            Err(Missing::Pending) => ("reading photo…".to_string(), palette.faint, font.clone()),
+            Err(Missing::Because(why)) => (why.to_string(), palette.faint, font.clone()),
         };
         let preview_room = inner.width() * POPOVER_PREVIEW_SHARE;
         let preview_width =
