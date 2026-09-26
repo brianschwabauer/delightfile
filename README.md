@@ -43,7 +43,9 @@ open.
   `text/uri-list`. Drop files in from anywhere. Drag between panes, tabs and windows, with
   a stacked-card ghost and a count badge.
 - **Undo.** Every move, copy, rename, trash, link and tag goes through a journal, and `u`
-  walks it back.
+  walks it back. `U` walks forward again, checking first that nothing has changed
+  underneath, and the app menu's Edit ▸ Undo history… lists every step either way and
+  walks to any of them.
 - **Tags.** `T` tags a file or a selection, stored in the freedesktop `user.xdg.tags`
   extended attribute, so the tags live on the file and other programs can read them. The
   seven Finder colours (and any tag `[tags]` gives a colour) show as overlapping dots after
@@ -242,7 +244,7 @@ it without leaving the list.
 | `d` `D` | trash, delete for good |
 | `a` `r` `R` | create, rename, rename the stem |
 | `T` | tags, comma-separated. `Tab` completes one |
-| `u` | undo |
+| `u` `U` | undo, redo |
 | `f` `/` `n` `N` | filter, find, next, previous. `f #red` filters by tag |
 | `s` `S` | search names (`fd`), search contents (`rg`). `s #red` searches by tag |
 | `m t` | tag names in the right-hand column (`m` picks what the column says) |
