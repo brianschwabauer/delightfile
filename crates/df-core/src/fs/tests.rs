@@ -1798,3 +1798,66 @@ fn a_failed_external_listing_keeps_its_sentence() {
         Some("showandtour1: cannot log in: Permission denied (publickey)")
     );
 }
+
+/// **The filter audit.** A row the `f` query hides keeps its mark, but no
+/// verb acts on it: the paths an operation is handed and the count the
+/// counter shows are the selected rows on screen, and clearing the query
+/// puts the hidden marks back in play. The bug this pins: `Ctrl+a`, then
+/// `f a`, then `d` trashed every file in the folder, the ones the eye could
+/// not see among them.
+#[test]
+fn a_verb_acts_on_the_selected_rows_the_filter_shows_and_no_others() {
+    let mut state = loaded_state(files(&["a.txt", "ab.txt", "b.txt", "c.txt"]));
+    state.select_all();
+    assert_eq!(state.selected_count(), 4);
+
+    state.set_filter("a");
+    assert!(state.is_selected("b.txt"), "the mark stays on a hidden row");
+    assert!(!state.acts_on("b.txt"), "…and nothing acts on it");
+    assert!(state.acts_on("ab.txt"));
+    assert_eq!(
+        state.selected_count(),
+        2,
+        "the counter counts what is shown"
+    );
+    assert_eq!(
+        state.selected_paths(),
+        vec![
+            PathBuf::from("/fixture/a.txt"),
+            PathBuf::from("/fixture/ab.txt")
+        ]
+    );
+
+    // `Ctrl+r` inverts the shown rows only: the two shown go, the hidden
+    // marks stay where they were — and are still not acted on.
+    state.invert_selection();
+    assert_eq!(state.selected_count(), 0);
+    assert!(state.selected_paths().is_empty());
+    assert!(state.is_selected("c.txt"));
+
+    // Cleared: the hidden marks are back in play, exactly as they were.
+    state.clear_filter();
+    assert_eq!(state.selected_count(), 2);
+    assert_eq!(
+        state.selected_paths(),
+        vec![
+            PathBuf::from("/fixture/b.txt"),
+            PathBuf::from("/fixture/c.txt")
+        ]
+    );
+}
+
+/// A paste's names wait for their rows (see `select_names`), and the filter
+/// judges them by the name as it will judge the row: one that matches is in
+/// play before its row arrives, one that does not is not.
+#[test]
+fn a_name_with_no_row_yet_is_in_play_when_the_filter_would_show_it() {
+    let mut state = loaded_state(files(&["a.txt"]));
+    state.set_filter("new");
+    state.select_names(["new.txt".to_string(), "other.txt".to_string()]);
+    assert_eq!(
+        state.selected_paths(),
+        vec![PathBuf::from("/fixture/new.txt")]
+    );
+    assert_eq!(state.selected_count(), 1);
+}

@@ -452,7 +452,8 @@ impl DirState {
     /// rows arrive, and nothing has said those are hidden. And a row hidden
     /// only by the **`f` query** stays selected, as it always has: that query
     /// is a search over rows you have already seen, typed and cleared in a
-    /// breath, not a statement about what the directory holds.
+    /// breath, not a statement about what the directory holds. It keeps its
+    /// mark, and nothing acts on it while it is hidden ([`DirState::in_play`]).
     fn deselect_unshown(&mut self) {
         if self.selected.is_empty() {
             return;
@@ -497,18 +498,83 @@ impl DirState {
 
     // ── Selection ───────────────────────────────────────────────────────────
 
+    /// Whether `name` wears the selection's mark — including a row the `f`
+    /// query is hiding, which keeps its mark (see [`DirState::in_play`]).
     pub fn is_selected(&self, name: &str) -> bool {
         self.selected.contains(name)
     }
 
-    /// Selected files, in name order, as paths — the input to every operation
-    /// in PLAN §5.
-    pub fn selected_paths(&self) -> Vec<PathBuf> {
-        self.selected.iter().map(|n| self.path.join(n)).collect()
+    /// Whether `name` is selected **and** a verb would act on it: marked, and
+    /// not hidden by the `f` query.
+    pub fn acts_on(&self, name: &str) -> bool {
+        self.selected.contains(name) && self.in_play(name)
     }
 
+    /// Whether a selected name is one the verbs act on.
+    ///
+    /// **Exactly the rows on screen.** A row the `f` query hides keeps its
+    /// mark — the query is typed and cleared in a breath, and a selection that
+    /// did not survive it would be work thrown away — but nothing acts on it
+    /// while it is hidden: `y`, `d`, `r`, a drag, `A` and a file dialog's pick
+    /// take the selected rows the eye can see, and the counter counts the
+    /// same ones. The alternative was `d` trashing files the filter had put
+    /// out of sight, which is the one thing a selection must never do.
+    ///
+    /// Asked of the name, not of the view: a name query is a function of the
+    /// name alone ([`filter::match_name`]), so this is one substring test per
+    /// selected name rather than a walk of the listing. A name with no row yet
+    /// (a paste's, see [`DirState::select_names`]) is in play when its name
+    /// matches, which is exactly when its row will be shown on arrival.
+    ///
+    /// A `#tag` query is a function of the row's tags, not its name
+    /// ([`tags::matches`]), so it is asked of the entry of that name; a name
+    /// with no row yet has no tags to be judged by and is not in play until
+    /// its row lands and shows it.
+    fn in_play(&self, name: &str) -> bool {
+        match self.filter.strip_prefix('#') {
+            _ if self.filter.is_empty() => true,
+            Some(tag) => self
+                .entries
+                .iter()
+                .any(|entry| entry.name == name && tags::matches(&entry.tags, tag)),
+            None => filter::match_name(name, &self.filter).is_some(),
+        }
+    }
+
+    /// The selected names in play ([`DirState::in_play`]), in name order.
+    ///
+    /// A `#tag` query's matching names are gathered once, from the entries,
+    /// rather than looked up once for every selected name — `Ctrl+a` over ten
+    /// thousand rows is ten thousand of them.
+    fn selected_in_play(&self) -> impl Iterator<Item = &String> {
+        let tagged: Option<std::collections::HashSet<&str>> =
+            self.filter.strip_prefix('#').map(|tag| {
+                self.entries
+                    .iter()
+                    .filter(|entry| tags::matches(&entry.tags, tag))
+                    .map(|entry| entry.name.as_str())
+                    .collect()
+            });
+        self.selected.iter().filter(move |name| match &tagged {
+            Some(tagged) => tagged.contains(name.as_str()),
+            None => self.in_play(name),
+        })
+    }
+
+    /// Selected files, in name order, as paths — the input to every operation
+    /// in PLAN §5. Only the ones in play ([`DirState::in_play`]).
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        self.selected_in_play().map(|n| self.path.join(n)).collect()
+    }
+
+    /// How many files a verb would act on — the counter's number, and what
+    /// `r` asks to decide between one name and the card. The same set as
+    /// [`DirState::selected_paths`].
     pub fn selected_count(&self) -> usize {
-        self.selected.len()
+        if self.filter.is_empty() {
+            return self.selected.len();
+        }
+        self.selected_in_play().count()
     }
 
     /// `Space`: toggle the row under the cursor. The caller advances the cursor

@@ -5247,7 +5247,9 @@ impl App {
         let mut folders: Vec<PathBuf> = dir
             .entries()
             .iter()
-            .filter(|entry| entry.is_dir() && dir.is_selected(&entry.name))
+            // The marks the eye can see: one the `f` query hides is not
+            // picked ([`df_core::fs::DirState::acts_on`]).
+            .filter(|entry| entry.is_dir() && dir.acts_on(&entry.name))
             .map(|entry| entry.path.clone())
             .collect();
         if folders.is_empty() {
@@ -7848,25 +7850,16 @@ impl App {
         // which is whatever the filesystem keeps; `rows()` is the sort on
         // screen. The card is read against the pane behind it, and rows in a
         // different order from the pane would be a puzzle.
-        let mut names: Vec<String> = listing
+        //
+        // **Only the rows on screen.** A row the `f` query has hidden keeps
+        // its mark, and no verb acts on it while it is hidden
+        // ([`df_core::fs::DirState::acts_on`]) — a card that renamed files the
+        // person could not see would be `d`'s old mistake with a text field.
+        let names: Vec<String> = listing
             .rows()
-            .filter(|(entry, _)| listing.is_selected(&entry.name))
+            .filter(|(entry, _)| listing.acts_on(&entry.name))
             .map(|(entry, _)| entry.name.clone())
             .collect();
-        // A row the `f` query has hidden stays selected, and `r` acts on the
-        // whole selection whether or not it is on screen. So those names come
-        // after the drawn ones, in scan order, since there is no drawn order
-        // to follow. The alternative is a card that silently leaves out files
-        // the person selected.
-        let drawn: HashSet<usize> = listing.view().iter().copied().collect();
-        names.extend(
-            listing
-                .entries()
-                .iter()
-                .enumerate()
-                .filter(|(index, entry)| !drawn.contains(index) && listing.is_selected(&entry.name))
-                .map(|(_, entry)| entry.name.clone()),
-        );
         if names.len() < 2 {
             return;
         }
@@ -23492,8 +23485,10 @@ mod tests {
     }
 
     /// The card lists the selection in the order the pane draws it, not in
-    /// the directory's scan order. A selected row the `f` query has hidden is
-    /// still in the card, after the drawn ones, rather than silently left out.
+    /// the directory's scan order — and only the selected rows the `f` query
+    /// shows: a hidden row keeps its mark, and no verb acts on it while it is
+    /// hidden (`DirState::acts_on`). That used to be the other way round, and
+    /// a card of four renamed three files nobody could see.
     #[test]
     fn the_bulk_card_lists_the_selection_in_the_panes_order() {
         // Created out of order, so that neither the order they were made in
@@ -23515,8 +23510,9 @@ mod tests {
         };
         assert_eq!(bulk.olds, drawn, "the pane's order");
 
-        // All but `a` hidden by the `f` query and still selected: they follow
-        // the row that is drawn, in scan order.
+        // All but `a` hidden by the `f` query and still selected. One row is
+        // shown, so `r` is the one-name prompt over it, not a card that
+        // renames the three the eye cannot see.
         app.close_overlay(now);
         app.dir().set_filter("a");
         let listing = &app.tab().cwd.dir;
@@ -23531,13 +23527,76 @@ mod tests {
             !hidden.is_empty() && hidden.iter().all(|name| listing.is_selected(name)),
             "the fixture needs a hidden row that is still selected: {shown:?}"
         );
-        let expected: Vec<String> = shown.iter().chain(&hidden).cloned().collect();
+        app.run(Command::Rename, 10, now);
+        assert!(app.dialog.is_none(), "a card for rows the filter hides");
+        assert_eq!(
+            app.prompt.as_ref().map(|prompt| prompt.kind),
+            Some(PromptKind::Rename)
+        );
+    }
+
+    /// The filter audit's bulk rename: two shown rows of three selected make
+    /// a card of two, in the pane's order, and the hidden one keeps its mark
+    /// for when the query is cleared.
+    #[test]
+    fn the_bulk_card_takes_only_the_rows_the_filter_shows() {
+        let mut app = Fixture::new("bulk-filtered", &["a2.txt", "b.txt", "a1.txt"]);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        app.dir().set_filter("a");
         app.run(Command::Rename, 10, now);
         let Some(Dialog::Bulk(bulk)) = &app.dialog else {
             panic!("no card");
         };
-        assert_eq!(bulk.olds, expected);
-        assert_eq!(bulk.len(), 4, "nothing selected is left out");
+        assert_eq!(bulk.olds, ["a1.txt", "a2.txt"]);
+        assert!(app.tab().cwd.dir.is_selected("b.txt"), "the mark stayed");
+    }
+
+    /// The filter audit's `y`, `d`, `D` and `A`: each takes the selected rows
+    /// on screen, through the one `targets` door they share with `Y`, `b`
+    /// and a drag. `D`'s card is read rather than answered, and `d` — which
+    /// goes straight to the job with the same list — is not run at all, so no
+    /// test puts anything in the real trash.
+    #[test]
+    fn the_verbs_take_only_the_rows_the_filter_shows() {
+        let mut app = Fixture::new("audit-verbs", &["a.txt", "ab.txt", "b.txt"]);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        app.dir().set_filter("a");
+        let files = app.files.clone();
+        let shown = vec![files.join("a.txt"), files.join("ab.txt")];
+        assert_eq!(app.targets(), shown, "what `d`, `Y`, `A` and `b` act on");
+        assert_eq!(app.cluster(now).selected, 2, "the counter agrees");
+
+        app.run(Command::DeletePermanently, 10, now);
+        let Some(Dialog::Confirm(confirm)) = &app.dialog else {
+            panic!("no confirm");
+        };
+        assert_eq!(
+            confirm.paths, shown,
+            "`D` would delete a row nobody can see"
+        );
+        app.close_overlay(now);
+
+        app.run(Command::Yank, 10, now);
+        assert_eq!(app.clipboard.paths, shown);
+    }
+
+    /// The filter audit's drag: a drag off a selected row carries the
+    /// selected rows on screen, and not the one the query hides.
+    #[test]
+    fn a_drag_out_of_a_filtered_listing_carries_only_what_it_shows() {
+        let mut app = Fixture::new("audit-drag", &["a.txt", "ab.txt", "b.txt"]);
+        let now = Instant::now();
+        app.run(Command::SelectAll, 10, now);
+        app.dir().set_filter("a");
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        let from = row_centre(&app, 0);
+        drag_to(&mut app, &ctx, from, from + egui::vec2(0.0, 160.0));
+        let files = app.files.clone();
+        let drag = app.drag.as_ref().expect("the press became a file drag");
+        assert_eq!(drag.paths, vec![files.join("a.txt"), files.join("ab.txt")]);
     }
 
     /// The rename card answers the pointer through the frame: a press on a
