@@ -4931,16 +4931,16 @@ impl App {
         }
     }
 
-    /// `u` / `Ctrl+Shift+z`.
+    /// `u` / `Ctrl+Shift+z`. Returns whether it took a step back.
     ///
     /// Synchronous: an undo is usually a rename back, and the one case that is
     /// not — deleting what a big copy created — is the price of the journal
     /// staying a plain `&mut` stack rather than something a worker can hold.
     /// (Noted as a deferral; moving it to the pool needs a shareable journal.)
-    fn undo(&mut self, now: Instant) {
+    fn undo(&mut self, now: Instant) -> bool {
         if self.journal.is_empty() {
             self.toasts.notice("Nothing to undo", now);
-            return;
+            return false;
         }
         // Asked before the undo, because afterwards the record is gone and the
         // report only says which paths it touched, not what kind of touch.
@@ -4993,7 +4993,7 @@ impl App {
                         self.dir().cursor_to_name(&name);
                         self.attach_view();
                     }
-                    return;
+                    return true;
                 }
                 // A rename taken back, or a trash restored, is a row coming
                 // back — the old name, the file out of the trash — and the
@@ -5010,8 +5010,60 @@ impl App {
                     self.dir().aim_cursor(name);
                     self.attach_view();
                 }
+                true
             }
-            Err(e) => self.toasts.error(e.to_string(), now),
+            Err(e) => {
+                self.toasts.error(e.to_string(), now);
+                false
+            }
+        }
+    }
+
+    /// `U`: do again what `u` last took back ([`Journal::redo`]). Returns
+    /// whether it took a step forward.
+    ///
+    /// Synchronous, as [`App::undo`] is and for its reason — and the same
+    /// deferral one step further: a redone paste is a copy, made here on this
+    /// thread through the copy a paste uses (reflinked where the filesystem
+    /// can), so a big one on a filesystem that cannot holds the window until
+    /// it lands.
+    fn redo(&mut self, now: Instant) -> bool {
+        if !self.journal.can_redo() {
+            self.toasts.notice("Nothing to redo", now);
+            return false;
+        }
+        // Asked before the redo, for the reason `undo` asks: afterwards the
+        // report says which paths it touched, not what kind of touch.
+        let lands = self.journal.peek_redo().is_some_and(redo_lands);
+        match self.journal.redo(&TaskCtx::detached()) {
+            Ok(report) => {
+                // An operation again, and one `u` takes back: the toast an
+                // operation lands with, which says so.
+                self.toasts.undo(report.description.clone(), now);
+                for dir in Self::affected(&report.touched, None) {
+                    self.rescan(&dir, now);
+                }
+                self.refresh_all(now);
+                // What the redo made — the new name, the copy, the link — is
+                // where the cursor goes, when it is in this listing: aimed,
+                // because the rescan above has not landed.
+                let cwd = self.cwd();
+                let made = report
+                    .touched
+                    .iter()
+                    .filter(|path| path.parent() == Some(cwd.as_path()))
+                    .find_map(|path| path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned());
+                if let (true, Some(name)) = (lands, made) {
+                    self.dir().aim_cursor(name);
+                    self.attach_view();
+                }
+                true
+            }
+            Err(e) => {
+                self.toasts.error(e.to_string(), now);
+                false
+            }
         }
     }
 
@@ -9415,6 +9467,14 @@ impl App {
         if command == Command::PasteSync && self.clipboard.is_empty() {
             return Some("Nothing yanked");
         }
+        // `u` and `U` with nothing on their stack: the key says so, and the
+        // app menu's Undo and Redo grey rather than wait to.
+        if command == Command::Undo && self.journal.is_empty() {
+            return Some("Nothing to undo");
+        }
+        if command == Command::Redo && !self.journal.can_redo() {
+            return Some("Nothing to redo");
+        }
         None
     }
 
@@ -9954,7 +10014,12 @@ impl App {
                 let here = self.cwd();
                 self.terminal_in(here, now);
             }
-            C::Undo => self.undo(now),
+            C::Undo => {
+                self.undo(now);
+            }
+            C::Redo => {
+                self.redo(now);
+            }
             C::TasksShow => self.toggle_panel(),
             C::ToggleView => self.toggle_view(now),
             C::ViewScaleUp => self.step_scale(true, now),
@@ -19044,6 +19109,14 @@ fn undo_restores(record: &OpRecord) -> bool {
     )
 }
 
+/// Whether a redo of `record` brings a row the cursor should go to — the
+/// new name, the moved file, the copy, the thing made, the link — rather than
+/// taking one away. The mirror of [`undo_restores`]: everything but a trash,
+/// which a redo empties out of the listing again.
+fn redo_lands(record: &OpRecord) -> bool {
+    !matches!(record, OpRecord::Trash { .. })
+}
+
 impl ApplicationHandler<crate::Wake> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_none() {
@@ -19311,6 +19384,9 @@ mod tests {
     /// `T`: the prompt, the difference a selection gets, `Tab`, `u`, the
     /// dots and the `m t` column.
     mod tagging;
+
+    /// `U`: redo through the keys, and the app menu's greys.
+    mod undo;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the

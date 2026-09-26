@@ -247,10 +247,10 @@ pub fn crumbs(at: &VfsPath) -> Vec<crate::chrome::Crumb> {
 ///
 /// The rule is "everything whose subject would have to be a local path, or
 /// whose implementation is a local process". So `u` is here (the journal
-/// records local inverses and a remote delete has none), the two search
-/// commands are here (`fd` and `rg` would search this machine while the pane
-/// showed another), and `p` is deliberately **not** here — a paste into a
-/// remote directory is an upload, which is the feature.
+/// records local inverses and a remote delete has none), and `U` with it;
+/// the two search commands are here (`fd` and `rg` would search this machine
+/// while the pane showed another), and `p` is deliberately **not** here — a
+/// paste into a remote directory is an upload, which is the feature.
 ///
 /// This list is a **guard**, not a courtesy: it is consulted in one place, at
 /// the top of the command dispatch, and every command on it is one that would
@@ -278,6 +278,7 @@ pub fn inert_remotely(command: df_core::keymap::Command) -> bool {
             | C::SearchName
             | C::SearchContent
             | C::Undo
+            | C::Redo
             | C::DiskUsage
             | C::YankToggle
             | C::ArchiveExtractHere
@@ -1224,6 +1225,7 @@ mod tests {
             C::Shell,
             C::SearchName,
             C::Undo,
+            C::Redo,
             C::CopyToClipboard,
             // **The bug this pins**: `O` had no remote guard at all, so the
             // opener picker launched a child process with the row's

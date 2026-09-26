@@ -650,6 +650,7 @@ pub fn app_items(
     ];
     let edit = vec![
         run("Undo", C::Undo, true),
+        run("Redo", C::Redo, true),
         run("Select all", C::SelectAll, true).after_gap(),
         run("Invert selection", C::InvertSelection, true),
         run("Copy", C::Yank, acts).after_gap(),
@@ -2716,6 +2717,7 @@ mod tests {
             outline(list("Edit")),
             vec![
                 ("Undo", "u", false),
+                ("Redo", "U", false),
                 ("Select all", "Ctrl+a", true),
                 ("Invert selection", "Ctrl+r", false),
                 ("Copy", "y", true),
@@ -2741,6 +2743,7 @@ mod tests {
         assert_eq!(command("Open terminal here"), C::TerminalHere);
         assert_eq!(command("Filter this folder…"), C::Filter);
         assert_eq!(command("Undo"), C::Undo);
+        assert_eq!(command("Redo"), C::Redo);
         assert_eq!(command("Copy"), C::Yank);
         assert_eq!(command("Cut"), C::YankCut);
         assert_eq!(command("Sync here…"), C::PasteSync);
@@ -2817,6 +2820,7 @@ mod tests {
             C::SearchContent,
             C::Filter,
             C::Undo,
+            C::Redo,
             C::SelectAll,
             C::InvertSelection,
             C::Yank,

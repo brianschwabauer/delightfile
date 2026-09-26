@@ -10,8 +10,8 @@
 //!    `Alt+←`/`Alt+→`, which is what every other program on the machine uses.
 //! 2. `[`/`]` are transport, so the tab keys move to `Alt+[`/`Alt+]` and the
 //!    swaps stay on `{`/`}` (PLAN §2).
-//! 3. Three commands yazi did not have: `u` undo (PLAN §5), `Ctrl+p` command
-//!    palette (§4.4), and a `Ctrl+n` new window (§2).
+//! 3. Four commands yazi did not have: `u` undo and `U` redo (PLAN §5),
+//!    `Ctrl+p` command palette (§4.4), and a `Ctrl+n` new window (§2).
 //!
 //! **Row order is the which-key order** (PLAN §4), so the `g`, `m`, `c` and `,`
 //! chords are grouped the way a person would want to read them, not sorted.
@@ -220,6 +220,7 @@ pub(super) fn build() -> Registry {
         // terminal is its Ctrl, which no other table in Files claims.
         (Files, "ctrl+t", C::TerminalHere,      "Open a terminal here",                Always),
         (Files, "u",      C::Undo,              "Undo last operation",                 Always),
+        (Files, "U",      C::Redo,              "Redo",                                Always),
         (Files, "w",      C::TasksShow,         "Task manager",                        Always),
         (Files, "M",      C::MountManager,      "Mount manager",                       Always),
         (Files, "b",      C::YankToggle,        "Add to the yank, or take back out",   Always),
