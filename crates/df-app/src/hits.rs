@@ -84,9 +84,9 @@
 //! ## What is refused
 //!
 //! The verbs that make something *in* the folder on screen — `a`, `p` and its
-//! variants, the links, `A` and extract-here — have no folder here to make it
-//! in (and the row they made would never be one of these), and `g b` has no
-//! folder to pin. `.` is refused as well: which files the search saw is a
+//! variants, the links, `A` and every extract (here, to a folder, all into
+//! one folder) — have no folder here to make it in (and what they made would
+//! never be one of these rows), and `g b` has no folder to pin. `.` is refused as well: which files the search saw is a
 //! property of the search, and the dotfiles it did not return are not hidden
 //! here, they were never found. Each says so, and the menus grey them
 //! ([`refusal`]).
@@ -527,10 +527,12 @@ pub fn chip_crumb(label: String) -> crate::chrome::Crumb {
 pub fn refusal(command: Command) -> Option<&'static str> {
     use Command as C;
     Some(match command {
-        // …and `A` and extract-here, which make a file or a folder the way
+        // …and `A` and the extracts, which make a file or a folder the way
         // `a` does, in a folder that is not on screen: what they made would
-        // never be one of these rows, so nobody would see it land.
-        C::Create | C::ArchiveCreate | C::ArchiveExtractHere => {
+        // never be one of these rows, so nobody would see it land. Extract to
+        // folder is also the gate for "all into one folder" (the menu's row)
+        // and for the `builtin:extract…` openers `O` offers (`App::launch`).
+        C::Create | C::ArchiveCreate | C::ArchiveExtractHere | C::ArchiveExtractSubfolder => {
             "Search results are not a folder — ← goes back to make something there"
         }
         C::Paste
@@ -688,7 +690,7 @@ mod tests {
         );
     }
 
-    /// What makes something here is refused — `A` and extract-here with the
+    /// What makes something here is refused — `A` and every extract with the
     /// same sentence as `a` — and a verb on the rows works.
     #[test]
     fn making_something_here_is_refused_and_acting_on_rows_is_not() {
@@ -700,14 +702,22 @@ mod tests {
             Command::ToggleHidden,
             Command::ArchiveCreate,
             Command::ArchiveExtractHere,
+            Command::ArchiveExtractSubfolder,
         ] {
             assert!(refusal(command).is_some(), "{}", command.id());
         }
-        assert_eq!(refusal(Command::ArchiveCreate), refusal(Command::Create));
-        assert_eq!(
-            refusal(Command::ArchiveExtractHere),
-            refusal(Command::Create)
-        );
+        for command in [
+            Command::ArchiveCreate,
+            Command::ArchiveExtractHere,
+            Command::ArchiveExtractSubfolder,
+        ] {
+            assert_eq!(
+                refusal(command),
+                refusal(Command::Create),
+                "{}",
+                command.id()
+            );
+        }
         for command in [Command::Rename, Command::Trash, Command::Yank] {
             assert_eq!(refusal(command), None, "{}", command.id());
         }

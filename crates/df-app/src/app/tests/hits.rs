@@ -740,19 +740,52 @@ fn undoing_a_trash_brings_the_row_back_unmarked() {
     assert_eq!(cursor(&app).as_deref(), Some("docs/foo.txt"));
 }
 
-/// **Review 4.** `A` and extract-here are refused with `a`'s sentence: what
-/// they make would land in a folder that is not on screen.
+/// **Review 4.** `A` and every extract are refused with `a`'s sentence: what
+/// they make would land in a folder that is not on screen. From every door —
+/// the keys, the menu's extract rows ("all into one folder" included), and
+/// the `builtin:extract…` openers `O` offers — and greyed in the menu.
 #[test]
-fn archive_and_extract_here_are_refused_in_the_hits() {
+fn archive_and_the_extracts_are_refused_in_the_hits() {
     let mut app = tree("hits-archive");
+    let root = app.files.clone();
     commit_three(&mut app);
     let now = Instant::now();
+    let sentence = app.refusal(Command::Create).map(str::to_string);
+    assert!(sentence.is_some());
     app.run(Command::ArchiveCreate, 10, now);
     assert!(app.prompt.is_none(), "`A` opened its prompt");
-    let said = toast_text(&app).map(str::to_string);
-    assert_eq!(said.as_deref(), app.refusal(Command::Create));
-    app.run(Command::ArchiveExtractHere, 10, now);
-    assert_eq!(toast_text(&app), app.refusal(Command::Create));
+    assert_eq!(toast_text(&app), sentence.as_deref());
+    for command in [
+        Command::ArchiveExtractHere,
+        Command::ArchiveExtractSubfolder,
+    ] {
+        app.toasts.clear();
+        app.run(command, 10, now);
+        assert_eq!(toast_text(&app), sentence.as_deref(), "{}", command.id());
+    }
+    for action in [
+        menu::Action::ExtractHere,
+        menu::Action::ExtractSubfolder,
+        menu::Action::ExtractMerged,
+    ] {
+        let command = menu_command(action).expect("an extract row is a verb");
+        assert_eq!(app.refusal(command), sentence.as_deref(), "{action:?}");
+    }
+    for builtin in ["extract", "extract-here", open::MERGED_BUILTIN] {
+        app.toasts.clear();
+        let choice = open::Choice {
+            name: builtin.to_string(),
+            command: format!("builtin:{builtin}"),
+            description: String::new(),
+            block: false,
+        };
+        app.launch(&choice, vec![root.join("src/foo.txt")], now);
+        assert_eq!(toast_text(&app), sentence.as_deref(), "builtin:{builtin}");
+    }
+    assert!(
+        app.ops.is_empty() && app.archive_job.is_none(),
+        "something ran"
+    );
 }
 
 /// **Review 5.** A folder dialog's button with nothing selected picks the
