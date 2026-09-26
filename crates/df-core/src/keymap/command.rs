@@ -162,6 +162,10 @@ commands! {
     RenameEmptyStem => "rename-empty-stem",
     Shell => "shell",
     ShellBlock => "shell-block",
+    // `Ctrl+t`: the `terminal-here` opener, handed the folder on screen — the
+    // same opener the `*/` rule offers on a folder's row, run the way `o` runs
+    // one, so a terminal of your own choosing is one key from any folder.
+    TerminalHere => "terminal-here",
     MountManager => "mount-manager",
     // Archives, browsed as directories and unpacked (PLAN §7.3). Both act on
     // the hovered archive in a real directory, and on the archive being

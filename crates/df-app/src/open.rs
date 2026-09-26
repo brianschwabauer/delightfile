@@ -206,6 +206,21 @@ pub fn choices_for(config: &Config, entry: &Entry) -> Vec<Choice> {
         .collect()
 }
 
+/// The opener "Open terminal here" runs: the one the shipped `*/` rule offers
+/// on a folder's row, whose `$1` is the folder itself.
+///
+/// Not `terminal-at`, its neighbour in the opener table: that one is for a
+/// *file*, and opens in `$(dirname "$1")` — handed a folder, it would put the
+/// terminal in the folder's parent.
+pub const TERMINAL_OPENER: &str = "terminal-here";
+
+/// An opener by its name in `[opener]`, detached from the config the way the
+/// rules' choices are — the lookup for a verb that is about a folder rather
+/// than about a file a rule matched.
+pub fn named(config: &Config, name: &str) -> Option<Choice> {
+    config.opener(name).map(Choice::from)
+}
+
 /// The built-in that only makes sense for several archives at once.
 pub const MERGED_BUILTIN: &str = "extract-merged";
 
@@ -535,6 +550,29 @@ mod tests {
         assert_eq!(argv[4], "/home/brian/a b.txt");
         // …and with no selection the snippet still runs, with no positionals.
         assert_eq!(shell_argv("/bin/sh", "ls", &[]).len(), 4);
+    }
+
+    /// "Open terminal here" is the folder's own opener, whose `$1` is the
+    /// folder — not the file's, which would open in the folder's parent — and
+    /// a config without it has nothing to find rather than something else.
+    #[test]
+    fn the_terminal_opener_is_the_one_a_folder_row_offers() {
+        let config = Config::default();
+        let choice = named(&config, TERMINAL_OPENER).expect("shipped");
+        assert_eq!(choice.name, "terminal-here");
+        assert!(!choice.block, "a terminal must not hold the window");
+        assert!(
+            choice.command.contains(r#"--working-directory="$1""#),
+            "{}",
+            choice.command
+        );
+        assert!(!choice.command.contains("dirname"), "{}", choice.command);
+        let folder_rule = config.openers_for("Work", "inode/directory", true);
+        assert!(folder_rule.iter().any(|o| o.name == TERMINAL_OPENER));
+
+        let mut bare = Config::default();
+        bare.openers.retain(|o| o.name != TERMINAL_OPENER);
+        assert_eq!(named(&bare, TERMINAL_OPENER), None);
     }
 
     #[test]

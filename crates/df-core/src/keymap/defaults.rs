@@ -208,6 +208,9 @@ pub(super) fn build() -> Registry {
         (Files, "R",      C::RenameEmptyStem,   "Rename with an empty stem",           Always),
         (Files, ";",      C::Shell,             "Shell command",                       Always),
         (Files, ":",      C::ShellBlock,        "Shell command (block)",               Always),
+        // No yazi ancestor: yazi *is* the terminal. `t` is a new tab, so the
+        // terminal is its Ctrl, which no other table in Files claims.
+        (Files, "ctrl+t", C::TerminalHere,      "Open a terminal here",                Always),
         (Files, "u",      C::Undo,              "Undo last operation",                 Always),
         (Files, "w",      C::TasksShow,         "Task manager",                        Always),
         (Files, "M",      C::MountManager,      "Mount manager",                       Always),

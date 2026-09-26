@@ -209,6 +209,7 @@ it without leaving the list.
 | `Alt+←` `Alt+→` | history back, forward |
 | `Ctrl+l` | type a path to go to |
 | `Enter` `o` | open. `O` picks the opener |
+| `Ctrl+t` | open a terminal here (the `terminal-here` opener) |
 | `Ctrl+Enter` | in a file dialog: its Select / Choose folder / Save button |
 | `Space` `v` `Ctrl+a` | select, visual mode, all |
 | `y` `x` `p` `P` | yank, cut, paste, paste over |

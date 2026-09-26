@@ -5371,6 +5371,25 @@ impl App {
         }
     }
 
+    /// `Ctrl+t`, and "Open terminal here" in the folder menu, the app menu's
+    /// Go list and a folder row's menu: the `terminal-here` opener, handed
+    /// `dir`, and run exactly as `o` runs an opener on a file.
+    ///
+    /// The opener is looked up by name rather than through the rules, because
+    /// the verb is about a folder you are *in*, not a row a rule matched — the
+    /// lookup the folder menu was missing. The gate has already turned away
+    /// the places that are not folders on this disk
+    /// (`"Terminals open on local folders"`).
+    fn terminal_in(&mut self, dir: PathBuf, now: Instant) {
+        match open::named(&self.config, open::TERMINAL_OPENER) {
+            Some(choice) => self.launch(&choice, vec![dir], now),
+            None => self.toasts.notice(
+                format!("No {} opener in delightfile.toml", open::TERMINAL_OPENER),
+                now,
+            ),
+        }
+    }
+
     /// `;` and `:`, and the blocking openers.
     ///
     /// A blocking command runs **on the pool**, not here: `:` means "wait for
@@ -8861,6 +8880,12 @@ impl App {
         if let Some(notice) = places::refusal(command, self.tab().virtual_kind()) {
             return Some(notice);
         }
+        // A terminal starts in a directory on this disk. An archive's folder,
+        // a server's and the trash are none of those, and the three lists
+        // below would each refuse it with a sentence about something else.
+        if command == Command::TerminalHere && self.tab().virtual_kind().is_some() {
+            return Some("Terminals open on local folders");
+        }
         // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
         // the commands that would write into one are inert *out loud*. A key
         // that silently does nothing is a key the user presses twice — and the
@@ -9409,6 +9434,10 @@ impl App {
             C::RenameEmptyStem => self.open_rename(true, now),
             C::Shell => self.open_prompt(PromptKind::Shell),
             C::ShellBlock => self.open_prompt(PromptKind::ShellBlock),
+            C::TerminalHere => {
+                let here = self.cwd();
+                self.terminal_in(here, now);
+            }
             C::Undo => self.undo(now),
             C::TasksShow => self.toggle_panel(),
             C::ToggleView => self.toggle_view(now),
@@ -11901,6 +11930,8 @@ impl App {
         if facts.is_dir && !facts.trash {
             let pinnable = self.refusal(Command::PinToggle).is_none();
             menu::insert_pin_row(&mut items, self.row_pinned(), pinnable);
+            let local = self.refusal(Command::TerminalHere).is_none();
+            menu::insert_terminal_row(&mut items, local);
         }
         // One menu at a time: this replaces an app menu that was up.
         self.show_menu(Menu::context(at, items));
@@ -12124,6 +12155,14 @@ impl App {
             A::OpenWithMenu | A::Nothing | A::Run(_) => {}
             A::Place(index) => self.go_place(index, now),
             A::PinRow => self.pin_row(now),
+            // The row the menu opened on is the cursor by now (see
+            // `right_click`), and a folder: the row is only offered on one.
+            A::TerminalRow => {
+                if let Some(entry) = self.tab().cwd.dir.cursor_entry() {
+                    let dir = entry.path.clone();
+                    self.terminal_in(dir, now);
+                }
+            }
             A::FileType(index) => self.choose_type(index),
             A::AllFiles => self.set_showing(Showing::AllFiles),
             // `a`'s prompt with the `/` that makes the name a folder already
@@ -17828,6 +17867,9 @@ fn menu_command(action: menu::Action) -> Option<Command> {
         // Pinning a row's folder is refused where pinning this one is: an
         // archive's folder is not somewhere to come back to.
         A::PinRow => C::PinToggle,
+        // A terminal in a row's folder is refused where one in this folder
+        // is: a folder in an archive or on a server is not on this disk.
+        A::TerminalRow => C::TerminalHere,
         A::Run(command) => command,
         // Choosing what a file dialog shows acts on no file, so no gate has
         // anything to refuse it: it works in an archive as it does anywhere.
@@ -18565,6 +18607,10 @@ mod tests {
 
     /// Every bar's thumb and track in the hand.
     mod bars;
+
+    /// "Open terminal here", from the key and every menu, and where it is
+    /// refused.
+    mod terminal;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the
@@ -20759,7 +20805,7 @@ mod tests {
     }
 
     /// The menu's arrows park the pointer's hover: with the pointer resting
-    /// on row 3, two `↓` put the keyboard on row 5, and it stays there on the
+    /// on row 4, two `↓` put the keyboard on row 6, and it stays there on the
     /// frame after — the row under the pointer neither takes the cursor back
     /// nor stays lit, and the compositor sending the same position again is
     /// not the hand moving. The park is that menu's: one opened after it
@@ -20776,7 +20822,7 @@ mod tests {
         right_click_at(&mut app, &ctx, below);
         assert_eq!(live_menu(&app), Some(menu::Kind::Context));
         let menu = app.menu.as_ref().expect("up");
-        let rows: Vec<(&str, bool)> = menu.items[..6]
+        let rows: Vec<(&str, bool)> = menu.items[..7]
             .iter()
             .map(|i| (i.label.as_str(), i.enabled))
             .collect();
@@ -20785,6 +20831,7 @@ mod tests {
             [
                 ("New file…", true),
                 ("New folder…", true),
+                ("Open terminal here", true),
                 ("Paste", true),
                 ("Sync here…", true),
                 ("Select all", true),
@@ -20793,24 +20840,24 @@ mod tests {
         );
         let cursor = |app: &App| app.menu.as_ref().and_then(|m| m.cursor);
 
-        let rest = menu_geometry(&app, &ctx).rows[3].center();
+        let rest = menu_geometry(&app, &ctx).rows[4].center();
         run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(rest)]);
-        assert_eq!(cursor(&app), Some(3), "the pointer's row");
-        assert_eq!(app.hovers.hover(Control::MenuItem(3)), 1.0);
+        assert_eq!(cursor(&app), Some(4), "the pointer's row");
+        assert_eq!(app.hovers.hover(Control::MenuItem(4)), 1.0);
 
         press_key(&mut app, &ctx, Key::ArrowDown);
         press_key(&mut app, &ctx, Key::ArrowDown);
-        assert_eq!(cursor(&app), Some(5), "the keys' row, on their frame");
+        assert_eq!(cursor(&app), Some(6), "the keys' row, on their frame");
         run_frame(&mut app, &ctx, Vec::new());
-        assert_eq!(cursor(&app), Some(5), "the resting pointer took it back");
+        assert_eq!(cursor(&app), Some(6), "the resting pointer took it back");
         assert_eq!(
             app.menu.as_ref().and_then(|m| m.submenu),
             None,
             "View flew out without being asked"
         );
-        assert!(app.hovers.hover(Control::MenuItem(3)) < 1.0, "row 3 is lit");
+        assert!(app.hovers.hover(Control::MenuItem(4)) < 1.0, "row 4 is lit");
         run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(rest)]);
-        assert_eq!(cursor(&app), Some(5), "a re-sent position woke the hover");
+        assert_eq!(cursor(&app), Some(6), "a re-sent position woke the hover");
 
         // Put away and opened again where it was, the pointer not moved: the
         // park was the last menu's, and the new one's row under the pointer
@@ -20820,11 +20867,11 @@ mod tests {
         app.open_folder_menu(below);
         run_frame(&mut app, &ctx, Vec::new());
         assert_eq!(live_menu(&app), Some(menu::Kind::Context));
-        assert_eq!(cursor(&app), Some(3), "the last menu's park carried over");
-        assert_eq!(app.hovers.hover(Control::MenuItem(3)), 1.0);
+        assert_eq!(cursor(&app), Some(4), "the last menu's park carried over");
+        assert_eq!(app.hovers.hover(Control::MenuItem(4)), 1.0);
         press_key(&mut app, &ctx, Key::ArrowDown);
         run_frame(&mut app, &ctx, Vec::new());
-        assert_eq!(cursor(&app), Some(4), "the new menu's arrows park too");
+        assert_eq!(cursor(&app), Some(5), "the new menu's arrows park too");
 
         let moved = menu_geometry(&app, &ctx).rows[1].center();
         run_frame(&mut app, &ctx, vec![egui::Event::PointerMoved(moved)]);

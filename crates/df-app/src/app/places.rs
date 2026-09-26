@@ -1166,11 +1166,11 @@ mod tests {
         );
     }
 
-    /// The app menu's Go list is "Go to path…" and "Jump to…", then the Places
-    /// list with its keys and the pin row under it; the folder menu has the
-    /// pin row, through `g b`'s own door; a directory row's menu pins that
-    /// row's folder, keyless and without a prompt. Each says Unpin once there
-    /// is a pin to take off.
+    /// The app menu's Go list is "Go to path…", "Jump to…" and "Open terminal
+    /// here", then the Places list with its keys and the pin row under it; the
+    /// folder menu has the pin row, through `g b`'s own door; a directory
+    /// row's menu pins that row's folder, keyless and without a prompt. Each
+    /// says Unpin once there is a pin to take off.
     #[test]
     fn the_menus_pin_and_go() {
         let mut s = Sandbox::new("menus", |files, config, _| {
@@ -1182,11 +1182,11 @@ mod tests {
         let menu = s.app.menu.take().expect("the app menu");
         let go = menu.items.iter().find(|i| i.label == "Go").expect("Go");
         let list = go.submenu.as_ref().expect("a list");
-        // The two ways of typing where to go, then — after a gap — the
-        // places.
-        let typed: Vec<&str> = list[..2].iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(typed, ["Go to path…", "Jump to…"]);
-        let places = &list[2..];
+        // The two ways of typing where to go and the terminal, then — after
+        // a gap — the places.
+        let typed: Vec<&str> = list[..3].iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(typed, ["Go to path…", "Jump to…", "Open terminal here"]);
+        let places = &list[3..];
         assert!(
             places[0].gap_before,
             "no gap between the typed and the places"
@@ -1222,7 +1222,7 @@ mod tests {
         let menu = s.app.menu.take().expect("the app menu");
         let go = menu.items.iter().find(|i| i.label == "Go").expect("Go");
         let list = go.submenu.as_ref().expect("a list");
-        assert_eq!(list[2].label, s.said(&files), "the pin heads the places");
+        assert_eq!(list[3].label, s.said(&files), "the pin heads the places");
         assert_eq!(list.last().expect("rows").label, "Unpin this folder");
 
         // Go ▸ a place goes there.

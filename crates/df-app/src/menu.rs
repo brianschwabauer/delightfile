@@ -172,6 +172,9 @@ pub enum Action {
     /// `Run(PinToggle)`, which is about the folder on screen rather than a row
     /// in it.
     PinRow,
+    /// A terminal in the folder the row menu opened on. Not
+    /// `Run(TerminalHere)`, which opens one in the folder on screen.
+    TerminalRow,
 }
 
 /// One row.
@@ -629,9 +632,12 @@ pub fn app_items(
     let sort = sort_items(facts.sort, facts.reverse, keymap, &refused);
     // The two ways of typing where to go. The places, which need no typing,
     // come under them once [`insert_go`] has put them in.
+    // …and the one way of going somewhere that leaves the window: a terminal
+    // in the folder on screen.
     let go = vec![
         run("Go to path…", C::GotoPath, facts.local),
         run("Jump to…", C::FuzzyJump, true),
+        run("Open terminal here", C::TerminalHere, true),
     ];
     let find = vec![
         run("Search everywhere by name…", C::SearchName, true),
@@ -726,6 +732,9 @@ pub fn folder_items(
         // in `/`, and drawing `a` here would teach it as a key that makes a
         // folder, which on its own it does not.
         Item::new("New folder…", "", Action::CreateFolder, !refused(C::Create)),
+        // A group of its own: it makes nothing here and puts nothing down,
+        // it leaves the window for a shell in the folder.
+        run("Open terminal here", C::TerminalHere, true).after_gap(),
         Item::new(
             "Paste",
             &key(C::Paste),
@@ -849,6 +858,28 @@ pub fn insert_pin_row(rows: &mut Vec<Item>, pinned: bool, enabled: bool) {
         .map_or(0, |at| at + 1);
     let label = if pinned { "Unpin folder" } else { "Pin folder" };
     rows.insert(at, Item::new(label, "", Action::PinRow, enabled));
+}
+
+/// Put "Open terminal here" into a directory row's menu, under "Pin folder"
+/// — or wherever the row's ways of going somewhere end.
+///
+/// No key, for "Pin folder"'s reason: `Ctrl+t` opens a terminal in the
+/// folder on screen, and this row is about the one under the pointer. Only
+/// on a folder: a file's own terminal is `terminal-at`, in its "Open with".
+pub fn insert_terminal_row(rows: &mut Vec<Item>, enabled: bool) {
+    let at = rows
+        .iter()
+        .position(|item| item.action == Action::PinRow)
+        .or_else(|| {
+            rows.iter()
+                .position(|item| item.action == Action::OpenWithMenu)
+        })
+        .or_else(|| rows.iter().position(|item| item.action == Action::Open))
+        .map_or(0, |at| at + 1);
+    rows.insert(
+        at,
+        Item::new("Open terminal here", "", Action::TerminalRow, enabled),
+    );
 }
 
 // ── The menu, while it is up ────────────────────────────────────────────────
@@ -1895,15 +1926,52 @@ mod tests {
             [
                 ("Go to path…", "Ctrl+l", false),
                 ("Jump to…", "z", false),
+                ("Open terminal here", "Ctrl+t", false),
                 ("~/Work", "g w", true),
                 ("Pin this folder", "g b", false),
             ]
         );
-        assert_eq!(list[2].action, Action::Place(0));
+        assert_eq!(list[3].action, Action::Place(0));
         assert_eq!(
             folder_pin_item(true, &keymap, |_| false).label,
             "Unpin this folder"
         );
+    }
+
+    /// A folder's row menu opens a terminal in that folder from under "Pin
+    /// folder", with no key — `Ctrl+t` is the folder on screen's — and greys
+    /// where the gate would refuse; with no pin row it follows "Open with",
+    /// and with neither, "Open folder".
+    #[test]
+    fn a_folder_row_opens_a_terminal_under_its_pin() {
+        let dir = Facts {
+            is_dir: true,
+            ..facts()
+        };
+        let mut rows = items(dir, &openers());
+        insert_pin_row(&mut rows, false, true);
+        insert_terminal_row(&mut rows, true);
+        let labels: Vec<&str> = rows.iter().take(4).map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Open folder",
+                "Open with",
+                "Pin folder",
+                "Open terminal here"
+            ]
+        );
+        assert_eq!(rows[3].action, Action::TerminalRow);
+        assert_eq!((rows[3].keys.as_str(), rows[3].enabled), ("", true));
+
+        let mut rows = items(dir, &openers());
+        insert_terminal_row(&mut rows, false);
+        assert_eq!(rows[2].label, "Open terminal here");
+        assert!(!rows[2].enabled);
+
+        let mut rows = items(dir, &[]);
+        insert_terminal_row(&mut rows, true);
+        assert_eq!(rows[1].label, "Open terminal here");
     }
 
     fn area() -> egui::Rect {
@@ -2621,10 +2689,14 @@ mod tests {
             ]
         );
         let list = |label: &str| row(&rows, label).submenu.as_deref().expect("a list");
-        // The places are [`insert_go`]'s to add, under these two.
+        // The places are [`insert_go`]'s to add, under these three.
         assert_eq!(
             outline(list("Go")),
-            vec![("Go to path…", "Ctrl+l", false), ("Jump to…", "z", false)]
+            vec![
+                ("Go to path…", "Ctrl+l", false),
+                ("Jump to…", "z", false),
+                ("Open terminal here", "Ctrl+t", false),
+            ]
         );
         assert_eq!(
             outline(list("Find")),
@@ -2659,6 +2731,7 @@ mod tests {
         assert_eq!(command("New tab"), C::TabCreate);
         assert_eq!(command("Go to path…"), C::GotoPath);
         assert_eq!(command("Jump to…"), C::FuzzyJump);
+        assert_eq!(command("Open terminal here"), C::TerminalHere);
         assert_eq!(command("Filter this folder…"), C::Filter);
         assert_eq!(command("Undo"), C::Undo);
         assert_eq!(command("Copy"), C::Yank);
@@ -2731,6 +2804,7 @@ mod tests {
             C::NewWindow,
             C::GotoPath,
             C::FuzzyJump,
+            C::TerminalHere,
             C::SearchName,
             C::SearchContent,
             C::Filter,
@@ -2932,6 +3006,14 @@ mod tests {
             vec![
                 ("New file…", "a", Action::Run(C::Create), true, false, None),
                 ("New folder…", "", Action::CreateFolder, true, false, None),
+                (
+                    "Open terminal here",
+                    "Ctrl+t",
+                    Action::Run(C::TerminalHere),
+                    true,
+                    true,
+                    None
+                ),
                 ("Paste", "p", Action::Paste, true, true, None),
                 (
                     "Sync here…",
@@ -3010,9 +3092,10 @@ mod tests {
         assert!(!enabled(&nothing, "Select all"), "Select all with no rows");
         assert!(enabled(&nothing, "New file…") && enabled(&nothing, "New folder…"));
 
-        let trash_like = |command: Command| matches!(command, C::Create | C::Paste);
+        let trash_like =
+            |command: Command| matches!(command, C::Create | C::Paste | C::TerminalHere);
         let refused = folder_items(folder_facts(), &keymap, trash_like);
-        for label in ["New file…", "New folder…", "Paste"] {
+        for label in ["New file…", "New folder…", "Open terminal here", "Paste"] {
             assert!(!enabled(&refused, label), "{label} would be refused");
         }
         for label in ["Select all", "View", "Sort"] {
