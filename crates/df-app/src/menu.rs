@@ -330,6 +330,9 @@ pub fn items(facts: Facts, openers: &[String]) -> Vec<Item> {
         Item::new("Cut", "x", Action::Cut, acts),
         Item::new("Paste", "p", Action::Paste, facts.clipboard),
         Item::new("Rename", "r", Action::Rename, facts.has_row),
+        // The command itself, so the row goes through `T`'s door and its
+        // gate; the app greys it where that gate would refuse.
+        Item::new("Tags…", "T", Action::Run(Command::Tag), acts),
         Item::new("Move to trash", "d", Action::Trash, acts),
         Item::new("Copy path", "c c", Action::CopyPath, facts.has_row).after_gap(),
         Item::new("Copy name", "c f", Action::CopyName, facts.has_row),
@@ -524,6 +527,7 @@ fn view_items(
         ("Created", LineMode::Btime, C::LinemodeBtime),
         ("Modified", LineMode::Mtime, C::LinemodeMtime),
         ("Owner", LineMode::Owner, C::LinemodeOwner),
+        ("Tags", LineMode::Tags, C::LinemodeTags),
         ("None", LineMode::None, C::LinemodeNone),
     ];
     let mut view: Vec<Item> = scales
@@ -653,6 +657,7 @@ pub fn app_items(
         run("Paste", C::Paste, facts.clipboard),
         run("Sync here…", C::PasteSync, facts.clipboard),
         run("Rename", C::Rename, acts),
+        run("Tags…", C::Tag, acts),
         run("New file or folder…", C::Create, true),
         run("Move to trash", C::Trash, acts),
         run("Compress…", C::ArchiveCreate, acts),
@@ -1793,6 +1798,7 @@ mod tests {
                 ("Cut", "x", Action::Cut, false),
                 ("Paste", "p", Action::Paste, false),
                 ("Rename", "r", Action::Rename, false),
+                ("Tags…", "T", Action::Run(Command::Tag), false),
                 ("Move to trash", "d", Action::Trash, false),
                 ("Copy path", "c c", Action::CopyPath, true),
                 ("Copy name", "c f", Action::CopyName, false),
@@ -2717,6 +2723,7 @@ mod tests {
                 ("Paste", "p", false),
                 ("Sync here…", "Alt+p", false),
                 ("Rename", "r", false),
+                ("Tags…", "T", false),
                 ("New file or folder…", "a", false),
                 ("Move to trash", "d", false),
                 ("Compress…", "A", false),
@@ -2738,6 +2745,7 @@ mod tests {
         assert_eq!(command("Cut"), C::YankCut);
         assert_eq!(command("Sync here…"), C::PasteSync);
         assert_eq!(command("New file or folder…"), C::Create);
+        assert_eq!(command("Tags…"), C::Tag);
         assert_eq!(command("Trash"), C::OpenTrash);
         assert_eq!(command("Clipboard"), C::YankShow);
         assert_eq!(command("Keyboard shortcuts"), C::Help);
@@ -3147,6 +3155,7 @@ mod tests {
                 ("Created", false),
                 ("Modified", false),
                 ("Owner", false),
+                ("Tags", false),
                 ("None", false),
                 ("Parent pane", true),
                 ("Preview pane", false),

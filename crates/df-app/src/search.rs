@@ -43,6 +43,15 @@
 //!    killed, because an ignored `rg` over a home directory keeps a core busy
 //!    for the length of the walk.
 //!
+//! ## `#tag`
+//!
+//! A names query that begins with `#` is not handed to `fd` at all: it asks
+//! for files by tag, and a tag lives in an attribute `fd` cannot read. So the
+//! walk is df-core's ([`df_core::fs::tags::find`]), run on the same kind of
+//! reader thread and sending the same batches down the same channel, so the
+//! list, the cap, the cancel and the kill-on-respawn are all the ones a name
+//! search has.
+//!
 //! ## Wiring
 //!
 //! The reader is a thread feeding a crossbeam channel and ringing the
@@ -146,7 +155,7 @@ impl Mode {
 
     pub fn placeholder(self) -> &'static str {
         match self {
-            Mode::Names => "Type a name…",
+            Mode::Names => "Type a name, or #tag…",
             Mode::Content => "Type a pattern…",
         }
     }
@@ -566,6 +575,12 @@ impl Search {
         self.generation += 1;
         let generation = self.generation;
 
+        // `#tag`: the tag walk in fd's place (see the module header).
+        if let Some(tag) = query.strip_prefix('#').filter(|_| self.mode == Mode::Names) {
+            self.spawn_tag_walk(tag, generation);
+            return;
+        }
+
         let mut process = build(self.mode, query, self.hidden);
         process
             .current_dir(&self.root)
@@ -608,6 +623,95 @@ impl Search {
         }
         self.running = Some(running);
     }
+}
+
+impl Search {
+    /// Start [`df_core::fs::tags::find`] for `tag` on a reader thread, as
+    /// [`Search::spawn`] starts `fd`. There is no process to kill: dropping
+    /// the [`Running`] sets `stop`, which the walk checks between entries.
+    fn spawn_tag_walk(&mut self, tag: &str, generation: u64) {
+        let (tx, rx) = unbounded::<(u64, Message)>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = Running {
+            generation,
+            child: Arc::new(Mutex::new(None)),
+            stop: Arc::clone(&stop),
+            results: rx,
+        };
+        let root = self.root.clone();
+        let tag = tag.to_string();
+        let hidden = self.hidden;
+        let notify = Arc::clone(&self.notify);
+        let spawned = std::thread::Builder::new()
+            .name("df-search-tags".to_string())
+            .spawn(move || walk_tags(root, tag, hidden, generation, stop, tx, notify));
+        if spawned.is_err() {
+            self.error = Some("could not start the tag search".to_string());
+            self.notice = true;
+            self.done = true;
+            return;
+        }
+        self.running = Some(running);
+    }
+}
+
+/// The tag walk's reader: matching paths in, batches of [`Hit`] out, one bell
+/// per batch — [`read`]'s shape, with the walk where `fd`'s output was.
+fn walk_tags(
+    root: PathBuf,
+    tag: String,
+    hidden: bool,
+    generation: u64,
+    stop: Arc<AtomicBool>,
+    out: Sender<(u64, Message)>,
+    notify: Notifier,
+) {
+    let mut batch: Vec<Hit> = Vec::with_capacity(BATCH);
+    let mut sent = 0usize;
+    let mut capped = false;
+    let mut last_flush = Instant::now();
+    let flush = |batch: &mut Vec<Hit>, last: &mut Instant| -> bool {
+        if batch.is_empty() {
+            return true;
+        }
+        let payload = std::mem::take(batch);
+        if out.send((generation, Message::Hits(payload))).is_err() {
+            return false;
+        }
+        notify();
+        *last = Instant::now();
+        true
+    };
+    for path in df_core::fs::tags::find(&root, &tag, hidden, Arc::clone(&stop)) {
+        let relative = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        batch.push(Hit {
+            entry: Entry::read(&path).ok(),
+            path,
+            relative,
+            line: None,
+            text: String::new(),
+            span: None,
+        });
+        sent += 1;
+        if sent >= MAX_HITS {
+            capped = true;
+            break;
+        }
+        let due = batch.len() >= BATCH || last_flush.elapsed() >= BATCH_LINGER;
+        if due && !flush(&mut batch, &mut last_flush) {
+            return;
+        }
+    }
+    // Stopped rather than finished: a newer query owns the list now.
+    if stop.load(Ordering::Relaxed) || !flush(&mut batch, &mut last_flush) {
+        return;
+    }
+    let _ = out.send((generation, Message::Done { capped }));
+    notify();
 }
 
 /// The command line for one search.
@@ -1103,6 +1207,37 @@ mod tests {
         assert_eq!(search.buffer.cursor(), 4, "after the last character");
         assert_eq!(search.buffer.cursor_byte(), "café".len());
         assert_eq!(search.deadline(now), Some(DEBOUNCE));
+    }
+
+    /// `#tag` in the names field walks for tags instead of running `fd`, and
+    /// its hits land the way `fd`'s do: relative to where the search started,
+    /// each with the row it would be in a listing.
+    #[test]
+    fn a_hash_query_searches_by_tag() {
+        use df_core::fs::tags;
+        let tree = df_core::test_support::TempTree::new("search-tags");
+        let red = tree.file("a/b/red.txt", b"x");
+        if tags::write(&red, &["Red".to_string()]).is_err() {
+            eprintln!("skipping: {} holds no tags", tree.path().display());
+            return;
+        }
+        tree.file("a/plain.txt", b"x");
+        let now = Instant::now();
+        let mut search = Search::new(Mode::Names, tree.path(), false, silent());
+        search.seed("#re", now);
+        assert!(search.tick(now + DEBOUNCE));
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !search.done && Instant::now() < deadline {
+            search.poll();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(search.done, "the walk never finished");
+        assert!(search.error.is_none(), "{:?}", search.error);
+        assert_eq!(search.hits.len(), 1);
+        assert_eq!(search.hits[0].relative, "a/b/red.txt");
+        let entry = search.hits[0].entry.as_ref().expect("the row");
+        assert_eq!(entry.tags, ["Red"]);
+        assert!(Mode::Names.placeholder().contains("#tag"));
     }
 
     /// A machine with no `fd` gets a sentence saying so, raised once —

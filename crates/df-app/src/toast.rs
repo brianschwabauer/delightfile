@@ -834,6 +834,7 @@ mod tests {
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
+                tags: &crate::tags::BUILT_IN,
                 nerd: false,
                 show_symlink: true,
                 now,

@@ -42,8 +42,14 @@ open.
 - **Drag and drop.** Drag rows out to Chrome's upload box or to an editor over
   `text/uri-list`. Drop files in from anywhere. Drag between panes, tabs and windows, with
   a stacked-card ghost and a count badge.
-- **Undo.** Every move, copy, rename, trash and link goes through a journal, and `u` walks
-  it back.
+- **Undo.** Every move, copy, rename, trash, link and tag goes through a journal, and `u`
+  walks it back.
+- **Tags.** `T` tags a file or a selection, stored in the freedesktop `user.xdg.tags`
+  extended attribute, so the tags live on the file and other programs can read them. The
+  seven Finder colours (and any tag `[tags]` gives a colour) show as overlapping dots after
+  the name. `f #red` filters a folder by tag and `s #red` finds tagged files anywhere
+  below it. Copies, moves across drives, the trash and syncs carry the tags along; a drive
+  that cannot hold them, like a FAT card, gets the files without them and says so.
 - **Git awareness.** Status dots per row, dimmed hidden files, branch and dirty count in
   the top bar.
 - **Disk usage.** A background `du` streams folder sizes into the size column and settles
@@ -225,9 +231,11 @@ it without leaving the list.
 | `Y` `c t` | copy the file to the clipboard, copy its text |
 | `d` `D` | trash, delete for good |
 | `a` `r` `R` | create, rename, rename the stem |
+| `T` | tags, comma-separated. `Tab` completes one |
 | `u` | undo |
-| `f` `/` `n` `N` | filter, find, next, previous |
-| `s` `S` | search names (`fd`), search contents (`rg`) |
+| `f` `/` `n` `N` | filter, find, next, previous. `f #red` filters by tag |
+| `s` `S` | search names (`fd`), search contents (`rg`). `s #red` searches by tag |
+| `m t` | tag names in the right-hand column (`m` picks what the column says) |
 | `z` `Z` | fuzzy jump, zoxide jump |
 | `t` `1`–`9` `Alt+[` `Alt+]` | new tab, switch, previous, next |
 | `Tab` | the spot panel: metadata, EXIF, checksum |
@@ -256,6 +264,17 @@ keeps everything until the trash is emptied by hand.
 ```toml
 [mgr]
 trash_keep_days = 30
+```
+
+Tags named `red`, `orange`, `yellow`, `green`, `blue`, `purple` and `grey` are coloured
+with the theme's colours of those names. `[tags]` in `delightfile.toml` colours any other
+tag, by palette name or hex:
+
+```toml
+[tags]
+work = "blue"
+urgent = "#ff0000"
+"invoice 2026" = "green"
 ```
 
 SFTP hosts come from `~/.config/yazi/vfs.toml` first and

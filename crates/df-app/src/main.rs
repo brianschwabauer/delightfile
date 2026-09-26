@@ -51,6 +51,7 @@ mod spot;
 mod sync;
 mod tab;
 mod tabs;
+mod tags;
 mod theme;
 mod toast;
 /// The trash, browsed as a directory (PLAN §7.4).

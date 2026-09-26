@@ -997,6 +997,13 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
             lifted || cut,
             ignored,
         );
+        // The tag dots, muted as the name is, at the end of its last line.
+        let dots: Vec<egui::Color32> = paint
+            .tags
+            .dots(&entry.tags, palette)
+            .into_iter()
+            .map(|colour| crate::chrome::fade(mute(colour, ground, lifted || cut, ignored), alpha))
+            .collect();
         name(
             &inside,
             label,
@@ -1004,6 +1011,10 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
             dir.row_spans(index),
             crate::chrome::fade(name_colour, alpha),
             crate::chrome::fade(palette.sky, alpha),
+            Dots {
+                colours: &dots,
+                behind: fill,
+            },
         );
     }
     // The ghosts are drawn at whole cells, so they take the cell's radius.
@@ -1067,8 +1078,16 @@ fn fit_into(size: egui::Vec2, into: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(into.center(), fitted)
 }
 
+/// The tag dots a caption ends with ([`crate::tags`]), and the colour the
+/// tile is lit with, which they wear as a ring.
+struct Dots<'a> {
+    colours: &'a [egui::Color32],
+    behind: egui::Color32,
+}
+
 /// A tile's name: up to two lines, centred, with the filter's matched runs
-/// highlighted the same way a row's are.
+/// highlighted the same way a row's are — and its tag dots at the right of
+/// the last line, the name and the dots centred as one.
 fn name(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -1076,6 +1095,7 @@ fn name(
     runs: &[df_core::fs::Span],
     colour: egui::Color32,
     highlight: egui::Color32,
+    dots: Dots<'_>,
 ) {
     use egui::text::{LayoutJob, TextFormat, TextWrapping};
     let format = |colour: egui::Color32| TextFormat {
@@ -1103,9 +1123,16 @@ fn name(
     if at < text.len() {
         job.append(&text[at..], 0.0, format(colour));
     }
+    // The dots' room comes out of the caption's lines, so a name that fills
+    // both is cut short before them rather than under them.
+    let room = if dots.colours.is_empty() {
+        0.0
+    } else {
+        crate::tags::DOT_GAP + crate::tags::dots_width(dots.colours.len())
+    };
     job.halign = egui::Align::Center;
     job.wrap = TextWrapping {
-        max_width: rect.width(),
+        max_width: (rect.width() - room).max(0.0),
         max_rows: 2,
         // Break mid-word: a file name is not prose, and a screenshot called
         // `Screenshot_2024-08-17_at_18.34.22.png` has no word boundaries to
@@ -1114,7 +1141,18 @@ fn name(
         overflow_character: Some('…'),
     };
     let galley = painter.layout_job(job);
-    painter.galley(egui::pos2(rect.center().x, rect.top()), galley, colour);
+    let origin = egui::pos2(rect.center().x - room / 2.0, rect.top());
+    let last = galley.rows.last().map(|row| row.rect());
+    painter.galley(origin, galley, colour);
+    if let Some(last) = last.filter(|_| room > 0.0) {
+        crate::tags::paint_dots(
+            painter,
+            origin.x + last.right() + crate::tags::DOT_GAP,
+            origin.y + last.center().y,
+            dots.colours,
+            dots.behind,
+        );
+    }
 }
 
 /// The tile name's font.
@@ -1466,6 +1504,7 @@ mod tests {
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
+                tags: &crate::tags::BUILT_IN,
                 nerd: false,
                 show_symlink: true,
                 now,

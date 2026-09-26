@@ -754,6 +754,8 @@ fn directory_body(
             entry,
             &[],
             ground,
+            // Nothing lights a previewed row, so its dots sit on the pane.
+            ground,
             LineMode::Size,
             // Muted by the parent column's amount: that treatment means "not
             // the thing you are acting on", which is also true of a previewed
@@ -2009,6 +2011,7 @@ mod tests {
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
+                tags: &crate::tags::BUILT_IN,
                 nerd,
                 show_symlink: true,
                 now,
@@ -2116,6 +2119,7 @@ mod tests {
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
+                tags: &crate::tags::BUILT_IN,
                 nerd,
                 show_symlink: true,
                 now,
@@ -2170,6 +2174,7 @@ mod tests {
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
+                tags: &crate::tags::BUILT_IN,
                 nerd: false,
                 show_symlink: true,
                 now: Instant::now(),

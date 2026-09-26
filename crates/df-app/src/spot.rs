@@ -172,6 +172,9 @@ pub struct Facts {
     /// because this is a fact about *why the row looks like that* and belongs
     /// next to `hidden` rather than after the branch name.
     pub ignored: bool,
+    /// The file's tags, as the row read them at scan time
+    /// ([`df_core::fs::tags`]).
+    pub tags: Vec<String>,
 }
 
 impl Facts {
@@ -198,6 +201,7 @@ impl Facts {
             git: None,
             hidden: entry.is_hidden,
             ignored: false,
+            tags: entry.tags.clone(),
         }
     }
 }
@@ -210,6 +214,9 @@ pub enum Value {
     Permissions,
     /// The chip, the progress bar, or the digest.
     Checksum,
+    /// Every tag the file carries, in its order: a coloured one as its dot
+    /// and its name, the rest as a name alone.
+    Tags(Vec<String>),
 }
 
 /// One row of the card.
@@ -247,6 +254,14 @@ pub fn rows(facts: &Facts) -> Vec<Row> {
         ),
         Row::text("Kind", format!("{} · {}", facts.kind, facts.mime)),
     ];
+    // Beside what the file is, because a tag is what somebody said it is —
+    // and every one of them, where the row's dots stop at three colours.
+    if !facts.tags.is_empty() {
+        rows.push(Row {
+            label: "Tags",
+            value: Value::Tags(facts.tags.clone()),
+        });
+    }
     if let Some(len) = facts.len {
         // Both spellings, always. The human one is what a person compares
         // against other files; the exact one is what they paste into a bug
@@ -650,6 +665,7 @@ impl Spot {
         let row = self.rows.get(self.cursor)?;
         let text = match &row.value {
             Value::Text(text) => text.clone(),
+            Value::Tags(tags) => tags.join(", "),
             Value::Permissions => octal(self.facts.mode),
             Value::Checksum => match &self.checksum {
                 Checksum::Done(digest) => digest.clone(),
@@ -831,7 +847,7 @@ fn row_height(row: &Row, checksum: &Checksum) -> f32 {
             Checksum::Done(_) => HASH_ROW_DONE,
             _ => HASH_ROW,
         },
-        Value::Text(_) => ROW,
+        Value::Text(_) | Value::Tags(_) => ROW,
     }
 }
 
@@ -1131,6 +1147,21 @@ pub fn paint(
                     room,
                 );
             }
+            Value::Tags(tags) => {
+                let ink = if on_cursor {
+                    palette.text
+                } else {
+                    palette.subtext0
+                };
+                tag_list(
+                    paint,
+                    &inside,
+                    egui::pos2(value_left, rect.center().y),
+                    tags,
+                    ink,
+                    room,
+                );
+            }
             Value::Permissions => {
                 permissions(
                     paint, &inside, spot, geometry, on_cursor, hovers, ripples, now,
@@ -1150,6 +1181,44 @@ pub fn paint(
             spot.scrolled_at(),
             1.0,
         );
+    }
+}
+
+/// The `Tags` row's value: each tag in turn, a coloured one led by its dot,
+/// with a word space between them, until `room` runs out — the last one that
+/// fits is cut short with `…` rather than left out without a word.
+fn tag_list(
+    paint: &Painting<'_>,
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    tags: &[String],
+    ink: egui::Color32,
+    room: f32,
+) {
+    let font = egui::FontId::proportional(FONT);
+    let space = painter
+        .layout_no_wrap("  ".to_string(), font.clone(), ink)
+        .size()
+        .x;
+    let end = at.x + room;
+    let mut x = at.x;
+    for tag in tags {
+        if let Some(colour) = paint.tags.color(tag, paint.palette) {
+            if x + crate::tags::DOT > end {
+                break;
+            }
+            crate::tags::paint_dots(painter, x, at.y, &[colour], colour);
+            x += crate::tags::DOT + crate::tags::DOT_GAP;
+        }
+        let width = painter
+            .layout_no_wrap(tag.clone(), font.clone(), ink)
+            .size()
+            .x;
+        chrome::truncated(painter, egui::pos2(x, at.y), tag, ink, (end - x).max(0.0));
+        x += width + space;
+        if x >= end {
+            break;
+        }
     }
 }
 
@@ -1374,6 +1443,7 @@ mod tests {
             git: None,
             hidden: false,
             ignored: false,
+            tags: Vec::new(),
         }
     }
 
@@ -1494,6 +1564,33 @@ mod tests {
 
     fn rows_have(facts: &Facts, label: &str) -> bool {
         rows(facts).iter().any(|r| r.label == label)
+    }
+
+    /// A tagged file has a `Tags` row, after what it is, holding every tag —
+    /// the colourless ones too — and `c c` on it copies them as a line. An
+    /// untagged file has no such row rather than an empty one.
+    #[test]
+    fn a_tagged_file_lists_its_tags() {
+        assert!(!rows(&facts()).iter().any(|r| r.label == "Tags"));
+        let mut facts = facts();
+        facts.tags = vec!["red".to_string(), "invoice 2026".to_string()];
+        let rows = rows(&facts);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label).collect();
+        let at = labels
+            .iter()
+            .position(|l| *l == "Tags")
+            .expect("a Tags row");
+        assert_eq!(labels[at - 1], "Kind");
+        assert_eq!(
+            rows[at].value,
+            Value::Tags(vec!["red".to_string(), "invoice 2026".to_string()])
+        );
+        let mut spot = Spot::new(facts);
+        spot.cursor = at;
+        assert_eq!(
+            spot.cell_text(),
+            Some(("Tags", "red, invoice 2026".to_string()))
+        );
     }
 
     #[test]
@@ -1668,6 +1765,7 @@ mod tests {
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
+                tags: &crate::tags::BUILT_IN,
                 nerd: false,
                 show_symlink: true,
                 now,

@@ -58,6 +58,10 @@ pub enum PromptKind {
     /// there, or nothing for a pin with no key. Its title names the folder
     /// ([`Prompt::label`]), so the bar does not name it a second time.
     Pin,
+    /// `T`: the tags of the row under the cursor, or of a selection, as a
+    /// comma-separated line. Its title names what is being tagged
+    /// ([`Prompt::label`]): `Tags of notes.txt:`, `Tags of 3 items:`.
+    Tags,
 }
 
 impl PromptKind {
@@ -77,6 +81,7 @@ impl PromptKind {
             PromptKind::SaveAs => "Save as:",
             PromptKind::Archive => "Archive as:",
             PromptKind::Pin => "Pin as:",
+            PromptKind::Tags => "Tags:",
         }
     }
 
@@ -94,6 +99,9 @@ impl PromptKind {
     pub fn hint(self) -> Option<&'static str> {
         match self {
             PromptKind::Pin => Some("a key after g, or Enter for none"),
+            // Neither is guessable from a field of words: that a comma is
+            // what separates them, and that `Tab` finishes one.
+            PromptKind::Tags => Some("commas between tags · Tab completes"),
             _ => None,
         }
     }
@@ -164,7 +172,8 @@ pub fn click_outside_action(kind: PromptKind) -> ClickOutside {
         | PromptKind::Connect
         | PromptKind::SaveAs
         | PromptKind::Archive
-        | PromptKind::Pin => ClickOutside::Cancel,
+        | PromptKind::Pin
+        | PromptKind::Tags => ClickOutside::Cancel,
         PromptKind::Filter | PromptKind::FindNext | PromptKind::FindPrev => ClickOutside::Commit,
         PromptKind::ConflictRename | PromptKind::HelpFilter => ClickOutside::Keep,
     }
@@ -425,9 +434,14 @@ mod tests {
             PromptKind::SaveAs,
             PromptKind::Archive,
             PromptKind::Pin,
+            PromptKind::Tags,
         ] {
             assert!(kind.title().ends_with(':'), "{kind:?}");
         }
+        assert!(
+            !PromptKind::Tags.is_live() && !PromptKind::Tags.anchored(),
+            "tags are written on Enter only, and typed in the bar"
+        );
         assert!(
             !PromptKind::Archive.is_live() && !PromptKind::Archive.anchored(),
             "an archive name packs nothing until Enter, and it is typed in the bar"
@@ -502,6 +516,7 @@ mod tests {
             (PromptKind::SaveAs, Cancel),
             (PromptKind::Archive, Cancel),
             (PromptKind::Pin, Cancel),
+            (PromptKind::Tags, Cancel),
         ] {
             assert_eq!(click_outside_action(kind), expected, "{kind:?}");
             // The rule the table is written from: a prompt that waits for

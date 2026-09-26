@@ -135,6 +135,13 @@ pub(crate) const ROW_PAD_X: f32 = 7.0;
 /// readable however long the file names get.
 pub(crate) const LINEMODE_GAP: f32 = 12.0;
 
+/// The most of a row the `m t` column may take, as a share of its width.
+///
+/// Two fifths: enough for three or four short tags on an ordinary row, and
+/// always leaving the name the larger half — the name is what a row is read
+/// for, and the tags past the cut are one `Tab` away on the spot panel.
+const TAGS_COLUMN_SHARE: f32 = 0.4;
+
 /// The usage bar's track width, in logical points (PLAN §7.3's du mode).
 ///
 /// 46 — a third of the linemode column, which is as much as can be given to a
@@ -1056,6 +1063,9 @@ pub struct Painting<'a> {
     pub painter: &'a egui::Painter,
     pub palette: &'a Palette,
     pub theme: &'a Theme,
+    /// What colour each tag is ([`crate::tags`]), for a row's dots and the
+    /// spot panel's `Tags` row.
+    pub tags: &'a crate::tags::TagColors,
     /// Whether the real icon glyphs can be drawn (see [`crate::icons`]).
     pub nerd: bool,
     pub show_symlink: bool,
@@ -1327,6 +1337,7 @@ impl Painting<'_> {
                 entry,
                 dir.row_spans(index),
                 ground,
+                fill,
                 linemode,
                 if dim || cut || lifted {
                     PARENT_DIM
@@ -1375,7 +1386,7 @@ impl Painting<'_> {
         self.flip_ghosts(&painter, flip, content, ROW_RADIUS);
     }
 
-    /// One row's contents: icon, name, and the linemode column.
+    /// One row's contents: icon, name, its tag dots, and the linemode column.
     ///
     /// Visible to the crate because the preview pane's directory body draws
     /// with it (PLAN §6, "replaces piper/eza"): a folder previewed and a folder
@@ -1389,6 +1400,10 @@ impl Painting<'_> {
         entry: &df_core::fs::Entry,
         spans: &[Span],
         ground: egui::Color32,
+        // The colour the row is lit with — the pane's, the cursor's, a
+        // hover's — which the tag dots wear as a ring, so where two overlap
+        // the one on top is cut out of the one under it.
+        behind: egui::Color32,
         linemode: LineMode,
         // `mute` is how far this row's ink is mixed back into the pane behind
         // it, 0–1. One number rather than the `dim: bool` it replaced, because
@@ -1483,11 +1498,34 @@ impl Painting<'_> {
         let mode_width = if mode_text.is_empty() && reserved <= 0.0 {
             0.0
         } else {
-            let galley = painter.layout_no_wrap(
-                mode_text.clone(),
-                egui::FontId::proportional(scale.font),
-                fade(self.palette.overlay1),
-            );
+            let galley = if note.is_none() && usage.is_none() && linemode == LineMode::Tags {
+                // The one column whose text has no natural width: a file can
+                // carry any number of tags, and a column that took what it
+                // liked would leave the name nothing. It stops at a share of
+                // the row and says the rest with `…` — `m t` is a glance, and
+                // the spot panel lists them all.
+                let mut job = egui::text::LayoutJob::single_section(
+                    mode_text.clone(),
+                    egui::TextFormat {
+                        font_id: egui::FontId::proportional(scale.font),
+                        color: fade(self.palette.overlay1),
+                        ..Default::default()
+                    },
+                );
+                job.wrap = egui::text::TextWrapping {
+                    max_width: rect.width() * TAGS_COLUMN_SHARE,
+                    max_rows: 1,
+                    break_anywhere: true,
+                    overflow_character: Some('…'),
+                };
+                painter.layout_job(job)
+            } else {
+                painter.layout_no_wrap(
+                    mode_text.clone(),
+                    egui::FontId::proportional(scale.font),
+                    fade(self.palette.overlay1),
+                )
+            };
             let width = galley.size().x;
             // Right-aligned inside the reserved column, which for a column
             // whose right edge is the row's is the same place it was drawn
@@ -1573,8 +1611,17 @@ impl Painting<'_> {
         }
         let mode_width = mode_width + dot_width;
 
+        // A dot per coloured tag, right after the name (see [`crate::tags`]).
+        // Their room comes out of the name's, so a long name is cut short
+        // before the dots rather than under them.
+        let dots = self.tags.dots(&entry.tags, self.palette);
+        let dots_room = if dots.is_empty() {
+            0.0
+        } else {
+            crate::tags::DOT_GAP + crate::tags::dots_width(dots.len())
+        };
         let name_left = rect.left() + ROW_PAD_X + scale.icon_column;
-        let name_room = (rect.right() - ROW_PAD_X - mode_width - name_left).max(0.0);
+        let name_room = (rect.right() - ROW_PAD_X - mode_width - name_left - dots_room).max(0.0);
         let name_end = self.text_spans(
             painter,
             egui::pos2(name_left, rect.center().y),
@@ -1588,6 +1635,19 @@ impl Painting<'_> {
             spans,
             name_room,
         );
+        if !dots.is_empty() {
+            // Muted with the name — a hidden file's dots are as quiet as its
+            // name, a cut row's as dim — since they are part of what it says.
+            let dots: Vec<egui::Color32> = dots.into_iter().map(fade).collect();
+            crate::tags::paint_dots(
+                painter,
+                name_end + crate::tags::DOT_GAP,
+                rect.center().y,
+                &dots,
+                behind,
+            );
+        }
+        let name_end = name_end + dots_room;
 
         // `→ target` after the name, in the dim colour, and only if it fits —
         // a symlink row must never lose its *name* to its target. Not in the
@@ -2400,6 +2460,7 @@ mod tests {
                 painter: ui.painter(),
                 palette: &palette,
                 theme: &theme,
+                tags: &crate::tags::BUILT_IN,
                 nerd: false,
                 show_symlink: true,
                 now: Instant::now(),

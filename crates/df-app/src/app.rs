@@ -82,6 +82,8 @@ mod compress;
 mod places;
 /// `alt+p`: the sync card, the comparison it waits on, and the syncs it starts.
 mod syncing;
+/// `T`: the `Tags:` prompt, its completion, and what `Enter` writes.
+mod tags;
 /// The trash's weight (its chip, the Empty trash card) and its clock
 /// (`[mgr] trash_keep_days`).
 mod trash;
@@ -1302,6 +1304,12 @@ pub struct App {
     config: Config,
     theme: Theme,
     palette: Palette,
+    /// The tag colours ([`crate::tags`]): the seven built in and `[tags]`,
+    /// resolved against the theme once rather than per dot.
+    tag_colors: crate::tags::TagColors,
+    /// The `Tags:` prompt's work in progress, from `T` to `Enter`
+    /// ([`tags`]).
+    tag_draft: Option<tags::Draft>,
     /// The live view settings: sort, linemode, hidden. Starts as the config's
     /// and is what the `,`, `m` and `.` bindings change.
     mgr: MgrConfig,
@@ -2206,6 +2214,8 @@ impl App {
             logged_first_frame: false,
             logged_first_listing: false,
             palette: Palette::from_theme(&theme),
+            tag_colors: crate::tags::TagColors::new(&config.tags, &theme),
+            tag_draft: None,
             config,
             theme,
             mgr,
@@ -8044,6 +8054,18 @@ impl App {
             self.paste_into_prompt(now);
             return;
         }
+        // `Tab` finishes a tag. The editor types nothing for it — completion
+        // belongs to the prompt around it, not to the line — and `Tags:` is
+        // the one prompt with a vocabulary to complete from.
+        if chord == Chord::plain(Key::Tab)
+            && self
+                .prompt
+                .as_ref()
+                .is_some_and(|prompt| prompt.kind == PromptKind::Tags)
+        {
+            self.complete_tag();
+            return;
+        }
         let action = self.prompt_action(chord);
         let Some(prompt) = &mut self.prompt else {
             return;
@@ -8244,6 +8266,12 @@ impl App {
                 compress::Answer::Refused(message) => Some(message),
                 compress::Answer::Kept => return,
             },
+            // Whatever cannot be written is said in a toast (see
+            // [`App::tags_submit`]); the prompt closes either way.
+            PromptKind::Tags => {
+                self.tags_submit(&text, now);
+                None
+            }
         };
         match error {
             Some(message) => {
@@ -8272,6 +8300,7 @@ impl App {
             // The sheet widens back out, and its cursor goes back to the top
             // with it — the row it was on was in the *narrowed* list.
             PromptKind::HelpFilter => self.clear_help_filter(),
+            PromptKind::Tags => self.tags_cancelled(),
             // A cancelled conflict rename goes back to the dialog, which is
             // still holding the unanswered conflict.
             _ => {}
@@ -8991,6 +9020,12 @@ impl App {
         if command == Command::TerminalHere && self.tab().virtual_kind().is_some() {
             return Some("Terminals open on local folders");
         }
+        // Tags are an attribute on a file on this machine's disk, and an
+        // archive's rows, a remote service's and the trash's are not that —
+        // one sentence for all three, since the reason is the same.
+        if command == Command::Tag && self.tab().virtual_kind().is_some() {
+            return Some("Tags live on local files");
+        }
         // PLAN §7.3: an archive browsed as a directory is read-only in v1, and
         // the commands that would write into one are inert *out loud*. A key
         // that silently does nothing is a key the user presses twice — and the
@@ -9476,6 +9511,7 @@ impl App {
             C::LinemodeBtime => self.choose_linemode(LineMode::Btime, now),
             C::LinemodeMtime => self.choose_linemode(LineMode::Mtime, now),
             C::LinemodeOwner => self.choose_linemode(LineMode::Owner, now),
+            C::LinemodeTags => self.choose_linemode(LineMode::Tags, now),
             C::LinemodeNone => self.choose_linemode(LineMode::None, now),
 
             // ── Sort ────────────────────────────────────────────────────────
@@ -9537,6 +9573,7 @@ impl App {
             C::Rename if self.tab().trash.is_some() => self.trash_restore(now),
             C::Rename => self.open_rename(false, now),
             C::RenameEmptyStem => self.open_rename(true, now),
+            C::Tag => self.open_tag_prompt(now),
             C::Shell => self.open_prompt(PromptKind::Shell),
             C::ShellBlock => self.open_prompt(PromptKind::ShellBlock),
             C::TerminalHere => {
@@ -12044,6 +12081,15 @@ impl App {
         };
         let names: Vec<String> = openers.iter().map(|choice| choice.name.clone()).collect();
         let mut items = menu::items(facts, &names);
+        // Greyed where the gate would refuse it — an archive's rows, a remote
+        // service's — rather than left live to toast "not here" when clicked.
+        if self.refusal(Command::Tag).is_some() {
+            for item in &mut items {
+                if item.action == menu::Action::Run(Command::Tag) {
+                    item.enabled = false;
+                }
+            }
+        }
         if facts.is_dir && !facts.trash {
             let pinnable = self.refusal(Command::PinToggle).is_none();
             menu::insert_pin_row(&mut items, self.row_pinned(), pinnable);
@@ -16458,6 +16504,7 @@ impl App {
             painter: &painter,
             palette: &self.palette,
             theme: &self.theme,
+            tags: &self.tag_colors,
             nerd: self.nerd,
             show_symlink: self.mgr.show_symlink,
             now,
@@ -18752,6 +18799,10 @@ mod tests {
 
     /// The trash's weight and its clock.
     mod trash;
+
+    /// `T`: the prompt, the difference a selection gets, `Tab`, `u`, the
+    /// dots and the `m t` column.
+    mod tagging;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the
