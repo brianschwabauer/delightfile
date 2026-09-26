@@ -20,17 +20,36 @@
 //! waits in [`App::du_backlog`] for whichever reader comes next, exactly as it
 //! would have waited in the channel.
 //!
-//! **The clock** is `[mgr] trash_keep_days`. Once the first frame is up, and
-//! then once a day for as long as the window is open — one instant in
-//! [`App::next_deadline`], never a poll — the home trash is listed on a task
-//! worker and every item whose record says it was deleted more than that many
-//! days ago is destroyed ([`df_core::ops::trash::purge_expired`] and the rules
-//! in [`df_core::ops::trash::expired`] for what is never chosen). It is a task
-//! like any other, so it is in `w` and `x` cancels it. It is *not* done while
-//! any tab has the trash open — rows vanishing from under the cursor with
-//! nobody's hand on a key is not something a list should do — and a file
-//! dialog never does it at all: the window belongs to another program for a
-//! few seconds, and that is no time to be deleting things.
+//! **The clock** is `[mgr] trash_keep_days`: the home trash is listed on a
+//! task worker and every item whose record says it was deleted more than that
+//! many days ago is destroyed ([`df_core::ops::trash::purge_expired`], and
+//! [`df_core::ops::trash::expired`] for what is never chosen). It is a task
+//! like any other, so it is in `w` and `x` cancels it.
+//!
+//! **Once a day per user, not per window.** Every window is a process with a
+//! clock of its own, checked on the frame after the first and on every frame
+//! after that; the trash's stamp ([`df_core::ops::trash::PURGE_STAMP`]) is what
+//! decides. A window only queues a purge when the stamp is a day old or
+//! missing, and the purge itself holds an `flock` on the stamp and reads it
+//! again under the lock, so of two windows launched together one purges and
+//! the other stands down without a word.
+//!
+//! **When it fires.** The daily check is an instant in [`App::next_deadline`],
+//! but an instant a day away is past `REPAINT_HORIZON` and dropped from the
+//! window's wake-up, on purpose: an idle window is not woken to check a
+//! clock. So the purge runs on the first frame *after* it is due, whatever
+//! brings that frame — a key, the pointer, a watcher event. Only a due inside
+//! the hour (another window's stamp about to turn a day old) wakes the window
+//! by itself. At startup the check waits for the first frame to be on screen
+//! and asks for no frame of its own: the frames that follow a window's first
+//! (its listing landing, the pointer arriving) run it.
+//!
+//! It is *not* done while any tab has the trash open — rows vanishing from
+//! under the cursor with nobody's hand on a key is not something a list
+//! should do — and one already running when `g t` opens the trash is
+//! cancelled and owed again. A file dialog never does it at all: the window
+//! belongs to another program for a few seconds, and that is no time to be
+//! deleting things.
 //!
 //! A purge is not journalled, for the reason [`crate::trashview`]'s own `D` is
 //! not: there is no inverse to record.
@@ -196,9 +215,18 @@ impl App {
 
     // ── The clock ───────────────────────────────────────────────────────────
 
-    /// The purge, if one is owed now. Called once the first frame is on
-    /// screen, and on every frame after — which costs a comparison, because
-    /// the frame that is owed one is woken by [`App::next_deadline`].
+    /// How long until the clock is owed a check, for [`App::next_deadline`]
+    /// — nothing until the first frame is on screen, so the check owed at
+    /// startup asks for no frame of its own. See the module note on why a day
+    /// away is, in practice, "the first frame after".
+    pub(super) fn trash_clock_deadline(&self, now: Instant) -> Option<Duration> {
+        self.trash_clock
+            .deadline(now)
+            .filter(|_| self.logged_first_frame)
+    }
+
+    /// The purge, if one is owed now. Called on every frame once the first
+    /// is on screen, which costs a comparison until the day is up.
     pub(super) fn tick_trash_clock(&mut self, now: Instant) {
         let Some(due) = self.trash_clock.due else {
             return;
@@ -206,7 +234,7 @@ impl App {
         if now < due {
             return;
         }
-        // The next one is a day from now whatever happens to this one: a
+        // The next check is a day from now whatever happens to this one: a
         // purge skipped because the trash is open is not retried every frame
         // until it is closed.
         self.trash_clock.due = Some(now + PURGE_EVERY);
@@ -217,7 +245,28 @@ impl App {
             log::debug!("trash purge skipped: the trash is open");
             return;
         }
+        let Some(root) = self.trash_clock.root.clone() else {
+            return;
+        };
+        // The stamp decides, not this window's clock: another window may have
+        // purged an hour ago, and then this one waits out the rest of that
+        // day. One `stat`, so asked here rather than queued as a task that
+        // would sit in `w` saying it did nothing.
+        let trash = df_core::ops::Trash::at(root);
+        if let Some(wait) = core_trash::purge_due_in(&trash, PURGE_EVERY, SystemTime::now()) {
+            self.trash_clock.due = Some(now + wait);
+            return;
+        }
         self.start_trash_purge();
+    }
+
+    /// Stop a purge that is running: the trash is coming on screen. It is
+    /// owed again — a cancelled purge does not stamp — and the next check
+    /// runs it.
+    pub(super) fn hold_trash_purge(&mut self) {
+        if let Some(id) = self.trash_clock.running() {
+            self.engine.cancel(id);
+        }
     }
 
     /// Queue the purge on the task engine's workers, which nice themselves
@@ -238,12 +287,22 @@ impl App {
             Lane::Macro,
             move |ctx| {
                 let trash = df_core::ops::Trash::at(&root);
-                let result = core_trash::purge_expired(&trash, keep_days, SystemTime::now(), ctx);
-                // Cancelled is quiet, as every cancelled task is; anything
-                // else is said, once, by whoever reads the slot.
+                // Under the stamp's lock, and asking the stamp again: of two
+                // windows that both found it a day old, one purges and the
+                // other stands down here.
+                let result = core_trash::purge_expired_if_due(
+                    &trash,
+                    keep_days,
+                    PURGE_EVERY,
+                    SystemTime::now(),
+                    ctx,
+                );
+                // Standing down and being cancelled are quiet, as every
+                // cancelled task is; anything else is said, once, by whoever
+                // reads the slot.
                 let answer = match &result {
-                    Ok(report) => Some(Ok(report.clone())),
-                    Err(df_core::DfError::Cancelled) => None,
+                    Ok(Some(report)) => Some(Ok(report.clone())),
+                    Ok(None) | Err(df_core::DfError::Cancelled) => None,
                     Err(e) => Some(Err(e.to_string())),
                 };
                 let failure = match &answer {

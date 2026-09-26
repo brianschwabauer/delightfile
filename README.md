@@ -58,9 +58,11 @@ open.
   A chip beside the position counter weighs the trash (`37 items · 1.2 GB`, counted in
   the background like the size column), and "Empty trash" asks with the same numbers.
   Anything in the home trash longer than `trash_keep_days` (30 by default) is removed for
-  good, once at startup and once a day after. It runs as a task you can cancel from `w`,
-  waits while the trash is open in a tab, never runs from a file dialog, and never touches
-  an item whose deletion date it cannot read.
+  good, at most once a day however many windows are open: a stamp file in the trash
+  (`.delightfile-purge`) records the last purge, and a lock on it keeps two windows from
+  purging at once. It runs as a task you can cancel from `w`, waits while the trash is
+  open in a tab (opening the trash stops one that is running), never runs from a file
+  dialog, and never touches an item whose deletion date it cannot read.
 - **SFTP.** Hosts from yazi's `vfs.toml` browse as directories, with download-on-open and
   upload-on-drop.
 - **Cloud storage.** Every remote in `rclone.conf` (Google Drive, Dropbox, S3, R2, anything

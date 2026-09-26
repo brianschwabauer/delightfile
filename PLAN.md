@@ -383,7 +383,8 @@ on cold start (delightviewer's ordering); results crossfade in over ~80 ms.
   listed and unmounted through `gio mount`, with `c` for a connect-to-server prompt.
 - **Trash**: freedesktop spec, with a virtual trash:// location to browse/restore. The
   view weighs itself (a du walk of `files/`, on a chip), and `[mgr] trash_keep_days`
-  (30) purges the home trash of anything older, at startup and daily, as a task.
+  (30) purges the home trash of anything older, at most daily per user (a stamp and an
+  `flock` in the trash root), as a task.
 
 ### 7.5 Mouse (beyond DnD)
 

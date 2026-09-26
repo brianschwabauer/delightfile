@@ -327,4 +327,111 @@ fn the_purge_waits_for_the_trash_to_be_closed() {
     assert!(!old.info_path().exists(), "…or its record did");
     assert!(recent.files_path().exists(), "the recent item was purged");
     assert_eq!(app.trash_clock.deadline(later), Some(PURGE_EVERY));
+
+    // …and it stamped the trash, so a window opened now finds today's purge
+    // done and queues nothing.
+    let mut other = Fixture::new("trash-purge-clock-2", &["a.txt"]);
+    other.trash_clock = Clock::starting(false, Some(trash.root().to_path_buf()), 30, now);
+    other.tick_trash_clock(now);
+    assert_eq!(
+        other.trash_clock.running(),
+        None,
+        "a second window purged too"
+    );
+}
+
+/// The purge is once a day per user: a window whose own clock is due finds
+/// another window's stamp from an hour ago, queues nothing, and checks again
+/// when that stamp turns a day old.
+#[test]
+fn a_window_waits_out_another_windows_purge() {
+    let mut app = Fixture::new("trash-purge-stamp", &["a.txt"]);
+    let trash = sandbox_trash(&app);
+    let old = plant(&trash, "old.txt", days_ago(45));
+    let hour = Duration::from_secs(3600);
+    let stamp =
+        std::fs::File::create(trash.root().join(df_core::ops::trash::PURGE_STAMP)).expect("stamp");
+    std::io::Write::write_all(&mut &stamp, b"purged").expect("write");
+    stamp
+        .set_modified(SystemTime::now() - hour)
+        .expect("an hour ago");
+
+    let now = Instant::now();
+    app.trash_clock = Clock::starting(false, Some(trash.root().to_path_buf()), 30, now);
+    app.tick_trash_clock(now);
+    assert_eq!(
+        app.trash_clock.running(),
+        None,
+        "purged a second time today"
+    );
+    assert!(old.files_path().exists());
+    let wait = app.trash_clock.deadline(now).expect("a check is owed");
+    assert!(
+        wait > PURGE_EVERY - hour * 2 && wait < PURGE_EVERY - hour / 2,
+        "the next check is {wait:?} away"
+    );
+}
+
+/// `g t` while a purge is still running stops it: the trash's rows are not
+/// taken out from under the view that just opened on them, and the purge,
+/// never stamped, is owed at the next check.
+#[test]
+fn opening_the_trash_stops_a_purge_that_is_running() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut app = Fixture::new("trash-purge-hold", &["a.txt"]);
+    let trash = sandbox_trash(&app);
+    let old = plant(&trash, "old.txt", days_ago(45));
+    app.trash_home = Some(trash.root().to_path_buf());
+    let now = Instant::now();
+    app.trash_clock = Clock::starting(false, Some(trash.root().to_path_buf()), 30, now);
+
+    // Every worker of the lane busy, so the purge is still queued — rather
+    // than finished, or half done — when the trash opens.
+    let release = Arc::new(AtomicBool::new(false));
+    let blockers: Vec<TaskId> = (0..app.config.tasks.macro_workers.max(1))
+        .map(|_| {
+            let release = Arc::clone(&release);
+            app.engine.spawn(FnJob::new("hold", Lane::Macro, move |_| {
+                while !release.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(())
+            }))
+        })
+        .collect();
+    app.tick_trash_clock(now);
+    let id = app.trash_clock.running().expect("the purge is queued");
+
+    app.run(Command::OpenTrash, 10, now);
+    assert!(app.tab().trash.is_some(), "g t did not open the trash");
+    release.store(true, Ordering::Relaxed);
+    assert_eq!(
+        app.engine.join(id, Duration::from_secs(10)),
+        Some(TaskState::Cancelled)
+    );
+    for blocker in blockers {
+        app.engine.join(blocker, Duration::from_secs(10));
+    }
+    app.poll_workers();
+    assert_eq!(app.trash_clock.running(), None);
+    assert!(old.files_path().exists(), "purged under the open trash");
+    assert_eq!(toast_text(&app), None, "a cancelled purge said something");
+    assert_eq!(
+        df_core::ops::trash::purge_due_in(&trash, PURGE_EVERY, SystemTime::now()),
+        None,
+        "a cancelled purge stamped the trash"
+    );
+}
+
+/// The check owed at startup asks for no frame of its own: nothing in the
+/// wake table until the first frame is on screen.
+#[test]
+fn the_clock_asks_for_no_frame_before_the_first() {
+    let mut app = Fixture::new("trash-purge-first-frame", &["a.txt"]);
+    let now = Instant::now();
+    app.trash_clock = Clock::starting(false, Some(PathBuf::from("/nonexistent/Trash")), 30, now);
+    assert!(!app.logged_first_frame);
+    assert_eq!(app.trash_clock_deadline(now), None);
+    app.logged_first_frame = true;
+    assert_eq!(app.trash_clock_deadline(now), Some(Duration::ZERO));
 }

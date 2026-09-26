@@ -1633,6 +1633,11 @@ pub struct App {
     /// When the trash next purges what `[mgr] trash_keep_days` has aged out,
     /// and the purge in flight ([`trash`]).
     trash_clock: trash::Clock,
+    /// The home trash's root, found once by [`App::new`] — the trash `g t`
+    /// shows and the clock purges. `None` in a test's `App`, whose `g t` then
+    /// asks the environment as it always has, and in a session with no
+    /// `$HOME`, where that asking says why there is no trash.
+    trash_home: Option<PathBuf>,
     /// The repository the current directory is in, recomputed only when the
     /// directory changes.
     ///
@@ -2056,12 +2061,12 @@ impl App {
         // of what `assemble` does not read (PLAN §7.4). A file dialog's never
         // runs: it is somebody else's window for a few seconds, and no time to
         // be deleting things.
-        let home = df_core::ops::Trash::home()
+        app.trash_home = df_core::ops::Trash::home()
             .ok()
             .map(|trash| trash.root().to_path_buf());
         app.trash_clock = trash::Clock::starting(
             app.chooser.is_some(),
-            home,
+            app.trash_home.clone(),
             app.config.mgr.trash_keep_days,
             Instant::now(),
         );
@@ -2256,6 +2261,7 @@ impl App {
             // dialog and where the home trash is; a test's `App` never purges
             // a trash it did not make.
             trash_clock: trash::Clock::default(),
+            trash_home: None,
             du: None,
             usage: None,
             folders: crate::folders::Folders::default(),
@@ -2632,8 +2638,9 @@ impl App {
         }
         // The trash's clock: a purge owed at startup waits for the first
         // frame to be on screen — nothing about the window's first
-        // appearance should queue behind it — and after that the frame it is
-        // owed on is woken by `next_deadline`, once a day.
+        // appearance should queue behind it — and runs on whichever frame
+        // comes next; after that, on the first frame past each day, whatever
+        // brings it (see `app::trash` on why no frame is asked for).
         if self.logged_first_frame {
             self.tick_trash_clock(now);
         }
@@ -4342,7 +4349,16 @@ impl App {
     /// deleted and not emptied. The asynchronous machinery exists for
     /// directories that can be enormous; this is not one.
     fn show_trash(&mut self, origin: PathBuf, now: Instant) {
-        let trash = match df_core::ops::Trash::home() {
+        // A purge of the old still running when the trash comes on screen
+        // stops, rather than taking rows out from under the view: it is
+        // owed again, and the next check of the clock runs it
+        // (`App::tick_trash_clock`).
+        self.hold_trash_purge();
+        let home = match &self.trash_home {
+            Some(root) => Ok(df_core::ops::Trash::at(root)),
+            None => df_core::ops::Trash::home(),
+        };
+        let trash = match home {
             Ok(trash) => trash,
             Err(e) => {
                 self.toasts.error(e.to_string(), now);
@@ -17450,10 +17466,13 @@ impl App {
             folders,
             clipboard,
             wl_copy,
-            // …and the trash's clock: one instant a day, known in advance.
-            // At startup it is already due, which is the frame after the
-            // first one (`App::tick_trash_clock`).
-            self.trash_clock.deadline(now),
+            // …and the trash's clock. Nothing before the first frame; after
+            // it, an instant usually a day away — past `REPAINT_HORIZON`,
+            // where the wake-up drops it, so an idle window is never woken to
+            // check a clock and the purge runs on the first frame after it is
+            // due. Only a due inside the hour, another window's stamp about
+            // to turn a day old, wakes the window (`app::trash`).
+            self.trash_clock_deadline(now),
             // …and the panes' scrollbars, the instant their linger ends and
             // the fade is owed its first frame.
             self.scrolled_at()
