@@ -133,7 +133,9 @@ pub const FAINT_CONTRAST: f32 = 3.0;
 pub const QUIET_CONTRAST: f32 = 4.0;
 
 impl Palette {
-    /// Every name [`Palette::from_theme`] reads, in the order of the fields.
+    /// Every name [`Palette::from_theme`] reads, in the order of the fields —
+    /// what the flavour tests hold every table to.
+    #[cfg(test)]
     pub const NAMES: [&'static str; 23] = [
         "crust", "mantle", "base", "surface0", "surface1", "surface2", "overlay0", "overlay1",
         "overlay2", "subtext0", "subtext1", "text", "blue", "sky", "red", "yellow", "mauve",
@@ -265,21 +267,6 @@ impl Palette {
             "pink" => self.pink,
             _ => return None,
         })
-    }
-
-    /// `color`, which this palette handed out under some name, as the same
-    /// name in `to`; unchanged when it is none of this palette's.
-    ///
-    /// For the few things that hold a colour across frames rather than asking
-    /// for one each frame — a drag's ghost keeps the icon of the row it was
-    /// picked up from — so the one frame the window turns light or dark turns
-    /// them too.
-    pub fn translate(&self, color: egui::Color32, to: &Palette) -> egui::Color32 {
-        Palette::NAMES
-            .iter()
-            .find(|name| self.named(name) == Some(color))
-            .and_then(|name| to.named(name))
-            .unwrap_or(color)
     }
 }
 
@@ -737,17 +724,6 @@ mod tests {
         assert_eq!(hairline(&l), l.surface2);
         assert_eq!(thumb(&l, 0.0), l.overlay1);
         assert_ne!(select_fill(&l, l.base), mix(l.base, l.yellow, 0.10));
-    }
-
-    /// A colour held across the switch comes out as the same name on the
-    /// other side, and one that was never a palette colour is left alone.
-    #[test]
-    fn a_held_colour_is_translated_by_name() {
-        let (dark, light) = (Palette::default(), latte());
-        assert_eq!(dark.translate(dark.blue, &light), light.blue);
-        assert_eq!(light.translate(light.text, &dark), dark.text);
-        let odd = egui::Color32::from_rgb(1, 2, 3);
-        assert_eq!(dark.translate(odd, &light), odd);
     }
 
     #[test]

@@ -1368,12 +1368,17 @@ pub struct App {
     desktop_side: Appearance,
     /// The portal watcher, once this session has followed the desktop
     /// ([`crate::appearance`]). Kept after a `theme-dark` or `theme-light`,
-    /// so `theme-auto` finds the answer already there.
+    /// so `theme-auto` finds the answer already there, and replaced when its
+    /// line has gone ([`App::revive_desktop`]).
     desktop: Option<crate::appearance::Desktop>,
-    /// Whether this app may ask the desktop at all. False for a test's
-    /// `App`, which reads nothing from this machine and hands in a
-    /// [`crate::appearance::Desktop::fake`] of its own when it wants one.
-    ask_desktop: bool,
+    /// How this app reaches the desktop: the session bus, or `None` for a
+    /// test's `App`, which reads nothing from this machine and hands in a
+    /// [`crate::appearance::Desktop::fake`] — or a socket pair — of its own
+    /// when it wants one.
+    desktop_bus: Option<crate::appearance::Connect>,
+    /// `theme-auto` has been asked for and not yet said what it is following:
+    /// the toast waits for the watcher to be listening, or to have failed.
+    announce_follow: bool,
     /// The live view settings: sort, linemode, hidden. Starts as the config's
     /// and is what the `,`, `m` and `.` bindings change.
     mgr: MgrConfig,
@@ -1901,8 +1906,9 @@ struct Drag {
     /// The name on the top card. The *grabbed* row's, not the first selected
     /// one's: the card has to show what the hand actually took hold of.
     label: String,
-    /// The glyph and colour beside it, from the same table the rows use.
-    icon: crate::icons::Icon,
+    /// The glyph and colour beside it, from the same table the rows use —
+    /// asked for each frame from what was picked up ([`Face`]).
+    face: Face,
     /// Where the ghost springs back to: the middle of the *thing* it came off
     /// — the row, or the yank chip. Not a pointer position; see
     /// [`dnd::ghost_home`], which is what turns it into one.
@@ -1969,7 +1975,7 @@ struct TabDrag {
     slide: crate::motion::Tween,
     /// The tab's title, on the face of the ghost.
     label: String,
-    icon: crate::icons::Icon,
+    face: Face,
 }
 
 /// A tab chip settling into a slot: a reorder that has just been committed, or
@@ -2001,7 +2007,35 @@ struct TabLanding {
 struct SpringHome {
     spring: dnd::SpringBack,
     label: String,
-    icon: crate::icons::Icon,
+    face: Face,
+}
+
+/// What a ghost card's icon is drawn from.
+///
+/// Held as the thing picked up rather than as the icon it had at the time, and
+/// drawn from it every frame with the palette and the theme of that frame, as
+/// a row's icon is — so a ghost in the hand while the window turns light or
+/// dark turns with the rows it came off, a shipped folder colour swapped for
+/// latte's accent included ([`crate::icons::icon_for`]).
+#[derive(Debug, Clone)]
+enum Face {
+    /// A row of the listing: its own icon.
+    Row(Box<df_core::fs::Entry>),
+    /// The whole clipboard, off the yank chip: the plain file glyph
+    /// ([`crate::icons::generic`]).
+    Clipboard,
+    /// A tab: the plain folder ([`crate::icons::folder`]).
+    Folder,
+}
+
+impl Face {
+    fn icon(&self, theme: &Theme, palette: &Palette, nerd: bool) -> crate::icons::Icon {
+        match self {
+            Face::Row(entry) => crate::icons::icon_for(entry, theme, palette, nerd),
+            Face::Clipboard => crate::icons::generic(palette, nerd),
+            Face::Folder => crate::icons::folder(palette, nerd),
+        }
+    }
 }
 
 /// A paste that has asked the clipboard for its bytes and is waiting for them.
@@ -2147,8 +2181,8 @@ impl App {
         // Before the window, with the other workers (PLAN §6's cold-start
         // ordering): the portal's answer is in by the time wgpu has an
         // adapter, and the first frame is on the side the desktop is on.
-        app.ask_desktop = true;
-        app.follow_desktop();
+        app.desktop_bus = Some(crate::appearance::session());
+        app.follow_desktop(true, Instant::now());
         app
     }
 
@@ -2297,7 +2331,8 @@ impl App {
             theme_mode: theme.mode,
             desktop_side: Appearance::Dark,
             desktop: None,
-            ask_desktop: false,
+            desktop_bus: None,
+            announce_follow: false,
             config,
             theme,
             mgr,
@@ -2604,6 +2639,10 @@ impl App {
         {
             changed |= self.desktop_said(scheme);
         }
+        // …and a watcher whose line has gone, started again when it is due;
+        // and `theme-auto`'s word, once there is one to say.
+        self.revive_desktop(now);
+        changed |= self.announce_following(now);
         // ffmpeg's answers about hovered files. Kept as a small ring so a
         // `↓ ↑` does not re-open the clip, and applied by the next frame's
         // `sync_playback` — which is the one place that decides what to mount.
@@ -13865,7 +13904,7 @@ impl App {
             // The generic file glyph: a clipboard carries whatever it carries,
             // and a card wearing the first file's icon would claim they are
             // all that kind.
-            icon: crate::icons::generic(&self.palette, self.nerd),
+            face: Face::Clipboard,
             // The chip's middle, like every other `home` in this file: what
             // the ghost lands *on* is the thing it was picked up from, and
             // [`dnd::ghost_home`] is what turns that into the pointer
@@ -13911,7 +13950,7 @@ impl App {
         let Some(entry) = dir.row(index) else { return };
         let grabbed = entry.path.clone();
         let label = entry.name.clone();
-        let icon = crate::icons::icon_for(entry, &self.theme, &self.palette, self.nerd);
+        let face = Face::Row(Box::new(entry.clone()));
         let selected = dir.selected_paths();
         let paths = if selected.contains(&grabbed) {
             selected
@@ -13921,7 +13960,7 @@ impl App {
         self.drag = Some(Drag {
             paths,
             label,
-            icon,
+            face,
             home: grid::pane_rect(content, metrics, scroll_rows, index, self.scale).center(),
             at,
             spring: dnd::SpringOpen::default(),
@@ -14028,7 +14067,7 @@ impl App {
                 now,
             ),
             label,
-            icon: crate::icons::folder(&self.palette, self.nerd),
+            face: Face::Folder,
         });
         // A gesture that starts is one the cancel of an older one has nothing
         // to say about — the ghost's flight home, and a chip still settling
@@ -14293,7 +14332,7 @@ impl App {
                 now,
             ),
             label: drag.label,
-            icon: drag.icon,
+            face: drag.face,
         });
     }
 
@@ -14558,7 +14597,7 @@ impl App {
                 now,
             ),
             label: drag.label,
-            icon: drag.icon,
+            face: drag.face,
         });
     }
 
@@ -15584,17 +15623,72 @@ impl App {
         }
     }
 
-    /// Start asking the desktop, if this session follows it and is allowed to
-    /// ask, and nobody is asking yet. Once asked, the watcher stays: a
+    /// Start asking the desktop, if this session follows it and can ask,
+    /// and nobody is asking — no watcher yet, or one whose line has gone.
+    ///
+    /// `eager` is somebody asking (startup, `theme-auto`), which starts one
+    /// whenever there is none listening. Otherwise a dead watcher is replaced
+    /// only once [`crate::appearance::RETRY`] has passed since it was started,
+    /// so a bus that refuses at once costs a thread per ten seconds of
+    /// activity rather than one per frame. A live watcher stays: a
     /// `theme-dark` and then a `theme-auto` should land on the desktop's side
     /// at once, not after a second round trip.
-    fn follow_desktop(&mut self) {
-        if self.ask_desktop && self.theme_mode == ThemeMode::Auto && self.desktop.is_none() {
-            let waker = self.waker.named("desktop");
-            self.desktop = Some(crate::appearance::Desktop::watch(Arc::new(move || {
-                waker.wake()
-            })));
+    fn follow_desktop(&mut self, eager: bool, now: Instant) {
+        let Some(connect) = self.desktop_bus.clone() else {
+            return;
+        };
+        if self.theme_mode != ThemeMode::Auto {
+            return;
         }
+        let due = match &self.desktop {
+            None => true,
+            Some(desktop) => {
+                desktop.link() == crate::appearance::Link::Gone
+                    && (eager
+                        || now.saturating_duration_since(desktop.started())
+                            >= crate::appearance::RETRY)
+            }
+        };
+        if due {
+            let waker = self.waker.named("desktop");
+            self.desktop = Some(crate::appearance::Desktop::watch_over(
+                connect,
+                Arc::new(move || waker.wake()),
+            ));
+        }
+    }
+
+    /// A watcher whose line has gone is started again — the frame after a
+    /// bell, or any other frame, once it is due. Nothing schedules a frame
+    /// for this: a window at rest with a dead bus stays at rest, and the next
+    /// thing that wakes it asks again (PLAN §1).
+    fn revive_desktop(&mut self, now: Instant) {
+        self.follow_desktop(false, now);
+    }
+
+    /// `theme-auto`'s toast, once the watcher can say what it is following:
+    /// the side, while it is listening and has heard; that the desktop could
+    /// not be reached, when its line has gone. Nothing while it is still
+    /// connecting. Returns whether a toast went up.
+    fn announce_following(&mut self, now: Instant) -> bool {
+        if !self.announce_follow {
+            return false;
+        }
+        let side = self.appearance().name();
+        let message = match self.desktop.as_ref().map(|d| (d.link(), d.heard())) {
+            Some((crate::appearance::Link::Listening, true)) => {
+                format!("Following the desktop ({side})")
+            }
+            Some((crate::appearance::Link::Starting | crate::appearance::Link::Listening, _)) => {
+                return false;
+            }
+            Some((crate::appearance::Link::Gone, _)) | None => {
+                format!("Could not reach the desktop's light or dark setting — staying {side}")
+            }
+        };
+        self.announce_follow = false;
+        self.toasts.notice(message, now);
+        true
     }
 
     /// The desktop said which side it prefers. Heard whatever the session's
@@ -15609,21 +15703,21 @@ impl App {
     /// over `[flavor] mode`, until it quits.
     fn set_theme_mode(&mut self, mode: ThemeMode, now: Instant) {
         self.theme_mode = mode;
-        self.follow_desktop();
+        self.follow_desktop(true, now);
         self.apply_appearance();
-        // The side is named only once the desktop has said which: a watcher
-        // started by this very command has not heard yet, and "dark" would be
-        // a guess the next frame might contradict.
-        let heard = self.desktop.as_ref().is_some_and(|d| d.heard());
-        let message = match mode {
-            ThemeMode::Auto if heard => {
-                format!("Following the desktop ({})", self.appearance().name())
+        // Following is announced when it is known what is being followed: at
+        // once for a watcher already listening, and otherwise when the one
+        // this has just started is listening or has failed — "following the
+        // desktop (dark)" said of a line that is not there would be a claim
+        // the window cannot keep.
+        self.announce_follow = mode == ThemeMode::Auto;
+        match mode {
+            ThemeMode::Auto => {
+                self.announce_following(now);
             }
-            ThemeMode::Auto => "Following the desktop".to_string(),
-            ThemeMode::Dark => "Dark theme".to_string(),
-            ThemeMode::Light => "Light theme".to_string(),
-        };
-        self.toasts.notice(message, now);
+            ThemeMode::Dark => self.toasts.notice("Dark theme", now),
+            ThemeMode::Light => self.toasts.notice("Light theme", now),
+        }
     }
 
     /// Put the window on the side it should be on. Returns whether it moved.
@@ -15635,8 +15729,6 @@ impl App {
     /// handful of things that *hold* a colour across frames rather than asking
     /// for one, and each is turned here:
     ///
-    /// - a drag's ghost, and a tab's, which keep the icon they were picked up
-    ///   with — translated name for name ([`Palette::translate`]);
     /// - the surface's clear colour, and the window's own light/dark hint to
     ///   the compositor for any decorations it draws;
     /// - a document page, which is a picture with the palette baked into it —
@@ -15650,22 +15742,14 @@ impl App {
         if next == self.palette {
             return false;
         }
-        let before = std::mem::replace(&mut self.palette, next);
+        self.palette = next;
         // The seven colour tags are the palette's and turn with it; a
         // `[tags]` line naming a palette colour is resolved again on the new
         // side, and a hex stays what it was.
         self.tag_colors =
             crate::tags::TagColors::new(&self.config.tags, &self.theme, self.appearance());
-        let turn = |icon: &mut crate::icons::Icon| icon.color = before.translate(icon.color, &next);
-        if let Some(drag) = &mut self.drag {
-            turn(&mut drag.icon);
-        }
-        if let Some(tab_drag) = &mut self.tab_drag {
-            turn(&mut tab_drag.icon);
-        }
-        if let Some(home) = &mut self.spring_back {
-            turn(&mut home.icon);
-        }
+        // A ghost in the hand needs nothing: its icon is drawn each frame
+        // from what was picked up ([`Face`]).
         if let Some(gfx) = &mut self.gfx {
             gfx.set_clear(next.base);
         }
@@ -18279,7 +18363,7 @@ impl App {
             paint.ghost(
                 &cards,
                 &ui::GhostFace {
-                    icon: drag.icon,
+                    icon: drag.face.icon(&self.theme, &self.palette, self.nerd),
                     name: &drag.label,
                     count: dnd::ghost_badge(drag.paths.len()),
                     verb: frame.verb.label(),
@@ -18302,7 +18386,7 @@ impl App {
                 paint.ghost(
                     &cards,
                     &ui::GhostFace {
-                        icon: drag.icon,
+                        icon: drag.face.icon(&self.theme, &self.palette, self.nerd),
                         name: &drag.label,
                         count: None,
                         verb: if armed { "New window" } else { "" },
@@ -18317,7 +18401,7 @@ impl App {
             paint.ghost(
                 &cards,
                 &ui::GhostFace {
-                    icon: home.icon,
+                    icon: home.face.icon(&self.theme, &self.palette, self.nerd),
                     name: &home.label,
                     count: dnd::ghost_badge(home.spring.count()),
                     // A drag that is being cancelled is not carrying a verb any

@@ -510,7 +510,7 @@ impl Bus {
     /// deadline, because a peer that sends one byte every eighty seconds resets
     /// them for ever. [`Bus::call`] and [`Bus::read_line`] carry the deadline
     /// (see [`Bus::deadline_read`]).
-    fn on_socket(sock: UnixStream) -> Bus {
+    pub(crate) fn on_socket(sock: UnixStream) -> Bus {
         sock.set_read_timeout(Some(CALL_TIMEOUT)).ok();
         sock.set_write_timeout(Some(Duration::from_secs(10))).ok();
         Bus {
@@ -914,6 +914,25 @@ impl Outbox {
         Ok(self.serial)
     }
 
+    /// A handle that can end this connection and do nothing else — for
+    /// whoever has to be able to stop a reader it does not own, while the
+    /// reader's own thread keeps the [`Outbox`] and its serials.
+    pub fn hangup(&self) -> Result<Hangup, String> {
+        let sock = self
+            .sock
+            .try_clone()
+            .map_err(|e| format!("keeping a handle on {}: {e}", self.name))?;
+        Ok(Hangup { sock })
+    }
+}
+
+/// The one thing a connection's owner may do from outside it: end it. See
+/// [`Outbox::hangup`].
+pub struct Hangup {
+    sock: UnixStream,
+}
+
+impl Hangup {
     /// Close the connection under both halves.
     ///
     /// A shutdown is of the socket, not of this handle, so the [`Inbox`]
@@ -2907,7 +2926,7 @@ mod generic {
         // Long enough that the reader is almost surely in its `read`; the
         // test holds either way, since a shut socket reads as its end.
         std::thread::sleep(Duration::from_millis(30));
-        outbox.hang_up();
+        outbox.hangup().unwrap().hang_up();
         assert!(reader.join().unwrap().is_err());
     }
 
