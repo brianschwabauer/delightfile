@@ -740,6 +740,68 @@ fn undoing_a_trash_brings_the_row_back_unmarked() {
     assert_eq!(cursor(&app).as_deref(), Some("docs/foo.txt"));
 }
 
+/// `d`, `u`, `U`, `u` in the hits: the trash done again takes the row out
+/// again — its file is back in the sandbox's trash, and no stale row stays
+/// for it — and the next `u` brings the row back once more.
+#[test]
+fn redoing_a_trash_takes_the_row_out_again() {
+    let mut app = tree("hits-retrash");
+    let root = app.files.clone();
+    commit_three(&mut app);
+    let now = Instant::now();
+    let trash = df_core::ops::Trash::at(root.join("..").join("Trash"));
+    let item = trash
+        .trash(&root.join("docs/foo.txt"), &TaskCtx::detached())
+        .expect("trashed");
+    app.journal.record(OpRecord::Trash { items: vec![item] });
+    app.rescan(&root.join("docs"), now);
+    app.run(Command::Undo, 10, now);
+    assert!(rows(&app).contains(&"docs/foo.txt".to_string()));
+
+    app.run(Command::Redo, 10, now);
+    assert!(!root.join("docs/foo.txt").exists(), "not trashed again");
+    assert_eq!(
+        std::fs::read_dir(trash.files_dir())
+            .expect("the trash")
+            .count(),
+        1,
+        "into the trash it came out of"
+    );
+    let mut names = rows(&app);
+    names.sort();
+    assert_eq!(names, ["src/deep/foo.txt", "src/foo.txt"]);
+    assert_eq!(
+        app.tab().virtual_kind(),
+        Some(Virtual::Hits),
+        "still the hits"
+    );
+
+    app.run(Command::Undo, 10, now);
+    assert!(root.join("docs/foo.txt").exists());
+    assert!(rows(&app).contains(&"docs/foo.txt".to_string()));
+}
+
+/// `r`, `u`, `U` in the hits: the rename done again carries its row
+/// forward with it, as the undo carried it back, and the cursor is on it.
+#[test]
+fn redoing_a_rename_carries_the_row_forward() {
+    let mut app = tree("hits-rerename");
+    let root = app.files.clone();
+    commit_three(&mut app);
+    let now = Instant::now();
+    app.run(Command::Rename, 10, now);
+    app.submit_prompt("bar.txt".to_string(), now);
+    app.run(Command::Undo, 10, now);
+    assert!(rows(&app).contains(&"src/deep/foo.txt".to_string()));
+
+    app.run(Command::Redo, 10, now);
+    assert!(root.join("src/deep/bar.txt").exists());
+    let mut names = rows(&app);
+    names.sort();
+    assert_eq!(names, ["docs/foo.txt", "src/deep/bar.txt", "src/foo.txt"]);
+    assert_eq!(cursor(&app).as_deref(), Some("src/deep/bar.txt"));
+}
+
 /// **Review 4.** `A` and every extract are refused with `a`'s sentence: what
 /// they make would land in a folder that is not on screen. From every door —
 /// the keys, the menu's extract rows ("all into one folder" included), and

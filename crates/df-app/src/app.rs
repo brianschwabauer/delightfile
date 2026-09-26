@@ -5214,6 +5214,20 @@ impl App {
         // Asked before the redo, for the reason `undo` asks: afterwards the
         // report says which paths it touched, not what kind of touch.
         let lands = self.journal.peek_redo().is_some_and(redo_lands);
+        // What the redo does to a search's hits, read off the record as
+        // `undo` reads it: a rename done again carries its rows forward, in
+        // the order the journal moves the files, rather than leaving them to
+        // be re-read under a name that has gone. A trash done again needs
+        // nothing here: the re-read of its folder takes its rows out, as it
+        // did the first time, and a `u` puts them back again.
+        let forward: Vec<(PathBuf, PathBuf)> = match self.journal.peek_redo() {
+            Some(OpRecord::Rename { moved }) => vec![(moved.from.clone(), moved.to.clone())],
+            Some(OpRecord::Renames { moved }) => moved
+                .iter()
+                .map(|record| (record.from.clone(), record.to.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
         match self.journal.redo(&TaskCtx::detached()) {
             Ok(Redo::Copy(copy)) => {
                 self.spawn_redo_copy(copy);
@@ -5223,6 +5237,10 @@ impl App {
                 // An operation again, and one `u` takes back: the toast an
                 // operation lands with, which says so.
                 self.toasts.undo(report.description.clone(), now);
+                let hits = self.tab().hits.as_ref().map(|v| v.root().to_path_buf());
+                if hits.is_some() {
+                    self.tabs.active_mut().follow_hits(&forward);
+                }
                 for dir in Self::affected(&report.touched, None) {
                     self.rescan(&dir, now);
                 }
@@ -5230,6 +5248,20 @@ impl App {
                 // A mode set again may be the one the spot panel is showing,
                 // as a mode put back may be (see `undo`).
                 self.refresh_spot_mode();
+                // In a search's hits the row a redo lands on is named by its
+                // path from the root, and it is the cursor's.
+                if let (true, Some(root)) = (lands, hits) {
+                    let made = report
+                        .touched
+                        .iter()
+                        .map(|path| crate::hits::name_under(&root, path))
+                        .find(|name| self.tab().cwd.dir.position_of(name).is_some());
+                    if let Some(name) = made {
+                        self.dir().cursor_to_name(&name);
+                        self.attach_view();
+                    }
+                    return true;
+                }
                 // What the redo made — the new name, the copy, the link — is
                 // where the cursor goes, when it is in this listing: aimed,
                 // because the rescan above has not landed.
