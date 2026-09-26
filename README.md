@@ -76,6 +76,13 @@ open.
 - **Cloud storage.** Every remote in `rclone.conf` (Google Drive, Dropbox, S3, R2, anything
   rclone speaks) browses the same way at `rclone://<name>`. rclone does the talking, so
   delightfile never holds a token.
+- **Search.** `s` searches names with `fd` and `S` searches contents with `rg`, streamed
+  into a panel with the preview following the highlighted hit. `Enter` turns the hits into
+  the tab's listing, named by their path from where you searched, so select, yank, trash,
+  rename and bulk rename, drag out, sort and archive all work on files from all over the
+  tree; a content search's column shows each file's first matching line. `Alt+Enter` goes
+  to one hit's folder instead, and `←` goes back. `Enter` on an empty name search lists
+  everything below the folder as one flat list.
 - **Tabs.** Folder tabs joined to the bar below them, reorderable by dragging, and
   detachable into their own window.
 
@@ -226,6 +233,7 @@ it without leaving the list.
 | `Alt+←` `Alt+→` | history back, forward |
 | `Ctrl+l` | type a path to go to |
 | `Enter` `o` | open. `O` picks the opener |
+| `Alt+Enter` | go to a search hit's folder, the cursor on it |
 | `Ctrl+t` | open a terminal here (the `terminal-here` opener) |
 | `Ctrl+Enter` | in a file dialog: its Select / Choose folder / Save button |
 | `Space` `v` `Ctrl+a` | select, visual mode, all |
