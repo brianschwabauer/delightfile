@@ -601,3 +601,93 @@ fn a_link_has_no_permissions_of_its_own_to_set() {
         Some("Links have no permissions of their own — change the file they point to")
     );
 }
+
+// ── In a search's hits ──────────────────────────────────────────────────────
+
+/// `names`, relative to the folder on screen, fed to the `s` panel as fd
+/// prints them and committed with `Enter`: the tab's listing is their hits.
+fn list_hits(app: &mut App, names: &[&str]) {
+    let now = Instant::now();
+    let root = app.cwd();
+    app.run(Command::SearchName, 10, now);
+    let search = app.search.as_mut().expect("the panel opened");
+    search.seed("foo", now);
+    let feed = search.feed();
+    feed.hits(
+        names
+            .iter()
+            .map(|name| search::parse(search::Mode::Names, &root, "foo", name).expect("a hit"))
+            .collect(),
+    );
+    feed.done(false);
+    app.poll_workers();
+    app.overlay_key(Chord::plain(Key::Enter), 10, now);
+    assert_eq!(app.tab().virtual_kind(), Some(Virtual::Hits));
+}
+
+/// The change `u` would take back next, path by path: where, and how deep
+/// below the folder it was asked in.
+fn recorded(app: &App) -> Vec<(PathBuf, usize)> {
+    match app.journal.peek() {
+        Some(OpRecord::Mode { changes }) => changes
+            .iter()
+            .map(|change| (change.path.clone(), change.depth))
+            .collect(),
+        other => panic!("not a change of permissions: {other:?}"),
+    }
+}
+
+/// `C` in a search's hits sets the file at its real path, found from the
+/// listing's root — the folder the search ran in — however far below it the
+/// row is: a row in a folder under the root is recorded two components deep
+/// and one a folder further down three, the file of the same name elsewhere
+/// is left alone, and `u` puts each back, the row following every time.
+#[test]
+fn c_in_the_hits_sets_the_file_at_its_real_path_below_the_root() {
+    let mut app = Fixture::with_folders("perm-hits", &["a.txt"], &["src/deep"]);
+    let root = app.files.clone();
+    let (shallow, deep) = (root.join("src/foo.txt"), root.join("src/deep/foo.txt"));
+    for file in [&shallow, &deep] {
+        std::fs::write(file, b"foo\n").expect("write the tree");
+        set(file, 0o644);
+    }
+    list_hits(&mut app, &["src/foo.txt", "src/deep/foo.txt"]);
+    assert_eq!(
+        app.refusal(Command::Permissions),
+        None,
+        "hits are files here"
+    );
+
+    at(&mut app, "src/foo.txt", false);
+    press_c(&mut app);
+    typed(&mut app, "600");
+    press(&mut app, key(Key::Enter));
+    land(&mut app, |app| row_mode(app, "src/foo.txt") == Some(0o600));
+    assert_eq!(mode_of(&shallow), 0o600);
+    assert_eq!(mode_of(&deep), 0o644, "the other foo.txt was changed");
+    assert_eq!(recorded(&app), [(shallow.clone(), 2)]);
+    assert_eq!(
+        app.tab().virtual_kind(),
+        Some(Virtual::Hits),
+        "still the hits"
+    );
+
+    at(&mut app, "src/deep/foo.txt", false);
+    press_c(&mut app);
+    typed(&mut app, "640");
+    press(&mut app, key(Key::Enter));
+    land(&mut app, |app| {
+        row_mode(app, "src/deep/foo.txt") == Some(0o640)
+    });
+    assert_eq!(recorded(&app), [(deep.clone(), 3)]);
+
+    app.run(Command::Undo, 10, Instant::now());
+    assert_eq!(mode_of(&deep), 0o644);
+    land(&mut app, |app| {
+        row_mode(app, "src/deep/foo.txt") == Some(0o644)
+    });
+    app.run(Command::Undo, 10, Instant::now());
+    assert_eq!(mode_of(&shallow), 0o644);
+    assert_eq!(toast_text(&app), Some("Restored permissions of 1 item"));
+    land(&mut app, |app| row_mode(app, "src/foo.txt") == Some(0o644));
+}
