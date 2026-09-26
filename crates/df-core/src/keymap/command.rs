@@ -160,6 +160,9 @@ commands! {
     Create => "create",
     Rename => "rename",
     RenameEmptyStem => "rename-empty-stem",
+    // `T`: the `Tags:` prompt over the selection or the row under the cursor
+    // (`crate::fs::tags`) — the tags a file carries in its `user.xdg.tags`.
+    Tag => "tag",
     Shell => "shell",
     ShellBlock => "shell-block",
     // `Ctrl+t`: the `terminal-here` opener, handed the folder on screen — the
@@ -235,6 +238,7 @@ commands! {
     LinemodeBtime => "linemode-btime",
     LinemodeMtime => "linemode-mtime",
     LinemodeOwner => "linemode-owner",
+    LinemodeTags => "linemode-tags",
     LinemodeNone => "linemode-none",
     // Not a linemode but the thing that replaces one: PLAN §7.3's "what's big"
     // mode, where the right-hand column becomes a usage bar and directories

@@ -31,7 +31,7 @@
 //! sort_dir_first = true
 //! sort_sensitive = false
 //! sort_reverse = false
-//! linemode = "size"          # size permissions btime mtime owner none
+//! linemode = "size"          # size permissions btime mtime owner tags none
 //! show_hidden = false
 //! show_symlink = true
 //! scrolloff = 5
@@ -57,6 +57,14 @@
 //! [goto]
 //! h = "~"
 //! w = "~/Work"
+//!
+//! # Colours for tags (`T`). red orange yellow green blue purple grey are
+//! # coloured already; any other tag is text-only until it is given one here,
+//! # as a palette name or a hex colour.
+//! [tags]
+//! work = "blue"
+//! urgent = "#ff0000"
+//! "invoice 2026" = "green"
 //!
 //! # A named opener. `block = true` means delightfile waits for it.
 //! [opener.zed]
@@ -476,6 +484,9 @@ pub enum LineMode {
     Btime,
     Mtime,
     Owner,
+    /// The file's tags, by name ([`crate::fs::tags`]) — every one of them,
+    /// the colourless ones included, which the row's dots cannot show.
+    Tags,
     None,
 }
 
@@ -487,6 +498,7 @@ impl LineMode {
             "btime" | "created" => LineMode::Btime,
             "mtime" | "modified" => LineMode::Mtime,
             "owner" => LineMode::Owner,
+            "tags" => LineMode::Tags,
             "none" => LineMode::None,
             _ => return None,
         })
@@ -844,6 +856,20 @@ pub struct OpenRule {
     pub openers: Vec<String>,
 }
 
+/// The colour a `[tags]` line gives a tag.
+///
+/// Kept as written rather than resolved here: a palette name is looked up in
+/// the theme by the app, which has it, so a `[palette]` override in
+/// `theme.toml` re-tints `work = "blue"` the way it re-tints everything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TagColor {
+    /// A palette name (`blue`, `peach`) or one of the seven colour tags'
+    /// own names (`orange`, `purple`, `grey`), which mean what they mean on
+    /// a tag.
+    Named(String),
+    Hex(Color),
+}
+
 /// Everything `delightfile.toml` says.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
@@ -853,6 +879,11 @@ pub struct Config {
     pub goto: Vec<Bookmark>,
     pub openers: Vec<Opener>,
     pub rules: Vec<OpenRule>,
+    /// `[tags]`: a colour for any tag, in the order written. The seven colour
+    /// tags ([`crate::fs::tags::COLOURS`]) need no line here; one that has a
+    /// line anyway takes the colour the line gives it. Matched
+    /// case-insensitively, as tags are.
+    pub tags: Vec<(String, TagColor)>,
 }
 
 impl Default for Config {
@@ -882,6 +913,7 @@ impl Default for Config {
                     openers: openers.iter().map(|o| (*o).to_string()).collect(),
                 })
                 .collect(),
+            tags: Vec::new(),
         }
     }
 }
@@ -1042,6 +1074,40 @@ impl Config {
                 }
             }
             config.goto = bookmarks;
+        }
+
+        // A colour per tag. A hex is checked here; a name is the theme's to
+        // know, so it is kept as written and looked up by the app.
+        if let Some(tags) = doc.table("tags") {
+            for entry in &tags.entries {
+                let color = match entry.value.as_str().map(str::trim) {
+                    Some(hex) if hex.starts_with('#') => Color::parse(hex).map(TagColor::Hex),
+                    Some(name) if !name.is_empty() => Some(TagColor::Named(name.to_string())),
+                    _ => None,
+                };
+                let key = entry.key.trim();
+                match color {
+                    Some(color) if !key.is_empty() && !key.contains(',') => {
+                        config
+                            .tags
+                            .retain(|(tag, _)| !crate::fs::tags::same(tag, key));
+                        config.tags.push((key.to_string(), color));
+                    }
+                    Some(_) => warnings.push(ConfigWarning::new(
+                        file,
+                        entry.line,
+                        format!("tags `{}`: a tag cannot be empty or hold a comma", entry.key),
+                    )),
+                    None => warnings.push(ConfigWarning::new(
+                        file,
+                        entry.line,
+                        format!(
+                            "tags `{}`: expected a palette name like \"blue\" or a colour like \"#ff0000\"",
+                            entry.key
+                        ),
+                    )),
+                }
+            }
         }
 
         for (name, table) in doc.tables_under("opener") {
@@ -2146,6 +2212,38 @@ mod tests {
         assert_eq!(c.goto.len(), 2);
         assert_eq!(c.goto[1].key, "m");
         assert_eq!(c.goto[1].description, "Go to /mnt");
+    }
+
+    /// `[tags]` gives any tag a colour, by palette name or by hex, and a line
+    /// that is neither warns while the rest apply. The last line for a tag
+    /// wins, in whatever case it was written.
+    #[test]
+    fn a_tags_table_colours_any_tag() {
+        let (c, warnings) = parse(
+            "[tags]\nwork = \"blue\"\nurgent = \"#ff0000\"\n\"invoice 2026\" = \"Green\"\n\
+             bad = \"#zzz\"\nnumber = 3\nWork = \"peach\"\n",
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].to_string().contains("bad"), "{warnings:?}");
+        assert!(warnings[1].to_string().contains("number"), "{warnings:?}");
+        assert_eq!(
+            c.tags,
+            vec![
+                (
+                    "urgent".to_string(),
+                    TagColor::Hex(Color { r: 255, g: 0, b: 0 })
+                ),
+                (
+                    "invoice 2026".to_string(),
+                    TagColor::Named("Green".to_string())
+                ),
+                ("Work".to_string(), TagColor::Named("peach".to_string())),
+            ]
+        );
+        assert!(
+            Config::default().tags.is_empty(),
+            "nothing ships coloured but the seven"
+        );
     }
 
     #[test]

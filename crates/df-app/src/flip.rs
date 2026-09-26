@@ -377,6 +377,7 @@ mod tests {
             C::LinemodeBtime,
             C::LinemodeMtime,
             C::LinemodeOwner,
+            C::LinemodeTags,
             C::LinemodeNone,
             // Navigation replaces the listing outright.
             C::Leave,

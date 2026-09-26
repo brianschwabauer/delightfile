@@ -99,6 +99,8 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("m b", Command::LinemodeBtime),
         ("m m", Command::LinemodeMtime),
         ("m o", Command::LinemodeOwner),
+        ("m t", Command::LinemodeTags),
+        ("T", Command::Tag),
         ("m n", Command::LinemodeNone),
         ("c c", Command::CopyPath),
         ("c d", Command::CopyDirname),
@@ -208,7 +210,7 @@ fn pending_lists_continuations_in_declaration_order() {
         panic!("`m` should be a prefix");
     };
     let labels: Vec<String> = continuations.iter().map(|c| c.next.label()).collect();
-    assert_eq!(labels, vec!["s", "p", "b", "m", "o", "n", "u"]);
+    assert_eq!(labels, vec!["s", "p", "b", "m", "o", "t", "n", "u"]);
     // Every row carries the description the which-key card prints.
     assert_eq!(continuations[0].description, "Linemode: size");
     assert_eq!(continuations[0].command, Command::LinemodeSize);

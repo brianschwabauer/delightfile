@@ -206,6 +206,9 @@ pub(super) fn build() -> Registry {
         (Files, "a",      C::Create,            "Create (trailing / for a directory)", Always),
         (Files, "r",      C::Rename,            "Rename",                              Always),
         (Files, "R",      C::RenameEmptyStem,   "Rename with an empty stem",           Always),
+        // `T` for tags, beside `t` for a tab: yazi leaves it free, and the
+        // shifted letter is the one a less frequent verb gets here (`D`, `R`).
+        (Files, "T",      C::Tag,               "Tags…",                               Always),
         (Files, ";",      C::Shell,             "Shell command",                       Always),
         (Files, ":",      C::ShellBlock,        "Shell command (block)",               Always),
         // No yazi ancestor: yazi *is* the terminal. `t` is a new tab, so the
@@ -227,6 +230,7 @@ pub(super) fn build() -> Registry {
         (Files, "m b", C::LinemodeBtime,       "Linemode: created",     Always),
         (Files, "m m", C::LinemodeMtime,       "Linemode: modified",    Always),
         (Files, "m o", C::LinemodeOwner,       "Linemode: owner",       Always),
+        (Files, "m t", C::LinemodeTags,        "Linemode: tags",        Always),
         (Files, "m n", C::LinemodeNone,        "Linemode: none",        Always),
         (Files, "m u", C::DiskUsage,           "Show disk usage",       Always),
 

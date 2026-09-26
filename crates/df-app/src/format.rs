@@ -28,6 +28,9 @@ pub fn linemode_text(entry: &Entry, mode: LineMode) -> String {
         LineMode::Mtime => time_text(entry.mtime),
         LineMode::Btime => time_text(entry.btime),
         LineMode::Owner => entry.owner_label(),
+        // Every tag by name, the colourless ones too: the dots after the
+        // name say which colours a file wears, and this says the rest.
+        LineMode::Tags => entry.tags.join(", "),
         LineMode::None => String::new(),
     }
 }

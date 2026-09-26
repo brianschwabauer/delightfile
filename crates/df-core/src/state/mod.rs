@@ -5,8 +5,10 @@
 //! linemode you chose *here*, hidden files you turned on *here* — plus the tab
 //! list, so session restore later has somewhere to read from, the pinned
 //! places ([`pins`], `g b`), which are here and not in config because a
-//! keystroke makes them and the program never writes config, and the panes'
-//! widths ([`panes`]), which are here for the same reason: a drag made them.
+//! keystroke makes them and the program never writes config, the panes'
+//! widths ([`panes`]), which are here for the same reason: a drag made them,
+//! and the tags the `Tags:` prompt has applied ([`tags`]), so `Tab` can
+//! complete one used last month in another folder.
 //!
 //! **The view scale is not in here** (the list steps and the grid). It was, as
 //! `view=` and `scale=` on a directory's line, until 2026-09-23; since then it
@@ -27,12 +29,14 @@
 //! !tabs\t0=/home/brian\t1=/tmp\tactive=1\tt=1756598400
 //! !panes\tratio=0.125,0.5,0.375\tparent_collapsed=0\tpreview_collapsed=0\tparent_before=0.125\tpreview_before=0.375
 //! !pin\tpath=~/Work\tkey=w
+//! !tag\tname=work
 //! ```
 //!
 //! - Fields are separated by **tabs**. The first field is the record's key: an
 //!   absolute path, `!tabs` for the one tab record, `!panes` for the panes'
-//!   widths ([`panes`]), or `!pin` for each pinned place ([`pins`]). Paths
-//!   are absolute and `!` is not a path, so the two can never collide.
+//!   widths ([`panes`]), `!pin` for each pinned place ([`pins`]), or `!tag`
+//!   for each known tag ([`tags`]). Paths are absolute and `!` is not a path,
+//!   so the two can never collide.
 //! - Every later field is `key=value`, split at the **first** `=` so a value may
 //!   contain one.
 //! - Escaping, applied to keys and values alike: `\\` for a backslash, `\t` for
@@ -83,6 +87,7 @@ use crate::{DfError, Result};
 
 pub mod panes;
 pub mod pins;
+pub mod tags;
 pub use panes::{Panes, Side};
 pub use pins::{Pin, PinRefusal};
 
@@ -212,6 +217,8 @@ pub struct StateStore {
     /// The panes' widths as they were last left ([`panes`]), or `None` while
     /// they are the config's.
     panes: Option<Panes>,
+    /// Every tag the prompt has applied, oldest first ([`tags`]).
+    tags: Vec<String>,
     dirty: bool,
 }
 
@@ -280,6 +287,7 @@ impl StateStore {
             tabs_touched: 0,
             pins: Vec::new(),
             panes: None,
+            tags: Vec::new(),
             dirty: false,
         }
     }
@@ -514,9 +522,11 @@ impl StateStore {
         // Beside the tabs: the other record about the window rather than
         // about a directory in it.
         self.render_panes(&mut out);
-        // Last, in the order they were pinned — the one record kind whose
-        // order is data rather than something to sort for stability.
+        // In the order they were pinned — a record kind whose order is data
+        // rather than something to sort for stability.
         self.render_pins(&mut out);
+        // Last, in the order they were first applied, for the same reason.
+        self.render_tags(&mut out);
         out
     }
 
@@ -546,6 +556,10 @@ impl StateStore {
             }
             if key.as_slice() == pins::PIN_KEY.as_bytes() {
                 self.parse_pin(fields, index + 1);
+                continue;
+            }
+            if key.as_slice() == tags::TAG_KEY.as_bytes() {
+                self.parse_tag(fields, index + 1);
                 continue;
             }
             if !key.starts_with(b"/") {
@@ -805,6 +819,7 @@ pub fn linemode_name(mode: LineMode) -> &'static str {
         LineMode::Btime => "btime",
         LineMode::Mtime => "mtime",
         LineMode::Owner => "owner",
+        LineMode::Tags => "tags",
         LineMode::None => "none",
     }
 }

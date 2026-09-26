@@ -405,6 +405,20 @@ impl CreatedLink {
     }
 }
 
+/// One file's tags, before and after the `Tags:` prompt changed them.
+///
+/// Both lists whole, rather than what was added and what was taken away: the
+/// undo puts `before` back exactly, order and spelling included, and checks
+/// the file still has exactly `after` first — a difference could be replayed
+/// backwards over a set that has changed since, and quietly undo somebody
+/// else's edit along with this one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagChange {
+    pub path: PathBuf,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+}
+
 /// A completed operation, and everything its inverse needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpRecord {
@@ -466,6 +480,11 @@ pub enum OpRecord {
     /// [`OpRecord::Copy`], and a failure part way rewrites the record to cover
     /// only what is left so a second `u` finishes the job.
     Links { links: Vec<CreatedLink> },
+    /// `T`: the tags of one file, or of every item in a selection, as one
+    /// `Enter` in the `Tags:` prompt changed them ([`crate::fs::tags`]).
+    /// Inverse: put each file's old tags back — all of them, and only once
+    /// every file is checked to still carry exactly what the prompt wrote.
+    Tags { changes: Vec<TagChange> },
 }
 
 impl OpRecord {
@@ -512,6 +531,13 @@ impl OpRecord {
                     one.link.file_name().unwrap_or_default().to_string_lossy()
                 ),
                 many => format!("linked {}", plural(many.len(), "item", "items")),
+            },
+            OpRecord::Tags { changes } => match changes.as_slice() {
+                [one] => format!(
+                    "tagged {}",
+                    one.path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                many => format!("tagged {}", plural(many.len(), "item", "items")),
             },
         }
     }
@@ -668,6 +694,7 @@ pub fn undo_attempt(record: &OpRecord, ctx: &TaskCtx) -> UndoAttempt {
             fingerprint,
         } => whole(undo_link(link, target.as_deref(), fingerprint)),
         OpRecord::Links { links } => undo_links(links, ctx),
+        OpRecord::Tags { changes } => undo_tags(changes),
     }
 }
 
@@ -954,6 +981,70 @@ fn undo_links(links: &[CreatedLink], ctx: &TaskCtx) -> UndoAttempt {
                 )
             } else {
                 format!("Removed {} links", grouped(links.len() as u64))
+            },
+            touched,
+        }),
+        remaining: None,
+    }
+}
+
+/// Put every file's old tags back, all-or-nothing on the check.
+///
+/// Each file must still carry exactly the tags the prompt wrote: a file whose
+/// tags somebody has changed since — another `T`, another program — is a set
+/// this undo knows nothing about, and restoring over it would throw that edit
+/// away. One such file refuses the whole undo before any tag is touched, as a
+/// multi-file move does. A write that fails part way hands back the rest, so a
+/// second `u` finishes the job.
+fn undo_tags(changes: &[TagChange]) -> UndoAttempt {
+    use crate::fs::tags;
+    let refuse = |e: DfError| UndoAttempt {
+        result: Err(e),
+        remaining: None,
+    };
+    if changes.is_empty() {
+        return refuse(DfError::Op("nothing to undo".to_string()));
+    }
+    for change in changes {
+        let now = match tags::try_read(&change.path) {
+            Ok(now) if exists(&change.path) => now,
+            _ => {
+                return refuse(DfError::Op(format!(
+                    "cannot undo: {} is no longer there",
+                    change.path.display()
+                )))
+            }
+        };
+        if now != change.after {
+            return refuse(DfError::Op(format!(
+                "cannot undo: the tags of {} have changed since",
+                change.path.display()
+            )));
+        }
+    }
+    let mut touched = Vec::new();
+    for (i, change) in changes.iter().enumerate() {
+        if let Err(e) = tags::write(&change.path, &change.before) {
+            return UndoAttempt {
+                result: Err(DfError::Op(format!(
+                    "cannot undo: {}: {e}",
+                    change.path.display()
+                ))),
+                remaining: (i > 0).then(|| OpRecord::Tags {
+                    changes: changes[i..].to_vec(),
+                }),
+            };
+        }
+        touched.push(change.path.clone());
+    }
+    UndoAttempt {
+        result: Ok(UndoReport {
+            description: match changes {
+                [one] => format!(
+                    "Restored tags of {}",
+                    one.path.file_name().unwrap_or_default().to_string_lossy()
+                ),
+                many => format!("Restored tags of {} items", grouped(many.len() as u64)),
             },
             touched,
         }),
@@ -1459,6 +1550,119 @@ mod tests {
         let err = j.undo(&ctx()).unwrap_err();
         assert!(err.to_string().contains("cannot undo"), "{err}");
         assert!(made.path.is_dir());
+    }
+
+    fn tag_list(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    /// `u` after `T` puts every file's old tags back — order and spelling as
+    /// they were, and an untagged file untagged again — and says how many.
+    #[test]
+    fn undo_of_tags_restores_every_file() {
+        use crate::fs::tags;
+        let t = TempTree::new("undo-tags");
+        let a = t.file("a.txt", b"a");
+        if !tags::supported_here(&a) {
+            return;
+        }
+        let b = t.file("b.txt", b"b");
+        tags::write(&a, &tag_list(&["Work", "red"])).unwrap();
+        let changes = vec![
+            TagChange {
+                path: a.clone(),
+                before: tag_list(&["Work", "red"]),
+                after: tag_list(&["red", "urgent"]),
+            },
+            TagChange {
+                path: b.clone(),
+                before: Vec::new(),
+                after: tag_list(&["urgent"]),
+            },
+        ];
+        for change in &changes {
+            tags::write(&change.path, &change.after).unwrap();
+        }
+        let mut journal = Journal::default();
+        journal.record(OpRecord::Tags { changes });
+        assert_eq!(journal.peek().unwrap().describe(), "tagged 2 items");
+
+        let report = journal.undo(&ctx()).unwrap();
+        assert_eq!(report.description, "Restored tags of 2 items");
+        assert_eq!(report.touched, vec![a.clone(), b.clone()]);
+        assert_eq!(tags::read(&a), ["Work", "red"]);
+        assert!(tags::read(&b).is_empty());
+        assert!(journal.is_empty());
+
+        let one = OpRecord::Tags {
+            changes: vec![TagChange {
+                path: a.clone(),
+                before: Vec::new(),
+                after: tag_list(&["Work", "red"]),
+            }],
+        };
+        assert_eq!(
+            undo_record(&one, &ctx()).unwrap().description,
+            "Restored tags of a.txt"
+        );
+        assert!(tags::read(&a).is_empty());
+    }
+
+    /// A file whose tags changed after the prompt — another `T`, another
+    /// program — refuses the whole undo before any file is touched, and the
+    /// entry stays for when it can go through.
+    #[test]
+    fn undo_of_tags_refuses_a_set_that_has_changed() {
+        use crate::fs::tags;
+        let t = TempTree::new("undo-tags-changed");
+        let a = t.file("a.txt", b"a");
+        if !tags::supported_here(&a) {
+            return;
+        }
+        let b = t.file("b.txt", b"b");
+        let changes = vec![
+            TagChange {
+                path: a.clone(),
+                before: Vec::new(),
+                after: tag_list(&["red"]),
+            },
+            TagChange {
+                path: b.clone(),
+                before: Vec::new(),
+                after: tag_list(&["red"]),
+            },
+        ];
+        for change in &changes {
+            tags::write(&change.path, &change.after).unwrap();
+        }
+        tags::write(&b, &tag_list(&["red", "blue"])).unwrap();
+        let mut journal = Journal::default();
+        journal.record(OpRecord::Tags { changes });
+
+        let err = journal.undo(&ctx()).unwrap_err().to_string();
+        assert!(err.contains("changed since"), "{err}");
+        assert_eq!(
+            tags::read(&a),
+            ["red"],
+            "not even the first file was touched"
+        );
+        assert_eq!(journal.len(), 1, "the entry waits");
+
+        // Put back as the prompt left it, the undo goes through.
+        tags::write(&b, &tag_list(&["red"])).unwrap();
+        journal.undo(&ctx()).unwrap();
+        assert!(tags::read(&a).is_empty() && tags::read(&b).is_empty());
+
+        // A file that has gone is refused the same way.
+        let gone = OpRecord::Tags {
+            changes: vec![TagChange {
+                path: t.join("gone.txt"),
+                before: Vec::new(),
+                after: tag_list(&["red"]),
+            }],
+        };
+        let err = undo_record(&gone, &ctx()).unwrap_err().to_string();
+        assert!(err.contains("no longer there"), "{err}");
     }
 
     #[test]
