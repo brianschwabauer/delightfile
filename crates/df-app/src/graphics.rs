@@ -33,6 +33,9 @@ pub struct Gfx {
     /// Consecutive timed-out acquires, for the same reason — and so the
     /// recovery line can say how many there were.
     timeouts: u32,
+    /// What each frame is cleared to before egui draws: the palette's `base`
+    /// ([`Gfx::new`]), and so the window's side, light or dark.
+    clear: egui::Color32,
 }
 
 /// What one call to [`Gfx::present`] did.
@@ -67,14 +70,11 @@ pub enum Presented {
     Occluded,
 }
 
-/// The window background: catppuccin-mocha `base` (#1e1e2e), the same ground
-/// the yazi config this replaces sits on (PLAN §3, §8). It is the clear color
-/// as well as the pane background, so a resize never flashes a different
-/// surface behind the panes before egui has repainted them.
-pub const BG: egui::Color32 = egui::Color32::from_rgb(0x1e, 0x1e, 0x2e);
-
 impl Gfx {
-    pub fn new(window: Arc<Window>) -> Result<Gfx, GfxError> {
+    /// `clear` is what the surface is cleared to under every frame: the
+    /// palette's `base`, the pane ground, so a resize never flashes a
+    /// different surface behind the panes before egui has repainted them.
+    pub fn new(window: Arc<Window>, clear: egui::Color32) -> Result<Gfx, GfxError> {
         // **Vulkan only, unless `WGPU_BACKEND` says otherwise.** With every
         // backend enabled, wgpu brings GL up beside Vulkan and `request_adapter`
         // enumerates both, and GL is never the one picked while Vulkan works.
@@ -194,7 +194,13 @@ impl Gfx {
             egui_state,
             occluded: false,
             timeouts: 0,
+            clear,
         })
+    }
+
+    /// The clear colour, for the frame the window turns light or dark.
+    pub fn set_clear(&mut self, clear: egui::Color32) {
+        self.clear = clear;
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -340,9 +346,9 @@ impl Gfx {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: BG.r() as f64 / 255.0,
-                            g: BG.g() as f64 / 255.0,
-                            b: BG.b() as f64 / 255.0,
+                            r: self.clear.r() as f64 / 255.0,
+                            g: self.clear.g() as f64 / 255.0,
+                            b: self.clear.b() as f64 / 255.0,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,

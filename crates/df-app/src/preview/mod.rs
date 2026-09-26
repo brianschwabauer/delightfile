@@ -382,6 +382,12 @@ struct DocView {
     inflight: Option<doc::View>,
     /// What is actually on screen, which is what a new request is compared to.
     shown: Option<doc::View>,
+    /// The colours the page on screen was drawn in, and the ones the page
+    /// being drawn was asked for in. A page is a picture with the palette
+    /// baked into it ([`doc::Ink`]), so a window that has turned light or
+    /// dark since has a page that is not settled however little else moved.
+    ink: Option<doc::Ink>,
+    inflight_ink: Option<doc::Ink>,
     /// The reader this kind needs is not installed. Not an error.
     unavailable: bool,
     error: Option<String>,
@@ -402,6 +408,8 @@ impl DocView {
             swapped_at: None,
             inflight: None,
             shown: None,
+            ink: None,
+            inflight_ink: None,
             unavailable: false,
             error: None,
             chip_at: None,
@@ -1110,9 +1118,14 @@ impl Pane {
                 let texture = upload(ctx, "df-preview-doc", &image);
                 if texture.is_some() {
                     // The outgoing page is kept only while something is coming
-                    // in over it; a crossfade from nothing is a flash.
-                    view.previous = view.current.take();
+                    // in over it; a crossfade from nothing is a flash. Not for
+                    // the same page redrawn in the other side's colours: the
+                    // window turned in one frame, and its page turns without a
+                    // fade of its own.
+                    let reinked = view.shown == Some(drawn) && view.ink != view.inflight_ink;
+                    view.previous = view.current.take().filter(|_| !reinked);
                     view.current = texture;
+                    view.ink = view.inflight_ink.take();
                     view.swapped_at = Some(now);
                     view.shown = Some(drawn);
                     view.page = drawn.page;
@@ -1253,12 +1266,13 @@ impl Pane {
             zoom: view.zoom,
             yaw,
         };
-        let settled = view.shown.as_ref().is_some_and(|shown| {
-            shown.page == wanted.page
-                && shown.target == wanted.target
-                && (shown.zoom - wanted.zoom).abs() < f32::EPSILON
-                && (shown.yaw - wanted.yaw).abs() < f32::EPSILON
-        });
+        let settled = view.ink == Some(ink)
+            && view.shown.as_ref().is_some_and(|shown| {
+                shown.page == wanted.page
+                    && shown.target == wanted.target
+                    && (shown.zoom - wanted.zoom).abs() < f32::EPSILON
+                    && (shown.yaw - wanted.yaw).abs() < f32::EPSILON
+            });
         if settled && view.error.is_none() {
             return;
         }
@@ -1268,6 +1282,7 @@ impl Pane {
             return;
         }
         view.inflight = Some(wanted);
+        view.inflight_ink = Some(ink);
         self.docs.request(doc::Job {
             token,
             path,

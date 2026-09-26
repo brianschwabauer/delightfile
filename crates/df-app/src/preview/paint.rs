@@ -1588,6 +1588,8 @@ fn draw_at(painter: &egui::Painter, rect: egui::Rect, texture: &Texture, alpha: 
     mesh.add_rect_with_uv(
         rect,
         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        // A texture's tint, not a colour on screen: white is the picture as it
+        // is, on either side, and only its alpha carries the crossfade.
         egui::Color32::from_white_alpha((alpha.clamp(0.0, 1.0) * 255.0).round() as u8),
     );
     painter.add(egui::Shape::mesh(mesh));

@@ -238,6 +238,14 @@ commands! {
     ToggleParent => "toggle-parent",
     TogglePreview => "toggle-preview",
     ResetPanes => "reset-panes",
+    // Light or dark for this session, over `[flavor] mode`: follow the
+    // desktop, or hold one side whatever it says. **Unbound by default**, as
+    // the panes' rows are — they are the app menu's Appearance radios — and
+    // never written back: the config says what a window opens as, and this
+    // says what this one is showing now.
+    ThemeAuto => "theme-auto",
+    ThemeDark => "theme-dark",
+    ThemeLight => "theme-light",
 
     // ── Copy the path, in its four useful shapes, plus the contents ───────
     CopyPath => "copy-path",

@@ -477,7 +477,7 @@ pub fn paint_picker(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
         // The description is what the picker is read for; the opener's name is

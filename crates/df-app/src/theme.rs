@@ -1,18 +1,46 @@
-//! The palette, resolved once: [`df_core::config::Theme`]'s named colours as
-//! `egui::Color32`s the painter can use without a lookup per row.
+//! The palette, resolved once per side: [`df_core::config::Theme`]'s named
+//! colours as `egui::Color32`s the painter can use without a lookup per row.
 //!
-//! df-core stores colours as sRGB bytes in a `Vec<(String, Color)>` — the shape
-//! `theme.toml` writes, and the shape a theme browser wants to list. That is the
-//! wrong shape for a paint loop: a hundred rows × several colours each × sixty
-//! frames is a lot of string comparisons for an answer that cannot change
-//! between frames. So the names are looked up once at startup and everything
-//! after that is a field.
+//! df-core stores colours as sRGB bytes in a `Vec<(String, Color)>` per side —
+//! the shape `theme.toml` writes, and the shape a theme browser wants to list.
+//! That is the wrong shape for a paint loop: a hundred rows × several colours
+//! each × sixty frames is a lot of string comparisons for an answer that
+//! cannot change between frames. So the names are looked up once, when the
+//! side on screen is decided — at startup, and again the one frame the window
+//! turns light or dark — and everything after that is a field.
 //!
-//! Every field is a *named catppuccin-mocha value*, never an invented one. When
-//! a state needs to be lighter, it moves up the palette's own ramp
-//! (`base → surface0 → surface1 → surface2`) rather than being tinted by a
-//! number somebody eyeballed — which is also what makes a user's `[palette]`
-//! override in `theme.toml` do something coherent instead of half of one.
+//! Every field is a *named catppuccin value* of the flavour that side is,
+//! never an invented one. When a state needs to be lighter, it moves up the
+//! palette's own ramp (`base → surface0 → surface1 → surface2`) rather than
+//! being tinted by a number somebody eyeballed — which is also what makes a
+//! user's `[palette]` override in `theme.toml` do something coherent instead
+//! of half of one.
+//!
+//! ## Two sides
+//!
+//! The window is dark or light (`[flavor] mode`, the desktop, or the session's
+//! own `theme-*` command), and the two sides are two flavours: mocha and latte
+//! unless `theme.toml` says otherwise. Catppuccin's ramps run from the ground
+//! towards the text in both, so almost everything reads the same way on
+//! either — a hover one step up the ramp is a step *darker* on latte and
+//! nothing had to know. What does have to know is below, as helpers that
+//! answer by [`Palette::light`]:
+//!
+//! - **What was white or black and meant "brighter" or "darker"** — a
+//!   ripple's splash, the scrim under a modal card, the dark edge a drag's
+//!   ghost wears. On a light ground a splash darkens and the scrim washes
+//!   towards the ground rather than towards black; a shadow stays dark but
+//!   carries less weight ([`splash`], [`scrim`], [`shadow`]).
+//! - **Where latte's ramp is too close together to read** — its whole range,
+//!   crust to text, is 6:1 where mocha's is 13:1, so the few places that sat
+//!   on the ramp's quiet end take one step further along it on the light side
+//!   ([`quiet`], [`hairline`], [`thumb`]), and an accent that has to be read
+//!   *as text* on a light ground is taken halfway to the text ([`ink`]).
+//!
+//! Every number those helpers use for the light side is measured against what
+//! the dark side already does — the same step in lightness, the same residual
+//! contrast — and each constant says which measurement. The dark side is
+//! exactly what it was.
 
 use df_core::config::{Appearance, Color, Theme};
 
@@ -57,26 +85,42 @@ pub struct Palette {
     pub lavender: egui::Color32,
     pub maroon: egui::Color32,
     pub pink: egui::Color32,
+    /// Whether this is a light palette: its ground brighter than its text.
+    ///
+    /// Read off the colours rather than off which side asked for them, so a
+    /// `light = "catppuccin-mocha"` in `theme.toml` — a dark flavour on the
+    /// light side — is painted as the dark flavour it is, splashes and scrims
+    /// included.
+    pub light: bool,
 }
 
 impl Palette {
-    pub fn from_theme(theme: &Theme) -> Palette {
-        // Every one of these names is in the shipped table, so the fallback is
-        // unreachable in practice; it exists because a user's `theme.toml` can
-        // rename nothing but can, in principle, be loaded against a future
-        // flavour that is missing a name. Falling back to a mid grey makes that
-        // visible without crashing.
+    /// Every name [`Palette::from_theme`] reads, in the order of the fields.
+    pub const NAMES: [&'static str; 23] = [
+        "crust", "mantle", "base", "surface0", "surface1", "surface2", "overlay0", "overlay1",
+        "overlay2", "subtext0", "subtext1", "text", "blue", "sky", "red", "yellow", "mauve",
+        "green", "peach", "teal", "lavender", "maroon", "pink",
+    ];
+
+    /// One side of `theme`, resolved.
+    pub fn from_theme(theme: &Theme, side: Appearance) -> Palette {
+        // Every one of these names is in all four shipped tables, so the
+        // fallback is unreachable in practice; it exists because a user's
+        // `theme.toml` can rename nothing but can, in principle, be loaded
+        // against a future flavour that is missing a name. Falling back to a
+        // mid grey makes that visible without crashing.
         let pick = |name: &str| {
-            to_color32(theme.color(Appearance::Dark, name).unwrap_or(Color {
+            to_color32(theme.color(side, name).unwrap_or(Color {
                 r: 0x7f,
                 g: 0x84,
                 b: 0x9c,
             }))
         };
+        let (base, text) = (pick("base"), pick("text"));
         Palette {
             crust: pick("crust"),
             mantle: pick("mantle"),
-            base: pick("base"),
+            base,
             surface0: pick("surface0"),
             surface1: pick("surface1"),
             surface2: pick("surface2"),
@@ -85,7 +129,7 @@ impl Palette {
             overlay2: pick("overlay2"),
             subtext0: pick("subtext0"),
             subtext1: pick("subtext1"),
-            text: pick("text"),
+            text,
             blue: pick("blue"),
             sky: pick("sky"),
             red: pick("red"),
@@ -97,22 +141,113 @@ impl Palette {
             lavender: pick("lavender"),
             maroon: pick("maroon"),
             pink: pick("pink"),
+            light: luminance(base) > luminance(text),
         }
+    }
+
+    /// The palette for what is drawn *over a picture* — the transport strip
+    /// on its scrim across a playing video.
+    ///
+    /// Always a dark one, whichever side the window is on: a frame of video is
+    /// its own ground, the scrim under the controls is black on either side
+    /// (it is darkening a picture, not a pane), and the controls on it are
+    /// light-on-dark for the same reason a subtitle is. The theme's dark side
+    /// when that is dark, and mocha when somebody has put a light flavour
+    /// there.
+    pub fn for_media(theme: &Theme) -> Palette {
+        let dark = Palette::from_theme(theme, Appearance::Dark);
+        if dark.light {
+            Palette::default()
+        } else {
+            dark
+        }
+    }
+
+    /// `dark` on a dark palette, `light` on a light one: a choice between two
+    /// named values, never a number in between.
+    pub fn sided<T>(&self, dark: T, light: T) -> T {
+        if self.light {
+            light
+        } else {
+            dark
+        }
+    }
+
+    /// One of the named colours, by its catppuccin name — for a colour chosen
+    /// by name somewhere that is not a paint loop, such as the shipped
+    /// directory icons' light-side accents.
+    pub fn named(&self, name: &str) -> Option<egui::Color32> {
+        Some(match name {
+            "crust" => self.crust,
+            "mantle" => self.mantle,
+            "base" => self.base,
+            "surface0" => self.surface0,
+            "surface1" => self.surface1,
+            "surface2" => self.surface2,
+            "overlay0" => self.overlay0,
+            "overlay1" => self.overlay1,
+            "overlay2" => self.overlay2,
+            "subtext0" => self.subtext0,
+            "subtext1" => self.subtext1,
+            "text" => self.text,
+            "blue" => self.blue,
+            "sky" => self.sky,
+            "red" => self.red,
+            "yellow" => self.yellow,
+            "mauve" => self.mauve,
+            "green" => self.green,
+            "peach" => self.peach,
+            "teal" => self.teal,
+            "lavender" => self.lavender,
+            "maroon" => self.maroon,
+            "pink" => self.pink,
+            _ => return None,
+        })
+    }
+
+    /// `color`, which this palette handed out under some name, as the same
+    /// name in `to`; unchanged when it is none of this palette's.
+    ///
+    /// For the few things that hold a colour across frames rather than asking
+    /// for one each frame — a drag's ghost keeps the icon of the row it was
+    /// picked up from — so the one frame the window turns light or dark turns
+    /// them too.
+    pub fn translate(&self, color: egui::Color32, to: &Palette) -> egui::Color32 {
+        Palette::NAMES
+            .iter()
+            .find(|name| self.named(name) == Some(color))
+            .and_then(|name| to.named(name))
+            .unwrap_or(color)
     }
 }
 
 impl Default for Palette {
+    /// The shipped dark side: catppuccin-mocha.
     fn default() -> Palette {
-        Palette::from_theme(&Theme::default())
+        Palette::from_theme(&Theme::default(), Appearance::Dark)
     }
 }
 
-/// Blend two opaque colours.
-///
-/// Straight per-channel interpolation in sRGB. Every use of this mixes two
-/// neighbouring values on one catppuccin ramp, which share a hue — so there is
-/// no hue to be lost on the way and a gamma-correct mix would land in visibly
-/// the same place.
+/// Relative luminance, for telling a light ground from a dark one. The WCAG
+/// formula, on the one question it is never wrong about.
+fn luminance(color: egui::Color32) -> f32 {
+    let channel = |c: u8| {
+        let c = f32::from(c) / 255.0;
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+}
+
+/// The same colour at `alpha` of its own opacity.
+fn at(color: egui::Color32, alpha: f32) -> egui::Color32 {
+    let a = (alpha.clamp(0.0, 1.0) * f32::from(color.a())).round() as u8;
+    egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a)
+}
+
 /// How far the two lit row surfaces are pulled off the grey ramp, towards the
 /// palette's `lavender`.
 ///
@@ -132,6 +267,12 @@ const ROW_TINT: f32 = 0.18;
 /// One function for the list and the grid so a row and its tile cannot drift
 /// apart — the grid's promise is that toggling the view changes the geometry
 /// and nothing else.
+///
+/// The same step on both sides. On latte it is 1.8:1 against `base` where
+/// mocha's is 2.5:1, and a step further up the ramp would close that — at the
+/// price of the name on the row, which falls from 4.0:1 to 3.4:1 on
+/// `surface2`. The cursor's job is to be found and its row's to be read, and
+/// latte's lavender tint is strong enough for the first.
 pub fn cursor_fill(palette: &Palette) -> egui::Color32 {
     mix(palette.surface1, palette.lavender, ROW_TINT)
 }
@@ -143,6 +284,166 @@ pub fn hover_fill(palette: &Palette) -> egui::Color32 {
     mix(palette.surface0, palette.lavender, ROW_TINT)
 }
 
+/// How far a *selected* row's ground is tinted towards the selection accent,
+/// on a dark palette.
+///
+/// A tenth of the way. Enough to say which files `d` is about to trash, and
+/// still a tint and not a fill — at much above this the file names start
+/// fighting the ground they are on, and a selection of forty rows would turn
+/// the column into a yellow block.
+const SELECT_TINT: f32 = 0.10;
+
+/// …and on a light one: a fifth.
+///
+/// latte's yellow is a deep amber on a near-white ground, and a tenth of it is
+/// 1.09:1 against `base` — a wash nobody sees, which leaves the selection to
+/// its bar alone. A fifth is a visible cream (1.18:1, as near mocha's 1.30:1 as
+/// it gets before the names on it start to lose: 6.0:1 on it, from 6.5:1).
+const SELECT_TINT_LIGHT: f32 = 0.20;
+
+/// A selected row's ground: `ground`, tinted towards the selection's yellow.
+/// One function for the list and the grid, as [`cursor_fill`] is.
+pub fn select_fill(palette: &Palette, ground: egui::Color32) -> egui::Color32 {
+    mix(
+        ground,
+        palette.yellow,
+        palette.sided(SELECT_TINT, SELECT_TINT_LIGHT),
+    )
+}
+
+/// How much more of the text a ripple is splashed with on a light palette
+/// than white is on a dark one.
+///
+/// Twice. A white splash at the ripple's peak (0.08) lifts mocha's `surface0`
+/// by 7 in CIE lightness; latte's `text` at the same 0.08 darkens latte's
+/// `surface0` by 3.6, and at 0.16 by 7.4 — the same step, the other way.
+const LIGHT_SPLASH: f32 = 2.0;
+
+/// A click's ripple at `alpha` (see [`crate::ripple`]).
+///
+/// On a dark palette the surface brightens under the finger, in white, as it
+/// always has. On a light one a white splash is a brightening nobody can see —
+/// 1.04:1 on latte's `surface0` — so the surface *darkens* instead, in the
+/// palette's own text colour, by the same step in lightness ([`LIGHT_SPLASH`]).
+pub fn splash(palette: &Palette, alpha: f32) -> egui::Color32 {
+    if palette.light {
+        at(palette.text, alpha * LIGHT_SPLASH)
+    } else {
+        egui::Color32::from_white_alpha((alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
+    }
+}
+
+/// The light side's scrim: how opaque the wash of `base` is, 0–255.
+///
+/// A hundred. Under mocha's scrim ([`crate::chrome::HELP_SCRIM`], black at
+/// 150) the panes' text is left at 2.7:1 against their ground — pushed back,
+/// still legible. latte's `base` at 100 over latte's panes leaves them at
+/// 2.8:1: the same distance back, reached by fading towards the ground rather
+/// than towards black.
+const LIGHT_SCRIM: u8 = 100;
+
+/// The wash laid over the whole window under a card that dims it.
+///
+/// A flat wash, not a gradient: it covers the window uniformly, so there is no
+/// fade-to-transparent to ease. On a dark palette it is black; on a light one
+/// it is the palette's own `base`, so the window is pushed back by going
+/// paler — a black veil over a light window reads as the lights going out,
+/// not as a card coming forward.
+pub fn scrim(palette: &Palette) -> egui::Color32 {
+    if palette.light {
+        at(palette.base, f32::from(LIGHT_SCRIM) / 255.0)
+    } else {
+        egui::Color32::from_black_alpha(crate::chrome::HELP_SCRIM)
+    }
+}
+
+/// How much of a dark palette's shadow weight a light palette's shadow keeps.
+///
+/// A little over half. The ghost card's edge is `crust` at 0.6 over mocha's
+/// `surface1`, 14.6 darker in CIE lightness; latte's `text` over latte's
+/// `surface1` makes the same step at 0.35 — seven twelfths of 0.6.
+const LIGHT_SHADOW: f32 = 7.0 / 12.0;
+
+/// A dark edge or shadow at `alpha`.
+///
+/// Dark on either side — a shadow is the absence of light, and a light
+/// ground does not change that — but lighter in alpha on a light palette,
+/// where the same weight of dark is a stronger mark ([`LIGHT_SHADOW`]). On a
+/// dark palette it is `crust`, the darkest thing there; on a light one `crust`
+/// is paler than the surfaces it would edge, so it is the palette's `text`.
+pub fn shadow(palette: &Palette, alpha: f32) -> egui::Color32 {
+    if palette.light {
+        at(palette.text, alpha * LIGHT_SHADOW)
+    } else {
+        at(palette.crust, alpha)
+    }
+}
+
+/// How far an accent that is read as text is taken towards the text colour on
+/// a light palette.
+///
+/// Halfway. catppuccin's accents are ground colours on a dark flavour and
+/// mid-tones on latte: latte's yellow on its crust is 2.0:1, and a key legend
+/// in it is a legend nobody reads. Halfway to `text` puts every accent this
+/// program sets as type — the which-key card's keys, the chips' counts, a
+/// filter's matched letters — at 3:1 or better on the grounds they sit on,
+/// with the hue still the accent's.
+const LIGHT_INK: f32 = 0.5;
+
+/// An accent colour as the ink of text: the accent itself on a dark palette,
+/// and on a light one the accent taken halfway to `text` ([`LIGHT_INK`]).
+///
+/// Only for type. A bar, a dot or a plate in the accent is a mark, and a mark
+/// in a saturated hue reads on latte's grounds as it is.
+pub fn ink(palette: &Palette, accent: egui::Color32) -> egui::Color32 {
+    if palette.light {
+        mix(accent, palette.text, LIGHT_INK)
+    } else {
+        accent
+    }
+}
+
+/// The quiet ink of a menu: the keys beside its rows, and the rows it will
+/// not run.
+///
+/// `overlay0` on a dark palette, where it is 3.8:1 on a card's `crust`; two
+/// steps further along the ramp on a light one, `overlay2`, because latte's
+/// `overlay0` on its crust is 2.0:1 — and a greyed row is still one somebody
+/// has to be able to read to learn why it is grey.
+pub fn quiet(palette: &Palette) -> egui::Color32 {
+    palette.sided(palette.overlay0, palette.overlay2)
+}
+
+/// A one-point rule: a card's edge, a menu's separators, the hairline between
+/// two quiet tabs.
+///
+/// `surface1` on a dark palette; one step on, `surface2`, on a light one,
+/// where `surface1` on `crust` is 1.4:1 — a hairline that disappears on a
+/// laptop panel tilted a few degrees.
+pub fn hairline(palette: &Palette) -> egui::Color32 {
+    palette.sided(palette.surface1, palette.surface2)
+}
+
+/// A scrollbar's thumb: at rest, and lit by the pointer over its band (`lit`
+/// 0–1).
+///
+/// `overlay0` towards `overlay1` on a dark palette; one step on, `overlay1`
+/// towards `overlay2`, on a light one — latte's `overlay0` on its `base` is
+/// 2.3:1 where mocha's is 3.4:1, and `overlay1` is 2.8:1.
+pub fn thumb(palette: &Palette, lit: f32) -> egui::Color32 {
+    if palette.light {
+        mix(palette.overlay1, palette.overlay2, lit)
+    } else {
+        mix(palette.overlay0, palette.overlay1, lit)
+    }
+}
+
+/// Blend two opaque colours.
+///
+/// Straight per-channel interpolation in sRGB. Every use of this mixes two
+/// neighbouring values on one catppuccin ramp, which share a hue — so there is
+/// no hue to be lost on the way and a gamma-correct mix would land in visibly
+/// the same place.
 pub fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
@@ -153,6 +454,10 @@ pub fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
 mod tests {
     use super::*;
 
+    fn latte() -> Palette {
+        Palette::from_theme(&Theme::default(), Appearance::Light)
+    }
+
     #[test]
     fn the_shipped_palette_resolves_every_name() {
         let p = Palette::default();
@@ -160,17 +465,133 @@ mod tests {
         assert_eq!(p.crust, egui::Color32::from_rgb(0x11, 0x11, 0x1b));
         assert_eq!(p.blue, egui::Color32::from_rgb(0x89, 0xb4, 0xfa));
         assert_eq!(p.red, egui::Color32::from_rgb(0xf3, 0x8b, 0xa8));
+        assert!(!p.light);
+        let l = latte();
+        assert_eq!(l.base, egui::Color32::from_rgb(0xef, 0xf1, 0xf5));
+        assert_eq!(l.text, egui::Color32::from_rgb(0x4c, 0x4f, 0x69));
+        assert!(l.light);
     }
 
-    /// A `[palette]` override in `theme.toml` reaches the painter.
+    /// All four flavours, on either side, build a palette in which every name
+    /// the painter reads is the flavour's own — none of them the fallback grey.
+    #[test]
+    fn every_flavour_builds_a_whole_palette() {
+        for flavour in df_core::config::flavor_names() {
+            for side in [Appearance::Dark, Appearance::Light] {
+                let (theme, warnings) = Theme::parse(
+                    &format!("[flavor]\n{} = \"{flavour}\"\n", side.name()),
+                    std::path::Path::new("theme.toml"),
+                );
+                assert!(warnings.is_empty(), "{warnings:?}");
+                let palette = Palette::from_theme(&theme, side);
+                for name in Palette::NAMES {
+                    let wanted = theme.color(side, name).expect("a shipped name");
+                    assert_eq!(
+                        palette.named(name),
+                        Some(to_color32(wanted)),
+                        "{flavour} {name}"
+                    );
+                }
+                // Only latte is light, and it is light on whichever side it
+                // was put.
+                assert_eq!(palette.light, flavour == "catppuccin-latte", "{flavour}");
+            }
+        }
+    }
+
+    /// A `[palette]` override in `theme.toml` reaches the painter, on both
+    /// sides; a side's own table reaches only its side.
     #[test]
     fn a_user_override_changes_the_pane_colour() {
         let (theme, warnings) = Theme::parse(
-            "[palette]\nbase = \"#000000\"\n",
+            "[palette]\nbase = \"#000000\"\n\n[palette.light]\nblue = \"#123456\"\n",
             std::path::Path::new("theme.toml"),
         );
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(Palette::from_theme(&theme).base, egui::Color32::BLACK);
+        let dark = Palette::from_theme(&theme, Appearance::Dark);
+        let light = Palette::from_theme(&theme, Appearance::Light);
+        assert_eq!(dark.base, egui::Color32::BLACK);
+        assert_eq!(light.base, egui::Color32::BLACK);
+        assert_eq!(light.blue, egui::Color32::from_rgb(0x12, 0x34, 0x56));
+        assert_eq!(dark.blue, Palette::default().blue);
+        // A black ground under latte's dark text is a dark palette now, and
+        // is painted as one.
+        assert!(!light.light);
+    }
+
+    /// Media chrome is dark whichever side is up, and whatever flavour the
+    /// dark side was given.
+    #[test]
+    fn what_is_drawn_over_a_picture_is_always_dark() {
+        assert_eq!(Palette::for_media(&Theme::default()), Palette::default());
+        let (theme, _) = Theme::parse(
+            "[flavor]\ndark = \"catppuccin-latte\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        assert!(!Palette::for_media(&theme).light);
+    }
+
+    /// The dark side's helpers are exactly what the painters used before
+    /// there was a light side.
+    #[test]
+    fn the_dark_side_is_unchanged() {
+        let p = Palette::default();
+        assert_eq!(
+            splash(&p, 0.08),
+            egui::Color32::from_white_alpha((0.08f32 * 255.0).round() as u8)
+        );
+        assert_eq!(
+            scrim(&p),
+            egui::Color32::from_black_alpha(crate::chrome::HELP_SCRIM)
+        );
+        assert_eq!(ink(&p, p.yellow), p.yellow);
+        assert_eq!(quiet(&p), p.overlay0);
+        assert_eq!(hairline(&p), p.surface1);
+        assert_eq!(thumb(&p, 0.0), p.overlay0);
+        assert_eq!(thumb(&p, 1.0), p.overlay1);
+        assert_eq!(select_fill(&p, p.base), mix(p.base, p.yellow, 0.10));
+        // What the ghost's edge was drawn with: `crust` at its alpha.
+        assert_eq!(shadow(&p, 0.6), crate::chrome::fade(p.crust, 0.6));
+    }
+
+    /// On the light side the helpers go the other way: a splash darkens, a
+    /// scrim goes pale, a shadow stays dark with less weight, accents set as
+    /// type deepen, and the quiet end of the ramp moves along.
+    #[test]
+    fn the_light_side_turns_the_right_way() {
+        let l = latte();
+        // Colours are held premultiplied; the hue is the unmultiplied one.
+        let lum = |c: egui::Color32| {
+            let [r, g, b, _] = c.to_srgba_unmultiplied();
+            luminance(egui::Color32::from_rgb(r, g, b))
+        };
+        // Premultiplied: a splash in the text colour is dark ink.
+        let s = splash(&l, 0.08);
+        assert!(
+            s.a() > (0.08f32 * 255.0) as u8 && s.r() < s.a() / 2,
+            "{s:?}"
+        );
+        let veil = scrim(&l);
+        assert!(lum(veil) > 0.5, "{veil:?}");
+        let edge = shadow(&l, 0.6);
+        assert!(edge.a() < egui::Color32::from_black_alpha(153).a());
+        assert!(lum(edge) < lum(l.surface1), "{edge:?}");
+        assert!(lum(ink(&l, l.yellow)) < lum(l.yellow));
+        assert_eq!(quiet(&l), l.overlay2);
+        assert_eq!(hairline(&l), l.surface2);
+        assert_eq!(thumb(&l, 0.0), l.overlay1);
+        assert_ne!(select_fill(&l, l.base), mix(l.base, l.yellow, 0.10));
+    }
+
+    /// A colour held across the switch comes out as the same name on the
+    /// other side, and one that was never a palette colour is left alone.
+    #[test]
+    fn a_held_colour_is_translated_by_name() {
+        let (dark, light) = (Palette::default(), latte());
+        assert_eq!(dark.translate(dark.blue, &light), light.blue);
+        assert_eq!(light.translate(light.text, &dark), dark.text);
+        let odd = egui::Color32::from_rgb(1, 2, 3);
+        assert_eq!(dark.translate(odd, &light), odd);
     }
 
     #[test]

@@ -1128,7 +1128,7 @@ pub fn paint(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
 
@@ -1296,7 +1296,7 @@ fn permissions(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
     }
@@ -1390,7 +1390,7 @@ fn checksum(
                 inside.circle_filled(
                     splash.center,
                     splash.radius,
-                    egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                    crate::theme::splash(palette, splash.alpha),
                 );
             }
 

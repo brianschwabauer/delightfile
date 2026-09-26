@@ -201,7 +201,7 @@ pub fn paint(paint: &Painting<'_>, bar: &Geometry, alpha: f32, lit: f32, held: b
     let color = if held {
         paint.palette.subtext0
     } else {
-        crate::theme::mix(paint.palette.overlay0, paint.palette.overlay1, lit)
+        crate::theme::thumb(paint.palette, lit)
     };
     paint
         .painter

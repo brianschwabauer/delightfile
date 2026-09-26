@@ -62,10 +62,9 @@ const LE: u8 = b'l';
 pub const MSG_METHOD_CALL: u8 = 1;
 pub const MSG_METHOD_RETURN: u8 = 2;
 pub const MSG_ERROR: u8 = 3;
-/// A broadcast. This client subscribes to none, but udisks2 sends them anyway
-/// and [`Bus::call`] has to read past them to find its reply — so the constant
-/// exists to *name* what is being skipped, and the tests check one parses.
-#[cfg_attr(not(test), allow(dead_code))]
+/// A broadcast. udisks2 sends them unasked and [`Bus::call`] reads past them
+/// to find its reply; the one this program subscribes to is the portal's
+/// `SettingChanged`, which [`crate::appearance`] listens for.
 pub const MSG_SIGNAL: u8 = 4;
 
 /// The header flag a caller sets when it will not read the answer. A service
@@ -913,6 +912,16 @@ impl Outbox {
             .write_all(&msg.encode()?)
             .map_err(|e| format!("writing to {}: {e}", self.name))?;
         Ok(self.serial)
+    }
+
+    /// Close the connection under both halves.
+    ///
+    /// A shutdown is of the socket, not of this handle, so the [`Inbox`]
+    /// blocked in `read` on the other half wakes to the end of the stream and
+    /// its reader stops — the one way to end a thread that is waiting, with no
+    /// deadline, for a message that may never come.
+    pub fn hang_up(&self) {
+        let _ = self.sock.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -2886,6 +2895,20 @@ mod generic {
         assert_eq!(first.member.as_deref(), Some("Activate"));
         assert_eq!(first.serial, 70);
         assert!(inbox.backlog.is_empty(), "the signal was not kept");
+    }
+
+    /// Hanging up the writing half ends a read blocked, with no deadline, on
+    /// the other — which is how a listener with nothing coming is let go.
+    #[test]
+    fn hanging_up_wakes_a_waiting_inbox() {
+        let (ours, _theirs) = UnixStream::pair().unwrap();
+        let (mut inbox, outbox) = Bus::on_socket(ours).into_service().unwrap();
+        let reader = std::thread::spawn(move || inbox.next());
+        // Long enough that the reader is almost surely in its `read`; the
+        // test holds either way, since a shut socket reads as its end.
+        std::thread::sleep(Duration::from_millis(30));
+        outbox.hang_up();
+        assert!(reader.join().unwrap().is_err());
     }
 
     /// A message the inbox can frame but not read — big-endian, or with a

@@ -22,7 +22,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use df_core::config::{Config, LineMode, MgrConfig, SortBy, Theme, ViewScale};
+use df_core::config::{
+    Appearance, Config, LineMode, MgrConfig, SortBy, Theme, ThemeMode, ViewScale,
+};
 use df_core::fs::{random_seed, FindDirection, Scanner, SortOptions, WatchEvent, Watcher};
 use df_core::input::{InputAction, InputBuffer, InputEvent};
 use df_core::keymap::{
@@ -228,6 +230,17 @@ const BAND_EDGE: f32 = 0.55;
 /// weight is the line's, because it is the same kind of line: where
 /// something the hand is dragging ends.
 const DIVIDER_FREE: f32 = 0.55;
+
+/// The longest the first frame waits for the desktop to say light or dark.
+///
+/// The question goes out before the window is asked for, and a desktop portal
+/// that is running answers in a millisecond or two — well inside the couple
+/// of hundred a window and a GPU device take to exist — so in practice this
+/// is never waited at all. It bounds the case where the portal is being
+/// started for this very call: 150 ms is a window that appears a beat late
+/// on the right side rather than on time on the wrong one, and a portal
+/// slower than that is one the window turns for when it does answer.
+const FIRST_ANSWER: Duration = Duration::from_millis(150);
 
 /// Wakes the event loop from a worker thread.
 ///
@@ -1335,13 +1348,32 @@ pub struct App {
     // ── The model ───────────────────────────────────────────────────────────
     config: Config,
     theme: Theme,
+    /// The side on screen, resolved ([`crate::theme`]). Replaced whole the
+    /// frame the window turns light or dark ([`App::apply_appearance`]).
     palette: Palette,
     /// The tag colours ([`crate::tags`]): the seven built in and `[tags]`,
-    /// resolved against the theme once rather than per dot.
+    /// resolved against the side on screen once rather than per dot, and
+    /// again when the window turns ([`App::apply_appearance`]).
     tag_colors: crate::tags::TagColors,
     /// The `Tags:` prompt's work in progress, from `T` to `Enter`
     /// ([`tags`]).
     tag_draft: Option<tags::Draft>,
+    /// The palette for chrome drawn over a picture — always a dark one
+    /// ([`Palette::for_media`]).
+    media_palette: Palette,
+    /// Which side this session asks for: `[flavor] mode` until a `theme-*`
+    /// command says otherwise. Per session, and never written back.
+    theme_mode: ThemeMode,
+    /// The side the desktop last said it prefers, and dark until it has.
+    desktop_side: Appearance,
+    /// The portal watcher, once this session has followed the desktop
+    /// ([`crate::appearance`]). Kept after a `theme-dark` or `theme-light`,
+    /// so `theme-auto` finds the answer already there.
+    desktop: Option<crate::appearance::Desktop>,
+    /// Whether this app may ask the desktop at all. False for a test's
+    /// `App`, which reads nothing from this machine and hands in a
+    /// [`crate::appearance::Desktop::fake`] of its own when it wants one.
+    ask_desktop: bool,
     /// The live view settings: sort, linemode, hidden. Starts as the config's
     /// and is what the `,`, `m` and `.` bindings change.
     mgr: MgrConfig,
@@ -2112,6 +2144,11 @@ impl App {
             app.config.mgr.trash_keep_days,
             Instant::now(),
         );
+        // Before the window, with the other workers (PLAN §6's cold-start
+        // ordering): the portal's answer is in by the time wgpu has an
+        // adapter, and the first frame is on the side the desktop is on.
+        app.ask_desktop = true;
+        app.follow_desktop();
         app
     }
 
@@ -2235,6 +2272,12 @@ impl App {
         watcher.watch(tab.watched());
         // The pins' `g` keys, laid over the keymap as it arrived.
         let (keymap, places) = places::Places::start(keymap, &config.goto, state.pins());
+        // Until the desktop says otherwise, `auto` is dark (see
+        // [`crate::appearance`]); [`App::new`] starts asking.
+        let side = match theme.mode {
+            ThemeMode::Light => Appearance::Light,
+            ThemeMode::Dark | ThemeMode::Auto => Appearance::Dark,
+        };
 
         App {
             gfx: None,
@@ -2247,13 +2290,14 @@ impl App {
             watchdog: crate::watchdog::Watchdog::start(),
             logged_first_frame: false,
             logged_first_listing: false,
-            palette: Palette::from_theme(&theme),
-            tag_colors: crate::tags::TagColors::new(
-                &config.tags,
-                &theme,
-                df_core::config::Appearance::Dark,
-            ),
+            palette: Palette::from_theme(&theme, side),
+            tag_colors: crate::tags::TagColors::new(&config.tags, &theme, side),
             tag_draft: None,
+            media_palette: Palette::for_media(&theme),
+            theme_mode: theme.mode,
+            desktop_side: Appearance::Dark,
+            desktop: None,
+            ask_desktop: false,
             config,
             theme,
             mgr,
@@ -2431,7 +2475,7 @@ impl App {
                 .create_window(attrs)
                 .map_err(|e| GfxError(format!("create window: {e}")))?,
         );
-        let gfx = Gfx::new(window)?;
+        let gfx = Gfx::new(window, self.palette.base)?;
 
         // Before the first frame, so no row is ever drawn with the wrong face.
         self.nerd = crate::icons::install(&gfx.egui_ctx);
@@ -2496,6 +2540,18 @@ impl App {
         }
 
         self.gfx = Some(gfx);
+        // The first frame on the side the desktop is on. The question went
+        // out before the window was asked for, so this almost never waits —
+        // only for a portal slower than creating a window and a GPU device,
+        // and then no longer than [`FIRST_ANSWER`].
+        if let Some(scheme) = self
+            .desktop
+            .as_mut()
+            .and_then(|desktop| desktop.wait_first(FIRST_ANSWER))
+        {
+            self.desktop_said(scheme);
+        }
+        self.window_theme();
         Ok(())
     }
 
@@ -2539,6 +2595,15 @@ impl App {
         // happen on the thread egui lives on.
         let ctx = self.gfx.as_ref().map(|g| g.egui_ctx.clone());
         let mut changed = self.preview.poll(ctx.as_ref(), now);
+        // The desktop turning light or dark. Whatever else this frame paints
+        // is painted from the palette this decides.
+        if let Some(scheme) = self
+            .desktop
+            .as_mut()
+            .and_then(crate::appearance::Desktop::drain)
+        {
+            changed |= self.desktop_said(scheme);
+        }
         // ffmpeg's answers about hovered files. Kept as a small ring so a
         // `↓ ↑` does not re-open the clip, and applied by the next frame's
         // `sync_playback` — which is the one place that decides what to mount.
@@ -10313,6 +10378,9 @@ impl App {
             C::ToggleParent => self.toggle_pane(Side::Parent, now),
             C::TogglePreview => self.toggle_pane(Side::Preview, now),
             C::ResetPanes => self.reset_panes(now),
+            C::ThemeAuto => self.set_theme_mode(ThemeMode::Auto, now),
+            C::ThemeDark => self.set_theme_mode(ThemeMode::Dark, now),
+            C::ThemeLight => self.set_theme_mode(ThemeMode::Light, now),
             C::Spot => self.toggle_spot(),
 
             // ── Opening (PLAN §6) ───────────────────────────────────────────
@@ -12961,6 +13029,7 @@ impl App {
             reverse: self.mgr.sort_reverse,
             parent_open: !self.dividers.collapsed(Side::Parent),
             preview_open: self.preview_open(),
+            appearance: self.theme_mode,
         };
         let mut items = menu::app_items(facts, self.type_items(), &self.keymap, |command| {
             self.refusal(command).is_some()
@@ -14520,6 +14589,9 @@ impl App {
         // everywhere else in this gesture. Without this the second case left
         // `self.drag` set with `handed_off` true, so the files stayed in a hand
         // the compositor was never given and no `DragEnded` was ever coming.
+        // Drawn once, on the side the window is on as the drag leaves it: the
+        // bitmap is the compositor's from then on, and a window turning light
+        // or dark mid-drag cannot reach it.
         let handed = self.data_device.as_ref().is_some_and(|device| {
             device.drag(
                 dnd::offer(&paths),
@@ -15498,6 +15570,112 @@ impl App {
         let panes = self.dividers.reset(now);
         self.state.set_panes(panes);
         self.state_changed(now);
+    }
+
+    // ── Light and dark ──────────────────────────────────────────────────────
+
+    /// The side the window should be on: the one the session asked for, or,
+    /// following the desktop, the one it last said.
+    fn appearance(&self) -> Appearance {
+        match self.theme_mode {
+            ThemeMode::Dark => Appearance::Dark,
+            ThemeMode::Light => Appearance::Light,
+            ThemeMode::Auto => self.desktop_side,
+        }
+    }
+
+    /// Start asking the desktop, if this session follows it and is allowed to
+    /// ask, and nobody is asking yet. Once asked, the watcher stays: a
+    /// `theme-dark` and then a `theme-auto` should land on the desktop's side
+    /// at once, not after a second round trip.
+    fn follow_desktop(&mut self) {
+        if self.ask_desktop && self.theme_mode == ThemeMode::Auto && self.desktop.is_none() {
+            let waker = self.waker.named("desktop");
+            self.desktop = Some(crate::appearance::Desktop::watch(Arc::new(move || {
+                waker.wake()
+            })));
+        }
+    }
+
+    /// The desktop said which side it prefers. Heard whatever the session's
+    /// mode — so `theme-auto` later starts from the latest word — and acted on
+    /// only while following it. Returns whether the window turned.
+    fn desktop_said(&mut self, scheme: crate::appearance::Scheme) -> bool {
+        self.desktop_side = scheme.appearance();
+        self.apply_appearance()
+    }
+
+    /// `theme-auto`, `theme-dark` and `theme-light`: this session's side,
+    /// over `[flavor] mode`, until it quits.
+    fn set_theme_mode(&mut self, mode: ThemeMode, now: Instant) {
+        self.theme_mode = mode;
+        self.follow_desktop();
+        self.apply_appearance();
+        let message = match mode {
+            ThemeMode::Auto => format!("Following the desktop ({})", self.appearance().name()),
+            ThemeMode::Dark => "Dark theme".to_string(),
+            ThemeMode::Light => "Light theme".to_string(),
+        };
+        self.toasts.notice(message, now);
+    }
+
+    /// Put the window on the side it should be on. Returns whether it moved.
+    ///
+    /// **One frame, no crossfade.** The palette is replaced whole, and since
+    /// every painter asks it for its colours every frame, the next frame is
+    /// entirely the other side — the panes, the chrome, the cards, the
+    /// scrims, the git dots and the highlighted text. What remains is the
+    /// handful of things that *hold* a colour across frames rather than asking
+    /// for one, and each is turned here:
+    ///
+    /// - a drag's ghost, and a tab's, which keep the icon they were picked up
+    ///   with — translated name for name ([`Palette::translate`]);
+    /// - the surface's clear colour, and the window's own light/dark hint to
+    ///   the compositor for any decorations it draws;
+    /// - a document page, which is a picture with the palette baked into it —
+    ///   the preview pane sees the new ink on this frame and redraws the page
+    ///   (`preview::Pane::sync_doc`).
+    ///
+    /// Everything prepared off-thread for text and markdown is colourless
+    /// (token kinds and blocks, coloured at paint), so none of it is redone.
+    fn apply_appearance(&mut self) -> bool {
+        let next = Palette::from_theme(&self.theme, self.appearance());
+        if next == self.palette {
+            return false;
+        }
+        let before = std::mem::replace(&mut self.palette, next);
+        // The seven colour tags are the palette's and turn with it; a
+        // `[tags]` line naming a palette colour is resolved again on the new
+        // side, and a hex stays what it was.
+        self.tag_colors =
+            crate::tags::TagColors::new(&self.config.tags, &self.theme, self.appearance());
+        let turn = |icon: &mut crate::icons::Icon| icon.color = before.translate(icon.color, &next);
+        if let Some(drag) = &mut self.drag {
+            turn(&mut drag.icon);
+        }
+        if let Some(tab_drag) = &mut self.tab_drag {
+            turn(&mut tab_drag.icon);
+        }
+        if let Some(home) = &mut self.spring_back {
+            turn(&mut home.icon);
+        }
+        if let Some(gfx) = &mut self.gfx {
+            gfx.set_clear(next.base);
+        }
+        self.window_theme();
+        true
+    }
+
+    /// Tell the window which side it is on, for whatever the compositor or a
+    /// client-side frame draws around it.
+    fn window_theme(&self) {
+        if let Some(gfx) = &self.gfx {
+            gfx.window.set_theme(Some(if self.palette.light {
+                winit::window::Theme::Light
+            } else {
+                winit::window::Theme::Dark
+            }));
+        }
     }
 
     /// Whether the preview pane is open. A folded one does no work at all —
@@ -17669,6 +17847,8 @@ impl App {
                         rect,
                         rotation,
                         mirrored,
+                        // The frame's tint: white is the video as it is,
+                        // whichever side the window is on.
                         egui::Color32::WHITE,
                     )));
                 }
@@ -17685,9 +17865,21 @@ impl App {
             }
             // …and the strip over it, which reports back where its controls
             // landed so the *next* frame's pointer pass can claim exactly the
-            // track and exactly the button.
+            // track and exactly the button. Over a video it sits on a black
+            // scrim on the picture rather than on the pane, so it is drawn in
+            // the dark palette whichever side the window is on
+            // ([`Palette::for_media`]); an audio clip's strip is on the pane's
+            // own ground, and in its colours.
+            let over = ui::Painting {
+                palette: if state.has_video {
+                    &self.media_palette
+                } else {
+                    &self.palette
+                },
+                ..paint
+            };
             self.transport_hits = crate::playback::strip::paint(
-                &paint,
+                &over,
                 content,
                 state,
                 strip_alpha,
@@ -17956,7 +18148,7 @@ impl App {
             .as_ref()
             .is_some_and(|geometry| geometry.backdrop() && self.overlay_up(geometry))
         {
-            painter.rect_filled(area, 0, egui::Color32::from_black_alpha(chrome::HELP_SCRIM));
+            painter.rect_filled(area, 0, crate::theme::scrim(&self.palette));
         }
         match (&overlay, &self.dialog) {
             (Some(OverlayGeom::Mounts(geometry)), _) => {
@@ -19786,6 +19978,9 @@ mod tests {
 
     /// `C`: the permissions card, its job, `u`, and the doors to it.
     mod permissions;
+
+    /// Light and dark: the commands, the desktop, and the radios.
+    mod appearance;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
     /// half a screen with it, the line editor kills back to the start of the

@@ -230,14 +230,6 @@ pub(crate) const PARENT_DIM: f32 = 0.45;
 /// plate under a name that is leaving reads as a new selection.
 const GHOST_PLATE: f32 = 0.33;
 
-/// How far a *selected* row's ground is tinted towards the selection accent.
-///
-/// A tenth of the way. Enough to say which files `d` is about to trash, and
-/// still a tint and not a fill — at much above this the file names
-/// start fighting the ground they are on, and a selection of forty rows would
-/// turn the column into a yellow block.
-pub(crate) const SELECT_TINT: f32 = 0.10;
-
 /// The selected row's accent bar, in logical points.
 ///
 /// A tint alone is not enough (`delightful-ui`: selection has to be
@@ -1280,7 +1272,7 @@ impl Painting<'_> {
             // reads as the brightest thing in the column when it is standing on
             // a selected row.
             let ground_here = if selected {
-                mix(ground, self.palette.yellow, SELECT_TINT)
+                crate::theme::select_fill(self.palette, ground)
             } else {
                 ground
             };
@@ -1337,7 +1329,7 @@ impl Painting<'_> {
                 inside.circle_filled(
                     splash.center,
                     splash.radius,
-                    egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                    crate::theme::splash(self.palette, splash.alpha),
                 );
             }
 
@@ -1657,6 +1649,11 @@ impl Painting<'_> {
         };
         let name_left = rect.left() + ROW_PAD_X + scale.icon_column;
         let name_room = (rect.right() - ROW_PAD_X - mode_width - name_left - dots_room).max(0.0);
+        // The part `f` or `/` matched, in the one colour on the palette that
+        // is neither a file type nor the selection: the highlight has to be
+        // readable as "this is why the row is here" and nothing else — so on
+        // a light palette it is deepened as type is ([`crate::theme::ink`]).
+        let matched = fade(crate::theme::ink(self.palette, self.palette.sky));
         let name_end = if path_name {
             self.path_spans(
                 painter,
@@ -1666,7 +1663,7 @@ impl Painting<'_> {
                 [
                     fade(self.palette.subtext0),
                     fade(name_color(entry, self.palette)),
-                    fade(self.palette.sky),
+                    matched,
                 ],
                 spans,
                 name_room,
@@ -1678,11 +1675,7 @@ impl Painting<'_> {
                 &entry.name,
                 scale.font,
                 fade(name_color(entry, self.palette)),
-                // The part `f` or `/` matched, in the one colour on the palette
-                // that is neither a file type nor the selection: the highlight
-                // has to be readable as "this is why the row is here" and
-                // nothing else.
-                fade(self.palette.sky),
+                matched,
                 spans,
                 name_room,
             )
@@ -2005,7 +1998,7 @@ impl Painting<'_> {
                 self.painter.add(egui::Shape::convex_polygon(
                     crate::dnd::tilted(card.rect, card.tilt),
                     fade(card_fill, a),
-                    egui::Stroke::new(1.0, fade(self.palette.crust, a * 0.6)),
+                    egui::Stroke::new(1.0, crate::theme::shadow(self.palette, a * 0.6)),
                 ));
                 continue;
             }
@@ -2014,7 +2007,7 @@ impl Painting<'_> {
             self.painter.rect_stroke(
                 card.rect,
                 crate::dnd::GHOST_RADIUS,
-                egui::Stroke::new(1.0, fade(self.palette.crust, a * 0.6)),
+                egui::Stroke::new(1.0, crate::theme::shadow(self.palette, a * 0.6)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -2698,7 +2691,7 @@ mod tests {
     #[test]
     fn every_git_state_gets_its_own_colour() {
         use df_core::git::FileStatus as S;
-        let palette = Palette::from_theme(&Theme::default());
+        let palette = Palette::default();
         assert_eq!(git_dot(S::Modified, &palette), Some(palette.peach));
         assert_eq!(git_dot(S::Added, &palette), Some(palette.green));
         assert_eq!(git_dot(S::Conflict, &palette), Some(palette.red));

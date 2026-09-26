@@ -181,11 +181,12 @@ mod tests {
     }
 
     /// `[tags]` colours a tag by palette name, by one of the colour tags'
-    /// own words, or by hex — and overrides a built-in one.
+    /// own words, or by hex — and overrides a built-in one. A name is the
+    /// colour of that name on the side it is resolved on, and a hex is the
+    /// same on both.
     #[test]
     fn a_tags_table_adds_colours() {
         let theme = Theme::default();
-        let palette = Palette::from_theme(&theme);
         let lines = vec![
             ("Work".to_string(), TagColor::Named("blue".to_string())),
             ("later".to_string(), TagColor::Named("Orange".to_string())),
@@ -199,18 +200,26 @@ mod tests {
                 TagColor::Named("ultraviolet".to_string()),
             ),
         ];
-        let colors = TagColors::new(&lines, &theme, Appearance::Dark);
-        assert_eq!(colors.color("work", &palette), Some(palette.blue));
-        assert_eq!(colors.color("LATER", &palette), Some(palette.peach));
-        assert_eq!(
-            colors.color("urgent", &palette),
-            Some(egui::Color32::from_rgb(255, 0, 0))
-        );
-        assert_eq!(colors.color("red", &palette), Some(palette.teal));
-        assert_eq!(
-            colors.color("nope", &palette),
-            None,
-            "an unknown name is left out"
+        for side in [Appearance::Dark, Appearance::Light] {
+            let palette = Palette::from_theme(&theme, side);
+            let colors = TagColors::new(&lines, &theme, side);
+            assert_eq!(colors.color("work", &palette), Some(palette.blue));
+            assert_eq!(colors.color("LATER", &palette), Some(palette.peach));
+            assert_eq!(
+                colors.color("urgent", &palette),
+                Some(egui::Color32::from_rgb(255, 0, 0))
+            );
+            assert_eq!(colors.color("red", &palette), Some(palette.teal));
+            assert_eq!(
+                colors.color("nope", &palette),
+                None,
+                "an unknown name is left out"
+            );
+        }
+        assert_ne!(
+            TagColors::new(&lines, &theme, Appearance::Dark),
+            TagColors::new(&lines, &theme, Appearance::Light),
+            "a named colour turns with the side"
         );
     }
 

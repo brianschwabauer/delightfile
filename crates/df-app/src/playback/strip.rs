@@ -233,6 +233,9 @@ fn scrim(painter: &egui::Painter, content: egui::Rect, hold: f32, peak: f32) {
     if peak <= 0.004 {
         return;
     }
+    // Black on either side: this darkens a frame of video, which is its own
+    // ground, not a pane — and the strip on it is drawn in the dark palette
+    // for the same reason (`Palette::for_media`).
     let ink = |a: f32| {
         egui::Color32::from_rgba_unmultiplied(
             0,
@@ -498,6 +501,7 @@ pub fn progress(state: &TransportState) -> f32 {
 /// hand, so it needs this before it knows where the bar's ends are.
 fn text_width(painter: &egui::Painter, text: &str, font: &egui::FontId) -> f32 {
     painter
+        // Measured, never drawn: the colour is no part of the width.
         .layout_no_wrap(text.to_string(), font.clone(), egui::Color32::WHITE)
         .rect
         .width()

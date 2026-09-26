@@ -1028,7 +1028,7 @@ mod tests {
             ("../escape.txt", 4, false),
         ]);
         let theme = df_core::config::Theme::default();
-        let palette = crate::theme::Palette::from_theme(&theme);
+        let palette = crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             let paint = crate::ui::Painting {

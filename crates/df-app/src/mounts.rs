@@ -2010,7 +2010,7 @@ pub fn paint(
                     clipped.circle_filled(
                         splash.center,
                         splash.radius,
-                        egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                        crate::theme::splash(palette, splash.alpha),
                     );
                 }
                 paint_face(
@@ -2778,7 +2778,7 @@ Mount(3): backup -> file:///mnt/backup
     #[test]
     fn the_card_paints_in_every_state() {
         let theme = df_core::config::Theme::default();
-        let palette = crate::theme::Palette::from_theme(&theme);
+        let palette = crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             let painting = crate::ui::Painting {
@@ -3060,7 +3060,7 @@ Mount(3): backup -> file:///mnt/backup
 
         // A server wears the network glyph and a folder the folder, and
         // neither has a status: a place is not mounted or unmounted.
-        let palette = crate::theme::Palette::from_theme(&df_core::config::Theme::default());
+        let palette = crate::theme::Palette::default();
         let local = face(&card, Item::Place(0), &palette, true);
         let remote = face(&card, Item::Place(1), &palette, true);
         assert_eq!(local.icon, Some(crate::icons::folder(&palette, true)));
@@ -3492,7 +3492,7 @@ Mount(3): backup -> file:///mnt/backup
         assert!(!geometry(area, &card).cloud);
 
         let theme = df_core::config::Theme::default();
-        let palette = crate::theme::Palette::from_theme(&theme);
+        let palette = crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let row = face(&card, Item::Cloud(0), &palette, true);
         assert_eq!(row.name, "r2");
         assert_eq!(row.detail, "s3");

@@ -293,7 +293,7 @@ pub fn paint(
             painter.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
     };
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn the_tray_paints_without_panicking() {
         let theme = df_core::config::Theme::default();
-        let palette = crate::theme::Palette::from_theme(&theme);
+        let palette = crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             let painting = crate::ui::Painting {

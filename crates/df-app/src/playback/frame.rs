@@ -289,6 +289,8 @@ impl FrameConverter {
                     view: &target.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
+                        // The frame's own texture, which the conversion covers
+                        // edge to edge: black is a video's ground, not a pane's.
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },

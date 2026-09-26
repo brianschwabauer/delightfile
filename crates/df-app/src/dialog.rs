@@ -740,6 +740,7 @@ pub(crate) fn title_font() -> egui::FontId {
 pub fn confirm_geometry(painter: &egui::Painter, area: egui::Rect, confirm: &Confirm) -> Geometry {
     let lines = confirm.lines();
     let title = painter
+        // Measured, never drawn: the colour is no part of the size.
         .layout_no_wrap(confirm.title(), title_font(), egui::Color32::WHITE)
         .size();
     // Cancel first, the committing button last and rightmost: the destructive
@@ -1906,7 +1907,7 @@ fn paint_popover(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
 
@@ -2032,7 +2033,7 @@ pub fn paint_conflict(
             clipped.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
         chrome::truncated(
@@ -2095,7 +2096,7 @@ pub fn paint_conflict(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
         let color = if dialog.apply_all {
@@ -2241,7 +2242,7 @@ pub fn button(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     inside.text(

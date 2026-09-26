@@ -42,7 +42,7 @@
 
 use std::time::{Duration, Instant};
 
-use df_core::config::{LineMode, SortBy, ViewScale};
+use df_core::config::{LineMode, SortBy, ThemeMode, ViewScale};
 use df_core::keymap::{Command, Registry};
 
 use crate::chrome::{
@@ -461,6 +461,10 @@ pub struct AppFacts {
     /// Whether the parent and the preview are open, for View's two ticks.
     pub parent_open: bool,
     pub preview_open: bool,
+    /// Which side this session asked for, for Appearance's radios: the
+    /// session's own `theme-*` choice, or `[flavor] mode` until it has made
+    /// one.
+    pub appearance: ThemeMode,
 }
 
 /// The sort command that orders by `by`, in the direction `reverse` says — or
@@ -613,6 +617,12 @@ fn sort_items(
 /// act on the files: a tab or a window, the places and panels, the two ways
 /// to learn the rest, and leaving.
 ///
+/// Appearance sits in the View and Sort group, last in it, though it is about
+/// none of the files: it is window furniture as they are — how the window
+/// shows what it shows — and a group of its own for one list of three radios
+/// would be a separator spent on nothing. Its rows are the `theme-*` commands,
+/// ticked by [`AppFacts::appearance`].
+///
 /// `types` is a file dialog's [`type_items`], flown out of a "File type" row
 /// beside View and Sort; empty — every session that is not a dialog with
 /// filters — and there is no such row. Absent rather than grey, for the
@@ -642,6 +652,16 @@ pub fn app_items(
     view.push(run("Preview pane", C::TogglePreview, true).check(facts.preview_open));
     view.push(run("Reset pane widths", C::ResetPanes, true));
     let sort = sort_items(facts.sort, facts.reverse, keymap, &refused);
+    // Light or dark: the desktop's, or one held for this session. Radios, so
+    // the one in force is ticked and the three labels start in one column.
+    let appearance = [
+        ("Follow the desktop", ThemeMode::Auto, C::ThemeAuto),
+        ("Dark", ThemeMode::Dark, C::ThemeDark),
+        ("Light", ThemeMode::Light, C::ThemeLight),
+    ]
+    .iter()
+    .map(|(label, mode, command)| run(label, *command, true).check(facts.appearance == *mode))
+    .collect();
     // The two ways of typing where to go. The places, which need no typing,
     // come under them once [`insert_go`] has put them in.
     // …and the one way of going somewhere that leaves the window: a terminal
@@ -687,6 +707,7 @@ pub fn app_items(
         parent("Edit", edit).after_gap(),
         parent("View", view).after_gap(),
         parent("Sort", sort),
+        parent("Appearance", appearance),
         run("Mounts…", C::MountManager, true).after_gap(),
         run("Trash", C::OpenTrash, true),
         run("Tasks", C::TasksShow, true),
@@ -1642,7 +1663,7 @@ fn list(
                     egui::pos2(rect.right() - PAD_X, y + 1.0),
                 ),
                 0,
-                fade_color(paint.palette.surface1, alpha),
+                fade_color(crate::theme::hairline(paint.palette), alpha),
             );
         }
         row(
@@ -1696,17 +1717,18 @@ fn row(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha * alpha),
         );
     }
 
     let text_color = if enabled {
         fade_color(palette.text, alpha)
     } else {
-        // Dim, not hidden — see [`Item::enabled`].
-        fade_color(palette.overlay0, alpha)
+        // Dim, not hidden — see [`Item::enabled`] — and in the ramp's quiet
+        // ink, which steps along on a light palette ([`crate::theme::quiet`]).
+        fade_color(crate::theme::quiet(palette), alpha)
     };
-    let key_color = fade_color(palette.overlay0, alpha);
+    let key_color = fade_color(crate::theme::quiet(palette), alpha);
     let keys_width = if item.keys.is_empty() {
         0.0
     } else {
@@ -2634,6 +2656,7 @@ mod tests {
             reverse: false,
             parent_open: true,
             preview_open: true,
+            appearance: ThemeMode::Auto,
         }
     }
 
@@ -2683,6 +2706,51 @@ mod tests {
     /// and the key each one teaches — read out of the default registry, not
     /// spelled here a second time — and the Go, Find and Edit lists the same
     /// way.
+    /// Appearance is three radios, one per `theme-*` command, with the
+    /// session's side ticked and the other two keeping the tick's column.
+    #[test]
+    fn appearance_ticks_the_side_the_session_asked_for() {
+        for (mode, ticked) in [
+            (ThemeMode::Auto, "Follow the desktop"),
+            (ThemeMode::Dark, "Dark"),
+            (ThemeMode::Light, "Light"),
+        ] {
+            let rows = app(AppFacts {
+                appearance: mode,
+                ..app_facts()
+            });
+            let list = row(&rows, "Appearance").submenu.as_deref().expect("a list");
+            let seen: Vec<(&str, Option<bool>, Action)> = list
+                .iter()
+                .map(|i| (i.label.as_str(), i.checked, i.action))
+                .collect();
+            assert_eq!(
+                seen,
+                vec![
+                    (
+                        "Follow the desktop",
+                        Some(ticked == "Follow the desktop"),
+                        Action::Run(Command::ThemeAuto)
+                    ),
+                    (
+                        "Dark",
+                        Some(ticked == "Dark"),
+                        Action::Run(Command::ThemeDark)
+                    ),
+                    (
+                        "Light",
+                        Some(ticked == "Light"),
+                        Action::Run(Command::ThemeLight)
+                    ),
+                ],
+                "{mode:?}"
+            );
+            // Unbound by default, so no key is taught — and live everywhere,
+            // an archive and the trash included.
+            assert!(list.iter().all(|i| i.keys.is_empty() && i.enabled));
+        }
+    }
+
     #[test]
     fn the_app_menu_rows_are_in_their_groups() {
         let rows = app(app_facts());
@@ -2696,6 +2764,7 @@ mod tests {
                 ("Edit", "", true),
                 ("View", "", true),
                 ("Sort", "", false),
+                ("Appearance", "", false),
                 ("Mounts…", "M", true),
                 ("Trash", "g t", false),
                 ("Tasks", "w", false),
@@ -2768,14 +2837,17 @@ mod tests {
         assert_eq!(command("Clipboard"), C::YankShow);
         assert_eq!(command("Keyboard shortcuts"), C::Help);
         assert_eq!(command("Quit"), C::Quit);
-        // The five parents are the only rows that fly anything out, and
+        // The six parents are the only rows that fly anything out, and
         // nothing on the top level is a tick.
         let parents: Vec<&str> = rows
             .iter()
             .filter(|i| i.has_submenu())
             .map(|i| i.label.as_str())
             .collect();
-        assert_eq!(parents, vec!["Go", "Find", "Edit", "View", "Sort"]);
+        assert_eq!(
+            parents,
+            vec!["Go", "Find", "Edit", "View", "Sort", "Appearance"]
+        );
         assert!(rows.iter().all(|i| i.checked.is_none()));
         assert!(
             flat(&rows).iter().all(|i| i.enabled),

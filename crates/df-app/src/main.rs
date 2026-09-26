@@ -8,6 +8,8 @@
 //! and workers being startable before the window exists.
 
 mod app;
+/// Following the desktop between light and dark (`[flavor] mode = "auto"`).
+mod appearance;
 mod archive;
 mod bulk;
 mod chrome;

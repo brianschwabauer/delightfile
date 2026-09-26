@@ -503,7 +503,14 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
     let color = if broken {
         palette.red
     } else if let Some(fg) = themed.and_then(|i| i.fg) {
-        to_color32(fg)
+        // A shipped colour was picked for a dark ground; on a light one it
+        // gives way to the flavour's accent of the same hue (see
+        // [`df_core::config::DirIcon::light`]). A written one is the writer's.
+        themed
+            .and_then(|i| i.light)
+            .filter(|_| palette.light)
+            .and_then(|name| palette.named(name))
+            .unwrap_or_else(|| to_color32(fg))
     } else if let Some(fg) = ruled.and_then(|i| i.fg) {
         to_color32(fg)
     } else if link && !dir {
@@ -619,16 +626,29 @@ mod tests {
     #[test]
     fn a_themed_directory_gets_its_own_glyph_and_colour() {
         let theme = Theme::default();
-        let palette = Palette::from_theme(&theme);
+        let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let icon = icon_for(&entry("Work", Kind::Dir), &theme, &palette, true);
         assert_eq!(icon.glyph, '\u{f0b1}');
+        assert_eq!(icon.color, egui::Color32::from_rgb(0xf7, 0x76, 0x8e));
+
+        // On the light side the yazi colour gives way to latte's own red, and
+        // a rule somebody wrote keeps the colour they wrote.
+        let light = Palette::from_theme(&theme, df_core::config::Appearance::Light);
+        let icon = icon_for(&entry("Work", Kind::Dir), &theme, &light, true);
+        assert_eq!(icon.glyph, '\u{f0b1}');
+        assert_eq!(icon.color, light.red);
+        let (written, _) = Theme::parse(
+            "[[icon.dir]]\nname = \"Work\"\ntext = \"W\"\nfg = \"#f7768e\"\n",
+            std::path::Path::new("theme.toml"),
+        );
+        let icon = icon_for(&entry("Work", Kind::Dir), &written, &light, true);
         assert_eq!(icon.color, egui::Color32::from_rgb(0xf7, 0x76, 0x8e));
     }
 
     #[test]
     fn a_plain_directory_falls_back_to_the_generic_glyph_in_blue() {
         let theme = Theme::default();
-        let palette = Palette::from_theme(&theme);
+        let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let icon = icon_for(&entry("scratch", Kind::Dir), &theme, &palette, true);
         assert_eq!(icon.glyph, GENERIC_DIR);
         assert_eq!(icon.color, palette.blue);
@@ -639,7 +659,7 @@ mod tests {
     #[test]
     fn a_broken_symlink_is_red() {
         let theme = Theme::default();
-        let palette = Palette::from_theme(&theme);
+        let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let e = entry("gone", Kind::Symlink { target: None });
         assert_eq!(icon_for(&e, &theme, &palette, true).color, palette.red);
         assert_eq!(name_color(&e, &palette), palette.red);
@@ -650,7 +670,7 @@ mod tests {
     #[test]
     fn a_downloads_folder_is_legible_at_a_glance() {
         let theme = Theme::default();
-        let p = Palette::from_theme(&theme);
+        let p = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let cases: &[(&str, egui::Color32)] = &[
             ("holiday.jpg", p.mauve),
             ("IMG_4821.HEIC", p.mauve),
@@ -715,7 +735,7 @@ mod tests {
     #[test]
     fn an_extension_changes_the_glyph_and_not_the_hue() {
         let theme = Theme::default();
-        let p = Palette::from_theme(&theme);
+        let p = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let rust = icon_for(&file("main.rs"), &theme, &p, true);
         let python = icon_for(&file("train.py"), &theme, &p, true);
         assert_ne!(rust.glyph, python.glyph);
@@ -736,7 +756,7 @@ mod tests {
             std::path::Path::new("theme.toml"),
         );
         assert!(warnings.is_empty(), "{warnings:?}");
-        let p = Palette::from_theme(&theme);
+        let p = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let icon = icon_for(&file("main.rs"), &theme, &p, true);
         assert_eq!(icon.glyph, 'R');
         assert_eq!(icon.color, egui::Color32::WHITE);
@@ -752,7 +772,7 @@ mod tests {
     #[test]
     fn a_link_keeps_its_colour_and_borrows_its_targets_glyph() {
         let theme = Theme::default();
-        let p = Palette::from_theme(&theme);
+        let p = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let link = entry(
             "shot.png",
             Kind::Symlink {
@@ -794,7 +814,7 @@ mod tests {
     #[test]
     fn the_fallback_glyphs_are_ascii() {
         let theme = Theme::default();
-        let palette = Palette::from_theme(&theme);
+        let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         for (name, kind) in [
             ("Work", Kind::Dir),
             ("notes.txt", Kind::File),
@@ -822,7 +842,7 @@ mod tests {
     #[test]
     fn colours_survive_a_missing_font() {
         let theme = Theme::default();
-        let palette = Palette::from_theme(&theme);
+        let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let icon = icon_for(&entry("Work", Kind::Dir), &theme, &palette, false);
         assert_eq!(icon.glyph, PLAIN_DIR);
         assert_eq!(icon.color, egui::Color32::from_rgb(0xf7, 0x76, 0x8e));
@@ -869,7 +889,7 @@ mod tests {
     #[test]
     fn a_glyph_never_overrules_the_classifier() {
         let theme = Theme::default();
-        let palette = Palette::from_theme(&theme);
+        let palette = Palette::from_theme(&theme, df_core::config::Appearance::Dark);
         let glyph = |name: &str| icon_for(&file(name), &theme, &palette, true).glyph;
 
         // `app.ts` is TypeScript; `00001.ts` is a transport stream, and the

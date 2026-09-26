@@ -279,7 +279,7 @@ pub fn paint_finder(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
 
@@ -313,7 +313,7 @@ pub fn paint_finder(
             egui::pos2(rect.right() - PAD_X - detail_width, rect.center().y),
             &row.detail,
             palette.overlay0,
-            palette.sky,
+            crate::theme::ink(palette, palette.sky),
             &hit.detail,
             detail_font,
             detail_width,
@@ -324,7 +324,7 @@ pub fn paint_finder(
             egui::pos2(label_left, rect.center().y),
             &row.label,
             palette.text,
-            palette.sky,
+            crate::theme::ink(palette, palette.sky),
             &hit.label,
             FontId::proportional(FONT),
             (rect.right() - PAD_X - detail_width - GAP - label_left).max(0.0),
@@ -649,7 +649,7 @@ pub fn paint_search(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
 
@@ -783,7 +783,7 @@ fn paint_switch(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
         inside.text(

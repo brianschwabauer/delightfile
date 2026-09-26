@@ -516,7 +516,7 @@ pub fn tab_strip(
                 egui::pos2(x + TAB_SEPARATOR_WIDTH / 2.0, strip.center().y + half),
             ),
             0,
-            palette.surface1,
+            crate::theme::hairline(palette),
         );
     }
 
@@ -629,7 +629,7 @@ fn tab_new(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     inside.text(
@@ -732,7 +732,7 @@ fn tab_chip(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     let color = if is_active {
@@ -1386,12 +1386,13 @@ fn paint_cluster(
             palette.mauve,
             1.0 + hovers.hover(Control::GitChip) * 0.4,
         );
+        let ink = crate::theme::ink(palette, palette.mauve);
         painter.text(
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
             &glyph,
             egui::FontId::proportional(FONT),
-            palette.mauve,
+            ink,
         );
         painter.text(
             egui::pos2(
@@ -1401,7 +1402,7 @@ fn paint_cluster(
             egui::Align2::LEFT_CENTER,
             branch,
             egui::FontId::proportional(FONT),
-            palette.mauve,
+            ink,
         );
     }
     if let (Some(rect), Some(yank)) = (geom.yank, &cluster.yank) {
@@ -1417,7 +1418,7 @@ fn paint_cluster(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * yank.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha * yank.alpha),
             );
         }
         inside.text(
@@ -1425,7 +1426,7 @@ fn paint_cluster(
             egui::Align2::LEFT_CENTER,
             geom.labels.yank.as_deref().unwrap_or(""),
             egui::FontId::proportional(FONT),
-            fade(accent, yank.alpha),
+            fade(crate::theme::ink(palette, accent), yank.alpha),
         );
     }
     if let Some(rect) = geom.selected {
@@ -1502,7 +1503,7 @@ fn type_chip(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     let font = egui::FontId::proportional(FONT);
@@ -1566,7 +1567,7 @@ fn pick_button(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     inside.text(
@@ -1603,7 +1604,7 @@ fn cancel_button(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     inside.text(
@@ -1635,7 +1636,7 @@ fn action_chip(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(paint.palette, splash.alpha),
         );
     }
     inside.text(
@@ -1643,7 +1644,7 @@ fn action_chip(
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(FONT),
-        accent,
+        crate::theme::ink(paint.palette, accent),
     );
 }
 
@@ -2039,7 +2040,7 @@ fn menu_button(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     inside.text(
@@ -2128,7 +2129,7 @@ pub fn path_bar(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
         // The directory you are actually in is the bright one; the ancestors
@@ -2179,7 +2180,7 @@ pub fn path_bar(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
         let glyph = crate::icons::glyph(paint.nerd, FILTER_ICON, FILTER_GLYPH);
@@ -3035,7 +3036,7 @@ pub fn hints(
                 inside.circle_filled(
                     splash.center,
                     splash.radius,
-                    egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                    crate::theme::splash(palette, splash.alpha),
                 );
             }
         }
@@ -3122,7 +3123,7 @@ pub fn which_key(
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha * alpha),
             );
         }
         let y = rect.center().y;
@@ -3131,7 +3132,7 @@ pub fn which_key(
             egui::Align2::LEFT_CENTER,
             &row.keys,
             key_font(FONT),
-            fade(palette.yellow, alpha),
+            fade(crate::theme::ink(palette, palette.yellow), alpha),
         );
         painter.text(
             egui::pos2(*label_x, y),
@@ -3289,7 +3290,7 @@ pub fn help_overlay(
     let (query, caret) = (filter.query, filter.caret);
     let painter = paint.painter;
     let palette = paint.palette;
-    painter.rect_filled(area, 0, egui::Color32::from_black_alpha(HELP_SCRIM));
+    painter.rect_filled(area, 0, crate::theme::scrim(palette));
     card(paint, rect, 1.0);
 
     let shown = lines.iter().filter(|l| l.selectable()).count();
@@ -3413,7 +3414,7 @@ pub fn help_overlay(
                     egui::Align2::LEFT_CENTER,
                     &binding.keys,
                     key_font(FONT),
-                    palette.yellow,
+                    crate::theme::ink(palette, palette.yellow),
                 );
                 let description_left = row.left() + PAD_X + HELP_KEYS_COLUMN;
                 let id_galley = painter.layout_no_wrap(
@@ -3558,7 +3559,7 @@ pub fn card(paint: &Painting<'_>, rect: egui::Rect, alpha: f32) {
     paint.painter.rect_stroke(
         rect,
         CARD_RADIUS,
-        egui::Stroke::new(1.0, fade(paint.palette.surface1, alpha)),
+        egui::Stroke::new(1.0, fade(crate::theme::hairline(paint.palette), alpha)),
         egui::StrokeKind::Inside,
     );
 }
@@ -3598,7 +3599,7 @@ pub fn close_button(
         inside.circle_filled(
             splash.center,
             splash.radius,
-            egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+            crate::theme::splash(palette, splash.alpha),
         );
     }
     inside.text(
@@ -3627,6 +3628,7 @@ pub fn key_font(size: f32) -> egui::FontId {
 
 pub fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
     painter
+        // Measured, never drawn: the colour is no part of the width.
         .layout_no_wrap(text.to_string(), font, egui::Color32::WHITE)
         .size()
         .x

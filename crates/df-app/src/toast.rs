@@ -587,6 +587,7 @@ const TOAST_RADIUS: u8 = crate::chrome::CARD_RADIUS;
 
 fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
     painter
+        // Measured, never drawn: the colour is no part of the width.
         .layout_no_wrap(text.to_string(), font, egui::Color32::WHITE)
         .size()
         .x

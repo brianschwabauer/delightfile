@@ -857,7 +857,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         let lifted = !dragged.is_empty() && dragged.contains(&entry.path);
 
         let ground_here = if selected {
-            mix(ground, palette.yellow, crate::ui::SELECT_TINT)
+            crate::theme::select_fill(palette, ground)
         } else {
             ground
         };
@@ -983,7 +983,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
             inside.circle_filled(
                 splash.center,
                 splash.radius,
-                egui::Color32::from_white_alpha((splash.alpha * 255.0).round() as u8),
+                crate::theme::splash(palette, splash.alpha),
             );
         }
 
@@ -1010,7 +1010,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
             &entry.name,
             dir.row_spans(index),
             crate::chrome::fade(name_colour, alpha),
-            crate::chrome::fade(palette.sky, alpha),
+            crate::chrome::fade(crate::theme::ink(palette, palette.sky), alpha),
             Dots {
                 colours: &dots,
                 behind: fill,
