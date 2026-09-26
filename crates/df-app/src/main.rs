@@ -26,6 +26,7 @@ mod fuzzy;
 mod graphics;
 mod grid;
 mod help;
+mod hits;
 mod hover;
 mod icons;
 mod input;

@@ -142,6 +142,15 @@ pub(crate) const LINEMODE_GAP: f32 = 12.0;
 /// for, and the tags past the cut are one `Tab` away on the spot panel.
 const TAGS_COLUMN_SHARE: f32 = 0.4;
 
+/// The most of a row a content hit's matched line may take in the linemode
+/// column (PLAN §7.2), as a share of the row's width.
+///
+/// Two fifths. The name is the row's first fact and the line its second, and
+/// a line is as long as whatever file it came from: past this it is cut at its
+/// end with `…`, which leaves the name the larger part of every row while the
+/// line keeps enough words to be recognised.
+const NOTE_SHARE: f32 = 0.4;
+
 /// The usage bar's track width, in logical points (PLAN §7.3's du mode).
 ///
 /// 46 — a third of the linemode column, which is as much as can be given to a
@@ -1040,6 +1049,11 @@ pub struct ListView<'a> {
     /// name. `None` — every listing but that one — costs a `None` check per row
     /// and nothing else.
     pub notes: Option<&'a std::collections::HashMap<String, String>>,
+    /// Whether the rows' names are paths — a search's hits (PLAN §7.2), each
+    /// named by its path from the root the search ran in. The folders are
+    /// drawn in the quiet ink and the file's own name in the row's, cut from
+    /// the front when the column is narrow ([`crate::hits`]).
+    pub paths: bool,
     /// What the background walk has said about this pane's directories
     /// (PLAN §7.3), or `None` when folder sizes are off, when the listing is
     /// virtual, or in a pane whose linemode is not the size.
@@ -1204,11 +1218,17 @@ impl Painting<'_> {
             git,
             usage,
             notes,
+            paths,
             folders,
             empty_note,
         } = view;
         let content = content_rect(pane);
         if let Some(message) = self.pane_state_message(dir, slow_load) {
+            // A search that found nothing did not find an empty folder.
+            let message = match message.as_str() {
+                "empty" if paths => "nothing found".to_string(),
+                _ => message,
+            };
             self.quiet_label(content, &message);
             self.empty_note(content, dir, empty_note);
             return;
@@ -1379,6 +1399,7 @@ impl Painting<'_> {
                 notes
                     .and_then(|notes| notes.get(&entry.name))
                     .map(String::as_str),
+                paths,
                 folders,
                 columns,
             );
@@ -1426,6 +1447,8 @@ impl Painting<'_> {
         // Outranked by `usage` for the reason above, and outranking the
         // linemode for the reason in [`ListView::notes`].
         note: Option<&str>,
+        // The name is a path from a search's root ([`ListView::paths`]).
+        path_name: bool,
         // Recursive directory sizes, when they are being measured for this
         // pane (PLAN §7.3). Last in precedence: it fills in the one thing the
         // plain linemode cannot say, and gets out of the way of the two modes
@@ -1498,33 +1521,45 @@ impl Painting<'_> {
         let mode_width = if mode_text.is_empty() && reserved <= 0.0 {
             0.0
         } else {
-            let galley = if note.is_none() && usage.is_none() && linemode == LineMode::Tags {
-                // The one column whose text has no natural width: a file can
-                // carry any number of tags, and a column that took what it
-                // liked would leave the name nothing. It stops at a share of
-                // the row and says the rest with `…` — `m t` is a glance, and
-                // the spot panel lists them all.
-                let mut job = egui::text::LayoutJob::single_section(
-                    mode_text.clone(),
-                    egui::TextFormat {
-                        font_id: egui::FontId::proportional(scale.font),
-                        color: fade(self.palette.overlay1),
-                        ..Default::default()
-                    },
-                );
-                job.wrap = egui::text::TextWrapping {
-                    max_width: rect.width() * TAGS_COLUMN_SHARE,
-                    max_rows: 1,
-                    break_anywhere: true,
-                    overflow_character: Some('…'),
-                };
-                painter.layout_job(job)
-            } else {
-                painter.layout_no_wrap(
-                    mode_text.clone(),
-                    egui::FontId::proportional(scale.font),
-                    fade(self.palette.overlay1),
-                )
+            let font = egui::FontId::proportional(scale.font);
+            // Two columns have no natural width, and each stops at a share of
+            // the row and says the rest with `…`.
+            let share = match (note, path_name) {
+                // A content hit's matched line is as long as the line was, and
+                // this column is laid out before the name: uncapped, one long
+                // line would take the whole row and leave the name nothing. So
+                // it gets at most [`NOTE_SHARE`] of the row, cut at its end.
+                (Some(_), true) => Some(NOTE_SHARE),
+                // A file can carry any number of tags, and a column that took
+                // what it liked would leave the name nothing. `m t` is a
+                // glance, and the spot panel lists them all.
+                (None, _) if usage.is_none() && linemode == LineMode::Tags => {
+                    Some(TAGS_COLUMN_SHARE)
+                }
+                _ => None,
+            };
+            let galley = match share {
+                Some(share) => {
+                    use egui::text::{LayoutJob, TextFormat, TextWrapping};
+                    let mut job = LayoutJob::single_section(
+                        mode_text.clone(),
+                        TextFormat {
+                            font_id: font,
+                            color: fade(self.palette.overlay1),
+                            ..Default::default()
+                        },
+                    );
+                    job.wrap = TextWrapping {
+                        max_width: (rect.width() * share).max(0.0),
+                        max_rows: 1,
+                        break_anywhere: true,
+                        overflow_character: Some('…'),
+                    };
+                    painter.layout_job(job)
+                }
+                None => {
+                    painter.layout_no_wrap(mode_text.clone(), font, fade(self.palette.overlay1))
+                }
             };
             let width = galley.size().x;
             // Right-aligned inside the reserved column, which for a column
@@ -1622,19 +1657,36 @@ impl Painting<'_> {
         };
         let name_left = rect.left() + ROW_PAD_X + scale.icon_column;
         let name_room = (rect.right() - ROW_PAD_X - mode_width - name_left - dots_room).max(0.0);
-        let name_end = self.text_spans(
-            painter,
-            egui::pos2(name_left, rect.center().y),
-            &entry.name,
-            scale.font,
-            fade(name_color(entry, self.palette)),
-            // The part `f` or `/` matched, in the one colour on the palette
-            // that is neither a file type nor the selection: the highlight has
-            // to be readable as "this is why the row is here" and nothing else.
-            fade(self.palette.sky),
-            spans,
-            name_room,
-        );
+        let name_end = if path_name {
+            self.path_spans(
+                painter,
+                egui::pos2(name_left, rect.center().y),
+                &entry.name,
+                scale.font,
+                [
+                    fade(self.palette.subtext0),
+                    fade(name_color(entry, self.palette)),
+                    fade(self.palette.sky),
+                ],
+                spans,
+                name_room,
+            )
+        } else {
+            self.text_spans(
+                painter,
+                egui::pos2(name_left, rect.center().y),
+                &entry.name,
+                scale.font,
+                fade(name_color(entry, self.palette)),
+                // The part `f` or `/` matched, in the one colour on the palette
+                // that is neither a file type nor the selection: the highlight
+                // has to be readable as "this is why the row is here" and
+                // nothing else.
+                fade(self.palette.sky),
+                spans,
+                name_room,
+            )
+        };
         if !dots.is_empty() {
             // Muted with the name — a hidden file's dots are as quiet as its
             // name, a cut row's as dim — since they are part of what it says.
@@ -1668,6 +1720,107 @@ impl Painting<'_> {
                 }
             }
         }
+    }
+
+    /// A search hit's name: its path from the root, the folders in the first
+    /// of `inks`, the file's own name in the second and what `f` matched in
+    /// the third (PLAN §7.2, [`crate::hits`]). Returns where it ended.
+    ///
+    /// A column of hits is a column of shared beginnings — `src/preview/` on
+    /// every other row — so when it does not fit it is cut from the *front*, a
+    /// folder at a time, `…/` standing for what went
+    /// ([`crate::chrome::elide_segments`]): the end is what tells two rows
+    /// apart. The spans are byte ranges into the whole name, so they are
+    /// carried across the cut; a name so narrow its own last part is cut too
+    /// is drawn without them.
+    #[allow(clippy::too_many_arguments)]
+    fn path_spans(
+        &self,
+        painter: &egui::Painter,
+        pos: egui::Pos2,
+        text: &str,
+        font: f32,
+        [folders, name, highlight]: [egui::Color32; 3],
+        spans: &[Span],
+        max_width: f32,
+    ) -> f32 {
+        use egui::text::{LayoutJob, TextFormat, TextWrapping};
+        let font_id = egui::FontId::proportional(font);
+        let segments: Vec<&str> = text.split('/').collect();
+        let shown = crate::chrome::elide_segments(&segments, |candidate| {
+            painter
+                .layout_no_wrap(candidate.to_string(), font_id.clone(), name)
+                .size()
+                .x
+                <= max_width
+        });
+        // Where the part of the name still shown starts, and what stands in
+        // front of it. `None` when even the last part had to be cut.
+        const LEAD: &str = "…/";
+        let kept = if shown == text {
+            Some(("", 0))
+        } else {
+            shown
+                .strip_prefix(LEAD)
+                .filter(|tail| text.ends_with(tail))
+                .map(|tail| (LEAD, text.len() - tail.len()))
+        };
+        let format = |color: egui::Color32| TextFormat {
+            font_id: font_id.clone(),
+            color,
+            ..Default::default()
+        };
+        let mut job = LayoutJob::default();
+        match kept {
+            Some((lead, start)) => {
+                if !lead.is_empty() {
+                    job.append(lead, 0.0, format(folders));
+                }
+                // Every place the ink changes: where the file's own name
+                // starts, and each end of each match.
+                let leaf = text.rfind('/').map_or(0, |slash| slash + 1);
+                let mut cuts = vec![start, leaf.max(start), text.len()];
+                for &(from, to) in spans {
+                    for at in [from, to] {
+                        if at > start && at < text.len() && text.is_char_boundary(at) {
+                            cuts.push(at);
+                        }
+                    }
+                }
+                cuts.sort_unstable();
+                cuts.dedup();
+                for pair in cuts.windows(2) {
+                    let (from, to) = (pair[0], pair[1]);
+                    if from >= to {
+                        continue;
+                    }
+                    let matched = spans.iter().any(|&(a, b)| a <= from && to <= b);
+                    let color = if matched {
+                        highlight
+                    } else if from < leaf {
+                        folders
+                    } else {
+                        name
+                    };
+                    job.append(&text[from..to], 0.0, format(color));
+                }
+            }
+            None => job.append(&shown, 0.0, format(name)),
+        }
+        job.wrap = TextWrapping {
+            max_width,
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = painter.layout_job(job);
+        let width = galley.size().x;
+        painter.galley(
+            egui::pos2(pos.x, pos.y - galley.size().y / 2.0),
+            galley,
+            name,
+        );
+        pos.x + width
     }
 
     /// Draw text left-aligned and vertically centred, truncated with an ellipsis

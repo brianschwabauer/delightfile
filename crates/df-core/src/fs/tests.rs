@@ -1847,6 +1847,32 @@ fn a_verb_acts_on_the_selected_rows_the_filter_shows_and_no_others() {
     );
 }
 
+/// The re-read door a virtual listing uses: a row that goes takes its mark
+/// with it, and a row renamed in place keeps both its mark and the cursor.
+#[test]
+fn rows_re_read_in_place_keep_their_mark_and_the_cursor_through_a_rename() {
+    let mut state = loaded_state(files(&["a.txt", "b.txt", "c.txt"]));
+    state.select_all();
+    state.cursor_to_name("b.txt");
+    state.retain_entries(|entry| {
+        if entry.name == "b.txt" {
+            entry.name = "z.txt".to_string();
+            entry.path = PathBuf::from("/fixture/z.txt");
+        }
+        entry.name != "a.txt"
+    });
+    let names: Vec<&str> = state.rows().map(|(e, _)| e.name.as_str()).collect();
+    assert_eq!(names, ["c.txt", "z.txt"]);
+    assert!(!state.is_selected("a.txt"), "a mark outlived its row");
+    assert!(state.is_selected("z.txt"), "the renamed row lost its mark");
+    assert!(!state.is_selected("b.txt"));
+    assert_eq!(
+        state.cursor_entry().map(|e| e.name.as_str()),
+        Some("z.txt"),
+        "the cursor stayed on the row it was on"
+    );
+}
+
 /// A paste's names wait for their rows (see `select_names`), and the filter
 /// judges them by the name as it will judge the row: one that matches is in
 /// play before its row arrives, one that does not is not.

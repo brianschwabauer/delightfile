@@ -831,6 +831,43 @@ impl DirState {
         revise(&mut self.entries)
     }
 
+    /// Re-read rows a caller owns: `revise` may rewrite an entry, and answers
+    /// whether it stays.
+    ///
+    /// The door for a virtual listing that has no directory to rescan — PLAN
+    /// §7.2's search hits, whose rows are re-read one by one after an
+    /// operation touched them. The view is rebuilt under the usual cursor rule
+    /// (the same name, or where it was when its row went), and a mark on a row
+    /// that went is dropped, as a finished scan drops a mark on a file that is
+    /// gone. A row `revise` renamed keeps what it had under its old name: the
+    /// mark, and the cursor if it was on it.
+    pub fn retain_entries(&mut self, mut revise: impl FnMut(&mut Entry) -> bool) {
+        let mut gone = Vec::new();
+        let mut renamed = Vec::new();
+        self.entries.retain_mut(|entry| {
+            let was = entry.name.clone();
+            let keep = revise(entry);
+            if !keep {
+                gone.push(was);
+            } else if entry.name != was {
+                renamed.push((was, entry.name.clone()));
+            }
+            keep
+        });
+        for name in gone {
+            self.selected.remove(&name);
+        }
+        for (was, now) in renamed {
+            if self.selected.remove(&was) {
+                self.selected.insert(now.clone());
+            }
+            if self.cursor_name.as_deref() == Some(was.as_str()) {
+                self.cursor_name = Some(now);
+            }
+        }
+        self.rebuild();
+    }
+
     /// Load synchronously. For startup's parent pane and for tests; everything
     /// interactive goes through [`DirState::begin_scan`].
     pub fn load_blocking(&mut self) -> Result<(), DfError> {

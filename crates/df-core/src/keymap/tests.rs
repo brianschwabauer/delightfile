@@ -72,6 +72,8 @@ fn the_files_table_is_the_muscle_memory_contract() {
         ("O", Command::OpenInteractive),
         // A picker's primary button, from the keyboard.
         ("ctrl+enter", Command::Choose),
+        // A search hit's own folder (PLAN §7.2).
+        ("alt+enter", Command::Reveal),
         ("y", Command::Yank),
         ("x", Command::YankCut),
         ("p", Command::Paste),
@@ -1039,6 +1041,32 @@ fn tab_in_the_search_panel_swaps_names_and_contents() {
         press(&km, &files(), WhenFlags::NONE, "tab"),
         Dispatch::Match(Command::Spot)
     );
+}
+
+/// `Enter` in the search panel lists the hits; `Alt+Enter` is the one-hit
+/// answer — the hit's folder — in the panel and in the listing alike, under
+/// one command id with one description.
+#[test]
+fn alt_enter_goes_to_the_files_folder_from_the_panel_and_the_listing() {
+    let km = Registry::defaults();
+    let pick = ContextStack::with(&[Context::Pick]);
+    for stack in [&pick, &files()] {
+        assert_eq!(
+            press(&km, stack, WhenFlags::NONE, "alt+enter"),
+            Dispatch::Match(Command::Reveal)
+        );
+    }
+    assert_eq!(
+        press(&km, &pick, WhenFlags::NONE, "enter"),
+        Dispatch::Match(Command::OverlaySubmit)
+    );
+    assert_eq!(Command::Reveal.id(), "reveal");
+    let row = km
+        .active_bindings(&files(), WhenFlags::NONE)
+        .into_iter()
+        .find(|b| b.command == Command::Reveal)
+        .expect("reveal is on the help sheet");
+    assert_eq!(row.description, "Go to this file's folder");
 }
 
 /// The `[pick]` cards page the way the listing does — a page on

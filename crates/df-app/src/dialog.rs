@@ -1505,10 +1505,12 @@ pub fn paint_bulk(
         else {
             break;
         };
+        // The name — or, over a search's hits from several folders, the path
+        // to it from the root, so two `mod.rs` rows can be told apart.
         chrome::truncated_in(
             &clipped,
             egui::pos2(row.old.left() + PAD_X, row.old.center().y),
-            old,
+            &bulk.label(row.index),
             // The old name is history: it is here to be compared against, not
             // read, so it is a step quieter than the name being typed.
             if old != line {

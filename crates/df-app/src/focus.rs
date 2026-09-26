@@ -66,6 +66,8 @@ pub struct EscapeState {
     pub visual: bool,
     pub selection: bool,
     pub filter: bool,
+    /// The list pane is a search's hits rather than a folder (PLAN §7.2).
+    pub hits: bool,
 }
 
 /// One rung of the `Esc` ladder (PLAN §4.1).
@@ -79,6 +81,8 @@ pub enum EscapeRung {
     LeaveVisual,
     ClearFilter,
     ClearSelection,
+    /// Back from a search's hits to the folder the search ran in.
+    LeaveHits,
     /// Everything is already put away.
     Nothing,
 }
@@ -97,6 +101,12 @@ pub enum EscapeRung {
 /// and can see in the bar; the selection may be a dozen `Space`s old and is
 /// the one state in the program with no undo, so it is the later rung of the
 /// two — `Esc` on a filtered listing must not throw it away.
+///
+/// Leaving a search's hits is the last rung of all, under the selection: it
+/// is the biggest step the ladder takes — a different listing — and the hits
+/// are the one listing `Esc` can walk out of, because it is the one a panel
+/// put there. The filter and the selection inside it are taken back first,
+/// one press each, as they are anywhere.
 pub fn escape_rung(state: EscapeState) -> EscapeRung {
     if state.overlay_open {
         return EscapeRung::CloseOverlay;
@@ -121,6 +131,9 @@ pub fn escape_rung(state: EscapeState) -> EscapeRung {
     }
     if state.selection {
         return EscapeRung::ClearSelection;
+    }
+    if state.hits {
+        return EscapeRung::LeaveHits;
     }
     EscapeRung::Nothing
 }
@@ -238,6 +251,7 @@ mod tests {
             visual: true,
             selection: true,
             filter: true,
+            hits: true,
         };
         let order = [
             EscapeRung::CloseOverlay,
@@ -248,6 +262,7 @@ mod tests {
             EscapeRung::LeaveVisual,
             EscapeRung::ClearFilter,
             EscapeRung::ClearSelection,
+            EscapeRung::LeaveHits,
             EscapeRung::Nothing,
         ];
         for expected in order {
@@ -262,6 +277,7 @@ mod tests {
                 EscapeRung::LeaveVisual => state.visual = false,
                 EscapeRung::ClearSelection => state.selection = false,
                 EscapeRung::ClearFilter => state.filter = false,
+                EscapeRung::LeaveHits => state.hits = false,
                 EscapeRung::Nothing => {}
             }
         }

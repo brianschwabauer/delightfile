@@ -426,6 +426,14 @@ pub struct Tab {
     pub remote: Option<crate::remote::Session>,
     /// The trash, while this tab is browsing it (PLAN §7.4).
     pub trash: Option<crate::trashview::View>,
+    /// A search's hits, while they are this tab's listing (PLAN §7.2).
+    ///
+    /// Unlike the three above, [`Tab::cwd`]'s path is a real directory here —
+    /// the root the search ran in, which every row's name is relative to —
+    /// so "this listing's path plus a name" is still a file (see
+    /// [`crate::hits`]). It is still not a *folder listing*: nothing scans
+    /// it, and leaving it is going back to that folder.
+    pub hits: Option<crate::hits::View>,
     /// Where this tab sits on the view-scale ladder ([`ViewScale`]), grid
     /// included.
     ///
@@ -471,6 +479,21 @@ pub enum Virtual {
     Archive,
     Remote,
     Trash,
+    /// A search's hits (PLAN §7.2). The odd one out: every row is a file on
+    /// this machine at its own real path, so it is virtual only as a
+    /// *listing* — see [`Virtual::real_rows`].
+    Hits,
+}
+
+impl Virtual {
+    /// Whether the rows are files on this machine at their own paths, which
+    /// every verb that acts on a row can act on — a pick, the extract rows,
+    /// a typed path. Only the hits: an archive member and a remote row have
+    /// no local path, and a trashed file's is inside the trash, where the
+    /// only verbs are the trash's own.
+    pub fn real_rows(self) -> bool {
+        self == Virtual::Hits
+    }
 }
 
 impl Tab {
@@ -493,6 +516,7 @@ impl Tab {
             archive: None,
             remote: None,
             trash: None,
+            hits: None,
             scale,
             list_scale,
         };
@@ -565,7 +589,16 @@ impl Tab {
         let leaving = self.cwd.path().to_path_buf();
         // Leaving is what makes a memory: the row under the cursor now is the
         // row this directory should show when the tab comes back to it.
-        if let Some(name) = self.cwd.dir.cursor_entry().map(|entry| entry.name.clone()) {
+        //
+        // Out of a search's hits the directory being left is the root, and
+        // the row that belongs to it is the one the root's own listing was on
+        // when the search was committed — a hit's name (`src/a.rs`) is not a
+        // row there, and it is the root that `Alt+←` comes back to.
+        let remembered = match self.hits.take() {
+            Some(view) => view.origin,
+            None => self.cwd.dir.cursor_entry().map(|entry| entry.name.clone()),
+        };
+        if let Some(name) = remembered {
             self.cursors.remember(leaving.clone(), name);
         }
         // Still inside the open archive: the rows come out of the tree, and no
@@ -617,6 +650,7 @@ impl Tab {
         scanner: &Scanner,
         now: Instant,
     ) {
+        self.hits = None;
         self.archive = Some(browse);
         self.show_archive("", mgr, sort, scanner, now);
     }
@@ -692,6 +726,7 @@ impl Tab {
     ) -> Option<df_core::vfs::VfsPath> {
         self.archive = None;
         self.trash = None;
+        self.hits = None;
         self.remote = Some(at);
         self.refresh_remote(mgr, sort, now)
     }
@@ -783,6 +818,7 @@ impl Tab {
     ) {
         self.archive = None;
         self.remote = None;
+        self.hits = None;
         let on = self
             .trash
             .is_some()
@@ -805,6 +841,122 @@ impl Tab {
         self.parent = Some(parent);
     }
 
+    // ── A search's hits (PLAN §7.2) ─────────────────────────────────────────
+
+    /// Make a search's hits this tab's listing, with the cursor aimed at
+    /// `on` — the hit that was highlighted in the panel.
+    ///
+    /// The rows so far land at once, and the rest stream in through
+    /// [`Tab::poll_hits`]. The listing is *loading* until the walk is over,
+    /// which is the honest state for a pane still being filled. The history
+    /// is not touched, for the reason walking into the trash does not touch
+    /// it: `Alt+←` is about folders, and the tab is still, as far as the
+    /// history knows, in the root folder the search ran in.
+    ///
+    /// The parent column is that root folder, listed for real with its cursor
+    /// on the row it was on — the trash's rule: the column beside a listing
+    /// that is not a folder is where `←` goes.
+    pub fn show_hits(
+        &mut self,
+        mut view: crate::hits::View,
+        on: Option<String>,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        scanner: &Scanner,
+        now: Instant,
+    ) {
+        self.archive = None;
+        self.remote = None;
+        self.trash = None;
+        let root = view.root().to_path_buf();
+        let rows = view.take();
+        let running = view.running();
+        let origin = view.origin.clone();
+        self.hits = Some(view);
+
+        self.cwd = Listing::new(root.clone(), mgr, sort, now);
+        self.cwd.dir.begin_external();
+        self.cwd.dir.extend_external(rows);
+        if !running {
+            self.cwd.dir.finish_external();
+        }
+        if let Some(name) = on {
+            self.cwd.dir.aim_cursor(name);
+        }
+
+        let mut parent = Listing::new(root, mgr, sort, now);
+        parent.begin_scan(scanner, now);
+        if let Some(name) = origin {
+            parent.dir.aim_cursor(name);
+        }
+        self.parent = Some(parent);
+    }
+
+    /// Whatever the running search has found since the last look, into the
+    /// rows. Returns whether anything changed.
+    ///
+    /// Through [`DirState::extend_external`], the rebuild a scanner's batch
+    /// goes through: the rows are sorted as they land and the cursor stays on
+    /// its name, so a list still filling never moves under the hand. The walk
+    /// ending — or `Ctrl+s` ending it — finishes the listing.
+    pub fn poll_hits(&mut self) -> bool {
+        let Some(view) = &mut self.hits else {
+            return false;
+        };
+        let polled = view.search.poll();
+        let rows = view.take();
+        let running = view.running();
+        let changed = polled || !rows.is_empty();
+        if !rows.is_empty() {
+            self.cwd.dir.extend_external(rows);
+        }
+        if !running && self.cwd.dir.state() == df_core::fs::LoadState::Loading {
+            self.cwd.dir.finish_external();
+            return true;
+        }
+        changed
+    }
+
+    /// `Ctrl+s` in the listing: stop the walk and keep what it found.
+    pub fn stop_hits(&mut self) {
+        if let Some(view) = &mut self.hits {
+            view.search.cancel();
+        }
+        self.poll_hits();
+    }
+
+    /// Re-read the rows after an operation touched the tree, renaming the ones
+    /// `moved` names first ([`crate::hits::View::refresh`]).
+    pub fn refresh_hits(&mut self, moved: &[(PathBuf, PathBuf)]) {
+        if let Some(view) = &mut self.hits {
+            view.refresh(&mut self.cwd.dir, moved);
+        }
+    }
+
+    /// `←` out of the hits: back to the root folder, with the cursor on the
+    /// row it was on when the search was committed. Returns whether there were
+    /// any hits to leave.
+    ///
+    /// Not a navigation: the tab never left the root as far as the history is
+    /// concerned (see [`Tab::show_hits`]), so this pushes nothing.
+    pub fn leave_hits(
+        &mut self,
+        mgr: &MgrConfig,
+        sort: SortOptions,
+        scanner: &Scanner,
+        now: Instant,
+    ) -> bool {
+        let Some(view) = self.hits.take() else {
+            return false;
+        };
+        self.cwd = Listing::new(view.root().to_path_buf(), mgr, sort, now);
+        self.rescan_all(mgr, sort, scanner, now);
+        if let Some(name) = view.origin {
+            self.cwd.dir.aim_cursor(name);
+        }
+        true
+    }
+
     /// Which virtual listing this tab is in, if any.
     pub fn virtual_kind(&self) -> Option<Virtual> {
         if self.archive.is_some() {
@@ -813,6 +965,8 @@ impl Tab {
             Some(Virtual::Remote)
         } else if self.trash.is_some() {
             Some(Virtual::Trash)
+        } else if self.hits.is_some() {
+            Some(Virtual::Hits)
         } else {
             None
         }
@@ -841,6 +995,17 @@ impl Tab {
         if self.remote.is_some() || self.trash.is_some() {
             return;
         }
+        // A search's hits are re-read row by row rather than scanned: their
+        // path is the root, and a scan of it would replace the hits with the
+        // root's own listing. The column beside them is the root, which is a
+        // folder and is re-read as one.
+        if self.hits.is_some() {
+            self.refresh_hits(&[]);
+            if let Some(parent) = &mut self.parent {
+                parent.begin_scan(scanner, now);
+            }
+            return;
+        }
         self.cwd.begin_scan(scanner, now);
         self.parent = match self.cwd.path().parent() {
             Some(parent) => {
@@ -855,6 +1020,12 @@ impl Tab {
     /// What the tab strip calls this tab: the directory's own name, or `/` at
     /// the root, which genuinely has none.
     pub fn title(&self) -> String {
+        // A tab of hits is named after the search, not after the folder it
+        // ran in: two tabs would otherwise both say `delightfile` and only one
+        // of them would be the folder.
+        if let Some(view) = &self.hits {
+            return view.title();
+        }
         match self.cwd.path().file_name() {
             Some(name) => name.to_string_lossy().into_owned(),
             None => self.cwd.path().to_string_lossy().into_owned(),
@@ -869,6 +1040,15 @@ impl Tab {
     /// (PLAN §2 watches the active tab's directories), so what it is showing may
     /// be minutes old, but it is showing the right *place* and should not jump.
     pub fn rescan(&mut self, scanner: &Scanner, now: Instant) {
+        // Hits are re-read row by row, and the root beside them is a folder
+        // (see [`Tab::rescan_all`]).
+        if self.hits.is_some() {
+            self.refresh_hits(&[]);
+            if let Some(parent) = &mut self.parent {
+                parent.begin_scan(scanner, now);
+            }
+            return;
+        }
         if self.virtual_kind().is_some() {
             // The rows came from a tree, not from a directory; asking the
             // scanner for a path that does not exist would only produce a
@@ -911,6 +1091,11 @@ impl Tab {
             }
             return dirs;
         }
+        // A search's hits are not watched (see [`crate::hits`]): only the
+        // root, which the parent column lists and `←` goes back to.
+        if let Some(view) = &self.hits {
+            return vec![view.root().to_path_buf()];
+        }
         let mut dirs = vec![self.cwd.path().to_path_buf()];
         if let Some(parent) = &self.parent {
             dirs.push(parent.path().to_path_buf());
@@ -943,6 +1128,15 @@ impl Tab {
     /// runs over *every* tab has to come through here, because a remote tab is
     /// exactly the one it will otherwise get wrong.
     pub fn sync_parent_marker(&mut self) {
+        // Beside a search's hits the column is the root itself, and its marker
+        // is the row the root was on — the listing's own path names no row in
+        // it.
+        if let Some(view) = &self.hits {
+            if let (Some(name), Some(parent)) = (&view.origin, &mut self.parent) {
+                parent.dir.cursor_to_name(name);
+            }
+            return;
+        }
         match self.remote.as_ref().map(|session| session.at.clone()) {
             Some(at) => self.sync_remote_parent_cursor(&at),
             None => self.sync_parent_cursor(),
@@ -1317,6 +1511,7 @@ mod tests {
             archive: None,
             remote: None,
             trash: None,
+            hits: None,
             scale,
             list_scale,
         };
@@ -1402,6 +1597,7 @@ mod tests {
             archive: None,
             remote: None,
             trash: None,
+            hits: None,
             scale,
             list_scale,
         };

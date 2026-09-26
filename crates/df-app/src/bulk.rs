@@ -83,6 +83,16 @@
 //! nobody typed into are filled in again from what the card knows now, photo
 //! included.
 //!
+//! ## Files from several folders
+//!
+//! A search's hits (PLAN §7.2) are a selection that spans a tree, and the card
+//! takes them as they are ([`Bulk::across`]). Each file is renamed in its own
+//! folder and never moved, the old-name column shows the path from the root
+//! so two `mod.rs` rows can be told apart, and "duplicate" and "taken" are
+//! judged per folder: two `mod.rs` rows in two folders may both become
+//! `lib.rs`. What else is in each folder is read from the disk when the card
+//! opens, because the hits are not the folders' whole contents.
+//!
 //! ## The five ways a name can be wrong
 //!
 //! They are different problems and they read differently, so they are variants
@@ -231,17 +241,17 @@ struct PhotoReader {
 }
 
 impl PhotoReader {
-    /// Read `jobs` (a row's id and its name) in order on a worker, ringing
+    /// Read `jobs` (a row's id and its file) in order on a worker, ringing
     /// `notify` after each. `None` if the thread could not be started, in which
     /// case the caller must not leave anything waiting on it.
-    fn start(dir: PathBuf, jobs: Vec<(usize, String)>, notify: Notifier) -> Option<PhotoReader> {
+    fn start(jobs: Vec<(usize, PathBuf)>, notify: Notifier) -> Option<PhotoReader> {
         let (tx, rx) = unbounded();
         let spawned = std::thread::Builder::new()
             .name("df-exif".to_string())
             .spawn(move || {
                 df_core::thread::lower_priority(df_core::thread::NICE_INTERACTIVE);
-                for (id, name) in jobs {
-                    let facts = exif::read(&dir.join(&name));
+                for (id, path) in jobs {
+                    let facts = exif::read(&path);
                     if tx.send((id, facts)).is_err() {
                         // The card is gone; so is anybody to tell.
                         return;
@@ -261,10 +271,21 @@ impl PhotoReader {
 
 /// The card, while it is up (or kept as a draft, see `App::bulk_draft`).
 pub struct Bulk {
-    /// The directory every one of these names is in. One directory, always: a
-    /// selection spans one listing, and a card that renamed across directories
-    /// would be a move with a text field for a destination.
+    /// The listing the selection was made in. For a folder, the directory
+    /// every one of these names is in. For a search's hits (PLAN §7.2) the
+    /// root they are named from, while each row's file stays in its own
+    /// folder ([`Bulk::folders`]).
     pub dir: PathBuf,
+    /// The folder each row's file is in, in row order and swapped with the
+    /// rows. Every one of them is [`Bulk::dir`] in a folder's card.
+    ///
+    /// **A rename never moves.** Each file is renamed inside its own folder —
+    /// a name with a `/` in it is refused ([`Problem::Unusable`]) — so a card
+    /// over hits from twelve folders is twelve folders' worth of renames, and
+    /// never a move with a text field for a destination. Collisions are
+    /// judged per folder: two `mod.rs` rows in different folders may both
+    /// become `lib.rs`.
+    pub folders: Vec<PathBuf>,
     /// Old names, in row order: parallel to the editor's lines and to
     /// [`Bulk::facts`] and [`Bulk::derived`], and swapped with them when a row
     /// moves.
@@ -292,10 +313,10 @@ pub struct Bulk {
     /// Each row's position when the card opened, swapped with the rows, so a
     /// photo the worker read for "row 7" finds that file after a row move.
     ids: Vec<usize>,
-    /// Names already in the directory that are not part of this card: the
+    /// Names already in each row's folder that are not part of this card: the
     /// "taken" test, snapshotted when the card opened rather than re-read per
     /// keystroke.
-    others: HashSet<String>,
+    others: HashMap<PathBuf, HashSet<String>>,
     photos: Option<PhotoReader>,
     /// A wheel's fractions of a row, until they add up to one.
     carry: f32,
@@ -329,11 +350,40 @@ impl Bulk {
         if crate::remote::is_remote(&dir) {
             return Err("Rename one at a time over the link — r renames the row under the cursor");
         }
-        let mut facts: Vec<Facts> = names.iter().map(|name| Facts::stat(&dir, name)).collect();
+        let others = HashMap::from([(dir.clone(), others_of(siblings, &names))]);
+        let rows = names.into_iter().map(|name| (dir.clone(), name)).collect();
+        Ok(Bulk::build(dir, rows, others, notify))
+    }
+
+    /// Open the card over files from several folders: a search's hits
+    /// (PLAN §7.2), whose selection spans a tree. `dir` is the root the rows
+    /// are named from, and `paths` the files, in the pane's order.
+    ///
+    /// What else is in each folder is read here, one `read_dir` per folder the
+    /// selection touches: the hits are not the folders' whole contents, and a
+    /// name taken by a file the search did not return is still taken.
+    pub fn across(dir: PathBuf, paths: &[PathBuf], notify: Notifier) -> Bulk {
+        let rows = rows_of(paths);
+        let others = others_on_disk(&rows);
+        Bulk::build(dir, rows, others, notify)
+    }
+
+    /// The card over `(folder, name)` rows, with the photo reader started on
+    /// the ones that could be photos.
+    fn build(
+        dir: PathBuf,
+        rows: Vec<(PathBuf, String)>,
+        others: HashMap<PathBuf, HashSet<String>>,
+        notify: Notifier,
+    ) -> Bulk {
+        let mut facts: Vec<Facts> = rows
+            .iter()
+            .map(|(folder, name)| Facts::stat(folder, name))
+            .collect();
         let mut jobs = Vec::new();
         for (id, row) in facts.iter_mut().enumerate() {
             if could_be_photo(row) {
-                jobs.push((id, row.name.clone()));
+                jobs.push((id, rows[id].0.join(&row.name)));
             } else {
                 row.photo = Photo::None;
             }
@@ -341,7 +391,7 @@ impl Bulk {
         let photos = if jobs.is_empty() {
             None
         } else {
-            PhotoReader::start(dir.clone(), jobs, notify)
+            PhotoReader::start(jobs, notify)
         };
         if photos.is_none() {
             // No reader, so nothing may wait on one: a `Pending` with no
@@ -352,22 +402,31 @@ impl Bulk {
                 }
             }
         }
-        let mut bulk = Bulk::from_facts(dir, facts, siblings);
+        let folders = rows.into_iter().map(|(folder, _)| folder).collect();
+        let mut bulk = Bulk::from_rows(dir, folders, facts, others);
         bulk.photos = photos;
-        Ok(bulk)
+        bulk
     }
 
-    /// The card over facts already gathered, with no photo reader: what
-    /// [`Bulk::new`] builds on, and what the tests build directly so that a
-    /// photo arrives exactly when they say.
+    /// The card over one folder's facts already gathered, with no photo
+    /// reader: what the tests build directly so that a photo arrives exactly
+    /// when they say.
+    #[cfg(test)]
     fn from_facts(dir: PathBuf, facts: Vec<Facts>, siblings: &[String]) -> Bulk {
+        let names: Vec<String> = facts.iter().map(|row| row.name.clone()).collect();
+        let others = HashMap::from([(dir.clone(), others_of(siblings, &names))]);
+        let folders = vec![dir.clone(); facts.len()];
+        Bulk::from_rows(dir, folders, facts, others)
+    }
+
+    /// The card over facts already gathered, each in its folder.
+    fn from_rows(
+        dir: PathBuf,
+        folders: Vec<PathBuf>,
+        facts: Vec<Facts>,
+        others: HashMap<PathBuf, HashSet<String>>,
+    ) -> Bulk {
         let olds: Vec<String> = facts.iter().map(|row| row.name.clone()).collect();
-        let chosen: HashSet<&str> = olds.iter().map(String::as_str).collect();
-        let others = siblings
-            .iter()
-            .filter(|name| !chosen.contains(name.as_str()))
-            .cloned()
-            .collect();
         let parsed = Template::parse(template::DEFAULT);
         let now = Civil::now();
         let derived: Vec<Result<String, Missing>> = facts
@@ -383,6 +442,7 @@ impl Bulk {
         let rows = olds.len();
         Bulk {
             dir,
+            folders,
             editor: NamesEditor::new(lines),
             olds,
             facts,
@@ -417,18 +477,45 @@ impl Bulk {
         names: &[String],
         siblings: &[String],
     ) -> Option<Box<Bulk>> {
-        if draft.dir != dir || draft.olds.len() != names.len() {
-            return None;
-        }
-        let ours: HashSet<&str> = draft.olds.iter().map(String::as_str).collect();
-        if names.iter().any(|name| !ours.contains(name.as_str())) {
-            return None;
-        }
-        let others: HashSet<String> = siblings
+        let rows: Vec<(PathBuf, String)> = names
             .iter()
-            .filter(|name| !ours.contains(name.as_str()))
-            .cloned()
+            .map(|name| (dir.to_path_buf(), name.clone()))
             .collect();
+        let others = HashMap::from([(dir.to_path_buf(), others_of(siblings, names))]);
+        Bulk::reopen_rows(draft, dir, &rows, others)
+    }
+
+    /// [`Bulk::reopen`] for a card over files from several folders
+    /// ([`Bulk::across`]).
+    pub fn reopen_across(draft: Box<Bulk>, dir: &Path, paths: &[PathBuf]) -> Option<Box<Bulk>> {
+        let rows = rows_of(paths);
+        let others = others_on_disk(&rows);
+        Bulk::reopen_rows(draft, dir, &rows, others)
+    }
+
+    /// The same selection is the same listing and the same set of files —
+    /// each name in its own folder.
+    fn reopen_rows(
+        draft: Box<Bulk>,
+        dir: &Path,
+        rows: &[(PathBuf, String)],
+        others: HashMap<PathBuf, HashSet<String>>,
+    ) -> Option<Box<Bulk>> {
+        if draft.dir != dir || draft.olds.len() != rows.len() {
+            return None;
+        }
+        let ours: HashSet<(&Path, &str)> = draft
+            .folders
+            .iter()
+            .zip(&draft.olds)
+            .map(|(folder, old)| (folder.as_path(), old.as_str()))
+            .collect();
+        if rows
+            .iter()
+            .any(|(folder, name)| !ours.contains(&(folder.as_path(), name.as_str())))
+        {
+            return None;
+        }
         let mut draft = draft;
         draft.others = others;
         // The draft's own parse would do. Parsing again costs nothing and means
@@ -459,10 +546,37 @@ impl Bulk {
         !self.editor.touched(row)
     }
 
+    /// What the old-name column says for row `row`: the name, or — in a card
+    /// over several folders — the path to it from the listing's root, since
+    /// three rows reading `mod.rs` would be three rows nobody could tell apart.
+    pub fn label(&self, row: usize) -> String {
+        let (Some(folder), Some(old)) = (self.folders.get(row), self.olds.get(row)) else {
+            return String::new();
+        };
+        if *folder == self.dir {
+            return old.clone();
+        }
+        crate::hits::name_under(&self.dir, &folder.join(old))
+    }
+
     /// What is wrong with each row, in row order.
+    ///
+    /// Judged folder by folder: a name is a duplicate only of another row in
+    /// the same folder, and taken only by a file in its own.
     pub fn problems(&self) -> Vec<Option<Problem>> {
-        let names: Vec<&str> = self.editor.lines().iter().map(String::as_str).collect();
-        let mut found = problems(&names, &self.others);
+        let lines = self.editor.lines();
+        let mut found = vec![None; lines.len()];
+        let none = HashSet::new();
+        for (folder, rows) in self.by_folder() {
+            let names: Vec<&str> = rows
+                .iter()
+                .filter_map(|&row| lines.get(row).map(String::as_str))
+                .collect();
+            let others = self.others.get(folder).unwrap_or(&none);
+            for (row, problem) in rows.iter().zip(problems(&names, others)) {
+                found[*row] = problem;
+            }
+        }
         for (row, problem) in found.iter_mut().enumerate() {
             if problem.is_some() || !self.untouched(row) {
                 continue;
@@ -500,16 +614,50 @@ impl Bulk {
             .map(|(_, new)| new.clone())
     }
 
-    /// The renames to carry out, in an order that is safe to run one at a time.
-    pub fn renames(&self) -> Vec<(PathBuf, PathBuf)> {
-        let pairs: Vec<(String, String)> = self
-            .olds
+    /// The same row's new file, in its folder — what a card over several
+    /// folders lands the cursor on.
+    pub fn first_change_path(&self) -> Option<PathBuf> {
+        self.olds
             .iter()
             .zip(self.editor.lines())
-            .filter(|(old, new)| old != new)
-            .map(|(old, new)| (old.clone(), new.clone()))
-            .collect();
-        ordered_renames(&self.dir, &pairs)
+            .zip(&self.folders)
+            .find(|((old, new), _)| old != new)
+            .map(|((_, new), folder)| folder.join(new))
+    }
+
+    /// The renames to carry out, in an order that is safe to run one at a time.
+    ///
+    /// Ordered folder by folder: a rename never crosses one, so the only
+    /// collisions (and the only swaps) are between rows in the same folder.
+    pub fn renames(&self) -> Vec<(PathBuf, PathBuf)> {
+        let lines = self.editor.lines();
+        let mut out = Vec::new();
+        for (folder, rows) in self.by_folder() {
+            let pairs: Vec<(String, String)> = rows
+                .iter()
+                .filter_map(|&row| Some((self.olds.get(row)?, lines.get(row)?)))
+                .filter(|(old, new)| old != new)
+                .map(|(old, new)| (old.clone(), new.clone()))
+                .collect();
+            out.extend(ordered_renames(folder, &pairs));
+        }
+        out
+    }
+
+    /// The rows, grouped by the folder they are in: each folder once, in the
+    /// order it first appears, with its rows in row order. One pass, because
+    /// the card asks for its problems every frame.
+    fn by_folder(&self) -> Vec<(&PathBuf, Vec<usize>)> {
+        let mut groups: Vec<(&PathBuf, Vec<usize>)> = Vec::new();
+        let mut at: HashMap<&PathBuf, usize> = HashMap::new();
+        for (row, folder) in self.folders.iter().enumerate() {
+            let group = *at.entry(folder).or_insert_with(|| {
+                groups.push((folder, Vec::new()));
+                groups.len() - 1
+            });
+            groups[group].1.push(row);
+        }
+        groups
     }
 
     /// What a candidate would make of the row the popover is about (row 0 for
@@ -704,6 +852,7 @@ impl Bulk {
                 continue;
             }
             self.olds.swap(a, b);
+            self.folders.swap(a, b);
             self.facts.swap(a, b);
             self.derived.swap(a, b);
             self.ids.swap(a, b);
@@ -1301,6 +1450,55 @@ fn single_value(text: &str) -> Option<Template> {
     let parsed = Template::parse(text);
     let one = matches!(parsed.parts(), [Part::Token(_)]);
     (one && parsed.problems().is_empty()).then_some(parsed)
+}
+
+/// What else is in one folder, from its whole listing less the names the card
+/// is renaming — so a row keeping its own name does not collide with itself.
+fn others_of(siblings: &[String], names: &[String]) -> HashSet<String> {
+    let chosen: HashSet<&str> = names.iter().map(String::as_str).collect();
+    siblings
+        .iter()
+        .filter(|name| !chosen.contains(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Each file as its folder and its name.
+fn rows_of(paths: &[PathBuf]) -> Vec<(PathBuf, String)> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let folder = path.parent()?.to_path_buf();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some((folder, name))
+        })
+        .collect()
+}
+
+/// What else is in each folder the rows are in, read from the disk: one
+/// `read_dir` per folder. A folder that cannot be read contributes nothing,
+/// and the rename itself is still refused by the kernel if a name is taken.
+fn others_on_disk(rows: &[(PathBuf, String)]) -> HashMap<PathBuf, HashSet<String>> {
+    let mut others: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    for (folder, _) in rows {
+        if others.contains_key(folder) {
+            continue;
+        }
+        let siblings: Vec<String> = std::fs::read_dir(folder)
+            .map(|read| {
+                read.filter_map(Result::ok)
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let names: Vec<String> = rows
+            .iter()
+            .filter(|(at, _)| at == folder)
+            .map(|(_, name)| name.clone())
+            .collect();
+        others.insert(folder.clone(), others_of(&siblings, &names));
+    }
+    others
 }
 
 /// The validation, as a pure function of the names and what else is in the
@@ -2396,5 +2594,42 @@ mod tests {
         );
         assert_eq!(bulk.changes(), 1);
         assert_eq!(bulk.first_change(), Some("z.txt".to_string()));
+    }
+
+    /// A card over files from two folders judges each folder on its own: two
+    /// `a.txt` rows may both become `b.txt`, a name is taken only by a file in
+    /// its own folder, each rename stays in its folder, and the old-name
+    /// column says which folder a row is from.
+    #[test]
+    fn a_card_across_folders_judges_each_folder_on_its_own() {
+        let (one, two) = (PathBuf::from("/r/one"), PathBuf::from("/r/two"));
+        let others = HashMap::from([
+            (one.clone(), HashSet::from(["taken.txt".to_string()])),
+            (two.clone(), HashSet::new()),
+        ]);
+        let mut bulk = Bulk::from_rows(
+            PathBuf::from("/r"),
+            vec![one.clone(), two.clone()],
+            vec![file("a.txt", None), file("a.txt", None)],
+            others,
+        );
+        assert_eq!(
+            (bulk.label(0), bulk.label(1)),
+            ("one/a.txt".into(), "two/a.txt".into())
+        );
+
+        run(&mut bulk, "<ctrl+u>b.txt");
+        assert!(bulk.valid(), "{:?}", bulk.problems());
+        assert_eq!(
+            bulk.renames(),
+            vec![
+                (one.join("a.txt"), one.join("b.txt")),
+                (two.join("a.txt"), two.join("b.txt"))
+            ]
+        );
+        assert_eq!(bulk.first_change_path(), Some(one.join("b.txt")));
+
+        run(&mut bulk, "<ctrl+u>taken.txt");
+        assert_eq!(bulk.problems(), vec![Some(Problem::Taken), None]);
     }
 }

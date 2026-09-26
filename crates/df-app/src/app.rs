@@ -67,7 +67,7 @@ use crate::scrollbar::Bar;
 use crate::search::{self, Search};
 use crate::select::{self, Visual};
 use crate::spot::{self, Spot};
-use crate::tab::Tab;
+use crate::tab::{Tab, Virtual};
 use crate::tabs::Tabs;
 use crate::theme::Palette;
 use crate::toast::Toasts;
@@ -2559,6 +2559,15 @@ impl App {
                 self.search_follow = true;
             }
         }
+        // …and the searches committed to a listing (PLAN §7.2), still walking
+        // behind the rows they have already put there. Every tab, as the
+        // scanner's updates below are: a search committed in a tab now behind
+        // the strip is still filling it.
+        for tab in self.tabs.iter_mut() {
+            if tab.poll_hits() {
+                changed = true;
+            }
+        }
         if let Some(thumbs) = &mut self.thumbs {
             if thumbs.poll(ctx.as_ref()) {
                 changed = true;
@@ -2714,7 +2723,15 @@ impl App {
         }
         let scanner = &self.scanner;
         let tab = self.tabs.active_mut();
-        if dir == tab.cwd.path() {
+        // A search's hits have the root as their path and are not its
+        // listing: a scan of it would replace them with the root's own rows.
+        // They are re-read row by row instead, for any change inside the
+        // tree they came from (PLAN §7.2, `crate::hits`'s "No watcher").
+        if let Some(root) = tab.hits.as_ref().map(|view| view.root().to_path_buf()) {
+            if dir.starts_with(&root) {
+                tab.refresh_hits(&[]);
+            }
+        } else if dir == tab.cwd.path() {
             tab.cwd.begin_scan(scanner, now);
         }
         if let Some(parent) = &mut tab.parent {
@@ -2764,6 +2781,19 @@ impl App {
         }
         if path == Path::new(crate::trashview::URL) {
             self.open_trash(now);
+            return;
+        }
+        // A search's hits share their path with the root they ran in, so a
+        // door that names the root — its crumb, a bookmark, a typed path —
+        // would be a navigation to where the tab already is, and go nowhere.
+        // It is leaving the hits.
+        if self
+            .tab()
+            .hits
+            .as_ref()
+            .is_some_and(|view| view.root() == path)
+        {
+            self.leave_hits(now);
             return;
         }
         let (mgr, sort) = (self.mgr.clone(), self.sort());
@@ -2912,6 +2942,12 @@ impl App {
     /// moment ago, so [`df_core::fs::DirState::cursor_to_name`] would find
     /// nothing and give up. The aim waits for the batch that has the row.
     fn land_on(&mut self, focus: &[PathBuf]) {
+        // A search's hits share the root's path without being its listing:
+        // what an operation made in the root is not a hit, and no rescan will
+        // bring it here to be landed on.
+        if self.tab().hits.is_some() {
+            return;
+        }
         let Some(names) = focus_names(&self.cwd(), focus) else {
             return;
         };
@@ -4882,11 +4918,33 @@ impl App {
         // Asked before the undo, because afterwards the record is gone and the
         // report only says which paths it touched, not what kind of touch.
         let restores = self.journal.peek().is_some_and(undo_restores);
+        // A rename taken back, in a search's hits: the rows it renamed are
+        // renamed back, the way they followed it forward — a row re-read
+        // under the name it no longer has would simply go.
+        let back_again: Vec<(PathBuf, PathBuf)> = match self.journal.peek() {
+            Some(OpRecord::Rename { moved }) => vec![(moved.to.clone(), moved.from.clone())],
+            Some(OpRecord::Renames { moved }) => moved
+                .iter()
+                .map(|record| (record.to.clone(), record.from.clone()))
+                .collect(),
+            _ => Vec::new(),
+        };
         match self.journal.undo(&TaskCtx::detached()) {
             Ok(report) => {
                 // The refusal *and* the success are the user's words: df-core
                 // writes these to be read, so they are shown verbatim.
                 self.toasts.notice(report.description.clone(), now);
+                // Only the ones that really went back: an undo refused
+                // part way leaves the rest where they were.
+                let back_again: Vec<(PathBuf, PathBuf)> = back_again
+                    .into_iter()
+                    .filter(|(now_at, back)| {
+                        now_at.symlink_metadata().is_err() && back.symlink_metadata().is_ok()
+                    })
+                    .collect();
+                if self.tab().hits.is_some() && !back_again.is_empty() {
+                    self.tabs.active_mut().refresh_hits(&back_again);
+                }
                 for dir in Self::affected(&report.touched, None) {
                     self.rescan(&dir, now);
                 }
@@ -4995,9 +5053,12 @@ impl App {
             return false;
         };
         let where_ = match kind {
-            crate::tab::Virtual::Archive => "inside an archive",
-            crate::tab::Virtual::Remote => "on a remote service",
-            crate::tab::Virtual::Trash => "in the trash",
+            Virtual::Archive => "inside an archive",
+            Virtual::Remote => "on a remote service",
+            Virtual::Trash => "in the trash",
+            // A search's hits are files at their own paths: a dialog can be
+            // answered from a search as well as from a folder.
+            Virtual::Hits => return false,
         };
         self.toasts.error(
             format!("Nothing {where_} can be picked — it has no path on this machine"),
@@ -5224,8 +5285,13 @@ impl App {
         match mode {
             PickMode::File | PickMode::Files => self.pick(vec![path.to_path_buf()]),
             PickMode::Folder => {
-                let cwd = self.cwd();
-                self.pick(vec![cwd]);
+                // The folder the row is in — which in a search's hits is the
+                // hit's own, not the root the search ran in.
+                let folder = match (&self.tab().hits, path.parent()) {
+                    (Some(_), Some(parent)) => parent.to_path_buf(),
+                    _ => self.cwd(),
+                };
+                self.pick(vec![folder]);
             }
             PickMode::Save => self.save_to(path.to_path_buf(), now),
         }
@@ -5369,7 +5435,7 @@ impl App {
         // A file dialog needs a selection or a file under the cursor; a
         // folder always has the folder on screen, and a save always has a
         // name to be typed.
-        let enabled = self.tab().virtual_kind().is_none()
+        let enabled = self.tab().virtual_kind().is_none_or(Virtual::real_rows)
             && match mode {
                 PickMode::File | PickMode::Files => {
                     selected > 0 || dir.cursor_entry().is_some_and(|entry| !entry.is_dir())
@@ -6170,6 +6236,14 @@ impl App {
                     search.toggle(now);
                 }
             }
+            // `Alt+Enter` in the search panel: the highlighted hit's folder,
+            // with the cursor on it — what `Enter` did before it listed them
+            // all. Nothing on the other `[pick]` cards.
+            C::Reveal => {
+                if self.search.is_some() {
+                    self.search_submit(now);
+                }
+            }
             C::TaskInspect => {
                 if let Some(panel) = &mut self.panel {
                     panel.inspect = !panel.inspect;
@@ -6425,7 +6499,7 @@ impl App {
             return;
         }
         if self.search.is_some() {
-            self.search_submit(now);
+            self.commit_search(now);
             return;
         }
         if self.mounts.is_some() {
@@ -7279,23 +7353,40 @@ impl App {
         self.sync_context();
     }
 
-    /// `Enter` on a result: go to the file's directory, put the cursor on it,
-    /// and close.
+    /// `Alt+Enter` on a result: go to the file's directory, put the cursor on
+    /// it, and close.
     ///
     /// Not "open it" — a file manager's answer to "I found it" is to *be
     /// there*, with the file under the cursor and every key that acts on a file
     /// pointed at it. `Enter` again opens it, which is one more keystroke and
-    /// the one you would have pressed anyway.
+    /// the one you would have pressed anyway. (`Enter` in the panel is the
+    /// bigger answer now: every hit, as the listing — [`App::commit_search`].)
     fn search_submit(&mut self, now: Instant) {
         let Some(hit) = self.search.as_ref().and_then(Search::chosen) else {
             return;
         };
-        let (path, name) = (hit.path.clone(), file_name(&hit.path));
+        let path = hit.path.clone();
+        self.search = None;
+        self.sync_context();
+        self.go_to_file(&path, now);
+    }
+
+    /// The file at `path`, in its own folder, under the cursor: the panel's
+    /// `Alt+Enter`, and the listing's.
+    fn go_to_file(&mut self, path: &Path, now: Instant) {
+        let name = file_name(path);
         let Some(dir) = path.parent().map(Path::to_path_buf) else {
             return;
         };
-        self.search = None;
-        self.sync_context();
+        // Out of a search's hits, whose path is the root: a hit at the top of
+        // the tree is in the root folder, which is the same path as the
+        // listing and still not the same place. Leaving is the way there.
+        if self.tab().hits.is_some() {
+            self.navigate(dir, now);
+            self.tabs.active_mut().cwd.dir.aim_cursor(name);
+            self.attach_view();
+            return;
+        }
         if dir != self.tab().cwd.path() {
             self.navigate(dir, now);
             // The scan is asynchronous, so the cursor cannot land yet — the
@@ -7306,6 +7397,132 @@ impl App {
         } else if !self.dir().cursor_to_name(&name) {
             self.toasts
                 .error(format!("{name} is not in this folder any more"), now);
+        }
+    }
+
+    /// `Alt+Enter` in the list: the hovered hit's own folder. Only a search's
+    /// hits are anywhere but the folder on screen.
+    fn reveal_hovered(&mut self, now: Instant) {
+        let path = self
+            .tab()
+            .hits
+            .as_ref()
+            .and(self.tab().cwd.dir.cursor_entry())
+            .map(|entry| entry.path.clone());
+        match path {
+            Some(path) => self.go_to_file(&path, now),
+            None => self.toasts.notice("Already in its folder", now),
+        }
+    }
+
+    /// `Enter` in the panel: every hit, as this tab's listing, with the cursor
+    /// on the one that was highlighted (PLAN §7.2, [`crate::hits`]).
+    ///
+    /// The search goes with the rows, still running if it is: the walk does
+    /// not have to finish before the list is the pane. An empty field in
+    /// names mode lists everything under the root; an empty one in contents
+    /// mode has asked nothing, and the panel stays.
+    fn commit_search(&mut self, now: Instant) {
+        let Some(mut search) = self.search.take() else {
+            return;
+        };
+        if search.mode == search::Mode::Content && search.query().is_empty() {
+            self.search = Some(search);
+            self.toasts.notice("Type a pattern to search for", now);
+            return;
+        }
+        search.commit();
+        if let Some(message) = search.take_notice() {
+            self.toasts.error(message, now);
+        }
+        // Nothing to list, and nothing still coming: the panel says so
+        // already, and a pane of no rows would be one more `←` to get back.
+        if search.error.is_some() || (search.hits.is_empty() && !search.searching()) {
+            if search.error.is_none() {
+                self.toasts.notice("Nothing found to list", now);
+            }
+            self.search = Some(search);
+            return;
+        }
+        let on = search.chosen().map(|hit| hit.relative.clone());
+        // Where `←` goes back to: the root folder's own row — kept from the
+        // hits this replaces when the search was refined from a listing.
+        let origin = match &self.tab().hits {
+            Some(view) => view.origin.clone(),
+            None => self
+                .tab()
+                .cwd
+                .dir
+                .cursor_entry()
+                .map(|entry| entry.name.clone()),
+        };
+        let view = crate::hits::View::new(search, origin);
+        // "What's big" is about one folder's children, and the hits are not
+        // them: the mode ends here as it ends on any other way out of the
+        // folder it was measuring.
+        if self.usage.is_some() {
+            self.leave_usage(now);
+        }
+        let (mgr, sort) = (self.mgr.clone(), self.sort());
+        self.tabs
+            .active_mut()
+            .show_hits(view, on, &mgr, sort, &self.scanner, now);
+        self.visual = None;
+        self.close_player();
+        self.attach_view();
+        self.sync_context();
+        self.rewatch();
+    }
+
+    /// `←` and `Esc`'s last rung in a search's hits: back to the root folder,
+    /// the cursor on the row it was on.
+    fn leave_hits(&mut self, now: Instant) {
+        let (mgr, sort) = (self.mgr.clone(), self.sort());
+        if self
+            .tabs
+            .active_mut()
+            .leave_hits(&mgr, sort, &self.scanner, now)
+        {
+            self.visual = None;
+            self.rewatch();
+        }
+    }
+
+    /// `s`/`S` in a search's hits, and a click on the breadcrumb's chip: the
+    /// panel again, with the query in the field and the same root, to be
+    /// refined — `Enter` lists the new answer in place of this one.
+    ///
+    /// The key says which tool (`None` is the chip's, which keeps the one the
+    /// hits came from). The hits already found are the panel's list until the
+    /// query runs again, a debounce later — the stale list is a better answer
+    /// than an empty one for the moment it survives (`delightful-ui` §8).
+    fn reopen_search(&mut self, mode: Option<search::Mode>, now: Instant) {
+        let Some(view) = &self.tab().hits else {
+            if let Some(mode) = mode {
+                self.open_search(mode);
+            }
+            return;
+        };
+        let mode = mode.unwrap_or(view.mode());
+        let query = view.query().to_string();
+        let stale = (mode == view.mode()).then(|| view.search.hits.clone());
+        let on = self
+            .tab()
+            .cwd
+            .dir
+            .cursor_entry()
+            .map(|entry| entry.name.clone());
+        self.open_search(mode);
+        if let Some(search) = &mut self.search {
+            if let Some(hits) = stale {
+                search.hits = hits;
+                if let Some(at) =
+                    on.and_then(|on| search.hits.iter().position(|h| h.relative == on))
+                {
+                    search.set_cursor(at);
+                }
+            }
+            search.seed(&query, now);
         }
     }
 
@@ -7829,7 +8046,12 @@ impl App {
         let Some(entry) = self.tab().cwd.dir.cursor_entry() else {
             return;
         };
-        let name = entry.name.clone();
+        // A search hit's row name is its path from the root; what is being
+        // renamed is the file, whose name is its last part.
+        let name = match &self.tab().hits {
+            Some(_) => file_name(&entry.path),
+            None => entry.name.clone(),
+        };
         let (kind, buffer) = if empty_stem {
             (
                 PromptKind::RenameEmptyStem,
@@ -7861,6 +8083,27 @@ impl App {
             .map(|(entry, _)| entry.name.clone())
             .collect();
         if names.len() < 2 {
+            return;
+        }
+        // A search's hits are files from all over a tree: each is renamed in
+        // its own folder, against what else that folder holds (PLAN §7.2,
+        // [`crate::bulk::Bulk::across`]).
+        if self.tab().hits.is_some() {
+            let paths: Vec<PathBuf> = listing
+                .rows()
+                .filter(|(entry, _)| listing.acts_on(&entry.name))
+                .map(|(entry, _)| entry.path.clone())
+                .collect();
+            let waker = self.waker.named("exif");
+            let notify: df_core::fs::Notifier = Arc::new(move || waker.wake());
+            let card = match self.bulk_draft.take() {
+                Some(draft) => crate::bulk::Bulk::reopen_across(draft, &dir, &paths),
+                None => None,
+            }
+            .unwrap_or_else(|| Box::new(crate::bulk::Bulk::across(dir, &paths, notify)));
+            self.prompt_opened += 1;
+            self.dialog = Some(Dialog::Bulk(card));
+            self.sync_context();
             return;
         }
         // Every name in the directory, including the hidden ones and the ones
@@ -7960,7 +8203,14 @@ impl App {
         }
         let renames = bulk.renames();
         let dir = bulk.dir.clone();
-        let cursor_on = bulk.first_change();
+        // In a search's hits a row is named by its path from the root, so the
+        // cursor goes to that; in a folder, to the new name.
+        let cursor_on = match &self.tab().hits {
+            Some(_) => bulk
+                .first_change_path()
+                .map(|path| crate::hits::name_under(&dir, &path)),
+            None => bulk.first_change(),
+        };
         self.dialog = None;
         // The work is done, so there is no draft of it to come back to.
         self.bulk_draft = None;
@@ -8009,6 +8259,15 @@ impl App {
         // is what makes a swap undoable in one press.
         let moved = collapse_renames(moved);
         let count = moved.len();
+        // A search's hits have no scan to bring the new names: the rows are
+        // renamed where they stand, before anything is re-read.
+        if self.tab().hits.is_some() {
+            let pairs: Vec<(PathBuf, PathBuf)> = moved
+                .iter()
+                .map(|record| (record.from.clone(), record.to.clone()))
+                .collect();
+            self.tabs.active_mut().refresh_hits(&pairs);
+        }
         if !moved.is_empty() {
             self.journal.record(OpRecord::Renames { moved });
         }
@@ -8392,7 +8651,12 @@ impl App {
         else {
             return Err("Nothing under the cursor".to_string());
         };
-        let to = self.cwd().join(text);
+        // In a search's hits the file is renamed where it is, beside its own
+        // folder's files — not moved into the root the rows are named from.
+        let to = match (&self.tab().hits, from.parent()) {
+            (Some(_), Some(folder)) => folder.join(text),
+            _ => self.cwd().join(text),
+        };
         df_core::ops::rename(&from, &to, false).map_err(|e| e.to_string())?;
         if let Ok(moved) = MovedPath::record(&from, &to) {
             self.journal.record(OpRecord::Rename { moved });
@@ -8402,6 +8666,21 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.toasts.undo(format!("Renamed to {name}"), now);
+        // …and its row follows: a hits listing has no scan to bring the new
+        // name, so the row is renamed in place, and the cursor stays on it.
+        if let Some(root) = self.tab().hits.as_ref().map(|v| v.root().to_path_buf()) {
+            self.tabs
+                .active_mut()
+                .refresh_hits(&[(from.clone(), to.clone())]);
+            // The folder it is in may be the root, which the parent column
+            // is listing.
+            if let Some(folder) = to.parent() {
+                self.rescan(folder, now);
+            }
+            self.attach_view();
+            self.dir().aim_cursor(crate::hits::name_under(&root, &to));
+            return Ok(());
+        }
         let cwd = self.cwd();
         self.rescan(&cwd, now);
         self.attach_view();
@@ -8895,6 +9174,7 @@ impl App {
             visual: self.visual.is_some(),
             selection: self.dir().selected_count() > 0,
             filter: !self.dir().filter().is_empty(),
+            hits: self.tab().hits.is_some(),
         };
         match escape_rung(state) {
             EscapeRung::CloseOverlay => self.close_overlay(Instant::now()),
@@ -8907,6 +9187,7 @@ impl App {
             }
             EscapeRung::ClearSelection => self.dir().clear_selection(),
             EscapeRung::ClearFilter => self.dir().clear_filter(),
+            EscapeRung::LeaveHits => self.leave_hits(Instant::now()),
             // …and there is no rung under that one. The keyboard is already in
             // the list — it never left (PLAN §2.1) — so an `Esc` with nothing
             // open and nothing marked does nothing, visibly and on purpose.
@@ -9008,15 +9289,23 @@ impl App {
             return Some(notice);
         }
         // A terminal starts in a directory on this disk. An archive's folder,
-        // a server's and the trash are none of those, and the three lists
-        // below would each refuse it with a sentence about something else.
+        // a server's, the trash and a search's hits are none of those, and
+        // the lists below would each refuse it with a sentence about
+        // something else, or not at all.
         if command == Command::TerminalHere && self.tab().virtual_kind().is_some() {
             return Some("Terminals open on local folders");
         }
         // Tags are an attribute on a file on this machine's disk, and an
         // archive's rows, a remote service's and the trash's are not that —
-        // one sentence for all three, since the reason is the same.
-        if command == Command::Tag && self.tab().virtual_kind().is_some() {
+        // one sentence for all three, since the reason is the same. A
+        // search's hits are ([`Virtual::real_rows`]): `T` tags each at its
+        // own path.
+        if command == Command::Tag
+            && self
+                .tab()
+                .virtual_kind()
+                .is_some_and(|kind| !kind.real_rows())
+        {
             return Some("Tags live on local files");
         }
         // …and on a network or FUSE mount the rows are listed without their
@@ -9044,6 +9333,14 @@ impl App {
         // palette's "Empty trash".
         if self.tab().trash.is_some() && inert_in_trash(command) {
             return Some("Not in the trash — Enter restores, D destroys");
+        }
+        // PLAN §7.2: a search's hits are files and every verb on a file
+        // works on them; what is refused is making something *here*, since
+        // here is not a folder (see [`crate::hits`]).
+        if self.tab().hits.is_some() {
+            if let Some(notice) = crate::hits::refusal(command) {
+                return Some(notice);
+            }
         }
         // A sync with nothing to sync has no card to open, so its menu rows
         // grey rather than opening one to say so.
@@ -9106,6 +9403,12 @@ impl App {
                 // it had one.
                 if self.columns > 1 && self.step_cursor(grid::Step::Left) {
                     self.apply_visual();
+                    return;
+                }
+                // A search's hits are one level: `←` is back to the folder the
+                // search ran in, the cursor where it was (PLAN §7.2).
+                if self.tab().hits.is_some() {
+                    self.leave_hits(now);
                     return;
                 }
                 // `←` on a remote service walks up the remote tree, and at the
@@ -9218,7 +9521,9 @@ impl App {
             // click has a crumb that simply does not offer it, a key has no
             // such cue, so it says why rather than doing nothing.
             C::GotoPath => {
-                if self.tab().virtual_kind().is_none() {
+                // A search's hits sit in the root folder, which is a path the
+                // prompt can start from like any other.
+                if self.tab().virtual_kind().is_none_or(Virtual::real_rows) {
                     self.open_path_prompt();
                 } else {
                     self.toasts.notice("Type a path in a local folder", now);
@@ -9408,6 +9713,8 @@ impl App {
                 if let Some(search) = &mut self.search {
                     search.cancel();
                 }
+                // …and one still filling a listing, which keeps what it found.
+                self.tabs.active_mut().stop_hits();
             }
 
             // ── Windows (PLAN §2) ───────────────────────────────────────────
@@ -9640,6 +9947,7 @@ impl App {
             // it does, dimmed-and-silent included. Outside a picker there is
             // no button, and `press_pick` does nothing without one.
             C::Choose => self.press_pick(now),
+            C::Reveal => self.reveal_hovered(now),
 
             // ── The palette and the jumps (PLAN §4.4, §7.2) ─────────────────
             C::CommandPalette => self.open_palette(),
@@ -9648,8 +9956,10 @@ impl App {
             C::AppMenu => self.open_app_menu(),
             C::FuzzyJump => self.open_jump(Source::Jump),
             C::ZoxideJump => self.open_jump(Source::Zoxide),
-            C::SearchName => self.open_search(search::Mode::Names),
-            C::SearchContent => self.open_search(search::Mode::Content),
+            // In a search's hits the panel comes back with the query in it, to
+            // be refined ([`App::reopen_search`]); anywhere else it opens empty.
+            C::SearchName => self.reopen_search(Some(search::Mode::Names), now),
+            C::SearchContent => self.reopen_search(Some(search::Mode::Content), now),
 
             // ── Leaving ─────────────────────────────────────────────────────
             C::Quit => self.quit = Some(Quit::WriteCwd),
@@ -10567,9 +10877,11 @@ impl App {
                 self.finder_submit(page, now);
                 return;
             }
+            // The panel's `Enter` lists every hit with the cursor on the
+            // highlighted one, so a click lists them with it on this one.
             if let Some(search) = &mut self.search {
                 search.set_cursor(search.first + offset);
-                self.search_submit(now);
+                self.commit_search(now);
             }
             return;
         }
@@ -10914,7 +11226,15 @@ impl App {
         {
             return None;
         }
-        self.path_bar.1.last().map(|crumb| crumb.label.as_str())
+        // The folder, not a search's chip after it: a prompt over the hits
+        // is about the root they are named from — where `;` runs, and what a
+        // typed path is relative to.
+        self.path_bar
+            .1
+            .iter()
+            .rev()
+            .find(|crumb| !crate::hits::is_chip(crumb))
+            .map(|crumb| crumb.label.as_str())
     }
 
     /// Rebuild the breadcrumb when the directory has changed under it.
@@ -10951,10 +11271,24 @@ impl App {
             self.repo_counts = None;
             return;
         }
-        if self.path_bar.0 != cwd || self.path_bar.1.is_empty() {
+        // A search's hits end the root's path in a chip that says what was
+        // asked and how many came back (PLAN §7.2). The root is the listing's
+        // path too, so a commit or a `←` changes the bar without changing the
+        // path it is cached against — the chip coming or going is what says
+        // it is stale.
+        let chip = self
+            .tab()
+            .hits
+            .as_ref()
+            .map(|view| view.chip(self.tab().cwd.dir.total()));
+        let had_chip = self.path_bar.1.last().is_some_and(crate::hits::is_chip);
+        if self.path_bar.0 != cwd || self.path_bar.1.is_empty() || had_chip != chip.is_some() {
             // The one walk up for `.git` per navigation. See [`App::repo`].
             self.repo = df_core::git::repo_root(&cwd);
             self.path_bar = (cwd, chrome::crumbs(&self.cwd()), None);
+            if let Some(chip) = &chip {
+                self.path_bar.1.push(crate::hits::chip_crumb(chip.clone()));
+            }
             // …and the one *request* per navigation. Deliberately here rather
             // than in `repo_status`: a status that fails for good — a corrupt
             // index, a permission problem — stores nothing, so a `repo_status`
@@ -10964,6 +11298,14 @@ impl App {
             // schedule.
             if let Some(root) = self.repo.clone() {
                 self.git().refresh(&root);
+            }
+        }
+        // The count moves while the walk runs, and the `…` goes when it ends:
+        // the chip's words are kept up to date here, once a frame, for the
+        // price of a string compare.
+        if let (Some(chip), Some(last)) = (chip, self.path_bar.1.last_mut()) {
+            if crate::hits::is_chip(last) && last.label != chip {
+                last.label = chip;
             }
         }
         self.path_bar.2 = self.branch_chip();
@@ -11609,7 +11951,13 @@ impl App {
                 if let Some(crumb) = self.path_bar.1.get(index) {
                     let path = crumb.path.clone();
                     let last = index + 1 == self.path_bar.1.len();
-                    if path != self.cwd() {
+                    // The search chip at the end of a hits listing's path puts
+                    // the query back in the panel, to be refined; the root's
+                    // own crumb, which is the listing's path too, leaves the
+                    // hits for the folder (`navigate` knows).
+                    if crate::hits::is_chip(crumb) {
+                        self.reopen_search(None, now);
+                    } else if path != self.cwd() || self.tab().hits.is_some() {
                         self.navigate(path, now);
                     } else if last && self.tab().virtual_kind().is_none() {
                         // The segment you are already in has nowhere to go, so
@@ -11984,7 +12332,18 @@ impl App {
         // item — the card would be a card with a single row in it, and the
         // toast already says what happened.
         if let Some(Control::Crumb(index)) = over {
+            // The search chip has no path to copy; what it stands for is the
+            // query, which is the thing worth having on the clipboard.
+            let query = self
+                .tab()
+                .hits
+                .as_ref()
+                .map(|view| view.query().to_string());
             if let Some(crumb) = self.path_bar.1.get(index) {
+                if let (true, Some(query)) = (crate::hits::is_chip(crumb), query) {
+                    self.offer(None, query.as_bytes(), "Copied query".to_string(), now);
+                    return;
+                }
                 let text = crumb.path.to_string_lossy().into_owned();
                 self.offer(None, text.as_bytes(), "Copied path".to_string(), now);
             }
@@ -12056,7 +12415,7 @@ impl App {
         // Only in a real directory: an archive nested inside one has to come
         // out before it can be opened, so offering "Extract here" on it would
         // offer something that cannot be done.
-        let archive = self.tab().virtual_kind().is_none()
+        let archive = self.tab().virtual_kind().is_none_or(Virtual::real_rows)
             && entry.as_ref().is_some_and(crate::archive::extractable);
         let archives = if archive {
             self.archive_units(&self.targets()).units.len()
@@ -12089,6 +12448,16 @@ impl App {
                 }
             }
         }
+        // Over a search's hits the rows are the ordinary ones and the verbs
+        // that make something here are refused (`crate::hits::refusal`): their
+        // rows grey, rather than stay live only to toast "not here".
+        if self.tab().hits.is_some() {
+            for item in &mut items {
+                if menu_command(item.action).is_some_and(|c| self.refusal(c).is_some()) {
+                    item.enabled = false;
+                }
+            }
+        }
         if facts.is_dir && !facts.trash {
             let pinnable = self.refusal(Command::PinToggle).is_none();
             menu::insert_pin_row(&mut items, self.row_pinned(), pinnable);
@@ -12112,7 +12481,7 @@ impl App {
         let facts = menu::AppFacts {
             picker: self.chooser.is_some(),
             // `GotoPath`'s own refusal, in `run`.
-            local: self.tab().virtual_kind().is_none(),
+            local: self.tab().virtual_kind().is_none_or(Virtual::real_rows),
             targets: self.targets().len(),
             clipboard: !self.clipboard.is_empty(),
             scale: self.scale_here(),
@@ -13498,17 +13867,27 @@ impl App {
                 .as_ref()
                 .and_then(|parent| parent.dir.row(index))
                 .map(|entry| entry.path.clone()),
-            dnd::Target::Pane(Column::List) => Some(self.cwd()),
+            // A search's hits are not a folder to drop into — `p` is refused
+            // there for the same reason (`crate::hits::refusal`) — and neither
+            // is the chip that stands for them, nor a tab showing them. A
+            // directory *row* among the hits is a folder, and takes a drop.
+            dnd::Target::Pane(Column::List) => self.tab().hits.is_none().then(|| self.cwd()),
             dnd::Target::Pane(Column::Parent) => self
                 .tab()
                 .parent
                 .as_ref()
                 .map(|parent| parent.path().to_path_buf()),
-            dnd::Target::Crumb(index) => self.path_bar.1.get(index).map(|crumb| crumb.path.clone()),
+            dnd::Target::Crumb(index) => self
+                .path_bar
+                .1
+                .get(index)
+                .filter(|crumb| !crate::hits::is_chip(crumb))
+                .map(|crumb| crumb.path.clone()),
             dnd::Target::Tab(index) => self
                 .tabs
                 .iter()
                 .nth(index)
+                .filter(|tab| tab.hits.is_none())
                 .map(|tab| tab.cwd.path().to_path_buf()),
         }
     }
@@ -13903,9 +14282,18 @@ impl App {
                 .notice("Nothing in that drop this can open", now);
             return;
         }
-        let dest = at
-            .and_then(|at| self.dropped_target(at))
-            .unwrap_or_else(|| self.cwd());
+        let dest = match at.and_then(|at| self.dropped_target(at)) {
+            Some(dest) => dest,
+            // Over nothing that names a folder, a drop lands in the one on
+            // screen — and a search's hits are not one (`p`'s refusal).
+            None if self.tab().hits.is_some() => {
+                if let Some(notice) = self.refusal(Command::Paste) {
+                    self.toasts.notice(notice, now);
+                }
+                return;
+            }
+            None => self.cwd(),
+        };
         let clip = Clipboard::yank(paths);
         self.paste_into(&clip, dest, false, now);
     }
@@ -16221,6 +16609,21 @@ impl App {
         // was reading, decoding or rendering; opened again, it is asked for
         // the cursor's row like any other change of row.
         let preview_open = self.preview_open();
+        // A content search's hits open at the line they matched on, the first
+        // time each is shown (PLAN §7.2) — the listing's answer to the scroll
+        // the panel gives its highlighted hit below.
+        let matched = match (&searched, &self.tab().hits) {
+            (None, Some(view)) => self
+                .tab()
+                .cwd
+                .dir
+                .cursor_entry()
+                .and_then(|entry| Some((entry.path.clone(), view.line_of(&entry.name)?))),
+            _ => None,
+        };
+        if let Some((path, line)) = matched {
+            self.preview.open_at(&path, line);
+        }
         if in_archive || !preview_open {
             self.preview.sync(None, target, now);
         } else {
@@ -16573,6 +16976,9 @@ impl App {
                 // …and neither is the trash's column: the parent beside the
                 // trash is a real directory, whose rows want their linemode.
                 notes: None,
+                // Beside a search's hits it is the root folder, whose rows are
+                // names.
+                paths: false,
                 // The walk measures the directory you are in, not the one
                 // above it — and the parent column's linemode is off anyway.
                 folders: None,
@@ -16613,12 +17019,21 @@ impl App {
             usage: self.usage.as_ref().filter(|u| u.is_about(&cwd_now)),
             // PLAN §7.4: in the trash the column is where each row came from,
             // which is the fact the view is read for.
-            notes: self.tab().trash.is_some().then_some(&self.trash_notes),
+            // …and in a content search's hits it is each file's first
+            // matching line (PLAN §7.2, `crate::hits`).
+            notes: match (&self.tab().trash, &self.tab().hits) {
+                (Some(_), _) => Some(&self.trash_notes),
+                (None, Some(view)) if view.mode() == search::Mode::Content => Some(&view.notes),
+                _ => None,
+            },
+            paths: self.tab().hits.is_some(),
+            // Not over a search's hits: the walk is about the root's own
+            // children, and a hit's name is a path, not one of them.
             folders: self
                 .folders
                 .is_about(&cwd_now, self.tabs.active_index())
                 .then_some(&self.folders)
-                .filter(|f| !f.is_empty()),
+                .filter(|f| !f.is_empty() && self.tab().hits.is_none()),
             // An empty trash says how long it keeps things, since there is no
             // chip to hover while there is nothing in it.
             empty_note: keep_note.as_deref(),
@@ -17917,7 +18332,10 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
         ],
         OverlayGeom::Search(_) => vec![
             Hint::inert("↑↓", "move"),
-            Hint::new("Enter", "go there", C::OverlaySubmit),
+            // Every hit into the pane, or the highlighted one's folder
+            // (PLAN §7.2).
+            Hint::new("Enter", "list them", C::OverlaySubmit),
+            Hint::new("Alt+Enter", "go there", C::Reveal),
             // `⟷` and not the shorter `↔`, here and on the help sheet: no
             // face the program ships draws `↔`, so it would be a box
             // (`icons`' glyph test holds the line).
@@ -18779,6 +19197,9 @@ mod tests {
 
     /// `A`, driven through the prompt, the card and the job.
     mod compress;
+
+    /// A search's hits as the tab's listing (PLAN §7.2).
+    mod hits;
 
     /// `rclone://` from every door, and the mount card's cloud rows.
     mod cloud;

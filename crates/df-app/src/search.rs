@@ -27,6 +27,19 @@
 //! ([`Search::seed`]). "Not here" becomes "then everywhere below here" without
 //! retyping anything.
 //!
+//! A search ends in one of two keys. **`Enter` commits the whole hit set** to
+//! the tab as its listing ([`crate::hits`]), with the cursor on the
+//! highlighted hit. A card can answer "where is it", and everything else
+//! (select, yank, trash, rename, drag out, sort) is done in the list pane, so
+//! the results go there instead of the card growing a second copy of those
+//! verbs. `Enter` does not wait for the walk to finish ([`Search::commit`]).
+//! The process moves into the listing with the rows it has found and keeps
+//! filling it. An empty field in names mode commits everything under the
+//! root, which is the folder flattened. **`Alt+Enter`** is what `Enter` used
+//! to do: it goes to the highlighted hit's folder with the cursor on the hit.
+//! From the listing, `s`, `S` or the chip at the end of the breadcrumb bring
+//! the query back here to be refined, and `Enter` commits it again.
+//!
 //! ## The shape of a running search
 //!
 //! One process at a time, killed and respawned when the query changes — or
@@ -409,6 +422,27 @@ impl Search {
         true
     }
 
+    /// `Enter`: the field says what is wanted, and it is wanted now.
+    ///
+    /// The debounce is for a query still being typed, and one being committed
+    /// is not — so a pending query is spawned on the spot rather than 150 ms
+    /// later, into a listing that would sit empty for no reason. An empty
+    /// field in names mode is a question too: fd with no pattern lists
+    /// everything under the root, which is the folder flattened
+    /// ([`crate::hits`]). Contents mode has no such reading — rg with an
+    /// empty pattern is every line of every file — so there an empty field
+    /// runs nothing.
+    pub fn commit(&mut self) {
+        if let Some((query, _)) = self.pending.take() {
+            self.spawn(&query);
+            return;
+        }
+        let flatten = self.mode == Mode::Names && self.query().is_empty();
+        if flatten && self.running.is_none() && self.hits.is_empty() {
+            self.spawn("");
+        }
+    }
+
     /// `Ctrl+s`: stop the process, keep what it found.
     pub fn cancel(&mut self) {
         self.pending = None;
@@ -712,6 +746,54 @@ fn walk_tags(
     }
     let _ = out.send((generation, Message::Done { capped }));
     notify();
+}
+
+/// The far end of a search's channel, held by a test in place of fd or rg.
+///
+/// A real walk is a test that depends on what the disk returns and how fast;
+/// this is the same channel the reader thread writes, so what a test sends
+/// arrives through exactly the [`Search::poll`] a real batch does.
+#[cfg(test)]
+pub(crate) struct Feed {
+    generation: u64,
+    tx: Sender<(u64, Message)>,
+}
+
+#[cfg(test)]
+impl Feed {
+    /// One batch, as the reader sends one.
+    pub(crate) fn hits(&self, hits: Vec<Hit>) {
+        let _ = self.tx.send((self.generation, Message::Hits(hits)));
+    }
+
+    /// The process ended, cut off at the cap or not.
+    pub(crate) fn done(&self, capped: bool) {
+        let _ = self.tx.send((self.generation, Message::Done { capped }));
+    }
+}
+
+#[cfg(test)]
+impl Search {
+    /// Stand a [`Feed`] in for the process: the search is running, and its
+    /// results are whatever the test sends.
+    pub(crate) fn feed(&mut self) -> Feed {
+        self.pending = None;
+        self.hits.clear();
+        self.done = false;
+        self.capped = false;
+        self.generation += 1;
+        let (tx, rx) = unbounded();
+        self.running = Some(Running {
+            generation: self.generation,
+            child: Arc::new(Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+            results: rx,
+        });
+        Feed {
+            generation: self.generation,
+            tx,
+        }
+    }
 }
 
 /// The command line for one search.
@@ -1194,6 +1276,39 @@ mod tests {
         assert_eq!(search.mode, Mode::Names);
         assert!(!search.searching());
         assert_eq!(search.deadline(now), None);
+    }
+
+    /// `Enter` does not wait out the debounce: a pending query runs on the
+    /// spot, and nothing is left owed a frame.
+    #[test]
+    fn a_commit_runs_the_pending_query_now() {
+        let now = Instant::now();
+        let tree = df_core::test_support::TempTree::new("search-commit");
+        let mut search = Search::new(Mode::Names, tree.path(), false, silent());
+        search.seed("delightfile-no-such-name", now);
+        assert_eq!(search.deadline(now), Some(DEBOUNCE));
+        search.commit();
+        assert_eq!(search.deadline(now), None, "the debounce is spent");
+        // Running, or — on a machine with no fd — failed and saying so.
+        assert!(search.searching() || search.error.is_some());
+    }
+
+    /// An empty field is a question in names mode — everything under the
+    /// root, the folder flattened — and none in contents mode, where rg
+    /// would match every line of every file.
+    #[test]
+    fn an_empty_commit_flattens_names_and_asks_rg_nothing() {
+        let tree = df_core::test_support::TempTree::new("search-flatten");
+        let root = tree.path();
+        let mut names = Search::new(Mode::Names, root, false, silent());
+        names.commit();
+        assert!(
+            names.searching() || names.error.is_some(),
+            "fd was asked for everything"
+        );
+        let mut content = Search::new(Mode::Content, root, false, silent());
+        content.commit();
+        assert!(!content.searching() && content.error.is_none());
     }
 
     /// The filter's hand-over: the letters are in the field, the caret is

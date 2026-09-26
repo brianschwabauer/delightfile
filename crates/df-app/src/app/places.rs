@@ -342,6 +342,7 @@ pub(super) fn refusal(command: Command, here: Option<Virtual>) -> Option<&'stati
     match here {
         Some(Virtual::Archive) => Some("Only a folder can be pinned — this is inside an archive"),
         Some(Virtual::Trash) => Some("The trash is not a folder to pin — g t goes there"),
+        Some(Virtual::Hits) => Some("Search results are not a folder to pin — ← goes back to it"),
         Some(Virtual::Remote) | None => None,
     }
 }
@@ -684,11 +685,13 @@ mod tests {
         assert!(!with_home[0].fallback);
     }
 
-    /// `g b` is refused inside an archive and in the trash, and nowhere else.
+    /// `g b` is refused inside an archive, in the trash and in a search's hits,
+    /// and nowhere else.
     #[test]
     fn a_pin_is_refused_where_there_is_no_folder() {
         assert!(refusal(Command::PinToggle, Some(Virtual::Archive)).is_some());
         assert!(refusal(Command::PinToggle, Some(Virtual::Trash)).is_some());
+        assert!(refusal(Command::PinToggle, Some(Virtual::Hits)).is_some());
         assert_eq!(refusal(Command::PinToggle, Some(Virtual::Remote)), None);
         assert_eq!(refusal(Command::PinToggle, None), None);
         assert_eq!(refusal(Command::Trash, Some(Virtual::Archive)), None);

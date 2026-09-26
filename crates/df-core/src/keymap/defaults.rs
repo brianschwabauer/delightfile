@@ -187,6 +187,11 @@ pub(super) fn build() -> Registry {
         // means something closer to hand — here, walking into a folder.
         (Files, "ctrl+enter",  C::Choose,
             "Choose — what the dialog's Select / Choose folder / Save button does", Always),
+        // No yazi ancestor: a search's hits are rows from all over a tree
+        // (PLAN §7.2), and this is the one row verb that is about *where* the
+        // file is rather than what it is. `Alt` because `Enter` is open,
+        // `Shift+Enter` open-with and `Ctrl+Enter` the dialog's button.
+        (Files, "alt+enter",   C::Reveal,          "Go to this file's folder", Always),
 
         // ── Files: the clipboard and the file operations (§5) ────────────────
         (Files, "y",      C::Yank,              "Yank (copy)",                         Always),
@@ -405,6 +410,10 @@ pub(super) fn build() -> Registry {
         // The search panel stacks on Pick; this puts ctrl+s on its help sheet.
         (Pick, "ctrl+s", C::CancelSearch,  "Cancel the search", Always),
         (Pick, "tab",    C::SearchToggle,  "Names ⟷ contents",  Always),
+        // `Enter` in the search panel lists the hits in the pane; this is the
+        // one-hit answer it used to be — the hit's folder, the cursor on it —
+        // and the same key that answers it from the listing.
+        (Pick, "alt+enter", C::Reveal,     "Go to this file's folder", Always),
 
         // ── Tasks (`w`) ─────────────────────────────────────────────────────
         (Tasks, "esc",    C::OverlayClose, "Close the task manager", Always),

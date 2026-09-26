@@ -732,6 +732,33 @@ impl Pane {
         ));
     }
 
+    /// Open `path` at `line` (1-based) the first time it is shown: a content
+    /// search's hit, which is read for the line it matched on (PLAN §7.2).
+    ///
+    /// Only a file the pane has no place for yet. One it remembers opens where
+    /// the reader left it, as every file does: that position is the more
+    /// recent thing somebody chose. Written into the same memory
+    /// [`Pane::sync`] reads a place from, so there is one way a file opens
+    /// part way down and not two.
+    pub fn open_at(&mut self, path: &Path, line: usize) {
+        if self.places.recall(path).is_none() {
+            self.places.remember(
+                path.to_path_buf(),
+                Spot {
+                    scroll: line.saturating_sub(1),
+                    page: 0,
+                },
+            );
+        }
+    }
+
+    /// The first line drawn ([`Pane::scroll`]'s field), for the tests that
+    /// check where a file opened.
+    #[cfg(test)]
+    pub fn scroll(&self) -> usize {
+        self.scroll
+    }
+
     /// The path the live request is for, if any: what the pane has been asked
     /// to show, whether or not it has arrived.
     #[cfg(test)]

@@ -138,6 +138,11 @@ commands! {
     // because `Enter` walks into a folder and a folder dialog still has to be
     // answerable without the mouse. Nothing at all outside a picker.
     Choose => "choose",
+    // `Alt+Enter`: go to the folder the file under the cursor is in, with the
+    // cursor on it. Only a search's hits have rows that are somewhere else —
+    // in the listing and in the panel alike — so everywhere else it says the
+    // file is already in its folder.
+    Reveal => "reveal",
     Yank => "yank",
     YankCut => "yank-cut",
     Unyank => "unyank",
