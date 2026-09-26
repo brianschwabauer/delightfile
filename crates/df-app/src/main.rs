@@ -26,6 +26,8 @@ mod fuzzy;
 mod graphics;
 mod grid;
 mod help;
+/// The undo history card (PLAN §5).
+mod history;
 mod hits;
 mod hover;
 mod icons;

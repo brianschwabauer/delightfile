@@ -285,12 +285,14 @@ pub enum Surface {
     Search,
     /// The `~` / `F1` sheet's lines.
     Help,
+    /// The undo history card ([`crate::history`]).
+    History,
 }
 
 impl Surface {
     /// Every card with a bar, for the frame-request list and the wake-ups
     /// to walk: a card added here is asked about by both.
-    pub const ALL: [Surface; 12] = [
+    pub const ALL: [Surface; 13] = [
         Surface::Palette,
         Surface::Tasks,
         Surface::Mounts,
@@ -303,6 +305,7 @@ impl Surface {
         Surface::WhichKey,
         Surface::Search,
         Surface::Help,
+        Surface::History,
     ];
 
     /// The bar's name in `DF_FRAME_LOG`, which says whose fade is holding
@@ -321,6 +324,7 @@ impl Surface {
             Surface::WhichKey => "which-bar",
             Surface::Search => "search-bar",
             Surface::Help => "help-bar",
+            Surface::History => "history-bar",
         }
     }
 }

@@ -90,6 +90,11 @@ commands! {
     AppMenu => "app-menu",
     Undo => "undo",
     Redo => "redo",
+    // The journal as a list: every step `u` could take back and `U` could do
+    // again, and a way to walk any number of them at once. **Unbound by
+    // default** — the app menu's Edit ▸ Undo history… and the palette are its
+    // doors, and a `keymap.toml` line puts it on a key.
+    UndoHistory => "undo-history",
 
     // ── Cursor & navigation (PLAN §4.1) ───────────────────────────────────
     CursorUp => "cursor-up",

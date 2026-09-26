@@ -993,6 +993,7 @@ mod tests {
         for c in [
             C::Undo,
             C::Redo,
+            C::UndoHistory,
             C::CommandPalette,
             C::Open,
             C::EnterDirectory,

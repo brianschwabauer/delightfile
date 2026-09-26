@@ -54,6 +54,7 @@ use crate::focus::{escape_rung, EscapeRung, EscapeState, Hovered, Rightward};
 use crate::graphics::{Gfx, GfxError};
 use crate::grid::{self, GridView, Thumbs};
 use crate::help::{self, Help};
+use crate::history::{self, HistoryCard};
 use crate::hover::Hovers;
 use crate::input::{click_outside_action, ClickOutside, Prompt, PromptKind};
 use crate::menu::{self, Menu};
@@ -531,6 +532,8 @@ enum OverlayGeom {
     /// dialog is: it carries a row rectangle per visible hit and the enum is
     /// otherwise a few words wide.
     Search(Box<SearchGeom>),
+    /// The undo history card, and the journal's rows it was measured for.
+    History(history::Geometry),
 }
 
 impl OverlayGeom {
@@ -546,6 +549,7 @@ impl OverlayGeom {
             OverlayGeom::Finder(g) => g.card,
             OverlayGeom::Mounts(g) => g.card,
             OverlayGeom::Search(g) => g.card,
+            OverlayGeom::History(g) => g.card,
         }
     }
 
@@ -571,7 +575,8 @@ impl OverlayGeom {
             OverlayGeom::Picker(..)
             | OverlayGeom::Panel(..)
             | OverlayGeom::Spot(_)
-            | OverlayGeom::Search(_) => false,
+            | OverlayGeom::Search(_)
+            | OverlayGeom::History(_) => false,
         }
     }
 
@@ -589,6 +594,7 @@ impl OverlayGeom {
             OverlayGeom::Finder(_) => WheelOwner::Card(Surface::Palette),
             OverlayGeom::Mounts(_) => WheelOwner::Card(Surface::Mounts),
             OverlayGeom::Search(_) => WheelOwner::Card(Surface::Search),
+            OverlayGeom::History(_) => WheelOwner::Card(Surface::History),
         }
     }
 
@@ -618,6 +624,7 @@ impl OverlayGeom {
             OverlayGeom::Finder(g) => g.close,
             OverlayGeom::Mounts(g) => g.close,
             OverlayGeom::Search(g) => g.close,
+            OverlayGeom::History(g) => Some(g.close()),
         }
     }
 
@@ -638,6 +645,7 @@ impl OverlayGeom {
             OverlayGeom::Sync(g) => g.band.map(|band| (band, Surface::Sync)),
             OverlayGeom::Spot(g) => g.band.map(|band| (band, Surface::Spot)),
             OverlayGeom::Search(g) => g.band.map(|band| (band, Surface::Search)),
+            OverlayGeom::History(g) => g.band.map(|band| (band, Surface::History)),
             OverlayGeom::Bulk(_) => None,
         }
     }
@@ -687,6 +695,7 @@ impl OverlayGeom {
                 .map(overlay::switch_control)
                 .or_else(|| geometry.row_at(pos).map(Control::PanelRow)),
             OverlayGeom::Mounts(geometry) => geometry.row_at(pos).map(Control::PanelRow),
+            OverlayGeom::History(geometry) => geometry.row_at(pos).map(Control::PanelRow),
             // The spot has two kinds of target on one card — nine permission
             // chips and the checksum's button — so it does its own hit test.
             OverlayGeom::Spot(geometry) => geometry.hit(pos),
@@ -717,6 +726,9 @@ impl OverlayGeom {
                 Some(geometry.switch_rect(search::Mode::Content))
             }
             (OverlayGeom::Mounts(geometry), Control::PanelRow(i)) => geometry.rows.get(i).copied(),
+            (OverlayGeom::History(geometry), Control::PanelRow(i)) => {
+                geometry.rects.get(i).copied()
+            }
             (OverlayGeom::Spot(geometry), control) => geometry.rect_of(control),
             (OverlayGeom::Bulk(geometry), control) => geometry.rect_of(control),
             (OverlayGeom::Sync(geometry), control) => geometry.rect_of(control),
@@ -1530,6 +1542,8 @@ pub struct App {
     picker: Option<Picker>,
     /// `w`'s task panel.
     panel: Option<TaskPanel>,
+    /// The undo history card (`undo-history`).
+    undo_history: Option<HistoryCard>,
     /// `Tab`'s spot panel (PLAN §6).
     spot: Option<Spot>,
     /// The git front end, started the first time something asks it a question.
@@ -2252,6 +2266,7 @@ impl App {
             dialog: None,
             picker: None,
             panel: None,
+            undo_history: None,
             spot: None,
             git: None,
             repo: None,
@@ -4931,7 +4946,8 @@ impl App {
         }
     }
 
-    /// `u` / `Ctrl+Shift+z`. Returns whether it took a step back.
+    /// `u` / `Ctrl+Shift+z`. Returns whether it took a step back, for the undo
+    /// history's walk ([`App::history_submit`]).
     ///
     /// Synchronous: an undo is usually a rename back, and the one case that is
     /// not — deleting what a big copy created — is the price of the journal
@@ -5020,7 +5036,7 @@ impl App {
     }
 
     /// `U`: do again what `u` last took back ([`Journal::redo`]). Returns
-    /// whether it took a step forward.
+    /// whether it took a step forward, for the undo history's walk.
     ///
     /// Synchronous, as [`App::undo`] is and for its reason — and the same
     /// deferral one step further: a redone paste is a copy, made here on this
@@ -5064,6 +5080,62 @@ impl App {
                 self.toasts.error(e.to_string(), now);
                 false
             }
+        }
+    }
+
+    /// The undo history card, which the same command closes again.
+    fn toggle_history(&mut self) {
+        self.undo_history = match self.undo_history.take() {
+            Some(_) => None,
+            None => Some(HistoryCard::new(&history::rows(&self.journal))),
+        };
+        self.sync_context();
+    }
+
+    /// How many rows the undo history lists: both stacks.
+    fn history_len(&self) -> usize {
+        self.journal.len() + self.journal.redo_len()
+    }
+
+    /// `Enter` on the undo history: `u` or `U`, one step at a time, until the
+    /// row under the cursor is on the other side of the line — stopping at
+    /// the first step refused, whose reason is the toast. The card stays up,
+    /// drawn again from the journal as the walk left it.
+    fn history_submit(&mut self, now: Instant) {
+        let rows = history::rows(&self.journal);
+        let Some(walk) = self
+            .undo_history
+            .as_ref()
+            .and_then(|card| history::walk(&rows, card.cursor))
+        else {
+            return;
+        };
+        let (steps, forward) = match walk {
+            history::Walk::Undo(steps) => (steps, false),
+            history::Walk::Redo(steps) => (steps, true),
+        };
+        let mut taken = 0;
+        while taken < steps {
+            let stepped = if forward {
+                self.redo(now)
+            } else {
+                self.undo(now)
+            };
+            if !stepped {
+                break;
+            }
+            taken += 1;
+        }
+        // One step's own toast says what it did. Several say how many, since
+        // the last one's sentence would read as the whole walk — and as a
+        // notice, even forwards: the undo toast's `u` would take back one of
+        // them, not the walk it would be sitting under.
+        if taken == steps && steps > 1 {
+            let verb = if forward { "Redid" } else { "Undid" };
+            self.toasts.notice(
+                format!("{verb} {}", plural(steps, "operation", "operations")),
+                now,
+            );
         }
     }
 
@@ -6233,6 +6305,7 @@ impl App {
             || self.finder.is_some()
             || self.search.is_some()
             || self.mounts.is_some()
+            || self.undo_history.is_some()
     }
 
     /// The context an open surface is matched in. Never stacked on `Files`:
@@ -6254,6 +6327,10 @@ impl App {
             // than growing a table that would be a copy of it.
             Context::Pick
         } else if self.picker.is_some() {
+            Context::Pick
+        } else if self.undo_history.is_some() {
+            // A "choose one of these" card as well: its arrows, its page
+            // keys, `Enter` and `Esc` are `[pick]`'s.
             Context::Pick
         } else if self.spot.is_some() {
             Context::Spot
@@ -6566,6 +6643,11 @@ impl App {
             spot.move_cursor(delta);
             return;
         }
+        let listed = self.history_len();
+        if let Some(card) = &mut self.undo_history {
+            card.move_cursor(delta, listed);
+            return;
+        }
         let rows = self.task_rows();
         if let Some(panel) = &mut self.panel {
             panel.move_cursor(delta, rows.len());
@@ -6597,6 +6679,12 @@ impl App {
             // enough, as many as fit in one that is not.
             let rows = picker.choices.len();
             picker.set_cursor(jump.target(picker.cursor, rows, picker.page()));
+            return;
+        }
+        let rows = self.history_len();
+        if let Some(card) = &mut self.undo_history {
+            let target = jump.target(card.cursor, rows, card.page(rows));
+            card.select(target, rows);
         }
     }
 
@@ -6616,6 +6704,10 @@ impl App {
         }
         if self.spot.is_some() {
             self.spot_action(now);
+            return;
+        }
+        if self.undo_history.is_some() && self.dialog.is_none() && self.picker.is_none() {
+            self.history_submit(now);
             return;
         }
         // The rename card's keyboard `Enter` is its line editor's submit (see
@@ -6697,6 +6789,7 @@ impl App {
         }
         self.picker = None;
         self.panel = None;
+        self.undo_history = None;
         self.finder = None;
         // Dropping the search kills its process — see `search::Running`'s
         // `Drop`. Closing the panel must not leave an `rg` walking a home
@@ -6769,6 +6862,17 @@ impl App {
                 detail: plural(n, "item", "items"),
                 kind: finder::Kind::Command,
                 choice: Choice::Run(Command::EmptyTrash),
+            });
+        }
+        // The undo history, which has no key by default and so no registry
+        // row to be found under — unless a `keymap.toml` gave it one, when it
+        // is already in the list with its chord.
+        if !seen.contains(&Command::UndoHistory.id()) {
+            rows.push(finder::Row {
+                label: "Undo history…".to_string(),
+                detail: String::new(),
+                kind: finder::Kind::Command,
+                choice: Choice::Run(Command::UndoHistory),
             });
         }
         // The view toggle, which has no registry row to be found under — see
@@ -10020,6 +10124,7 @@ impl App {
             C::Redo => {
                 self.redo(now);
             }
+            C::UndoHistory => self.toggle_history(),
             C::TasksShow => self.toggle_panel(),
             C::ToggleView => self.toggle_view(now),
             C::ViewScaleUp => self.step_scale(true, now),
@@ -10921,6 +11026,14 @@ impl App {
             let (card, rects) = panel::geometry(area, bar_top, rows.len());
             return Some(OverlayGeom::Panel(card, rects, rows));
         }
+        if let Some(card) = &self.undo_history {
+            // Read from the journal every frame, as the task panel's rows are
+            // read from the engine: the card keeps a cursor, not the journal.
+            let rows = history::rows(&self.journal);
+            return Some(OverlayGeom::History(history::geometry(
+                area, bar_top, card, rows,
+            )));
+        }
         if let Some(card) = &self.mounts {
             return Some(OverlayGeom::Mounts(crate::mounts::geometry(area, card)));
         }
@@ -10965,6 +11078,7 @@ impl App {
             OverlayGeom::Finder(_) => self.finder.is_some(),
             OverlayGeom::Mounts(_) => self.mounts.is_some(),
             OverlayGeom::Search(_) => self.search.is_some(),
+            OverlayGeom::History(_) => self.undo_history.is_some(),
         }
     }
 
@@ -11156,6 +11270,20 @@ impl App {
                 if let Some(picker) = &mut self.picker {
                     picker.set_cursor(picker.first + index);
                     self.submit_overlay(page, now);
+                    return;
+                }
+                // The undo history: a click is the cursor, and a second one
+                // is `Enter` on the row the first put it on. Not the first
+                // click alone, as the picker's is — a walk of the journal is
+                // a dozen files moved, and a slipped click must not be one.
+                if self.undo_history.is_some() {
+                    let listed = self.history_len();
+                    if let Some(card) = &mut self.undo_history {
+                        card.select(card.first + index, listed);
+                    }
+                    if double {
+                        self.history_submit(now);
+                    }
                     return;
                 }
                 let rows = self.task_rows();
@@ -11775,6 +11903,9 @@ impl App {
             (Surface::Search, Some(OverlayGeom::Search(geometry)), _) => {
                 overlay::search_bar(geometry, self.search.as_ref()?)
             }
+            (Surface::History, Some(OverlayGeom::History(geometry)), _) => {
+                history::bar(geometry, self.undo_history.as_ref()?)
+            }
             (Surface::Tray, _, _) => crate::tray::bar(tray, self.tray_first, self.clipboard.len()),
             (Surface::WhichKey, _, _) => crate::whichkey::bar(which?),
             (Surface::Help, _, _) => {
@@ -11838,6 +11969,12 @@ impl App {
                 .spot
                 .as_mut()
                 .is_some_and(|spot| spot.scroll_to(first, now)),
+            Bar::Card(Surface::History) => {
+                let rows = self.history_len();
+                self.undo_history
+                    .as_mut()
+                    .is_some_and(|card| card.scroll_to(row, rows, now))
+            }
             Bar::Card(Surface::Confirm | Surface::Conflict | Surface::Sync) => {
                 match &mut self.dialog {
                     Some(Dialog::Confirm(confirm)) => confirm.scroll_to(row, now),
@@ -11958,6 +12095,11 @@ impl App {
             Bar::Card(Surface::Spot) => {
                 if let Some(spot) = &mut self.spot {
                     spot.let_go(now);
+                }
+            }
+            Bar::Card(Surface::History) => {
+                if let Some(card) = &mut self.undo_history {
+                    card.let_go(now);
                 }
             }
             Bar::Card(Surface::Confirm | Surface::Conflict | Surface::Sync) => {
@@ -12948,6 +13090,12 @@ impl App {
                 .spot
                 .as_mut()
                 .is_some_and(|spot| spot.wheel(points, now)),
+            WheelOwner::Card(Surface::History) => {
+                let rows = self.history_len();
+                self.undo_history
+                    .as_mut()
+                    .is_some_and(|card| card.wheel(points, rows, now))
+            }
             WheelOwner::Card(Surface::Sync) => self.sync_wheel(points),
             WheelOwner::Card(Surface::Confirm | Surface::Conflict) | WheelOwner::Bulk => {
                 match &mut self.dialog {
@@ -16953,6 +17101,15 @@ impl App {
         {
             picker.fit(rects.len(), now);
         }
+        // The undo history, told its rows before how many it showed, so a
+        // step walked — or a job journalled under it — is the list rebuilt
+        // rather than a scroll ([`HistoryCard::tick`]).
+        if let (Some(card), Some(OverlayGeom::History(geometry))) =
+            (&mut self.undo_history, &overlay)
+        {
+            card.tick(&geometry.rows);
+            card.fit(geometry.rects.len(), geometry.rows.len(), now);
+        }
 
         // ── The clock-driven bits, ticked once, before anything is drawn ────
         self.toasts.tick(now);
@@ -17637,6 +17794,9 @@ impl App {
         if let (Some(OverlayGeom::Search(geometry)), Some(search)) = (&overlay, &self.search) {
             overlay::paint_search(&paint, geometry, search, &self.hovers, &self.ripples);
         }
+        if let (Some(OverlayGeom::History(geometry)), Some(card)) = (&overlay, &self.undo_history) {
+            history::paint(&paint, geometry, card, &self.hovers, &self.ripples);
+        }
         if let (Some(OverlayGeom::Panel(card, rects, _)), Some(panel)) = (&overlay, &self.panel) {
             panel::paint(
                 &paint,
@@ -18084,6 +18244,16 @@ impl App {
                 .min(),
             // …and a scrolled menu's, by the same rule.
             self.menu.as_ref().and_then(|menu| menu.bar_deadline(now)),
+            // …and the undo history's, the instant the next of its "3 min
+            // ago"s would read differently: one wake-up a minute at most, and
+            // none at all while it is shut.
+            self.undo_history.as_ref().and_then(|_| {
+                self.journal
+                    .undoable()
+                    .chain(self.journal.redoable())
+                    .map(|(_, at)| history::next_change(at, now))
+                    .min()
+            }),
             // …and the cards', by the same rule.
             crate::scrollbar::Surface::ALL
                 .into_iter()
@@ -18126,6 +18296,10 @@ impl App {
             (Surface::Spot, _) => self.spot.as_ref().and_then(Spot::scrolled_at),
             (Surface::Search, _) => self.search.as_ref().and_then(Search::scrolled_at),
             (Surface::Help, _) => self.help.as_ref().and_then(Help::scrolled_at),
+            (Surface::History, _) => self
+                .undo_history
+                .as_ref()
+                .and_then(HistoryCard::scrolled_at),
             // The tray forgets its linger while it is shut.
             (Surface::Tray, _) => self.tray_bar.scrolled_at(),
             // Only while the card is up: one on its way out fades its bar
@@ -18489,6 +18663,23 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
         OverlayGeom::Picker(..) => vec![
             Hint::inert("↑↓", "choose"),
             Hint::new("Enter", "open", C::OverlaySubmit),
+            Hint::new("Esc", "close", C::OverlayClose),
+        ],
+        // What `Enter` does depends on which side of the line the cursor is,
+        // and an empty journal has no `Enter` to offer at all.
+        OverlayGeom::History(geometry) if geometry.rows.is_empty() => {
+            vec![Hint::new("Esc", "close", C::OverlayClose)]
+        }
+        OverlayGeom::History(geometry) => vec![
+            Hint::new(
+                "Enter",
+                if geometry.on_redo {
+                    "redo to here"
+                } else {
+                    "undo to here"
+                },
+                C::OverlaySubmit,
+            ),
             Hint::new("Esc", "close", C::OverlayClose),
         ],
         OverlayGeom::Panel(_, _, _) => vec![
@@ -19385,7 +19576,7 @@ mod tests {
     /// dots and the `m t` column.
     mod tagging;
 
-    /// `U`: redo through the keys, and the app menu's greys.
+    /// `U`, and the undo history card.
     mod undo;
 
     /// **The bug this fixes**: `Ctrl+u` is in two tables — the help sheet pages
