@@ -263,3 +263,53 @@ fn a_folder_rows_menu_opens_a_terminal_in_that_folder() {
         .iter()
         .all(|item| item.action != menu::Action::TerminalRow));
 }
+
+/// A search's hits are a listing, not a folder: `Ctrl+t` over them is
+/// refused with the sentence the other virtual listings get, the folder
+/// menu greys its row, and nothing is started.
+#[test]
+fn ctrl_t_is_refused_in_a_search_s_hits() {
+    let mut app = Fixture::with_folders("terminal-hits", &["a.txt"], &["src"]);
+    std::fs::write(app.files.join("src/foo.txt"), b"foo\n").expect("write the tree");
+    let out = stub_terminal(&mut app);
+    let ctx = egui::Context::default();
+    run_frame(&mut app, &ctx, Vec::new());
+
+    let now = Instant::now();
+    let root = app.cwd();
+    app.run(Command::SearchName, 10, now);
+    let search = app.search.as_mut().expect("the panel opened");
+    search.seed("foo", now);
+    let feed = search.feed();
+    feed.hits(vec![search::parse(
+        search::Mode::Names,
+        &root,
+        "foo",
+        "src/foo.txt",
+    )
+    .expect("a hit")]);
+    feed.done(false);
+    app.poll_workers();
+    app.overlay_key(Chord::plain(Key::Enter), 10, now);
+    assert_eq!(app.tab().virtual_kind(), Some(Virtual::Hits));
+
+    let refusal = Some("Terminals open on local folders");
+    assert_eq!(app.refusal(Command::TerminalHere), refusal);
+    ctrl_t(&mut app, &ctx);
+    assert_eq!(toast_text(&app), refusal);
+
+    app.open_folder_menu(egui::pos2(400.0, 400.0));
+    let row = app
+        .menu
+        .as_ref()
+        .expect("a menu is up")
+        .items
+        .iter()
+        .find(|item| item.label == "Open terminal here")
+        .cloned()
+        .expect("the row");
+    assert!(!row.enabled, "live over the hits");
+
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!out.exists(), "a terminal was opened over the hits");
+}

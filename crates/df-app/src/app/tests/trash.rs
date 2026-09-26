@@ -435,3 +435,60 @@ fn the_clock_asks_for_no_frame_before_the_first() {
     app.logged_first_frame = true;
     assert_eq!(app.trash_clock_deadline(now), Some(Duration::ZERO));
 }
+
+/// `m t` in the trash view: the linemode is the tags one, but the trash's
+/// own column — where each row came from — still wins it, as it wins every
+/// linemode, since a trashed row carries no tags to show; and the chip
+/// beside the counter is still up and weighing, beside a column it does
+/// not share a pixel with.
+#[test]
+fn m_t_in_the_trash_leaves_the_trash_its_column_and_its_chip() {
+    let mut app = Fixture::new("trash-linemode-tags", &["a.txt"]);
+    let trash = sandbox_trash(&app);
+    let items = vec![
+        plant(&trash, "one.txt", days_ago(1)),
+        plant(&trash, "two.txt", days_ago(2)),
+    ];
+    let notes = crate::trashview::notes(&items);
+    app.trash_home = Some(trash.root().to_path_buf());
+    app.run(Command::OpenTrash, 10, Instant::now());
+    assert!(app.tab().trash.is_some(), "g t did not open the trash");
+    app.run(Command::LinemodeTags, 10, Instant::now());
+    assert_eq!(app.mgr.linemode, LineMode::Tags);
+    assert!(
+        chip(&app).is_some_and(|label| label.starts_with("2 items")),
+        "{:?}",
+        chip(&app)
+    );
+
+    let ctx = egui::Context::default();
+    run_frame(&mut app, &ctx, Vec::new());
+    let input = egui::RawInput {
+        screen_rect: Some(screen()),
+        focused: true,
+        ..Default::default()
+    };
+    let output = ctx.run_ui(input, |ui| app.frame(ui));
+    let painted = painted_text(&output.shapes);
+    let label = chip(&app).expect("the chip");
+    let (_, chip_at) = painted
+        .iter()
+        .find(|(text, _)| *text == label)
+        .expect("the chip is painted");
+    for name in ["one.txt", "two.txt"] {
+        let dir = &app.tab().cwd.dir;
+        let row = dir.row(dir.position_of(name).expect("a row")).expect("row");
+        assert_eq!(
+            crate::format::linemode_text(row, LineMode::Tags),
+            "",
+            "a trashed row carries no tags"
+        );
+        let rect = row_rect(&app, dir.position_of(name).expect("a row"));
+        let note = notes.get(name).expect("a note");
+        let (_, at) = painted
+            .iter()
+            .find(|(text, at)| text == note && rect.intersects(*at))
+            .unwrap_or_else(|| panic!("{name}'s row does not say {note}"));
+        assert!(!at.intersects(*chip_at), "the column runs under the chip");
+    }
+}

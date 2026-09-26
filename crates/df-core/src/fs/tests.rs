@@ -1887,3 +1887,47 @@ fn a_name_with_no_row_yet_is_in_play_when_the_filter_would_show_it() {
     );
     assert_eq!(state.selected_count(), 1);
 }
+
+/// `f #red` hides by tag, so the marks it hides are judged by their rows'
+/// tags, not their names: `Ctrl+a`, `f #red`, `d` acts on the red rows on
+/// screen — none of which has "#red" in its name — and on nothing else, and
+/// a name with no row yet has no tags to show it by.
+#[test]
+fn a_tag_query_judges_the_marks_by_their_rows_tags() {
+    let tagged = |name: &str, tags: &[&str]| Entry {
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        ..file(name)
+    };
+    let mut state = loaded_state(vec![
+        tagged("a.txt", &["Red"]),
+        tagged("b.txt", &["blue"]),
+        tagged("c.txt", &["redo", "work"]),
+        tagged("red.txt", &[]),
+    ]);
+    state.select_all();
+    state.set_filter("#red");
+    let shown: Vec<&str> = state.rows().map(|(e, _)| e.name.as_str()).collect();
+    assert_eq!(shown, ["a.txt", "c.txt"]);
+    assert_eq!(state.selected_count(), 2);
+    assert_eq!(
+        state.selected_paths(),
+        vec![
+            PathBuf::from("/fixture/a.txt"),
+            PathBuf::from("/fixture/c.txt")
+        ]
+    );
+    assert!(state.acts_on("a.txt"));
+    assert!(!state.acts_on("red.txt"), "a red name is not a red tag");
+    assert!(state.is_selected("b.txt"), "the hidden mark stays");
+
+    state.clear_filter();
+    assert_eq!(state.selected_count(), 4, "every mark back in play");
+
+    state.set_filter("#red");
+    state.select_names(["a.txt".to_string(), "new.txt".to_string()]);
+    assert_eq!(
+        state.selected_paths(),
+        vec![PathBuf::from("/fixture/a.txt")],
+        "no row, no tags to be red by"
+    );
+}

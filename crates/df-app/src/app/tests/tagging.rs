@@ -378,3 +378,151 @@ fn the_menus_offer_tags_on_local_files() {
     assert!(tags.enabled);
     assert_eq!(tags.action, menu::Action::Run(Command::Tag));
 }
+
+// ── In a search's hits ──────────────────────────────────────────────────────
+
+/// One name in three folders: what a names search for `foo` finds in
+/// [`hits_fixture`].
+const FOOS: [&str; 3] = ["src/foo.txt", "src/deep/foo.txt", "docs/foo.txt"];
+
+/// A fixture with [`FOOS`] under it, whose files can hold tags, or `None` on
+/// a machine whose `$TMPDIR` cannot.
+fn hits_fixture(name: &str) -> Option<Fixture> {
+    let app = Fixture::with_folders(name, &["a.txt"], &["src/deep", "docs"]);
+    for file in FOOS {
+        std::fs::write(app.files.join(file), b"foo\n").expect("write the tree");
+    }
+    let probe = app.files.join("a.txt");
+    match file_tags::write(&probe, &list(&["probe"])) {
+        Ok(()) => {
+            file_tags::write(&probe, &[]).expect("untag the probe");
+            Some(app)
+        }
+        Err(e) => {
+            eprintln!("skipping: {} holds no tags ({e})", app.files.display());
+            None
+        }
+    }
+}
+
+/// `names`, relative to the folder on screen, fed to the `s` panel as fd
+/// prints them and committed with `Enter`: the tab's listing is their hits.
+fn list_hits(app: &mut App, names: &[&str]) {
+    let now = Instant::now();
+    let root = app.cwd();
+    app.run(Command::SearchName, 10, now);
+    let search = app.search.as_mut().expect("the panel opened");
+    search.seed("foo", now);
+    let feed = search.feed();
+    feed.hits(
+        names
+            .iter()
+            .map(|name| search::parse(search::Mode::Names, &root, "foo", name).expect("a hit"))
+            .collect(),
+    );
+    feed.done(false);
+    app.poll_workers();
+    app.overlay_key(Chord::plain(Key::Enter), 10, now);
+    assert_eq!(app.tab().virtual_kind(), Some(Virtual::Hits));
+}
+
+/// A hit is a file at its own path, so its row carries the tags the file
+/// does — read by the search's worker as a scan reads them — and wears their
+/// dots after its path; `f #red` narrows the hits to the red ones, and a
+/// mark on a hit it hides stays on it but is not acted on until the query
+/// is cleared.
+#[test]
+fn a_hit_wears_its_tags_and_f_hash_filters_the_hits() {
+    let Some(mut app) = hits_fixture("tags-hits-dots") else {
+        return;
+    };
+    let root = app.files.clone();
+    file_tags::write(&root.join("src/foo.txt"), &list(&["red", "work"])).expect("tag");
+    list_hits(&mut app, &FOOS);
+
+    assert_eq!(entry_tags(&app, "src/foo.txt"), ["red", "work"]);
+    assert!(entry_tags(&app, "docs/foo.txt").is_empty());
+    let dir = &app.tab().cwd.dir;
+    let row = dir
+        .row(dir.position_of("src/foo.txt").expect("row"))
+        .expect("row");
+    assert_eq!(
+        app.tag_colors.dots(&row.tags, &app.palette),
+        vec![app.palette.red],
+        "one dot, red"
+    );
+    // The row paints its path and its dots without trouble.
+    let ctx = egui::Context::default();
+    run_frame(&mut app, &ctx, Vec::new());
+
+    app.run(Command::SelectAll, 10, Instant::now());
+    app.dir().set_filter("#red");
+    let shown: Vec<String> = app
+        .tab()
+        .cwd
+        .dir
+        .rows()
+        .map(|(entry, _)| entry.name.clone())
+        .collect();
+    assert_eq!(shown, ["src/foo.txt"]);
+    assert_eq!(app.tab().cwd.dir.selected_count(), 1);
+    assert_eq!(
+        app.tab().cwd.dir.selected_paths(),
+        vec![root.join("src/foo.txt")],
+        "only the red hit is acted on"
+    );
+    assert!(
+        app.tab().cwd.dir.is_selected("docs/foo.txt"),
+        "its mark stays"
+    );
+    app.dir().clear_filter();
+    assert_eq!(app.tab().cwd.dir.selected_count(), 3);
+}
+
+/// `T` in a search's hits is let through — the rows are files on this disk —
+/// and tags the file under the cursor at its own path, two folders down, and
+/// none of the others with its name; its row wears the tag at once, and `u`
+/// takes it off the file and the row again.
+#[test]
+fn t_in_the_hits_tags_the_file_at_its_real_path() {
+    let Some(mut app) = hits_fixture("tags-hits-t") else {
+        return;
+    };
+    let root = app.files.clone();
+    list_hits(&mut app, &FOOS);
+    assert_eq!(
+        app.refusal(Command::Tag),
+        None,
+        "hits are files on this disk"
+    );
+    at(&mut app, "src/deep/foo.txt", false);
+
+    let (title, line) = press_t(&mut app);
+    assert_eq!(title, "Tags of foo.txt:");
+    assert_eq!(line, "");
+    enter(&mut app, "red");
+    let deep = root.join("src/deep/foo.txt");
+    assert_eq!(file_tags::read(&deep), ["red"]);
+    for other in ["src/foo.txt", "docs/foo.txt"] {
+        assert!(
+            file_tags::read(&root.join(other)).is_empty(),
+            "{other} was tagged"
+        );
+    }
+    assert_eq!(entry_tags(&app, "src/deep/foo.txt"), ["red"]);
+    assert_eq!(toast(&app), "Tagged foo.txt red");
+    assert_eq!(
+        app.tab().virtual_kind(),
+        Some(Virtual::Hits),
+        "still the hits"
+    );
+
+    app.run(Command::Undo, 10, Instant::now());
+    assert_eq!(toast(&app), "Restored tags of foo.txt");
+    assert!(file_tags::read(&deep).is_empty());
+    assert!(
+        entry_tags(&app, "src/deep/foo.txt").is_empty(),
+        "the row kept the tag the undo took off"
+    );
+    assert_eq!(app.tab().virtual_kind(), Some(Virtual::Hits));
+}
