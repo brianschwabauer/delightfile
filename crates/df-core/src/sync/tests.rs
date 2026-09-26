@@ -362,6 +362,29 @@ fn a_sync_carries_the_tags() {
     );
 }
 
+/// A folder that is already at the destination is the destination's, and a
+/// sync into it leaves its tags as they are; only a folder the run makes
+/// takes the source folder's.
+#[test]
+fn a_sync_leaves_an_existing_folder_s_tags_alone() {
+    use crate::fs::tags;
+    let t = TempTree::new("sync-tags-existing");
+    let dir = t.dir("src/photos");
+    if !tags::supported_here(&dir) {
+        return;
+    }
+    t.file("src/photos/new.jpg", b"n");
+    tags::write(&dir, &["holiday".to_string()]).unwrap();
+    let there = t.dir("dst/photos");
+    tags::write(&there, &["archive".to_string()]).unwrap();
+    let plan = quick(std::slice::from_ref(&dir), &t.join("dst"));
+    let report =
+        without_reflink(|| execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached()));
+    assert_eq!(report.problems(), 0, "{report:?}");
+    assert_eq!(tags::read(&there), ["archive"]);
+    assert!(there.join("new.jpg").is_file());
+}
+
 #[test]
 fn a_folder_that_could_not_be_read_is_a_problem() {
     use std::os::unix::fs::PermissionsExt;

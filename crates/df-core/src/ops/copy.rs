@@ -13,9 +13,13 @@
 //!
 //! Every `user.*` extended attribute travels with the bytes — the file's tags
 //! ([`crate::fs::tags`]) above all — copied after the contents and before the
-//! rename out of the temporary name, so no final name exists without them. A
-//! destination that keeps no attributes (a FAT card) still gets the file; the
-//! copy only notes that the tags did not land ([`CopyStats::tags_dropped`]).
+//! mode, and on the paths that write through a temporary name (an overwrite,
+//! a durable copy) before the rename out of it, so there no final name exists
+//! without them. A fresh file a paste writes straight to its name gets them
+//! just after its bytes, under that name. A destination that keeps no
+//! attributes (a FAT card) still gets the file; the copy only notes that the
+//! tags did not land ([`CopyStats::tags_dropped`]). A folder's own tags go
+//! onto a folder the copy made, never onto one it merged into.
 //!
 //! Move is `rename(2)` first, because within one filesystem that is atomic and
 //! costs nothing. Across filesystems `rename` returns `EXDEV` and there is no
@@ -262,7 +266,9 @@ fn copy_dir(
     options: CopyOptions,
     meta: &std::fs::Metadata,
 ) -> Result<CopyStats> {
-    if exists(dst) {
+    // Whether the folder at `dst` is this copy's own, rather than one that
+    // was there and is being merged into — which keeps its own tags.
+    let made = if exists(dst) {
         if !options.overwrite {
             // Including a destination directory: merging into one the caller
             // did not know was there is a silent overwrite of every name that
@@ -270,18 +276,22 @@ fn copy_dir(
             return Err(already_exists(dst));
         }
         let dst_meta = std::fs::symlink_metadata(dst).map_err(|e| DfError::io(dst, e))?;
-        if !dst_meta.is_dir() {
+        if dst_meta.is_dir() {
+            // An existing directory is merged into, which is what every file
+            // manager does and what "overwrite" means for a folder.
+            false
+        } else {
             super::delete::remove_tree_unchecked(dst)?;
             std::fs::create_dir(dst).map_err(|e| DfError::io(dst, e))?;
+            true
         }
-        // An existing directory is merged into, which is what every file
-        // manager does and what "overwrite" means for a folder.
     } else {
         std::fs::create_dir_all(dst).map_err(|e| DfError::io(dst, e))?;
         if options.durable {
             sync_parent(dst)?;
         }
-    }
+        true
+    };
     ctx.advance(0, 1);
 
     let mut stats = CopyStats {
@@ -299,8 +309,11 @@ fn copy_dir(
     // The folder's own tags, then mode and mtime last: creating the children
     // bumped the directory's mtime, so setting it before the recursion would
     // achieve nothing — and the attributes go before the mode, because a
-    // read-only mode would refuse them.
-    stats.tags_dropped |= crate::fs::tags::carry(src, dst);
+    // read-only mode would refuse them. Only onto a folder this copy made: one
+    // merged into is the destination's, and its tags are its own.
+    if made {
+        stats.tags_dropped |= crate::fs::tags::carry(src, dst);
+    }
     apply_mode(dst, meta);
     apply_times(dst, meta);
     Ok(stats)
@@ -1443,6 +1456,31 @@ mod tests {
         assert_eq!(tags::read(&durable), ["red", "invoice 2026"]);
     }
 
+    /// A folder pasted over a folder is merged into it, and the folder merged
+    /// into keeps its own tags — what lands inside it brings theirs. A folder
+    /// that replaces a file in the way is the copy's own, and takes the
+    /// source folder's.
+    #[test]
+    fn a_merged_folder_keeps_its_own_tags() {
+        let Some(t) = tag_tree("copy-tags-merge") else {
+            return;
+        };
+        let src = t.dir("src");
+        let inside = t.file("src/new.txt", b"x");
+        tagged(&src, &["holiday"]);
+        tagged(&inside, &["red"]);
+        let dst = t.dir("dst");
+        tagged(&dst, &["archive"]);
+
+        copy_tree(&src, &dst, &ctx(), true).unwrap();
+        assert_eq!(tags::read(&dst), ["archive"], "the destination's folder");
+        assert_eq!(tags::read(&dst.join("new.txt")), ["red"]);
+
+        let file_in_the_way = t.file("was-a-file", b"x");
+        tagged(&file_in_the_way, &["stale"]);
+        copy_tree(&src, &file_in_the_way, &ctx(), true).unwrap();
+        assert_eq!(tags::read(&file_in_the_way), ["holiday"]);
+    }
     /// A move across drives is a copy and a delete, and the tags are in the
     /// copy — the one kind of move that does not keep the inode.
     #[test]

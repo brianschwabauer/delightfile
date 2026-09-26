@@ -259,6 +259,8 @@ impl Walk<'_> {
         dst_meta: &Metadata,
     ) -> Result<Class> {
         let same = match kind {
+            // Tags are not compared: a file whose only change is its tags is
+            // unchanged here, and keeps the destination's old ones.
             Kind::File => {
                 quick_same(src_meta, dst_meta)
                     && (!self.plan.options.content || same_contents(src, dst, self.stop)?)

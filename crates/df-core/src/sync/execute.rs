@@ -248,10 +248,13 @@ impl Run<'_> {
         }
         match item.kind {
             Kind::Dir => {
-                make_dir(dst)?;
-                // A folder's tags come across with it, as a file's come
-                // across inside its copy ([`copy::copy_file_with`]).
-                crate::fs::tags::carry(src, dst);
+                // A folder this run made takes the source folder's tags, as a
+                // file's come across inside its copy
+                // ([`copy::copy_file_with`]). One that was already there
+                // keeps its own: it is the destination's folder, not a copy.
+                if make_dir(dst)? {
+                    crate::fs::tags::carry(src, dst);
+                }
                 Ok(0)
             }
             Kind::File => copy::copy_file_with(src, dst, self.ctx, options),
@@ -413,12 +416,12 @@ fn wants_verify(item: &Item, verify: Verify) -> bool {
 ///
 /// A folder that has appeared since the plan is taken as it is: making a
 /// folder that is already there is the one idempotent thing in a sync.
-fn make_dir(dst: &Path) -> Result<()> {
+fn make_dir(dst: &Path) -> Result<bool> {
     match std::fs::create_dir(dst) {
-        Ok(()) => copy::sync_parent(dst),
+        Ok(()) => copy::sync_parent(dst).map(|()| true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             match std::fs::symlink_metadata(dst) {
-                Ok(meta) if meta.is_dir() => Ok(()),
+                Ok(meta) if meta.is_dir() => Ok(false),
                 _ => Err(DfError::io(dst, e)),
             }
         }
