@@ -216,7 +216,7 @@ pub(crate) const HOVER_LIFT: f32 = 1.0;
 /// How far a hovered row *under the cursor bar* is lifted further. Small: the
 /// cursor row is already the brightest thing in the column, and a hover that
 /// doubled it would make the pointer look like it had selected something.
-const CURSOR_HOVER_LIFT: f32 = 0.35;
+pub(crate) const CURSOR_HOVER_LIFT: f32 = 0.35;
 
 /// The parent pane's rows, mixed towards its own background. Two thirds of the
 /// way: the column is there to say where you are, not to be read, and at full

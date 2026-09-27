@@ -45,7 +45,7 @@ fn with_mount_card(name: &str, ctx: &egui::Context) -> Fixture {
     run_frame(&mut app, ctx, Vec::new());
     // Built rather than opened, as `M` would start the udisks worker.
     let mut built = Card::new();
-    built.update(Vec::new(), shares(30));
+    built.update(Vec::new(), Vec::new(), shares(30));
     app.mounts = Some(built);
     app.sync_context();
     run_frame(&mut app, ctx, Vec::new());

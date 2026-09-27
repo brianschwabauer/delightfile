@@ -685,7 +685,12 @@ pub(crate) fn place_card(area: egui::Rect, width: f32, height: f32) -> egui::Rec
 /// How much of the window's height a card has for its rows, in points: the
 /// window less a [`CARD_MARGIN`] above and below, less the card's `fixed`
 /// parts — its padding, its heading, its answers, its hint strip.
-pub(crate) fn room(area: egui::Rect, fixed: f32) -> f32 {
+///
+/// [`fit_rows`]'s alone. The Places card used to call it on its own, because
+/// its rows were two lines and its empty states one; with every row one line,
+/// its headings count among its fixed parts and it fits by `fit_rows` like
+/// every other card.
+fn room(area: egui::Rect, fixed: f32) -> f32 {
     (area.height() - CARD_MARGIN * 2.0 - fixed).max(0.0)
 }
 

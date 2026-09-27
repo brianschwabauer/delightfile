@@ -105,7 +105,7 @@ pub const CHIP_RADIUS: u8 = ROW_RADIUS - CHIP_INSET as u8;
 /// now that the hover and the fade multiply it: a wash, not a fill — the text
 /// on the chip is what is being read, and a plate at much above this starts
 /// competing with it.
-const CHIP_TINT: f32 = 0.16;
+pub const CHIP_TINT: f32 = 0.16;
 
 // ── Tab strip (PLAN §2) ─────────────────────────────────────────────────────
 

@@ -1,13 +1,24 @@
-//! The mount manager — PLAN §7.4's "`M`: udisks2 over hand-rolled D-Bus —
-//! list/mount/unmount/eject" — and, under the disks, the network shares gvfs
-//! has mounted and the way to connect to another one.
+//! The Places card, `M` — PLAN §7.4's "`M`: udisks2 over hand-rolled D-Bus —
+//! list/mount/unmount/eject", grown into every answer to "where can I go that
+//! is not in this folder".
 //!
-//! Over the disks, the places: every pinned folder and every `[goto]` row, as
-//! the app's Places list gives them ([`Place`]). The card is where a person
-//! looks for "where can I go that is not in this folder", and a pinned folder
-//! and a mounted stick are both answers to that. The card only draws them and
-//! says which one is under the cursor; going there, and `d` unpinning a pin,
-//! are the app's (`crate::app::places`).
+//! Three sections, top to bottom. **Devices**: the disks udisks2 knows and,
+//! under them, the phones and cameras gvfs's MTP and gphoto2 volume monitors
+//! have seen ([`Phone`]). **Network**: the shares gvfs has mounted, the rclone
+//! remotes, and the way to connect to another server. **Places**: every
+//! pinned folder and every `[goto]` row, as the app's Places list gives them
+//! ([`Place`]). Devices first because `M` `Enter` mounting the stick — or the
+//! phone — that was just plugged in is the card's main job, so the cursor
+//! starts on the first device ([`Card::with_places`]). The card only draws
+//! the places and says which one is under the cursor; going there, and `d`
+//! unpinning a pin, are the app's (`crate::app::places`).
+//!
+//! Every row is one line, the height of a row in the list panes: a glyph, the
+//! name, and after it in quieter ink what the row is and where — a disk's
+//! size, filesystem and mount point, a share's URL, a place's path — elided in
+//! its middle to fit ([`row_layout`]). A place row ends in its `g` key, drawn
+//! as the which-key card draws a key. While a call is out on a row, what it is
+//! doing takes the detail's place, and when one fails, the failure does.
 //!
 //! ## Why udisks2 and not `/proc/mounts`
 //!
@@ -54,6 +65,33 @@
 //! [`Spec`] is the bridge between the two: it builds the spec from the URL the
 //! way gvfs does, and finds it among the directories that are really there.
 //!
+//! ## Phones and cameras are gvfs's too
+//!
+//! A phone plugged in over USB is not a block device either: it speaks MTP,
+//! and a camera speaks PTP, and what turns either into a directory is gvfs —
+//! `gvfs-mtp` and `gvfs-gphoto2`, whose volume monitors report the device
+//! the moment it is plugged in, before anything is mounted. `gio mount -li`
+//! lists those volumes beside the shares, each with the *activation root*
+//! mounting it takes (`mtp://Google_Pixel_10a_…/`), and nests the mount
+//! under it once there is one. [`phones_from`] reads both from the same
+//! listing [`shares_from`] does, keyed by that root; `gio mount <root>` mounts
+//! one ([`mount_gio`]) and `gio mount -u <root>` puts it away, and the
+//! directory it appears as under gvfs-fuse is found through the same
+//! [`Spec`] bridge (`mtp:host=…`).
+//!
+//! A phone that is locked, or not set to *File transfer*, cannot be opened:
+//! gvfs says so in libmtp's words, and the card says what to do about it
+//! instead ([`unlock_hint`]).
+//!
+//! ## Hearing a phone arrive
+//!
+//! udisks2 is asked when the card opens; a phone plugged in while the window
+//! is up is heard ([`Monitor`]): one `gio mount --monitor` for the life of the
+//! window, its stdout read by a thread that blocks on the pipe and rings the
+//! event loop only when gio prints an event — nothing polls, and a window with
+//! nothing plugged in stays at zero frames. The events are read by
+//! [`Blocks`] and [`event_from`], pure functions over gio's own format.
+//!
 //! ## Cloud remotes are rows, not mounts
 //!
 //! Under the shares, the Network section lists the vfs's rclone services —
@@ -72,7 +110,9 @@
 //! that is being acted on is drawn as busy rather than the window being
 //! unresponsive. Connecting to a server can take as long as a network timeout,
 //! so that is a job on the task engine instead ([`connect`]), where it shows in
-//! the task panel like any other long thing.
+//! the task panel like any other long thing — and so is mounting a phone
+//! ([`mount_gio`]), which waits on a USB device that may be asking its owner
+//! whether to allow it.
 //!
 //! ## When udisks2 is not there
 //!
@@ -85,7 +125,9 @@
 //! No `gio`, or a `gio` with no gvfs behind it, is a Network section that says
 //! nothing is mounted — which is true. The connect row stays, because it is
 //! where the user finds out that connecting needs gvfs: from `gio`'s own error,
-//! or from [`connect`] saying `gio` is missing.
+//! or from [`connect`] saying `gio` is missing. No phone is listed without
+//! `gvfs-mtp` (or a camera without `gvfs-gphoto2`), and with no `gio` there is
+//! no watcher either: nothing is started and nothing is said.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -104,10 +146,13 @@ const BLOCK: &str = "org.freedesktop.UDisks2.Block";
 const FILESYSTEM: &str = "org.freedesktop.UDisks2.Filesystem";
 const DRIVE: &str = "org.freedesktop.UDisks2.Drive";
 
-/// How many rows the card shows before it scrolls. A machine with more than
-/// this many mountable filesystems and shares is a server, and a server is not
-/// what `M` is for.
-pub const ROWS: usize = 10;
+/// How many rows the card shows before it scrolls, at most: a window too short
+/// for them gets fewer ([`window`]).
+///
+/// Twenty one-line rows are about as tall as the ten two-line rows the card
+/// had before its rows were one line — a disk or two, a phone, a share, the
+/// connect row and a dozen places, all in view on an ordinary screen.
+pub const ROWS: usize = 20;
 
 /// One mountable filesystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +176,7 @@ pub struct Device {
     pub mount: Option<PathBuf>,
     pub removable: bool,
     pub ejectable: bool,
-    /// "SanDisk Cruzer" — the hardware, for the second line of the row.
+    /// "SanDisk Cruzer" — the hardware behind it.
     pub hardware: String,
 }
 
@@ -140,31 +185,23 @@ impl Device {
         self.mount.is_some()
     }
 
-    /// The right-hand text: where it is, or what it is.
-    pub fn status(&self) -> String {
-        match &self.mount {
-            Some(path) => path.to_string_lossy().into_owned(),
-            None => "not mounted".to_string(),
-        }
-    }
-
-    /// The dim second line: size, filesystem, device node, and whether it comes
-    /// out.
+    /// What the row says after the name: the size, the filesystem, and where
+    /// it is mounted or that it is not — `931 GB · ext4 · /run/media/me/x`.
     pub fn detail(&self) -> String {
         let mut parts = vec![crate::format::human_size(self.size)];
         if !self.fs.is_empty() {
             parts.push(self.fs.clone());
         }
-        parts.push(self.node.clone());
-        if !self.hardware.is_empty() {
-            parts.push(self.hardware.clone());
-        }
-        if self.removable {
-            parts.push("removable".to_string());
-        }
+        parts.push(match &self.mount {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => NOT_MOUNTED.to_string(),
+        });
         parts.join(" · ")
     }
 }
+
+/// What a disk's or a phone's row says where the mount point would be.
+const NOT_MOUNTED: &str = "not mounted";
 
 /// Turn a `GetManagedObjects` reply into the rows the card shows.
 ///
@@ -471,7 +508,27 @@ impl Spec {
     /// case-folded, because neither DNS nor SMB tells `NAS/Media` from
     /// `nas/media`. `davs` is `dav` with `ssl=true`. Every other backend takes
     /// the scheme as its type and the host, user and port as they came.
+    ///
+    /// A phone or a camera ([`Protocol`]) is its host and nothing else — the
+    /// device is the whole mount, and there is no account or port to it. Its
+    /// host is whatever gvfs put in the activation root: a name
+    /// (`Google_Pixel_10a_…`), or on an older gvfs the USB address in
+    /// brackets (`[usb:001,005]`), which gvfs keeps in the spec and which the
+    /// address grammar takes off as it would an IPv6 literal's, so they go
+    /// back on.
     pub fn of(address: &Address) -> Spec {
+        if Protocol::of_scheme(&address.scheme).is_some() {
+            let host = if address.host.contains(':') {
+                format!("[{}]", address.host)
+            } else {
+                address.host.clone()
+            };
+            return Spec {
+                kind: address.scheme.clone(),
+                pairs: vec![("host".to_string(), host)],
+                prefix: None,
+            };
+        }
         let mut pairs: Vec<(String, String)> = Vec::new();
         let mut rest: Vec<&str> = address.segments().collect();
         let kind = match address.scheme.as_str() {
@@ -599,15 +656,38 @@ impl Spec {
 pub fn gio_mounts(listing: &str) -> Vec<(String, String)> {
     listing
         .lines()
-        .filter_map(|line| line.strip_prefix("Mount("))
-        .filter_map(|line| {
-            let (_, rest) = line.split_once("): ")?;
-            // From the right: the URL is escaped and has no spaces in it; the
-            // name is whatever the backend called the mount.
-            let (name, url) = rest.rsplit_once(" -> ")?;
-            Some((name.to_string(), url.trim().to_string()))
-        })
+        // At the margin only: an indented mount belongs to a volume.
+        .filter(|line| line.starts_with("Mount("))
+        .filter_map(mount_line)
         .filter(|(_, url)| !url.starts_with("file://"))
+        .collect()
+}
+
+/// A `Mount(N): name -> url` line of gio's, indentation already taken off,
+/// as `(name, url)`.
+fn mount_line(line: &str) -> Option<(String, String)> {
+    let (_, rest) = line.strip_prefix("Mount(")?.split_once("): ")?;
+    // From the right: the URL is escaped and has no spaces in it; the name is
+    // whatever the backend called the mount.
+    let (name, url) = rest.rsplit_once(" -> ")?;
+    Some((name.to_string(), url.trim().to_string()))
+}
+
+/// The directory among `present` gvfs-fuse made for a mount with this spec,
+/// or the name gvfs would give it when none is there (see [`shares_from`]).
+fn fuse_dir(spec: &Spec, present: &[(&String, Spec)]) -> String {
+    present
+        .iter()
+        .find(|(_, there)| spec.same_server(there) && spec.prefix == there.prefix)
+        .map(|(dir, _)| (*dir).clone())
+        .unwrap_or_else(|| spec.dir_name())
+}
+
+/// What `root` holds that reads as a gvfs-fuse directory name.
+fn specs_in(entries: &[String]) -> Vec<(&String, Spec)> {
+    entries
+        .iter()
+        .filter_map(|name| Some((name, Spec::from_dir_name(name)?)))
         .collect()
 }
 
@@ -623,23 +703,18 @@ pub fn gio_mounts(listing: &str) -> Vec<(String, String)> {
 /// in [`SCHEMES`], and an honest "is not there" for the rest.
 ///
 /// A URL that does not parse is not a row, because there is nowhere to go.
+/// A phone's or a camera's mount is not a share: it is a row of the Devices
+/// section ([`phones_from`]), and listed here too it would be there twice.
 pub fn shares_from(listing: &str, root: &Path, entries: &[String]) -> Vec<Share> {
-    let present: Vec<(&String, Spec)> = entries
-        .iter()
-        .filter_map(|name| Some((name, Spec::from_dir_name(name)?)))
-        .collect();
+    let present = specs_in(entries);
     let mut shares: Vec<Share> = gio_mounts(listing)
         .into_iter()
+        .filter(|(_, url)| device_scheme(url).is_none())
         .filter_map(|(name, url)| {
             let address = Address::parse(&url)?;
-            let spec = Spec::of(&address);
-            let dir = present
-                .iter()
-                .find(|(_, there)| spec.same_server(there) && spec.prefix == there.prefix)
-                .map(|(dir, _)| (*dir).clone())
-                .unwrap_or_else(|| spec.dir_name());
-            // A backend that is not a server (an archive, a phone) is called
-            // what gio calls it; a URL-shaped label for it would be noise.
+            let dir = fuse_dir(&Spec::of(&address), &present);
+            // A backend that is not a server (an archive) is called what gio
+            // calls it; a URL-shaped label for it would be noise.
             let label = if SCHEMES.contains(&address.scheme.as_str()) && !address.host.is_empty() {
                 address.label()
             } else {
@@ -662,9 +737,181 @@ pub fn shares_from(listing: &str, root: &Path, entries: &[String]) -> Vec<Share>
     shares
 }
 
-/// Where gvfs-fuse shows its mounts: `/run/user/<uid>/gvfs`.
+// ── Phones and cameras (gvfs) ───────────────────────────────────────────────
+
+/// Which of gvfs's volume monitors saw a phone or a camera: what kind of
+/// thing it is, and so the glyph its row wears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// `gvfs-mtp`: a phone, or anything else that speaks MTP.
+    Mtp,
+    /// `gvfs-gphoto2`: a camera, over PTP.
+    Gphoto2,
+}
+
+impl Protocol {
+    /// The protocol a URL scheme is, when it is one of these two.
+    pub fn of_scheme(scheme: &str) -> Option<Protocol> {
+        match scheme.to_ascii_lowercase().as_str() {
+            "mtp" => Some(Protocol::Mtp),
+            "gphoto2" => Some(Protocol::Gphoto2),
+            _ => None,
+        }
+    }
+
+    /// The protocol whose volume monitor a gio `Type:` line names —
+    /// `GProxyVolume (GProxyVolumeMonitorMTP)`, `… (GProxyVolumeMonitorGPhoto2)`
+    /// — and `None` for udisks2's, and for everything else.
+    fn of_monitor(kind: &str) -> Option<Protocol> {
+        let kind = kind.to_ascii_lowercase();
+        if kind.contains("volumemonitormtp") {
+            Some(Protocol::Mtp)
+        } else if kind.contains("volumemonitorgphoto2") {
+            Some(Protocol::Gphoto2)
+        } else {
+            None
+        }
+    }
+}
+
+/// The protocol of a URL whose scheme is a phone's or a camera's.
+fn device_scheme(url: &str) -> Option<Protocol> {
+    Protocol::of_scheme(url.split_once("://")?.0)
+}
+
+/// One phone or camera gvfs has seen: a row in the Devices section, under the
+/// disks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Phone {
+    /// The volume's activation root, `mtp://Google_Pixel_10a_…/`: what
+    /// `gio mount` mounts and `gio mount -u` puts away, and the row's identity
+    /// across a refresh.
+    pub root: String,
+    /// What gio calls it: `Pixel 10a`.
+    pub name: String,
+    pub protocol: Protocol,
+    /// The directory gvfs-fuse shows it as, while it is mounted: where `Enter`
+    /// goes.
+    pub mount: Option<PathBuf>,
+}
+
+impl Phone {
+    pub fn is_mounted(&self) -> bool {
+        self.mount.is_some()
+    }
+
+    /// What the row says after the name: where it is, or that it is not
+    /// mounted. The name is the model already (`Pixel 10a`), and the glyph
+    /// says phone or camera, so neither is said twice.
+    pub fn detail(&self) -> String {
+        match &self.mount {
+            Some(path) => path.to_string_lossy().into_owned(),
+            None => NOT_MOUNTED.to_string(),
+        }
+    }
+}
+
+/// Whether two gio URLs are one root, trailing `/` or not.
+fn same_root(a: &str, b: &str) -> bool {
+    a.trim_end_matches('/') == b.trim_end_matches('/')
+}
+
+/// The Devices section's phones and cameras out of a `gio mount -li` listing,
+/// each mounted one with the directory under `root` that gvfs-fuse shows it
+/// as — `entries` being what `root` holds, matched as [`shares_from`]
+/// matches a share's.
+///
+/// A phone is a **volume** that gvfs's MTP or gphoto2 monitor reported,
+/// whatever it is nested under (neither monitor makes drives, so it is at the
+/// margin), with the `activation_root=` that `-i` prints in its block. It is
+/// **mounted** when a mount of that root is listed anywhere: nested under the
+/// volume (gvfs's shadow of the mount) or at the margin (the daemon's own).
+/// A margin mount of an `mtp://` or `gphoto2://` root that no volume claims —
+/// mounted by address on a machine whose volume monitor is not running — is a
+/// row as well, called what gio calls the mount. A volume with no root is not
+/// a row, because there is nothing to hand `gio mount`.
+///
+/// Sorted by name, then by root, so two of one model keep their order.
+pub fn phones_from(listing: &str, root: &Path, entries: &[String]) -> Vec<Phone> {
+    let lines: Vec<(usize, &str)> = listing
+        .lines()
+        .map(|line| {
+            let text = line.trim_start();
+            (line.len() - text.len(), text.trim_end())
+        })
+        .collect();
+    // Every mount of a device's root, wherever gio put it.
+    let mounts: Vec<(String, String)> = lines
+        .iter()
+        .filter_map(|(_, text)| mount_line(text))
+        .filter(|(_, url)| device_scheme(url).is_some())
+        .collect();
+    let mut phones: Vec<(String, String, Protocol)> = Vec::new();
+    for (at, (indent, text)) in lines.iter().enumerate() {
+        let Some((_, name)) = text
+            .strip_prefix("Volume(")
+            .and_then(|rest| rest.split_once("): "))
+        else {
+            continue;
+        };
+        let mut protocol = None;
+        let mut activation = None;
+        let mut nested = None;
+        for (_, line) in lines[at + 1..]
+            .iter()
+            .take_while(|(inner, _)| inner > indent)
+        {
+            if let Some(kind) = line.strip_prefix("Type: ") {
+                protocol = protocol.or(Protocol::of_monitor(kind));
+            } else if let Some(url) = line.strip_prefix("activation_root=") {
+                activation = activation.or(Some(url.to_string()));
+            } else if let Some((_, url)) = mount_line(line) {
+                nested = nested.or(Some(url));
+            }
+        }
+        let (Some(protocol), Some(root)) = (protocol, activation.or(nested)) else {
+            continue;
+        };
+        if !phones.iter().any(|(known, _, _)| same_root(known, &root)) {
+            phones.push((root, name.to_string(), protocol));
+        }
+    }
+    for (name, url) in &mounts {
+        if !phones.iter().any(|(known, _, _)| same_root(known, url)) {
+            if let Some(protocol) = device_scheme(url) {
+                phones.push((url.clone(), name.clone(), protocol));
+            }
+        }
+    }
+    let present = specs_in(entries);
+    let mut phones: Vec<Phone> = phones
+        .into_iter()
+        .map(|(url, name, protocol)| {
+            let mounted = mounts.iter().any(|(_, mount)| same_root(mount, &url));
+            let mount = Address::parse(&url)
+                .filter(|_| mounted)
+                .map(|address| root.join(fuse_dir(&Spec::of(&address), &present)));
+            Phone {
+                root: url,
+                name,
+                protocol,
+                mount,
+            }
+        })
+        .collect();
+    phones.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.root.cmp(&b.root))
+    });
+    phones
+}
+
+/// Where gvfs-fuse shows its mounts: `$XDG_RUNTIME_DIR/gvfs`
+/// ([`df_core::du::gvfs_root`]).
 pub fn gvfs_root() -> PathBuf {
-    PathBuf::from(format!("/run/user/{}/gvfs", df_core::ops::trash::uid()))
+    df_core::du::gvfs_root()
 }
 
 /// The names in gvfs-fuse's directory; none when it is not there.
@@ -678,53 +925,73 @@ fn gvfs_entries(root: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `gio mount -l`, started and not yet waited for.
+/// `gio mount -li`, started and not yet waited for.
 ///
 /// In two halves because gio spends half a second of every listing waiting for
 /// gvfs's volume monitors to report in, whatever there is to report. So the
 /// worker starts it, asks udisks2 its question while gio waits, and collects
 /// both: one round trip for the card, with the quicker half hidden inside the
 /// slower one.
-struct ShareListing(Option<std::process::Child>);
+///
+/// `-i` for the activation root a phone's volume is mounted by, which the
+/// plain listing leaves out; the rest of what it adds is indented under the
+/// line it is about, where the share parser does not look.
+struct GioListing(Option<std::process::Child>);
 
-impl ShareListing {
-    fn start() -> ShareListing {
+impl GioListing {
+    fn start() -> GioListing {
         let child = Command::new("gio")
-            .args(["mount", "-l"])
+            .args(["mount", "-li"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn();
-        ShareListing(match child {
+        GioListing(match child {
             Ok(child) => Some(child),
             Err(e) => {
-                log::debug!("gio mount -l did not start: {e}");
+                log::debug!("gio mount -li did not start: {e}");
                 None
             }
         })
     }
 
-    /// No gio, or a gio that failed, is no shares: a machine without gvfs has
-    /// nothing mounted through it.
-    fn finish(self) -> Vec<Share> {
+    /// The phones and the shares. No gio, or a gio that failed, is neither: a
+    /// machine without gvfs has nothing mounted through it.
+    fn finish(self) -> (Vec<Phone>, Vec<Share>) {
         let Some(child) = self.0 else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let Ok(output) = child.wait_with_output() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
+        let listing = String::from_utf8_lossy(&output.stdout);
         let root = gvfs_root();
-        shares_from(
-            &String::from_utf8_lossy(&output.stdout),
-            &root,
-            &gvfs_entries(&root),
+        let entries = gvfs_entries(&root);
+        (
+            phones_from(&listing, &root, &entries),
+            shares_from(&listing, &root, &entries),
         )
     }
 }
 
 /// Every share gvfs has mounted, now. Blocks for as long as gio does.
 pub fn list_shares() -> Vec<Share> {
-    ShareListing::start().finish()
+    GioListing::start().finish().1
+}
+
+/// How this program runs one `gio` command to its end: `gio` itself
+/// ([`system_gio`]), or a test's stand-in, which notes what it was asked and
+/// answers the way gio would have. The mounts and unmounts go through it; the
+/// listing, which is started and collected in two halves, does not.
+pub type Gio =
+    std::sync::Arc<dyn Fn(&[&str]) -> std::io::Result<std::process::Output> + Send + Sync>;
+
+/// The real `gio`, its stdin closed, so a question it asks is answered by
+/// end-of-file ([`attempt`]).
+pub fn system_gio() -> Gio {
+    std::sync::Arc::new(|args: &[&str]| {
+        Command::new("gio").args(args).stdin(Stdio::null()).output()
+    })
 }
 
 /// A `gio` that could not be started, as a sentence.
@@ -741,14 +1008,10 @@ fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
 }
 
-/// `u` on a share: `gio mount -u`, which is what a desktop's own eject button
-/// beside a share does.
-fn unmount_share(url: &str) -> Reply {
-    let output = Command::new("gio")
-        .args(["mount", "-u", url])
-        .stdin(Stdio::null())
-        .output();
-    match output {
+/// `u` on a share, or on a phone: `gio mount -u <url>`, which is what a
+/// desktop's own eject button beside either does.
+fn unmount_gio(url: &str, gio: &Gio) -> Reply {
+    match gio(&["mount", "-u", url]) {
         Ok(output) if output.status.success() => Reply::Unmounted,
         Ok(output) => Reply::Failed(
             first_line(&String::from_utf8_lossy(&output.stderr))
@@ -757,6 +1020,59 @@ fn unmount_share(url: &str) -> Reply {
         ),
         Err(e) => Reply::Failed(gio_error(&e)),
     }
+}
+
+/// `Enter` or `m` on a phone or a camera: `gio mount <root>`, nobody there to
+/// answer anything. Called on a task-engine worker, since a phone takes a
+/// moment to open and may be asking its owner whether to allow it.
+///
+/// Mounted, or gio's own first words about why not. A device asks no
+/// questions — MTP has no password — so where a share would fall back to a
+/// terminal ([`Connected::NeedsTerminal`]) this has nothing to fall back to,
+/// and "already mounted" is mounted, as it is for a share.
+pub fn mount_gio(root: &str, gio: &Gio) -> Connected {
+    let output = match gio(&["mount", root]) {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Connected::Failed("gio is not installed: phones need gvfs".to_string())
+        }
+        Err(e) => return Connected::Failed(gio_error(&e)),
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success() || stderr.to_lowercase().contains("already mounted") {
+        return Connected::Mounted(None);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Connected::Failed(
+        first_line(&stderr)
+            .or_else(|| first_line(&stdout))
+            .unwrap_or("gio mount failed without saying why")
+            .to_string(),
+    )
+}
+
+/// What the card says to somebody whose phone would not open because of the
+/// phone rather than the program.
+pub const UNLOCK: &str = "Unlock the phone and choose File transfer, then try again";
+
+/// [`UNLOCK`], when a phone's mount failed in the words libmtp and gvfs use
+/// for a device they could not open or found busy — which is what a locked
+/// phone, or one plugged in only to charge, looks like from here. `None` for
+/// any other failure, whose own words say more, and for a camera, which has
+/// no screen to unlock.
+pub fn unlock_hint(protocol: Protocol, message: &str) -> Option<&'static str> {
+    if protocol != Protocol::Mtp {
+        return None;
+    }
+    let said = message.to_lowercase();
+    [
+        "unable to open mtp device",
+        "device is busy",
+        "libmtp_error",
+    ]
+    .iter()
+    .any(|words| said.contains(words))
+    .then_some(UNLOCK)
 }
 
 /// Check what was typed at the connect prompt, and return the address to hand
@@ -850,12 +1166,8 @@ pub enum Connected {
 ///
 /// Called on a task-engine worker: it blocks for as long as the server takes
 /// to answer, and then for as long as gvfs-fuse takes to show the mount.
-pub fn connect(url: &str) -> Connected {
-    let output = match Command::new("gio")
-        .args(["mount", url])
-        .stdin(Stdio::null())
-        .output()
-    {
+pub fn connect(url: &str, gio: &Gio) -> Connected {
+    let output = match gio(&["mount", url]) {
         Ok(output) => output,
         Err(e) => return Connected::Failed(gio_error(&e)),
     };
@@ -939,22 +1251,24 @@ pub fn landing(shares: &[Share], address: &Address) -> Option<(PathBuf, PathBuf)
 /// What the event loop asks the worker to do.
 #[derive(Debug, Clone)]
 pub enum Request {
-    /// Both halves of the card: udisks2's disks and gvfs's shares.
+    /// Everything the card lists that it does not know already: udisks2's
+    /// disks, and gvfs's phones and shares.
     List,
     Mount(String),
     Unmount(String),
     Eject(String),
-    /// A share's URL, for `gio mount -u`.
-    UnmountShare(String),
+    /// A share's URL or a phone's root, for `gio mount -u`.
+    GioUnmount(String),
 }
 
 /// What comes back.
 #[derive(Debug, Clone)]
 pub enum Reply {
-    /// The card's contents, both sections from one request — so the card never
-    /// shows the disks of one moment beside the shares of another.
+    /// The card's contents from one request — so the card never shows the
+    /// disks of one moment beside the phones or the shares of another.
     Listing {
         devices: Vec<Device>,
+        phones: Vec<Phone>,
         shares: Vec<Share>,
     },
     /// A mount landed, and this is where. The card cds there on the next
@@ -978,13 +1292,14 @@ pub struct Mounts {
 }
 
 impl Mounts {
-    /// Start the worker. `notify` is rung once per reply.
-    pub fn start(notify: df_core::fs::Notifier) -> Mounts {
+    /// Start the worker. `notify` is rung once per reply; `gio` is how it
+    /// puts a share or a phone away.
+    pub fn start(notify: df_core::fs::Notifier, gio: Gio) -> Mounts {
         let (tx, rx) = unbounded::<Request>();
         let (reply_tx, reply_rx) = unbounded::<Reply>();
         let handle = std::thread::Builder::new()
             .name("df-mounts".to_string())
-            .spawn(move || run(rx, reply_tx, notify));
+            .spawn(move || run(rx, reply_tx, notify, gio));
         let worker = match handle {
             Ok(h) => Some(h),
             Err(e) => {
@@ -997,6 +1312,23 @@ impl Mounts {
             replies: reply_rx,
             worker,
         }
+    }
+
+    /// A worker with no thread behind it, for a test: what it is asked goes
+    /// to the returned end, for the test to read, and nothing ever answers —
+    /// so no test talks to this machine's udisks2 or runs its gio.
+    #[cfg(test)]
+    pub fn detached() -> (Mounts, Receiver<Request>) {
+        let (tx, rx) = unbounded::<Request>();
+        let (_, replies) = unbounded::<Reply>();
+        (
+            Mounts {
+                requests: Some(tx),
+                replies,
+                worker: None,
+            },
+            rx,
+        )
     }
 
     pub fn ask(&self, request: Request) {
@@ -1025,13 +1357,18 @@ impl Drop for Mounts {
 /// four times should not authenticate four times, and a connection that has
 /// gone away is reopened on the next request rather than being an error the
 /// user has to do something about.
-fn run(requests: Receiver<Request>, replies: Sender<Reply>, notify: df_core::fs::Notifier) {
+fn run(
+    requests: Receiver<Request>,
+    replies: Sender<Reply>,
+    notify: df_core::fs::Notifier,
+    gio: Gio,
+) {
     let mut bus: Option<Bus> = None;
     for request in requests {
         let reply = match &request {
-            // gio, not the system bus: a share is put away whether or not
-            // udisks2 is there to be asked.
-            Request::UnmountShare(url) => unmount_share(url),
+            // gio, not the system bus: a share or a phone is put away whether
+            // or not udisks2 is there to be asked.
+            Request::GioUnmount(url) => unmount_gio(url, &gio),
             _ => udisks(&mut bus, &request),
         };
         let _ = replies.send(reply);
@@ -1066,14 +1403,15 @@ fn udisks(bus: &mut Option<Bus>, request: &Request) -> Reply {
 fn handle(bus: &mut Bus, request: &Request) -> Result<Reply, String> {
     match request {
         Request::List => {
-            // gio first, and collected last: see [`ShareListing`]. Collected
+            // gio first, and collected last: see [`GioListing`]. Collected
             // whatever udisks2 said, so a failed call does not leave the child
             // behind unreaped.
-            let shares = ShareListing::start();
+            let gio = GioListing::start();
             let devices = list_devices(bus);
-            let shares = shares.finish();
+            let (phones, shares) = gio.finish();
             Ok(Reply::Listing {
                 devices: devices?,
+                phones,
                 shares,
             })
         }
@@ -1096,7 +1434,8 @@ fn handle(bus: &mut Bus, request: &Request) -> Result<Reply, String> {
             bus.call(SERVICE, drive, DRIVE, "Eject", Some("a{sv}"), &args)?;
             Ok(Reply::Ejected)
         }
-        Request::UnmountShare(url) => Ok(unmount_share(url)),
+        // Answered in `run`, never through the bus.
+        Request::GioUnmount(_) => Err("gio unmounts, not udisks2".to_string()),
     }
 }
 
@@ -1114,16 +1453,254 @@ fn list_devices(bus: &mut Bus) -> Result<Vec<Device>, String> {
     Ok(devices_from(&objects))
 }
 
+// ── Hearing a phone arrive: `gio mount --monitor` ───────────────────────────
+
+/// What happened, in the words of `gio mount --monitor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    VolumeAdded,
+    VolumeRemoved,
+    MountAdded,
+    MountRemoved,
+    /// Anything else gio reports — a volume or a mount changed, a drive came
+    /// or went — which says only that the card, if it is up, should look
+    /// again.
+    Other,
+}
+
+/// One event gio printed, read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Event {
+    pub change: Change,
+    /// The name in quotes on the event's line: `Pixel 10a`.
+    pub name: String,
+    /// Whether the volume or the mount is a phone's or a camera's, and which:
+    /// from the `Type:` line `--detail` prints under the event, or from the
+    /// scheme of its root.
+    pub protocol: Option<Protocol>,
+    /// Its root: a volume's `activation_root=`, a mount's URL.
+    pub root: Option<String>,
+}
+
+/// gio's event lines, each `Head: 'name'` with the head padded so the names
+/// line up: the head, what it is, and whether `--detail` prints the volume,
+/// mount or drive under it — every one does, closing with a blank line,
+/// except the eject button's.
+const EVENTS: &[(&str, Change, bool)] = &[
+    ("Volume added", Change::VolumeAdded, true),
+    ("Volume removed", Change::VolumeRemoved, true),
+    ("Mount added", Change::MountAdded, true),
+    ("Mount removed", Change::MountRemoved, true),
+    ("Volume changed", Change::Other, true),
+    ("Mount changed", Change::Other, true),
+    ("Mount pre-unmount", Change::Other, true),
+    ("Drive connected", Change::Other, true),
+    ("Drive disconnected", Change::Other, true),
+    ("Drive changed", Change::Other, true),
+    ("Drive eject button", Change::Other, false),
+];
+
+/// The event a line of gio's opens, if it opens one: what changed, the name,
+/// and whether detail follows. Only a line at the margin: everything under
+/// an event is indented.
+fn event_line(line: &str) -> Option<(Change, String, bool)> {
+    let (head, rest) = line.split_once(':')?;
+    let (_, change, detail) = EVENTS.iter().find(|(known, _, _)| *known == head)?;
+    let name = rest.trim();
+    let name = name
+        .strip_prefix('\'')
+        .and_then(|name| name.strip_suffix('\''))
+        .unwrap_or(name);
+    Some((*change, name.to_string(), *detail))
+}
+
+/// The lines of gio's monitor, gathered into one block per event: the event's
+/// line and the detail printed under it, up to the blank line that ends it.
+///
+/// Nothing is held back for a line that is not coming: an event with no
+/// detail is a block the moment its line arrives, and an event line that
+/// arrives while a block is open closes that block first. A line that belongs
+/// to no event — gio saying something of its own — is dropped.
+#[derive(Debug, Default)]
+pub struct Blocks {
+    open: Vec<String>,
+}
+
+impl Blocks {
+    /// Take one line (its newline or not); returns the blocks it completed,
+    /// oldest first.
+    pub fn feed(&mut self, line: &str) -> Vec<Vec<String>> {
+        let line = line.trim_end_matches(['\n', '\r']);
+        let mut done = Vec::new();
+        if let Some((_, _, detail)) = event_line(line) {
+            if !self.open.is_empty() {
+                done.push(std::mem::take(&mut self.open));
+            }
+            if detail {
+                self.open.push(line.to_string());
+            } else {
+                done.push(vec![line.to_string()]);
+            }
+        } else if line.trim().is_empty() {
+            if !self.open.is_empty() {
+                done.push(std::mem::take(&mut self.open));
+            }
+        } else if !self.open.is_empty() {
+            self.open.push(line.to_string());
+        }
+        done
+    }
+
+    /// The stream ended: the block that was open, if one was.
+    pub fn finish(&mut self) -> Option<Vec<String>> {
+        (!self.open.is_empty()).then(|| std::mem::take(&mut self.open))
+    }
+}
+
+/// One block of [`Blocks`], read: `None` for a block that does not start
+/// with an event's line.
+///
+/// The root is the first one the detail names — a volume's activation root,
+/// which comes before any mount nested under it, or a mount's own URL.
+pub fn event_from(block: &[String]) -> Option<Event> {
+    let (first, rest) = block.split_first()?;
+    let (change, name, _) = event_line(first)?;
+    let mut protocol = None;
+    let mut root: Option<String> = None;
+    for line in rest {
+        let line = line.trim();
+        if let Some(kind) = line.strip_prefix("Type: ") {
+            protocol = protocol.or(Protocol::of_monitor(kind));
+        } else if let Some(url) = line.strip_prefix("activation_root=") {
+            root = root.or(Some(url.to_string()));
+        } else if let Some((_, url)) = mount_line(line) {
+            root = root.or(Some(url));
+        }
+    }
+    let protocol = protocol.or_else(|| root.as_deref().and_then(device_scheme));
+    Some(Event {
+        change,
+        name,
+        protocol,
+        root,
+    })
+}
+
+/// `gio mount --monitor --detail` for the life of the window, and the thread
+/// that reads it.
+///
+/// The thread blocks on gio's stdout and does nothing else: it wakes when gio
+/// prints, hands over each event whole, and rings the event loop once per
+/// line that completed one — so a window with nothing being plugged in is a
+/// window at zero frames. It ends when the pipe does.
+///
+/// Dropping this kills gio — it holds nothing that needs a gentler end — and
+/// reaps it, which closes the pipe, and then joins the thread. gio is tied to
+/// the thread that started it ([`df_core::vfs::child::tie_to_this_thread`]),
+/// the event loop's, so a window that dies without running its destructors
+/// does not leave a gio behind, listening on the session bus for nobody.
+pub struct Monitor {
+    child: std::process::Child,
+    events: Receiver<Event>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Monitor {
+    /// Start listening, or `None` when there is no `gio` to listen with —
+    /// which is nothing to tell anyone: a machine without gvfs has no phones
+    /// for it to hear about. Call it on the event loop's thread; see above.
+    pub fn start(notify: df_core::fs::Notifier) -> Option<Monitor> {
+        let mut command = Command::new("gio");
+        command
+            .args(["mount", "--monitor", "--detail"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        df_core::vfs::child::tie_to_this_thread(&mut command);
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                log::debug!("gio mount --monitor did not start: {e}");
+                return None;
+            }
+        };
+        let (tx, events) = unbounded::<Event>();
+        let reader = child.stdout.take().and_then(|stdout| {
+            std::thread::Builder::new()
+                .name("df-gio-monitor".to_string())
+                .spawn(move || listen(stdout, tx, notify))
+                .map_err(|e| log::warn!("the gio monitor's reader did not start: {e}"))
+                .ok()
+        });
+        if reader.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        Some(Monitor {
+            child,
+            events,
+            reader,
+        })
+    }
+
+    /// Whatever gio has said since the last call.
+    pub fn drain(&self) -> Vec<Event> {
+        self.events.try_iter().collect()
+    }
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        if let Err(e) = self.child.kill() {
+            log::debug!("the gio monitor would not stop: {e}");
+        }
+        let _ = self.child.wait();
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+    }
+}
+
+/// The reader thread: gio's stdout, line by line, until it ends. Any reader,
+/// so a test can hand it gio's words without a gio.
+fn listen(stdout: impl std::io::Read, events: Sender<Event>, notify: df_core::fs::Notifier) {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut blocks = Blocks::default();
+    let mut bytes = Vec::new();
+    let hand_over = |done: Vec<Vec<String>>| {
+        let mut sent = false;
+        for event in done.iter().filter_map(|block| event_from(block)) {
+            sent |= events.send(event).is_ok();
+        }
+        if sent {
+            notify();
+        }
+    };
+    loop {
+        bytes.clear();
+        match reader.read_until(b'\n', &mut bytes) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => hand_over(blocks.feed(&String::from_utf8_lossy(&bytes))),
+        }
+    }
+    hand_over(blocks.finish().into_iter().collect());
+}
+
 // ── The card's state ────────────────────────────────────────────────────────
 
 /// One row of the Places section: a pinned folder or a `[goto]` row, as the
 /// app's Places list describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
-    /// Where it is, as the list shows it: `~/Work`, `sftp://host/srv`.
+    /// What the folder is called: its last name, `Work`, `srv`.
     pub name: String,
-    /// The key that goes there (`g w`), or a `[goto]` row's own words.
+    /// Where it is, as the lists show it: `~/Work`, `sftp://host/srv`.
     pub detail: String,
+    /// The key that goes there, `g w`, drawn at the row's end; `None` for a
+    /// pin with no key of its own.
+    pub key: Option<String>,
     /// Where `Enter` goes.
     pub target: PathBuf,
     /// A place on another machine, which wears the network glyph rather than
@@ -1159,15 +1736,48 @@ impl Cloud {
     pub fn target(&self) -> PathBuf {
         PathBuf::from(df_core::vfs::VfsPath::rclone(&self.name, "").to_url())
     }
+
+    /// What the row says the remote is: the service by the name people know
+    /// it by — `Google Drive`, `S3` — where rclone's type for it is one of
+    /// those, and rclone's own word for it otherwise.
+    pub fn service(&self) -> String {
+        let known = match self.provider.to_ascii_lowercase().as_str() {
+            "drive" => "Google Drive",
+            "s3" => "S3",
+            "dropbox" => "Dropbox",
+            "onedrive" => "OneDrive",
+            "b2" => "Backblaze B2",
+            "box" => "Box",
+            "pcloud" => "pCloud",
+            "mega" => "MEGA",
+            "protondrive" => "Proton Drive",
+            "googlephotos" => "Google Photos",
+            "google cloud storage" | "gcs" => "Google Cloud Storage",
+            "azureblob" => "Azure Blob Storage",
+            "azurefiles" => "Azure Files",
+            "swift" => "Swift",
+            "webdav" => "WebDAV",
+            "sftp" => "SFTP",
+            "ftp" => "FTP",
+            "smb" => "SMB",
+            "jottacloud" => "Jottacloud",
+            "koofr" => "Koofr",
+            "yandex" => "Yandex Disk",
+            _ => return self.provider.clone(),
+        };
+        known.to_string()
+    }
 }
 
-/// Something the cursor can be on.
+/// Something the cursor can be on, in the card's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Item {
-    /// An index into [`Card::places`].
-    Place(usize),
     /// An index into [`Card::devices`].
     Disk(usize),
+    /// An index into [`Card::phones`].
+    Phone(usize),
+    /// An index into [`Card::places`].
+    Place(usize),
     /// An index into [`Card::shares`].
     Share(usize),
     /// An index into [`Card::clouds`].
@@ -1179,9 +1789,9 @@ pub enum Item {
 /// One line of the card, from top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Line {
-    /// A section's name: `Places`, `Disks`, `Network`.
+    /// A section's name: `Devices`, `Network`, `Places`.
     Section(&'static str),
-    /// A section with nothing in it, and why.
+    /// A section with nothing in it, and why: one line, a row's height.
     Empty(&'static str),
     Item(Item),
 }
@@ -1190,11 +1800,14 @@ impl Line {
     fn height(self) -> f32 {
         match self {
             Line::Section(_) => SECTION_ROW,
-            Line::Empty(_) => EMPTY_ROW,
-            Line::Item(_) => ROW,
+            Line::Empty(_) | Line::Item(_) => ROW,
         }
     }
 }
+
+/// The sections, top to bottom. Always all three, each with its heading, so
+/// the headings are a fixed part of the card's height ([`window`]).
+const SECTIONS: [&str; 3] = ["Devices", "Network", "Places"];
 
 /// The card's own state, while it is open.
 pub struct Card {
@@ -1202,6 +1815,8 @@ pub struct Card {
     /// when a pin comes off it.
     pub places: Vec<Place>,
     pub devices: Vec<Device>,
+    /// The phones and cameras, under the disks in the Devices section.
+    pub phones: Vec<Phone>,
     pub shares: Vec<Share>,
     /// The rclone services, after the shares in the Network section. Handed
     /// in by the app when the card opens ([`Card::set_clouds`]): they are the
@@ -1216,8 +1831,13 @@ pub struct Card {
     /// One at a time: two mounts of the same device is one of them failing with
     /// `AlreadyMounted`, and a card that let you start it is a card that
     /// produced an error you caused by being allowed to. Holds the busy row's
-    /// identity: a block object's path, or a share's URL.
-    pub busy: Option<String>,
+    /// identity — a block object's path, a share's URL, a phone's root — and
+    /// what is being done to it (`mounting…`), which the row says in place of
+    /// its detail ([`Card::start`]).
+    pub busy: Option<(String, &'static str)>,
+    /// The last call's failure, on the row it failed on, in place of the
+    /// row's detail until the next call starts ([`Card::fail`]).
+    pub failed: Option<(String, String)>,
     /// Nothing has come back yet.
     pub loading: bool,
     /// How tall the body may be before it scrolls: [`WINDOW`], or less in a
@@ -1240,11 +1860,13 @@ impl Card {
         Card {
             places: Vec::new(),
             devices: Vec::new(),
+            phones: Vec::new(),
             shares: Vec::new(),
             clouds: Vec::new(),
             cursor: 0,
             first: 0,
             busy: None,
+            failed: None,
             loading: true,
             window: WINDOW,
             bar: crate::scrollbar::Linger::default(),
@@ -1253,60 +1875,61 @@ impl Card {
         }
     }
 
-    /// A card with its Places section, the cursor on the first row after it.
+    /// A card with its Places section filled, the cursor on its first row.
     ///
-    /// `M` is the disks' key, and `M` `Enter` mounting the stick just plugged
-    /// in is the card's main job, so the cursor starts where the first disk
-    /// will be — before udisks2 has named it, because the places are this
-    /// machine's own data and known the instant the card opens. Until the
-    /// listing lands that index is the connect row; [`Card::update`] keeps
-    /// the index and the first disk fills it. The places are one `↑` away.
+    /// `M` `Enter` mounting the stick — or the phone — just plugged in is the
+    /// card's main job, so the Devices section is on top and the cursor starts
+    /// on its first row, before udisks2 has named it: the places are this
+    /// machine's own data and known the instant the card opens, the devices
+    /// are not. Until the listing lands that row is the first of the Network
+    /// section's; [`Card::update`] keeps the index, and the first device
+    /// fills it. The places are at the bottom, one `↑` away round the top.
     pub fn with_places(places: Vec<Place>) -> Card {
         let mut card = Card::new();
-        card.cursor = places.len();
         card.places = places;
         card.follow();
         card
     }
 
     /// The rclone services, put under the shares. The cursor keeps its index,
-    /// which on a card still waiting for udisks2 is the first row after the
-    /// places — so it rests on the first cloud row until the disks arrive
-    /// above it, exactly as it rests on the connect row when there are none
-    /// (see [`Card::with_places`]).
+    /// which on a card still waiting for udisks2 is the first row — so it
+    /// rests on the first cloud row until the devices arrive above it,
+    /// exactly as it rests on the connect row when there are none (see
+    /// [`Card::with_places`]).
     pub fn set_clouds(&mut self, clouds: Vec<Cloud>) {
         self.clouds = clouds;
         self.cursor = self.cursor.min(self.items().len().saturating_sub(1));
         self.rebuilt();
     }
 
-    /// Everything the cursor can land on, in order: the places, the disks, the
-    /// shares, the cloud remotes, and the connect row. Never empty — the
-    /// connect row is always there.
+    /// Everything the cursor can land on, in order: the disks, the phones,
+    /// the shares, the cloud remotes, the connect row, and the places. Never
+    /// empty — the connect row is always there.
     pub fn items(&self) -> Vec<Item> {
-        (0..self.places.len())
-            .map(Item::Place)
-            .chain((0..self.devices.len()).map(Item::Disk))
+        (0..self.devices.len())
+            .map(Item::Disk)
+            .chain((0..self.phones.len()).map(Item::Phone))
             .chain((0..self.shares.len()).map(Item::Share))
             .chain((0..self.clouds.len()).map(Item::Cloud))
             .chain(std::iter::once(Item::Connect))
+            .chain((0..self.places.len()).map(Item::Place))
             .collect()
     }
 
     /// Every line, headings and empty states included.
     pub fn lines(&self) -> Vec<Line> {
-        let mut lines = vec![Line::Section("Places")];
-        if self.places.is_empty() {
-            lines.push(Line::Empty(PLACES_EMPTY));
-        } else {
-            lines.extend((0..self.places.len()).map(|i| Line::Item(Item::Place(i))));
-        }
-        lines.push(Line::Section("Disks"));
-        match self.disks_empty() {
+        let [devices, network, places] = SECTIONS;
+        let mut lines = vec![Line::Section(devices)];
+        match self.devices_empty() {
             Some(message) => lines.push(Line::Empty(message)),
-            None => lines.extend((0..self.devices.len()).map(|i| Line::Item(Item::Disk(i)))),
+            None => lines.extend(
+                (0..self.devices.len())
+                    .map(Item::Disk)
+                    .chain((0..self.phones.len()).map(Item::Phone))
+                    .map(Line::Item),
+            ),
         }
-        lines.push(Line::Section("Network"));
+        lines.push(Line::Section(network));
         match self.shares_empty() {
             Some(message) => lines.push(Line::Empty(message)),
             None => lines.extend((0..self.shares.len()).map(|i| Line::Item(Item::Share(i)))),
@@ -1316,6 +1939,12 @@ impl Card {
         // was mounted to reach one.
         lines.extend((0..self.clouds.len()).map(|i| Line::Item(Item::Cloud(i))));
         lines.push(Line::Item(Item::Connect));
+        lines.push(Line::Section(places));
+        if self.places.is_empty() {
+            lines.push(Line::Empty(PLACES_EMPTY));
+        } else {
+            lines.extend((0..self.places.len()).map(|i| Line::Item(Item::Place(i))));
+        }
         lines
     }
 
@@ -1326,6 +1955,13 @@ impl Card {
     pub fn selected_device(&self) -> Option<&Device> {
         match self.selected()? {
             Item::Disk(i) => self.devices.get(i),
+            _ => None,
+        }
+    }
+
+    pub fn selected_phone(&self) -> Option<&Phone> {
+        match self.selected()? {
+            Item::Phone(i) => self.phones.get(i),
             _ => None,
         }
     }
@@ -1349,6 +1985,32 @@ impl Card {
             Item::Cloud(i) => self.clouds.get(i),
             _ => None,
         }
+    }
+
+    /// A call about the row whose identity is `identity` has gone out: the
+    /// row says `doing` (`mounting…`) until it comes back, and whatever the
+    /// last call's failure said is over.
+    pub fn start(&mut self, identity: impl Into<String>, doing: &'static str) {
+        self.busy = Some((identity.into(), doing));
+        self.failed = None;
+    }
+
+    /// The call came back and did what it was asked.
+    pub fn finish(&mut self) {
+        self.busy = None;
+    }
+
+    /// The call came back with `message`, which the row it was about says in
+    /// place of its detail until the next call starts.
+    pub fn fail(&mut self, message: impl Into<String>) {
+        if let Some((identity, _)) = self.busy.take() {
+            self.failed = Some((identity, message.into()));
+        }
+    }
+
+    /// Whether a call is out about the row whose identity is `identity`.
+    pub fn is_busy(&self, identity: &str) -> bool {
+        self.busy.as_ref().is_some_and(|(busy, _)| busy == identity)
     }
 
     /// Take a new Places list — a pin came off it — keeping the cursor at the
@@ -1526,18 +2188,20 @@ impl Card {
             .min(self.window)
     }
 
-    /// What a row is across a refresh: the block object, the share's URL, or
-    /// the connect row.
+    /// What a row is across a refresh: the block object, the phone's root,
+    /// the share's URL, the remote's name, the place's target, or the connect
+    /// row.
     fn identity(&self, item: Item) -> Option<String> {
         match item {
+            Item::Disk(i) => self.devices.get(i).map(|d| format!("disk {}", d.object)),
+            Item::Phone(i) => self.phones.get(i).map(|p| format!("phone {}", p.root)),
+            Item::Share(i) => self.shares.get(i).map(|s| format!("share {}", s.url)),
+            Item::Cloud(i) => self.clouds.get(i).map(|c| format!("cloud {}", c.name)),
+            Item::Connect => Some("connect".to_string()),
             Item::Place(i) => self
                 .places
                 .get(i)
                 .map(|p| format!("place {}", p.target.display())),
-            Item::Disk(i) => self.devices.get(i).map(|d| format!("disk {}", d.object)),
-            Item::Share(i) => self.shares.get(i).map(|s| format!("share {}", s.url)),
-            Item::Cloud(i) => self.clouds.get(i).map(|c| format!("cloud {}", c.name)),
-            Item::Connect => Some("connect".to_string()),
         }
     }
 
@@ -1547,16 +2211,17 @@ impl Card {
     /// leaves the cursor on the disk that was just mounted rather than on
     /// whatever now sorts into that row (`delightful-ui` §8). The *first*
     /// listing has one exception: a cursor still where the card opened it —
-    /// on the first row after the places ([`Card::with_places`]), which is
-    /// the connect row until the listing lands — stays at that index, so the
-    /// first disk arrives *under* it. The index does not move, so nothing
+    /// on the first row ([`Card::with_places`]), which is the Network
+    /// section's first until the listing lands — stays at that index, so the
+    /// first device arrives *under* it. The index does not move, so nothing
     /// jumps; it only gains the row it was waiting for. A cursor somebody has
-    /// moved, up into the places or anywhere else, is kept by identity like
-    /// any other.
-    pub fn update(&mut self, devices: Vec<Device>, shares: Vec<Share>) {
+    /// moved, round into the places or anywhere else, is kept by identity
+    /// like any other.
+    pub fn update(&mut self, devices: Vec<Device>, phones: Vec<Phone>, shares: Vec<Share>) {
         let on = self.selected().and_then(|item| self.identity(item));
-        let waiting = self.loading && self.cursor == self.places.len();
+        let waiting = self.loading && self.cursor == 0;
         self.devices = devices;
+        self.phones = phones;
         self.shares = shares;
         self.loading = false;
         let items = self.items();
@@ -1567,20 +2232,20 @@ impl Card {
         });
         self.cursor = match kept {
             Some(at) => at,
-            None if waiting => self.places.len(),
+            None if waiting => 0,
             None => self.cursor,
         }
         .min(items.len().saturating_sub(1));
         self.rebuilt();
     }
 
-    /// What the disks section says when it has no rows, or `None` when it
-    /// has some.
+    /// What the Devices section says when it has no rows — no disk and no
+    /// phone — or `None` when it has some.
     ///
     /// Two different nothings, and they must not look alike
     /// (`delightful-ui` §11): still asking, and nothing to manage.
-    pub fn disks_empty(&self) -> Option<&'static str> {
-        if !self.devices.is_empty() {
+    pub fn devices_empty(&self) -> Option<&'static str> {
+        if !self.devices.is_empty() || !self.phones.is_empty() {
             return None;
         }
         Some(if self.loading {
@@ -1614,9 +2279,9 @@ impl Card {
 /// remember — and the list never scrolls past its own end.
 ///
 /// Everything between the row and the row before it comes back with it, not
-/// only the heading: over the first disk of a machine with nothing pinned
-/// that is the Places section's own heading and its empty state, and the
-/// card scrolled back to its first row that still hid its first section
+/// only the heading: over the first share of a machine with nothing plugged
+/// in that is the Devices section's heading and its empty state as well, and
+/// the card scrolled back to its first row that still hid its first section
 /// would be a card that looked as though it had no top.
 fn scroll(first: usize, at: usize, lines: &[Line], window: f32) -> usize {
     let heights: Vec<f32> = lines.iter().map(|line| line.height()).collect();
@@ -1662,35 +2327,39 @@ fn deepest(heights: &[f32], window: f32) -> usize {
 
 // ── The card ────────────────────────────────────────────────────────────────
 
-/// One row. Two lines: the name, then the detail under it.
+/// One row: one line, the height of a row in the list panes
+/// ([`crate::ui::ROW_HEIGHT`]) — the glyph, the name, and the detail after it.
 ///
-/// Tall enough for both of them and the air between. It was 34 — one line of
-/// [`FONT`] plus its padding — so the second line was drawn *through* the
-/// first: the name and the detail shared a baseline and the row read as one
-/// smudge.
-const ROW: f32 = 46.0;
-/// Where the name's centre sits in the row, and the detail's under it.
-const NAME_LINE: f32 = 15.0;
-const DETAIL_LINE: f32 = 31.0;
+/// It was two lines, the detail under the name, which made ten rows of the
+/// card as tall as twenty of a pane and put what a row *is* a line away from
+/// what it is called.
+const ROW: f32 = crate::ui::ROW_HEIGHT;
 /// A section's heading line: the help sheet's group-title line
 /// ([`crate::chrome::HELP_ROW`]) with a few points more above it, so the
 /// second section reads as starting rather than as continuing the first.
 const SECTION_ROW: f32 = 26.0;
-/// A section with nothing in it: one line of text, not a two-line row.
-const EMPTY_ROW: f32 = 30.0;
-/// The most the rows may take before the card scrolls: [`ROWS`] rows and all
+/// The most the lines may take before the card scrolls: [`ROWS`] rows and the
 /// three headings. At most: a window too short for it gets less ([`window`]).
-const WINDOW: f32 = ROWS as f32 * ROW + 3.0 * SECTION_ROW;
+const WINDOW: f32 = ROWS as f32 * ROW + SECTIONS.len() as f32 * SECTION_ROW;
 /// The row's own left/right inset, inside the card's [`PAD`].
 const ROW_PAD: f32 = 10.0;
-/// The width a place's glyph is centred in: a little over the glyph itself,
-/// so the folder and the server glyph, which are not one width, start their
-/// text in one column.
+/// The width a row's glyph is centred in: a little over the glyph itself, so
+/// glyphs that are not one width start their names in one column.
 const ICON_COLUMN: f32 = 18.0;
-/// The most of a row the right-hand status may take before it is ellipsised.
-/// A mount point is a path and paths are long; the name is what the row is
-/// *about*, so it keeps the majority.
-const STATUS_SHARE: f32 = 0.42;
+/// Between the name and the detail after it, and between the detail and the
+/// key chip: the gap between the panes, since it separates two columns of
+/// facts rather than two words of one.
+const DETAIL_GAP: f32 = crate::ui::GAP;
+/// The most of a row's text the name may take, leaving the rest to the
+/// detail. A name is short — a label, a model, a folder — and the detail is a
+/// path that can be any length, so the name gets what it needs up to this and
+/// the detail everything else.
+const NAME_SHARE: f32 = 0.6;
+/// A detail narrower than this is left out rather than squeezed to an `…`
+/// that says nothing.
+const MIN_DETAIL: f32 = 24.0;
+/// The key chip's padding either side of its key.
+const CHIP_PAD: f32 = 5.0;
 /// The card's inner padding — `chrome::CARD_PAD`, not a number of its own.
 ///
 /// The plate is [`crate::chrome::card`], whose radius is
@@ -1707,6 +2376,9 @@ const TITLE: f32 = 20.0;
 const HEADING: f32 = TITLE + 8.0;
 const MAX_WIDTH: f32 = 560.0;
 const FONT: f32 = 13.0;
+/// The detail's face: a step under the name's, as well as quieter, so it
+/// reads as what the name is rather than as a second name.
+const DETAIL_FONT: f32 = FONT - 1.0;
 
 /// Where the card's pieces are.
 #[derive(Debug, Clone)]
@@ -1750,12 +2422,18 @@ impl Geometry {
 /// heading and the hint strip.
 const FIXED: f32 = PAD * 2.0 + HEADING + crate::chrome::HINT_ROW;
 
-/// How tall the body may be in `area`: [`WINDOW`], or what the window leaves
-/// between the heading and the hint strip when that is less
-/// ([`crate::dialog::room`]). Never less than a row, so the cursor always has
-/// a whole line to be on.
+/// How tall the body may be in `area`: [`WINDOW`], or less in a window too
+/// short for it.
+///
+/// Every card with a list fits it by one rule ([`crate::dialog::fit_rows`]),
+/// and now that a row is one height this card's is that rule too: the three
+/// headings are a fixed part of the card, like its title and its hint strip,
+/// and the rows are as many as the rest of the window has room for, up to
+/// [`ROWS`] — and never none, so the cursor always has a whole line to be on.
 pub fn window(area: egui::Rect) -> f32 {
-    crate::dialog::room(area, FIXED).clamp(ROW, WINDOW)
+    let headings = SECTIONS.len() as f32 * SECTION_ROW;
+    let (rows, _) = crate::dialog::fit_rows(area, MAX_WIDTH, FIXED + headings, ROW, ROWS);
+    rows as f32 * ROW + headings
 }
 
 /// Lay the card out, centred and biased above true centre
@@ -1799,7 +2477,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
 }
 
 /// The card's bar, beside its body, while the lines are more than it shows.
-/// Counted in points, since the lines are not one height ([`extent`]).
+/// Counted in points, since the headings are not a row's height ([`extent`]).
 pub fn bar(geometry: &Geometry, card: &Card) -> Option<crate::scrollbar::Geometry> {
     let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
     let above: f32 = heights[..card.first.min(heights.len())].iter().sum();
@@ -1811,14 +2489,14 @@ pub fn bar(geometry: &Geometry, card: &Card) -> Option<crate::scrollbar::Geometr
 /// and the lines as far down as a view can start plus that window.
 ///
 /// The window rather than the lines laid out in it, which are fewer while a
-/// heading or an empty section's line is in view and more when rows are:
-/// a thumb measured from them would lengthen and shorten as a drag went
-/// down the card, and near [`crate::scrollbar::MIN_THUMB`] flip a line back
-/// and forth from one frame to the next. And the reach rather than every
-/// line, because the view stops at the last lines that fill the window
-/// ([`deepest`]), which can start above the window's height from the end:
-/// the bottom of the thumb's travel is that line, so a thumb pulled all the
-/// way down lands on it rather than on the line before.
+/// heading is in view and more when rows are: a thumb measured from them
+/// would lengthen and shorten as a drag went down the card, and near
+/// [`crate::scrollbar::MIN_THUMB`] flip a line back and forth from one frame
+/// to the next. And the reach rather than every line, because the view stops
+/// at the last lines that fill the window ([`deepest`]), which can start above
+/// the window's height from the end: the bottom of the thumb's travel is that
+/// line, so a thumb pulled all the way down lands on it rather than on the
+/// line before.
 fn extent(card: &Card) -> (f32, f32) {
     let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
     let reach: f32 = heights[..deepest(&heights, card.window)].iter().sum();
@@ -1826,111 +2504,212 @@ fn extent(card: &Card) -> (f32, f32) {
 }
 
 /// What one row says.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Face {
-    /// The glyph in front of the two lines, for a place: what kind of place
-    /// it is, the way a file row's icon says what kind of file.
+    /// The glyph in front of the name: what kind of thing the row is, the way
+    /// a file row's icon says what kind of file.
     icon: Option<crate::icons::Icon>,
     name: String,
+    /// What follows the name: the row's detail, or while a call is out on the
+    /// row what the call is doing, and after one failed, the failure.
     detail: String,
-    /// The right-hand text and its colour; `None` for a row with no state.
-    status: Option<(String, egui::Color32)>,
+    /// The detail's ink: `quiet` for the detail, the palette's amber while
+    /// busy — so a polkit prompt behind the window is not read as the card
+    /// having hung — and its red for a failure.
+    tone: egui::Color32,
+    /// A place's `g` key, drawn as a chip at the row's end.
+    key: Option<String>,
 }
 
 fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) -> Face {
-    let busy = |identity: &str| card.busy.as_deref() == Some(identity);
-    // A status is words, so an accented one is the accent as ink.
-    let working = || {
-        (
-            "working…".to_string(),
-            crate::theme::ink(palette, palette.peach),
-        )
-    };
-    match item {
-        Item::Place(i) => {
-            let Some(place) = card.places.get(i) else {
-                return Face::default();
-            };
-            Face {
-                icon: Some(if place.remote {
-                    crate::icons::network(palette, nerd)
+    use crate::icons;
+    // The icon, the name, the detail, the key, and the identity a call about
+    // the row is kept under — none for a row nothing is ever done to.
+    let row = match item {
+        Item::Disk(i) => card.devices.get(i).map(|device| {
+            (
+                icons::drive(palette, nerd, device.removable),
+                device.label.clone(),
+                device.detail(),
+                None,
+                Some(device.object.clone()),
+            )
+        }),
+        Item::Phone(i) => card.phones.get(i).map(|phone| {
+            (
+                match phone.protocol {
+                    Protocol::Mtp => icons::phone(palette, nerd),
+                    Protocol::Gphoto2 => icons::camera(palette, nerd),
+                },
+                phone.name.clone(),
+                phone.detail(),
+                None,
+                Some(phone.root.clone()),
+            )
+        }),
+        // Every share listed is mounted — gvfs lists nothing else — so what it
+        // says after its name is where it is: its URL, and not gvfs-fuse's
+        // spec-named directory, which is nobody's idea of where a share is.
+        Item::Share(i) => card.shares.get(i).map(|share| {
+            (
+                icons::network(palette, nerd),
+                share.label.clone(),
+                share.url.clone(),
+                None,
+                Some(share.url.clone()),
+            )
+        }),
+        // The glyph a remote place wears: it is the same kind of thing —
+        // somewhere that is not this disk — and the detail says which service
+        // in words.
+        Item::Cloud(i) => card.clouds.get(i).map(|cloud| {
+            (
+                icons::network(palette, nerd),
+                cloud.name.clone(),
+                cloud.service(),
+                None,
+                None,
+            )
+        }),
+        Item::Connect => Some((
+            icons::connect(palette, nerd),
+            "Connect to server…".to_string(),
+            "smb · sftp · ftp · dav · nfs".to_string(),
+            None,
+            None,
+        )),
+        Item::Place(i) => card.places.get(i).map(|place| {
+            (
+                if place.remote {
+                    icons::network(palette, nerd)
                 } else {
-                    crate::icons::folder(palette, nerd)
-                }),
-                name: place.name.clone(),
-                detail: place.detail.clone(),
-                status: None,
-            }
-        }
-        Item::Disk(i) => {
-            let Some(device) = card.devices.get(i) else {
-                return Face::default();
-            };
-            // A mounted device is the palette's own "this is live" colour; an
-            // unmounted one is plain text. The busy one is amber and says so, so
-            // a polkit prompt behind the window is not read as the card having
-            // hung.
-            let status = if busy(&device.object) {
-                working()
-            } else if device.is_mounted() {
-                (device.status(), crate::theme::ink(palette, palette.green))
-            } else {
-                (device.status(), palette.quiet)
-            };
-            Face {
-                icon: None,
-                name: device.label.clone(),
-                detail: device.detail(),
-                status: Some(status),
-            }
-        }
-        Item::Share(i) => {
-            let Some(share) = card.shares.get(i) else {
-                return Face::default();
-            };
-            // Every share listed is mounted — gvfs lists nothing else — so it
-            // wears the mounted disk's green, and says what kind of server it is
-            // where a disk says where it is: the path would be gvfs-fuse's
-            // spec-named directory, which is nobody's idea of where a share is.
-            let status = if busy(&share.url) {
-                working()
-            } else {
-                (
-                    share.scheme.clone(),
-                    crate::theme::ink(palette, palette.green),
-                )
-            };
-            Face {
-                icon: None,
-                name: share.label.clone(),
-                detail: share.url.clone(),
-                status: Some(status),
-            }
-        }
-        Item::Cloud(i) => {
-            let Some(cloud) = card.clouds.get(i) else {
-                return Face::default();
-            };
-            // The network glyph a remote place wears in the Places section:
-            // it is the same kind of thing — somewhere that is not this disk —
-            // and a second glyph for "far away, but a cloud" would be a
-            // distinction the row's second line already draws in words.
-            Face {
-                icon: Some(crate::icons::network(palette, nerd)),
-                name: cloud.name.clone(),
-                detail: cloud.provider.clone(),
-                // No state: nothing is mounted, so there is no green to wear
-                // and nothing to be busy with.
-                status: None,
-            }
-        }
-        Item::Connect => Face {
-            icon: None,
-            name: "Connect to server…".to_string(),
-            detail: "smb · sftp · ftp · dav · nfs".to_string(),
-            status: None,
-        },
+                    icons::folder(palette, nerd)
+                },
+                place.name.clone(),
+                place.detail.clone(),
+                place.key.clone(),
+                None,
+            )
+        }),
+    };
+    let Some((icon, name, detail, key, identity)) = row else {
+        return Face::default();
+    };
+    let busy = card
+        .busy
+        .as_ref()
+        .filter(|(busy, _)| identity.as_deref() == Some(busy.as_str()));
+    let failed = card
+        .failed
+        .as_ref()
+        .filter(|(failed, _)| identity.as_deref() == Some(failed.as_str()));
+    // Words, so an accented one is the accent as ink ([`crate::theme::ink`]).
+    let (detail, tone) = match (busy, failed) {
+        (Some((_, doing)), _) => (
+            (*doing).to_string(),
+            crate::theme::ink(palette, palette.peach),
+        ),
+        (None, Some((_, message))) => (message.clone(), crate::theme::ink(palette, palette.red)),
+        (None, None) => (detail, palette.quiet),
+    };
+    Face {
+        icon: Some(icon),
+        name,
+        detail,
+        tone,
+        key,
     }
+}
+
+/// What a row is filled with: the list panes' rule, on the card's plate.
+///
+/// The cursor is [`crate::theme::cursor_fill`], and a hover lifts whatever
+/// the row already is ([`crate::theme::lift`]) — the full step on a plain row,
+/// a little on the cursor's, as a pane's rows do — so on a light palette both
+/// are the panes' washes of blue rather than a grey slab. `None` for a row the
+/// colour of the plate, which is not drawn.
+fn row_fill(palette: &crate::theme::Palette, on_cursor: bool, hover: f32) -> Option<egui::Color32> {
+    let plate = palette.crust;
+    let (base, lift) = if on_cursor {
+        (
+            crate::theme::cursor_fill(palette),
+            crate::ui::CURSOR_HOVER_LIFT,
+        )
+    } else {
+        (plate, crate::ui::HOVER_LIFT)
+    };
+    let fill = crate::theme::lift(palette, base, hover * lift);
+    (fill != plate).then_some(fill)
+}
+
+/// Where one row's pieces go.
+#[derive(Debug, Clone, PartialEq)]
+struct RowLayout {
+    /// The glyph's centre, when there is a glyph to draw.
+    glyph: Option<egui::Pos2>,
+    /// The name's left end, on the row's centre line, and the most it may
+    /// take.
+    name: (egui::Pos2, f32),
+    /// The detail's left end and the room it has.
+    detail: (egui::Pos2, f32),
+    /// The key chip, when the row has a key.
+    chip: Option<egui::Rect>,
+}
+
+/// Lay out a row `rect` whose name is `name_width` wide, with a glyph or not,
+/// and a key chip `chip_width` wide or none.
+///
+/// Left to right: the glyph in its column, the name, [`DETAIL_GAP`], the
+/// detail, and at the far end the chip. The name has what it needs up to
+/// [`NAME_SHARE`] of the text's room and the detail has the rest, so a long
+/// path never pushes the name off the row and a short name leaves the path
+/// the room.
+///
+/// The chip sits [`crate::chrome::CHIP_INSET`] in from the row's top, bottom
+/// and right, with [`crate::chrome::CHIP_RADIUS`] corners: the row's own
+/// radius less that inset, so the chip's corner is concentric with the row
+/// plate's round it when the row is under the cursor (`delightful-ui` §15).
+fn row_layout(
+    rect: egui::Rect,
+    glyph: bool,
+    name_width: f32,
+    chip_width: Option<f32>,
+) -> RowLayout {
+    let y = rect.center().y;
+    let mut left = rect.left() + ROW_PAD;
+    let glyph = glyph.then(|| {
+        let at = egui::pos2(left + ICON_COLUMN / 2.0, y);
+        left += ICON_COLUMN + crate::chrome::ICON_GAP;
+        at
+    });
+    let inset = crate::chrome::CHIP_INSET;
+    let chip = chip_width.map(|width| {
+        egui::Rect::from_min_max(
+            egui::pos2(rect.right() - inset - width, rect.top() + inset),
+            egui::pos2(rect.right() - inset, rect.bottom() - inset),
+        )
+    });
+    let right = chip.map_or(rect.right() - ROW_PAD, |chip| chip.left() - DETAIL_GAP);
+    let room = (right - left).max(0.0);
+    let name = name_width.min(room * NAME_SHARE).max(0.0);
+    let detail_left = left + name + DETAIL_GAP;
+    RowLayout {
+        glyph,
+        name: (egui::pos2(left, y), name),
+        detail: (egui::pos2(detail_left, y), (right - detail_left).max(0.0)),
+        chip,
+    }
+}
+
+/// The detail as it fits `room`, `measure` saying how wide a text is: whole
+/// when it fits, its middle taken out when not — a path's start says whose it
+/// is and its end which, and both matter — and nothing at all when there is
+/// less room than [`MIN_DETAIL`].
+fn fitted_detail(detail: &str, room: f32, measure: impl Fn(&str) -> f32) -> String {
+    if room < MIN_DETAIL {
+        return String::new();
+    }
+    crate::chrome::elide_middle_with(detail, |candidate| measure(candidate) <= room)
 }
 
 /// Draw it, over the scrim the app lays for it.
@@ -1946,13 +2725,13 @@ pub fn paint(
     crate::chrome::card(paint, geometry.card, 1.0);
 
     let left = geometry.card.left() + PAD;
-    // "Mounts" over the two sections, the way the help sheet's "Keys" sits
-    // over its groups: the card is about both, and "Disks" is now the name of
-    // its first half.
+    // "Places" over the three sections, the way the help sheet's "Keys" sits
+    // over its groups: every row on the card is somewhere to go that is not
+    // this folder.
     painter.text(
         egui::pos2(left, geometry.card.top() + PAD + TITLE / 2.0),
         egui::Align2::LEFT_CENTER,
-        "Mounts",
+        "Places",
         egui::FontId::proportional(FONT + 2.0),
         palette.text,
     );
@@ -1983,8 +2762,15 @@ pub fn paint(
                 );
             }
             Line::Empty(message) => {
+                // In the names' column, where the rows' names would be, when
+                // there are glyphs in front of them.
+                let indent = if paint.nerd {
+                    ICON_COLUMN + crate::chrome::ICON_GAP
+                } else {
+                    0.0
+                };
                 clipped.text(
-                    egui::pos2(rect.left() + ROW_PAD, rect.center().y),
+                    egui::pos2(rect.left() + ROW_PAD + indent, rect.center().y),
                     egui::Align2::LEFT_CENTER,
                     message,
                     egui::FontId::proportional(FONT),
@@ -2003,17 +2789,8 @@ pub fn paint(
                 // the program, and it was the one row in the crate that gave no
                 // feedback at all under the finger (`delightful-ui` §4).
                 let rect = crate::hover::pressed_rect(*rect, hovers.press(key));
-                let on_cursor = selected == Some(item);
-                if on_cursor || hover > 0.0 {
-                    clipped.rect_filled(
-                        rect,
-                        crate::ui::ROW_RADIUS,
-                        crate::theme::mix(
-                            palette.crust,
-                            palette.surface1,
-                            if on_cursor { 1.0 } else { hover * 0.6 },
-                        ),
-                    );
+                if let Some(fill) = row_fill(palette, selected == Some(item), hover) {
+                    clipped.rect_filled(rect, crate::ui::ROW_RADIUS, fill);
                 }
                 for splash in ripples.splashes(key, paint.now) {
                     clipped.circle_filled(
@@ -2059,103 +2836,72 @@ pub fn paint(
     }
 }
 
-/// One row's two lines and its status.
+/// The face a key chip's key is set in: the which-key card's, a step down to
+/// sit inside a row.
+fn chip_font() -> egui::FontId {
+    crate::chrome::key_font(FONT - 1.5)
+}
+
+/// One row's glyph, name, detail and key, where [`row_layout`] puts them.
 fn paint_face(
     painter: &egui::Painter,
     rect: egui::Rect,
     face: &Face,
     palette: &crate::theme::Palette,
 ) {
-    // The status first, because it is right-aligned and the two lines beside
-    // it are given whatever it leaves.
-    let status_width = face.status.as_ref().map_or(0.0, |(status, colour)| {
-        right_aligned(
-            painter,
-            egui::pos2(rect.right() - ROW_PAD, rect.center().y),
-            status,
-            *colour,
-            (rect.width() * STATUS_SHARE - ROW_PAD).max(0.0),
-            egui::FontId::proportional(FONT - 1.0),
-        )
-    });
-    let mut left = rect.left() + ROW_PAD;
-    // A place's glyph, centred on the row's two lines together, and the lines
-    // moved over by its column. Without a patched font there is no glyph to
-    // draw — the file rows go without one too — and then no column either,
-    // so the text is not indented by a blank.
-    if let Some(icon) = face.icon.filter(|icon| icon.glyph != ' ') {
+    let font = egui::FontId::proportional(FONT);
+    let detail_font = egui::FontId::proportional(DETAIL_FONT);
+    // Without a patched font there is no glyph to draw — the file rows go
+    // without one too — and then no column either, so the name is not
+    // indented by a blank.
+    let icon = face.icon.filter(|icon| icon.glyph != ' ');
+    let name_width = crate::chrome::text_width(painter, &face.name, font.clone());
+    let chip_width = face
+        .key
+        .as_ref()
+        .map(|keys| crate::chrome::text_width(painter, keys, chip_font()) + CHIP_PAD * 2.0);
+    let layout = row_layout(rect, icon.is_some(), name_width, chip_width);
+    if let (Some(icon), Some(at)) = (icon, layout.glyph) {
         painter.text(
-            egui::pos2(
-                left + ICON_COLUMN / 2.0,
-                rect.top() + (NAME_LINE + DETAIL_LINE) / 2.0,
-            ),
+            at,
             egui::Align2::CENTER_CENTER,
             icon.glyph,
-            egui::FontId::proportional(FONT + 3.0),
+            egui::FontId::proportional(FONT + 1.0),
             icon.color,
         );
-        left += ICON_COLUMN + crate::chrome::ICON_GAP;
     }
-    let text_width = (rect.right() - ROW_PAD - status_width - crate::ui::GAP - left).max(0.0);
-    crate::chrome::truncated_in(
-        painter,
-        egui::pos2(left, rect.top() + NAME_LINE),
-        &face.name,
-        palette.text,
-        text_width,
-        egui::FontId::proportional(FONT),
-    );
-    // The detail line: dimmer *and* smaller, so it reads as a caption under
-    // the name rather than as a second name (`ui-anti-slop`: hierarchy by
-    // size, not by decoration).
-    crate::chrome::truncated_in(
-        painter,
-        egui::pos2(left, rect.top() + DETAIL_LINE),
-        &face.detail,
-        palette.subtext0,
-        text_width,
-        egui::FontId::proportional(FONT - 1.5),
-    );
-}
-
-/// One ellipsised line, right-aligned on `right` and centred on its `y`,
-/// returning how wide it ended up.
-///
-/// [`crate::chrome::truncated`]'s twin. A left-aligned line can be drawn where
-/// it is told; a right-aligned one has to be laid out before it knows where it
-/// starts, and the caller wants that width anyway — it is what is left for the
-/// columns beside it.
-fn right_aligned(
-    painter: &egui::Painter,
-    right: egui::Pos2,
-    text: &str,
-    color: egui::Color32,
-    max_width: f32,
-    font: egui::FontId,
-) -> f32 {
-    use egui::text::{LayoutJob, TextFormat, TextWrapping};
-    let mut job = LayoutJob::single_section(
-        text.to_string(),
-        TextFormat {
-            font_id: font,
-            color,
-            ..Default::default()
-        },
-    );
-    job.wrap = TextWrapping {
-        max_width,
-        max_rows: 1,
-        break_anywhere: true,
-        overflow_character: Some('…'),
-    };
-    let galley = painter.layout_job(job);
-    let size = galley.size();
-    painter.galley(
-        egui::pos2(right.x - size.x, right.y - size.y / 2.0),
-        galley,
-        color,
-    );
-    size.x
+    let (name_at, name_room) = layout.name;
+    crate::chrome::truncated_in(painter, name_at, &face.name, palette.text, name_room, font);
+    let (detail_at, detail_room) = layout.detail;
+    let detail = fitted_detail(&face.detail, detail_room, |candidate| {
+        crate::chrome::text_width(painter, candidate, detail_font.clone())
+    });
+    if !detail.is_empty() {
+        painter.text(
+            detail_at,
+            egui::Align2::LEFT_CENTER,
+            detail,
+            detail_font,
+            face.tone,
+        );
+    }
+    // The key the way the which-key card draws one — monospace, in the
+    // yellow's ink — on a chip of its own tint, so it reads as a key to press
+    // and not as more of the path beside it.
+    if let (Some(keys), Some(chip)) = (&face.key, layout.chip) {
+        painter.rect_filled(
+            chip,
+            crate::chrome::CHIP_RADIUS,
+            crate::theme::mix(palette.crust, palette.yellow, crate::chrome::CHIP_TINT),
+        );
+        painter.text(
+            chip.center(),
+            egui::Align2::CENTER_CENTER,
+            keys,
+            chip_font(),
+            crate::theme::ink(palette, palette.yellow),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2328,10 +3074,11 @@ mod tests {
         assert!(usb.removable && usb.ejectable);
         assert_eq!(usb.hardware, "SanDisk Cruzer");
         assert!(!usb.is_mounted());
-        assert_eq!(usb.status(), "not mounted");
-        assert!(usb.detail().contains("vfat"));
-        assert!(usb.detail().contains("/dev/sdb1"));
-        assert!(usb.detail().contains("removable"));
+        assert_eq!(
+            usb.detail(),
+            "14.9 GB · vfat · not mounted",
+            "size, filesystem, and where — here, nowhere"
+        );
         assert_eq!(usb.drive.as_deref(), Some("/drives/usb"));
 
         // No label: the device node's last component, which is what `lsblk`
@@ -2339,7 +3086,7 @@ mod tests {
         let root = &devices[1];
         assert_eq!(root.label, "nvme0n1p2");
         assert!(root.is_mounted());
-        assert_eq!(root.status(), "/");
+        assert_eq!(root.detail(), "465.7 GB · ext4 · /");
         assert!(!root.removable);
         assert!(!root.ejectable, "an unstated flag is false, not true");
         assert_eq!(root.hardware, "", "a drive with no vendor says nothing");
@@ -2753,6 +3500,488 @@ Mount(3): backup -> file:///mnt/backup
         assert_eq!(land("smb://nas/other"), None);
     }
 
+    // ── Phones and cameras ──────────────────────────────────────────────────
+
+    /// `gio mount -li` on the development machine (gio 2.88, gvfs 1.60 with
+    /// gvfs-mtp), with nothing plugged in: three of its nine drives, as
+    /// captured — gio numbers what it lists, so the numbers skip. Everything
+    /// here is udisks2's.
+    const UNPLUGGED: &str = "\
+Drive(1): Samsung SSD 960 EVO 500GB
+  Type: GProxyDrive (GProxyVolumeMonitorUDisks2)
+  ids:
+   unix-device: '/dev/nvme1n1'
+  themed icons:  [drive-harddisk-solidstate]  [drive-harddisk]  [drive]  [drive-harddisk-solidstate-symbolic]  [drive-harddisk-symbolic]  [drive-symbolic]
+  symbolic themed icons:  [drive-harddisk-solidstate-symbolic]  [drive-harddisk-symbolic]  [drive-symbolic]  [drive-harddisk-solidstate]  [drive-harddisk]  [drive]
+  is_removable=0
+  is_media_removable=0
+  has_media=1
+  is_media_check_automatic=1
+  can_poll_for_media=0
+  can_eject=0
+  can_start=0
+  can_stop=0
+  start_stop_type=shutdown
+  sort_key=00coldplug/00fixed/nvme1
+  Volume(0): 499 GB Volume
+    Type: GProxyVolume (GProxyVolumeMonitorUDisks2)
+    ids:
+     class: 'device'
+     unix-device: '/dev/nvme1n1p4'
+     uuid: 'E4D4FCBAD4FC8FD2'
+    uuid=E4D4FCBAD4FC8FD2
+    themed icons:  [drive-harddisk-solidstate]  [drive-harddisk]  [drive]  [drive-harddisk-solidstate-symbolic]  [drive-harddisk-symbolic]  [drive-symbolic]
+    symbolic themed icons:  [drive-harddisk-solidstate-symbolic]  [drive-harddisk-symbolic]  [drive-symbolic]  [drive-harddisk-solidstate]  [drive-harddisk]  [drive]
+    can_mount=1
+    can_eject=0
+    should_automount=0
+    sort_key=gvfs.time_detected_usec.1790345348083171
+Drive(4): hp      DVD A  DH16AAL
+  Type: GProxyDrive (GProxyVolumeMonitorUDisks2)
+  ids:
+   unix-device: '/dev/sr0'
+  themed icons:  [drive-optical]  [drive]  [drive-optical-symbolic]  [drive-symbolic]
+  symbolic themed icons:  [drive-optical-symbolic]  [drive-symbolic]  [drive-optical]  [drive]
+  is_removable=1
+  is_media_removable=1
+  has_media=0
+  is_media_check_automatic=1
+  can_poll_for_media=0
+  can_eject=1
+  can_start=0
+  can_stop=0
+  start_stop_type=shutdown
+  sort_key=00coldplug/11removable/sr0
+Drive(8): Generic STORAGE DEVICE
+  Type: GProxyDrive (GProxyVolumeMonitorUDisks2)
+  ids:
+   unix-device: '/dev/sde'
+  themed icons:  [drive-removable-media-flash-sd]  [drive-removable-media-flash]  [drive-removable-media]  [drive-removable]  [drive]  [drive-removable-media-flash-sd-symbolic]  [drive-removable-media-flash-symbolic]  [drive-removable-media-symbolic]  [drive-removable-symbolic]  [drive-symbolic]
+  symbolic themed icons:  [drive-removable-media-symbolic]  [drive-removable-symbolic]  [drive-symbolic]  [drive-removable-media]  [drive-removable]  [drive]
+  is_removable=1
+  is_media_removable=1
+  has_media=1
+  is_media_check_automatic=1
+  can_poll_for_media=0
+  can_eject=1
+  can_start=0
+  can_stop=0
+  start_stop_type=shutdown
+  sort_key=01hotplug/1790456998993800
+  Volume(0): 64 GB Volume
+    Type: GProxyVolume (GProxyVolumeMonitorUDisks2)
+    ids:
+     class: 'device'
+     unix-device: '/dev/sde1'
+    themed icons:  [media-flash-sd]  [media-flash]  [media]  [media-flash-sd-symbolic]  [media-flash-symbolic]  [media-symbolic]
+    symbolic themed icons:  [media-flash-symbolic]  [media-symbolic]  [media-flash]  [media]
+    can_mount=0
+    can_eject=1
+    should_automount=0
+    sort_key=gvfs.time_detected_usec.1790456999250486
+    Mount(0): 64 GB Volume -> file:///run/media/brian/disk
+      Type: GProxyMount (GProxyVolumeMonitorUDisks2)
+      default_location=file:///run/media/brian/disk
+      themed icons:  [media-flash-sd]  [media-flash]  [media]  [media-flash-sd-symbolic]  [media-flash-symbolic]  [media-symbolic]
+      symbolic themed icons:  [media-flash-symbolic]  [media-symbolic]  [media-flash]  [media]
+      x_content_types: x-content/image-dcf
+      can_unmount=1
+      can_eject=1
+      is_shadowed=0
+      sort_key=gvfs.time_detected_usec.1790457433685306
+";
+
+    /// A phone's volume, as gvfs-mtp reports one — **not captured**: no phone
+    /// could be plugged into the machine these were written on, so this is
+    /// gio's format as its source prints a volume (`list_volumes`, glib
+    /// 2.88's `gio-tool-mount.c`), with the activation root gvfs-mtp builds
+    /// from the device's udev serial.
+    const PHONE_VOLUME: &str = "\
+Volume(0): Pixel 10a
+  Type: GProxyVolume (GProxyVolumeMonitorMTP)
+  ids:
+   unix-device: '/dev/bus/usb/003/012'
+  activation_root=mtp://Google_Pixel_10a_4B021FDAQ00123/
+  themed icons:  [phone]  [phone-symbolic]
+  symbolic themed icons:  [phone-symbolic]  [phone]
+  can_mount=1
+  can_eject=0
+  should_automount=1
+  sort_key=gvfs.time_detected_usec.1790460000000000
+";
+
+    /// …once it is mounted: gvfs's shadow of the mount nested under the
+    /// volume, and the daemon's own mount at the margin. Written the same way.
+    ///
+    /// Its first line is on the `const`'s own line because a `\` line break
+    /// in a Rust string takes the next line's indentation with it.
+    const PHONE_MOUNTS: &str = "  Mount(0): Pixel 10a -> mtp://Google_Pixel_10a_4B021FDAQ00123/
+    Type: GProxyShadowMount (GProxyVolumeMonitorMTP)
+    default_location=mtp://Google_Pixel_10a_4B021FDAQ00123/
+    themed icons:  [phone]  [phone-symbolic]
+    symbolic themed icons:  [phone-symbolic]  [phone]
+    x_content_types: x-content/image-dcf
+    can_unmount=1
+    can_eject=0
+    is_shadowed=0
+Mount(0): Pixel 10a -> mtp://Google_Pixel_10a_4B021FDAQ00123/
+  Type: GDaemonMount
+  default_location=mtp://Google_Pixel_10a_4B021FDAQ00123/
+  themed icons:  [phone]  [phone-symbolic]
+  symbolic themed icons:  [phone-symbolic]  [phone]
+  can_unmount=1
+  can_eject=0
+  is_shadowed=1
+";
+
+    const PIXEL: &str = "mtp://Google_Pixel_10a_4B021FDAQ00123/";
+    const PIXEL_DIR: &str = "mtp:host=Google_Pixel_10a_4B021FDAQ00123";
+
+    /// Unplugged, plugged in, and mounted: no phone, then the phone not
+    /// mounted, then the phone at its gvfs-fuse directory — and never a
+    /// share, though its daemon's mount is at the margin where shares are.
+    #[test]
+    fn a_phone_is_the_mtp_monitors_volume_and_its_mount() {
+        let root = Path::new("/run/user/1000/gvfs");
+        assert!(phones_from(UNPLUGGED, root, &[]).is_empty());
+
+        let plugged = format!("{UNPLUGGED}{PHONE_VOLUME}");
+        assert_eq!(
+            phones_from(&plugged, root, &[]),
+            vec![Phone {
+                root: PIXEL.to_string(),
+                name: "Pixel 10a".to_string(),
+                protocol: Protocol::Mtp,
+                mount: None,
+            }]
+        );
+        assert!(shares_from(&plugged, root, &[]).is_empty());
+
+        let mounted = format!("{UNPLUGGED}{PHONE_VOLUME}{PHONE_MOUNTS}");
+        let phones = phones_from(&mounted, root, &entries(&[PIXEL_DIR]));
+        assert_eq!(phones.len(), 1, "one phone, though gio lists it twice");
+        assert_eq!(phones[0].mount, Some(root.join(PIXEL_DIR)));
+        assert_eq!(
+            phones[0].detail(),
+            format!("{}", root.join(PIXEL_DIR).display())
+        );
+        assert!(
+            shares_from(&mounted, root, &entries(&[PIXEL_DIR])).is_empty(),
+            "the daemon's mount at the margin is the phone, not a share"
+        );
+        // Before gvfs-fuse has caught up, the name it will use.
+        assert_eq!(
+            phones_from(&mounted, root, &[])[0].mount,
+            Some(root.join(PIXEL_DIR))
+        );
+        // Nested only, or at the margin only: mounted either way.
+        let shadow: String = PHONE_MOUNTS
+            .lines()
+            .take_while(|line| line.starts_with(' '))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let nested = format!("{PHONE_VOLUME}{shadow}");
+        assert!(phones_from(&nested, root, &[])[0].is_mounted());
+        let margin =
+            format!("{PHONE_VOLUME}Mount(0): Pixel 10a -> {PIXEL}\n  Type: GDaemonMount\n");
+        assert!(phones_from(&margin, root, &[])[0].is_mounted());
+    }
+
+    /// A camera over gphoto2, from an older gvfs that roots it at its USB
+    /// address, and a phone mounted by address with no volume monitor to
+    /// report it: both rows, each at the directory gvfs names it.
+    #[test]
+    fn a_camera_and_a_phone_without_a_volume_are_rows_too() {
+        let listing = "\
+Volume(0): Canon Digital Camera
+  Type: GProxyVolume (GProxyVolumeMonitorGPhoto2)
+  activation_root=gphoto2://[usb:001,004]/
+  Mount(0): Canon Digital Camera -> gphoto2://[usb:001,004]/
+    Type: GProxyShadowMount (GProxyVolumeMonitorGPhoto2)
+Volume(1): Card Reader
+  Type: GProxyVolume (GProxyVolumeMonitorUDisks2)
+Mount(0): Galaxy S24 -> mtp://SAMSUNG_Galaxy_S24_R5CX/
+  Type: GDaemonMount
+";
+        let root = Path::new("/run/user/1000/gvfs");
+        let phones = phones_from(listing, root, &[]);
+        let rows: Vec<(&str, Protocol, Option<PathBuf>)> = phones
+            .iter()
+            .map(|p| (p.name.as_str(), p.protocol, p.mount.clone()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "Canon Digital Camera",
+                    Protocol::Gphoto2,
+                    Some(root.join("gphoto2:host=%5Busb%3A001%2C004%5D"))
+                ),
+                (
+                    "Galaxy S24",
+                    Protocol::Mtp,
+                    Some(root.join("mtp:host=SAMSUNG_Galaxy_S24_R5CX"))
+                ),
+            ],
+            "sorted by name; the udisks2 volume is not a phone"
+        );
+        // A volume that says what it is but not how to mount it is no row.
+        let rootless = "Volume(0): Pixel\n  Type: GProxyVolume (GProxyVolumeMonitorMTP)\n";
+        assert!(phones_from(rootless, root, &[]).is_empty());
+    }
+
+    /// The spec bridge takes a device's root to gvfs's name for it, both ways
+    /// round.
+    #[test]
+    fn a_devices_spec_is_its_host() {
+        let spec = |url: &str| Spec::of(&Address::parse(url).expect("parses"));
+        assert_eq!(spec(PIXEL).dir_name(), PIXEL_DIR);
+        assert_eq!(
+            spec("gphoto2://[usb:001,004]/").dir_name(),
+            "gphoto2:host=%5Busb%3A001%2C004%5D"
+        );
+        let read = Spec::from_dir_name(PIXEL_DIR).expect("a spec");
+        assert!(read.same_server(&spec(PIXEL)));
+    }
+
+    /// gio's monitor, as `--detail` prints it — **written from its source**
+    /// (`gio-tool-mount.c`'s `monitor_*` callbacks), not captured, for the
+    /// reason the phone's listing was not: a phone plugged in, mounted,
+    /// the card reader's eject button pressed, the phone unmounted and pulled.
+    const MONITOR: &str = "\
+Volume added:       'Pixel 10a'
+  Volume(0): Pixel 10a
+    Type: GProxyVolume (GProxyVolumeMonitorMTP)
+    ids:
+     unix-device: '/dev/bus/usb/003/012'
+    activation_root=mtp://Google_Pixel_10a_4B021FDAQ00123/
+    themed icons:  [phone]  [phone-symbolic]
+    symbolic themed icons:  [phone-symbolic]  [phone]
+    can_mount=1
+    can_eject=0
+    should_automount=1
+
+Mount added:        'Pixel 10a'
+  Mount(0): Pixel 10a -> mtp://Google_Pixel_10a_4B021FDAQ00123/
+    Type: GDaemonMount
+    default_location=mtp://Google_Pixel_10a_4B021FDAQ00123/
+    can_unmount=1
+    can_eject=0
+    is_shadowed=0
+
+Drive eject button: 'Multiple Card  Reader'
+Mount removed:      'nas/media'
+  Mount(0): media on nas -> smb://nas/media/
+    Type: GDaemonMount
+    can_unmount=1
+    can_eject=0
+    is_shadowed=0
+
+Volume removed:     'Pixel 10a'
+  Volume(0): Pixel 10a
+    Type: GProxyVolume (GProxyVolumeMonitorMTP)
+    activation_root=mtp://Google_Pixel_10a_4B021FDAQ00123/
+    can_mount=1
+    can_eject=0
+    should_automount=1
+
+";
+
+    /// Fed a line at a time, as the reader thread feeds it: each event is
+    /// handed over the moment its last line arrives — the blank line under
+    /// its detail, or its own line when it has none — and read for what
+    /// happened, to what, and what it is.
+    #[test]
+    fn the_monitor_hands_over_each_event_as_it_ends() {
+        let mut blocks = Blocks::default();
+        let mut events = Vec::new();
+        for (at, line) in MONITOR.lines().enumerate() {
+            for block in blocks.feed(&format!("{line}\n")) {
+                events.push((at, event_from(&block).expect("an event")));
+            }
+        }
+        assert_eq!(blocks.finish(), None, "nothing held back at the end");
+        type Heard<'a> = (usize, Change, &'a str, Option<Protocol>, Option<&'a str>);
+        let got: Vec<Heard> = events
+            .iter()
+            .map(|(at, e)| {
+                (
+                    *at,
+                    e.change,
+                    e.name.as_str(),
+                    e.protocol,
+                    e.root.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    11,
+                    Change::VolumeAdded,
+                    "Pixel 10a",
+                    Some(Protocol::Mtp),
+                    Some(PIXEL)
+                ),
+                (
+                    19,
+                    Change::MountAdded,
+                    "Pixel 10a",
+                    Some(Protocol::Mtp),
+                    Some(PIXEL)
+                ),
+                (20, Change::Other, "Multiple Card  Reader", None, None),
+                (
+                    27,
+                    Change::MountRemoved,
+                    "nas/media",
+                    None,
+                    Some("smb://nas/media/")
+                ),
+                (
+                    35,
+                    Change::VolumeRemoved,
+                    "Pixel 10a",
+                    Some(Protocol::Mtp),
+                    Some(PIXEL)
+                ),
+            ],
+            "each on the line that ended it"
+        );
+
+        // A stream that stops mid-event gives up what it had; a line that is
+        // no event's is dropped; an event line closes the one before it.
+        let mut blocks = Blocks::default();
+        assert!(blocks.feed("gio: something of its own\n").is_empty());
+        assert!(blocks.feed("Volume changed:     'Pixel 10a'\n").is_empty());
+        let closed = blocks.feed("Mount pre-unmount:  'Pixel 10a'\n");
+        assert_eq!(
+            closed,
+            vec![vec!["Volume changed:     'Pixel 10a'".to_string()]]
+        );
+        let last = blocks.finish().expect("the open block");
+        assert_eq!(
+            event_from(&last).map(|e| (e.change, e.name)),
+            Some((Change::Other, "Pixel 10a".to_string()))
+        );
+    }
+
+    /// The reader thread's loop over gio's words: every event handed over,
+    /// the event loop rung once for each, and the loop over when the stream
+    /// is.
+    #[test]
+    fn the_reader_rings_once_per_event_and_ends_with_the_stream() {
+        let rung = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bell = std::sync::Arc::clone(&rung);
+        let (tx, rx) = unbounded::<Event>();
+        listen(
+            MONITOR.as_bytes(),
+            tx,
+            std::sync::Arc::new(move || {
+                bell.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        );
+        let heard: Vec<Change> = rx.try_iter().map(|event| event.change).collect();
+        assert_eq!(
+            heard,
+            [
+                Change::VolumeAdded,
+                Change::MountAdded,
+                Change::Other,
+                Change::MountRemoved,
+                Change::VolumeRemoved,
+            ]
+        );
+        assert_eq!(rung.load(std::sync::atomic::Ordering::SeqCst), 5);
+    }
+
+    /// A stand-in for gio that notes what it was asked and answers with
+    /// `code`, `stdout` and `stderr`.
+    fn fake_gio(
+        code: i32,
+        stdout: &'static str,
+        stderr: &'static str,
+    ) -> (Gio, std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
+        use std::os::unix::process::ExitStatusExt;
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&asked);
+        let gio: Gio = std::sync::Arc::new(move |args: &[&str]| {
+            log.lock()
+                .expect("the log")
+                .push(args.iter().map(|arg| arg.to_string()).collect());
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        });
+        (gio, asked)
+    }
+
+    /// `gio mount <root>`: mounted, already mounted, or gio's first words —
+    /// and for a locked phone, what to do about it instead.
+    #[test]
+    fn a_phone_is_mounted_by_its_root_and_a_locked_one_says_so() {
+        let (gio, asked) = fake_gio(0, "", "");
+        assert_eq!(mount_gio(PIXEL, &gio), Connected::Mounted(None));
+        assert_eq!(
+            *asked.lock().expect("the log"),
+            vec![vec!["mount".to_string(), PIXEL.to_string()]]
+        );
+        let (gio, _) = fake_gio(2, "", "gio: mtp://x/: Location is already mounted\n");
+        assert_eq!(mount_gio(PIXEL, &gio), Connected::Mounted(None));
+
+        let locked =
+            "gio: mtp://Google_Pixel_10a_4B021FDAQ00123/: Unable to open MTP device “003,012”\n";
+        let (gio, _) = fake_gio(2, "", locked);
+        let Connected::Failed(message) = mount_gio(PIXEL, &gio) else {
+            panic!("a locked phone mounted");
+        };
+        assert_eq!(message, locked.trim());
+        assert_eq!(unlock_hint(Protocol::Mtp, &message), Some(UNLOCK));
+        assert_eq!(
+            UNLOCK,
+            "Unlock the phone and choose File transfer, then try again"
+        );
+        for said in [
+            "gio: mtp://x/: Device is busy",
+            "gio: mtp://x/: LIBMTP_ERROR_GENERAL",
+        ] {
+            assert_eq!(unlock_hint(Protocol::Mtp, said), Some(UNLOCK), "{said}");
+        }
+        // Anything else is in gio's words, and a camera has no lock screen.
+        assert_eq!(
+            unlock_hint(Protocol::Mtp, "gio: mtp://x/: No such device"),
+            None
+        );
+        assert_eq!(unlock_hint(Protocol::Gphoto2, locked), None);
+
+        let (gio, _) = fake_gio(1, "", "");
+        assert!(matches!(mount_gio(PIXEL, &gio), Connected::Failed(_)));
+    }
+
+    /// `u` on a share or a phone is `gio mount -u <url>`, and its failure is
+    /// gio's first line.
+    #[test]
+    fn a_gio_mount_is_put_away_by_its_url() {
+        let (gio, asked) = fake_gio(0, "", "");
+        assert!(matches!(unmount_gio(PIXEL, &gio), Reply::Unmounted));
+        assert_eq!(
+            *asked.lock().expect("the log"),
+            vec![vec![
+                "mount".to_string(),
+                "-u".to_string(),
+                PIXEL.to_string()
+            ]]
+        );
+        let (gio, _) = fake_gio(2, "", "gio: mtp://x/: Device busy\nmore\n");
+        assert!(matches!(
+            unmount_gio(PIXEL, &gio),
+            Reply::Failed(message) if message == "gio: mtp://x/: Device busy"
+        ));
+    }
+
     // ── The card ────────────────────────────────────────────────────────────
 
     fn share_rows(n: usize) -> Vec<Share> {
@@ -2783,127 +4012,398 @@ Mount(3): backup -> file:///mnt/backup
             .collect()
     }
 
-    /// The card lays out and paints in every state without panicking.
+    /// The phone of the fixtures above, mounted or not.
+    fn pixel(mounted: bool) -> Phone {
+        Phone {
+            root: PIXEL.to_string(),
+            name: "Pixel 10a".to_string(),
+            protocol: Protocol::Mtp,
+            mount: mounted.then(|| PathBuf::from("/run/user/1000/gvfs").join(PIXEL_DIR)),
+        }
+    }
+
+    fn palette() -> crate::theme::Palette {
+        let theme = df_core::config::Theme::default();
+        crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark)
+    }
+
+    /// The card lays out and paints in every state without panicking, with a
+    /// patched font and without one.
     #[test]
     fn the_card_paints_in_every_state() {
         let theme = df_core::config::Theme::default();
-        let palette = crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark);
+        let palette = palette();
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
-            let painting = crate::ui::Painting {
-                tips: None,
-                held: None,
-                painter: ui.painter(),
-                palette: &palette,
-                theme: &theme,
-                tags: &crate::tags::BUILT_IN,
-                nerd: false,
-                show_symlink: true,
-                now: std::time::Instant::now(),
-            };
-            let hovers = crate::hover::Hovers::new();
-            for area in [
-                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0)),
-                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 90.0)),
-            ] {
-                let draw = |card: &Card| {
-                    paint(
-                        &painting,
-                        card,
-                        &geometry(area, card),
-                        &hovers,
-                        &crate::ripple::Ripples::new(),
-                    );
+            for nerd in [false, true] {
+                let painting = crate::ui::Painting {
+                    tips: None,
+                    held: None,
+                    painter: ui.painter(),
+                    palette: &palette,
+                    theme: &theme,
+                    tags: &crate::tags::BUILT_IN,
+                    nerd,
+                    show_symlink: true,
+                    now: std::time::Instant::now(),
                 };
-                // Still loading, empty, populated, scrolled, and busy.
-                let mut card = Card::new();
-                draw(&card);
-                card.update(Vec::new(), Vec::new());
-                draw(&card);
-                card.places = places(3);
-                draw(&card);
-                card.update(many_devices(20), share_rows(3));
-                draw(&card);
-                card.set_clouds(clouds());
-                draw(&card);
-                card.move_cursor(21);
-                card.busy = Some("sftp://me@host1/".to_string());
-                draw(&card);
-                card.move_cursor(-3);
-                card.busy = Some("/block/16".to_string());
-                draw(&card);
+                let hovers = crate::hover::Hovers::new();
+                for area in [
+                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0)),
+                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 90.0)),
+                ] {
+                    let draw = |card: &Card| {
+                        paint(
+                            &painting,
+                            card,
+                            &geometry(area, card),
+                            &hovers,
+                            &crate::ripple::Ripples::new(),
+                        );
+                    };
+                    // Still loading, empty, populated, scrolled, busy, failed.
+                    let mut card = Card::new();
+                    draw(&card);
+                    card.update(Vec::new(), Vec::new(), Vec::new());
+                    draw(&card);
+                    card.set_places(places(3));
+                    draw(&card);
+                    card.update(
+                        many_devices(20),
+                        vec![pixel(false), pixel(true)],
+                        share_rows(3),
+                    );
+                    draw(&card);
+                    card.set_clouds(clouds());
+                    draw(&card);
+                    card.move_cursor(21);
+                    card.start("sftp://me@host1/", "unmounting…");
+                    draw(&card);
+                    card.move_cursor(-3);
+                    card.start(PIXEL, "mounting…");
+                    draw(&card);
+                    card.fail(UNLOCK);
+                    draw(&card);
+                }
             }
         });
     }
 
-    /// The geometry hit-tests to the rows it drew, and only to rows.
+    /// The geometry hit-tests to the rows it drew, and only to rows: every
+    /// row one line tall, the height of a row in the panes, and every heading
+    /// its own smaller line.
     #[test]
-    fn the_card_hit_tests_its_rows_and_not_its_headings() {
+    fn the_card_hit_tests_its_one_line_rows_and_not_its_headings() {
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
         let mut card = Card::new();
-        card.update(devices_from(&objects()), share_rows(1));
+        card.update(devices_from(&objects()), vec![pixel(false)], share_rows(1));
         let g = geometry(area, &card);
-        // Two disks, one share, and the connect row.
-        assert_eq!(g.rows.len(), 4);
+        // Two disks, the phone, one share and the connect row.
+        assert_eq!(g.rows.len(), 5);
         assert_eq!(
             card.visible_items(),
-            vec![Item::Disk(0), Item::Disk(1), Item::Share(0), Item::Connect]
+            vec![
+                Item::Disk(0),
+                Item::Disk(1),
+                Item::Phone(0),
+                Item::Share(0),
+                Item::Connect
+            ]
         );
         for (i, rect) in g.rows.iter().enumerate() {
             assert_eq!(g.row_at(rect.center()), Some(i));
             assert!(g.body.contains_rect(*rect));
+            assert_eq!(
+                rect.height(),
+                crate::ui::ROW_HEIGHT,
+                "one line, a pane's row"
+            );
+            // No gap between rows for a pointer to fall through, and none on
+            // top of another.
+            if let Some(next) = g.rows.get(i + 1) {
+                assert!(next.top() >= rect.bottom() - 0.01);
+            }
         }
         assert!(g.row_at(egui::pos2(0.0, 0.0)).is_none());
-        // A heading is drawn, and is not a row.
-        let (_, heading) = g.lines[0];
-        assert_eq!(g.lines[0].0, Line::Section("Places"));
-        assert_eq!(g.lines[2].0, Line::Section("Disks"));
-        assert!(g.row_at(heading.center()).is_none());
+        // A heading is drawn, is its own height, and is not a row.
+        let (heading, rect) = g.lines[0];
+        assert_eq!(heading, Line::Section("Devices"));
+        assert_eq!(rect.height(), SECTION_ROW);
+        assert!(g.row_at(rect.center()).is_none());
 
         // An empty card still has its three headings, every empty state, and
         // the connect row.
-        card.update(Vec::new(), Vec::new());
+        card.update(Vec::new(), Vec::new(), Vec::new());
         let g = geometry(area, &card);
         assert_eq!(g.rows.len(), 1);
         assert_eq!(
             g.lines.iter().map(|(line, _)| *line).collect::<Vec<_>>(),
             vec![
-                Line::Section("Places"),
-                Line::Empty(PLACES_EMPTY),
-                Line::Section("Disks"),
+                Line::Section("Devices"),
                 Line::Empty("no removable filesystems"),
                 Line::Section("Network"),
                 Line::Empty("nothing mounted"),
                 Line::Item(Item::Connect),
+                Line::Section("Places"),
+                Line::Empty(PLACES_EMPTY),
             ]
+        );
+        for (line, rect) in &g.lines {
+            if let Line::Empty(_) = line {
+                assert_eq!(rect.height(), ROW, "an empty state is one line too");
+            }
+        }
+    }
+
+    /// Glyph, name and detail on one centre line, left to right, with the key
+    /// chip at the far end: inset from the row's top, bottom and end by one
+    /// gap, its corner concentric with the row plate's round it.
+    #[test]
+    fn a_row_lays_its_name_its_detail_and_its_key_along_one_line() {
+        let row = egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(500.0, ROW));
+        let y = row.center().y;
+        let layout = row_layout(row, true, 60.0, Some(40.0));
+        assert_eq!(
+            layout.glyph,
+            Some(egui::pos2(ROW_PAD + ICON_COLUMN / 2.0, y))
+        );
+        let name_left = ROW_PAD + ICON_COLUMN + crate::chrome::ICON_GAP;
+        assert_eq!(layout.name, (egui::pos2(name_left, y), 60.0));
+        let (detail_at, detail_room) = layout.detail;
+        assert_eq!(detail_at, egui::pos2(name_left + 60.0 + DETAIL_GAP, y));
+
+        let chip = layout.chip.expect("a key, so a chip");
+        let inset = crate::chrome::CHIP_INSET;
+        assert_eq!(chip.top() - row.top(), inset);
+        assert_eq!(row.bottom() - chip.bottom(), inset);
+        assert_eq!(
+            row.right() - chip.right(),
+            inset,
+            "equal gaps on every side"
+        );
+        assert_eq!(chip.width(), 40.0);
+        assert_eq!(
+            crate::chrome::CHIP_RADIUS + inset as u8,
+            crate::ui::ROW_RADIUS,
+            "the chip's corner is concentric with the row's"
+        );
+        assert_eq!(
+            detail_at.x + detail_room,
+            chip.left() - DETAIL_GAP,
+            "the detail stops a gap short of the chip"
+        );
+
+        // A name longer than its share leaves the detail the rest; no chip is
+        // the row's padding at the end; no glyph is no column.
+        let long = row_layout(row, true, 900.0, None);
+        let room = row.right() - ROW_PAD - name_left;
+        assert_eq!(long.name.1, room * NAME_SHARE);
+        assert_eq!(long.chip, None);
+        assert!((long.detail.0.x + long.detail.1 - (row.right() - ROW_PAD)).abs() < 1e-3);
+        let bare = row_layout(row, false, 60.0, None);
+        assert_eq!(bare.glyph, None);
+        assert_eq!(bare.name.0.x, ROW_PAD);
+        // Squeezed to nothing, nothing is negative.
+        let tiny = row_layout(
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(20.0, ROW)),
+            true,
+            60.0,
+            Some(40.0),
+        );
+        assert!(tiny.name.1 >= 0.0 && tiny.detail.1 >= 0.0);
+    }
+
+    /// A path too long for the room it has loses its middle, keeping whose it
+    /// is and which it is; one that fits is whole; and a detail with no room
+    /// to speak of is left out rather than squeezed to a lone `…`.
+    #[test]
+    fn a_long_detail_loses_its_middle() {
+        let seven = |text: &str| text.chars().count() as f32 * 7.0;
+        let path = "/run/user/1000/gvfs/mtp:host=Google_Pixel_10a_4B021FDAQ00123";
+        let fitted = fitted_detail(path, 20.0 * 7.0, seven);
+        assert!(fitted.chars().count() <= 20, "{fitted}");
+        assert!(fitted.starts_with("/run/user"), "{fitted}");
+        assert!(fitted.ends_with("DAQ00123"), "{fitted}");
+        assert!(fitted.contains('…'));
+        assert_eq!(fitted_detail("~/Work", 200.0, seven), "~/Work");
+        assert_eq!(fitted_detail(path, MIN_DETAIL - 1.0, seven), "");
+    }
+
+    /// Each kind of row says what it is after its name: a disk its size,
+    /// filesystem and mount point; a phone where it is or that it is not
+    /// mounted; a share its URL; a remote its service by name; a place its
+    /// path, with its key as a chip.
+    #[test]
+    fn every_row_says_what_it_is_after_its_name() {
+        let palette = palette();
+        let mut card = Card::with_places(places(2));
+        card.update(
+            many_devices(1),
+            vec![pixel(false), pixel(true)],
+            share_rows(1),
+        );
+        card.set_clouds(clouds());
+        let said = |item: Item| {
+            let face = face(&card, item, &palette, true);
+            (face.name, face.detail, face.key)
+        };
+        let glyph =
+            |card: &Card, item: Item| face(card, item, &palette, true).icon.map(|i| i.glyph);
+        assert_eq!(
+            said(Item::Disk(0)),
+            ("Disk 0".into(), "1.0 GB · ext4 · /run/media/x".into(), None)
+        );
+        assert_eq!(
+            said(Item::Phone(0)),
+            ("Pixel 10a".into(), "not mounted".into(), None)
+        );
+        assert_eq!(
+            said(Item::Phone(1)).1,
+            format!("/run/user/1000/gvfs/{PIXEL_DIR}")
+        );
+        assert_eq!(
+            said(Item::Share(0)),
+            ("me@host0".into(), "sftp://me@host0/".into(), None)
+        );
+        assert_eq!(said(Item::Cloud(0)), ("r2".into(), "S3".into(), None));
+        assert_eq!(said(Item::Cloud(1)).1, "rclone");
+        assert_eq!(
+            said(Item::Place(0)),
+            ("place0".into(), "~/place0".into(), Some("g w".into())),
+            "the folder, where it is, and its key"
+        );
+        assert_eq!(said(Item::Place(1)).2, None, "a keyless pin has no chip");
+        for item in card.items() {
+            let face = face(&card, item, &palette, true);
+            assert_eq!(face.tone, palette.quiet, "{item:?}: the detail is quiet");
+            assert!(face.icon.is_some(), "{item:?}: every row has its glyph");
+        }
+        assert_eq!(
+            glyph(&card, Item::Phone(0)),
+            Some(crate::icons::phone(&palette, true).glyph)
+        );
+        assert_eq!(
+            glyph(&card, Item::Place(1)),
+            Some(crate::icons::network(&palette, true).glyph),
+            "a place on another machine wears the server"
+        );
+        let camera = Phone {
+            protocol: Protocol::Gphoto2,
+            ..pixel(false)
+        };
+        card.update(Vec::new(), vec![camera], Vec::new());
+        assert_eq!(
+            glyph(&card, Item::Phone(0)),
+            Some(crate::icons::camera(&palette, true).glyph)
+        );
+        assert_eq!(
+            Cloud {
+                name: "gdrive".into(),
+                provider: "drive".into()
+            }
+            .service(),
+            "Google Drive"
         );
     }
 
-    /// A row is two lines, and they do not sit on top of each other.
-    ///
-    /// They did: the name was drawn from the row's top and the detail centred
-    /// on its bottom edge, in a row one line tall, so the two overlapped by
-    /// most of their height and the card read as a column of smudges. The
-    /// check is the geometry rather than the pixels — the two baselines are a
-    /// line apart, and the row is tall enough to hold both with air left over.
+    /// A row is filled as a pane's row is — the cursor's fill, a hover's
+    /// lift — and its words in an accent are that accent as ink, on either
+    /// side: on the light one the cursor is the panes' wash of blue, and the
+    /// amber and red of a status are darkened until they read.
     #[test]
-    fn a_row_has_room_for_both_of_its_lines() {
-        // A line of text is about its point size plus its leading; the two
-        // faces here are FONT and FONT - 1.5.
-        let name = FONT * 1.3;
-        let detail = (FONT - 1.5) * 1.3;
-        assert!(
-            DETAIL_LINE - NAME_LINE >= (name + detail) / 2.0,
-            "the two lines overlap: {NAME_LINE} then {DETAIL_LINE}"
+    fn a_row_is_filled_and_inked_as_the_panes_rows_are() {
+        let theme = df_core::config::Theme::default();
+        for side in [
+            df_core::config::Appearance::Dark,
+            df_core::config::Appearance::Light,
+        ] {
+            let palette = crate::theme::Palette::from_theme(&theme, side);
+            assert_eq!(row_fill(&palette, false, 0.0), None, "a plain row");
+            assert_eq!(
+                row_fill(&palette, true, 0.0),
+                Some(crate::theme::cursor_fill(&palette)),
+                "{side:?}: the cursor"
+            );
+            assert_eq!(
+                row_fill(&palette, false, 1.0),
+                Some(crate::theme::lift(
+                    &palette,
+                    palette.crust,
+                    crate::ui::HOVER_LIFT
+                )),
+                "{side:?}: a hover"
+            );
+            assert_eq!(
+                row_fill(&palette, true, 1.0),
+                Some(crate::theme::lift(
+                    &palette,
+                    crate::theme::cursor_fill(&palette),
+                    crate::ui::CURSOR_HOVER_LIFT
+                )),
+                "{side:?}: a hover on the cursor"
+            );
+
+            let mut card = Card::new();
+            card.update(many_devices(1), Vec::new(), Vec::new());
+            card.start("/block/0", "mounting…");
+            let busy = face(&card, Item::Disk(0), &palette, false);
+            assert_eq!(busy.tone, crate::theme::ink(&palette, palette.peach));
+            card.fail("refused");
+            let failed = face(&card, Item::Disk(0), &palette, false);
+            assert_eq!(failed.tone, crate::theme::ink(&palette, palette.red));
+        }
+    }
+
+    /// While a call is out on a row, what it is doing is said where its
+    /// detail was, in amber; when it fails, the failure is, in red, until the
+    /// next call; and no other row changes.
+    #[test]
+    fn a_rows_status_takes_its_details_place() {
+        let palette = palette();
+        let mut card = Card::new();
+        card.update(many_devices(2), vec![pixel(false)], Vec::new());
+        let seen = |card: &Card, item: Item| {
+            let face = face(card, item, &palette, false);
+            (face.detail, face.tone)
+        };
+        card.start("/block/1", "mounting…");
+        assert_eq!(
+            seen(&card, Item::Disk(1)),
+            (
+                "mounting…".to_string(),
+                crate::theme::ink(&palette, palette.peach)
+            )
         );
-        assert!(
-            NAME_LINE - name / 2.0 > 0.0,
-            "the name is cut off at the top"
+        assert_eq!(seen(&card, Item::Disk(0)).1, palette.quiet, "not its row");
+        assert!(card.is_busy("/block/1"));
+
+        card.fail("Not authorized to perform operation");
+        assert!(card.busy.is_none());
+        assert_eq!(
+            seen(&card, Item::Disk(1)),
+            (
+                "Not authorized to perform operation".to_string(),
+                crate::theme::ink(&palette, palette.red)
+            )
         );
-        assert!(
-            ROW - (DETAIL_LINE + detail / 2.0) > 0.0,
-            "the detail is cut off at the bottom"
+        // The next call is a fresh start: the failure is over.
+        card.start(PIXEL, "mounting…");
+        assert_eq!(seen(&card, Item::Disk(1)).1, palette.quiet);
+        assert_eq!(
+            seen(&card, Item::Phone(0)),
+            (
+                "mounting…".to_string(),
+                crate::theme::ink(&palette, palette.peach)
+            )
         );
+        card.finish();
+        assert_eq!(
+            seen(&card, Item::Phone(0)),
+            ("not mounted".to_string(), palette.quiet)
+        );
+        // A failure with nothing out is nobody's.
+        card.fail("stray");
+        assert!(card.failed.is_none());
     }
 
     /// …and the card is tall enough for the lines it draws, the heading over
@@ -2913,7 +4413,7 @@ Mount(3): backup -> file:///mnt/backup
     fn the_card_is_as_tall_as_what_it_draws() {
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
         let mut card = Card::new();
-        card.update(devices_from(&objects()), Vec::new());
+        card.update(devices_from(&objects()), Vec::new(), Vec::new());
         let g = geometry(area, &card);
         let (_, last) = *g.lines.last().expect("lines");
         assert_eq!(last.height(), ROW);
@@ -2939,11 +4439,11 @@ Mount(3): backup -> file:///mnt/backup
     #[test]
     fn the_cursor_holds_its_place_across_a_refresh() {
         let mut card = Card::new();
-        assert_eq!(card.disks_empty(), Some("asking udisks2…"));
+        assert_eq!(card.devices_empty(), Some("asking udisks2…"));
         assert_eq!(card.shares_empty(), Some("asking gvfs…"));
         assert_eq!(card.selected(), Some(Item::Connect), "the only row so far");
-        card.update(devices_from(&objects()), share_rows(1));
-        assert_eq!(card.disks_empty(), None);
+        card.update(devices_from(&objects()), Vec::new(), share_rows(1));
+        assert_eq!(card.devices_empty(), None);
         assert_eq!(card.shares_empty(), None);
         assert_eq!(
             card.selected(),
@@ -2969,32 +4469,38 @@ Mount(3): backup -> file:///mnt/backup
         let on = card.selected_device().map(|d| d.object.clone());
         let mut again = devices_from(&objects());
         again.reverse();
-        card.update(again, share_rows(1));
+        card.update(again, Vec::new(), share_rows(1));
         assert_eq!(card.selected_device().map(|d| d.object.clone()), on);
 
-        // A share keeps the cursor across a refresh that adds a disk above it.
+        // A share keeps the cursor across a refresh that adds a disk and a
+        // phone above it.
         card.select(Item::Share(0));
-        card.update(many_devices(3), share_rows(1));
+        card.update(many_devices(3), vec![pixel(false)], share_rows(1));
         assert_eq!(card.selected(), Some(Item::Share(0)));
-        assert_eq!(card.cursor, 3);
+        assert_eq!(card.cursor, 4);
+        // …and a phone keeps it across a refresh that mounts it.
+        card.select(Item::Phone(0));
+        card.update(many_devices(1), vec![pixel(true)], share_rows(1));
+        assert_eq!(card.selected(), Some(Item::Phone(0)));
+        assert!(card.selected_phone().is_some_and(Phone::is_mounted));
 
         // A listing with nothing leaves the connect row, and does not panic.
-        card.update(Vec::new(), Vec::new());
+        card.update(Vec::new(), Vec::new(), Vec::new());
         assert!(card.selected_device().is_none());
         assert_eq!(card.selected(), Some(Item::Connect));
-        assert_eq!(card.disks_empty(), Some("no removable filesystems"));
+        assert_eq!(card.devices_empty(), Some("no removable filesystems"));
         assert_eq!(card.shares_empty(), Some("nothing mounted"));
+        // A phone alone is not "no removable filesystems".
+        card.update(Vec::new(), vec![pixel(false)], Vec::new());
+        assert_eq!(card.devices_empty(), None);
     }
 
     fn places(n: usize) -> Vec<Place> {
         (0..n)
             .map(|i| Place {
-                name: format!("~/place{i}"),
-                detail: if i == 0 {
-                    "g w".into()
-                } else {
-                    "pinned".into()
-                },
+                name: format!("place{i}"),
+                detail: format!("~/place{i}"),
+                key: (i == 0).then(|| "g w".to_string()),
                 target: PathBuf::from(format!("/home/me/place{i}")),
                 remote: i == 1,
                 pinned: i != 2,
@@ -3002,107 +4508,99 @@ Mount(3): backup -> file:///mnt/backup
             .collect()
     }
 
-    /// The places are the card's first rows, ready before udisks2 has said
-    /// anything, and the card opens with the cursor where the first disk will
-    /// be — the connect row's index while the listing is out, the first disk
-    /// once it lands, with the index never moving. The places are `↑` away,
-    /// and a place coming off the list leaves the cursor at the same height.
+    /// Devices on top, then the network, then the places; the card opens with
+    /// the cursor on its first row, where the first device will be — the
+    /// first network row while the listing is out, the first device once it
+    /// lands, the index never moving. The places are one `↑` away round the
+    /// top, and a place coming off the list leaves the cursor at the same
+    /// height.
     #[test]
-    fn the_card_opens_on_the_disks_with_the_places_above() {
+    fn the_card_opens_on_the_devices_with_the_places_below() {
         let mut card = Card::with_places(places(3));
         assert_eq!(
-            card.items()[..4],
+            card.items(),
             [
+                Item::Connect,
                 Item::Place(0),
                 Item::Place(1),
-                Item::Place(2),
-                Item::Connect
+                Item::Place(2)
             ]
         );
-        assert_eq!(card.cursor, 3, "the first row after the places");
+        assert_eq!(card.cursor, 0, "the first row");
         assert_eq!(
             card.selected(),
             Some(Item::Connect),
-            "until a disk is there"
+            "until a device is there"
         );
-        card.update(devices_from(&objects()), share_rows(1));
-        assert_eq!(card.cursor, 3, "no jump when the listing lands");
+        card.update(devices_from(&objects()), vec![pixel(false)], share_rows(1));
+        assert_eq!(card.cursor, 0, "no jump when the listing lands");
         assert_eq!(
             card.selected(),
             Some(Item::Disk(0)),
             "the first disk filled it"
         );
-        assert_eq!(card.first, 0, "the places are on screen above it");
+        assert_eq!(card.first, 0);
         assert_eq!(
-            card.lines()[..5],
+            card.lines(),
             [
+                Line::Section("Devices"),
+                Line::Item(Item::Disk(0)),
+                Line::Item(Item::Disk(1)),
+                Line::Item(Item::Phone(0)),
+                Line::Section("Network"),
+                Line::Item(Item::Share(0)),
+                Line::Item(Item::Connect),
                 Line::Section("Places"),
                 Line::Item(Item::Place(0)),
                 Line::Item(Item::Place(1)),
                 Line::Item(Item::Place(2)),
-                Line::Section("Disks"),
-            ]
+            ],
+            "disks, then phones, then the network, then the places"
         );
         card.move_cursor(-1);
         assert_eq!(card.selected(), Some(Item::Place(2)), "one ↑ away");
         assert_eq!(
             card.selected_place().map(|p| p.name.as_str()),
-            Some("~/place2")
+            Some("place2")
         );
-
-        // No disks: the index waits and whatever is first after the places
-        // fills it — here the share.
-        let mut bare = Card::with_places(places(2));
-        bare.update(Vec::new(), share_rows(1));
-        assert_eq!(bare.cursor, 2);
-        assert_eq!(bare.selected(), Some(Item::Share(0)));
-        // No places: the first disk, as the card always opened.
-        let mut plain = Card::with_places(Vec::new());
-        plain.update(devices_from(&objects()), Vec::new());
-        assert_eq!(plain.selected(), Some(Item::Disk(0)));
-        // A cursor moved up into the places before the listing lands is
-        // somebody's choice, and stays.
-        let mut early = Card::with_places(places(3));
-        early.move_cursor(-2);
-        early.update(devices_from(&objects()), Vec::new());
-        assert_eq!(early.selected(), Some(Item::Place(1)));
-
-        // A server wears the network glyph and a folder the folder, and
-        // neither has a status: a place is not mounted or unmounted.
-        let palette = crate::theme::Palette::default();
-        let local = face(&card, Item::Place(0), &palette, true);
-        let remote = face(&card, Item::Place(1), &palette, true);
-        assert_eq!(local.icon, Some(crate::icons::folder(&palette, true)));
-        assert_eq!(remote.icon, Some(crate::icons::network(&palette, true)));
-        assert_eq!(
-            (local.name.as_str(), local.detail.as_str()),
-            ("~/place0", "g w")
-        );
-        assert!(local.status.is_none());
-
-        card.move_cursor(-1);
+        // A place off the list: the cursor stays at its height, on the row
+        // that moved into the gap.
+        card.select(Item::Place(1));
         card.set_places(places(2));
         assert_eq!(card.selected(), Some(Item::Place(1)));
         card.set_places(Vec::new());
-        assert_eq!(card.selected(), Some(Item::Disk(1)), "the same height");
+        assert_eq!(card.selected(), Some(Item::Connect), "the last row now");
         assert!(card.selected_place().is_none());
 
-        // Ten places push the disks past the window: the card opens scrolled
-        // so the first disk is whole, and what is drawn is whole lines, so no
-        // half row sits under the "+N more".
-        let mut long = Card::with_places(places(10));
-        long.update(devices_from(&objects()), share_rows(1));
+        // No disks: the phone fills the first row. Nothing plugged in: the
+        // first network row does.
+        let mut phone = Card::with_places(places(2));
+        phone.update(Vec::new(), vec![pixel(false)], share_rows(1));
+        assert_eq!(phone.selected(), Some(Item::Phone(0)));
+        let mut bare = Card::with_places(places(2));
+        bare.update(Vec::new(), Vec::new(), share_rows(1));
+        assert_eq!(bare.selected(), Some(Item::Share(0)));
+        // A cursor moved round into the places before the listing lands is
+        // somebody's choice, and stays.
+        let mut early = Card::with_places(places(3));
+        early.move_cursor(-2);
+        assert_eq!(early.selected(), Some(Item::Place(1)));
+        early.update(devices_from(&objects()), Vec::new(), Vec::new());
+        assert_eq!(early.selected(), Some(Item::Place(1)));
+
+        // Thirty places under the devices: the card opens at its top, and the
+        // last place, reached by End, is whole at the bottom — what is drawn
+        // is whole lines, so no half row sits under the "+N more".
+        let mut long = Card::with_places(places(30));
+        long.update(devices_from(&objects()), Vec::new(), share_rows(1));
         assert_eq!(long.selected(), Some(Item::Disk(0)));
-        assert!(long
-            .visible()
-            .iter()
-            .any(|(line, _)| *line == Line::Item(Item::Disk(0))));
-        let (last, top) = *long.visible().last().expect("lines");
-        assert!(top + last.height() <= WINDOW + 0.01, "a row is cut off");
+        assert_eq!(long.visible()[0].0, Line::Section("Devices"));
         assert!(long.visible().len() < long.lines().len());
-        long.jump(Jump::Top);
-        assert_eq!(long.selected(), Some(Item::Place(0)));
-        assert_eq!(long.visible()[0].0, Line::Section("Places"));
+        long.jump(Jump::Bottom);
+        assert_eq!(long.selected(), Some(Item::Place(29)));
+        let (last, top) = *long.visible().last().expect("lines");
+        assert_eq!(last, Line::Item(Item::Place(29)));
+        assert!(top + last.height() <= WINDOW + 0.01, "a row is cut off");
     }
 
     /// A long card scrolls to keep the cursor's row whole, brings a section's
@@ -3110,22 +4608,34 @@ Mount(3): backup -> file:///mnt/backup
     #[test]
     fn a_long_card_scrolls_to_the_cursor() {
         let mut card = Card::new();
-        card.update(many_devices(12), share_rows(12));
+        card.update(many_devices(30), Vec::new(), share_rows(30));
         assert_eq!(card.first, 0);
 
-        // Down to the connect row, the last line: it is wholly inside the
-        // window, and the view went no further than that.
+        // Down to the connect row, the last row: it is wholly inside the
+        // window, and the view went no further down than that took.
         card.jump(Jump::Bottom);
         assert_eq!(card.selected(), Some(Item::Connect));
-        let (last, top) = *card.visible().last().expect("lines");
-        assert_eq!(last, Line::Item(Item::Connect));
+        let (_, top) = card
+            .visible()
+            .into_iter()
+            .find(|(line, _)| *line == Line::Item(Item::Connect))
+            .expect("the cursor's row is drawn");
         assert!(top + ROW <= WINDOW + 0.01, "the cursor's row is cut off");
-        assert!(top + ROW > WINDOW - ROW, "scrolled past the end");
         assert!(card.first > 0);
+        let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
+        let at = card
+            .lines()
+            .iter()
+            .position(|line| *line == Line::Item(Item::Connect))
+            .expect("the connect row");
+        assert!(
+            heights[card.first - 1..=at].iter().sum::<f32>() > WINDOW,
+            "scrolled further than the cursor needed"
+        );
 
         // Up, a row at a time, to the first share: the Network heading comes
         // into view over it.
-        for _ in 0..30 {
+        for _ in 0..40 {
             if card.selected() == Some(Item::Share(0)) {
                 break;
             }
@@ -3138,41 +4648,38 @@ Mount(3): backup -> file:///mnt/backup
             "the share at the top has its section's name over it"
         );
 
-        // All the way up: the card's top is back — the Places section over
-        // the Disks one, though the cursor is on a disk.
+        // All the way up: the card's top is back.
         card.jump(Jump::Top);
         assert_eq!(card.first, 0);
-        assert_eq!(card.visible()[0].0, Line::Section("Places"));
+        assert_eq!(card.visible()[0].0, Line::Section("Devices"));
 
         // A short list never scrolls.
         assert_eq!(
             scroll(
                 3,
                 1,
-                &[Line::Section("Disks"), Line::Item(Item::Connect)],
+                &[Line::Section("Devices"), Line::Item(Item::Connect)],
                 WINDOW
             ),
             0
         );
     }
 
-    /// `↑` on the first row is the connect row and `↓` on the connect row is
-    /// the first place, with the view following the cursor round either way.
+    /// `↑` on the first row is the last place and `↓` on the last place is
+    /// the first row, with the view following the cursor round either way.
     #[test]
     fn the_arrows_wrap_at_both_ends() {
         let mut card = Card::with_places(places(2));
-        card.update(devices_from(&objects()), share_rows(1));
+        card.update(devices_from(&objects()), Vec::new(), share_rows(1));
         let last = card.items().len() - 1;
         assert_eq!(card.selected(), Some(Item::Disk(0)));
 
-        card.move_cursor(-2);
-        assert_eq!(card.selected(), Some(Item::Place(0)));
         card.move_cursor(-1);
         assert_eq!(card.cursor, last, "↑ on the first row is the last");
-        assert_eq!(card.selected(), Some(Item::Connect));
+        assert_eq!(card.selected(), Some(Item::Place(1)));
         card.move_cursor(1);
         assert_eq!(card.cursor, 0, "↓ on the last row is the first");
-        assert_eq!(card.selected(), Some(Item::Place(0)));
+        assert_eq!(card.selected(), Some(Item::Disk(0)));
 
         // A stride longer than the list goes round as many times as it says.
         card.move_cursor(last as isize + 1);
@@ -3181,20 +4688,20 @@ Mount(3): backup -> file:///mnt/backup
         assert_eq!(card.cursor, last);
 
         // On a card that scrolls, the view goes round with the cursor: the
-        // connect row whole at the bottom, then the top of the card back.
-        let mut long = Card::new();
-        long.update(many_devices(12), share_rows(12));
+        // last row whole at the bottom, then the top of the card back.
+        let mut long = Card::with_places(places(3));
+        long.update(many_devices(12), Vec::new(), share_rows(12));
         assert_eq!(long.selected(), Some(Item::Disk(0)));
         long.move_cursor(-1);
-        assert_eq!(long.selected(), Some(Item::Connect));
+        assert_eq!(long.selected(), Some(Item::Place(2)));
         let (bottom, top) = *long.visible().last().expect("lines");
-        assert_eq!(bottom, Line::Item(Item::Connect));
+        assert_eq!(bottom, Line::Item(Item::Place(2)));
         assert!(top + ROW <= WINDOW + 0.01, "the cursor's row is cut off");
         assert!(long.first > 0);
         long.move_cursor(1);
         assert_eq!(long.selected(), Some(Item::Disk(0)));
         assert_eq!(long.first, 0);
-        assert_eq!(long.visible()[0].0, Line::Section("Places"));
+        assert_eq!(long.visible()[0].0, Line::Section("Devices"));
     }
 
     /// The card has no empty case: the connect row is always there, before
@@ -3204,7 +4711,7 @@ Mount(3): backup -> file:///mnt/backup
     fn a_card_with_one_row_stays_on_it() {
         let mut waiting = Card::new();
         let mut empty = Card::new();
-        empty.update(Vec::new(), Vec::new());
+        empty.update(Vec::new(), Vec::new(), Vec::new());
         for card in [&mut waiting, &mut empty] {
             assert_eq!(card.items(), [Item::Connect]);
             for delta in [1, -1, 2, -7] {
@@ -3233,12 +4740,12 @@ Mount(3): backup -> file:///mnt/backup
     #[test]
     fn the_page_keys_stride_by_the_rows_on_screen_and_stop_at_the_ends() {
         let mut card = Card::new();
-        card.update(many_devices(20), share_rows(3));
+        card.update(many_devices(30), Vec::new(), share_rows(3));
         let last = card.items().len() - 1;
         assert_eq!(card.cursor, 0);
-        // Under the Places heading, its empty state and the Disks heading,
-        // nine rows fit; scrolled past them, more do.
-        assert_eq!(card.visible_items().len(), 9);
+        // Under the Devices heading, twenty-two one-line rows fill the
+        // window.
+        assert_eq!(card.visible_items().len(), 22);
 
         let page = card.visible_items().len();
         card.jump(Jump::Page(1));
@@ -3252,7 +4759,7 @@ Mount(3): backup -> file:///mnt/backup
         let page = card.visible_items().len();
         let from = card.cursor;
         card.jump(Jump::HalfPage(1));
-        assert_eq!(card.cursor, from + page / 2);
+        assert_eq!(card.cursor, (from + page / 2).min(last));
         assert!(on_screen(&card));
 
         let page = card.visible_items().len();
@@ -3292,10 +4799,11 @@ Mount(3): backup -> file:///mnt/backup
         assert_eq!(card.cursor, last);
     }
 
-    /// A short window gives the body the room it leaves between the heading
-    /// and the hint strip, and the cursor's row is always among the lines
-    /// drawn; a tall one gives it the old window. The bar is there only while
-    /// there are lines the body does not show.
+    /// A short window gives the body as many rows as fit between the
+    /// heading and the hint strip, under the three section headings, and the
+    /// cursor's row is always among the lines drawn; a tall one gives it all
+    /// [`ROWS`]. The bar is there only while there are lines the body does
+    /// not show.
     #[test]
     fn a_short_window_scrolls_the_mount_cards_body() {
         let now = std::time::Instant::now();
@@ -3303,16 +4811,29 @@ Mount(3): backup -> file:///mnt/backup
             egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height))
         };
         let (tall, short) = (screen(900.0), screen(300.0));
-        assert_eq!(window(tall), WINDOW, "the old window");
-        assert!(window(short) < WINDOW && window(short) >= ROW);
-        assert_eq!(window(screen(60.0)), ROW, "never less than a row");
+        let headings = SECTIONS.len() as f32 * SECTION_ROW;
+        assert_eq!(window(tall), WINDOW, "all twenty rows");
+        assert!(window(short) < WINDOW);
+        assert_eq!(
+            (window(short) - headings) % ROW,
+            0.0,
+            "whole rows under the headings"
+        );
+        assert_eq!(
+            window(screen(60.0)),
+            ROW + headings,
+            "never less than a row"
+        );
 
         let mut card = Card::with_places(places(3));
-        card.update(many_devices(20), share_rows(3));
+        card.update(many_devices(20), Vec::new(), share_rows(3));
         card.fit(window(tall), now);
         let g = geometry(tall, &card);
         assert!(tall.contains_rect(g.card));
-        assert!(bar(&g, &card).is_some(), "twenty disks in the old window");
+        assert!(
+            bar(&g, &card).is_some(),
+            "twenty disks and more past the window"
+        );
         assert!(g.band.is_some());
 
         card.fit(window(short), now);
@@ -3349,7 +4870,7 @@ Mount(3): backup -> file:///mnt/backup
 
         // A short list in a tall window has nothing to scroll.
         let mut few = Card::new();
-        few.update(Vec::new(), Vec::new());
+        few.update(Vec::new(), Vec::new(), Vec::new());
         few.fit(window(tall), now);
         let g = geometry(tall, &few);
         assert_eq!(bar(&g, &few), None);
@@ -3368,7 +4889,7 @@ Mount(3): backup -> file:///mnt/backup
             let area =
                 egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height as f32));
             let mut card = Card::with_places(places(3));
-            card.update(Vec::new(), share_rows(9));
+            card.update(Vec::new(), Vec::new(), share_rows(24));
             card.fit(window(area), now);
             let heights: Vec<f32> = card.lines().iter().map(|line| line.height()).collect();
             let last = deepest(&heights, card.window);
@@ -3410,20 +4931,20 @@ Mount(3): backup -> file:///mnt/backup
         let t0 = std::time::Instant::now();
         let short = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 300.0));
         let mut card = Card::with_places(places(3));
-        card.update(many_devices(20), share_rows(3));
+        card.update(many_devices(20), Vec::new(), share_rows(3));
         card.fit(window(short), t0);
         assert_eq!(card.scrolled_at(), None, "opening is not a scroll");
 
         let t1 = t0 + std::time::Duration::from_millis(16);
         card.jump(Jump::Bottom);
         card.fit(window(short), t1);
-        assert_eq!(card.selected(), Some(Item::Connect));
+        assert_eq!(card.selected(), Some(Item::Place(2)));
         assert_eq!(card.scrolled_at(), Some(t1), "the End key scrolled it");
 
-        // Fewer disks, and the connect row, which the cursor stays on, further
+        // Fewer disks, and the last place, which the cursor stays on, further
         // up the list: the view follows it.
         let before = card.first;
-        card.update(many_devices(8), share_rows(3));
+        card.update(many_devices(8), Vec::new(), share_rows(3));
         let t2 = t1 + std::time::Duration::from_secs(5);
         card.fit(window(short), t2);
         assert_ne!(card.first, before, "the view moved with the refresh");
@@ -3444,23 +4965,24 @@ Mount(3): backup -> file:///mnt/backup
     }
 
     /// The rclone services sit under gvfs's shares and over the connect row,
-    /// go to `rclone://<name>`, wear the remote glyph with their provider
-    /// under the name, and take the mount verbs off the hint strip while the
-    /// cursor is on one.
+    /// go to `rclone://<name>`, wear the remote glyph with their service after
+    /// the name, and take the mount verbs off the hint strip while the cursor
+    /// is on one.
     #[test]
     fn cloud_remotes_follow_the_shares_in_the_network_section() {
         let mut card = Card::with_places(places(1));
         card.set_clouds(clouds());
         // While udisks2 is still being asked, the cursor waits where the
-        // first disk will be — on the first cloud row, for now…
+        // first device will be — on the first cloud row, for now…
         assert_eq!(card.selected(), Some(Item::Cloud(0)));
-        card.update(many_devices(1), share_rows(1));
-        // …and the disk arrives under it.
+        card.update(many_devices(1), Vec::new(), share_rows(1));
+        // …and the disk arrives over it.
         assert_eq!(card.selected(), Some(Item::Disk(0)));
         let network = |card: &Card| -> Vec<Line> {
             card.lines()
                 .into_iter()
                 .skip_while(|line| *line != Line::Section("Network"))
+                .take_while(|line| *line != Line::Section("Places"))
                 .collect()
         };
         assert_eq!(
@@ -3474,7 +4996,7 @@ Mount(3): backup -> file:///mnt/backup
             ]
         );
         // With no shares gvfs's sentence stays, and the remotes follow it.
-        card.update(many_devices(1), Vec::new());
+        card.update(many_devices(1), Vec::new(), Vec::new());
         assert_eq!(
             network(&card),
             [
@@ -3488,7 +5010,7 @@ Mount(3): backup -> file:///mnt/backup
 
         // A refresh keeps the cursor on the remote it was on.
         card.select(Item::Cloud(1));
-        card.update(many_devices(2), share_rows(2));
+        card.update(many_devices(2), Vec::new(), share_rows(2));
         let on = card.selected_cloud().expect("still on a remote");
         assert_eq!(on.name, "gdrive");
         assert_eq!(on.target(), PathBuf::from("rclone://gdrive"));
@@ -3500,12 +5022,11 @@ Mount(3): backup -> file:///mnt/backup
         card.select(Item::Connect);
         assert!(!geometry(area, &card).cloud);
 
-        let theme = df_core::config::Theme::default();
-        let palette = crate::theme::Palette::from_theme(&theme, df_core::config::Appearance::Dark);
+        let palette = palette();
         let row = face(&card, Item::Cloud(0), &palette, true);
         assert_eq!(row.name, "r2");
-        assert_eq!(row.detail, "s3");
-        assert!(row.status.is_none(), "nothing is mounted, so no state");
+        assert_eq!(row.detail, "S3", "the service, by the name people know");
+        assert_eq!(row.tone, palette.quiet, "nothing is mounted, so no state");
         assert_eq!(
             row.icon.map(|icon| icon.glyph),
             Some(crate::icons::network(&palette, true).glyph),

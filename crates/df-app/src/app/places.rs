@@ -31,7 +31,7 @@
 //! Every surface that lists places reads one list ([`pool`]): the pins in the
 //! order they were pinned, then the `[goto]` rows that are not already pinned,
 //! then home if nothing above was home. `g space` is that list in the finder,
-//! the mount card's Places section is it without the home row, and the app
+//! the Places card's Places section is it without the home row, and the app
 //! menu's Go list is it with the pin row under it. `z` has its own, wider pool
 //! (history and zoxide besides), which starts with the pins for the same reason
 //! this one does: they are the places somebody asked to have at the top.
@@ -124,11 +124,10 @@ fn shown(written: &str, home: Option<&Path>) -> String {
 ///
 /// Those three are one line each with no room to wrap, and a folder four
 /// levels under `/tmp` ran the which-key card's description out through the
-/// card's side and pushed the prompt's field off the end of the bar.
+/// card's side and pushed the prompt's field off the end of the bar. (The
+/// Places card's rows are measured instead: their paths are elided to the
+/// room the row has.)
 const BRIEF: usize = 40;
-
-/// …and in a row of its own, the mount card's, which has the card's width.
-const ROW_BRIEF: usize = 56;
 
 /// `text` with its middle folders dropped until it fits in `max` characters,
 /// the start that says whose it is kept: `~/…/crates/df-app`,
@@ -210,8 +209,8 @@ pub(super) struct Place {
     /// A `[goto]` row's own words.
     pub description: Option<String>,
     /// The home row the list ends on when nothing above it was home. Not a
-    /// pin and not a bookmark, so the mount card, which lists those, leaves it
-    /// out.
+    /// pin and not a bookmark, so the Places card, which lists those, leaves
+    /// it out.
     pub fallback: bool,
 }
 
@@ -310,8 +309,9 @@ pub(super) fn finder_rows(
         .collect()
 }
 
-/// The mount card's Places section: the list without its home fallback, each
-/// row saying its key, or a `[goto]` row's words, or that it is a pin.
+/// The Places card's Places section: the list without its home fallback,
+/// each row the folder's name, then where it is — `~` for home — and its `g`
+/// key when it has one.
 pub(super) fn card_places(
     pool: &[Place],
     keymap: &Registry,
@@ -319,17 +319,34 @@ pub(super) fn card_places(
 ) -> Vec<crate::mounts::Place> {
     pool.iter()
         .filter(|place| !place.fallback)
-        .map(|place| crate::mounts::Place {
-            name: brief(&place.label(home), ROW_BRIEF),
-            detail: place
-                .key(keymap)
-                .or_else(|| place.description.clone())
-                .unwrap_or_else(|| "pinned".to_string()),
-            target: place.target.clone(),
-            remote: place.remote(),
-            pinned: place.pinned,
+        .map(|place| {
+            let label = place.label(home);
+            crate::mounts::Place {
+                name: folder_name(&label),
+                detail: label,
+                key: place.key(keymap),
+                target: place.target.clone(),
+                remote: place.remote(),
+                pinned: place.pinned,
+            }
         })
         .collect()
+}
+
+/// What a place is called on its row: the last name in `label` — `Work` for
+/// `~/Work`, `srv` for `sftp://box/srv`, the server for `sftp://box` — and
+/// the label itself for `~` and `/`, which have no name of their own to give.
+fn folder_name(label: &str) -> String {
+    let path = match label.split_once("://") {
+        Some((_, rest)) => rest,
+        None => label,
+    };
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(label)
+        .to_string()
 }
 
 /// The sentence `g b` says where it cannot pin, for [`App::refusal`]'s gate —
@@ -450,7 +467,7 @@ impl App {
 
     /// Everything a change to the pins has to reach: the goto table and the
     /// keymap (so `g`'s card and `Goto(n)` agree with the list at once), the
-    /// state file's write-behind, the mount card if it is up, and the help
+    /// state file's write-behind, the Places card if it is up, and the help
     /// sheet if it is, whose lines are read out of that keymap: a view the
     /// new count moves is the sheet laid out again, not scrolled.
     fn pins_changed(&mut self, now: Instant) {
@@ -516,20 +533,21 @@ impl App {
         self.sync_context();
     }
 
-    /// The mount card's Places section, as it stands.
+    /// The Places card's Places section, as it stands.
     pub(super) fn card_places(&self) -> Vec<crate::mounts::Place> {
         card_places(&self.places_pool(), &self.keymap, home().as_deref())
     }
 
-    /// A new mount card, its Places section filled — the part of `M` that is
+    /// A new Places card, its Places section filled — the part of `M` that is
     /// this machine's own and needs no udisks2 to answer — and the cursor
-    /// where the first disk will be ([`crate::mounts::Card::with_places`]).
+    /// where the first device will be ([`crate::mounts::Card::with_places`]).
     pub(super) fn mount_card(&self) -> crate::mounts::Card {
         crate::mounts::Card::with_places(self.card_places())
     }
 
-    /// `d` on the mount card: unpin the place under the cursor. A `[goto]`
-    /// row is the config's, and the key says so rather than doing nothing.
+    /// `d` on the Places card: unpin the place under the cursor. A `[goto]`
+    /// row is the config's, and the key says so rather than doing nothing;
+    /// on any other row `d` does nothing at all.
     pub(super) fn unpin_selected_place(&mut self, now: Instant) {
         let Some(place) = self
             .mounts
@@ -541,7 +559,7 @@ impl App {
         };
         if !place.pinned {
             self.toasts.notice(
-                format!("{} is a [goto] bookmark, not a pin", place.name),
+                format!("{} is a [goto] bookmark, not a pin", place.detail),
                 now,
             );
             return;
@@ -549,7 +567,7 @@ impl App {
         self.unpin(&place.target.to_string_lossy(), now);
     }
 
-    /// `Enter` or a click on a Places row of the mount card: go there, the
+    /// `Enter` or a click on a Places row of the Places card: go there, the
     /// way its `g` key would.
     pub(super) fn go_selected_place(&mut self, now: Instant) {
         let Some(target) = self
@@ -836,14 +854,10 @@ mod tests {
             said(&text(dir), home().as_deref())
         }
 
-        /// …in full, as the picker lists it for the typing to match.
+        /// …in full, as the picker lists it for the typing to match, and as
+        /// a Places card row says where it is.
         fn full(&self, dir: &Path) -> String {
             shown(&text(dir), home().as_deref())
-        }
-
-        /// …as a mount card row names it.
-        fn row(&self, dir: &Path) -> String {
-            brief(&self.full(dir), ROW_BRIEF)
         }
     }
 
@@ -1063,11 +1077,12 @@ mod tests {
             .all(|row| !matches!(&row.choice, Choice::Cd(p) if crate::remote::is_remote(p))));
     }
 
-    /// The mount card opens with a Places section over the disks, the cursor
-    /// below it where the first disk will be: pins, then `[goto]` rows
-    /// not already pinned, each saying its key. `d` unpins a pin and says so,
-    /// and on a `[goto]` row says why it will not; `Enter` on a place goes
-    /// there. The strip offers `d` only while the cursor is on a pin.
+    /// The Places card ends with a Places section under the devices and the
+    /// network, the cursor on the card's first row: pins, then `[goto]` rows
+    /// not already pinned, each its folder's name, where it is, and its key.
+    /// `d` unpins a pin and says so, and on a `[goto]` row says why it will
+    /// not; `Enter` on a place goes there. The strip offers `d` only while
+    /// the cursor is on a pin.
     ///
     /// The card is built as `M` builds it, less the udisks2 request: the
     /// system bus is this machine's, not the test's.
@@ -1084,28 +1099,63 @@ mod tests {
         s.app.mounts = Some(s.app.mount_card());
         s.app.sync_context();
         let card = s.app.mounts.as_ref().expect("the card");
-        let rows: Vec<(String, String, bool, bool)> = card
+        type Row = (String, String, Option<String>, bool, bool);
+        let rows: Vec<Row> = card
             .places
             .iter()
-            .map(|p| (p.name.clone(), p.detail.clone(), p.pinned, p.remote))
+            .map(|p| {
+                (
+                    p.name.clone(),
+                    p.detail.clone(),
+                    p.key.clone(),
+                    p.pinned,
+                    p.remote,
+                )
+            })
             .collect();
+        let keyed = |key: &str| Some(key.to_string());
         assert_eq!(
             rows,
             vec![
-                (s.row(&files.join("other")), "g o".to_string(), true, false),
-                (s.row(&files.join("sub")), "pinned".to_string(), true, false),
-                ("sftp://box/srv".to_string(), "g s".to_string(), false, true),
+                (
+                    "other".to_string(),
+                    s.full(&files.join("other")),
+                    keyed("g o"),
+                    true,
+                    false
+                ),
+                (
+                    "sub".to_string(),
+                    s.full(&files.join("sub")),
+                    None,
+                    true,
+                    false
+                ),
+                (
+                    "srv".to_string(),
+                    "sftp://box/srv".to_string(),
+                    keyed("g s"),
+                    false,
+                    true
+                ),
             ],
             "no home fallback on the card"
         );
-        assert_eq!(card.lines()[0], Line::Section("Places"));
-        // Where the first disk will be: udisks2 has not answered (and never
-        // will, here), so that index is the connect row for now.
+        let lines = card.lines();
+        assert_eq!(lines[0], Line::Section("Devices"));
         assert_eq!(
-            card.cursor,
-            card.places.len(),
-            "the card opens below the places"
+            lines[lines.len() - 4..],
+            [
+                Line::Section("Places"),
+                Line::Item(Item::Place(0)),
+                Line::Item(Item::Place(1)),
+                Line::Item(Item::Place(2)),
+            ],
+            "the places at the bottom"
         );
+        // Where the first device will be: udisks2 has not answered (and never
+        // will, here), so the first row is the connect row for now.
+        assert_eq!(card.cursor, 0, "the card opens on its first row");
         assert_eq!(card.selected(), Some(Item::Connect));
         let area = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0));
         let strip = |app: &App| -> Vec<String> {
@@ -1120,11 +1170,11 @@ mod tests {
         };
         assert!(
             !strip(&s.app).contains(&"d".to_string()),
-            "no d below the places"
+            "no d off the places"
         );
 
-        // Up past the [goto] row to the second pin: `d` is offered, and takes
-        // it off the list with the cursor where it was.
+        // Up round the top, past the [goto] row, to the second pin: `d` is
+        // offered, and takes it off the list with the cursor where it was.
         s.keys("up up");
         assert_eq!(
             s.app.mounts.as_ref().and_then(|c| c.selected()),
@@ -1160,13 +1210,27 @@ mod tests {
         let s = Sandbox::new("empty", |_, config, _| config.goto = Vec::new());
         let card = s.app.mount_card();
         assert!(card.places.is_empty());
+        let lines = card.lines();
         assert_eq!(
-            &card.lines()[..2],
+            &lines[lines.len() - 2..],
             &[
                 Line::Section("Places"),
                 Line::Empty("Nothing pinned · g b pins this folder"),
             ]
         );
+    }
+
+    /// A place's row is called by its folder's last name; home and the root,
+    /// which have none to give, by what the lists call them.
+    #[test]
+    fn a_place_is_called_by_its_folder() {
+        assert_eq!(folder_name("~/Work"), "Work");
+        assert_eq!(folder_name("~/Work/delightfile/"), "delightfile");
+        assert_eq!(folder_name("/mnt/schwabserverroot/plex"), "plex");
+        assert_eq!(folder_name("sftp://box/srv/www"), "www");
+        assert_eq!(folder_name("sftp://showandtour1"), "showandtour1");
+        assert_eq!(folder_name("~"), "~");
+        assert_eq!(folder_name("/"), "/");
     }
 
     /// The app menu's Go list is "Go to path…", "Jump to…" and "Open terminal

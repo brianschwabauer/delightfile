@@ -46,7 +46,7 @@ fn button(at: egui::Pos2, pressed: bool) -> egui::Event {
 /// The mount card thirty shares long, as the frame fits it to the window.
 fn thirty_shares(now: Instant) -> Card {
     let mut card = Card::new();
-    card.update(Vec::new(), shares(30));
+    card.update(Vec::new(), Vec::new(), shares(30));
     card.fit(crate::mounts::window(screen()), now);
     card
 }
@@ -76,7 +76,7 @@ fn the_mount_cards_thumb_is_taken_and_dragged() {
     frame(&mut app, &ctx, screen(), Vec::new(), t0);
     // Built rather than opened, as `M` would start the udisks worker.
     let mut built = Card::new();
-    built.update(Vec::new(), shares(30));
+    built.update(Vec::new(), Vec::new(), shares(30));
     app.mounts = Some(built);
     app.sync_context();
     frame(&mut app, &ctx, screen(), Vec::new(), t0);
@@ -160,6 +160,11 @@ fn the_mount_cards_thumb_is_taken_and_dragged() {
 
 /// A press on the mount card's track, below the thumb, pages a view's worth
 /// down and takes nothing into the hand.
+///
+/// Sixty shares, so the page leaves the thumb short of the press: the thumb
+/// is taken by a press that lands on it once the page is over (the grab is
+/// read from the card as the page left it), and with one-line rows thirty
+/// shares make a thumb that a page carries under the pointer.
 #[test]
 fn a_press_on_a_cards_track_pages_towards_it() {
     let ctx = egui::Context::default();
@@ -167,7 +172,7 @@ fn a_press_on_a_cards_track_pages_towards_it() {
     let t0 = Instant::now();
     frame(&mut app, &ctx, screen(), Vec::new(), t0);
     let mut built = Card::new();
-    built.update(Vec::new(), shares(30));
+    built.update(Vec::new(), Vec::new(), shares(60));
     app.mounts = Some(built);
     app.sync_context();
     frame(&mut app, &ctx, screen(), Vec::new(), t0);
@@ -177,7 +182,9 @@ fn a_press_on_a_cards_track_pages_towards_it() {
     assert!(bar.contains(below) && !bar.on_thumb(below));
     let pressed = vec![egui::Event::PointerMoved(below), button(below, true)];
     frame(&mut app, &ctx, screen(), pressed, t0);
-    let mut twin = thirty_shares(t0);
+    let mut twin = Card::new();
+    twin.update(Vec::new(), Vec::new(), shares(60));
+    twin.fit(crate::mounts::window(screen()), t0);
     twin.scroll_to(bar.page(false), t0);
     assert!(twin.first > 0);
     assert_eq!(mount_card(&app).first, twin.first, "not a page down");
@@ -319,7 +326,7 @@ fn with_mount_card(name: &str, ctx: &egui::Context, now: Instant) -> Fixture {
     frame(&mut app, ctx, screen(), Vec::new(), now);
     // Built rather than opened, as `M` would start the udisks worker.
     let mut built = Card::new();
-    built.update(Vec::new(), shares(30));
+    built.update(Vec::new(), Vec::new(), shares(30));
     app.mounts = Some(built);
     app.sync_context();
     frame(&mut app, ctx, screen(), Vec::new(), now);

@@ -459,6 +459,51 @@ pub fn network(palette: &Palette, nerd: bool) -> Icon {
 
 const NETWORK_PLACE: char = '\u{f233}'; // nf-fa-server
 
+/// A disk on the Places card: a USB plug for one that comes out, a drive for
+/// one that does not — the question a person scanning for the stick they
+/// just plugged in is asking (nf-fa-usb, nf-fa-hdd_o).
+pub fn drive(palette: &Palette, nerd: bool, removable: bool) -> Icon {
+    Icon {
+        glyph: match (nerd, removable) {
+            (false, _) => ' ',
+            (true, true) => USB,
+            (true, false) => DRIVE,
+        },
+        color: palette.lavender,
+    }
+}
+
+/// A phone gvfs reached over MTP (nf-fa-mobile).
+pub fn phone(palette: &Palette, nerd: bool) -> Icon {
+    Icon {
+        glyph: if nerd { PHONE } else { ' ' },
+        color: palette.green,
+    }
+}
+
+/// A camera gvfs reached over PTP (nf-fa-camera).
+pub fn camera(palette: &Palette, nerd: bool) -> Icon {
+    Icon {
+        glyph: if nerd { CAMERA } else { ' ' },
+        color: palette.green,
+    }
+}
+
+/// The Places card's "Connect to server…" row: a plus, since the row adds a
+/// share rather than being one (nf-fa-plus).
+pub fn connect(palette: &Palette, nerd: bool) -> Icon {
+    Icon {
+        glyph: if nerd { PLUS } else { ' ' },
+        color: palette.subtext0,
+    }
+}
+
+const DRIVE: char = '\u{f0a0}'; // nf-fa-hdd_o
+const USB: char = '\u{f287}'; // nf-fa-usb
+const PHONE: char = '\u{f10b}'; // nf-fa-mobile
+const CAMERA: char = '\u{f030}'; // nf-fa-camera
+const PLUS: char = '\u{f067}'; // nf-fa-plus
+
 /// The icon for one row.
 ///
 /// `theme` supplies the user's rules — `[[icon.dir]]`'s nineteen and whatever
@@ -963,6 +1008,12 @@ mod glyph_tests {
             super::GENERIC_DIR,
             super::GENERIC_FILE,
             super::NETWORK_PLACE,
+            // The Places card's rows.
+            super::DRIVE,
+            super::USB,
+            super::PHONE,
+            super::CAMERA,
+            super::PLUS,
         ]
         .iter()
         .filter(|_| nerd)

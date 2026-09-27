@@ -368,8 +368,8 @@ struct PendingArchive {
     slot: Arc<std::sync::Mutex<Option<std::result::Result<df_core::archive::ArchiveTree, String>>>>,
 }
 
-/// A `gio mount` running on the pool for the connect prompt, and where its
-/// answer lands.
+/// A `gio mount` running on the pool — for the connect prompt, or for a phone
+/// on the Places card — and where its answer lands.
 ///
 /// A job rather than a request to the mounts worker because a server that is
 /// not answering holds it for as long as a network timeout, and the worker is
@@ -378,9 +378,14 @@ struct PendingArchive {
 struct PendingConnect {
     id: TaskId,
     /// What was typed, validated: the address the terminal fallback re-runs.
+    /// For a phone, its root.
     url: String,
-    /// What the toasts call it — [`crate::mounts::Address::label`].
+    /// What the toasts call it — [`crate::mounts::Address::label`], or the
+    /// phone's name.
     label: String,
+    /// A phone's or a camera's mount, whose row is busy on the card until it
+    /// lands, rather than the connect prompt's.
+    phone: Option<crate::mounts::Protocol>,
     slot: Arc<std::sync::Mutex<Option<crate::mounts::Connected>>>,
 }
 
@@ -1637,10 +1642,25 @@ pub struct App {
     /// resting state of a session that never asked about disks: no thread, no
     /// system-bus connection.
     udisks: Option<crate::mounts::Mounts>,
-    /// The disks card, while it is open (PLAN §7.4).
+    /// The Places card, while it is open (PLAN §7.4).
     mounts: Option<crate::mounts::Card>,
-    /// Connections to servers in flight, from the card's connect prompt.
+    /// Connections to servers in flight, from the card's connect prompt, and
+    /// phones being mounted from the card.
     connects: Vec<PendingConnect>,
+    /// How `gio` is run to mount and unmount a share or a phone: `gio` itself,
+    /// or in a test, a stand-in that notes what it was asked
+    /// ([`crate::mounts::Gio`]).
+    gio: crate::mounts::Gio,
+    /// Where gvfs-fuse shows gvfs's mounts, `$XDG_RUNTIME_DIR/gvfs`: where a
+    /// phone's directory is looked for, and the trees the size column and the
+    /// thumbnails leave alone ([`df_core::du::on_device`]). A test's sandbox
+    /// in a test.
+    gvfs: PathBuf,
+    /// `gio mount --monitor`, heard for the life of the window: a phone
+    /// plugged in, a share or a phone going away ([`crate::mounts::Monitor`]).
+    /// Started by [`App::new`] — never in a file dialog, never in a test —
+    /// and `None` on a machine without gio.
+    gio_monitor: Option<crate::mounts::Monitor>,
     /// Syncs on the pool, and what each owes the window when it lands
     /// (`app/syncing.rs`).
     syncs: Vec<crate::sync::Running>,
@@ -2183,6 +2203,14 @@ impl App {
         // adapter, and the first frame is on the side the desktop is on.
         app.desktop_bus = Some(crate::appearance::session());
         app.follow_desktop(true, Instant::now());
+        // gvfs's events, so a phone plugged in is heard with no card open
+        // (PLAN §7.4). Not in a file dialog, which is somebody else's window
+        // for a few seconds; and started here, on the event loop's thread,
+        // because gio's life is tied to the thread that starts it.
+        if app.chooser.is_none() {
+            let waker = app.waker.named("gio");
+            app.gio_monitor = crate::mounts::Monitor::start(Arc::new(move || waker.wake()));
+        }
         app
     }
 
@@ -2397,6 +2425,9 @@ impl App {
             udisks: None,
             mounts: None,
             connects: Vec::new(),
+            gio: crate::mounts::system_gio(),
+            gvfs: crate::mounts::gvfs_root(),
+            gio_monitor: None,
             syncs: Vec::new(),
             tray_open: false,
             tray_first: 0,
@@ -2787,8 +2818,12 @@ impl App {
         if self.poll_usage(now) {
             changed = true;
         }
-        // Whatever udisks2 has said (PLAN §7.4).
+        // Whatever udisks2 has said (PLAN §7.4)…
         if self.poll_mounts(now) {
+            changed = true;
+        }
+        // …and whatever gvfs has: a phone plugged in, a mount gone.
+        if self.poll_gio(now) {
             changed = true;
         }
         // The photos the bulk rename card's reader has got through, and the
@@ -3031,7 +3066,7 @@ impl App {
                 // The same for a connection: read, then forgotten, so one
                 // cancelled before it ran is not waited on for ever.
                 self.poll_connects(now);
-                self.connects.retain(|pending| pending.id != event.id);
+                self.forget_connect(event.id);
             }
             // A failure is not always the end — a transient one is republished
             // as `Failed { retries }` and then runs again — so the op stays
@@ -7258,13 +7293,15 @@ impl App {
         }
     }
 
-    // ── The mount manager: `M` (PLAN §7.4) ──────────────────────────────────
+    // ── The Places card: `M` (PLAN §7.4) ────────────────────────────────────
 
     /// The udisks2 worker, started the first time the card is opened.
     fn udisks(&mut self) -> &crate::mounts::Mounts {
         let waker = self.waker.named("udisks");
-        self.udisks
-            .get_or_insert_with(|| crate::mounts::Mounts::start(Arc::new(move || waker.wake())))
+        let gio = self.gio.clone();
+        self.udisks.get_or_insert_with(|| {
+            crate::mounts::Mounts::start(Arc::new(move || waker.wake()), gio)
+        })
     }
 
     /// `M`: open the card and ask for the listing.
@@ -7303,7 +7340,7 @@ impl App {
     /// wants from a disk in a file manager is to be *in* it; mounting is the
     /// step that has to happen first when it has not happened yet, and pressing
     /// `Enter` twice on a fresh USB stick doing both is the shortest true
-    /// description of the job.
+    /// description of the job. A phone is the same.
     ///
     /// A share is always mounted — gvfs lists nothing else — so `Enter` on one
     /// is always "go there". The connect row's `Enter` is its prompt.
@@ -7312,6 +7349,10 @@ impl App {
         let Some(card) = &self.mounts else { return };
         match card.selected() {
             Some(Item::Disk(_)) => {}
+            Some(Item::Phone(_)) => {
+                self.phone_selected(true, now);
+                return;
+            }
             Some(Item::Place(_)) => {
                 self.go_selected_place(now);
                 return;
@@ -7321,7 +7362,7 @@ impl App {
                     return;
                 };
                 // Not into a share that is on its way out.
-                if card.busy.as_deref() == Some(share.url.as_str()) {
+                if card.is_busy(&share.url) {
                     return;
                 }
                 let path = share.path.clone();
@@ -7365,10 +7406,68 @@ impl App {
     /// Ask udisks2 to mount `device`, and draw its row busy until it answers.
     fn mount_device(&mut self, device: crate::mounts::Device) {
         if let Some(card) = &mut self.mounts {
-            card.busy = Some(device.object.clone());
+            card.start(device.object.clone(), "mounting…");
         }
         self.udisks()
             .ask(crate::mounts::Request::Mount(device.object));
+    }
+
+    /// `Enter` (`go`) or `m` on a phone or a camera: into it when it is
+    /// mounted and `Enter` asked, and mounted when it is not.
+    fn phone_selected(&mut self, go: bool, now: Instant) {
+        let Some(card) = &self.mounts else { return };
+        let Some(phone) = card.selected_phone().cloned() else {
+            return;
+        };
+        if card.busy.is_some() {
+            return;
+        }
+        match &phone.mount {
+            Some(path) if go => {
+                let path = path.clone();
+                self.close_overlay(now);
+                self.jump_to(path, now);
+            }
+            Some(_) => self
+                .toasts
+                .notice(format!("{} is already mounted", phone.name), now),
+            None => self.mount_phone(phone),
+        }
+    }
+
+    /// `gio mount <root>` for a phone on the pool, through the connect
+    /// machinery ([`crate::mounts::mount_gio`]), its row saying `mounting…`
+    /// until the job lands. A phone asks nothing of the keyboard — the "allow
+    /// access?" it may ask is on its own screen — so there is no terminal to
+    /// hand it to.
+    fn mount_phone(&mut self, phone: crate::mounts::Phone) {
+        if let Some(card) = &mut self.mounts {
+            card.start(phone.root.clone(), "mounting…");
+        }
+        let slot: Arc<std::sync::Mutex<Option<crate::mounts::Connected>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&slot);
+        let (root, gio) = (phone.root.clone(), self.gio.clone());
+        let job = FnJob::new(
+            format!("Mount {}", phone.name),
+            Lane::Micro,
+            move |_ctx: &TaskCtx| {
+                let result = crate::mounts::mount_gio(&root, &gio);
+                match sink.lock() {
+                    Ok(mut guard) => *guard = Some(result),
+                    Err(poisoned) => *poisoned.into_inner() = Some(result),
+                }
+                Ok(())
+            },
+        );
+        let id = self.engine.spawn(job);
+        self.connects.push(PendingConnect {
+            id,
+            url: phone.root,
+            label: phone.name,
+            phone: Some(phone.protocol),
+            slot,
+        });
     }
 
     /// `m`: mount, and only mount.
@@ -7388,6 +7487,10 @@ impl App {
             // A place is a folder, and a cloud remote is reached rather than
             // mounted: there is nothing to mount in either.
             Some(Item::Place(_) | Item::Cloud(_)) => return,
+            Some(Item::Phone(_)) => {
+                self.phone_selected(false, now);
+                return;
+            }
             Some(Item::Share(_)) => card.selected_share().map(|share| share.label.clone()),
             Some(Item::Disk(_)) => {
                 let Some(device) = card.selected_device().cloned() else {
@@ -7409,9 +7512,9 @@ impl App {
         }
     }
 
-    /// `u` on a mounted row: put it away. A disk goes back to udisks2 and a
-    /// share to gvfs, both through the one worker, so a share being unmounted
-    /// is drawn busy exactly as a disk is.
+    /// `u` on a mounted row: put it away. A disk goes back to udisks2, and a
+    /// share or a phone to gvfs, all through the one worker, so a share being
+    /// unmounted is drawn busy exactly as a disk is.
     fn unmount_selected(&mut self, now: Instant) {
         use crate::mounts::Item;
         let Some(card) = self.mounts.as_ref().filter(|card| card.busy.is_none()) else {
@@ -7423,10 +7526,11 @@ impl App {
                 let Some(url) = card.selected_share().map(|share| share.url.clone()) else {
                     return;
                 };
-                if let Some(card) = &mut self.mounts {
-                    card.busy = Some(url.clone());
-                }
-                self.udisks().ask(crate::mounts::Request::UnmountShare(url));
+                self.gio_unmount(url);
+                return;
+            }
+            Some(Item::Phone(_)) => {
+                self.unmount_phone(now);
                 return;
             }
             Some(Item::Place(_) | Item::Cloud(_) | Item::Connect) | None => return,
@@ -7440,10 +7544,40 @@ impl App {
             return;
         }
         if let Some(card) = &mut self.mounts {
-            card.busy = Some(device.object.clone());
+            card.start(device.object.clone(), "unmounting…");
         }
         self.udisks()
             .ask(crate::mounts::Request::Unmount(device.object));
+    }
+
+    /// `u` or `e` on a phone or a camera: `gio mount -u` on its root. A phone
+    /// has no drive of its own to eject — unmounting it is all "safely remove"
+    /// means for one — so the two keys are one here.
+    fn unmount_phone(&mut self, now: Instant) {
+        let Some(phone) = self
+            .mounts
+            .as_ref()
+            .filter(|card| card.busy.is_none())
+            .and_then(|card| card.selected_phone())
+            .cloned()
+        else {
+            return;
+        };
+        if !phone.is_mounted() {
+            self.toasts
+                .notice(format!("{} is not mounted", phone.name), now);
+            return;
+        }
+        self.gio_unmount(phone.root);
+    }
+
+    /// `gio mount -u <url>` on the worker, the row under `url` busy until it
+    /// answers.
+    fn gio_unmount(&mut self, url: String) {
+        if let Some(card) = &mut self.mounts {
+            card.start(url.clone(), "unmounting…");
+        }
+        self.udisks().ask(crate::mounts::Request::GioUnmount(url));
     }
 
     /// `e`: eject the whole drive, which is what "safely remove" means.
@@ -7454,6 +7588,10 @@ impl App {
         };
         match card.selected() {
             Some(Item::Disk(_)) => {}
+            Some(Item::Phone(_)) => {
+                self.unmount_phone(now);
+                return;
+            }
             Some(Item::Share(_)) => {
                 // A share has no drive to eject. The key that does what the
                 // hand reaching for `e` meant is named, rather than `e`
@@ -7475,14 +7613,15 @@ impl App {
             return;
         };
         if let Some(card) = &mut self.mounts {
-            card.busy = Some(device.object.clone());
+            card.start(device.object.clone(), "ejecting…");
         }
         self.udisks().ask(crate::mounts::Request::Eject(drive));
     }
 
     /// `r`: list again. For the share that was connected in a terminal, which
     /// nothing announces to this program, and for the disk that was plugged in
-    /// while the card was up.
+    /// while the card was up. (A phone, and a share gvfs mounts or unmounts,
+    /// are announced: [`App::gio_heard`] lists again for them.)
     fn refresh_mounts(&mut self) {
         if self.mounts.is_some() {
             self.udisks().ask(crate::mounts::Request::List);
@@ -7509,12 +7648,12 @@ impl App {
         let slot: Arc<std::sync::Mutex<Option<crate::mounts::Connected>>> =
             Arc::new(std::sync::Mutex::new(None));
         let sink = Arc::clone(&slot);
-        let job_url = url.clone();
+        let (job_url, gio) = (url.clone(), self.gio.clone());
         let job = FnJob::new(
             format!("Connect to {label}"),
             Lane::Micro,
             move |_ctx: &TaskCtx| {
-                let result = crate::mounts::connect(&job_url);
+                let result = crate::mounts::connect(&job_url, &gio);
                 match sink.lock() {
                     Ok(mut guard) => *guard = Some(result),
                     Err(poisoned) => *poisoned.into_inner() = Some(result),
@@ -7531,6 +7670,7 @@ impl App {
             id,
             url,
             label,
+            phone: None,
             slot,
         });
     }
@@ -7548,17 +7688,43 @@ impl App {
             };
             match result {
                 Some(result) => {
-                    landed.push((pending.url.clone(), pending.label.clone(), result));
+                    landed.push((
+                        pending.url.clone(),
+                        pending.label.clone(),
+                        pending.phone,
+                        result,
+                    ));
                     false
                 }
                 None => true,
             }
         });
         let changed = !landed.is_empty();
-        for (url, label, result) in landed {
-            self.connected(url, label, result, now);
+        for (url, label, phone, result) in landed {
+            match phone {
+                Some(protocol) => self.phone_mounted(&url, &label, protocol, result, now),
+                None => self.connected(url, label, result, now),
+            }
         }
         changed
+    }
+
+    /// A connection's job is over without having said anything — cancelled
+    /// before it ran — so it is forgotten, and a phone's row stops saying
+    /// `mounting…` for a mount that is not coming.
+    fn forget_connect(&mut self, id: TaskId) {
+        let gone: Vec<String> = self
+            .connects
+            .iter()
+            .filter(|pending| pending.id == id && pending.phone.is_some())
+            .map(|pending| pending.url.clone())
+            .collect();
+        self.connects.retain(|pending| pending.id != id);
+        if let Some(card) = &mut self.mounts {
+            if gone.iter().any(|root| card.is_busy(root)) {
+                card.finish();
+            }
+        }
     }
 
     /// One connection's outcome: go there, hand it to a terminal, or say why
@@ -7606,8 +7772,51 @@ impl App {
         }
     }
 
+    /// A phone's mount came back: its row is itself again and the card lists
+    /// it mounted, or the row says why not — and when gvfs's words mean the
+    /// phone would not open, what to do about it instead
+    /// ([`crate::mounts::unlock_hint`]). The card stays where it was either
+    /// way: `Enter` again goes in, as it does for a disk.
+    fn phone_mounted(
+        &mut self,
+        root: &str,
+        label: &str,
+        protocol: crate::mounts::Protocol,
+        result: crate::mounts::Connected,
+        now: Instant,
+    ) {
+        match result {
+            crate::mounts::Connected::Mounted(_) => {
+                if let Some(card) = self.mounts.as_mut().filter(|card| card.is_busy(root)) {
+                    card.finish();
+                }
+                self.toasts.notice(format!("Mounted {label}"), now);
+                self.refresh_mounts();
+            }
+            crate::mounts::Connected::Failed(message) => {
+                let hint = crate::mounts::unlock_hint(protocol, &message);
+                let said = hint.map_or(message, str::to_string);
+                if let Some(card) = self.mounts.as_mut().filter(|card| card.is_busy(root)) {
+                    card.fail(said.clone());
+                }
+                if hint.is_some() {
+                    self.toasts.notice(said, now);
+                } else {
+                    self.toasts.error(said, now);
+                }
+            }
+            // A device asks nothing ([`crate::mounts::mount_gio`] never says
+            // this); were it to, there is nobody to answer.
+            crate::mounts::Connected::NeedsTerminal => {
+                if let Some(card) = self.mounts.as_mut().filter(|card| card.is_busy(root)) {
+                    card.fail("gio wanted an answer");
+                }
+            }
+        }
+    }
+
     /// Whether a finished connection may move the listing: no prompt, no
-    /// dialog, and no surface up but the mount card — which the move closes,
+    /// dialog, and no surface up but the Places card — which the move closes,
     /// its job done — or the task panel, which is about tasks and not files.
     fn free_to_move(&self) -> bool {
         self.prompt.is_none()
@@ -7619,6 +7828,11 @@ impl App {
     }
 
     /// Take whatever the worker has said. Returns whether anything changed.
+    ///
+    /// A listing only fills the card; every other reply answers the call its
+    /// busy row is waiting on. (A listing used to clear the busy row too,
+    /// which was harmless while listings came only from `M` and `r`; with
+    /// gvfs's events asking for them, one can land while a mount is out.)
     fn poll_mounts(&mut self, now: Instant) -> bool {
         let replies = match &self.udisks {
             Some(udisks) => udisks.drain(),
@@ -7629,31 +7843,44 @@ impl App {
         }
         let mut refresh = false;
         for reply in replies {
-            if let Some(card) = &mut self.mounts {
-                card.busy = None;
-            }
+            let answered = |app: &mut App| {
+                if let Some(card) = &mut app.mounts {
+                    card.finish();
+                }
+            };
             match reply {
-                crate::mounts::Reply::Listing { devices, shares } => {
+                crate::mounts::Reply::Listing {
+                    devices,
+                    phones,
+                    shares,
+                } => {
                     if let Some(card) = &mut self.mounts {
-                        card.update(devices, shares);
+                        card.update(devices, phones, shares);
                     }
                 }
                 crate::mounts::Reply::Mounted(path) => {
+                    answered(self);
                     self.toasts
                         .notice(format!("Mounted at {}", path.display()), now);
                     refresh = true;
                 }
                 crate::mounts::Reply::Unmounted => {
+                    answered(self);
                     self.toasts.notice("Unmounted", now);
                     refresh = true;
                 }
                 crate::mounts::Reply::Ejected => {
+                    answered(self);
                     self.toasts.notice("Safe to remove", now);
                     refresh = true;
                 }
                 crate::mounts::Reply::Failed(message) => {
-                    // The card stays up: the failure is about one row, and
-                    // closing the surface would take the other disks away too.
+                    // The card stays up: the failure is about one row, which
+                    // says so, and closing the surface would take the other
+                    // rows away too.
+                    if let Some(card) = &mut self.mounts {
+                        card.fail(message.clone());
+                    }
                     self.toasts.error(message, now);
                     if self.mounts.as_ref().is_some_and(|card| card.loading) {
                         // …unless nothing ever arrived, in which case there is
@@ -7668,6 +7895,102 @@ impl App {
             self.udisks().ask(crate::mounts::Request::List);
         }
         true
+    }
+
+    /// Take whatever gvfs has said since the last frame. Returns whether it
+    /// said anything.
+    fn poll_gio(&mut self, now: Instant) -> bool {
+        let events = match &self.gio_monitor {
+            Some(monitor) => monitor.drain(),
+            None => return false,
+        };
+        if events.is_empty() {
+            return false;
+        }
+        self.gio_heard(events, now);
+        true
+    }
+
+    /// What gvfs said, acted on.
+    ///
+    /// A phone or a camera plugged in is said in a toast that names the key
+    /// that reaches it — plugged in with the card shut, it would otherwise
+    /// arrive without a word. A share or a phone going away takes any tab
+    /// that was inside it out to the nearest folder still there
+    /// ([`App::leave_gvfs_mount`]). And whatever it was, the card, if it is
+    /// up, lists again, so it is never showing a phone that is not there.
+    fn gio_heard(&mut self, events: Vec<crate::mounts::Event>, now: Instant) {
+        use crate::mounts::Change;
+        for event in &events {
+            match event.change {
+                Change::VolumeAdded if event.protocol.is_some() => {
+                    let message = match self.keymap.binding_label(Command::MountManager) {
+                        Some(key) => format!("{} plugged in · {key} to open it", event.name),
+                        None => format!("{} plugged in", event.name),
+                    };
+                    self.toasts.notice(message, now);
+                }
+                Change::VolumeRemoved | Change::MountRemoved => {
+                    if let Some(root) = &event.root {
+                        self.leave_gvfs_mount(root, now);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.refresh_mounts();
+    }
+
+    /// The gvfs mount at `root` has gone: every tab inside the directory
+    /// gvfs-fuse showed it as goes up to the nearest folder still there — what
+    /// a tab does when the folder it is in is deleted or a disk is unmounted
+    /// under it, which a FUSE directory never tells the watcher.
+    ///
+    /// The directory is the one gvfs names such a mount ([`crate::mounts::Spec`]),
+    /// and the one the card listed it at when that is another.
+    fn leave_gvfs_mount(&mut self, root: &str, now: Instant) {
+        let Some(address) = crate::mounts::Address::parse(root) else {
+            return;
+        };
+        let mut dirs = vec![self.gvfs.join(crate::mounts::Spec::of(&address).dir_name())];
+        if let Some(card) = &self.mounts {
+            let same = |url: &str| url.trim_end_matches('/') == root.trim_end_matches('/');
+            dirs.extend(
+                card.phones
+                    .iter()
+                    .filter(|phone| same(&phone.root))
+                    .filter_map(|phone| phone.mount.clone()),
+            );
+            dirs.extend(
+                card.shares
+                    .iter()
+                    .filter(|share| same(&share.url))
+                    .map(|share| share.path.clone()),
+            );
+        }
+        let inside = |cwd: &Path| dirs.iter().find(|dir| cwd.starts_with(dir)).cloned();
+        let active = self.tabs.active_index();
+        let (mgr, sort) = (self.mgr.clone(), self.sort());
+        let mut moved_active = None;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let Some(dir) = inside(tab.cwd.path()) else {
+                continue;
+            };
+            let up = nearest_existing(&dir);
+            log::info!(
+                "{} went with its mount; moving to {}",
+                tab.cwd.path().display(),
+                up.display()
+            );
+            if index == active {
+                moved_active = Some(up);
+            } else {
+                tab.navigate(up, &mgr, sort, &self.scanner, now);
+            }
+        }
+        if let Some(up) = moved_active {
+            self.navigate(up, now);
+        }
     }
 
     // ── Carrying files from several directories (PLAN §7.1) ─────────────────
@@ -20127,6 +20450,10 @@ mod tests {
 
     /// `C`: the permissions card, its job, `u`, and the doors to it.
     mod permissions;
+
+    /// Phones and cameras on the Places card, gvfs's events, and the trees
+    /// the size column and the thumbnails leave alone.
+    mod phones;
 
     /// Light and dark: the commands, the desktop, and the radios.
     mod appearance;
