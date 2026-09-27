@@ -1734,9 +1734,18 @@ impl Monitor {
         })
     }
 
-    /// Whether gio has died: its pipe ended, and the thread with it.
-    pub fn gone(&self) -> bool {
-        self.gone.load(std::sync::atomic::Ordering::SeqCst)
+    /// Whether gio has died: its pipe ended, and the thread with it. A dead
+    /// gio is reaped here and now, rather than left a zombie until the
+    /// restart or the window's end: the frame the reader's last bell brings
+    /// asks this.
+    pub fn gone(&mut self) -> bool {
+        if !self.gone.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        if let Err(e) = self.child.try_wait() {
+            log::debug!("the gio monitor could not be reaped: {e}");
+        }
+        true
     }
 
     /// When this watcher was started.
@@ -4073,18 +4082,27 @@ Volume removed:     'Pixel 10a'
             "printf '%s\\n' \"Volume added:       'Pixel 10a'\" '  Volume(0): Pixel 10a' \
              '    Type: GProxyVolume (GProxyVolumeMonitorMTP)' ''",
         ]);
-        let monitor = Monitor::spawn(
+        let mut monitor = Monitor::spawn(
             command,
             std::sync::Arc::new(move || {
                 bell.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }),
         )
         .expect("sh starts");
+        let proc = PathBuf::from(format!("/proc/{}", monitor.child.id()));
         let deadline = Instant::now() + Duration::from_secs(10);
         while !monitor.gone() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert!(monitor.gone(), "the pipe ended and nobody noticed");
+        // Asked while it is gone, it is reaped: no zombie is left in the
+        // process table (the exit can trail the pipe's end by a moment, so
+        // it is asked until then).
+        while proc.exists() && Instant::now() < deadline {
+            assert!(monitor.gone());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!proc.exists(), "a dead gio was left a zombie");
         let heard = monitor.drain();
         assert_eq!(heard.len(), 1);
         assert_eq!(heard[0].change, Change::VolumeAdded);

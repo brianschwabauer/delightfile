@@ -7964,8 +7964,10 @@ impl App {
     /// file dialog and a test never have one to start again. Here, on the
     /// event loop's thread, as the first was, for the tie to it.
     fn revive_gio(&mut self, now: Instant) {
-        let due = self.gio_monitor.as_ref().is_some_and(|monitor| {
-            crate::mounts::restart_due(monitor.gone(), self.gio_restarts, monitor.started(), now)
+        let restarts = self.gio_restarts;
+        let due = self.gio_monitor.as_mut().is_some_and(|monitor| {
+            let gone = monitor.gone();
+            crate::mounts::restart_due(gone, restarts, monitor.started(), now)
         });
         if !due {
             return;
