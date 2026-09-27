@@ -7300,7 +7300,7 @@ impl App {
     // ── The Places card: `M` (PLAN §7.4) ────────────────────────────────────
 
     /// The udisks2 worker, started the first time the card is opened.
-    fn udisks(&mut self) -> &crate::mounts::Mounts {
+    fn udisks(&mut self) -> &mut crate::mounts::Mounts {
         let waker = self.waker.named("udisks");
         let gio = self.gio.clone();
         self.udisks.get_or_insert_with(|| {
@@ -7308,13 +7308,47 @@ impl App {
         })
     }
 
+    /// Ask the worker to act on a row: the row says what is being done to it
+    /// until the answer comes back ([`crate::mounts::Card::start`]).
+    fn act(&mut self, request: crate::mounts::Request) {
+        if let (Some(card), Some(row)) = (&mut self.mounts, request.row()) {
+            card.start(row.to_string(), request.doing());
+        }
+        self.udisks().ask(request);
+    }
+
     /// `M`: open the card and ask for the listing.
+    ///
+    /// A card is built anew each time, so a call the last one started and
+    /// that is still out — a mount on the worker, a phone's mount on the
+    /// pool — is put on the new one's row ([`App::in_flight`]): the row says
+    /// so, and the card takes no second call while it is out, as the card
+    /// that started it would not have.
     fn open_mounts(&mut self) {
         let mut card = self.mount_card();
         card.set_clouds(self.cloud_rows());
+        if let Some((row, doing)) = self.in_flight() {
+            card.start(row, doing);
+        }
         self.mounts = Some(card);
         self.udisks().ask(crate::mounts::Request::List);
         self.sync_context();
+    }
+
+    /// The call about a row that is still out, whichever card started it: the
+    /// worker's oldest ([`crate::mounts::Mounts::in_flight`]), or a phone's
+    /// mount on the pool.
+    fn in_flight(&self) -> Option<(String, &'static str)> {
+        self.udisks
+            .as_ref()
+            .and_then(crate::mounts::Mounts::in_flight)
+            .map(|(row, doing)| (row.to_string(), doing))
+            .or_else(|| {
+                self.connects
+                    .iter()
+                    .find(|pending| pending.phone.is_some())
+                    .map(|pending| (pending.url.clone(), "mounting…"))
+            })
     }
 
     /// The Network section's cloud rows: every rclone service the vfs knows,
@@ -7409,11 +7443,7 @@ impl App {
 
     /// Ask udisks2 to mount `device`, and draw its row busy until it answers.
     fn mount_device(&mut self, device: crate::mounts::Device) {
-        if let Some(card) = &mut self.mounts {
-            card.start(device.object.clone(), "mounting…");
-        }
-        self.udisks()
-            .ask(crate::mounts::Request::Mount(device.object));
+        self.act(crate::mounts::Request::Mount(device.object));
     }
 
     /// `Enter` (`go`) or `m` on a phone or a camera: into it when it is
@@ -7444,9 +7474,20 @@ impl App {
     /// until the job lands. A phone asks nothing of the keyboard — the "allow
     /// access?" it may ask is on its own screen — so there is no terminal to
     /// hand it to.
+    ///
+    /// Never twice: a mount of this root already on the pool — started by a
+    /// card since closed and opened again — is the one the row is waiting
+    /// on, and a second `gio mount` would only race it.
     fn mount_phone(&mut self, phone: crate::mounts::Phone) {
         if let Some(card) = &mut self.mounts {
             card.start(phone.root.clone(), "mounting…");
+        }
+        if self
+            .connects
+            .iter()
+            .any(|pending| pending.phone.is_some() && pending.url == phone.root)
+        {
+            return;
         }
         let slot: Arc<std::sync::Mutex<Option<crate::mounts::Connected>>> =
             Arc::new(std::sync::Mutex::new(None));
@@ -7547,11 +7588,7 @@ impl App {
                 .notice(format!("{} is not mounted", device.label), now);
             return;
         }
-        if let Some(card) = &mut self.mounts {
-            card.start(device.object.clone(), "unmounting…");
-        }
-        self.udisks()
-            .ask(crate::mounts::Request::Unmount(device.object));
+        self.act(crate::mounts::Request::Unmount(device.object));
     }
 
     /// `u` or `e` on a phone or a camera: `gio mount -u` on its root. A phone
@@ -7578,10 +7615,7 @@ impl App {
     /// `gio mount -u <url>` on the worker, the row under `url` busy until it
     /// answers.
     fn gio_unmount(&mut self, url: String) {
-        if let Some(card) = &mut self.mounts {
-            card.start(url.clone(), "unmounting…");
-        }
-        self.udisks().ask(crate::mounts::Request::GioUnmount(url));
+        self.act(crate::mounts::Request::GioUnmount(url));
     }
 
     /// `e`: eject the whole drive, which is what "safely remove" means.
@@ -7616,10 +7650,10 @@ impl App {
                 .notice(format!("{} cannot be ejected", device.label), now);
             return;
         };
-        if let Some(card) = &mut self.mounts {
-            card.start(device.object.clone(), "ejecting…");
-        }
-        self.udisks().ask(crate::mounts::Request::Eject(drive));
+        self.act(crate::mounts::Request::Eject {
+            object: device.object,
+            drive,
+        });
     }
 
     /// `r`: list again. For the share that was connected in a terminal, which
@@ -7833,27 +7867,31 @@ impl App {
 
     /// Take whatever the worker has said. Returns whether anything changed.
     ///
-    /// A listing only fills the card; every other reply answers the call its
-    /// busy row is waiting on. (A listing used to clear the busy row too,
-    /// which was harmless while listings came only from `M` and `r`; with
-    /// gvfs's events asking for them, one can land while a mount is out.)
+    /// Each answer comes with the request it answers. A listing fills the
+    /// card, and a listing that failed says so and touches no row — it was
+    /// about none, and a refresh gvfs's events asked for can fail while a
+    /// mount is out without the mount's row being told it failed, or let go
+    /// of while it is still waiting. Any other answer is its row's: the row
+    /// stops saying what it was doing, or says why it could not, if the card
+    /// on screen still has that row busy.
     fn poll_mounts(&mut self, now: Instant) -> bool {
-        let replies = match &self.udisks {
+        use crate::mounts::{Reply, Request};
+        let answers = match &mut self.udisks {
             Some(udisks) => udisks.drain(),
             None => return false,
         };
-        if replies.is_empty() {
+        if answers.is_empty() {
             return false;
         }
         let mut refresh = false;
-        for reply in replies {
-            let answered = |app: &mut App| {
-                if let Some(card) = &mut app.mounts {
-                    card.finish();
-                }
+        for crate::mounts::Answer { to, reply } in answers {
+            let row = to.row().map(str::to_string);
+            let busy_here = |app: &App| {
+                row.as_deref()
+                    .is_some_and(|row| app.mounts.as_ref().is_some_and(|card| card.is_busy(row)))
             };
             match reply {
-                crate::mounts::Reply::Listing {
+                Reply::Listing {
                     devices,
                     phones,
                     shares,
@@ -7862,41 +7900,44 @@ impl App {
                         card.update(devices, phones, shares);
                     }
                 }
-                crate::mounts::Reply::Mounted(path) => {
-                    answered(self);
-                    self.toasts
-                        .notice(format!("Mounted at {}", path.display()), now);
-                    refresh = true;
-                }
-                crate::mounts::Reply::Unmounted => {
-                    answered(self);
-                    self.toasts.notice("Unmounted", now);
-                    refresh = true;
-                }
-                crate::mounts::Reply::Ejected => {
-                    answered(self);
-                    self.toasts.notice("Safe to remove", now);
-                    refresh = true;
-                }
-                crate::mounts::Reply::Failed(message) => {
-                    // The card stays up: the failure is about one row, which
-                    // says so, and closing the surface would take the other
-                    // rows away too.
-                    if let Some(card) = &mut self.mounts {
-                        card.fail(message.clone());
-                    }
+                Reply::Failed(message) if to == Request::List => {
                     self.toasts.error(message, now);
                     if self.mounts.as_ref().is_some_and(|card| card.loading) {
-                        // …unless nothing ever arrived, in which case there is
-                        // no card to stay up.
+                        // Nothing ever arrived, so there is no card to stay
+                        // up.
                         self.mounts = None;
                         self.sync_context();
                     }
                 }
+                Reply::Failed(message) => {
+                    // The card stays up: the failure is about one row, which
+                    // says so, and closing the surface would take the other
+                    // rows away too.
+                    if busy_here(self) {
+                        if let Some(card) = &mut self.mounts {
+                            card.fail(message.clone());
+                        }
+                    }
+                    self.toasts.error(message, now);
+                }
+                done => {
+                    if busy_here(self) {
+                        if let Some(card) = &mut self.mounts {
+                            card.finish();
+                        }
+                    }
+                    let said = match done {
+                        Reply::Mounted(path) => format!("Mounted at {}", path.display()),
+                        Reply::Ejected => "Safe to remove".to_string(),
+                        _ => "Unmounted".to_string(),
+                    };
+                    self.toasts.notice(said, now);
+                    refresh = true;
+                }
             }
         }
         if refresh && self.mounts.is_some() {
-            self.udisks().ask(crate::mounts::Request::List);
+            self.udisks().ask(Request::List);
         }
         true
     }

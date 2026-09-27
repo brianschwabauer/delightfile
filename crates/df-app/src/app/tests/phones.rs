@@ -14,7 +14,9 @@ use std::os::unix::process::ExitStatusExt;
 use std::sync::Mutex;
 
 use super::*;
-use crate::mounts::{Change, Event, Gio, Item, Phone, Protocol, Request};
+use df_core::vfs::{Vfs, VfsConfig};
+
+use crate::mounts::{Answer, Change, Event, Gio, Item, Phone, Protocol, Reply, Request};
 
 const ROOT: &str = "mtp://Google_Pixel_10a_4B021FDAQ00123/";
 const DIR: &str = "mtp:host=Google_Pixel_10a_4B021FDAQ00123";
@@ -49,16 +51,45 @@ fn gvfs(app: &mut Fixture) -> PathBuf {
 }
 
 /// The Places card up with the phone on it, the worker detached, the cursor
-/// on the phone. Returns what the worker is asked.
-fn card_with(app: &mut Fixture, phone: Phone) -> crossbeam_channel::Receiver<Request> {
-    let (worker, asked) = crate::mounts::Mounts::detached();
+/// on the phone. Returns what the worker is asked, and the end its answers
+/// are sent down.
+fn card_with(
+    app: &mut Fixture,
+    phone: Phone,
+) -> (
+    crossbeam_channel::Receiver<Request>,
+    crossbeam_channel::Sender<Answer>,
+) {
+    let (worker, asked, answers) = crate::mounts::Mounts::detached();
     app.udisks = Some(worker);
     let mut card = app.mount_card();
     card.update(Vec::new(), vec![phone], Vec::new());
     card.select(Item::Phone(0));
     app.mounts = Some(card);
     app.sync_context();
-    asked
+    (asked, answers)
+}
+
+/// A vfs with no services, so `M` reads nothing of this machine's
+/// `vfs.toml` or `rclone.conf` for the card's cloud rows.
+fn no_services(app: &mut Fixture) {
+    app.vfs = Some(Arc::new(Vfs::with_config(
+        VfsConfig::default(),
+        Vec::new(),
+        Arc::new(|| {}),
+    )));
+}
+
+/// The worker's answer to a listing, with the phone on it.
+fn listing_with(phone: Phone) -> Answer {
+    Answer {
+        to: Request::List,
+        reply: Reply::Listing {
+            devices: Vec::new(),
+            phones: vec![phone],
+            shares: Vec::new(),
+        },
+    }
 }
 
 fn pixel(mount: Option<PathBuf>) -> Phone {
@@ -100,7 +131,7 @@ fn land(app: &mut App) {
 fn enter_on_a_phone_mounts_it_by_its_root() {
     let mut app = Fixture::new("phone-mount", &["a.txt"]);
     let asked = fake_gio(&mut app, 0, "");
-    let worker = card_with(&mut app, pixel(None));
+    let (worker, _) = card_with(&mut app, pixel(None));
     let now = Instant::now();
 
     app.mount_action(now);
@@ -128,6 +159,156 @@ fn enter_on_a_phone_mounts_it_by_its_root() {
     assert_eq!(app.cwd(), app.files, "a mount goes nowhere by itself");
 }
 
+/// Closing the card and opening it again while a phone's mount is out does
+/// not mount the phone twice. The new card's row says it is mounting and
+/// takes no `Enter`; a mount of that root asked for anyway asks gio nothing;
+/// and the one mount, when it lands, lands on the new card.
+#[test]
+fn a_card_opened_again_does_not_mount_a_phone_twice() {
+    let mut app = Fixture::new("phone-twice", &["a.txt"]);
+    let asked = fake_gio(&mut app, 0, "");
+    no_services(&mut app);
+    let (worker, answers) = card_with(&mut app, pixel(None));
+    let now = Instant::now();
+
+    app.mount_action(now);
+    app.close_overlay(now);
+    assert!(app.mounts.is_none(), "Esc");
+    app.run(Command::MountManager, 10, now);
+    let card = app.mounts.as_ref().expect("M");
+    assert_eq!(
+        card.busy,
+        Some((ROOT.to_string(), "mounting…")),
+        "the new card knows the mount is out"
+    );
+    assert!(matches!(worker.try_recv(), Ok(Request::List)));
+    answers
+        .send(listing_with(pixel(None)))
+        .expect("the app listens");
+    app.poll_mounts(now);
+    let card = app.mounts.as_mut().expect("still up");
+    card.select(Item::Phone(0));
+    assert!(card.is_busy(ROOT), "its row says so");
+
+    app.mount_action(now);
+    app.mount_phone(pixel(None));
+    land(&mut app);
+    assert_eq!(
+        *asked.lock().expect("the log"),
+        vec![vec!["mount".to_string(), ROOT.to_string()]],
+        "gio was asked once"
+    );
+    let card = app.mounts.as_ref().expect("still up");
+    assert!(card.busy.is_none() && card.failed.is_none());
+    assert_eq!(toast(&app).as_deref(), Some("Mounted Pixel 10a"));
+}
+
+/// A listing that fails while a phone's mount is out — the refresh a gvfs
+/// event asked for, with udisks2 gone — is said, and leaves the phone's row
+/// alone: still mounting, no failure written on it, no second `Enter` let
+/// through. The mount's own outcome still lands on it.
+#[test]
+fn a_failed_listing_leaves_a_mounting_row_alone() {
+    let mut app = Fixture::new("phone-listing", &["a.txt"]);
+    let asked = fake_gio(&mut app, 0, "");
+    let (worker, answers) = card_with(&mut app, pixel(None));
+    let now = Instant::now();
+
+    app.mount_action(now);
+    app.gio_heard(
+        vec![event(Change::Other, "Multiple Card  Reader", None, None)],
+        now,
+    );
+    assert!(matches!(worker.try_recv(), Ok(Request::List)));
+    let gone = "The name org.freedesktop.UDisks2 was not provided by any .service files";
+    answers
+        .send(Answer {
+            to: Request::List,
+            reply: Reply::Failed(gone.to_string()),
+        })
+        .expect("the app listens");
+    assert!(app.poll_mounts(now));
+    assert_eq!(toast(&app).as_deref(), Some(gone), "the failure is said");
+    let card = app.mounts.as_ref().expect("the card stays up");
+    assert_eq!(card.busy, Some((ROOT.to_string(), "mounting…")));
+    assert_eq!(card.failed, None, "and not written on the phone's row");
+
+    app.mount_action(now);
+    land(&mut app);
+    assert_eq!(asked.lock().expect("the log").len(), 1, "no second mount");
+    let card = app.mounts.as_ref().expect("the card stays up");
+    assert!(card.busy.is_none() && card.failed.is_none());
+    assert_eq!(toast(&app).as_deref(), Some("Mounted Pixel 10a"));
+}
+
+/// The same for a disk on the worker: a failed listing leaves its mounting
+/// row alone, the mount's answer finishes it, and a mount that fails says so
+/// on its row.
+#[test]
+fn a_disks_answers_land_on_its_row_and_a_listings_do_not() {
+    let mut app = Fixture::new("disk-answers", &["a.txt"]);
+    let (_, answers) = card_with(&mut app, pixel(None));
+    let disk = crate::mounts::Device {
+        object: "/block/sdb1".to_string(),
+        drive: Some("/drives/usb".to_string()),
+        node: "/dev/sdb1".to_string(),
+        label: "PHOTOS".to_string(),
+        fs: "vfat".to_string(),
+        size: 1 << 30,
+        mount: None,
+        removable: true,
+        ejectable: true,
+        hardware: String::new(),
+    };
+    if let Some(card) = &mut app.mounts {
+        card.update(vec![disk.clone()], Vec::new(), Vec::new());
+        card.select(Item::Disk(0));
+    }
+    let now = Instant::now();
+    app.mount_action(now);
+    let busy = |app: &App| app.mounts.as_ref().and_then(|card| card.busy.clone());
+    assert_eq!(busy(&app), Some((disk.object.clone(), "mounting…")));
+
+    let send = |to: Request, reply: Reply| {
+        answers.send(Answer { to, reply }).expect("the app listens");
+    };
+    send(
+        Request::List,
+        Reply::Failed("udisks2 went away".to_string()),
+    );
+    app.poll_mounts(now);
+    assert_eq!(busy(&app), Some((disk.object.clone(), "mounting…")));
+
+    send(
+        Request::Mount(disk.object.clone()),
+        Reply::Failed("Not authorized to perform operation".to_string()),
+    );
+    app.poll_mounts(now);
+    let card = app.mounts.as_ref().expect("the card stays up");
+    assert_eq!(card.busy, None);
+    assert_eq!(
+        card.failed,
+        Some((
+            disk.object.clone(),
+            "Not authorized to perform operation".to_string()
+        ))
+    );
+
+    app.mount_action(now);
+    send(
+        Request::Mount(disk.object.clone()),
+        Reply::Mounted(PathBuf::from("/run/media/me/PHOTOS")),
+    );
+    app.poll_mounts(now);
+    let card = app.mounts.as_ref().expect("the card stays up");
+    assert_eq!(card.busy, None);
+    assert_eq!(card.failed, None);
+    assert_eq!(
+        toast(&app).as_deref(),
+        Some("Mounted at /run/media/me/PHOTOS")
+    );
+}
+
 /// A phone that is locked, or charging rather than in File transfer, is
 /// told to be unlocked — in a toast and on its row — rather than shown
 /// libmtp's words; a failure of any other kind is shown in gio's.
@@ -139,7 +320,7 @@ fn a_locked_phone_is_asked_to_be_unlocked() {
         2,
         "gio: mtp://Google_Pixel_10a_4B021FDAQ00123/: Unable to open MTP device “003,012”\n",
     );
-    let worker = card_with(&mut app, pixel(None));
+    let (worker, _) = card_with(&mut app, pixel(None));
     app.mount_action(Instant::now());
     land(&mut app);
 
@@ -194,7 +375,7 @@ fn u_and_e_on_a_phone_unmount_it() {
     let mut app = Fixture::new("phone-unmount", &["a.txt"]);
     let mounted = Some(PathBuf::from("/run/user/1000/gvfs").join(DIR));
     for eject in [false, true] {
-        let worker = card_with(&mut app, pixel(mounted.clone()));
+        let (worker, _) = card_with(&mut app, pixel(mounted.clone()));
         if eject {
             app.eject_selected(Instant::now());
         } else {
@@ -209,7 +390,7 @@ fn u_and_e_on_a_phone_unmount_it() {
             Some((ROOT.to_string(), "unmounting…"))
         );
     }
-    let worker = card_with(&mut app, pixel(None));
+    let (worker, _) = card_with(&mut app, pixel(None));
     app.unmount_selected(Instant::now());
     assert_eq!(toast(&app).as_deref(), Some("Pixel 10a is not mounted"));
     assert!(worker.try_recv().is_err());
@@ -252,7 +433,7 @@ fn a_phone_plugged_in_is_announced_with_the_key_that_opens_it() {
         Some("Pixel 10a plugged in · M to open it")
     );
 
-    let worker = card_with(&mut app, pixel(None));
+    let (worker, _) = card_with(&mut app, pixel(None));
     app.gio_heard(vec![event(Change::Other, "Pixel 10a", None, None)], now);
     assert!(matches!(worker.try_recv(), Ok(Request::List)));
 }

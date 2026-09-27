@@ -1249,16 +1249,53 @@ pub fn landing(shares: &[Share], address: &Address) -> Option<(PathBuf, PathBuf)
 // ── The worker ──────────────────────────────────────────────────────────────
 
 /// What the event loop asks the worker to do.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     /// Everything the card lists that it does not know already: udisks2's
     /// disks, and gvfs's phones and shares.
     List,
+    /// A block object's path.
     Mount(String),
     Unmount(String),
-    Eject(String),
+    /// The drive to eject, and the block object whose row asked.
+    Eject {
+        object: String,
+        drive: String,
+    },
     /// A share's URL or a phone's root, for `gio mount -u`.
     GioUnmount(String),
+}
+
+impl Request {
+    /// The row the request is about — a block object's path, a share's URL,
+    /// a phone's root, the identities [`Card::start`] keeps a busy row by —
+    /// or `None` for a listing, which is about no row.
+    pub fn row(&self) -> Option<&str> {
+        match self {
+            Request::List => None,
+            Request::Mount(object) | Request::Unmount(object) => Some(object),
+            Request::Eject { object, .. } => Some(object),
+            Request::GioUnmount(url) => Some(url),
+        }
+    }
+
+    /// What the row says while the request is out.
+    pub fn doing(&self) -> &'static str {
+        match self {
+            Request::List => "listing…",
+            Request::Mount(_) => "mounting…",
+            Request::Unmount(_) | Request::GioUnmount(_) => "unmounting…",
+            Request::Eject { .. } => "ejecting…",
+        }
+    }
+}
+
+/// One reply, with the request it answers, so a failed listing is never
+/// taken for the failure of a mount that is out at the same moment.
+#[derive(Debug, Clone)]
+pub struct Answer {
+    pub to: Request,
+    pub reply: Reply,
 }
 
 /// What comes back.
@@ -1287,8 +1324,13 @@ pub enum Reply {
 /// closed card — cannot outlive its connection.
 pub struct Mounts {
     requests: Option<Sender<Request>>,
-    replies: Receiver<Reply>,
+    replies: Receiver<Answer>,
     worker: Option<std::thread::JoinHandle<()>>,
+    /// What has been asked and not yet answered, oldest first: the worker
+    /// answers each request once, in order. Kept here rather than on the
+    /// card, which is built anew each time `M` opens it — a mount asked for
+    /// by a card that has since closed is still out ([`Mounts::in_flight`]).
+    outstanding: Vec<Request>,
 }
 
 impl Mounts {
@@ -1296,7 +1338,7 @@ impl Mounts {
     /// puts a share or a phone away.
     pub fn start(notify: df_core::fs::Notifier, gio: Gio) -> Mounts {
         let (tx, rx) = unbounded::<Request>();
-        let (reply_tx, reply_rx) = unbounded::<Reply>();
+        let (reply_tx, reply_rx) = unbounded::<Answer>();
         let handle = std::thread::Builder::new()
             .name("df-mounts".to_string())
             .spawn(move || run(rx, reply_tx, notify, gio));
@@ -1311,34 +1353,60 @@ impl Mounts {
             requests: Some(tx),
             replies: reply_rx,
             worker,
+            outstanding: Vec::new(),
         }
     }
 
     /// A worker with no thread behind it, for a test: what it is asked goes
-    /// to the returned end, for the test to read, and nothing ever answers —
-    /// so no test talks to this machine's udisks2 or runs its gio.
+    /// to the first end returned, for the test to read, and what the test
+    /// sends down the second comes back as the worker's answers — so no test
+    /// talks to this machine's udisks2 or runs its gio.
     #[cfg(test)]
-    pub fn detached() -> (Mounts, Receiver<Request>) {
+    pub fn detached() -> (Mounts, Receiver<Request>, Sender<Answer>) {
         let (tx, rx) = unbounded::<Request>();
-        let (_, replies) = unbounded::<Reply>();
+        let (answer, replies) = unbounded::<Answer>();
         (
             Mounts {
                 requests: Some(tx),
                 replies,
                 worker: None,
+                outstanding: Vec::new(),
             },
             rx,
+            answer,
         )
     }
 
-    pub fn ask(&self, request: Request) {
+    pub fn ask(&mut self, request: Request) {
         if let Some(requests) = &self.requests {
-            let _ = requests.send(request);
+            if requests.send(request.clone()).is_ok() {
+                self.outstanding.push(request);
+            }
         }
     }
 
-    pub fn drain(&self) -> Vec<Reply> {
-        self.replies.try_iter().collect()
+    /// Whatever the worker has answered, each with the request it answers.
+    pub fn drain(&mut self) -> Vec<Answer> {
+        let answers: Vec<Answer> = self.replies.try_iter().collect();
+        for answer in &answers {
+            if let Some(at) = self
+                .outstanding
+                .iter()
+                .position(|asked| *asked == answer.to)
+            {
+                self.outstanding.remove(at);
+            }
+        }
+        answers
+    }
+
+    /// The oldest request about a row that is still out, as the row it is
+    /// about and what the row says meanwhile: what a card opened while it is
+    /// out shows on that row ([`Card::start`]).
+    pub fn in_flight(&self) -> Option<(&str, &'static str)> {
+        self.outstanding
+            .iter()
+            .find_map(|asked| Some((asked.row()?, asked.doing())))
     }
 }
 
@@ -1359,7 +1427,7 @@ impl Drop for Mounts {
 /// user has to do something about.
 fn run(
     requests: Receiver<Request>,
-    replies: Sender<Reply>,
+    replies: Sender<Answer>,
     notify: df_core::fs::Notifier,
     gio: Gio,
 ) {
@@ -1371,7 +1439,7 @@ fn run(
             Request::GioUnmount(url) => unmount_gio(url, &gio),
             _ => udisks(&mut bus, &request),
         };
-        let _ = replies.send(reply);
+        let _ = replies.send(Answer { to: request, reply });
         notify();
     }
 }
@@ -1428,7 +1496,7 @@ fn handle(bus: &mut Bus, request: &Request) -> Result<Reply, String> {
             bus.call(SERVICE, object, FILESYSTEM, "Unmount", Some("a{sv}"), &args)?;
             Ok(Reply::Unmounted)
         }
-        Request::Eject(drive) => {
+        Request::Eject { drive, .. } => {
             let mut args = Vec::new();
             crate::dbus::marshal_no_options(&mut args);
             bus.call(SERVICE, drive, DRIVE, "Eject", Some("a{sv}"), &args)?;
@@ -4028,6 +4096,52 @@ Volume removed:     'Pixel 10a'
         );
         assert!(restart_due(true, 0, started, started + retry));
         assert!(!restart_due(true, 1, started, started + retry * 2), "twice");
+    }
+
+    /// The worker's answers come with the request they answer, and what is
+    /// still out is known after the card that asked for it has gone: the
+    /// oldest request about a row, until its own answer comes back — a
+    /// listing's answer in between does not count as it.
+    #[test]
+    fn the_worker_knows_what_is_still_out() {
+        let (mut worker, asked, answers) = Mounts::detached();
+        assert_eq!(worker.in_flight(), None);
+        worker.ask(Request::List);
+        assert_eq!(worker.in_flight(), None, "a listing is about no row");
+        worker.ask(Request::Eject {
+            object: "/block/sdb1".to_string(),
+            drive: "/drives/usb".to_string(),
+        });
+        assert_eq!(worker.in_flight(), Some(("/block/sdb1", "ejecting…")));
+        assert_eq!(asked.try_iter().count(), 2);
+
+        answers
+            .send(Answer {
+                to: Request::List,
+                reply: Reply::Failed("gone".to_string()),
+            })
+            .expect("listening");
+        let heard = worker.drain();
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].to, Request::List);
+        assert_eq!(worker.in_flight(), Some(("/block/sdb1", "ejecting…")));
+
+        answers
+            .send(Answer {
+                to: Request::Eject {
+                    object: "/block/sdb1".to_string(),
+                    drive: "/drives/usb".to_string(),
+                },
+                reply: Reply::Ejected,
+            })
+            .expect("listening");
+        worker.drain();
+        assert_eq!(worker.in_flight(), None);
+        assert_eq!(
+            Request::GioUnmount(PIXEL.to_string()).row(),
+            Some(PIXEL),
+            "a phone's or a share's is its URL"
+        );
     }
 
     /// A stand-in for gio that notes what it was asked and answers with
