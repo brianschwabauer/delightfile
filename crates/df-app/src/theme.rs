@@ -349,12 +349,14 @@ const ROW_TINT: f32 = 0.18;
 /// On a light palette the cursor is not a step along the ramp — latte's
 /// `surface1` is a grey slab on a near-white pane, the darkest thing in the
 /// column, and it reads as a hole rather than as where you are. It is a wash
-/// of the accent instead, as a light desktop's own lists draw theirs. Sixteen
-/// percent: 14 in CIE lightness and hue away from `base`, the row's text on it
-/// at 5.7:1, quiet text 3.6:1 and a folder's name 4.8:1 — all above their
-/// floors (4.5, 3 and 4.5) — where latte's `surface1` step left the text at
-/// 4.0:1.
-const CURSOR_TINT_LIGHT: f32 = 0.16;
+/// of the accent instead, as a light desktop's own lists draw theirs.
+/// Fourteen percent: 12.5 in CIE lightness and hue away from `base`, the
+/// row's text on it at 5.9:1, quiet text 3.7:1 and a folder's name 4.9:1 —
+/// and on a *selected* row ([`cursor_on_selection`]) 5.4:1, 3.4:1 and 4.5:1,
+/// every one above its floor (4.5, 3 and 4.5), where latte's `surface1` step
+/// left the text at 4.0:1. Sixteen percent reads a shade stronger and puts a
+/// folder's name on a selected cursor row under its floor.
+const CURSOR_TINT_LIGHT: f32 = 0.14;
 
 /// …and a row under the pointer: seven percent, a whisper — 6.5 from `base`
 /// in CIE lightness and hue, enough to say where the hand is and too little to
@@ -428,33 +430,42 @@ pub fn lift(palette: &Palette, under: egui::Color32, amount: f32) -> egui::Color
 }
 
 /// How far a *selected* row's ground is tinted towards the selection accent,
-/// on a dark palette.
+/// on either side.
 ///
 /// A tenth of the way. Enough to say which files `d` is about to trash, and
 /// still a tint and not a fill — at much above this the file names start
 /// fighting the ground they are on, and a selection of forty rows would turn
 /// the column into a yellow block.
-const SELECT_TINT: f32 = 0.10;
-
-/// …and on a light one: fourteen percent.
 ///
-/// latte's yellow is a deep amber on a near-white ground, and a tenth of it is
-/// a wash nobody sees, which leaves the selection to its bar alone. Fourteen
-/// percent is a cream 10.3 from `base` in CIE lightness and hue — mocha's
-/// selection is 10.9 from its own — and stays clear of the cursor's blue:
-/// the cursor on a selected row ([`cursor_on_selection`]) is 8.4 from the
-/// plain cursor and 15.7 from the plain selection, with the row's text on it
-/// at 5.1:1 and quiet text 3.2:1.
-const SELECT_TINT_LIGHT: f32 = 0.14;
+/// On latte a tenth is a cream 7.5 from `base` in CIE lightness and hue, where
+/// mocha's is 10.9 from its own: quieter, and held there by the cursor that
+/// stands on it. Any more and a folder's name on a selected cursor row
+/// ([`cursor_on_selection`]) falls under 4.5:1; at a tenth it is 4.5:1, the
+/// row's text 5.4:1, and the three states stay apart — the cursor on a
+/// selected row 6.3 from the plain cursor and 13.4 from the plain selection.
+/// The selection's bar says the rest, as it does on the dark side.
+const SELECT_TINT: f32 = 0.10;
 
 /// A selected row's ground: `ground`, tinted towards the selection's yellow.
 /// One function for the list and the grid, as [`cursor_fill`] is.
 pub fn select_fill(palette: &Palette, ground: egui::Color32) -> egui::Color32 {
-    mix(
-        ground,
-        palette.yellow,
-        palette.sided(SELECT_TINT, SELECT_TINT_LIGHT),
-    )
+    mix(ground, palette.yellow, SELECT_TINT)
+}
+
+/// The outline the grid draws round the cursor's tile when it is not
+/// selected — the cursor's own colour.
+///
+/// On a dark palette the cursor's fill, as it always was. On a light one the
+/// fill is a pale wash that an outline one point wide cannot carry (1.2:1 on
+/// `base`), so the outline is the accent as ink ([`ink`]) — the navy a
+/// folder's name is, 5.9:1 — which reads as the same blue family as the row
+/// the list draws for it.
+pub fn cursor_ring(palette: &Palette) -> egui::Color32 {
+    if palette.light {
+        ink(palette, palette.blue)
+    } else {
+        cursor_fill(palette)
+    }
 }
 
 /// How much more of the text a ripple is splashed with on a light palette
@@ -828,6 +839,7 @@ mod tests {
         );
         assert_eq!(lift(&p, selected, 0.5), mix(selected, hover_fill(&p), 0.5));
         assert_eq!(ink(&p, p.blue), p.blue);
+        assert_eq!(cursor_ring(&p), cursor_fill(&p));
     }
 
     /// Two decimals, as the docs quote a contrast.
@@ -844,22 +856,53 @@ mod tests {
     fn the_light_cursor_is_a_wash_the_row_still_reads_on() {
         let l = latte();
         let cursor = cursor_fill(&l);
-        assert_eq!(cursor, mix(l.base, l.blue, 0.16));
+        assert_eq!(cursor, mix(l.base, l.blue, 0.14));
+        let navy = ink(&l, l.blue);
         assert!(ratio(l.text, cursor) >= 4.5, "{}", ratio(l.text, cursor));
         assert!(ratio(l.quiet, cursor) >= 3.0, "{}", ratio(l.quiet, cursor));
-        assert_eq!(ratio(l.text, cursor), 5.73);
-        assert_eq!(ratio(l.quiet, cursor), 3.55);
+        assert!(
+            ratio(navy, cursor) >= INK_CONTRAST,
+            "{}",
+            ratio(navy, cursor)
+        );
         let hover = hover_fill(&l);
         assert_eq!(hover, mix(l.base, l.blue, 0.07));
         assert!(contrast(hover, l.base) < contrast(cursor, l.base));
 
         let selected = select_fill(&l, l.base);
         let both = cursor_on_selection(&l, selected, cursor);
-        assert_eq!(both, mix(selected, l.blue, 0.16));
+        assert_eq!(both, mix(selected, l.blue, 0.14));
         assert_ne!(both, cursor);
         assert_ne!(both, selected);
-        assert!(ratio(l.text, both) >= 4.5, "{}", ratio(l.text, both));
-        assert!(ratio(l.quiet, both) >= 3.0, "{}", ratio(l.quiet, both));
+        // Every number on every row state clears its floor: the row's text
+        // 4.5:1, quiet text 3:1, a folder's name 4.5:1.
+        for (state, ground) in [("selected", selected), ("cursor and selected", both)] {
+            assert!(
+                ratio(l.text, ground) >= 4.5,
+                "{state}: {}",
+                ratio(l.text, ground)
+            );
+            assert!(
+                ratio(l.quiet, ground) >= 3.0,
+                "{state}: {}",
+                ratio(l.quiet, ground)
+            );
+            assert!(
+                ratio(navy, ground) >= INK_CONTRAST,
+                "{state}: {}",
+                ratio(navy, ground)
+            );
+        }
+        println!(
+            "light rows — cursor: text {} quiet {} folder {}; selected: text {} quiet {} folder {}; both: text {} quiet {} folder {}; hover: text {}",
+            ratio(l.text, cursor), ratio(l.quiet, cursor), ratio(navy, cursor),
+            ratio(l.text, selected), ratio(l.quiet, selected), ratio(navy, selected),
+            ratio(l.text, both), ratio(l.quiet, both), ratio(navy, both),
+            ratio(l.text, hover),
+        );
+        // The grid's outline round the cursor is the navy, which reads.
+        assert_eq!(cursor_ring(&l), navy);
+        assert!(ratio(cursor_ring(&l), l.base) >= 4.5);
         // A hover deepens whatever it lies on, the cursor included, rather
         // than pulling it back towards the pane.
         assert!(luminance(lift(&l, cursor, 1.0)) < luminance(cursor));
@@ -927,7 +970,7 @@ mod tests {
         assert_eq!(l.faint, l.overlay2);
         assert_eq!(hairline(&l), l.surface2);
         assert_eq!(thumb(&l, 0.0), l.overlay1);
-        assert_ne!(select_fill(&l, l.base), mix(l.base, l.yellow, 0.10));
+        assert_eq!(select_fill(&l, l.base), mix(l.base, l.yellow, 0.10));
     }
 
     #[test]

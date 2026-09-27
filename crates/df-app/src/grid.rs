@@ -950,7 +950,7 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         let ring = if selected {
             Some(palette.yellow)
         } else if glow > 0.0 {
-            Some(crate::theme::cursor_fill(palette))
+            Some(crate::theme::cursor_ring(palette))
         } else {
             None
         };

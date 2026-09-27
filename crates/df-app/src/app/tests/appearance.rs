@@ -612,7 +612,7 @@ fn the_light_cursor_and_a_folder_s_name_paint_as_measured() {
     let light = latte();
     let (colours, texts) = painted(&mut app, &ctx);
     let cursor = crate::theme::cursor_fill(&light);
-    assert_eq!(cursor, crate::theme::mix(light.base, light.blue, 0.16));
+    assert_eq!(cursor, crate::theme::mix(light.base, light.blue, 0.14));
     assert!(
         colours.contains(&cursor),
         "the cursor row's wash is painted"
@@ -641,4 +641,5 @@ fn the_light_cursor_and_a_folder_s_name_paint_as_measured() {
     assert_ne!(both, cursor);
     assert!(colours.contains(&both), "the third state is painted");
     assert!(crate::theme::contrast(light.text, both) >= 4.5);
+    assert!(crate::theme::contrast(navy, both) >= crate::theme::INK_CONTRAST);
 }
