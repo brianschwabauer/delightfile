@@ -781,7 +781,10 @@ fn overrides_replace_rebind_and_unbind() {
         .iter()
         .find(|b| b.command == Command::MountManager)
         .expect("bound");
-    assert_eq!(bound.description, "Mount manager");
+    assert_eq!(
+        bound.description,
+        "Places: drives, phones, network and pins"
+    );
 }
 
 /// A `keymap.toml` written against the old pane-focus model named a `[preview]`

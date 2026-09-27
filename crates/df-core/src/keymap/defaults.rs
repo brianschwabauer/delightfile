@@ -222,7 +222,9 @@ pub(super) fn build() -> Registry {
         (Files, "u",      C::Undo,              "Undo last operation",                 Always),
         (Files, "U",      C::Redo,              "Redo",                                Always),
         (Files, "w",      C::TasksShow,         "Task manager",                        Always),
-        (Files, "M",      C::MountManager,      "Mount manager",                       Always),
+        // Still `mount-manager` by id, so a keymap that names it keeps working;
+        // what it opens is every place that is not this folder, drives first.
+        (Files, "M",      C::MountManager,      "Places: drives, phones, network and pins", Always),
         (Files, "b",      C::YankToggle,        "Add to the yank, or take back out",   Always),
         (Files, "B",      C::YankShow,          "Show what is yanked",                 Always),
         (Files, "e",      C::ArchiveExtractHere,      "Extract here",                  Always),

@@ -179,6 +179,9 @@ commands! {
     // same opener the `*/` rule offers on a folder's row, run the way `o` runs
     // one, so a terminal of your own choosing is one key from any folder.
     TerminalHere => "terminal-here",
+    // `M`: the Places card — drives, phones and cameras, network shares and
+    // cloud remotes, pins. The id is the one it had when the card was only
+    // the disks, so a `keymap.toml` that names it still does.
     MountManager => "mount-manager",
     // Archives, browsed as directories and unpacked (PLAN §7.3). Both act on
     // the hovered archive in a real directory, and on the archive being
