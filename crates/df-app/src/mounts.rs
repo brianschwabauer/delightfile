@@ -518,7 +518,9 @@ impl Spec {
     /// back on.
     pub fn of(address: &Address) -> Spec {
         if Protocol::of_scheme(&address.scheme).is_some() {
-            let host = if address.host.contains(':') {
+            // Only when they are off: a root that escaped its brackets
+            // (`%5Busb%3A001%2C004%5D`) decodes with them still on.
+            let host = if address.host.contains(':') && !address.host.starts_with('[') {
                 format!("[{}]", address.host)
             } else {
                 address.host.clone()
@@ -3892,6 +3894,15 @@ Mount(0): Galaxy S24 -> mtp://SAMSUNG_Galaxy_S24_R5CX/
         assert_eq!(
             spec("gphoto2://[usb:001,004]/").dir_name(),
             "gphoto2:host=%5Busb%3A001%2C004%5D"
+        );
+        // The same root with its brackets escaped: one pair, not two.
+        assert_eq!(
+            spec("gphoto2://%5Busb%3A001%2C004%5D/").dir_name(),
+            "gphoto2:host=%5Busb%3A001%2C004%5D"
+        );
+        assert_eq!(
+            spec("mtp://%5Busb%3A003%2C012%5D/").dir_name(),
+            "mtp:host=%5Busb%3A003%2C012%5D"
         );
         let read = Spec::from_dir_name(PIXEL_DIR).expect("a spec");
         assert!(read.same_server(&spec(PIXEL)));
