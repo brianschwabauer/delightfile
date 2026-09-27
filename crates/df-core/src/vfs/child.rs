@@ -1,6 +1,12 @@
 //! The rclone daemon's life, tied to ours. **The vfs's second island of
 //! `unsafe`**, beside `poll`, and written to the same three rules.
 //!
+//! [`tie_to_this_thread`] is public because the rclone daemon is not the only
+//! child that outlives a crash if nothing ties it down: the app's gvfs watcher
+//! (`gio mount --monitor`, which the Places card listens to for phones being
+//! plugged in) blocks on the session bus, not on its stdin, and is tied the
+//! same way.
+//!
 //! An `ssh` child dies with delightfile for free: when delightfile goes, its
 //! end of the pipes closes, and `ssh` exits on the EOF at its stdin. `rclone
 //! rcd` has no stdin to watch — it serves a socket — so if delightfile dies
@@ -55,7 +61,7 @@ use std::process::{Child, Command};
 ///
 /// Call it on the thread that will own the child for its whole life; see the
 /// module note on why that is the thread, not the process.
-pub(super) fn tie_to_this_thread(command: &mut Command) {
+pub fn tie_to_this_thread(command: &mut Command) {
     // Captured before the fork: in the child, `getppid` is compared against
     // it, and a mismatch means the process that spawned it has already died.
     let parent = libc::pid_t::try_from(std::process::id()).unwrap_or(libc::pid_t::MAX);

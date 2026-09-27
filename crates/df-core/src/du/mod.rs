@@ -68,7 +68,7 @@ pub use cache::{
     HeavyHitter, Remembered, DEFAULT_FOLDER_SIZE_TTL, DU_CACHE_DIRS, MAX_CACHED_CHILDREN,
     MAX_CACHE_CHILDREN, MAX_STAMP_ENTRIES,
 };
-pub use fstype::{is_remote, magic_of, REMOTE_FS_MAGIC};
+pub use fstype::{gvfs_root, is_remote, magic_of, on_device, REMOTE_FS_MAGIC};
 pub use scanner::{du_blocking, DuMessage, DuScanner, DuToken, DU_WORKERS, MAX_TRACKED_DIRS};
 pub use walk::{
     child_counts, crosses_boundary, walk, walk_blocking, walk_reusing, ChildCount, DuOptions,

@@ -78,7 +78,9 @@
 //! after a teardown reconnects lazily — a dropped wifi link costs one visible
 //! error and one reconnect, not a restart.
 
-mod child;
+/// Public for the app's one long-lived child of its own, the gvfs watcher:
+/// see the module's note.
+pub mod child;
 mod config;
 mod conn;
 mod http;

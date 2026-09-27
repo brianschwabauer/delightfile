@@ -19,8 +19,19 @@
 //! they pointed it at: the cost is the answer they asked for, and refusing to
 //! measure a mount because measuring it is slow would be the program deciding
 //! it knows better.
+//!
+//! ## Phones and cameras
+//!
+//! A phone or a camera gvfs has mounted is a directory under gvfs-fuse's
+//! (`$XDG_RUNTIME_DIR/gvfs/mtp:host=…`, `…/gphoto2:host=…`), and every read
+//! of it is a USB round trip through the device's own protocol — slow, one at
+//! a time, and on a phone held up whenever the screen locks. It is FUSE, so
+//! [`is_remote`] would refuse it too, but only after asking: `statfs` on a
+//! phone is itself a question the phone has to answer. [`on_device`] answers
+//! from the path alone, so the size column and the grid's thumbnails can
+//! leave a phone alone without touching it once.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `f_type` values that mean "this is not local storage".
 ///
@@ -52,6 +63,35 @@ pub const REMOTE_FS_MAGIC: &[i64] = &[
 /// would turn one transient error into a column of em dashes.
 pub fn is_remote(path: &Path) -> bool {
     magic_of(path).is_some_and(|magic| REMOTE_FS_MAGIC.contains(&magic))
+}
+
+/// Where gvfs-fuse shows gvfs's mounts: `$XDG_RUNTIME_DIR/gvfs`, which is
+/// where gvfsd starts it, or `/run/user/<uid>/gvfs` when the variable is unset
+/// or not an absolute path — the directory systemd would have given it.
+pub fn gvfs_root() -> PathBuf {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", crate::ops::trash::uid())))
+        .join("gvfs")
+}
+
+/// Whether `path` is inside a phone or a camera under the gvfs-fuse
+/// directory `gvfs`: its first component below `gvfs` is an MTP or a gphoto2
+/// mount (`mtp:host=…`, `gphoto2:host=…`). The gvfs directory itself, and a
+/// share beside the phone (`sftp:host=…`), are not.
+///
+/// A question about the path, never about the disk: nothing here is read, so
+/// the answer costs a phone nothing (see the module note).
+pub fn on_device(path: &Path, gvfs: &Path) -> bool {
+    let Ok(inside) = path.strip_prefix(gvfs) else {
+        return false;
+    };
+    inside
+        .components()
+        .next()
+        .and_then(|first| first.as_os_str().to_str())
+        .is_some_and(|first| first.starts_with("mtp:") || first.starts_with("gphoto2:"))
 }
 
 /// The `f_type` of the filesystem `path` is on.
@@ -100,6 +140,47 @@ mod tests {
         assert_eq!(magic_of(Path::new("/nonexistent-df-fstype-probe")), None);
         // An embedded NUL cannot become a C string at all.
         assert_eq!(magic_of(Path::new("bad\0path")), None);
+    }
+
+    /// A phone or a camera is known by its gvfs-fuse directory, the device
+    /// itself and anything inside it; the gvfs directory, a share beside it
+    /// and a path somewhere else are not.
+    #[test]
+    fn a_phone_or_a_camera_is_known_by_its_path() {
+        let gvfs = Path::new("/run/user/1000/gvfs");
+        let phone = gvfs.join("mtp:host=Google_Pixel_10a_4B021FDAQ00123");
+        assert!(on_device(&phone, gvfs));
+        assert!(on_device(
+            &phone.join("Internal shared storage/DCIM/Camera"),
+            gvfs
+        ));
+        assert!(on_device(
+            &gvfs.join("gphoto2:host=%5Busb%3A001%2C004%5D/store_00010001"),
+            gvfs
+        ));
+        assert!(!on_device(gvfs, gvfs), "gvfs's own directory");
+        assert!(!on_device(
+            &gvfs.join("sftp:host=example.org,user=me"),
+            gvfs
+        ));
+        assert!(!on_device(
+            &gvfs.join("smb-share:server=nas,share=mtp:x"),
+            gvfs
+        ));
+        assert!(!on_device(Path::new("/home/me/mtp:host=x"), gvfs));
+        assert!(!on_device(
+            Path::new("/run/user/1000/gvfs-other/mtp:host=x"),
+            gvfs
+        ));
+    }
+
+    /// The runtime directory the session gives gvfs, and the systemd one
+    /// when it gives none.
+    #[test]
+    fn gvfs_lives_in_the_runtime_directory() {
+        let root = gvfs_root();
+        assert!(root.is_absolute());
+        assert!(root.ends_with("gvfs"));
     }
 
     /// The table is the whole feature, so the three filesystems it exists for
