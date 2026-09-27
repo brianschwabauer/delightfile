@@ -63,9 +63,17 @@ open.
 - **Archives as directories.** Walk into zip, tar, tar.gz, tar.xz and tar.zst, preview
   what is inside, extract the selection. 7z, rar and bzip2 are detected and refused rather
   than half-read.
-- **Trash and mounts.** The freedesktop trash browsed as a directory with restore on
-  `Enter`, udisks2 mount/unmount over a hand-rolled D-Bus client, and gvfs network
-  shares (SMB, SFTP, FTP, WebDAV, NFS) listed beside the disks, with a connect prompt.
+- **Places.** `M` lists everywhere that is not this folder, one line each: the disks
+  udisks2 knows (mounted or not, over a hand-rolled D-Bus client) and the phones and
+  cameras gvfs has seen, then gvfs's network shares (SMB, SFTP, FTP, WebDAV, NFS), the
+  rclone remotes and a connect prompt, then your pins and `[goto]` rows with their keys.
+  `Enter` mounts what is not mounted and goes into what is.
+
+  A phone needs gvfs-mtp (a camera, gvfs-gphoto2), and it has to be unlocked and set to
+  File transfer before it will open. Plugged in while the window is up, it gets a toast
+  naming the key. Inside one, folder sizes are not walked and the grid shows icons, so
+  browsing a phone does not pull every photo over USB.
+- **Trash.** The freedesktop trash browsed as a directory with restore on `Enter`.
 
   A chip beside the position counter weighs the trash (`37 items · 1.2 GB`, counted in
   the background like the size column), and "Empty trash" asks with the same numbers.
@@ -261,7 +269,7 @@ it without leaving the list.
 | `-` `=` | walk this tab's density ladder: Compact, Comfortable, Roomy, Grid |
 | `j` `k` `l` | video shuttle, anywhere |
 | `Ctrl+←` `Ctrl+→` | frame step or page turn in the preview |
-| `M` `w` `g t` | mounts, tasks, trash |
+| `M` `w` `g t` | places (drives, phones, network, pins), tasks, trash |
 | `Ctrl+p` | command palette |
 | `F10` | app menu, also the `≡` button at the left of the path |
 | `?` | help |
