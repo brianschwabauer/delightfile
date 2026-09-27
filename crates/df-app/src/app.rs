@@ -8511,12 +8511,21 @@ impl App {
     }
 
     /// The tiles worth a thumbnail this frame, nearest first.
+    ///
+    /// None on a phone or a camera: a thumbnail there is a whole photo read
+    /// over MTP or PTP, one at a time, for every tile on screen and the row
+    /// past it, while the grid is being scrolled — the link would be busy for
+    /// minutes with pictures nobody asked to see. The tiles keep their icons
+    /// ([`df_core::du::on_device`]).
     fn tile_wants(
         &self,
         content: egui::Rect,
         metrics: &grid::Metrics,
         scroll_rows: f32,
     ) -> Vec<grid::Want> {
+        if df_core::du::on_device(self.tab().cwd.path(), &self.gvfs) {
+            return Vec::new();
+        }
         let dir = &self.tab().cwd.dir;
         let window = grid::wanted(
             dir.len(),
@@ -11077,7 +11086,7 @@ impl App {
                 // makes: a re-walk is a walk, and a directory that has had an
                 // NFS mount appear under it since the first one must not be
                 // walked just because the first walk was allowed.
-                if df_core::du::is_remote(&cwd) {
+                if df_core::du::on_device(&cwd, &self.gvfs) || df_core::du::is_remote(&cwd) {
                     log::debug!(
                         "folder sizes: {} became a network mount; not re-walking",
                         cwd.display()
@@ -11200,6 +11209,16 @@ impl App {
         //
         // `m u` is untouched — a walk somebody typed goes wherever they pointed
         // it (see [`df_core::du::fstype`]).
+        //
+        // A phone or a camera is asked by its path first, before `statfs`
+        // would put the question to the device itself: every read of one is a
+        // USB round trip, and a locked phone holds it
+        // ([`df_core::du::on_device`]).
+        if df_core::du::on_device(&dir, &self.gvfs) {
+            log::debug!("folder sizes: {} is on a phone", dir.display());
+            self.folders.decline(dir, tab);
+            return true;
+        }
         if df_core::du::is_remote(&dir) {
             log::debug!("folder sizes: {} is a network mount", dir.display());
             self.folders.decline(dir, tab);

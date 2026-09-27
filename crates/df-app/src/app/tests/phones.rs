@@ -1,6 +1,7 @@
 //! Phones and cameras on the Places card, through the app: `Enter` mounting
 //! one and going into it, `u` putting it away, what a locked phone is told,
-//! and gvfs's events heard.
+//! gvfs's events heard, and the trees the size column and the grid's
+//! thumbnails leave alone.
 //!
 //! No phone, no gvfs and no udisks2 take part. `gio` is a stand-in that notes
 //! what it was asked and answers as gio would ([`crate::mounts::Gio`]), the
@@ -71,6 +72,12 @@ fn pixel(mount: Option<PathBuf>) -> Phone {
 
 fn toast(app: &App) -> Option<String> {
     app.toasts.current().map(|toast| toast.message.clone())
+}
+
+/// Go to `dir` and let its listing land.
+fn go(app: &mut App, dir: &Path) {
+    app.navigate(dir.to_path_buf(), Instant::now());
+    settle(app.tabs.active_mut(), &app.scanner);
 }
 
 /// Until every mount the card started has come back and been read.
@@ -287,4 +294,37 @@ fn a_phone_pulled_out_takes_its_tabs_out_with_it() {
         .map(|tab| tab.cwd.path().to_path_buf())
         .collect();
     assert_eq!(cwds, vec![gvfs.clone(), files, gvfs]);
+}
+
+/// Inside a phone the size column walks nothing — declined by the path,
+/// before anything asks the device — and the grid asks for no thumbnail;
+/// beside it, both go on as ever.
+#[test]
+fn a_phone_is_left_to_its_icons_and_its_sizes_unwalked() {
+    let mut app = Fixture::with_folders("phone-gate", &["a.txt"], &["sub"]);
+    let phone = gvfs(&mut app).join(DIR);
+    std::fs::create_dir_all(phone.join("DCIM")).expect("make the phone");
+    std::fs::write(phone.join("IMG_0001.txt"), b"x").expect("a photo");
+    let now = Instant::now();
+    let tab = app.tabs.active_index();
+    let content = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+    let metrics = crate::grid::metrics(content.width());
+
+    go(&mut app, &phone);
+    assert!(app.begin_folder_sizes(phone.clone(), now));
+    assert!(
+        app.folders.is_about(&phone, tab),
+        "declined, so not asked again"
+    );
+    assert!(app.du.is_none(), "no walk was started");
+    assert!(
+        app.tile_wants(content, &metrics, 0.0).is_empty(),
+        "no thumbnail is asked of a phone"
+    );
+
+    let files = app.files.clone();
+    go(&mut app, &files);
+    assert!(!app.tile_wants(content, &metrics, 0.0).is_empty());
+    app.begin_folder_sizes(files, now);
+    assert!(app.du.is_some(), "a folder on this disk is walked");
 }
