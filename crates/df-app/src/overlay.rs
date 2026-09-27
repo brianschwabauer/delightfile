@@ -595,7 +595,7 @@ pub fn paint_search(
         status,
         FontId::proportional(FONT - 1.0),
         if search.error.is_some() {
-            palette.red
+            crate::theme::ink(palette, palette.red)
         } else {
             palette.faint
         },
@@ -711,14 +711,14 @@ pub fn paint_search(
                     Align2::LEFT_CENTER,
                     format!(":{number}"),
                     key_font(FONT - 1.0),
-                    palette.peach,
+                    crate::theme::ink(palette, palette.peach),
                 );
                 spans(
                     &inside,
                     egui::pos2(text_left, bottom),
                     hit.text.trim_end(),
                     palette.subtext0,
-                    palette.yellow,
+                    crate::theme::ink(palette, palette.yellow),
                     hit.span.as_slice(),
                     key_font(FONT - 0.5),
                     rect.right() - PAD_X - text_left,

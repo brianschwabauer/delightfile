@@ -35,7 +35,13 @@
 //!   crust to text, is 6:1 where mocha's is 13:1, so the few places that sat
 //!   on the ramp's quiet end take a step further along it on the light side
 //!   ([`Palette::faint`], [`hairline`], [`thumb`]), and an accent that has to be read
-//!   *as text* on a light ground is taken halfway to the text ([`ink`]).
+//!   *as text* on a light ground is taken most of the way to the text, to a
+//!   floor ([`ink`]).
+//! - **Where a ramp step is the wrong tool** — latte's `surface1` as the
+//!   cursor row is the darkest slab in a near-white column. On the light side
+//!   the cursor and the hover are washes of the accent over whatever they
+//!   stand on ([`cursor_fill`], [`hover_fill`], [`cursor_on_selection`],
+//!   [`lift`]).
 //!
 //! Every number those helpers use for the light side is measured against what
 //! the dark side already does — the same step in lightness, the same residual
@@ -118,6 +124,10 @@ pub struct Palette {
     /// where latte's `overlay1` is 2.8:1. Measured when the palette is
     /// resolved, as `faint` is.
     pub quiet: egui::Color32,
+    /// The accents as the ink of text on this palette ([`ink`]), worked out
+    /// once when the palette is resolved: on a dark palette each accent is its
+    /// own ink.
+    inks: [(egui::Color32, egui::Color32); 11],
 }
 
 /// The contrast a light palette's [`Palette::faint`] has to reach on its
@@ -179,6 +189,19 @@ impl Palette {
         } else {
             (pick("overlay0"), pick("overlay1"))
         };
+        // The accents, and what each is as type on this side ([`ink`]).
+        let accents = [
+            "blue", "sky", "red", "yellow", "mauve", "green", "peach", "teal", "lavender",
+            "maroon", "pink",
+        ]
+        .map(pick);
+        let inks = accents.map(|accent| {
+            if light {
+                (accent, inked(accent, text, base))
+            } else {
+                (accent, accent)
+            }
+        });
         Palette {
             crust: pick("crust"),
             mantle: pick("mantle"),
@@ -206,6 +229,7 @@ impl Palette {
             light,
             faint,
             quiet,
+            inks,
         }
     }
 
@@ -314,29 +338,93 @@ fn at(color: egui::Color32, alpha: f32) -> egui::Color32 {
 /// same family as everything around it. Lavender rather than `blue` because
 /// blue is the *directory* colour and the accent this program marks live
 /// things with; a cursor bar the same hue as the accent would look like a
-/// selection.
+/// selection. On the dark side only: the light side's cursor is a wash of the
+/// accent itself ([`CURSOR_TINT_LIGHT`]), which on a near-white pane reads as
+/// where you are rather than as a selection, the selection being yellow.
 const ROW_TINT: f32 = 0.18;
 
-/// What the cursor row is lifted towards: the palette's `surface1`, warmed.
+/// How far the light side's cursor row is tinted from the pane towards
+/// `blue`.
+///
+/// On a light palette the cursor is not a step along the ramp — latte's
+/// `surface1` is a grey slab on a near-white pane, the darkest thing in the
+/// column, and it reads as a hole rather than as where you are. It is a wash
+/// of the accent instead, as a light desktop's own lists draw theirs. Sixteen
+/// percent: 14 in CIE lightness and hue away from `base`, the row's text on it
+/// at 5.7:1, quiet text 3.6:1 and a folder's name 4.8:1 — all above their
+/// floors (4.5, 3 and 4.5) — where latte's `surface1` step left the text at
+/// 4.0:1.
+const CURSOR_TINT_LIGHT: f32 = 0.16;
+
+/// …and a row under the pointer: seven percent, a whisper — 6.5 from `base`
+/// in CIE lightness and hue, enough to say where the hand is and too little to
+/// be mistaken for the cursor.
+const HOVER_TINT_LIGHT: f32 = 0.07;
+
+/// What the cursor row is lifted towards.
 ///
 /// One function for the list and the grid so a row and its tile cannot drift
 /// apart — the grid's promise is that toggling the view changes the geometry
 /// and nothing else.
 ///
-/// The same step on both sides. On latte it is 1.8:1 against `base` where
-/// mocha's is 2.5:1, and a step further up the ramp would close that — at the
-/// price of the name on the row, which falls from 4.0:1 to 3.4:1 on
-/// `surface2`. The cursor's job is to be found and its row's to be read, and
-/// latte's lavender tint is strong enough for the first.
+/// On a dark palette, the palette's `surface1`, warmed ([`ROW_TINT`]). On a
+/// light one, the pane washed towards `blue` ([`CURSOR_TINT_LIGHT`]).
 pub fn cursor_fill(palette: &Palette) -> egui::Color32 {
-    mix(palette.surface1, palette.lavender, ROW_TINT)
+    if palette.light {
+        mix(palette.base, palette.blue, CURSOR_TINT_LIGHT)
+    } else {
+        mix(palette.surface1, palette.lavender, ROW_TINT)
+    }
 }
 
-/// What a row under the pointer is lifted towards: the step below
-/// [`cursor_fill`] on the same ramp, warmed by the same amount, so a hover
-/// that lands on the cursor row composes with it instead of greying it out.
+/// What a row under the pointer is lifted towards: on a dark palette the step
+/// below [`cursor_fill`] on the same ramp, warmed by the same amount; on a
+/// light one the pane's whisper of `blue` ([`HOVER_TINT_LIGHT`]).
 pub fn hover_fill(palette: &Palette) -> egui::Color32 {
-    mix(palette.surface0, palette.lavender, ROW_TINT)
+    if palette.light {
+        mix(palette.base, palette.blue, HOVER_TINT_LIGHT)
+    } else {
+        mix(palette.surface0, palette.lavender, ROW_TINT)
+    }
+}
+
+/// The cursor standing on a *selected* row: what `cursor` — the fill it takes
+/// on the plain pane — becomes over the selection's wash, `selected`.
+///
+/// On a dark palette the cursor's fill replaces the ground, as it always has,
+/// and the selection is kept by its bar. On a light one the cursor is a tint,
+/// so it tints whatever it stands on: the selection's cream turned towards
+/// blue, which is a third colour — neither the cursor's nor the selection's —
+/// so a cursor on a selected row reads as both at once.
+pub fn cursor_on_selection(
+    palette: &Palette,
+    selected: egui::Color32,
+    cursor: egui::Color32,
+) -> egui::Color32 {
+    if palette.light {
+        mix(selected, palette.blue, CURSOR_TINT_LIGHT)
+    } else {
+        cursor
+    }
+}
+
+/// `under` — a row's fill so far — lifted by the pointer's hover, `amount`
+/// 0–1.
+///
+/// On a dark palette, towards [`hover_fill`], as it always was. On a light one
+/// the hover is a tint like the cursor, so it deepens whatever it lies on by
+/// the same whisper of `blue` — the pane, a selection, the cursor itself —
+/// rather than pulling a selected row or the cursor back towards the pane.
+pub fn lift(palette: &Palette, under: egui::Color32, amount: f32) -> egui::Color32 {
+    if palette.light {
+        mix(
+            under,
+            palette.blue,
+            HOVER_TINT_LIGHT * amount.clamp(0.0, 1.0),
+        )
+    } else {
+        mix(under, hover_fill(palette), amount)
+    }
 }
 
 /// How far a *selected* row's ground is tinted towards the selection accent,
@@ -348,13 +436,16 @@ pub fn hover_fill(palette: &Palette) -> egui::Color32 {
 /// the column into a yellow block.
 const SELECT_TINT: f32 = 0.10;
 
-/// …and on a light one: a fifth.
+/// …and on a light one: fourteen percent.
 ///
 /// latte's yellow is a deep amber on a near-white ground, and a tenth of it is
-/// 1.09:1 against `base` — a wash nobody sees, which leaves the selection to
-/// its bar alone. A fifth is a visible cream (1.18:1, as near mocha's 1.30:1 as
-/// it gets before the names on it start to lose: 6.0:1 on it, from 6.5:1).
-const SELECT_TINT_LIGHT: f32 = 0.20;
+/// a wash nobody sees, which leaves the selection to its bar alone. Fourteen
+/// percent is a cream 10.3 from `base` in CIE lightness and hue — mocha's
+/// selection is 10.9 from its own — and stays clear of the cursor's blue:
+/// the cursor on a selected row ([`cursor_on_selection`]) is 8.4 from the
+/// plain cursor and 15.7 from the plain selection, with the row's text on it
+/// at 5.1:1 and quiet text 3.2:1.
+const SELECT_TINT_LIGHT: f32 = 0.14;
 
 /// A selected row's ground: `ground`, tinted towards the selection's yellow.
 /// One function for the list and the grid, as [`cursor_fill`] is.
@@ -435,27 +526,58 @@ pub fn shadow(palette: &Palette, alpha: f32) -> egui::Color32 {
 }
 
 /// How far an accent that is read as text is taken towards the text colour on
-/// a light palette.
+/// a light palette, at the least.
 ///
-/// Halfway. catppuccin's accents are ground colours on a dark flavour and
-/// mid-tones on latte: latte's yellow on its crust is 2.0:1, and a key legend
-/// in it is a legend nobody reads. Halfway to `text` puts every accent this
-/// program sets as type — the which-key card's keys, the chips' counts, a
-/// filter's matched letters — at 3:1 or better on the grounds they sit on,
-/// with the hue still the accent's.
-const LIGHT_INK: f32 = 0.5;
+/// A little over half. catppuccin's accents are ground colours on a dark
+/// flavour and mid-tones on latte — its blue as a folder's name is a
+/// saturated royal blue that shouts down the rest of the column, and its
+/// yellow as a key legend is 2.3:1 and not read at all. Fifty-five percent of
+/// the way to `text` makes blue a quiet navy, `#3759a8`: text with a hint of
+/// hue, 5.9:1 on `base`.
+const LIGHT_INK: f32 = 0.55;
 
-/// An accent colour as the ink of text: the accent itself on a dark palette,
-/// and on a light one the accent taken halfway to `text` ([`LIGHT_INK`]).
-///
-/// Only for type. A bar, a dot or a plate in the accent is a mark, and a mark
-/// in a saturated hue reads on latte's grounds as it is.
-pub fn ink(palette: &Palette, accent: egui::Color32) -> egui::Color32 {
-    if palette.light {
-        mix(accent, palette.text, LIGHT_INK)
-    } else {
-        accent
+/// The floor an accent set as type is held to on a light palette's `base`:
+/// 4.5:1, the line body text is held to. Blue, red, mauve, green, peach,
+/// teal, lavender and maroon clear it at [`LIGHT_INK`]; sky, yellow and pink,
+/// catppuccin's palest, are taken on towards `text` until they do.
+pub const INK_CONTRAST: f32 = 4.5;
+
+/// `accent` as type on a light ground: taken [`LIGHT_INK`] of the way to
+/// `text`, and further, a percent at a time, until it reads at
+/// [`INK_CONTRAST`] on `base`.
+fn inked(accent: egui::Color32, text: egui::Color32, base: egui::Color32) -> egui::Color32 {
+    let mut t = LIGHT_INK;
+    loop {
+        let ink = mix(accent, text, t);
+        if t >= 1.0 || contrast(ink, base) >= INK_CONTRAST {
+            return ink;
+        }
+        t = (t + 0.01).min(1.0);
     }
+}
+
+/// An accent colour as the ink of text — the one rule for every place an
+/// accent is set as type: a folder's name, an executable's, a broken link's,
+/// a chip's label, a filter's matched letters, a card's heading, an error.
+///
+/// The accent itself on a dark palette. On a light one the accent taken
+/// towards `text` ([`LIGHT_INK`], and past it to [`INK_CONTRAST`]), looked up
+/// from the palette's own table for its accents and worked out on the spot
+/// for any other colour.
+///
+/// Only for type. A bar, a dot, a plate or an icon in the accent is a mark,
+/// and a mark in a saturated hue reads on latte's grounds as it is. And not
+/// for the preview's content — a file's syntax colours, a document's links —
+/// which is the flavour's own colouring of somebody else's text.
+pub fn ink(palette: &Palette, accent: egui::Color32) -> egui::Color32 {
+    if !palette.light {
+        return accent;
+    }
+    palette
+        .inks
+        .iter()
+        .find(|(from, _)| *from == accent)
+        .map_or_else(|| inked(accent, palette.text, palette.base), |(_, to)| *to)
 }
 
 /// The grey one step louder than [`Palette::quiet`], for where the two stand
@@ -695,6 +817,88 @@ mod tests {
         assert_eq!(select_fill(&p, p.base), mix(p.base, p.yellow, 0.10));
         // What the ghost's edge was drawn with: `crust` at its alpha.
         assert_eq!(shadow(&p, 0.6), crate::chrome::fade(p.crust, 0.6));
+        // The rows: a step up the ramp, warmed, and the cursor on a selected
+        // row is the cursor's own fill; a hover mixes towards its fill.
+        assert_eq!(cursor_fill(&p), mix(p.surface1, p.lavender, 0.18));
+        assert_eq!(hover_fill(&p), mix(p.surface0, p.lavender, 0.18));
+        let selected = select_fill(&p, p.base);
+        assert_eq!(
+            cursor_on_selection(&p, selected, cursor_fill(&p)),
+            cursor_fill(&p)
+        );
+        assert_eq!(lift(&p, selected, 0.5), mix(selected, hover_fill(&p), 0.5));
+        assert_eq!(ink(&p, p.blue), p.blue);
+    }
+
+    /// Two decimals, as the docs quote a contrast.
+    fn ratio(a: egui::Color32, b: egui::Color32) -> f32 {
+        (contrast(a, b) * 100.0).round() / 100.0
+    }
+
+    /// On the light side the cursor row is a wash of blue, not latte's grey
+    /// `surface1`: the row's text reads on it at 4.5:1 or better and quiet
+    /// text at 3:1; a hover is a lighter wash of the same; and the cursor on
+    /// a selected row is a third colour, neither the cursor's nor the
+    /// selection's, that the text still reads on.
+    #[test]
+    fn the_light_cursor_is_a_wash_the_row_still_reads_on() {
+        let l = latte();
+        let cursor = cursor_fill(&l);
+        assert_eq!(cursor, mix(l.base, l.blue, 0.16));
+        assert!(ratio(l.text, cursor) >= 4.5, "{}", ratio(l.text, cursor));
+        assert!(ratio(l.quiet, cursor) >= 3.0, "{}", ratio(l.quiet, cursor));
+        assert_eq!(ratio(l.text, cursor), 5.73);
+        assert_eq!(ratio(l.quiet, cursor), 3.55);
+        let hover = hover_fill(&l);
+        assert_eq!(hover, mix(l.base, l.blue, 0.07));
+        assert!(contrast(hover, l.base) < contrast(cursor, l.base));
+
+        let selected = select_fill(&l, l.base);
+        let both = cursor_on_selection(&l, selected, cursor);
+        assert_eq!(both, mix(selected, l.blue, 0.16));
+        assert_ne!(both, cursor);
+        assert_ne!(both, selected);
+        assert!(ratio(l.text, both) >= 4.5, "{}", ratio(l.text, both));
+        assert!(ratio(l.quiet, both) >= 3.0, "{}", ratio(l.quiet, both));
+        // A hover deepens whatever it lies on, the cursor included, rather
+        // than pulling it back towards the pane.
+        assert!(luminance(lift(&l, cursor, 1.0)) < luminance(cursor));
+        assert!(luminance(lift(&l, selected, 1.0)) < luminance(selected));
+        assert_eq!(lift(&l, l.base, 1.0), hover);
+    }
+
+    /// Every accent set as type on the light side reads at 4.5:1 on `base`;
+    /// blue — a folder's name — is the quiet navy fifty-five percent of the
+    /// way to `text`, 5.9:1, and reads on the cursor row too.
+    #[test]
+    fn accents_as_type_reach_their_floor_on_the_light_side() {
+        let l = latte();
+        let navy = ink(&l, l.blue);
+        assert_eq!(navy, mix(l.blue, l.text, 0.55));
+        assert_eq!(navy, egui::Color32::from_rgb(0x37, 0x59, 0xa8));
+        assert_eq!(ratio(navy, l.base), 5.88);
+        assert!(ratio(navy, cursor_fill(&l)) >= INK_CONTRAST);
+        for accent in [
+            l.blue, l.sky, l.red, l.yellow, l.mauve, l.green, l.peach, l.teal, l.lavender,
+            l.maroon, l.pink,
+        ] {
+            let inked = ink(&l, accent);
+            assert!(
+                contrast(inked, l.base) >= INK_CONTRAST,
+                "{accent:?} → {inked:?} at {}",
+                ratio(inked, l.base)
+            );
+            // The table and the rule agree, for a colour the table does not
+            // hold as much as for one it does.
+            assert_eq!(inked, inked_by_rule(&l, accent));
+        }
+        // A colour the palette never handed out is inked by the same rule.
+        let custom = egui::Color32::from_rgb(0xff, 0x80, 0x00);
+        assert!(contrast(ink(&l, custom), l.base) >= INK_CONTRAST);
+    }
+
+    fn inked_by_rule(palette: &Palette, accent: egui::Color32) -> egui::Color32 {
+        inked(accent, palette.text, palette.base)
     }
 
     /// On the light side the helpers go the other way: a splash darkens, a

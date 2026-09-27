@@ -569,17 +569,19 @@ pub fn icon_for(entry: &Entry, theme: &Theme, palette: &Palette, nerd: bool) -> 
 /// *icon* carries the kind, in colour, and a name tinted to match would say the
 /// same thing twice at the cost of a listing that reads like a paint chart.
 pub fn name_color(entry: &Entry, palette: &Palette) -> egui::Color32 {
+    // A name is type, so its accent is the accent as ink: itself on a dark
+    // palette, a quiet navy, wine or forest on a light one (crate::theme::ink).
     if entry.is_broken_symlink() {
-        return palette.red;
+        return crate::theme::ink(palette, palette.red);
     }
     if entry.is_dir() {
-        return palette.blue;
+        return crate::theme::ink(palette, palette.blue);
     }
     match entry.file_kind {
         // A socket, fifo or device node: real, listed, and not openable. Given
         // its own colour so `→` on one is visibly not going to do anything.
         FileKind::Special => palette.overlay2,
-        FileKind::Executable => palette.green,
+        FileKind::Executable => crate::theme::ink(palette, palette.green),
         FileKind::Config => palette.subtext0,
         _ => palette.text,
     }

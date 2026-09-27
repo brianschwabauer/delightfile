@@ -916,7 +916,8 @@ fn archive_body(
         painter.layout_no_wrap(text, font.clone(), color.gamma_multiply(alpha))
     };
     let label = run(format.clone(), palette.text);
-    let warning = encrypted.then(|| run(" · encrypted".to_string(), palette.yellow));
+    let yellow = crate::theme::ink(palette, palette.yellow);
+    let warning = encrypted.then(|| run(" · encrypted".to_string(), yellow));
     let label_width = label.size().x;
     painter.galley(
         egui::pos2(x, centre - label.size().y / 2.0),
@@ -952,7 +953,7 @@ fn archive_body(
         painter.galley(
             egui::pos2(x + counts_width, centre - warning.size().y / 2.0),
             warning,
-            palette.yellow,
+            yellow,
         );
     }
     // The hairline, inset to the rows' padding so it reads as the header's

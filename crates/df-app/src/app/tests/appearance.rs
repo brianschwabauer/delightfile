@@ -578,3 +578,67 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
         "the chip is painted: {texts:?}"
     );
 }
+
+/// On the light side the cursor row is a wash of blue rather than latte's grey
+/// `surface1`, a folder's name is the navy [`crate::theme::ink`] makes of
+/// blue, and the cursor standing on a selected row is the third colour —
+/// each painted by a real frame. The dark side paints what it always did.
+#[test]
+fn the_light_cursor_and_a_folder_s_name_paint_as_measured() {
+    let mut app = Fixture::with_folders("theme-light-cursor", &["a.txt"], &["src"]);
+    let ctx = egui::Context::default();
+    run_frame(&mut app, &ctx, Vec::new());
+    assert_eq!(
+        app.tab()
+            .cwd
+            .dir
+            .row(app.tab().cwd.dir.cursor())
+            .map(|e| e.name.as_str()),
+        Some("src"),
+        "folders first, and the cursor on the first row"
+    );
+
+    let (colours, texts) = painted(&mut app, &ctx);
+    let dark = mocha();
+    assert!(colours.contains(&crate::theme::cursor_fill(&dark)));
+    assert!(
+        texts
+            .iter()
+            .any(|(text, ink)| text == "src" && *ink == dark.blue),
+        "{texts:?}"
+    );
+
+    app.run(Command::ThemeLight, 10, Instant::now());
+    let light = latte();
+    let (colours, texts) = painted(&mut app, &ctx);
+    let cursor = crate::theme::cursor_fill(&light);
+    assert_eq!(cursor, crate::theme::mix(light.base, light.blue, 0.16));
+    assert!(
+        colours.contains(&cursor),
+        "the cursor row's wash is painted"
+    );
+    assert!(
+        !colours.contains(&crate::theme::mix(light.surface1, light.lavender, 0.18)),
+        "not latte's grey step"
+    );
+    let navy = crate::theme::ink(&light, light.blue);
+    assert!(crate::theme::contrast(navy, light.base) >= crate::theme::INK_CONTRAST);
+    assert!(
+        texts
+            .iter()
+            .any(|(text, ink)| text == "src" && *ink == navy),
+        "the folder's name in navy: {texts:?}"
+    );
+
+    // Selected, the cursor row is the selection's cream turned towards blue.
+    app.run(Command::SelectAll, 10, Instant::now());
+    let (colours, _) = painted(&mut app, &ctx);
+    let both = crate::theme::cursor_on_selection(
+        &light,
+        crate::theme::select_fill(&light, light.base),
+        cursor,
+    );
+    assert_ne!(both, cursor);
+    assert!(colours.contains(&both), "the third state is painted");
+    assert!(crate::theme::contrast(light.text, both) >= 4.5);
+}

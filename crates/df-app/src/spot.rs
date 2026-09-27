@@ -1347,7 +1347,7 @@ fn checksum(
                     egui::Align2::LEFT_CENTER,
                     chunk,
                     egui::FontId::monospace(FONT),
-                    palette.teal,
+                    crate::theme::ink(palette, palette.teal),
                 );
             }
         }
@@ -1356,7 +1356,7 @@ fn checksum(
                 painter,
                 egui::pos2(left, row.center().y),
                 message,
-                palette.red,
+                crate::theme::ink(palette, palette.red),
                 (row.right() - PAD_X - left).max(0.0),
             );
         }

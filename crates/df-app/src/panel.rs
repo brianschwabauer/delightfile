@@ -481,11 +481,17 @@ pub fn paint(
         }
 
         let tone = tone_color(row.tone, palette);
+        // The chip's words in the tone as ink; its plate and the bar are
+        // marks, in the tone itself. The two grey tones are text already.
+        let words = match row.tone {
+            Tone::Waiting | Tone::Quiet => tone,
+            _ => crate::theme::ink(palette, tone),
+        };
         // The state chip, right-aligned on the name's line.
         let chip = inside.layout_no_wrap(
             row.state.clone(),
             egui::FontId::proportional(FONT - 1.0),
-            tone,
+            words,
         );
         let chip_rect = egui::Rect::from_min_size(
             egui::pos2(
@@ -498,7 +504,7 @@ pub fn paint(
         inside.galley(
             egui::pos2(chip_rect.left() + 6.0, chip_rect.top() + 2.0),
             chip,
-            tone,
+            words,
         );
         chrome::truncated(
             &inside,
@@ -540,7 +546,7 @@ pub fn paint(
             egui::pos2(rect.left() + PAD_X, rect.bottom() - 8.0),
             &detail,
             if panel.inspect && on_cursor && row.error.is_some() {
-                palette.red
+                crate::theme::ink(palette, palette.red)
             } else {
                 palette.quiet
             },

@@ -1476,7 +1476,10 @@ pub fn paint_bulk(
     // place the card says *no* — a disabled button with no reason beside it is
     // a dead end (`delightful-ui` §9). It is drawn beside the buttons, below.
     let (status, tint) = if settled {
-        ("fix the names in red to continue".to_string(), palette.red)
+        (
+            "fix the names in red to continue".to_string(),
+            crate::theme::ink(palette, palette.red),
+        )
     } else if waiting {
         ("reading photo data…".to_string(), palette.quiet)
     } else if changes == 0 {
@@ -1491,7 +1494,7 @@ pub fn paint_bulk(
                     format!("{} files", grouped(changes as u64))
                 }
             ),
-            palette.green,
+            crate::theme::ink(palette, palette.green),
         )
     };
     let font = egui::FontId::proportional(FONT);
@@ -1697,7 +1700,7 @@ fn template_job(
         font_id: bulk_font(),
         color: match ink {
             Ink::Plain | Ink::Problem => palette.text,
-            Ink::Value => palette.blue,
+            Ink::Value => crate::theme::ink(palette, palette.blue),
         },
         underline: match ink {
             Ink::Problem => egui::Stroke::new(1.0, palette.red),
@@ -1751,7 +1754,11 @@ fn paint_name(
     painter.rect_filled(rect.shrink(1.0), ROW_RADIUS, ground);
 
     if let Some(problem) = row.problem {
-        let color = if pending { palette.quiet } else { palette.red };
+        let color = if pending {
+            palette.quiet
+        } else {
+            crate::theme::ink(palette, palette.red)
+        };
         let right = rect.right() - PAD_X;
         chrome::truncated(
             painter,
@@ -1922,7 +1929,7 @@ fn paint_popover(
             mono.clone(),
         );
         let (preview, preview_color, preview_font) = match bulk.preview(candidate) {
-            Ok(name) => (name, palette.blue, mono.clone()),
+            Ok(name) => (name, crate::theme::ink(palette, palette.blue), mono.clone()),
             Err(Missing::Pending) => ("reading photo…".to_string(), palette.faint, font.clone()),
             Err(Missing::Because(why)) => (why.to_string(), palette.faint, font.clone()),
         };
@@ -1993,7 +2000,7 @@ pub fn paint_conflict(
             .unwrap_or_else(|| "↑↓ choose · o/s/r answer · Enter apply · Esc cancel".to_string()),
         egui::FontId::proportional(FONT),
         if dialog.error.is_some() {
-            palette.red
+            crate::theme::ink(palette, palette.red)
         } else {
             palette.quiet
         },
@@ -2096,7 +2103,7 @@ pub fn paint_conflict(
             );
         }
         let color = if dialog.apply_all {
-            palette.yellow
+            crate::theme::ink(palette, palette.yellow)
         } else {
             mix(palette.quiet, palette.text, hover)
         };
@@ -2153,7 +2160,7 @@ fn paint_facts(
         egui::Align2::LEFT_CENTER,
         heading,
         egui::FontId::proportional(FONT - 1.5),
-        accent,
+        crate::theme::ink(palette, accent),
     );
     let Some(facts) = facts else { return };
 

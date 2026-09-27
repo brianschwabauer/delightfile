@@ -959,7 +959,7 @@ pub fn paint(
             painter,
             egui::pos2(left, geometry.card.top() + CARD_PAD + ROW * 2.0 + ROW / 2.0),
             &line,
-            palette.red,
+            crate::theme::ink(palette, palette.red),
             (geometry.card.right() - CARD_PAD - left).max(0.0),
             font.clone(),
         );
@@ -981,7 +981,7 @@ pub fn paint(
         let (detail_text, detail_tint) = if i == last && below > 0 {
             (format!("+{} more", grouped(below as u64)), palette.faint)
         } else if row.mark == Mark::Problem {
-            (row.detail.clone(), palette.red)
+            (row.detail.clone(), crate::theme::ink(palette, palette.red))
         } else {
             (row.detail.clone(), palette.quiet)
         };

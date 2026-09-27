@@ -1490,7 +1490,7 @@ fn type_chip(
     let hover = hovers.hover(key).max(open);
     let rect = pressed_rect(rect, hovers.press(key).max(open));
     let (accent, ink) = if types.narrowing {
-        (palette.blue, palette.blue)
+        (palette.blue, crate::theme::ink(palette, palette.blue))
     } else {
         (
             palette.overlay1,
@@ -2136,7 +2136,7 @@ pub fn path_bar(
         // are the route you took to it. A chip has its own ink for the same
         // reason it has its own plate.
         let color = if crumb.accent {
-            palette.sky
+            crate::theme::ink(palette, palette.sky)
         } else if index == last {
             palette.text
         } else {
@@ -2189,7 +2189,7 @@ pub fn path_bar(
             egui::Align2::LEFT_CENTER,
             &glyph,
             font.clone(),
-            fade(palette.blue, alpha),
+            fade(crate::theme::ink(palette, palette.blue), alpha),
         );
         inside.text(
             egui::pos2(
@@ -2199,7 +2199,7 @@ pub fn path_bar(
             egui::Align2::LEFT_CENTER,
             filter,
             font.clone(),
-            fade(palette.blue, alpha),
+            fade(crate::theme::ink(palette, palette.blue), alpha),
         );
     }
 
@@ -2742,7 +2742,7 @@ fn prompt_field(
     painter.galley(
         egui::pos2(inner.left(), top(&layout.title)),
         layout.title.clone(),
-        palette.blue,
+        crate::theme::ink(palette, palette.blue),
     );
 
     if let (Some((message, error)), Some(line)) = (prompt.message(), error_line) {
@@ -2765,7 +2765,7 @@ fn prompt_field(
                     message,
                     egui::FontId::proportional(FONT),
                     if error {
-                        palette.red
+                        crate::theme::ink(palette, palette.red)
                     } else {
                         hint_ink(palette)
                     },
@@ -2775,7 +2775,11 @@ fn prompt_field(
     }
     match &layout.furniture {
         Some((Furniture::Error(galley), left)) => {
-            painter.galley(egui::pos2(*left, top(galley)), galley.clone(), palette.red);
+            painter.galley(
+                egui::pos2(*left, top(galley)),
+                galley.clone(),
+                crate::theme::ink(palette, palette.red),
+            );
         }
         Some((Furniture::Hint(galley, room), left)) => {
             // The same words at the same width, so the same place — only the
@@ -2787,7 +2791,11 @@ fn prompt_field(
             painter.galley(egui::pos2(*left, top(&galley)), galley, hint_ink(palette));
         }
         Some((Furniture::Case(galley, lit), left)) => {
-            let color = if *lit { palette.yellow } else { palette.faint };
+            let color = if *lit {
+                crate::theme::ink(palette, palette.yellow)
+            } else {
+                palette.faint
+            };
             painter.galley(egui::pos2(*left, top(galley)), galley.clone(), color);
         }
         None => {}
@@ -2861,7 +2869,7 @@ fn inked_job(
             Ink::Quiet => hint_ink(palette),
             Ink::Strong => palette.text,
             Ink::Absent => palette.surface2,
-            Ink::Warn => palette.yellow,
+            Ink::Warn => crate::theme::ink(palette, palette.yellow),
         };
         job.append(
             &inked.text()[range.clone()],
@@ -3398,7 +3406,7 @@ pub fn help_overlay(
                     egui::Align2::LEFT_CENTER,
                     *name,
                     egui::FontId::proportional(FONT),
-                    palette.blue,
+                    crate::theme::ink(palette, palette.blue),
                 );
             }
             HelpLine::Row(binding) => {

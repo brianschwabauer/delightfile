@@ -871,12 +871,13 @@ pub fn paint(paint: &crate::ui::Painting<'_>, view: GridView<'_>) {
         // and lifting the ground to that same colour underneath it would rub
         // the ring out against its own fill.
         let inner_glow = if selected { glow } else { 0.0 };
-        let base = mix(ground_here, crate::theme::cursor_fill(palette), inner_glow);
-        let fill = mix(
-            base,
-            crate::theme::hover_fill(palette),
-            hover * crate::ui::HOVER_LIFT,
+        let cursor_here = crate::theme::cursor_on_selection(
+            palette,
+            ground_here,
+            crate::theme::cursor_fill(palette),
         );
+        let base = mix(ground_here, cursor_here, inner_glow);
+        let fill = crate::theme::lift(palette, base, hover * crate::ui::HOVER_LIFT);
         let rect = crate::hover::pressed_rect(rect, hovers.press(key));
         // The cell is what the pointer and the ring are measured against; the
         // card is what is drawn (see [`card_rect`]).

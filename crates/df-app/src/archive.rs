@@ -591,7 +591,11 @@ pub fn card(
             value,
             egui::TextFormat {
                 font_id: egui::FontId::proportional(CARD_FONT),
-                color: if refused { palette.red } else { palette.text },
+                color: if refused {
+                    crate::theme::ink(palette, palette.red)
+                } else {
+                    palette.text
+                },
                 ..Default::default()
             },
         );

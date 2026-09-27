@@ -459,7 +459,7 @@ impl Toasts {
         );
 
         let text_color = if toast.kind == ToastKind::Error {
-            palette.red
+            crate::theme::ink(palette, palette.red)
         } else {
             palette.text
         };
@@ -489,7 +489,7 @@ impl Toasts {
                 egui::Align2::RIGHT_CENTER,
                 key,
                 egui::FontId::monospace(FONT),
-                fade(palette.yellow),
+                fade(crate::theme::ink(palette, palette.yellow)),
             );
         }
     }

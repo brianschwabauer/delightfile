@@ -1277,13 +1277,21 @@ impl Painting<'_> {
                 ground
             };
             let glow = f32::from(on_cursor) * cursor_alpha;
-            let base = mix(ground_here, cursor_color, glow);
+            // On a selected row the cursor stands on the selection's wash:
+            // the same fill on a dark palette, a third colour on a light one
+            // ([`crate::theme::cursor_on_selection`]).
+            let cursor_here = if selected {
+                crate::theme::cursor_on_selection(self.palette, ground_here, cursor_color)
+            } else {
+                cursor_color
+            };
+            let base = mix(ground_here, cursor_here, glow);
             let lift = if glow > 0.5 {
                 CURSOR_HOVER_LIFT
             } else {
                 HOVER_LIFT
             };
-            let fill = mix(base, crate::theme::hover_fill(self.palette), hover * lift);
+            let fill = crate::theme::lift(self.palette, base, hover * lift);
             let rect = pressed_rect(rect, press);
             // Nothing is drawn for a row that is the same colour as the pane
             // it sits on — the common case, and one fewer quad per row.

@@ -1839,7 +1839,13 @@ struct Face {
 
 fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) -> Face {
     let busy = |identity: &str| card.busy.as_deref() == Some(identity);
-    let working = || ("working…".to_string(), palette.peach);
+    // A status is words, so an accented one is the accent as ink.
+    let working = || {
+        (
+            "working…".to_string(),
+            crate::theme::ink(palette, palette.peach),
+        )
+    };
     match item {
         Item::Place(i) => {
             let Some(place) = card.places.get(i) else {
@@ -1867,7 +1873,7 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
             let status = if busy(&device.object) {
                 working()
             } else if device.is_mounted() {
-                (device.status(), palette.green)
+                (device.status(), crate::theme::ink(palette, palette.green))
             } else {
                 (device.status(), palette.quiet)
             };
@@ -1889,7 +1895,10 @@ fn face(card: &Card, item: Item, palette: &crate::theme::Palette, nerd: bool) ->
             let status = if busy(&share.url) {
                 working()
             } else {
-                (share.scheme.clone(), palette.green)
+                (
+                    share.scheme.clone(),
+                    crate::theme::ink(palette, palette.green),
+                )
             };
             Face {
                 icon: None,
@@ -1970,7 +1979,7 @@ pub fn paint(
                     egui::Align2::LEFT_CENTER,
                     name,
                     egui::FontId::proportional(crate::chrome::FONT),
-                    palette.blue,
+                    crate::theme::ink(palette, palette.blue),
                 );
             }
             Line::Empty(message) => {
