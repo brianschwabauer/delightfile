@@ -1661,6 +1661,9 @@ pub struct App {
     /// Started by [`App::new`] — never in a file dialog, never in a test —
     /// and `None` on a machine without gio.
     gio_monitor: Option<crate::mounts::Monitor>,
+    /// How many times a dead watcher has been started again: once at most
+    /// ([`crate::mounts::restart_due`]).
+    gio_restarts: u32,
     /// Syncs on the pool, and what each owes the window when it lands
     /// (`app/syncing.rs`).
     syncs: Vec<crate::sync::Running>,
@@ -2428,6 +2431,7 @@ impl App {
             gio: crate::mounts::system_gio(),
             gvfs: crate::mounts::gvfs_root(),
             gio_monitor: None,
+            gio_restarts: 0,
             syncs: Vec::new(),
             tray_open: false,
             tray_first: 0,
@@ -7897,18 +7901,38 @@ impl App {
         true
     }
 
-    /// Take whatever gvfs has said since the last frame. Returns whether it
-    /// said anything.
+    /// Take whatever gvfs has said since the last frame, and start the
+    /// watcher again if its gio has died and a restart is due. Returns
+    /// whether it said anything.
     fn poll_gio(&mut self, now: Instant) -> bool {
         let events = match &self.gio_monitor {
             Some(monitor) => monitor.drain(),
             None => return false,
         };
+        self.revive_gio(now);
         if events.is_empty() {
             return false;
         }
         self.gio_heard(events, now);
         true
+    }
+
+    /// A watcher whose gio has died is started again — once, the first frame
+    /// that comes ten seconds or more after it started
+    /// ([`crate::mounts::restart_due`]). Only one [`App::new`] started: a
+    /// file dialog and a test never have one to start again. Here, on the
+    /// event loop's thread, as the first was, for the tie to it.
+    fn revive_gio(&mut self, now: Instant) {
+        let due = self.gio_monitor.as_ref().is_some_and(|monitor| {
+            crate::mounts::restart_due(monitor.gone(), self.gio_restarts, monitor.started(), now)
+        });
+        if !due {
+            return;
+        }
+        self.gio_restarts += 1;
+        log::info!("gio mount --monitor ended; starting it again");
+        let waker = self.waker.named("gio");
+        self.gio_monitor = crate::mounts::Monitor::start(Arc::new(move || waker.wake()));
     }
 
     /// What gvfs said, acted on.
@@ -21459,6 +21483,7 @@ mod tests {
                     unpin: false,
                     cloud,
                     band: None,
+                    more: None,
                 }),
                 &None,
             )

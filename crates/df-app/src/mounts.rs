@@ -1592,7 +1592,9 @@ pub fn event_from(block: &[String]) -> Option<Event> {
 /// The thread blocks on gio's stdout and does nothing else: it wakes when gio
 /// prints, hands over each event whole, and rings the event loop once per
 /// line that completed one — so a window with nothing being plugged in is a
-/// window at zero frames. It ends when the pipe does.
+/// window at zero frames. It ends when the pipe does, which is gio dying: it
+/// says so ([`Monitor::gone`]) and rings once more, so the app can start
+/// another ([`restart_due`]).
 ///
 /// Dropping this kills gio — it holds nothing that needs a gentler end — and
 /// reaps it, which closes the pipe, and then joins the thread. gio is tied to
@@ -1603,6 +1605,10 @@ pub struct Monitor {
     child: std::process::Child,
     events: Receiver<Event>,
     reader: Option<std::thread::JoinHandle<()>>,
+    /// The pipe has ended: gio is dead, and nothing more will be heard.
+    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// When it was started, for [`restart_due`].
+    started: Instant,
 }
 
 impl Monitor {
@@ -1611,8 +1617,14 @@ impl Monitor {
     /// for it to hear about. Call it on the event loop's thread; see above.
     pub fn start(notify: df_core::fs::Notifier) -> Option<Monitor> {
         let mut command = Command::new("gio");
+        command.args(["mount", "--monitor", "--detail"]);
+        Monitor::spawn(command, notify)
+    }
+
+    /// `command`'s stdout, heard as gio's is: [`Monitor::start`]'s gio, or a
+    /// test's stand-in that prints gio's words and exits.
+    fn spawn(mut command: Command, notify: df_core::fs::Notifier) -> Option<Monitor> {
         command
-            .args(["mount", "--monitor", "--detail"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -1625,10 +1637,16 @@ impl Monitor {
             }
         };
         let (tx, events) = unbounded::<Event>();
+        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended = std::sync::Arc::clone(&gone);
         let reader = child.stdout.take().and_then(|stdout| {
             std::thread::Builder::new()
                 .name("df-gio-monitor".to_string())
-                .spawn(move || listen(stdout, tx, notify))
+                .spawn(move || {
+                    listen(stdout, tx, std::sync::Arc::clone(&notify));
+                    ended.store(true, std::sync::atomic::Ordering::SeqCst);
+                    notify();
+                })
                 .map_err(|e| log::warn!("the gio monitor's reader did not start: {e}"))
                 .ok()
         });
@@ -1641,7 +1659,19 @@ impl Monitor {
             child,
             events,
             reader,
+            gone,
+            started: Instant::now(),
         })
+    }
+
+    /// Whether gio has died: its pipe ended, and the thread with it.
+    pub fn gone(&self) -> bool {
+        self.gone.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// When this watcher was started.
+    pub fn started(&self) -> Instant {
+        self.started
     }
 
     /// Whatever gio has said since the last call.
@@ -1660,6 +1690,21 @@ impl Drop for Monitor {
             let _ = reader.join();
         }
     }
+}
+
+/// Whether a watcher whose gio has died is started again now.
+///
+/// **Once** in a window's life, and not before
+/// [`crate::appearance::RETRY`] has passed since it was started — the
+/// desktop-theme watcher's ten seconds, for its reason: something that died
+/// at once dies again at once, and a restart a frame would be a process a
+/// frame. And no frame is asked for it: the first frame something else
+/// brings after it is due starts it, as the theme watcher's does. Once only,
+/// because a gio that has died twice has something wrong with it that a
+/// third start will not fix; the card still lists on `M` and `r`, so what is
+/// lost is being told about a phone plugged in with the card shut.
+pub fn restart_due(gone: bool, restarts: u32, started: Instant, now: Instant) -> bool {
+    gone && restarts == 0 && now.saturating_duration_since(started) >= crate::appearance::RETRY
 }
 
 /// The reader thread: gio's stdout, line by line, until it ends. Any reader,
@@ -2188,6 +2233,26 @@ impl Card {
             .min(self.window)
     }
 
+    /// Whether the lines are more than the window shows, so the card scrolls
+    /// and has its `+N more` line ([`MORE_LINE`]) — however far it is
+    /// scrolled, so the card does not change size as the view reaches the
+    /// end and the count runs out.
+    pub fn overflows(&self) -> bool {
+        self.lines().iter().map(|line| line.height()).sum::<f32>() > self.window + 0.01
+    }
+
+    /// How many rows are below the last one drawn: what the `+N more` line
+    /// says, and nothing once the view is at the end.
+    pub fn more(&self) -> usize {
+        let items = self.items();
+        let shown = self
+            .visible_items()
+            .last()
+            .and_then(|last| items.iter().position(|item| item == last))
+            .map_or(0, |at| at + 1);
+        items.len().saturating_sub(shown)
+    }
+
     /// What a row is across a refresh: the block object, the phone's root,
     /// the share's URL, the remote's name, the place's target, or the connect
     /// row.
@@ -2360,6 +2425,11 @@ const NAME_SHARE: f32 = 0.6;
 const MIN_DETAIL: f32 = 24.0;
 /// The key chip's padding either side of its key.
 const CHIP_PAD: f32 = 5.0;
+/// The `+N more` line under the rows of a card that scrolls: a caption's
+/// line, the hint strip's height. Its own line, and not the last row's
+/// corner, which it used to share — with a place's key chip there now, the
+/// count was drawn over the key.
+const MORE_LINE: f32 = crate::chrome::HINT_ROW;
 /// The card's inner padding — `chrome::CARD_PAD`, not a number of its own.
 ///
 /// The plate is [`crate::chrome::card`], whose radius is
@@ -2404,6 +2474,9 @@ pub struct Geometry {
     /// The band the body's bar is pointed at by, while there are lines the
     /// body does not show ([`crate::scrollbar::band`]).
     pub band: Option<egui::Rect>,
+    /// The `+N more` line, under the body and over the hint strip, while the
+    /// card scrolls ([`Card::overflows`]); `None` when every line is shown.
+    pub more: Option<egui::Rect>,
 }
 
 impl Geometry {
@@ -2430,27 +2503,42 @@ const FIXED: f32 = PAD * 2.0 + HEADING + crate::chrome::HINT_ROW;
 /// headings are a fixed part of the card, like its title and its hint strip,
 /// and the rows are as many as the rest of the window has room for, up to
 /// [`ROWS`] — and never none, so the cursor always has a whole line to be on.
+///
+/// The `+N more` line is a fixed part as well: room is kept for it whether or
+/// not it turns out to be needed, so a card that does scroll has it inside
+/// the height the window allowed rather than past its foot.
 pub fn window(area: egui::Rect) -> f32 {
     let headings = SECTIONS.len() as f32 * SECTION_ROW;
-    let (rows, _) = crate::dialog::fit_rows(area, MAX_WIDTH, FIXED + headings, ROW, ROWS);
+    let fixed = FIXED + headings + MORE_LINE;
+    let (rows, _) = crate::dialog::fit_rows(area, MAX_WIDTH, fixed, ROW, ROWS);
     rows as f32 * ROW + headings
 }
 
 /// Lay the card out, centred and biased above true centre
 /// (`delightful-ui` §16), for the body [`Card::fit`] was last given.
 pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
-    let rect = crate::dialog::place_card(area, MAX_WIDTH, FIXED + card.body_height());
+    let more_line = if card.overflows() { MORE_LINE } else { 0.0 };
+    let rect = crate::dialog::place_card(area, MAX_WIDTH, FIXED + card.body_height() + more_line);
     let body_top = rect.top() + PAD + HEADING;
+    let strip_top = rect.bottom() - PAD - crate::chrome::HINT_ROW;
     // Never upside down: a window shorter than the heading and the hint
     // strip leaves the body no height at all, and nothing is drawn or
     // pressed in it, rather than a body whose bottom is above its top.
     let body = egui::Rect::from_min_max(
         egui::pos2(rect.left() + PAD, body_top),
-        egui::pos2(
-            rect.right() - PAD,
-            (rect.bottom() - PAD - crate::chrome::HINT_ROW).max(body_top),
-        ),
+        egui::pos2(rect.right() - PAD, (strip_top - more_line).max(body_top)),
     );
+    let more = card.overflows().then(|| {
+        egui::Rect::from_min_max(
+            egui::pos2(body.left(), body.bottom()),
+            egui::pos2(
+                body.right(),
+                (body.bottom() + MORE_LINE)
+                    .min(strip_top)
+                    .max(body.bottom()),
+            ),
+        )
+    });
     let mut lines = Vec::new();
     let mut rows = Vec::new();
     for (line, offset) in card.visible() {
@@ -2473,6 +2561,7 @@ pub fn geometry(area: egui::Rect, card: &Card) -> Geometry {
         unpin: card.selected_place().is_some_and(|place| place.pinned),
         cloud: card.selected_cloud().is_some(),
         band: crate::scrollbar::band(rect, body, window, total),
+        more,
     }
 }
 
@@ -2808,17 +2897,13 @@ pub fn paint(
             }
         }
     }
-    let items = card.items();
-    let shown = card
-        .visible_items()
-        .last()
-        .and_then(|last| items.iter().position(|item| item == last))
-        .map_or(0, |at| at + 1);
-    let more = items.len().saturating_sub(shown);
-    if more > 0 {
-        painter.text(
-            egui::pos2(geometry.body.right(), geometry.body.bottom()),
-            egui::Align2::RIGHT_BOTTOM,
+    // On its own line under the rows, at their text's right edge — never in
+    // a row, where it would sit over the key chip a place row ends in.
+    let more = card.more();
+    if let Some(line) = geometry.more.filter(|_| more > 0) {
+        painter.with_clip_rect(line).text(
+            egui::pos2(line.right() - ROW_PAD, line.center().y),
+            egui::Align2::RIGHT_CENTER,
             format!("+{more} more"),
             egui::FontId::proportional(FONT - 1.0),
             palette.faint,
@@ -3896,6 +3981,55 @@ Volume removed:     'Pixel 10a'
         assert_eq!(rung.load(std::sync::atomic::Ordering::SeqCst), 5);
     }
 
+    /// A watcher whose gio exits is gone once its last words are heard, and
+    /// is started again once — ten seconds after it started, never before,
+    /// and never a second time.
+    #[test]
+    fn a_dead_watcher_is_started_again_once_after_ten_seconds() {
+        let rung = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let bell = std::sync::Arc::clone(&rung);
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%s\\n' \"Volume added:       'Pixel 10a'\" '  Volume(0): Pixel 10a' \
+             '    Type: GProxyVolume (GProxyVolumeMonitorMTP)' ''",
+        ]);
+        let monitor = Monitor::spawn(
+            command,
+            std::sync::Arc::new(move || {
+                bell.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        )
+        .expect("sh starts");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !monitor.gone() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(monitor.gone(), "the pipe ended and nobody noticed");
+        let heard = monitor.drain();
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].change, Change::VolumeAdded);
+        assert_eq!(heard[0].protocol, Some(Protocol::Mtp));
+        assert_eq!(
+            rung.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "once for the event, once for the end"
+        );
+
+        let started = monitor.started();
+        let retry = crate::appearance::RETRY;
+        assert!(
+            !restart_due(false, 0, started, started + retry * 2),
+            "alive"
+        );
+        assert!(
+            !restart_due(true, 0, started, started + retry / 2),
+            "too soon"
+        );
+        assert!(restart_due(true, 0, started, started + retry));
+        assert!(!restart_due(true, 1, started, started + retry * 2), "twice");
+    }
+
     /// A stand-in for gio that notes what it was asked and answers with
     /// `code`, `stdout` and `stderr`.
     fn fake_gio(
@@ -4404,6 +4538,74 @@ Volume removed:     'Pixel 10a'
         // A failure with nothing out is nobody's.
         card.fail("stray");
         assert!(card.failed.is_none());
+    }
+
+    /// A card with more places than it shows says how many more on a line
+    /// of its own: under the last row drawn, over the hint strip, inside the
+    /// height the window allowed — and so clear of the last row's key chip,
+    /// which it used to be drawn over. The line stays, empty, when the view
+    /// reaches the end, so the card keeps its size; a card that shows every
+    /// line has no such line and keeps no room for one.
+    #[test]
+    fn more_is_said_on_its_own_line_under_the_last_row() {
+        let now = std::time::Instant::now();
+        let keyed: Vec<Place> = places(30)
+            .into_iter()
+            .enumerate()
+            .map(|(i, place)| Place {
+                key: Some(format!("g {}", i % 10)),
+                ..place
+            })
+            .collect();
+        for height in (300..=900).step_by(50) {
+            let area =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, height as f32));
+            let mut card = Card::with_places(keyed.clone());
+            card.update(many_devices(1), Vec::new(), Vec::new());
+            card.fit(window(area), now);
+            card.select(Item::Place(3));
+            let g = geometry(area, &card);
+            assert!(card.overflows() && card.more() > 0, "in {height}");
+            let line = g.more.expect("the count has its own line");
+            assert_eq!(line.height(), MORE_LINE, "in {height}");
+            assert!(area.contains_rect(g.card), "past the window in {height}");
+            assert!(g.card.contains_rect(line));
+            assert!(
+                line.bottom() <= g.card.bottom() - PAD - crate::chrome::HINT_ROW + 0.01,
+                "over the hint strip in {height}"
+            );
+            // The last row drawn is a place with its key, whole in the body,
+            // and its chip is above the count's line.
+            let (last, rect) = *g.lines.last().expect("lines");
+            let Line::Item(Item::Place(i)) = last else {
+                panic!("the last line in {height} is {last:?}");
+            };
+            assert!(card.places[i].key.is_some());
+            assert!(g.body.contains_rect(rect));
+            let chip = row_layout(rect, true, 40.0, Some(30.0))
+                .chip
+                .expect("a key, so a chip");
+            assert!(g.body.contains_rect(chip), "the chip is cut in {height}");
+            assert!(chip.bottom() <= line.top(), "the count is over the chip");
+            assert!(rect.bottom() <= line.top() + 0.01, "the count is in a row");
+            assert_eq!(g.row_at(line.center()), None, "the line is not a row");
+
+            // At the end: nothing more to say, and the card the same size.
+            card.jump(Jump::Bottom);
+            let end = geometry(area, &card);
+            assert_eq!(card.more(), 0);
+            assert!(end.more.is_some());
+            assert_eq!(end.card, g.card, "the card changed size at the end");
+        }
+
+        let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
+        let mut few = Card::with_places(places(2));
+        few.update(many_devices(1), Vec::new(), Vec::new());
+        few.fit(window(area), now);
+        let g = geometry(area, &few);
+        assert!(!few.overflows());
+        assert_eq!(g.more, None);
+        assert_eq!(g.card.height(), FIXED + few.body_height());
     }
 
     /// …and the card is tall enough for the lines it draws, the heading over
