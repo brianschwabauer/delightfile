@@ -35,8 +35,11 @@
 //! `File::lock`): an append is one write of a whole line, and a rewrite is a
 //! temporary file renamed over the journal.
 //!
-//! Emptying old items (`[mgr] trash_keep_days`) is not done here yet:
-//! [`purge_due_in`] is never due (M2.35).
+//! Emptying old items (`[mgr] trash_keep_days`) works over the journal too
+//! (M2.35): a line whose date is that many days old has its item destroyed,
+//! once a day for all windows, through a stamp beside the journal. Only what
+//! the journal records is ever aged out, so nothing Finder or anything else
+//! put in the Trash is touched.
 
 // Foundation's methods are `unsafe fn` in objc2-foundation 0.2: every call
 // here is one of three (`defaultManager`, a file URL from a path's bytes,
@@ -322,6 +325,39 @@ pub fn for_sync(dest: &Path) -> Result<Trash> {
     Trash::home()
 }
 
+// ── Keeping the trash from growing for ever (`[mgr] trash_keep_days`) ───────
+
+/// One day, in the unit a `SystemTime` is compared in.
+const DAY_SECS: u64 = 86_400;
+
+/// The items a journal kept for `keep_days` days may lose at `now`: every
+/// one whose recorded date reads, and reads at least that many days ago.
+///
+/// Pure, for the reason Linux's is: it is the one decision that destroys
+/// files nobody pointed at. Never chosen: anything when `keep_days` is `0`
+/// ("never purge"), a line whose date does not read, and a date in the
+/// future. Unlike Linux's there is no slack for time zones: the journal is
+/// delightfile's alone and its dates are UTC, so thirty days is thirty days.
+///
+/// What is not in the journal is never an item here at all: Finder's own
+/// things in the Trash, and anything else put there, are not delightfile's
+/// to age out.
+fn expired(items: &[TrashedItem], now: SystemTime, keep_days: u64) -> Vec<TrashedItem> {
+    if keep_days == 0 {
+        return Vec::new();
+    }
+    let Some(cutoff) = now.checked_sub(Duration::from_secs(keep_days.saturating_mul(DAY_SECS)))
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|item| !item.is_orphan())
+        .filter(|item| parse_deletion_date(&item.deleted_at).is_some_and(|at| at <= cutoff))
+        .cloned()
+        .collect()
+}
+
 /// What a purge of old items came to: how many went, and how many would not.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Purged {
@@ -331,30 +367,138 @@ pub struct Purged {
     pub first_error: Option<String>,
 }
 
-/// Refused: old items are not emptied on macOS yet (M2.35).
+/// Destroy every item the journal records that [`expired`] chooses, line
+/// first and then the item, as [`purge`] does one.
+///
+/// As on Linux, an item that will not go is counted and stepped over, the
+/// first reason kept; a cancel is the only error that ends the run early.
+/// Age is `now` less the recorded date, and a clock that has jumped ahead
+/// purges as old everything it has passed.
 pub fn purge_expired(
-    _trash: &Trash,
-    _keep_days: u64,
-    _now: SystemTime,
-    _ctx: &TaskCtx,
+    trash: &Trash,
+    keep_days: u64,
+    now: SystemTime,
+    ctx: &TaskCtx,
 ) -> Result<Purged> {
-    Err(DfError::Unsupported("Emptying old trash"))
+    let old = expired(&trash.list()?, now, keep_days);
+    let mut report = Purged::default();
+    for item in &old {
+        ctx.checkpoint()?;
+        // Asked again at the last moment: an item restored and trashed
+        // again under the same name since the listing has a newer line,
+        // and is not the item the listing chose.
+        if !still_recorded(item) {
+            continue;
+        }
+        match purge(item, ctx) {
+            Ok(()) => report.removed += 1,
+            Err(DfError::Cancelled) => return Err(DfError::Cancelled),
+            Err(e) => {
+                report.failed += 1;
+                report.first_error.get_or_insert_with(|| e.to_string());
+            }
+        }
+    }
+    Ok(report)
 }
 
-/// Refused, as [`purge_expired`].
+/// Whether the journal still has `item`'s line, read from the file rather
+/// than from [`recorded`]'s memory, since a purge is about to act on it.
+fn still_recorded(item: &TrashedItem) -> bool {
+    read(&item.trash_root).is_ok_and(|lines| {
+        lines
+            .iter()
+            .any(|line| line.as_ref().is_ok_and(|line| item.is(line)))
+    })
+}
+
+// ── Once a day per user, not per window ─────────────────────────────────────
+
+/// The stamp beside a journal: `trash-journal.purge`. Its mtime is the last
+/// purge and its being non-empty says one has happened; an `flock` on it is
+/// the one purge at a time, since every window is a process of its own and
+/// each keeps a daily clock (Linux's `PURGE_STAMP` says the rest). The
+/// journal's own lock is another file, which a purge takes and lets go of
+/// once per item it destroys.
+fn stamp_of(trash: &Trash) -> PathBuf {
+    let mut name = trash.root().as_os_str().to_os_string();
+    name.push(".purge");
+    PathBuf::from(name)
+}
+
+/// How long until a journal stamped at `stamped` is owed a purge, `every`
+/// apart; `None` when it is owed one now. Never stamped is owed now, and a
+/// stamp in the future waits a whole `every`.
+fn purge_wait(stamped: Option<SystemTime>, every: Duration, now: SystemTime) -> Option<Duration> {
+    let stamped = stamped?;
+    match now.duration_since(stamped) {
+        Ok(since) if since >= every => None,
+        Ok(since) => Some(every - since),
+        Err(_) => Some(every),
+    }
+}
+
+/// When the journal was last purged, by its stamp: `None` for never.
+fn read_stamp(meta: &std::fs::Metadata) -> Option<SystemTime> {
+    (meta.len() > 0).then(|| meta.modified().ok()).flatten()
+}
+
+/// How long until `trash` is owed a purge, asked without taking the lock;
+/// `None` is now. A journal that does not exist has nothing to purge and is
+/// asked again in `every`.
+pub fn purge_due_in(trash: &Trash, every: Duration, now: SystemTime) -> Option<Duration> {
+    if !exists(trash.root()) {
+        return Some(every);
+    }
+    let stamped = std::fs::metadata(stamp_of(trash))
+        .ok()
+        .and_then(|meta| read_stamp(&meta));
+    purge_wait(stamped, every, now)
+}
+
+/// [`purge_expired`], at most once per `every` for everybody who purges this
+/// journal: `None` when it stood down, because another process holds the
+/// stamp or the stamp says the last purge was less than `every` ago. The
+/// stamp is locked for the whole run and read under the lock, and written
+/// only when the run completes, so a cancelled purge is still owed.
 pub fn purge_expired_if_due(
-    _trash: &Trash,
-    _keep_days: u64,
-    _every: Duration,
-    _now: SystemTime,
-    _ctx: &TaskCtx,
+    trash: &Trash,
+    keep_days: u64,
+    every: Duration,
+    now: SystemTime,
+    ctx: &TaskCtx,
 ) -> Result<Option<Purged>> {
-    Err(DfError::Unsupported("Emptying old trash"))
-}
-
-/// Never owed a purge until M2.35: asked again in `every`.
-pub fn purge_due_in(_trash: &Trash, every: Duration, _now: SystemTime) -> Option<Duration> {
-    Some(every)
+    if !exists(trash.root()) {
+        return Ok(None);
+    }
+    let path = stamp_of(trash);
+    let mut stamp = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| DfError::io(&path, e))?
+    };
+    match stamp.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => return Err(DfError::io(&path, e)),
+    }
+    let meta = stamp.metadata().map_err(|e| DfError::io(&path, e))?;
+    if purge_wait(read_stamp(&meta), every, now).is_some() {
+        return Ok(None);
+    }
+    let report = purge_expired(trash, keep_days, now, ctx)?;
+    stamp
+        .set_len(0)
+        .and_then(|()| stamp.write_all(b"delightfile purged this trash; the mtime says when\n"))
+        .and_then(|()| stamp.set_modified(now))
+        .map_err(|e| DfError::io(&path, e))?;
+    Ok(Some(report))
 }
 
 // ── Foundation ──────────────────────────────────────────────────────────────
@@ -772,5 +916,304 @@ mod tests {
         let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_788_183_907);
         assert_eq!(parse_deletion_date(&iso8601_utc(t)), Some(t));
         assert_eq!(parse_deletion_date("yesterday"), None);
+    }
+
+    // ── `[mgr] trash_keep_days` (M2.35): Linux's aging tests over the journal
+
+    const DAY: Duration = Duration::from_secs(DAY_SECS);
+
+    /// A line with the given date, in a journal that is never touched.
+    fn dated(name: &str, deleted_at: &str) -> TrashedItem {
+        TrashedItem {
+            trash_root: PathBuf::from("/nonexistent/trash-journal"),
+            name: OsString::from(name),
+            original: PathBuf::from(format!("/Users/someone/{name}")),
+            deleted_at: deleted_at.to_string(),
+        }
+    }
+
+    /// `days` whole days before `now`, as the journal writes it.
+    fn days_before(now: SystemTime, days: u64) -> String {
+        iso8601_utc(now - Duration::from_secs(days * DAY_SECS))
+    }
+
+    fn names(items: &[TrashedItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| i.name.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The whole table: old enough goes, and nothing else ever does — not a
+    /// newer line, not one a second short of its keep, not a date that does
+    /// not read, not one from the future, and nothing at all when the keep
+    /// is zero. The journal's dates are UTC and its own, so there is no
+    /// slack: a line exactly the keep old goes.
+    #[test]
+    fn only_what_is_older_than_the_keep_expires() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        let items = vec![
+            dated("ancient", &days_before(now, 400)),
+            dated("old", &days_before(now, 31)),
+            dated("exactly", &days_before(now, 30)),
+            dated(
+                "short",
+                &iso8601_utc(now - Duration::from_secs(30 * DAY_SECS - 1)),
+            ),
+            dated("new", &days_before(now, 2)),
+            dated("today", &iso8601_utc(now)),
+            dated("tomorrow", &iso8601_utc(now + DAY)),
+            dated("unreadable", "last tuesday"),
+            dated("undated", ""),
+        ];
+        assert_eq!(
+            names(&expired(&items, now, 30)),
+            vec!["ancient", "old", "exactly"]
+        );
+        // A second later, "short" is the keep old too.
+        assert_eq!(
+            names(&expired(&items, now + Duration::from_secs(1), 30)),
+            vec!["ancient", "old", "exactly", "short"]
+        );
+        // A shorter keep reaches further, and still never the unknowable.
+        assert_eq!(
+            names(&expired(&items, now, 1)),
+            vec!["ancient", "old", "exactly", "short", "new"]
+        );
+        assert!(expired(&items, now, 0).is_empty());
+        assert!(expired(&items, SystemTime::UNIX_EPOCH, 30).is_empty());
+        assert!(expired(&items, now, u64::MAX).is_empty());
+    }
+
+    /// The date parser reads back exactly what the writer wrote, and turns
+    /// everything else into "no date" rather than a panic.
+    #[test]
+    fn a_deletion_date_round_trips_and_nonsense_is_none() {
+        for stamp in [0u64, 1, 951_827_696, 1_756_598_400, 4_102_444_800] {
+            let t = SystemTime::UNIX_EPOCH + Duration::from_secs(stamp);
+            assert_eq!(parse_deletion_date(&iso8601_utc(t)), Some(t));
+        }
+        for text in [
+            "",
+            "yesterday",
+            "2026-13-01T00:00:00",
+            "2026-08-31T25:00:00",
+            "2026/08/31T00:00:00",
+        ] {
+            assert_eq!(parse_deletion_date(text), None, "{text}");
+        }
+    }
+
+    /// Put an item where the Trash would have put it — a folder of the
+    /// test's own, standing in for `~/.Trash` — and its line in `journal`
+    /// with the date given: the way last month's `d` looks on disk.
+    fn plant(t: &TempTree, journal: &Path, name: &str, deleted_at: &str, dir: bool) -> PathBuf {
+        let location = t.join("Trash").join(name);
+        if dir {
+            std::fs::create_dir_all(location.join("inner")).unwrap();
+            std::fs::write(location.join("inner/deep.txt"), b"deep").unwrap();
+        } else {
+            std::fs::create_dir_all(t.join("Trash")).unwrap();
+            std::fs::write(&location, b"body").unwrap();
+        }
+        let line = Line {
+            deleted_at: deleted_at.to_string(),
+            original: t.join("home").join(name),
+            location: location.clone(),
+        };
+        append(journal, &line).unwrap();
+        location
+    }
+
+    /// Against a journal: the old items go, line and item both, and
+    /// everything the table protects is still there afterwards — and so is
+    /// what the journal does not record (Finder's own things in the Trash)
+    /// and a line this build cannot read, however old its date.
+    #[test]
+    fn purging_the_old_leaves_everything_else_where_it_was() {
+        let t = TempTree::new("mac-trash-keep");
+        let journal = t.join("journal");
+        let trash = Trash::at(&journal);
+        let now = SystemTime::now();
+        plant(&t, &journal, "old.txt", &days_before(now, 45), false);
+        plant(&t, &journal, "old-folder", &days_before(now, 90), true);
+        plant(&t, &journal, "recent.txt", &days_before(now, 3), false);
+        plant(&t, &journal, "undated.txt", "", false);
+        // Finder's own: in the Trash, in no line.
+        t.file("Trash/finders.txt", b"?");
+        // A line that is not a line.
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .unwrap()
+            .write_all(format!("{}\tnot a path\n", days_before(now, 400)).as_bytes())
+            .unwrap();
+
+        let report = purge_expired(&trash, 30, now, &ctx()).unwrap();
+        assert_eq!(
+            report,
+            Purged {
+                removed: 2,
+                failed: 0,
+                first_error: None
+            }
+        );
+        for gone in ["old.txt", "old-folder"] {
+            assert!(!exists(&t.join("Trash").join(gone)), "{gone} survived");
+        }
+        for kept in ["recent.txt", "undated.txt", "finders.txt"] {
+            assert!(exists(&t.join("Trash").join(kept)), "{kept} was purged");
+        }
+        assert_eq!(
+            names(&trash.list().unwrap()),
+            vec!["recent.txt", "undated.txt"]
+        );
+        let text = std::fs::read_to_string(&journal).unwrap();
+        assert!(text.contains("\tnot a path\n"), "{text}");
+
+        // Run again and there is nothing old left to take…
+        assert_eq!(
+            purge_expired(&trash, 30, now, &ctx()).unwrap(),
+            Purged::default()
+        );
+        // …and a keep of zero never takes anything.
+        assert_eq!(
+            purge_expired(&trash, 0, now + DAY * 9_000, &ctx()).unwrap(),
+            Purged::default()
+        );
+        assert_eq!(trash.list().unwrap().len(), 2);
+    }
+
+    /// A line that changed between the listing and the purge is not the item
+    /// the listing chose, and is left alone.
+    #[test]
+    fn a_record_that_changed_since_the_listing_is_not_purged() {
+        let t = TempTree::new("mac-trash-keep-race");
+        let journal = t.join("journal");
+        let trash = Trash::at(&journal);
+        let now = SystemTime::now();
+        plant(&t, &journal, "notes.txt", &days_before(now, 45), false);
+        let listed = expired(&trash.list().unwrap(), now, 30);
+        assert_eq!(listed.len(), 1);
+        // Restored and trashed again under the same name, a moment ago.
+        rewrite(&journal, |_| false).unwrap();
+        plant(&t, &journal, "notes.txt", &iso8601_utc(now), false);
+        assert!(!still_recorded(&listed[0]));
+        assert!(still_recorded(&trash.list().unwrap()[0]));
+    }
+
+    /// Never stamped is owed now; a stamp a day old is owed now; a younger one
+    /// waits out the rest of its day; one from the future waits a whole day.
+    #[test]
+    fn a_stamp_says_how_long_until_the_next_purge() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_790_000_000);
+        let hour = Duration::from_secs(3600);
+        assert_eq!(purge_wait(None, DAY, now), None);
+        assert_eq!(purge_wait(Some(now - DAY), DAY, now), None);
+        assert_eq!(purge_wait(Some(now - DAY * 3), DAY, now), None);
+        assert_eq!(purge_wait(Some(now - hour), DAY, now), Some(DAY - hour));
+        assert_eq!(purge_wait(Some(now), DAY, now), Some(DAY));
+        assert_eq!(purge_wait(Some(now + hour), DAY, now), Some(DAY));
+    }
+
+    /// Once a day for everybody: the first run purges and stamps, a second
+    /// the same day stands down whatever has aged since, and a day on it runs
+    /// again — and the quick question a window asks agrees throughout.
+    #[test]
+    fn a_purge_runs_once_a_day_whoever_asks() {
+        let t = TempTree::new("mac-trash-keep-stamp");
+        let journal = t.join("journal");
+        let trash = Trash::at(&journal);
+        let now = SystemTime::now();
+        // Nothing to purge where nothing was ever trashed, and nothing made.
+        assert_eq!(
+            purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap(),
+            None
+        );
+        assert_eq!(purge_due_in(&trash, DAY, now), Some(DAY));
+        assert!(!exists(&journal) && !exists(&stamp_of(&trash)));
+
+        plant(&t, &journal, "old.txt", &days_before(now, 45), false);
+        plant(&t, &journal, "recent.txt", &days_before(now, 3), false);
+        assert_eq!(purge_due_in(&trash, DAY, now), None, "never purged");
+        let first = purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap();
+        assert_eq!(first.map(|r| r.removed), Some(1));
+        // Stamped with the purge's own `now`, to the filesystem's grain.
+        let stamped = std::fs::metadata(stamp_of(&trash))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let off = now.duration_since(stamped).unwrap_or_else(|e| e.duration());
+        assert!(off < Duration::from_secs(1), "stamped {off:?} away");
+        let wait = purge_due_in(&trash, DAY, now).expect("not owed again today");
+        assert!(wait > DAY - Duration::from_secs(1));
+
+        // Another process, later the same day: stands down, and the item that
+        // has become old since is left for tomorrow's.
+        plant(&t, &journal, "older.txt", &days_before(now, 60), false);
+        let later = now + Duration::from_secs(3600);
+        assert_eq!(
+            purge_expired_if_due(&trash, 30, DAY, later, &ctx()).unwrap(),
+            None
+        );
+        assert!(exists(&t.join("Trash/older.txt")));
+
+        let tomorrow = now + DAY + Duration::from_secs(1);
+        assert_eq!(purge_due_in(&trash, DAY, tomorrow), None);
+        let next = purge_expired_if_due(&trash, 30, DAY, tomorrow, &ctx()).unwrap();
+        assert_eq!(next.map(|r| r.removed), Some(1));
+        assert!(!exists(&t.join("Trash/older.txt")));
+        assert!(exists(&t.join("Trash/recent.txt")));
+    }
+
+    /// A purge another process is running is not run twice: the second
+    /// stands down silently while the lock is held — and a stamp file that
+    /// has only ever been locked, never written, is not a purge.
+    #[test]
+    fn a_second_purger_stands_down_while_the_first_holds_the_stamp() {
+        let t = TempTree::new("mac-trash-keep-lock");
+        let journal = t.join("journal");
+        let trash = Trash::at(&journal);
+        let now = SystemTime::now();
+        plant(&t, &journal, "old.txt", &days_before(now, 45), false);
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(stamp_of(&trash))
+            .unwrap();
+        held.lock().unwrap();
+        assert_eq!(
+            purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap(),
+            None
+        );
+        assert!(exists(&t.join("Trash/old.txt")), "purged under a lock");
+        // Empty, so still owed: the other process never finished.
+        assert_eq!(purge_due_in(&trash, DAY, now), None);
+        held.unlock().unwrap();
+        let report = purge_expired_if_due(&trash, 30, DAY, now, &ctx()).unwrap();
+        assert_eq!(report.map(|r| r.removed), Some(1));
+    }
+
+    /// A cancelled purge does not stamp: it has not happened, and the next
+    /// check runs it.
+    #[test]
+    fn a_cancelled_purge_is_still_owed() {
+        use crate::tasks::{NullSink, TaskFlags};
+        let t = TempTree::new("mac-trash-keep-cancel");
+        let journal = t.join("journal");
+        let trash = Trash::at(&journal);
+        let now = SystemTime::now();
+        plant(&t, &journal, "old.txt", &days_before(now, 45), false);
+        let flags = Arc::new(TaskFlags::new());
+        flags.cancel();
+        let cancelled = TaskCtx::with_sink(flags, Arc::new(NullSink));
+        assert!(matches!(
+            purge_expired_if_due(&trash, 30, DAY, now, &cancelled),
+            Err(DfError::Cancelled)
+        ));
+        assert!(exists(&t.join("Trash/old.txt")));
+        assert_eq!(purge_due_in(&trash, DAY, now), None);
     }
 }
