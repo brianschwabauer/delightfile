@@ -208,6 +208,9 @@ struct Record {
 #[derive(Debug)]
 pub struct StateStore {
     path: PathBuf,
+    /// Keyed by [`crate::path::key`] — every read and every write — so a
+    /// directory is one record however it is spelled (Windows). On Unix the
+    /// key is the path, and it is what the file holds.
     dirs: HashMap<PathBuf, Record>,
     tabs: Vec<PathBuf>,
     active_tab: usize,
@@ -320,19 +323,23 @@ impl StateStore {
     /// kept alive by *having* one, and refreshed by [`StateStore::touch`] when
     /// the app decides a visit is worth recording.
     pub fn get(&self, dir: &Path) -> Option<ViewState> {
-        self.dirs.get(dir).map(|r| r.state)
+        self.record(dir).map(|r| r.state)
     }
 
     pub fn sort(&self, dir: &Path) -> Option<SortOverride> {
-        self.dirs.get(dir).and_then(|r| r.state.sort)
+        self.record(dir).and_then(|r| r.state.sort)
     }
 
     pub fn linemode(&self, dir: &Path) -> Option<LineMode> {
-        self.dirs.get(dir).and_then(|r| r.state.linemode)
+        self.record(dir).and_then(|r| r.state.linemode)
     }
 
     pub fn show_hidden(&self, dir: &Path) -> Option<bool> {
-        self.dirs.get(dir).and_then(|r| r.state.show_hidden)
+        self.record(dir).and_then(|r| r.state.show_hidden)
+    }
+
+    fn record(&self, dir: &Path) -> Option<&Record> {
+        self.dirs.get(crate::path::key(dir).as_ref())
     }
 
     /// The directories the tabs were last on, oldest tab first. Empty until
@@ -372,7 +379,7 @@ impl StateStore {
 
     /// Forget a directory. Returns whether there was anything to forget.
     pub fn clear(&mut self, dir: &Path) -> bool {
-        let removed = self.dirs.remove(dir).is_some();
+        let removed = self.dirs.remove(crate::path::key(dir).as_ref()).is_some();
         self.dirty |= removed;
         removed
     }
@@ -382,7 +389,7 @@ impl StateStore {
     /// directory is not a reason to remember it, having chosen something there
     /// is.
     pub fn touch(&mut self, dir: &Path) {
-        if let Some(record) = self.dirs.get_mut(dir) {
+        if let Some(record) = self.dirs.get_mut(crate::path::key(dir).as_ref()) {
             record.touched = now();
             self.dirty = true;
         }
@@ -397,7 +404,7 @@ impl StateStore {
     }
 
     fn update(&mut self, dir: impl Into<PathBuf>, edit: impl FnOnce(&mut ViewState)) {
-        let dir = dir.into();
+        let dir = crate::path::into_key(dir.into());
         let mut state = self.dirs.get(&dir).map(|r| r.state).unwrap_or_default();
         edit(&mut state);
         self.dirty = true;
@@ -635,7 +642,8 @@ impl StateStore {
             if state.is_empty() {
                 continue;
             }
-            self.dirs.insert(path, Record { state, touched });
+            self.dirs
+                .insert(crate::path::into_key(path), Record { state, touched });
         }
         // A file that was over the cap — an older build with a bigger one, or a
         // hand-merged pair of files — is trimmed on load rather than carried.

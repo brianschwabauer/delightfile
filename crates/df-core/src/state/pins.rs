@@ -88,9 +88,11 @@ pub enum PinRefusal {
 }
 
 /// Two spellings of one place. By [`Path`] equality after expanding `~`, which
-/// is component-wise, so a trailing `/` does not make a second place.
+/// is component-wise, so a trailing `/` does not make a second place, of the
+/// [`crate::path::key`]s, so on Windows neither does another case.
 fn same_place(a: &str, b: &str) -> bool {
-    Path::new(&expand_home(a)) == Path::new(&expand_home(b))
+    let (a, b) = (expand_home(a), expand_home(b));
+    crate::path::key(Path::new(&a)) == crate::path::key(Path::new(&b))
 }
 
 /// A key as the keymap would bind it, or the refusal. Surrounding space is
@@ -435,6 +437,19 @@ mod tests {
         // Blank is no key, not a bad one: `Enter` on an empty prompt.
         store.pin("/srv/three", Some("  ".to_string())).unwrap();
         assert_eq!(store.pinned("/srv/three").unwrap().key, None);
+    }
+
+    /// Where the platform folds case (Windows) a place pinned in one case is
+    /// pinned in every case; where it keeps case, another case is another
+    /// place.
+    #[test]
+    fn a_place_in_another_case_is_the_same_place_where_the_platform_folds_it() {
+        let tree = TempTree::new("state-pins-case");
+        let mut store = store_at(&tree);
+        let pinned = crate::test_support::abs("/srv/Photos");
+        store.pin(pinned.to_string_lossy(), None).unwrap();
+        let other = crate::test_support::abs("/SRV/photos");
+        assert_eq!(store.is_pinned(&other.to_string_lossy()), cfg!(windows));
     }
 
     /// `~/Work` and `$HOME/Work` are one folder, whichever was pinned.

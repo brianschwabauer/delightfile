@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 /// bound. At a path plus a name apiece this is tens of kilobytes.
 pub const CURSOR_MEMORY: usize = 512;
 
-/// The last thing seen at each of a bounded number of paths.
+/// The last thing seen at each of a bounded number of paths, keyed by
+/// [`crate::path::key`] so one directory is one entry however a pane spells
+/// it (Windows); on Unix the key is the path.
 #[derive(Debug, Clone)]
 pub struct Recent<V> {
     limit: usize,
@@ -49,7 +51,7 @@ impl<V> Recent<V> {
         if self.limit == 0 {
             return;
         }
-        let path = path.into();
+        let path = crate::path::into_key(path.into());
         if let Some(at) = self.order.iter().position(|p| *p == path) {
             // Touched, so it goes to the young end: a directory somebody keeps
             // coming back to must not be evicted by one they passed through.
@@ -67,14 +69,15 @@ impl<V> Recent<V> {
 
     /// What was on screen at `path`, if it is still remembered.
     pub fn recall(&self, path: &Path) -> Option<&V> {
-        self.seen.get(path)
+        self.seen.get(crate::path::key(path).as_ref())
     }
 
     /// Forget one path — what a caller does when the value turned out to be
     /// stale (a file that changed under the preview, a directory that is gone).
     pub fn forget(&mut self, path: &Path) {
-        if self.seen.remove(path).is_some() {
-            self.order.retain(|p| p != path);
+        let path = crate::path::key(path);
+        if self.seen.remove(path.as_ref()).is_some() {
+            self.order.retain(|p| p != path.as_ref());
         }
     }
 

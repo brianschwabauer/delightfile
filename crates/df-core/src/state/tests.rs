@@ -98,6 +98,22 @@ fn gnarly_paths_survive_a_save_and_a_load() {
     }
 }
 
+/// Where the platform folds case (Windows) one directory is one record in
+/// every spelling; where it keeps case, each spelling is a directory.
+#[test]
+fn a_directory_is_one_record_in_either_case_where_the_platform_folds_it() {
+    let mut store = StateStore::load_from(PathBuf::new());
+    store.set_hidden(abs("/tmp/Mixed Case"), Some(true));
+    assert_eq!(
+        store.show_hidden(&abs("/tmp/mixed case")),
+        cfg!(windows).then_some(true)
+    );
+    store.set_hidden(abs("/tmp/MIXED CASE"), Some(false));
+    assert_eq!(store.len(), if cfg!(windows) { 1 } else { 2 });
+    store.touch(&abs("/TMP/mixed case"));
+    assert!(store.clear(&abs("/tmp/MIXED CASE")));
+}
+
 /// A key is a path absolute as this platform reads one: `C:\Users\x` on
 /// Windows, where `/home/x` has no drive and is dropped on load; `/home/x` on
 /// Unix, where `C:\Users\x` is one relative name.

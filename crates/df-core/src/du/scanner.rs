@@ -479,7 +479,7 @@ fn run_walk(
     // walked past every few minutes, which is the one thing the TTL is for.
     let reused: Mutex<HashSet<PathBuf>> = Mutex::new(HashSet::new());
     let known = |dir: &Path, mtime: Option<std::time::SystemTime>| -> Option<(DuTotals, u64)> {
-        let (stamp, totals) = reusable.get(dir)?;
+        let (stamp, totals) = reusable.get(crate::path::key(dir).as_ref())?;
         // The `mtime` the walk already has, and one `read_dir` — which is the
         // syscall descending would have cost anyway, so a hit is free and a
         // miss costs the price of the check alone.

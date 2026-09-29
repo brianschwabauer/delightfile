@@ -215,9 +215,16 @@ pub struct HeavyHitter {
 }
 
 /// The bounded store.
+///
+/// Keyed by [`crate::path::key`], at every write and every lookup, so one
+/// directory is one record however a pane spells it (Windows); a record whose
+/// key is not its spelling keeps the spelling, since a child's name is read
+/// back off it. On Unix the key is the path and nothing is kept twice.
 #[derive(Debug)]
 pub struct DuCache {
-    records: HashMap<PathBuf, (DuRecord, u64)>,
+    /// Key → the record, its last touch, and its spelling when that is not
+    /// the key.
+    records: HashMap<PathBuf, (DuRecord, u64, Option<PathBuf>)>,
     children_total: usize,
     clock: u64,
     ttl: Duration,
@@ -338,14 +345,14 @@ impl DuCache {
         children_complete: bool,
         approximate: bool,
     ) {
-        let dir = dir.into();
+        let (dir, spelling) = crate::path::keyed(dir.into());
         children.sort_by(|a, b| b.1.total_bytes.cmp(&a.1.total_bytes).then(a.0.cmp(&b.0)));
         let complete = children_complete && children.len() <= MAX_CACHED_CHILDREN;
         children.truncate(MAX_CACHED_CHILDREN);
 
         self.clock += 1;
         let touched = self.clock;
-        if let Some((old, _)) = self.records.remove(&dir) {
+        if let Some((old, _, _)) = self.records.remove(&dir) {
             self.children_total = self.children_total.saturating_sub(old.children.len());
         }
         self.children_total += children.len();
@@ -361,6 +368,7 @@ impl DuCache {
                     approximate,
                 },
                 touched,
+                spelling,
             ),
         );
         self.evict();
@@ -373,7 +381,7 @@ impl DuCache {
         let ttl = self.ttl;
         self.clock += 1;
         let touched = self.clock;
-        let (record, stamp) = self.records.get_mut(dir)?;
+        let (record, stamp, _) = self.records.get_mut(crate::path::key(dir).as_ref())?;
         if now.saturating_duration_since(record.walked_at) > ttl {
             return None;
         }
@@ -409,7 +417,9 @@ impl DuCache {
     /// column on a directory that is being rewritten, say, where the
     /// alternative is a blank that flickers.
     pub fn get_stale(&self, dir: &Path) -> Option<&DuRecord> {
-        self.records.get(dir).map(|(record, _)| record)
+        self.records
+            .get(crate::path::key(dir).as_ref())
+            .map(|(record, _, _)| record)
     }
 
     /// Every immediate child of `dir` the cache can name a size for.
@@ -424,17 +434,19 @@ impl DuCache {
     /// No syscalls, and no TTL filter: a child past the TTL comes back with
     /// `fresh: false` so the caller can draw it and re-walk behind it.
     pub fn remembered_children(&self, dir: &Path, now: Instant) -> Vec<ChildTotal> {
+        let dir = crate::path::key(dir);
         let mut merged: HashMap<&str, (Instant, DuTotals)> = HashMap::new();
-        if let Some((record, _)) = self.records.get(dir) {
+        if let Some((record, _, _)) = self.records.get(dir.as_ref()) {
             for (name, totals) in &record.children {
                 merged.insert(name.as_str(), (record.walked_at, *totals));
             }
         }
-        for (path, (record, _)) in &self.records {
-            if path.parent() != Some(dir) {
+        for (path, (record, _, spelling)) in &self.records {
+            if path.parent() != Some(dir.as_ref()) {
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            let spelled = spelling.as_deref().unwrap_or(path);
+            let Some(name) = spelled.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
             match merged.get(name) {
@@ -467,16 +479,21 @@ impl DuCache {
     /// The walk asks about every directory it meets, once, on a worker thread —
     /// so it gets one snapshot rather than a mutex acquisition per directory
     /// contending with the UI thread. `root` itself is left out: a walk of a
-    /// directory is not allowed to answer itself from the cache.
+    /// directory is not allowed to answer itself from the cache. Keyed as the
+    /// cache is, by [`crate::path::key`]: look a directory up by its key.
     pub fn reusable_under(
         &self,
         root: &Path,
         now: Instant,
     ) -> HashMap<PathBuf, (DirStamp, DuTotals)> {
+        let root = crate::path::key(root);
+        let root = root.as_ref();
         self.records
             .iter()
             .filter(|(path, _)| path.as_path() != root && path.starts_with(root))
-            .filter(|(_, (record, _))| now.saturating_duration_since(record.walked_at) <= self.ttl)
+            .filter(|(_, (record, _, _))| {
+                now.saturating_duration_since(record.walked_at) <= self.ttl
+            })
             // **An estimate is not something to build the next estimate on.**
             // A record produced by a reusing walk was itself part-remembered,
             // and reusing it would compound the error every time somebody
@@ -484,15 +501,15 @@ impl DuCache {
             // nothing ever recounting it. Walking such a subtree costs the
             // syscalls the reuse was meant to save; paying them once is what
             // makes the number come back true.
-            .filter(|(_, (record, _))| !record.approximate)
-            .map(|(path, (record, _))| (path.clone(), (record.stamp, record.totals)))
+            .filter(|(_, (record, _, _))| !record.approximate)
+            .map(|(path, (record, _, _))| (path.clone(), (record.stamp, record.totals)))
             .collect()
     }
 
     /// Drop one directory's record. What "refresh this" is implemented with.
     pub fn forget(&mut self, dir: &Path) -> bool {
-        match self.records.remove(dir) {
-            Some((record, _)) => {
+        match self.records.remove(crate::path::key(dir).as_ref()) {
+            Some((record, _, _)) => {
                 self.children_total = self.children_total.saturating_sub(record.children.len());
                 true
             }
@@ -547,7 +564,7 @@ impl DuCache {
             let Some(oldest) = self
                 .records
                 .iter()
-                .min_by_key(|(_, (_, touched))| *touched)
+                .min_by_key(|(_, (_, touched, _))| *touched)
                 .map(|(path, _)| path.clone())
             else {
                 return;

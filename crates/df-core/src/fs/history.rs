@@ -51,7 +51,8 @@ impl History {
     /// `cd .`) must not cost a press of `Alt+←` to undo.
     pub fn push(&mut self, dir: impl Into<PathBuf>) {
         let dir = dir.into();
-        if dir == self.current {
+        // The same place however it is spelled (Windows folds case).
+        if crate::path::key(&dir) == crate::path::key(&self.current) {
             return;
         }
         self.forward.clear();

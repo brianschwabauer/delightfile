@@ -206,6 +206,21 @@ pub fn into_key(p: PathBuf) -> PathBuf {
     }
 }
 
+/// [`into_key`], and the spelling beside it when the key differs from it —
+/// for a table that shows its keys to anyone, as names or paths. `(p, None)`
+/// where the key is the path, so Unix keeps one copy.
+pub fn keyed(p: PathBuf) -> (PathBuf, Option<PathBuf>) {
+    if !platform::os::FOLD_CASE {
+        return (p, None);
+    }
+    let key = folded(&p);
+    if key == p {
+        (key, None)
+    } else {
+        (key, Some(p))
+    }
+}
+
 /// `p` with every name lowercased — the fold [`key`] applies on Windows, by
 /// Unicode's lowercase mapping of its UTF-8 view. A path that is not Unicode
 /// is left as it is.

@@ -1599,6 +1599,25 @@ fn a_dir_state_loads_a_real_tree_through_the_scanner() {
 
 // ── History ─────────────────────────────────────────────────────────────────
 
+/// Where the platform folds case (Windows), a place remembered or visited in
+/// one spelling is the same place in another; where it keeps case, two.
+#[test]
+fn memory_and_history_key_a_place_as_the_platform_folds_case() {
+    use crate::test_support::abs;
+    let mut recent: Recent<String> = Recent::new(3);
+    recent.remember(abs("/Work/Photos"), "a.jpg".to_string());
+    assert_eq!(
+        recent.recall(&abs("/work/photos")).map(String::as_str),
+        cfg!(windows).then_some("a.jpg")
+    );
+    recent.forget(&abs("/WORK/PHOTOS"));
+    assert_eq!(recent.is_empty(), cfg!(windows));
+
+    let mut history = History::new(abs("/Work"));
+    history.push(abs("/work"));
+    assert_eq!(history.can_go_back(), !cfg!(windows));
+}
+
 #[test]
 fn history_is_the_browser_model() {
     let mut history = History::new("/a");

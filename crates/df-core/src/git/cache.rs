@@ -87,6 +87,9 @@ impl RepoStatus {
     }
 }
 
+/// Every map keyed by [`crate::path::key`], so one repository is one entry
+/// however a pane spells its path (Windows); the spelling a scan runs in is
+/// the value's ([`RepoStatus::root`], the found root).
 #[derive(Default)]
 struct Cache {
     repos: HashMap<PathBuf, Arc<RepoStatus>>,
@@ -182,7 +185,8 @@ impl Git {
     /// walk-up for those is the one that costs the most (it goes all the way to
     /// `/`).
     pub fn repo_root(&self, path: &Path) -> Option<PathBuf> {
-        if let Some(hit) = lock(&self.state.cache).roots.get(path) {
+        let key = crate::path::key(path);
+        if let Some(hit) = lock(&self.state.cache).roots.get(key.as_ref()) {
             return hit.clone();
         }
         let found = repo::repo_root(path);
@@ -190,13 +194,16 @@ impl Git {
         if cache.roots.len() >= ROOT_MEMO {
             cache.roots.clear();
         }
-        cache.roots.insert(path.to_path_buf(), found.clone());
+        cache.roots.insert(key.into_owned(), found.clone());
         found
     }
 
     /// Whatever is currently known about `root`. Never blocks, never scans.
     pub fn status(&self, root: &Path) -> Option<Arc<RepoStatus>> {
-        lock(&self.state.cache).repos.get(root).cloned()
+        lock(&self.state.cache)
+            .repos
+            .get(crate::path::key(root).as_ref())
+            .cloned()
     }
 
     /// The status for the repository containing `path`, queueing a first scan if
@@ -227,21 +234,26 @@ impl Git {
         let Some(requests) = &self.requests else {
             return;
         };
+        let key = crate::path::key(root);
         {
             let mut cache = lock(&self.state.cache);
-            if !cache.pending.insert(root.to_path_buf()) {
+            if !cache.pending.insert(key.clone().into_owned()) {
                 return;
             }
         }
         if requests.send(root.to_path_buf()).is_err() {
-            lock(&self.state.cache).pending.remove(root);
+            lock(&self.state.cache).pending.remove(key.as_ref());
         }
     }
 
     /// Rescan every repository already in the cache. For a window regaining
     /// focus, where anything could have happened in a terminal meanwhile.
     pub fn refresh_all(&self) {
-        let roots: Vec<PathBuf> = lock(&self.state.cache).repos.keys().cloned().collect();
+        let roots: Vec<PathBuf> = lock(&self.state.cache)
+            .repos
+            .values()
+            .map(|status| status.root.clone())
+            .collect();
         for root in roots {
             self.refresh(&root);
         }
@@ -278,9 +290,12 @@ impl Git {
     /// Drop one repository's cached status — a tab closing, or a repository the
     /// user just deleted.
     pub fn forget(&self, root: &Path) {
+        let key = crate::path::key(root);
         let mut cache = lock(&self.state.cache);
-        cache.repos.remove(root);
-        cache.roots.retain(|_, v| v.as_deref() != Some(root));
+        cache.repos.remove(key.as_ref());
+        cache
+            .roots
+            .retain(|_, v| v.as_deref().map(crate::path::key) != Some(key.clone()));
     }
 
     /// Drop everything, including the root memo. For a config reload.
@@ -293,7 +308,9 @@ impl Git {
     /// Whether a scan is queued or running for `root`. Tests wait on this; the
     /// app has the notifier and does not need it.
     pub fn is_pending(&self, root: &Path) -> bool {
-        lock(&self.state.cache).pending.contains(root)
+        lock(&self.state.cache)
+            .pending
+            .contains(crate::path::key(root).as_ref())
     }
 }
 
@@ -316,8 +333,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn run_one(state: &State, root: &Path, notify: &Notifier) {
     let result = status::status_blocking(root);
+    let key = crate::path::into_key(root.to_path_buf());
     let mut cache = lock(&state.cache);
-    cache.pending.remove(root);
+    cache.pending.remove(&key);
 
     let data = match result {
         Ok(data) => data,
@@ -344,7 +362,7 @@ fn run_one(state: &State, root: &Path, notify: &Notifier) {
         generation,
     });
 
-    if cache.repos.len() >= GIT_REPOS && !cache.repos.contains_key(root) {
+    if cache.repos.len() >= GIT_REPOS && !cache.repos.contains_key(&key) {
         // Oldest scan wins the eviction. `generation` is monotonic, so the
         // smallest one is the least recently refreshed.
         if let Some(oldest) = cache
@@ -356,7 +374,7 @@ fn run_one(state: &State, root: &Path, notify: &Notifier) {
             cache.repos.remove(&oldest);
         }
     }
-    cache.repos.insert(root.to_path_buf(), status);
+    cache.repos.insert(key, status);
     drop(cache);
     notify();
 }

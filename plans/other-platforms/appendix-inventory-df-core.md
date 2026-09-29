@@ -181,7 +181,7 @@
 | 41 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `insert` | ✓ S1.16 |
 | 279–306 | `status_blocking`: `Command::new("git")` with `-c core.hooksPath=/dev/null` (291), `.current_dir(root)` | Windows-differs | core:git/cache.rs:run_one ← `Git::start` ← app:app.rs:git | `/dev/null` is a Unix device path. §4 ✓ S1.13 ✓ P3.8 |
 | 556–565 | `insert`: trailing `b'/'` means directory; `Path::new(OsStr::from_bytes(trimmed))`; `root.join(rel)` | Unix-only | `parse_porcelain_v2` ← `status_blocking` | git emits `/`-separated repo-relative paths ✓ S1.16 ✓ P3.8 |
-| 577–587 | Rollup loop bounded by `ancestor.starts_with(root)` / `ancestor == root` | Windows-differs (case) | as above | §3 |
+| 577–587 | Rollup loop bounded by `ancestor.starts_with(root)` / `ancestor == root` | Windows-differs (case) | as above | §3 ✓ P3.19 |
 
 ### ops.rs
 
@@ -314,14 +314,14 @@
 | 637–657 | `state_path_from`: `$XDG_STATE_HOME/delightfile/state` or `$HOME/.local/state/delightfile/state` | Linux-only; macOS-differs (not `~/Library`) | `state_path`; app:portal/request.rs:from_env | ✓ S1.11 |
 | 744–747 | `path_bytes`: `OsStrExt::as_bytes` | Unix-only | `render` | ✓ S1.16 |
 | 749–752 | `path_from`: `OsStringExt::from_vec` | Unix-only | `parse`, `parse_tabs` | ✓ S1.16 |
-| 202, 305–318 | `dirs: HashMap<PathBuf, Record>`; `get`/`sort`/`linemode`/`show_hidden` | Windows-differs (case) | app:app.rs, app:tab.rs:new, app:app/places.rs | |
+| 202, 305–318 | `dirs: HashMap<PathBuf, Record>`; `get`/`sort`/`linemode`/`show_hidden` | Windows-differs (case) | app:app.rs, app:tab.rs:new, app:app/places.rs | ✓ P3.19 |
 
 ### state/pins.rs
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 59–61 | `Pin::expanded_path` → `expand_home` (`HOME`) | Windows-differs | app:app/places.rs:pool; app:finder.rs:merge_places | ✓ P3.14 |
-| 92–94 | `same_place`: `Path::new(&expand_home(a)) == Path::new(&expand_home(b))` | Windows-differs (case) | `Pin::is` ← `pinned`, `unpin`, `set_pin_key` ← app:app/places.rs | |
+| 92–94 | `same_place`: `Path::new(&expand_home(a)) == Path::new(&expand_home(b))` | Windows-differs (case) | `Pin::is` ← `pinned`, `unpin`, `set_pin_key` ← app:app/places.rs | ✓ P3.19 |
 
 ### sync/execute.rs
 
@@ -344,7 +344,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 51–67 | `roots`: duplicate yanked names via `HashSet<OsString>` | Windows-differs (case) | `walk` ← `plan` ← app:sync.rs:plan_job | |
+| 51–67 | `roots`: duplicate yanked names via `HashSet<OsString>` | Windows-differs (case) | `walk` ← `plan` ← app:sync.rs:plan_job | ✓ P3.19 |
 | 178–199 | `visit`: `symlink_metadata(dst)` decides New/Changed/Unchanged | Windows-differs (case) | as above | On a case-insensitive destination, `dst.join(name)` resolves to a differently cased existing entry ✓ P3.18 |
 | 366–424 | `case_twins`, `fold`, `fold_char`: Unicode simple case folding of UTF-8 names (`to_str()`; non-UTF-8 skipped) | Windows-/macOS-relevant | `extras_in` | Already handles case-folding destinations. No Unicode normalization (NFC/NFD) handling |
 
@@ -1749,9 +1749,9 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| ops.rs:124–135 | `is_ancestor` / `is_strict_ancestor`: `normalize` + `starts_with` | Windows-/macOS-differs (case) | delete rails; app:app/syncing.rs:paste_sync | |
+| ops.rs:124–135 | `is_ancestor` / `is_strict_ancestor`: `normalize` + `starts_with` | Windows-/macOS-differs (case) | delete rails; app:app/syncing.rs:paste_sync | ✓ P3.19 |
 | ops.rs:158–177 | `*_resolved`: `canonicalize` both sides, `starts_with` | (canonical spelling on both sides) | paste, copy, sync | ✓ P3.18 |
-| ops/delete.rs:40–54 | Home and cwd rails | (case) | `check_deletable` | |
+| ops/delete.rs:40–54 | Home and cwd rails | (case) | `check_deletable` | ✓ P3.19 |
 | ops/create.rs:139–141 | Same-directory check for rename | (case) | `rename` | ✓ P3.18 |
 | ops/paste.rs:128–176 | `Clipboard` membership (`Vec`/`HashSet<PathBuf>`) | (case) | yank/cut/toggle | |
 | ops/paste.rs:193 | `spans_directories`: `parent != first` | (case) | df-app tray | |
@@ -1759,18 +1759,18 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | ops/paste.rs:400, 457, 462 | `claimed.contains` | (case) | `plan_paste`, `unique_name` | |
 | ops/trash.rs:316 | `orphans`: `item.name == name` (`OsString`) | (case) | `list` | Both sides come from `read_dir` |
 | ops/journal.rs:872, 911 | `read_link(link) != target` | (case) | undo | Link text compare |
-| fs/history.rs:54 | `History::push`: `dir == self.current` | (case) | tab history | |
-| fs/memory.rs:29, 53, 69 | `Recent`: `HashMap<PathBuf, V>`, `order` position | (case) | cursor memory | |
+| fs/history.rs:54 | `History::push`: `dir == self.current` | (case) | tab history | ✓ P3.19 |
+| fs/memory.rs:29, 53, 69 | `Recent`: `HashMap<PathBuf, V>`, `order` position | (case) | cursor memory | ✓ P3.19 |
 | fs/mod.rs:370, 462, 506 | Cursor and selection held by `name: String` | (case) | `DirState` | Names come from `read_dir` |
-| state/mod.rs:202, 305–318, 357, 367, 382–398 | `dirs: HashMap<PathBuf, Record>` keyed by the pane's path | (case) | app | Persisted keys vs navigated paths |
-| state/pins.rs:92–94 | `same_place`: `Path == Path` after `expand_home` | (case) | pins | |
-| du/cache.rs:220, 434, 478 | `records: HashMap<PathBuf, …>`, `parent() != Some(dir)`, `starts_with(root)` | (case) | folder sizes | |
-| du/scanner.rs:497, 604–614 | `tracked: HashMap<PathBuf, …>` | (case) | du scanner | |
-| git/status.rs:180–192, 217–233 | `files`/`dirs`/`collapsed: HashMap<PathBuf, …>`; `status_for` lookup and `ancestors()` | (case) | app:ui.rs:listing, app:grid.rs:paint, app:app.rs:sync_spot, git_line | Keys built from git's spelling joined to `root`, looked up with the pane's spelling |
-| git/status.rs:580–585 | `ancestor.starts_with(root)`, `ancestor == root` | (case) | rollup | |
-| git/cache.rs:92–93 | `repos`/`roots: HashMap<PathBuf, …>` | (case) | `Git` | |
-| sync/plan.rs:51–67 | Duplicate names in `HashSet<OsString>` | (case) | `roots` | |
-| sync/plan.rs:307–321 | `ours`/`theirs` `HashSet<&OsString>` | (case), mitigated by `case_twins` | `extras_in` | |
+| state/mod.rs:202, 305–318, 357, 367, 382–398 | `dirs: HashMap<PathBuf, Record>` keyed by the pane's path | (case) | app | Persisted keys vs navigated paths ✓ P3.19 |
+| state/pins.rs:92–94 | `same_place`: `Path == Path` after `expand_home` | (case) | pins | ✓ P3.19 |
+| du/cache.rs:220, 434, 478 | `records: HashMap<PathBuf, …>`, `parent() != Some(dir)`, `starts_with(root)` | (case) | folder sizes | ✓ P3.19 |
+| du/scanner.rs:497, 604–614 | `tracked: HashMap<PathBuf, …>` | (case) | du scanner | ✓ P3.19 |
+| git/status.rs:180–192, 217–233 | `files`/`dirs`/`collapsed: HashMap<PathBuf, …>`; `status_for` lookup and `ancestors()` | (case) | app:ui.rs:listing, app:grid.rs:paint, app:app.rs:sync_spot, git_line | Keys built from git's spelling joined to `root`, looked up with the pane's spelling ✓ P3.19 |
+| git/status.rs:580–585 | `ancestor.starts_with(root)`, `ancestor == root` | (case) | rollup | ✓ P3.19 |
+| git/cache.rs:92–93 | `repos`/`roots: HashMap<PathBuf, …>` | (case) | `Git` | ✓ P3.19 |
+| sync/plan.rs:51–67 | Duplicate names in `HashSet<OsString>` | (case) | `roots` | ✓ P3.19 |
+| sync/plan.rs:307–321 | `ours`/`theirs` `HashSet<&OsString>` | (case), mitigated by `case_twins` | `extras_in` | ✓ P3.19 |
 | sync/plan.rs:366–424 | `case_twins`, `fold`: explicit simple case folding (UTF-8 only) | case-aware | `extras_in` | The one place that already models a case-insensitive destination |
 | sync/mod.rs:367–383 | `removals`: `HashMap<(usize, &Path), usize>` | (case) | removals | Both sides come from the plan |
 | sync/rsync.rs:462–473, 814–839 | Root name maps `HashMap<OsString/&OsStr, usize>`, `items` by `(root, &Path)` | (case) | rsync plan, landed | rsync's spelling vs local names |

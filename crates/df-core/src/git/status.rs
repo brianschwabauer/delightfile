@@ -169,7 +169,9 @@ impl DirtyCounts {
     }
 }
 
-/// One repository's status, keyed by absolute path.
+/// One repository's status, keyed by absolute path — by [`crate::path::key`]
+/// of it, so a row spelled in another case than git's output (Windows) finds
+/// its dot. Look paths up through [`StatusData::status_for`], which keys them.
 ///
 /// Two maps rather than one, because a directory can carry *both*: `target/` may
 /// be ignored in its own right while also being the rollup of something. The
@@ -214,10 +216,11 @@ impl StatusData {
     /// of hash lookups and it is what makes `-unormal` affordable; the
     /// alternative, `-uall`, is a listing of every file in `node_modules`.
     pub fn status_for(&self, path: &Path) -> Option<FileStatus> {
-        if let Some(s) = self.files.get(path) {
+        let path = crate::path::key(path);
+        if let Some(s) = self.files.get(path.as_ref()) {
             return Some(*s);
         }
-        if let Some(s) = self.dirs.get(path) {
+        if let Some(s) = self.dirs.get(path.as_ref()) {
             return Some(*s);
         }
         if self.collapsed.is_empty() {
@@ -567,7 +570,9 @@ fn insert(data: &mut StatusData, root: &Path, raw: &[u8], status: FileStatus, ro
     let Ok(rel) = crate::platform::os::from_bytes(trimmed) else {
         return;
     };
-    let abs = root.join(rel);
+    let abs = crate::path::into_key(root.join(rel));
+    let root = crate::path::key(root);
+    let root = root.as_ref();
 
     if is_dir {
         merge(&mut data.dirs, abs.clone(), status);

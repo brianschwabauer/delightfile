@@ -48,7 +48,9 @@ pub fn roots(sources: &[PathBuf], dest_dir: &Path) -> Result<Vec<Root>> {
             dest_dir.display()
         )));
     }
-    let mut names: HashSet<OsString> = HashSet::new();
+    // Keyed ([`crate::path::key`]): on Windows `Photos` and `photos` land on
+    // one folder too.
+    let mut names: HashSet<PathBuf> = HashSet::new();
     let mut roots = Vec::with_capacity(sources.len());
     for src in sources {
         let src = normalize(src);
@@ -59,7 +61,7 @@ pub fn roots(sources: &[PathBuf], dest_dir: &Path) -> Result<Vec<Root>> {
             ));
         }
         let name = file_name(&src)?;
-        if !names.insert(name.to_os_string()) {
+        if !names.insert(crate::path::key(Path::new(name)).into_owned()) {
             return Err(DfError::Op(format!(
                 "two of the yanked items are called {}, and a sync would put both in one place",
                 name.to_string_lossy()
@@ -308,6 +310,11 @@ impl Walk<'_> {
         };
         let ours: HashSet<&OsString> = names.iter().collect();
         let twins = case_twins(names, &theirs);
+        // The source's names by [`crate::path::key`], made the first time a
+        // name is neither ours nor a twin: on Windows one the source has in
+        // another case is the same file, not an extra. On Unix the key is
+        // the name, which is not ours, so this never finds one.
+        let mut keyed: Option<HashSet<std::borrow::Cow<'_, Path>>> = None;
         for name in theirs.iter().filter(|name| !ours.contains(name)) {
             if let Some(twin) = twins.get(name) {
                 if let Some(&index) = placed.get(twin) {
@@ -316,6 +323,15 @@ impl Walk<'_> {
                         item.class = Class::Changed;
                     }
                 }
+                continue;
+            }
+            let keyed = keyed.get_or_insert_with(|| {
+                names
+                    .iter()
+                    .map(|name| crate::path::key(Path::new(name)))
+                    .collect()
+            });
+            if keyed.contains(&crate::path::key(Path::new(name))) {
                 continue;
             }
             self.extra(root, rel.join(name), &dst.join(name))?;

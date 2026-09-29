@@ -724,6 +724,43 @@ fn the_newer_of_the_two_answers_wins() {
     assert_eq!(children[0].totals.total_bytes, 900);
 }
 
+/// Where the platform folds case (Windows) a record is found in any case,
+/// and a child named off it keeps the spelling it was walked in; where case
+/// is kept, another case is another directory.
+#[test]
+fn a_record_is_found_in_either_case_where_the_platform_folds_it() {
+    use crate::test_support::abs;
+    let mut cache = DuCache::new();
+    let now = Instant::now();
+    cache.insert(
+        abs("/w/Work"),
+        DirStamp::default(),
+        now,
+        DuTotals {
+            total_bytes: 7,
+            ..DuTotals::default()
+        },
+        Vec::new(),
+        true,
+    );
+    assert_eq!(cache.get_stale(&abs("/w/work")).is_some(), cfg!(windows));
+    let names: Vec<String> = cache
+        .remembered_children(&abs("/W"), now)
+        .into_iter()
+        .map(|child| child.name)
+        .collect();
+    if cfg!(windows) {
+        assert_eq!(names, ["Work"], "the spelling, not the key");
+    } else {
+        assert!(names.is_empty(), "{names:?}");
+    }
+    assert_eq!(
+        cache.reusable_under(&abs("/W"), now).len(),
+        usize::from(cfg!(windows))
+    );
+    assert_eq!(cache.forget(&abs("/W/WORK")), cfg!(windows));
+}
+
 /// The parent's walk steps over a subtree the cache already knows, and still
 /// reports it as though it had counted it — so the totals are the same and the
 /// listing cannot tell the difference.

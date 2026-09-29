@@ -303,6 +303,28 @@ fn non_utf8_filenames_still_get_a_dot() {
     assert!(data.files.values().all(|s| *s == FileStatus::Modified));
 }
 
+/// Where the platform folds case (Windows) a row spelled in another case
+/// than git's output finds its dot, and the rollup its folder's; where case
+/// is kept, another case is another file.
+#[test]
+fn a_row_in_another_case_finds_its_dot_where_the_platform_folds_it() {
+    let bytes = framed(&[b"1 .M N... 100644 100644 100644 aaa bbb Src/Main.rs"]);
+    let data = parse_porcelain_v2(&bytes, &root());
+    assert_eq!(
+        data.status_for(&root().join("Src").join("Main.rs")),
+        Some(FileStatus::Modified)
+    );
+    assert_eq!(
+        data.status_for(&root().join("src").join("main.rs"))
+            .is_some(),
+        cfg!(windows)
+    );
+    assert_eq!(
+        data.status_for(&root().join("SRC")).is_some(),
+        cfg!(windows)
+    );
+}
+
 #[test]
 fn unicode_filenames_get_a_dot_on_every_platform() {
     let name = "ünïcödé — 日本語 🎬.txt";
@@ -690,6 +712,34 @@ fn the_cache_fills_in_asynchronously_and_bumps_the_generation() {
     // And a second ask is served from the cache.
     assert!(git.ensure(&repo.join("a.txt")).is_some());
     assert_eq!(git.generation(), 1);
+}
+
+/// Where the platform folds case (Windows) the cache finds a repository's
+/// status in any case of its root; where case is kept, another case is
+/// another directory.
+#[test]
+fn the_cache_finds_a_repository_in_another_case_where_the_platform_folds_it() {
+    if !git_installed() {
+        eprintln!("skipping: git is not installed");
+        return;
+    }
+    let t = TempTree::new("git-case");
+    let repo = t.dir("Repo");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), b"x\n").unwrap();
+    let git = Git::start(std::sync::Arc::new(|| {}));
+    git.ensure(&repo);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while git.status(&repo).is_none() && std::time::Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert!(git.status(&repo).is_some(), "a status landed");
+    let other = t.path().join("REPO");
+    assert_eq!(git.status(&other).is_some(), cfg!(windows));
+    assert_eq!(
+        git.status_for(&other.join("A.TXT")).is_some(),
+        cfg!(windows)
+    );
 }
 
 /// A repository is untrusted content: it can arrive in an archive, on a stick,

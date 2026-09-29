@@ -139,17 +139,19 @@ pub fn is_url(path: &Path) -> bool {
 }
 
 /// Is `ancestor` at or above `path` in the tree? Lexical, over normalized
-/// paths, so `/a/b` is an ancestor of `/a/b/c` but not of `/a/bc`.
+/// paths, so `/a/b` is an ancestor of `/a/b/c` but not of `/a/bc` — and over
+/// their [`crate::path::key`]s, so `C:\Users` is one of `c:\users\x` on
+/// Windows.
 pub fn is_ancestor(ancestor: &Path, path: &Path) -> bool {
-    let a = normalize(ancestor);
-    let p = normalize(path);
+    let a = crate::path::into_key(normalize(ancestor));
+    let p = crate::path::into_key(normalize(path));
     p.starts_with(&a)
 }
 
 /// Strictly below: an ancestor that is not the path itself.
 pub fn is_strict_ancestor(ancestor: &Path, path: &Path) -> bool {
-    let a = normalize(ancestor);
-    let p = normalize(path);
+    let a = crate::path::into_key(normalize(ancestor));
+    let p = crate::path::into_key(normalize(path));
     p != a && p.starts_with(&a)
 }
 
@@ -302,6 +304,16 @@ mod tests {
             !is_ancestor(Path::new("/a/b"), Path::new("/a/bc")),
             "a prefix of the *name* is not an ancestor"
         );
+    }
+
+    /// Ancestry is over keys: on Windows `C:\Users\Brian` is above
+    /// `c:\users\brian\x`; where case is kept, it is another folder.
+    #[test]
+    fn ancestry_folds_case_where_the_platform_does() {
+        let (upper, lower) = (fixture::abs("/Users/Brian"), fixture::abs("/users/brian/x"));
+        assert_eq!(is_ancestor(&upper, &lower), cfg!(windows));
+        assert_eq!(is_strict_ancestor(&upper, &lower), cfg!(windows));
+        assert!(!is_strict_ancestor(&upper, &fixture::abs("/users/brian")));
     }
 
     #[test]

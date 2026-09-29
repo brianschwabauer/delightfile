@@ -1077,6 +1077,18 @@ fn a_file_a_case_folding_card_lists_in_its_own_case_is_rewritten_not_trashed() {
     );
 }
 
+/// Two yanked folders whose names differ only in case land on one folder
+/// where the platform folds case (Windows), so the sync refuses them as it
+/// refuses two of one name; where it keeps case they are two.
+#[test]
+fn two_yanked_names_in_two_cases_are_one_place_where_the_platform_folds_it() {
+    let t = TempTree::new("sync-dup-case");
+    let a = t.dir("one/Photos");
+    let b = t.dir("two/photos");
+    let result = plan::roots(&[a, b], &t.dir("dst"));
+    assert_eq!(result.is_err(), cfg!(windows), "{result:?}");
+}
+
 /// On a volume that folds case, the destination's `photo.jpg` is the
 /// source's `Photo.JPG`: a stat of one spelling finds the other, so it is a
 /// change to write, not a new file beside an extra. Skipped on a volume

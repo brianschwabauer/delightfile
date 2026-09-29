@@ -341,7 +341,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `a_case_only_rename_changes_the_case_where_the_volume_folds_it` and
       `a_destination_in_another_case_is_the_same_file_where_the_volume_folds_case`;
       and where it keeps case, `a_rename_onto_a_hard_link_in_another_case_is_a_no_op`.
-- [ ] **P3.19** Lookup tables keyed on `path::key`: `state/mod.rs:202, 305–318,
+- [x] **P3.19** Lookup tables keyed on `path::key`: `state/mod.rs:202, 305–318,
       357, 367, 382–398` (`dirs` map: every `get` **and every write path**),
       `fs/memory.rs:29, 53, 69` (`Recent`), `ops.rs:124–135` (`is_ancestor`/
       `is_strict_ancestor`: both sides through `key` before `starts_with`),
@@ -353,6 +353,29 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       when the spelling is displayed. On Unix `key` is the identity, so this is a
       no-op there; the test is that Linux tests pass unchanged. Done when: each
       listed map goes through `key` and a Windows-shaped test per module exists.
+      — done (port/paths). Keyed at insert and lookup: the state store's
+      `dirs` (every getter, `clear`, `touch`, `update`, `parse`), `Recent`
+      (`remember`, `recall`, `forget`), `is_ancestor`/`is_strict_ancestor`,
+      the sync planner's yanked names and, after `case_twins`, a lazily built
+      keyed set of the source's names that keeps a destination name in another
+      case from being an extra, `History::push`'s "already here", `DuCache`
+      (every read and write; a record whose key is not its spelling keeps the
+      spelling, `path::keyed`, because `remembered_children` names children
+      off it) with the scanner's lookup into `reusable_under`, `StatusData`
+      (inserts, the rollup's bounds, `status_for`), the git cache's `repos`,
+      `roots` and `pending` (with `refresh_all` rescanning `RepoStatus::root`,
+      the spelling), and pins' `same_place`. Not keyed: the scanner's
+      `tracked` map (`du/scanner.rs:497, 604–614`), which one walk writes and
+      reads in its own spelling. The state file on Windows holds the folded
+      key; nothing shows it. Tests, one per module, each asserting the fold on
+      Windows and two places on Unix: `memory_and_history_key_a_place_as_the_platform_folds_case`,
+      `ancestry_folds_case_where_the_platform_does`,
+      `a_directory_is_one_record_in_either_case_where_the_platform_folds_it`,
+      `a_place_in_another_case_is_the_same_place_where_the_platform_folds_it`,
+      `two_yanked_names_in_two_cases_are_one_place_where_the_platform_folds_it`,
+      `a_record_is_found_in_either_case_where_the_platform_folds_it`,
+      `a_row_in_another_case_finds_its_dot_where_the_platform_folds_it`,
+      `the_cache_finds_a_repository_in_another_case_where_the_platform_folds_it`.
 - [ ] **P3.20** Leave as-is, with a Decisions-log line each: `ops/paste.rs:128–176,
       193, 400, 457, 462` (clipboard membership: both spellings come from
       `read_dir`), `ops/trash.rs:316`, `ops/journal.rs:872, 911`, `fs/mod.rs:370,
@@ -465,6 +488,22 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
   name), and skips a final `.` or `..` that the old split kept — while the
   platform's separator set is exactly `/` on Unix and `/` or `\` on
   Windows, which is the whole of the change the task wants.
+- 2026-09-29 — P3.19: the state store keeps only the key, so on Windows its
+  file holds each directory folded to lowercase. Reason: no one reads those
+  keys but the store, and a spelling beside each would be a second path per
+  record for nothing; the tabs, which are shown, are not keys and keep
+  theirs. `DuCache` keeps the spelling where the key differs
+  (`path::keyed`), because child names are read off it.
+- 2026-09-29 — P3.19: the du scanner's `tracked` map is not keyed. Reason:
+  one walk fills it and reads it back, every path in it spelled from the one
+  root it was given; the seam between spellings is the cache, whose lookup
+  (`reusable_under`) is keyed.
+- 2026-09-29 — P3.19: in the sync planner the keyed check comes after
+  `case_twins`, not in place of the exact `ours` set. Reason: a twin also
+  turns an unchanged file into a change (so its case is rewritten), which a
+  keyed `ours` set would hide; the keyed set only keeps what `case_twins`
+  refuses to pair (a name that folds to two) from being taken for an extra.
+  Built lazily, it costs Linux nothing where there is no extra.
 - 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
   did, not every one through `trim_trailing_separator`: `a//` stays `a/`
   and a typed `/` stays "no name given" on Linux.
