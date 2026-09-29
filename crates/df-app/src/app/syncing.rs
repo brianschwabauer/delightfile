@@ -135,7 +135,7 @@ impl App {
             ));
         }
         if !df_core::sync::rsync::available() {
-            return Err("Sync to a server needs rsync".to_string());
+            return Err(needs_rsync(df_core::platform::process::RSYNC_HINT));
         }
         let far: Vec<df_core::vfs::VfsPath> = match direction {
             Direction::Upload => crate::remote::at_of(dest).into_iter().collect(),
@@ -427,6 +427,19 @@ thread_local! {
     static TEST_SHELL: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Why a sync with a server cannot start here: no `rsync`, or one too old to
+/// run it ([`df_core::sync::rsync::available`] asks for 3.1 or newer), with
+/// what the platform adds to that (`RSYNC_HINT`): nothing on Linux, where the
+/// sentence is as it always was, and Homebrew's rsync on a Mac, whose own is
+/// always too old (02-macos.md M2.6).
+fn needs_rsync(hint: &str) -> String {
+    if hint.is_empty() {
+        "Sync to a server needs rsync".to_string()
+    } else {
+        format!("Sync to a server needs rsync — {hint}")
+    }
+}
+
 /// A path in a `sftp://` display path, as the server's `rsync` must be handed
 /// it: the vfs's own rule (`vfs::conn`'s `wire_path`). Empty is the service's
 /// root — the login directory, unless `vfs.toml` names another; absolute is
@@ -509,7 +522,7 @@ mod tests {
     use df_core::test_support::TempTree;
 
     use super::super::*;
-    use super::{remote_sync, server_path, SyncCard};
+    use super::{needs_rsync, remote_sync, server_path, SyncCard};
     use df_core::sync::rsync::{Direction, Host};
 
     /// An `App` opened on `dir`, with nothing read from this machine: the
@@ -856,6 +869,23 @@ mod tests {
         assert_eq!(server_path("photos", "/srv/"), PathBuf::from("/srv/photos"));
     }
 
+    /// With no rsync new enough, the refusal is Linux's sentence as it was,
+    /// and on a Mac it goes on to say which rsync to install (M2.6).
+    #[test]
+    fn a_sync_with_no_rsync_says_what_the_platform_needs() {
+        assert_eq!(needs_rsync(""), "Sync to a server needs rsync");
+        assert_eq!(
+            needs_rsync("needs rsync 3.1 or newer — `brew install rsync`"),
+            "Sync to a server needs rsync — needs rsync 3.1 or newer — `brew install rsync`"
+        );
+        let refusal = needs_rsync(df_core::platform::process::RSYNC_HINT);
+        assert_eq!(
+            refusal.contains("brew install rsync"),
+            cfg!(target_os = "macos"),
+            "{refusal}"
+        );
+    }
+
     #[test]
     fn a_sync_with_a_server_is_an_rsync_transfer_named_like_the_panes() {
         let host = Host::alias("showandtour1");
@@ -919,8 +949,10 @@ mod tests {
     fn y_on_a_server_row_then_alt_p_syncs_it_down_through_rsync() {
         use super::TEST_SHELL;
         use std::os::unix::fs::PermissionsExt;
+        // Skipped where there is no rsync 3.1 or newer: a Mac's own is 2.6.9
+        // or openrsync, which `available` turns away (M2.6).
         if !df_core::sync::rsync::available() {
-            eprintln!("rsync is not installed; skipping");
+            eprintln!("no rsync 3.1 or newer here; skipping");
             return;
         }
         let now = Instant::now();
