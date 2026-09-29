@@ -136,7 +136,8 @@ pub fn devices_from(objects: &[(String, Interfaces)]) -> Vec<Device> {
 /// where it can ask them. `$1` is the address, handed over as an *argument* by
 /// [`crate::open::spawn_detached`] and never spliced into this line: a URL is
 /// text somebody typed.
-pub const TERMINAL_MOUNT: &str = r#"setsid uwsm-app -- "${TERMINAL:-ghostty}" -e gio mount "$1""#;
+pub const TERMINAL_MOUNT: Option<&str> =
+    Some(r#"setsid uwsm-app -- "${TERMINAL:-ghostty}" -e gio mount "$1""#);
 
 /// How long a new mount is given to appear under gvfs-fuse's directory after
 /// `gio mount` has said it is done. gvfs-fuse hears about mounts over D-Bus, a

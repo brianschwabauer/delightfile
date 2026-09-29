@@ -7795,12 +7795,19 @@ impl App {
                 // terminal is somewhere it can. Nothing tells this program when
                 // the user has finished typing there, so the share turns up
                 // on the card's next listing — `M`, or `r` if it is up.
+                //
+                // A platform with no such terminal has no connect that asks
+                // for one either; were one to, this says so rather than
+                // leaving the question unanswered in silence.
+                let Some(terminal) = crate::platform::mounts::TERMINAL_MOUNT else {
+                    self.toasts.error(
+                        "A terminal for the server's questions is not available on this platform",
+                        now,
+                    );
+                    return;
+                };
                 let cwd = self.child_cwd();
-                match open::spawn_detached(
-                    crate::platform::mounts::TERMINAL_MOUNT,
-                    &[PathBuf::from(url)],
-                    &cwd,
-                ) {
+                match open::spawn_detached(terminal, &[PathBuf::from(url)], &cwd) {
                     Ok(()) => self
                         .toasts
                         .notice("Enter your credentials in the terminal", now),
@@ -26609,5 +26616,41 @@ mod tests {
         hesitate_on(&mut app, &ctx, "c");
         let keys: Vec<&str> = app.which_rows.iter().map(|row| row.keys.as_str()).collect();
         assert_eq!(keys, ["c"], "the card listed another chord's rows");
+    }
+
+    /// What a platform with no mounts of its own answers `M` with — an empty
+    /// listing (`platform::mounts::run` off Linux) — leaves the card up on its
+    /// Places and its connect row, where a failed listing would close it.
+    #[test]
+    fn an_empty_listing_leaves_the_places_and_the_connect_row() {
+        use crate::mounts::{Answer, Item, Line, Reply, Request};
+        let mut app = Fixture::new("empty-listing", &["a.txt"]);
+        // No services, so the card's cloud rows read nothing of this machine.
+        app.vfs = Some(Arc::new(df_core::vfs::Vfs::with_config(
+            df_core::vfs::VfsConfig::default(),
+            Vec::new(),
+            Arc::new(|| {}),
+        )));
+        let (worker, asked, answers) = crate::mounts::Mounts::detached();
+        app.udisks = Some(worker);
+        app.open_mounts();
+        assert_eq!(asked.try_recv().ok(), Some(Request::List));
+        answers
+            .send(Answer {
+                to: Request::List,
+                reply: Reply::Listing {
+                    devices: Vec::new(),
+                    phones: Vec::new(),
+                    shares: Vec::new(),
+                },
+            })
+            .expect("the app is listening");
+        app.poll_mounts(Instant::now());
+        let card = app.mounts.as_ref().expect("the card stayed up");
+        assert!(!card.loading);
+        let lines = card.lines();
+        assert!(lines.contains(&Line::Empty("no removable filesystems")));
+        assert!(lines.contains(&Line::Item(Item::Connect)));
+        assert!(lines.contains(&Line::Section("Places")));
     }
 }

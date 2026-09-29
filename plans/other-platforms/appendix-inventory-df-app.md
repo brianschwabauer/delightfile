@@ -46,11 +46,11 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 5107-5134 | `fn launch(&mut self, choice: &open::Choice, paths: Vec<PathBuf>, now: Instant)` → `open::spawn_detached(&choice.command, &paths, &cwd)` (5131) | Linux-only (runtime: opener strings) + Unix-only (via open.rs) | `o`/`O`/menu Open-with | Opener strings are df-core `DEFAULT_OPENERS` (crates/df-core/src/config.rs:192-275): `setsid uwsm-app -- …`, `"${TERMINAL:-ghostty}"`, `zeditor`, `google-chrome-stable`, `delightviewer`, `pinta`, `xdg-open "$1"`, `mpv`, `system-cmd-*`, `$(dirname "$1")`, `>/dev/null 2>&1`. |
 | 5136-5184 | `fn run_shell(&mut self, snippet: &str, paths: Vec<PathBuf>, block: bool, now: Instant)`: non-block → `open::spawn_detached` (5145); block → FnJob (Lane::Micro) → `open::run_blocking(&snippet, &paths, &cwd)` (5162) | Unix-only (compile via open.rs:131) | `;`, `:`, `block = true` openers | — |
 | 5528-5561 | `fn route_keys`: `press.text` used only when `press.chord` is `None` (multi-char commits 5536-5549, single char fallback 5553-5559) | macOS-differs | App::frame (13696) | See §3. |
-| 6278-6282 | `fn udisks(&mut self) -> &crate::mounts::Mounts` → `Mounts::start(Arc::new(move \|\| waker.wake()))` | Linux-only | open_mounts, mount_device, unmount_selected, eject_selected, refresh_mounts, poll_mounts | See mounts.rs block. |
-| 6283-6475 | `open_mounts` (6284), `mount_action` (6301), `mount_device` (6348), `mount_selected` (6362), `unmount_selected` (6396), `eject_selected` (6431), `refresh_mounts` (6467) → `Request::{List, Mount, Unmount, UnmountShare, Eject}` | Linux-only | `M` card keys `Enter`/`m`/`u`/`e`/`r` | — |
-| 6485-6545 | `fn connect(&mut self, url: String, now: Instant)`: FnJob → `crate::mounts::connect(&job_url)` (6498) | Linux-only | `PromptKind::Connect` submit (7773 via `mounts::connect_url`) | gio mount on the task engine. |
-| 6547-6589 | `fn connected(…, result: crate::mounts::Connected, …)`: `NeedsTerminal` → `open::spawn_detached(crate::mounts::TERMINAL_MOUNT, &[PathBuf::from(url)], &cwd)` (6575-6579) | Linux-only | App::poll_connects (6540) | — |
-| 6603-6655 | `fn poll_mounts` → `Reply::{Listing, Mounted, Unmounted, Ejected, Failed}` | Linux-only | frame | — |
+| 6278-6282 | `fn udisks(&mut self) -> &crate::mounts::Mounts` → `Mounts::start(Arc::new(move \|\| waker.wake()))` | Linux-only | open_mounts, mount_device, unmount_selected, eject_selected, refresh_mounts, poll_mounts | See mounts.rs block. ✓ S1.24 |
+| 6283-6475 | `open_mounts` (6284), `mount_action` (6301), `mount_device` (6348), `mount_selected` (6362), `unmount_selected` (6396), `eject_selected` (6431), `refresh_mounts` (6467) → `Request::{List, Mount, Unmount, UnmountShare, Eject}` | Linux-only | `M` card keys `Enter`/`m`/`u`/`e`/`r` | — ✓ S1.24 |
+| 6485-6545 | `fn connect(&mut self, url: String, now: Instant)`: FnJob → `crate::mounts::connect(&job_url)` (6498) | Linux-only | `PromptKind::Connect` submit (7773 via `mounts::connect_url`) | gio mount on the task engine. ✓ S1.24 |
+| 6547-6589 | `fn connected(…, result: crate::mounts::Connected, …)`: `NeedsTerminal` → `open::spawn_detached(crate::mounts::TERMINAL_MOUNT, &[PathBuf::from(url)], &cwd)` (6575-6579) | Linux-only | App::poll_connects (6540) | — ✓ S1.24 |
+| 6603-6655 | `fn poll_mounts` → `Reply::{Listing, Mounted, Unmounted, Ejected, Failed}` | Linux-only | frame | — ✓ S1.24 |
 | 7201-7255 | `fn set_mode(&mut self, mode: u32, now: Instant)`: `use std::os::unix::fs::PermissionsExt;` (7212); `std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))` (7243); comment 7226 "there is no `lchmod` on Linux" | Unix-only (compile) | App::spot_action (7185, `spot::Action::SetMode`) | Spot panel permission chips. |
 | 12078-12090 | `fn open_window(&mut self, dir: &Path, now: Instant) -> bool` → `self.windows.open(dir)` | portable (spawn); see window.rs | `C::NewWindow` in App::run (8900-8902), App::release_tab_drag (12404) | Second window = second process. |
 | 12428-12461 | `fn tick_drag`: `dnd::verb_for(pointer.toggle, pointer.alt)` (12442); `if !window.contains(at) && pointer.down { self.hand_off_drag(now) }` (12458-12461) | Linux-only (drag-out) | App::frame | winit has no drag-source API on macOS/Windows. |
@@ -509,7 +509,7 @@ Call sites outside the module:
 | (inbound) request.rs:351 | `Setup::from_env` | `df_core::state::state_path_from(var("XDG_STATE_HOME"), var("HOME"))` |
 | tests/portal.rs | integration | runs `CARGO_BIN_EXE_delightfile --portal` on a private `dbus-daemon` (see §7) |
 
-#### `src/mounts.rs` — 2,875 lines (non-test 1-1887, `mod tests` 1888-2875, 21 tests) ✓ S1.21 (split)
+#### `src/mounts.rs` — 2,875 lines (non-test 1-1887, `mod tests` 1888-2875, 21 tests) ✓ S1.21 (split), S1.24 (stubs)
 
 What it rests on:
 - **udisks2 over the system bus** through `crate::dbus` (88-96; `Bus::system` 1036).
@@ -586,8 +586,8 @@ Call sites outside the module:
 |---|---|---|
 | app.rs:342-348 | `struct PendingConnect` | `label: String` (from `crate::mounts::Address::label`), `slot: Arc<std::sync::Mutex<Option<crate::mounts::Connected>>>` |
 | app.rs:512 | `enum OverlayGeom` | `Mounts(crate::mounts::Geometry)` |
-| app.rs:1355, 1357 | `App` fields | `udisks: Option<crate::mounts::Mounts>`, `mounts: Option<crate::mounts::Card>` |
-| app.rs:6278-6282 | `App::udisks` | `crate::mounts::Mounts::start(Arc::new(move \|\| waker.wake()))` |
+| app.rs:1355, 1357 | `App` fields | `udisks: Option<crate::mounts::Mounts>`, `mounts: Option<crate::mounts::Card>` ✓ S1.24 |
+| app.rs:6278-6282 | `App::udisks` | `crate::mounts::Mounts::start(Arc::new(move \|\| waker.wake()))` ✓ S1.24 |
 | app.rs:6287 | `App::open_mounts` | `ask(Request::List)` |
 | app.rs:6302-6346 | `App::mount_action` | `Item::{Disk, Place, Share, Connect}` |
 | app.rs:6348-6360 | `App::mount_device` | `ask(Request::Mount(device.object))` (6353) |
@@ -595,9 +595,9 @@ Call sites outside the module:
 | app.rs:6396-6430 | `App::unmount_selected` | `ask(Request::UnmountShare(url))` (6410), `ask(Request::Unmount(device.object))` (6427) |
 | app.rs:6431-6465 | `App::eject_selected` | `ask(Request::Eject(drive))` (6461) |
 | app.rs:6467-6470 | `App::refresh_mounts` | `ask(Request::List)` (6469) |
-| app.rs:6486-6545 | `App::connect` | `Address::parse(&url).map(\|a\| a.label())` (6487-6488); FnJob `crate::mounts::connect(&job_url)` (6498) |
-| app.rs:6547-6589 | `App::connected` | `Connected::{Mounted, NeedsTerminal, Failed}`; `open::spawn_detached(crate::mounts::TERMINAL_MOUNT, …)` (6575-6579) |
-| app.rs:6603-6655 | `App::poll_mounts` | `Reply::{Listing, Mounted, Unmounted, Ejected, Failed}` (6617-6635); `ask(Request::List)` (6649) |
+| app.rs:6486-6545 | `App::connect` | `Address::parse(&url).map(\|a\| a.label())` (6487-6488); FnJob `crate::mounts::connect(&job_url)` (6498) ✓ S1.24 |
+| app.rs:6547-6589 | `App::connected` | `Connected::{Mounted, NeedsTerminal, Failed}`; `open::spawn_detached(crate::mounts::TERMINAL_MOUNT, …)` (6575-6579) ✓ S1.24 |
+| app.rs:6603-6655 | `App::poll_mounts` | `Reply::{Listing, Mounted, Unmounted, Ejected, Failed}` (6617-6635); `ask(Request::List)` (6649) ✓ S1.24 |
 | app.rs:7773 | `App::submit_prompt` | `PromptKind::Connect => crate::mounts::connect_url(&text)` |
 | app.rs:9949 | `App::overlay_geometry` | `crate::mounts::geometry(area, card)` |
 | app.rs:15692 | `App::frame` | `crate::mounts::paint(&paint, area, card, geometry, &self.hovers, &self.ripples)` |
