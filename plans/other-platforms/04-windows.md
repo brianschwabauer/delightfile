@@ -313,7 +313,13 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 - [ ] **W4.26** Tests: Windows twins for `crumbs`, `typed_path`, `shorten_home`,
       `save_target`, `parse_file_uri`; `#[cfg(unix)]` on the df-app tests appendix B
       §7 flags that S1.33 did not already gate. Done when: `cargo test -p df-app`
-      green on the runner.
+      green on the runner. Phase 3 (port/paths) did the `crumbs` twin (W4.9)
+      and three fixtures: the tab tests list a temp folder of forty files, not
+      `/` (a drive's root on the runner holds a handful), and the sync card
+      and state-store tests read labels and keys as the platform writes them.
+      What the runner still failed at the end of Phase 3 (23 of 1,093) is
+      listed by cause in `03-paths.md`'s Decisions log (2026-09-29, "df-app
+      on the Windows runner").
 - [ ] **W4.33** `platform::appearance` Windows body (S1.35's surface: `Desktop`,
       `Connect`, `session`): the system's light or dark for `[flavor] mode =
       "auto"`, in place of the stub that answers nothing and says `Link::Gone`.

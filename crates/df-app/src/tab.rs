@@ -1217,10 +1217,23 @@ mod tests {
     /// test below is about — a *fresh* one snaps rather than slides, and that
     /// is its own test.
     fn listing(now: Instant) -> Listing {
-        // `/` always has entries, which is what takes the listing out of its
-        // fresh state on the first `set_first`.
-        let mut l = Listing::new("/", &MgrConfig::default(), SortOptions::default(), now);
-        l.dir.load_blocking().expect("read /");
+        // A folder of forty files, read once: rows enough for every scroll
+        // below on every platform — a Windows drive's root, which `/` is
+        // there, may hold only a handful. Having entries is what takes the
+        // listing out of its fresh state on the first `set_first`; the folder
+        // itself is gone again when the tree drops, and nothing here reads it
+        // twice.
+        let tree = df_core::test_support::TempTree::new("tab-listing");
+        for i in 0..40 {
+            tree.file(format!("file-{i:02}.txt"), b"x");
+        }
+        let mut l = Listing::new(
+            tree.path(),
+            &MgrConfig::default(),
+            SortOptions::default(),
+            now,
+        );
+        l.dir.load_blocking().expect("read the folder");
         l.set_first(0, now);
         l
     }
