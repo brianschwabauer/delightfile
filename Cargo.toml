@@ -70,6 +70,15 @@ egui-winit = { version = "0.35.0", default-features = false, features = [
     "x11",
 ] }
 winit = "0.30.13"
+# macOS only: AppKit and Foundation, for df-app's `platform/macos` bodies (the
+# pasteboard, drag-out, volumes, the appearance). **Not new crates in the
+# build**: these are the versions winit 0.30.13 compiles on macOS, so naming
+# them costs only the few extra classes each crate's features switch on
+# (plans/other-platforms/00-ground-rules.md §3). Cargo.lock also holds objc2
+# 0.6 and objc2-foundation 0.3 through wgpu and cpal; those are not these.
+objc2 = "0.5.2"
+objc2-foundation = "0.2.2"
+objc2-app-kit = "0.2.2"
 pollster = "1.0.1"
 miniz_oxide = "0.8"
 # The bulk-rename template's `re` transform (df-core `rename::template`). No
