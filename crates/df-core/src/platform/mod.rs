@@ -54,7 +54,7 @@
 //! | `user` | `uid() -> u32` | `getuid` (unix) | unix | `0` |
 //! | `user` | `cache_suffix() -> String` (the `yazi-<suffix>` thumbnail directory) | the uid (unix) | unix | `"0"`, yazi's `uid_or_zero` |
 //! | `user` | `user_name(uid)`, `group_name(gid)` `-> Option<&'static str>` | `/etc/passwd`, `/etc/group`, read once | `getpwuid_r` / `getgrgid_r`, each id asked once | `None` |
-//! | `thread` | `lower_priority(nice: i32) -> bool` (called with 1–19 by [`crate::thread::lower_priority`]) | `setpriority(PRIO_PROCESS, 0, nice)`: this thread | nothing, `false` (M2.5) | nothing, `false` |
+//! | `thread` | `lower_priority(nice: i32) -> bool` (called with 1–19 by [`crate::thread::lower_priority`]) | `setpriority(PRIO_PROCESS, 0, nice)`: this thread | `pthread_set_qos_class_self_np(UTILITY)`: this thread | nothing, `false` |
 //! | `time` | `local_civil(secs: i64) -> Option<rename::facts::Civil>` | `localtime_r` (unix) | unix | `localtime_s` |
 //! | `dirs` | `home`, `config_dir`, `state_dir`, `data_dir`, `cache_dir`, `runtime_dir`, `temp_dir`: `fn() -> Option<PathBuf>` | XDG, `$HOME` fallbacks (unix) | unix, the same (D5.1) | `%USERPROFILE%` and `%TEMP%`; the rest `None` (D5.1) |
 //! | `os` | `as_bytes(&OsStr) -> Result<Cow<[u8]>>`, `from_bytes(&[u8]) -> Result<OsString>` (P3.1) | the bytes, never an error (unix) | unix | UTF-8; `Unsupported("non-Unicode file name")` otherwise |
