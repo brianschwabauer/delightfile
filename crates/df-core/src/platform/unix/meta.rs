@@ -54,6 +54,12 @@ pub fn is_hidden(name: &OsStr, _meta: &Metadata) -> bool {
     name.as_bytes().first() == Some(&b'.')
 }
 
+/// Whether a file with this name and `st_mode` runs: an execute bit, for
+/// anyone. The name says nothing here.
+pub fn is_executable(_name: &OsStr, mode: u32) -> bool {
+    mode & 0o111 != 0
+}
+
 /// The device the file is on (`st_dev`).
 pub fn dev(meta: &Metadata) -> u64 {
     meta.dev()

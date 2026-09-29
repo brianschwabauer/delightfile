@@ -399,7 +399,12 @@ pub fn kind_for_name(name: &str, mime: &str, mode: u32) -> FileKind {
     // nothing about a socket either — every socket on the machine is 0755, and
     // reading that as "you can run this" was the bug — so the rule only applies
     // to a file the mode says is regular, or to a mode with no type bits to ask.
-    if kind == FileKind::Binary && mode & 0o111 != 0 && !is_special_mode(mode) {
+    // Whether it runs is the platform's to say: an execute bit on Unix, the
+    // extension (`PATHEXT`) on Windows, which has no bit.
+    if kind == FileKind::Binary
+        && crate::platform::meta::is_executable(std::ffi::OsStr::new(name), mode)
+        && !is_special_mode(mode)
+    {
         return FileKind::Executable;
     }
     kind
@@ -623,14 +628,30 @@ mod tests {
         assert_eq!(kind("deploy.sh"), FileKind::Executable);
         assert_eq!(kind("libfoo.so"), FileKind::Executable);
         assert_eq!(kind("game.exe"), FileKind::Executable);
-        // A blob with the bit set — the case the name cannot answer.
         assert_eq!(
-            kind_for_name("a.out", "application/octet-stream", 0o755),
-            FileKind::Executable
+            classify(
+                Kind::File,
+                "setup.exe",
+                "application/x-msdownload",
+                0o100_644
+            ),
+            FileKind::Executable,
+            "by its name, on every platform"
+        );
+        // A blob the name cannot answer for: the platform says whether it
+        // runs — the execute bit on Unix, the extension (`PATHEXT`) on
+        // Windows, which has no bit.
+        assert_eq!(
+            kind_for_name("a.out", "application/octet-stream", 0o755) == FileKind::Executable,
+            cfg!(unix)
         );
         assert_eq!(
             kind_for_name("a.out", "application/octet-stream", 0o644),
             FileKind::Binary
+        );
+        assert_eq!(
+            kind_for_name("OLD.COM", "application/octet-stream", 0o644) == FileKind::Executable,
+            cfg!(windows)
         );
         // …and the bit on a picture means nothing.
         assert_eq!(

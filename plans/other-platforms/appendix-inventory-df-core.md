@@ -143,9 +143,9 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 315–344 | `pub fn classify(kind, name, mime, mode: u32)` → `is_special_mode(mode)` | Windows-differs | core:fs/entry.rs:from_parts; core:vfs/mod.rs:remote_entry; app:trashview.rs:row_from | A mode of 0 is treated as "unknown" and falls through to name rules |
-| 351–357 | `const S_IFMT = 0o170_000`, `S_IFREG = 0o100_000`; `is_special_mode` | Windows-differs | `classify`, `kind_for_name` | Unix `st_mode` type encoding |
-| 402 | `kind_for_name`: `mode & 0o111 != 0` → `FileKind::Executable` | Windows-differs | `classify`; `pub fn kind_for_name` | Windows has no execute bit |
+| 315–344 | `pub fn classify(kind, name, mime, mode: u32)` → `is_special_mode(mode)` | Windows-differs | core:fs/entry.rs:from_parts; core:vfs/mod.rs:remote_entry; app:trashview.rs:row_from | A mode of 0 is treated as "unknown" and falls through to name rules ✓ P3.28 |
+| 351–357 | `const S_IFMT = 0o170_000`, `S_IFREG = 0o100_000`; `is_special_mode` | Windows-differs | `classify`, `kind_for_name` | Unix `st_mode` type encoding ✓ P3.28 |
+| 402 | `kind_for_name`: `mode & 0o111 != 0` → `FileKind::Executable` | Windows-differs | `classify`; `pub fn kind_for_name` | Windows has no execute bit ✓ P3.28 |
 
 ### fs/owner.rs
 

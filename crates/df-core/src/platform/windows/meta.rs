@@ -132,6 +132,26 @@ pub fn is_hidden(name: &OsStr, meta: &Metadata) -> bool {
     name.to_string_lossy().starts_with('.') || meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0
 }
 
+/// Whether a file with this name runs: its extension is one `PATHEXT` names
+/// (`.COM;.EXE;.BAT;.CMD` when it is unset), in any case. Windows has no
+/// execute bit, and the mode made up here never has one, so `mode` says
+/// nothing. `PATHEXT` is read once: this is asked for every row of a listing.
+pub fn is_executable(name: &OsStr, _mode: u32) -> bool {
+    static PATHEXT: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let known = PATHEXT.get_or_init(|| {
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .filter_map(|ext| ext.strip_prefix('.'))
+            .map(str::to_string)
+            .collect()
+    });
+    let Some(ext) = Path::new(name).extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    known.iter().any(|known| known.eq_ignore_ascii_case(ext))
+}
+
 /// An `st_mode` made up from what Windows knows: a link is `lrwxrwxrwx`, a
 /// directory `drwxr-xr-x`, a file `-rw-r--r--`, or `-r--r--r--` when it is
 /// read-only.

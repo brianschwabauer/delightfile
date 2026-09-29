@@ -54,6 +54,7 @@
 //! | `meta` | `dev`, `ino`, `nlink`, `blocks_bytes` `-> u64`; `mode`, `uid`, `gid` `-> u32`; `change_time -> (i64, i64)`; `mtime -> i64`; each `fn(&Metadata)` | `MetadataExt` (unix) | unix | `0`, `0`, `1`, the size (W4.35); a mode made from the type and read-only flag; `0`, `0`; the last write |
 //! | `meta` | `Identity { dev, ino, nlink }`; `identity(path, &Metadata) -> io::Result<Identity>` (the `symlink_metadata`: not through a link); `maybe_linked(&Metadata) -> bool` (P3.4) | off the `stat` (unix) | unix | `GetFileInformationByHandle` on a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`; any regular file may be linked |
 //! | `meta` | `is_hidden(name: &OsStr, &Metadata) -> bool` (the row's own metadata) (P3.4) | a leading dot (unix) | unix: `UF_HIDDEN` not read | a leading dot or `FILE_ATTRIBUTE_HIDDEN` |
+//! | `meta` | `is_executable(name: &OsStr, mode: u32) -> bool` (a row the name cannot classify, P3.28) | `mode & 0o111` (unix) | unix | the extension in `PATHEXT`, read once |
 //! | `user` | `uid() -> u32` | `getuid` (unix) | unix | `0` |
 //! | `user` | `cache_suffix() -> String` (the `yazi-<suffix>` thumbnail directory) | the uid (unix) | unix | `"0"`, yazi's `uid_or_zero` |
 //! | `user` | `user_name(uid)`, `group_name(gid)` `-> Option<&'static str>` | `/etc/passwd`, `/etc/group`, read once | `None` (M2.4) | `None` |

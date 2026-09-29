@@ -409,12 +409,20 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `path::key`, so `C:\Users` and `c:\users` share their prefix on Windows
       (Unix: the equality it was). `another_drive_is_linked_absolutely` has
       `C:\a` → `D:\b`, a share → a drive, and one drive in two cases.
-- [ ] **P3.28** `fs/kind.rs:315–357, 402` decides `Executable` by `mode & 0o111`;
+- [x] **P3.28** `fs/kind.rs:315–357, 402` decides `Executable` by `mode & 0o111`;
       with the synthesized Windows mode nothing is executable. Add
       `platform::meta::is_executable(name: &OsStr, mode: u32) -> bool` (Unix: the
       mode test as today; Windows: extension in `PATHEXT`) and call it from
       `classify`. Done when: `classify("setup.exe")` is `Executable` under
-      `cfg!(windows)` in a test; Linux tests unchanged.
+      `cfg!(windows)` in a test; Linux tests unchanged. — done (port/paths).
+      The call is in `kind_for_name`, where `classify` reaches the rule;
+      Windows reads `PATHEXT` once (`OnceLock`), since it is asked per row.
+      `setup.exe` is `Executable` on every platform already, by the extension
+      table; the test that tells the two rules apart has a blob with an
+      execute bit (`Executable` on Unix only) and `OLD.COM` (Windows only),
+      and keeps the Linux assert under `cfg!(unix)`. A remote or archive row
+      with `0o755` and no known extension is no longer marked runnable on
+      Windows; the plan's rule accepts that.
 
 ## 5. Names (appendix §3.5 and the Windows rules)
 
