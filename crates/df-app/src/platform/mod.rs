@@ -47,6 +47,7 @@
 //! | `pdfium::candidates` | `fn() -> Vec<PathBuf>`, most specific first, before the system loader | `$DF_PDFIUM_LIB`, `~/.local/lib/{delightfile,delightviewer}/`, the dev `target/` | macOS: `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/`, `~/.local/lib/delightfile/`; Windows: `$DF_PDFIUM_LIB`, the executable's directory | S1.30 |
 //! | `window::attributes` | `fn(title: &str, app_id: &str) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title, size, Option read as Alt; Windows: title, size | S1.27 |
 //! | `fonts::dirs` | `fn() -> Vec<PathBuf>`, where a Nerd Font is looked for, in order | `/usr/share/fonts/…`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts` | macOS: `~/Library/Fonts`, `/Library/Fonts`, `/System/Library/Fonts{,/Supplemental}`; Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, `C:\Windows\Fonts` | S1.29 |
+//! | `keys::mods` | `fn(winit::keyboard::ModifiersState) -> df_core::keymap::Mods`, the held modifiers as the keymap names them | each as itself | macOS: Command or Control is `ctrl`, never `super_key`; Windows: as Linux | M2.20 |
 //! | `gfx::PREFERRED_BACKENDS` | `wgpu::Backends`, the first instance's | `VULKAN` | macOS `METAL`, Windows `DX12` | S1.28 |
 //! | `gfx::PREFERRED_NAME` | `&str`, what the log calls them | `"Vulkan"` | `"Metal"`, `"DX12"` | S1.28 |
 //! | `icon::{draw, Icon, Rgba, HOTSPOT}` | the drag icon's pixels | portable, drawn for the Wayland drag | same, unused until a native drag-out | S1.22 |

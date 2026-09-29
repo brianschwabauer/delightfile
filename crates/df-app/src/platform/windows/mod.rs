@@ -13,6 +13,7 @@ pub mod clipboard;
 pub mod device;
 pub mod fonts;
 pub mod gfx;
+pub mod keys;
 pub mod mounts;
 pub mod open;
 pub mod pdfium;
