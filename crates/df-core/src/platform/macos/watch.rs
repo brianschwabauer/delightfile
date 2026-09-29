@@ -244,15 +244,21 @@ mod tests {
         }));
         assert!(bell.load(Ordering::SeqCst) > 0, "the notifier was rung");
 
+        // One refresh per DEBOUNCE of the burst, whatever it holds: the runner
+        // takes a good part of a second to write 200 files, and that is
+        // several windows, each one refresh — never one per file.
+        let started = Instant::now();
         for i in 0..200 {
             t.file(format!("watched/burst{i}.txt"), b"x");
         }
+        let spread = (started.elapsed().as_millis() / DEBOUNCE.as_millis()) as usize + 2;
         std::thread::sleep(DEBOUNCE * 4);
         let burst = watcher.drain();
         assert!(
-            (1..=4).contains(&burst.len()),
-            "200 files are a handful of refreshes: {burst:?}"
+            (1..=spread).contains(&burst.len()),
+            "200 files over {spread} debounce windows: {burst:?}"
         );
+        assert!(burst.iter().all(|e| *e == WatchEvent::Changed(dir.clone())));
 
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(first(&watcher, Duration::from_secs(5), |e| {

@@ -1700,15 +1700,19 @@ fn a_file_landing_in_a_watched_directory_raises_a_refresh() {
     );
 
     // A burst is one refresh, not one per file: DEBOUNCE exists so a
-    // `git checkout` costs a single rescan.
+    // `git checkout` costs a single rescan. A burst that takes longer to
+    // write than a few DEBOUNCEs (200 files on a slow CI disk) is one
+    // refresh per DEBOUNCE of it, which is the deadline doing its job.
+    let started = Instant::now();
     for i in 0..200 {
         tmp.file(&format!("burst{i}.txt"), b"x");
     }
+    let spread = (started.elapsed().as_millis() / DEBOUNCE.as_millis()) as usize + 2;
     std::thread::sleep(DEBOUNCE * 4);
     let events = watcher.drain();
     assert!(
-        events.len() <= 4,
-        "200 files should debounce into a handful of refreshes, got {}",
+        events.len() <= spread.max(4),
+        "200 files over {spread} debounce windows should be a handful of refreshes, got {}",
         events.len()
     );
     assert!(events.iter().all(|e| matches!(e, WatchEvent::Changed(_))));
