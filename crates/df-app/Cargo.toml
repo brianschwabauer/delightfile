@@ -88,12 +88,16 @@ objc2.workspace = true
 objc2-foundation = { workspace = true, features = [
     "NSArray",
     "NSData",
+    "NSDictionary",
     "NSEnumerator",
+    "NSError",
+    "NSFileManager",
     "NSGeometry",
     "NSKeyValueObserving",
     "NSString",
     "NSThread",
     "NSURL",
+    "NSValue",
 ] }
 objc2-app-kit = { workspace = true, features = [
     "NSAppearance",
@@ -103,7 +107,10 @@ objc2-app-kit = { workspace = true, features = [
     "NSResponder",
     "NSView",
     "NSWindow",
+    "NSWorkspace",
 ] }
+# `statfs`, for where a volume was mounted from. Already in the build.
+libc.workspace = true
 
 [dev-dependencies]
 # The `TempTree` fixture and PLAN §9's gnarly names, shared rather than

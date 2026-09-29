@@ -37,7 +37,7 @@
 //! | `desktop::start` | `fn(&ActiveEventLoop, &Window, app::Waker) -> Option<Desktop>` | adopts winit's Wayland connection | macOS: always `Some`; Windows: `None` | S1.22 |
 //! | `desktop::pointer_position` | `fn(&Window) -> Option<(f32, f32)>`, logical points, for a drop winit reports | `None` (Wayland has no query, and never reports one) | macOS: the window's pointer (`mouseLocationOutsideOfEventStream`) in winit's flipped view (M2.11); Windows: `None` until W4.17 | S1.32 |
 //! | `desktop::{Event, PasteFailure}` | the events `Desktop::poll` answers in | portable, one definition | same | S1.22 |
-//! | `mounts::run` | `fn(Receiver<mounts::Request>, Sender<mounts::Answer>, Notifier, mounts::Gio)`, the Places card worker's thread | udisks2 over the system bus, `gio mount -u`, `gio mount -li` | an empty listing; any other request `Failed("Not available on this platform")` | S1.24 |
+//! | `mounts::run` | `fn(Receiver<mounts::Request>, Sender<mounts::Answer>, Notifier, mounts::Gio)`, the Places card worker's thread | udisks2 over the system bus, `gio mount -u`, `gio mount -li` | macOS: `NSFileManager`'s mounted volumes, the local ones disks and the rest shares, unmount and eject through `NSWorkspace`, `Mount` answered that macOS mounts disks itself (M2.14); Windows: an empty listing, any other request `Failed("Not available on this platform")` | S1.24 |
 //! | `mounts::{connect, mount_gio}` | `fn(&str, &mounts::Gio) -> mounts::Connected` | `gio mount`, and where the mount landed | `Connected::Failed` | S1.24 |
 //! | `mounts::system_gio` | `fn() -> mounts::Gio` | runs `gio` | answers every run `Unsupported` | S1.24 |
 //! | `mounts::Monitor` | `start(Notifier) -> Option<Monitor>`, `gone(&mut self) -> bool`, `started(&self) -> Instant`, `drain(&self) -> Vec<mounts::Event>` | `gio mount --monitor --detail` | `start` is `None`; no value exists | S1.24 |
@@ -73,6 +73,11 @@ mod unix;
 /// edited.
 #[cfg(any(target_os = "macos", test))]
 mod pasteboard;
+
+/// The Places card's rows from the volumes macOS has mounted: macOS's, and
+/// compiled in every target's tests for the same reason.
+#[cfg(any(target_os = "macos", test))]
+mod volumes;
 
 #[cfg(target_os = "linux")]
 mod linux;

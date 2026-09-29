@@ -119,9 +119,11 @@
 //! Everything here that talks to this machine — udisks2, `gio`, gvfs-fuse's
 //! directory and the watcher — is Linux's, and lives with the worker's loop in
 //! `crate::platform::mounts`. This module is the card, the model, and the
-//! readers of what gio prints, which are pure and tested here. A platform
-//! with no body of its own yet has a worker that lists nothing and refuses
-//! the rest, so its card is the Places, the cloud rows and the connect row.
+//! readers of what gio prints, which are pure and tested here. On macOS the
+//! worker lists the volumes the system has mounted and puts them away
+//! through `NSWorkspace` (`crate::platform::volumes`). A platform with no
+//! body of its own yet has a worker that lists nothing and refuses the
+//! rest, so its card is the Places, the cloud rows and the connect row.
 //!
 //! ## When udisks2 is not there
 //!
