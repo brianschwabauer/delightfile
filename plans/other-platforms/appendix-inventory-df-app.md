@@ -143,7 +143,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 214-217 | `-V`/`--version` → `format!("delightfile {}\n", env!("CARGO_PKG_VERSION"))` | portable | main | — |
 | 449-459 | `pub fn write_cwd_file(path: &Path, cwd: &Path)`: `std::fs::write(path, cwd.as_os_str().as_encoded_bytes())` | Windows-differs (bytes are WTF-8 on Windows; no newline) | App::finish (16359) | Consumer is the `Super+F` shell function / yazi-style wrapper. |
 | 461-478 | `pub fn write_chooser_file(path: &Path, paths: &[PathBuf])`: each `as_encoded_bytes()` + `b'\n'` | Windows-differs | App::finish (16348) | Consumer: termfilechooser wrapper / `portal::request::read_picked`. |
-| 44, 226, 362-372, 541 (at 7ad55ad; row added 2026-09-29 by the df-app agent) | `use std::os::unix::ffi::OsStrExt`; `parse` tests `arg.as_bytes().starts_with(b"-")`; `flag` strips `--name=` off `arg.as_bytes()` and rebuilds the value with `OsStr::from_bytes`; the test `a_path_that_is_not_utf8_is_kept_byte_for_byte` uses `OsStringExt::from_vec` | Unix-only (compile; Windows) | main (`cli::parse(std::env::args_os().skip(1))`) | Arrived with 7ad55ad. Second pass: S1.36 (through `df_core::platform::os`). |
+| 44, 226, 362-372, 541 (at 7ad55ad; row added 2026-09-29 by the df-app agent) | `use std::os::unix::ffi::OsStrExt`; `parse` tests `arg.as_bytes().starts_with(b"-")`; `flag` strips `--name=` off `arg.as_bytes()` and rebuilds the value with `OsStr::from_bytes`; the test `a_path_that_is_not_utf8_is_kept_byte_for_byte` uses `OsStringExt::from_vec` | Unix-only (compile; Windows) | main (`cli::parse(std::env::args_os().skip(1))`) | Arrived with 7ad55ad. Second pass: S1.36 (through `df_core::platform::os`). ✓ S1.36 |
 
 ### src/clipboard.rs (693 lines; non-test 1-501)
 

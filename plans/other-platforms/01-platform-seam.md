@@ -767,7 +767,7 @@ their native clipboards *are* synchronous.
       Linux behaviour is unchanged, and df-app compiles on the macOS and Windows
       runners with the stubs. — done 631246a, Linux verified (the stubs type-check
       when selected on Linux), other targets unverified until CI
-- [ ] **S1.36** `cli.rs` reads an argument as bytes (arrived with 7ad55ad, after
+- [x] **S1.36** `cli.rs` reads an argument as bytes (arrived with 7ad55ad, after
       this plan): `parse` asks `OsStrExt::as_bytes(arg).starts_with(b"-")`,
       `flag` splits `--name=value` on the bytes and rebuilds the value with
       `OsStr::from_bytes`, and `a_path_that_is_not_utf8_is_kept_byte_for_byte`
@@ -779,6 +779,17 @@ their native clipboards *are* synchronous.
       not UTF-8 is a Unix path) or a Windows twin with an unpaired surrogate.
       Done when: `std::os::unix` is gone from `cli.rs`'s non-test code, the `cli`
       tests pass on Linux, and df-app compiles on the Windows runner.
+      *As built:* `parse` asks `is_option(&arg)`, `as_bytes(arg)` starting with
+      `-`; `flag` strips `--name=` off `as_bytes(arg)` and makes the value with
+      `from_bytes`, so `Flag::Value` holds an `OsString` rather than borrowing
+      the argument. On Linux and macOS both conversions are the old exact
+      bytes. On Windows an argument with no UTF-8 (a lone surrogate) is a path
+      rather than an option — an option's name has to be text — and a value
+      that could not be spelled would make the argument not that flag (it
+      cannot happen: a value cut from valid UTF-8 at an ASCII `=` is valid).
+      The non-UTF-8 test is `#[cfg(unix)]`; no Windows twin, since W4.26 owns
+      the Windows twins. — done, uncommitted 2026-09-29, Linux verified, other
+      targets unverified until CI
 
 ## 4. Closing the phase
 

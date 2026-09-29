@@ -41,7 +41,6 @@
 //! showing a folder means showing it among its siblings.
 
 use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// What the command line asked for.
@@ -238,7 +237,7 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Outcome {
     let mut reveal = false;
     for arg in args {
         count += 1;
-        if rest_are_paths || !arg.as_bytes().starts_with(b"-") {
+        if rest_are_paths || !is_option(&arg) {
             if out.start.is_some() {
                 return Outcome::Fail(format!(
                     "only one path can be opened (got `{}` as well)",
@@ -362,13 +361,23 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Outcome {
     Outcome::Run(out)
 }
 
+/// Whether `arg` is spelled as an option: it starts with `-`.
+///
+/// Read off the argument's bytes ([`df_core::platform::os::as_bytes`]), the
+/// kernel's own on Linux and macOS. Only on Windows can an argument have none
+/// — a name that is not valid Unicode — and that one is a path, since an
+/// option's name has to be text.
+fn is_option(arg: &OsStr) -> bool {
+    df_core::platform::os::as_bytes(arg).is_ok_and(|bytes| bytes.starts_with(b"-"))
+}
+
 /// What `--name=value` had to say about itself.
-enum Flag<'a> {
+enum Flag {
     /// This is not that flag.
     Absent,
     /// This is that flag, and it was given nothing.
     Empty,
-    Value(&'a OsStr),
+    Value(OsString),
 }
 
 /// Read `--name=value` out of one argument.
@@ -376,14 +385,21 @@ enum Flag<'a> {
 /// Three flags take a path and all reject an empty one, so the reading and
 /// the rejecting are one function rather than the same three lines thrice.
 ///
-/// The value is a path, so it is read as bytes: only the name is text.
-fn flag<'a>(arg: &'a OsStr, name: &str) -> Flag<'a> {
-    match arg
-        .as_bytes()
+/// The value is a path, so it is read as bytes: only the name is text. The
+/// bytes are the platform's ([`df_core::platform::os`]), exact on Linux and
+/// macOS; on Windows an argument or a value it cannot spell is not the flag.
+fn flag(arg: &OsStr, name: &str) -> Flag {
+    let Ok(bytes) = df_core::platform::os::as_bytes(arg) else {
+        return Flag::Absent;
+    };
+    match bytes
         .strip_prefix(name.as_bytes())
         .and_then(|rest| rest.strip_prefix(b"="))
     {
-        Some(value) if !value.is_empty() => Flag::Value(OsStr::from_bytes(value)),
+        Some(value) if !value.is_empty() => match df_core::platform::os::from_bytes(value) {
+            Ok(value) => Flag::Value(value),
+            Err(_) => Flag::Absent,
+        },
         Some(_) => Flag::Empty,
         None => Flag::Absent,
     }
@@ -555,6 +571,7 @@ mod tests {
     /// `--reveal`, and as what a flag is given. An *option* that is not text
     /// is an unknown option, said with the bytes it could not read replaced.
     #[test]
+    #[cfg(unix)] // a name that is not UTF-8 is a Unix name
     fn a_path_that_is_not_utf8_is_kept_byte_for_byte() {
         use std::os::unix::ffi::OsStringExt;
         let bytes = |bytes: &[u8]| OsString::from_vec(bytes.to_vec());
