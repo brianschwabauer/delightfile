@@ -71,15 +71,17 @@ use crate::theme::Palette;
 /// re-ordered by a change to the UI font.
 pub const ICON_FAMILY: &str = "df-icons";
 
-/// Preferred faces, most wanted first. All three are common Arch packages and
-/// all three are patched with the same icon set, so the choice is only about
-/// which Latin face rides along in the fallback chain.
+/// Preferred faces, most wanted first. The first four are common Arch
+/// packages and all are patched with the same icon set, so the choice is
+/// only about which Latin face rides along in the fallback chain. The last is
+/// what Homebrew's `font-symbols-only-nerd-font` cask installs on macOS.
 const PREFERRED: &[&str] = &[
     "JetBrainsMonoNerdFont-Regular",
     "FiraCodeNerdFont-Regular",
     "CaskaydiaMonoNerdFont-Regular",
     "HackNerdFont-Regular",
     "SymbolsNerdFont-Regular",
+    "SymbolsNerdFontMono-Regular",
 ];
 
 /// Find a Nerd Font on this machine, if there is one.
@@ -88,8 +90,11 @@ const PREFERRED: &[&str] = &[
 /// straight to egui, and a font that vanished between the scan and the load
 /// would be a failure with no useful recovery.
 fn find_nerd_font() -> Option<(PathBuf, Vec<u8>)> {
-    let dirs = crate::platform::fonts::dirs();
+    find_nerd_font_in(crate::platform::fonts::dirs())
+}
 
+/// [`find_nerd_font`] over the given directories, in order.
+fn find_nerd_font_in(dirs: Vec<PathBuf>) -> Option<(PathBuf, Vec<u8>)> {
     let mut best: Option<(usize, PathBuf)> = None;
     for dir in dirs {
         let Ok(reader) = std::fs::read_dir(&dir) else {
@@ -652,6 +657,36 @@ mod tests {
 
     fn file(name: &str) -> Entry {
         entry(name, Kind::File)
+    }
+
+    /// The face is picked by name from the platform's font directories: the
+    /// most preferred first whichever directory it is in, a patched face the
+    /// list does not name only when nothing it names is there, and an
+    /// unpatched one never.
+    #[test]
+    fn the_icon_face_is_found_by_preference_across_directories() {
+        let tree = df_core::test_support::TempTree::new("icon-font");
+        let user = tree.dir("user");
+        let system = tree.dir("system");
+        let found = || find_nerd_font_in(vec![user.clone(), system.clone()]).map(|(path, _)| path);
+
+        tree.file("system/Helvetica.ttf", b"x");
+        assert_eq!(found(), None, "nothing patched");
+
+        tree.file("system/SomeOtherNerdFont-Regular.otf", b"x");
+        assert_eq!(found(), Some(system.join("SomeOtherNerdFont-Regular.otf")));
+
+        // What `brew install --cask font-symbols-only-nerd-font` puts in
+        // `~/Library/Fonts`.
+        tree.file("user/SymbolsNerdFontMono-Regular.ttf", b"x");
+        assert_eq!(found(), Some(user.join("SymbolsNerdFontMono-Regular.ttf")));
+
+        tree.file("system/JetBrainsMonoNerdFont-Regular.ttf", b"x");
+        assert_eq!(
+            found(),
+            Some(system.join("JetBrainsMonoNerdFont-Regular.ttf")),
+            "a later directory's more preferred face wins"
+        );
     }
 
     /// The nineteen ported rules have to actually reach a row — that is the
