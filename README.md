@@ -108,7 +108,13 @@ the exact frame you were looking at.
 
 ## Building
 
-Needs a Wayland session, a recent stable Rust, and FFmpeg 9 development libraries, which
+Linux, in a Wayland session, is the platform delightfile supports. macOS and Windows are a
+port in progress: their builds are meant to compile, with stand-ins that say "not
+available on this platform" where a feature has no native body yet, but they are
+unverified and nobody has run one. The plan and how far it has got are in
+[plans/other-platforms/](plans/other-platforms/README.md).
+
+On Linux it needs a recent stable Rust and FFmpeg 9 development libraries, which
 `ffmpeg-next` links against. On Arch that is `pacman -S rust ffmpeg`.
 
 ```sh

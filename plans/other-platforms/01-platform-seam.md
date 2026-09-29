@@ -953,10 +953,14 @@ their native clipboards *are* synchronous.
 - [ ] **S1.40** Remove `continue-on-error` from the macOS and Windows CI jobs
       (`06-build-and-release.md` B6.5). Done when: all three jobs are required and
       green on `main`.
-- [ ] **S1.41** Update `README.md`'s "Building" section: it currently says "Needs a
+- [>] **S1.41** Update `README.md`'s "Building" section: it currently says "Needs a
       Wayland session"; it now says Linux (Wayland) is the supported platform and
       macOS/Windows builds compile but are unverified, linking to `plans/other-platforms/`. Done
       when: reviewed by Brian.
+      — integration session, 2026-09-29: written, uncommitted 2026-09-29, and
+      waiting on the done-when, Brian's review. The section says the macOS and
+      Windows builds are *meant* to compile rather than that they do, since
+      no CI run has compiled df-app for either yet (S1.40).
 - [ ] **S1.42** Update the memory/PLAN pointers: `PLAN.md` gets a one-paragraph
       pointer to `plans/other-platforms/README.md` under a "Cross-platform" heading. Done when: the
       paragraph exists.
