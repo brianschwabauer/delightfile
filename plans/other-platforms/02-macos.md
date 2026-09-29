@@ -122,15 +122,23 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       true for local, non-remote paths. Done when: a test on the macOS runner
       trashes a temp file, sees it under `~/.Trash`, restores it, and the journal
       is empty again.
-- [ ] **M2.9** Trash view and "Empty trash" on macOS: `App::show_trash`
+- [x] **M2.9** Trash view and "Empty trash" on macOS: `App::show_trash`
       (`app.rs:4055–4078`) lists the journal; the empty-state text says "Only
       files trashed from delightfile are listed — Finder's Trash may hold more";
       "Empty trash" purges journal items only and the toast says so. Done when: a
       `App::for_test` test on macOS shows the text.
+      — done b993ac5, compiles and unit-tested on the macOS runner, not seen on
+      screen. The words are df-app's `platform::trash::{LISTED_NOTE, EMPTIED_NOTE}`
+      (`None` on Linux and Windows), read by `trashview::empty_note` under an empty
+      view and by `trashview::purged_whole` for "Empty trash"'s toast;
+      `app::tests::an_empty_trash_says_what_it_lists` opens the view on a sandbox
+      trash and reads the macOS line on the runner. Until df-core's M2.8 lands,
+      `Trash::home()` is the stub and `d`, `g t` and "Empty trash" stay refused with
+      "Trash is not available on this platform"; the words show once it lands.
 
 ## 3. Clipboard, drag and drop (df-app `platform/macos/`)
 
-- [ ] **M2.10** `platform::clipboard` bodies (S1.23 surface) with
+- [x] **M2.10** `platform::clipboard` bodies (S1.23 surface) with
       `NSPasteboard.generalPasteboard` (objc2-app-kit):
       - `copy(None, bytes)` → `clearContents`, `setString:forType:NSPasteboardTypeString`.
       - `copy(Some("text/uri-list"), bytes)` → parse the list with the existing
@@ -150,12 +158,22 @@ rows), `appendix-inventory-df-app.md` §1–§3.
         `paste(image/*)` → `dataForType:` of the matching UTI.
       Done when: unit tests for the mime↔UTI tables pass everywhere; a macOS-runner
       test round-trips a string and a file URL through the real pasteboard.
-- [ ] **M2.11** `platform::desktop::pointer_position(&Window) -> Option<(f32, f32)>`:
+      — done e81f584 (its image test corrected in 870818e), compiles and unit-tested
+      on the macOS runner, not seen on screen. Text, a list of two files and a PNG
+      round-trip through a pasteboard of the test's own (`pasteboardWithUniqueName`,
+      served by the same pasteboard server as the general one, so a developer's
+      clipboard is left alone); the mime↔UTI table is `platform::pasteboard`, tested
+      on every target. Read back item by item rather than with
+      `readObjectsForClasses:` (Decisions log).
+- [x] **M2.11** `platform::desktop::pointer_position(&Window) -> Option<(f32, f32)>`:
       macOS body `NSWindow.mouseLocationOutsideOfEventStream` converted to the
       view's top-left logical coordinates (flip y by the content view's height).
       Used by S1.32's drop-in arms. Done when: a drop from Finder highlights the
       row under the pointer (live check V7 §4.5).
-- [ ] **M2.12** Drag-out: `platform::desktop::Desktop::drag(offers, count, card,
+      — done d1d4f3f, compiles and unit-tested on the macOS runner, not seen on
+      screen: winit's view is flipped, so `convertPoint:fromView:` of the window's
+      point is the flip. Live check 07-verification.md §4.5.
+- [x] **M2.12** Drag-out: `platform::desktop::Desktop::drag(offers, count, card,
       ink, scale)` on macOS builds `NSPasteboardItem`s — one per path with
       `public.file-url` (the URL string) plus one item carrying
       `public.utf8-plain-text` (paths joined by `\n`, as `dnd::offer` already
@@ -179,17 +197,26 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `ns_view` and the event queue). Done when: a drag out of the list onto the
       Desktop makes a copy (live check); unit test that `offer` → pasteboard items
       count matches.
-- [ ] **M2.13** `Desktop::set_selection`/`receive` on macOS delegate to M2.10's
+      — done 7092733, compiles and unit-tested on the macOS runner, not seen on
+      screen. `dragout::tests::every_file_is_one_item` checks the item count against
+      `dnd::offer` on every target. Each file item carries its path as text rather
+      than one extra text item, and the picture is drawn at scale 1 (Decisions log).
+      Whether `currentEvent` inside winit's `CursorMoved` is the `mouseDragged`
+      AppKit wants stays an Open question for the live check (§4.5).
+- [x] **M2.13** `Desktop::set_selection`/`receive` on macOS delegate to M2.10's
       synchronous functions and answer `Event::Copied { ok: true }` /
       `Event::Pasted` immediately on the next `poll`, so `app.rs`'s state machine
       sees the same events as on Linux. `Event::Selection` is emitted on `poll`
       when `NSPasteboard.changeCount` moved (mirrors the clipboard types into
       `App.clipboard_types` for the paste chord's readiness). Done when: `y` then
       Cmd+V in Finder and Cmd+C in Finder then `p` both work (live check).
+      — done f68af3f, compiles and unit-tested on the macOS runner, not seen on
+      screen. The mirror reads `changeCount` at most every 200 ms (Decisions log).
+      Live check §4.5.
 
 ## 4. Volumes and connect (df-app `platform/macos/mounts.rs`)
 
-- [ ] **M2.14** `Mounts::start` worker: `Request::List` → `NSFileManager
+- [x] **M2.14** `Mounts::start` worker: `Request::List` → `NSFileManager
       .mountedVolumeURLsIncludingResourceValuesForKeys:options:` with keys
       `NSURLVolumeNameKey`, `NSURLVolumeTotalCapacityKey`,
       `NSURLVolumeIsRemovableKey`, `NSURLVolumeIsEjectableKey`,
@@ -203,38 +230,67 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       .unmountAndEjectDeviceAtURL:error:`; `Mount` → `Reply::Failed("macOS mounts
       disks itself")`. Done when: unit tests for the row mapping pass with a fake
       table; live check V7 §4.7.
-- [ ] **M2.15** `connect(url)`: `NSWorkspace.openURL` on the `smb://`,
+      — done 49dbe92, compiles and unit-tested on the macOS runner, not seen on
+      screen: `platform::volumes::rows` maps a fake table on every target, and
+      `the_boot_volume_is_listed_as_a_disk` finds `/` on the runner. An ejectable
+      disk's `drive` is its mount point, and a share's URL is
+      `NSURLVolumeURLForRemountingKey` where the system has one (Decisions log).
+      Live check §4.7.
+- [x] **M2.15** `connect(url)`: `NSWorkspace.openURL` on the `smb://`,
       `sftp://` (Finder does not mount sftp; for `sftp` return
       `Connected::Failed("use the sftp: bookmark instead")`), `nfs://`, `ftp://`
       URL (`afp` is not offered: `mounts::SCHEMES` at `mounts.rs:273` decides what
       the prompt accepts and stays as it is); then poll `/Volumes` for a new entry for up to 10 s and return
       `Connected::Mounted(Some(path))` or `Mounted(None)`. `TERMINAL_MOUNT` is
       `None`. Done when: live check.
+      — done ba43572, compiles and unit-tested on the macOS runner, not seen on
+      screen for what can run there (the `sftp://` refusal, the routing table);
+      nothing connects on a runner. `dav://` and `davs://` are refused too
+      (Decisions log); what `Mounted(None)` says is an Open question. Live check
+      §4.7.
 
 ## 5. Openers, fonts, dirs (see `05-defaults-and-config.md` for the tables)
 
-- [ ] **M2.16** `platform::open::detached_argv` on macOS: no `setsid`; instead
+- [x] **M2.16** `platform::open::detached_argv` on macOS: no `setsid`; instead
       `spawn_detached` uses `CommandExt::process_group(0)` and null stdio so the
       child outlives the window. Done when: a test spawns `sleep 1` and the app's
       exit does not kill it (macOS runner).
-- [ ] **M2.17** The macOS default opener and rule tables from `05-defaults-and-config.md`
+      — done 1107eac, compiles and unit-tested on the macOS runner, not seen on
+      screen: `a_launched_program_leads_its_own_group_and_is_collected` sees the
+      child lead a process group of its own, outlive the call, and leave no zombie.
+      The shared Unix spawn asks `platform::open::{detach, release}`; on Linux both
+      do nothing (Decisions log).
+- [~] **M2.17** The macOS default opener and rule tables from `05-defaults-and-config.md`
       §2 are wired into `platform::defaults::{OPENERS, RULES, BOOKMARKS}` and
       `df_core::config::Config::default` reads them. Done when: `open.rs`'s
       `opener_rules_pick_by_glob_then_mime` has a macOS twin asserting `open "$1"`.
+      — blocked: every half of it is df-core's (`Config::default` in `config.rs`,
+      `platform::defaults` beside it), and this branch was told to keep out of
+      df-core while two other branches change it. Options: (a) the df-core branch,
+      or a pass after the three merge, adds `df_core::platform::defaults::{OPENERS,
+      RULES, BOOKMARKS}` per target from 05 §2.1/§6 and `Config::default` reads
+      them, and df-app then gains the `open.rs` twin asserting `open "$1"`; (b)
+      Brian lets this branch make that df-core change itself, at the cost of a
+      likely conflict in `config.rs` with `port/paths`.
 - [ ] **M2.18** `platform::dirs` macOS values per `05-defaults-and-config.md` §1
       (D5.1 lands them; this task is the cross-reference). Done when: D5.1 done.
-- [ ] **M2.19** `platform::fonts::dirs()` macOS list (D5.6) and the README line
+- [x] **M2.19** `platform::fonts::dirs()` macOS list (D5.6) and the README line
       telling people `brew install --cask font-symbols-only-nerd-font`. Done when:
       the icon font is found on a machine with that cask (live check).
+      — done 6b2d653 (with D5.6), compiles and unit-tested on the macOS runner, not
+      seen on screen; the README says how to get the cask. Live check that the icon
+      font is found (§4.1).
 
 ## 6. Keyboard and window
 
-- [ ] **M2.20** `platform::keys::mods(state: ModifiersState) -> Mods`: macOS body
+- [x] **M2.20** `platform::keys::mods(state: ModifiersState) -> Mods`: macOS body
       sets `ctrl = control_key() || super_key()` and `super_key = false`; other
       targets keep `keys.rs:52–66` as today. `keys::chord_from` calls it. Done when:
       a `keys.rs` test with `SUPER` held maps to `ctrl` under `cfg!(target_os =
       "macos")` and to `super_key` elsewhere.
-- [ ] **M2.21** Labels: `df_core::keymap::Chord::label` (`keymap/key.rs:323–345`)
+      — done ce9f7e0, compiles and unit-tested on the macOS runner, not seen on
+      screen: `keys::tests::super_is_ctrl_on_macos_and_itself_elsewhere`.
+- [~] **M2.21** Labels: `df_core::keymap::Chord::label` (`keymap/key.rs:323–345`)
       takes a `df_core::platform::keys::LABELS` table (pure strings, in df-core —
       df-core has no winit, so this is a separate module from df-app's
       `platform::keys::mods`): macOS `⌃`/`⌥`/`⇧`/`⌘` with `Ctrl+`
@@ -243,24 +299,48 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `app.rs:12393, 12845, 16480, 16781`) go through `df_core::platform::keys::ctrl_name()`
       ("Ctrl" / "⌘"). Done when: `keys.rs:164`'s `"Alt+←"` assertion has a macOS
       twin `"⌥←"`.
-- [ ] **M2.22** Pointer modifiers: `app.rs:13785–13787` already treats egui's
+      — blocked: `Chord::label` and the `LABELS` table are df-core's (see M2.17 for
+      why this branch did not touch df-core). The df-app half is the strings that
+      name Ctrl, today overlay.rs:612 ("Ctrl+s to stop"), overlay.rs:1194 (`Ctrl+{n}`),
+      app.rs:14814 ("Ctrl+N opens another window"), app.rs:15309 ("press Ctrl+v
+      again"), app.rs:19733 (the `Ctrl+s` hint) and app.rs:20139 ("Ctrl-click
+      selects"), plus cli.rs:205's `Ctrl+Enter`. Options: (a) df-core gains
+      `platform::keys::{LABELS, ctrl_name}` and `Chord::label` reads them, and then
+      the df-app strings go through `ctrl_name()`; (b) df-app renders those strings
+      through a `platform::keys` name of its own now, with chord labels still saying
+      `Ctrl+` on macOS until (a), which would show `⌘` and `Ctrl` side by side
+      meanwhile.
+- [x] **M2.22** Pointer modifiers: `app.rs:13785–13787` already treats egui's
       `command` (Cmd) as `toggle`; confirm `dnd::verb_for` gets Cmd → Copy and
       Option → Link on macOS and add the mapping to the help sheet's mouse section.
       Done when: reviewed; live check.
-- [ ] **M2.23** Occlusion path (`app.rs:158–167, 16217–16236`, `graphics.rs:38–67`):
+      — done, nothing to commit (reviewed 2026-09-29). `pointer.toggle` is egui's
+      `command || ctrl`, and egui-winit sets `command` from Cmd on macOS, so
+      Cmd-click toggles and Cmd-drag is `Verb::Copy`; Option is egui's `alt`, so
+      Option-drag is `Verb::Link`. The help sheet has no mouse section to add the
+      mapping to; its "⌘-click toggles, ⌥-drag links" line is D5.5's and blocked
+      with it. Live check §4.5.
+- [x] **M2.23** Occlusion path (`app.rs:158–167, 16217–16236`, `graphics.rs:38–67`):
       the comments say the code is right and dead on Wayland. On macOS it is live.
       No code change; add a `log::debug!` when `Presented::Occluded` fires so the
       live check can confirm it. Done when: the log line exists; V7 §4.1 minimize
       check.
-- [ ] **M2.24** Present mode: Metal has no `Mailbox`; `graphics.rs:148–152` takes
+      — done, nothing to commit: `Gfx::present` already logs "surface occluded;
+      frames paused until the window is shown" and "surface visible again" at debug,
+      once per change. Live check §4.1 with `RUST_LOG=debug`.
+- [x] **M2.24** Present mode: Metal has no `Mailbox`; `graphics.rs:148–152` takes
       `Fifo`. The animation pacing assumption (frames paced to refresh under
       Mailbox) needs a live check for stutter; no code change unless the check
       fails. Done when: recorded; V7 §4.1.
-- [ ] **M2.25** `Windows::open` (`window.rs:122–141`) on macOS spawns
+      — recorded, nothing to commit: `Gfx::new` takes `Mailbox` only when the
+      surface offers it, so Metal gets `Fifo`. Live check §4.1.
+- [x] **M2.25** `Windows::open` (`window.rs:122–141`) on macOS spawns
       `current_exe()` directly, which works from inside the bundle; each window is
       its own Dock tile (accepted decision). Add `-n`-style behaviour nowhere. Done
       when: live check of Ctrl/Cmd+N.
-- [ ] **M2.26** Cmd+Q: winit 0.30.13's default menu binds Quit to `terminate:`
+      — recorded, nothing to commit: `Windows::open` spawns `current_exe()`, which
+      inside the bundle is `Contents/MacOS/delightfile`. Live check §4.1.
+- [x] **M2.26** Cmd+Q: winit 0.30.13's default menu binds Quit to `terminate:`
       (`menu.rs:71`); its app delegate implements only `applicationWillTerminate:`,
       which calls `exiting()` on the handler — **not** `CloseRequested`, which only
       `windowShouldClose:` sends. So Cmd+Q runs `App::exiting` (`app.rs:17209–17262`,
@@ -271,7 +351,11 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `applicationShouldTerminate:` to route through `CloseRequested` — is the
       fallback if the first proves insufficient. Done when: a unit test drives
       `exiting` without `finish` and sees the cwd file written; live check V7 §4.1.
-- [ ] **M2.30** `platform::appearance` macOS body (S1.35's surface: `Desktop`,
+      — done 734c533, compiles and unit-tested on the macOS runner, not seen on
+      screen: `app::tests::an_exit_without_a_close_still_writes_the_cwd_file`. The
+      first route was enough; no application delegate (Decisions log). Live check
+      §4.1.
+- [x] **M2.30** `platform::appearance` macOS body (S1.35's surface: `Desktop`,
       `Connect`, `session`): the system's light or dark for `[flavor] mode =
       "auto"`, in place of the stub that answers nothing and says `Link::Gone`.
       Two routes, to be chosen here and logged: winit 0.30.13 already reports the
@@ -285,6 +369,9 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       appearance-name → `Scheme` mapping passes on the macOS runner; live check
       that switching System Settings → Appearance turns a window in `auto`
       (V7 §4.1).
+      — done e52a88e, compiles and unit-tested on the macOS runner, not seen on
+      screen: the `effectiveAppearance` route, with key-value observing, shipped,
+      not the fallback (Decisions log). Live check §4.1.
 
 ## 7. Optional
 
@@ -316,7 +403,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       wrapper process that starts the daemon and signals it when the parent
       goes) is this task's to settle and record. Done when: a runner test kills
       the parent with `SIGKILL` and sees the daemon gone within a second.
-- [ ] **M2.31** Take `-A dead_code` off the macos job's clippy line in
+- [~] **M2.31** Take `-A dead_code` off the macos job's clippy line in
       `.github/workflows/ci.yml` (S1.53). It is there because df-app items
       whose only callers are Linux bodies — the drag-and-drop helpers in
       `dnd.rs`, gio's output readers in `mounts.rs`, `platform/icon.rs`,
@@ -324,10 +411,23 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       Linux device alone constructs — are dead on macOS until this phase gives
       them callers (M2.10–M2.15). Done when: the last of those lands and the
       macos job's clippy passes without the flag.
+      — blocked: with M2.10–M2.15 and M2.12 in, the macOS build has 29 dead items
+      left (and 5 more in the test build), down from 49, and none of them waits on a
+      Phase 2 task: they are Linux's alone — gio's listing and monitor readers and
+      `Spec`'s helpers in `mounts.rs`, the `Event`/`Change` variants and
+      `Reply::Mounted` and `Connected::NeedsTerminal` only gio makes,
+      `dnd::{wanted_mime, paths_from, is_ours}` which only the Wayland device reads,
+      `PasteFailure::{Stalled, Broken}`, `Link::Starting` and `ClipError::Missing`.
+      The flag stays. Options: (a) move those items into `platform/linux/` with
+      their tests (a move under the Linux-unchanged rule, most of it `mounts.rs`);
+      (b) mark each `#[cfg_attr(not(target_os = "linux"), allow(dead_code))]`, which
+      needs an exception to "no cfg outside platform/"; (c) keep `-A dead_code` on
+      macOS for good, with the linux job, where every item has its caller, as the
+      one that holds dead code out.
 
 ## 9. Found in Phase 2
 
-- [>] **M2.34** df-app builds, lints and passes its tests on the macOS runner
+- [x] **M2.34** df-app builds, lints and passes its tests on the macOS runner
       with the stubs as they are, before any Phase 2 body lands. Run
       36628614462 on `main` was the first to build df-app for macOS: the
       build, clippy (with `-A dead_code`, S1.53) and `--version` passed as
@@ -355,6 +455,9 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       target). Done when: on the macos job, df-app builds, its clippy line
       passes, `--version` runs, and every df-app test passes except those
       three.
+      — done 917545e; run 36636630419 on this branch: df-app built, linted and ran
+      `--version` on the macOS runner, and 1,128 of its 1,129 tests passed, the one
+      left the rsync test above.
 
 ## Decisions log
 
@@ -375,12 +478,93 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   while the df-core branch took `M2.28` for the chmod walk; at integration the
   chmod walk kept it and the appearance body became `M2.30`
   (`01-platform-seam.md` Decisions log).
+- (df-app) 2026-09-29 — M2.34 appended: the first macOS build of df-app, on
+  `main`'s run 36628614462, passed its build, clippy and `--version` but not
+  its tests, and a task was owed for making them hold before any body landed.
+- (df-app) 2026-09-29 — M2.34: the three `trashview` tests whose fixtures are
+  the freedesktop layout are `#[cfg(target_os = "linux")]`; the hits test's
+  trash line follows `Trash::home()` rather than being gated, so the rest of
+  that long test still runs on macOS.
+- (df-app) 2026-09-29 — Local type checks of df-app for macOS: see
+  `00-ground-rules.md` §6. Every objc2 call in this phase was compiled on Linux
+  before it met the runner.
+- (df-app) 2026-09-29 — M2.10: a list of files is read back item by item
+  (`pasteboardItems` → `public.file-url` → `NSURL` → `filePathURL` → `path`),
+  not with `readObjectsForClasses:`, whose class array objc2-app-kit 0.2 types
+  as `NSArray<AnyObject>`; Finder's file reference URLs resolve the same way.
+  The paste table takes `com.compuserve.gif` and `org.webmproject.webp` too, so
+  what the copy table writes can be pasted back. The runner tests use a
+  pasteboard of their own, from the same server, so a developer running the
+  tests keeps their clipboard.
+- (df-app) 2026-09-29 — M2.13: the mirror of the pasteboard's types is taken
+  when `changeCount` has moved, and the count is read at most every 200 ms,
+  since each read is a round trip to the pasteboard server and a frame can
+  come every few milliseconds. A paste reads the bytes themselves, so a
+  mirror a fifth of a second old picks the type and nothing else.
+- (df-app) 2026-09-29 — M2.14: an ejectable disk's `drive` is its mount
+  point, not `None` as planned: the card's `e` refuses a disk with no drive,
+  and macOS ejects by where the volume is mounted. A share's `url` is
+  `NSURLVolumeURLForRemountingKey` (`smb://host/share`) where the system has
+  one and `statfs`'s `f_mntfromname` (`//user@host/share`) where it does not,
+  with the scheme then taken from the filesystem type (`smbfs` → `smb`).
+- (df-app) 2026-09-29 — M2.15: `dav://` and `davs://` are refused as `sftp://`
+  is: Finder mounts WebDAV only from its own Connect to Server, with an
+  `http(s)://` address that `openURL` would open in a browser. A connect waits
+  for any new entry under `/Volumes`, as planned, rather than matching the
+  share by address: the address macOS records for a share carries a user and a
+  Bonjour name the typed address need not.
+- (df-app) 2026-09-29 — M2.16: the child is collected by a thread of its own
+  once it exits (`platform::open::release`), since nothing forks in between
+  and a launched editor closed an hour later would otherwise stay a zombie for
+  as long as delightfile ran. The shared Unix spawn calls
+  `platform::open::{detach, release}`; on Linux both do nothing, and `setsid
+  --fork` in the argv is the detaching as before.
+- (df-app) 2026-09-29 — M2.12: each file's pasteboard item carries its path as
+  `public.utf8-plain-text` beside its URL, in place of one extra item holding
+  every path: Finder makes a text clipping out of an item with only text, and
+  a drag of two files onto the Desktop would leave a third thing there. The
+  window's mark (`dnd::self_mime()`) rides on the first item as a type with no
+  bytes. The session offers only `Copy`: nothing leaves the window as a move.
+  The picture is drawn at one pixel to the point, as for Wayland at scale 1,
+  and AppKit scales it on a Retina screen.
+- (df-app) 2026-09-29 — M2.26: `exiting` wraps up a quit that did not come
+  through `finish` as a closed window would (`WriteCwd`). On Linux every quit
+  comes through `finish` first, so nothing changes there; the one Linux path
+  that could reach `exiting` without it, an event loop that ends on its own,
+  now writes the cwd file too, which is what closing the window does.
+- (df-app) 2026-09-29 — M2.30: the `NSApp.effectiveAppearance` route shipped,
+  with a key-value observer class of our own registered with
+  `NSKeyValueObservingOptionInitial`, so the first answer is in before
+  `watch_over` returns. On macOS `appearance::Connect` is a unit struct: there
+  is no connection to make, only the application to ask. A watcher started off
+  the main thread (a test's) is `Link::Gone` at once.
+- (df-app) 2026-09-29 — M2.9: on macOS the line under an empty trash view is
+  what the view cannot see, in place of the trash clock's line; the clock is
+  not lost, since its purge says what it removed in its own toast.
+- (df-app) 2026-09-29 — M2.17, M2.21 and 05's D5.3, D5.5 and D5.11 are
+  blocked rather than done in df-core from this branch: it was asked to keep
+  out of df-core while `port/macos-core` and `port/paths` change it.
 
 ## Open questions
 
 - Whether `NSApp.currentEvent` inside winit's `CursorMoved` dispatch is the
   `mouseDragged` event AppKit requires for `beginDraggingSession` (M2.12). If not,
   the fallback is an `NSView` subclass override of `mouseDragged:` — record which.
+  (df-app, 2026-09-29: M2.12 is built on the first; only the live check in
+  `07-verification.md` §4.5 can answer.)
+- (df-app) What a connect that saw nothing appear under `/Volumes` within ten
+  seconds should say (M2.15). The plan's `Mounted(None)` makes the window say
+  "Connected to …", which is untrue while Finder's dialog is still asking for a
+  password and true when the share was mounted already. Options: keep it; a
+  new `Connected` variant the window words as "Finder is connecting to … —
+  `M` lists the share once it is mounted"; or wait longer.
+- (df-app) Who makes the df-core halves of M2.17 and M2.21 (and 05's D5.3,
+  D5.5, D5.11): the df-core branch, a pass after the port branches merge, or
+  this branch with leave to touch df-core. The options are in each task.
+- (df-app) M2.31: how the items that only Linux calls stop being dead code on
+  macOS, if they should: moved into `platform/linux/`, allowed per item with a
+  `cfg_attr`, or `-A dead_code` kept on macOS for good. The options are in the
+  task.
 - Ghostty on macOS: does `ghostty -e` work from `open -a`? Affects the `edit` opener
   default in `05-defaults-and-config.md`.
 - Tags on macOS (S1.18): which extended attribute do they live in? freedesktop's
