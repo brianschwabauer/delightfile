@@ -1481,13 +1481,16 @@ mod tests {
         tagged(&file, &["red"]);
         let plain = t.file("plain.txt", b"x");
 
+        // A drive that keeps no attributes is another volume, which no
+        // clone reaches: macOS's clone would carry them past the refusal.
+        let card = |f: &dyn Fn() -> Result<CopyStats>| without_reflink(|| tags::refusing(f));
         let dst = t.join("card");
-        let stats = tags::refusing(|| copy_tree(&src, &dst, &ctx(), false)).unwrap();
+        let stats = card(&|| copy_tree(&src, &dst, &ctx(), false)).unwrap();
         assert!(stats.tags_dropped);
         assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"aaa");
         assert!(tags::read(&dst.join("a.txt")).is_empty());
 
-        let stats = tags::refusing(|| copy_tree(&plain, &t.join("p.txt"), &ctx(), false));
+        let stats = card(&|| copy_tree(&plain, &t.join("p.txt"), &ctx(), false));
         assert!(
             !stats.unwrap().tags_dropped,
             "nothing to lose, nothing lost"
@@ -1496,7 +1499,7 @@ mod tests {
         // A move onto it keeps nothing back either: the source goes, as it
         // would with any other move, and the report says what was not kept.
         let moved = t.join("moved");
-        let stats = tags::refusing(|| move_cross_device(&src, &moved, &ctx())).unwrap();
+        let stats = card(&|| move_cross_device(&src, &moved, &ctx())).unwrap();
         assert!(stats.tags_dropped);
         assert!(!exists(&src));
         assert_eq!(std::fs::read(moved.join("a.txt")).unwrap(), b"aaa");

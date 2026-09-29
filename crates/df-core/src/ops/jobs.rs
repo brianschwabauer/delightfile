@@ -525,7 +525,9 @@ mod tests {
             let slot = job.outcome();
             let ctx = TaskCtx::detached();
             if refused {
-                tags::refusing(|| job.run(&ctx)).unwrap();
+                // A drive that keeps no attributes is another volume, which
+                // no clone reaches: macOS's would carry them past the refusal.
+                crate::ops::copy::without_reflink(|| tags::refusing(|| job.run(&ctx))).unwrap();
             } else {
                 job.run(&ctx).unwrap();
             }
