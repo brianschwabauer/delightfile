@@ -49,5 +49,20 @@ miniz_oxide.workspace = true
 # crate — so the build gains a few features rather than a dependency.
 regex.workspace = true
 
+# macOS only: the trash (`platform/macos/trash.rs`) is NSFileManager's
+# `trashItemAtURL:resultingItemURL:error:`, which only Foundation offers. These
+# are the versions winit 0.30.13 already compiles for df-app on macOS, so the
+# build gains no crate it did not have (`plans/other-platforms/00-ground-rules.md`
+# §3), only the four Foundation classes the call needs.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-foundation = { version = "0.2.2", default-features = false, features = [
+    "std",
+    "NSError",
+    "NSFileManager",
+    "NSString",
+    "NSURL",
+] }
+
 [lints]
 workspace = true

@@ -724,6 +724,8 @@ dependencies = [
  "libc",
  "log",
  "miniz_oxide 0.8.9",
+ "objc2 0.5.2",
+ "objc2-foundation 0.2.2",
  "regex",
  "thiserror 2.0.20",
 ]

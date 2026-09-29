@@ -2455,7 +2455,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
+    #[cfg(unix)] // a trash to put things in (Windows: W4.7)
     fn undo_of_a_trash_restores_it() {
         let t = TempTree::new("j-trash");
         let bin = crate::ops::Trash::at(t.join("Trash"));
@@ -2472,7 +2472,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
+    #[cfg(unix)] // a trash to put things in (Windows: W4.7)
     fn undo_of_a_trash_refuses_when_the_name_came_back() {
         let t = TempTree::new("j-trash-taken");
         let bin = crate::ops::Trash::at(t.join("Trash"));
@@ -2481,10 +2481,14 @@ mod tests {
         std::fs::write(&file, b"newer").unwrap();
 
         let mut j = Journal::default();
-        j.record(OpRecord::Trash { items: vec![item] });
+        j.record(OpRecord::Trash {
+            items: vec![item.clone()],
+        });
         let err = j.undo(&ctx()).unwrap_err();
         assert!(err.to_string().contains("exists again"), "{err}");
         assert_eq!(std::fs::read(&file).unwrap(), b"newer");
+        // Not left in a trash outside the fixture (macOS's is the user's).
+        crate::ops::trash::purge(&item, &ctx()).unwrap();
     }
 
     #[test]
@@ -3096,7 +3100,7 @@ mod tests {
     /// A redo of `d` puts the file back in the trash it was restored from,
     /// which is the one `u` will look in next.
     #[test]
-    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
+    #[cfg(unix)] // a trash to put things in (Windows: W4.7)
     fn redo_of_a_trash_trashes_it_again_into_the_same_trash() {
         let t = TempTree::new("j-redo-trash");
         let bin = crate::ops::Trash::at(t.join("Trash"));
@@ -3612,9 +3616,8 @@ mod tests {
     /// as a move's does: the entry stops listing the file that went back, a
     /// second `u` finishes, and the redo line — which has no forward form for
     /// the half that went — is cleared.
-    #[cfg(unix)]
+    #[cfg(unix)] // a trash to put things in (Windows: W4.7)
     #[test]
-    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
     fn a_partly_undone_trash_leaves_only_the_remainder_and_clears_the_redo_stack() {
         use std::os::unix::fs::PermissionsExt;
         let t = TempTree::new("j-trash-partial");
@@ -3706,7 +3709,7 @@ mod tests {
     /// The name a redo of `d` would trash again now belongs to a different
     /// file: refused, and the new file stays where it is.
     #[test]
-    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
+    #[cfg(unix)] // a trash to put things in (Windows: W4.7)
     fn redo_of_a_trash_refuses_a_file_replaced_under_the_same_name() {
         let t = TempTree::new("j-redo-trash-replaced");
         let bin = crate::ops::Trash::at(t.join("Trash"));

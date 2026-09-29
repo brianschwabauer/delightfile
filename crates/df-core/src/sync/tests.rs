@@ -820,8 +820,27 @@ fn removals_are_the_topmost_extras_deepest_first_with_what_each_takes() {
     );
 }
 
+/// The item a trash holds that came from `original`.
+#[cfg(unix)]
+fn trashed_from(items: &[crate::ops::TrashedItem], original: &Path) -> crate::ops::TrashedItem {
+    items
+        .iter()
+        .find(|item| item.original == original)
+        .cloned()
+        .unwrap_or_else(|| panic!("{} is not in the trash: {items:?}", original.display()))
+}
+
+/// Destroy what a test trashed, which on macOS is in the user's Trash rather
+/// than the fixture's.
+#[cfg(unix)]
+fn empty(items: &[crate::ops::TrashedItem]) {
+    for item in items {
+        crate::ops::trash::purge(item, &TaskCtx::detached()).unwrap();
+    }
+}
+
 #[test]
-#[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
+#[cfg(unix)] // a trash to put things in (Windows: W4.7)
 fn a_mirror_trashes_the_extras_after_copying_and_before_verifying() {
     let t = TempTree::new("sync-mirror-trash");
     let mut plan = with_extras(&t);
@@ -843,17 +862,19 @@ fn a_mirror_trashes_the_extras_after_copying_and_before_verifying() {
     assert!(!dest.join("gone").exists());
     assert_eq!(std::fs::read(dest.join("keep.txt")).unwrap(), b"keep");
     // In the trash, whole: the folder is one item that can go back as one.
-    let files = t.join("Trash/files");
-    assert_eq!(
-        std::fs::read(files.join("gone/two/three.txt")).unwrap(),
-        b"1234"
-    );
-    assert!(files.join("deep-extra.txt").is_file());
     let trashed = crate::ops::Trash::at(t.join("Trash")).list().unwrap();
     assert_eq!(trashed.len(), 2);
+    let folder = trashed_from(&trashed, &dest.join("gone")).location();
+    assert_eq!(
+        std::fs::read(folder.join("two/three.txt")).unwrap(),
+        b"1234"
+    );
+    let extra = trashed_from(&trashed, &dest.join("a/b/deep-extra.txt"));
+    assert!(extra.location().is_file());
 
     // And the next plan finds the two sides the same.
     assert!(quick(&[t.join("src/d")], &t.join("dst")).in_sync(Mode::Mirror));
+    empty(&trashed);
 }
 
 #[test]
@@ -879,7 +900,7 @@ fn an_update_removes_nothing_whatever_the_plan_found() {
 }
 
 #[test]
-#[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
+#[cfg(unix)] // a trash to put things in (Windows: W4.7)
 fn a_mirror_moves_a_folder_in_the_way_to_the_trash_and_copies_the_file() {
     let t = TempTree::new("sync-mirror-in-the-way");
     let dir = t.dir("src/d");
@@ -901,10 +922,13 @@ fn a_mirror_moves_a_folder_in_the_way_to_the_trash_and_copies_the_file() {
         std::fs::read(t.join("dst/d/was-a-folder")).unwrap(),
         b"now a file"
     );
+    let trashed = crate::ops::Trash::at(t.join("Trash")).list().unwrap();
+    let folder = trashed_from(&trashed, &t.join("dst/d/was-a-folder")).location();
     assert_eq!(
-        std::fs::read(t.join("Trash/files/was-a-folder/precious")).unwrap(),
+        std::fs::read(folder.join("precious")).unwrap(),
         b"kept, in the trash"
     );
+    empty(&trashed);
 }
 
 #[cfg(unix)]
