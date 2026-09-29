@@ -127,7 +127,14 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
     }
 
     let len = if meta.is_symlink() { 0 } else { meta.len() };
-    match std::fs::remove_file(path) {
+    let removed = if meta.is_symlink() {
+        // A link, of whichever kind: on Windows one to a directory is removed
+        // as a directory, without following it.
+        crate::platform::fs::remove_link(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match removed {
         Ok(()) => ctx.advance(len, 1),
         Err(e) if gone(&e) => {}
         Err(e) => return Err(DfError::io(path, e)),
@@ -155,6 +162,8 @@ pub(crate) fn remove_tree_unchecked(path: &Path) -> Result<()> {
     };
     if meta.is_dir() && !meta.is_symlink() {
         std::fs::remove_dir_all(path).map_err(|e| DfError::io(path, e))
+    } else if meta.is_symlink() {
+        crate::platform::fs::remove_link(path).map_err(|e| DfError::io(path, e))
     } else {
         std::fs::remove_file(path).map_err(|e| DfError::io(path, e))
     }
@@ -215,6 +224,30 @@ mod tests {
         remove_tree(&with_slash, &ctx()).unwrap();
         assert!(real.join("precious").is_file(), "the target survives");
         assert!(!exists(&link), "the link itself is gone");
+    }
+
+    /// A link to a directory is removed as a link — on Windows, where such a
+    /// link is a directory to the file system, with the call for one — and
+    /// the directory it points at is untouched. Skipped where a link cannot
+    /// be made (Windows without Developer Mode or elevation).
+    #[test]
+    fn removes_a_link_to_a_directory_and_nothing_it_points_at() {
+        let t = TempTree::new("delete-dir-link");
+        let real = t.dir("real");
+        std::fs::write(real.join("precious"), b"keep").unwrap();
+        let link = t.join("link");
+        if let Err(e) = crate::platform::fs::symlink(&real, &link) {
+            eprintln!("skipping: no link could be made here ({e})");
+            return;
+        }
+        remove_tree(&link, &ctx()).unwrap();
+        assert!(!exists(&link), "the link is gone");
+        assert!(real.join("precious").is_file(), "the target survives");
+
+        crate::platform::fs::symlink(&real, &link).unwrap();
+        remove_tree_unchecked(&link).unwrap();
+        assert!(!exists(&link));
+        assert!(real.join("precious").is_file());
     }
 
     #[test]

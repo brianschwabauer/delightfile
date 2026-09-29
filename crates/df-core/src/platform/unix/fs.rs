@@ -105,6 +105,12 @@ pub fn is_junction(_path: &Path) -> bool {
     false
 }
 
+/// Remove the symlink at `path` itself, never what it points at: `unlink(2)`,
+/// whatever the link points to.
+pub fn remove_link(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path)
+}
+
 /// `access(2)` for writing: whether this user may make a name in `dir`.
 ///
 /// Asked of the kernel rather than worked out from the mode bits, because

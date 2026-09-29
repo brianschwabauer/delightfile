@@ -388,14 +388,19 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       shared, and a thumbnail yazi wrote is simply regenerated once). Record it in
       the module doc. Done when: the doc comment says so. — done (port/paths):
       a paragraph in the module essay's scheme section.
-- [ ] **P3.26** Removing links: `ops/delete.rs:96–111, 118–130` and
+- [x] **P3.26** Removing links: `ops/delete.rs:96–111, 118–130` and
       `ops/journal.rs:879, 933` remove a symlink with `remove_file`; on Windows a
       directory symlink or junction needs `remove_dir`. Add
       `platform::fs::remove_link(path) -> io::Result<()>` (Unix: `remove_file`;
       Windows: `remove_dir` when `symlink_metadata().file_type().is_symlink_dir()`,
       else `remove_file`) and call it at those sites. Done when: Linux tests
       unchanged; a Windows-runner test removes a directory symlink made under
-      Developer Mode (skipped when `symlink_dir` fails with 1314).
+      Developer Mode (skipped when `symlink_dir` fails with 1314). — done
+      (port/paths), at the four sites and at one more of the same kind: the
+      undo of a copy removes a copied link through it
+      (`CopyManifest::remove`). `removes_a_link_to_a_directory_and_nothing_it_points_at`
+      runs everywhere and skips where no link can be made (P3.30:
+      `a_trailing_slash_does_not_turn_a_link_into_its_target` was bin 1).
 - [ ] **P3.27** `ops/link.rs:40–70` (`relative_to`): when the two paths have
       different `Prefix` components (different drives or a UNC), return the target
       absolute rather than a relative path with prefix components in it. Done when:

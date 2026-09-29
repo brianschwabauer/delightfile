@@ -108,6 +108,22 @@ pub fn is_junction(path: &Path) -> bool {
     crate::platform::meta::reparse_tag(path) == Some(IO_REPARSE_TAG_MOUNT_POINT)
 }
 
+/// Remove the link at `path` itself, never what it points at. Windows has
+/// two kinds: a link to a directory, and a junction, are directories to the
+/// file system and go with `RemoveDirectoryW`; a link to a file goes with
+/// `DeleteFileW`.
+pub fn remove_link(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::FileTypeExt;
+    if std::fs::symlink_metadata(path)?
+        .file_type()
+        .is_symlink_dir()
+    {
+        std::fs::remove_dir(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 /// Assumed: the CRT's `_access(path, 2)` ignores the read-only bit on a
 /// directory and would say the same. W4.6 replaces this with a real probe.
 pub fn writable(_dir: &Path) -> bool {

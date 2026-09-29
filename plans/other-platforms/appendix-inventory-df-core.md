@@ -224,15 +224,15 @@
 | 40–54 | Home and cwd rails via lexical `is_ancestor` | Windows-differs (case) | as above | |
 | 63 | `current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` | Windows-differs | as above | ✓ P3.13 |
 | 64 | `std::env::var_os("HOME")` | Windows-differs | as above | Unset on Windows, so the home rail is skipped ✓ S1.17 |
-| 96–111 | `remove_tree`: a symlink is removed with `remove_file` (109) | Windows-differs | `delete_permanent` ← core:ops/jobs.rs:DeleteJob::run, core:ops/trash.rs:purge, core:sync/execute.rs:remove_extras, remove; core:ops/copy.rs:move_cross_device | Windows directory symlinks and junctions are removed with `remove_dir` |
-| 118–130 | `remove_tree_unchecked`: `remove_dir_all` for a real dir, otherwise `remove_file` | Windows-differs | core:ops/copy.rs:copy_tree_with, copy_symlink, copy_dir, move_path; core:ops/create.rs:rename; core:ops/trash.rs:trash | As above |
+| 96–111 | `remove_tree`: a symlink is removed with `remove_file` (109) | Windows-differs | `delete_permanent` ← core:ops/jobs.rs:DeleteJob::run, core:ops/trash.rs:purge, core:sync/execute.rs:remove_extras, remove; core:ops/copy.rs:move_cross_device | Windows directory symlinks and junctions are removed with `remove_dir` ✓ P3.26 |
+| 118–130 | `remove_tree_unchecked`: `remove_dir_all` for a real dir, otherwise `remove_file` | Windows-differs | core:ops/copy.rs:copy_tree_with, copy_symlink, copy_dir, move_path; core:ops/create.rs:rename; core:ops/trash.rs:trash | As above ✓ P3.26 |
 
 ### ops/journal.rs (in memory only; the journal is never written to disk)
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 879 | `undo_link`: `std::fs::remove_file(link)` | Windows-differs | `undo_attempt` ← `Journal::undo` ← app:app.rs:undo | Directory symlinks need `remove_dir` on Windows |
-| 933 | `undo_links`: `std::fs::remove_file(&l.link)` | Windows-differs | as above | As above |
+| 879 | `undo_link`: `std::fs::remove_file(link)` | Windows-differs | `undo_attempt` ← `Journal::undo` ← app:app.rs:undo | Directory symlinks need `remove_dir` on Windows ✓ P3.26 |
+| 933 | `undo_links`: `std::fs::remove_file(&l.link)` | Windows-differs | as above | As above ✓ P3.26 |
 | 1999 | `redo_links`: `std::os::unix::fs::symlink(text, &l.link)` | Unix-only | `Journal::redo` ← app:app.rs (redo) | Added 2026-09-29: redo postdates the inventory ✓ S1.5 |
 
 ### ops/link.rs

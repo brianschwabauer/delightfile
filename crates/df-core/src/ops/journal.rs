@@ -365,10 +365,10 @@ impl CopyManifest {
         for (rel, fp) in self.entries.iter().rev() {
             ctx.checkpoint()?;
             let path = self.path_of(rel);
-            let outcome = if fp.kind == FileKind::Dir {
-                std::fs::remove_dir(&path)
-            } else {
-                std::fs::remove_file(&path)
+            let outcome = match fp.kind {
+                FileKind::Dir => std::fs::remove_dir(&path),
+                FileKind::Symlink => crate::platform::fs::remove_link(&path),
+                FileKind::File | FileKind::Other => std::fs::remove_file(&path),
             };
             match outcome {
                 Ok(()) => ctx.advance(if fp.kind == FileKind::File { fp.len } else { 0 }, 1),
@@ -1428,7 +1428,7 @@ fn undo_link(link: &Path, target: Option<&Path>, fingerprint: &Fingerprint) -> R
             )));
         }
     }
-    std::fs::remove_file(link).map_err(|e| DfError::io(link, e))?;
+    crate::platform::fs::remove_link(link).map_err(|e| DfError::io(link, e))?;
     Ok(UndoReport {
         description: format!(
             "Removed the link {}",
@@ -1482,7 +1482,7 @@ fn undo_links(links: &[CreatedLink], ctx: &TaskCtx) -> UndoAttempt {
                 }),
             };
         }
-        if let Err(e) = std::fs::remove_file(&l.link) {
+        if let Err(e) = crate::platform::fs::remove_link(&l.link) {
             return UndoAttempt {
                 result: Err(DfError::io(&l.link, e)),
                 remaining: (i > 0).then(|| OpRecord::Links {
