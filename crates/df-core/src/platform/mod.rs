@@ -67,7 +67,8 @@
 //! | `pipe` | `AVAILABLE: bool`; `fd(&pipe) -> i32`; `remaining(deadline)`; `poll_read2(stdout, stderr, timeout) -> io::Result<(bool, bool)>`; `poll_write(fd, timeout) -> io::Result<bool>`; `set_nonblocking(fd) -> io::Result<()>` | `poll`, `fcntl` (unix) | unix | `AVAILABLE = false`, so SFTP refuses before spawning; the rest `Unsupported("SFTP")` (W4.20) |
 //! | `socket` | `AVAILABLE: bool`; `Stream: Read + Write`; `connect(path, timeout) -> io::Result<Stream>`; `private_dir(dir, uid) -> io::Result<()>` (the rclone daemon's remote control) | `UnixStream`; mode 0700 and owner check (unix) | unix | `AVAILABLE = false`, so cloud remotes refuse before `rclone` starts; the rest `Unsupported("Cloud remotes")` (W4.32) |
 //! | `process` | `NULL_DEVICE: &str` | `/dev/null` (unix) | unix | `NUL` |
-//! | `process` | `HAS_RSYNC: bool` | `true` (unix) | unix; the version gate is M2.6 | `false` |
+//! | `process` | `HAS_RSYNC: bool` (then [`crate::sync::rsync::available`] asks for 3.1 or newer) | `true` (unix) | unix | `false` |
+//! | `process` | `RSYNC_HINT: &str` (what "needs rsync" adds) | `""` | `brew install rsync` | `""` |
 //! | `process` | `pause(&Child)`, `resume(&Child)` `-> io::Result<()>` | `SIGSTOP` / `SIGCONT` (unix) | unix | `Unsupported` (W4.2) |
 //! | `process` | `terminate(&mut Child) -> io::Result<()>` (not a reaped one) | `kill(SIGTERM)` (unix) | unix | `Child::kill` |
 //! | `process` | `tie_to_this_thread(&mut Command)` (re-exported as `vfs::child`) | `prctl(PR_SET_PDEATHSIG)` + `getppid` in `pre_exec` | nothing: the child can outlive a crash (M2.29) | nothing (W4.31) |
