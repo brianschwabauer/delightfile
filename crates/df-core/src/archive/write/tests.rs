@@ -1161,7 +1161,13 @@ fn the_real_tools_accept_what_is_written() {
                 .output()
                 .unwrap();
             let names = String::from_utf8_lossy(&out.stdout);
-            assert!(names.contains(unicode), "{names}");
+            // macOS's libarchive hands names out decomposed (NFD), the form
+            // HFS+ stored them in: the same name, other bytes.
+            let decomposed = "photos/u\u{308}ni\u{308}co\u{308}de\u{301} — 日本語.txt";
+            assert!(
+                names.contains(unicode) || names.contains(decomposed),
+                "{names}"
+            );
         }
     }
     let tgz = t.join("photos.tar.gz");
