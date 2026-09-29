@@ -151,12 +151,20 @@ the `Result` to the nearest place that already returns `DfError`, keep the Unix 
 identical. A test per format that round-trips a non-ASCII UTF-8 name on every target,
 and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 
-- [ ] **P3.5** State file: `state/mod.rs:744–752` (`path_bytes`, `path_from`), and
+- [x] **P3.5** State file: `state/mod.rs:744–752` (`path_bytes`, `path_from`), and
       the record-key rule at `:536` (`starts_with(b"/")`) becomes "parses as an
       absolute path" via `Path::is_absolute` after decoding. Header stays
       `# delightfile state v1`: the on-disk bytes on Linux do not change. Done when:
       `state/tests.rs` passes on Linux unchanged and a Windows-shaped key
-      (`C:\Users\x`) round-trips in a new test.
+      (`C:\Users\x`) round-trips in a new test. — done (port/paths):
+      `path_bytes`/`path_from` were already `platform::os` (S1.16); the key is
+      decoded first and kept when `is_absolute`, which on Unix is the leading
+      `/` it was. `a_key_is_absolute_as_the_platform_reads_it` round-trips
+      `C:\Users\x` on Windows (`/home/x` on Unix), and the byte-for-byte
+      fixture test holds. What `state/tests.rs` asserts on Linux is unchanged;
+      its literal `/tmp/…` keys go through `test_support::abs`, the identity on
+      Unix and `C:\tmp\…` on Windows, where the new rule drops `/tmp/…`
+      (P3.30, bin 2).
 - [ ] **P3.6** `.trashinfo`: `ops/trash.rs:679–720` (`encode_path`, `decode_path`)
       and `:255–270` (`list`), `:609–646` (`fit`, `clip` — clip on UTF-8 char
       boundaries of the UTF-8 view, and `MAX_NAME_BYTES` stays a byte budget on Unix

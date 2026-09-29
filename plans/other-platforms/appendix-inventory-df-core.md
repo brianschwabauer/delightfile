@@ -309,7 +309,7 @@
 |---|---|---|---|---|
 | 221–223 | `state_path()` → `state_path_from(var_os("XDG_STATE_HOME"), var_os("HOME"))` | Linux-only | `StateStore::load` ← app:app.rs:new | Windows: `HOME` unset → `None` → session-only ✓ S1.11 |
 | 481, 500 | `render`: `escape(path_bytes(key))`, tab paths `path_bytes(tab)` | Unix-only | `flush` ← app:app.rs:flush_state | ✓ S1.16 |
-| 536 | `parse`: `if !key.starts_with(b"/")` → line skipped | Windows-differs | `load_from` ← `load` | A Windows absolute path starts with a drive letter, so every directory record would be dropped |
+| 536 | `parse`: `if !key.starts_with(b"/")` → line skipped | Windows-differs | `load_from` ← `load` | A Windows absolute path starts with a drive letter, so every directory record would be dropped ✓ P3.5 |
 | 594, 616 | `parse` / `parse_tabs`: `path_from(&key)`, `path_from(&value)` | Unix-only | as above | ✓ S1.16 |
 | 637–657 | `state_path_from`: `$XDG_STATE_HOME/delightfile/state` or `$HOME/.local/state/delightfile/state` | Linux-only; macOS-differs (not `~/Library`) | `state_path`; app:portal/request.rs:from_env | ✓ S1.11 |
 | 744–747 | `path_bytes`: `OsStrExt::as_bytes` | Unix-only | `render` | ✓ S1.16 |

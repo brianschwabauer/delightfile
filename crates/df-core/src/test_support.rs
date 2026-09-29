@@ -76,6 +76,22 @@ impl Drop for TempTree {
     }
 }
 
+/// The absolute path a Unix-shaped literal names, spelled for this platform:
+/// `abs("/tmp/x")` is `/tmp/x` on Unix and `C:\tmp\x` on Windows, where
+/// `/tmp/x` is not absolute. For tests about paths that never reach a disk —
+/// a store's keys, a rail's arguments — so they say the same thing on every
+/// target.
+pub fn abs(unix: &str) -> PathBuf {
+    let root = if std::path::MAIN_SEPARATOR == '\\' {
+        "C:\\"
+    } else {
+        "/"
+    };
+    unix.split('/')
+        .filter(|name| !name.is_empty())
+        .fold(PathBuf::from(root), |path, name| path.join(name))
+}
+
 /// The gnarly names of PLAN §9, in one place so every operation test
 /// exercises the same set.
 pub fn gnarly_names() -> Vec<String> {

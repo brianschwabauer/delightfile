@@ -7,10 +7,16 @@
 use std::path::{Path, PathBuf};
 
 use super::*;
-use crate::ops::fixture::TempTree;
+use crate::ops::fixture::{abs, TempTree};
 
 fn store_at(tree: &TempTree) -> StateStore {
     StateStore::load_from(tree.join("state"))
+}
+
+/// [`abs`]`(unix)` as its key is written in the file: escaped, so a Windows
+/// key's backslashes are doubled.
+fn key_text(unix: &str) -> String {
+    String::from_utf8(escape(&path_bytes(&abs(unix)).unwrap())).unwrap()
 }
 
 fn text_of(store: &StateStore) -> String {
@@ -92,6 +98,28 @@ fn gnarly_paths_survive_a_save_and_a_load() {
     }
 }
 
+/// A key is a path absolute as this platform reads one: `C:\Users\x` on
+/// Windows, where `/home/x` has no drive and is dropped on load; `/home/x` on
+/// Unix, where `C:\Users\x` is one relative name.
+#[test]
+fn a_key_is_absolute_as_the_platform_reads_it() {
+    let (native, foreign) = if cfg!(windows) {
+        (PathBuf::from(r"C:\Users\x"), PathBuf::from("/home/x"))
+    } else {
+        (PathBuf::from("/home/x"), PathBuf::from(r"C:\Users\x"))
+    };
+    let tree = TempTree::new("state-native-key");
+    let mut store = store_at(&tree);
+    store.set_hidden(&native, Some(true));
+    store.set_hidden(&foreign, Some(true));
+    store.flush().unwrap();
+
+    let reloaded = store_at(&tree);
+    assert_eq!(reloaded.show_hidden(&native), Some(true));
+    assert_eq!(reloaded.show_hidden(&foreign), None, "not absolute here");
+    assert_eq!(reloaded.len(), 1);
+}
+
 /// A file written while the view scale was still per directory — Brian has
 /// one — loads without it: the `view=` and `scale=` keys are dropped, a line
 /// that held nothing else is not a record at all, and the next save writes the
@@ -99,17 +127,21 @@ fn gnarly_paths_survive_a_save_and_a_load() {
 #[test]
 fn a_file_from_before_the_view_scale_moved_to_the_tab_loads_without_it() {
     let tree = TempTree::new("state-old-view");
-    let body = concat!(
-        "# delightfile state v1\n",
-        "/tmp/pictures\tview=grid\tscale=roomy\tlinemode=none\tt=100\n",
-        "/tmp/only-grid\tview=grid\tt=200\n",
-        "/tmp/only-scale\tscale=comfortable\tt=300\n",
-        "/tmp/listed\tview=list\tsort=size\tsort_reverse=1\tt=400\n",
+    let body = format!(
+        "# delightfile state v1\n\
+         {}\tview=grid\tscale=roomy\tlinemode=none\tt=100\n\
+         {}\tview=grid\tt=200\n\
+         {}\tscale=comfortable\tt=300\n\
+         {}\tview=list\tsort=size\tsort_reverse=1\tt=400\n",
+        key_text("/tmp/pictures"),
+        key_text("/tmp/only-grid"),
+        key_text("/tmp/only-scale"),
+        key_text("/tmp/listed"),
     );
     std::fs::write(tree.join("state"), body).unwrap();
 
     let mut store = store_at(&tree);
-    let pictures = Path::new("/tmp/pictures");
+    let pictures = &abs("/tmp/pictures");
     assert_eq!(
         store.get(pictures),
         Some(ViewState {
@@ -119,14 +151,14 @@ fn a_file_from_before_the_view_scale_moved_to_the_tab_loads_without_it() {
         "the rest of the line still loads"
     );
     assert_eq!(
-        store.sort(Path::new("/tmp/listed")),
+        store.sort(&abs("/tmp/listed")),
         Some(SortOverride {
             by: SortBy::Size,
             reverse: true
         })
     );
-    assert_eq!(store.get(Path::new("/tmp/only-grid")), None);
-    assert_eq!(store.get(Path::new("/tmp/only-scale")), None);
+    assert_eq!(store.get(&abs("/tmp/only-grid")), None);
+    assert_eq!(store.get(&abs("/tmp/only-scale")), None);
     assert_eq!(store.len(), 2, "pictures and listed");
     assert!(!store.is_dirty(), "reading an old file is not a change");
 
@@ -136,13 +168,16 @@ fn a_file_from_before_the_view_scale_moved_to_the_tab_loads_without_it() {
 
     // Something else changes, the file is rewritten, and the keys are gone
     // from the disk as well as from memory.
-    store.set_hidden("/tmp/elsewhere", Some(true));
+    store.set_hidden(abs("/tmp/elsewhere"), Some(true));
     store.flush().unwrap();
     let written = std::fs::read_to_string(tree.join("state")).unwrap();
     assert!(!written.contains("view="), "{written}");
     assert!(!written.contains("scale="), "{written}");
     assert!(
-        written.contains("/tmp/pictures\tlinemode=none\tt=100\n"),
+        written.contains(&format!(
+            "{}\tlinemode=none\tt=100\n",
+            key_text("/tmp/pictures")
+        )),
         "{written}"
     );
 
@@ -155,7 +190,7 @@ fn a_file_from_before_the_view_scale_moved_to_the_tab_loads_without_it() {
 #[test]
 fn every_override_round_trips() {
     let tree = TempTree::new("state-overrides");
-    let dir = Path::new("/tmp/everything");
+    let dir = &abs("/tmp/everything");
     let mut store = store_at(&tree);
     store.set_sort(
         dir,
@@ -184,7 +219,7 @@ fn every_override_round_trips() {
 #[test]
 fn hidden_false_is_not_the_same_as_unset() {
     let tree = TempTree::new("state-hidden");
-    let dir = Path::new("/tmp/hidden");
+    let dir = &abs("/tmp/hidden");
     let mut store = store_at(&tree);
     store.set_hidden(dir, Some(false));
     store.flush().unwrap();
@@ -396,19 +431,23 @@ fn an_oversized_file_is_trimmed_on_load() {
     let mut body = String::from(HEADER);
     body.push('\n');
     for i in 0..MAX_STATE_ENTRIES + 20 {
-        body.push_str(&format!("/tmp/d{i:05}\thidden=1\tt={}\n", 1000 + i));
+        body.push_str(&format!(
+            "{}\thidden=1\tt={}\n",
+            key_text(&format!("/tmp/d{i:05}")),
+            1000 + i
+        ));
     }
     std::fs::write(tree.join("state"), body).unwrap();
 
     let store = store_at(&tree);
     assert_eq!(store.len(), MAX_STATE_ENTRIES);
     assert_eq!(
-        store.show_hidden(Path::new("/tmp/d00000")),
+        store.show_hidden(&abs("/tmp/d00000")),
         None,
         "the oldest timestamps lost"
     );
     let newest = format!("/tmp/d{:05}", MAX_STATE_ENTRIES + 19);
-    assert_eq!(store.show_hidden(Path::new(&newest)), Some(true));
+    assert_eq!(store.show_hidden(&abs(&newest)), Some(true));
 }
 
 #[test]
@@ -416,17 +455,17 @@ fn touch_moves_a_record_up_the_queue() {
     let tree = TempTree::new("state-touch-lru");
     let mut body = String::from(HEADER);
     body.push('\n');
-    body.push_str("/tmp/old\thidden=1\tt=1\n");
-    body.push_str("/tmp/older\thidden=1\tt=0\n");
+    body.push_str(&format!("{}\thidden=1\tt=1\n", key_text("/tmp/old")));
+    body.push_str(&format!("{}\thidden=1\tt=0\n", key_text("/tmp/older")));
     std::fs::write(tree.join("state"), body).unwrap();
 
     let mut store = store_at(&tree);
-    store.touch(Path::new("/tmp/older"));
+    store.touch(&abs("/tmp/older"));
     assert!(store.is_dirty(), "a touch is worth saving");
     let rendered = text_of(&store);
     let older_line = rendered
         .lines()
-        .find(|l| l.starts_with("/tmp/older"))
+        .find(|l| l.starts_with(&key_text("/tmp/older")))
         .expect("older");
     assert!(
         !older_line.contains("\tt=0"),
@@ -439,25 +478,31 @@ fn touch_moves_a_record_up_the_queue() {
 #[test]
 fn corrupt_lines_are_skipped_and_the_good_ones_load() {
     let tree = TempTree::new("state-corrupt");
-    let body = concat!(
-        "# delightfile state v1\n",
-        "\n",
-        "# a comment in the middle\n",
-        "/tmp/good\thidden=1\tt=100\n",
-        "relative/path\thidden=1\n",
-        "/tmp/bad-escape\\q\thidden=1\n",
-        "/tmp/no-equals\thidden1\n",
-        "/tmp/unknown-key\tlinemode=owner\tfuture_setting=7\n",
-        "/tmp/unknown-value\tlinemode=hologram\n",
-        "\u{0}garbage\u{1}\u{2}\n",
-        "/tmp/also-good\tsort=size\tsort_reverse=1\tt=200\n",
+    let body = format!(
+        "# delightfile state v1\n\
+         \n\
+         # a comment in the middle\n\
+         {}\thidden=1\tt=100\n\
+         relative/path\thidden=1\n\
+         {}\\q\thidden=1\n\
+         {}\thidden1\n\
+         {}\tlinemode=owner\tfuture_setting=7\n\
+         {}\tlinemode=hologram\n\
+         \u{0}garbage\u{1}\u{2}\n\
+         {}\tsort=size\tsort_reverse=1\tt=200\n",
+        key_text("/tmp/good"),
+        key_text("/tmp/bad-escape"),
+        key_text("/tmp/no-equals"),
+        key_text("/tmp/unknown-key"),
+        key_text("/tmp/unknown-value"),
+        key_text("/tmp/also-good"),
     );
     std::fs::write(tree.join("state"), body).unwrap();
 
     let store = store_at(&tree);
-    assert_eq!(store.show_hidden(Path::new("/tmp/good")), Some(true));
+    assert_eq!(store.show_hidden(&abs("/tmp/good")), Some(true));
     assert_eq!(
-        store.sort(Path::new("/tmp/also-good")),
+        store.sort(&abs("/tmp/also-good")),
         Some(SortOverride {
             by: SortBy::Size,
             reverse: true
@@ -465,7 +510,7 @@ fn corrupt_lines_are_skipped_and_the_good_ones_load() {
         "a good line after the bad ones still loads"
     );
     assert_eq!(
-        store.linemode(Path::new("/tmp/unknown-key")),
+        store.linemode(&abs("/tmp/unknown-key")),
         Some(LineMode::Owner),
         "an unknown key does not cost the line"
     );
@@ -474,9 +519,9 @@ fn corrupt_lines_are_skipped_and_the_good_ones_load() {
         None,
         "keys must be absolute"
     );
-    assert_eq!(store.get(Path::new("/tmp/no-equals")), None);
+    assert_eq!(store.get(&abs("/tmp/no-equals")), None);
     assert_eq!(
-        store.get(Path::new("/tmp/unknown-value")),
+        store.get(&abs("/tmp/unknown-value")),
         None,
         "an unreadable value leaves nothing to remember"
     );
@@ -488,12 +533,15 @@ fn a_corrupt_file_is_repaired_by_the_next_flush() {
     let tree = TempTree::new("state-repair");
     std::fs::write(
         tree.join("state"),
-        "garbage\n/tmp/good\thidden=1\tt=1\nmore garbage\\q\n",
+        format!(
+            "garbage\n{}\thidden=1\tt=1\nmore garbage\\q\n",
+            key_text("/tmp/good")
+        ),
     )
     .unwrap();
 
     let mut store = store_at(&tree);
-    store.set_hidden("/tmp/second", Some(false));
+    store.set_hidden(abs("/tmp/second"), Some(false));
     store.flush().unwrap();
 
     let written = std::fs::read_to_string(tree.join("state")).unwrap();
@@ -501,8 +549,8 @@ fn a_corrupt_file_is_repaired_by_the_next_flush() {
     assert!(written.starts_with(HEADER));
 
     let reloaded = store_at(&tree);
-    assert_eq!(reloaded.show_hidden(Path::new("/tmp/good")), Some(true));
-    assert_eq!(reloaded.show_hidden(Path::new("/tmp/second")), Some(false));
+    assert_eq!(reloaded.show_hidden(&abs("/tmp/good")), Some(true));
+    assert_eq!(reloaded.show_hidden(&abs("/tmp/second")), Some(false));
 }
 
 #[test]

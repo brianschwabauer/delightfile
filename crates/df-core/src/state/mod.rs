@@ -570,7 +570,14 @@ impl StateStore {
                 self.parse_tag(fields, index + 1);
                 continue;
             }
-            if !key.starts_with(b"/") {
+            // A key that cannot name a path here (not Unicode, on Windows) is
+            // not remembered; one that names a relative path is not a record.
+            // Absolute is this platform's reading: `/…` on Unix, `C:\…` or
+            // `\\server\share\…` on Windows.
+            let Ok(path) = path_from(&key) else {
+                continue;
+            };
+            if !path.is_absolute() {
                 log::warn!(
                     "state: {}:{}: key is not an absolute path; line skipped",
                     self.path.display(),
@@ -628,9 +635,6 @@ impl StateStore {
             if state.is_empty() {
                 continue;
             }
-            let Ok(path) = path_from(&key) else {
-                continue;
-            };
             self.dirs.insert(path, Record { state, touched });
         }
         // A file that was over the cap — an older build with a bigger one, or a
