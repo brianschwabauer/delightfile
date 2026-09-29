@@ -1,4 +1,4 @@
-//! The command line: `delightfile [path]`, `--cwd-file=<path>`,
+//! The command line: `delightfile [path]`, `--reveal`, `--cwd-file=<path>`,
 //! `--chooser-file=<path>` and the three `--chooser-*` switches that say what
 //! kind of dialog it is standing in for (PLAN §3), `--chooser-request=<path>`
 //! for the whole of a dialog, and `--portal`.
@@ -33,6 +33,12 @@
 //! name, where to start, the file-type filters — as a small TOML file that
 //! `delightfile --portal` (see [`crate::portal`]) writes for each dialog it
 //! is asked for and removes once the window has answered.
+//!
+//! `--reveal` is the file manager's side of the same service: "Show in
+//! folder" reaches `--portal` as `org.freedesktop.FileManager1.ShowItems`,
+//! and each window it opens for that is `delightfile --reveal <path>`. A bare
+//! path cannot say it, because a bare path to a folder opens the folder, and
+//! showing a folder means showing it among its siblings.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +47,10 @@ use std::path::{Path, PathBuf};
 pub struct Args {
     /// Where to start. `None` means the process's current directory.
     pub start: Option<PathBuf>,
+    /// `--reveal`: `start` is to be shown, not opened — the window opens the
+    /// folder it is in with the cursor on it, whether it is a file or a
+    /// folder (see `reveal_directory` in `app.rs`).
+    pub reveal: bool,
     /// Where to write the final directory on a `q` quit.
     pub cwd_file: Option<PathBuf>,
     /// The dialog this session is standing in for. `Some` is what puts the
@@ -146,8 +156,8 @@ impl Chooser {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Run(Args),
-    /// `--portal`: no window, just the file-chooser backend on the session
-    /// bus.
+    /// `--portal`: no window, just the file-chooser backend and
+    /// `org.freedesktop.FileManager1` on the session bus.
     Portal,
     /// Print this and exit 0 — `--help`, `--version`.
     Print(String),
@@ -164,6 +174,10 @@ usage: delightfile [path] [options]
 
   path                   the directory to open (default: the current one);
                          a file opens its directory with the cursor on it
+  --reveal               show the path rather than open it: its folder opens
+                         with the cursor on it, a folder included (what
+                         \"Show in folder\" asks --portal for; needs a path,
+                         and cannot be a --chooser-* dialog)
   --cwd-file=<path>      write the final directory here when quitting with `q`
                          (`Q` quits without writing it)
   --chooser-file=<path>  pick rather than open: `Enter` or the Select button
@@ -181,8 +195,9 @@ usage: delightfile [path] [options]
                          kind, title, button label, suggested name, starting
                          folder and file-type filters (written by --portal;
                          needs --chooser-file, and outranks the switches)
-  --portal               serve the xdg-desktop-portal file chooser on the
-                         session bus; D-Bus starts this, not a person
+  --portal               serve the xdg-desktop-portal file chooser, and
+                         org.freedesktop.FileManager1 (\"Show in folder\"), on
+                         the session bus; D-Bus starts this, not a person
   -h, --help             show this
   -V, --version          show the version
 ";
@@ -198,6 +213,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
     let mut chooser_request: Option<PathBuf> = None;
     let (mut multiple, mut directory, mut save) = (false, false, false);
     let (mut portal, mut count) = (false, 0);
+    let mut reveal = false;
     for arg in args {
         count += 1;
         if rest_are_paths || !arg.starts_with('-') {
@@ -219,6 +235,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
             "--chooser-directory" => directory = true,
             "--chooser-save" => save = true,
             "--portal" => portal = true,
+            "--reveal" => reveal = true,
             _ => {
                 let found = ["--cwd-file", "--chooser-file", "--chooser-request"]
                     .into_iter()
@@ -249,6 +266,20 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
         } else {
             Outcome::Fail("--portal takes no other arguments".to_string())
         };
+    }
+    // Revealing is the file manager pointing at something, and a dialog is a
+    // window answering somebody else's question from where that question
+    // said to start; a window cannot be both. And with no path there is
+    // nothing to point at — refused, like a chooser switch with nowhere to
+    // answer, rather than quietly opening the current directory.
+    if reveal {
+        if chooser_file.is_some() || chooser_request.is_some() || multiple || directory || save {
+            return Outcome::Fail("--reveal cannot be used with the --chooser-* options".into());
+        }
+        if out.start.is_none() {
+            return Outcome::Fail("--reveal needs a path to show".into());
+        }
+        out.reveal = true;
     }
     match (chooser_file, chooser_request) {
         // The request file says everything the switches could, and more; a
@@ -490,6 +521,7 @@ mod tests {
             parse_str(&["/tmp"]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/tmp")),
+                reveal: false,
                 cwd_file: None,
                 chooser: None,
             })
@@ -503,6 +535,7 @@ mod tests {
             parse_str(&["--cwd-file=/tmp/yazi-cwd", "/home/brian"]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
+                reveal: false,
                 cwd_file: Some(PathBuf::from("/tmp/yazi-cwd")),
                 chooser: None,
             })
@@ -542,6 +575,7 @@ mod tests {
             parse_str(&["--chooser-file=/tmp/out", "/home/brian"]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
+                reveal: false,
                 cwd_file: None,
                 chooser: chooser(false, false, false),
             })
@@ -554,6 +588,7 @@ mod tests {
             ]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
+                reveal: false,
                 cwd_file: None,
                 chooser: chooser(true, false, false),
             })
@@ -568,6 +603,7 @@ mod tests {
             ]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
+                reveal: false,
                 cwd_file: None,
                 chooser: chooser(false, true, false),
             })
@@ -582,6 +618,7 @@ mod tests {
             ]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian/Downloads/photo.jpg")),
+                reveal: false,
                 cwd_file: None,
                 chooser: chooser(false, false, true),
             })
@@ -602,6 +639,7 @@ mod tests {
             ]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/brian")),
+                reveal: false,
                 cwd_file: None,
                 chooser: chooser(true, true, true),
             })
@@ -678,6 +716,65 @@ mod tests {
         assert!(matches!(parse_str(&["--portal", "/tmp"]), Outcome::Fail(_)));
         assert!(matches!(
             parse_str(&["--chooser-file=/tmp/out", "--portal"]),
+            Outcome::Fail(_)
+        ));
+    }
+
+    /// `--reveal` marks the path as one to show; it needs a path, and it is
+    /// never a dialog.
+    #[test]
+    fn reveal_shows_a_path_and_is_never_a_dialog() {
+        let revealed = Outcome::Run(Args {
+            start: Some(PathBuf::from("/home/brian/Downloads")),
+            reveal: true,
+            cwd_file: None,
+            chooser: None,
+        });
+        assert_eq!(parse_str(&["--reveal", "/home/brian/Downloads"]), revealed);
+        // Anywhere on the line, and before the end of the options — the
+        // shape `--portal` starts its windows with.
+        assert_eq!(parse_str(&["/home/brian/Downloads", "--reveal"]), revealed);
+        assert_eq!(
+            parse_str(&["--reveal", "--", "/home/brian/Downloads"]),
+            revealed
+        );
+        // After `--` it is a name like any other.
+        assert_eq!(
+            parse_str(&["--", "--reveal"]),
+            Outcome::Run(Args {
+                start: Some(PathBuf::from("--reveal")),
+                ..Args::default()
+            })
+        );
+        // Beside the cwd-file it is still a plain window.
+        let Outcome::Run(args) = parse_str(&["--cwd-file=/tmp/cwd", "--reveal", "/tmp"]) else {
+            panic!("did not parse");
+        };
+        assert!(args.reveal);
+        assert_eq!(args.cwd_file, Some(PathBuf::from("/tmp/cwd")));
+
+        match parse_str(&["--reveal"]) {
+            Outcome::Fail(message) => assert!(message.contains("--reveal"), "{message}"),
+            other => panic!("--reveal alone parsed as {other:?}"),
+        }
+        for chooser in [
+            "--chooser-file=/tmp/out",
+            "--chooser-request=/tmp/request.toml",
+            "--chooser-multiple",
+            "--chooser-directory",
+            "--chooser-save",
+        ] {
+            match parse_str(&["--reveal", chooser, "/tmp/x"]) {
+                Outcome::Fail(message) => assert!(message.contains("--reveal"), "{message}"),
+                other => panic!("--reveal with {chooser} parsed as {other:?}"),
+            }
+        }
+        assert!(matches!(
+            parse_str(&["--portal", "--reveal"]),
+            Outcome::Fail(_)
+        ));
+        assert!(matches!(
+            parse_str(&["--reveal=1", "/tmp"]),
             Outcome::Fail(_)
         ));
     }
@@ -794,6 +891,7 @@ mime = ["text/plain"]
             parse_str(&["--", "--help"]),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("--help")),
+                reveal: false,
                 cwd_file: None,
                 chooser: None,
             })

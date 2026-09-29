@@ -1,0 +1,10 @@
+# D-Bus starts the same backend when a program asks the desktop to show a file
+# in its folder (Chrome's "Show in folder") and nothing owns the name yet:
+# `delightfile --portal` serves org.freedesktop.FileManager1 beside the file
+# chooser. Installed under ~/.local/share/dbus-1/services, it overrides the
+# one another file manager (Nautilus, usually) put in /usr/share.
+# build/install.sh writes this out with the placeholder in Exec replaced by
+# the installed binary's absolute path.
+[D-BUS Service]
+Name=org.freedesktop.FileManager1
+Exec=@BIN@ --portal

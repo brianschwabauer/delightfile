@@ -14,6 +14,8 @@
 # D-Bus starts it on the first file dialog, and portals.conf is pointed at it —
 # unless portals.conf already names another file chooser, which is the
 # person's choice and is left alone (the line to change is printed instead).
+# The same process answers "Show in folder" (org.freedesktop.FileManager1),
+# so its service file goes in with the portal's and comes out with it.
 #
 # One thing this deliberately does *not* do, because it is the machine's
 # opinion rather than the program's: make delightfile the default handler for
@@ -31,6 +33,10 @@ bindir="$HOME/.local/bin"
 
 bus_name="org.freedesktop.impl.portal.desktop.delightfile"
 service="$data/dbus-1/services/$bus_name.service"
+# "Show in folder". A user-level service file wins over the one another file
+# manager installed under /usr/share for the same name.
+file_manager_name="org.freedesktop.FileManager1"
+file_manager_service="$data/dbus-1/services/$file_manager_name.service"
 portal_user="$data/xdg-desktop-portal/portals/delightfile.portal"
 portal_system="/usr/share/xdg-desktop-portal/portals/delightfile.portal"
 portals_conf="$config/xdg-desktop-portal/portals.conf"
@@ -177,13 +183,15 @@ reload_bus() {
 }
 
 install_portal() {
-    local tmp version
-    tmp="$(mktemp)"
-    sed "s|@BIN@|$bindir/delightfile|" \
-        "$repo/build/$bus_name.service.in" >"$tmp"
-    install -Dm644 "$tmp" "$service"
-    rm -f "$tmp"
-    echo "  $service"
+    local tmp version name
+    for name in "$bus_name" "$file_manager_name"; do
+        tmp="$(mktemp)"
+        sed "s|@BIN@|$bindir/delightfile|" \
+            "$repo/build/$name.service.in" >"$tmp"
+        install -Dm644 "$tmp" "$data/dbus-1/services/$name.service"
+        rm -f "$tmp"
+        echo "  $data/dbus-1/services/$name.service"
+    done
 
     # xdg-desktop-portal reads backends from $XDG_DATA_HOME and
     # $XDG_DATA_DIRS since 1.20.1; before that, only from its own
@@ -205,8 +213,9 @@ install_portal() {
 }
 
 remove_portal() {
-    rm -f "$service" "$portal_user"
+    rm -f "$service" "$file_manager_service" "$portal_user"
     echo "removed $service"
+    echo "removed $file_manager_service"
     echo "removed $portal_user"
     if [[ -e $portal_system ]]; then
         as_root rm -f "$portal_system"
@@ -317,5 +326,9 @@ to make it the desktop's file manager:
 file dialogs (Chrome's upload box, every "Save as") open delightfile once
 xdg-desktop-portal is restarted. Its window's Wayland app_id is
 `delightfile-picker`, for a window rule that floats it.
+
+"Show in folder" opens delightfile too: at once when nothing else owns
+org.freedesktop.FileManager1, and otherwise once whatever does (Nautilus,
+usually) has exited.
 NEXT
 restart_note

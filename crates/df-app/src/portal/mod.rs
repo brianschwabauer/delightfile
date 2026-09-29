@@ -44,13 +44,23 @@
 //! duplicate handle: each is an error *reply* to that one call. The request
 //! threads never panic on bus data, and the shared state is behind locks that
 //! shrug off poisoning, so one bad request is one failed dialog.
+//!
+//! ## And "Show in folder"
+//!
+//! The same process serves `org.freedesktop.FileManager1` at
+//! `/org/freedesktop/FileManager1` ([`show`]): what Chrome's "Show in folder"
+//! calls, and every other program that asks the desktop to point at a file.
+//! Its name is claimed second and waited in line for rather than insisted
+//! on, so a desktop whose file manager already owns it still gets its file
+//! dialogs, and gets "Show in folder" the moment that file manager exits.
 
 mod request;
+mod show;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::dbus::{Bus, Inbox, Message, Outbox, Value, MSG_METHOD_CALL};
+use crate::dbus::{Bus, Claim, Inbox, Message, Outbox, Value, MSG_METHOD_CALL};
 use request::{Answer, Dialog, Kind, Pending, Setup};
 
 /// The well-known name the `.portal` file points xdg-desktop-portal at.
@@ -101,6 +111,18 @@ pub fn run() -> i32 {
     if let Err(e) = bus.request_name(BUS_NAME) {
         log::error!("portal: {e}");
         return 1;
+    }
+    // Second, and never fatal: the file chooser is what this service is
+    // started for, and a FileManager1 somebody else owns is no reason to stop
+    // serving it. In line is as good as owned in the end — the bus hands the
+    // name over when its owner goes.
+    match bus.request_name_queued(show::BUS_NAME) {
+        Ok(Claim::Owned) => log::info!("portal: serving {} too", show::BUS_NAME),
+        Ok(Claim::Queued) => log::info!(
+            "portal: {} is another program's; in line for it",
+            show::BUS_NAME
+        ),
+        Err(e) => log::warn!("portal: not serving {}: {e}", show::BUS_NAME),
     }
     let (inbox, outbox) = match bus.into_service() {
         Ok(halves) => halves,
@@ -185,11 +207,21 @@ impl Service {
                 return self.start(call, kind);
             }
         }
+        if path == show::OBJECT_PATH && on(show::INTERFACE) {
+            if let Some(method) = show::Method::of_member(member) {
+                return Some(show::answer(call, method, &self.setup));
+            }
+        }
         if on(REQUEST) && member == "Close" {
             return Some(self.close(call, path));
         }
         if on(PROPERTIES) && path == OBJECT_PATH {
             if let Some(reply) = properties(call, member) {
+                return Some(reply);
+            }
+        }
+        if on(PROPERTIES) && path == show::OBJECT_PATH {
+            if let Some(reply) = show::properties(call, member) {
                 return Some(reply);
             }
         }
@@ -284,13 +316,18 @@ impl Service {
     }
 
     /// `Introspect` on any path this service has something at: the portal
-    /// object, an open request, or a node on the way down to either.
+    /// object, the FileManager1 object, an open request, or a node on the way
+    /// down to any of them.
     fn introspect(&self, call: &Message, path: &str) -> Message {
         let handles: Vec<String> = lock(&self.requests).keys().cloned().collect();
-        let known = std::iter::once(OBJECT_PATH).chain(handles.iter().map(String::as_str));
+        let known = [OBJECT_PATH, show::OBJECT_PATH]
+            .into_iter()
+            .chain(handles.iter().map(String::as_str));
         let children = children_of(path, known);
         let interfaces = if path == OBJECT_PATH {
             PORTAL_INTERFACES
+        } else if path == show::OBJECT_PATH {
+            show::INTERFACES
         } else if handles.iter().any(|handle| handle == path) {
             REQUEST_INTERFACES
         } else if !children.is_empty() {
@@ -598,6 +635,136 @@ mod tests {
         assert!(children("/org/freedesktop/portal/desktop/request/1_7/t").is_empty());
         // A sibling that merely shares a prefix is not a child.
         assert!(children("/org/free").is_empty());
+    }
+
+    /// A service over a socket nobody is at: enough to call `answer` on,
+    /// which returns its replies rather than sending them.
+    fn service() -> Service {
+        let (ours, _theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (_inbox, outbox) = Bus::on_socket(ours).into_service().unwrap();
+        Service::new(outbox, Setup::default())
+    }
+
+    fn introspect(service: &mut Service, path: &str) -> Message {
+        let call = Message {
+            serial: 1,
+            ..Message::method_call(BUS_NAME, path, INTROSPECTABLE, "Introspect")
+        };
+        service.answer(&call).unwrap()
+    }
+
+    fn xml(reply: &Message) -> String {
+        match reply.args().unwrap().as_slice() {
+            [Value::Str(xml)] => xml.clone(),
+            other => panic!("not introspection: {other:?}"),
+        }
+    }
+
+    /// `busctl tree` walks from `/` down to the FileManager1 object as it
+    /// does to the portal's, and finds there the three methods and the
+    /// standard interfaces.
+    #[test]
+    fn introspection_walks_down_to_the_file_manager_object() {
+        let mut service = service();
+        assert!(xml(&introspect(&mut service, "/")).contains("<node name=\"org\"/>"));
+        let freedesktop = xml(&introspect(&mut service, "/org/freedesktop"));
+        assert!(
+            freedesktop.contains("<node name=\"FileManager1\"/>"),
+            "{freedesktop}"
+        );
+        assert!(
+            freedesktop.contains("<node name=\"portal\"/>"),
+            "{freedesktop}"
+        );
+
+        let object = xml(&introspect(&mut service, show::OBJECT_PATH));
+        assert!(object.contains("<interface name=\"org.freedesktop.FileManager1\">"));
+        for method in ["ShowItems", "ShowFolders", "ShowItemProperties"] {
+            assert!(
+                object.contains(&format!("<method name=\"{method}\">")),
+                "{method}"
+            );
+        }
+        for standard in [PROPERTIES, INTROSPECTABLE, PEER] {
+            assert!(
+                object.contains(&format!("<interface name=\"{standard}\">")),
+                "{standard}"
+            );
+        }
+        assert!(!object.contains("<node name="), "a leaf: {object}");
+        // Nothing of the file chooser's is there, nor of it at the portal's.
+        assert!(!object.contains(FILE_CHOOSER));
+        assert!(!xml(&introspect(&mut service, OBJECT_PATH)).contains(show::INTERFACE));
+        let below = introspect(&mut service, "/org/freedesktop/FileManager1/x");
+        assert_eq!(below.error_name.as_deref(), Some(UNKNOWN_OBJECT));
+    }
+
+    /// The three methods reach [`show`] at the FileManager1 object — with or
+    /// without an interface — and nowhere else; the standard interfaces
+    /// answer there as they do at the portal's.
+    #[test]
+    fn show_in_folder_is_answered_at_its_own_path() {
+        let mut service = service();
+        let show_items = |path: &str, interface: Option<&str>| {
+            let mut call = Message {
+                serial: 8,
+                sender: Some(":1.9".into()),
+                ..Message::method_call(show::BUS_NAME, path, show::INTERFACE, "ShowItems")
+            }
+            .with_args(
+                "ass",
+                &[
+                    Value::Array(vec![Value::Str("file:///tmp/x".into())]),
+                    Value::Str(String::new()),
+                ],
+            )
+            .unwrap();
+            call.interface = interface.map(str::to_string);
+            call
+        };
+        for interface in [Some(show::INTERFACE), None] {
+            let reply = service
+                .answer(&show_items(show::OBJECT_PATH, interface))
+                .unwrap();
+            assert_eq!(reply.kind, crate::dbus::MSG_METHOD_RETURN, "{interface:?}");
+            assert!(reply.body.is_empty());
+        }
+        let elsewhere = service
+            .answer(&show_items(OBJECT_PATH, Some(show::INTERFACE)))
+            .unwrap();
+        assert_eq!(elsewhere.error_name.as_deref(), Some(UNKNOWN_METHOD));
+        let wrong_interface = service
+            .answer(&show_items(show::OBJECT_PATH, Some(FILE_CHOOSER)))
+            .unwrap();
+        assert_eq!(wrong_interface.error_name.as_deref(), Some(UNKNOWN_METHOD));
+
+        // A bad body is the caller's error, and the service goes on.
+        let mut bad = show_items(show::OBJECT_PATH, None);
+        bad.signature = Some("as".into());
+        bad.body = crate::dbus::marshal_body("as", &[Value::Array(Vec::new())]).unwrap();
+        assert_eq!(
+            service.answer(&bad).unwrap().error_name.as_deref(),
+            Some(INVALID_ARGS)
+        );
+
+        let get_all = Message {
+            serial: 9,
+            ..Message::method_call(show::BUS_NAME, show::OBJECT_PATH, PROPERTIES, "GetAll")
+        }
+        .with_args("s", &[Value::Str(show::INTERFACE.into())])
+        .unwrap();
+        assert_eq!(
+            service.answer(&get_all).unwrap().args().unwrap(),
+            vec![Value::Dict(vec![])]
+        );
+        let ping = Message {
+            serial: 10,
+            ..Message::method_call(show::BUS_NAME, show::OBJECT_PATH, PEER, "Ping")
+        };
+        assert_eq!(
+            service.answer(&ping).unwrap().kind,
+            crate::dbus::MSG_METHOD_RETURN
+        );
     }
 
     /// The answer's shape: `uris` only on success, and an empty results

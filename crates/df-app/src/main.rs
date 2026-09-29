@@ -44,7 +44,8 @@ mod overlay;
 mod panel;
 mod permissions;
 mod playback;
-/// `--portal`: the xdg-desktop-portal file-chooser backend.
+/// `--portal`: the xdg-desktop-portal file-chooser backend, and
+/// `org.freedesktop.FileManager1` ("Show in folder").
 mod portal;
 mod preview;
 /// Remote services browsed as directories (PLAN §7.6).

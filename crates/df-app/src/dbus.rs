@@ -76,6 +76,16 @@ pub const FLAG_NO_REPLY_EXPECTED: u8 = 0x1;
 /// in the queue owning nothing.
 const NAME_DO_NOT_QUEUE: u32 = 0x4;
 
+/// What a queued `RequestName` ([`Bus::request_name_queued`]) came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The name is this connection's now.
+    Owned,
+    /// Somebody else has it, and this connection is in line behind them: the
+    /// bus hands it over when they let go or exit.
+    Queued,
+}
+
 /// The largest array the specification allows (64 MiB). A value this side
 /// builds that is bigger is refused before the bus refuses it by hanging up.
 const MAX_ARRAY: usize = 64 * 1024 * 1024;
@@ -528,10 +538,33 @@ impl Bus {
     /// Refuses to queue ([`NAME_DO_NOT_QUEUE`]): a service that is second in
     /// line owns nothing, receives nothing, and would sit there looking alive.
     pub fn request_name(&mut self, name: &str) -> Result<(), String> {
-        let body = marshal_body(
-            "su",
-            &[Value::Str(name.to_string()), Value::U32(NAME_DO_NOT_QUEUE)],
-        )?;
+        match self.ask_for_name(name, NAME_DO_NOT_QUEUE)? {
+            // Primary owner now, or already was.
+            1 | 4 => Ok(()),
+            3 => Err(format!("{name} is already owned by another process")),
+            other => Err(format!("RequestName({name}) answered {other}")),
+        }
+    }
+
+    /// Own `name`, or wait in line for it.
+    ///
+    /// The other half of [`Bus::request_name`]: for a name that is somebody
+    /// else's by default — `org.freedesktop.FileManager1`, which Nautilus
+    /// claims wherever it is installed — being next in line is worth having,
+    /// because the bus hands the name to the queue the moment its owner goes.
+    /// No flags: the name is waited for rather than taken from whoever has
+    /// it, and once owned it is not given up to the next program that asks.
+    pub fn request_name_queued(&mut self, name: &str) -> Result<Claim, String> {
+        match self.ask_for_name(name, 0)? {
+            1 => Ok(Claim::Owned),
+            2 => Ok(Claim::Queued),
+            other => Err(format!("RequestName({name}) answered {other}")),
+        }
+    }
+
+    /// `RequestName(name, flags)`, and the bus's one-word answer.
+    fn ask_for_name(&mut self, name: &str, flags: u32) -> Result<u32, String> {
+        let body = marshal_body("su", &[Value::Str(name.to_string()), Value::U32(flags)])?;
         let reply = self.call(
             BUS_DRIVER,
             "/org/freedesktop/DBus",
@@ -540,12 +573,7 @@ impl Bus {
             Some("su"),
             &body,
         )?;
-        match Reader::new(&reply).u32()? {
-            // Primary owner now, or already was.
-            1 | 4 => Ok(()),
-            3 => Err(format!("{name} is already owned by another process")),
-            other => Err(format!("RequestName({name}) answered {other}")),
-        }
+        Reader::new(&reply).u32()
     }
 
     /// Hand the connection over to a service: one [`Inbox`] for the single
@@ -2914,6 +2942,79 @@ mod generic {
         assert_eq!(first.member.as_deref(), Some("Activate"));
         assert_eq!(first.serial, 70);
         assert!(inbox.backlog.is_empty(), "the signal was not kept");
+    }
+
+    /// A queued claim asks with no flags at all, and takes the bus's 1
+    /// (owned) and 2 (in line) as the two ways of succeeding; 3 and 4 — which
+    /// a request that queues is never meant to get — and an error are not.
+    #[test]
+    fn a_queued_name_request_is_owned_or_in_line() {
+        for (answer, expected) in [
+            (1, Ok(Claim::Owned)),
+            (2, Ok(Claim::Queued)),
+            (3, Err("answered 3")),
+            (4, Err("answered 4")),
+        ] {
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            let mut bus = Bus::on_socket(ours);
+            bus.timeout = Duration::from_secs(5);
+            let peer = std::thread::spawn(move || {
+                let mut peer = theirs;
+                let request = parse_message(&read_request(&mut peer)).unwrap();
+                assert_eq!(request.member.as_deref(), Some("RequestName"));
+                assert_eq!(
+                    request.args().unwrap(),
+                    vec![s("org.freedesktop.FileManager1"), Value::U32(0)],
+                    "no do-not-queue flag, and no other"
+                );
+                let reply = Message {
+                    serial: 9,
+                    sender: Some(BUS_DRIVER.into()),
+                    ..Message::method_return(&request)
+                }
+                .with_args("u", &[Value::U32(answer)])
+                .unwrap();
+                peer.write_all(&reply.encode().unwrap()).unwrap();
+            });
+            let got = bus.request_name_queued("org.freedesktop.FileManager1");
+            peer.join().unwrap();
+            match (got, expected) {
+                (Ok(got), Ok(expected)) => assert_eq!(got, expected),
+                (Err(e), Err(said)) => assert!(e.contains(said), "{e}"),
+                (got, expected) => panic!("{answer}: got {got:?}, wanted {expected:?}"),
+            }
+        }
+
+        // The bus refusing the call is an error too, not a claim.
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut bus = Bus::on_socket(ours);
+        bus.timeout = Duration::from_secs(5);
+        let peer = std::thread::spawn(move || {
+            let mut peer = theirs;
+            let request = parse_message(&read_request(&mut peer)).unwrap();
+            let refusal = Message {
+                serial: 9,
+                sender: Some(BUS_DRIVER.into()),
+                ..Message::error(
+                    &request,
+                    "org.freedesktop.DBus.Error.AccessDenied",
+                    "not for you",
+                )
+            };
+            peer.write_all(&refusal.encode().unwrap()).unwrap();
+        });
+        let got = bus.request_name_queued("org.freedesktop.FileManager1");
+        peer.join().unwrap();
+        assert!(got.is_err(), "{got:?}");
+    }
+
+    /// One whole message off a peer's socket.
+    fn read_request(peer: &mut UnixStream) -> Vec<u8> {
+        let mut head = [0u8; 16];
+        peer.read_exact(&mut head).unwrap();
+        let mut rest = vec![0u8; frame_len(&head).unwrap() - 16];
+        peer.read_exact(&mut rest).unwrap();
+        [&head[..], &rest[..]].concat()
     }
 
     /// Hanging up the writing half ends a read blocked, with no deadline, on

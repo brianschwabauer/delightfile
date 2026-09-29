@@ -228,6 +228,7 @@ mod tests {
             round_trip("/home/brian/src"),
             cli::Outcome::Run(cli::Args {
                 start: Some(PathBuf::from("/home/brian/src")),
+                reveal: false,
                 cwd_file: None,
                 chooser: None,
             })
@@ -237,6 +238,7 @@ mod tests {
             round_trip("--cwd-file=/tmp/x"),
             cli::Outcome::Run(cli::Args {
                 start: Some(PathBuf::from("--cwd-file=/tmp/x")),
+                reveal: false,
                 cwd_file: None,
                 chooser: None,
             })

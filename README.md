@@ -140,6 +140,19 @@ xdg-mime default delightfile.desktop inode/directory
 That covers `xdg-open`, "open containing folder", and every launcher that asks the desktop
 database who handles a directory.
 
+A browser's "Show in folder" goes another way: it calls `org.freedesktop.FileManager1` on
+the session bus, and whichever program owns that name opens the folder. Nautilus installs
+a service file for the name, so on a machine that has Nautilus, Nautilus answers, and when
+it is slow the browser waits until the call times out. `delightfile --portal`, the
+file-picker backend below, serves that name as well: `ShowItems` opens the folder each
+file is in with the cursor on the file, `ShowFolders` opens each folder, and
+`build/install.sh` puts in the service file that makes D-Bus start delightfile for it.
+Where another file manager already owns the name, delightfile waits in line and takes it
+over when that one exits.
+
+`delightfile --reveal <path>` does the same from a shell: it opens the folder the path is
+in with the cursor on it, even when the path is a folder itself.
+
 ## Making it the file picker
 
 Every GTK, Qt and browser file dialog on a Wayland desktop goes through
@@ -154,6 +167,9 @@ GTK's dialog — told the dialog's title, the caller's button label ("Upload" ra
 
 - a D-Bus service file, `~/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.delightfile.service`,
   so the bus starts the backend on the first dialog;
+- a second one, `~/.local/share/dbus-1/services/org.freedesktop.FileManager1.service`,
+  which starts the same backend for "Show in folder" (see above) and takes precedence over
+  the one another file manager put in `/usr/share`;
 - `~/.local/share/xdg-desktop-portal/portals/delightfile.portal`, which xdg-desktop-portal
   reads from there since 1.20.1 (on an older one the script installs it to
   `/usr/share/xdg-desktop-portal/portals/` with `sudo`, or prints the command);
@@ -168,7 +184,7 @@ GTK's dialog — told the dialog's title, the caller's button label ("Upload" ra
   change is printed instead.
 
 Then `systemctl --user restart xdg-desktop-portal`. `bash build/install.sh --remove-portal`
-undoes all three.
+undoes all four.
 
 The picker window's Wayland app_id (X11 class) is `delightfile-picker`, not `delightfile`,
 so a window rule can float and centre it without touching the file manager. Its title is

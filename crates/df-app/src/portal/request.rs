@@ -331,8 +331,9 @@ fn toml_array(items: &[String]) -> String {
 /// test can hand the service another one.
 #[derive(Debug, Clone, Default)]
 pub struct Setup {
-    /// The program each dialog runs: this binary, unless
-    /// `DELIGHTFILE_PICKER_EXE` names another (the tests' stub).
+    /// The program each dialog runs, and each "Show in folder" window
+    /// ([`super::show`]): this binary, unless `DELIGHTFILE_PICKER_EXE` names
+    /// another (the tests' stub).
     pub picker: Option<PathBuf>,
     /// `$XDG_RUNTIME_DIR/delightfile`: where request and answer files live.
     pub runtime_dir: Option<PathBuf>,

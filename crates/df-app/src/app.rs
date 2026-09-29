@@ -2311,7 +2311,10 @@ impl App {
         // A directory *peek* is listed the way entering it would list it.
         preview.set_sort(sort);
         let now = Instant::now();
-        let (start, focus) = start_directory(args.start.as_deref());
+        let (start, focus) = match args.start.as_deref() {
+            Some(path) if args.reveal => reveal_directory(path),
+            requested => start_directory(requested),
+        };
         // A save dialog's start path is the file the portal just created for
         // it; that is the suggestion, spelled the way the listing will spell
         // its row (the start directory joined with the name), so the two
@@ -5811,9 +5814,6 @@ impl App {
         self.pick(vec![target]);
     }
 
-    /// A save dialog's Save button: `Save as:`, prefilled with the name the
-    /// caller suggested (`current_name`, through the portal) or the file the
-    /// dialog was opened on — or, when there is neither, the file under the
     /// What a picker session does on the frame it appears: says which dialog
     /// it is, and — in a save whose caller suggested a name (`current_name`)
     /// — opens `Save as:` on that name, so `Enter` saves it here and the name
@@ -5841,6 +5841,9 @@ impl App {
         self.toasts.notice(picker_line(mode, filter), now);
     }
 
+    /// A save dialog's Save button: `Save as:`, prefilled with the name the
+    /// caller suggested (`current_name`, through the portal) or the file the
+    /// dialog was opened on — or, when there is neither, the file under the
     /// cursor, since saving next to a file under a name like it is the common
     /// case — with the stem selected, so typing replaces the name and keeps
     /// the extension, the way every save dialog opens.
@@ -19966,6 +19969,42 @@ fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>) {
     }
 }
 
+/// Where `--reveal` starts: the folder `path` is in, with the cursor on it —
+/// a folder as much as a file, since showing a folder means showing it among
+/// its siblings ("Show in folder", through `--portal`).
+///
+/// A path that is not there (yet, or any more) opens the folder it would be
+/// in, with nothing to put the cursor on; when that is gone too, the current
+/// directory, as [`start_directory`] falls back. `/` has no folder to be
+/// shown in, so it is opened itself.
+fn reveal_directory(path: &Path) -> (PathBuf, Option<String>) {
+    let fallback = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let parent = match path.parent() {
+        // A bare relative name is in the current directory.
+        Some(parent) if parent.as_os_str().is_empty() => fallback(),
+        Some(parent) => parent.to_path_buf(),
+        None => return (path.to_path_buf(), None),
+    };
+    // The entry itself, not what it points at: a dangling link is still a
+    // row the cursor can stand on.
+    if path.symlink_metadata().is_ok() {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        return (parent, name);
+    }
+    if parent.is_dir() {
+        log::warn!(
+            "{}: not there; opening the folder it would be in",
+            path.display()
+        );
+        return (parent, None);
+    }
+    log::warn!(
+        "{}: neither it nor its folder is there; opening the current directory",
+        path.display()
+    );
+    (fallback(), None)
+}
+
 /// The file a `Save as:` name stands for in `dir`, or why it stands for none.
 ///
 /// Trimmed, as `a` and `r` trim: a leading or trailing space on a file name
@@ -19998,6 +20037,10 @@ fn picker_greeting(mode: PickMode) -> &'static str {
         PickMode::Save => "Enter on a file replaces it, Save names a new one",
     }
 }
+
+/// The greeting of a save that opened with `Save as:` already up on the
+/// caller's name (see [`App::greet_picker`]).
+const SAVE_NAMED_GREETING: &str = "Enter saves it here — Esc browses, Save names it again";
 
 /// The longest greeting, in characters, that still gets the filter's clause.
 ///
@@ -20038,10 +20081,6 @@ fn with_filter_clause(greeting: &str, name: &str) -> String {
 /// One value for the whole session rather than one per tab or per directory:
 /// the dialog asked for one kind of file, and a tab that quietly showed
 /// another would be a second answer to the same question.
-/// The greeting of a save that opened with `Save as:` already up on the
-/// caller's name (see [`App::greet_picker`]).
-const SAVE_NAMED_GREETING: &str = "Enter saves it here — Esc browses, Save names it again";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Showing {
     /// Only the files the active filter admits, dotfiles hidden. Where every
@@ -21360,6 +21399,42 @@ mod tests {
         let (dir, focus) = start_directory(Some(Path::new("/nonexistent/delightfile-test")));
         assert_eq!(Some(dir), std::env::current_dir().ok());
         assert_eq!(focus, None);
+    }
+
+    /// `--reveal` opens the folder a path is in with the cursor on it, for a
+    /// file and a folder alike; a path that is gone opens where it would be,
+    /// cursor-less, and one whose folder is gone too falls back as a plain
+    /// path does. `/` is in no folder, and is opened itself.
+    #[test]
+    fn reveal_opens_the_folder_a_path_is_in() {
+        let root = std::env::temp_dir().join(format!("df-reveal-{}", std::process::id()));
+        let folder = root.join("a folder");
+        std::fs::create_dir_all(&folder).expect("a temp dir");
+        let file = root.join("notes.txt");
+        std::fs::write(&file, b"").expect("a temp file");
+
+        assert_eq!(
+            reveal_directory(&file),
+            (root.clone(), Some("notes.txt".to_string()))
+        );
+        assert_eq!(
+            reveal_directory(&folder),
+            (root.clone(), Some("a folder".to_string())),
+            "a folder is shown, not opened"
+        );
+        // Without the switch, the same folder opens.
+        assert_eq!(start_directory(Some(&folder)), (folder.clone(), None));
+
+        assert_eq!(
+            reveal_directory(&root.join("gone.txt")),
+            (root.clone(), None)
+        );
+        assert_eq!(
+            reveal_directory(&root.join("gone").join("x")),
+            (std::env::current_dir().expect("a cwd"), None)
+        );
+        assert_eq!(reveal_directory(Path::new("/")), (PathBuf::from("/"), None));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// PLAN §5: an operation with an inverse lands with the undo toast; the
@@ -23257,6 +23332,39 @@ mod tests {
         );
     }
 
+    /// A save whose caller suggested a name opens with `Save as:` already up
+    /// on it, and `Enter` saves under it in the folder on screen; a save with
+    /// no name to suggest opens on the listing as before.
+    #[test]
+    fn a_named_save_opens_on_its_name() {
+        let now = Instant::now();
+        let mut app = picker("save-greets", &["other.txt"], &[], SAVE);
+        if let Some(chooser) = app.chooser.as_mut() {
+            chooser.name = Some("report.pdf".to_string());
+        }
+        app.greet_picker(now);
+        let prompt = app.prompt.as_ref().expect("the name is on screen");
+        assert_eq!(prompt.kind, PromptKind::SaveAs);
+        assert_eq!(prompt.query(), "report.pdf");
+        assert_eq!(
+            prompt.buffer.selection(),
+            Some(0..6),
+            "the stem is selected"
+        );
+        assert_eq!(toast(&app).as_deref(), Some(SAVE_NAMED_GREETING));
+        app.submit_prompt("report.pdf".to_string(), now);
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("report.pdf")]);
+
+        let mut app = picker("save-greets-unnamed", &["other.txt"], &[], SAVE);
+        app.greet_picker(now);
+        assert!(app.prompt.is_none(), "nothing to suggest, nothing opened");
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some(picker_greeting(PickMode::Save))
+        );
+    }
+
     /// Where the frame draws the picker's two buttons, measured the way the
     /// frame measures them.
     fn picker_buttons(app: &App) -> (egui::Rect, egui::Rect) {
@@ -23332,39 +23440,6 @@ mod tests {
         let mut app = picker("folder-here", &["a.txt"], &["docs"], FOLDER);
         app.press_pick(now);
         assert_eq!(app.chosen, [app.files.clone()], "nothing selected is here");
-    /// A save whose caller suggested a name opens with `Save as:` already up
-    /// on it, and `Enter` saves under it in the folder on screen; a save with
-    /// no name to suggest opens on the listing as before.
-    #[test]
-    fn a_named_save_opens_on_its_name() {
-        let now = Instant::now();
-        let mut app = picker("save-greets", &["other.txt"], &[], SAVE);
-        if let Some(chooser) = app.chooser.as_mut() {
-            chooser.name = Some("report.pdf".to_string());
-        }
-        app.greet_picker(now);
-        let prompt = app.prompt.as_ref().expect("the name is on screen");
-        assert_eq!(prompt.kind, PromptKind::SaveAs);
-        assert_eq!(prompt.query(), "report.pdf");
-        assert_eq!(
-            prompt.buffer.selection(),
-            Some(0..6),
-            "the stem is selected"
-        );
-        assert_eq!(toast(&app).as_deref(), Some(SAVE_NAMED_GREETING));
-        app.submit_prompt("report.pdf".to_string(), now);
-        assert_eq!(app.quit, Some(Quit::Chosen));
-        assert_eq!(app.chosen, [app.files.join("report.pdf")]);
-
-        let mut app = picker("save-greets-unnamed", &["other.txt"], &[], SAVE);
-        app.greet_picker(now);
-        assert!(app.prompt.is_none(), "nothing to suggest, nothing opened");
-        assert_eq!(
-            toast(&app).as_deref(),
-            Some(picker_greeting(PickMode::Save))
-        );
-    }
-
     }
 
     /// `Esc` climbs its ladder as ever, and only a press with nothing left to
