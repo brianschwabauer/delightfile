@@ -3,7 +3,8 @@
 //!
 //! Who is asked is the platform's ([`crate::platform::appearance`]): on Linux
 //! the XDG desktop portal's `color-scheme`, read once and then heard, on a
-//! thread of its own; on macOS and Windows, for now, nobody. This module is
+//! thread of its own; on macOS the application's appearance, observed; on
+//! Windows, for now, nobody. This module is
 //! what the answer means once it is in, which is the same wherever it came
 //! from.
 //!
