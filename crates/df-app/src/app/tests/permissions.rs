@@ -3,11 +3,12 @@
 //! real engine landed the way `finish_op` lands one, `u`, the menus' rows,
 //! the spot panel's door to it, and where it refuses.
 //!
-//! Linux only: the change is found through Linux's descriptor walk
-//! (`df_core::platform::nofollow`, S1.19), which the other targets refuse
-//! until M2.28 gives macOS one; the fixtures set and read Unix mode bits.
+//! Unix only: the change is found through the platform's descriptor walk
+//! (`df_core::platform::nofollow`: Linux's `O_PATH` one, S1.19, and macOS's
+//! `openat` one, M2.28), which Windows refuses; the fixtures set and read
+//! Unix mode bits.
 
-#![cfg(target_os = "linux")]
+#![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
 

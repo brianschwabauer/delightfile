@@ -26500,7 +26500,7 @@ mod tests {
     /// The spot's `Space` hint is `Space` on the focused row: over the
     /// permission row it flips the chosen bit, on the file itself.
     #[test]
-    #[cfg(target_os = "linux")] // the chip's change is Linux's walk (S1.19)
+    #[cfg(unix)] // the chip's change is the platform's walk (S1.19, M2.28)
     fn a_click_on_the_spots_space_hint_toggles_the_chosen_bit() {
         use std::os::unix::fs::PermissionsExt;
         let ctx = egui::Context::default();
