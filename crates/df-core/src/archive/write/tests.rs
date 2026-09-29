@@ -1130,11 +1130,39 @@ fn the_real_tools_accept_what_is_written() {
 
     let zip = t.join("photos.zip");
     pack(vec![photos.clone()], zip.clone(), Format::Zip);
+    let unicode = "photos/ünïcödé — 日本語.txt";
     if on_path("unzip").is_some() {
         assert!(tool_accepts("unzip", &["-tqq"], &zip), "unzip -t");
         let out = Command::new("unzip").arg("-Z1").arg(&zip).output().unwrap();
         let names = String::from_utf8_lossy(&out.stdout);
-        assert!(names.contains("photos/ünïcödé — 日本語.txt"), "{names}");
+        if !names.contains(unicode) {
+            // Apple's unzip prints every byte from 0x80 to 0x9F as `?` — a
+            // control character in Latin-1, and in UTF-8 the middle of most
+            // characters past U+07FF — so its listing cannot show this name
+            // whatever the archive holds. Its listing is checked for exactly
+            // that, and the name itself is asked of libarchive, which reads
+            // the UTF-8 flag.
+            let filtered: Vec<u8> = unicode
+                .bytes()
+                .map(|b| if (0x80..=0x9F).contains(&b) { b'?' } else { b })
+                .collect();
+            assert!(
+                names.contains(&*String::from_utf8_lossy(&filtered)),
+                "{names}"
+            );
+            assert!(
+                on_path("bsdtar").is_some(),
+                "an unzip that hides names needs bsdtar beside it to check them"
+            );
+            let out = Command::new("bsdtar")
+                .env("LC_ALL", "en_US.UTF-8")
+                .arg("-tf")
+                .arg(&zip)
+                .output()
+                .unwrap();
+            let names = String::from_utf8_lossy(&out.stdout);
+            assert!(names.contains(unicode), "{names}");
+        }
     }
     let tgz = t.join("photos.tar.gz");
     pack(vec![photos.clone()], tgz.clone(), Format::TarGz);

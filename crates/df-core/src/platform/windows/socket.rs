@@ -13,6 +13,10 @@ use std::time::Duration;
 /// Whether the rclone daemon can be spoken to here: not yet.
 pub const AVAILABLE: bool = false;
 
+/// The longest socket path Windows' `AF_UNIX` binds (its `sun_path` is 108
+/// bytes, as Linux's), for the day W4.32 uses it; nothing is bound until then.
+pub const PATH_MAX: usize = 107;
+
 fn unsupported() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,

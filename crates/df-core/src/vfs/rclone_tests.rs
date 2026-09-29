@@ -403,7 +403,7 @@ fn rclone_round_trip_everything() {
         return;
     };
     let remote = TempDir::new("rclone-remote");
-    let scratch = TempDir::new("rclone-scratch");
+    let scratch = TempDir::for_socket("rclone-scratch");
     let local = TempDir::new("rclone-local");
 
     let big: Vec<u8> = (0..600_000u32).map(|i| (i % 251) as u8).collect();
@@ -745,7 +745,7 @@ fn rclone_cancel_mid_transfer_stops_the_job_and_keeps_the_original() {
         return;
     };
     let remote = TempDir::new("rclone-cancel-remote");
-    let scratch = TempDir::new("rclone-cancel-scratch");
+    let scratch = TempDir::for_socket("rclone-cancel-scratch");
     let local = TempDir::new("rclone-cancel-local");
     let big: Vec<u8> = (0..16 * 1024 * 1024u32)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
@@ -866,7 +866,7 @@ fn a_daemon_that_cannot_start_says_why() {
         eprintln!("skipping a_daemon_that_cannot_start_says_why: no rclone on $PATH");
         return;
     };
-    let scratch = TempDir::new("rclone-bad-scratch");
+    let scratch = TempDir::for_socket("rclone-bad-scratch");
     let mut service = Service::rclone(unique_name("bad"), "/nonexistent");
     service.program = Some((rclone, vec!["--no-such-flag-anywhere".into()]));
     service.socket_dir = Some(scratch.path.join("run"));
@@ -895,7 +895,7 @@ fn a_killed_daemon_is_replaced_on_the_next_request() {
         return;
     };
     let remote = TempDir::new("rclone-respawn");
-    let scratch = TempDir::new("rclone-respawn-scratch");
+    let scratch = TempDir::for_socket("rclone-respawn-scratch");
     remote.file("still-here.txt", b"yes");
     // A stand-in for rclone that writes its pid down and then *is* rclone.
     let pid_file = scratch.path.join("pid");
@@ -1042,7 +1042,7 @@ fn a_listing_nobody_wants_is_stopped_rather_than_waited_out() {
         }
     });
 
-    let scratch = TempDir::new("rclone-slow-scratch");
+    let scratch = TempDir::for_socket("rclone-slow-scratch");
     let name = unique_name("slow");
     let service = scratch_service(
         Service::rclone(&name, format!(":http,url='http://127.0.0.1:{port}/':")),
@@ -1102,7 +1102,7 @@ fn a_daemon_dies_with_the_thread_that_spawned_it() {
         return;
     };
     let remote = TempDir::new("rclone-orphan-remote");
-    let scratch = TempDir::new("rclone-orphan-scratch");
+    let scratch = TempDir::for_socket("rclone-orphan-scratch");
     let service = local_service(&unique_name("or"), &remote, &scratch, &rclone);
     let pid = std::thread::spawn(move || {
         let daemon = Daemon::spawn(Arc::new(service), &[]).unwrap();
@@ -1139,7 +1139,7 @@ fn a_failed_download_sweeps_up_its_own_partials_and_nothing_else() {
         return;
     };
     let remote = TempDir::new("rclone-sweep-remote");
-    let scratch = TempDir::new("rclone-sweep-scratch");
+    let scratch = TempDir::for_socket("rclone-sweep-scratch");
     let local = TempDir::new("rclone-sweep-local");
     // A file rclone can stat but not read: the copy fails after it starts.
     let locked = remote.file("locked.bin", b"secret");

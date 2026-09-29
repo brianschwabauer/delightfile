@@ -60,6 +60,26 @@ impl TempDir {
         TempDir { path }
     }
 
+    /// A scratch directory a socket can be bound in, a few folders down: under
+    /// the temp dir while that leaves room in `sun_path`
+    /// ([`crate::platform::socket::PATH_MAX`]) for a folder and a socket's
+    /// name, under `/tmp` when it does not — macOS's `$TMPDIR` is
+    /// `/var/folders/…/T/`, 49 bytes of its 103.
+    #[cfg(unix)]
+    pub(super) fn for_socket(tag: &str) -> TempDir {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!("df-{tag}-{}-{unique}", std::process::id());
+        let mut path = std::env::temp_dir().join(&name);
+        // `run/` and `rclone-<pid>-<32-byte name>-<n>.sock` after it.
+        if path.as_os_str().len() + 64 > crate::platform::socket::PATH_MAX {
+            path = PathBuf::from("/tmp").join(&name);
+        }
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create the fixture directory");
+        TempDir { path }
+    }
+
     pub(super) fn file(&self, name: &str, contents: &[u8]) -> PathBuf {
         let path = self.path.join(name);
         std::fs::write(&path, contents).expect("write a fixture file");
@@ -1083,7 +1103,9 @@ fn a_server_that_dies_before_version_reports_ssh_own_words() {
 #[test]
 fn a_server_that_closes_silently_is_a_disconnect() {
     let error = connect_err(
-        Service::direct("fake", "/bin/true", Vec::new()),
+        // Looked up on `PATH`, where every Unix keeps one: macOS has no
+        // `/bin/true`, only `/usr/bin/true`.
+        Service::direct("fake", "true", Vec::new()),
         "must fail",
     );
     assert!(matches!(error, VfsError::Disconnected { .. }), "{error}");
