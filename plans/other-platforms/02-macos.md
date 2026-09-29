@@ -1,6 +1,6 @@
 # 02 — macOS
 
-Status: **not started**
+Status: **in progress**
 
 Scope: native macOS bodies behind the Phase 1 seam, so that the `.app` produced by
 `06-build-and-release.md` is a working file manager on Apple Silicon: file watching,
@@ -324,6 +324,37 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       Linux device alone constructs — are dead on macOS until this phase gives
       them callers (M2.10–M2.15). Done when: the last of those lands and the
       macos job's clippy passes without the flag.
+
+## 9. Found in Phase 2
+
+- [>] **M2.34** df-app builds, lints and passes its tests on the macOS runner
+      with the stubs as they are, before any Phase 2 body lands. Run
+      36628614462 on `main` was the first to build df-app for macOS: the
+      build, clippy (with `-A dead_code`, S1.53) and `--version` passed as
+      the code stood, and `cargo test -p df-app` had 8 failures of 1,102.
+      Fixed as portability bugs: `app::syncing::tests::
+      a_socket_is_left_out_in_the_toast_and_is_no_problem` bound its socket
+      deep inside the temporary tree, past `sun_path`'s 104 bytes under
+      macOS's `/var/folders/…/T/` — it now binds at a short path and renames
+      the socket into place; `app::tests::hits::
+      making_something_in_the_hits_is_refused` asserted that `d` is live in a
+      search's hits, which a platform with no trash yet refuses everywhere —
+      the trash line now expects what `Trash::home()` implies. Gated
+      `#[cfg(target_os = "linux")]`, because their fixtures are the
+      freedesktop trash's `<trash>/files/<name>` layout, which is Linux's
+      alone: `trashview::tests::a_trash_record_becomes_a_list_pane_row`,
+      `trashview::tests::a_restore_is_refused_rather_than_overwriting_newer_work`,
+      `trashview::tests::rows_map_back_to_the_records_they_came_from`. Not
+      df-app's to fix, and left failing: `app::syncing::tests::
+      y_on_a_server_row_then_alt_p_syncs_it_down_through_rsync` (the runner's
+      `/usr/bin/rsync` is openrsync, which `df_core::sync::rsync::available()`
+      accepts until df-core's M2.6 version gate lands, after which the test
+      skips), and `icons::glyph_tests::the_chrome_glyphs_all_render` and
+      `menu::tests::a_key_stands_clear_of_the_chevron` (no Nerd Font on the
+      runner, as on the linux job; the chrome-glyph work fixes them on every
+      target). Done when: on the macos job, df-app builds, its clippy line
+      passes, `--version` runs, and every df-app test passes except those
+      three.
 
 ## Decisions log
 

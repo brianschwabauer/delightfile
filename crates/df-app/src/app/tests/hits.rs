@@ -448,9 +448,20 @@ fn making_something_in_the_hits_is_refused() {
     ] {
         assert!(app.refusal(command).is_some(), "{} is live", command.id());
     }
-    for command in [Command::Rename, Command::Trash, Command::Yank] {
+    for command in [Command::Rename, Command::Yank] {
         assert_eq!(app.refusal(command), None, "{} is refused", command.id());
     }
+    // `d` is the trash, which the hits do not refuse; a platform with no
+    // trash yet refuses it everywhere, in its own words (S1.34).
+    let no_trash = matches!(
+        df_core::ops::Trash::home(),
+        Err(df_core::DfError::Unsupported(_))
+    );
+    assert_eq!(
+        app.refusal(Command::Trash),
+        no_trash.then_some("Trash is not available on this platform"),
+        "trash is refused"
+    );
 }
 
 /// A walk still running when `Enter` came keeps landing in the listing, sorted
