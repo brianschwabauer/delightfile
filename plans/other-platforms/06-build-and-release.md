@@ -1,6 +1,6 @@
 # 06 — Build and release
 
-Status: **not started**
+Status: **in progress**
 
 Scope: the CI matrix that keeps all three targets compiling, the release workflow
 that produces installable artifacts, the packaging of native libraries the app needs
@@ -10,9 +10,11 @@ before Phase 1 can be marked done, because it is the only enforcement of the pla
 seam. Everything from §3 on waits for Phase 2 (macOS) or Phase 4 (Windows) to have
 something worth shipping.
 
-Today there is no `.github/` directory, no CI, and no release process: Brian builds
-with `cargo build --release` and `build/install.sh` (see
-`appendix-inventory-df-app.md` §5 for what that script does).
+When this document was written there was no `.github/` directory, no CI, and no
+release process: Brian builds with `cargo build --release` and `build/install.sh`
+(see `appendix-inventory-df-app.md` §5 for what that script does). Since 2026-09-29
+`.github/workflows/ci.yml` holds the §1 matrix. It has not run yet, because nothing
+has been pushed, so every task it covers is at most `[>]`.
 
 ## Decisions already made
 
@@ -42,7 +44,7 @@ with `cargo build --release` and `build/install.sh` (see
 
 ## 1. CI matrix (do with Phase 1)
 
-- [ ] **B6.1** Create `.github/workflows/ci.yml` triggered on `push` to `main` and on
+- [>] **B6.1** Create `.github/workflows/ci.yml` triggered on `push` to `main` and on
       `pull_request`. Jobs: `linux`, `macos`, `windows`. Each job: checkout, toolchain,
       native deps (§2), `cargo build --workspace`, then tests: on Linux `cargo test
       --workspace`; on macOS and Windows `cargo test -p df-core -p df-app` only,
@@ -56,25 +58,58 @@ with `cargo build --release` and `build/install.sh` (see
       Done when: the workflow file exists and the `linux` job is green on `main`.
       The `macos` and `windows` jobs are allowed to fail until Phase 1's stubs land
       (`continue-on-error: true` with a comment naming the Phase 1 task that removes
-      it).
-- [ ] **B6.2** Linux job runs in `container: archlinux:latest` with
+      it). — written 2026-09-29, unverified until the first push. The macOS and
+      Windows jobs run `cargo build -p df-core`, `cargo test -p df-core` and
+      `cargo build -p dv-media` ahead of the B6.1 steps, so that while they fail
+      the log shows how far each gets (B6.3's, B6.4's and B6.7's done-when). The
+      linux job is expected to fail at `cargo test --workspace` because the
+      container runs as root; see Open questions.
+- [>] **B6.2** Linux job runs in `container: archlinux:latest` with
       `pacman -Syu --noconfirm rust ffmpeg pkgconf clang git`. Cache
       `~/.cargo/registry`, `~/.cargo/git`, `target/` keyed on `Cargo.lock` and the
       job name.
       Done when: a cold run and a warm run both pass and the warm run is under 10
-      minutes.
-- [ ] **B6.3** macOS job on `macos-latest` (verify it is arm64 with `uname -m` in the
+      minutes. — written 2026-09-29, unverified until the first push. The key is
+      `<job>-rustc-<hash of rustc -vV>-<hash of Cargo.lock>`; the compiler is in it
+      because Arch's `rust` rolls (Decisions log).
+- [>] **B6.3** macOS job on `macos-latest` (verify it is arm64 with `uname -m` in the
       log). Toolchain via `dtolnay/rust-toolchain@stable`. Native deps per §2.2.
       Done when: `cargo build -p df-core` and `cargo test -p df-core` pass on the
-      runner. (df-app follows once Phase 1 stubs exist.)
-- [ ] **B6.4** Windows job on `windows-latest`, MSVC toolchain. Native deps per
-      §2.3. Same done-when as B6.3.
+      runner. (df-app follows once Phase 1 stubs exist.) — written 2026-09-29,
+      unverified until the first push. `uname -m` is logged and the step fails if it
+      is not `arm64`; the action is pinned by commit with `toolchain: stable`.
+- [>] **B6.4** Windows job on `windows-latest`, MSVC toolchain. Native deps per
+      §2.3. Same done-when as B6.3. — written 2026-09-29, unverified until the first
+      push. Toolchain `stable-x86_64-pc-windows-msvc`; `core.autocrlf false` before
+      checkout.
 - [ ] **B6.5** Remove `continue-on-error` from the macOS and Windows jobs. This is the
       last task of Phase 1 (`01-platform-seam.md` S1.40 cross-references it).
       Done when: all three jobs are required and green on `main`.
-- [ ] **B6.6** Add `cargo fmt --check` to the linux job only. Done when: green.
+- [>] **B6.6** Add `cargo fmt --check` to the linux job only. Done when: green.
+      — written 2026-09-29, unverified until the first push. It is the first cargo
+      step in the job, straight after the cache restore.
 
 ## 2. Native dependencies per target
+
+What every target has to supply, read from the repository on 2026-09-29:
+`Cargo.lock` holds `ffmpeg-next` 9.0.0 and `ffmpeg-sys-next` 9.0.0, and
+`crates/dv-media/Cargo.toml` takes `ffmpeg-next` with `default-features = false`
+and `codec`, `format`, `software-resampling`, `software-scaling`. So the link needs
+libavcodec, libavformat, libavutil, libswresample and libswscale, and not
+libavdevice or libavfilter. The headers must say libavcodec major 63. That is
+ffmpeg-sys-next 9's newest version flag, `ffmpeg_9_0` = libavcodec 63.1, and it is
+what Linux builds against today. Arch's `ffmpeg 2:9.0.1-4` has libavcodec and
+libavformat 63.1.101, libavutil 61.1.101, libswresample 7.1.101 and libswscale
+10.1.101.
+`ffmpeg-sys-next` looks for FFmpeg in this order. First `FFMPEG_DIR`, taking
+`include/` and `lib/` under it and linking `avcodec` and the rest by name, which
+under MSVC means `avcodec.lib`. Then vcpkg, on MSVC targets only. Then pkg-config.
+Its build script also compiles and runs a small C program against the headers, and
+runs bindgen, which loads libclang.
+
+Nothing links pdfium at build time. `pdfium-render` has no `static` feature and
+opens the library at run time, so the CI jobs fetch none. B6.8 and B6.12 are for
+packaging.
 
 ### 2.1 Linux
 
@@ -82,7 +117,7 @@ System FFmpeg 9 via pacman. pdfium optional at runtime as today. Nothing changes
 
 ### 2.2 macOS
 
-- [ ] **B6.7** Establish how to get FFmpeg with **libavcodec major 63** on the macOS
+- [>] **B6.7** Establish how to get FFmpeg with **libavcodec major 63** on the macOS
       runner. Try in order and record the winner in the Decisions log:
       1. `brew install ffmpeg` then `pkg-config --modversion libavcodec`; use it if the
          major is 63.
@@ -92,34 +127,136 @@ System FFmpeg 9 via pacman. pdfium optional at runtime as today. Nothing changes
          --enable-gpl` and the decoders the app uses, cached by the FFmpeg version
          string; export `PKG_CONFIG_PATH=$HOME/ffmpeg-prefix/lib/pkgconfig`.
       Done when: `cargo build -p dv-media` succeeds on the runner and the log shows
-      which option was used.
+      which option was used. — written 2026-09-29, unverified until the first push.
+      The workflow uses option 1 on the evidence in the Decisions log; its FFmpeg
+      step prints `FFmpeg: B6.7 option 1, Homebrew ffmpeg <version>, libavcodec
+      <version>` and fails, pointing here, when the major is not 63. Switching to
+      option 2 or 3 is below.
 - [ ] **B6.8** pdfium for macOS: download `pdfium-mac-arm64.tgz` from the
       `bblanchon/pdfium-binaries` release matching the `pdfium_7881` ABI feature in
       `crates/df-app/Cargo.toml` (chromium/7881 or the nearest release that keeps the
       ABI; the pdfium-render docs list the pairing). Store the URL and sha256 in
       `build/macos/pdfium.lock` (a two-line text file). The runner fetches and verifies
       it. Done when: the file exists and the fetch step verifies the hash.
-- [ ] **B6.9** Confirm `libclang` is available for `bindgen` on the runner (Xcode's
+      Researched 2026-09-29: the release exists, and its URL and sha256 are in the
+      Decisions log. The lock file is not written yet.
+- [>] **B6.9** Confirm `libclang` is available for `bindgen` on the runner (Xcode's
       is). Done when: `dv-media` builds without a `LIBCLANG_PATH` override, or the
-      override is set in the workflow with a comment.
+      override is set in the workflow with a comment. — written 2026-09-29,
+      unverified until the first push. The workflow sets no override. The Runner step
+      logs `xcode-select -p`, the Xcode whose toolchain clang-sys searches for
+      libclang. If bindgen cannot find libclang, add to the FFmpeg step:
+      `echo "LIBCLANG_PATH=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> "$GITHUB_ENV"`.
+
+**Switching B6.7 to a fallback** (researched 2026-09-29). Each replaces the `brew
+install` line of the `FFmpeg (Homebrew)` step in `.github/workflows/ci.yml`. The
+libavcodec-63 check after it stays; change the `option 1` in its echo.
+
+- *Option 2, `ffmpeg@9`.* Homebrew has no `ffmpeg@9` today, because `ffmpeg` itself
+  is 9.x. It keeps the previous major as a versioned formula when a new one lands,
+  and `ffmpeg@8`, `@7`, `@6`, `@5` and `@4` exist now, so expect `ffmpeg@9` when
+  `ffmpeg` moves to 10. It is keg-only, so pkg-config has to be told where it is, in
+  this step for the check and through `GITHUB_ENV` for the cargo steps.
+  ```bash
+  brew install ffmpeg@9 pkgconf
+  export PKG_CONFIG_PATH="$(brew --prefix ffmpeg@9)/lib/pkgconfig"
+  echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+  ```
+- *Option 3, from source*, cached by version. Add a cache step in front of the
+  FFmpeg step, with the same `actions/cache` pin as the cargo cache.
+  ```yaml
+  - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+    with:
+      path: ~/ffmpeg-prefix
+      key: ffmpeg-9.0.2-${{ runner.os }}-${{ runner.arch }}
+  ```
+  Then replace the `brew install` line with this.
+  ```bash
+  prefix="$HOME/ffmpeg-prefix"
+  if [ ! -f "$prefix/lib/pkgconfig/libavcodec.pc" ]; then
+    curl -fsSL https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz | tar xJ
+    (cd ffmpeg-9.0.2 &&
+      ./configure --prefix="$prefix" --enable-shared --disable-static \
+        --disable-programs --disable-doc --enable-gpl \
+        --disable-avdevice --disable-avfilter &&
+      make -j"$(sysctl -n hw.ncpu)" install)
+  fi
+  export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+  echo "PKG_CONFIG_PATH=$PKG_CONFIG_PATH" >> "$GITHUB_ENV"
+  ```
+  Keep the version in the cache key and the URL the same. avdevice and avfilter are
+  off because nothing links them, as the §2 intro says. Without external libraries this build
+  has no software AV1 decoder, so AVIF previews would not decode. That does not
+  matter for CI. For a release build add `--enable-libdav1d` (after
+  `brew install dav1d`) and bundle `libdav1d` with the rest (B6.16). The dylibs'
+  install names are absolute paths under `$prefix`, so the tests and the smoke test
+  find them on the runner.
 
 ### 2.3 Windows
 
-- [ ] **B6.10** FFmpeg for Windows: download a `ffmpeg-n9.*-win64-gpl-shared` build
+- [>] **B6.10** FFmpeg for Windows: download a `ffmpeg-n9.*-win64-gpl-shared` build
       from `BtbN/FFmpeg-Builds` releases (GPL matches the project licence). Pin the
       exact asset name and sha256 in `build/windows/ffmpeg.lock`. The workflow
       extracts it and sets `FFMPEG_DIR` to the extracted directory, which is what
       `ffmpeg-sys-next` reads on Windows. Done when: `cargo build -p dv-media` passes
-      on the runner.
-- [ ] **B6.11** `bindgen` on Windows needs `LIBCLANG_PATH`. The `windows-latest`
+      on the runner. — written 2026-09-29, unverified until the first push. The pin
+      (`FFMPEG_URL`, `FFMPEG_SHA256`) is in the `windows` job's `env:` in
+      `ci.yml` for now: `build/` was outside that change, so
+      `build/windows/ffmpeg.lock` does not exist yet. The step checks the sha256,
+      extracts with `7z`, fails unless `version_major.h` says 63, and sets
+      `FFMPEG_DIR`.
+- [>] **B6.11** `bindgen` on Windows needs `LIBCLANG_PATH`. The `windows-latest`
       image has LLVM under `C:\Program Files\LLVM`; set the variable in the workflow.
-      Done when: build passes.
+      Done when: build passes. — written 2026-09-29, unverified until the first
+      push. The image's LLVM is 20.1.8, installed by Chocolatey into that directory.
+      The step falls back to Visual Studio's bundled LLVM (`VC\Tools\LLVM\x64\bin`
+      via `vswhere`), which is what rust-ffmpeg's own Windows CI uses, when
+      `libclang.dll` is not there.
 - [ ] **B6.12** pdfium for Windows: `pdfium-win-x64.tgz` from the same
       `bblanchon/pdfium-binaries` release as B6.8, pinned in
       `build/windows/pdfium.lock`. Done when: fetched and verified in the job.
-- [ ] **B6.13** The `windows` job's smoke test must run with the FFmpeg `bin/`
+      Researched 2026-09-29: the release exists, and its URL and sha256 are in the
+      Decisions log. The lock file is not written yet.
+- [>] **B6.13** The `windows` job's smoke test must run with the FFmpeg `bin/`
       directory on `PATH` so the DLLs resolve. Done when: `delightfile --version`
-      prints on the runner.
+      prints on the runner. — written 2026-09-29, unverified until the first push.
+      The FFmpeg step appends `bin\` to `GITHUB_PATH`, so the df-app tests get it
+      too.
+
+**Switching B6.10 to another build** (researched 2026-09-29). The step derives the
+directory name from the URL (the zip's top directory is the asset name without
+`.zip`, for BtbN's builds and gyan.dev's alike), so a switch changes only
+`FFMPEG_URL` and `FFMPEG_SHA256`:
+
+- *A newer BtbN build.* BtbN keeps the last build of each month for two years and
+  the last 14 daily builds (its README, "Release Retention Policy"). The `latest`
+  release is rebuilt daily, so its hash changes every day and it cannot be pinned.
+  Take a month-end `autobuild-YYYY-MM-DD-HH-MM` release and its
+  `ffmpeg-n9.<x>-…-win64-gpl-shared-9.<y>.zip`. The sha256 is that asset's line in
+  the release's `checksums.sha256` (the API's `digest` field agrees).
+- *gyan.dev's release build*, which is what rust-ffmpeg's own Windows CI links
+  against, with `FFMPEG_DIR` and `LIBCLANG_PATH` set as here. The versioned GitHub
+  mirror is `GyanD/codexffmpeg`. The 9.0.1 zip, downloaded and listed on
+  2026-09-29, has `lib/avcodec.lib`, `avformat.lib`, `avutil.lib`,
+  `swresample.lib`, `swscale.lib` and `bin/avcodec-63.dll`. Its two lines are
+  these.
+  ```yaml
+  FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build-shared.zip
+  FFMPEG_SHA256: 6fd54b3b4f49117a307877b570f5e1659090f178973298658b41f5c559b5b5ab
+  ```
+  9.0.2 is `…/9.0.2/ffmpeg-9.0.2-full_build-shared.zip`, sha256
+  `8d31e162f1616e37aab3fa2db991b97e1b8dbeb1c8465fd81a81be16ff91b328`. That hash is
+  the GitHub API's; the file was not downloaded.
+- *vcpkg*, last, because it builds FFmpeg from source (tens of minutes; cache
+  `C:\vcpkg\installed`). The image has vcpkg at `C:\vcpkg` (`VCPKG_INSTALLATION_ROOT`),
+  and vcpkg's `ffmpeg` port is 9.0.2 on its master branch today. The image's checkout
+  is pinned to an older commit. Replace the FFmpeg step's body with
+  `git -C C:\vcpkg pull`, then
+  `vcpkg install ffmpeg[core,avcodec,avformat,swresample,swscale]:x64-windows`,
+  then add `VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT` to `GITHUB_ENV` and
+  `C:\vcpkg\installed\x64-windows\bin` to `GITHUB_PATH` (for B6.13). Drop the
+  `FFMPEG_*` env lines. With `FFMPEG_DIR` unset, ffmpeg-sys-next asks the vcpkg
+  crate, which reads `VCPKG_ROOT`.
 
 ## 3. Packaging
 
@@ -287,9 +424,126 @@ Why not sign now:
 - 2026-09-25 — Bundle FFmpeg and pdfium on macOS and Windows; ad-hoc codesign the
   macOS bundle so it launches on Apple Silicon.
 - 2026-09-25 — No resource-embedding crate on Windows; `build.rs` calls `rc.exe`.
+- 2026-09-29 — FFmpeg requirement, read from the repository rather than this
+  document: `ffmpeg-next`/`ffmpeg-sys-next` 9.0.0 (`Cargo.lock`) with `codec`,
+  `format`, `software-resampling` and `software-scaling` (`crates/dv-media/Cargo.toml`).
+  That means libavcodec, libavformat, libavutil, libswresample and libswscale at
+  libavcodec major 63. Arch has `ffmpeg 2:9.0.1-4` (libavcodec 63.1.101). The macOS
+  and Windows jobs fail with a pointer to §2 when their FFmpeg is not major 63. The
+  Linux job only logs the version, because Arch is the reference and moves with
+  Brian's machine.
+- 2026-09-29 — macOS FFmpeg: B6.7 option 1, `brew install ffmpeg`. Evidence:
+  `formulae.brew.sh/api/formula/ffmpeg.json` gives stable 9.0.2 with `arm64_tahoe`
+  and `arm64_sequoia` bottles (none for `arm64_sonoma`) and versioned formulae
+  `ffmpeg@8` … `@2.8`. `macos-latest` is macOS 26 arm64
+  (actions/runner-images README; image 20260907.0351.1 has Homebrew 6.0.22,
+  pkgconf 3.0.7 and Xcode's clang). The README also shows Intel macOS only under
+  `-intel`/`-large` labels now (`macos-15-intel`, `macos-26-intel`) and `macos-14`
+  deprecated; "Decisions already made" still holds for the plain labels.
+  rust-ffmpeg's own CI (zmwangx/rust-ffmpeg `.github/workflows/build.yml`) builds
+  with `brew install ffmpeg pkg-config` on `macos-latest`. Options 2 and 3 are
+  written out in §2.2, "Switching B6.7 to a fallback". Unverified until the first
+  push.
+- 2026-09-29 — Windows FFmpeg: BtbN
+  `autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-shared-9.0.zip`,
+  76,434,028 bytes, sha256
+  `00d78694632f17a1de325c639d0acf04a6b3ab8f20ce0a2e5bedd2d5e21e3adb`. Downloaded
+  and hashed locally; the hash matches the release's `checksums.sha256` and the API
+  digest. It holds `include/` at libavcodec 63.1.101, `bin/avcodec-63.dll` …, and
+  MSVC import libraries `lib/avcodec.lib`, `avformat.lib`, `avutil.lib`,
+  `swresample.lib` and `swscale.lib`, which is what `FFMPEG_DIR` needs under
+  `link.exe`. A month-end build because BtbN keeps those for two years; daily
+  builds are kept 14 days, and `latest` changes daily and cannot be hash-pinned.
+  The fallbacks, gyan.dev's 9.0.1 build (also checked locally) and vcpkg, are
+  written out in §2.3, "Switching B6.10 to another build". Unverified until the
+  first push.
+- 2026-09-29 — pdfium: the CI jobs fetch none, because `pdfium-render` has no
+  `static` feature and nothing links it at build time. For B6.8/B6.12:
+  `bblanchon/pdfium-binaries` release `chromium/7881` exists (published
+  2026-06-08; latest is `chromium/8076`, which is not the ABI `pdfium_7881` asks
+  for). Both assets downloaded and hashed locally:
+  `https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/7881/pdfium-mac-arm64.tgz`
+  sha256 `52e94ca5aa8847934330daf3f8150c190682c5ca93831468794f8b90d4392e40`
+  (holds `lib/libpdfium.dylib`), and `…/chromium/7881/pdfium-win-x64.tgz` sha256
+  `73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08` (holds
+  `bin/pdfium.dll`). The lock files belong under `build/`, which was outside this
+  change.
+- 2026-09-29 — Windows `LIBCLANG_PATH`: `C:\Program Files\LLVM\bin`. The
+  windows-2025 image installs LLVM 20.1.8 there through Chocolatey
+  (runner-images `Install-LLVM.ps1`). The step falls back to Visual Studio's
+  bundled LLVM, found with `vswhere`, if `libclang.dll` is not there. macOS gets no
+  override (B6.9).
+- 2026-09-29 — Action pins are full commit SHAs with the tag in a comment:
+  `actions/checkout` v7.0.1 `3d3c42e5aac5ba805825da76410c181273ba90b1`,
+  `actions/cache` v6.1.0 `55cc8345863c7cc4c66a329aec7e433d2d1c52a9`, and
+  `dtolnay/rust-toolchain` master `02cb101ec7c40f2c49e1d9714d64511d8e1b74de` with
+  `toolchain: stable`. B6.3 says `@stable`, which is a branch that moves; the pin
+  installs the same toolchain from an action that does not. No other third-party
+  actions.
+- 2026-09-29 — The cache key carries a hash of the compiler as well as the job name
+  and `Cargo.lock`, where B6.2 names only the last two. On Linux it is `rustc -vV`
+  hashed; on macOS and Windows it is `dtolnay/rust-toolchain`'s `cachekey` output.
+  actions/cache saves only when the key missed. Without the compiler in the key, a
+  rust upgrade would restore a `target/` that cargo discards, and that stale cache
+  would come back on every run until `Cargo.lock` changed. Arch's `rust` rolls and
+  stable moves every six weeks, so this would happen often. `restore-keys` falls
+  back only within the same compiler.
+- 2026-09-29 — Three workflow-wide settings B6.1 does not name.
+  `CARGO_INCREMENTAL=0`, because incremental artifacts do nothing in CI and make
+  `target/`, and so the cache, bigger. `permissions: contents: read`, since the
+  workflow only reads. `timeout-minutes: 90` on every job, so that a hung test ends
+  the run instead of holding it for GitHub's six-hour default.
+- 2026-09-29 — The macOS and Windows jobs run `cargo build -p df-core`,
+  `cargo test -p df-core` and `cargo build -p dv-media` before the B6.1 steps. While
+  those jobs are allowed to fail, the first failing step then shows how far each
+  target gets. Phase 1 still exits only when every step is green.
+- 2026-09-29 — Windows: `git config --global core.autocrlf false` before checkout,
+  so that tests reading files from the tree see the same bytes as on Linux. The
+  toolchain is named `stable-x86_64-pc-windows-msvc` rather than relying on the
+  image's default host.
+- 2026-09-29 — The Windows FFmpeg pin (`FFMPEG_URL`, `FFMPEG_SHA256`) lives in the
+  job's `env:` in `ci.yml` until B6.10 creates `build/windows/ffmpeg.lock`.
 
 ## Open questions
 
 - Homebrew FFmpeg major on the macOS runner at implementation time (B6.7 resolves).
+  (2026-09-29: `formulae.brew.sh` lists `ffmpeg` 9.0.2 with an `arm64_tahoe` bottle.
+  The first run's FFmpeg step log settles it.)
+- The Linux job runs as root, and root ignores permission bits (found 2026-09-29).
+  The archlinux container runs every step as root. Under `unshare -r` (namespace
+  root, which bypasses permission checks the same way), `cargo test --workspace` on
+  main fails 13 tests. Each chmods something to `0o000` or `0o555` and expects the
+  I/O to fail. In df-core: `ops::copy::tests::a_move_that_cannot_happen_leaves_the_destination_alone`,
+  `ops::journal::tests::{a_partial_undo_clears_the_redo_stack_and_a_refused_one_does_not,
+  a_partial_redo_splits_and_both_halves_can_be_walked,
+  a_partly_undone_copy_leaves_only_the_remainder_to_retry,
+  a_partly_undone_move_leaves_only_the_remainder_to_retry,
+  a_partly_undone_trash_leaves_only_the_remainder_and_clears_the_redo_stack}`,
+  `sync::tests::{a_folder_that_could_not_be_read_is_a_problem,
+  a_removal_that_fails_is_recorded_and_the_rest_carry_on,
+  a_source_that_cannot_be_read_back_is_named_as_itself}`, and
+  `sync::rsync::tests::a_file_rsync_could_not_send_is_one_problem_not_two`, which the
+  container skips because it has no rsync. In df-app:
+  `app::syncing::tests::{a_run_with_problems_comes_back_as_a_card_naming_them,
+  a_folder_that_could_not_be_read_opens_the_card_and_fails_the_task}` and
+  `app::tests::undo::a_copy_redo_that_cannot_land_goes_back_and_undo_works_again`.
+  As an ordinary user all of them pass. There are two ways out:
+  1. Run the cargo steps as an unprivileged user inside the container: `useradd`,
+     `chown` the workspace and a fixed `CARGO_HOME`, and prefix each cargo step
+     with `runuser -u <user> --`. This is CI-only and leaves the code alone. The
+     cost is more workflow, and file ownership to keep right for the cache step.
+  2. Make those tests skip when the chmod'd path is still readable, as
+     `du/tests.rs:208`, `archive/write/tests.rs:727` and `vfs/rclone_tests.rs:1146`
+     already do. The workflow stays as written, but the change is in `crates/`,
+     and in CI those 12 tests would then assert nothing.
+
+  Until one is chosen, expect the linux job to go red at `cargo test --workspace`.
+  macOS is not affected, because the runner's user is not root. Windows is not
+  affected either, because these tests set Unix mode bits and do not run there.
+- The linux job uses Arch's `rust` package, while macOS and Windows use rustup's
+  current stable. After a Rust release the two can differ by a version for
+  a few days, and a new clippy lint under `-D warnings` would then fail one job and
+  not the others. Should macOS and Windows pin the version Arch ships (for example
+  `toolchain: 1.98`), and who bumps it?
 - Bundle identifier `com.showandtour.delightfile`: confirm with Brian before the first
   release (it is baked into the notarization record and the app's preferences path).

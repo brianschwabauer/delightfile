@@ -1,0 +1,287 @@
+# The CI matrix of plans/other-platforms/06-build-and-release.md §1 (B6.1–B6.4,
+# B6.6). It is the only thing that holds the platform seam to one function set
+# on every target (00-ground-rules.md §2), so each job compiles the whole
+# workspace for its own OS rather than cross-checking from Linux: df-app cannot
+# be cross-checked at all, because ffmpeg-sys-next's build script needs the
+# target's own FFmpeg headers.
+#
+# Linux runs in an Arch container because ffmpeg-next 9 needs FFmpeg 9
+# (libavcodec 63), which Ubuntu LTS does not ship, and because Arch is the one
+# machine the app is known to work on. macOS and Windows get FFmpeg 9 per
+# 06-build-and-release.md §2; the fallbacks for when a source stops giving
+# major 63 are written up there ("Switching B6.7 to a fallback", "Switching
+# B6.10 to another build").
+#
+# The action pins are commit SHAs; the comment after each names the tag.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are for edit-compile loops; in CI they only make
+  # target/ (and so the cache) bigger.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+# Every job has a timeout well above a cold build (egui, wgpu and FFmpeg's
+# bindgen on a 3- or 4-core runner) so that a test that hangs ends the run
+# instead of holding it for GitHub's six-hour default.
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Before checkout: without git in the container, actions/checkout falls
+      # back to a tarball with no .git in it.
+      - name: Native dependencies (pacman)
+        run: pacman -Syu --noconfirm rust ffmpeg pkgconf clang git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Versions
+        id: versions
+        run: |
+          rustc -vV
+          cargo -V
+          echo "FFmpeg: Arch ffmpeg $(pacman -Q ffmpeg | cut -d' ' -f2), libavcodec $(pkg-config --modversion libavcodec)"
+          echo "rustc=$(rustc -vV | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      # Keyed on the job, the compiler and Cargo.lock. The compiler is in the key
+      # because Arch's rust rolls: without it, a rust upgrade would restore a
+      # target/ that cargo throws away wholesale, and the cache (saved only on a
+      # key miss) would keep handing back the stale one until Cargo.lock changed.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ github.job }}-rustc-${{ steps.versions.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ github.job }}-rustc-${{ steps.versions.outputs.rustc }}-
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+      # The whole workspace, dv-* included: the container has the ffmpeg binary
+      # and bash that dv-media's and dv-playback's integration tests call.
+      # Steps here run as root, whom permission bits do not stop, so the tests
+      # that chmod a file away and expect the I/O to fail will fail here until
+      # the root question under Open questions in 06-build-and-release.md is
+      # settled.
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      # chunks_exact_to_as_chunks is the 34-warning baseline in dv-* and
+      # preview/ (00-ground-rules.md §1), allowed until it is fixed separately.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
+
+      - name: Smoke test (the binary loads and runs)
+        run: target/debug/delightfile --version
+
+  macos:
+    runs-on: macos-latest
+    # Allowed to fail until Phase 1's stubs land. S1.40 in 01-platform-seam.md
+    # (= B6.5 in 06-build-and-release.md) removes this line.
+    continue-on-error: true
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # B6.3: macos-latest must be Apple Silicon; no Intel macOS is built.
+      - name: Runner
+        run: |
+          uname -m
+          sw_vers
+          xcode-select -p
+          if [ "$(uname -m)" != arm64 ]; then
+            echo "::error::macos-latest is $(uname -m), not arm64; pin an arm64 image (macos-15 or later)"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-29
+        id: toolchain
+        with:
+          toolchain: stable
+          components: clippy
+
+      # B6.7 option 1: Homebrew's ffmpeg is 9.x (libavcodec 63) with an
+      # arm64_tahoe bottle, so this is a download, not a build. The check below
+      # is what tells the day it stops being 63; the fallbacks (ffmpeg@9, then
+      # a source build) are in 06-build-and-release.md, "Switching B6.7 to a
+      # fallback".
+      # bindgen's libclang is Xcode's, found without LIBCLANG_PATH (B6.9).
+      - name: FFmpeg (Homebrew)
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: |
+          brew install ffmpeg pkgconf
+          lavc=$(pkg-config --modversion libavcodec)
+          echo "FFmpeg: B6.7 option 1, Homebrew $(brew list --versions ffmpeg), libavcodec $lavc"
+          if [ "${lavc%%.*}" != 63 ]; then
+            echo "::error::Homebrew's ffmpeg has libavcodec $lavc; ffmpeg-next 9 needs major 63. See 'Switching B6.7 to a fallback' in plans/other-platforms/06-build-and-release.md."
+            exit 1
+          fi
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ github.job }}-rustc-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ github.job }}-rustc-${{ steps.toolchain.outputs.cachekey }}-
+
+      # Narrowest first, so that while the port is under way the log says how
+      # far it gets: df-core (B6.3's done-when), then the FFmpeg link (B6.7's),
+      # then the rest of B6.1.
+      - name: cargo build -p df-core
+        run: cargo build -p df-core
+
+      - name: cargo test -p df-core
+        run: cargo test -p df-core
+
+      - name: cargo build -p dv-media
+        run: cargo build -p dv-media
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+      # Not the dv-* suites: they spawn ffmpeg, bash build/test-assets.sh and
+      # espeak and hold /home/brian literals, and are not part of the port;
+      # the build above proves the vendored crates compile here.
+      - name: cargo test -p df-core -p df-app
+        run: cargo test -p df-core -p df-app
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
+
+      - name: Smoke test (the binary loads and runs)
+        run: target/debug/delightfile --version
+
+  windows:
+    runs-on: windows-latest
+    # Allowed to fail until Phase 1's stubs land. S1.40 in 01-platform-seam.md
+    # (= B6.5 in 06-build-and-release.md) removes this line.
+    continue-on-error: true
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      # B6.10: BtbN's FFmpeg 9.0.1 GPL shared build for win64 (libavcodec
+      # 63.1.101, the same FFmpeg as Arch's 9.0.1). A month-end autobuild,
+      # because BtbN keeps the last build of each month for two years and a
+      # daily one for 14 days, and `latest` is rebuilt daily so no hash could
+      # hold. The zip carries MSVC import libraries (lib/avcodec.lib, …) beside
+      # the MinGW ones, which is what FFMPEG_DIR needs under link.exe, and
+      # unpacks to a directory named after itself. Switching to another build
+      # (a newer BtbN one, or gyan.dev's) is these two lines; the candidates
+      # are in 06-build-and-release.md, "Switching B6.10 to another build".
+      # B6.10 moves the pin into build/windows/ffmpeg.lock.
+      FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-shared-9.0.zip
+      FFMPEG_SHA256: 00d78694632f17a1de325c639d0acf04a6b3ab8f20ce0a2e5bedd2d5e21e3adb
+    steps:
+      # The runner's git checks out with CRLF; tests that read files from the
+      # tree should see the bytes Linux sees.
+      - name: Check out with LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-29
+        id: toolchain
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: FFmpeg (pinned by sha256)
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $name = ($env:FFMPEG_URL -split '/')[-1] -replace '\.zip$', ''
+          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
+          Invoke-WebRequest $env:FFMPEG_URL -OutFile $zip
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne $env:FFMPEG_SHA256) { throw "$name.zip has sha256 $sha, expected $env:FFMPEG_SHA256" }
+          7z x $zip "-o$env:RUNNER_TEMP" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "7z could not extract $zip" }
+          $dir = Join-Path $env:RUNNER_TEMP $name
+          $major = (Select-String -Path "$dir\include\libavcodec\version_major.h" -Pattern 'define LIBAVCODEC_VERSION_MAJOR\s+(\d+)').Matches[0].Groups[1].Value
+          Write-Output "FFmpeg: B6.10, $name, libavcodec major $major"
+          if ($major -ne '63') { throw "libavcodec major is $major; ffmpeg-next 9 needs 63" }
+          # ffmpeg-sys-next reads FFMPEG_DIR ({dir}\include, {dir}\lib); the
+          # DLLs in bin\ have to be on PATH for the tests and the smoke test
+          # (B6.13).
+          Add-Content -Path $env:GITHUB_ENV -Value "FFMPEG_DIR=$dir"
+          Add-Content -Path $env:GITHUB_PATH -Value "$dir\bin"
+
+      # B6.11: bindgen loads libclang.dll. The image's LLVM is under Program
+      # Files; Visual Studio's bundled copy is the fallback.
+      - name: libclang for bindgen
+        shell: pwsh
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\libclang.dll")) {
+            $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+            $llvm = "$vs\VC\Tools\LLVM\x64\bin"
+          }
+          if (-not (Test-Path "$llvm\libclang.dll")) { throw "no libclang.dll under Program Files\LLVM or Visual Studio" }
+          Write-Output "LIBCLANG_PATH=$llvm"
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm"
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ github.job }}-rustc-${{ steps.toolchain.outputs.cachekey }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ github.job }}-rustc-${{ steps.toolchain.outputs.cachekey }}-
+
+      # Narrowest first, as on macOS: df-core (B6.4's done-when), then the
+      # FFmpeg link (B6.10's), then the rest of B6.1.
+      - name: cargo build -p df-core
+        run: cargo build -p df-core
+
+      - name: cargo test -p df-core
+        run: cargo test -p df-core
+
+      - name: cargo build -p dv-media
+        run: cargo build -p dv-media
+
+      - name: cargo build --workspace
+        run: cargo build --workspace
+
+      # Not the dv-* suites, for the reason given in the macOS job.
+      - name: cargo test -p df-core -p df-app
+        run: cargo test -p df-core -p df-app
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
+
+      - name: Smoke test (the binary loads and runs)
+        run: target/debug/delightfile --version
