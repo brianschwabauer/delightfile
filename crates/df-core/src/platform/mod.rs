@@ -39,7 +39,8 @@
 //! | `fs` | `writable(dir) -> bool` | `access(W_OK)` (unix) | unix | `true` (W4.6) |
 //! | `fs` | `is_junction(path) -> bool` (the path itself, P3.7) | `false` (unix) | unix | reparse tag `IO_REPARSE_TAG_MOUNT_POINT` |
 //! | `fs` | `remove_link(path) -> io::Result<()>` (the link, never its target, P3.26) | `remove_file` (unix) | unix | `remove_dir` for a link to a directory or a junction, else `remove_file` |
-//! | `fs` | `reflink(reader, writer) -> bool` | `FICLONE` | `false` (M2.2) | `false` |
+//! | `fs` | `reflink(reader, writer) -> bool` (clone into an open file) | `FICLONE` | `false` | `false` |
+//! | `fs` | `clone_before_open(reader, dst) -> io::Result<bool>` (clone into a new file; `false`: copy the long way) | `Ok(false)` | `fclonefileat` (APFS) | `Ok(false)` |
 //! | `fs` | `forget_cached(file, path)` | `posix_fadvise(DONTNEED)` | nothing (`F_NOCACHE` is no hint) | nothing |
 //! | `fs` | `is_remote(path) -> bool`, `magic_of(path) -> Option<i64>` | `statfs` `f_type` against `du::REMOTE_FS_MAGIC` | `statfs` `f_fstypename` (`smbfs`, `nfs`, `macfuse`…) / `f_type` | `false` / `None` |
 //! | `trash` | `TrashedItem { trash_root, name, original, deleted_at }` with `location()`, `files_path()`, `info_path()`, `is_orphan()` | freedesktop `files/` + `info/` | empty paths, never an orphan (M2.8) | same stub (W4.7) |
