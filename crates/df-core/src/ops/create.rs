@@ -50,6 +50,17 @@ pub fn create(path: &Path) -> Result<Created> {
     if exists(&path) {
         return Err(DfError::Op(format!("{} already exists", path.display())));
     }
+    // Every name this makes, the leaf and each missing parent, has to be one
+    // the platform takes — refused up front, with the reason, rather than
+    // half made (Windows: `a:b`, `con`, a trailing dot).
+    for made in path
+        .ancestors()
+        .take_while(|p| !p.as_os_str().is_empty() && !exists(p))
+    {
+        if let Some(name) = made.file_name() {
+            valid(name)?;
+        }
+    }
 
     let created_parents = make_parents(&path)?;
 
@@ -139,6 +150,7 @@ pub fn rename(from: &Path, to: &Path, force: bool) -> Result<()> {
     if name.is_empty() {
         return Err(DfError::Op("no name given".to_string()));
     }
+    valid(name)?;
 
     // One directory however it is spelled: keyed, so `C:\Dir` and `c:\dir`
     // are one on Windows. On Unix the key is the path itself.
@@ -172,6 +184,17 @@ pub fn rename(from: &Path, to: &Path, force: bool) -> Result<()> {
         super::delete::remove_tree_unchecked(to)?;
     }
     std::fs::rename(from, to).map_err(|e| DfError::io(from, e))
+}
+
+/// `name`, if the platform takes it ([`crate::path::name_is_valid`]), or the
+/// refusal that says why.
+fn valid(name: &std::ffi::OsStr) -> Result<()> {
+    crate::path::name_is_valid(name).map_err(|why| {
+        DfError::Op(format!(
+            "\"{}\" cannot be a name here: {why}",
+            name.to_string_lossy()
+        ))
+    })
 }
 
 /// Whether `to` is `from` in another case, reached only because the volume
@@ -390,6 +413,27 @@ mod tests {
         std::fs::hard_link(&from, t.join("foo.txt")).unwrap();
         rename(&from, &t.join("foo.txt"), false).unwrap();
         assert_eq!(names_in(t.path()), ["Foo.txt", "foo.txt"]);
+    }
+
+    /// A name Windows will not make is refused there before anything is
+    /// made, with the reason; the same names are ordinary on Unix.
+    #[test]
+    fn a_name_the_platform_refuses_is_refused_with_its_reason() {
+        let t = TempTree::new("create-invalid");
+        for name in ["x:y.txt", "con.txt", "trailing.", "sub/what?/inner.txt"] {
+            let made = create(&t.join(name));
+            if cfg!(windows) {
+                let err = made.unwrap_err().to_string();
+                assert!(err.contains("cannot be a name here"), "{name}: {err}");
+            } else {
+                assert!(made.is_ok(), "{name}: {made:?}");
+            }
+        }
+        assert!(!t.join("sub").exists() || cfg!(unix), "nothing half made");
+
+        let from = t.file("ok.txt", b"x");
+        let renamed = rename(&from, &t.join("aux.txt"), false);
+        assert_eq!(renamed.is_err(), cfg!(windows), "{renamed:?}");
     }
 
     #[test]

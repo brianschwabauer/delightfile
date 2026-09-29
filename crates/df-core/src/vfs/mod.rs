@@ -755,7 +755,12 @@ impl Vfs {
             source: e,
         })?;
         let unique = UNIQUE.fetch_add(1, Ordering::Relaxed);
-        let local = dir.join(format!("{unique}-{}", remote.name()));
+        // The server's name, made one this platform takes (`a:b` is a fine
+        // name on the server and none on Windows); the file is thrown away.
+        let local = dir.join(format!(
+            "{unique}-{}",
+            crate::path::made_valid(remote.name())
+        ));
         self.download(remote, &local, ctx)?;
         Ok(local)
     }

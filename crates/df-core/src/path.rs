@@ -281,6 +281,52 @@ pub fn name_is_valid_strict(name: &OsStr) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// `name` made into one this platform takes, for a file nobody chose the
+/// name of and nobody keeps — a remote file downloaded to a temporary name
+/// to open it. What [`name_is_valid`] would refuse is replaced by `_`. On
+/// Unix only NUL and `/` are, which a name from a listing never has.
+pub fn made_valid(name: &str) -> Cow<'_, str> {
+    if platform::os::STRICT_NAMES {
+        made_valid_strict(name)
+    } else if name.contains(['\0', '/']) {
+        Cow::Owned(name.replace(['\0', '/'], "_"))
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
+/// [`made_valid`] by Windows' rule: every character it refuses becomes `_`,
+/// so does a trailing dot or space, and a device name gets a `_` in front.
+pub fn made_valid_strict(name: &str) -> Cow<'_, str> {
+    if name_is_valid_strict(OsStr::new(name)).is_ok() {
+        return Cow::Borrowed(name);
+    }
+    let mut out: String = name
+        .chars()
+        .map(|c| {
+            if u32::from(c) < 0x20
+                || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '/' | '\\')
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if out.ends_with(['.', ' ']) {
+        out.pop();
+        out.push('_');
+    }
+    let base = out.split('.').next().unwrap_or_default().trim_end();
+    if is_device_name(base) {
+        out.insert(0, '_');
+    }
+    if out.is_empty() {
+        out.push('_');
+    }
+    Cow::Owned(out)
+}
+
 fn is_device_name(base: &str) -> bool {
     const DEVICES: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
     if DEVICES.iter().any(|d| d.eq_ignore_ascii_case(base)) {
@@ -593,6 +639,30 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(with_slashes(r"..\a\b"), "../a/b");
             assert_eq!(with_slashes(r"C:\a/b"), "C:/a/b");
+        }
+    }
+
+    #[test]
+    fn a_name_is_made_valid_by_underscores() {
+        assert_eq!(made_valid_strict("plain.txt"), "plain.txt");
+        assert!(matches!(made_valid_strict("plain.txt"), Cow::Borrowed(_)));
+        assert_eq!(made_valid_strict("a:b*c?.txt"), "a_b_c_.txt");
+        assert_eq!(made_valid_strict("tab\there"), "tab_here");
+        assert_eq!(made_valid_strict("dots..."), "dots.._");
+        assert_eq!(made_valid_strict("con.txt"), "_con.txt");
+        assert_eq!(made_valid_strict(r"back\slash"), "back_slash");
+        for name in ["a:b*c?.txt", "dots...", "con.txt", "space ", "x|y"] {
+            let made = made_valid_strict(name);
+            assert!(
+                name_is_valid_strict(OsStr::new(made.as_ref())).is_ok(),
+                "{made}"
+            );
+        }
+        if cfg!(unix) {
+            assert_eq!(made_valid("a:b*c?.txt"), "a:b*c?.txt", "all legal here");
+        }
+        if cfg!(windows) {
+            assert_eq!(made_valid("a:b"), "a_b");
         }
     }
 

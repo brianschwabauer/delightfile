@@ -31,8 +31,11 @@
 //!   case-insensitive check is because macOS and Windows filesystems will happily
 //!   resolve `.GIT` to it.
 //!
-//! Plus the mechanical ones: an empty name, a name with a NUL in it, and a name
-//! longer than [`MAX_NAME_BYTES`].
+//! Plus the mechanical ones: an empty name, a name with a NUL in it, a name
+//! longer than [`MAX_NAME_BYTES`], and a component this platform will not make
+//! ([`crate::path::name_is_valid`]) — on Windows `con.txt`, `x:y`, `a?` and a
+//! trailing dot, which would fail, or worse, make a file other than the one
+//! named.
 //!
 //! A `.` component is none of these. `./one.txt`, which `bsdtar` writes for
 //! every member of an archive made with `bsdtar -cf x.zip .`, is `one.txt`
@@ -492,6 +495,15 @@ pub fn name_is_unsafe(name: &str) -> bool {
             return true;
         }
         if part.eq_ignore_ascii_case(".git") {
+            return true;
+        }
+        // A name the platform will not make: on Windows `con.txt`, `x:y`,
+        // `a?`, a trailing dot. Unix refuses only NUL and `/`, which the
+        // checks above have already caught.
+        if !part.is_empty()
+            && part != "."
+            && crate::path::name_is_valid(std::ffi::OsStr::new(part)).is_err()
+        {
             return true;
         }
     }

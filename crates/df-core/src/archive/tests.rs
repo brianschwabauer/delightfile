@@ -657,12 +657,28 @@ fn traversal_and_absolute_and_dot_git_names_are_flagged() {
         "..hidden/x",
         "a/.gitignore",
         "a/git/config",
-        "dots../x",
     ] {
         assert!(!name_is_unsafe(name), "{name:?} should be fine");
     }
     assert!(name_is_unsafe(&"x".repeat(MAX_NAME_BYTES + 1)));
     assert!(name_is_unsafe("has\0nul"));
+}
+
+/// A component the platform will not make is unsafe to extract: on Windows a
+/// device name, a reserved character, a trailing dot. They are ordinary names
+/// on Unix.
+#[test]
+fn names_the_platform_refuses_are_flagged_there() {
+    for name in [
+        "con.txt",
+        "dir/x:y",
+        "dir/what?",
+        "dots../x",
+        "a/nul",
+        "tail. /x",
+    ] {
+        assert_eq!(name_is_unsafe(name), cfg!(windows), "{name:?}");
+    }
 }
 
 #[test]

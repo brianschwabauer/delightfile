@@ -426,7 +426,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 
 ## 5. Names (appendix §3.5 and the Windows rules)
 
-- [ ] **P3.21** `path::name_is_valid` is called by `ops/create.rs` (create, rename),
+- [x] **P3.21** `path::name_is_valid` is called by `ops/create.rs` (create, rename),
       `rename/` (bulk rename preview says why a row cannot be applied, using the
       existing "cannot be filled" mechanism), `archive/tree.rs:469–494`
       (`name_is_unsafe` adds the Windows rule set through it, so extraction refuses
@@ -434,7 +434,21 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       sanitizes a remote name for the local temp file: replace each invalid character
       with `_`, since that file is disposable). Done when: tests for each on every
       target (the rule set is testable on Linux by calling the strict variant
-      directly).
+      directly). — done (port/paths) for create, rename, the archive and the vfs;
+      the bulk rename preview is split out as P3.31 (blocked, below). `create`
+      checks the leaf and every parent it will make before making any;
+      `rename` checks the new name; both refuse with
+      `"<name>" cannot be a name here: <why>`. `name_is_unsafe` asks it of every
+      component (Unix: NUL and `/`, already refused there, so no change).
+      `download_to_temp` names the local file with `path::made_valid` (new,
+      with `made_valid_strict`: each refused character to `_`, a trailing dot
+      or space to `_`, a device name prefixed with `_`; the identity on Unix
+      for any name a listing has). Tests on every target, asserting each rule
+      where it applies: `a_name_the_platform_refuses_is_refused_with_its_reason`,
+      `names_the_platform_refuses_are_flagged_there`,
+      `a_name_is_made_valid_by_underscores`. On Linux the one visible
+      difference is the wording of the refusal for a typed NUL, which the
+      system refused before anyway.
 - [ ] **P3.22** `fs/scan.rs:328, 369` and `fs/mod.rs:506`: `Entry.name` stays a lossy
       `String` for display, but `selected_paths` and every op takes `Entry.path`
       (the real `PathBuf`), never `dir.join(name)`. Audit and fix the callers listed
@@ -444,6 +458,21 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `cfg!(windows)` (drop `\n`, `\t`, `\`, `"`, and the 255-`x` name becomes 200
       to stay under `MAX_PATH` with the temp prefix). Linux list unchanged. Done
       when: Linux tests unchanged; the df-core test suite compiles on Windows.
+- [~] **P3.31** (split from P3.21, 2026-09-29) The bulk rename preview says
+      why a row's name cannot be made on this platform. — blocked: the plan put
+      it in df-core's `rename/` through the template's "cannot be filled"
+      mechanism (`template::Missing`), but a row's validity is df-app's
+      (`bulk::problems`, which already refuses a `/` as `Problem::Unusable`),
+      and the template has no row to judge; routed through `Missing`,
+      `name_is_valid`'s Unix rule would move a `/` in a filled value from "not
+      a usable name" to a new message on Linux. Options: (a) leave it to
+      W4.12, which already has `bulk::problems` call `path::name_is_valid`
+      (strict on Windows) — nothing more in df-core, and the renames
+      themselves are already refused with the reason by `ops::rename`
+      (P3.21); (b) have the template report `Missing::Because(why)` for a
+      filled name that fails `path::name_is_valid_strict`, applied only where
+      `platform::os::STRICT_NAMES` holds, so Linux sees nothing. (a) needs no
+      new code here and keeps the one list of a row's problems in one place.
 
 ## 6. Tests (appendix §5)
 
@@ -552,6 +581,10 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
   not offered on Windows (`HAS_RSYNC`), and macOS keeps identity keys.
 - 2026-09-29 — P3.20, `vfs/config.rs:214, 224`: left exact. Service names
   from config, not paths.
+- 2026-09-29 — P3.31 appended, blocked, for P3.21's bulk-rename half
+  (options there). The number skips P3.29 and P3.30: P3.30 was assigned to
+  the Windows test-suite task by the brief this phase ran under, and P3.29 is
+  left alone in case another branch has taken it.
 - 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
   did, not every one through `trim_trailing_separator`: `a//` stays `a/`
   and a typed `/` stays "no name given" on Linux.

@@ -29,7 +29,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 212–216 | `destination_for`: `dest_dir.join(&entry.path)` once `name_is_unsafe` passes | Windows-differs | `plan_extract` ← app:app.rs:spawn_extract; core:archive/whole.rs:read_here | Names with `:` `<` `>` `"` `\|` `?` `*`, control characters, a trailing `.` or space, or a reserved device name (`CON`, `NUL`, `COM1`…) are not refused and are joined verbatim |
+| 212–216 | `destination_for`: `dest_dir.join(&entry.path)` once `name_is_unsafe` passes | Windows-differs | `plan_extract` ← app:app.rs:spawn_extract; core:archive/whole.rs:read_here | Names with `:` `<` `>` `"` `\|` `?` `*`, control characters, a trailing `.` or space, or a reserved device name (`CON`, `NUL`, `COM1`…) are not refused and are joined verbatim ✓ P3.21 |
 
 ### archive/mod.rs
 
@@ -43,7 +43,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 469–494 | `name_is_unsafe`: refuses a leading `/` or `\`, an `X:` drive prefix, `..`, `.git` in any ASCII case, NUL, and more than `MAX_NAME_BYTES` (4096) bytes | Windows-differs | `tree::build` (sets `unsafe_name`); core:archive/extract.rs:destination_for | No rule for Windows-reserved names or characters (see extract.rs:212) |
+| 469–494 | `name_is_unsafe`: refuses a leading `/` or `\`, an `X:` drive prefix, `..`, `.git` in any ASCII case, NUL, and more than `MAX_NAME_BYTES` (4096) bytes | Windows-differs | `tree::build` (sets `unsafe_name`); core:archive/extract.rs:destination_for | No rule for Windows-reserved names or characters (see extract.rs:212) ✓ P3.21 |
 
 ### archive/unpack.rs
 
@@ -437,7 +437,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 657–668 | `download_to_temp`: `temp_dir()/delightfile-vfs-{pid}/{n}-{remote.name()}` | Windows-differs | app:app.rs:open_remote, sync_remote_preview | A remote name is used as a local file name unchanged (Windows-illegal characters and reserved names are possible) |
+| 657–668 | `download_to_temp`: `temp_dir()/delightfile-vfs-{pid}/{n}-{remote.name()}` | Windows-differs | app:app.rs:open_remote, sync_remote_preview | A remote name is used as a local file name unchanged (Windows-illegal characters and reserved names are possible) ✓ P3.21 |
 | 694–715 | `Vfs::unique_name`: `OsString::from(remote.name())` → `trash::suffixed` (Unix-only `fit`) | Unix-only (via ops/trash.rs:609) | `upload_new` ← app:app.rs:spawn_upload | |
 | 1174 | `remote_entry`: `path: PathBuf::from(dir.join(&name).to_url())` (an `sftp://` URL inside a `PathBuf`) | Windows-differs | `convert_batch`, `stat_entry` ← app:app.rs:remote_upload | §3.7 |
 
