@@ -14,9 +14,10 @@
 //!
 //! The events are the same on every target, so they are defined here once.
 //! The handle and [`start`] are each target's (`device` in its module):
-//! the Wayland data device on Linux, and on macOS and Windows for now no
-//! device at all. So is [`pointer_position`], which says where a drop that
-//! winit reports without a position is, where the platform can tell.
+//! the Wayland data device on Linux, the pasteboard on macOS, and on Windows
+//! for now no device at all. So is [`pointer_position`], which says where a
+//! drop that winit reports without a position is, where the platform can
+//! tell.
 
 use std::path::PathBuf;
 

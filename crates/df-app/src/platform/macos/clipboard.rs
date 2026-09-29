@@ -70,6 +70,13 @@ pub fn paste(mime: &str) -> Result<Vec<u8>, ClipError> {
     paste_from(&general(), mime)
 }
 
+/// How many times the pasteboard has changed hands: a number that moves
+/// whenever anything, this program included, puts something on it.
+pub fn change_count() -> isize {
+    // SAFETY: a read of an integer property of the shared pasteboard.
+    unsafe { general().changeCount() }
+}
+
 /// The pasteboard everybody shares.
 fn general() -> Retained<NSPasteboard> {
     // SAFETY: a class method with no arguments that always answers.
