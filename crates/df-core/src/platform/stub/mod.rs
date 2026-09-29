@@ -20,6 +20,7 @@
 pub mod fs;
 #[cfg(windows)]
 pub mod nofollow;
+#[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
 pub mod thread;
