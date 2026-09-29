@@ -186,7 +186,7 @@ has not dropped.
       local path, so there is nothing to assert there.
       — done: the df-core half 70ad913; the df-app refusal test,
       `app::tests::the_trash_is_refused_where_the_platform_has_none`, with
-      S1.34, done, uncommitted 2026-09-29. Linux verified, other targets
+      S1.34, done 2544733. Linux verified, other targets
       unverified until CI (the test is compiled out on Linux and first runs on
       the macOS and Windows runners)
 - [x] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
@@ -439,7 +439,7 @@ has not dropped.
       imports are used on every target. Done when: none of df-core's tests
       reaches a Linux-only stub on the macOS or Windows runner, Linux's count is
       unchanged (the gated tests still run there), and `cargo check -p df-core
-      --tests` is clean for both targets. — done, uncommitted 2026-09-29, Linux
+      --tests` is clean for both targets. — done afd0016, Linux
       verified (1138 with S1.26's new test; cross-checked clean for both
       targets), other targets unverified until CI
 - [x] **S1.55** df-core linted for macOS and Windows as their CI jobs lint it
@@ -453,7 +453,7 @@ has not dropped.
       `ops/mode.rs`, because the `nofollow` stub's `Finder` was a unit
       struct. The stub's `Finder` now carries a private `()` field; Linux's
       `Finder` and `ops::mode` are unchanged. Done when: that command is clean
-      for both targets. — done, uncommitted 2026-09-29, cross-checked locally,
+      for both targets. — done dc91116, cross-checked locally,
       CI pending
 
 ## 3. df-app: the seam
@@ -581,7 +581,7 @@ their native clipboards *are* synchronous.
       ever hold a running child, did not change. Off Linux's exact bytes,
       `file_uri` spells a name that has none (not valid Unicode, Windows only)
       lossily, and `parse_file_uri` answers `None` for bytes the platform
-      cannot spell (not UTF-8, Windows only). — done, uncommitted 2026-09-29,
+      cannot spell (not UTF-8, Windows only). — done 7a0999c,
       Linux verified (the stubs type-check when selected on Linux), other
       targets unverified until CI
 - [x] **S1.24** `platform::mounts` (df-app): `Mounts::start(notify)`, `ask`, `drain`,
@@ -638,8 +638,8 @@ their native clipboards *are* synchronous.
       `[target.'cfg(target_os = "linux")'.dependencies]` table (S1.20's
       deferred half); its only calls are the Wayland thread's. The grep holds
       once S1.26 (`open.rs`) and S1.36 (`cli.rs`) have landed, for everything
-      but tests marked `#[cfg(unix)]` or Linux (S1.33). — done, uncommitted
-      2026-09-29, Linux verified (the stubs type-check when selected on Linux),
+      but tests marked `#[cfg(unix)]` or Linux (S1.33). — done 8349438, Linux
+      verified (the stubs type-check when selected on Linux),
       other targets unverified until CI
 - [x] **S1.26** `platform::open` (df-app): `shell_program`, `shell_argv`,
       `detached_argv`, `which`, `spawn_detached`, `run_blocking` bodies
@@ -670,8 +670,8 @@ their native clipboards *are* synchronous.
       fallbacks). The two tests of moved bodies moved with them:
       `paths_reach_the_shell_as_arguments` to `platform::unix::open` and
       `detaching_only_prefixes_what_it_can_find` to `platform::linux::open`
-      (S1.33's `/bin/zsh` and `setsid` gates, by where they live). — done,
-      uncommitted 2026-09-29, Linux verified (the stubs type-check when
+      (S1.33's `/bin/zsh` and `setsid` gates, by where they live). — done
+      1a477d3, Linux verified (the stubs type-check when
       selected on Linux), other targets unverified until CI
 - [x] **S1.27** `platform::window::attributes(title: &str, app_id: &str) ->
       WindowAttributes`: Linux body is `app.rs:2111–2124` (`with_name` from
@@ -833,8 +833,8 @@ their native clipboards *are* synchronous.
       modules selected and df-app's own `target_os = "linux"` (and, for
       Windows, `unix`) gates turned off: no errors, and no warning but the
       dead code S1.53 allows; `std::os::unix` and df-core's Linux-only items,
-      which such a build still resolves, by grep. — done, uncommitted
-      2026-09-29, Linux verified, other targets unverified until CI
+      which such a build still resolves, by grep. — done 3bfad09, Linux
+      verified, other targets unverified until CI
 - [x] **S1.34** `remote.rs:419–421` uses `df_core::fs::names::suffixed` (moved in
       S1.6). `app.rs:4055–4190` (`show_trash`, `trash_restore`, `trash_purge`) call
       the `platform::trash` surface; on a target where `Trash::home()` is
@@ -853,7 +853,7 @@ their native clipboards *are* synchronous.
       over the link is a delete on the server, which has no local trash in
       it. The S1.6 test asserts the three refusals and that `d` toasts and
       deletes nothing; compiled with its gate lifted it builds on Linux and
-      fails there, as it should. — done, uncommitted 2026-09-29, Linux
+      fails there, as it should. — done 2544733, Linux
       verified, other targets unverified until CI
 - [x] **S1.35** `platform::appearance` (df-app): the desktop's light or dark for
       `[flavor] mode = "auto"` (the portal read and its `SettingChanged` watcher,
@@ -897,24 +897,25 @@ their native clipboards *are* synchronous.
       that could not be spelled would make the argument not that flag (it
       cannot happen: a value cut from valid UTF-8 at an ASCII `=` is valid).
       The non-UTF-8 test is `#[cfg(unix)]`; no Windows twin, since W4.26 owns
-      the Windows twins. — done, uncommitted 2026-09-29, Linux verified, other
+      the Windows twins. — done 5a89e18, Linux verified, other
       targets unverified until CI
 - [x] **S1.53** Dead code off Linux (added 2026-09-29 at integration). Built
-      with the macOS or the Windows platform modules selected, df-app has some
-      48 dead-code warnings per target and nothing else: the drag-and-drop
-      helpers (`dnd.rs`), gio's output readers and the variants only gio and
-      udisks answer in (`mounts.rs`), `platform::desktop::Event`'s drag and
-      clipboard variants and `PasteFailure`, the portal's `appearance::Scheme`
-      and `Link` states, `clipboard::ClipError::Failed`, and the drag image
-      (`platform/icon.rs`) — items whose only callers are Linux bodies. Decided: no `allow`
-      attribute in the code and no `cfg` outside `platform/` for them. The
+      with the macOS or the Windows platform modules selected, df-app's
+      binary has 49 dead-code warnings per target and nothing else: the
+      drag-and-drop helpers (`dnd.rs`), gio's output readers and the variants
+      only gio and udisks answer in (`mounts.rs`), `platform::desktop::Event`'s
+      drag and clipboard variants and `PasteFailure`, the portal's
+      `appearance::Scheme` and `Link` states, `clipboard::ClipError::Failed`,
+      and the drag image (`platform/icon.rs`) — items whose only callers are
+      Linux bodies. Decided: no `allow` attribute in the code and no `cfg`
+      outside `platform/` for them. The
       `macos` and `windows` jobs in `.github/workflows/ci.yml` pass
       `-A dead_code` to clippy, each with a comment saying it is removed when
       Phase 2 and Phase 4 give those items callers; that removal is M2.31 and
       W4.34, and `06-build-and-release.md`'s Decisions log says so. The
       `linux` job's clippy line is unchanged. Done when: both foreign jobs'
       clippy lines carry the flag and its comment, the Linux one does not, and
-      the workflow still parses. — done, uncommitted 2026-09-29, Linux
+      the workflow still parses. — done 0895136, Linux
       verified (the YAML parses; df-app built and linted on Linux with each
       target's stubs shows only dead code), other targets unverified until CI
 - [x] **S1.54** Two tests that failed anywhere but Brian's machine (added
@@ -959,7 +960,7 @@ their native clipboards *are* synchronous.
       The two font tests the container also fails are not this task's (the
       Open question in `06-build-and-release.md` stands). Done when: both
       tests pass with `TMPDIR` on btrfs and without `zip`; Linux's other
-      tests unchanged. — done, uncommitted 2026-09-29, Linux verified
+      tests unchanged. — done 76411eb, Linux verified
 
 ## 4. Closing the phase
 
@@ -970,7 +971,7 @@ their native clipboards *are* synchronous.
       Wayland session"; it now says Linux (Wayland) is the supported platform and
       macOS/Windows builds compile but are unverified, linking to `plans/other-platforms/`. Done
       when: reviewed by Brian.
-      — integration session, 2026-09-29: written, uncommitted 2026-09-29, and
+      — integration session, 2026-09-29: written in e8cc019, and
       waiting on the done-when, Brian's review. The section says the macOS and
       Windows builds are *meant* to compile rather than that they do, since
       no CI run has compiled df-app for either yet (S1.40).
@@ -983,7 +984,7 @@ their native clipboards *are* synchronous.
       "Cross-platform" subsection there, one paragraph saying the port is
       planned and marked in `plans/other-platforms/README.md` and that the
       first phase is under way. The memory pointers are outside the
-      repository. — done, uncommitted 2026-09-29
+      repository. — done 444804d
 
 ## Decisions log
 
@@ -1209,7 +1210,7 @@ their native clipboards *are* synchronous.
   left with the Windows path failures to P3.24: that job is red until Phase 3
   either way, and gating them now would hide what P3.3 has to make pass.
 - 2026-09-29 — S1.53 (new task): off Linux df-app's items whose only callers
-  are Linux bodies are dead code, some 48 warnings per target. They are
+  are Linux bodies are dead code, 49 warnings per target. They are
   allowed by the macos and windows CI jobs (`-A dead_code` on their clippy
   lines), not by `allow` attributes or `cfg`s in the code, and M2.31 and
   W4.34 take the flag off once Phases 2 and 4 have given them callers. The

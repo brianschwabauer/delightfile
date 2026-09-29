@@ -581,7 +581,7 @@ Why not sign now:
   home left owned by root are handed over and build without a rebuild.
 - 2026-09-29 — The macos and windows jobs run clippy with `-A dead_code` beside
   `-A clippy::chunks_exact_to_as_chunks`; the linux job does not (S1.53 in
-  `01-platform-seam.md`). Off Linux, df-app has some 48 dead-code warnings per
+  `01-platform-seam.md`). Off Linux, df-app has 49 dead-code warnings per
   target — the drag-and-drop helpers, gio's output readers, enum variants only
   the Wayland device constructs, `platform/icon.rs` — because their only
   callers are Linux bodies, found by building df-app on Linux with each
