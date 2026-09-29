@@ -334,7 +334,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 267–282 | `SyncPlan::label`: `format!("{name}/{}", item.rel.to_string_lossy())`, trailing `'/'` for folders | Windows-differs | app:sync.rs (card rows) | Mixed separators on Windows (`rel` renders with `\`) |
-| 310–318 | `is_debris`: `use std::os::unix::ffi::OsStrExt`; `name.as_bytes().starts_with(TEMP_PREFIX)` | Unix-only | `has_debris`, `in_sync`, `listed`, `removals`; core:sync/execute.rs:remove_extras | ✓ S1.16 |
+| 310–318 | `is_debris`: `use std::os::unix::ffi::OsStrExt`; `name.as_bytes().starts_with(TEMP_PREFIX)` | Unix-only | `has_debris`, `in_sync`, `listed`, `removals`; core:sync/execute.rs:remove_extras | ✓ S1.16 ✓ P3.9 |
 | 412–436 | `trash_available`: `Trash::home`, `device_of`, `mount_point_of`, `.Trash` sticky `mode() & 0o1000` (427), `.Trash-{uid()}` (431), `writable` | Linux-only | core:sync/plan.rs:walk | ✓ S1.6 |
 | 414 | `use std::os::unix::fs::PermissionsExt` | Unix-only | `trash_available` | ✓ S1.6 |
 | 443–458 | `trash_for`: home trash if same `dev`, else `topdir_trash(mount_point_of(dest), uid())` | Linux-only | core:sync/execute.rs:remove | ✓ S1.6 |
@@ -356,18 +356,18 @@
 | 69–77 | `available()`: `rsync --version` | Windows-differs; macOS-differs | app:app/syncing.rs:remote_sync | rsync is not in a stock Windows install. macOS bundles `/usr/bin/rsync` 2.6.9 (macOS 15 adds openrsync) ✓ S1.14 |
 | 126–139 | `Host::shell`: `Command::new("ssh")` + a POSIX-shell script for the server | Windows-differs | `remote_digests` | §4 |
 | 173–188 | `rsh()` / `rsh_with("ssh")`: the `-e` string rsync uses to start ssh | Windows-differs | `common()` → `dry_run_args`, `run_args` | |
-| 230–244 | `endpoint`: `as_os_str().as_bytes()`, trims or appends `b'/'`, prefixes `host:` for the remote side, `OsStr::from_bytes` | Unix-only | `endpoints` → `dry_run_args`, `run_args` | In rsync's argument syntax a colon before the first `/` means `host:path`, so a Windows local path `C:\x` reads as host `C` ✓ S1.16 |
+| 230–244 | `endpoint`: `as_os_str().as_bytes()`, trims or appends `b'/'`, prefixes `host:` for the remote side, `OsStr::from_bytes` | Unix-only | `endpoints` → `dry_run_args`, `run_args` | In rsync's argument syntax a colon before the first `/` means `host:path`, so a Windows local path `C:\x` reads as host `C` ✓ S1.16 ✓ P3.9 |
 | 266–308 | `dry_run_args` / `run_args`: `--info=progress2`, `--no-inc-recursive`, `--out-format=%i %l %n`, `--delete-after`, `--fsync` | macOS-differs | `plan`, `run` | `--info` needs rsync ≥ 3.1.0 and `--no-inc-recursive` ≥ 3.0.0. `--fsync` is gated on ≥ 3.2.0 (`FSYNC_SINCE`, 312) |
-| 383–426 | `parse_line`: `OsString::from_vec(name)` from rsync's itemized bytes | Unix-only | `parse_itemized` ← `plan`; stdout thread in `run` | ✓ S1.16 |
-| 429–450 | `unescape`: rsync `\#ooo` octal escapes to raw bytes | Unix-only (byte model) | `parse_line` | |
+| 383–426 | `parse_line`: `OsString::from_vec(name)` from rsync's itemized bytes | Unix-only | `parse_itemized` ← `plan`; stdout thread in `run` | ✓ S1.16 ✓ P3.9 |
+| 429–450 | `unescape`: rsync `\#ooo` octal escapes to raw bytes | Unix-only (byte model) | `parse_line` | ✓ P3.9 |
 | 511–536 | `plan`: `Command::new("rsync")` dry run via `collect` | Windows-differs | app:sync.rs:remote_plan_job | §4 |
 | 631–658 | `wait`: on stop, `signal(child, libc::SIGCONT)` then `child.kill()` | Unix-only | `collect`, `run` | ✓ S1.13 |
 | 662–675 | `signal`: `libc::pid_t::try_from(child.id())`, `libc::kill(pid, signal)` | Unix-only (Windows libc: no `kill`, no `pid_t`) | `wait`, `run` | ✓ S1.13 |
 | 914–992 | `run`: `Command::new("rsync")`; pause/resume as `libc::SIGSTOP` / `libc::SIGCONT` (966–976) | Unix-only | `execute` ← core:sync/execute.rs:execute ← app:sync.rs:sync_job | ✓ S1.13 |
 | 1024–1042 | `far_side`: server paths held as `PathBuf` (`name.join(&item.rel)`, `source.parent()`) | Windows-differs | `verify_remote` | `PathBuf::join` inserts `\` on Windows, and these paths go to a Unix server |
-| 1143–1148 | `remote_digests`: stdin = NUL-separated `name.as_os_str().as_bytes()` | Unix-only | `verify_remote` | ✓ S1.16 |
+| 1143–1148 | `remote_digests`: stdin = NUL-separated `name.as_os_str().as_bytes()` | Unix-only | `verify_remote` | ✓ S1.16 ✓ P3.9 |
 | 1156 | Exit-status check `matches!(status.code(), Some(255) \| Some(126) \| Some(127) \| None)` | Windows-differs | `remote_digests` | `code()` is `None` only for a signal death on Unix |
-| 1189–1211 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | ✓ S1.16 |
+| 1189–1211 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | ✓ S1.16 ✓ P3.9 |
 
 ### tasks.rs
 
@@ -1695,12 +1695,12 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | ops/trash.rs:719 | `decode_path`: `OsString::from_vec(out)` | Unix-only | `parse_trashinfo` | ✓ S1.6 |
 | state/mod.rs:746 | `path_bytes`: `as_bytes()` | Unix-only | `render` | ✓ S1.16 |
 | state/mod.rs:751 | `path_from`: `OsString::from_vec` | Unix-only | `parse`, `parse_tabs` | ✓ S1.16 |
-| sync/mod.rs:315–316 | `is_debris`: `name.as_bytes().starts_with(TEMP_PREFIX.as_bytes())` | Unix-only | plan helpers | ✓ S1.16 |
+| sync/mod.rs:315–316 | `is_debris`: `name.as_bytes().starts_with(TEMP_PREFIX.as_bytes())` | Unix-only | plan helpers | ✓ S1.16 ✓ P3.9 |
 | sync/mod.rs:481 | `writable`: `CString::new(dir.as_os_str().as_bytes())` | Unix-only | `trash_available` | ✓ S1.5 |
-| sync/rsync.rs:231, 242 | `endpoint`: `as_bytes()` in, `OsStr::from_bytes` out | Unix-only | rsync argv | ✓ S1.16 |
-| sync/rsync.rs:398 | `parse_line`: `OsString::from_vec(name)` | Unix-only | `parse_itemized` | ✓ S1.16 |
-| sync/rsync.rs:1146 | `remote_digests`: `name.as_os_str().as_bytes()` to stdin | Unix-only | `verify_remote` | ✓ S1.16 |
-| sync/rsync.rs:1209 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | ✓ S1.16 |
+| sync/rsync.rs:231, 242 | `endpoint`: `as_bytes()` in, `OsStr::from_bytes` out | Unix-only | rsync argv | ✓ S1.16 ✓ P3.9 |
+| sync/rsync.rs:398 | `parse_line`: `OsString::from_vec(name)` | Unix-only | `parse_itemized` | ✓ S1.16 ✓ P3.9 |
+| sync/rsync.rs:1146 | `remote_digests`: `name.as_os_str().as_bytes()` to stdin | Unix-only | `verify_remote` | ✓ S1.16 ✓ P3.9 |
+| sync/rsync.rs:1209 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | ✓ S1.16 ✓ P3.9 |
 
 ### 3.2 Splitting, joining or trimming a local path on a literal `/`
 

@@ -208,14 +208,19 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       a Unicode twin that runs everywhere, and the hostile-config test escapes
       the backslashes of the marker's path inside git's quoted value (P3.30,
       bin 2 both).
-- [ ] **P3.9** rsync and sync: `sync/rsync.rs:230–244, 383–450, 1143–1211` and
+- [x] **P3.9** rsync and sync: `sync/rsync.rs:230–244, 383–450, 1143–1211` and
       `sync/mod.rs:310–318` (`is_debris`). The whole rsync-backed remote sync is
       `Unsupported` on Windows (no rsync, and `endpoint`'s `host:` syntax collides
       with drive letters), so these sites only need to *compile*: route the byte
       conversions through `platform::os` and let Phase 4 stub `sync::rsync::available`
       to `false` on Windows. macOS keeps the real body (Phase 2 handles the rsync
       version gate). Done when: df-core compiles on all three targets and
-      `sync/tests.rs` passes on Linux.
+      `sync/tests.rs` passes on Linux. — done (port/paths), nothing left to
+      change: S1.16 routed every byte conversion here through `platform::os`,
+      and S1.14 already gates `available` on `platform::process::HAS_RSYNC`
+      (`false` on Windows), so Phase 4 has no stub to add. df-core compiles on
+      all three targets (CI, and the local cross checks) and `sync/tests.rs`
+      passes on Linux.
 - [ ] **P3.10** `ops.rs:109–120` (`is_url`) scans the UTF-8 view (`to_str`), and a
       non-UTF-8 path is simply not a URL. `ops.rs:196–204` (`trim_trailing_slash`)
       becomes `path::trim_trailing_separator`. `ops/create.rs:36–43` uses
