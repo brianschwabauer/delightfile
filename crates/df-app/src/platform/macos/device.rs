@@ -15,13 +15,20 @@
 //! [`Event::Selection`] with the types now on offer, which is the mirror a
 //! paste chooses its type from.
 //!
+//! It also says where the pointer is when winit reports a drop without a
+//! position ([`pointer_position`]), which takes two AppKit calls on the
+//! window's own view.
+//!
 //! Dragging out is not here yet (`plans/other-platforms/02-macos.md` M2.12):
 //! [`Desktop::drag`] says no, and the ghost springs home, as it did when
 //! there was no device at all.
 
+#![allow(unsafe_code)] // Reads of winit's own NSView and NSWindow through objc2; each call says why it holds.
+
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
+use objc2_app_kit::NSView;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
@@ -148,11 +155,28 @@ pub fn start(_event_loop: &ActiveEventLoop, _window: &Window, waker: Waker) -> O
     Some(Desktop::new(waker))
 }
 
-/// Where the pointer is over `window`, in logical points, for a drop winit
-/// reports without a position (`App::winit_drop`). Not asked yet (M2.11):
-/// `None`, and the caller falls back to the last position egui saw.
-pub fn pointer_position(_window: &Window) -> Option<(f32, f32)> {
-    None
+/// Where the pointer is over `window`, in logical points from its top-left
+/// corner, for a drop winit reports without a position (`App::winit_drop`).
+///
+/// AppKit keeps the pointer's place in the window whatever events have been
+/// delivered (`mouseLocationOutsideOfEventStream`), in the window's own
+/// bottom-up coordinates; winit's view is flipped, so converting the point
+/// into the view turns it top-down, in the logical points egui draws in.
+/// `None` only for a window that is not an AppKit one.
+pub fn pointer_position(window: &Window) -> Option<(f32, f32)> {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
+        return None;
+    };
+    // SAFETY: the handle is winit's `NSView`, which lives as long as the
+    // window this borrow came from, and this runs on the main thread, in the
+    // window's own event.
+    let view: &NSView = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+    let ns_window = view.window()?;
+    // SAFETY: a read of a point from a live window.
+    let at = unsafe { ns_window.mouseLocationOutsideOfEventStream() };
+    let local = view.convertPoint_fromView(at, None);
+    Some((local.x as f32, local.y as f32))
 }
 
 #[cfg(test)]
