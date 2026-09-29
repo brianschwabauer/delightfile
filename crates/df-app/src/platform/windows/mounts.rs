@@ -22,6 +22,9 @@ const NOT_HERE: &str = "Not available on this platform";
 /// No mount asks questions here, so there is no terminal to ask them in.
 pub const TERMINAL_MOUNT: Option<&str> = None;
 
+/// Nothing connects here, so no connect comes back unseen.
+pub const CONNECT_UNSEEN: Option<&str> = None;
+
 /// A `gio` that is never there: it answers every run with "unsupported".
 /// Nothing on this platform runs it.
 pub fn system_gio() -> Gio {

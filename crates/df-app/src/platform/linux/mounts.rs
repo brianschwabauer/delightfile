@@ -139,6 +139,11 @@ pub fn devices_from(objects: &[(String, Interfaces)]) -> Vec<Device> {
 pub const TERMINAL_MOUNT: Option<&str> =
     Some(r#"setsid uwsm-app -- "${TERMINAL:-ghostty}" -e gio mount "$1""#);
 
+/// What a connect that came back with no share to go to says in place of
+/// "Connected to": nothing, since `gio mount` has said it is done by then and
+/// only the share's folder was not found.
+pub const CONNECT_UNSEEN: Option<&str> = None;
+
 /// How long a new mount is given to appear under gvfs-fuse's directory after
 /// `gio mount` has said it is done. gvfs-fuse hears about mounts over D-Bus, a
 /// moment after the mount itself; two seconds is far more than that moment and

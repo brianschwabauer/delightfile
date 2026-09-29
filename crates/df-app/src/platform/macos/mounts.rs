@@ -64,6 +64,13 @@ const VOLUMES: &str = "/Volumes";
 /// No mount asks questions in a terminal here: Finder asks in its own dialog.
 pub const TERMINAL_MOUNT: Option<&str> = None;
 
+/// What a connect says when nothing new appeared under `/Volumes` in
+/// [`CONNECT_WAIT`]: Finder was handed the address, and whether it connected
+/// is behind a dialog this program cannot see, so it does not say it did
+/// (02-macos.md M2.15). A share that does appear is "Connected to" as
+/// anywhere.
+pub const CONNECT_UNSEEN: Option<&str> = Some("Finder was asked to connect to");
+
 /// A `gio` that is never there: it answers every run with "unsupported".
 /// Nothing on this platform runs it.
 pub fn system_gio() -> Gio {
@@ -112,7 +119,9 @@ pub fn run(requests: Receiver<Request>, replies: Sender<Answer>, notify: Notifie
 ///
 /// `Mounted(None)` when nothing new turned up under `/Volumes` in
 /// [`CONNECT_WAIT`]: Finder may still be asking for a password, or the share
-/// was mounted already; either way the card lists it once it is there.
+/// was mounted already; either way the card lists it once it is there, and
+/// the window says Finder was asked rather than that it connected
+/// ([`CONNECT_UNSEEN`]).
 pub fn connect(url: &str, _gio: &Gio) -> Connected {
     if let Route::Refused(why) = volumes::route(url) {
         return Connected::Failed(why.to_string());

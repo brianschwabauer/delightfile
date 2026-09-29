@@ -7801,7 +7801,15 @@ impl App {
     ) {
         match result {
             crate::mounts::Connected::Mounted(path) => {
-                self.toasts.notice(format!("Connected to {label}"), now);
+                // Back with no share to go to may not be connected at all
+                // where the connecting is another program's, behind a dialog
+                // this one cannot see (Finder's, 02-macos.md M2.15); the
+                // platform says so in its own words.
+                let said = match (&path, crate::platform::mounts::CONNECT_UNSEEN) {
+                    (None, Some(asked)) => format!("{asked} {label}"),
+                    _ => format!("Connected to {label}"),
+                };
+                self.toasts.notice(said, now);
                 self.refresh_mounts();
                 // Only when nothing else has the keyboard. The connection lands
                 // seconds after its `Enter`, and a rename prompt or a delete
@@ -22194,6 +22202,38 @@ mod tests {
             crate::trashview::keep_text(app.config.mgr.trash_keep_days)
         };
         assert_eq!(app.trash_empty_note(), expected);
+    }
+
+    /// A connect that comes back with a share to go to says it connected
+    /// everywhere; one that comes back with none says so on Linux, where
+    /// `gio mount` has finished, and on macOS only that Finder was asked,
+    /// since its dialog may still be up (M2.15).
+    #[test]
+    fn a_connect_with_no_share_to_go_to_says_what_is_known() {
+        let mut app = Fixture::new("connect-words", &["a.txt"]);
+        let now = Instant::now();
+        let url = "smb://nas/media".to_string();
+        app.connected(
+            url.clone(),
+            url.clone(),
+            crate::mounts::Connected::Mounted(None),
+            now,
+        );
+        let unseen = if cfg!(target_os = "macos") {
+            "Finder was asked to connect to smb://nas/media"
+        } else {
+            "Connected to smb://nas/media"
+        };
+        assert_eq!(toast_text(&app), Some(unseen));
+
+        let share = app.files.clone();
+        app.connected(
+            url.clone(),
+            url,
+            crate::mounts::Connected::Mounted(Some(share)),
+            now,
+        );
+        assert_eq!(toast_text(&app), Some("Connected to smb://nas/media"));
     }
 
     /// A quit that never came through `finish` — Cmd+Q on macOS, which winit
