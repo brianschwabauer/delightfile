@@ -555,7 +555,8 @@ mod tests {
     /// real path, and the deletion date standing in for the modification time.
     #[test]
     // The freedesktop trash's layout (`<trash>/files/<name>`), which is
-    // Linux's: macOS keeps no such layout (02-macos.md M2.8, M2.34).
+    // Linux's: macOS keeps no such layout, and has the twin below built
+    // through its journal (02-macos.md M2.8, M2.34).
     #[cfg(target_os = "linux")]
     fn a_trash_record_becomes_a_list_pane_row() {
         let i = item(
@@ -578,6 +579,40 @@ mod tests {
         // The deletion date is the row's date, which is what `, m` sorts by.
         assert_eq!(row.mtime, deleted_at("2026-08-30T09:15:00"));
         assert!(row.mtime.is_some());
+    }
+
+    /// The same mapping on macOS, from a record the platform's trash wrote:
+    /// a file trashed through a journal of the test's own lands in the
+    /// runner's Finder Trash, and its row carries the name it has there, the
+    /// path the journal says it is at, the original name's type and the
+    /// deletion date (02-macos.md M2.8). What it trashed, it destroys.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_journal_record_becomes_a_list_pane_row() {
+        let tree = df_core::test_support::TempTree::new("trashview-mac-row");
+        let trash = df_core::ops::Trash::at(tree.join("journal"));
+        let ctx = df_core::tasks::TaskCtx::detached();
+        let file = tree.file("work/notes.txt", b"hello");
+        trash.trash(&file, &ctx).expect("trashed");
+        let listed = trash.list().expect("listed");
+        assert_eq!(listed.len(), 1);
+        let i = &listed[0];
+
+        let row = row_from(i, None, None);
+        assert_eq!(row.name, i.name.to_string_lossy());
+        assert_eq!(row.path, i.location());
+        assert!(
+            std::fs::symlink_metadata(&row.path).is_ok(),
+            "{}",
+            row.path.display()
+        );
+        assert!(!row.is_dir());
+        assert_eq!(row.mime, "text/plain");
+        assert!(row.btime.is_none());
+        assert_eq!(row.mtime, deleted_at(&i.deleted_at));
+        assert!(row.mtime.is_some());
+
+        df_core::ops::trash::purge(i, &ctx).expect("purged");
     }
 
     /// A trashed symlink is a symlink, not a device node.
@@ -709,7 +744,8 @@ mod tests {
     /// the one PLAN §5 exists for: the original name being taken again.
     #[test]
     // The freedesktop trash's layout (`<trash>/files/<name>`), which is
-    // Linux's: macOS keeps no such layout (02-macos.md M2.8, M2.34).
+    // Linux's: macOS keeps no such layout, and has the twin below built
+    // through its journal (02-macos.md M2.8, M2.34).
     #[cfg(target_os = "linux")]
     fn a_restore_is_refused_rather_than_overwriting_newer_work() {
         let tree = df_core::test_support::TempTree::new("trashview-restore");
@@ -761,6 +797,53 @@ mod tests {
         assert!(root.join("work/fine.txt").exists());
     }
 
+    /// Every refusal again on macOS, over items the platform's trash put in
+    /// Finder's Trash and recorded in a journal of the test's own: the name
+    /// taken again, the folder gone, the item emptied out of the Trash
+    /// behind the journal's back — and df-core's restore agreeing (M2.8).
+    /// What is still in the Trash at the end is destroyed.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_journal_restore_is_refused_rather_than_overwriting_newer_work() {
+        let tree = df_core::test_support::TempTree::new("trashview-mac-restore");
+        let root = tree.path();
+        let trash = df_core::ops::Trash::at(tree.join("journal"));
+        let ctx = df_core::tasks::TaskCtx::detached();
+        let make = |rel: &str| {
+            let file = tree.file(rel, b"body");
+            trash.trash(&file, &ctx).expect("trashed")
+        };
+
+        let fine = make("work/fine.txt");
+        assert_eq!(restore_refusal(&fine), None);
+
+        let taken = make("work/taken.txt");
+        std::fs::write(root.join("work/taken.txt"), b"newer").expect("write");
+        let refusal = restore_refusal(&taken).expect("refused");
+        assert!(refusal.contains("exists again"), "{refusal}");
+        assert!(refusal.contains("rename"), "{refusal}");
+
+        let orphan = make("vanished/orphan.txt");
+        std::fs::remove_dir(root.join("vanished")).expect("remove the folder");
+        let refusal = restore_refusal(&orphan).expect("refused");
+        assert!(refusal.contains("vanished"), "{refusal}");
+
+        // Emptied in Finder: the journal still has its line, the Trash not
+        // the item.
+        let ghost = make("work/ghost.txt");
+        std::fs::remove_file(ghost.location()).expect("remove");
+        let refusal = restore_refusal(&ghost).expect("refused");
+        assert!(refusal.contains("no longer in the trash"), "{refusal}");
+
+        assert!(df_core::ops::trash::restore(&taken, &ctx).is_err());
+        assert!(df_core::ops::trash::restore(&fine, &ctx).is_ok());
+        assert!(root.join("work/fine.txt").exists());
+
+        for left in [&taken, &orphan, &ghost] {
+            df_core::ops::trash::purge(left, &ctx).expect("purged");
+        }
+    }
+
     /// Under an empty trash view: on macOS, that Finder's own items are not
     /// listed, whatever the clock; elsewhere the clock, or nothing. And
     /// "Empty trash" says on macOS that it emptied only what it listed
@@ -795,7 +878,8 @@ mod tests {
     /// of selected paths comes back as the items they name.
     #[test]
     // The freedesktop trash's layout (`<trash>/files/<name>`), which is
-    // Linux's: macOS keeps no such layout (02-macos.md M2.8, M2.34).
+    // Linux's: macOS keeps no such layout, and has the twin below built
+    // through its journal (02-macos.md M2.8, M2.34).
     #[cfg(target_os = "linux")]
     fn rows_map_back_to_the_records_they_came_from() {
         let view = View {
@@ -815,6 +899,43 @@ mod tests {
         let items = view.items_for(&picked);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].original, PathBuf::from("/home/brian/a.txt"));
+    }
+
+    /// The same on macOS, over what the platform's trash listed: two files
+    /// of one name trashed through a journal of the test's own are two
+    /// names in Finder's Trash, each row finds its own record, and the rows'
+    /// paths come back as the items in order (M2.8). Both are destroyed at
+    /// the end.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn journal_rows_map_back_to_the_records_they_came_from() {
+        let tree = df_core::test_support::TempTree::new("trashview-mac-rows");
+        let trash = df_core::ops::Trash::at(tree.join("journal"));
+        let ctx = df_core::tasks::TaskCtx::detached();
+        let first = trash
+            .trash(&tree.file("home/a.txt", b"one"), &ctx)
+            .expect("trashed");
+        let second = trash
+            .trash(&tree.file("etc/a.txt", b"two"), &ctx)
+            .expect("trashed");
+        assert_ne!(first.name, second.name, "the Trash named the second itself");
+
+        let view = View {
+            items: trash.list().expect("listed"),
+            origin: tree.path().to_path_buf(),
+        };
+        assert_eq!(
+            view.item(&second.name).map(|i| i.original.clone()),
+            Some(second.original.clone())
+        );
+        assert!(view.item(OsStr::new("nope.txt")).is_none());
+        let rows = rows(&view.items);
+        let picked: Vec<PathBuf> = rows.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(view.items_for(&picked), view.items);
+
+        for item in [&first, &second] {
+            df_core::ops::trash::purge(item, &ctx).expect("purged");
+        }
     }
 
     /// The chip's words: the count alone before the walk has said anything,
