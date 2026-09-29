@@ -16,10 +16,14 @@
 
 name: CI
 
+# `port/**` branches are where the port's work is tried on the macOS and
+# Windows runners before it reaches main: nothing else can compile df-app for
+# those targets.
 on:
   push:
-    branches: [main]
+    branches: [main, "port/**"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -178,26 +182,34 @@ jobs:
           restore-keys: |
             ${{ github.job }}-rustc-${{ steps.toolchain.outputs.cachekey }}-
 
+      # Every step below runs whether or not the one before it failed, so one
+      # run shows everything that is wrong on the target rather than the first
+      # thing.
       # Narrowest first, so that while the port is under way the log says how
       # far it gets: df-core (B6.3's done-when), then the FFmpeg link (B6.7's),
       # then the rest of B6.1.
       - name: cargo build -p df-core
+        if: ${{ !cancelled() }}
         run: cargo build -p df-core
 
       - name: cargo test -p df-core
-        run: cargo test -p df-core
+        if: ${{ !cancelled() }}
+        run: cargo test -p df-core --no-fail-fast
 
       - name: cargo build -p dv-media
+        if: ${{ !cancelled() }}
         run: cargo build -p dv-media
 
       - name: cargo build --workspace
+        if: ${{ !cancelled() }}
         run: cargo build --workspace
 
       # Not the dv-* suites: they spawn ffmpeg, bash build/test-assets.sh and
       # espeak and hold /home/brian literals, and are not part of the port;
       # the build above proves the vendored crates compile here.
       - name: cargo test -p df-core -p df-app
-        run: cargo test -p df-core -p df-app
+        if: ${{ !cancelled() }}
+        run: cargo test -p df-core -p df-app --no-fail-fast
 
       # -A dead_code here and on Windows only (S1.53): the drag-and-drop
       # helpers, gio's output readers, platform/icon.rs and a few enum
@@ -205,9 +217,11 @@ jobs:
       # sees them unused. It comes off with M2.31 in 02-macos.md, once Phase 2
       # has given them callers. The linux job allows no dead code.
       - name: cargo clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
 
       - name: Smoke test (the binary loads and runs)
+        if: ${{ !cancelled() }}
         run: target/debug/delightfile --version
 
   windows:
@@ -294,26 +308,49 @@ jobs:
       # Narrowest first, as on macOS: df-core (B6.4's done-when), then the
       # FFmpeg link (B6.10's), then the rest of B6.1.
       - name: cargo build -p df-core
+        if: ${{ !cancelled() }}
         run: cargo build -p df-core
 
       - name: cargo test -p df-core
-        run: cargo test -p df-core
+        if: ${{ !cancelled() }}
+        run: cargo test -p df-core --no-fail-fast
 
       - name: cargo build -p dv-media
+        if: ${{ !cancelled() }}
         run: cargo build -p dv-media
 
       - name: cargo build --workspace
+        if: ${{ !cancelled() }}
         run: cargo build --workspace
 
       # Not the dv-* suites, for the reason given in the macOS job.
       - name: cargo test -p df-core -p df-app
-        run: cargo test -p df-core -p df-app
+        if: ${{ !cancelled() }}
+        run: cargo test -p df-core -p df-app --no-fail-fast
 
       # -A dead_code, as on macOS (S1.53): what only a Linux body calls is
       # unused here. It comes off with W4.34 in 04-windows.md, once Phase 4
       # has given those items callers.
       - name: cargo clippy
+        if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
 
       - name: Smoke test (the binary loads and runs)
+        if: ${{ !cancelled() }}
         run: target/debug/delightfile --version
+
+      # The program and the FFmpeg DLLs it loads, for trying by hand on a
+      # Windows machine: CI proves it starts, not that it draws.
+      - name: Collect the program and its DLLs
+        if: ${{ !cancelled() && hashFiles('target/debug/delightfile.exe') != '' }}
+        run: |
+          mkdir -p dist
+          cp target/debug/delightfile.exe dist/
+          cp "$FFMPEG_DIR"/bin/*.dll dist/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() && hashFiles('dist/delightfile.exe') != '' }}
+        with:
+          name: delightfile-windows-debug
+          path: dist
+          retention-days: 7
