@@ -43,6 +43,8 @@ mod open;
 mod overlay;
 mod panel;
 mod permissions;
+/// Everything that differs by operating system, behind one set of names.
+mod platform;
 mod playback;
 /// `--portal`: the xdg-desktop-portal file-chooser backend, and
 /// `org.freedesktop.FileManager1` ("Show in folder").
