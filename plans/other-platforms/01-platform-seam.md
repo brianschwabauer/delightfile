@@ -406,7 +406,7 @@ drag state machine (appendix B §1 `app.rs` rows 12428–13455) untouched on Lin
 gives macOS and Windows a synchronous clipboard for free in later phases, because
 their native clipboards *are* synchronous.
 
-- [>] **S1.20** Cargo: move `wayland-client` from `[dependencies]` to
+- [x] **S1.20** Cargo: move `wayland-client` from `[dependencies]` to
       `[target.'cfg(target_os = "linux")'.dependencies]` in `crates/df-app/Cargo.toml`
       (the workspace entry at `Cargo.toml:37` stays). Move `libc` to the same Linux
       target table **with S1.25, not before**: after S1.25 its remaining df-app uses
@@ -427,7 +427,8 @@ their native clipboards *are* synchronous.
       for now leave them. Done when: `cargo tree -p df-app --target
       aarch64-apple-darwin` (on CI) shows no `wayland-*`. (`cargo tree` resolves
       without the target installed, so this one also runs on Linux.)
-      — df-app agent, started 2026-09-29
+      — done 29726ca, Linux verified (`cargo tree` for both other targets names no
+      `wayland-*`), other targets unverified until CI
 - [ ] **S1.21** `git mv crates/df-app/src/wayland crates/df-app/src/platform/linux/wayland`,
       `git mv src/dbus.rs src/platform/linux/dbus.rs`, `git mv src/portal
       src/platform/linux/portal`, and split `src/mounts.rs`: the model and card
@@ -444,7 +445,7 @@ their native clipboards *are* synchronous.
       Update `main.rs:10–65`'s `mod` list: `wayland`, `dbus`, `portal` are gone from
       it; `mod platform;` is added. Done when: Linux builds, all moved tests pass
       from their new paths, `tests/portal.rs` gets `#![cfg(target_os = "linux")]`.
-- [ ] **S1.22** `platform::desktop` (df-app): `pub struct Desktop` with exactly the
+- [>] **S1.22** `platform::desktop` (df-app): `pub struct Desktop` with exactly the
       `DataDevice` API (`ready`, `set_selection`, `receive`, `drag`, `poll`) and
       `pub enum Event { Enter, Motion, Leave, Drop, DragEnded, Selection, Copied,
       Pasted }` + `PasteFailure` moved verbatim from `wayland/mod.rs:185–266` into
@@ -457,7 +458,16 @@ their native clipboards *are* synchronous.
       `platform::icon::Rgba`. Done when: Linux behaviour identical (the eight
       `Event` arms in `poll_data_device` compile against the moved enum); the
       "no wayland data device" log line at `app.rs:2192` becomes platform-neutral
-      ("no native drag device — drag out and drop in are off").
+      ("no native drag device — drag out and drop in are off"). *As built:* the
+      per-target half is each target's `platform/<os>/device.rs` (`Desktop` and
+      `start`), which `platform/desktop.rs` re-exports, so `desktop.rs` holds no
+      cfg; on Linux `Desktop` is `wayland::DataDevice` itself (`pub use … as
+      Desktop`), and on macOS and Windows an empty enum, since `start` never makes
+      one. `wayland/icon.rs` moved to `platform/icon.rs` in this task rather than
+      S1.21, because `Rgba` is in `Desktop::drag`'s signature. The moved enums'
+      doc links to the Wayland thread's private `Command` and `RECEIVE_TIMEOUT`
+      now name `Desktop::set_selection`/`receive` and "time"; nothing else in them
+      changed. — df-app agent, started 2026-09-29
 - [ ] **S1.23** `platform::clipboard` (df-app): move the *fallback* transport out of
       `clipboard.rs:330–431` — `copy`, `reap`, `offered_types`, `paste` — into
       `platform/linux/clipboard.rs` (wl-copy/wl-paste bodies unchanged) with stubs

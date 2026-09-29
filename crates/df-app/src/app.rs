@@ -1477,7 +1477,7 @@ pub struct App {
     /// is the one being looked at, and winit does not always send a `Focused`
     /// for it.
     window_focused: bool,
-    /// What [`crate::wayland::DataDevice::ready`] said last frame.
+    /// What [`crate::platform::desktop::Desktop::ready`] said last frame.
     ///
     /// Only the *transition* matters. A thread that dies takes every copy and
     /// paste in flight with it, and nothing else notices: the send was accepted
@@ -1832,10 +1832,10 @@ pub struct App {
 
     // ── Drag and drop (PLAN §7.1) ───────────────────────────────────────────
     /// The compositor-side data device: drags out, drops in. `None` when the
-    /// protocol is not there to be had (see [`crate::wayland`]), and every use
+    /// protocol is not there to be had (see [`crate::platform::desktop`]), and every use
     /// of it is written so that is simply a session without cross-application
     /// drags rather than a session with a hole in it.
-    data_device: Option<crate::wayland::DataDevice>,
+    data_device: Option<crate::platform::desktop::Desktop>,
     /// What the system clipboard is offering, mirrored from the data device's
     /// `selection` events (PLAN §7.4). Kept rather than asked for, because
     /// asking means `wl-paste --list-types` and a process spawn inside a frame.
@@ -1845,7 +1845,7 @@ pub struct App {
     /// empty" — and a paste guesses wrong either way, so it shells out instead.
     clipboard_seen: bool,
     /// Copies waiting on the compositor's answer, oldest first. A copy is not
-    /// a copy until it has answered (see [`crate::wayland`]).
+    /// a copy until it has answered (see [`crate::platform::desktop`]).
     ///
     /// A queue and not one slot: `c c` twice in quick succession sends two
     /// `SetSelection`s and gets two `Copied`s back, and a single slot meant the
@@ -2063,12 +2063,12 @@ impl Face {
 
 /// A paste that has asked the clipboard for its bytes and is waiting for them.
 ///
-/// The wait is the point: the read happens on [`crate::wayland`]'s thread, over
+/// The wait is the point: the read happens on [`crate::platform::desktop`]'s thread, over
 /// a pipe some other application is filling at its own pace, so the decision of
 /// *what this paste is* is made when `p` is pressed and acted on a frame or two
 /// later when the bytes arrive.
 struct PendingPaste {
-    /// Which request this is, echoed back on [`crate::wayland::Event::Pasted`].
+    /// Which request this is, echoed back on [`crate::platform::desktop::Event::Pasted`].
     ///
     /// `p` and then `P` inside one round trip send two `Receive`s; the window
     /// is waiting for the second, and the first answer to come back would
@@ -2105,7 +2105,7 @@ struct PendingPaste {
 /// directory is involved, and the thing that has to still be there when they
 /// land is the *field*, not a tab.
 struct PendingTextPaste {
-    /// Echoed back on [`crate::wayland::Event::Pasted`], drawn from the same
+    /// Echoed back on [`crate::platform::desktop::Event::Pasted`], drawn from the same
     /// counter [`PendingPaste::seq`] is.
     seq: u64,
     /// Which prompt asked, or `None` for the bulk rename card. Both halves are
@@ -2607,9 +2607,9 @@ impl App {
         // without one is a session with no cross-application drags and
         // everything else intact.
         self.data_device =
-            Self::start_data_device(event_loop, &gfx.window, self.waker.named("wayland"));
+            crate::platform::desktop::start(event_loop, &gfx.window, self.waker.named("wayland"));
         if self.data_device.is_none() {
-            log::info!("no wayland data device — drag out and drop in are off");
+            log::info!("no native drag device — drag out and drop in are off");
         }
 
         self.gfx = Some(gfx);
@@ -2626,37 +2626,6 @@ impl App {
         }
         self.window_theme();
         Ok(())
-    }
-
-    /// Adopt winit's Wayland connection for [`crate::wayland`].
-    ///
-    /// `None` on X11, on a compositor without the protocol, or when the handles
-    /// cannot be had — all of which are "this desktop does not do that", not
-    /// errors.
-    fn start_data_device(
-        event_loop: &ActiveEventLoop,
-        window: &Window,
-        waker: Waker,
-    ) -> Option<crate::wayland::DataDevice> {
-        use winit::raw_window_handle::{
-            HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
-        };
-        let RawDisplayHandle::Wayland(display) = event_loop.display_handle().ok()?.as_raw() else {
-            return None;
-        };
-        let RawWindowHandle::Wayland(surface) = window.window_handle().ok()?.as_raw() else {
-            return None;
-        };
-        // SAFETY: both handles describe objects winit owns and keeps alive for
-        // the lifetime of the window, and the device is dropped in `finish`
-        // before the window is. The workspace warns on `unsafe_code`; this is
-        // the one call site in df-app outside `crate::wayland`, and it is here
-        // rather than inside that module because this is where the two handles
-        // — and the promise about their lifetime — actually come from.
-        #[allow(unsafe_code)]
-        unsafe {
-            crate::wayland::DataDevice::start(display.display, surface.surface, waker)
-        }
     }
 
     /// Drain whatever the workers finished. Returns true when something changed
@@ -14840,7 +14809,7 @@ impl App {
         let drag = self.drag.as_ref()?;
         if drag.handed_off {
             // The compositor has the pointer. Nothing local moves the drag now;
-            // it ends when [`crate::wayland`] says it did.
+            // it ends when [`crate::platform::desktop`] says it did.
             return None;
         }
         let verb = dnd::verb_for(pointer.toggle, pointer.alt);
@@ -14858,7 +14827,7 @@ impl App {
         // The implicit pointer grab means motion keeps arriving even outside
         // our own surface, so "left the window" is a question this side can
         // still answer — and the moment it becomes true is the moment the
-        // pointer stops being ours (see [`crate::wayland`]).
+        // pointer stops being ours (see [`crate::platform::desktop`]).
         if !window.contains(at) && pointer.down {
             self.hand_off_drag(now);
             return None;
@@ -15110,8 +15079,9 @@ impl App {
             .as_ref()
             .map(|gfx| gfx.egui_ctx.pixels_per_point().round() as i32)
             .unwrap_or(1);
-        let rgba =
-            |color: egui::Color32| crate::wayland::Rgba(color.r(), color.g(), color.b(), color.a());
+        let rgba = |color: egui::Color32| {
+            crate::platform::icon::Rgba(color.r(), color.g(), color.b(), color.a())
+        };
         // Two ways this can fail, and both mean the same thing to the gesture:
         // no protocol at all, or a thread that has since exited so the command
         // goes nowhere. It is not an error and it is not silence either — the
@@ -15138,7 +15108,7 @@ impl App {
         }
     }
 
-    /// What [`crate::wayland`] has to say, once a frame.
+    /// What [`crate::platform::desktop`] has to say, once a frame.
     fn poll_data_device(&mut self, now: Instant) {
         let Some(device) = &self.data_device else {
             return;
@@ -15146,35 +15116,35 @@ impl App {
         let ready = device.ready();
         for event in device.poll() {
             match event {
-                crate::wayland::Event::Enter { at, ours } => {
+                crate::platform::desktop::Event::Enter { at, ours } => {
                     self.incoming = Some(Incoming {
                         at: egui::pos2(at.0, at.1),
                         ours,
                     });
                 }
-                crate::wayland::Event::Motion { at } => {
+                crate::platform::desktop::Event::Motion { at } => {
                     if let Some(incoming) = &mut self.incoming {
                         incoming.at = egui::pos2(at.0, at.1);
                     }
                 }
-                crate::wayland::Event::Leave => self.incoming = None,
-                crate::wayland::Event::Drop { paths, ours } => {
+                crate::platform::desktop::Event::Leave => self.incoming = None,
+                crate::platform::desktop::Event::Drop { paths, ours } => {
                     let at = self.incoming.take().map(|incoming| incoming.at);
                     self.take_external_drop(paths, ours, at, now);
                 }
-                crate::wayland::Event::DragEnded => {
+                crate::platform::desktop::Event::DragEnded => {
                     // Our own drag, back from the compositor. Whatever it did
                     // out there, this side is done holding files.
                     self.drag = None;
                     self.press = None;
                     self.targets.tick(None, None, now);
                 }
-                crate::wayland::Event::Selection { mimes } => {
+                crate::platform::desktop::Event::Selection { mimes } => {
                     self.clipboard_types = mimes;
                     self.clipboard_seen = true;
                 }
-                crate::wayland::Event::Copied { ok } => self.copy_answered(ok, now),
-                crate::wayland::Event::Pasted { seq, bytes } => {
+                crate::platform::desktop::Event::Copied { ok } => self.copy_answered(ok, now),
+                crate::platform::desktop::Event::Pasted { seq, bytes } => {
                     // A prompt's `Ctrl+v` first: it draws its sequence numbers
                     // from the same counter, so at most one of the two slots
                     // can be waiting on any given answer.
@@ -15523,7 +15493,7 @@ impl App {
     /// The toast is *not* shown here, on either path. `set_selection` is a
     /// request, and until the compositor has answered it the only honest thing
     /// to say is nothing: the message waits in [`App::pending_copy`] for
-    /// [`crate::wayland::Event::Copied`]. The fallback waits too, in
+    /// [`crate::platform::desktop::Event::Copied`]. The fallback waits too, in
     /// [`WlCopy`] — the shell-out used to claim "Copied" the moment `wl-copy`'s
     /// parent exited, which it does *before* its forked server has taken
     /// anything, so the one toast that path could show was the one it had not

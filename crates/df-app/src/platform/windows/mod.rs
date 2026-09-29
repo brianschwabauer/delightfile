@@ -2,3 +2,5 @@
 //! signatures that answer "not available here", so the program builds and
 //! runs while Phase 4 (`plans/other-platforms/04-windows.md`) writes the
 //! native ones.
+
+pub mod device;

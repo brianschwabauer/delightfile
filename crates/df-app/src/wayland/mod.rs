@@ -132,12 +132,9 @@
 // file in df-app where the compiler is not checking.
 #![allow(unsafe_code)]
 
-mod icon;
-
 use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
-use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -163,9 +160,9 @@ use wayland_client::protocol::{
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 
-pub use icon::Rgba;
-
 use crate::app::Waker;
+use crate::platform::desktop::{Event, PasteFailure};
+use crate::platform::icon::{self, Rgba};
 
 /// How long a target has to take the bytes we are handing it before we give up.
 ///
@@ -179,91 +176,6 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 /// *their* side. Running out is a failure with a name — see [`PasteFailure`] —
 /// and never a short answer dressed up as a whole one.
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// What the pointer's own drag machinery learns from the compositor.
-#[derive(Debug, Clone)]
-pub enum Event {
-    /// A drag — somebody else's, or ours come back — is over our window, at
-    /// this surface-local point.
-    Enter {
-        at: (f32, f32),
-        ours: bool,
-    },
-    Motion {
-        at: (f32, f32),
-    },
-    /// It left without dropping.
-    Leave,
-    /// It was dropped, and here is what it was carrying. Empty when the offer
-    /// held nothing this program can paste.
-    Drop {
-        paths: Vec<PathBuf>,
-        ours: bool,
-    },
-    /// **Our** outgoing drag is over, whatever became of it.
-    DragEnded,
-    /// The clipboard changed hands: this is what it now offers, in the order
-    /// the owner announced it. Empty when the selection was cleared.
-    Selection {
-        mimes: Vec<String>,
-    },
-    /// The compositor's answer to a [`Command::SetSelection`]. `false` means
-    /// the copy did *not* happen and the window must say so.
-    Copied {
-        ok: bool,
-    },
-    /// The bytes a [`Command::Receive`] asked for, or why they never came in
-    /// full — see [`PasteFailure`].
-    ///
-    /// `seq` is the number the request carried, echoed back. `p` then `P`
-    /// inside one round trip asks twice, and the window is only waiting for the
-    /// second one: without the number the first answer to arrive is applied
-    /// with the *second* request's meaning, so a `p` that should have asked
-    /// before overwriting overwrites.
-    Pasted {
-        seq: u64,
-        bytes: Result<Vec<u8>, PasteFailure>,
-    },
-}
-
-/// Why a paste came back with nothing usable.
-///
-/// The distinction is the whole point of this type. A read that ran out of
-/// [`RECEIVE_TIMEOUT`], or broke on the pipe, used to come back as `Some(what
-/// arrived so far)` — indistinguishable from a source that wrote its bytes and
-/// closed. So a clipboard that stalled halfway through a 40 MB image wrote 20
-/// MB of it to disk and put up a green toast saying so, and a truncated
-/// `text/uri-list` read as "those files are gone". Half a file is not a paste,
-/// and the only honest answer to one is red.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PasteFailure {
-    /// There was no offer left to ask: the clipboard changed hands between the
-    /// keystroke and the read.
-    Gone,
-    /// The source stopped writing and never closed the pipe. `got` is how much
-    /// had arrived — enough to say *where* it stopped, never enough to keep.
-    Stalled { got: usize },
-    /// The pipe itself failed part way through.
-    Broken { got: usize },
-}
-
-impl std::fmt::Display for PasteFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PasteFailure::Gone => f.write_str("The clipboard did not hand anything over"),
-            PasteFailure::Stalled { got } => write!(
-                f,
-                "The clipboard source stopped sending after {}",
-                crate::format::human_size(*got as u64)
-            ),
-            PasteFailure::Broken { got } => write!(
-                f,
-                "The clipboard broke off after {}",
-                crate::format::human_size(*got as u64)
-            ),
-        }
-    }
-}
 
 /// What the paint thread asks the wayland thread to do.
 enum Command {

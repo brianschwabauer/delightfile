@@ -33,13 +33,13 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 169-181 | `const CLIPBOARD_ANSWER: Duration = 10 s` | Linux-only | App::expire_clipboard (12854-12880) | Timeout for the Wayland thread's `Copied`/`Pasted` answer, then falls back to wl-copy/wl-paste. |
 | 183-194 | `const WL_COPY_SETTLE: Duration = 150 ms` | Linux-only | App::settle_wl_copy (13171-13220), App::next_deadline (16104-16108) | wl-copy fallback settle window. |
 | 979-982 | `fn home() -> Option<PathBuf> { std::env::var_os("HOME").map(PathBuf::from) }` | Windows-differs (runtime) | App::palette_rows (6176, 6183, 6205), App::go_to_path (7945), app/places.rs (88, 352, 358, 365, 414, 429, 444, 478, 495, 502, 507, 515, 563), app/syncing.rs:99 | Only `HOME` is read; used for `~` shortening/expansion and the Places home row. |
-| 1510-1513 | field `data_device: Option<crate::wayland::DataDevice>` | Linux-only (compile, via module) | set App::init_gfx (2188), dropped App::finish (16365) | — |
+| 1510-1513 | field `data_device: Option<crate::wayland::DataDevice>` | Linux-only (compile, via module) | set App::init_gfx (2188), dropped App::finish (16365) | — ✓ S1.22 |
 | 1782-1800 | `struct WlCopy { child: std::process::Child, message: Option<String>, started: Instant }` | Linux-only (runtime) | App::copy_via_wl_copy, App::settle_wl_copy, App::retire_wl_copy | Holds the running `wl-copy --foreground`. |
 | 2111-2112 | `fn init_gfx` … `use winit::platform::wayland::WindowAttributesExtWayland;` | Linux-only (compile) | ApplicationHandler::resumed (17057-17064) | winit's `platform::wayland` module is `#[cfg(any(wayland_platform, docsrs))]` (winit src/platform/mod.rs:15-16). |
 | 2114-2124 | `Window::default_attributes().with_title(title).with_inner_size(LogicalSize::new(1400.0, 900.0)).with_name(app_id, app_id)` | Linux-only (compile) | App::init_gfx | `with_name` is the `WindowAttributesExtWayland` method (winit src/platform/wayland.rs:108; X11 has its own at x11.rs:159). These three are the only window attributes set: no icon, no decorations/transparency/theme settings. |
 | 2133 | `self.nerd = crate::icons::install(&gfx.egui_ctx)` | Linux-only (font dirs) | App::init_gfx | See icons.rs. |
-| 2182-2193 | `self.data_device = Self::start_data_device(event_loop, &gfx.window, self.waker.named("wayland"))`; `log::info!("no wayland data device — drag out and drop in are off")` | Linux-only | App::init_gfx | — |
-| 2198-2229 | `fn start_data_device(event_loop: &ActiveEventLoop, window: &Window, waker: Waker) -> Option<crate::wayland::DataDevice>`: `let RawDisplayHandle::Wayland(display) = event_loop.display_handle().ok()?.as_raw() else { return None }` (2211), same for `RawWindowHandle::Wayland(surface)` (2214), then `#[allow(unsafe_code)] unsafe { crate::wayland::DataDevice::start(display.display, surface.surface, waker) }` (2224-2227) | Linux-only (compile via `crate::wayland`; runtime `None` on non-Wayland handles) | App::init_gfx (2189) | The only `unsafe` call site into `crate::wayland` outside that module (comment 2220-2222). |
+| 2182-2193 | `self.data_device = Self::start_data_device(event_loop, &gfx.window, self.waker.named("wayland"))`; `log::info!("no wayland data device — drag out and drop in are off")` | Linux-only | App::init_gfx | — ✓ S1.22 |
+| 2198-2229 | `fn start_data_device(event_loop: &ActiveEventLoop, window: &Window, waker: Waker) -> Option<crate::wayland::DataDevice>`: `let RawDisplayHandle::Wayland(display) = event_loop.display_handle().ok()?.as_raw() else { return None }` (2211), same for `RawWindowHandle::Wayland(surface)` (2214), then `#[allow(unsafe_code)] unsafe { crate::wayland::DataDevice::start(display.display, surface.surface, waker) }` (2224-2227) | Linux-only (compile via `crate::wayland`; runtime `None` on non-Wayland handles) | App::init_gfx (2189) | The only `unsafe` call site into `crate::wayland` outside that module (comment 2220-2222). ✓ S1.22 |
 | 4055-4078 | `fn show_trash`: `df_core::ops::Trash::home()` (4057), `trash.list()` | df-core seam (freedesktop trash) | App::open_trash (4044), App::refresh_trash (4081) | See trashview.rs; df-core owns the trash layout. |
 | 4105-4140 | `fn trash_restore` → `crate::trashview::restore_refusal` (4115), `df_core::ops::trash::restore(item, &ctx)` (4119) | df-core seam | key `Enter`/`r` in trash view | — |
 | 4142-4190 | `fn trash_purge` → FnJob `df_core::ops::purge(item, ctx)` (4158) | df-core seam | `D`, "Empty trash" (4410-4472) | — |
@@ -55,7 +55,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 12078-12090 | `fn open_window(&mut self, dir: &Path, now: Instant) -> bool` → `self.windows.open(dir)` | portable (spawn); see window.rs | `C::NewWindow` in App::run (8900-8902), App::release_tab_drag (12404) | Second window = second process. |
 | 12428-12461 | `fn tick_drag`: `dnd::verb_for(pointer.toggle, pointer.alt)` (12442); `if !window.contains(at) && pointer.down { self.hand_off_drag(now) }` (12458-12461) | Linux-only (drag-out) | App::frame | winit has no drag-source API on macOS/Windows. |
 | 12680-12722 | `fn hand_off_drag`: `device.drag(dnd::offer(&paths), count, rgba(surface1), rgba(text), scale)` (12708-12716); on `false`/no device, `spring_home` (12717-12721) | Linux-only | App::tick_drag | — |
-| 12724-12806 | `fn poll_data_device`: matches `crate::wayland::Event::{Enter, Motion, Leave, Drop, DragEnded, Selection, Copied, Pasted}` (12732-12795) | Linux-only | App::frame (14674) | Only producer of external drops, selection mirror, paste answers. |
+| 12724-12806 | `fn poll_data_device`: matches `crate::wayland::Event::{Enter, Motion, Leave, Drop, DragEnded, Selection, Copied, Pasted}` (12732-12795) | Linux-only | App::frame (14674) | Only producer of external drops, selection mirror, paste answers. ✓ S1.22 |
 | 12815-12846 | `fn clipboard_thread_gone`: re-sends stranded copies via `copy_via_wl_copy`, pastes via `paste_via_wl_paste`; notice "press Ctrl+v again" (12845) | Linux-only | poll_data_device (12809) | — |
 | 12849-12880 | `fn expire_clipboard`: after `CLIPBOARD_ANSWER`, `clipboard::text_offer` + `clipboard::paste` (12893-12894) / wl-copy | Linux-only | poll_data_device (12812) | — |
 | 12906-12924 | `fn paste_via_wl_paste` → `crate::clipboard::paste(&mime)` (12908) | Linux-only | clipboard_thread_gone, expire_clipboard | Blocking `wl-paste` on the UI thread. |
@@ -329,9 +329,9 @@ Full public API:
 
 | Line | Item (signature verbatim) | First doc line |
 |---|---|---|
-| mod.rs:166 | `pub use icon::Rgba;` | — |
-| mod.rs:185-227 | `pub enum Event { Enter { at: (f32, f32), ours: bool }, Motion { at: (f32, f32) }, Leave, Drop { paths: Vec<PathBuf>, ours: bool }, DragEnded, Selection { mimes: Vec<String> }, Copied { ok: bool }, Pasted { seq: u64, bytes: Result<Vec<u8>, PasteFailure> } }` | What the pointer's own drag machinery learns from the compositor. |
-| mod.rs:239-248 | `pub enum PasteFailure { Gone, Stalled { got: usize }, Broken { got: usize } }` (+ `impl Display`, 250-266) | Why a paste came back with nothing usable. |
+| mod.rs:166 | `pub use icon::Rgba;` | — ✓ S1.22 |
+| mod.rs:185-227 | `pub enum Event { Enter { at: (f32, f32), ours: bool }, Motion { at: (f32, f32) }, Leave, Drop { paths: Vec<PathBuf>, ours: bool }, DragEnded, Selection { mimes: Vec<String> }, Copied { ok: bool }, Pasted { seq: u64, bytes: Result<Vec<u8>, PasteFailure> } }` | What the pointer's own drag machinery learns from the compositor. ✓ S1.22 |
+| mod.rs:239-248 | `pub enum PasteFailure { Gone, Stalled { got: usize }, Broken { got: usize } }` (+ `impl Display`, 250-266) | Why a paste came back with nothing usable. ✓ S1.22 |
 | mod.rs:297 | `pub struct DataDevice` (private fields `commands`, `events`, `bell: OwnedFd`, `ready: Arc<AtomicBool>`, `thread`) | The handle the app holds: a doorbell, two channels and a thread. |
 | mod.rs:329 | `impl DataDevice` · `pub unsafe fn start(display: NonNull<c_void>, surface: NonNull<c_void>, waker: Waker) -> Option<DataDevice>` | Adopt winit's connection and start the thread. |
 | mod.rs:363 | `impl DataDevice` · `pub fn ready(&self) -> bool` | Is there a data device to talk to? |
@@ -340,20 +340,20 @@ Full public API:
 | mod.rs:389 | `impl DataDevice` · `#[must_use] pub fn drag(&self, offers: Vec<(String, Vec<u8>)>, count: usize, card: Rgba, ink: Rgba, scale: i32) -> bool` | Start a drag out of the window, offering `offers` and carrying an icon drawn for `count` files. |
 | mod.rs:407 | `impl DataDevice` · `pub fn poll(&self) -> Vec<Event>` | Everything that has happened since the last frame. |
 | mod.rs:424 | `impl Drop for DataDevice` (sends `Command::Exit`, joins) | — |
-| icon.rs:48 | `pub const HOTSPOT: (i32, i32) = (PAD as i32 + 16, PAD as i32 + CARD_H as i32 / 2);` | Where the pointer sits on the icon: the top card's grab point, matching [`crate::dnd::GHOST_GRAB`] … |
-| icon.rs:51 | `pub struct Icon { pub width: u32, pub height: u32, pub pixels: Vec<u8> }` | A drawn icon, ready to be copied into a shm pool. |
-| icon.rs:61 | `pub struct Rgba(pub u8, pub u8, pub u8, pub u8);` | One straight-alpha colour on the way in. |
-| icon.rs:72 | `pub fn draw(count: usize, card: Rgba, ink: Rgba) -> Icon` | Draw the stack for a drag of `count` items. |
+| icon.rs:48 | `pub const HOTSPOT: (i32, i32) = (PAD as i32 + 16, PAD as i32 + CARD_H as i32 / 2);` | Where the pointer sits on the icon: the top card's grab point, matching [`crate::dnd::GHOST_GRAB`] … ✓ S1.22 |
+| icon.rs:51 | `pub struct Icon { pub width: u32, pub height: u32, pub pixels: Vec<u8> }` | A drawn icon, ready to be copied into a shm pool. ✓ S1.22 |
+| icon.rs:61 | `pub struct Rgba(pub u8, pub u8, pub u8, pub u8);` | One straight-alpha colour on the way in. ✓ S1.22 |
+| icon.rs:72 | `pub fn draw(count: usize, card: Rgba, ink: Rgba) -> Icon` | Draw the stack for a drag of `count` items. ✓ S1.22 |
 
 Call sites outside the module (the seam):
 
 | File:line | fn | Use |
 |---|---|---|
-| app.rs:1513 | `App` field | `data_device: Option<crate::wayland::DataDevice>` |
-| app.rs:2188-2193 | `App::init_gfx` | `Self::start_data_device(event_loop, &gfx.window, self.waker.named("wayland"))` |
-| app.rs:2203-2229 | `App::start_data_device` | `RawDisplayHandle::Wayland` / `RawWindowHandle::Wayland` → `unsafe { crate::wayland::DataDevice::start(display.display, surface.surface, waker) }` (2225) |
-| app.rs:12700, 12708-12716 | `App::hand_off_drag` | `crate::wayland::Rgba(r, g, b, a)`; `device.drag(dnd::offer(&paths), count, …, scale)` |
-| app.rs:12726-12797 | `App::poll_data_device` | `device.ready()` (12729), `device.poll()` (12730), match on all eight `crate::wayland::Event` variants (12732-12795) |
+| app.rs:1513 | `App` field | `data_device: Option<crate::wayland::DataDevice>` ✓ S1.22 |
+| app.rs:2188-2193 | `App::init_gfx` | `Self::start_data_device(event_loop, &gfx.window, self.waker.named("wayland"))` ✓ S1.22 |
+| app.rs:2203-2229 | `App::start_data_device` | `RawDisplayHandle::Wayland` / `RawWindowHandle::Wayland` → `unsafe { crate::wayland::DataDevice::start(display.display, surface.surface, waker) }` (2225) ✓ S1.22 |
+| app.rs:12700, 12708-12716 | `App::hand_off_drag` | `crate::wayland::Rgba(r, g, b, a)`; `device.drag(dnd::offer(&paths), count, …, scale)` ✓ S1.22 |
+| app.rs:12726-12797 | `App::poll_data_device` | `device.ready()` (12729), `device.poll()` (12730), match on all eight `crate::wayland::Event` variants (12732-12795) ✓ S1.22 |
 | app.rs:13110-13113 | `App::offer` | `device.ready() && device.set_selection(crate::clipboard::offer_mimes(mime), bytes.to_vec())` |
 | app.rs:13329, 13350-13353 | `App::paste_system` | `d.ready()`, `device.receive(seq, mime.clone())` |
 | app.rs:13411, 13423-13426 | `App::paste_into_prompt` | `d.ready()`, `device.receive(seq, mime.clone())` |

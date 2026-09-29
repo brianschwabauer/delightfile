@@ -25,14 +25,22 @@
 //!
 //! | Item | Signature | Linux | macOS, Windows | Task |
 //! |---|---|---|---|---|
+//! | `desktop::Desktop` | `ready(&self) -> bool`, `set_selection(&self, Vec<String>, Vec<u8>) -> bool`, `receive(&self, u64, String) -> bool`, `drag(&self, Vec<(String, Vec<u8>)>, usize, icon::Rgba, icon::Rgba, i32) -> bool`, `poll(&self) -> Vec<desktop::Event>` | the Wayland data device | no value exists | S1.22 |
+//! | `desktop::start` | `fn(&ActiveEventLoop, &Window, app::Waker) -> Option<Desktop>` | adopts winit's Wayland connection | `None` | S1.22 |
+//! | `desktop::{Event, PasteFailure}` | the events `Desktop::poll` answers in | portable, one definition | same | S1.22 |
+//! | `icon::{draw, Icon, Rgba, HOTSPOT}` | the drag icon's pixels | portable, drawn for the Wayland drag | same, unused until a native drag-out | S1.22 |
 //!
 //! The rows are the phase's checklist inside the code: each task of
 //! `plans/other-platforms/01-platform-seam.md` §3 adds its own as it lands.
+//! `desktop` and `icon` are the same on every target and live here rather
+//! than in a target's module; `desktop` takes its `Desktop` and `start` from
+//! the target's `device`.
+
+pub mod desktop;
+pub mod icon;
 
 #[cfg(target_os = "linux")]
 mod linux;
-// Empty until the first row of the table lands.
-#[allow(unused_imports)]
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
