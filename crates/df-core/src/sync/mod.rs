@@ -308,12 +308,11 @@ impl SyncPlan {
     /// copy is not worth a place in the trash. Only for a sync on this
     /// machine; `rsync` keeps its own temporary names and its own house.
     pub fn is_debris(&self, item: &Item) -> bool {
-        use std::os::unix::ffi::OsStrExt;
         self.remote.is_none()
             && item.class == Class::Extra
             && item.rel.file_name().is_some_and(|name| {
-                name.as_bytes()
-                    .starts_with(crate::ops::copy::TEMP_PREFIX.as_bytes())
+                crate::platform::os::as_bytes(name)
+                    .is_ok_and(|name| name.starts_with(crate::ops::copy::TEMP_PREFIX.as_bytes()))
             })
     }
 

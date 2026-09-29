@@ -31,16 +31,14 @@ pub struct Created {
 /// Refuses to touch an existing path: `a` is for making something new, and
 /// truncating a file the user forgot about would be unrecoverable.
 pub fn create(path: &Path) -> Result<Created> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let raw = path.as_os_str().as_bytes();
+    let raw = crate::platform::os::as_bytes(path.as_os_str())?;
     let is_dir = raw.last() == Some(&b'/');
     let path = if is_dir {
         // Trim the marker; `Path` keeps trailing slashes in its `OsStr`, and
         // `create_dir` does not mind them, but everything downstream compares
         // paths and `a/` must equal `a`.
         let trimmed = &raw[..raw.len() - 1];
-        PathBuf::from(std::ffi::OsStr::from_bytes(trimmed))
+        PathBuf::from(crate::platform::os::from_bytes(trimmed)?)
     } else {
         path.to_path_buf()
     };

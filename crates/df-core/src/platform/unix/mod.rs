@@ -10,6 +10,7 @@ pub mod dirs;
 pub mod errno;
 pub mod fs;
 pub mod meta;
+pub mod os;
 pub mod pipe;
 pub mod process;
 pub mod time;

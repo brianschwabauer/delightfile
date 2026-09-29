@@ -495,7 +495,12 @@ impl StateStore {
             let Some(record) = self.dirs.get(key) else {
                 continue;
             };
-            out.extend_from_slice(&escape(path_bytes(key)));
+            // A path the platform cannot spell as bytes (not Unicode, on
+            // Windows) is not remembered rather than written wrong.
+            let Ok(bytes) = path_bytes(key) else {
+                continue;
+            };
+            out.extend_from_slice(&escape(&bytes));
             let state = &record.state;
             if let Some(sort) = state.sort {
                 push_field(&mut out, "sort", sort_name(sort.by).as_bytes());
@@ -514,7 +519,9 @@ impl StateStore {
         if !self.tabs.is_empty() {
             out.extend_from_slice(TABS_KEY.as_bytes());
             for (i, tab) in self.tabs.iter().enumerate() {
-                push_field(&mut out, &i.to_string(), path_bytes(tab));
+                if let Ok(bytes) = path_bytes(tab) {
+                    push_field(&mut out, &i.to_string(), &bytes);
+                }
             }
             push_field(&mut out, "active", self.active_tab.to_string().as_bytes());
             push_field(&mut out, "t", self.tabs_touched.to_string().as_bytes());
@@ -621,7 +628,10 @@ impl StateStore {
             if state.is_empty() {
                 continue;
             }
-            self.dirs.insert(path_from(&key), Record { state, touched });
+            let Ok(path) = path_from(&key) else {
+                continue;
+            };
+            self.dirs.insert(path, Record { state, touched });
         }
         // A file that was over the cap — an older build with a bigger one, or a
         // hand-merged pair of files — is trimmed on load rather than carried.
@@ -643,7 +653,11 @@ impl StateStore {
                 b"active" => active = text(&value).parse().unwrap_or(0),
                 b"t" => self.tabs_touched = text(&value).parse().unwrap_or(0),
                 _ => match text(&name).parse::<usize>() {
-                    Ok(index) => numbered.push((index, path_from(&value))),
+                    Ok(index) => {
+                        if let Ok(path) = path_from(&value) {
+                            numbered.push((index, path));
+                        }
+                    }
                     Err(_) => log::warn!(
                         "state: {}:{line}: unknown tab field {}",
                         self.path.display(),
@@ -773,14 +787,14 @@ fn strip_cr(line: &[u8]) -> &[u8] {
     }
 }
 
-fn path_bytes(path: &Path) -> &[u8] {
-    use std::os::unix::ffi::OsStrExt;
-    path.as_os_str().as_bytes()
+/// A path's bytes for the file: exactly the `OsStr` on Unix, its UTF-8 on
+/// Windows, where a path that is not Unicode has none.
+fn path_bytes(path: &Path) -> crate::Result<std::borrow::Cow<'_, [u8]>> {
+    crate::platform::os::as_bytes(path.as_os_str())
 }
 
-fn path_from(bytes: &[u8]) -> PathBuf {
-    use std::os::unix::ffi::OsStringExt;
-    PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
+fn path_from(bytes: &[u8]) -> crate::Result<PathBuf> {
+    crate::platform::os::from_bytes(bytes).map(PathBuf::from)
 }
 
 /// Bytes as text for the fields that are ASCII by construction — enum names,

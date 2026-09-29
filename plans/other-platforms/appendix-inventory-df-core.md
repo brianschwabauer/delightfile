@@ -58,11 +58,11 @@
 | 98–105 | `Format::tool()`: `"zstd"`, `"xz"`, `"7z"` | Windows-differs | `is_available`, `piped`, `seven_zip` | Bare names |
 | 116–121 | `Format::is_available`: `on_path("7z")` or `super::have(tool)` | Windows-differs | app:app/compress.rs:open_archive_prompt | |
 | 187, 213 | `extension_of` / `named`: `text.rsplit('/')` takes the leaf of a typed archive name | Windows-differs | `extension` ← app:app/compress.rs:format_hint; `named` ← app:app/compress.rs:archive_submit | A typed `out\photos.zip` is not split on `\` |
-| 529–536 | `walk`: `use std::os::unix::ffi::OsStrExt`; member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` ← app:app/compress.rs:spawn_archive | |
-| 542–543 | `visit`: `use std::os::unix::ffi::OsStrExt; use std::os::unix::fs::MetadataExt` | Unix-only | as above | |
+| 529–536 | `walk`: `use std::os::unix::ffi::OsStrExt`; member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` ← app:app/compress.rs:spawn_archive | ✓ S1.16 |
+| 542–543 | `visit`: `use std::os::unix::ffi::OsStrExt; use std::os::unix::fs::MetadataExt` | Unix-only | as above | ✓ S1.16 |
 | 553–556 | `Member { mode: meta.mode(), mtime: meta.mtime(), uid: meta.uid(), gid: meta.gid() }` | Unix-only | Consumed by write/tar.rs:175–181 and write/zip.rs:218–235 | ✓ S1.7 |
-| 561–562 | Symlink target `read_link(path)…as_os_str().as_bytes()` | Unix-only | as above | Link text is stored as raw bytes |
-| 566, 579–580 | Member names built as bytes: `push(b'/')`, `extend_from_slice(child.as_bytes())` | Unix-only | as above | `/` is the archive format's own separator. The child bytes come from `OsStr` |
+| 561–562 | Symlink target `read_link(path)…as_os_str().as_bytes()` | Unix-only | as above | Link text is stored as raw bytes ✓ S1.16 |
+| 566, 579–580 | Member names built as bytes: `push(b'/')`, `extend_from_slice(child.as_bytes())` | Unix-only | as above | `/` is the archive format's own separator. The child bytes come from `OsStr` ✓ S1.16 |
 | 656–661 | `on_path`: `var_os("PATH")`, `dir.join(name)`, `external::is_executable` | Windows-differs (+ Unix-only via `is_executable`) | `Format::is_available`, `seven_zip` | No `.exe` suffix ✓ S1.13 |
 | 684–696 | `piped`: `Command::new(tool)` with `-q -c -T0` or `-z -c -q -T0` | Windows-differs | `Pack::run` | §4 |
 | 762–782 | `seven_zip`: `7z a -t7z -bd -y -snl -- <temp> <names…>` via `external::run_in(…, Some(dir), …)` | Windows-differs | `Pack::run` | §4 |
@@ -169,9 +169,9 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 41 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `insert` | |
+| 41 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `insert` | ✓ S1.16 |
 | 279–306 | `status_blocking`: `Command::new("git")` with `-c core.hooksPath=/dev/null` (291), `.current_dir(root)` | Windows-differs | core:git/cache.rs:run_one ← `Git::start` ← app:app.rs:git | `/dev/null` is a Unix device path. §4 ✓ S1.13 |
-| 556–565 | `insert`: trailing `b'/'` means directory; `Path::new(OsStr::from_bytes(trimmed))`; `root.join(rel)` | Unix-only | `parse_porcelain_v2` ← `status_blocking` | git emits `/`-separated repo-relative paths |
+| 556–565 | `insert`: trailing `b'/'` means directory; `Path::new(OsStr::from_bytes(trimmed))`; `root.join(rel)` | Unix-only | `parse_porcelain_v2` ← `status_blocking` | git emits `/`-separated repo-relative paths ✓ S1.16 |
 | 577–587 | Rollup loop bounded by `ancestor.starts_with(root)` / `ancestor == root` | Windows-differs (case) | as above | §3 |
 
 ### ops.rs
@@ -179,9 +179,9 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 73–98 | `normalize`: `path.is_absolute()`, else `current_dir().join(path)`; pushes `"/"` when empty (95) | Windows-differs | ~30 core callers incl. core:ops/delete.rs:check_deletable, core:ops/journal.rs:record, core:ops/link.rs:symlink, core:ops/paste.rs:carried, core:ops/trash.rs:trash, for_path, mount_point_of, core:sync/plan.rs:roots, walk | On Windows `is_absolute` needs a prefix and a root, so `\foo` and `/foo` are relative |
-| 109–120 | `is_url`: `use std::os::unix::ffi::OsStrExt`; scans `as_bytes()` for `://` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | |
+| 109–120 | `is_url`: `use std::os::unix::ffi::OsStrExt`; scans `as_bytes()` for `://` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 |
 | 142–149 | `resolved`: `std::fs::canonicalize(path)` / `canonicalize(parent).join(name)` | Windows-differs | `is_ancestor_resolved` ← core:ops/paste.rs:plan_paste, core:sync/plan.rs:roots; `is_strict_ancestor_resolved` ← core:ops/copy.rs:copies_into_itself, move_path | Windows `canonicalize` returns `\\?\`-prefixed verbatim paths |
-| 196–204 | `trim_trailing_slash`: `as_bytes()`, trims `b'/'`, `OsStr::from_bytes` | Unix-only | core:ops/delete.rs:remove_tree, remove_tree_unchecked | `\` is also a separator on Windows |
+| 196–204 | `trim_trailing_slash`: `as_bytes()`, trims `b'/'`, `OsStr::from_bytes` | Unix-only | core:ops/delete.rs:remove_tree, remove_tree_unchecked | `\` is also a separator on Windows ✓ S1.16 |
 | 212–218 | `same_file`: `MetadataExt::dev()` / `ino()` of both `symlink_metadata` | Unix-only | core:ops/copy.rs:copy_tree_with, copy_file, move_path; core:ops/create.rs:rename; core:ops/paste.rs:plan_paste; core:sync/plan.rs:roots | ✓ S1.5 |
 
 ### ops/copy.rs
@@ -204,7 +204,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 33–46 | `create`: `use std::os::unix::ffi::OsStrExt`; trailing `b'/'` means "directory"; trimmed with `OsStr::from_bytes` | Unix-only | app:app.rs:create | A typed trailing `\` is not a directory marker |
+| 33–46 | `create`: `use std::os::unix::ffi::OsStrExt`; trailing `b'/'` means "directory"; trimmed with `OsStr::from_bytes` | Unix-only | app:app.rs:create | A typed trailing `\` is not a directory marker ✓ S1.16 |
 | 139–146 | `rename`: `from.parent().map(normalize) != to.parent().map(normalize)`; message falls back to `Path::new("/")` | Windows-differs (case) | app:app.rs:rename, run_bulk; app:bulk.rs:start | |
 
 ### ops/delete.rs
@@ -259,8 +259,8 @@
 | 554–564 | `device_of`: `MetadataExt::dev()` of the nearest existing ancestor | Unix-only | `for_path`, `mount_point_of`; core:sync/mod.rs:trash_available, trash_for | ✓ S1.6 |
 | 568–582 | `mount_point_of`: walks `parent()` until `device_of` changes | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows mount points and junctions do not change a `dev` ✓ S1.6 |
 | 588–594 | `uid()`: `libc::getuid()` | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for; app:mounts.rs:gvfs_root | ✓ S1.8 |
-| 609–633 | `fit`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; stem/extension clipped as bytes | Unix-only | `suffixed` ← core:ops/paste.rs:unique_name, core:vfs/mod.rs:unique_name, app:remote.rs:free_name; `claim_name` | |
-| 637–646 | `clip`: cuts at a UTF-8 boundary in a byte string | Unix-only (byte model) | `fit` | |
+| 609–633 | `fit`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; stem/extension clipped as bytes | Unix-only | `suffixed` ← core:ops/paste.rs:unique_name, core:vfs/mod.rs:unique_name, app:remote.rs:free_name; `claim_name` | ✓ S1.16 |
+| 637–646 | `clip`: cuts at a UTF-8 boundary in a byte string | Unix-only (byte model) | `fit` | ✓ S1.16 |
 | 679–691 | `encode_path`: `OsStrExt::as_bytes`, percent-encodes, `/` unreserved | Unix-only | `trashinfo_text` ← `Trash::trash` | ✓ S1.6 |
 | 695–720 | `decode_path`: `OsStringExt::from_vec` | Unix-only | `parse_trashinfo` ← `Trash::list` | ✓ S1.6 |
 
@@ -286,12 +286,12 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 221–223 | `state_path()` → `state_path_from(var_os("XDG_STATE_HOME"), var_os("HOME"))` | Linux-only | `StateStore::load` ← app:app.rs:new | Windows: `HOME` unset → `None` → session-only ✓ S1.11 |
-| 481, 500 | `render`: `escape(path_bytes(key))`, tab paths `path_bytes(tab)` | Unix-only | `flush` ← app:app.rs:flush_state | |
+| 481, 500 | `render`: `escape(path_bytes(key))`, tab paths `path_bytes(tab)` | Unix-only | `flush` ← app:app.rs:flush_state | ✓ S1.16 |
 | 536 | `parse`: `if !key.starts_with(b"/")` → line skipped | Windows-differs | `load_from` ← `load` | A Windows absolute path starts with a drive letter, so every directory record would be dropped |
-| 594, 616 | `parse` / `parse_tabs`: `path_from(&key)`, `path_from(&value)` | Unix-only | as above | |
+| 594, 616 | `parse` / `parse_tabs`: `path_from(&key)`, `path_from(&value)` | Unix-only | as above | ✓ S1.16 |
 | 637–657 | `state_path_from`: `$XDG_STATE_HOME/delightfile/state` or `$HOME/.local/state/delightfile/state` | Linux-only; macOS-differs (not `~/Library`) | `state_path`; app:portal/request.rs:from_env | ✓ S1.11 |
-| 744–747 | `path_bytes`: `OsStrExt::as_bytes` | Unix-only | `render` | |
-| 749–752 | `path_from`: `OsStringExt::from_vec` | Unix-only | `parse`, `parse_tabs` | |
+| 744–747 | `path_bytes`: `OsStrExt::as_bytes` | Unix-only | `render` | ✓ S1.16 |
+| 749–752 | `path_from`: `OsStringExt::from_vec` | Unix-only | `parse`, `parse_tabs` | ✓ S1.16 |
 | 202, 305–318 | `dirs: HashMap<PathBuf, Record>`; `get`/`sort`/`linemode`/`show_hidden` | Windows-differs (case) | app:app.rs, app:tab.rs:new, app:app/places.rs | |
 
 ### state/pins.rs
@@ -312,7 +312,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 267–282 | `SyncPlan::label`: `format!("{name}/{}", item.rel.to_string_lossy())`, trailing `'/'` for folders | Windows-differs | app:sync.rs (card rows) | Mixed separators on Windows (`rel` renders with `\`) |
-| 310–318 | `is_debris`: `use std::os::unix::ffi::OsStrExt`; `name.as_bytes().starts_with(TEMP_PREFIX)` | Unix-only | `has_debris`, `in_sync`, `listed`, `removals`; core:sync/execute.rs:remove_extras | |
+| 310–318 | `is_debris`: `use std::os::unix::ffi::OsStrExt`; `name.as_bytes().starts_with(TEMP_PREFIX)` | Unix-only | `has_debris`, `in_sync`, `listed`, `removals`; core:sync/execute.rs:remove_extras | ✓ S1.16 |
 | 412–436 | `trash_available`: `Trash::home`, `device_of`, `mount_point_of`, `.Trash` sticky `mode() & 0o1000` (427), `.Trash-{uid()}` (431), `writable` | Linux-only | core:sync/plan.rs:walk | ✓ S1.6 |
 | 414 | `use std::os::unix::fs::PermissionsExt` | Unix-only | `trash_available` | ✓ S1.6 |
 | 443–458 | `trash_for`: home trash if same `dev`, else `topdir_trash(mount_point_of(dest), uid())` | Linux-only | core:sync/execute.rs:remove | ✓ S1.6 |
@@ -330,22 +330,22 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 43 | `use std::os::unix::ffi::{OsStrExt, OsStringExt}` | Unix-only | file-wide | |
+| 43 | `use std::os::unix::ffi::{OsStrExt, OsStringExt}` | Unix-only | file-wide | ✓ S1.16 |
 | 69–77 | `available()`: `rsync --version` | Windows-differs; macOS-differs | app:app/syncing.rs:remote_sync | rsync is not in a stock Windows install. macOS bundles `/usr/bin/rsync` 2.6.9 (macOS 15 adds openrsync) ✓ S1.14 |
 | 126–139 | `Host::shell`: `Command::new("ssh")` + a POSIX-shell script for the server | Windows-differs | `remote_digests` | §4 |
 | 173–188 | `rsh()` / `rsh_with("ssh")`: the `-e` string rsync uses to start ssh | Windows-differs | `common()` → `dry_run_args`, `run_args` | |
-| 230–244 | `endpoint`: `as_os_str().as_bytes()`, trims or appends `b'/'`, prefixes `host:` for the remote side, `OsStr::from_bytes` | Unix-only | `endpoints` → `dry_run_args`, `run_args` | In rsync's argument syntax a colon before the first `/` means `host:path`, so a Windows local path `C:\x` reads as host `C` |
+| 230–244 | `endpoint`: `as_os_str().as_bytes()`, trims or appends `b'/'`, prefixes `host:` for the remote side, `OsStr::from_bytes` | Unix-only | `endpoints` → `dry_run_args`, `run_args` | In rsync's argument syntax a colon before the first `/` means `host:path`, so a Windows local path `C:\x` reads as host `C` ✓ S1.16 |
 | 266–308 | `dry_run_args` / `run_args`: `--info=progress2`, `--no-inc-recursive`, `--out-format=%i %l %n`, `--delete-after`, `--fsync` | macOS-differs | `plan`, `run` | `--info` needs rsync ≥ 3.1.0 and `--no-inc-recursive` ≥ 3.0.0. `--fsync` is gated on ≥ 3.2.0 (`FSYNC_SINCE`, 312) |
-| 383–426 | `parse_line`: `OsString::from_vec(name)` from rsync's itemized bytes | Unix-only | `parse_itemized` ← `plan`; stdout thread in `run` | |
+| 383–426 | `parse_line`: `OsString::from_vec(name)` from rsync's itemized bytes | Unix-only | `parse_itemized` ← `plan`; stdout thread in `run` | ✓ S1.16 |
 | 429–450 | `unescape`: rsync `\#ooo` octal escapes to raw bytes | Unix-only (byte model) | `parse_line` | |
 | 511–536 | `plan`: `Command::new("rsync")` dry run via `collect` | Windows-differs | app:sync.rs:remote_plan_job | §4 |
 | 631–658 | `wait`: on stop, `signal(child, libc::SIGCONT)` then `child.kill()` | Unix-only | `collect`, `run` | ✓ S1.13 |
 | 662–675 | `signal`: `libc::pid_t::try_from(child.id())`, `libc::kill(pid, signal)` | Unix-only (Windows libc: no `kill`, no `pid_t`) | `wait`, `run` | ✓ S1.13 |
 | 914–992 | `run`: `Command::new("rsync")`; pause/resume as `libc::SIGSTOP` / `libc::SIGCONT` (966–976) | Unix-only | `execute` ← core:sync/execute.rs:execute ← app:sync.rs:sync_job | ✓ S1.13 |
 | 1024–1042 | `far_side`: server paths held as `PathBuf` (`name.join(&item.rel)`, `source.parent()`) | Windows-differs | `verify_remote` | `PathBuf::join` inserts `\` on Windows, and these paths go to a Unix server |
-| 1143–1148 | `remote_digests`: stdin = NUL-separated `name.as_os_str().as_bytes()` | Unix-only | `verify_remote` | |
+| 1143–1148 | `remote_digests`: stdin = NUL-separated `name.as_os_str().as_bytes()` | Unix-only | `verify_remote` | ✓ S1.16 |
 | 1156 | Exit-status check `matches!(status.code(), Some(255) \| Some(126) \| Some(127) \| None)` | Windows-differs | `remote_digests` | `code()` is `None` only for a signal death on Unix |
-| 1189–1211 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | |
+| 1189–1211 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | ✓ S1.16 |
 
 ### tasks.rs
 
@@ -1633,28 +1633,28 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| archive/write/mod.rs:536 | Top-level member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` | Written into zip/tar headers |
-| archive/write/mod.rs:562 | Symlink target `as_os_str().as_bytes()` | Unix-only | as above | Stored as the link payload |
-| archive/write/mod.rs:580 | Child name `child.as_bytes()` | Unix-only | as above | |
+| archive/write/mod.rs:536 | Top-level member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` | Written into zip/tar headers ✓ S1.16 |
+| archive/write/mod.rs:562 | Symlink target `as_os_str().as_bytes()` | Unix-only | as above | Stored as the link payload ✓ S1.16 |
+| archive/write/mod.rs:580 | Child name `child.as_bytes()` | Unix-only | as above | ✓ S1.16 |
 | du/fstype.rs:64 | `CString::new(path.as_os_str().as_bytes())` for `statfs` | Unix-only | `is_remote` | ✓ S1.5 |
 | fs/inotify.rs:109 | `CString::new(path.as_os_str().as_bytes())` for `inotify_add_watch` | Linux-only | `add_watch` | ✓ S1.4 |
-| git/status.rs:564 | `Path::new(OsStr::from_bytes(trimmed))` from git `-z` output | Unix-only | `parse_porcelain_v2` | |
-| ops.rs:111 | `is_url` scans `as_bytes()` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | |
-| ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | |
+| git/status.rs:564 | `Path::new(OsStr::from_bytes(trimmed))` from git `-z` output | Unix-only | `parse_porcelain_v2` | ✓ S1.16 |
+| ops.rs:111 | `is_url` scans `as_bytes()` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 |
+| ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | ✓ S1.16 |
 | ops/copy.rs:672 | `CString::new(path.as_os_str().as_bytes())` for `utimensat` | Unix-only | `set_times` | ✓ S1.5 |
-| ops/create.rs:36–43 | `create`: bytes in, trailing `/` check, `from_bytes` out | Unix-only | app:app.rs:create | |
+| ops/create.rs:36–43 | `create`: bytes in, trailing `/` check, `from_bytes` out | Unix-only | app:app.rs:create | ✓ S1.16 |
 | ops/trash.rs:266–270 | `list`: `file.as_bytes()`, `OsString::from_vec` | Unix-only | app:app.rs:show_trash | ✓ S1.6 |
-| ops/trash.rs:613–632 | `fit`: `file_stem().as_bytes()`, `extension().as_bytes()`, `OsString::from_vec` | Unix-only | `suffixed`, `claim_name` | |
+| ops/trash.rs:613–632 | `fit`: `file_stem().as_bytes()`, `extension().as_bytes()`, `OsString::from_vec` | Unix-only | `suffixed`, `claim_name` | ✓ S1.16 |
 | ops/trash.rs:682 | `encode_path`: `as_bytes()` | Unix-only | `trashinfo_text` | ✓ S1.6 |
 | ops/trash.rs:719 | `decode_path`: `OsString::from_vec(out)` | Unix-only | `parse_trashinfo` | ✓ S1.6 |
-| state/mod.rs:746 | `path_bytes`: `as_bytes()` | Unix-only | `render` | |
-| state/mod.rs:751 | `path_from`: `OsString::from_vec` | Unix-only | `parse`, `parse_tabs` | |
-| sync/mod.rs:315–316 | `is_debris`: `name.as_bytes().starts_with(TEMP_PREFIX.as_bytes())` | Unix-only | plan helpers | |
+| state/mod.rs:746 | `path_bytes`: `as_bytes()` | Unix-only | `render` | ✓ S1.16 |
+| state/mod.rs:751 | `path_from`: `OsString::from_vec` | Unix-only | `parse`, `parse_tabs` | ✓ S1.16 |
+| sync/mod.rs:315–316 | `is_debris`: `name.as_bytes().starts_with(TEMP_PREFIX.as_bytes())` | Unix-only | plan helpers | ✓ S1.16 |
 | sync/mod.rs:481 | `writable`: `CString::new(dir.as_os_str().as_bytes())` | Unix-only | `trash_available` | ✓ S1.5 |
-| sync/rsync.rs:231, 242 | `endpoint`: `as_bytes()` in, `OsStr::from_bytes` out | Unix-only | rsync argv | |
-| sync/rsync.rs:398 | `parse_line`: `OsString::from_vec(name)` | Unix-only | `parse_itemized` | |
-| sync/rsync.rs:1146 | `remote_digests`: `name.as_os_str().as_bytes()` to stdin | Unix-only | `verify_remote` | |
-| sync/rsync.rs:1209 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | |
+| sync/rsync.rs:231, 242 | `endpoint`: `as_bytes()` in, `OsStr::from_bytes` out | Unix-only | rsync argv | ✓ S1.16 |
+| sync/rsync.rs:398 | `parse_line`: `OsString::from_vec(name)` | Unix-only | `parse_itemized` | ✓ S1.16 |
+| sync/rsync.rs:1146 | `remote_digests`: `name.as_os_str().as_bytes()` to stdin | Unix-only | `verify_remote` | ✓ S1.16 |
+| sync/rsync.rs:1209 | `parse_sha256sum`: `OsString::from_vec(name)` | Unix-only | `verify_remote` | ✓ S1.16 |
 
 ### 3.2 Splitting, joining or trimming a local path on a literal `/`
 

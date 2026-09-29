@@ -6,6 +6,7 @@
 //! trash, which was its first user; a paste, a download and an upload to a
 //! server use it the same way, and none of them is the trash.
 
+use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
@@ -36,11 +37,9 @@ pub fn suffixed(name: &OsStr, n: u32) -> OsString {
 /// changes what the file is. If the extension alone does not fit, the whole
 /// name is clipped and the extension goes with it — nothing else is possible.
 pub(crate) fn fit(name: &OsStr, suffix: Option<u32>, max: usize) -> OsString {
-    use std::os::unix::ffi::{OsStrExt, OsStringExt};
-
     let as_path = Path::new(name);
-    let stem = as_path.file_stem().unwrap_or(name).as_bytes().to_vec();
-    let ext = as_path.extension().map(|e| e.as_bytes().to_vec());
+    let stem = bytes_of(as_path.file_stem().unwrap_or(name));
+    let ext = as_path.extension().map(bytes_of);
 
     let suffix = suffix
         .map(|n| format!("_{n}").into_bytes())
@@ -48,7 +47,7 @@ pub(crate) fn fit(name: &OsStr, suffix: Option<u32>, max: usize) -> OsString {
     let ext_len = ext.as_ref().map(|e| e.len() + 1).unwrap_or(0);
     if suffix.len() + ext_len > max {
         // Pathological: an extension longer than a whole name may be.
-        return OsString::from_vec(clip(name.as_bytes(), max));
+        return name_of(clip(&bytes_of(name), max));
     }
     let room = max - suffix.len() - ext_len;
 
@@ -58,7 +57,24 @@ pub(crate) fn fit(name: &OsStr, suffix: Option<u32>, max: usize) -> OsString {
         out.push(b'.');
         out.extend_from_slice(&ext);
     }
-    OsString::from_vec(out)
+    name_of(out)
+}
+
+/// The bytes of a name: exactly the `OsStr` on Unix. A name the platform
+/// cannot spell as bytes (not Unicode, on Windows) is spelled lossily — the
+/// result is a *new* name to create, and a replacement character in it names
+/// a file that can exist, where an error has nowhere to go.
+fn bytes_of(name: &OsStr) -> Vec<u8> {
+    crate::platform::os::as_bytes(name)
+        .map(Cow::into_owned)
+        .unwrap_or_else(|_| name.to_string_lossy().into_owned().into_bytes())
+}
+
+/// The name made of `bytes`. [`clip`] never splits a character, so bytes that
+/// came from a Unicode name stay one; the lossy arm is never reached on Unix.
+fn name_of(bytes: Vec<u8>) -> OsString {
+    crate::platform::os::from_bytes(&bytes)
+        .unwrap_or_else(|_| OsString::from(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// Cut a byte string to at most `room` bytes without splitting a UTF-8

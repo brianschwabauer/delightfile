@@ -38,7 +38,6 @@
 //! dimmed — git reports those as their own entry.
 
 use std::collections::HashMap;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -562,9 +561,12 @@ fn insert(data: &mut StatusData, root: &Path, raw: &[u8], status: FileStatus, ro
     if trimmed.is_empty() {
         return;
     }
-    // Bytes, not `str`: a path is bytes on this platform, and a filename that is
-    // not UTF-8 still gets a dot.
-    let rel = Path::new(std::ffi::OsStr::from_bytes(trimmed));
+    // Bytes, not `str`: a path is bytes on Unix, and a filename that is not
+    // UTF-8 still gets a dot. On Windows one that is not UTF-8 names no file
+    // there, and is left out.
+    let Ok(rel) = crate::platform::os::from_bytes(trimmed) else {
+        return;
+    };
     let abs = root.join(rel);
 
     if is_dir {

@@ -356,7 +356,10 @@ impl Iterator for Find {
                 continue;
             };
             let Ok(item) = item else { continue };
-            if !self.hidden && item.file_name().as_bytes().first() == Some(&b'.') {
+            if !self.hidden
+                && crate::platform::os::as_bytes(&item.file_name())
+                    .is_ok_and(|name| name.first() == Some(&b'.'))
+            {
                 continue;
             }
             let path = item.path();

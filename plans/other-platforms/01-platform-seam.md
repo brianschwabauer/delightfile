@@ -270,9 +270,9 @@ has not dropped.
       gate is Phase 2. Done when: a Windows-shaped unit test of the gating function
       exists (pure) and the function has no cfg outside `platform/` (put the
       constant `platform::process::HAS_RSYNC: bool` in the platform module).
-      — done SHA_S114, cross-checked locally, CI pending (the pure gate is
+      — done d9436e3, cross-checked locally, CI pending (the pure gate is
       `sync::rsync::gated(has_rsync, probe)`; its test runs on every target)
-- [ ] **S1.16** Bytes ↔ UTF-8 at every `OsStrExt`/`OsStringExt` site outside
+- [>] **S1.16** Bytes ↔ UTF-8 at every `OsStrExt`/`OsStringExt` site outside
       `platform/` — **the mechanical half of `03-paths.md` §2, pulled into this
       phase** because without it df-core cannot compile on Windows and S1.40's exit
       criterion is unreachable. Create `platform::os::{as_bytes, from_bytes}` exactly
@@ -287,6 +287,10 @@ has not dropped.
       bytes are identical (`as_bytes` is `OsStrExt::as_bytes` there). Done when:
       `grep -rn "OsStrExt\|OsStringExt" crates/df-core/src` hits only `platform/`
       and `cargo check -p df-core --target x86_64-pc-windows-msvc` passes on CI.
+      Since the plan was written `fs/tags.rs`'s walk reads a name's first byte
+      too; that site is rewritten here and the file's syscalls move in S1.18.
+      — df-core core-seam session, started 2026-09-29; the grep's last hits are
+      `fs/tags.rs` (S1.18) and `state/tests.rs` (S1.15).
 - [ ] **S1.17** `platform::user::owner_names(uid, gid) -> (Option<String>,
       Option<String>)` behind `fs/owner.rs:25–84`: Linux body is the existing
       `/etc/passwd`/`/etc/group` parser moved; macOS stub returns `None` (M2.4
@@ -578,6 +582,19 @@ their native clipboards *are* synchronous.
   supersedes this when it lands. The comments in `vfs/tests.rs`,
   `vfs/rclone_tests.rs` and `sync/rsync.rs` that named `libc::kill` and
   `SIGSTOP` in prose were reworded, so the task's grep reads true.
+- 2026-09-29 — S1.16, where the `Result` goes when the nearest caller has no
+  `DfError` to return: `ops::create`, the archive writer's walk and
+  `sync::rsync::remote_digests` propagate it with `?`; `sync::rsync`'s
+  `endpoint`, `endpoints`, `dry_run_args` and `run_args` now return `Result`
+  (df-app calls none of them; the rsync tests `unwrap`). A record that cannot
+  be spelled is skipped: a state-file record or tab, a git status line, an
+  rsync itemized or `sha256sum` line. A predicate answers "no"
+  (`ops::is_url`, `SyncPlan::is_debris`, the tag walk's hidden check), and
+  `ops::trim_trailing_slash` returns the path untrimmed. `fs::names::fit`
+  cannot fail (df-app's `suffixed` caller takes an `OsString`), so for a
+  non-Unicode name — Windows only — it spells the new name lossily: it is a
+  name to create, not a path to find. On Unix every one of these is exactly
+  the old byte path, since both conversions are infallible there.
 
 ## Open questions
 

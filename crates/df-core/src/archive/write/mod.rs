@@ -534,21 +534,19 @@ fn walk(sources: &[PathBuf], ctx: &TaskCtx) -> Result<Walked> {
         skipped: Vec::new(),
     };
     for source in sources {
-        use std::os::unix::ffi::OsStrExt;
         let Some(name) = source.file_name() else {
             return Err(DfError::Op(format!(
                 "{} has no name to put in an archive",
                 source.display()
             )));
         };
-        visit(source, name.as_bytes().to_vec(), &mut walked, ctx)?;
+        let name = crate::platform::os::as_bytes(name)?.into_owned();
+        visit(source, name, &mut walked, ctx)?;
     }
     Ok(walked)
 }
 
 fn visit(path: &Path, name: Vec<u8>, walked: &mut Walked, ctx: &TaskCtx) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-
     if walked.members.len().is_multiple_of(WALK_CHECK) {
         ctx.checkpoint()?;
     }
@@ -566,7 +564,7 @@ fn visit(path: &Path, name: Vec<u8>, walked: &mut Walked, ctx: &TaskCtx) -> Resu
     let kind = meta.file_type();
     if kind.is_symlink() {
         let target = std::fs::read_link(path).map_err(|e| DfError::io(path, e))?;
-        let target = target.as_os_str().as_bytes().to_vec();
+        let target = crate::platform::os::as_bytes(target.as_os_str())?.into_owned();
         walked.members.push(member(name, What::Link(target), true));
     } else if kind.is_dir() {
         let mut dir_name = name.clone();
@@ -584,7 +582,7 @@ fn visit(path: &Path, name: Vec<u8>, walked: &mut Walked, ctx: &TaskCtx) -> Resu
         for (child, child_path) in children {
             let mut child_name = name.clone();
             child_name.push(b'/');
-            child_name.extend_from_slice(child.as_bytes());
+            child_name.extend_from_slice(&crate::platform::os::as_bytes(&child)?);
             visit(&child_path, child_name, walked, ctx)?;
         }
     } else if kind.is_file() {

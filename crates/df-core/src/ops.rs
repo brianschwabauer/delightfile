@@ -119,8 +119,9 @@ pub fn normalize(path: &Path) -> PathBuf {
 /// scheme — a letter, then letters, digits, `+`, `-` or `.` — followed by
 /// `://`, which no path a person types into a file manager starts with.
 pub fn is_url(path: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let bytes = path.as_os_str().as_bytes();
+    let Ok(bytes) = crate::platform::os::as_bytes(path.as_os_str()) else {
+        return false;
+    };
     let Some(colon) = bytes.windows(3).position(|w| w == b"://") else {
         return false;
     };
@@ -206,13 +207,18 @@ pub fn is_real_dir(path: &Path) -> bool {
 /// A recursive delete handed `~/link/` would therefore descend into the target
 /// and empty it. Everything that unlinks trims first.
 pub fn trim_trailing_slash(path: &Path) -> PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    let raw = path.as_os_str().as_bytes();
+    // A path that has no bytes to trim (not Unicode, on Windows) is left as it
+    // is: there is no slash in it that could be read.
+    let Ok(raw) = crate::platform::os::as_bytes(path.as_os_str()) else {
+        return path.to_path_buf();
+    };
     let mut end = raw.len();
     while end > 1 && raw[end - 1] == b'/' {
         end -= 1;
     }
-    PathBuf::from(std::ffi::OsStr::from_bytes(&raw[..end]))
+    crate::platform::os::from_bytes(&raw[..end])
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Are these two paths the same file *on disk* (same device and inode)?

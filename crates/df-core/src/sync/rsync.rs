@@ -40,13 +40,13 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::platform;
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
@@ -238,8 +238,8 @@ impl Transfer {
     /// as `dest/photos`, the way a paste lands it. The destination gains one,
     /// so it is always taken as a folder; the server's login directory is
     /// `host:` alone, since `host:/` would be its root.
-    fn endpoint(&self, path: &Path, remote: bool, folder: bool) -> OsString {
-        let mut bytes = path.as_os_str().as_bytes().to_vec();
+    fn endpoint(&self, path: &Path, remote: bool, folder: bool) -> Result<OsString> {
+        let mut bytes = platform::os::as_bytes(path.as_os_str())?.into_owned();
         while bytes.len() > 1 && bytes.last() == Some(&b'/') {
             bytes.pop();
         }
@@ -250,20 +250,20 @@ impl Transfer {
         if remote {
             out.push(format!("{}:", self.host.host()));
         }
-        out.push(OsStr::from_bytes(&bytes));
-        out
+        out.push(platform::os::from_bytes(&bytes)?);
+        Ok(out)
     }
 
     /// The paths at the end of every command line: `--`, then the sources,
     /// then the destination. The `--` keeps a server path that starts with a
     /// dash from being read as an option.
-    fn endpoints(&self) -> Vec<OsString> {
+    fn endpoints(&self) -> Result<Vec<OsString>> {
         let mut out = vec![OsString::from("--")];
         for source in &self.sources {
-            out.push(self.endpoint(source, self.remote_sources(), false));
+            out.push(self.endpoint(source, self.remote_sources(), false)?);
         }
-        out.push(self.endpoint(&self.dest, !self.remote_sources(), true));
-        out
+        out.push(self.endpoint(&self.dest, !self.remote_sources(), true)?);
+        Ok(out)
     }
 
     fn common(&self) -> Vec<OsString> {
@@ -274,7 +274,7 @@ impl Transfer {
     /// unchanged ones included (`-ii`) so the card can count them, and
     /// `--delete-after` always, so the extras are known before `m` asks for
     /// them. Each line is `%i %l %n`: the change, the length, the name.
-    pub fn dry_run_args(&self, content: bool) -> Vec<OsString> {
+    pub fn dry_run_args(&self, content: bool) -> Result<Vec<OsString>> {
         let mut args: Vec<OsString> =
             ["-a", "-n", "-ii", "--delete-after", "--out-format=%i %l %n"]
                 .iter()
@@ -284,8 +284,8 @@ impl Transfer {
             args.push("--checksum".into());
         }
         args.extend(self.common());
-        args.extend(self.endpoints());
-        args
+        args.extend(self.endpoints()?);
+        Ok(args)
     }
 
     /// The run itself. `--no-inc-recursive` makes `rsync` count the whole
@@ -294,7 +294,7 @@ impl Transfer {
     /// deletes is itemized as the dry run's are, which is how the report
     /// counts what really landed; `fsync` asks the receiving side to flush
     /// each file it writes ([`fsync_for`]).
-    pub fn run_args(&self, mode: Mode, content: bool, fsync: bool) -> Vec<OsString> {
+    pub fn run_args(&self, mode: Mode, content: bool, fsync: bool) -> Result<Vec<OsString>> {
         let mut args: Vec<OsString> = [
             "-a",
             "--info=progress2",
@@ -314,8 +314,8 @@ impl Transfer {
             args.push("--fsync".into());
         }
         args.extend(self.common());
-        args.extend(self.endpoints());
-        args
+        args.extend(self.endpoints()?);
+        Ok(args)
     }
 }
 
@@ -406,7 +406,7 @@ fn parse_line(line: &[u8]) -> Option<Itemized> {
     if name.is_empty() || name == b"." {
         return None;
     }
-    let name = PathBuf::from(OsString::from_vec(name));
+    let name = PathBuf::from(platform::os::from_bytes(&name).ok()?);
     if code.starts_with(b"*deleting") {
         return Some(Itemized {
             class: Class::Extra,
@@ -527,7 +527,7 @@ pub fn plan(
     stop: &dyn Fn() -> bool,
 ) -> Result<SyncPlan> {
     let mut command = Command::new("rsync");
-    command.args(transfer.dry_run_args(options.content));
+    command.args(transfer.dry_run_args(options.content)?);
     let ran = collect(command, None, stop)?;
     let Some(status) = ran.status else {
         return Err(DfError::Cancelled);
@@ -923,7 +923,7 @@ struct Ran {
 fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCtx) -> Result<Ran> {
     let mut command = Command::new("rsync");
     command
-        .args(transfer.run_args(mode, content, fsync))
+        .args(transfer.run_args(mode, content, fsync)?)
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1145,7 +1145,7 @@ fn remote_digests(
     let command = host.shell(remote_script(folder));
     let mut input = Vec::new();
     for name in names {
-        input.extend_from_slice(name.as_os_str().as_bytes());
+        input.extend_from_slice(&platform::os::as_bytes(name.as_os_str())?);
         input.push(0);
     }
     let ran = collect(command, Some(input), &|| ctx.is_cancelled())?;
@@ -1208,7 +1208,10 @@ pub fn parse_sha256sum(output: &[u8]) -> Digests {
         if let Some(rest) = name.strip_prefix(b"./") {
             name = rest.to_vec();
         }
-        out.push((PathBuf::from(OsString::from_vec(name)), digest));
+        let Ok(name) = platform::os::from_bytes(&name) else {
+            continue;
+        };
+        out.push((PathBuf::from(name), digest));
     }
     out
 }
@@ -1285,7 +1288,7 @@ mod tests {
     fn the_run_is_rsync_archive_with_the_whole_transfer_counted_up_front() {
         let t = upload();
         assert_eq!(
-            strings(&t.run_args(Mode::Update, false, false)),
+            strings(&t.run_args(Mode::Update, false, false).unwrap()),
             [
                 "-a",
                 "--info=progress2",
@@ -1299,7 +1302,7 @@ mod tests {
                 "showandtour1:backups/photos/",
             ]
         );
-        let mirror = strings(&t.run_args(Mode::Mirror, true, true));
+        let mirror = strings(&t.run_args(Mode::Mirror, true, true).unwrap());
         assert_eq!(mirror[4..7], ["--delete-after", "--checksum", "--fsync"]);
         assert!(
             !mirror.contains(&"--delete".to_string()),
@@ -1311,10 +1314,10 @@ mod tests {
     fn the_dry_run_itemizes_everything_and_always_looks_for_extras() {
         let t = upload();
         assert_eq!(
-            strings(&t.dry_run_args(false))[..5],
+            strings(&t.dry_run_args(false).unwrap())[..5],
             ["-a", "-n", "-ii", "--delete-after", "--out-format=%i %l %n"]
         );
-        assert!(strings(&t.dry_run_args(true)).contains(&"--checksum".to_string()));
+        assert!(strings(&t.dry_run_args(true).unwrap()).contains(&"--checksum".to_string()));
     }
 
     #[test]
@@ -1326,7 +1329,7 @@ mod tests {
             dest: PathBuf::from("/home/brian/Pictures"),
         };
         assert_eq!(
-            strings(&t.endpoints()),
+            strings(&t.endpoints().unwrap()),
             [
                 "--",
                 "showandtour1:photos/2024",
@@ -1341,7 +1344,7 @@ mod tests {
             ..t
         };
         assert_eq!(
-            strings(&home.endpoints()).last().unwrap(),
+            strings(&home.endpoints().unwrap()).last().unwrap(),
             "showandtour1:",
             "the login directory, not the server's root"
         );
