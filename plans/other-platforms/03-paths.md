@@ -232,11 +232,15 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `has_trailing_separator` and trims that one separator, as before; a new
       test makes a folder with the platform's own separator. `is_url` keeps
       S1.16's `platform::os::as_bytes` scan (Decisions log).
-- [ ] **P3.11** `du/fstype.rs:64`, `ops/copy.rs:672`, `sync/mod.rs:481`,
+- [x] **P3.11** `du/fstype.rs:64`, `ops/copy.rs:672`, `sync/mod.rs:481`,
       `fs/inotify.rs:109`: `CString` construction for libc calls. These move into
       `platform/` in Phase 1 (they are Unix-only bodies) and keep `OsStrExt` there,
       which is allowed inside `platform/`. Done when: confirmed moved; nothing to do
-      here beyond checking.
+      here beyond checking. — done (port/paths), confirmed: the four are
+      `platform/linux/fs.rs` (`magic_of`), `platform/unix/fs.rs` (`set_times`,
+      `writable`) and `platform/linux/inotify.rs`; `grep -rn
+      "OsStrExt\|OsStringExt\|CString::new" crates/df-core/src` outside
+      `platform/` finds only the `#[cfg(unix)]` state fixture test.
 
 ## 3. Literal `/` and the root (appendix §3.2, §3.3)
 
