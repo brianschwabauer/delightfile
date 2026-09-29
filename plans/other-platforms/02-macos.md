@@ -1,6 +1,6 @@
 # 02 — macOS
 
-Status: **not started**
+Status: **in progress**
 
 Scope: native macOS bodies behind the Phase 1 seam, so that the `.app` produced by
 `06-build-and-release.md` is a working file manager on Apple Silicon: file watching,
@@ -55,7 +55,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
 
 ## 1. Filesystem (df-core `platform/macos/`)
 
-- [ ] **M2.1** `platform::watch` kqueue backend in `platform/macos/watch.rs`:
+- [x] **M2.1** `platform::watch` kqueue backend in `platform/macos/watch.rs`:
       `kqueue()`; per watched directory `open(dir, O_EVTONLY)` and
       `EV_SET(fd, EVFILT_VNODE, EV_ADD|EV_CLEAR, NOTE_WRITE|NOTE_DELETE|NOTE_RENAME|
       NOTE_REVOKE|NOTE_ATTRIB|NOTE_EXTEND)`; a wake pipe like the Linux design's,
@@ -68,10 +68,12 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       surface as S1.4; `#![allow(unsafe_code)]` with the three ownership rules
       restated. Done when: the three `Watcher` tests from `fs/tests.rs` (S1.4 gated
       them to Linux) are re-enabled under `#[cfg(any(target_os = "linux",
-      target_os = "macos"))]` and pass on the macOS runner.
-- [ ] **M2.2** `platform::fs::clone_before_open(src, dst) -> io::Result<bool>`:
-      macOS body `libc::fclonefileat(src_fd, AT_FDCWD, dst_cstr, CLONE_NOFOLLOW)`
-      after `open(src, O_RDONLY)`, with `const CLONE_NOFOLLOW: u32 = 0x0001` declared
+      target_os = "macos"))]` and pass on the macOS runner. — done 0fdd762, green on
+      the macOS runner (run 36640376030)
+- [x] **M2.2** `platform::fs::clone_before_open(reader, dst) -> io::Result<bool>`:
+      macOS body `libc::fclonefileat(reader_fd, AT_FDCWD, dst_cstr,
+      CLONE_NOFOLLOW)` on the source the copy has open, with
+      `const CLONE_NOFOLLOW: u32 = 0x0001` declared
       locally (from `<sys/clonefile.h>`; libc 0.2.189 has `fclonefileat` but not the
       flag); `Ok(true)` on success, `Ok(false)` on
       `ENOTSUP`/`EXDEV`/`EINVAL` (cross-volume, non-APFS, or a destination that
@@ -80,48 +82,56 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       calls it before creating the writer and skips the chunked copy on `true`;
       `apply_mode`/`set_times` still run (a clone carries them, so they are
       idempotent). Done when: a test on the macOS runner copies a 100 MiB file and
-      asserts the copy took under 50 ms; skipped on other targets.
-- [ ] **M2.3** `platform::fs::is_remote`: `statfs` and `f_fstypename` in
+      asserts the copy took under 50 ms; skipped on other targets. — done 02a326c,
+      green on the macOS runner (run 36640376030)
+- [x] **M2.3** `platform::fs::is_remote`: `statfs` and `f_fstypename` in
       `{"nfs", "smbfs", "afpfs", "webdav", "cifs", "ftp"}` or starting with
       `"fuse"`/`"macfuse"`/`"osxfuse"`. `magic_of` returns `f_type` for parity.
-      Done when: a unit test with a fake `statfs` result table passes.
-- [ ] **M2.4** `platform::user::owner_names`: macOS body uses `getpwuid_r`/`getgrgid_r`
+      Done when: a unit test with a fake `statfs` result table passes. — done
+      8b432f3, green on the macOS runner (run 36640376030)
+- [x] **M2.4** `platform::user::owner_names`: macOS body uses `getpwuid_r`/`getgrgid_r`
       (Open Directory serves them; `/etc/passwd` lists only system accounts). The
       Linux body keeps its `/etc/passwd` parser. Done when: `fs::owner` tests pass on
-      both.
-- [ ] **M2.5** `platform::thread::lower_priority`: macOS body
+      both. — done 97ee7ca, green on the macOS runner (run 36640376030)
+- [x] **M2.5** `platform::thread::lower_priority`: macOS body
       `pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0)` for `nice > 0`, leaving
-      the calling thread's class at UTILITY. Neither the function nor
-      `QOS_CLASS_UTILITY` (`0x11`) is in libc 0.2.189: declare
-      `extern "C" { fn pthread_set_qos_class_self_np(cls: u32, rel: i32) -> i32; }`
-      and the constant locally, in the platform file. Done when: compiles and a
-      test asserts the call returns 0.
-- [ ] **M2.6** `platform::process::rsync_available()` gates on version: parse
+      the calling thread's class at UTILITY. Both are in libc 0.2.189
+      (`libc::pthread_set_qos_class_self_np`, `libc::qos_class_t::QOS_CLASS_UTILITY`,
+      re-exported from its `new/apple/libpthread`), so nothing is declared
+      locally. Done when: compiles and a test asserts the call returns 0. — done
+      7a999e4, green on the macOS runner (run 36640376030)
+- [x] **M2.6** `platform::process::rsync_available()` gates on version: parse
       `rsync --version`'s first line and require ≥ 3.1.0 (`--info=progress2`);
       `platform::process::RSYNC_HINT` = "needs rsync 3.1 or newer — `brew install
       rsync`" and `app/syncing.rs:123` appends it to its error. Done when: the
       pure parser test covers `rsync  version 2.6.9`, `3.2.7` and openrsync's
-      banner (returns false).
-- [ ] **M2.7** `platform::fs::forget_cached`: `fcntl(fd, F_NOCACHE, 1)` is *not*
+      banner (returns false). — done 89d10d3, green on the macOS runner (run
+      36640376030); the df-app half, appending `RSYNC_HINT` to the refusal in
+      `app/syncing.rs`, is the df-app branch's
+- [x] **M2.7** `platform::fs::forget_cached`: `fcntl(fd, F_NOCACHE, 1)` is *not*
       used (it changes the file's caching mode, not a hint); the macOS body stays a
-      no-op as in S1.5. Done when: recorded here; nothing to do.
+      no-op as in S1.5. Done when: recorded here; nothing to do. — done 8b432f3,
+      green on the macOS runner (run 36640376030)
 
 ## 2. Trash (df-core `platform/macos/trash.rs`)
 
-- [ ] **M2.8** `Trash::home()` returns a `Trash` whose root is the journal file
-      `platform::dirs::state_dir()/trash-journal`; `Trash::trash(path, ctx)` calls
+- [x] **M2.8** `Trash::home()` returns a `Trash` whose root is the journal file
+      `platform::dirs::state_dir()/delightfile/trash-journal`;
+      `Trash::trash(path, ctx)` calls
       `NSFileManager.defaultManager.trashItemAtURL:resultingItemURL:error:`
       (objc2-foundation), then appends a journal line
       `<deleted_at>\t<original>\t<location>` (UTF-8, escaped like the state file)
-      and returns `TrashedItem { name: location.file_name(), original, deleted_at,
-      location }`. `list()` reads the journal and keeps lines whose `location` still
+      and returns `TrashedItem { trash_root: the journal, name:
+      location.file_name(), original, deleted_at }`, whose `location()` reads its
+      line back from the journal. `list()` reads the journal and keeps lines
+      whose `location` still
       exists (dropping stale ones on the next write). `restore` renames `location`
       back to `original` (or `move_cross_device`) and removes the line; `purge`
       removes `location` and the line. `for_path` returns `home()` for every local
       path (NSFileManager picks the volume's `.Trashes` itself). `available_for` is
       true for local, non-remote paths. Done when: a test on the macOS runner
       trashes a temp file, sees it under `~/.Trash`, restores it, and the journal
-      is empty again.
+      is empty again. — done 254d843, green on the macOS runner (run 36640376030)
 - [ ] **M2.9** Trash view and "Empty trash" on macOS: `App::show_trash`
       (`app.rs:4055–4078`) lists the journal; the empty-state text says "Only
       files trashed from delightfile are listed — Finder's Trash may hold more";
@@ -221,8 +231,11 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       §2 are wired into `platform::defaults::{OPENERS, RULES, BOOKMARKS}` and
       `df_core::config::Config::default` reads them. Done when: `open.rs`'s
       `opener_rules_pick_by_glob_then_mime` has a macOS twin asserting `open "$1"`.
-- [ ] **M2.18** `platform::dirs` macOS values per `05-defaults-and-config.md` §1
-      (D5.1 lands them; this task is the cross-reference). Done when: D5.1 done.
+- [x] **M2.18** `platform::dirs` macOS values per `05-defaults-and-config.md` §1
+      (D5.1 lands them; this task is the cross-reference). Done when: D5.1 done. —
+      done b420fef, green on the macOS runner (run 36640376030); the macOS column of
+      D5.1's table for `platform::dirs` (zoxide's row is not `platform::dirs` and
+      stays with D5.1)
 - [ ] **M2.19** `platform::fonts::dirs()` macOS list (D5.6) and the README line
       telling people `brew install --cask font-symbols-only-nerd-font`. Done when:
       the icon font is found on a machine with that cask (live check).
@@ -297,25 +310,28 @@ rows), `appendix-inventory-df-app.md` §1–§3.
 
 ## 8. Found in Phase 1
 
-- [ ] **M2.28** `platform::nofollow` macOS body (S1.19), in place of the stub
+- [x] **M2.28** `platform::nofollow` macOS body (S1.19), in place of the stub
       that refuses every permissions change: the same anchored walk without
       `/proc` — `open(anchor, O_RDONLY | O_DIRECTORY)`, then each component with
       `openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)` (macOS has no
       `O_PATH`, so a folder must be readable to be walked; one shut to its owner
       is the "Apply again" case `ops::mode` already reports),
       `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` for what the last component is,
-      and `fchmodat(dirfd, name, mode, AT_SYMLINK_NOFOLLOW)` to set it, which on
-      macOS refuses a link rather than following it. `read_dir_in` lists through
-      the descriptor (`fdopendir` of a `dup`). Done when: `ops/mode.rs`'s
-      `on_disk` tests are `#[cfg(unix)]` and pass on the macOS runner.
-- [ ] **M2.29** `platform::process::tie_to_this_thread` macOS body (S1.50), in
+      and `fchmodat(dirfd, name, mode, AT_SYMLINK_NOFOLLOW)` to set it, which
+      never follows a link (on one swapped in after the lookup it would set the
+      link's own mode). `read_dir_in` lists through the descriptor (`fdopendir` of
+      a `dup`, rewound). Done when: `ops/mode.rs`'s
+      `on_disk` tests are `#[cfg(unix)]` and pass on the macOS runner. — done
+      e2c0818, green on the macOS runner (run 36640376030)
+- [x] **M2.29** `platform::process::tie_to_this_thread` macOS body (S1.50), in
       place of the no-op under which an rclone daemon outlives a delightfile that
       crashes. macOS has no `PR_SET_PDEATHSIG`; the notice of a parent's exit is
       a kqueue `EVFILT_PROC` filter with `NOTE_EXIT`. Nothing run in `pre_exec`
       outlasts the `exec`, so where that watch runs (for instance a small
       wrapper process that starts the daemon and signals it when the parent
       goes) is this task's to settle and record. Done when: a runner test kills
-      the parent with `SIGKILL` and sees the daemon gone within a second.
+      the parent with `SIGKILL` and sees the daemon gone within a second. — done
+      56dc919, green on the macOS runner (run 36640376030)
 - [ ] **M2.31** Take `-A dead_code` off the macos job's clippy line in
       `.github/workflows/ci.yml` (S1.53). It is there because df-app items
       whose only callers are Linux bodies — the drag-and-drop helpers in
@@ -324,6 +340,40 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       Linux device alone constructs — are dead on macOS until this phase gives
       them callers (M2.10–M2.15). Done when: the last of those lands and the
       macos job's clippy passes without the flag.
+- [x] **M2.32** `cargo test -p df-core` green on the macOS runner (added
+      2026-09-29: the first CI run had 9 failures there). The rsync tests skip
+      where rsync is older than 3.1 (M2.6); the zip test lists the UTF-8 name
+      with bsdtar where Apple's `unzip` prints bytes 0x80–0x9F as `?`, and
+      takes libarchive's NFD spelling of it; a socket path is measured against
+      the platform's `sun_path` (`platform::socket::PATH_MAX`: 107 on Linux,
+      103 on macOS) and the tests that bind one do it under `/tmp` when
+      `$TMPDIR` is too deep; the fake server that closes at once is `true` on
+      `PATH`, not `/bin/true`. Done when: the macos job's `cargo test -p
+      df-core` step passes. — done d6c1b1a, green on the macOS runner
+      (run 36640376030)
+- [x] **M2.33** `platform::xattr` macOS body (added 2026-09-29, when Brian
+      delegated the open question on tags): tags are Finder's
+      `com.apple.metadata:_kMDItemUserTags`, a binary plist of names read and
+      written by a hand-written codec limited to an array of strings
+      (`platform/macos/bplist.rs`), each name with an optional `\n<colour
+      index>`; `fs::tags`' `user.xdg.tags` is answered from it (names joined
+      with commas), the seven colours written with Finder's indices (grey 1,
+      green 2, purple 3, blue 4, yellow 5, red 6, orange 7) and a colour Finder
+      gave a tag kept when the tags are written again; other `user.*`
+      attributes are carried with `getxattr`/`setxattr`/`listxattr`/
+      `removexattr` and `XATTR_NOFOLLOW`; a tag on a link is refused as on
+      Linux. Done when: the tag tests in `fs/tags.rs` and the body's own run
+      on the macOS runner, a tag written there reads back from Finder's
+      attribute as Finder's plist, and live check V7 §4.4. — done a8c8f81,
+      green on the macOS runner (run 36640376030)
+- [ ] **M2.34** Emptying old trash on macOS (`[mgr] trash_keep_days`, added
+      2026-09-29): `purge_expired`, `purge_expired_if_due` and `purge_due_in`
+      over the M2.8 journal, with a stamp beside it so one window a day purges,
+      as Linux's does over the freedesktop trash. Until then `purge_due_in` is
+      never due and the other two refuse ("Emptying old trash is not available
+      on this platform"). Done when: the aging tests of
+      `platform/linux/trash.rs` have macOS twins over the journal that pass on
+      the runner.
 
 ## Decisions log
 
@@ -344,6 +394,108 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   while the df-core branch took `M2.28` for the chmod walk; at integration the
   chmod walk kept it and the appearance body became `M2.30`
   (`01-platform-seam.md` Decisions log).
+- (df-core) 2026-09-29 — Tags on macOS are Finder's tags
+  (`com.apple.metadata:_kMDItemUserTags`), so a tag set in delightfile shows
+  in Finder and the reverse. Brian delegated the open question on 2026-09-29;
+  it is removed below and M2.33 appended for the body.
+- (df-core) 2026-09-29 — M2.1: a kqueue watch is on the directory's vnode, so
+  it hears names made, removed and renamed in it, and not a file inside
+  rewritten in place or `chmod`ed; a row's size or date is then brought up to
+  date by the next rescan. A save through a temporary file and a rename is
+  seen. There is no `Overflow` on macOS (`EV_CLEAR` folds, never drops). A
+  burst is held to one refresh per debounce window it spans: the runner took
+  seven windows to write the 200-file burst the Linux test holds to four, so
+  both watcher tests bound it by the time the burst took, with four as the
+  floor.
+- (df-core) 2026-09-29 — M2.2: `clone_before_open` takes the reader the copy
+  already has open, not the source's path (the task sketched `(src, dst)`),
+  so the clone is of the file the copy opened. `ENOTSUP` and `EOPNOTSUPP`
+  (different numbers on macOS), `EXDEV` and `EINVAL` fall back to the chunked
+  copy. The clone is opened read-only for the durable flush, since a
+  read-only source's clone cannot be opened for writing. `without_reflink`
+  turns it off in tests as it does `FICLONE`.
+- (df-core) 2026-09-29 — M2.3: `fs::tags::read_here` asks `du::is_remote`
+  instead of matching `du::magic_of` against the Linux magics itself — the
+  same answer on Linux, where `is_remote` is that match, and on macOS the one
+  that knows a share by its `statfs` type name, so tags are not read per row
+  on an SMB share.
+- (df-core) 2026-09-29 — M2.4: each uid and gid is asked of Open Directory
+  once per process and the answer kept, a name or none; names are leaked for
+  the process so the call answers `&'static str` as Linux's does. The owner
+  test's "unknown" id became 3999999999: 4294967294 is macOS's `nobody`.
+- (df-core) 2026-09-29 — M2.5: libc 0.2.189 has
+  `pthread_set_qos_class_self_np` and `qos_class_t` for Apple after all, so
+  they are used from libc; the task text is corrected. Every nice level is
+  `QOS_CLASS_UTILITY`.
+- (df-core) 2026-09-29 — M2.6, a Linux-visible change: `rsync::available()`
+  requires 3.1.0 or newer on every Unix, read from `rsync --version` with
+  `LC_ALL=C`. On Linux that refuses only an rsync old enough that every run
+  already failed on `--info=progress2`; `parse_version` also takes a `v`
+  before the numbers. `RSYNC_HINT` is `""` on Linux and Windows, so Linux's
+  sentence is unchanged.
+- (df-core) 2026-09-29 — M2.8: `TrashedItem` keeps the four fields every
+  target and df-app share. On macOS `trash_root` is the journal (the Trash's
+  root, so a redo's `Trash::at(item.trash_root)` is the same trash) and
+  `location()` reads the item's line back from it, cached per journal by its
+  size and date — the task's sketch gave the item a `location` field, which
+  would change the struct on every target and df-app's literals of it. The
+  journal is `state_dir()/delightfile/trash-journal`, beside the `state`
+  file (the task's `state_dir()/trash-journal` read as delightfile's own
+  state directory), changed only under an exclusive lock on
+  `trash-journal.lock`; `files_dir()` is the journal, as the stub's root was;
+  `info_path()` is the location. A purge drops the line first, as Linux drops
+  the `.trashinfo` first. Tests trash into the runner's real `~/.Trash`
+  (NSFileManager chooses) with a journal in their fixture, and purge what
+  they leave. Aging is M2.34.
+- (df-core) 2026-09-29 — M2.18: yazi's `yazi-fs/src/xdg.rs` has no macOS
+  branch (config `~/.config/yazi`, state `~/.local/state/yazi`, temp
+  `std::env::temp_dir()` + `yazi-<uid>`), so macOS keeps the XDG rules and
+  the thumbnail cache is shared as on Linux. `runtime_dir()` is `$TMPDIR`;
+  the Unix `$XDG_RUNTIME_DIR` body is Linux's alone.
+- (df-core) 2026-09-29 — M2.28: without `O_PATH` a descriptor needs read
+  permission, so a folder its owner has shut is found and opened when next
+  used (its inode checked then), and until then refuses every use with
+  `EACCES` — what Linux's `O_PATH` descriptor answers — which keeps the
+  "Apply again" sentence. The walk's types are the platform's
+  (`nofollow::{Folder, Entry, Stat, meta}`; on Linux `File`, `File`,
+  `Metadata` and `platform::meta`), since `std::fs::Metadata` cannot be made
+  from an `fstatat`; `ops/mode.rs` changed in its type names only. The last
+  name is looked up once by `fstatat` and once by `fchmodat`, so a file
+  renamed over it between the two is caught by the inode the record keeps
+  rather than by a descriptor. `fchmodat` with `AT_SYMLINK_NOFOLLOW` sets a
+  link's own mode rather than refusing it, as the task text had it; it never
+  follows one, and the lookup before it has already left links alone. The
+  task text is corrected.
+- (df-core) 2026-09-29 — M2.29: the watch runs in a process of its own,
+  forked by the daemon-to-be between `fork` and `exec` (the daemon's child,
+  never exec'd): it closes every inherited descriptor — `std`'s exec-error
+  pipe among them, which would otherwise keep `spawn` waiting — and waits in
+  kqueue on `EVFILT_PROC`/`NOTE_EXIT` for delightfile or the daemon, sending
+  the daemon `SIGTERM` if delightfile goes first. A thread's exit is no
+  kqueue event, so on macOS the daemon is tied to the process, not the
+  thread. It shows as a second `delightfile`, a child of `rclone`.
+- (df-core) 2026-09-29 — M2.32: the right directory for a real rclone socket
+  on macOS is `$TMPDIR/delightfile/` (the runtime directory, M2.18), then
+  `$TMPDIR/delightfile-<uid>/`, then `/tmp/delightfile-<uid>/` when a long
+  remote name passes `sun_path`'s 103 bytes; the bound is now the platform's
+  (`size_of::<sockaddr_un>() − offset_of!(sun_path) − 1`), not Linux's 107.
+- (df-core) 2026-09-29 — M2.33: a comma list is the seam `fs::tags` speaks,
+  and the macOS body translates it: reading takes the `\n<index>` off each
+  name, writing gives each name the colour Finder already had for it on the
+  file, else a colour tag's own index, else none, so a clone keeps every
+  colour and a chunked copy keeps the colour tags'. Finder's attribute is
+  listed as `user.xdg.tags`, and a literal `user.xdg.tags` (a disk tagged on
+  Linux) is hidden behind it and not read. A link could hold attributes on
+  macOS but is refused a tag, as on Linux. A Finder tag with a comma in its
+  name reads as two.
+- (df-core) 2026-09-29 — Stubs only Windows still stands behind are compiled
+  only there (`#[cfg(windows)]` on their lines in `platform/stub/mod.rs`),
+  so none is dead code on macOS; every df-core stub is now Windows-only.
+- (df-core) 2026-09-29 — M2.32, M2.33 and M2.34 were numbered on the df-core
+  branch while the df-app branch works in parallel; if the two branches took
+  the same numbers, the df-core ones keep M2.32 (named in the brief) and
+  M2.33 (the tags decision), and whichever is merged second renumbers
+  anything else.
 
 ## Open questions
 
@@ -352,10 +504,3 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   the fallback is an `NSView` subclass override of `mouseDragged:` — record which.
 - Ghostty on macOS: does `ghostty -e` work from `open -a`? Affects the `edit` opener
   default in `05-defaults-and-config.md`.
-- Tags on macOS (S1.18): which extended attribute do they live in? freedesktop's
-  `user.xdg.tags` (what Linux delightfile writes, so a disk shared with Linux
-  keeps its tags, but Finder shows none of them) or Finder's
-  `com.apple.metadata:_kMDItemUserTags` (a binary plist of names with colour
-  suffixes, which Finder and Spotlight read but Linux tools do not)? Until this
-  is decided `platform::xattr` on macOS is the stub: no tags are read, `T`
-  refuses, and a copy carries no attributes.

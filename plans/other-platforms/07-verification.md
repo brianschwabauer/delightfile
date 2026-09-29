@@ -119,8 +119,13 @@ document that owns the feature.
 - [ ] Trash with `d`: file appears in Finder's Trash; `u` undo restores it to the
       original folder; `D` deletes permanently after the prompt; the trash view tab
       lists, restores and purges items the app trashed.
-- [ ] Items trashed by Finder appear in the trash view (or are documented as not
-      appearing; Phase 2 decides, record which).
+- [ ] Items trashed by Finder do not appear in the trash view (M2.8 decided it:
+      the view lists what the app trashed, from its journal); emptying the Trash in
+      Finder takes the app's items out of the view too.
+- [ ] Tags (`T`): a tag set in the app shows in Finder, a colour tag in its colour;
+      a tag set in Finder shows on the row; a copy (same volume and across) keeps
+      them; `T` on a symlink is refused (M2.33).
+- [ ] Owner linemode (`m o`): the logged-in user and `staff` by name (M2.4).
 - [ ] Rename, bulk rename with `{taken}` on a photo (EXIF read), `{camera}`.
 - [ ] Create file, create folder with `/` in the prompt.
 - [ ] Archive: extract a zip, a tar.gz, a 7z (if `7z` is installed via Homebrew,
@@ -153,6 +158,10 @@ document that owns the feature.
       eject the USB stick from the card and confirm Finder agrees.
 - [ ] SFTP: `Connect to:` an ssh host that is in `~/.ssh/config`; list, preview a
       text file, copy a file down, copy a file up.
+- [ ] A cloud remote open, then `kill -9` the app: `rclone rcd` is gone within a
+      second (`ps aux | grep rclone`) (M2.29).
+- [ ] `alt+p` sync to a server with Apple's `rsync` only: refused, and the toast
+      names Homebrew's (`RSYNC_HINT`); with `brew install rsync`: it runs (M2.6).
 - [ ] `--chooser-file` and the portal flag are absent from `--help`.
 - [ ] Zoxide jumps if `zoxide` is installed via Homebrew.
 

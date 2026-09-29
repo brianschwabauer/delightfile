@@ -95,8 +95,8 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 33–46 | `REMOTE_FS_MAGIC`: Linux `f_type` magics (NFS 0x6969, CIFS, SMB2, FUSE 0x65735546, …) | Linux-only (macOS: compiles, never matches) | `is_remote` | In the Apple `libc::statfs` layout, `f_type` is a `u32` Darwin type number, with the name in `f_fstypename: [c_char; 16]` ✓ S1.5 |
-| 61–80 | `magic_of`: `OsStrExt::as_bytes` → `CString`, `libc::statfs`, `buf.f_type as i64` | Linux-only (macOS: compiles; Windows: no compile) | `is_remote` ← app:app.rs:poll_folders, begin_folder_sizes | ✓ S1.5 |
+| 33–46 | `REMOTE_FS_MAGIC`: Linux `f_type` magics (NFS 0x6969, CIFS, SMB2, FUSE 0x65735546, …) | Linux-only (macOS: compiles, never matches) | `is_remote` | In the Apple `libc::statfs` layout, `f_type` is a `u32` Darwin type number, with the name in `f_fstypename: [c_char; 16]` ✓ S1.5 ✓ M2.3 (macOS asks `f_fstypename`) |
+| 61–80 | `magic_of`: `OsStrExt::as_bytes` → `CString`, `libc::statfs`, `buf.f_type as i64` | Linux-only (macOS: compiles; Windows: no compile) | `is_remote` ← app:app.rs:poll_folders, begin_folder_sizes | ✓ S1.5 ✓ M2.3 |
 
 ### du/walk.rs
 
@@ -151,7 +151,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 25–28 | `users()`: `parse_id_file("/etc/passwd")` | Linux-only (macOS: compiles, incomplete) | `user_name`, `owner_label` ← core:fs/entry.rs:owner_label ← app:format.rs:linemode_text, app:remote.rs:card_rows; app:spot.rs:rows | macOS `/etc/passwd` lists system accounts only (users come from Open Directory). Windows: the file is absent, so owners print as numbers ✓ S1.17 |
+| 25–28 | `users()`: `parse_id_file("/etc/passwd")` | Linux-only (macOS: compiles, incomplete) | `user_name`, `owner_label` ← core:fs/entry.rs:owner_label ← app:format.rs:linemode_text, app:remote.rs:card_rows; app:spot.rs:rows | macOS `/etc/passwd` lists system accounts only (users come from Open Directory). Windows: the file is absent, so owners print as numbers ✓ S1.17 ✓ M2.4 (`getpwuid_r`) |
 | 31–34 | `groups()`: `parse_id_file("/etc/group")` | Linux-only (as above) | `group_name`, `owner_label` | ✓ S1.17 |
 | 39–84 | uid/gid `u32` → name model (`user_name(uid: u32)`, `group_name(gid: u32)`, `owner_label(uid, gid)`) | Windows-differs | as above | Windows owners are SIDs ✓ S1.17 |
 
@@ -162,16 +162,16 @@
 | 52 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `c_path`, `Find::next` | ✓ S1.16, S1.18 |
 | 141, 154–155, 290, 412–430, 451 | errno: `ENODATA`, `ENOTSUP`, `EPERM`, `ENOSYS`, `ERANGE` read off attribute calls | Linux-only (macOS numbers differ; `ENODATA` is `ENOATTR` there) | `write`, `refusal`, `quiet`, `sized`, `get_raw`, test `set_raw` | ✓ S1.18 |
 | 359 | `Find::next`: `file_name().as_bytes().first() == Some(&b'.')` for the hidden check | Unix-only | `find` ← app:search.rs | ✓ S1.16 |
-| 474–519 | `lgetxattr`, `llistxattr`, `lsetxattr`, `lremovexattr` | Linux-only (macOS: no compile; its calls take an options word) | `get_raw`, `list_raw`, `set_raw`, `remove_raw` ← `read`, `write`, `find`, `carry` (← core:ops/copy.rs, core:sync/execute.rs) | ✓ S1.18 |
+| 474–519 | `lgetxattr`, `llistxattr`, `lsetxattr`, `lremovexattr` | Linux-only (macOS: no compile; its calls take an options word) | `get_raw`, `list_raw`, `set_raw`, `remove_raw` ← `read`, `write`, `find`, `carry` (← core:ops/copy.rs, core:sync/execute.rs) | ✓ S1.18 ✓ M2.33 (macOS `*xattr` with `XATTR_NOFOLLOW`, tags in Finder's attribute) |
 
 ### fs/watch.rs
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 41 | `use super::inotify::{self, Inotify, Pipe, WATCH_MASK}` | Linux-only | | ✓ S1.4 |
-| 94–111 | `Watcher::new`: `Inotify::new()?`, `Pipe::new()?`, spawns thread `df-watch` running `run` | Linux-only | `Watcher::start` ← app:app.rs:assemble | On error, `start` falls back to `Watcher::disabled()` (122: log text names inotify) ✓ S1.4 |
+| 94–111 | `Watcher::new`: `Inotify::new()?`, `Pipe::new()?`, spawns thread `df-watch` running `run` | Linux-only | `Watcher::start` ← app:app.rs:assemble | On error, `start` falls back to `Watcher::disabled()` (122: log text names inotify) ✓ S1.4 ✓ M2.1 (kqueue) |
 | 147–167 | `Watcher::watch` / `interrupt` → `Pipe::wake` | Linux-only (via `Pipe`) | app:app.rs:assemble, rewatch; `drain` ← app:app.rs:poll_workers | ✓ S1.4 |
-| 181–276 | `run`: `inotify::poll_two(inotify.fd(), pipe.read_fd(), timeout)`, `read_events`, `HashMap<i32 (wd), PathBuf>` | Linux-only | thread body | ✓ S1.4 |
+| 181–276 | `run`: `inotify::poll_two(inotify.fd(), pipe.read_fd(), timeout)`, `read_events`, `HashMap<i32 (wd), PathBuf>` | Linux-only | thread body | ✓ S1.4 ✓ M2.1 (kqueue) |
 | 279–301 | `set_watches`: `add_watch(&dir, WATCH_MASK)`, `rm_watch(wd)` | Linux-only | `run` | ✓ S1.4 |
 
 ### git/status.rs
@@ -197,12 +197,12 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 54 | `const FICLONE: libc::c_ulong = 0x4004_9409` | Linux-only (macOS: compiles, ioctl fails) | `reflink` | ✓ S1.5 |
+| 54 | `const FICLONE: libc::c_ulong = 0x4004_9409` | Linux-only (macOS: compiles, ioctl fails) | `reflink` | ✓ S1.5 ✓ M2.2 (`fclonefileat` before the open) |
 | 231–244 | `copy_symlink`: `std::os::unix::fs::symlink(&target, dst)` (239) | Unix-only | `copy_entry`; core:sync/execute.rs:copy_one | Windows needs `symlink_file`/`symlink_dir` plus privilege ✓ S1.5 |
 | 432–439 | `sync_file`: `File::sync_all` | macOS-differs | `copy_file`, `sync_path` ← core:sync/rsync.rs:flush_here | Rust std on Apple implements `sync_all` with `fcntl(F_FULLFSYNC)`. Doc comment 431 describes Linux `fsync` |
 | 464–479 | `sync_dir`: `File::open(dir)` then `sync_all`; `EINVAL` tolerated | Windows-differs | `sync_parent` ← `copy_symlink`, `copy_dir`, `copy_file`, core:sync/execute.rs:make_dir; core:sync/rsync.rs:flush_here | On Windows std's `File::open` of a directory fails (no `FILE_FLAG_BACKUP_SEMANTICS`) ✓ S1.5 |
 | 473 | `e.raw_os_error() == Some(libc::EINVAL)` | Windows-differs | `sync_dir` | On Windows `raw_os_error` carries Win32 codes. `libc::EINVAL` there is the CRT's 22 ✓ S1.3 |
-| 581–594 | `reflink`: `use std::os::unix::io::AsRawFd`; `libc::ioctl(writer, FICLONE, reader)` | Linux-only (macOS: compiles, always falls back; Windows: no compile) | `write_contents` ← `copy_file` ← `copy_entry`, `copy_file_with` | ✓ S1.5 |
+| 581–594 | `reflink`: `use std::os::unix::io::AsRawFd`; `libc::ioctl(writer, FICLONE, reader)` | Linux-only (macOS: compiles, always falls back; Windows: no compile) | `write_contents` ← `copy_file` ← `copy_entry`, `copy_file_with` | ✓ S1.5 ✓ M2.2 |
 | 629–635 | `apply_mode`: `PermissionsExt::mode()`, `Permissions::from_mode` | Unix-only | `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | ✓ S1.7 |
 | 651–688 | `set_times`: `OsStrExt` → `CString`; `libc::timespec`; `libc::utimensat(AT_FDCWD, …, AT_SYMLINK_NOFOLLOW)` | Unix-only | `apply_times` ← `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | ✓ S1.5 |
 | 655, 665–668 | `const UTIME_OMIT: i64 = 0x3ffffffe` used as `tv_nsec` for a missing time | Linux-only (macOS: compiles, wrong constant) | `set_times` | libc apple: `UTIME_OMIT = -2`. Taken for pre-1970 or unreadable atime/mtime ✓ S1.5 |
@@ -248,8 +248,8 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 63–64 | `std::os::fd::AsRawFd`; `std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}` | Unix-only | file-wide | ✓ S1.7, S1.19 |
-| 313–390 | The anchored walk: `PROC_FD = "/proc/self/fd"`, `proc_ready`, `named`, `open_named` with `libc::O_PATH \| O_NOFOLLOW \| O_DIRECTORY`, `open_in`, `stat_in` | Linux-only (macOS: no `O_PATH`, no `/proc`; Windows: neither) | `plan`, `chmod`, `undo`, `redo` ← app:app.rs, app:app/permissions.rs | ✓ S1.19 |
-| 423–483 | `Finder` (anchor opened with `O_PATH \| O_DIRECTORY`, `ENOTDIR` for a swapped folder) | Linux-only | as above | ✓ S1.19 |
+| 313–390 | The anchored walk: `PROC_FD = "/proc/self/fd"`, `proc_ready`, `named`, `open_named` with `libc::O_PATH \| O_NOFOLLOW \| O_DIRECTORY`, `open_in`, `stat_in` | Linux-only (macOS: no `O_PATH`, no `/proc`; Windows: neither) | `plan`, `chmod`, `undo`, `redo` ← app:app.rs, app:app/permissions.rs | ✓ S1.19 ✓ M2.28 (macOS: `openat`/`fstatat`/`fchmodat`) |
+| 423–483 | `Finder` (anchor opened with `O_PATH \| O_DIRECTORY`, `ENOTDIR` for a swapped folder) | Linux-only | as above | ✓ S1.19 ✓ M2.28 |
 | 486–489 | `swapped`: `ENOTDIR \| ELOOP` | Linux-only numbers | `lookup_failed`, `unreachable`, `redo_unreachable` | ✓ S1.19 |
 | 503–516 | `set_mode_of`: `set_permissions` of the `/proc` name with `Permissions::from_mode` | Linux-only | `set_one`, `undo`, `redo` | ✓ S1.19 |
 | 564–634, 825–844, 1054, 1085–1145 | `meta.mode()`, `dev()`, `ino()` | Unix-only | `plan`, `set_one`, `redo`, `still_as_*` | ✓ S1.7 |
@@ -267,8 +267,8 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 1–30 | Module: freedesktop.org Trash spec (`Trash/files`, `Trash/info/*.trashinfo`, `$topdir/.Trash[-$uid]`) | Linux-only | | The macOS Finder trash is `~/.Trash` (plus `/Volumes/*/.Trashes/<uid>`). The Windows Recycle Bin is per-volume `$Recycle.Bin\<SID>` ✓ S1.6 |
-| 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` ✓ S1.6 |
+| 1–30 | Module: freedesktop.org Trash spec (`Trash/files`, `Trash/info/*.trashinfo`, `$topdir/.Trash[-$uid]`) | Linux-only | | The macOS Finder trash is `~/.Trash` (plus `/Volumes/*/.Trashes/<uid>`). The Windows Recycle Bin is per-volume `$Recycle.Bin\<SID>` ✓ S1.6 ✓ M2.8 (NSFileManager + journal) |
+| 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` ✓ S1.6 ✓ M2.8 (macOS: the journal in the state directory) |
 | 132–145 | `ensure`: `PermissionsExt`, `from_mode(0o700)` | Unix-only | `Trash::trash` | ✓ S1.6 |
 | 178–184 | `trash`: `rename(path, &dst)`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::trash` ← core:ops/jobs.rs:TrashJob::run; core:sync/execute.rs:remove; app:app.rs:run, menu_action | See ops/copy.rs:738 on Win32 codes ✓ S1.3 |
 | 201–205 | `claim_name`: `room = MAX_NAME_BYTES (255) - "trashinfo".len() - 1`, in bytes | Windows-differs | `trash` | The NTFS component limit is 255 UTF-16 units ✓ S1.6 |
@@ -327,7 +327,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 470–482 | `forget_cached`: `use std::os::unix::io::AsRawFd`; `libc::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` | Linux-only (macOS: no compile, libc apple has no `posix_fadvise`) | `read_back` ← `Run::same_bytes` (verify); core:sync/rsync.rs:verify_remote | ✓ S1.5 |
+| 470–482 | `forget_cached`: `use std::os::unix::io::AsRawFd`; `libc::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` | Linux-only (macOS: no compile, libc apple has no `posix_fadvise`) | `read_back` ← `Run::same_bytes` (verify); core:sync/rsync.rs:verify_remote | ✓ S1.5 ✓ M2.7 (nothing on macOS) |
 
 ### sync/mod.rs
 
@@ -353,11 +353,11 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 43 | `use std::os::unix::ffi::{OsStrExt, OsStringExt}` | Unix-only | file-wide | ✓ S1.16 |
-| 69–77 | `available()`: `rsync --version` | Windows-differs; macOS-differs | app:app/syncing.rs:remote_sync | rsync is not in a stock Windows install. macOS bundles `/usr/bin/rsync` 2.6.9 (macOS 15 adds openrsync) ✓ S1.14 |
+| 69–77 | `available()`: `rsync --version` | Windows-differs; macOS-differs | app:app/syncing.rs:remote_sync | rsync is not in a stock Windows install. macOS bundles `/usr/bin/rsync` 2.6.9 (macOS 15 adds openrsync) ✓ S1.14 ✓ M2.6 (3.1 or newer) |
 | 126–139 | `Host::shell`: `Command::new("ssh")` + a POSIX-shell script for the server | Windows-differs | `remote_digests` | §4 |
 | 173–188 | `rsh()` / `rsh_with("ssh")`: the `-e` string rsync uses to start ssh | Windows-differs | `common()` → `dry_run_args`, `run_args` | |
 | 230–244 | `endpoint`: `as_os_str().as_bytes()`, trims or appends `b'/'`, prefixes `host:` for the remote side, `OsStr::from_bytes` | Unix-only | `endpoints` → `dry_run_args`, `run_args` | In rsync's argument syntax a colon before the first `/` means `host:path`, so a Windows local path `C:\x` reads as host `C` ✓ S1.16 |
-| 266–308 | `dry_run_args` / `run_args`: `--info=progress2`, `--no-inc-recursive`, `--out-format=%i %l %n`, `--delete-after`, `--fsync` | macOS-differs | `plan`, `run` | `--info` needs rsync ≥ 3.1.0 and `--no-inc-recursive` ≥ 3.0.0. `--fsync` is gated on ≥ 3.2.0 (`FSYNC_SINCE`, 312) |
+| 266–308 | `dry_run_args` / `run_args`: `--info=progress2`, `--no-inc-recursive`, `--out-format=%i %l %n`, `--delete-after`, `--fsync` | macOS-differs | `plan`, `run` | `--info` needs rsync ≥ 3.1.0 and `--no-inc-recursive` ≥ 3.0.0. `--fsync` is gated on ≥ 3.2.0 (`FSYNC_SINCE`, 312) ✓ M2.6 |
 | 383–426 | `parse_line`: `OsString::from_vec(name)` from rsync's itemized bytes | Unix-only | `parse_itemized` ← `plan`; stdout thread in `run` | ✓ S1.16 |
 | 429–450 | `unescape`: rsync `\#ooo` octal escapes to raw bytes | Unix-only (byte model) | `parse_line` | |
 | 511–536 | `plan`: `Command::new("rsync")` dry run via `collect` | Windows-differs | app:sync.rs:remote_plan_job | §4 |
@@ -387,7 +387,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 27–43 | `lower_priority`: `libc::setpriority(libc::PRIO_PROCESS, 0, nice)` | Linux-only (macOS: compiles, whole process; Windows: no compile) | core:tasks.rs:worker_loop; core:du/scanner.rs:new; core:preview/job.rs:with_debounce; app:preview/body.rs, app:bulk.rs, app:grid.rs, app:preview/decode.rs, app:preview/prepare.rs, app:playback/mod.rs, app:preview/doc/mod.rs (one call each, inside spawned worker closures) | The doc comment (19–21) states that `who = 0` means the calling thread only on Linux ✓ S1.9 |
+| 27–43 | `lower_priority`: `libc::setpriority(libc::PRIO_PROCESS, 0, nice)` | Linux-only (macOS: compiles, whole process; Windows: no compile) | core:tasks.rs:worker_loop; core:du/scanner.rs:new; core:preview/job.rs:with_debounce; app:preview/body.rs, app:bulk.rs, app:grid.rs, app:preview/decode.rs, app:preview/prepare.rs, app:playback/mod.rs, app:preview/doc/mod.rs (one call each, inside spawned worker closures) | The doc comment (19–21) states that `who = 0` means the calling thread only on Linux ✓ S1.9 ✓ M2.5 (QoS utility) |
 
 ### vfs/config.rs
 
@@ -414,7 +414,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 55 | `use std::os::unix::process::CommandExt` (`pre_exec`) | Unix-only | `tie_to_this_thread` | ✓ S1.50 |
-| 61–95 | `tie_to_this_thread`: `prctl(PR_SET_PDEATHSIG, SIGTERM)` and `getppid()` in `pre_exec`, `ESRCH` when the parent is gone | Linux-only (macOS: no `prctl`; Windows: no `pre_exec`) | core:vfs/rclone.rs:Daemon::spawn; app:mounts.rs (gvfs watcher) | ✓ S1.50 |
+| 61–95 | `tie_to_this_thread`: `prctl(PR_SET_PDEATHSIG, SIGTERM)` and `getppid()` in `pre_exec`, `ESRCH` when the parent is gone | Linux-only (macOS: no `prctl`; Windows: no `pre_exec`) | core:vfs/rclone.rs:Daemon::spawn; app:mounts.rs (gvfs watcher) | ✓ S1.50 ✓ M2.29 (a kqueue `NOTE_EXIT` watcher) |
 | 104–116 | `terminate`: `libc::kill(pid, SIGTERM)` on a child not yet reaped | Unix-only | core:vfs/rclone.rs:Daemon drop | ✓ S1.50 |
 
 ### vfs/http.rs (added 2026-09-29; lines as of 6aee8d1)
@@ -429,7 +429,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 98 | `use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}` | Unix-only | `private_dir`, a test | ✓ S1.51 |
-| 1091–1133 | `socket_path`: `$XDG_RUNTIME_DIR` (non-empty), `$TMPDIR/delightfile-<uid>`, `/tmp/delightfile-<uid>`, `sun_path` bound | Unix model (Windows: no unix socket) | `Daemon::spawn` | uid ✓ S1.8, runtime dir ✓ S1.11 |
+| 1091–1133 | `socket_path`: `$XDG_RUNTIME_DIR` (non-empty), `$TMPDIR/delightfile-<uid>`, `/tmp/delightfile-<uid>`, `sun_path` bound | Unix model (Windows: no unix socket) | `Daemon::spawn` | uid ✓ S1.8, runtime dir ✓ S1.11 `sun_path` bound per platform ✓ M2.32; macOS runtime dir `$TMPDIR` ✓ M2.18 |
 | 1140–1157 | `private_dir`: `DirBuilder::mode(0o700)`, owner `uid()` check, re-close with `from_mode(0o700)` | Unix-only | `socket_path` | ✓ S1.51 |
 | 248, 857 | `child::tie_to_this_thread`, `child::terminate` | Linux-only / Unix-only | `Daemon::spawn`, `Drop for Daemon` | ✓ S1.50 |
 
