@@ -28,6 +28,7 @@
 //!
 //! | Module | Item | Linux | macOS | Windows |
 //! |---|---|---|---|---|
+//! | `errno` | `is_cross_device`, `is_exists`, `is_not_empty`, `is_not_dir`, `is_dir`, `is_invalid`, `is_transient`: `fn(&io::Error) -> bool` | `libc::E*` (unix) | `libc::E*` (unix) | Win32 codes; `is_dir` never |
 
 #[cfg(unix)]
 mod unix;

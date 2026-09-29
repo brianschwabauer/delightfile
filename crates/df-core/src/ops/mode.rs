@@ -816,7 +816,7 @@ fn set_one(finder: &mut Finder, anchor: &Path, pair: &Planned) -> std::result::R
         .map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {
                 Missed::Gone
-            } else if expected == DIRECTORY && e.raw_os_error() == Some(libc::ENOTDIR) {
+            } else if expected == DIRECTORY && crate::platform::errno::is_not_dir(&e) {
                 Missed::Failed(NOT_THE_SAME_KIND.to_string())
             } else {
                 Missed::Failed(lookup_failed(&e))

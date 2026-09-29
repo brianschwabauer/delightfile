@@ -32,6 +32,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::platform::errno;
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
@@ -505,7 +506,7 @@ pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     let handle = File::open(dir).map_err(|e| DfError::io(dir, e))?;
     match handle.sync_all() {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {
+        Err(e) if errno::is_invalid(&e) => {
             log::debug!("{} cannot be flushed as a directory: {e}", dir.display());
             Ok(())
         }
@@ -776,7 +777,7 @@ pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
     // directory, a vanished mount — and there was nothing left to put back.
     match std::fs::rename(src, dst) {
         Ok(()) => return Ok(CopyStats::default()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+        Err(e) if errno::is_cross_device(&e) => {
             // Across filesystems the copy overwrites in place, temp-file and
             // all; an existing destination *directory* is merged into rather
             // than replaced, which leaves too much rather than too little.
@@ -790,7 +791,7 @@ pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
     super::delete::remove_tree_unchecked(dst)?;
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(CopyStats::default()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => move_cross_device(src, dst, ctx),
+        Err(e) if errno::is_cross_device(&e) => move_cross_device(src, dst, ctx),
         Err(e) => Err(DfError::io(src, e)),
     }
 }
@@ -801,12 +802,9 @@ pub fn move_path(src: &Path, dst: &Path, ctx: &TaskCtx, overwrite: bool) -> Resu
 /// Only asked when the destination is known to exist, which is what keeps
 /// `ENOTDIR` from being read as "a component of the path is not a directory".
 fn in_the_way(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        // ENOTEMPTY/EEXIST: a directory with something in it. EISDIR: a
-        // directory where the source is not one. ENOTDIR: the reverse.
-        Some(libc::ENOTEMPTY) | Some(libc::EEXIST) | Some(libc::EISDIR) | Some(libc::ENOTDIR)
-    )
+    // ENOTEMPTY/EEXIST: a directory with something in it. EISDIR: a
+    // directory where the source is not one. ENOTDIR: the reverse.
+    errno::is_not_empty(e) || errno::is_exists(e) || errno::is_dir(e) || errno::is_not_dir(e)
 }
 
 /// The cross-filesystem move: copy everything, prove it arrived, then delete

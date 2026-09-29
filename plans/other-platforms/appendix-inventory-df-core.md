@@ -192,13 +192,13 @@
 | 231–244 | `copy_symlink`: `std::os::unix::fs::symlink(&target, dst)` (239) | Unix-only | `copy_entry`; core:sync/execute.rs:copy_one | Windows needs `symlink_file`/`symlink_dir` plus privilege |
 | 432–439 | `sync_file`: `File::sync_all` | macOS-differs | `copy_file`, `sync_path` ← core:sync/rsync.rs:flush_here | Rust std on Apple implements `sync_all` with `fcntl(F_FULLFSYNC)`. Doc comment 431 describes Linux `fsync` |
 | 464–479 | `sync_dir`: `File::open(dir)` then `sync_all`; `EINVAL` tolerated | Windows-differs | `sync_parent` ← `copy_symlink`, `copy_dir`, `copy_file`, core:sync/execute.rs:make_dir; core:sync/rsync.rs:flush_here | On Windows std's `File::open` of a directory fails (no `FILE_FLAG_BACKUP_SEMANTICS`) |
-| 473 | `e.raw_os_error() == Some(libc::EINVAL)` | Windows-differs | `sync_dir` | On Windows `raw_os_error` carries Win32 codes. `libc::EINVAL` there is the CRT's 22 |
+| 473 | `e.raw_os_error() == Some(libc::EINVAL)` | Windows-differs | `sync_dir` | On Windows `raw_os_error` carries Win32 codes. `libc::EINVAL` there is the CRT's 22 ✓ S1.3 |
 | 581–594 | `reflink`: `use std::os::unix::io::AsRawFd`; `libc::ioctl(writer, FICLONE, reader)` | Linux-only (macOS: compiles, always falls back; Windows: no compile) | `write_contents` ← `copy_file` ← `copy_entry`, `copy_file_with` | |
 | 629–635 | `apply_mode`: `PermissionsExt::mode()`, `Permissions::from_mode` | Unix-only | `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | |
 | 651–688 | `set_times`: `OsStrExt` → `CString`; `libc::timespec`; `libc::utimensat(AT_FDCWD, …, AT_SYMLINK_NOFOLLOW)` | Unix-only | `apply_times` ← `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | |
 | 655, 665–668 | `const UTIME_OMIT: i64 = 0x3ffffffe` used as `tv_nsec` for a missing time | Linux-only (macOS: compiles, wrong constant) | `set_times` | libc apple: `UTIME_OMIT = -2`. Taken for pre-1970 or unreadable atime/mtime |
-| 738–756 | `move_path`: `rename`, then `raw_os_error() == Some(libc::EXDEV)` → `move_cross_device` (740, 754) | Windows-differs | core:ops/paste.rs:execute; core:ops/journal.rs:undo_moves | A Windows cross-volume rename fails with Win32 `ERROR_NOT_SAME_DEVICE` (17). `libc::EXDEV` on the windows target is 18 |
-| 764–771 | `in_the_way`: `ENOTEMPTY \| EEXIST \| EISDIR \| ENOTDIR` against `raw_os_error()` | Windows-differs | `move_path` (746) | On the windows target `libc::EEXIST` = 17 = `ERROR_NOT_SAME_DEVICE`. A cross-volume move onto an existing destination therefore matches, and `move_path` then calls `remove_tree_unchecked(dst)` (751) |
+| 738–756 | `move_path`: `rename`, then `raw_os_error() == Some(libc::EXDEV)` → `move_cross_device` (740, 754) | Windows-differs | core:ops/paste.rs:execute; core:ops/journal.rs:undo_moves | A Windows cross-volume rename fails with Win32 `ERROR_NOT_SAME_DEVICE` (17). `libc::EXDEV` on the windows target is 18 ✓ S1.3 |
+| 764–771 | `in_the_way`: `ENOTEMPTY \| EEXIST \| EISDIR \| ENOTDIR` against `raw_os_error()` | Windows-differs | `move_path` (746) | On the windows target `libc::EEXIST` = 17 = `ERROR_NOT_SAME_DEVICE`. A cross-volume move onto an existing destination therefore matches, and `move_path` then calls `remove_tree_unchecked(dst)` (751) ✓ S1.3 |
 
 ### ops/create.rs
 
@@ -247,11 +247,11 @@
 | 1–30 | Module: freedesktop.org Trash spec (`Trash/files`, `Trash/info/*.trashinfo`, `$topdir/.Trash[-$uid]`) | Linux-only | | The macOS Finder trash is `~/.Trash` (plus `/Volumes/*/.Trashes/<uid>`). The Windows Recycle Bin is per-volume `$Recycle.Bin\<SID>` |
 | 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` |
 | 132–145 | `ensure`: `PermissionsExt`, `from_mode(0o700)` | Unix-only | `Trash::trash` | |
-| 178–184 | `trash`: `rename(path, &dst)`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::trash` ← core:ops/jobs.rs:TrashJob::run; core:sync/execute.rs:remove; app:app.rs:run, menu_action | See ops/copy.rs:738 on Win32 codes |
+| 178–184 | `trash`: `rename(path, &dst)`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::trash` ← core:ops/jobs.rs:TrashJob::run; core:sync/execute.rs:remove; app:app.rs:run, menu_action | See ops/copy.rs:738 on Win32 codes ✓ S1.3 |
 | 201–205 | `claim_name`: `room = MAX_NAME_BYTES (255) - "trashinfo".len() - 1`, in bytes | Windows-differs | `trash` | The NTFS component limit is 255 UTF-16 units |
 | 255–270 | `list`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; strips `.trashinfo` on bytes; `OsString::from_vec` | Unix-only | app:app.rs:show_trash | |
 | 410–415 | `restorable_destination`: `original.is_absolute()` and no `..` | Windows-differs | `restore` | A decoded `/home/…` is not absolute on Windows, so the restore is refused |
-| 462–468 | `restore`: `rename`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::restore`; core:ops/journal.rs:undo_trash; app:app.rs:trash_restore | |
+| 462–468 | `restore`: `rename`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::restore`; core:ops/journal.rs:undo_trash; app:app.rs:trash_restore | ✓ S1.3 |
 | 484–491 | `home_trash_path`: `dir.is_absolute()`; `home.join(".local/share/Trash")` | Linux-only | `Trash::home` | |
 | 494–521 | `for_path`: compares `device_of(target)` with `device_of(home)`, else `mount_point_of` + `topdir_trash(uid())` | Linux-only | core:ops/jobs.rs:TrashJob::run | |
 | 524–551 | `topdir_trash`: `.Trash` must be a real dir with the sticky bit (`mode() & 0o1000`); `.Trash/<uid>`; `.Trash-<uid>` at 0o700 | Linux-only | `for_path`; core:sync/mod.rs:trash_for | |
@@ -350,7 +350,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 349–363 | `default_transient`: `raw_os_error()` in `{11, 16, 23, 24, 26, 116}` (EAGAIN, EBUSY, ENFILE, EMFILE, ETXTBSY, ESTALE on Linux) | Linux-only (macOS: compiles, wrong numbers) | `Job::is_transient` default ← `run_one` (982) | libc apple: EAGAIN=35, ESTALE=70, and 11 is EDEADLK. Windows codes are Win32 |
+| 349–363 | `default_transient`: `raw_os_error()` in `{11, 16, 23, 24, 26, 116}` (EAGAIN, EBUSY, ENFILE, EMFILE, ETXTBSY, ESTALE on Linux) | Linux-only (macOS: compiles, wrong numbers) | `Job::is_transient` default ← `run_one` (982) | libc apple: EAGAIN=35, ESTALE=70, and 11 is EDEADLK. Windows codes are Win32 ✓ S1.3 |
 | 896 | `worker_loop`: `crate::thread::lower_priority(NICE_BULK)` | macOS-differs (see thread.rs) | task pool workers | |
 
 ### test_support.rs (compiled under `cfg(test)` and under feature `test-support`, which df-app enables as a dev-dependency)

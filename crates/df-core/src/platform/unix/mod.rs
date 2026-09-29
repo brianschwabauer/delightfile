@@ -5,3 +5,5 @@
 //! they take from it, so the contract in [`super`] is always read off a target
 //! module, and a macOS body that has to diverge later replaces one re-export
 //! rather than a caller.
+
+pub mod errno;

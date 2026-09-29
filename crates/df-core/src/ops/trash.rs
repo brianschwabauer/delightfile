@@ -33,6 +33,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::platform::errno;
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
@@ -177,7 +178,7 @@ impl Trash {
         let dst = self.files_dir().join(&name);
         let moved = match std::fs::rename(path, &dst) {
             Ok(()) => Ok(()),
-            Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            Err(e) if errno::is_cross_device(&e) => {
                 super::copy::move_cross_device(path, &dst, ctx).map(|_stats| ())
             }
             Err(e) => Err(DfError::io(path, e)),
@@ -461,7 +462,7 @@ pub fn restore(item: &TrashedItem, ctx: &TaskCtx) -> Result<PathBuf> {
 
     match std::fs::rename(&src, &item.original) {
         Ok(()) => {}
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+        Err(e) if errno::is_cross_device(&e) => {
             super::copy::move_cross_device(&src, &item.original, ctx)?;
         }
         Err(e) => return Err(DfError::io(&src, e)),

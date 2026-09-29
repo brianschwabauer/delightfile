@@ -53,9 +53,10 @@ has not dropped.
 
 ## 1. Skeleton (do first, in one change)
 
-- [ ] **S1.1** `crates/df-core/src/lib.rs:46–82`: add
+- [x] **S1.1** `crates/df-core/src/lib.rs:46–82`: add
       `#[error("{0} is not available on this platform")] Unsupported(&'static str)`
       to `DfError`. Done when: it exists and `cargo test -p df-core` is green.
+      — done 1758eda
 - [>] **S1.2** Create `crates/df-core/src/platform/{mod.rs, unix/mod.rs, linux/mod.rs,
       macos/mod.rs, windows/mod.rs}` and `crates/df-app/src/platform/{mod.rs,
       linux/mod.rs, macos/mod.rs, windows/mod.rs}` with the selection boilerplate:
@@ -70,7 +71,9 @@ has not dropped.
       that the following tasks add (fill the table as you go; it is the phase's
       checklist inside the code). Done when: both crates compile on Linux with the
       empty modules and the CI workflow from B6.1 exists.
-- [ ] **S1.3** `platform::errno` (df-core): `is_cross_device`, `is_exists`,
+      — df-core core-seam session, started 2026-09-29: df-core half done 1758eda;
+      the df-app half (§3) and the B6.1 workflow belong to other agents.
+- [>] **S1.3** `platform::errno` (df-core): `is_cross_device`, `is_exists`,
       `is_not_empty`, `is_not_dir`, `is_dir`, `is_invalid`, `is_transient`, each
       `fn(&io::Error) -> bool`. Unix body compares `raw_os_error()` with the
       `libc::E*` constants (correct per target by construction; the current
@@ -85,7 +88,9 @@ has not dropped.
       file, but the *move-cross-device* helper it calls is shared and uses the new
       predicate), `tasks.rs:349–363`, and the `EEXIST`/`ENOTEMPTY`/`ENOTDIR`/`EISDIR`
       uses the appendix lists under `ops/*.rs`. Done when: `grep -rn "libc::E" crates/df-core/src`
-      hits only `platform/`.
+      hits only `platform/`. — df-core core-seam session, started 2026-09-29; the
+      grep's remaining hits are in files that move whole in S1.18 (`fs/tags.rs`),
+      S1.19 (`ops/mode.rs`'s descriptor walk) and S1.50 (`vfs/child.rs`).
 
 ## 2. df-core: filesystem primitives
 

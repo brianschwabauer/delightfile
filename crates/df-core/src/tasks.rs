@@ -354,12 +354,9 @@ pub fn default_transient(err: &DfError) -> bool {
     if matches!(source.kind(), Interrupted | WouldBlock | TimedOut) {
         return true;
     }
-    matches!(
-        source.raw_os_error(),
-        // EAGAIN, EBUSY, ENFILE, EMFILE, ETXTBSY, ESTALE: all of them mean
-        // "not now" rather than "not ever".
-        Some(11) | Some(16) | Some(23) | Some(24) | Some(26) | Some(116)
-    )
+    // EAGAIN, EBUSY, ENFILE, EMFILE, ETXTBSY, ESTALE on Unix: all of them
+    // mean "not now" rather than "not ever".
+    crate::platform::errno::is_transient(source)
 }
 
 /// A [`Job`] made from a closure, for the many one-liner tasks (and for tests).
@@ -1352,6 +1349,9 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
+    /// Unix: 16 and 28 are `EBUSY` and `ENOSPC` on Linux and macOS alike, and
+    /// something else entirely in Win32's table.
+    #[cfg(unix)]
     #[test]
     fn transient_classification() {
         let t = |e: std::io::Error| default_transient(&DfError::io("/x", e));
