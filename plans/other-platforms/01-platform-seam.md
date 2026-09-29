@@ -94,7 +94,7 @@ has not dropped.
 
 ## 2. df-core: filesystem primitives
 
-- [>] **S1.4** `platform::watch`: move `fs/inotify.rs` (whole file) and the run loop
+- [x] **S1.4** `platform::watch`: move `fs/inotify.rs` (whole file) and the run loop
       of `fs/watch.rs:94–111, 147–167, 181–301` into `platform/linux/watch.rs` +
       `platform/linux/inotify.rs`. `fs/watch.rs` keeps `WatchEvent`, `Notifier`, the
       `Watcher` struct's public methods (`new`, `start`, `disabled`, `is_active`,
@@ -108,8 +108,9 @@ has not dropped.
       appended. Done when: the two `Watcher` tests in `fs/tests.rs` that start a real
       watcher pass on Linux
       and are `#[cfg(target_os = "linux")]`-gated until Phase 2/4 add bodies; df-core
-      compiles on all three targets.
-- [>] **S1.5** `platform::fs` (df-core), moving these bodies out of `ops/copy.rs`,
+      compiles on all three targets. — done c720dc2; the whole crate compiles for
+      both foreign targets from SHA_CLOSE, cross-checked locally, CI pending
+- [x] **S1.5** `platform::fs` (df-core), moving these bodies out of `ops/copy.rs`,
       `ops/link.rs`, `ops.rs`, `sync/execute.rs`, `vfs/conn.rs`:
       - `reflink(reader: &File, writer: &File) -> bool` — Linux:
         `ops/copy.rs:54, 581–594` (FICLONE) unchanged; macOS/Windows stub `false`.
@@ -146,8 +147,9 @@ has not dropped.
         `false`/`None` (Phases 2/4 fill).
       Done when: `grep -rn "std::os::unix" crates/df-core/src` hits only `platform/`
       (except the `MetadataExt` sites, which are P3.4) and Linux tests pass.
-      — df-core core-seam session, started 2026-09-29; the grep's other hits are
-      later tasks' sites (S1.7, S1.12, S1.13, S1.15, S1.16, S1.18–S1.51).
+      — done df0c64b; the grep holds from SHA_CLOSE for everything but tests
+      marked `#[cfg(unix)]` (S1.15), which name `std::os::unix` because they test
+      Unix semantics, as `00-ground-rules.md` §6 has them do.
 - [>] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
       crates/df-core/src/platform/linux/trash.rs`; `ops/trash.rs` becomes a shim
       that `pub use`s the portable surface. The portable surface is:
@@ -182,7 +184,7 @@ has not dropped.
       local path, so there is nothing to assert there.
       — df-core core-seam session, started 2026-09-29: df-core half done d7768c1;
       the df-app refusal test is the §3 agent's, with S1.34.
-- [>] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
+- [x] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
       `03-paths.md` P3.4. In this phase create the module with the **Unix body only**
       and a Windows body good enough to compile: `dev = 0`, `ino = 0`, `nlink = 1`,
       synthesized `mode`, zero `uid`/`gid`, `change_time` from `last_write_time`.
@@ -197,9 +199,9 @@ has not dropped.
       `st_ino`) and `ops/copy.rs`'s `apply_mode` (`PermissionsExt::mode()`, the same
       `st_mode`). `archive/write` also needs `st_mtime`, so the module has
       `mtime(&Metadata) -> i64` beside P3.4's list. Done when: no `MetadataExt`
-      outside `platform/` in df-core, Linux tests pass. — df-core core-seam
-      session, started 2026-09-29; the remaining hits are tests (S1.15) and
-      `vfs/rclone.rs` (S1.51).
+      outside `platform/` in df-core, Linux tests pass. — done 4a38afd; the grep
+      holds from SHA_CLOSE (tests included; the last test sites read through
+      `platform::meta`).
 - [x] **S1.8** `platform::user`: `uid() -> u32` (Unix `getuid`; Windows: `0`, and
       **`cache_suffix() -> String`** used by `preview/cache.rs:128–132, 195–212` for
       `yazi-<suffix>`: Unix the uid, Windows ~~the `USERNAME` env var~~ `"0"` — yazi's
@@ -272,7 +274,7 @@ has not dropped.
       constant `platform::process::HAS_RSYNC: bool` in the platform module).
       — done d9436e3, cross-checked locally, CI pending (the pure gate is
       `sync::rsync::gated(has_rsync, probe)`; its test runs on every target)
-- [>] **S1.16** Bytes ↔ UTF-8 at every `OsStrExt`/`OsStringExt` site outside
+- [x] **S1.16** Bytes ↔ UTF-8 at every `OsStrExt`/`OsStringExt` site outside
       `platform/` — **the mechanical half of `03-paths.md` §2, pulled into this
       phase** because without it df-core cannot compile on Windows and S1.40's exit
       criterion is unreachable. Create `platform::os::{as_bytes, from_bytes}` exactly
@@ -289,8 +291,9 @@ has not dropped.
       and `cargo check -p df-core --target x86_64-pc-windows-msvc` passes on CI.
       Since the plan was written `fs/tags.rs`'s walk reads a name's first byte
       too; that site is rewritten here and the file's syscalls move in S1.18.
-      — df-core core-seam session, started 2026-09-29; the grep's last hits are
-      `fs/tags.rs` (S1.18) and `state/tests.rs` (S1.15).
+      — done 59e23f4; the grep holds from SHA_CLOSE (tests included), and
+      `cargo check -p df-core --target x86_64-pc-windows-msvc` passes locally, CI
+      pending.
 - [x] **S1.17** `platform::user::{user_name(uid), group_name(gid)} ->
       Option<&'static str>` (the shape `fs::owner`'s public functions already
       had; the sketch was `owner_names(uid, gid) -> (Option<String>,
@@ -322,7 +325,7 @@ has not dropped.
       compiling everywhere: `TempTree::symlink` (`platform::fs::symlink`), the
       archive writer's `photos()` (`platform::fs::apply_mode`), `du/tests.rs`'s
       size helpers (`Metadata::len`, `platform::meta::blocks_bytes`), and
-      `sync/tests.rs`'s inode check (`platform::meta::ino`). — done SHA_S115,
+      `sync/tests.rs`'s inode check (`platform::meta::ino`). — done ba58aa7,
       cross-checked locally (`cargo check -p df-core --tests` for both targets;
       linking needs the runners), CI pending
 - [x] **S1.18** `platform::xattr` (added 2026-09-29: file tags postdate the
@@ -715,6 +718,11 @@ their native clipboards *are* synchronous.
   it; Windows refuses through the vfs spawn error, and its transport is W4.32.
   `platform::socket::Stream` is `UnixStream` on Unix and an uninhabited type
   on Windows, so `vfs::http::post` is written once.
+- 2026-09-29 — Two warnings that only a foreign target shows were silenced
+  without a cfg outside `platform/`: `fs::owner::parse_id_table` is `pub`
+  (only Linux's body calls it outside tests), and `fs::watch::Control::Watch`
+  carries `#[allow(dead_code)]` (only a platform's watcher thread reads the
+  list, and the stub never starts one).
 
 ## Open questions
 

@@ -1468,9 +1468,8 @@ fn sftp_server_round_trip_everything() {
     assert!(!remote.path.join("made-link").symlink_metadata().is_ok());
 
     vfs.chmod(&root.join("hello.txt"), 0o600, &ctx).unwrap();
-    let mode = std::os::unix::fs::MetadataExt::mode(
-        &std::fs::metadata(remote.path.join("hello.txt")).unwrap(),
-    );
+    let mode =
+        crate::platform::meta::mode(&std::fs::metadata(remote.path.join("hello.txt")).unwrap());
     assert_eq!(mode & 0o777, 0o600);
 
     // ── Status → readable error ─────────────────────────────────────────

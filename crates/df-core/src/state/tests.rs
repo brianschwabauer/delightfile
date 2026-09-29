@@ -71,12 +71,7 @@ fn gnarly_paths_survive_a_save_and_a_load() {
         PathBuf::from(format!("/tmp/{}", "x".repeat(255))),
         // Not UTF-8 at all: a Latin-1 name, which is a legal Unix filename and
         // the case a String-keyed store would silently drop.
-        {
-            use std::os::unix::ffi::OsStringExt;
-            PathBuf::from(std::ffi::OsString::from_vec(
-                b"/tmp/latin\xff\xfe1".to_vec(),
-            ))
-        },
+        PathBuf::from(crate::platform::os::from_bytes(b"/tmp/latin\xff\xfe1").unwrap()),
     ];
 
     let mut store = store_at(&tree);

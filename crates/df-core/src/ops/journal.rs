@@ -3301,7 +3301,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn redo_of_a_hard_link_links_the_same_file_again() {
-        use std::os::unix::fs::MetadataExt;
         let t = TempTree::new("j-redo-hardlink");
         let target = t.file("target.txt", b"x");
         let hard = t.join("hard");
@@ -3318,8 +3317,8 @@ mod tests {
         assert!(!super::exists(&hard));
         redone(&mut j);
         assert_eq!(
-            std::fs::metadata(&hard).unwrap().ino(),
-            std::fs::metadata(&target).unwrap().ino(),
+            crate::platform::meta::ino(&std::fs::metadata(&hard).unwrap()),
+            crate::platform::meta::ino(&std::fs::metadata(&target).unwrap()),
             "a second name for the same file"
         );
         j.undo(&ctx()).unwrap();

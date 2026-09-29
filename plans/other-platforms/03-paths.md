@@ -67,14 +67,15 @@ roots, budgets) to sites that already compile everywhere.
 
 ## 1. `platform::os` and `df_core::path` (the foundation)
 
-- [ ] **P3.1** (**Landed by S1.16 in Phase 1**; mark `[x]` with S1.16's commit and
+- [x] **P3.1** (**Landed by S1.16 in Phase 1**; mark `[x]` with S1.16's commit and
       keep the spec here as the reference.) `crates/df-core/src/platform/os.rs`: `pub fn as_bytes(s: &OsStr) ->
       Result<Cow<'_, [u8]>>` and `pub fn from_bytes(b: &[u8]) -> Result<OsString>`.
       Unix bodies: `OsStrExt::as_bytes` / `OsStringExt::from_vec`, infallible in
       practice (the `Result` is always `Ok`). Windows bodies: `to_str` /
       `String::from_utf8`, `Err(DfError::Unsupported("non-Unicode file name"))`
       otherwise. Unit tests on both. Done when: both bodies compile on their
-      targets (CI) and the Unix tests pass on Linux.
+      targets (CI) and the Unix tests pass on Linux. — done 59e23f4 (S1.16),
+      cross-checked locally, CI pending
 - [ ] **P3.2** `crates/df-core/src/path.rs` (new, portable, no cfg inside):
       - `pub fn root_of(p: &Path) -> PathBuf` — the `Prefix`+`RootDir` components
         (`C:\`, `\\server\share\`) or `/`; for a relative path, the root of the

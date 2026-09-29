@@ -623,8 +623,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_mode_job_goes_inside_and_can_be_undone() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().mode() & 0o7777;
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &std::path::Path| {
+            crate::platform::meta::mode(&std::fs::metadata(path).unwrap()) & 0o7777
+        };
         let set = |path: &std::path::Path, mode: u32| {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
         };
