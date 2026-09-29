@@ -1,4 +1,6 @@
-//! File tags: the freedesktop `user.xdg.tags` extended attribute.
+//! File tags: the freedesktop `user.xdg.tags` extended attribute — and on
+//! macOS, Finder's tags, which the platform reads and writes in its place
+//! ([`crate::platform::xattr`]).
 //!
 //! A tag is a word a person puts on a file — `red`, `work`, `invoice 2026` —
 //! and the file carries it, not a database beside it. That is the whole reason
@@ -28,16 +30,17 @@
 //! # Never through a link
 //!
 //! Every call here is the `l` form (`lgetxattr`, `lsetxattr`, `llistxattr`,
-//! `lremovexattr`), so a symlink is never followed: tagging a link must not
-//! quietly tag whatever it points at, which may be in another folder or
-//! another person's. Linux does not let a `user.*` attribute sit on a link at
-//! all, so a link simply has no tags, and asking to give it some is refused
+//! `lremovexattr`; `XATTR_NOFOLLOW` on macOS), so a symlink is never
+//! followed: tagging a link must not quietly tag whatever it points at, which
+//! may be in another folder or another person's. Linux does not let a
+//! `user.*` attribute sit on a link at all, and macOS is made to refuse the
+//! same, so a link simply has no tags, and asking to give it some is refused
 //! ([`TagError::Link`]).
 //!
 //! # The syscalls
 //!
 //! The four calls live in [`crate::platform::xattr`], with the `unsafe` they
-//! need. Linux has them; macOS and Windows have no body yet, so there a row
+//! need. Linux and macOS have them; Windows has no body yet, so there a row
 //! has no tags, a tag search finds nothing, a copy carries none, and asking
 //! to tag something says tags are not available on this platform.
 
@@ -96,7 +99,10 @@ pub fn read_on(magic: i64) -> bool {
 /// scanned directory. A directory that cannot be asked is read as local —
 /// the tag reads that follow fail as quietly as the question did.
 pub fn read_here(dir: &Path) -> bool {
-    crate::du::magic_of(dir).is_none_or(read_on)
+    // The platform's own answer, which on Linux is exactly `read_on` of the
+    // magic (`du::is_remote` is that table) and on macOS knows a share by the
+    // name `statfs` gives it.
+    !crate::du::is_remote(dir)
 }
 
 /// The tags on `path`, in the order they are stored. Empty when it has none,

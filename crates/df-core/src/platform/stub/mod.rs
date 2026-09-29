@@ -1,6 +1,7 @@
 //! Honest stubs, shared by every target that has no native body of a feature
-//! yet — today macOS and Windows, which is why this module is selected with
-//! `not(target_os = "linux")` rather than named after either.
+//! yet — which is why this module is selected with `not(target_os = "linux")`
+//! rather than named after a target. Today that is Windows alone: macOS has a
+//! body of its own for every one (Phase 2).
 //!
 //! One copy rather than two identical ones: `macos` and `windows` each re-export
 //! the stubs they stand behind, so a native body lands by replacing that one
@@ -30,4 +31,5 @@ pub mod trash;
 pub mod user;
 #[cfg(windows)]
 pub mod watch;
+#[cfg(windows)]
 pub mod xattr;
