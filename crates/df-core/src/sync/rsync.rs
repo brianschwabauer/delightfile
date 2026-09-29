@@ -1445,9 +1445,11 @@ cd+++++++++ 40 photos/empty/
         assert_eq!(plan.extra.count, 2);
         assert_eq!(plan.removal, Removal::Delete);
         assert!(plan.remote.is_some());
+        // Read with slashes: a label is in the platform's separator, and this
+        // test reads rsync's output on every platform.
         assert_eq!(
             plan.listed(Mode::Mirror)
-                .map(|item| plan.label(item))
+                .map(|item| crate::path::with_slashes(&plan.label(item)).into_owned())
                 .collect::<Vec<_>>(),
             [
                 "solo.txt",

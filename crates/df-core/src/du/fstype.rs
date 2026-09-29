@@ -137,7 +137,9 @@ mod tests {
     }
 
     /// The runtime directory the session gives gvfs, and the systemd one
-    /// when it gives none.
+    /// when it gives none. Unix only: gvfs is a Linux desktop's, and Windows
+    /// has no runtime directory to put it in.
+    #[cfg(unix)]
     #[test]
     fn gvfs_lives_in_the_runtime_directory() {
         let root = gvfs_root();

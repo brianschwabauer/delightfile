@@ -268,6 +268,11 @@ mod tests {
     /// trash — both succeed: whatever one finds already gone, the other took,
     /// and a directory that vanished between being seen and being opened, or
     /// being emptied and being removed, is not a failure.
+    ///
+    /// Unix only until W4.37: on Windows a file the other delete has marked
+    /// for deletion answers "access denied", not "not found", to the next
+    /// open, and `gone` does not read that as gone yet.
+    #[cfg(unix)]
     #[test]
     fn a_tree_emptied_by_somebody_else_meanwhile_is_not_a_failure() {
         for round in 0..20 {

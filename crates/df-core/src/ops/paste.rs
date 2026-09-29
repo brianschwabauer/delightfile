@@ -597,7 +597,7 @@ mod tests {
     #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
     use super::*;
-    use crate::ops::fixture::{gnarly_names, TempTree};
+    use crate::ops::fixture::{abs, gnarly_names, TempTree};
     use std::ffi::OsStr;
 
     fn ctx() -> TaskCtx {
@@ -607,14 +607,14 @@ mod tests {
     #[test]
     fn a_yanked_url_is_carried_exactly_as_given() {
         let remote = PathBuf::from("sftp://host/a");
-        let local = PathBuf::from("/home/brian/./b/../c");
+        let local = abs("/home/brian/./b/../c");
         for clip in [
             Clipboard::yank([remote.clone(), local.clone()]),
             Clipboard::cut([remote.clone(), local.clone()]),
         ] {
-            assert_eq!(clip.paths, [remote.clone(), PathBuf::from("/home/brian/c")]);
+            assert_eq!(clip.paths, [remote.clone(), abs("/home/brian/c")]);
             assert!(clip.contains(&remote));
-            assert!(clip.contains(Path::new("/home/brian/c")));
+            assert!(clip.contains(&abs("/home/brian/c")));
         }
         // `b` on a remote row adds the URL, and a second `b` takes it back.
         let mut clip = Clipboard::default();
@@ -1201,8 +1201,11 @@ mod tests {
         assert!(clip.is_empty());
     }
 
+    /// Unix-shaped literals as this platform's absolute paths
+    /// ([`crate::test_support::abs`]): the paths are normalized on the way in,
+    /// and `/a` is not absolute on Windows.
     fn paths(names: &[&str]) -> Vec<PathBuf> {
-        names.iter().map(PathBuf::from).collect()
+        names.iter().map(|name| abs(name)).collect()
     }
 
     /// One `b` puts the batch in, the next takes the same batch out — and a
@@ -1251,7 +1254,7 @@ mod tests {
         clip.toggle(&paths(&["/a"]));
         clip.toggle(&paths(&["/m"]));
         assert_eq!(clip.paths, paths(&["/z", "/a", "/m"]));
-        assert_eq!(clip.remove(1), Some(PathBuf::from("/a")));
+        assert_eq!(clip.remove(1), Some(abs("/a")));
         assert_eq!(clip.paths, paths(&["/z", "/m"]));
         assert_eq!(clip.remove(9), None);
     }
@@ -1259,7 +1262,7 @@ mod tests {
     /// An empty press does nothing, and says nothing.
     #[test]
     fn toggling_nothing_is_a_no_op() {
-        let mut clip = Clipboard::cut([PathBuf::from("/a")]);
+        let mut clip = Clipboard::cut([abs("/a")]);
         assert_eq!(clip.toggle(&[]), Toggled::default());
         assert_eq!(clip.paths, paths(&["/a"]));
         assert_eq!(clip.mode, PasteMode::Cut);
@@ -1269,7 +1272,7 @@ mod tests {
     /// copy, whatever the clipboard was the last time it held anything.
     #[test]
     fn toggling_keeps_the_verb_unless_there_was_nothing_to_keep() {
-        let mut clip = Clipboard::cut([PathBuf::from("/a")]);
+        let mut clip = Clipboard::cut([abs("/a")]);
         clip.toggle(&paths(&["/b"]));
         assert_eq!(
             clip.mode,
@@ -1285,7 +1288,7 @@ mod tests {
         assert_eq!(clip.mode, PasteMode::Copy);
 
         // `X` leaves the old verb behind; the next pile does not inherit it.
-        let mut clip = Clipboard::cut([PathBuf::from("/a")]);
+        let mut clip = Clipboard::cut([abs("/a")]);
         clip.clear();
         clip.toggle(&paths(&["/b"]));
         assert_eq!(clip.mode, PasteMode::Copy);
@@ -1299,9 +1302,9 @@ mod tests {
         let mut clip = Clipboard::default();
         clip.toggle(&paths(&["/d/./e/../f.txt"]));
         assert_eq!(clip.paths, paths(&["/d/f.txt"]));
-        assert!(clip.contains(Path::new("/d/f.txt")));
-        assert!(clip.contains(Path::new("/d/e/../f.txt")));
-        assert!(!clip.contains(Path::new("/d/g.txt")));
+        assert!(clip.contains(&abs("/d/f.txt")));
+        assert!(clip.contains(&abs("/d/e/../f.txt")));
+        assert!(!clip.contains(&abs("/d/g.txt")));
         assert_eq!(
             clip.toggle(&paths(&["/d/f.txt"])),
             Toggled {

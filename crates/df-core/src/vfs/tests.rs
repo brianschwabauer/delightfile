@@ -919,10 +919,15 @@ fn a_server_with_no_attrs_falls_back_to_the_longname() {
 }
 
 // ── Fake servers: the failures a real one will not stage ────────────────────
+//
+// Unix only, each of them: the "server" is `/bin/sh`, and SFTP's pipe I/O has
+// no Windows body until W4.20, which gives these tests a small Rust replay
+// binary in place of the shell.
 
 /// A service whose "server" is `sh` replaying `bytes`, then holding its pipes
 /// open until delightfile hangs up (the `read` waits for a newline that never
 /// comes; killing the child on drop ends it).
+#[cfg(unix)]
 fn replay_service(dir: &TempDir, bytes: &[u8]) -> Service {
     assert!(
         !bytes.contains(&b'\n'),
@@ -943,6 +948,7 @@ fn replay_service(dir: &TempDir, bytes: &[u8]) -> Service {
 /// A valid VERSION 3 reply, followed by a REALPATH `NAME` answer for the
 /// connect-time home resolution (request id 1), so a fake server can get a
 /// [`Connection`] all the way up before misbehaving.
+#[cfg(unix)]
 fn handshake_bytes() -> Vec<u8> {
     let mut bytes = Reply::Version {
         version: 3,
@@ -975,6 +981,7 @@ fn connect_err(service: Service, why: &str) -> VfsError {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_server_speaking_the_wrong_version_is_refused() {
     let dir = TempDir::new("vfs-badver");
@@ -997,6 +1004,7 @@ fn a_server_speaking_the_wrong_version_is_refused() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_reply_with_somebody_elses_id_hangs_up_the_connection() {
     let dir = TempDir::new("vfs-badid");
@@ -1027,6 +1035,7 @@ fn a_reply_with_somebody_elses_id_hangs_up_the_connection() {
     assert!(error.is_connection_fatal(), "pipelining's one failure mode");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_four_gigabyte_length_claim_costs_a_refusal_not_an_allocation() {
     let dir = TempDir::new("vfs-huge");
@@ -1048,6 +1057,7 @@ fn a_four_gigabyte_length_claim_costs_a_refusal_not_an_allocation() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_server_that_dies_before_version_reports_ssh_own_words() {
     let error = connect_err(
@@ -1069,6 +1079,7 @@ fn a_server_that_dies_before_version_reports_ssh_own_words() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_server_that_closes_silently_is_a_disconnect() {
     let error = connect_err(
@@ -1141,6 +1152,7 @@ fn cancelled_before_dispatch_never_reaches_the_wire() {
 // ── The hermetic integration test ───────────────────────────────────────────
 
 /// Where OpenSSH installs `sftp-server`, by distribution habit, then `$PATH`.
+#[cfg(unix)]
 fn find_sftp_server() -> Option<PathBuf> {
     for candidate in [
         "/usr/lib/ssh/sftp-server",         // Arch
@@ -1563,6 +1575,7 @@ fn sftp_server_round_trip_everything() {
 /// The reconnect path: kill the child out from under a live vfs, watch one
 /// operation fail with a connection error, and the next one succeed on a
 /// fresh connection.
+#[cfg(unix)]
 #[test]
 fn a_dropped_connection_reconnects_on_the_next_request() {
     let Some(server) = find_sftp_server() else {

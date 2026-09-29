@@ -363,17 +363,23 @@ mod tests {
     #[test]
     fn a_file_from_before_pins_loads_with_none() {
         let tree = TempTree::new("state-pins-old");
+        // `/tmp/a` on Unix; on Windows, where that is not absolute, `C:\tmp\a`
+        // with its backslashes escaped as the file writes them.
+        let a = crate::test_support::abs("/tmp/a");
+        let key = String::from_utf8(crate::state::escape(a.to_string_lossy().as_bytes())).unwrap();
         std::fs::write(
             tree.join("state"),
-            "# delightfile state v1\n\
-             /tmp/a\tsort=size\tsort_reverse=0\tt=10\n\
-             !tabs\t0=/tmp/a\tactive=0\tt=10\n",
+            format!(
+                "# delightfile state v1\n\
+                 {key}\tsort=size\tsort_reverse=0\tt=10\n\
+                 !tabs\t0={key}\tactive=0\tt=10\n"
+            ),
         )
         .unwrap();
         let store = store_at(&tree);
         assert!(store.pins().is_empty());
-        assert_eq!(store.tabs(), &[std::path::PathBuf::from("/tmp/a")]);
-        assert!(store.sort(Path::new("/tmp/a")).is_some());
+        assert_eq!(store.tabs(), std::slice::from_ref(&a));
+        assert!(store.sort(&a).is_some());
         assert!(!store.is_dirty());
     }
 

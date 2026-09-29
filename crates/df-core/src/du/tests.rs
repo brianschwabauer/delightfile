@@ -574,9 +574,9 @@ fn a_touched_mtime_alone_is_still_fresh() {
     );
 
     let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-    let dir = std::fs::File::open(tree.path()).unwrap();
-    dir.set_times(std::fs::FileTimes::new().set_modified(long_ago))
-        .unwrap();
+    // Through the platform: Windows opens a directory only with backup
+    // semantics, and sets a time only through a handle opened to write one.
+    crate::platform::fs::set_times(tree.path(), None, Some(long_ago)).unwrap();
 
     let hit = cache.remembered(tree.path(), now).expect("still there");
     assert!(

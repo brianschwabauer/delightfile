@@ -446,13 +446,16 @@ fn a_7z_is_written_by_7_zip_from_the_items_own_folder() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    let names: Vec<&str> = text
+    // 7-Zip lists a member with the platform's separator: `\` on Windows.
+    let names: Vec<String> = text
         .lines()
         .filter_map(|line| line.strip_prefix("Path = "))
+        .map(|name| crate::path::with_slashes(name).into_owned())
         .collect();
-    assert!(names.contains(&"solo.txt"), "{names:?}");
-    assert!(names.contains(&"photos/notes.txt"), "{names:?}");
-    assert!(names.contains(&"photos/.hidden"), "{names:?}");
+    let has = |name: &str| names.iter().any(|n| n == name);
+    assert!(has("solo.txt"), "{names:?}");
+    assert!(has("photos/notes.txt"), "{names:?}");
+    assert!(has("photos/.hidden"), "{names:?}");
     let tested = Command::new(&seven)
         .args(["t", "-bd"])
         .arg(&dest)
@@ -958,7 +961,7 @@ fn names_of(archive: &Path, format: Format) -> Vec<String> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix("Path = "))
-        .map(str::to_string)
+        .map(|name| crate::path::with_slashes(name).into_owned())
         .collect()
 }
 
@@ -1143,7 +1146,10 @@ fn the_real_tools_accept_what_is_written() {
         let out = Command::new("tar").arg("-tvf").arg(&tar).output().unwrap();
         let listing = String::from_utf8_lossy(&out.stdout);
         assert!(listing.contains("photos/link -> notes.txt"), "{listing}");
-        assert!(listing.contains("-rw-r-----"), "{listing}");
+        // The mode `photos` gave notes.txt, which only Unix can give.
+        if cfg!(unix) {
+            assert!(listing.contains("-rw-r-----"), "{listing}");
+        }
     }
     if on_path("gzip").is_some() {
         assert!(tool_accepts("gzip", &["-t"], &tgz), "gzip -t");

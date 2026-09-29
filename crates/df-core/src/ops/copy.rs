@@ -992,6 +992,9 @@ mod tests {
         assert_eq!(std::fs::read(&dst).unwrap(), b"hello reflink");
     }
 
+    /// Unix only: the fixture opens a directory as a `File`, which Windows
+    /// does not do, and Windows' reflink is `false` for everything anyway.
+    #[cfg(unix)]
     #[test]
     fn reflink_of_a_non_regular_file_reports_failure() {
         let t = TempTree::new("reflink-neg");

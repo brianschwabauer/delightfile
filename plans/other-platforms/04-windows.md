@@ -377,6 +377,22 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       `blocks_bytes(path, &meta)` (Unix: off the `stat`, the path unread) and
       the du walk's `sizes_of` passes the entry's path. Done when: a du test on
       the runner sees a sparse file's total below its length.
+- [ ] **W4.36** `platform::time::local_civil` before 1970 on Windows: the
+      CRT's `localtime_s` refuses a negative `time_t`, so a file dated before
+      the epoch has no civil date and the bulk card's date tokens say so. Use
+      `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime` (windows-sys,
+      `Win32_System_Time`) from the `FILETIME` the seconds make, which covers
+      1601 onwards. Done when: `rename::facts::tests::a_time_before_the_epoch_is_still_a_date`
+      loses its `#[cfg(unix)]` and passes on the runner.
+- [ ] **W4.37** `ops::delete::remove_tree`'s "already gone" on Windows: a file
+      another deleter has marked for deletion answers `ERROR_ACCESS_DENIED`
+      (`STATUS_DELETE_PENDING` underneath) to the next open or delete, where
+      Unix answers `ENOENT`, so two deletes of one tree race to a failure.
+      Read it as gone — through a `platform::errno::is_delete_pending`, or by
+      treating an access-denied `lstat` of a name the directory no longer
+      lists as gone — and let `gone` ask it. Done when:
+      `ops::delete::tests::a_tree_emptied_by_somebody_else_meanwhile_is_not_a_failure`
+      loses its `#[cfg(unix)]` and passes on the runner.
 
 ## Decisions log
 

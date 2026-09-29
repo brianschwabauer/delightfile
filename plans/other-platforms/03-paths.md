@@ -492,14 +492,28 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 
 ## 6. Tests (appendix §5)
 
-- [ ] **P3.24** Sweep the 36 test files: replace literal `/tmp/...` fixture paths that
+- [>] **P3.24** Sweep the 36 test files: replace literal `/tmp/...` fixture paths that
       reach the filesystem with `TempTree`/`temp_dir()`; leave pure-string tests
       that only parse or format (they still pass on Windows because they never
       touch a disk) but wrap those that assert Unix-shaped output (`== "/"`,
       `ends_with("/Work")`) in `#[cfg(unix)]` with a Windows twin where cheap. Mode,
       symlink, uid, `EXDEV` tests get `#[cfg(unix)]`. Done when: `cargo test -p
       df-core` is green on all three CI targets, with the Linux count not lower
-      than before this phase.
+      than before this phase. — port/paths, started 2026-09-29. Driven by the
+      Windows runner rather than by the regex census of appendix §5 (most of
+      its rows pass on Windows as they are: a pure parse over `/repo`, a
+      synthetic `Entry` under `/fixture`, a `/tmp/x` in an error message). What
+      it took, beside the fixes each P3 task made to its own tests: literal
+      absolute paths that a store, a rail or the clipboard keeps go through
+      `test_support::abs` (`/tmp/x` on Unix, `C:\tmp\x` on Windows); times are
+      set through `platform::fs::set_times`; labels and 7-Zip's listings are
+      read `with_slashes`; mode checks compare with the platform's `st_mode`
+      and keep their literals under `cfg!(unix)`; a relative-to-cwd test skips
+      when the temp directory is on another drive. Gated `#[cfg(unix)]`, each
+      naming the Phase 4 task that un-gates it: the fake SFTP servers (W4.20),
+      the concurrent-delete race (W4.37), a date before 1970 (W4.36); and, for
+      good, gvfs's runtime directory and a reflink into a directory opened as
+      a `File`. The per-test table is P3.30's.
 
 ## Decisions log
 
