@@ -594,6 +594,29 @@ Why not sign now:
   `01-platform-seam.md`): `the_menus_pin_and_go` finds its row by name instead
   of by scan order, and an archive's `./` member is no longer unsafe. The two
   Nerd Font tests remain as that question describes.
+- 2026-09-29 — The two Nerd Font failures from Open questions are fixed under
+  `crates/`, and Brian approved the approach: a chrome glyph that no loaded
+  face can draw is drawn by the app as a vector shape
+  (`crates/df-app/src/glyphs.rs`). The failures were
+  `icons::glyph_tests::the_chrome_glyphs_all_render` ("no face draws '✓'
+  (U+2713)") and `menu::tests::a_key_stands_clear_of_the_chevron` ("the key is
+  -0.84375 pt from the ▸"): without a Nerd Font, which includes every stock Mac
+  and Windows install, the chrome drew ✓ and ▸ as missing-glyph boxes and
+  measured them at the box's width. egui's stock faces lack ten of the chrome's
+  symbols: ✓ ▸ ◂ ← ↑ → ↓ ⇧ ≡ ⟷ (Hack, the monospace face, lacks only ✓). Each
+  shape takes the advance, baseline and colour of the text it sits in, centres
+  on the stock face's math axis at that face's stroke weight, and scales with
+  the font size and the display. Where any face has the glyph, as on Brian's
+  machine with a Nerd Font, the text goes to egui unchanged, so nothing there
+  moves. The other way the question offered, a Nerd Font such as
+  `ttf-jetbrains-mono-nerd` on the container's pacman line, was not taken: CI
+  would stop exercising the fontless path, and that path is what a stock Mac or
+  Windows install gets. File-type icons are unchanged; without a Nerd Font they
+  are still `ls -F` classifiers. df-app's tests pass with the font, with
+  `/usr/share/fonts/TTF` and `~/.local/share/fonts` hidden in a mount namespace
+  on the host, and in `archlinux:latest` with the linux job's pacman line and
+  builder user, where the 5 `preview::doc::font` tests still skip for want of any
+  system font.
 
 ## Open questions
 
@@ -602,16 +625,9 @@ Why not sign now:
   The first run's FFmpeg step log settles it.)
 - Four tests pass on Brian's machine and fail in a clean archlinux container (found
   2026-09-29 in the local run under §1; each fails again when run alone). Until
-  they are dealt with, the linux job goes red at `cargo test --workspace`.
-  - Two need a Nerd Font. `icons::glyph_tests::the_chrome_glyphs_all_render`
-    panics with "no face draws '✓' (U+2713)", and
-    `menu::tests::a_key_stands_clear_of_the_chevron` with "the key is -0.84375 pt
-    from the ▸". On the host, hiding `/usr/share/fonts/TTF` and
-    `~/.local/share/fonts` in a mount namespace reproduces both. The glyph test's
-    own doc says the plain glyphs must draw "patched font or not". So on a machine
-    without a Nerd Font, which includes every stock Mac and Windows install, the
-    chrome has at least ✓ drawn as a missing-glyph box. That matters to the port
-    as well as to CI.
+  they are dealt with, the linux job goes red at `cargo test --workspace`. The two
+  that needed a Nerd Font are settled in the Decisions log; these are the other
+  two.
   - One depends on directory order. `app::places::tests::the_menus_pin_and_go`
     takes `sub`'s index from `entries()`, which came back as `["sub", "other"]`,
     and after `set_cursor` with it the row menu pins `other`. The test passes with
@@ -625,13 +641,11 @@ Why not sign now:
     unsafe: `unsafe_count()` is 1 where the test wants 0.
 
   There are two ways to settle them, and they can be combined. One is to change
-  code under `crates/`. For the fonts, decide what the chrome falls back to for ✓
-  and ▸. For the places test, take the cursor index from the order on screen. For
-  the archive test, decide whether a `./` member is unsafe. The other is to make
-  the container look like Brian's machine, adding a Nerd Font such as
-  `ttf-jetbrains-mono-nerd` (232 MiB installed) and `zip` to the pacman line. That
-  turns three of the four green, but it hides the font gap from CI, and the places
-  test still depends on the filesystem.
+  code under `crates/`. For the places test, take the cursor index from the order
+  on screen. For the archive test, decide whether a `./` member is unsafe. The
+  other is to make the container look like Brian's machine, adding `zip` to the
+  pacman line. That turns the archive test green, but the places test still
+  depends on the filesystem.
 - The linux job uses Arch's `rust` package, while macOS and Windows use rustup's
   current stable. After a Rust release the two can differ by a version for
   a few days, and a new clippy lint under `-D warnings` would then fail one job and
