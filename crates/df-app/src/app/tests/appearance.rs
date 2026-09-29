@@ -389,10 +389,17 @@ fn a_ghost_in_the_hand_turns_with_the_rows() {
     assert_eq!(ghost_icon(&app).color, latte().red);
 }
 
-/// A white splash — a dark side's ripple — anywhere on a light frame, where
-/// a ripple darkens in the text colour instead ([`crate::theme::splash`]).
-fn no_white_splash(what: &str, colours: &[egui::Color32]) {
-    for colour in colours {
+/// A white splash — a dark side's ripple — on a light frame, where a ripple
+/// darkens in the text colour instead ([`crate::theme::splash`]).
+///
+/// `circles` is the fill of every circle the frame painted, which is all a
+/// ripple ever paints: every `theme::splash` is a `circle_filled`. Nothing
+/// else on the frame is judged, because a light surface fading in is the same
+/// bytes as white at the bottom of its fade. A toast's crust plate a
+/// millisecond or two into its rise premultiplies to `#03_03_03_03`, and a
+/// frame that happened to land there failed the check with no splash on it.
+fn no_white_splash(what: &str, circles: &[egui::Color32]) {
+    for colour in circles {
         let white =
             colour.r() == colour.a() && colour.g() == colour.a() && colour.b() == colour.a();
         assert!(
@@ -412,21 +419,32 @@ fn named(palette: &Palette) -> Vec<egui::Color32> {
     ]
 }
 
-/// One frame of `app`, and what it painted: every fill, stroke and text
-/// colour, and each text with the colour it was set in.
-fn painted(
-    app: &mut App,
-    ctx: &egui::Context,
-) -> (Vec<egui::Color32>, Vec<(String, egui::Color32)>) {
+/// What one frame painted: every fill, stroke and text colour; each text with
+/// the colour it was set in; and every circle's fill, which is where a ripple
+/// is.
+type Painted = (
+    Vec<egui::Color32>,
+    Vec<(String, egui::Color32)>,
+    Vec<egui::Color32>,
+);
+
+/// One frame of `app`, and what it painted.
+fn painted(app: &mut App, ctx: &egui::Context) -> Painted {
     fn walk(
         shape: &egui::Shape,
         colours: &mut Vec<egui::Color32>,
         texts: &mut Vec<(String, egui::Color32)>,
+        circles: &mut Vec<egui::Color32>,
     ) {
         match shape {
-            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, colours, texts)),
+            egui::Shape::Vec(shapes) => {
+                shapes.iter().for_each(|s| walk(s, colours, texts, circles))
+            }
             egui::Shape::Rect(rect) => colours.extend([rect.fill, rect.stroke.color]),
-            egui::Shape::Circle(circle) => colours.extend([circle.fill, circle.stroke.color]),
+            egui::Shape::Circle(circle) => {
+                colours.extend([circle.fill, circle.stroke.color]);
+                circles.push(circle.fill);
+            }
             egui::Shape::LineSegment { stroke, .. } => colours.push(stroke.color),
             egui::Shape::Text(text) => {
                 let ink = text
@@ -447,11 +465,11 @@ fn painted(
         ..Default::default()
     };
     let output = ctx.run_ui(input, |ui| app.frame(ui));
-    let (mut colours, mut texts) = (Vec::new(), Vec::new());
+    let (mut colours, mut texts, mut circles) = (Vec::new(), Vec::new(), Vec::new());
     for clipped in &output.shapes {
-        walk(&clipped.shape, &mut colours, &mut texts);
+        walk(&clipped.shape, &mut colours, &mut texts, &mut circles);
     }
-    (colours, texts)
+    (colours, texts, circles)
 }
 
 /// **The surfaces the other features brought** paint from the palette on
@@ -495,7 +513,7 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
     };
 
     // The rows, a tagged one wearing its dot.
-    let (colours, _) = painted(&mut app, &ctx);
+    let (colours, _, _) = painted(&mut app, &ctx);
     on_latte("the list", &colours);
     if tagged {
         assert!(
@@ -509,7 +527,7 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
     app.dir().set_cursor(b);
     app.run(Command::Permissions, 10, Instant::now());
     assert!(matches!(app.dialog, Some(Dialog::Permissions(_))));
-    let (colours, texts) = painted(&mut app, &ctx);
+    let (colours, texts, _) = painted(&mut app, &ctx);
     on_latte("the permissions card", &colours);
     assert_eq!(set_in(&texts, "Execute"), light.quiet);
     // A box pressed, so its ripple is on the frame.
@@ -521,9 +539,9 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
         }
     });
     click_at(&mut app, &ctx, cell.expect("a box"));
-    let (colours, _) = painted(&mut app, &ctx);
+    let (colours, _, circles) = painted(&mut app, &ctx);
     on_latte("the permissions card's ripple", &colours);
-    no_white_splash("the permissions card's ripple", &colours);
+    no_white_splash("the permissions card's ripple", &circles);
     app.close_overlay(Instant::now());
 
     // The undo history card, over a rename.
@@ -531,7 +549,7 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
     settle_here(&mut app);
     app.run(Command::UndoHistory, 10, Instant::now());
     assert!(app.undo_history.is_some());
-    let (colours, texts) = painted(&mut app, &ctx);
+    let (colours, texts, _) = painted(&mut app, &ctx);
     on_latte("the undo history", &colours);
     assert_eq!(set_in(&texts, "just now"), light.faint);
     // Its row pressed, so its ripple is on the frame.
@@ -540,9 +558,9 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
     let row =
         history::geometry(screen(), screen().bottom() - ui::GAP, card, rows).rects[0].center();
     click_at(&mut app, &ctx, row);
-    let (colours, _) = painted(&mut app, &ctx);
+    let (colours, _, circles) = painted(&mut app, &ctx);
     on_latte("the undo history's ripple", &colours);
-    no_white_splash("the undo history's ripple", &colours);
+    no_white_splash("the undo history's ripple", &circles);
     app.run(Command::UndoHistory, 10, Instant::now());
     assert!(app.undo_history.is_none());
 
@@ -555,7 +573,7 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
     app.trash_home = Some(trash.root().to_path_buf());
     app.run(Command::OpenTrash, 10, Instant::now());
     let label = app.cluster(Instant::now()).trash.expect("the chip").label;
-    let (colours, texts) = painted(&mut app, &ctx);
+    let (colours, texts, _) = painted(&mut app, &ctx);
     on_latte("the trash view", &colours);
     assert_eq!(set_in(&texts, &label), light.subtext0);
     app.run(Command::Leave, 10, Instant::now());
@@ -578,7 +596,7 @@ fn the_newer_surfaces_paint_from_the_light_palette() {
     app.poll_workers();
     app.overlay_key(Chord::plain(Key::Enter), 10, Instant::now());
     assert_eq!(app.tab().virtual_kind(), Some(Virtual::Hits));
-    let (colours, texts) = painted(&mut app, &ctx);
+    let (colours, texts, _) = painted(&mut app, &ctx);
     on_latte("the hits", &colours);
     assert!(
         texts.iter().any(|(text, _)| text.starts_with("s foo")),
@@ -605,7 +623,7 @@ fn the_light_cursor_and_a_folder_s_name_paint_as_measured() {
         "folders first, and the cursor on the first row"
     );
 
-    let (colours, texts) = painted(&mut app, &ctx);
+    let (colours, texts, _) = painted(&mut app, &ctx);
     let dark = mocha();
     assert!(colours.contains(&crate::theme::cursor_fill(&dark)));
     assert!(
@@ -617,7 +635,7 @@ fn the_light_cursor_and_a_folder_s_name_paint_as_measured() {
 
     app.run(Command::ThemeLight, 10, Instant::now());
     let light = latte();
-    let (colours, texts) = painted(&mut app, &ctx);
+    let (colours, texts, _) = painted(&mut app, &ctx);
     let cursor = crate::theme::cursor_fill(&light);
     assert_eq!(cursor, crate::theme::mix(light.base, light.blue, 0.14));
     assert!(
@@ -639,7 +657,7 @@ fn the_light_cursor_and_a_folder_s_name_paint_as_measured() {
 
     // Selected, the cursor row is the selection's cream turned towards blue.
     app.run(Command::SelectAll, 10, Instant::now());
-    let (colours, _) = painted(&mut app, &ctx);
+    let (colours, _, _) = painted(&mut app, &ctx);
     let both = crate::theme::cursor_on_selection(
         &light,
         crate::theme::select_fill(&light, light.base),
