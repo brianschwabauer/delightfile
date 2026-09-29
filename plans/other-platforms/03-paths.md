@@ -301,10 +301,15 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       Tests: a Windows zoxide path's last name (`the_last_component_follows_the_platforms_separator`)
       and `out\photos` / `out\.zip` in `a_typed_name_chooses_the_format`, each
       under `cfg!(windows)` with the Unix reading beside it.
-- [ ] **P3.17** `sync/mod.rs:267–282` (`SyncPlan::label`): render `rel` with
+- [x] **P3.17** `sync/mod.rs:267–282` (`SyncPlan::label`): render `rel` with
       `path::display` and the platform separator; the trailing separator for folders
       is `std::path::MAIN_SEPARATOR`. Done when: the label test passes on Linux
-      unchanged.
+      unchanged. — done (port/paths): `{name}{MAIN_SEPARATOR}{display(rel)}`
+      and a trailing `MAIN_SEPARATOR`, byte for byte the old label on Unix. The
+      sync tests read labels through `with_slashes` so their expectations
+      stay written once; `a_label_uses_the_platforms_separator_throughout`
+      asserts the native form (P3.30: the four planner tests were bin 1, the
+      mixed `d/a\b/` label).
 
 ## 4. Case (appendix §3.4)
 

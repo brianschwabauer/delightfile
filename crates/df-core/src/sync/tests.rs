@@ -26,18 +26,54 @@ fn thorough(sources: &[PathBuf], dest: &Path) -> SyncPlan {
     .unwrap()
 }
 
+/// A plan's labels read with `/` between names, so the expectations below
+/// are written once for every platform: [`SyncPlan::label`] uses the
+/// platform's separator (the label test says so), `\` on Windows.
+trait Slashed {
+    fn slashed(&self, item: &Item) -> String;
+}
+
+impl Slashed for SyncPlan {
+    fn slashed(&self, item: &Item) -> String {
+        crate::path::with_slashes(&self.label(item)).into_owned()
+    }
+}
+
+/// A label is written in the platform's separator throughout: no `/`
+/// beside a `\` on Windows.
+#[test]
+fn a_label_uses_the_platforms_separator_throughout() {
+    let t = TempTree::new("sync-label");
+    let src = t.dir("src/d");
+    t.file("src/d/a/b/c.txt", b"c");
+    let plan = quick(&[src], &t.dir("dst"));
+    let labels: Vec<String> = plan.items.iter().map(|item| plan.label(item)).collect();
+    let sep = std::path::MAIN_SEPARATOR;
+    assert!(
+        labels.contains(&format!("d{sep}a{sep}b{sep}c.txt")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.contains(&format!("d{sep}a{sep}b{sep}")),
+        "{labels:?}"
+    );
+    if cfg!(unix) {
+        assert!(labels.contains(&"d/a/b/c.txt".to_string()), "{labels:?}");
+    }
+}
+
 /// Every classified path as `(label, class)`, in plan order.
 fn classes(plan: &SyncPlan) -> Vec<(String, Class)> {
     plan.items
         .iter()
-        .map(|item| (plan.label(item), item.class))
+        .map(|item| (plan.slashed(item), item.class))
         .collect()
 }
 
 fn class_of(plan: &SyncPlan, label: &str) -> Class {
     plan.items
         .iter()
-        .find(|item| plan.label(item) == label)
+        .find(|item| plan.slashed(item) == label)
         .map(|item| item.class)
         .unwrap_or_else(|| panic!("{label} is not in the plan: {:?}", classes(plan)))
 }
@@ -174,7 +210,7 @@ fn the_planner_sorts_every_path_into_new_changed_unchanged_and_extra() {
     assert_eq!(plan.bytes_to_copy(), 23);
     assert_eq!(
         plan.listed(Mode::Update)
-            .map(|item| plan.label(item))
+            .map(|item| plan.slashed(item))
             .collect::<Vec<_>>(),
         [
             "photos/2024/",
@@ -771,7 +807,7 @@ fn a_mirror_has_something_to_do_where_an_update_has_nothing() {
     assert_eq!(plan.listed(Mode::Update).count(), 0);
     assert_eq!(
         plan.listed(Mode::Mirror)
-            .map(|item| plan.label(item))
+            .map(|item| plan.slashed(item))
             .collect::<Vec<_>>(),
         ["d/extra"]
     );
@@ -784,7 +820,7 @@ fn removals_are_the_topmost_extras_deepest_first_with_what_each_takes() {
     let removals: Vec<(String, u64)> = plan
         .removals(Mode::Mirror)
         .into_iter()
-        .map(|(index, leaves)| (plan.label(&plan.items[index]), leaves))
+        .map(|(index, leaves)| (plan.slashed(&plan.items[index]), leaves))
         .collect();
     assert_eq!(
         removals,
@@ -931,14 +967,14 @@ fn a_killed_copys_leftover_is_cleared_even_by_an_update() {
     let item = plan
         .items
         .iter()
-        .find(|item| plan.label(item) == "d/.df-tmp-4242-7")
+        .find(|item| plan.slashed(item) == "d/.df-tmp-4242-7")
         .unwrap();
     assert_eq!(item.class, Class::Extra);
     assert!(plan.is_debris(item));
     assert!(!plan.in_sync(Mode::Update), "there is something to clear");
     assert_eq!(
         plan.listed(Mode::Update)
-            .map(|item| plan.label(item))
+            .map(|item| plan.slashed(item))
             .collect::<Vec<_>>(),
         ["d/.df-tmp-4242-7"],
         "an update lists the debris and no other extra"
@@ -1027,7 +1063,7 @@ fn a_file_a_case_folding_card_lists_in_its_own_case_is_rewritten_not_trashed() {
         .items
         .iter()
         .filter(|item| item.class == Class::Extra)
-        .map(|item| plan.label(item))
+        .map(|item| plan.slashed(item))
         .collect();
     assert_eq!(extras, ["d/stray.txt"], "the twin is no extra");
 

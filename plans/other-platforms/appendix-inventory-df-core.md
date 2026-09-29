@@ -333,7 +333,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 267–282 | `SyncPlan::label`: `format!("{name}/{}", item.rel.to_string_lossy())`, trailing `'/'` for folders | Windows-differs | app:sync.rs (card rows) | Mixed separators on Windows (`rel` renders with `\`) |
+| 267–282 | `SyncPlan::label`: `format!("{name}/{}", item.rel.to_string_lossy())`, trailing `'/'` for folders | Windows-differs | app:sync.rs (card rows) | Mixed separators on Windows (`rel` renders with `\`) ✓ P3.17 |
 | 310–318 | `is_debris`: `use std::os::unix::ffi::OsStrExt`; `name.as_bytes().starts_with(TEMP_PREFIX)` | Unix-only | `has_debris`, `in_sync`, `listed`, `removals`; core:sync/execute.rs:remove_extras | ✓ S1.16 ✓ P3.9 |
 | 412–436 | `trash_available`: `Trash::home`, `device_of`, `mount_point_of`, `.Trash` sticky `mode() & 0o1000` (427), `.Trash-{uid()}` (431), `writable` | Linux-only | core:sync/plan.rs:walk | ✓ S1.6 |
 | 414 | `use std::os::unix::fs::PermissionsExt` | Unix-only | `trash_available` | ✓ S1.6 |
@@ -1718,7 +1718,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | zoxide/mod.rs:340 | `path.rsplit('/')` for the last component | Windows-differs | `query` | ✓ P3.16 |
 | archive/write/mod.rs:187, 213 | `text.rsplit('/')` for the leaf of a typed archive name | Windows-differs | app:app/compress.rs | ✓ P3.16 |
 | git/status.rs:557 | Trailing `b'/'` in git's output means a directory | (git format) | `insert` | git uses `/` on every platform |
-| sync/mod.rs:276, 279 | `label` joins with `/` and appends `/` | Windows-differs | app:sync.rs | |
+| sync/mod.rs:276, 279 | `label` joins with `/` and appends `/` | Windows-differs | app:sync.rs | ✓ P3.17 |
 | sync/rsync.rs:232–236 | `endpoint` trims and appends `b'/'` | Unix-only | rsync argv | |
 | sync/rsync.rs:391–393 | `parse_line` trailing `/` means folder | (rsync format) | | |
 | sync/rsync.rs:1206 | `parse_sha256sum` strips `./` | (sha256sum format) | | |

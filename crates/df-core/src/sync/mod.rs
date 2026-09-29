@@ -263,7 +263,10 @@ impl SyncPlan {
     }
 
     /// `item` as a person reads it on the card: the root's name and the path
-    /// below it, with a trailing `/` on a folder.
+    /// below it, with a trailing separator on a folder — the platform's
+    /// separator throughout, `photos/2024/` on Unix and `photos\2024\` on
+    /// Windows, where `rel` is joined with `\` and a `/` beside it would mix
+    /// the two.
     pub fn label(&self, item: &Item) -> String {
         let name = self.roots[item.root]
             .dst
@@ -273,10 +276,14 @@ impl SyncPlan {
         let mut label = if item.rel.as_os_str().is_empty() {
             name
         } else {
-            format!("{name}/{}", item.rel.to_string_lossy())
+            format!(
+                "{name}{}{}",
+                std::path::MAIN_SEPARATOR,
+                crate::path::display(&item.rel)
+            )
         };
         if item.kind == Kind::Dir {
-            label.push('/');
+            label.push(std::path::MAIN_SEPARATOR);
         }
         label
     }
