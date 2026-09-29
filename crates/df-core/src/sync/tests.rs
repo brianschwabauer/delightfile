@@ -316,13 +316,38 @@ fn extras_are_found_at_every_depth_with_everything_under_them() {
     );
 }
 
+/// A unix socket bound at `path`. A path too long for `sun_path`
+/// ([`crate::platform::socket::PATH_MAX`]; macOS's `$TMPDIR` alone is 49 of
+/// its 103 bytes) is bound through a short link under `/tmp` to its folder:
+/// `bind` follows the link to the folder and makes the socket there, under
+/// its own name, exactly where `path` says.
+#[cfg(unix)]
+fn bind_socket(path: &Path) -> std::os::unix::net::UnixListener {
+    use std::os::unix::net::UnixListener;
+    if path.as_os_str().len() <= crate::platform::socket::PATH_MAX {
+        return UnixListener::bind(path).unwrap();
+    }
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let link = PathBuf::from("/tmp").join(format!(
+        "df-sock-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(path.parent().unwrap(), &link).unwrap();
+    let listener = UnixListener::bind(link.join(path.file_name().unwrap()));
+    std::fs::remove_file(&link).unwrap();
+    listener.unwrap()
+}
+
 #[cfg(unix)]
 #[test]
 fn a_socket_is_skipped_by_name_rather_than_silently() {
     let t = TempTree::new("sync-special");
     let dir = t.dir("src/d");
     let socket = dir.join("sock");
-    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let _listener = bind_socket(&socket);
+    assert!(std::fs::symlink_metadata(&socket).is_ok(), "bound in place");
     t.file("src/d/real.txt", b"x");
     let plan = quick(&[dir], &t.dir("dst"));
     assert_eq!(plan.specials, [socket]);

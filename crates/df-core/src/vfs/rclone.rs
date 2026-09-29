@@ -160,10 +160,11 @@ const STDERR_GRACE: Duration = Duration::from_millis(200);
 const STDERR_LINES: usize = 32;
 const STDERR_LINE_MAX: usize = 512;
 
-/// The longest path a unix socket can be bound at: `sun_path` is 108 bytes
-/// and the last is the NUL. A longer one fails in `bind` with "invalid
-/// argument", which would be a baffling thing to show anybody.
-const SUN_PATH_MAX: usize = 107;
+/// The longest path a unix socket can be bound at: the platform's `sun_path`
+/// less its NUL ([`crate::platform::socket::PATH_MAX`]: 107 bytes on Linux,
+/// 103 on macOS). A longer one fails in `bind` with "invalid argument", which
+/// would be a baffling thing to show anybody.
+const SUN_PATH_MAX: usize = crate::platform::socket::PATH_MAX;
 
 /// What a directory row and a file row are given as `st_mode`.
 const DIR_MODE: u32 = 0o040_755;
@@ -1092,7 +1093,12 @@ fn spawn_failure(service: &Service, program: &Path, source: std::io::Error) -> V
 /// Where the socket goes: the service's [`Service::socket_dir`] when it names
 /// one (the tests' way to keep out of the user's runtime directory), else
 /// `$XDG_RUNTIME_DIR/delightfile/`, else a private directory under the temp
-/// dir.
+/// dir, else one under `/tmp`, the first whose socket path fits `sun_path`.
+///
+/// macOS sets no `$XDG_RUNTIME_DIR`, so there the socket goes under
+/// `$TMPDIR`, the `/var/folders/…/T/` macOS makes for each user and keeps
+/// private to them — the nearest thing it has to a runtime directory — and
+/// under `/tmp` when a long remote name pushes that past macOS's 103 bytes.
 ///
 /// The name carries the pid, the service and a per-process counter. The pid
 /// keeps two delightfiles apart; the counter keeps two daemons in one process
@@ -1384,7 +1390,7 @@ mod tests {
         // In a scratch directory of its own, opened up so the check that
         // closes it again has something to do — never the user's runtime
         // directory.
-        let scratch = super::super::tests::TempDir::new("rclone-sockets");
+        let scratch = super::super::tests::TempDir::for_socket("rclone-sockets");
         let run = scratch.path.join("run");
         std::fs::create_dir(&run).unwrap_or_default();
         let _ = std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755));
@@ -1435,7 +1441,7 @@ mod tests {
             return;
         };
         let remote = TempDir::new("rclone-drop-remote");
-        let scratch = TempDir::new("rclone-drop-scratch");
+        let scratch = TempDir::for_socket("rclone-drop-scratch");
         let local = TempDir::new("rclone-drop-local");
         let big: Vec<u8> = (0..16 * 1024 * 1024u32)
             .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
