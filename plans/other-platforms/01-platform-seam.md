@@ -641,7 +641,7 @@ their native clipboards *are* synchronous.
       `help.contains("portal") == HAS_PORTAL`; `portal_stands_alone` asserts the
       unknown option where there is none. — done 47c6881, Linux verified, other
       targets unverified until CI
-- [>] **S1.32** Drop-in via winit on every target: add `WindowEvent::HoveredFile`,
+- [x] **S1.32** Drop-in via winit on every target: add `WindowEvent::HoveredFile`,
       `HoveredFileCancelled`, `DroppedFile` arms to `app.rs:17066–17162` that push
       `platform::desktop::Event::{Enter, Motion, Leave, Drop}` onto a new
       `App.native_drops: Vec<Event>` drained at the top of `poll_data_device`
@@ -667,8 +667,8 @@ their native clipboards *are* synchronous.
       is untouched. Under X11 winit *does* deliver these, so an X11 session gains
       drop-in by this path (not a supported session; logged). The unit tests are
       `a_file_dropped_through_winit_is_copied_into_the_folder_on_screen` and
-      `winits_hovers_and_drops_read_as_the_devices_do`. — df-app agent, started
-      2026-09-29
+      `winits_hovers_and_drops_read_as_the_devices_do`. — done de889c0, Linux
+      verified, other targets unverified until CI
 - [ ] **S1.33** Tests that block df-app's test target from compiling elsewhere
       (appendix B §7 "unix-ext", "unix-socket", "sh"): `#[cfg(unix)]` on
       `app.rs a_click_on_the_spots_space_hint_toggles_the_chosen_bit`, the four
