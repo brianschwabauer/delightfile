@@ -7,4 +7,4 @@ pub mod fs;
 pub mod meta;
 pub mod user;
 
-pub use super::stub::{trash, watch};
+pub use super::stub::{thread, trash, watch};

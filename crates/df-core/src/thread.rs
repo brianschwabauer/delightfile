@@ -16,14 +16,13 @@
 /// is nicer, 0 is the default and negative values need privileges we do not
 /// have and do not want).
 ///
-/// Linux only in effect — it is the only platform this program targets (PLAN
-/// §1) and the only one where `setpriority(PRIO_PROCESS, 0, …)` means *this
-/// thread* rather than the whole process. Call it from inside the thread it is
-/// meant for; calling it from the spawner would nice the spawner.
+/// Linux only in effect — the only platform where `setpriority(PRIO_PROCESS,
+/// 0, …)` means *this thread* rather than the whole process; elsewhere it
+/// changes nothing ([`crate::platform::thread`]). Call it from inside the
+/// thread it is meant for; calling it from the spawner would nice the spawner.
 ///
 /// Returns whether the kernel took it, so a caller that cares can log. Nothing
 /// in the program treats a refusal as an error.
-#[allow(unsafe_code)]
 pub fn lower_priority(nice: i32) -> bool {
     // Never raise: a caller that passes 0 or a negative is asking for
     // something this function deliberately does not offer, and clamping is
@@ -32,14 +31,7 @@ pub fn lower_priority(nice: i32) -> bool {
     if nice == 0 {
         return false;
     }
-    // SAFETY: `setpriority` takes three scalars and touches no memory of ours.
-    // `who = 0` with `PRIO_PROCESS` is Linux's "the calling thread", which is
-    // the whole reason this is a syscall rather than a thread-builder option.
-    let ok = unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) } == 0;
-    if !ok {
-        log::debug!("could not nice this thread to {nice}");
-    }
-    ok
+    crate::platform::thread::lower_priority(nice)
 }
 
 /// How nice a **bulk** worker should be: the copy/move/delete pool, twenty

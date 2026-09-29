@@ -352,7 +352,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 349–363 | `default_transient`: `raw_os_error()` in `{11, 16, 23, 24, 26, 116}` (EAGAIN, EBUSY, ENFILE, EMFILE, ETXTBSY, ESTALE on Linux) | Linux-only (macOS: compiles, wrong numbers) | `Job::is_transient` default ← `run_one` (982) | libc apple: EAGAIN=35, ESTALE=70, and 11 is EDEADLK. Windows codes are Win32 ✓ S1.3 |
-| 896 | `worker_loop`: `crate::thread::lower_priority(NICE_BULK)` | macOS-differs (see thread.rs) | task pool workers | |
+| 896 | `worker_loop`: `crate::thread::lower_priority(NICE_BULK)` | macOS-differs (see thread.rs) | task pool workers | ✓ S1.9 |
 
 ### test_support.rs (compiled under `cfg(test)` and under feature `test-support`, which df-app enables as a dev-dependency)
 
@@ -365,7 +365,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 27–43 | `lower_priority`: `libc::setpriority(libc::PRIO_PROCESS, 0, nice)` | Linux-only (macOS: compiles, whole process; Windows: no compile) | core:tasks.rs:worker_loop; core:du/scanner.rs:new; core:preview/job.rs:with_debounce; app:preview/body.rs, app:bulk.rs, app:grid.rs, app:preview/decode.rs, app:preview/prepare.rs, app:playback/mod.rs, app:preview/doc/mod.rs (one call each, inside spawned worker closures) | The doc comment (19–21) states that `who = 0` means the calling thread only on Linux |
+| 27–43 | `lower_priority`: `libc::setpriority(libc::PRIO_PROCESS, 0, nice)` | Linux-only (macOS: compiles, whole process; Windows: no compile) | core:tasks.rs:worker_loop; core:du/scanner.rs:new; core:preview/job.rs:with_debounce; app:preview/body.rs, app:bulk.rs, app:grid.rs, app:preview/decode.rs, app:preview/prepare.rs, app:playback/mod.rs, app:preview/doc/mod.rs (one call each, inside spawned worker closures) | The doc comment (19–21) states that `who = 0` means the calling thread only on Linux ✓ S1.9 |
 
 ### vfs/config.rs
 

@@ -207,15 +207,16 @@ has not dropped.
       (moved), `sync/mod.rs:431, 443–458` (moved), `preview/cache.rs`, and
       df-app `mounts.rs:gvfs_root` (Linux-only after S1.20), and since the plan was
       written df-core's own `du::gvfs_root` and `vfs/rclone.rs`'s socket directory.
-      Done when: no `libc::getuid` outside `platform/`. — done SHA_S18,
+      Done when: no `libc::getuid` outside `platform/`. — done ab0c2bb,
       cross-checked locally, CI pending
-- [ ] **S1.9** `platform::thread::lower_priority(nice: i32)`: Linux body from
+- [x] **S1.9** `platform::thread::lower_priority(nice: i32) -> bool`: Linux body from
       `thread.rs:27–43`; the macOS body (a QoS class via
       `pthread_set_qos_class_self_np`, M2.5) is **not** done in this phase because it
       changes scheduling class rather than niceness and needs a live check; macOS and
       Windows stub no-op.
       Callers unchanged (they call `df_core::thread::lower_priority`, which now
-      delegates). Done when: compiles on all targets.
+      delegates; the clamp to 1–19 stays there, on every target). Done when:
+      compiles on all targets. — done SHA_S19, cross-checked locally, CI pending
 - [ ] **S1.10** `platform::time::local_civil(secs: i64) -> Option<Civil>` with the body
       of `rename/facts.rs:53–88`: Unix `localtime_r`; Windows `localtime_s` (present
       in the windows libc). Also df-app's `format.rs` localtime (appendix B) calls

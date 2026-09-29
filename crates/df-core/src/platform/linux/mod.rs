@@ -3,6 +3,7 @@
 
 pub mod fs;
 mod inotify;
+pub mod thread;
 pub mod trash;
 pub mod watch;
 

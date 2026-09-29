@@ -1,7 +1,7 @@
 //! macOS: the shared Unix bodies, and stubs where Linux has something macOS
 //! does not (the native bodies are Phase 2, `plans/other-platforms/02-macos.md`).
 
-pub use super::stub::{trash, watch};
+pub use super::stub::{thread, trash, watch};
 pub use super::unix::{errno, meta, user};
 
 /// The shared Unix file primitives, with the Linux-only ones (reflink,

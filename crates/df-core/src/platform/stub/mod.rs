@@ -13,5 +13,6 @@
 //! "nothing", a service comes up inert. Never a panic, never a silent success.
 
 pub mod fs;
+pub mod thread;
 pub mod trash;
 pub mod watch;
