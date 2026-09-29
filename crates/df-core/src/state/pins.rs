@@ -34,8 +34,8 @@
 
 use std::path::Path;
 
-use crate::config::expand_home;
 use crate::keymap::{parse_chord, Chord};
+use crate::path::expand_home;
 
 use super::{push_field, split_field, text, StateStore};
 

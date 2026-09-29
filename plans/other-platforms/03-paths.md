@@ -269,12 +269,19 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `file_name` as before. The grep finds only test code. New tests: a
       Windows drive and share refused by the rail, and a root entry named as
       the breadcrumb names it (P3.30: `rail_refuses_the_root` was bin 1).
-- [ ] **P3.14** Home expansion: `config.rs:767–775` and `state/pins.rs:59, 93`,
+- [x] **P3.14** Home expansion: `config.rs:767–775` and `state/pins.rs:59, 93`,
       `vfs/config.rs:144–151` all call one `df_core::path::expand_home(text: &str) ->
       String` that uses `platform::dirs::home()` (`HOME` on Unix, `USERPROFILE` on
       Windows) and keeps the separator the person typed. `ops/trash.rs:489` and
       `zoxide/mod.rs:123, 125` move behind `platform::dirs` in Phase 1/5. Done when:
       one `expand_home` exists and `config.rs`, `pins.rs`, `vfs/config.rs` tests pass.
+      — done (port/paths). `path::expand_home` is the body `config::expand_home`
+      had (S1.17 had put it on `platform::dirs::home`); `config::expand_home` is
+      a `pub use` of it, so df-app's import is unchanged; pins call it by its
+      new name; `Service::key_path` calls it and keeps its own `None` for a
+      `~` with no home. The trash and zoxide sites were moved by S1.6 and
+      S1.11. New test: `~`, `~/Work` and `~\Work` keep what was typed after
+      the home.
 - [ ] **P3.15** `config.rs:1220–1229` (`Theme::dir_icon`): a pattern containing `/`
       is matched against `path::display(p)` with `\` normalized to `/` on Windows
       first, so a config written with `/` matches on every target. Done when: an

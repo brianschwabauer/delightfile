@@ -301,6 +301,24 @@ pub fn display(p: &Path) -> String {
     shown.to_string_lossy().into_owned()
 }
 
+/// A place as a person writes one — `~/Work`, `~\Work`, `/mnt/x`,
+/// `sftp://host/srv` — with a leading `~` replaced by the home directory
+/// ([`platform::dirs::home`]: `$HOME`, or `%USERPROFILE%` on Windows). The
+/// rest is kept as typed, separator and all, so a `~/Work` written on Linux
+/// names `C:\Users\x/Work` on Windows, which is the same folder. Unchanged
+/// when there is no home, or no `~`.
+///
+/// The one rule for every `~`: `[goto]` bookmarks, pins, an SFTP key file.
+pub fn expand_home(text: &str) -> String {
+    let Some(rest) = text.strip_prefix('~') else {
+        return text.to_string();
+    };
+    match platform::dirs::home() {
+        Some(home) => format!("{}{}", home.to_string_lossy(), rest),
+        None => text.to_string(),
+    }
+}
+
 /// `text` with this platform's separator written as `/`, for the formats
 /// that own the `/` — an archive's member names and link targets, a pattern
 /// a config wrote with slashes. The identity on Unix, where a `\` is part of
@@ -534,6 +552,20 @@ mod tests {
         if cfg!(windows) {
             assert!(name_is_valid(OsStr::new("con.txt")).is_err());
         }
+    }
+
+    #[test]
+    fn a_leading_tilde_is_home_and_the_rest_is_kept_as_typed() {
+        assert_eq!(expand_home("/mnt/x"), "/mnt/x");
+        assert_eq!(expand_home("sftp://h/srv"), "sftp://h/srv");
+        let Some(home) = platform::dirs::home() else {
+            assert_eq!(expand_home("~/Work"), "~/Work", "no home, no change");
+            return;
+        };
+        let home = home.to_string_lossy();
+        assert_eq!(expand_home("~"), home);
+        assert_eq!(expand_home("~/Work"), format!("{home}/Work"));
+        assert_eq!(expand_home(r"~\Work"), format!(r"{home}\Work"));
     }
 
     #[test]

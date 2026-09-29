@@ -912,20 +912,11 @@ impl Bookmark {
     }
 }
 
-/// A place as a person writes one — `~/Work`, `/mnt/x`, `sftp://host/srv` —
-/// with a leading `~` replaced by `$HOME`: [`Bookmark::expanded_path`]'s rule,
-/// apart from the bookmark so the pinned places in the state file
-/// ([`crate::state::Pin`]) are read by the same rule and cannot come to
-/// disagree with `[goto]` about where `~` is.
-pub fn expand_home(path: &str) -> String {
-    let Some(rest) = path.strip_prefix('~') else {
-        return path.to_string();
-    };
-    match crate::platform::dirs::home() {
-        Some(home) => format!("{}{}", home.to_string_lossy(), rest),
-        None => path.to_string(),
-    }
-}
+/// [`Bookmark::expanded_path`]'s rule, [`crate::path::expand_home`], under
+/// the name the app knows it by: one rule for `[goto]`, the pinned places in
+/// the state file ([`crate::state::Pin`]) and an SFTP key file, so none of
+/// them can come to disagree about where `~` is.
+pub use crate::path::expand_home;
 
 /// The shipped bookmark table, as [`Bookmark`]s.
 pub fn default_bookmarks() -> Vec<Bookmark> {

@@ -87,7 +87,7 @@
 | 155–169 | `DEFAULT_BOOKMARKS`: `~`, `~/.config`, `~/Downloads`, `~/Work`, `/mnt/schwabserverroot…`, `sftp://showandtour{1,2}` | Windows-differs (paths also absent on macOS) | `default_bookmarks` ← core:keymap/defaults.rs (452), `Config::default` | |
 | 192–282 | `DEFAULT_OPENERS`: POSIX-shell command strings: `setsid uwsm-app -- …`, `"${TERMINAL:-ghostty}"`, `"${EDITOR:-vi}"`, `zeditor`, `google-chrome-stable`, `delightviewer`, `pinta`, `system-cmd-wallpaper-set`, `system-cmd-image-optimize-yazi`, `xdg-open "$1"`, `mpv`, `$(dirname "$1")`, `>/dev/null 2>&1` | Linux-only | `Config::default` → `opener()`/`openers_for()` ← app:open.rs:choices_for, app:open.rs:from (copies `opener.command`) | Spawned by df-app, not df-core. `setsid` (util-linux), `uwsm-app` and `xdg-open` are Linux |
 | 306–375 | `DEFAULT_RULES`: glob/mime rules naming those openers (`open` = `xdg-open`) | Linux-only (via openers) | `Config::openers_for` ← app:open.rs:choices_for | |
-| 767–775 | `expand_home`: `var_os("HOME")`, `format!("{}{}", home.to_string_lossy(), rest)` | Windows-differs | `Bookmark::expanded_path` ← app:app.rs:goto, app:app/places.rs:pool, app:finder.rs:merge_places; core:state/pins.rs:expanded_path, same_place; app:app/places.rs:shown | `HOME` is not set by default on Windows (`USERPROFILE` is). The string splice keeps the `/` from `~/Work` ✓ S1.17 |
+| 767–775 | `expand_home`: `var_os("HOME")`, `format!("{}{}", home.to_string_lossy(), rest)` | Windows-differs | `Bookmark::expanded_path` ← app:app.rs:goto, app:app/places.rs:pool, app:finder.rs:merge_places; core:state/pins.rs:expanded_path, same_place; app:app/places.rs:shown | `HOME` is not set by default on Windows (`USERPROFILE` is). The string splice keeps the `/` from `~/Work` ✓ S1.17 ✓ P3.14 |
 | 1220–1229 | `Theme::dir_icon`: a pattern containing `/` is matched against the full path string | Windows-differs | app:icons.rs:icon_for (passes `entry.path.to_string_lossy()`) | Windows path strings use `\`, so such a pattern never matches |
 | 1400–1407 | `config_dir()`: `$XDG_CONFIG_HOME` (non-empty) or `$HOME/.config`, then `/delightfile` | Windows-differs; macOS-differs (not `~/Library/…`) | `load` ← app:app.rs:new; app:app.rs:new; core:vfs/config.rs:config_paths | Returns `None` on Windows unless `HOME` is set ✓ S1.11 |
 
@@ -320,7 +320,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 59–61 | `Pin::expanded_path` → `expand_home` (`HOME`) | Windows-differs | app:app/places.rs:pool; app:finder.rs:merge_places | |
+| 59–61 | `Pin::expanded_path` → `expand_home` (`HOME`) | Windows-differs | app:app/places.rs:pool; app:finder.rs:merge_places | ✓ P3.14 |
 | 92–94 | `same_place`: `Path::new(&expand_home(a)) == Path::new(&expand_home(b))` | Windows-differs (case) | `Pin::is` ← `pinned`, `unpin`, `set_pin_key` ← app:app/places.rs | |
 
 ### sync/execute.rs
@@ -393,7 +393,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 144–151 | `Service::key_path`: `~` → `var_os("HOME")` + `format!("{}{rest}", …)` | Windows-differs | `command`; app:app/syncing.rs:remote_sync | ✓ S1.17 |
+| 144–151 | `Service::key_path`: `~` → `var_os("HOME")` + `format!("{}{rest}", …)` | Windows-differs | `command`; app:app/syncing.rs:remote_sync | ✓ S1.17 ✓ P3.14 |
 | 181–202 | `Service::command`: `Command::new("ssh")` `-x -o BatchMode=yes -o ConnectTimeout=15 [-p] [-i] -s <dest> sftp` | Windows-differs | core:vfs/conn.rs:Transport::spawn | §4 |
 | 292–308 | `config_paths` / `xdg_config_home`: `$XDG_CONFIG_HOME` or `$HOME/.config` → `yazi/vfs.toml`, plus `config_dir()/vfs.toml` | Windows-differs; macOS-differs | `VfsConfig::load` ← core:vfs/mod.rs:Vfs::start ← app:app.rs:vfs | ✓ S1.11 |
 
@@ -1710,10 +1710,10 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | ops/create.rs:37 | Trailing `b'/'` marks "create a directory" | Windows-differs | app:app.rs:create | ✓ P3.10 |
 | ops/trash.rs:489 | `home.join(".local/share/Trash")` (embedded `/`) | Linux-only | `Trash::home` | ✓ S1.6 |
 | ops/trash.rs:683 | `encode_path` leaves `/` unescaped as the separator | Windows-differs | `trashinfo_text` | ✓ S1.6 |
-| state/pins.rs:59, 93 | `expand_home` splices `HOME` + `"/Work"` from `~/Work` | Windows-differs | pins, bookmarks | |
-| config.rs:771–772 | `expand_home` string concatenation | Windows-differs | bookmarks, pins | |
+| state/pins.rs:59, 93 | `expand_home` splices `HOME` + `"/Work"` from `~/Work` | Windows-differs | pins, bookmarks | ✓ P3.14 |
+| config.rs:771–772 | `expand_home` string concatenation | Windows-differs | bookmarks, pins | ✓ P3.14 |
 | config.rs:1222 | `dir_icon`: pattern `contains('/')` → match against the full path string | Windows-differs | app:icons.rs:icon_for | |
-| vfs/config.rs:146–150 | `key_path`: `~` + `HOME` string splice | Windows-differs | `command` | |
+| vfs/config.rs:146–150 | `key_path`: `~` + `HOME` string splice | Windows-differs | `command` | ✓ P3.14 |
 | zoxide/mod.rs:123, 125 | `.join(".local/share")`, `.join("zoxide/db.zo")` | Linux-only | `db_path` | ✓ S1.11 |
 | zoxide/mod.rs:340 | `path.rsplit('/')` for the last component | Windows-differs | `query` | |
 | archive/write/mod.rs:187, 213 | `text.rsplit('/')` for the leaf of a typed archive name | Windows-differs | app:app/compress.rs | |
@@ -1785,7 +1785,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 |---|---|---|---|---|
 | fs/scan.rs:328, 369 | `Entry.name = item.file_name().to_string_lossy()` | Windows-differs (unpaired surrogates); also Unix (non-UTF-8) | `DirState` | |
 | fs/mod.rs:506 | `selected_paths`: `self.path.join(n)` over lossy `name`s | same | every op in df-app | The rebuilt path differs from the real one when the name was not valid Unicode |
-| config.rs:772; vfs/config.rs:150 | `home.to_string_lossy()` spliced into a path string | same | bookmarks, key file | |
+| config.rs:772; vfs/config.rs:150 | `home.to_string_lossy()` spliced into a path string | same | bookmarks, key file | ✓ P3.14 |
 | zoxide/mod.rs:259 | `std::str::from_utf8(raw)` → `PathBuf::from(path)` (non-UTF-8 fails the whole file) | portable | `load_from` | |
 
 ### 3.6 Persisted and wire formats that carry a path

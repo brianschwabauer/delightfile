@@ -220,14 +220,15 @@ impl Service {
         }
     }
 
-    /// The key file with a leading `~` expanded, if there is one.
+    /// The key file with a leading `~` expanded ([`crate::path::expand_home`]),
+    /// if there is one — and none when it starts with `~` and there is no
+    /// home to put there.
     pub fn key_path(&self) -> Option<PathBuf> {
         let key = self.key_file.as_deref()?;
-        let Some(rest) = key.strip_prefix('~') else {
-            return Some(PathBuf::from(key));
-        };
-        let home = crate::platform::dirs::home()?;
-        Some(PathBuf::from(format!("{}{rest}", home.to_string_lossy())))
+        if key.starts_with('~') && crate::platform::dirs::home().is_none() {
+            return None;
+        }
+        Some(PathBuf::from(crate::path::expand_home(key)))
     }
 
     /// The rclone "fs" every call on this service is made against: the remote
