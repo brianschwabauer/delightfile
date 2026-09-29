@@ -15575,7 +15575,8 @@ impl App {
             Piece::Path => path.to_string_lossy().into_owned(),
             Piece::Dirname => path
                 .parent()
-                .unwrap_or(Path::new("/"))
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| df_core::path::root_of(&path))
                 .to_string_lossy()
                 .into_owned(),
             Piece::Filename => file_name(&path),
@@ -20051,7 +20052,8 @@ fn sort_options(mgr: &MgrConfig, seed: u64) -> SortOptions {
 /// Being handed a *file* opens its directory with the cursor on it — the shape
 /// "open this in the file manager" always means, and the one yazi has.
 fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>) {
-    let fallback = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let fallback =
+        || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(std::path::MAIN_SEPARATOR_STR));
     let Some(path) = requested else {
         return (fallback(), None);
     };
@@ -20082,7 +20084,8 @@ fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>) {
 /// directory, as [`start_directory`] falls back. `/` has no folder to be
 /// shown in, so it is opened itself.
 fn reveal_directory(path: &Path) -> (PathBuf, Option<String>) {
-    let fallback = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    let fallback =
+        || std::env::current_dir().unwrap_or_else(|_| PathBuf::from(std::path::MAIN_SEPARATOR_STR));
     let parent = match path.parent() {
         // A bare relative name is in the current directory.
         Some(parent) if parent.as_os_str().is_empty() => fallback(),
@@ -20261,7 +20264,8 @@ fn git_line(git: &df_core::git::Git, path: &Path) -> Option<String> {
 }
 
 /// The nearest ancestor of `path` that still exists — where to go when the
-/// directory you were in was deleted underneath you. `/` always qualifies.
+/// directory you were in was deleted underneath you. Its root always
+/// qualifies: `/`, or on Windows its drive.
 fn nearest_existing(path: &Path) -> PathBuf {
     let mut candidate = path;
     while let Some(parent) = candidate.parent() {
@@ -20270,7 +20274,7 @@ fn nearest_existing(path: &Path) -> PathBuf {
         }
         candidate = parent;
     }
-    PathBuf::from("/")
+    df_core::path::root_of(path)
 }
 
 /// What a path typed into `Go to:` names.

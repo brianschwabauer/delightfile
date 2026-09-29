@@ -152,17 +152,27 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
 Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 `✓ W4.n`.
 
-- [ ] **W4.9** Breadcrumb: `chrome.rs:853–888` (`crumbs`) uses
+- [x] **W4.9** Breadcrumb: `chrome.rs:853–888` (`crumbs`) uses
       `df_core::path::segments` (P3.2): the first crumb is `C:` (or
       `\\server\share`) and clicking it goes to the drive root. `trashview::crumbs`
       and `remote::crumbs` unchanged. Done when: a `crumbs` test with a
       Windows-shaped path passes (built under `cfg!(windows)`), Linux tests
-      unchanged.
-- [ ] **W4.10** Roots and fallbacks: `app.rs:16727–16750` (`start_directory`
+      unchanged. — done in Phase 3 (port/paths), with the path model the
+      breadcrumb is a site of: `crumbs` is `path::segments` mapped, which walks a
+      `.`/`..` without offering it as the old loop did, so Linux draws the same
+      crumbs; `a_windows_breadcrumb_starts_at_the_drive` (a drive, its root, a
+      share), and the Unix test runs under `cfg!(unix)`.
+- [x] **W4.10** Roots and fallbacks: `app.rs:16727–16750` (`start_directory`
       fallback), `app.rs:16901–16912` (`nearest_existing`), `app.rs:13048–13075`
       (`copy_piece` Dirname), `archive.rs:106–113` (`Browse::real`), `spot.rs:239–249`
       ("Where" row) → `df_core::path::root_of` / `display`. Done when: no
-      `Path::new("/")`/`PathBuf::from("/")` in df-app outside tests (`grep`).
+      `Path::new("/")`/`PathBuf::from("/")` in df-app outside tests (`grep`). —
+      done in Phase 3 (port/paths): `nearest_existing`, `copy_piece`'s dirname
+      and `Browse::real` fall back to `root_of` the path, the Where row to its
+      `display`; `start_directory` and `reveal_directory`, which have no path
+      to take a root from when the working directory is gone, fall back to
+      `MAIN_SEPARATOR_STR` (`/` on Linux, as before). The grep's hits left
+      are all test code (`mounts.rs:2606` is a `#[cfg(test)]` fixture).
 - [ ] **W4.11** Home and `~`: `app.rs:16914–16950` (`typed_path`) accepts `~`,
       `~/x`, `~\x`, `C:\x`, `C:/x`, `\\s\sh`; `finder.rs:336–359` (`shorten_home`)
       strips the home prefix on either separator and renders `~` + the platform
@@ -403,6 +413,11 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 - (df-app) 2026-09-29 — W4.33 appended: light mode's `auto` (which arrived after
   this plan) reads the XDG portal on Linux; on Windows S1.35 leaves a stub that
   answers nothing, and W4.33 is its native body.
+- 2026-09-29 — W4.9 and W4.10 were done in Phase 3 (port/paths): the
+  brief for Phase 3 named the breadcrumb's segments and the displayed root as
+  the df-app sites the path model itself requires, and a drive root's lack of
+  a parent pane needed nothing (`Path::parent` of `C:\` is `None`, as of `/`).
+  W4.11–W4.14, the rest of df-app's paths, stay here.
 - 2026-09-29 — W4.5's file identity (volume serial, file index, link count)
   was done in Phase 3 under P3.4, with P3.3's `same_file`, because the
   Windows runner's df-core suite could not go green without it; its

@@ -61,7 +61,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 12906-12924 | `fn paste_via_wl_paste` → `crate::clipboard::paste(&mime)` (12908) | Linux-only | clipboard_thread_gone, expire_clipboard | Blocking `wl-paste` on the UI thread. |
 | 12926-12953 | `fn take_external_drop(&mut self, paths: Vec<PathBuf>, ours: bool, at: Option<egui::Pos2>, now: Instant)` → `Clipboard::yank(paths)` → `self.paste_into(&clip, dest, false, now)` | consumer of Linux-only events | poll_data_device (12746) | Drop-in always copies. |
 | 12978-13015 | `fn yank_to_system` (`Y`): `clipboard::branch_for` → `offer(Some(mime), …)` / `offer(None, …)` / `offer(Some("text/uri-list"), clipboard::uri_list(&paths), …)` (13008-13013) | Linux-only (via offer) | key `Y` | — |
-| 13048-13075 | `fn copy_piece`: `Piece::Dirname` → `path.parent().unwrap_or(Path::new("/"))` (13061-13065) | Windows-differs | `c c`/`c d`/`c f`/`c n` | — |
+| 13048-13075 | `fn copy_piece`: `Piece::Dirname` → `path.parent().unwrap_or(Path::new("/"))` (13061-13065) | Windows-differs | `c c`/`c d`/`c f`/`c n` | — ✓ W4.10 |
 | 13097-13128 | `fn offer(&mut self, mime: Option<&str>, bytes: &[u8], message: String, now: Instant)`: `device.ready() && device.set_selection(crate::clipboard::offer_mimes(mime), bytes.to_vec())` (13110-13113) else `copy_via_wl_copy` (13127) | Linux-only | yank_to_system, copy_file_text, copy_piece, copy contents | — ✓ M2.13 |
 | 13129-13165 | `fn copy_via_wl_copy` → `retire_wl_copy()` (13147), `crate::clipboard::copy(mime, bytes)` (13148) | Linux-only | offer, copy_answered, clipboard_thread_gone, expire_clipboard | — ✓ S1.23 |
 | 13166-13220 | `fn settle_wl_copy`: `state.child.try_wait()` (13175) | Linux-only | frame | — ✓ S1.23 |
@@ -77,9 +77,9 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 16208-16211 | `gfx.egui_state.handle_platform_output(&gfx.window, platform_output)` | egui-winit (arboard/smithay-clipboard, webbrowser) | App::redraw_inner | — ✓ S1.20 |
 | 16217-16236 | `Presented::Occluded` arm: "But not on Wayland, where neither this nor that event exists"; `repaint_at = now + OCCLUDED_PROBE` | macOS-differs | App::redraw_inner | — ✓ M2.23 |
 | 16345-16367 | `fn finish`: `crate::cli::write_chooser_file(&chooser.out, &self.chosen)` (16348); `crate::cli::write_cwd_file(path, &cwd)` (16359); `self.data_device = None` (16365) "before the `wl_surface`" | Linux-only (data device) / see cli.rs | CloseRequested (17093-17096), RedrawRequested quit (17142-17146) | — ✓ M2.26 |
-| 16727-16750 | `fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>)`: fallback `std::env::current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` (16732) | Windows-differs | App::assemble (1928) | — |
+| 16727-16750 | `fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>)`: fallback `std::env::current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` (16732) | Windows-differs | App::assemble (1928) | — ✓ W4.10 |
 | 16752-16770 | `fn save_target(dir: &Path, text: &str) -> Result<PathBuf, String>`: refuses only `name.contains('/')` (16767-16769) | Windows-differs | App::save_as (5005) | `\`, `:`, reserved names are not checked. |
-| 16901-16912 | `fn nearest_existing(path: &Path) -> PathBuf` — fallback `PathBuf::from("/")` (16911) | Windows-differs | App::poll_workers (2388) | — |
+| 16901-16912 | `fn nearest_existing(path: &Path) -> PathBuf` — fallback `PathBuf::from("/")` (16911) | Windows-differs | App::poll_workers (2388) | — ✓ W4.10 |
 | 16914-16950 | `fn typed_path(text: &str, cwd: &Path, home: Option<&Path>) -> PathBuf`: expands `~` and `~/…` only (`rest.starts_with('/')`, 16927-16932) | Windows-differs | App::go_to_path (7945) | — |
 | 17066-17162 | `fn window_event`: arms `CloseRequested`, `Resized`, `Moved \| ScaleFactorChanged`, `Occluded(false)` (17115), `Focused`, `ModifiersChanged` (17127), `KeyboardInput` (17128-17140), `RedrawRequested`; no arm for `DroppedFile`, `HoveredFile`, `HoveredFileCancelled` or `Ime` | macOS/Windows: drop-in events unused | winit | winit `DroppedFile(PathBuf)`/`HoveredFile(PathBuf)` carry no position (winit src/event.rs:176-192); implementations exist in winit platform_impl for windows (drop_handler.rs), macos (window_delegate.rs), x11. `set_ime_allowed` is never called. ✓ S1.32 ✓ M2.11, M2.12 |
 | 17108-17118 | comment on `Occluded(false)`: "**Never delivered on Wayland**" | macOS-differs | window_event | — ✓ M2.23 |
@@ -118,7 +118,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
 | 98-104 | `Browse::inner`: `display.strip_prefix(&self.path)` then `rest.to_string_lossy().replace('\\', "/")` | already separator-agnostic | tab.rs:Tab::show_archive (636) and callers | Archive-inner paths are always `/`; `display_path` (86-92) is `self.path.join(inner)`. |
-| 106-113 | `Browse::real`: `self.path.parent()` else `PathBuf::from("/")` (112) | Windows-differs | Tab::show_archive (643), App::local_origin | — |
+| 106-113 | `Browse::real`: `self.path.parent()` else `PathBuf::from("/")` (112) | Windows-differs | Tab::show_archive (643), App::local_origin | — ✓ W4.10 |
 
 ### src/bulk.rs (2,400 lines; non-test 1-1401)
 
@@ -132,7 +132,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 853-888 | `pub fn crumbs(path: &std::path::Path) -> Vec<Crumb>`: `Component::RootDir` → crumb labelled `"/"` with `here.push("/")` (865-871); `Component::Normal` → one crumb each; every other component (`Prefix`, `CurDir`, `ParentDir`) is pushed onto the accumulator with no crumb (882-885) | Windows-differs | App::sync_path_bar (10398) | A drive `Prefix` gets no chip; the first chip reads `/`. |
+| 853-888 | `pub fn crumbs(path: &std::path::Path) -> Vec<Crumb>`: `Component::RootDir` → crumb labelled `"/"` with `here.push("/")` (865-871); `Component::Normal` → one crumb each; every other component (`Prefix`, `CurDir`, `ParentDir`) is pushed onto the accumulator with no crumb (882-885) | Windows-differs | App::sync_path_bar (10398) | A drive `Prefix` gets no chip; the first chip reads `/`. ✓ W4.9 |
 
 ### src/cli.rs (802 lines; non-test 1-478)
 
@@ -299,7 +299,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 |---|---|---|---|---|
 | 116-130 | `pub const BITS: [(u32, char, &str); 9]` (120): `(0o400, 'r', "owner may read")` … `(0o001, 'x', "everyone may execute")` | Windows-differs (POSIX mode) | chip painting (940), `toggle` (379-383), `rwx` (1001-1005) | — |
 | 150-200 | `pub struct Facts { …, pub mode: u32, pub uid: u32, pub gid: u32, … }` (157-159) filled from `entry.mode/uid/gid` (192-194) | Windows-differs | Spot panel | — |
-| 239-249 | `rows`: "Where" row = `facts.path.parent()` else `"/"` (248) | Windows-differs | Spot panel | — |
+| 239-249 | `rows`: "Where" row = `facts.path.parent()` else `"/"` (248) | Windows-differs | Spot panel | — ✓ W4.10 |
 | 268-275 | "Owner" row: `df_core::fs::owner::owner_label(facts.uid, facts.gid)` + `uid:gid` | Unix-only semantics via df-core | Spot panel | — |
 | 369-383, 532 | `pub fn octal(mode: u32) -> String`, `pub fn toggle(mode: u32, index: usize) -> u32`; `Action::SetMode(toggle(self.facts.mode, self.bit))` (532) | Unix-only (applied by app.rs:7243 `from_mode`) | App::spot_action (7185) | — |
 

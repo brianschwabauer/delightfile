@@ -858,34 +858,17 @@ pub struct Crumb {
 /// with the whole path in it — the app decides that, and this function does
 /// not need to know.
 pub fn crumbs(path: &std::path::Path) -> Vec<Crumb> {
-    use std::path::Component;
-    let mut out = Vec::new();
-    let mut here = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => {
-                here.push("/");
-                out.push(Crumb {
-                    label: "/".to_string(),
-                    path: here.clone(),
-                    accent: false,
-                });
-            }
-            Component::Normal(name) => {
-                here.push(name);
-                out.push(Crumb {
-                    label: name.to_string_lossy().into_owned(),
-                    path: here.clone(),
-                    accent: false,
-                });
-            }
-            // A relative path's `.`/`..`/prefix components cannot be clicked to
-            // anywhere meaningful, so they are pushed onto the accumulator and
-            // not offered as segments. In practice every path here is absolute.
-            other => here.push(other.as_os_str()),
-        }
-    }
-    out
+    // `df_core::path::segments`: the root as `/`, or on Windows the drive
+    // or share as people write it (`C:`), then one per name; a relative
+    // path's `.` and `..` are walked but not offered.
+    df_core::path::segments(path)
+        .into_iter()
+        .map(|segment| Crumb {
+            label: segment.label,
+            path: segment.path,
+            accent: false,
+        })
+        .collect()
 }
 
 /// The app menu's button, at the top row's leading end: a square as tall as a
@@ -4298,6 +4281,9 @@ mod tests {
     /// are in last, and each one addressing where it points.
     #[test]
     fn the_breadcrumb_is_the_path_one_segment_at_a_time() {
+        if !cfg!(unix) {
+            return;
+        }
         let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile"));
         let labels: Vec<&str> = path.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["/", "home", "brian", "Work", "delightfile"]);
@@ -4312,6 +4298,23 @@ mod tests {
         );
         // The root on its own is one crumb, not none.
         assert_eq!(crumbs(std::path::Path::new("/")).len(), 1);
+    }
+
+    /// On Windows the first crumb is the drive as people write it, `C:`, and
+    /// it goes to that drive's root; a share's is `\\server\share`.
+    #[test]
+    fn a_windows_breadcrumb_starts_at_the_drive() {
+        if !cfg!(windows) {
+            return;
+        }
+        let path = crumbs(std::path::Path::new(r"C:\Users\brian\Work"));
+        let labels: Vec<&str> = path.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["C:", "Users", "brian", "Work"]);
+        assert_eq!(path[0].path.as_path(), std::path::Path::new(r"C:\"));
+        assert_eq!(crumbs(std::path::Path::new(r"C:\")).len(), 1);
+        let share = crumbs(std::path::Path::new(r"\\server\share\docs"));
+        assert_eq!(share[0].label, r"\\server\share");
+        assert_eq!(share[1].label, "docs");
     }
 
     /// The crumbs tile the bar, the hit test finds what was drawn, and a path

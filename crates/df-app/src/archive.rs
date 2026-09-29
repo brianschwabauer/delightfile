@@ -109,7 +109,7 @@ impl Browse {
         self.path
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from("/"))
+            .unwrap_or_else(|| df_core::path::root_of(&self.path))
     }
 
     /// The rows of one directory inside the archive.

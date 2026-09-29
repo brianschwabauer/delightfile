@@ -252,7 +252,7 @@ pub fn rows(facts: &Facts) -> Vec<Row> {
                 .path
                 .parent()
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "/".to_string()),
+                .unwrap_or_else(|| df_core::path::display(&df_core::path::root_of(&facts.path))),
         ),
         Row::text("Kind", format!("{} · {}", facts.kind, facts.mime)),
     ];

@@ -124,7 +124,8 @@ fn is_separator_byte(b: u8) -> bool {
 /// The breadcrumb's steps for `p`, root first. On Unix the first is `/`; on
 /// Windows it is the drive or share as people write it (`C:`,
 /// `\\server\share`), and it goes to that root. Then one per name, each going
-/// to the path up to and including it.
+/// to the path up to and including it. A `.` or `..` (only a relative path
+/// has one) is walked through but is no step: it goes nowhere a click means.
 pub fn segments(p: &Path) -> Vec<Segment> {
     let mut out = Vec::new();
     let mut at = PathBuf::new();
@@ -155,10 +156,12 @@ pub fn segments(p: &Path) -> Vec<Segment> {
                     });
                 }
                 at.push(component.as_os_str());
-                out.push(Segment {
-                    label: component.as_os_str().to_string_lossy().into_owned(),
-                    path: at.clone(),
-                });
+                if let Component::Normal(name) = component {
+                    out.push(Segment {
+                        label: name.to_string_lossy().into_owned(),
+                        path: at.clone(),
+                    });
+                }
             }
         }
     }
@@ -473,6 +476,11 @@ mod tests {
 
     #[test]
     fn segments_go_root_first_then_one_per_name() {
+        assert_eq!(
+            labels("a/../b"),
+            [("a".to_string(), p("a")), ("b".to_string(), p("a/../b"))],
+            "a `..` is walked, not offered"
+        );
         if cfg!(unix) {
             assert_eq!(labels("/"), [("/".to_string(), p("/"))]);
             assert_eq!(
