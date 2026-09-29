@@ -409,6 +409,14 @@
 | 337–367 | `write_all`: `poll::poll_write(self.stdin.as_raw_fd(), left)` then a non-blocking `write` | Unix-only | `send`, `connect` | ✓ S1.12 |
 | 897 | `download_body`: `file.write_all_at(&data, offset)` | Unix-only | `download` ← core:vfs/mod.rs:Vfs::download, download_to_temp ← app:app.rs:open_remote, sync_remote_preview, remote_download | Windows `FileExt` has `seek_write`, not `write_all_at` ✓ S1.5 |
 
+### vfs/child.rs (added 2026-09-29: the rclone daemon postdates the inventory; lines as of 6aee8d1)
+
+| Line | What | Class | Used by | Note |
+|---|---|---|---|---|
+| 55 | `use std::os::unix::process::CommandExt` (`pre_exec`) | Unix-only | `tie_to_this_thread` | ✓ S1.50 |
+| 61–95 | `tie_to_this_thread`: `prctl(PR_SET_PDEATHSIG, SIGTERM)` and `getppid()` in `pre_exec`, `ESRCH` when the parent is gone | Linux-only (macOS: no `prctl`; Windows: no `pre_exec`) | core:vfs/rclone.rs:Daemon::spawn; app:mounts.rs (gvfs watcher) | ✓ S1.50 |
+| 104–116 | `terminate`: `libc::kill(pid, SIGTERM)` on a child not yet reaped | Unix-only | core:vfs/rclone.rs:Daemon drop | ✓ S1.50 |
+
 ### vfs/mod.rs
 
 | Line | What | Class | Used by | Note |

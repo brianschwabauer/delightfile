@@ -67,7 +67,9 @@ pub(crate) enum Control {
     /// Replace the whole watched set. Replace rather than add/remove because
     /// the caller's truth is "these are the directories on screen", and
     /// diffing that against the kernel's set is the watcher's job, not the
-    /// caller's.
+    /// caller's. Only a platform's watcher thread reads the list, and a
+    /// platform without one (its backend never opens) never does.
+    #[allow(dead_code)]
     Watch(Vec<PathBuf>),
     Stop,
 }

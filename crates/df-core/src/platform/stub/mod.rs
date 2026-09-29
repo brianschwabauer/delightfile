@@ -14,6 +14,7 @@
 
 pub mod fs;
 pub mod nofollow;
+pub mod process;
 pub mod thread;
 pub mod trash;
 pub mod user;

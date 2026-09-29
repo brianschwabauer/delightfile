@@ -73,7 +73,7 @@ has not dropped.
       empty modules and the CI workflow from B6.1 exists.
       — df-core core-seam session, started 2026-09-29: df-core half done 1758eda;
       the df-app half (§3) and the B6.1 workflow belong to other agents.
-- [>] **S1.3** `platform::errno` (df-core): `is_cross_device`, `is_exists`,
+- [x] **S1.3** `platform::errno` (df-core): `is_cross_device`, `is_exists`,
       `is_not_empty`, `is_not_dir`, `is_dir`, `is_invalid`, `is_transient`, each
       `fn(&io::Error) -> bool`. Unix body compares `raw_os_error()` with the
       `libc::E*` constants (correct per target by construction; the current
@@ -88,9 +88,9 @@ has not dropped.
       file, but the *move-cross-device* helper it calls is shared and uses the new
       predicate), `tasks.rs:349–363`, and the `EEXIST`/`ENOTEMPTY`/`ENOTDIR`/`EISDIR`
       uses the appendix lists under `ops/*.rs`. Done when: `grep -rn "libc::E" crates/df-core/src`
-      hits only `platform/`. — df-core core-seam session, started 2026-09-29; the
-      grep's remaining hits are in files that move whole in S1.18 (`fs/tags.rs`),
-      S1.19 (`ops/mode.rs`'s descriptor walk) and S1.50 (`vfs/child.rs`).
+      hits only `platform/`. — done 66e285d; the grep holds from SHA_S150, once
+      S1.18 (`fs/tags.rs`), S1.19 (`ops/mode.rs`'s descriptor walk) and S1.50
+      (`vfs/child.rs`) had moved the last hits.
 
 ## 2. df-core: filesystem primitives
 
@@ -250,7 +250,7 @@ has not dropped.
       unchanged.
       Done when: compiles on all targets, `vfs/tests.rs` passes on Linux. — done
       0f42ec2, cross-checked locally, CI pending
-- [>] **S1.13** `platform::process` (df-core): `NULL_DEVICE: &str`, `pause(&Child)`,
+- [x] **S1.13** `platform::process` (df-core): `NULL_DEVICE: &str`, `pause(&Child)`,
       `resume(&Child)` (each `-> io::Result<()>`; `sync::rsync` logs a refusal as it
       logged a failed `kill`), `is_executable(&Path) -> bool`, `candidates(name: &str) ->
       Vec<String>` (Unix: `[name]`; Windows: `[name.exe, name]` plus the
@@ -262,8 +262,8 @@ has not dropped.
       `archive/write/mod.rs:656–661` use `candidates`. `git/status.rs:291`
       `/dev/null` → `NULL_DEVICE` (`"NUL"` on Windows, W4.2's value, since the
       constant needs one now). Done when: no `libc::kill`/`SIGSTOP` outside
-      `platform/`; archive tests pass on Linux. — df-core core-seam session,
-      started 2026-09-29; the grep's last hit is `vfs/child.rs`, which S1.50 moves.
+      `platform/`; archive tests pass on Linux. — done 283a965; the grep holds
+      from SHA_S150, which moved `vfs/child.rs`.
 - [x] **S1.14** `sync::rsync::available()` (`sync/rsync.rs:69–77`) returns `false` on
       Windows without spawning (rsync is not a Windows tool; the `host:` endpoint
       syntax collides with drive letters). macOS keeps the real check; the version
@@ -341,7 +341,22 @@ has not dropped.
       to a Linux-gated `on_disk` module in `ops/mode.rs`; the grid tests run
       everywhere. Done when: `ops/mode.rs` names no `libc` or `O_PATH` in code,
       its tests pass on Linux, and df-core compiles on all three targets.
-      — done SHA_S119, cross-checked locally, CI pending
+      — done 1dbe892, cross-checked locally, CI pending
+- [x] **S1.50** `platform::process::{tie_to_this_thread, terminate}` (added
+      2026-09-29: the rclone daemon postdates the inventory; the brief called the
+      first `tie_to_parent`, but the code's name is `tie_to_this_thread`, which
+      says which parent it means and is what df-app's gvfs watcher calls through
+      `vfs::child`, so it is kept). `vfs/child.rs` moves whole to
+      `platform/linux/process.rs` (`prctl(PR_SET_PDEATHSIG, SIGTERM)` and the
+      `getppid` check in `pre_exec`); `terminate` (`kill(SIGTERM)` on a child
+      not yet reaped) moves on into the shared `platform/unix/process.rs`, so
+      macOS has it. `vfs/child.rs` stays as a two-line re-export. macOS and
+      Windows `tie_to_this_thread` is a no-op (`platform/stub/process.rs`) whose
+      doc says the child can outlive a crashed parent there (M2.29, W4.31);
+      Windows `terminate` is `Child::kill`. Done when: no `prctl`, `getppid` or
+      `libc::kill` outside `platform/`; the rclone tests pass on Linux; df-core
+      compiles on all three targets. — done SHA_S150, cross-checked locally, CI
+      pending
 
 ## 3. df-app: the seam
 
@@ -655,6 +670,13 @@ their native clipboards *are* synchronous.
   `errors`, as it always has without `/proc`. The disk tests are
   `#[cfg(target_os = "linux")]` because they test the Linux walk; a macOS body
   is M2.28.
+- 2026-09-29 — S1.50 (new task): `vfs/child.rs` ties the rclone daemon (and
+  df-app's gvfs watcher) to the thread that spawned it with Linux's
+  `prctl(PR_SET_PDEATHSIG)`, and stops it with `kill(SIGTERM)`. Fixed rule:
+  the file moved whole to `platform/linux/process.rs`, `terminate` on to the
+  shared Unix body (macOS has `SIGTERM`), and the tie is a no-op on macOS and
+  Windows with a doc comment saying the child can outlive a crash there; a
+  parent-exit watcher (M2.29) and a job object (W4.31) are later tasks.
 
 ## Open questions
 

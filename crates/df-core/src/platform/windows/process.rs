@@ -6,6 +6,8 @@ use std::io;
 use std::path::Path;
 use std::process::Child;
 
+pub use crate::platform::stub::process::*;
+
 /// The file that discards what is written to it and reads as empty.
 pub const NULL_DEVICE: &str = "NUL";
 
@@ -22,6 +24,15 @@ pub fn pause(_child: &Child) -> io::Result<()> {
 /// Refused, as [`pause`].
 pub fn resume(_child: &Child) -> io::Result<()> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
+/// Stop `child`: `TerminateProcess`, since Windows has no gentler signal a
+/// console-less child would see. A child already reaped is left alone.
+pub fn terminate(child: &mut Child) -> io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    child.kill()
 }
 
 /// Whether `path` is a file whose extension is one `PATHEXT` names

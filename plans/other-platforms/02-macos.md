@@ -294,6 +294,14 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       macOS refuses a link rather than following it. `read_dir_in` lists through
       the descriptor (`fdopendir` of a `dup`). Done when: `ops/mode.rs`'s
       `on_disk` tests are `#[cfg(unix)]` and pass on the macOS runner.
+- [ ] **M2.29** `platform::process::tie_to_this_thread` macOS body (S1.50), in
+      place of the no-op under which an rclone daemon outlives a delightfile that
+      crashes. macOS has no `PR_SET_PDEATHSIG`; the notice of a parent's exit is
+      a kqueue `EVFILT_PROC` filter with `NOTE_EXIT`. Nothing run in `pre_exec`
+      outlasts the `exec`, so where that watch runs (for instance a small
+      wrapper process that starts the daemon and signals it when the parent
+      goes) is this task's to settle and record. Done when: a runner test kills
+      the parent with `SIGKILL` and sees the daemon gone within a second.
 
 ## Decisions log
 

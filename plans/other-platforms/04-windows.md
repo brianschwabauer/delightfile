@@ -316,6 +316,17 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       `IShellFolder` enumeration of `CSIDL_BITBUCKET` and `IContextMenu`
       "undelete". Same note as W4.27.
 
+## 9. Found in Phase 1
+
+- [ ] **W4.31** `platform::process::tie_to_this_thread` Windows body (S1.50),
+      in place of the no-op under which a child outlives a crashed delightfile:
+      put the child in a job object created with
+      `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`CreateJobObjectW`,
+      `SetInformationJobObject`, `AssignProcessToJobObject` via `windows-sys`),
+      the handle held by the owning worker, so the system ends the child when
+      the last handle closes — however the process died. Done when: a runner
+      test ends the parent with `TerminateProcess` and sees the child gone.
+
 ## Decisions log
 
 - 2026-09-25 — No hand-written COM; drag-out and Recycle Bin restore deferred.

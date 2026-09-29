@@ -9,7 +9,11 @@ use std::collections::HashMap;
 /// Both files are `name:x:id:…`, colon-separated, one record per line. Lines
 /// that do not parse are skipped rather than failing the file: a passwd with
 /// one corrupt line still knows who you are.
-pub(crate) fn parse_id_table(text: &str) -> HashMap<u32, String> {
+///
+/// Public, not crate-private, because only Linux's body reads the files: on a
+/// platform that has no owner names the parser still stands, tested, for the
+/// day one does.
+pub fn parse_id_table(text: &str) -> HashMap<u32, String> {
     let mut map = HashMap::new();
     for line in text.lines() {
         let mut fields = line.split(':');

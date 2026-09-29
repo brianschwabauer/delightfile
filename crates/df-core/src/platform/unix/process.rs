@@ -38,6 +38,29 @@ fn signal(child: &Child, signal: libc::c_int) -> io::Result<()> {
     Ok(())
 }
 
+/// Ask `child` to exit with `SIGTERM`, the signal rclone cleans up on.
+///
+/// A child that has already been reaped is left alone and is `Ok`: once `std`
+/// has collected its status the pid is free for the kernel to hand to another
+/// process, and a signal sent to the number would land on a stranger. One not
+/// yet reaped is still ours — a zombie keeps its pid until it is waited for —
+/// so the check-then-signal here has no window.
+#[allow(unsafe_code)]
+pub fn terminate(child: &mut Child) -> io::Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pid = libc::pid_t::try_from(child.id())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: `kill` takes two integers and touches no memory of ours. `pid`
+    // is a child this `Child` has not reaped (checked above), so it names our
+    // own process.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Whether `path` is a file some execute bit is set on.
 pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
