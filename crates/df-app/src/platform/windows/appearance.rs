@@ -1,7 +1,7 @@
 //! The desktop's light or dark, on Windows: not asked yet.
 //!
 //! Windows knows which side it is on and tells a window when that changes,
-//! but reading it is Phase 4's (`plans/other-platforms/04-windows.md` W4.31).
+//! but reading it is Phase 4's (`plans/other-platforms/04-windows.md` W4.33).
 //! Until then this watcher starts no thread and hears nothing, which
 //! `[flavor] mode = "auto"` takes as dark — what a Linux session with no
 //! portal gets — and it says at once that nothing is coming ([`Link::Gone`]),

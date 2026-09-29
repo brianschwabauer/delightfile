@@ -271,7 +271,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `applicationShouldTerminate:` to route through `CloseRequested` — is the
       fallback if the first proves insufficient. Done when: a unit test drives
       `exiting` without `finish` and sees the cwd file written; live check V7 §4.1.
-- [ ] **M2.28** `platform::appearance` macOS body (S1.35's surface: `Desktop`,
+- [ ] **M2.30** `platform::appearance` macOS body (S1.35's surface: `Desktop`,
       `Connect`, `session`): the system's light or dark for `[flavor] mode =
       "auto"`, in place of the stub that answers nothing and says `Link::Gone`.
       Two routes, to be chosen here and logged: winit 0.30.13 already reports the
@@ -329,9 +329,13 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   composition key. Dead-key composition (Option+e, e → é) is lost in prompts; typing
   accented text there needs the character viewer or a paste. Accepted for a
   keyboard-driven file manager whose prompts are mostly file names.
-- (df-app) 2026-09-29 — M2.28 appended: light mode's `auto` (which arrived after
+- (df-app) 2026-09-29 — M2.30 appended: light mode's `auto` (which arrived after
   this plan) reads the XDG portal on Linux; on macOS S1.35 leaves a stub that
-  answers nothing, and M2.28 is its native body.
+  answers nothing, and M2.30 is its native body.
+- 2026-09-29 — The appearance body was appended as `M2.28` on the df-app branch
+  while the df-core branch took `M2.28` for the chmod walk; at integration the
+  chmod walk kept it and the appearance body became `M2.30`
+  (`01-platform-seam.md` Decisions log).
 
 ## Open questions
 

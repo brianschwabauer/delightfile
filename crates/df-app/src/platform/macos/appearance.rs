@@ -1,7 +1,7 @@
 //! The desktop's light or dark, on macOS: not asked yet.
 //!
 //! macOS knows which side it is on and tells a window when that changes, but
-//! reading it is Phase 2's (`plans/other-platforms/02-macos.md` M2.28). Until
+//! reading it is Phase 2's (`plans/other-platforms/02-macos.md` M2.30). Until
 //! then this watcher starts no thread and hears nothing, which `[flavor]
 //! mode = "auto"` takes as dark — what a Linux session with no portal gets —
 //! and it says at once that nothing is coming ([`Link::Gone`]), so

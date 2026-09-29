@@ -703,7 +703,7 @@ their native clipboards *are* synchronous.
       toasts that it could not reach the setting rather than claiming to follow it;
       `Connect` is `Arc<dyn Fn() -> Result<Infallible, String>>`, a connection
       never made. `app.rs` names `platform::appearance::{Desktop, Connect,
-      session}`. Native bodies: M2.28, W4.31. Done when: Linux tests pass from their
+      session}`. Native bodies: M2.30, W4.33. Done when: Linux tests pass from their
       new paths (`platform::linux::appearance::tests`, `app/tests/appearance.rs`),
       Linux behaviour is unchanged, and df-app compiles on the macOS and Windows
       runners with the stubs. — done a6b17de, Linux verified (the stubs type-check
@@ -889,7 +889,7 @@ their native clipboards *are* synchronous.
   as an inherent `impl`. The stubs answer nothing and say `Link::Gone` at once
   rather than delivering a `NoPreference`: the window lands on dark either way,
   and `theme-auto` then says it could not reach the setting instead of claiming
-  to follow one. M2.28 and W4.31 carry the native bodies.
+  to follow one. M2.30 and W4.33 carry the native bodies.
 - (df-app) 2026-09-29 — S1.21 split `mounts.rs` by what talks to the machine, not
   by the plan's list, which predates the phones: gio's output readers stay
   portable (pure, tested without gio), the processes and the bus move. The
@@ -912,6 +912,12 @@ their native clipboards *are* synchronous.
   Linux-visible change: winit's X11 backend delivers `DroppedFile`, so an X11
   session (which has no data device) now takes drops as a copy into the folder
   under the pointer; Wayland, the supported session, never sees these events.
+- 2026-09-29 — Integration of the df-core and df-app branches: both had appended
+  `M2.28` and `W4.31`. The df-core tasks keep their numbers (`M2.28` the macOS
+  chmod walk, `M2.29` the parent-exit watch, `W4.31` the job object, `W4.32`
+  the rclone transport); df-app's appearance bodies became `M2.30` and `W4.33`,
+  in `02-macos.md`, `04-windows.md`, their Decisions logs, S1.35 and the two
+  stubs' doc comments. No other ID changed.
 
 ## Open questions
 
