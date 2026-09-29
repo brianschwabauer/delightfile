@@ -56,7 +56,7 @@ has not dropped.
 - [x] **S1.1** `crates/df-core/src/lib.rs:46–82`: add
       `#[error("{0} is not available on this platform")] Unsupported(&'static str)`
       to `DfError`. Done when: it exists and `cargo test -p df-core` is green.
-      — done 1758eda
+      — done 94131a7
 - [>] **S1.2** Create `crates/df-core/src/platform/{mod.rs, unix/mod.rs, linux/mod.rs,
       macos/mod.rs, windows/mod.rs}` and `crates/df-app/src/platform/{mod.rs,
       linux/mod.rs, macos/mod.rs, windows/mod.rs}` with the selection boilerplate:
@@ -71,7 +71,7 @@ has not dropped.
       that the following tasks add (fill the table as you go; it is the phase's
       checklist inside the code). Done when: both crates compile on Linux with the
       empty modules and the CI workflow from B6.1 exists.
-      — df-core core-seam session, started 2026-09-29: df-core half done 1758eda;
+      — df-core core-seam session, started 2026-09-29: df-core half done 94131a7;
       the df-app half (§3) and the B6.1 workflow belong to other agents.
 - [x] **S1.3** `platform::errno` (df-core): `is_cross_device`, `is_exists`,
       `is_not_empty`, `is_not_dir`, `is_dir`, `is_invalid`, `is_transient`, each
@@ -88,7 +88,7 @@ has not dropped.
       file, but the *move-cross-device* helper it calls is shared and uses the new
       predicate), `tasks.rs:349–363`, and the `EEXIST`/`ENOTEMPTY`/`ENOTDIR`/`EISDIR`
       uses the appendix lists under `ops/*.rs`. Done when: `grep -rn "libc::E" crates/df-core/src`
-      hits only `platform/`. — done 66e285d; the grep holds from fdbf5ec, once
+      hits only `platform/`. — done 688d691; the grep holds from 57ce63d, once
       S1.18 (`fs/tags.rs`), S1.19 (`ops/mode.rs`'s descriptor walk) and S1.50
       (`vfs/child.rs`) had moved the last hits.
 
@@ -108,8 +108,8 @@ has not dropped.
       appended. Done when: the two `Watcher` tests in `fs/tests.rs` that start a real
       watcher pass on Linux
       and are `#[cfg(target_os = "linux")]`-gated until Phase 2/4 add bodies; df-core
-      compiles on all three targets. — done c720dc2; the whole crate compiles for
-      both foreign targets from d9f34ca and its tests from ba58aa7, cross-checked locally,
+      compiles on all three targets. — done ba40fba; the whole crate compiles for
+      both foreign targets from 5811c6b and its tests from ae24f85, cross-checked locally,
       CI pending
 - [x] **S1.5** `platform::fs` (df-core), moving these bodies out of `ops/copy.rs`,
       `ops/link.rs`, `ops.rs`, `sync/execute.rs`, `vfs/conn.rs`:
@@ -148,7 +148,7 @@ has not dropped.
         `false`/`None` (Phases 2/4 fill).
       Done when: `grep -rn "std::os::unix" crates/df-core/src` hits only `platform/`
       (except the `MetadataExt` sites, which are P3.4) and Linux tests pass.
-      — done df0c64b; the grep holds from bd5903c for everything but tests
+      — done e1e5e8c; the grep holds from bf80031 for everything but tests
       marked `#[cfg(unix)]` (S1.15), which name `std::os::unix` because they test
       Unix semantics, as `00-ground-rules.md` §6 has them do.
 - [>] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
@@ -183,7 +183,7 @@ has not dropped.
       `App::refusal(Command::Trash)` is `Some` for a local path; it first runs for
       real on the CI matrix at S1.40. On Linux `available_for` is true for every
       local path, so there is nothing to assert there.
-      — df-core core-seam session, started 2026-09-29: df-core half done d7768c1;
+      — df-core core-seam session, started 2026-09-29: df-core half done 70ad913;
       the df-app refusal test is the §3 agent's, with S1.34.
 - [x] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
       `03-paths.md` P3.4. In this phase create the module with the **Unix body only**
@@ -200,8 +200,8 @@ has not dropped.
       `st_ino`) and `ops/copy.rs`'s `apply_mode` (`PermissionsExt::mode()`, the same
       `st_mode`). `archive/write` also needs `st_mtime`, so the module has
       `mtime(&Metadata) -> i64` beside P3.4's list. Done when: no `MetadataExt`
-      outside `platform/` in df-core, Linux tests pass. — done 4a38afd; the grep
-      holds from bd5903c (tests included; the last test sites read through
+      outside `platform/` in df-core, Linux tests pass. — done 57c5c7b; the grep
+      holds from bf80031 (tests included; the last test sites read through
       `platform::meta`).
 - [x] **S1.8** `platform::user`: `uid() -> u32` (Unix `getuid`; Windows: `0`, and
       **`cache_suffix() -> String`** used by `preview/cache.rs:128–132, 195–212` for
@@ -210,7 +210,7 @@ has not dropped.
       (moved), `sync/mod.rs:431, 443–458` (moved), `preview/cache.rs`, and
       df-app `mounts.rs:gvfs_root` (Linux-only after S1.20), and since the plan was
       written df-core's own `du::gvfs_root` and `vfs/rclone.rs`'s socket directory.
-      Done when: no `libc::getuid` outside `platform/`. — done ab0c2bb,
+      Done when: no `libc::getuid` outside `platform/`. — done ed0530b,
       cross-checked locally, CI pending
 - [x] **S1.9** `platform::thread::lower_priority(nice: i32) -> bool`: Linux body from
       `thread.rs:27–43`; the macOS body (a QoS class via
@@ -219,12 +219,12 @@ has not dropped.
       Windows stub no-op.
       Callers unchanged (they call `df_core::thread::lower_priority`, which now
       delegates; the clamp to 1–19 stays there, on every target). Done when:
-      compiles on all targets. — done 9419fde, cross-checked locally, CI pending
+      compiles on all targets. — done 8118fae, cross-checked locally, CI pending
 - [x] **S1.10** `platform::time::local_civil(secs: i64) -> Option<Civil>` with the body
       of `rename/facts.rs:53–88`: Unix `localtime_r`; Windows `localtime_s` (present
       in the windows libc). Also df-app's `format.rs` localtime (appendix B) calls
       the same function. Done when: `Civil::local` tests pass on Linux; compiles on
-      Windows. — done bf77db9, cross-checked locally, CI pending
+      Windows. — done 39d8aa9, cross-checked locally, CI pending
 - [x] **S1.11** `platform::dirs`: `home()`, `config_dir()`, `state_dir()`,
       `data_dir()`, `cache_dir()`, `runtime_dir()`, `temp_dir()`, returning
       `Option<PathBuf>`. Linux bodies moved from `config.rs:1400–1407`,
@@ -236,7 +236,7 @@ has not dropped.
       but `home()` (`USERPROFILE`) and `temp_dir()`. Since the plan was written,
       `du::gvfs_root` and `vfs/rclone.rs`'s socket directory read
       `$XDG_RUNTIME_DIR` too; they use `runtime_dir()`. Done when: callers use
-      `platform::dirs`, Linux tests pass. — done 865e921, cross-checked locally,
+      `platform::dirs`, Linux tests pass. — done 5d3fd8d, cross-checked locally,
       CI pending
 - [x] **S1.12** `platform::pipe`: `git mv vfs/poll.rs platform/unix/pipe.rs`
       (`set_nonblocking`, `poll_read2`, `poll_write`). Windows: the module exists with
@@ -252,7 +252,7 @@ has not dropped.
       and Linux's handling of a failed `set_nonblocking` (logged, not fatal) is
       unchanged.
       Done when: compiles on all targets, `vfs/tests.rs` passes on Linux. — done
-      0f42ec2, cross-checked locally, CI pending
+      a22e68b, cross-checked locally, CI pending
 - [x] **S1.13** `platform::process` (df-core): `NULL_DEVICE: &str`, `pause(&Child)`,
       `resume(&Child)` (each `-> io::Result<()>`; `sync::rsync` logs a refusal as it
       logged a failed `kill`), `is_executable(&Path) -> bool`, `candidates(name: &str) ->
@@ -265,15 +265,15 @@ has not dropped.
       `archive/write/mod.rs:656–661` use `candidates`. `git/status.rs:291`
       `/dev/null` → `NULL_DEVICE` (`"NUL"` on Windows, W4.2's value, since the
       constant needs one now). Done when: no `libc::kill`/`SIGSTOP` outside
-      `platform/`; archive tests pass on Linux. — done 283a965; the grep holds
-      from fdbf5ec, which moved `vfs/child.rs`.
+      `platform/`; archive tests pass on Linux. — done dde51fe; the grep holds
+      from 57ce63d, which moved `vfs/child.rs`.
 - [x] **S1.14** `sync::rsync::available()` (`sync/rsync.rs:69–77`) returns `false` on
       Windows without spawning (rsync is not a Windows tool; the `host:` endpoint
       syntax collides with drive letters). macOS keeps the real check; the version
       gate is Phase 2. Done when: a Windows-shaped unit test of the gating function
       exists (pure) and the function has no cfg outside `platform/` (put the
       constant `platform::process::HAS_RSYNC: bool` in the platform module).
-      — done d9436e3, cross-checked locally, CI pending (the pure gate is
+      — done f81a714, cross-checked locally, CI pending (the pure gate is
       `sync::rsync::gated(has_rsync, probe)`; its test runs on every target)
 - [x] **S1.16** Bytes ↔ UTF-8 at every `OsStrExt`/`OsStringExt` site outside
       `platform/` — **the mechanical half of `03-paths.md` §2, pulled into this
@@ -292,7 +292,7 @@ has not dropped.
       and `cargo check -p df-core --target x86_64-pc-windows-msvc` passes on CI.
       Since the plan was written `fs/tags.rs`'s walk reads a name's first byte
       too; that site is rewritten here and the file's syscalls move in S1.18.
-      — done 59e23f4; the grep holds from bd5903c (tests included), and
+      — done e34eab8; the grep holds from bf80031 (tests included), and
       `cargo check -p df-core --target x86_64-pc-windows-msvc` passes locally, CI
       pending.
 - [x] **S1.17** `platform::user::{user_name(uid), group_name(gid)} ->
@@ -305,7 +305,7 @@ has not dropped.
       (S1.11), and likewise `config::expand_home`, `vfs::config`'s key path and
       rclone config lookup, and a `preview::cache` test. Done when: `fs::owner`
       tests pass on Linux; no `"HOME"` literal in
-      df-core outside `platform/`. — done d9af4f4
+      df-core outside `platform/`. — done 7a6e624
 - [x] **S1.15** Tests that stop df-core's test target from *compiling* elsewhere:
       `test_support.rs:61–68` (`TempTree::symlink` → `platform::fs::symlink`);
       `vfs/tests.rs`, `sync/rsync.rs` tests and `archive/external.rs` tests that write
@@ -326,7 +326,7 @@ has not dropped.
       compiling everywhere: `TempTree::symlink` (`platform::fs::symlink`), the
       archive writer's `photos()` (`platform::fs::apply_mode`), `du/tests.rs`'s
       size helpers (`Metadata::len`, `platform::meta::blocks_bytes`), and
-      `sync/tests.rs`'s inode check (`platform::meta::ino`). — done ba58aa7,
+      `sync/tests.rs`'s inode check (`platform::meta::ino`). — done ae24f85,
       cross-checked locally (`cargo check -p df-core --tests` for both targets;
       linking needs the runners), CI pending
 - [x] **S1.18** `platform::xattr` (added 2026-09-29: file tags postdate the
@@ -343,7 +343,7 @@ has not dropped.
       `user.xdg.tags` or Finder's `com.apple.metadata:_kMDItemUserTags` is an open
       question in `02-macos.md`. Done when: the tags tests pass on Linux,
       `fs/tags.rs` names no `libc`, and df-core compiles on all three targets.
-      — done cb54c3a, cross-checked locally, CI pending
+      — done 5ea059c, cross-checked locally, CI pending
 - [x] **S1.19** `platform::nofollow`, the permissions change's descriptor walk
       (added 2026-09-29: `ops/mode.rs` postdates the inventory). Finding a path
       below the anchor without following a link — `O_PATH | O_NOFOLLOW`
@@ -360,7 +360,7 @@ has not dropped.
       to a Linux-gated `on_disk` module in `ops/mode.rs`; the grid tests run
       everywhere. Done when: `ops/mode.rs` names no `libc` or `O_PATH` in code,
       its tests pass on Linux, and df-core compiles on all three targets.
-      — done 1dbe892, cross-checked locally, CI pending
+      — done a3ba8b0, cross-checked locally, CI pending
 - [x] **S1.50** `platform::process::{tie_to_this_thread, terminate}` (added
       2026-09-29: the rclone daemon postdates the inventory; the brief called the
       first `tie_to_parent`, but the code's name is `tie_to_this_thread`, which
@@ -374,7 +374,7 @@ has not dropped.
       doc says the child can outlive a crashed parent there (M2.29, W4.31);
       Windows `terminate` is `Child::kill`. Done when: no `prctl`, `getppid` or
       `libc::kill` outside `platform/`; the rclone tests pass on Linux; df-core
-      compiles on all three targets. — done fdbf5ec, cross-checked locally, CI
+      compiles on all three targets. — done 57ce63d, cross-checked locally, CI
       pending
 - [x] **S1.51** `platform::socket`, the rclone transport (added 2026-09-29:
       cloud remotes postdate the inventory). `vfs/http.rs` connects to
@@ -391,7 +391,7 @@ has not dropped.
       `vfs/rclone_tests.rs`, and `socket_names_are_short_safe_and_distinct`).
       Windows transport: W4.32. Done when: `vfs/http.rs` and `vfs/rclone.rs`
       name no `std::os::unix` outside tests, the rclone tests pass on Linux, and
-      df-core compiles on all three targets. — done d9f34ca, cross-checked
+      df-core compiles on all three targets. — done 5811c6b, cross-checked
       locally, CI pending
 
 ## 3. df-app: the seam
@@ -427,7 +427,7 @@ their native clipboards *are* synchronous.
       for now leave them. Done when: `cargo tree -p df-app --target
       aarch64-apple-darwin` (on CI) shows no `wayland-*`. (`cargo tree` resolves
       without the target installed, so this one also runs on Linux.)
-      — done 29726ca, Linux verified (`cargo tree` for both other targets names no
+      — done 66814ec, Linux verified (`cargo tree` for both other targets names no
       `wayland-*`), other targets unverified until CI
 - [x] **S1.21** `git mv crates/df-app/src/wayland crates/df-app/src/platform/linux/wayland`,
       `git mv src/dbus.rs src/platform/linux/dbus.rs`, `git mv src/portal
@@ -464,7 +464,7 @@ their native clipboards *are* synchronous.
       `mounts::tests::disks()`, the same two rows, and a Linux test holds the two
       equal. `icon.rs` moved in S1.22, and `mod platform;` was added in S1.2.
       `wayland` and `dbus` are private to `platform::linux`; `portal` is public
-      there for `main`. — done 87aacfc, Linux verified, other targets unverified
+      there for `main`. — done 2dc14d0, Linux verified, other targets unverified
       until CI
 - [x] **S1.22** `platform::desktop` (df-app): `pub struct Desktop` with exactly the
       `DataDevice` API (`ready`, `set_selection`, `receive`, `drag`, `poll`) and
@@ -488,7 +488,7 @@ their native clipboards *are* synchronous.
       S1.21, because `Rgba` is in `Desktop::drag`'s signature. The moved enums'
       doc links to the Wayland thread's private `Command` and `RECEIVE_TIMEOUT`
       now name `Desktop::set_selection`/`receive` and "time"; nothing else in them
-      changed. — done 0a2217e, Linux verified, other targets unverified until CI
+      changed. — done 019d4fe, Linux verified, other targets unverified until CI
 - [ ] **S1.23** `platform::clipboard` (df-app): move the *fallback* transport out of
       `clipboard.rs:330–431` — `copy`, `reap`, `offered_types`, `paste` — into
       `platform/linux/clipboard.rs` (wl-copy/wl-paste bodies unchanged) with stubs
@@ -532,7 +532,7 @@ their native clipboards *are* synchronous.
       `df_core::du::gvfs_root()` now (df-core's to place). The card's empty-state
       text is `Card::devices_empty`. The done-when is checked on Linux by
       `app::tests::an_empty_listing_leaves_the_places_and_the_connect_row`, which
-      feeds the stub's answer through a detached worker. — done 2ebad86, Linux
+      feeds the stub's answer through a detached worker. — done 2c371b5, Linux
       verified (the stubs type-check when selected on Linux), other targets
       unverified until CI
 - [ ] **S1.25** `format.rs:189–222` (`civil_local`) → `df_core::platform::time::local_civil`
@@ -569,7 +569,7 @@ their native clipboards *are* synchronous.
       with_option_as_alt` and `OptionAsAlt::Both` checked against winit 0.30.13's
       `src/platform/macos.rs` (the trait at :280, the method at :304, the enum at
       :518); the macOS body is the one stub that cannot be type-checked on Linux.
-      — done efe3869, Linux verified, other targets unverified until CI
+      — done 5bb4d59, Linux verified, other targets unverified until CI
 - [x] **S1.28** `platform::gfx::PREFERRED_BACKENDS: wgpu::Backends` — Linux `VULKAN`
       (unchanged), macOS `METAL`, Windows `DX12`. `graphics.rs:92` reads it. The
       retry-with-all-backends path stays as is. The four Wayland-reasoning comments
@@ -585,7 +585,7 @@ their native clipboards *are* synchronous.
       GL backend on Apple without `vulkan-portability`/`angle` (`build.rs`).
       Linux is verified by the code, not a launch (no GUI is driven here): the
       first instance is built from `Backends::VULKAN` exactly as before.
-      — done 381ce41, Linux verified, other targets unverified until CI
+      — done a978d99, Linux verified, other targets unverified until CI
 - [x] **S1.29** `platform::fonts::dirs() -> Vec<PathBuf>`: Linux body is
       `icons.rs:72–82` + the `$HOME` additions at `:102–105`; macOS and Windows lists
       are defined in `05-defaults-and-config.md` D5.6 and filled here (they are just
@@ -595,7 +595,7 @@ their native clipboards *are* synchronous.
       half — adding `SymbolsNerdFontMono-Regular` to `PREFERRED` — is D5.6's and
       was not done here: it would re-rank a face Linux already accepts as a
       last-resort match. A Linux test pins the order (system directories, then
-      `~/.local/share/fonts`, `~/.fonts`). — done cf13fa4, Linux verified, other
+      `~/.local/share/fonts`, `~/.fonts`). — done 3412429, Linux verified, other
       targets unverified until CI
 - [x] **S1.30** `platform::pdfium::{LIBRARY_NAME, candidates()}`: `preview/doc/pdf.rs:41–61`
       builds its list from them. Linux: `libpdfium.so` and the four paths as today.
@@ -610,7 +610,7 @@ their native clipboards *are* synchronous.
       asserts what holds on every target — the override first when set, and
       every other candidate named `LIBRARY_NAME` — and its two Linux-only
       assertions (the delightfile and delightviewer per-user copies) moved to
-      `platform::linux::pdfium`'s own test. — done 99246fe, Linux verified, other
+      `platform::linux::pdfium`'s own test. — done df33c49, Linux verified, other
       targets unverified until CI
 - [x] **S1.31** CLI: `cli.rs:221, 246–252` produce `Outcome::Portal` only when
       `platform::HAS_PORTAL` (a `const bool`, Linux `true`); otherwise `--portal` is
@@ -639,7 +639,7 @@ their native clipboards *are* synchronous.
       platform::HAS_PORTAL`, so elsewhere `--portal` is an unknown option.
       `cli::tests::the_help_names_the_portal_only_where_there_is_one` asserts
       `help.contains("portal") == HAS_PORTAL`; `portal_stands_alone` asserts the
-      unknown option where there is none. — done 47c6881, Linux verified, other
+      unknown option where there is none. — done 1d897c0, Linux verified, other
       targets unverified until CI
 - [x] **S1.32** Drop-in via winit on every target: add `WindowEvent::HoveredFile`,
       `HoveredFileCancelled`, `DroppedFile` arms to `app.rs:17066–17162` that push
@@ -667,7 +667,7 @@ their native clipboards *are* synchronous.
       is untouched. Under X11 winit *does* deliver these, so an X11 session gains
       drop-in by this path (not a supported session; logged). The unit tests are
       `a_file_dropped_through_winit_is_copied_into_the_folder_on_screen` and
-      `winits_hovers_and_drops_read_as_the_devices_do`. — done de889c0, Linux
+      `winits_hovers_and_drops_read_as_the_devices_do`. — done 415e4ea, Linux
       verified, other targets unverified until CI
 - [ ] **S1.33** Tests that block df-app's test target from compiling elsewhere
       (appendix B §7 "unix-ext", "unix-socket", "sh"): `#[cfg(unix)]` on
@@ -706,7 +706,7 @@ their native clipboards *are* synchronous.
       session}`. Native bodies: M2.30, W4.33. Done when: Linux tests pass from their
       new paths (`platform::linux::appearance::tests`, `app/tests/appearance.rs`),
       Linux behaviour is unchanged, and df-app compiles on the macOS and Windows
-      runners with the stubs. — done a6b17de, Linux verified (the stubs type-check
+      runners with the stubs. — done 631246a, Linux verified (the stubs type-check
       when selected on Linux), other targets unverified until CI
 - [ ] **S1.36** `cli.rs` reads an argument as bytes (arrived with 7ad55ad, after
       this plan): `parse` asks `OsStrExt::as_bytes(arg).starts_with(b"-")`,

@@ -74,7 +74,7 @@ roots, budgets) to sites that already compile everywhere.
       practice (the `Result` is always `Ok`). Windows bodies: `to_str` /
       `String::from_utf8`, `Err(DfError::Unsupported("non-Unicode file name"))`
       otherwise. Unit tests on both. Done when: both bodies compile on their
-      targets (CI) and the Unix tests pass on Linux. — done 59e23f4 (S1.16),
+      targets (CI) and the Unix tests pass on Linux. — done e34eab8 (S1.16),
       cross-checked locally, CI pending
 - [ ] **P3.2** `crates/df-core/src/path.rs` (new, portable, no cfg inside):
       - `pub fn root_of(p: &Path) -> PathBuf` — the `Prefix`+`RootDir` components
