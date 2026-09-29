@@ -570,7 +570,7 @@ their native clipboards *are* synchronous.
       `src/platform/macos.rs` (the trait at :280, the method at :304, the enum at
       :518); the macOS body is the one stub that cannot be type-checked on Linux.
       — done efe3869, Linux verified, other targets unverified until CI
-- [>] **S1.28** `platform::gfx::PREFERRED_BACKENDS: wgpu::Backends` — Linux `VULKAN`
+- [x] **S1.28** `platform::gfx::PREFERRED_BACKENDS: wgpu::Backends` — Linux `VULKAN`
       (unchanged), macOS `METAL`, Windows `DX12`. `graphics.rs:92` reads it. The
       retry-with-all-backends path stays as is. The four Wayland-reasoning comments
       (`graphics.rs:47–54, 78–90, 99–106, 135–147`) get one added sentence each saying
@@ -585,11 +585,17 @@ their native clipboards *are* synchronous.
       GL backend on Apple without `vulkan-portability`/`angle` (`build.rs`).
       Linux is verified by the code, not a launch (no GUI is driven here): the
       first instance is built from `Backends::VULKAN` exactly as before.
-      — df-app agent, started 2026-09-29
-- [ ] **S1.29** `platform::fonts::dirs() -> Vec<PathBuf>`: Linux body is
+      — done 381ce41, Linux verified, other targets unverified until CI
+- [>] **S1.29** `platform::fonts::dirs() -> Vec<PathBuf>`: Linux body is
       `icons.rs:72–82` + the `$HOME` additions at `:102–105`; macOS and Windows lists
       are defined in `05-defaults-and-config.md` D5.6 and filled here (they are just
       strings). Done when: `icons.rs` has no path literal.
+      *As built:* the one path literal left in `icons.rs` is in its tests, an
+      `Entry` fixture's path (`/home/brian/…`), not a font location. D5.6's other
+      half — adding `SymbolsNerdFontMono-Regular` to `PREFERRED` — is D5.6's and
+      was not done here: it would re-rank a face Linux already accepts as a
+      last-resort match. A Linux test pins the order (system directories, then
+      `~/.local/share/fonts`, `~/.fonts`). — df-app agent, started 2026-09-29
 - [ ] **S1.30** `platform::pdfium::{LIBRARY_NAME, candidates()}`: `preview/doc/pdf.rs:41–61`
       builds its list from them. Linux: `libpdfium.so` and the four paths as today.
       macOS: `libpdfium.dylib`, `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/libpdfium.dylib`

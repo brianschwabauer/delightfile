@@ -9,7 +9,8 @@
 //!
 //! egui cannot ask fontconfig for "a font containing U+F0B1", so this scans a
 //! short list of the places a Nerd Font is installed on Arch (`/usr/share/fonts`
-//! and the user's own font directory) for a regular-weight patched face, and
+//! and the user's own font directory — each platform's list is
+//! [`crate::platform::fonts::dirs`]) for a regular-weight patched face, and
 //! registers it as a **fallback** on egui's proportional and monospace families
 //! rather than as a replacement. Two consequences, both wanted: the UI keeps
 //! egui's own text face, and every other glyph the chrome needs that a plain
@@ -69,18 +70,6 @@ use crate::theme::Palette;
 /// re-ordered by a change to the UI font.
 pub const ICON_FAMILY: &str = "df-icons";
 
-/// Directories scanned for a patched font, in order. Deliberately short — this
-/// runs on the cold-start path (PLAN §6), and a full recursive walk of
-/// `/usr/share/fonts` is the tens of milliseconds delightviewer's own font
-/// loader is careful to keep off it.
-const FONT_DIRS: &[&str] = &[
-    "/usr/share/fonts/TTF",
-    "/usr/share/fonts/truetype",
-    "/usr/share/fonts/OTF",
-    "/usr/share/fonts/nerd-fonts",
-    "/usr/local/share/fonts",
-];
-
 /// Preferred faces, most wanted first. All three are common Arch packages and
 /// all three are patched with the same icon set, so the choice is only about
 /// which Latin face rides along in the fallback chain.
@@ -98,11 +87,7 @@ const PREFERRED: &[&str] = &[
 /// straight to egui, and a font that vanished between the scan and the load
 /// would be a failure with no useful recovery.
 fn find_nerd_font() -> Option<(PathBuf, Vec<u8>)> {
-    let mut dirs: Vec<PathBuf> = FONT_DIRS.iter().map(PathBuf::from).collect();
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(PathBuf::from(&home).join(".local/share/fonts"));
-        dirs.push(PathBuf::from(home).join(".fonts"));
-    }
+    let dirs = crate::platform::fonts::dirs();
 
     let mut best: Option<(usize, PathBuf)> = None;
     for dir in dirs {

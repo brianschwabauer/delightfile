@@ -9,6 +9,7 @@
 pub mod appearance;
 mod dbus;
 pub mod device;
+pub mod fonts;
 pub mod gfx;
 pub mod mounts;
 /// `--portal`: the xdg-desktop-portal file-chooser backend, and

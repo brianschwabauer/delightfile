@@ -5,6 +5,7 @@
 
 pub mod appearance;
 pub mod device;
+pub mod fonts;
 pub mod gfx;
 pub mod mounts;
 pub mod window;
