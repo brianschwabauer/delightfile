@@ -52,3 +52,10 @@ impl Desktop {
 pub fn start(_event_loop: &ActiveEventLoop, _window: &Window, _waker: Waker) -> Option<Desktop> {
     None
 }
+
+/// Where the pointer is over `window`, in logical points, for a drop winit
+/// reports without a position (`App::winit_drop`). Not asked yet (W4.17):
+/// `None`, and the caller falls back to the last position egui saw.
+pub fn pointer_position(_window: &Window) -> Option<(f32, f32)> {
+    None
+}

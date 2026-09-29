@@ -1905,6 +1905,11 @@ pub struct App {
     targets: Hovers<dnd::Target>,
     /// A drag from *another* application, while it is over the window.
     incoming: Option<Incoming>,
+    /// A drag from another application as winit reports it, queued until the
+    /// frame takes it with the desktop device's own events
+    /// ([`App::winit_drop`], [`App::poll_data_device`]). Always empty on
+    /// Wayland, where winit reports none.
+    native_drops: Vec<crate::platform::desktop::Event>,
     /// The last frame's drop geometry. An external drop arrives from the
     /// wayland thread between frames and has to be resolved against the frame
     /// the user was actually looking at when they let go.
@@ -2511,6 +2516,7 @@ impl App {
             spring_back: None,
             targets: Hovers::new(),
             incoming: None,
+            native_drops: Vec::new(),
             zones: None,
         }
     }
@@ -15114,6 +15120,30 @@ impl App {
 
     /// What [`crate::platform::desktop`] has to say, once a frame.
     fn poll_data_device(&mut self, now: Instant) {
+        // winit's drops first ([`App::winit_drop`]), read as the device's
+        // drop events are read below. Only these four are ever queued, and
+        // on Wayland none is.
+        for event in std::mem::take(&mut self.native_drops) {
+            match event {
+                crate::platform::desktop::Event::Enter { at, ours } => {
+                    self.incoming = Some(Incoming {
+                        at: egui::pos2(at.0, at.1),
+                        ours,
+                    });
+                }
+                crate::platform::desktop::Event::Motion { at } => {
+                    if let Some(incoming) = &mut self.incoming {
+                        incoming.at = egui::pos2(at.0, at.1);
+                    }
+                }
+                crate::platform::desktop::Event::Leave => self.incoming = None,
+                crate::platform::desktop::Event::Drop { paths, ours } => {
+                    let at = self.incoming.take().map(|incoming| incoming.at);
+                    self.take_external_drop(paths, ours, at, now);
+                }
+                _ => {}
+            }
+        }
         let Some(device) = &self.data_device else {
             return;
         };
@@ -15305,6 +15335,48 @@ impl App {
                 self.take_pasted(pending, bytes, now);
             }
             Err(error) => self.clip_failed(error, now),
+        }
+    }
+
+    /// A drag from another application, as winit reports it: queued as the
+    /// desktop device's events are, for [`App::poll_data_device`] to take.
+    ///
+    /// winit says which files and when, and nothing else. A drag coming in is
+    /// a `HoveredFile` for each file, a drop a `DroppedFile` for each, and
+    /// there is no motion in between; so the first `HoveredFile` of a drag is
+    /// `Enter` and the rest `Motion`, a drop's files are gathered into one
+    /// `Drop`, and `ours` is always false — winit cannot tell another
+    /// delightfile window's drag from anybody else's, so that lands as the
+    /// copy any other drop is. `at` is where the pointer is, when that can be
+    /// told; without it nothing is highlighted, and the drop lands in the
+    /// folder on screen.
+    fn winit_drop(&mut self, event: WindowEvent, at: Option<(f32, f32)>) {
+        use crate::platform::desktop::Event;
+        let hovering = match self.native_drops.last() {
+            Some(Event::Enter { .. } | Event::Motion { .. }) => true,
+            Some(_) => false,
+            None => self.incoming.is_some(),
+        };
+        match event {
+            WindowEvent::HoveredFile(_) => {
+                let Some(at) = at else {
+                    return;
+                };
+                self.native_drops.push(if hovering {
+                    Event::Motion { at }
+                } else {
+                    Event::Enter { at, ours: false }
+                });
+            }
+            WindowEvent::HoveredFileCancelled => self.native_drops.push(Event::Leave),
+            WindowEvent::DroppedFile(path) => match self.native_drops.last_mut() {
+                Some(Event::Drop { paths, .. }) => paths.push(path),
+                _ => self.native_drops.push(Event::Drop {
+                    paths: vec![path],
+                    ours: false,
+                }),
+            },
+            _ => {}
         }
     }
 
@@ -20388,6 +20460,24 @@ impl ApplicationHandler<crate::Wake> for App {
                     });
                     wants_frame = true;
                 }
+            }
+            // A drag from another application, as winit hands it over. **On
+            // Wayland winit never sends these** — the data device carries every
+            // drop there (`platform::desktop`) — so a Wayland session is
+            // unchanged by them; X11 does send them, and on macOS and Windows
+            // this is the only way a drop arrives. Where the pointer is comes
+            // from the platform when it can say, and otherwise from the last
+            // position egui saw.
+            WindowEvent::HoveredFile(_)
+            | WindowEvent::HoveredFileCancelled
+            | WindowEvent::DroppedFile(_) => {
+                let at = crate::platform::desktop::pointer_position(&gfx.window).or_else(|| {
+                    gfx.egui_ctx
+                        .input(|i| i.pointer.latest_pos())
+                        .map(|pos| (pos.x, pos.y))
+                });
+                self.winit_drop(event, at);
+                wants_frame = true;
             }
             WindowEvent::RedrawRequested => {
                 self.redraw();
@@ -26611,6 +26701,77 @@ mod tests {
         hesitate_on(&mut app, &ctx, "c");
         let keys: Vec<&str> = app.which_rows.iter().map(|row| row.keys.as_str()).collect();
         assert_eq!(keys, ["c"], "the card listed another chord's rows");
+    }
+
+    /// A file dropped on the window through winit — macOS's and Windows's
+    /// only drop-in — lands in the folder on screen when there is no row to
+    /// aim at: a copy, with the original left where it was.
+    #[test]
+    fn a_file_dropped_through_winit_is_copied_into_the_folder_on_screen() {
+        let mut app = Fixture::new("winit-drop", &["a.txt"]);
+        let elsewhere = app.files.with_file_name("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("a folder to drag from");
+        let dropped = elsewhere.join("dropped.txt");
+        std::fs::write(&dropped, b"from another program").expect("the file to drop");
+
+        app.winit_drop(WindowEvent::DroppedFile(dropped.clone()), None);
+        app.poll_data_device(Instant::now());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !app.ops.is_empty() && Instant::now() < deadline {
+            let events: Vec<TaskEvent> = app.task_events.try_iter().collect();
+            for event in events {
+                app.task_event(event, Instant::now());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.ops.is_empty(), "the copy never finished");
+        assert_eq!(
+            std::fs::read(app.files.join("dropped.txt")).ok(),
+            Some(b"from another program".to_vec()),
+            "the drop did not land in the folder on screen"
+        );
+        assert!(dropped.exists(), "a drop is a copy: the original stays");
+    }
+
+    /// What winit says of a drag, turned into what the device would have
+    /// said: the first file hovered enters, the rest move, a cancel leaves,
+    /// and a drop's files are one drop.
+    #[test]
+    fn winits_hovers_and_drops_read_as_the_devices_do() {
+        use crate::platform::desktop::Event;
+        let mut app = Fixture::new("winit-hover", &["a.txt"]);
+        let (one, two) = (PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two"));
+        app.winit_drop(WindowEvent::HoveredFile(one.clone()), Some((10.0, 20.0)));
+        app.winit_drop(WindowEvent::HoveredFile(two.clone()), Some((10.0, 20.0)));
+        assert!(matches!(
+            app.native_drops[..],
+            [
+                Event::Enter { ours: false, .. },
+                Event::Motion { at: (10.0, 20.0) }
+            ]
+        ));
+        app.poll_data_device(Instant::now());
+        assert_eq!(
+            app.incoming.as_ref().map(|incoming| incoming.at),
+            Some(egui::pos2(10.0, 20.0))
+        );
+        // Hovered again with the drag already over the window: a motion.
+        app.winit_drop(WindowEvent::HoveredFile(one.clone()), Some((30.0, 40.0)));
+        assert!(matches!(app.native_drops[..], [Event::Motion { .. }]));
+        app.winit_drop(WindowEvent::HoveredFileCancelled, None);
+        app.poll_data_device(Instant::now());
+        assert!(app.incoming.is_none(), "the cancel did not leave");
+
+        app.winit_drop(WindowEvent::DroppedFile(one.clone()), None);
+        app.winit_drop(WindowEvent::DroppedFile(two.clone()), None);
+        match &app.native_drops[..] {
+            [Event::Drop { paths, ours: false }] => assert_eq!(paths, &[one, two]),
+            other => panic!("a drop of two files queued {other:?}"),
+        }
+        // Nothing to highlight without a position.
+        app.native_drops.clear();
+        app.winit_drop(WindowEvent::HoveredFile(PathBuf::from("/tmp/x")), None);
+        assert!(app.native_drops.is_empty());
     }
 
     /// What a platform with no mounts of its own answers `M` with — an empty

@@ -33,6 +33,7 @@
 //! | `appearance::session` | `fn() -> Connect` | the session bus | a connection that is never made | S1.35 |
 //! | `desktop::Desktop` | `ready(&self) -> bool`, `set_selection(&self, Vec<String>, Vec<u8>) -> bool`, `receive(&self, u64, String) -> bool`, `drag(&self, Vec<(String, Vec<u8>)>, usize, icon::Rgba, icon::Rgba, i32) -> bool`, `poll(&self) -> Vec<desktop::Event>` | the Wayland data device | no value exists | S1.22 |
 //! | `desktop::start` | `fn(&ActiveEventLoop, &Window, app::Waker) -> Option<Desktop>` | adopts winit's Wayland connection | `None` | S1.22 |
+//! | `desktop::pointer_position` | `fn(&Window) -> Option<(f32, f32)>`, logical points, for a drop winit reports | `None` (Wayland has no query, and never reports one) | `None` until M2.11 / W4.17 | S1.32 |
 //! | `desktop::{Event, PasteFailure}` | the events `Desktop::poll` answers in | portable, one definition | same | S1.22 |
 //! | `mounts::run` | `fn(Receiver<mounts::Request>, Sender<mounts::Answer>, Notifier, mounts::Gio)`, the Places card worker's thread | udisks2 over the system bus, `gio mount -u`, `gio mount -li` | an empty listing; any other request `Failed("Not available on this platform")` | S1.24 |
 //! | `mounts::{connect, mount_gio}` | `fn(&str, &mounts::Gio) -> mounts::Connected` | `gio mount`, and where the mount landed | `Connected::Failed` | S1.24 |

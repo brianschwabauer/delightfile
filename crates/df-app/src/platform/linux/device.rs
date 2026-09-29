@@ -36,3 +36,14 @@ pub fn start(event_loop: &ActiveEventLoop, window: &Window, waker: Waker) -> Opt
         super::wayland::DataDevice::start(display.display, surface.surface, waker)
     }
 }
+
+/// Where the pointer is over `window`, in logical points, for a drop winit
+/// reports without a position (`App::winit_drop`).
+///
+/// `None`: winit has no way to ask on Wayland, and on Wayland it never
+/// reports such a drop either — the data device does, with its own position.
+/// Under X11, where it does, the caller falls back to the last position egui
+/// saw, which is the last `CursorMoved`.
+pub fn pointer_position(_window: &Window) -> Option<(f32, f32)> {
+    None
+}

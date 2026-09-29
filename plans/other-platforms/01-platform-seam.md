@@ -612,7 +612,7 @@ their native clipboards *are* synchronous.
       assertions (the delightfile and delightviewer per-user copies) moved to
       `platform::linux::pdfium`'s own test. — done 99246fe, Linux verified, other
       targets unverified until CI
-- [>] **S1.31** CLI: `cli.rs:221, 246–252` produce `Outcome::Portal` only when
+- [x] **S1.31** CLI: `cli.rs:221, 246–252` produce `Outcome::Portal` only when
       `platform::HAS_PORTAL` (a `const bool`, Linux `true`); otherwise `--portal` is
       an unknown flag. `main.rs:89–91` calls `platform::portal::run()`, which exists
       only on Linux; on other targets the `Outcome::Portal` arm is unreachable and is
@@ -639,8 +639,9 @@ their native clipboards *are* synchronous.
       platform::HAS_PORTAL`, so elsewhere `--portal` is an unknown option.
       `cli::tests::the_help_names_the_portal_only_where_there_is_one` asserts
       `help.contains("portal") == HAS_PORTAL`; `portal_stands_alone` asserts the
-      unknown option where there is none. — df-app agent, started 2026-09-29
-- [ ] **S1.32** Drop-in via winit on every target: add `WindowEvent::HoveredFile`,
+      unknown option where there is none. — done 47c6881, Linux verified, other
+      targets unverified until CI
+- [>] **S1.32** Drop-in via winit on every target: add `WindowEvent::HoveredFile`,
       `HoveredFileCancelled`, `DroppedFile` arms to `app.rs:17066–17162` that push
       `platform::desktop::Event::{Enter, Motion, Leave, Drop}` onto a new
       `App.native_drops: Vec<Event>` drained at the top of `poll_data_device`
@@ -654,6 +655,20 @@ their native clipboards *are* synchronous.
       (winit does not deliver `DroppedFile` on Wayland), so Linux is unchanged by
       construction; say so in the comment. Done when: a unit test feeds a synthetic
       `DroppedFile` through `App::for_test` and sees a paste into the cwd.
+      *As built:* a `&Window` cannot say where the last `CursorMoved` was, so
+      `pointer_position` answers `None` on Linux as on the other two for now, and
+      the arm falls back to egui's last pointer position (`latest_pos`), which is
+      that `CursorMoved`; with neither, nothing is highlighted and the drop lands
+      in the folder on screen. winit gives no motion during a drag and one event
+      per file, so `App::winit_drop` makes the first `HoveredFile` of a drag
+      `Enter` and the rest `Motion`, and gathers a drop's `DroppedFile`s into one
+      `Drop`. The queue is read at the top of `poll_data_device`, before the
+      device's own early return, by four arms of its own, so the Linux device loop
+      is untouched. Under X11 winit *does* deliver these, so an X11 session gains
+      drop-in by this path (not a supported session; logged). The unit tests are
+      `a_file_dropped_through_winit_is_copied_into_the_folder_on_screen` and
+      `winits_hovers_and_drops_read_as_the_devices_do`. — df-app agent, started
+      2026-09-29
 - [ ] **S1.33** Tests that block df-app's test target from compiling elsewhere
       (appendix B §7 "unix-ext", "unix-socket", "sh"): `#[cfg(unix)]` on
       `app.rs a_click_on_the_spots_space_hint_toggles_the_chosen_bit`, the four
@@ -890,6 +905,13 @@ their native clipboards *are* synchronous.
   (7ad55ad) do not compile on Windows, and their portable spelling is df-core's
   `platform::os`, so they wait for the second pass rather than growing a second
   copy of that helper here.
+- (df-app) 2026-09-29 — S1.32: `pointer_position` is `None` on every target in
+  this phase (Linux cannot ask a `&Window` where the last `CursorMoved` was), and
+  the caller falls back to egui's last pointer position, which is that
+  `CursorMoved` — the plan's Linux answer, reached without a Linux body. The one
+  Linux-visible change: winit's X11 backend delivers `DroppedFile`, so an X11
+  session (which has no data device) now takes drops as a copy into the folder
+  under the pointer; Wayland, the supported session, never sees these events.
 
 ## Open questions
 

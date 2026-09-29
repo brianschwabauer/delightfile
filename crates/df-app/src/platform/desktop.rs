@@ -15,11 +15,12 @@
 //! The events are the same on every target, so they are defined here once.
 //! The handle and [`start`] are each target's (`device` in its module):
 //! the Wayland data device on Linux, and on macOS and Windows for now no
-//! device at all.
+//! device at all. So is [`pointer_position`], which says where a drop that
+//! winit reports without a position is, where the platform can tell.
 
 use std::path::PathBuf;
 
-pub use super::device::{start, Desktop};
+pub use super::device::{pointer_position, start, Desktop};
 
 /// What the pointer's own drag machinery learns from the compositor.
 #[derive(Debug, Clone)]
