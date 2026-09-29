@@ -609,3 +609,86 @@ fn the_state_path_follows_xdg() {
         None
     );
 }
+
+// ── the file main wrote ─────────────────────────────────────────────────────
+
+/// `testdata/state-419a776` is the file `main` at 419a776 rendered — before
+/// the path model of `plans/other-platforms/03-paths.md` touched how a key is
+/// read or written — from a store holding one of everything: directory
+/// records whose keys need every escape, a key that is not UTF-8, the root,
+/// tabs, the panes, pins (`~`, a URL, an escape) and tags. Linux must go on
+/// reading it and writing it back unchanged, byte for byte: the file is
+/// Brian's, on disk now, and a load that dropped or rewrote a line of it would
+/// be the port changing Linux.
+///
+/// Unix only, as the file is: its keys are Unix absolute paths and one is not
+/// UTF-8, neither of which a Windows store reads.
+#[cfg(unix)]
+#[test]
+fn the_state_file_main_wrote_loads_and_saves_byte_for_byte() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let written: &[u8] = include_bytes!("testdata/state-419a776");
+    let tree = TempTree::new("state-main");
+    std::fs::write(tree.join("state"), written).unwrap();
+    let mut store = store_at(&tree);
+
+    assert_eq!(store.len(), 10, "every directory record");
+    assert_eq!(
+        store.linemode(Path::new(std::ffi::OsStr::from_bytes(
+            b"/tmp/caf\xe9 latin-1"
+        ))),
+        Some(LineMode::Size),
+        "the key that is not UTF-8, as the bytes it was"
+    );
+    assert_eq!(store.linemode(Path::new("/")), Some(LineMode::Owner));
+    assert_eq!(store.show_hidden(Path::new("/tmp/tab\there")), Some(false));
+    assert_eq!(
+        store.show_hidden(Path::new("/tmp/new\nline and\rreturn")),
+        Some(true)
+    );
+    assert_eq!(
+        store.sort(Path::new("/home/brian/src")),
+        Some(SortOverride {
+            by: SortBy::Mtime,
+            reverse: true
+        })
+    );
+    assert_eq!(store.tabs().len(), 3);
+    assert_eq!(store.active_tab(), 1);
+    assert_eq!(
+        store
+            .pins()
+            .iter()
+            .map(|pin| pin.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "~/Work",
+            "/mnt/plex",
+            "sftp://showandtour1/srv",
+            "/tmp/tab\there=eq"
+        ]
+    );
+    assert_eq!(store.known_tags(), ["work", "Grüße"]);
+    assert!(store.panes().is_some());
+    assert!(!store.is_dirty(), "reading it is not a change");
+
+    assert_eq!(store.render(), written, "rendered back byte for byte");
+    // And through a real save: a change made and unmade marks the store
+    // dirty, and the file it writes is the file it read.
+    store.set_hidden("/tmp/tab\there", Some(true));
+    store.set_hidden("/tmp/tab\there", Some(false));
+    store.flush().unwrap();
+    let saved = std::fs::read(tree.join("state")).unwrap();
+    let saved_text = String::from_utf8_lossy(&saved).into_owned();
+    let written_text = String::from_utf8_lossy(written).into_owned();
+    // The one line the edit touched carries a new time; every other line is
+    // the one main wrote.
+    let untouched = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| !line.starts_with("/tmp/tab\\there\t"))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(untouched(&saved_text), untouched(&written_text));
+}

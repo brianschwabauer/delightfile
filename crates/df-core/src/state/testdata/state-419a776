@@ -1,0 +1,19 @@
+# delightfile state v1
+/	linemode=owner	t=1790716590
+/home/brian/Pictures	linemode=none	hidden=1	t=1790716590
+/home/brian/src	sort=mtime	sort_reverse=1	t=1790716590
+/tmp/a\x3db	hidden=1	t=1790716590
+/tmp/back\\slash	hidden=1	t=1790716590
+/tmp/bell\x07 and del\x7f	hidden=1	t=1790716590
+/tmp/caf� latin-1	linemode=size	t=1790716590
+/tmp/new\nline and\rreturn	hidden=1	t=1790716590
+/tmp/tab\there	hidden=0	t=1790716590
+/tmp/ünïcödé — 日本語 🎬	hidden=1	t=1790716590
+!tabs	0=/home/brian	1=/tmp/tab\there	2=/tmp/caf� latin-1	active=1	t=1790716590
+!panes	ratio=0.125,0.5,0.375	parent_collapsed=0	preview_collapsed=0	parent_before=0.125	preview_before=0.375
+!pin	path=~/Work	key=w
+!pin	path=/mnt/plex
+!pin	path=sftp://showandtour1/srv	key=s
+!pin	path=/tmp/tab\there\x3deq
+!tag	name=work
+!tag	name=Grüße

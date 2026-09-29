@@ -364,3 +364,20 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 }
+
+/// `testdata/db-v3.zo` is a database in the layout `main` read at 419a776,
+/// before the path model of `plans/other-platforms/03-paths.md`: the
+/// [`fixture`] rows and one path with a tab, a dash and CJK in it. It loads
+/// with every path exactly the bytes that were written, on every target.
+#[test]
+fn a_database_main_read_still_loads_byte_for_byte() {
+    let dirs = parse(include_bytes!("testdata/db-v3.zo")).expect("parses");
+    let mut expected = fixture();
+    expected.push(("/tmp/tab\there and — 日本語 🎬", 0.25, 1_234_567_890));
+    assert_eq!(dirs.len(), expected.len());
+    for (got, (path, rank, last)) in dirs.iter().zip(&expected) {
+        assert_eq!(got.path.to_str(), Some(*path));
+        assert_eq!(got.rank, *rank);
+        assert_eq!(got.last_accessed, *last);
+    }
+}
