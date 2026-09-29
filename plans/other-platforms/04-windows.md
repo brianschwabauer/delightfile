@@ -326,6 +326,16 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       the handle held by the owning worker, so the system ends the child when
       the last handle closes — however the process died. Done when: a runner
       test ends the parent with `TerminateProcess` and sees the child gone.
+- [ ] **W4.32** Cloud remotes on Windows (S1.51): `rclone rcd` serves a unix
+      socket, which `std` cannot connect to on Windows, so `platform::socket` is
+      refused there and every cloud remote says "Cloud remotes is not available
+      on this platform". Choose the transport and record it: Windows 10's own
+      `AF_UNIX` through `windows-sys` (`socket`, `connect`, `send`, `recv`, with
+      the socket directory made private by an ACL rather than mode 0700), or
+      `--rc-addr 127.0.0.1:0` with rclone's `--rc-user`/`--rc-pass` and a random
+      password, since a loopback port is open to every local user. Then give
+      `platform/windows/socket.rs` that body and `AVAILABLE = true`. Done when:
+      `vfs/rclone_tests.rs` runs on the Windows runner.
 
 ## Decisions log
 

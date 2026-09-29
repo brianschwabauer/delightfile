@@ -88,7 +88,7 @@ has not dropped.
       file, but the *move-cross-device* helper it calls is shared and uses the new
       predicate), `tasks.rs:349–363`, and the `EEXIST`/`ENOTEMPTY`/`ENOTDIR`/`EISDIR`
       uses the appendix lists under `ops/*.rs`. Done when: `grep -rn "libc::E" crates/df-core/src`
-      hits only `platform/`. — done 66e285d; the grep holds from SHA_S150, once
+      hits only `platform/`. — done 66e285d; the grep holds from fdbf5ec, once
       S1.18 (`fs/tags.rs`), S1.19 (`ops/mode.rs`'s descriptor walk) and S1.50
       (`vfs/child.rs`) had moved the last hits.
 
@@ -263,7 +263,7 @@ has not dropped.
       `/dev/null` → `NULL_DEVICE` (`"NUL"` on Windows, W4.2's value, since the
       constant needs one now). Done when: no `libc::kill`/`SIGSTOP` outside
       `platform/`; archive tests pass on Linux. — done 283a965; the grep holds
-      from SHA_S150, which moved `vfs/child.rs`.
+      from fdbf5ec, which moved `vfs/child.rs`.
 - [x] **S1.14** `sync::rsync::available()` (`sync/rsync.rs:69–77`) returns `false` on
       Windows without spawning (rsync is not a Windows tool; the `host:` endpoint
       syntax collides with drive letters). macOS keeps the real check; the version
@@ -355,8 +355,25 @@ has not dropped.
       doc says the child can outlive a crashed parent there (M2.29, W4.31);
       Windows `terminate` is `Child::kill`. Done when: no `prctl`, `getppid` or
       `libc::kill` outside `platform/`; the rclone tests pass on Linux; df-core
-      compiles on all three targets. — done SHA_S150, cross-checked locally, CI
+      compiles on all three targets. — done fdbf5ec, cross-checked locally, CI
       pending
+- [x] **S1.51** `platform::socket`, the rclone transport (added 2026-09-29:
+      cloud remotes postdate the inventory). `vfs/http.rs` connects to
+      `rclone rcd` with `UnixStream`, and `vfs/rclone.rs` makes the socket's
+      directory private with `DirBuilderExt::mode`, `MetadataExt::uid` and
+      `PermissionsExt`. The connect-with-timeouts and `private_dir` move to the
+      shared `platform/unix/socket.rs` unchanged, so macOS keeps the real
+      transport (it is POSIX). Windows: `platform/windows/socket.rs`, whose
+      `AVAILABLE` is false, so `Daemon::spawn` refuses before starting rclone with
+      `VfsError::Spawn` whose source reads "Cloud remotes is not available on this
+      platform" — the same path S1.12 gives SFTP — and whose `connect` and
+      `private_dir` refuse the same way. The tests that serve or script a real
+      socket are `#[cfg(unix)]` (`vfs/http.rs`'s `over_a_socket`, the whole
+      `vfs/rclone_tests.rs`, and `socket_names_are_short_safe_and_distinct`).
+      Windows transport: W4.32. Done when: `vfs/http.rs` and `vfs/rclone.rs`
+      name no `std::os::unix` outside tests, the rclone tests pass on Linux, and
+      df-core compiles on all three targets. — done SHA_S151, cross-checked
+      locally, CI pending
 
 ## 3. df-app: the seam
 
@@ -677,6 +694,12 @@ their native clipboards *are* synchronous.
   shared Unix body (macOS has `SIGTERM`), and the tie is a no-op on macOS and
   Windows with a doc comment saying the child can outlive a crash there; a
   parent-exit watcher (M2.29) and a job object (W4.31) are later tasks.
+- 2026-09-29 — S1.51 (new task): cloud remotes speak to `rclone rcd` over a unix
+  socket. Fixed rule: the POSIX body (connect with timeouts, the private socket
+  directory) moved unchanged into the shared `platform::socket`, so macOS keeps
+  it; Windows refuses through the vfs spawn error, and its transport is W4.32.
+  `platform::socket::Stream` is `UnixStream` on Unix and an uninhabited type
+  on Windows, so `vfs::http::post` is written once.
 
 ## Open questions
 

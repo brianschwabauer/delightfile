@@ -29,7 +29,6 @@
 //! the socket.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
@@ -92,13 +91,7 @@ pub fn post(
     body: &str,
     timeout: Duration,
 ) -> Result<Response, HttpError> {
-    let mut stream = UnixStream::connect(socket).map_err(HttpError::Io)?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(HttpError::Io)?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(HttpError::Io)?;
+    let mut stream = crate::platform::socket::connect(socket, timeout).map_err(HttpError::Io)?;
     // One write for head and body: a request small enough to fit one socket
     // buffer goes out as one segment, and rclone's server never sees half a
     // header.
@@ -305,8 +298,6 @@ mod tests {
 
     use super::*;
     use std::io::Cursor;
-    use std::os::unix::net::UnixListener;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn response(bytes: &[u8]) -> Result<Response, HttpError> {
         read_response(Cursor::new(bytes.to_vec()))
@@ -451,74 +442,81 @@ mod tests {
         ));
     }
 
-    /// A private scratch directory for one test's socket, removed on drop —
-    /// under the temp dir, never the user's runtime directory — and a socket
-    /// path in it short enough for `sun_path`'s 108 bytes.
-    struct Scratch {
-        dir: std::path::PathBuf,
-    }
+    /// The exchange over a real socket, which is a unix socket until W4.32.
+    #[cfg(unix)]
+    mod over_a_socket {
+        use super::*;
+        use std::os::unix::net::UnixListener;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
-    impl Scratch {
-        fn new(tag: &str) -> Scratch {
-            static COUNTER: AtomicU32 = AtomicU32::new(0);
-            let name = format!(
-                "df-http-{tag}-{}-{}",
-                std::process::id(),
-                COUNTER.fetch_add(1, Ordering::Relaxed)
-            );
-            // `/tmp` when `$TMPDIR` is too deep for a socket inside it.
-            let mut dir = std::env::temp_dir().join(&name);
-            if dir.as_os_str().len() > 90 {
-                dir = std::path::PathBuf::from("/tmp").join(&name);
-            }
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            Scratch { dir }
+        /// A private scratch directory for one test's socket, removed on drop —
+        /// under the temp dir, never the user's runtime directory — and a socket
+        /// path in it short enough for `sun_path`'s 108 bytes.
+        struct Scratch {
+            dir: std::path::PathBuf,
         }
 
-        fn socket(&self) -> std::path::PathBuf {
-            self.dir.join("s.sock")
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    /// A one-shot server: accept one connection, read the request's head and
-    /// body, answer with `reply`, hand back what was asked.
-    fn serve_once(socket: &Path, reply: &'static [u8]) -> std::thread::JoinHandle<String> {
-        let _ = std::fs::remove_file(socket);
-        let listener = UnixListener::bind(socket).unwrap();
-        std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut head = String::new();
-            let mut length = 0usize;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap();
+        impl Scratch {
+            fn new(tag: &str) -> Scratch {
+                static COUNTER: AtomicU32 = AtomicU32::new(0);
+                let name = format!(
+                    "df-http-{tag}-{}-{}",
+                    std::process::id(),
+                    COUNTER.fetch_add(1, Ordering::Relaxed)
+                );
+                // `/tmp` when `$TMPDIR` is too deep for a socket inside it.
+                let mut dir = std::env::temp_dir().join(&name);
+                if dir.as_os_str().len() > 90 {
+                    dir = std::path::PathBuf::from("/tmp").join(&name);
                 }
-                head.push_str(&line);
-                if line == "\r\n" {
-                    break;
-                }
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                Scratch { dir }
             }
-            let mut body = vec![0u8; length];
-            reader.read_exact(&mut body).unwrap();
-            let mut stream = reader.into_inner();
-            stream.write_all(reply).unwrap();
-            head + &String::from_utf8(body).unwrap()
-        })
-    }
 
-    #[test]
-    fn a_post_over_a_unix_socket_round_trips_both_framings() {
-        for reply in [
+            fn socket(&self) -> std::path::PathBuf {
+                self.dir.join("s.sock")
+            }
+        }
+
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        /// A one-shot server: accept one connection, read the request's head and
+        /// body, answer with `reply`, hand back what was asked.
+        fn serve_once(socket: &Path, reply: &'static [u8]) -> std::thread::JoinHandle<String> {
+            let _ = std::fs::remove_file(socket);
+            let listener = UnixListener::bind(socket).unwrap();
+            std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                    head.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).unwrap();
+                let mut stream = reader.into_inner();
+                stream.write_all(reply).unwrap();
+                head + &String::from_utf8(body).unwrap()
+            })
+        }
+
+        #[test]
+        fn a_post_over_a_unix_socket_round_trips_both_framings() {
+            for reply in [
             &b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n{\"a\":\"1\"}\n"[..],
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n6\r\n:\"1\"}\n\r\n0\r\n\r\n",
         ] {
@@ -536,25 +534,26 @@ mod tests {
             assert!(request.contains("Connection: close\r\n"));
             assert!(request.ends_with("\r\n\r\n{\"a\":\"1\"}"), "{request}");
         }
-    }
+        }
 
-    #[test]
-    fn a_silent_server_times_out_and_a_missing_one_is_an_io_error() {
-        let scratch = Scratch::new("silent");
-        let socket = scratch.socket();
-        let listener = UnixListener::bind(&socket).unwrap();
-        // Accept and then say nothing, holding the connection open.
-        let held = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            std::thread::sleep(Duration::from_millis(600));
-            drop(stream);
-        });
-        let error = post(&socket, "rc/noop", "{}", Duration::from_millis(150)).unwrap_err();
-        assert!(matches!(error, HttpError::TimedOut), "{error}");
-        held.join().unwrap();
-        let _ = std::fs::remove_file(&socket);
+        #[test]
+        fn a_silent_server_times_out_and_a_missing_one_is_an_io_error() {
+            let scratch = Scratch::new("silent");
+            let socket = scratch.socket();
+            let listener = UnixListener::bind(&socket).unwrap();
+            // Accept and then say nothing, holding the connection open.
+            let held = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                std::thread::sleep(Duration::from_millis(600));
+                drop(stream);
+            });
+            let error = post(&socket, "rc/noop", "{}", Duration::from_millis(150)).unwrap_err();
+            assert!(matches!(error, HttpError::TimedOut), "{error}");
+            held.join().unwrap();
+            let _ = std::fs::remove_file(&socket);
 
-        let error = post(&socket, "rc/noop", "{}", Duration::from_millis(150)).unwrap_err();
-        assert!(matches!(error, HttpError::Io(_)), "{error}");
+            let error = post(&socket, "rc/noop", "{}", Duration::from_millis(150)).unwrap_err();
+            assert!(matches!(error, HttpError::Io(_)), "{error}");
+        }
     }
 }

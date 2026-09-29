@@ -95,7 +95,6 @@
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -214,6 +213,18 @@ impl Daemon {
     /// `--bwlimit`, which is how a cancel is caught mid-transfer on a machine
     /// where a local copy would otherwise finish before the first poll.
     pub(super) fn spawn(service: Arc<Service>, extra_args: &[String]) -> Result<Daemon, VfsError> {
+        // No socket to speak to rclone on (Windows, until W4.32): nothing is
+        // started, and the remote says why through the spawn error.
+        if !crate::platform::socket::AVAILABLE {
+            return Err(VfsError::Spawn {
+                service: service.name.clone(),
+                program: RCLONE.to_string(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    crate::DfError::Unsupported("Cloud remotes"),
+                ),
+            });
+        }
         let socket = socket_path(&service)?;
         // A socket file left by a crashed run with the same pid would make
         // `bind` fail with "address already in use"; nothing can be listening
@@ -1119,7 +1130,7 @@ fn socket_path(service: &Service) -> Result<PathBuf, VfsError> {
         if path.as_os_str().len() > SUN_PATH_MAX {
             continue;
         }
-        match private_dir(&dir, uid) {
+        match crate::platform::socket::private_dir(&dir, uid) {
             Ok(()) => return Ok(path),
             Err(e) => log::warn!("vfs {}: {}: {e}", service.name, dir.display()),
         }
@@ -1131,30 +1142,6 @@ fn socket_path(service: &Service) -> Result<PathBuf, VfsError> {
             "found no private directory short enough to put its socket in",
         ),
     })
-}
-
-/// Make `dir` if needed, and insist it is this user's and nobody else's.
-///
-/// The socket has no authentication of its own (`--rc-no-auth`); the
-/// directory's mode is its authentication. A directory someone else owns is
-/// refused rather than used, and one of ours that has been opened up is closed
-/// again.
-fn private_dir(dir: &Path, uid: u32) -> std::io::Result<()> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    let meta = std::fs::symlink_metadata(dir)?;
-    if !meta.is_dir() || meta.uid() != uid {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "not a directory this user owns",
-        ));
-    }
-    if meta.permissions().mode() & 0o077 != 0 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
 }
 
 /// A service name as a piece of a file name: letters, digits, `.`, `_` and
@@ -1386,8 +1373,11 @@ mod tests {
         );
     }
 
+    /// Unix: the socket directory's privacy is a mode.
+    #[cfg(unix)]
     #[test]
     fn socket_names_are_short_safe_and_distinct() {
+        use std::os::unix::fs::PermissionsExt;
         assert_eq!(file_safe("r2"), "r2");
         assert_eq!(file_safe("my remote/../x"), "my_remote_.._x");
         assert_eq!(file_safe(&"x".repeat(100)).len(), 32);

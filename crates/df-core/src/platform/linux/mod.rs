@@ -11,4 +11,4 @@ pub mod user;
 pub mod watch;
 pub mod xattr;
 
-pub use super::unix::{dirs, errno, meta, os, pipe, time};
+pub use super::unix::{dirs, errno, meta, os, pipe, socket, time};

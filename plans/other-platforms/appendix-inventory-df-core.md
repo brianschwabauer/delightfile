@@ -417,6 +417,22 @@
 | 61–95 | `tie_to_this_thread`: `prctl(PR_SET_PDEATHSIG, SIGTERM)` and `getppid()` in `pre_exec`, `ESRCH` when the parent is gone | Linux-only (macOS: no `prctl`; Windows: no `pre_exec`) | core:vfs/rclone.rs:Daemon::spawn; app:mounts.rs (gvfs watcher) | ✓ S1.50 |
 | 104–116 | `terminate`: `libc::kill(pid, SIGTERM)` on a child not yet reaped | Unix-only | core:vfs/rclone.rs:Daemon drop | ✓ S1.50 |
 
+### vfs/http.rs (added 2026-09-29; lines as of 6aee8d1)
+
+| Line | What | Class | Used by | Note |
+|---|---|---|---|---|
+| 32, 95–101 | `use std::os::unix::net::UnixStream`; `post` connects and sets read and write timeouts | Unix-only (Windows: no unix sockets in `std`) | `post` ← core:vfs/rclone.rs:Daemon::call, run_job | ✓ S1.51 |
+| 308, 455–560 | Tests serve one response on a `UnixListener` | Unix-only | | `#[cfg(unix)] mod over_a_socket` ✓ S1.51 |
+
+### vfs/rclone.rs (added 2026-09-29; lines as of 6aee8d1)
+
+| Line | What | Class | Used by | Note |
+|---|---|---|---|---|
+| 98 | `use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}` | Unix-only | `private_dir`, a test | ✓ S1.51 |
+| 1091–1133 | `socket_path`: `$XDG_RUNTIME_DIR` (non-empty), `$TMPDIR/delightfile-<uid>`, `/tmp/delightfile-<uid>`, `sun_path` bound | Unix model (Windows: no unix socket) | `Daemon::spawn` | uid ✓ S1.8, runtime dir ✓ S1.11 |
+| 1140–1157 | `private_dir`: `DirBuilder::mode(0o700)`, owner `uid()` check, re-close with `from_mode(0o700)` | Unix-only | `socket_path` | ✓ S1.51 |
+| 248, 857 | `child::tie_to_this_thread`, `child::terminate` | Linux-only / Unix-only | `Daemon::spawn`, `Drop for Daemon` | ✓ S1.50 |
+
 ### vfs/mod.rs
 
 | Line | What | Class | Used by | Note |

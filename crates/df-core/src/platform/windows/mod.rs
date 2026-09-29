@@ -9,6 +9,7 @@ pub mod meta;
 pub mod os;
 pub mod pipe;
 pub mod process;
+pub mod socket;
 pub mod time;
 pub mod user;
 

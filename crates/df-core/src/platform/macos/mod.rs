@@ -2,7 +2,7 @@
 //! does not (the native bodies are Phase 2, `plans/other-platforms/02-macos.md`).
 
 pub use super::stub::{nofollow, thread, trash, watch, xattr};
-pub use super::unix::{dirs, errno, meta, os, pipe, time};
+pub use super::unix::{dirs, errno, meta, os, pipe, socket, time};
 
 /// The shared Unix file primitives, with the Linux-only ones (reflink,
 /// dropping cached pages, `statfs` magic) answered by the stubs.
