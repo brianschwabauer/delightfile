@@ -5,6 +5,7 @@ pub mod fs;
 mod inotify;
 pub mod thread;
 pub mod trash;
+pub mod user;
 pub mod watch;
 
-pub use super::unix::{dirs, errno, meta, os, pipe, process, time, user};
+pub use super::unix::{dirs, errno, meta, os, pipe, process, time};

@@ -1,6 +1,8 @@
 //! Who this process runs as, in the numbers the rest of the program was
 //! written against. Windows identifies users by SID, not by a small integer.
 
+pub use crate::platform::stub::user::*;
+
 /// No numeric uid on Windows: `0`, which is also what yazi uses there.
 pub fn uid() -> u32 {
     0

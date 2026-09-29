@@ -87,7 +87,7 @@
 | 155–169 | `DEFAULT_BOOKMARKS`: `~`, `~/.config`, `~/Downloads`, `~/Work`, `/mnt/schwabserverroot…`, `sftp://showandtour{1,2}` | Windows-differs (paths also absent on macOS) | `default_bookmarks` ← core:keymap/defaults.rs (452), `Config::default` | |
 | 192–282 | `DEFAULT_OPENERS`: POSIX-shell command strings: `setsid uwsm-app -- …`, `"${TERMINAL:-ghostty}"`, `"${EDITOR:-vi}"`, `zeditor`, `google-chrome-stable`, `delightviewer`, `pinta`, `system-cmd-wallpaper-set`, `system-cmd-image-optimize-yazi`, `xdg-open "$1"`, `mpv`, `$(dirname "$1")`, `>/dev/null 2>&1` | Linux-only | `Config::default` → `opener()`/`openers_for()` ← app:open.rs:choices_for, app:open.rs:from (copies `opener.command`) | Spawned by df-app, not df-core. `setsid` (util-linux), `uwsm-app` and `xdg-open` are Linux |
 | 306–375 | `DEFAULT_RULES`: glob/mime rules naming those openers (`open` = `xdg-open`) | Linux-only (via openers) | `Config::openers_for` ← app:open.rs:choices_for | |
-| 767–775 | `expand_home`: `var_os("HOME")`, `format!("{}{}", home.to_string_lossy(), rest)` | Windows-differs | `Bookmark::expanded_path` ← app:app.rs:goto, app:app/places.rs:pool, app:finder.rs:merge_places; core:state/pins.rs:expanded_path, same_place; app:app/places.rs:shown | `HOME` is not set by default on Windows (`USERPROFILE` is). The string splice keeps the `/` from `~/Work` |
+| 767–775 | `expand_home`: `var_os("HOME")`, `format!("{}{}", home.to_string_lossy(), rest)` | Windows-differs | `Bookmark::expanded_path` ← app:app.rs:goto, app:app/places.rs:pool, app:finder.rs:merge_places; core:state/pins.rs:expanded_path, same_place; app:app/places.rs:shown | `HOME` is not set by default on Windows (`USERPROFILE` is). The string splice keeps the `/` from `~/Work` ✓ S1.17 |
 | 1220–1229 | `Theme::dir_icon`: a pattern containing `/` is matched against the full path string | Windows-differs | app:icons.rs:icon_for (passes `entry.path.to_string_lossy()`) | Windows path strings use `\`, so such a pattern never matches |
 | 1400–1407 | `config_dir()`: `$XDG_CONFIG_HOME` (non-empty) or `$HOME/.config`, then `/delightfile` | Windows-differs; macOS-differs (not `~/Library/…`) | `load` ← app:app.rs:new; app:app.rs:new; core:vfs/config.rs:config_paths | Returns `None` on Windows unless `HOME` is set ✓ S1.11 |
 
@@ -151,9 +151,9 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 25–28 | `users()`: `parse_id_file("/etc/passwd")` | Linux-only (macOS: compiles, incomplete) | `user_name`, `owner_label` ← core:fs/entry.rs:owner_label ← app:format.rs:linemode_text, app:remote.rs:card_rows; app:spot.rs:rows | macOS `/etc/passwd` lists system accounts only (users come from Open Directory). Windows: the file is absent, so owners print as numbers |
-| 31–34 | `groups()`: `parse_id_file("/etc/group")` | Linux-only (as above) | `group_name`, `owner_label` | |
-| 39–84 | uid/gid `u32` → name model (`user_name(uid: u32)`, `group_name(gid: u32)`, `owner_label(uid, gid)`) | Windows-differs | as above | Windows owners are SIDs |
+| 25–28 | `users()`: `parse_id_file("/etc/passwd")` | Linux-only (macOS: compiles, incomplete) | `user_name`, `owner_label` ← core:fs/entry.rs:owner_label ← app:format.rs:linemode_text, app:remote.rs:card_rows; app:spot.rs:rows | macOS `/etc/passwd` lists system accounts only (users come from Open Directory). Windows: the file is absent, so owners print as numbers ✓ S1.17 |
+| 31–34 | `groups()`: `parse_id_file("/etc/group")` | Linux-only (as above) | `group_name`, `owner_label` | ✓ S1.17 |
+| 39–84 | uid/gid `u32` → name model (`user_name(uid: u32)`, `group_name(gid: u32)`, `owner_label(uid, gid)`) | Windows-differs | as above | Windows owners are SIDs ✓ S1.17 |
 
 ### fs/watch.rs
 
@@ -214,7 +214,7 @@
 | 35 | `check_deletable`: `target == Path::new("/")` is the root rail | Windows-differs | `check_deletable_here` ← core:ops/jobs.rs:DeleteJob::run; core:ops/trash.rs:Trash::trash | Drive roots (`C:\`) are not caught by this rail |
 | 40–54 | Home and cwd rails via lexical `is_ancestor` | Windows-differs (case) | as above | |
 | 63 | `current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` | Windows-differs | as above | |
-| 64 | `std::env::var_os("HOME")` | Windows-differs | as above | Unset on Windows, so the home rail is skipped |
+| 64 | `std::env::var_os("HOME")` | Windows-differs | as above | Unset on Windows, so the home rail is skipped ✓ S1.17 |
 | 96–111 | `remove_tree`: a symlink is removed with `remove_file` (109) | Windows-differs | `delete_permanent` ← core:ops/jobs.rs:DeleteJob::run, core:ops/trash.rs:purge, core:sync/execute.rs:remove_extras, remove; core:ops/copy.rs:move_cross_device | Windows directory symlinks and junctions are removed with `remove_dir` |
 | 118–130 | `remove_tree_unchecked`: `remove_dir_all` for a real dir, otherwise `remove_file` | Windows-differs | core:ops/copy.rs:copy_tree_with, copy_symlink, copy_dir, move_path; core:ops/create.rs:rename; core:ops/trash.rs:trash | As above |
 
@@ -371,7 +371,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 144–151 | `Service::key_path`: `~` → `var_os("HOME")` + `format!("{}{rest}", …)` | Windows-differs | `command`; app:app/syncing.rs:remote_sync | |
+| 144–151 | `Service::key_path`: `~` → `var_os("HOME")` + `format!("{}{rest}", …)` | Windows-differs | `command`; app:app/syncing.rs:remote_sync | ✓ S1.17 |
 | 181–202 | `Service::command`: `Command::new("ssh")` `-x -o BatchMode=yes -o ConnectTimeout=15 [-p] [-i] -s <dest> sftp` | Windows-differs | core:vfs/conn.rs:Transport::spawn | §4 |
 | 292–308 | `config_paths` / `xdg_config_home`: `$XDG_CONFIG_HOME` or `$HOME/.config` → `yazi/vfs.toml`, plus `config_dir()/vfs.toml` | Windows-differs; macOS-differs | `VfsConfig::load` ← core:vfs/mod.rs:Vfs::start ← app:app.rs:vfs | ✓ S1.11 |
 

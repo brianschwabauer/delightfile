@@ -330,7 +330,7 @@ mod tests {
             return;
         }
 
-        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        let Some(home) = crate::platform::dirs::home() else {
             eprintln!("skipped: no HOME");
             return;
         };

@@ -226,7 +226,7 @@ impl Service {
         let Some(rest) = key.strip_prefix('~') else {
             return Some(PathBuf::from(key));
         };
-        let home = std::env::var_os("HOME")?;
+        let home = crate::platform::dirs::home()?;
         Some(PathBuf::from(format!("{}{rest}", home.to_string_lossy())))
     }
 
@@ -458,7 +458,7 @@ pub fn rclone_config_path() -> Option<PathBuf> {
     rclone_config_path_from(
         std::env::var_os("RCLONE_CONFIG"),
         xdg_config_home(),
-        std::env::var_os("HOME").map(PathBuf::from),
+        crate::platform::dirs::home(),
     )
 }
 

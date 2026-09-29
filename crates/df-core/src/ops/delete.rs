@@ -61,7 +61,7 @@ pub fn check_deletable_here(path: &Path) -> Result<()> {
     // other rails, so an unreadable cwd falls back to `/` — which makes the cwd
     // rail refuse everything rather than nothing.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = crate::platform::dirs::home();
     check_deletable(path, &cwd, home.as_deref())
 }
 

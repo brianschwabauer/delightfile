@@ -291,13 +291,17 @@ has not dropped.
       too; that site is rewritten here and the file's syscalls move in S1.18.
       — df-core core-seam session, started 2026-09-29; the grep's last hits are
       `fs/tags.rs` (S1.18) and `state/tests.rs` (S1.15).
-- [ ] **S1.17** `platform::user::owner_names(uid, gid) -> (Option<String>,
-      Option<String>)` behind `fs/owner.rs:25–84`: Linux body is the existing
+- [x] **S1.17** `platform::user::{user_name(uid), group_name(gid)} ->
+      Option<&'static str>` (the shape `fs::owner`'s public functions already
+      had; the sketch was `owner_names(uid, gid) -> (Option<String>,
+      Option<String>)`) behind `fs/owner.rs:25–84`: Linux body is the existing
       `/etc/passwd`/`/etc/group` parser moved; macOS stub returns `None` (M2.4
       replaces it with `getpwuid_r`); Windows returns `None`. Also
       `ops/delete.rs:64` (the home rail reads `HOME` directly) → `platform::dirs::home()`
-      (S1.11). Done when: `fs::owner` tests pass on Linux; no `"HOME"` literal in
-      df-core outside `platform/`.
+      (S1.11), and likewise `config::expand_home`, `vfs::config`'s key path and
+      rclone config lookup, and a `preview::cache` test. Done when: `fs::owner`
+      tests pass on Linux; no `"HOME"` literal in
+      df-core outside `platform/`. — done SHA_S117
 - [ ] **S1.15** Tests that stop df-core's test target from *compiling* elsewhere:
       `test_support.rs:61–68` (`TempTree::symlink` → `platform::fs::symlink`);
       `vfs/tests.rs`, `sync/rsync.rs` tests and `archive/external.rs` tests that write
@@ -595,6 +599,13 @@ their native clipboards *are* synchronous.
   non-Unicode name — Windows only — it spells the new name lossily: it is a
   name to create, not a path to find. On Unix every one of these is exactly
   the old byte path, since both conversions are infallible there.
+- 2026-09-29 — S1.17: the owner seam is `user_name(uid)` and `group_name(gid)`
+  returning `Option<&'static str>`, not a pair of `String`s: `fs::owner`'s
+  public functions (df-app calls them) already return `&'static str` out of
+  the once-read tables, and an owned pair would allocate per row where the
+  paint loop asks. `fs::owner::parse_id_table` stays portable (the passwd test
+  parses a table on every target); the file reading and the two caches moved
+  to `platform/linux/user.rs`.
 
 ## Open questions
 

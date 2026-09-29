@@ -921,7 +921,7 @@ pub fn expand_home(path: &str) -> String {
     let Some(rest) = path.strip_prefix('~') else {
         return path.to_string();
     };
-    match std::env::var_os("HOME") {
+    match crate::platform::dirs::home() {
         Some(home) => format!("{}{}", home.to_string_lossy(), rest),
         None => path.to_string(),
     }

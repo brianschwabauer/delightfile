@@ -50,6 +50,7 @@
 //! | `meta` | `dev`, `ino`, `nlink`, `blocks_bytes` `-> u64`; `mode`, `uid`, `gid` `-> u32`; `change_time -> (i64, i64)`; `mtime -> i64`; each `fn(&Metadata)` | `MetadataExt` (unix) | unix | `0`, `0`, `1`, the size; a mode made from the type and read-only flag; `0`, `0`; the last write (W4.5) |
 //! | `user` | `uid() -> u32` | `getuid` (unix) | unix | `0` |
 //! | `user` | `cache_suffix() -> String` (the `yazi-<suffix>` thumbnail directory) | the uid (unix) | unix | `"0"`, yazi's `uid_or_zero` |
+//! | `user` | `user_name(uid)`, `group_name(gid)` `-> Option<&'static str>` | `/etc/passwd`, `/etc/group`, read once | `None` (M2.4) | `None` |
 //! | `thread` | `lower_priority(nice: i32) -> bool` (called with 1–19 by [`crate::thread::lower_priority`]) | `setpriority(PRIO_PROCESS, 0, nice)`: this thread | nothing, `false` (M2.5) | nothing, `false` |
 //! | `time` | `local_civil(secs: i64) -> Option<rename::facts::Civil>` | `localtime_r` (unix) | unix | `localtime_s` |
 //! | `dirs` | `home`, `config_dir`, `state_dir`, `data_dir`, `cache_dir`, `runtime_dir`, `temp_dir`: `fn() -> Option<PathBuf>` | XDG, `$HOME` fallbacks (unix) | unix, the same (D5.1) | `%USERPROFILE%` and `%TEMP%`; the rest `None` (D5.1) |
