@@ -1440,9 +1440,10 @@ fn owner_names_come_from_the_passwd_table() {
     // The first record for an id wins (`root` before `toor`).
     let dupes = owner::parse_id_table("root:x:0:0:\ntoor:x:0:0:\n");
     assert_eq!(dupes.get(&0).map(String::as_str), Some("root"));
-    // An unknown id renders as its number rather than as nothing.
-    let label = owner::owner_label(4_294_967_294, 4_294_967_294);
-    assert_eq!(label, "4294967294 4294967294");
+    // An unknown id renders as its number rather than as nothing. Not
+    // 4294967294, which is -2 and macOS's `nobody`.
+    let label = owner::owner_label(3_999_999_999, 3_999_999_999);
+    assert_eq!(label, "3999999999 3999999999");
 }
 
 // ── The scanner ─────────────────────────────────────────────────────────────
