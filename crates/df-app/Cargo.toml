@@ -89,12 +89,16 @@ objc2-foundation = { workspace = true, features = [
     "NSArray",
     "NSData",
     "NSEnumerator",
+    "NSGeometry",
     "NSString",
     "NSURL",
 ] }
 objc2-app-kit = { workspace = true, features = [
     "NSPasteboard",
     "NSPasteboardItem",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
 ] }
 
 [dev-dependencies]
