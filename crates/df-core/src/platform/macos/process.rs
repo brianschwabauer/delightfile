@@ -214,10 +214,12 @@ mod tests {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        // The harness prints `test <name> ... ` and then runs the test, so
+        // the helper's line lands after that on the same line.
         let mut lines = BufReader::new(parent.stdout.take().unwrap()).lines();
         let daemon: libc::pid_t = loop {
             let line = lines.next().unwrap().unwrap();
-            if let Some(pid) = line.strip_prefix("daemon ") {
+            if let Some((_, pid)) = line.rsplit_once("daemon ") {
                 break pid.trim().parse().unwrap();
             }
         };
