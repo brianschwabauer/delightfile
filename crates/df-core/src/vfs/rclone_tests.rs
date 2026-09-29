@@ -924,8 +924,8 @@ fn a_killed_daemon_is_replaced_on_the_next_request() {
         .unwrap()
         .trim()
         .to_string();
-    // `kill(1)` rather than `libc::kill`, so the tests stay out of the crate's
-    // unsafe census.
+    // `kill(1)` rather than the `kill(2)` syscall, so the tests stay out of the
+    // crate's unsafe census.
     let killed = std::process::Command::new("kill")
         .args(["-9", &pid])
         .status()

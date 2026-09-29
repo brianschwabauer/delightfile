@@ -7,6 +7,7 @@ pub mod errno;
 pub mod fs;
 pub mod meta;
 pub mod pipe;
+pub mod process;
 pub mod time;
 pub mod user;
 

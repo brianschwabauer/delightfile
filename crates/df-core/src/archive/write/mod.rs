@@ -663,8 +663,12 @@ fn claim_temp(dest: &Path) -> Result<(PathBuf, File)> {
 fn on_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| super::external::is_executable(candidate))
+        .flat_map(|dir| {
+            crate::platform::process::candidates(name)
+                .into_iter()
+                .map(move |candidate| dir.join(candidate))
+        })
+        .find(|candidate| crate::platform::process::is_executable(candidate))
 }
 
 /// The tar, written into a compressor's stdin, whose stdout is the file.

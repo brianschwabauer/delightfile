@@ -249,9 +249,10 @@ has not dropped.
       and Linux's handling of a failed `set_nonblocking` (logged, not fatal) is
       unchanged.
       Done when: compiles on all targets, `vfs/tests.rs` passes on Linux. — done
-      SHA_S112, cross-checked locally, CI pending
-- [ ] **S1.13** `platform::process` (df-core): `NULL_DEVICE: &str`, `pause(&Child)`,
-      `resume(&Child)`, `is_executable(&Path) -> bool`, `candidates(name: &str) ->
+      0f42ec2, cross-checked locally, CI pending
+- [>] **S1.13** `platform::process` (df-core): `NULL_DEVICE: &str`, `pause(&Child)`,
+      `resume(&Child)` (each `-> io::Result<()>`; `sync::rsync` logs a refusal as it
+      logged a failed `kill`), `is_executable(&Path) -> bool`, `candidates(name: &str) ->
       Vec<String>` (Unix: `[name]`; Windows: `[name.exe, name]` plus the
       `bsdtar` → `tar` alias, because Windows ships libarchive's bsdtar as
       `tar.exe` and GNU tar on Linux would not accept the same flags). Bodies:
@@ -259,8 +260,10 @@ has not dropped.
       return `Err(Unsupported)`), `archive/external.rs:82–85` (`is_executable`,
       Windows: extension in `PATHEXT`), `archive/external.rs:75–78` and
       `archive/write/mod.rs:656–661` use `candidates`. `git/status.rs:291`
-      `/dev/null` → `NULL_DEVICE`. Done when: no `libc::kill`/`SIGSTOP` outside
-      `platform/`; archive tests pass on Linux.
+      `/dev/null` → `NULL_DEVICE` (`"NUL"` on Windows, W4.2's value, since the
+      constant needs one now). Done when: no `libc::kill`/`SIGSTOP` outside
+      `platform/`; archive tests pass on Linux. — df-core core-seam session,
+      started 2026-09-29; the grep's last hit is `vfs/child.rs`, which S1.50 moves.
 - [ ] **S1.14** `sync::rsync::available()` (`sync/rsync.rs:69–77`) returns `false` on
       Windows without spawning (rsync is not a Windows tool; the `host:` endpoint
       syntax collides with drive letters). macOS keeps the real check; the version
@@ -567,6 +570,12 @@ their native clipboards *are* synchronous.
   does not. `state::state_path_from` stays public and pure (df-app's portal and
   the state tests call it); a unit test pins it to `state_dir()` so the two
   copies of the rule cannot drift.
+- 2026-09-29 — S1.13's Windows `candidates` is this task's list,
+  `[name.exe, name]` plus `tar.exe`, `tar` for `bsdtar`. W4.2 lists a narrower
+  one (`["bsdtar.exe", "tar.exe"]`, no bare names); W4.2 is Phase 4's and
+  supersedes this when it lands. The comments in `vfs/tests.rs`,
+  `vfs/rclone_tests.rs` and `sync/rsync.rs` that named `libc::kill` and
+  `SIGSTOP` in prose were reworded, so the task's grep reads true.
 
 ## Open questions
 

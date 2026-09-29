@@ -21,8 +21,8 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 63 | `std::env::var_os("PATH")` into `extractor_on` in `external_extractor()` | Windows-differs | app:app.rs:extract_paths; app:preview/listing.rs:seven_zip | `split_paths` already uses `;` on Windows |
-| 75–78 | `extractor_on`: `split_paths(path).map(\|dir\| dir.join(name))` for `"7z"`, then `"bsdtar"` | Windows-differs | as above | Candidate names carry no `.exe`. Windows 10+ ships libarchive's bsdtar as `tar.exe`, not `bsdtar` |
-| 82–85 | `is_executable`: `std::os::unix::fs::PermissionsExt`, `mode() & 0o111 != 0` | Unix-only | `extractor_on`; core:archive/write/mod.rs:on_path | Windows has no execute bits |
+| 75–78 | `extractor_on`: `split_paths(path).map(\|dir\| dir.join(name))` for `"7z"`, then `"bsdtar"` | Windows-differs | as above | Candidate names carry no `.exe`. Windows 10+ ships libarchive's bsdtar as `tar.exe`, not `bsdtar` ✓ S1.13 |
+| 82–85 | `is_executable`: `std::os::unix::fs::PermissionsExt`, `mode() & 0o111 != 0` | Unix-only | `extractor_on`; core:archive/write/mod.rs:on_path | Windows has no execute bits ✓ S1.13 |
 | 207–217 | `run_in`: `Command::new(program)…spawn()` | Windows-differs | core:archive/whole.rs:by_extractor, two_stage; core:archive/write/mod.rs:seven_zip | See §4 |
 
 ### archive/extract.rs
@@ -63,7 +63,7 @@
 | 553–556 | `Member { mode: meta.mode(), mtime: meta.mtime(), uid: meta.uid(), gid: meta.gid() }` | Unix-only | Consumed by write/tar.rs:175–181 and write/zip.rs:218–235 | ✓ S1.7 |
 | 561–562 | Symlink target `read_link(path)…as_os_str().as_bytes()` | Unix-only | as above | Link text is stored as raw bytes |
 | 566, 579–580 | Member names built as bytes: `push(b'/')`, `extend_from_slice(child.as_bytes())` | Unix-only | as above | `/` is the archive format's own separator. The child bytes come from `OsStr` |
-| 656–661 | `on_path`: `var_os("PATH")`, `dir.join(name)`, `external::is_executable` | Windows-differs (+ Unix-only via `is_executable`) | `Format::is_available`, `seven_zip` | No `.exe` suffix |
+| 656–661 | `on_path`: `var_os("PATH")`, `dir.join(name)`, `external::is_executable` | Windows-differs (+ Unix-only via `is_executable`) | `Format::is_available`, `seven_zip` | No `.exe` suffix ✓ S1.13 |
 | 684–696 | `piped`: `Command::new(tool)` with `-q -c -T0` or `-z -c -q -T0` | Windows-differs | `Pack::run` | §4 |
 | 762–782 | `seven_zip`: `7z a -t7z -bd -y -snl -- <temp> <names…>` via `external::run_in(…, Some(dir), …)` | Windows-differs | `Pack::run` | §4 |
 
@@ -170,7 +170,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 41 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `insert` | |
-| 279–306 | `status_blocking`: `Command::new("git")` with `-c core.hooksPath=/dev/null` (291), `.current_dir(root)` | Windows-differs | core:git/cache.rs:run_one ← `Git::start` ← app:app.rs:git | `/dev/null` is a Unix device path. §4 |
+| 279–306 | `status_blocking`: `Command::new("git")` with `-c core.hooksPath=/dev/null` (291), `.current_dir(root)` | Windows-differs | core:git/cache.rs:run_one ← `Git::start` ← app:app.rs:git | `/dev/null` is a Unix device path. §4 ✓ S1.13 |
 | 556–565 | `insert`: trailing `b'/'` means directory; `Path::new(OsStr::from_bytes(trimmed))`; `root.join(rel)` | Unix-only | `parse_porcelain_v2` ← `status_blocking` | git emits `/`-separated repo-relative paths |
 | 577–587 | Rollup loop bounded by `ancestor.starts_with(root)` / `ancestor == root` | Windows-differs (case) | as above | §3 |
 
@@ -339,9 +339,9 @@
 | 383–426 | `parse_line`: `OsString::from_vec(name)` from rsync's itemized bytes | Unix-only | `parse_itemized` ← `plan`; stdout thread in `run` | |
 | 429–450 | `unescape`: rsync `\#ooo` octal escapes to raw bytes | Unix-only (byte model) | `parse_line` | |
 | 511–536 | `plan`: `Command::new("rsync")` dry run via `collect` | Windows-differs | app:sync.rs:remote_plan_job | §4 |
-| 631–658 | `wait`: on stop, `signal(child, libc::SIGCONT)` then `child.kill()` | Unix-only | `collect`, `run` | |
-| 662–675 | `signal`: `libc::pid_t::try_from(child.id())`, `libc::kill(pid, signal)` | Unix-only (Windows libc: no `kill`, no `pid_t`) | `wait`, `run` | |
-| 914–992 | `run`: `Command::new("rsync")`; pause/resume as `libc::SIGSTOP` / `libc::SIGCONT` (966–976) | Unix-only | `execute` ← core:sync/execute.rs:execute ← app:sync.rs:sync_job | |
+| 631–658 | `wait`: on stop, `signal(child, libc::SIGCONT)` then `child.kill()` | Unix-only | `collect`, `run` | ✓ S1.13 |
+| 662–675 | `signal`: `libc::pid_t::try_from(child.id())`, `libc::kill(pid, signal)` | Unix-only (Windows libc: no `kill`, no `pid_t`) | `wait`, `run` | ✓ S1.13 |
+| 914–992 | `run`: `Command::new("rsync")`; pause/resume as `libc::SIGSTOP` / `libc::SIGCONT` (966–976) | Unix-only | `execute` ← core:sync/execute.rs:execute ← app:sync.rs:sync_job | ✓ S1.13 |
 | 1024–1042 | `far_side`: server paths held as `PathBuf` (`name.join(&item.rel)`, `source.parent()`) | Windows-differs | `verify_remote` | `PathBuf::join` inserts `\` on Windows, and these paths go to a Unix server |
 | 1143–1148 | `remote_digests`: stdin = NUL-separated `name.as_os_str().as_bytes()` | Unix-only | `verify_remote` | |
 | 1156 | Exit-status check `matches!(status.code(), Some(255) \| Some(126) \| Some(127) \| None)` | Windows-differs | `remote_digests` | `code()` is `None` only for a signal death on Unix |

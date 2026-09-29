@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
+use crate::platform::process;
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
@@ -73,15 +74,14 @@ pub fn extractor_on(path: &OsStr) -> Option<Extractor> {
     .into_iter()
     .find_map(|(kind, name)| {
         std::env::split_paths(path)
-            .map(|dir| dir.join(name))
-            .find(|candidate| is_executable(candidate))
+            .flat_map(|dir| {
+                process::candidates(name)
+                    .into_iter()
+                    .map(move |candidate| dir.join(candidate))
+            })
+            .find(|candidate| process::is_executable(candidate))
             .map(|program| Extractor { kind, program })
     })
-}
-
-pub(super) fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 impl Extractor {
@@ -474,6 +474,6 @@ mod tests {
         let path = std::env::var_os("PATH")?;
         std::env::split_paths(&path)
             .map(|dir| dir.join(name))
-            .find(|c| is_executable(c))
+            .find(|c| process::is_executable(c))
     }
 }

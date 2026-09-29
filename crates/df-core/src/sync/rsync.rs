@@ -647,7 +647,7 @@ fn wait(
         if stop() {
             // Woken first if a pause had stopped it, or the kill would wait
             // on a process that cannot run to die.
-            signal(child, libc::SIGCONT);
+            signal(child, false);
             let _ = child.kill();
             let _ = child.wait();
             return Ok(None);
@@ -657,20 +657,18 @@ fn wait(
     }
 }
 
-/// Send `child` a signal: `SIGSTOP` and `SIGCONT` are how a pause reaches a
-/// process that is not ours to checkpoint.
-fn signal(child: &Child, signal: libc::c_int) {
-    let Ok(pid) = libc::pid_t::try_from(child.id()) else {
-        return;
+/// Stop `child` (`pause`) or let it run again: the stop and continue signals
+/// on Unix ([`crate::platform::process::pause`]) are how a pause reaches a
+/// process that is not ours to checkpoint. A refusal is logged and nothing
+/// else — the run goes on.
+fn signal(child: &Child, pause: bool) {
+    let sent = if pause {
+        crate::platform::process::pause(child)
+    } else {
+        crate::platform::process::resume(child)
     };
-    // One syscall on a pid this process spawned and has not yet reaped.
-    #[allow(unsafe_code)]
-    let rc = unsafe { libc::kill(pid, signal) };
-    if rc != 0 {
-        log::debug!(
-            "could not signal rsync ({})",
-            std::io::Error::last_os_error()
-        );
+    if let Err(e) = sent {
+        log::debug!("could not signal rsync ({e})");
     }
 }
 
@@ -965,14 +963,7 @@ fn run(transfer: &Transfer, mode: Mode, content: bool, fsync: bool, ctx: &TaskCt
         }
         if flags.is_paused() != stopped {
             stopped = flags.is_paused();
-            signal(
-                child,
-                if stopped {
-                    libc::SIGSTOP
-                } else {
-                    libc::SIGCONT
-                },
-            );
+            signal(child, stopped);
         }
     })?;
     let lines = stdout

@@ -288,7 +288,10 @@ pub fn status_blocking(root: &Path) -> Result<StatusData, StatusError> {
         .arg("-c")
         .arg("core.fsmonitor=")
         .arg("-c")
-        .arg("core.hooksPath=/dev/null")
+        .arg(format!(
+            "core.hooksPath={}",
+            crate::platform::process::NULL_DEVICE
+        ))
         .arg("-c")
         .arg("core.pager=cat")
         .arg("-c")
