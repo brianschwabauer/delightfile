@@ -198,10 +198,16 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       (a read-only `File` cannot set a time on Windows) and the mode checks
       compare with the platform's `st_mode` as well as, on Unix, the literal
       (P3.30, bin 2).
-- [ ] **P3.8** git: `git/status.rs:556–565` (`insert`), the `-c core.hooksPath=/dev/null`
+- [x] **P3.8** git: `git/status.rs:556–565` (`insert`), the `-c core.hooksPath=/dev/null`
       argument at `:291` becomes `platform::process::NULL_DEVICE` (`/dev/null` or
       `NUL`). Done when: `git/tests.rs` passes on Linux; the three real-`git` tests
-      keep their `GIT_CONFIG_GLOBAL` override through the same constant.
+      keep their `GIT_CONFIG_GLOBAL` override through the same constant. — done
+      (port/paths). `insert` (S1.16) and `core.hooksPath` (S1.13) were already
+      through the platform; the tests' `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`
+      now are too. `non_utf8_filenames_still_get_a_dot` is `#[cfg(unix)]`, with
+      a Unicode twin that runs everywhere, and the hostile-config test escapes
+      the backslashes of the marker's path inside git's quoted value (P3.30,
+      bin 2 both).
 - [ ] **P3.9** rsync and sync: `sync/rsync.rs:230–244, 383–450, 1143–1211` and
       `sync/mod.rs:310–318` (`is_debris`). The whole rsync-backed remote sync is
       `Unsupported` on Windows (no rsync, and `endpoint`'s `host:` syntax collides

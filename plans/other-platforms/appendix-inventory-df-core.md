@@ -58,11 +58,11 @@
 | 98–105 | `Format::tool()`: `"zstd"`, `"xz"`, `"7z"` | Windows-differs | `is_available`, `piped`, `seven_zip` | Bare names |
 | 116–121 | `Format::is_available`: `on_path("7z")` or `super::have(tool)` | Windows-differs | app:app/compress.rs:open_archive_prompt | |
 | 187, 213 | `extension_of` / `named`: `text.rsplit('/')` takes the leaf of a typed archive name | Windows-differs | `extension` ← app:app/compress.rs:format_hint; `named` ← app:app/compress.rs:archive_submit | A typed `out\photos.zip` is not split on `\` |
-| 529–536 | `walk`: `use std::os::unix::ffi::OsStrExt`; member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` ← app:app/compress.rs:spawn_archive | ✓ S1.16 |
-| 542–543 | `visit`: `use std::os::unix::ffi::OsStrExt; use std::os::unix::fs::MetadataExt` | Unix-only | as above | ✓ S1.16 |
-| 553–556 | `Member { mode: meta.mode(), mtime: meta.mtime(), uid: meta.uid(), gid: meta.gid() }` | Unix-only | Consumed by write/tar.rs:175–181 and write/zip.rs:218–235 | ✓ S1.7 |
-| 561–562 | Symlink target `read_link(path)…as_os_str().as_bytes()` | Unix-only | as above | Link text is stored as raw bytes ✓ S1.16 |
-| 566, 579–580 | Member names built as bytes: `push(b'/')`, `extend_from_slice(child.as_bytes())` | Unix-only | as above | `/` is the archive format's own separator. The child bytes come from `OsStr` ✓ S1.16 |
+| 529–536 | `walk`: `use std::os::unix::ffi::OsStrExt`; member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` ← app:app/compress.rs:spawn_archive | ✓ S1.16 ✓ P3.7 |
+| 542–543 | `visit`: `use std::os::unix::ffi::OsStrExt; use std::os::unix::fs::MetadataExt` | Unix-only | as above | ✓ S1.16 ✓ P3.7 |
+| 553–556 | `Member { mode: meta.mode(), mtime: meta.mtime(), uid: meta.uid(), gid: meta.gid() }` | Unix-only | Consumed by write/tar.rs:175–181 and write/zip.rs:218–235 | ✓ S1.7 ✓ P3.7 |
+| 561–562 | Symlink target `read_link(path)…as_os_str().as_bytes()` | Unix-only | as above | Link text is stored as raw bytes ✓ S1.16 ✓ P3.7 |
+| 566, 579–580 | Member names built as bytes: `push(b'/')`, `extend_from_slice(child.as_bytes())` | Unix-only | as above | `/` is the archive format's own separator. The child bytes come from `OsStr` ✓ S1.16 ✓ P3.7 |
 | 656–661 | `on_path`: `var_os("PATH")`, `dir.join(name)`, `external::is_executable` | Windows-differs (+ Unix-only via `is_executable`) | `Format::is_available`, `seven_zip` | No `.exe` suffix ✓ S1.13 |
 | 684–696 | `piped`: `Command::new(tool)` with `-q -c -T0` or `-z -c -q -T0` | Windows-differs | `Pack::run` | §4 |
 | 762–782 | `seven_zip`: `7z a -t7z -bd -y -snl -- <temp> <names…>` via `external::run_in(…, Some(dir), …)` | Windows-differs | `Pack::run` | §4 |
@@ -179,8 +179,8 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 41 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `insert` | ✓ S1.16 |
-| 279–306 | `status_blocking`: `Command::new("git")` with `-c core.hooksPath=/dev/null` (291), `.current_dir(root)` | Windows-differs | core:git/cache.rs:run_one ← `Git::start` ← app:app.rs:git | `/dev/null` is a Unix device path. §4 ✓ S1.13 |
-| 556–565 | `insert`: trailing `b'/'` means directory; `Path::new(OsStr::from_bytes(trimmed))`; `root.join(rel)` | Unix-only | `parse_porcelain_v2` ← `status_blocking` | git emits `/`-separated repo-relative paths ✓ S1.16 |
+| 279–306 | `status_blocking`: `Command::new("git")` with `-c core.hooksPath=/dev/null` (291), `.current_dir(root)` | Windows-differs | core:git/cache.rs:run_one ← `Git::start` ← app:app.rs:git | `/dev/null` is a Unix device path. §4 ✓ S1.13 ✓ P3.8 |
+| 556–565 | `insert`: trailing `b'/'` means directory; `Path::new(OsStr::from_bytes(trimmed))`; `root.join(rel)` | Unix-only | `parse_porcelain_v2` ← `status_blocking` | git emits `/`-separated repo-relative paths ✓ S1.16 ✓ P3.8 |
 | 577–587 | Rollup loop bounded by `ancestor.starts_with(root)` / `ancestor == root` | Windows-differs (case) | as above | §3 |
 
 ### ops.rs
@@ -1679,12 +1679,12 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| archive/write/mod.rs:536 | Top-level member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` | Written into zip/tar headers ✓ S1.16 |
-| archive/write/mod.rs:562 | Symlink target `as_os_str().as_bytes()` | Unix-only | as above | Stored as the link payload ✓ S1.16 |
-| archive/write/mod.rs:580 | Child name `child.as_bytes()` | Unix-only | as above | ✓ S1.16 |
+| archive/write/mod.rs:536 | Top-level member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` | Written into zip/tar headers ✓ S1.16 ✓ P3.7 |
+| archive/write/mod.rs:562 | Symlink target `as_os_str().as_bytes()` | Unix-only | as above | Stored as the link payload ✓ S1.16 ✓ P3.7 |
+| archive/write/mod.rs:580 | Child name `child.as_bytes()` | Unix-only | as above | ✓ S1.16 ✓ P3.7 |
 | du/fstype.rs:64 | `CString::new(path.as_os_str().as_bytes())` for `statfs` | Unix-only | `is_remote` | ✓ S1.5 |
 | fs/inotify.rs:109 | `CString::new(path.as_os_str().as_bytes())` for `inotify_add_watch` | Linux-only | `add_watch` | ✓ S1.4 |
-| git/status.rs:564 | `Path::new(OsStr::from_bytes(trimmed))` from git `-z` output | Unix-only | `parse_porcelain_v2` | ✓ S1.16 |
+| git/status.rs:564 | `Path::new(OsStr::from_bytes(trimmed))` from git `-z` output | Unix-only | `parse_porcelain_v2` | ✓ S1.16 ✓ P3.8 |
 | ops.rs:111 | `is_url` scans `as_bytes()` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 |
 | ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | ✓ S1.16 |
 | ops/copy.rs:672 | `CString::new(path.as_os_str().as_bytes())` for `utimensat` | Unix-only | `set_times` | ✓ S1.5 |
@@ -1806,7 +1806,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | sync/rsync.rs:1143–1211 | Remote `xargs -0 sha256sum` | Unix-only | verify | stdin: NUL-separated name bytes. stdout: `<64 hex>  <name>`, with a leading `\` meaning `\n`/`\r`/`\\` escapes |
 | sync/rsync.rs:1174–1184 | Remote script `cd -- '<folder>' && xargs -0 sha256sum --` | Windows-differs | verify | `folder.to_string_lossy()` with `'` → `'\''` |
 | sync/rsync.rs:230–244 | rsync endpoints | Unix-only | rsync argv | `host:` + path bytes. Sources lose trailing `/`, and the destination gains one |
-| archive/write/mod.rs:522–596 | zip/tar member names | Unix-only | archive creation | `OsStr` bytes joined with `/`. The zip `FLAG_UTF8` bit is defined at write/zip.rs:90 |
+| archive/write/mod.rs:522–596 | zip/tar member names | Unix-only | archive creation | `OsStr` bytes joined with `/`. The zip `FLAG_UTF8` bit is defined at write/zip.rs:90 ✓ P3.7 |
 | config.rs:155–169 | `[goto]` bookmark paths | portable encoding | app | TOML strings as typed. `~` is expanded at use |
 
 ### 3.7 Non-local paths carried in `PathBuf`

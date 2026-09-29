@@ -289,6 +289,10 @@ fn weird_filenames_survive_z_framing() {
     );
 }
 
+/// Unix only: a name there is bytes, and one that is not UTF-8 is still a
+/// file with a status. Windows has no such name (the Unicode test below is
+/// its twin), and a record naming one is left out rather than mangled.
+#[cfg(unix)]
 #[test]
 fn non_utf8_filenames_still_get_a_dot() {
     let mut record = b"1 .M N... 100644 100644 100644 aaa bbb ".to_vec();
@@ -297,6 +301,19 @@ fn non_utf8_filenames_still_get_a_dot() {
     let data = parse_porcelain_v2(&bytes, &root());
     assert_eq!(data.files.len(), 1);
     assert!(data.files.values().all(|s| *s == FileStatus::Modified));
+}
+
+#[test]
+fn unicode_filenames_get_a_dot_on_every_platform() {
+    let name = "ünïcödé — 日本語 🎬.txt";
+    let mut record = b"1 .M N... 100644 100644 100644 aaa bbb ".to_vec();
+    record.extend_from_slice(name.as_bytes());
+    let bytes = framed(&[&record]);
+    let data = parse_porcelain_v2(&bytes, &root());
+    assert_eq!(
+        data.status_for(&root().join(name)),
+        Some(FileStatus::Modified)
+    );
 }
 
 #[test]
@@ -548,8 +565,8 @@ fn git_in(dir: &Path, args: &[&str]) {
         .args(args)
         .current_dir(dir)
         // A test must not inherit the developer's identity, hooks or templates.
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", crate::platform::process::NULL_DEVICE)
+        .env("GIT_CONFIG_SYSTEM", crate::platform::process::NULL_DEVICE)
         .env("GIT_AUTHOR_NAME", "df")
         .env("GIT_AUTHOR_EMAIL", "df@example.invalid")
         .env("GIT_COMMITTER_NAME", "df")
@@ -693,9 +710,11 @@ fn a_repository_config_cannot_run_a_command_of_its_own() {
     let marker = t.path().join("EXECUTED");
     let config = repo.join(".git/config");
     let mut text = std::fs::read_to_string(&config).unwrap();
+    // A backslash escapes inside a quoted git config value, and a Windows
+    // path is made of them.
     text.push_str(&format!(
         "\tfsmonitor = \"touch {}; false\"\n",
-        marker.display()
+        marker.display().to_string().replace('\\', "\\\\")
     ));
     std::fs::write(&config, text).unwrap();
 
