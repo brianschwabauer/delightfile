@@ -109,7 +109,8 @@ has not dropped.
       watcher pass on Linux
       and are `#[cfg(target_os = "linux")]`-gated until Phase 2/4 add bodies; df-core
       compiles on all three targets. — done c720dc2; the whole crate compiles for
-      both foreign targets from SHA_CLOSE, cross-checked locally, CI pending
+      both foreign targets from d9f34ca and its tests from ba58aa7, cross-checked locally,
+      CI pending
 - [x] **S1.5** `platform::fs` (df-core), moving these bodies out of `ops/copy.rs`,
       `ops/link.rs`, `ops.rs`, `sync/execute.rs`, `vfs/conn.rs`:
       - `reflink(reader: &File, writer: &File) -> bool` — Linux:
@@ -147,7 +148,7 @@ has not dropped.
         `false`/`None` (Phases 2/4 fill).
       Done when: `grep -rn "std::os::unix" crates/df-core/src` hits only `platform/`
       (except the `MetadataExt` sites, which are P3.4) and Linux tests pass.
-      — done df0c64b; the grep holds from SHA_CLOSE for everything but tests
+      — done df0c64b; the grep holds from bd5903c for everything but tests
       marked `#[cfg(unix)]` (S1.15), which name `std::os::unix` because they test
       Unix semantics, as `00-ground-rules.md` §6 has them do.
 - [>] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
@@ -200,7 +201,7 @@ has not dropped.
       `st_mode`). `archive/write` also needs `st_mtime`, so the module has
       `mtime(&Metadata) -> i64` beside P3.4's list. Done when: no `MetadataExt`
       outside `platform/` in df-core, Linux tests pass. — done 4a38afd; the grep
-      holds from SHA_CLOSE (tests included; the last test sites read through
+      holds from bd5903c (tests included; the last test sites read through
       `platform::meta`).
 - [x] **S1.8** `platform::user`: `uid() -> u32` (Unix `getuid`; Windows: `0`, and
       **`cache_suffix() -> String`** used by `preview/cache.rs:128–132, 195–212` for
@@ -291,7 +292,7 @@ has not dropped.
       and `cargo check -p df-core --target x86_64-pc-windows-msvc` passes on CI.
       Since the plan was written `fs/tags.rs`'s walk reads a name's first byte
       too; that site is rewritten here and the file's syscalls move in S1.18.
-      — done 59e23f4; the grep holds from SHA_CLOSE (tests included), and
+      — done 59e23f4; the grep holds from bd5903c (tests included), and
       `cargo check -p df-core --target x86_64-pc-windows-msvc` passes locally, CI
       pending.
 - [x] **S1.17** `platform::user::{user_name(uid), group_name(gid)} ->
