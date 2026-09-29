@@ -35,9 +35,6 @@ egui-wgpu.workspace = true
 egui-winit.workspace = true
 winit.workspace = true
 pollster.workspace = true
-# Only for `localtime_r`: the mtime/btime linemodes have to be in the machine's
-# timezone, and the zoneinfo rules that decide the offset live behind libc.
-libc.workspace = true
 # PDF pages (PLAN §6). The version and the `pdfium_7881` ABI are delightviewer's
 # to the digit, so the two programs load the *same* `libpdfium.so` — there is one
 # copy of it on this machine and neither program may be the one that needs a
@@ -78,6 +75,10 @@ miniz_oxide.workspace = true
 # anywhere else this would be a second copy of them and a `wayland-client`
 # system library to find.
 wayland-client.workspace = true
+# Only for the Wayland thread's own plumbing — its wake pipe (`pipe2`, `poll`,
+# `read`, `write`) and the drag icon's `memfd_create` — so Linux only. The
+# local clock the linemodes read is df-core's (`platform::time`).
+libc.workspace = true
 
 [dev-dependencies]
 # The `TempTree` fixture and PLAN §9's gnarly names, shared rather than

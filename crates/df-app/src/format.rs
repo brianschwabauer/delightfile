@@ -8,8 +8,8 @@
 //!
 //! The one impure corner is the clock: turning a `SystemTime` into the year and
 //! month a person lives in needs the machine's timezone, and the timezone lives
-//! behind libc. That call is isolated to [`civil_local`]; the formatting itself
-//! is [`stamp`], which is pure and tested.
+//! behind the C library. That call is isolated to [`civil_local`]; the
+//! formatting itself is [`stamp`], which is pure and tested.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -193,12 +193,12 @@ fn local_stamp(time: SystemTime) -> Option<String> {
 /// A `SystemTime` in the machine's local timezone, as `(year, month, day, hour,
 /// minute)`.
 ///
-/// `localtime_r` rather than a hand-rolled calendar: the calendar is the easy
-/// half, and the hard half — which offset applied on this date, in this zone,
-/// under this year's DST rules — is a copy of `/usr/share/zoneinfo` that this
-/// program has no business carrying. libc is already in the workspace (df-core
-/// calls inotify through it) and this is the same kind of call.
-#[allow(unsafe_code)]
+/// The C library's local time ([`df_core::platform::time::local_civil`]:
+/// `localtime_r` on Linux and macOS, `localtime_s` on Windows) rather than a
+/// hand-rolled calendar: the calendar is the easy half, and the hard half —
+/// which offset applied on this date, in this zone, under this year's DST
+/// rules — is a copy of `/usr/share/zoneinfo` that this program has no
+/// business carrying.
 fn civil_local(time: SystemTime) -> Option<(i32, u32, u32, u32, u32)> {
     // Times before 1970 are legal on a filesystem (an archive with a bogus
     // stamp, a clock that was wrong) and `duration_since` refuses them, so the
@@ -207,22 +207,8 @@ fn civil_local(time: SystemTime) -> Option<(i32, u32, u32, u32, u32)> {
         Ok(d) => i64::try_from(d.as_secs()).ok()?,
         Err(e) => -i64::try_from(e.duration().as_secs()).ok()?,
     };
-    let t = secs as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: `t` and `tm` are owned locals of the right types, and
-    // `localtime_r` writes only into `tm`. The `_r` form is the reentrant one,
-    // so there is no shared static to race a worker thread over.
-    let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
-    if !ok {
-        return None;
-    }
-    Some((
-        tm.tm_year + 1900,
-        (tm.tm_mon + 1) as u32,
-        tm.tm_mday as u32,
-        tm.tm_hour as u32,
-        tm.tm_min as u32,
-    ))
+    let civil = df_core::platform::time::local_civil(secs)?;
+    Some((civil.year, civil.month, civil.day, civil.hour, civil.minute))
 }
 
 #[cfg(test)]

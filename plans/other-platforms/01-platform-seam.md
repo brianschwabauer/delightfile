@@ -428,7 +428,8 @@ their native clipboards *are* synchronous.
       aarch64-apple-darwin` (on CI) shows no `wayland-*`. (`cargo tree` resolves
       without the target installed, so this one also runs on Linux.)
       — done 66814ec, Linux verified (`cargo tree` for both other targets names no
-      `wayland-*`), other targets unverified until CI
+      `wayland-*`), other targets unverified until CI; `libc` moved to the Linux
+      table with S1.25
 - [x] **S1.21** `git mv crates/df-app/src/wayland crates/df-app/src/platform/linux/wayland`,
       `git mv src/dbus.rs src/platform/linux/dbus.rs`, `git mv src/portal
       src/platform/linux/portal`, and split `src/mounts.rs`: the model and card
@@ -551,13 +552,33 @@ their native clipboards *are* synchronous.
       feeds the stub's answer through a detached worker. — done 2c371b5, Linux
       verified (the stubs type-check when selected on Linux), other targets
       unverified until CI
-- [ ] **S1.25** `format.rs:189–222` (`civil_local`) → `df_core::platform::time::local_civil`
+- [x] **S1.25** `format.rs:189–222` (`civil_local`) → `df_core::platform::time::local_civil`
       (S1.10). `app.rs:7201–7255` (`set_mode`) → `df_core::platform::fs::apply_mode`.
       `trashview.rs:163–248` (`row_from`) → `df_core::platform::meta` (S1.7).
       `app.rs:979–982` (`home()`) → `df_core::platform::dirs::home()`.
       `trashview.rs:276–293` (`shorten`) and `finder.rs:336–359` (`shorten_home`)
       take `home()` from the same place. Done when: `grep -rn "std::os::unix\|libc::"
       crates/df-app/src` hits only `platform/`.
+      *As built:* `civil_local` keeps its own reading of the seconds (whole
+      seconds, the sign kept) and asks `local_civil` for the date, the same
+      `localtime_r`; df-core's body checks its conversions, so a year past
+      `i32::MAX`, which the old `+ 1900` overflowed, is now `None` and reads as
+      unknown — no real mtime is near it. `set_mode` no longer sets a mode
+      itself: since the plan was written it goes through
+      `df_core::ops::mode::chmod`, S1.19's walk, so there was nothing left to
+      route. `row_from` reads `mode`, `uid` and `gid` through
+      `platform::meta`; `home()` and `shorten` read `platform::dirs::home()`,
+      the same `$HOME` on Linux; `shorten_home` is handed its `home` by callers
+      that all use `home()` (its `/` rule is W4.11's). Also routed: the site the
+      inventory missed, `app/permissions.rs`'s `refresh_spot_mode`
+      (`MetadataExt::mode` → `platform::meta::mode`). With `format.rs` off
+      `localtime_r`, df-app's `libc` moved to the
+      `[target.'cfg(target_os = "linux")'.dependencies]` table (S1.20's
+      deferred half); its only calls are the Wayland thread's. The grep holds
+      once S1.26 (`open.rs`) and S1.36 (`cli.rs`) have landed, for everything
+      but tests marked `#[cfg(unix)]` or Linux (S1.33). — done, uncommitted
+      2026-09-29, Linux verified (the stubs type-check when selected on Linux),
+      other targets unverified until CI
 - [ ] **S1.26** `platform::open` (df-app): `shell_program`, `shell_argv`,
       `detached_argv`, `which`, `spawn_detached`, `run_blocking` bodies
       (`open.rs:40–134`) move to `platform/linux/open.rs`, re-exported from `open.rs`.
@@ -941,6 +962,12 @@ their native clipboards *are* synchronous.
   `fs::names::fit` is (S1.16), and `parse_file_uri` answers `None`, as a
   record that cannot be spelled is skipped. Linux is unchanged: both
   conversions are exact there, and `ClipError::Missing` reads as it did.
+- 2026-09-29 — S1.25: df-app's `civil_local` now takes its date from
+  df-core's `platform::time::local_civil`, the same `localtime_r`, instead of
+  its own copy of the call. One Linux-visible difference, at an input no file
+  has: a time whose year is past `i32::MAX` (some 6.7 × 10¹⁶ seconds out),
+  where the old `tm_year + 1900` overflowed, is now `None` and the linemode
+  shows it as unknown. Every real mtime reads the same numbers as before.
 
 ## Open questions
 

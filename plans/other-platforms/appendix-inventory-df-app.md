@@ -17,7 +17,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | Cargo.toml:37 | `wayland-client = { version = "0.31", features = ["system"] }` (workspace dep) | Linux-only (compile) | crates/df-app/Cargo.toml:49 `wayland-client.workspace = true` → `src/wayland/mod.rs` | Declared unconditionally in `[dependencies]`, not under a `[target.'cfg(...)']` table. winit 0.30.13 gates its own wayland deps to `cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_os = "ios", target_os = "macos"))))` (winit Cargo.toml target tables), so on macOS/Windows nothing unifies in `dlopen`. `wayland-sys` 0.31.11 build.rs probes pkg-config `wayland-client` unless feature `dlopen` is set. `wayland-backend` 0.3.17 source uses `std::os::unix` (e.g. src/rs/socket.rs, src/sys/client_impl/mod.rs). ✓ S1.20 |
-| Cargo.toml:31 / crates/df-app/Cargo.toml:37-40 | `libc = "0.2"`; df-app comment: "Only for `localtime_r`" | Unix-only (compile, via use) | format.rs:199-222 | The `libc` crate builds on Windows; `libc::localtime_r` does not exist there (Windows CRT has `localtime_s`). |
+| Cargo.toml:31 / crates/df-app/Cargo.toml:37-40 | `libc = "0.2"`; df-app comment: "Only for `localtime_r`" | Unix-only (compile, via use) | format.rs:199-222 | The `libc` crate builds on Windows; `libc::localtime_r` does not exist there (Windows CRT has `localtime_s`). ✓ S1.25 |
 | crates/df-app/Cargo.toml:3 | `description = "… file manager for Wayland."` | text | — | — |
 | crates/df-app/Cargo.toml:63-66 | `pdfium-render = { version = "0.9.3", default-features = false, features = ["pdfium_7881", "thread_safe"] }` | — | preview/doc/pdf.rs | No `static`: library is dlopen'd at runtime (see preview/doc/pdf.rs). |
 | Cargo.toml:62 | `egui-winit = "0.35.0"` default features | — | graphics.rs:172 | `clipboard`/`links`/`wayland`/`x11` on (see intro). ✓ S1.20 |
@@ -32,7 +32,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 158-167 | `const OCCLUDED_PROBE: Duration = 2 s` — doc: "the event does not exist on Wayland (winit) and the occlusion answer does not exist there either (wgpu), so on the one platform this program targets the pair is dead code" | macOS-differs | App::redraw_inner (16234) | On macOS both `WindowEvent::Occluded` (winit) and `CurrentSurfaceTexture::Occluded` (wgpu Metal) exist, so this path becomes live. |
 | 169-181 | `const CLIPBOARD_ANSWER: Duration = 10 s` | Linux-only | App::expire_clipboard (12854-12880) | Timeout for the Wayland thread's `Copied`/`Pasted` answer, then falls back to wl-copy/wl-paste. |
 | 183-194 | `const WL_COPY_SETTLE: Duration = 150 ms` | Linux-only | App::settle_wl_copy (13171-13220), App::next_deadline (16104-16108) | wl-copy fallback settle window. |
-| 979-982 | `fn home() -> Option<PathBuf> { std::env::var_os("HOME").map(PathBuf::from) }` | Windows-differs (runtime) | App::palette_rows (6176, 6183, 6205), App::go_to_path (7945), app/places.rs (88, 352, 358, 365, 414, 429, 444, 478, 495, 502, 507, 515, 563), app/syncing.rs:99 | Only `HOME` is read; used for `~` shortening/expansion and the Places home row. |
+| 979-982 | `fn home() -> Option<PathBuf> { std::env::var_os("HOME").map(PathBuf::from) }` | Windows-differs (runtime) | App::palette_rows (6176, 6183, 6205), App::go_to_path (7945), app/places.rs (88, 352, 358, 365, 414, 429, 444, 478, 495, 502, 507, 515, 563), app/syncing.rs:99 | Only `HOME` is read; used for `~` shortening/expansion and the Places home row. ✓ S1.25 |
 | 1510-1513 | field `data_device: Option<crate::wayland::DataDevice>` | Linux-only (compile, via module) | set App::init_gfx (2188), dropped App::finish (16365) | — ✓ S1.22 |
 | 1782-1800 | `struct WlCopy { child: std::process::Child, message: Option<String>, started: Instant }` | Linux-only (runtime) | App::copy_via_wl_copy, App::settle_wl_copy, App::retire_wl_copy | Holds the running `wl-copy --foreground`. ✓ S1.23 |
 | 2111-2112 | `fn init_gfx` … `use winit::platform::wayland::WindowAttributesExtWayland;` | Linux-only (compile) | ApplicationHandler::resumed (17057-17064) | winit's `platform::wayland` module is `#[cfg(any(wayland_platform, docsrs))]` (winit src/platform/mod.rs:15-16). ✓ S1.27 |
@@ -51,7 +51,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 6485-6545 | `fn connect(&mut self, url: String, now: Instant)`: FnJob → `crate::mounts::connect(&job_url)` (6498) | Linux-only | `PromptKind::Connect` submit (7773 via `mounts::connect_url`) | gio mount on the task engine. ✓ S1.24 |
 | 6547-6589 | `fn connected(…, result: crate::mounts::Connected, …)`: `NeedsTerminal` → `open::spawn_detached(crate::mounts::TERMINAL_MOUNT, &[PathBuf::from(url)], &cwd)` (6575-6579) | Linux-only | App::poll_connects (6540) | — ✓ S1.24 |
 | 6603-6655 | `fn poll_mounts` → `Reply::{Listing, Mounted, Unmounted, Ejected, Failed}` | Linux-only | frame | — ✓ S1.24 |
-| 7201-7255 | `fn set_mode(&mut self, mode: u32, now: Instant)`: `use std::os::unix::fs::PermissionsExt;` (7212); `std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))` (7243); comment 7226 "there is no `lchmod` on Linux" | Unix-only (compile) | App::spot_action (7185, `spot::Action::SetMode`) | Spot panel permission chips. |
+| 7201-7255 | `fn set_mode(&mut self, mode: u32, now: Instant)`: `use std::os::unix::fs::PermissionsExt;` (7212); `std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))` (7243); comment 7226 "there is no `lchmod` on Linux" | Unix-only (compile) | App::spot_action (7185, `spot::Action::SetMode`) | Spot panel permission chips. ✓ S1.25 |
 | 12078-12090 | `fn open_window(&mut self, dir: &Path, now: Instant) -> bool` → `self.windows.open(dir)` | portable (spawn); see window.rs | `C::NewWindow` in App::run (8900-8902), App::release_tab_drag (12404) | Second window = second process. |
 | 12428-12461 | `fn tick_drag`: `dnd::verb_for(pointer.toggle, pointer.alt)` (12442); `if !window.contains(at) && pointer.down { self.hand_off_drag(now) }` (12458-12461) | Linux-only (drag-out) | App::frame | winit has no drag-source API on macOS/Windows. |
 | 12680-12722 | `fn hand_off_drag`: `device.drag(dnd::offer(&paths), count, rgba(surface1), rgba(text), scale)` (12708-12716); on `false`/no device, `spring_home` (12717-12721) | Linux-only | App::tick_drag | — |
@@ -92,6 +92,12 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 118-120 | `fn shown(written: &str, home: Option<&Path>) -> String` → `finder::shorten_home(Path::new(&expand_home(written)), home)` | Windows-differs | `said` (188) | `expand_home` is df-core (config.rs:767). |
 | 138-183 | `fn brief(text: &str, max: usize) -> String`: finds `"~/"` or `"://"` head, splits the rest on `'/'` (148, 154) and rejoins with `/` (167, 182) | Windows-differs (display) | `said` (188), `card_places` (323), 568, 838 | — |
 | 190-196 | `pub(super) fn written(dir: &Path, home: Option<&Path>) -> String` — "How a folder is written into the state file when it is pinned: under `~`" → `finder::shorten_home` | Windows-differs | App pin/unpin (358, 478, 495, 502) | Pins persisted as `~/…` strings. |
+
+### src/app/permissions.rs (added after this inventory; row added 2026-09-29 by the integration pass)
+
+| Line | What | Class | Used by (file:fn) | Note |
+|---|---|---|---|---|
+| 11, 272 (at the integration base) | `use std::os::unix::fs::MetadataExt;`; `spot.facts.mode = meta.mode()` in `refresh_spot_mode` | Unix-only (compile) | App::refresh_spot_mode ← the permissions card's job landing | The spot panel's `st_mode`, read again after `C`. Now `df_core::platform::meta::mode`. ✓ S1.25 |
 
 ### src/app/syncing.rs (1,110 lines; non-test 1-478)
 
@@ -175,7 +181,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
 | 19-33 | `pub fn linemode_text(entry: &Entry, mode: LineMode) -> String`: `LineMode::Permissions => entry.permissions_string()` (23), `LineMode::Owner => entry.owner_label()` (30) | Windows-differs (df-core renders POSIX mode / uid:gid) | ui.rs:Painting::row (1223), dialog.rs:Facts::read (291), Facts::of (317) | — |
-| 189-222 | `#[allow(unsafe_code)] fn civil_local(time: SystemTime) -> Option<(i32, u32, u32, u32, u32)>`: `let t = secs as libc::time_t;` (207), `let mut tm: libc::tm = unsafe { std::mem::zeroed() };` (208), `unsafe { !libc::localtime_r(&t, &mut tm).is_null() }` (212) | Unix-only (compile) | `local_stamp` (185) ← `time_text` (35) ← `linemode_text`; `long_stamp` (150) ← spot::rows (263, 265), archive::card_rows (446), remote::card_rows (581); `file_stamp` (165) ← App::save_clipboard (13617) | Doc 193-197 cites `/usr/share/zoneinfo`. |
+| 189-222 | `#[allow(unsafe_code)] fn civil_local(time: SystemTime) -> Option<(i32, u32, u32, u32, u32)>`: `let t = secs as libc::time_t;` (207), `let mut tm: libc::tm = unsafe { std::mem::zeroed() };` (208), `unsafe { !libc::localtime_r(&t, &mut tm).is_null() }` (212) | Unix-only (compile) | `local_stamp` (185) ← `time_text` (35) ← `linemode_text`; `long_stamp` (150) ← spot::rows (263, 265), archive::card_rows (446), remote::card_rows (581); `file_stamp` (165) ← App::save_clipboard (13617) | Doc 193-197 cites `/usr/share/zoneinfo`. ✓ S1.25 |
 
 ### src/graphics.rs (394 lines; no tests)
 
@@ -309,8 +315,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 |---|---|---|---|---|
 | 72-78 | `pub const URL: &str = "trash://";` | Windows-differs | tab.rs:788, app.rs:2486 (App::navigate), 6785 (App::jump_to), 16555 (`scannable`) | `crumbs()` (117) is used at app.rs:10389. |
 | 130-150 | `pub fn row(item: &TrashedItem) -> Entry`: `std::fs::symlink_metadata(&path)`; `std::fs::metadata` when the lstat is a symlink | runtime-differs (symlink semantics) | `rows` (127) ← tab.rs:Tab::show_trash (784) | — |
-| 163-248 | `pub fn row_from(item: &TrashedItem, meta: Option<&Metadata>, target: Option<&Metadata>) -> Entry`: `use std::os::unix::fs::MetadataExt;` (176); `.map(\|m\| m.mode()).unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 })` (212-214); `uid: facts.map(\|m\| m.uid())` (240), `gid: … m.gid()` (241) | Unix-only (compile) | `row` (149), tests | — |
-| 276-293 | `fn shorten(path: &str) -> String`: `std::env::var_os("HOME")` (281); `rest.starts_with('/')` (290) | Windows-differs | `notes` (273) ← App::show_trash (4071) | — |
+| 163-248 | `pub fn row_from(item: &TrashedItem, meta: Option<&Metadata>, target: Option<&Metadata>) -> Entry`: `use std::os::unix::fs::MetadataExt;` (176); `.map(\|m\| m.mode()).unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 })` (212-214); `uid: facts.map(\|m\| m.uid())` (240), `gid: … m.gid()` (241) | Unix-only (compile) | `row` (149), tests | — ✓ S1.25 |
+| 276-293 | `fn shorten(path: &str) -> String`: `std::env::var_os("HOME")` (281); `rest.starts_with('/')` (290) | Windows-differs | `notes` (273) ← App::show_trash (4071) | — ✓ S1.25 |
 | 297-326 | `pub fn deleted_at(text: &str) -> Option<SystemTime>`: parses `YYYY-MM-DDThh:mm:ss` as UTC | portable | `row_from` (237) | Format is df-core's trashinfo `DeletionDate`. |
 | 339-381 | `pub fn restore_refusal(item: &TrashedItem) -> Option<String>`: `symlink_metadata` on `item.files_path()`, `original`, `original.parent()` | portable API | App::trash_restore (4115) | — |
 

@@ -177,7 +177,7 @@ pub fn row_from(
     meta: Option<&std::fs::Metadata>,
     target: Option<&std::fs::Metadata>,
 ) -> Entry {
-    use std::os::unix::fs::MetadataExt;
+    use df_core::platform::meta;
     let name = item.name.to_string_lossy().into_owned();
     let original_name = item
         .original
@@ -214,7 +214,7 @@ pub fn row_from(
             }
     );
     let mode = facts
-        .map(|m| m.mode())
+        .map(meta::mode)
         .unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 });
     // Sniffed from the *original* name, so a `notes_1.txt` in the trash still
     // gets the icon and the preview of the `notes.txt` it was.
@@ -241,8 +241,8 @@ pub fn row_from(
         mtime: deleted_at(&item.deleted_at),
         btime: None,
         mode,
-        uid: facts.map(|m| m.uid()).unwrap_or(0),
-        gid: facts.map(|m| m.gid()).unwrap_or(0),
+        uid: facts.map(meta::uid).unwrap_or(0),
+        gid: facts.map(meta::gid).unwrap_or(0),
         mime,
         // …and the kind follows the original name for the same reason.
         file_kind: df_core::fs::classify(kind, &original_name, mime, mode),
@@ -283,7 +283,7 @@ pub fn notes(items: &[TrashedItem]) -> std::collections::HashMap<String, String>
 /// `$HOME/Work/x` → `~/Work/x`. The column is narrow and the home prefix is the
 /// part every row shares, so it is the part worth spending one character on.
 fn shorten(path: &str) -> String {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(home) = df_core::platform::dirs::home() else {
         return path.to_string();
     };
     let home = home.to_string_lossy().into_owned();

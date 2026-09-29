@@ -8,7 +8,6 @@
 //! every surface's glue does. The card itself is [`crate::permissions`].
 
 use std::collections::HashSet;
-use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -269,7 +268,7 @@ impl App {
             return;
         }
         if let Ok(meta) = std::fs::metadata(&spot.facts.path) {
-            spot.facts.mode = meta.mode();
+            spot.facts.mode = df_core::platform::meta::mode(&meta);
         }
     }
 }

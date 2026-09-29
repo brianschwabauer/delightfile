@@ -1207,9 +1207,10 @@ impl WriteBehind {
     }
 }
 
-/// `$HOME`, for shortening the paths a jump overlay lists.
+/// The home directory (`$HOME` on Linux and macOS), for shortening the paths
+/// a jump overlay lists.
 fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    df_core::platform::dirs::home()
 }
 
 /// Seconds since the epoch, which is the clock zoxide's frecency is scored
