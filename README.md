@@ -29,6 +29,13 @@ It is my daily file manager on Hyprland with an NVIDIA card. It has not been tes
 other compositors, other GPUs, or X11. Bugs from those are expected rather than
 surprising.
 
+### Cross-platform
+
+The port to macOS and Windows is planned, phase by phase, in
+[plans/other-platforms/README.md](plans/other-platforms/README.md), which is also where its
+progress is marked. The first phase, cutting the code along a platform seam so that one
+source tree builds for all three, is under way; neither port has been run yet.
+
 ## What is in it
 
 Three miller columns, a preview pane that decodes rather than shells out, and a top bar

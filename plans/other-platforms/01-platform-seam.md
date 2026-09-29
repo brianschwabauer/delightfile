@@ -961,9 +961,16 @@ their native clipboards *are* synchronous.
       waiting on the done-when, Brian's review. The section says the macOS and
       Windows builds are *meant* to compile rather than that they do, since
       no CI run has compiled df-app for either yet (S1.40).
-- [ ] **S1.42** Update the memory/PLAN pointers: `PLAN.md` gets a one-paragraph
+- [x] **S1.42** Update the memory/PLAN pointers: `PLAN.md` gets a one-paragraph
       pointer to `plans/other-platforms/README.md` under a "Cross-platform" heading. Done when: the
       paragraph exists.
+      *As built:* `PLAN.md` is gone (removed as done in 6aee8d1), so the
+      paragraph went where the repository now points at its plan: the
+      README's Status section, whose first line still names `PLAN.md`. It is a
+      "Cross-platform" subsection there, one paragraph saying the port is
+      planned and marked in `plans/other-platforms/README.md` and that the
+      first phase is under way. The memory pointers are outside the
+      repository. — done, uncommitted 2026-09-29
 
 ## Decisions log
 
@@ -1202,6 +1209,10 @@ their native clipboards *are* synchronous.
   component anywhere else was already dropped by `normalize`; `..` and
   absolute names are flagged as before, and nothing that extracts moved. The
   places test's fix is a test fix only: the app was right.
+- 2026-09-29 — S1.42: with `PLAN.md` removed (6aee8d1), its "Cross-platform"
+  paragraph is a subsection of the README's Status, the one place the
+  repository still points at a plan from. The README's link to `PLAN.md`
+  itself is left as it is: whether it goes is not this plan's call.
 
 ## Open questions
 
