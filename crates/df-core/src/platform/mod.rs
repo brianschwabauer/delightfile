@@ -58,7 +58,7 @@
 //! | `meta` | `is_executable(name: &OsStr, mode: u32) -> bool` (a row the name cannot classify, P3.28) | `mode & 0o111` (unix) | unix | the extension in `PATHEXT`, read once |
 //! | `user` | `uid() -> u32` | `getuid` (unix) | unix | `0` |
 //! | `user` | `cache_suffix() -> String` (the `yazi-<suffix>` thumbnail directory) | the uid (unix) | unix | `"0"`, yazi's `uid_or_zero` |
-//! | `user` | `user_name(uid)`, `group_name(gid)` `-> Option<&'static str>` | `/etc/passwd`, `/etc/group`, read once | `None` (M2.4) | `None` |
+//! | `user` | `user_name(uid)`, `group_name(gid)` `-> Option<&'static str>` | `/etc/passwd`, `/etc/group`, read once | `getpwuid_r` / `getgrgid_r`, each id asked once | `None` |
 //! | `thread` | `lower_priority(nice: i32) -> bool` (called with 1–19 by [`crate::thread::lower_priority`]) | `setpriority(PRIO_PROCESS, 0, nice)`: this thread | nothing, `false` (M2.5) | nothing, `false` |
 //! | `time` | `local_civil(secs: i64) -> Option<rename::facts::Civil>` | `localtime_r` (unix) | unix | `localtime_s` |
 //! | `dirs` | `home`, `config_dir`, `state_dir`, `data_dir`, `cache_dir`, `runtime_dir`, `temp_dir`: `fn() -> Option<PathBuf>` | XDG, `$HOME` fallbacks (unix) | unix, the same (D5.1) | `%USERPROFILE%` and `%TEMP%`; the rest `None` (D5.1) |
