@@ -260,8 +260,8 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 128–176 | `Clipboard::contains` / `toggle`: `PathBuf` equality and `HashSet<PathBuf>` | Windows-differs (case) | app:app.rs:toggle_yank, overlay_command | |
-| 400, 457, 462 | `claimed.contains(&dst)` / `&candidate` in `plan_paste` and `unique_name` | Windows-differs (case) | `plan_paste` ← app:app.rs:paste_into; `unique_name` ← app:app.rs:make_folder, remote_download; core:archive/unpack.rs:destinations; core:vfs/mod.rs:unique_name | On a case-insensitive volume, `A.txt` and `a.txt` are one slot |
+| 128–176 | `Clipboard::contains` / `toggle`: `PathBuf` equality and `HashSet<PathBuf>` | Windows-differs (case) | app:app.rs:toggle_yank, overlay_command | ✓ P3.20 |
+| 400, 457, 462 | `claimed.contains(&dst)` / `&candidate` in `plan_paste` and `unique_name` | Windows-differs (case) | `plan_paste` ← app:app.rs:paste_into; `unique_name` ← app:app.rs:make_folder, remote_download; core:archive/unpack.rs:destinations; core:vfs/mod.rs:unique_name | On a case-insensitive volume, `A.txt` and `a.txt` are one slot ✓ P3.20 |
 
 ### ops/trash.rs
 
@@ -1753,15 +1753,15 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | ops.rs:158–177 | `*_resolved`: `canonicalize` both sides, `starts_with` | (canonical spelling on both sides) | paste, copy, sync | ✓ P3.18 |
 | ops/delete.rs:40–54 | Home and cwd rails | (case) | `check_deletable` | ✓ P3.19 |
 | ops/create.rs:139–141 | Same-directory check for rename | (case) | `rename` | ✓ P3.18 |
-| ops/paste.rs:128–176 | `Clipboard` membership (`Vec`/`HashSet<PathBuf>`) | (case) | yank/cut/toggle | |
-| ops/paste.rs:193 | `spans_directories`: `parent != first` | (case) | df-app tray | |
+| ops/paste.rs:128–176 | `Clipboard` membership (`Vec`/`HashSet<PathBuf>`) | (case) | yank/cut/toggle | ✓ P3.20 |
+| ops/paste.rs:193 | `spans_directories`: `parent != first` | (case) | df-app tray | ✓ P3.20 |
 | ops/paste.rs:273 | `resolve`: `c.src == src` | (case) | conflict dialog | ✓ P3.18 |
-| ops/paste.rs:400, 457, 462 | `claimed.contains` | (case) | `plan_paste`, `unique_name` | |
-| ops/trash.rs:316 | `orphans`: `item.name == name` (`OsString`) | (case) | `list` | Both sides come from `read_dir` |
-| ops/journal.rs:872, 911 | `read_link(link) != target` | (case) | undo | Link text compare |
+| ops/paste.rs:400, 457, 462 | `claimed.contains` | (case) | `plan_paste`, `unique_name` | ✓ P3.20 |
+| ops/trash.rs:316 | `orphans`: `item.name == name` (`OsString`) | (case) | `list` | Both sides come from `read_dir` ✓ P3.20 |
+| ops/journal.rs:872, 911 | `read_link(link) != target` | (case) | undo | Link text compare ✓ P3.20 |
 | fs/history.rs:54 | `History::push`: `dir == self.current` | (case) | tab history | ✓ P3.19 |
 | fs/memory.rs:29, 53, 69 | `Recent`: `HashMap<PathBuf, V>`, `order` position | (case) | cursor memory | ✓ P3.19 |
-| fs/mod.rs:370, 462, 506 | Cursor and selection held by `name: String` | (case) | `DirState` | Names come from `read_dir` |
+| fs/mod.rs:370, 462, 506 | Cursor and selection held by `name: String` | (case) | `DirState` | Names come from `read_dir` ✓ P3.20 |
 | state/mod.rs:202, 305–318, 357, 367, 382–398 | `dirs: HashMap<PathBuf, Record>` keyed by the pane's path | (case) | app | Persisted keys vs navigated paths ✓ P3.19 |
 | state/pins.rs:92–94 | `same_place`: `Path == Path` after `expand_home` | (case) | pins | ✓ P3.19 |
 | du/cache.rs:220, 434, 478 | `records: HashMap<PathBuf, …>`, `parent() != Some(dir)`, `starts_with(root)` | (case) | folder sizes | ✓ P3.19 |
@@ -1772,12 +1772,12 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | sync/plan.rs:51–67 | Duplicate names in `HashSet<OsString>` | (case) | `roots` | ✓ P3.19 |
 | sync/plan.rs:307–321 | `ours`/`theirs` `HashSet<&OsString>` | (case), mitigated by `case_twins` | `extras_in` | ✓ P3.19 |
 | sync/plan.rs:366–424 | `case_twins`, `fold`: explicit simple case folding (UTF-8 only) | case-aware | `extras_in` | The one place that already models a case-insensitive destination |
-| sync/mod.rs:367–383 | `removals`: `HashMap<(usize, &Path), usize>` | (case) | removals | Both sides come from the plan |
-| sync/rsync.rs:462–473, 814–839 | Root name maps `HashMap<OsString/&OsStr, usize>`, `items` by `(root, &Path)` | (case) | rsync plan, landed | rsync's spelling vs local names |
+| sync/mod.rs:367–383 | `removals`: `HashMap<(usize, &Path), usize>` | (case) | removals | Both sides come from the plan ✓ P3.20 |
+| sync/rsync.rs:462–473, 814–839 | Root name maps `HashMap<OsString/&OsStr, usize>`, `items` by `(root, &Path)` | (case) | rsync plan, landed | rsync's spelling vs local names ✓ P3.20 |
 | archive/tree.rs:487 | `.git` check with `eq_ignore_ascii_case` | case-aware | `name_is_unsafe` | |
 | config.rs:1684–1706 | `wildcard_match` lowercases ASCII text | ASCII case-insensitive | globs | |
 | zoxide/mod.rs:315, 320 | `query` lowercases ASCII | ASCII case-insensitive | Z overlay | |
-| vfs/config.rs:214, 224 | Service name `==` | (case) | vfs | Config names, not paths |
+| vfs/config.rs:214, 224 | Service name `==` | (case) | vfs | Config names, not paths ✓ P3.20 |
 
 ### 3.5 Path → `String` (lossy) values that are turned back into paths
 

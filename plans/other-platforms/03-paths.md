@@ -376,16 +376,18 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `a_record_is_found_in_either_case_where_the_platform_folds_it`,
       `a_row_in_another_case_finds_its_dot_where_the_platform_folds_it`,
       `the_cache_finds_a_repository_in_another_case_where_the_platform_folds_it`.
-- [ ] **P3.20** Leave as-is, with a Decisions-log line each: `ops/paste.rs:128–176,
+- [x] **P3.20** Leave as-is, with a Decisions-log line each: `ops/paste.rs:128–176,
       193, 400, 457, 462` (clipboard membership: both spellings come from
       `read_dir`), `ops/trash.rs:316`, `ops/journal.rs:872, 911`, `fs/mod.rs:370,
       462, 506` (cursor by name from `read_dir`), `sync/mod.rs:367–383`,
       `sync/rsync.rs:462–473, 814–839`, `vfs/config.rs:214, 224`. Done when: logged.
-- [ ] **P3.25** Thumbnail cache key (`preview/cache.rs:136–160`) hashes `Path` via
+      — done (port/paths): nine lines in the Decisions log, one per site.
+- [x] **P3.25** Thumbnail cache key (`preview/cache.rs:136–160`) hashes `Path` via
       `Hash for Path`, whose input bytes are platform-specific. Decision: leave the
       code; yazi-parity of *keys* is not attempted on Windows (the directory is still
       shared, and a thumbnail yazi wrote is simply regenerated once). Record it in
-      the module doc. Done when: the doc comment says so.
+      the module doc. Done when: the doc comment says so. — done (port/paths):
+      a paragraph in the module essay's scheme section.
 - [ ] **P3.26** Removing links: `ops/delete.rs:96–111, 118–130` and
       `ops/journal.rs:879, 933` remove a symlink with `remove_file`; on Windows a
       directory symlink or junction needs `remove_dir`. Add
@@ -504,6 +506,35 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
   keyed `ours` set would hide; the keyed set only keeps what `case_twins`
   refuses to pair (a name that folds to two) from being taken for an extra.
   Built lazily, it costs Linux nothing where there is no extra.
+- 2026-09-29 — P3.20, `ops/paste.rs:128–176` (`Clipboard::contains`,
+  `toggle`): left exact. Both sides are rows of a listing, spelled by
+  `read_dir`, and normalized the same way; a path carried in one case is
+  never offered back in another.
+- 2026-09-29 — P3.20, `ops/paste.rs:193` (`spans_directories`): left exact.
+  The parents are of carried paths, each from a listing; at worst one folder
+  reached in two cases reads as two, and the tray says "spans folders" when
+  it need not.
+- 2026-09-29 — P3.20, `ops/paste.rs:400, 457, 462` (`claimed`): left exact.
+  Two sources whose names differ only in case, pasted into one folder that
+  folds case, both plan to land; the second then meets the first at
+  execution, where `copy_file` and `move_path` ask `exists`, which the file
+  system answers for either spelling, and refuse it as "already exists". The
+  cost is an error in place of a `_1` name, never an overwrite.
+- 2026-09-29 — P3.20, `ops/trash.rs:316` (`orphans`, now
+  `platform/linux/trash.rs`): left exact. Linux's freedesktop trash only, and
+  both names are from `read_dir` of the same trash.
+- 2026-09-29 — P3.20, `ops/journal.rs:872, 911` (`read_link(link) != target`):
+  left exact. It asks whether the link still holds the very text this program
+  wrote into it; that is a text comparison by design, in any case-folding.
+- 2026-09-29 — P3.20, `fs/mod.rs:370, 462, 506` (cursor and selection by
+  name): left exact. The name and the rows it is looked up among come from one
+  `read_dir` of one directory.
+- 2026-09-29 — P3.20, `sync/mod.rs:367–383` (`removals`): left exact. Both
+  sides of the map are the plan's own items.
+- 2026-09-29 — P3.20, `sync/rsync.rs:462–473, 814–839`: left exact. rsync is
+  not offered on Windows (`HAS_RSYNC`), and macOS keeps identity keys.
+- 2026-09-29 — P3.20, `vfs/config.rs:214, 224`: left exact. Service names
+  from config, not paths.
 - 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
   did, not every one through `trim_trailing_separator`: `a//` stays `a/`
   and a typed `/` stays "no name given" on Linux.

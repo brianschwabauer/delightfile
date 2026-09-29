@@ -48,6 +48,14 @@
 //! Everything but the discriminant goes through std's own `Hash` impls, so the
 //! only thing that can drift is yazi's *structure*, not the transcription.
 //!
+//! **On Windows the names are not yazi's, and are not meant to be.** `Hash for
+//! Path` feeds in the platform's own bytes — WTF-8 and a drive prefix there —
+//! and the change time is Windows' last write, so a key computed here and one
+//! yazi computed for the same file need not agree. The directory is still the
+//! shared one (`%TEMP%\yazi-0`), and a thumbnail yazi wrote is simply made
+//! again, once, under this program's name for it. Matching yazi key for key on
+//! Windows is not attempted (`03-paths.md` P3.25).
+//!
 //! ## Freshness comes free
 //!
 //! There is no mtime comparison anywhere in this file, and there must not be:
