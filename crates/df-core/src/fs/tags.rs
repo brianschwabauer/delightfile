@@ -34,27 +34,23 @@
 //! all, so a link simply has no tags, and asking to give it some is refused
 //! ([`TagError::Link`]).
 //!
-//! # The unsafe here
+//! # The syscalls
 //!
-//! `std` has no binding for extended attributes, and PLAN §1's bar for a new
-//! dependency is "rewriting is impractical" — four syscalls with a
-//! path, a name and a buffer each do not clear it. So the calls are made
-//! through `libc` in the small functions under "The syscalls" below, each an
-//! `unsafe` block with its own `#[allow(unsafe_code)]` (the workspace warns on
-//! `unsafe_code` so every use is a deliberate one, as in the inotify watcher).
-//! Nothing unsafe escapes them: the paths and names are `CString`s that
-//! outlive the call, every buffer is a `Vec` whose length is the size handed
-//! in, and every return value is checked and turned into
-//! [`std::io::Error::last_os_error`].
+//! The four calls live in [`crate::platform::xattr`], with the `unsafe` they
+//! need. Linux has them; macOS and Windows have no body yet, so there a row
+//! has no tags, a tag search finds nothing, a copy carries none, and asking
+//! to tag something says tags are not available on this platform.
 
-use std::ffi::CString;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::platform::xattr::{self, get_raw, list_raw, remove_raw, set_raw};
 use crate::DfError;
+
+#[cfg(test)]
+pub(crate) use crate::platform::xattr::{refusing, supported_here};
 
 /// The attribute the tags live in (freedesktop's shared-metadata name).
 pub const XATTR: &str = "user.xdg.tags";
@@ -117,7 +113,7 @@ pub fn try_read(path: &Path) -> crate::Result<Vec<String>> {
     match get_raw(path, XATTR) {
         Ok(Some(bytes)) => Ok(parse(&String::from_utf8_lossy(&bytes))),
         Ok(None) => Ok(Vec::new()),
-        Err(e) if quiet(&e) => Ok(Vec::new()),
+        Err(e) if xattr::quiet(&e) => Ok(Vec::new()),
         Err(e) => Err(DfError::io(path, e)),
     }
 }
@@ -131,6 +127,9 @@ pub fn write(path: &Path, tags: &[String]) -> Result<(), TagError> {
     if let Some(bad) = tags.iter().find(|tag| tag.contains(',')) {
         return Err(TagError::Comma(bad.clone()));
     }
+    if !xattr::AVAILABLE {
+        return Err(TagError::Io(DfError::Unsupported("Tags")));
+    }
     let tags: Vec<&str> = tags
         .iter()
         .map(|tag| tag.trim())
@@ -138,7 +137,7 @@ pub fn write(path: &Path, tags: &[String]) -> Result<(), TagError> {
         .collect();
     let result = if tags.is_empty() {
         match remove_raw(path, XATTR) {
-            Err(e) if e.raw_os_error() == Some(libc::ENODATA) => Ok(()),
+            Err(e) if xattr::is_absent(&e) => Ok(()),
             other => other,
         }
     } else {
@@ -150,14 +149,14 @@ pub fn write(path: &Path, tags: &[String]) -> Result<(), TagError> {
 /// What a failed write says: the two refusals a person can do something about
 /// named as such, anything else as the error it was.
 fn refusal(path: &Path, e: io::Error) -> TagError {
-    match e.raw_os_error() {
-        Some(libc::ENOTSUP) => TagError::Unsupported,
-        Some(libc::EPERM)
-            if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink()) =>
-        {
-            TagError::Link
-        }
-        _ => TagError::Io(DfError::io(path, e)),
+    if xattr::is_unsupported(&e) {
+        TagError::Unsupported
+    } else if xattr::is_not_permitted(&e)
+        && std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_symlink())
+    {
+        TagError::Link
+    } else {
+        TagError::Io(DfError::io(path, e))
     }
 }
 
@@ -251,7 +250,7 @@ pub(crate) fn carry(src: &Path, dst: &Path) -> bool {
     let names = match list_raw(src) {
         Ok(names) => names,
         Err(e) => {
-            if !quiet(&e) {
+            if !xattr::quiet(&e) {
                 log::debug!("{}: cannot list attributes: {e}", src.display());
             }
             return false;
@@ -271,7 +270,7 @@ pub(crate) fn carry(src: &Path, dst: &Path) -> bool {
             if name == XATTR {
                 dropped = true;
             }
-            if quiet(&e) {
+            if xattr::quiet(&e) {
                 log::debug!("{} keeps no {name}: {e}", dst.display());
             } else {
                 log::warn!("{}: could not carry {name}: {e}", dst.display());
@@ -279,16 +278,6 @@ pub(crate) fn carry(src: &Path, dst: &Path) -> bool {
         }
     }
     dropped
-}
-
-/// The attribute errors that mean "there is nothing here, and there never
-/// will be": no such attribute, or a filesystem that keeps none. Neither is
-/// worth more than a debug line.
-fn quiet(e: &io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(libc::ENODATA) | Some(libc::ENOTSUP) | Some(libc::ENOSYS)
-    )
 }
 
 // ── Finding tagged files ────────────────────────────────────────────────────
@@ -379,184 +368,6 @@ impl Iterator for Find {
 /// attribute names alone.
 fn tagged(path: &Path) -> bool {
     list_raw(path).is_ok_and(|names| names.iter().any(|name| name == XATTR))
-}
-
-// ── The syscalls ────────────────────────────────────────────────────────────
-
-/// A path as the C calls take it.
-fn c_path(path: &Path) -> io::Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
-}
-
-fn c_name(name: &str) -> io::Result<CString> {
-    CString::new(name)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains a NUL byte"))
-}
-
-/// How big a first buffer is. A tag list is a few dozen bytes and an attribute
-/// name list is the same, so one call answers almost every question; a value
-/// longer than this is asked for again at its own size.
-const FIRST_BUFFER: usize = 256;
-
-/// Ask a sizing call twice: once into a buffer that is usually big enough,
-/// and — on `ERANGE`, the value having grown since or being bigger than
-/// guessed — again at the size the kernel reports. `call(buffer)` is the
-/// syscall writing into `buffer`; an empty one asks for the size alone.
-fn sized(mut call: impl FnMut(&mut [u8]) -> isize) -> io::Result<Vec<u8>> {
-    let mut buffer = vec![0u8; FIRST_BUFFER];
-    for _ in 0..4 {
-        let n = call(&mut buffer);
-        if n >= 0 {
-            buffer.truncate(n as usize);
-            return Ok(buffer);
-        }
-        let e = io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::ERANGE) {
-            return Err(e);
-        }
-        let needed = call(&mut []);
-        if needed < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        buffer = vec![0u8; needed as usize + FIRST_BUFFER];
-    }
-    Err(io::Error::from_raw_os_error(libc::ERANGE))
-}
-
-/// One attribute's value, or `None` when the file has no such attribute.
-fn get_raw(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
-    let c_path = c_path(path)?;
-    let c_name = c_name(name)?;
-    match sized(|buffer| sys_get(&c_path, &c_name, buffer)) {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.raw_os_error() == Some(libc::ENODATA) => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-/// The names of every attribute on `path`, of every namespace.
-fn list_raw(path: &Path) -> io::Result<Vec<String>> {
-    let c_path = c_path(path)?;
-    let bytes = sized(|buffer| sys_list(&c_path, buffer))?;
-    // The kernel's list is names back to back, each ending in a NUL.
-    Ok(bytes
-        .split(|b| *b == 0)
-        .filter(|name| !name.is_empty())
-        .map(|name| String::from_utf8_lossy(name).into_owned())
-        .collect())
-}
-
-/// Set one attribute, creating or replacing it.
-fn set_raw(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
-    #[cfg(test)]
-    if REFUSING.with(std::cell::Cell::get) {
-        return Err(io::Error::from_raw_os_error(libc::ENOTSUP));
-    }
-    let c_path = c_path(path)?;
-    let c_name = c_name(name)?;
-    if sys_set(&c_path, &c_name, value) != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Remove one attribute. `ENODATA` when there was none, left to the caller.
-fn remove_raw(path: &Path, name: &str) -> io::Result<()> {
-    let c_path = c_path(path)?;
-    let c_name = c_name(name)?;
-    if sys_remove(&c_path, &c_name) != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-// The four calls themselves, one `unsafe` block each and nothing else, so the
-// whole of what is being trusted is in view at once.
-
-/// `lgetxattr(2)` into `buffer`; an empty one asks for the size alone.
-#[allow(unsafe_code)]
-fn sys_get(path: &CString, name: &CString, buffer: &mut [u8]) -> isize {
-    // SAFETY: both strings are NUL-terminated and borrowed for the length of
-    // the call, and the kernel writes at most `buffer.len()` bytes into the
-    // buffer — none at all when that is zero.
-    unsafe {
-        libc::lgetxattr(
-            path.as_ptr(),
-            name.as_ptr(),
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-        )
-    }
-}
-
-/// `llistxattr(2)`, into `buffer` as [`sys_get`] takes it.
-#[allow(unsafe_code)]
-fn sys_list(path: &CString, buffer: &mut [u8]) -> isize {
-    // SAFETY: as `sys_get`: a borrowed NUL-terminated path, and a buffer the
-    // kernel writes at most its own length into.
-    unsafe { libc::llistxattr(path.as_ptr(), buffer.as_mut_ptr().cast(), buffer.len()) }
-}
-
-/// `lsetxattr(2)`, flags 0: create or replace.
-#[allow(unsafe_code)]
-fn sys_set(path: &CString, name: &CString, value: &[u8]) -> libc::c_int {
-    // SAFETY: two borrowed NUL-terminated strings, and `value` is a live
-    // slice the kernel reads exactly `value.len()` bytes of.
-    unsafe {
-        libc::lsetxattr(
-            path.as_ptr(),
-            name.as_ptr(),
-            value.as_ptr().cast(),
-            value.len(),
-            0,
-        )
-    }
-}
-
-/// `lremovexattr(2)`.
-#[allow(unsafe_code)]
-fn sys_remove(path: &CString, name: &CString) -> libc::c_int {
-    // SAFETY: two borrowed NUL-terminated strings; nothing is written.
-    unsafe { libc::lremovexattr(path.as_ptr(), name.as_ptr()) }
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Stand in for a destination that keeps no attributes (a FAT card), on
-    /// this thread: every set answers `ENOTSUP`. There is no such filesystem
-    /// a test can make without mounting one.
-    static REFUSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Run `f` with every attribute write on this thread refused as a FAT card
-/// refuses it.
-#[cfg(test)]
-pub(crate) fn refusing<T>(f: impl FnOnce() -> T) -> T {
-    REFUSING.with(|c| c.set(true));
-    let out = f();
-    REFUSING.with(|c| c.set(false));
-    out
-}
-
-/// Whether this machine's `$TMPDIR` holds `user.*` attributes, for the tests
-/// that need one — tmpfs does from Linux 6.6, ext4 and btrfs always have.
-/// Says why when it does not, so a skipped test is a visible one.
-#[cfg(test)]
-pub(crate) fn supported_here(probe: &Path) -> bool {
-    match set_raw(probe, "user.df-probe", b"1") {
-        Ok(()) => {
-            let _ = remove_raw(probe, "user.df-probe");
-            true
-        }
-        Err(e) => {
-            eprintln!(
-                "skipping: {} holds no user.* attributes ({e})",
-                probe.display()
-            );
-            false
-        }
-    }
 }
 
 #[cfg(test)]

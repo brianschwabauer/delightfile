@@ -12,4 +12,4 @@ pub mod process;
 pub mod time;
 pub mod user;
 
-pub use super::stub::{thread, trash, watch};
+pub use super::stub::{thread, trash, watch, xattr};

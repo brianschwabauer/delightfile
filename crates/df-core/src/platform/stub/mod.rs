@@ -17,3 +17,4 @@ pub mod thread;
 pub mod trash;
 pub mod user;
 pub mod watch;
+pub mod xattr;

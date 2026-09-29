@@ -301,7 +301,7 @@ has not dropped.
       (S1.11), and likewise `config::expand_home`, `vfs::config`'s key path and
       rclone config lookup, and a `preview::cache` test. Done when: `fs::owner`
       tests pass on Linux; no `"HOME"` literal in
-      df-core outside `platform/`. — done SHA_S117
+      df-core outside `platform/`. — done d9af4f4
 - [ ] **S1.15** Tests that stop df-core's test target from *compiling* elsewhere:
       `test_support.rs:61–68` (`TempTree::symlink` → `platform::fs::symlink`);
       `vfs/tests.rs`, `sync/rsync.rs` tests and `archive/external.rs` tests that write
@@ -310,6 +310,21 @@ has not dropped.
       `UnixListener` → `#[cfg(unix)]`. Only compile errors are fixed here; tests that
       would *fail* on Windows for path reasons are Phase 3 P3.24. Done when:
       `cargo test -p df-core --no-run` succeeds on the macOS and Windows runners.
+- [x] **S1.18** `platform::xattr` (added 2026-09-29: file tags postdate the
+      inventory). `fs/tags.rs`'s four `l*xattr` calls (`lgetxattr`, `llistxattr`,
+      `lsetxattr`, `lremovexattr`), their buffer sizing, the errno they read
+      (`ENODATA`, `ENOTSUP`, `EPERM`, `ENOSYS`, `ERANGE`) and the two test hooks
+      move to `platform/linux/xattr.rs` unchanged. `fs::tags` keeps the tag logic
+      and `carry`, the `user.*` preservation copy, move and sync call; both reach
+      the attributes only through the seam. macOS and Windows get
+      `platform/stub/xattr.rs`: reads answer "no attributes" (`None`, an empty
+      list), writes refuse, and `AVAILABLE` is false, so `tags::write` returns
+      `TagError::Io(DfError::Unsupported("Tags"))` and `carry` copies nothing and
+      reports nothing lost. No macOS body: whether macOS tags are
+      `user.xdg.tags` or Finder's `com.apple.metadata:_kMDItemUserTags` is an open
+      question in `02-macos.md`. Done when: the tags tests pass on Linux,
+      `fs/tags.rs` names no `libc`, and df-core compiles on all three targets.
+      — done SHA_S118, cross-checked locally, CI pending
 
 ## 3. df-app: the seam
 
@@ -606,6 +621,14 @@ their native clipboards *are* synchronous.
   paint loop asks. `fs::owner::parse_id_table` stays portable (the passwd test
   parses a table on every target); the file reading and the two caches moved
   to `platform/linux/user.rs`.
+- 2026-09-29 — S1.18 (new task): file tags are `user.xdg.tags` extended
+  attributes read and written with the Linux `l*xattr` calls, a site the
+  inventory predates. Handled by the fixed rule — the Linux body moved
+  unchanged into `platform::xattr`, macOS and Windows stubbed — with the macOS
+  body left undecided because the attribute to use is a real choice (open
+  question in `02-macos.md`). `tags::write` checks `xattr::AVAILABLE` after its
+  comma check, so a stub platform refuses with "Tags is not available on this
+  platform" rather than the Linux text for a drive that keeps no attributes.
 
 ## Open questions
 

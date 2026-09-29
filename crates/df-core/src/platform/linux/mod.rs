@@ -7,5 +7,6 @@ pub mod thread;
 pub mod trash;
 pub mod user;
 pub mod watch;
+pub mod xattr;
 
 pub use super::unix::{dirs, errno, meta, os, pipe, process, time};

@@ -155,6 +155,15 @@
 | 31–34 | `groups()`: `parse_id_file("/etc/group")` | Linux-only (as above) | `group_name`, `owner_label` | ✓ S1.17 |
 | 39–84 | uid/gid `u32` → name model (`user_name(uid: u32)`, `group_name(gid: u32)`, `owner_label(uid, gid)`) | Windows-differs | as above | Windows owners are SIDs ✓ S1.17 |
 
+### fs/tags.rs (added 2026-09-29: file tags postdate the inventory; lines as of 6aee8d1)
+
+| Line | What | Class | Used by | Note |
+|---|---|---|---|---|
+| 52 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `c_path`, `Find::next` | ✓ S1.16, S1.18 |
+| 141, 154–155, 290, 412–430, 451 | errno: `ENODATA`, `ENOTSUP`, `EPERM`, `ENOSYS`, `ERANGE` read off attribute calls | Linux-only (macOS numbers differ; `ENODATA` is `ENOATTR` there) | `write`, `refusal`, `quiet`, `sized`, `get_raw`, test `set_raw` | ✓ S1.18 |
+| 359 | `Find::next`: `file_name().as_bytes().first() == Some(&b'.')` for the hidden check | Unix-only | `find` ← app:search.rs | ✓ S1.16 |
+| 474–519 | `lgetxattr`, `llistxattr`, `lsetxattr`, `lremovexattr` | Linux-only (macOS: no compile; its calls take an options word) | `get_raw`, `list_raw`, `set_raw`, `remove_raw` ← `read`, `write`, `find`, `carry` (← core:ops/copy.rs, core:sync/execute.rs) | ✓ S1.18 |
+
 ### fs/watch.rs
 
 | Line | What | Class | Used by | Note |

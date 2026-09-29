@@ -301,3 +301,10 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   the fallback is an `NSView` subclass override of `mouseDragged:` — record which.
 - Ghostty on macOS: does `ghostty -e` work from `open -a`? Affects the `edit` opener
   default in `05-defaults-and-config.md`.
+- Tags on macOS (S1.18): which extended attribute do they live in? freedesktop's
+  `user.xdg.tags` (what Linux delightfile writes, so a disk shared with Linux
+  keeps its tags, but Finder shows none of them) or Finder's
+  `com.apple.metadata:_kMDItemUserTags` (a binary plist of names with colour
+  suffixes, which Finder and Spotlight read but Linux tools do not)? Until this
+  is decided `platform::xattr` on macOS is the stub: no tags are read, `T`
+  refuses, and a copy carries no attributes.
