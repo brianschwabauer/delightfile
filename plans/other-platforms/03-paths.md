@@ -165,14 +165,22 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       its literal `/tmp/…` keys go through `test_support::abs`, the identity on
       Unix and `C:\tmp\…` on Windows, where the new rule drops `/tmp/…`
       (P3.30, bin 2).
-- [ ] **P3.6** `.trashinfo`: `ops/trash.rs:679–720` (`encode_path`, `decode_path`)
+- [x] **P3.6** `.trashinfo`: `ops/trash.rs:679–720` (`encode_path`, `decode_path`)
       and `:255–270` (`list`), `:609–646` (`fit`, `clip` — clip on UTF-8 char
       boundaries of the UTF-8 view, and `MAX_NAME_BYTES` stays a byte budget on Unix
       while Windows uses a 255-UTF-16-unit budget from `platform::path::MAX_NAME`).
       Note that the whole freedesktop trash is Linux-only after Phase 1 (macOS and
       Windows have their own `platform::trash`); this task is still needed because
       `suffixed`/`fit` are used by paste and vfs on every target. Done when:
-      `ops/trash.rs` tests pass on Linux and `suffixed` has a UTF-8 test.
+      `ops/trash.rs` tests pass on Linux and `suffixed` has a UTF-8 test. — done
+      (port/paths). `encode_path`, `decode_path` and `list` are in
+      `platform/linux/trash.rs` since S1.6 and already byte-exact there, so
+      nothing changed in them; `fit` and `clip` (in `fs/names.rs` since S1.6)
+      count a name in `platform::os::MAX_NAME` units — bytes on Unix, so Linux
+      clips exactly as before, UTF-16 units on Windows — and never split a
+      character or a surrogate pair. `MAX_NAME_BYTES` stays, the Linux trash's
+      byte budget. Tests: a UTF-8 name clipped by both rules, a surrogate pair
+      kept whole, and the existing ones measured in the platform's unit.
 - [ ] **P3.7** Archive member names: `archive/write/mod.rs:529–580`; member
       `mode`/`uid`/`gid`/`mtime` via `platform::meta`. `MADE_BY` stays "Unix" on
       every target (readers accept it; the synthesized mode is valid). Symlink

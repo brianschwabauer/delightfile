@@ -26,6 +26,13 @@ pub const STRICT_NAMES: bool = false;
 /// here, where two spellings are two files, or come from one `read_dir`.
 pub const FOLD_CASE: bool = false;
 
+/// The longest one name may be, in the unit [`NAME_IN_UTF16`] names: 255
+/// bytes, the limit of ext4, btrfs, xfs and APFS alike.
+pub const MAX_NAME: usize = 255;
+
+/// Whether [`MAX_NAME`] counts UTF-16 code units: no, bytes.
+pub const NAME_IN_UTF16: bool = false;
+
 /// The bytes of `s`, exactly as the kernel has them. Never an error here.
 pub fn as_bytes(s: &OsStr) -> Result<Cow<'_, [u8]>> {
     Ok(Cow::Borrowed(s.as_bytes()))

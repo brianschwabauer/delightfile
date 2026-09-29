@@ -60,6 +60,7 @@
 //! | `dirs` | `home`, `config_dir`, `state_dir`, `data_dir`, `cache_dir`, `runtime_dir`, `temp_dir`: `fn() -> Option<PathBuf>` | XDG, `$HOME` fallbacks (unix) | unix, the same (D5.1) | `%USERPROFILE%` and `%TEMP%`; the rest `None` (D5.1) |
 //! | `os` | `as_bytes(&OsStr) -> Result<Cow<[u8]>>`, `from_bytes(&[u8]) -> Result<OsString>` (P3.1) | the bytes, never an error (unix) | unix | UTF-8; `Unsupported("non-Unicode file name")` otherwise |
 //! | `os` | `STRICT_NAMES: bool`, `FOLD_CASE: bool` (what [`crate::path`] holds a name and a key to, P3.2) | `false`, `false` (unix) | unix | `true`, `true` |
+//! | `os` | `MAX_NAME: usize`, `NAME_IN_UTF16: bool` (how long a made-up name may be, [`crate::fs::names`], P3.6) | 255 bytes (unix) | unix | 255 UTF-16 units |
 //! | `pipe` | `AVAILABLE: bool`; `fd(&pipe) -> i32`; `remaining(deadline)`; `poll_read2(stdout, stderr, timeout) -> io::Result<(bool, bool)>`; `poll_write(fd, timeout) -> io::Result<bool>`; `set_nonblocking(fd) -> io::Result<()>` | `poll`, `fcntl` (unix) | unix | `AVAILABLE = false`, so SFTP refuses before spawning; the rest `Unsupported("SFTP")` (W4.20) |
 //! | `socket` | `AVAILABLE: bool`; `Stream: Read + Write`; `connect(path, timeout) -> io::Result<Stream>`; `private_dir(dir, uid) -> io::Result<()>` (the rclone daemon's remote control) | `UnixStream`; mode 0700 and owner check (unix) | unix | `AVAILABLE = false`, so cloud remotes refuse before `rclone` starts; the rest `Unsupported("Cloud remotes")` (W4.32) |
 //! | `process` | `NULL_DEVICE: &str` | `/dev/null` (unix) | unix | `NUL` |

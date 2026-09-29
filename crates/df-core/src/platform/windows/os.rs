@@ -22,6 +22,14 @@ pub const STRICT_NAMES: bool = true;
 /// NTFS does, so `C:\Users\x` and `c:\users\X` find one record.
 pub const FOLD_CASE: bool = true;
 
+/// The longest one name may be, in the unit [`NAME_IN_UTF16`] names: 255
+/// UTF-16 code units, NTFS's limit.
+pub const MAX_NAME: usize = 255;
+
+/// Whether [`MAX_NAME`] counts UTF-16 code units: yes — a name is UTF-16
+/// here, so `é` costs one and `🎬` two, where UTF-8 would say two and four.
+pub const NAME_IN_UTF16: bool = true;
+
 /// The UTF-8 of `s`, or a refusal when it is not valid Unicode.
 pub fn as_bytes(s: &OsStr) -> Result<Cow<'_, [u8]>> {
     s.to_str()

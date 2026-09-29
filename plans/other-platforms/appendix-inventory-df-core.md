@@ -271,7 +271,7 @@
 | 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` ✓ S1.6 |
 | 132–145 | `ensure`: `PermissionsExt`, `from_mode(0o700)` | Unix-only | `Trash::trash` | ✓ S1.6 |
 | 178–184 | `trash`: `rename(path, &dst)`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::trash` ← core:ops/jobs.rs:TrashJob::run; core:sync/execute.rs:remove; app:app.rs:run, menu_action | See ops/copy.rs:738 on Win32 codes ✓ S1.3 |
-| 201–205 | `claim_name`: `room = MAX_NAME_BYTES (255) - "trashinfo".len() - 1`, in bytes | Windows-differs | `trash` | The NTFS component limit is 255 UTF-16 units ✓ S1.6 |
+| 201–205 | `claim_name`: `room = MAX_NAME_BYTES (255) - "trashinfo".len() - 1`, in bytes | Windows-differs | `trash` | The NTFS component limit is 255 UTF-16 units ✓ S1.6 ✓ P3.6 |
 | 255–270 | `list`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; strips `.trashinfo` on bytes; `OsString::from_vec` | Unix-only | app:app.rs:show_trash | ✓ S1.6 |
 | 410–415 | `restorable_destination`: `original.is_absolute()` and no `..` | Windows-differs | `restore` | A decoded `/home/…` is not absolute on Windows, so the restore is refused ✓ S1.6 |
 | 462–468 | `restore`: `rename`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::restore`; core:ops/journal.rs:undo_trash; app:app.rs:trash_restore | ✓ S1.3 |
@@ -281,8 +281,8 @@
 | 554–564 | `device_of`: `MetadataExt::dev()` of the nearest existing ancestor | Unix-only | `for_path`, `mount_point_of`; core:sync/mod.rs:trash_available, trash_for | ✓ S1.6 |
 | 568–582 | `mount_point_of`: walks `parent()` until `device_of` changes | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows mount points and junctions do not change a `dev` ✓ S1.6 |
 | 588–594 | `uid()`: `libc::getuid()` | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for; app:mounts.rs:gvfs_root | ✓ S1.8 |
-| 609–633 | `fit`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; stem/extension clipped as bytes | Unix-only | `suffixed` ← core:ops/paste.rs:unique_name, core:vfs/mod.rs:unique_name, app:remote.rs:free_name; `claim_name` | ✓ S1.16 |
-| 637–646 | `clip`: cuts at a UTF-8 boundary in a byte string | Unix-only (byte model) | `fit` | ✓ S1.16 |
+| 609–633 | `fit`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; stem/extension clipped as bytes | Unix-only | `suffixed` ← core:ops/paste.rs:unique_name, core:vfs/mod.rs:unique_name, app:remote.rs:free_name; `claim_name` | ✓ S1.16 ✓ P3.6 |
+| 637–646 | `clip`: cuts at a UTF-8 boundary in a byte string | Unix-only (byte model) | `fit` | ✓ S1.16 ✓ P3.6 |
 | 679–691 | `encode_path`: `OsStrExt::as_bytes`, percent-encodes, `/` unreserved | Unix-only | `trashinfo_text` ← `Trash::trash` | ✓ S1.6 |
 | 695–720 | `decode_path`: `OsStringExt::from_vec` | Unix-only | `parse_trashinfo` ← `Trash::list` | ✓ S1.6 |
 
