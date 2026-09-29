@@ -620,10 +620,11 @@ mod tests {
             "2 new · 0 changed · 0 unchanged · 3 B to copy"
         );
         assert_eq!(card.labels(), ["Cancel", "Sync"]);
+        // Read with slashes: a label is in the platform's separator.
         assert_eq!(
             card.rows()
                 .iter()
-                .map(|row| row.text.as_str())
+                .map(|row| df_core::path::with_slashes(&row.text).into_owned())
                 .collect::<Vec<_>>(),
             ["photos/", "photos/a.jpg", "photos/b.jpg"]
         );
@@ -697,7 +698,7 @@ mod tests {
         assert!(shown
             .rows()
             .iter()
-            .any(|row| row.text == "photos/stray.txt"));
+            .any(|row| df_core::path::with_slashes(&row.text) == "photos/stray.txt"));
         // `m` again, and the extras are nobody's business.
         key(&mut app, Key::Char('m'));
         assert_eq!(card(&app).labels(), ["Cancel", "Sync"]);

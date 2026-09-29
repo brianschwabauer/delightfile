@@ -21098,7 +21098,9 @@ mod tests {
         let path = std::env::temp_dir().join(format!("df-app-state-{nanos}"));
         let _cleanup = scopeguard(&path);
         let mut store = StateStore::load_from(&path);
-        let dotfiles = Path::new("/dotfiles");
+        // Absolute on this platform: `/dotfiles` has no drive on Windows,
+        // where the store would not keep it.
+        let dotfiles = &df_core::test_support::abs("/dotfiles");
         assert_eq!(store.show_hidden(dotfiles), None, "the config's by default");
         store.set_hidden(dotfiles, Some(true));
         assert!(store.is_dirty());
@@ -21107,7 +21109,10 @@ mod tests {
 
         let reloaded = StateStore::load_from(&path);
         assert_eq!(reloaded.show_hidden(dotfiles), Some(true));
-        assert_eq!(reloaded.show_hidden(Path::new("/elsewhere")), None);
+        assert_eq!(
+            reloaded.show_hidden(&df_core::test_support::abs("/elsewhere")),
+            None
+        );
 
         // Back to the default is stored as *no preference* rather than as a
         // record, so a folder somebody changed and changed back does not live

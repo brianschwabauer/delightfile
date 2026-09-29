@@ -1162,14 +1162,15 @@ mod tests {
         assert_eq!(
             card.rows(),
             [
+                // A label is in the platform's separator: `\` on Windows.
                 Row {
                     mark: Mark::New,
-                    text: "photos/a.jpg".to_string(),
+                    text: format!("photos{}a.jpg", std::path::MAIN_SEPARATOR),
                     detail: "2.0 KB".to_string(),
                 },
                 Row {
                     mark: Mark::Changed,
-                    text: "photos/b.jpg".to_string(),
+                    text: format!("photos{}b.jpg", std::path::MAIN_SEPARATOR),
                     detail: "10 B".to_string(),
                 },
             ]
@@ -1396,17 +1397,21 @@ mod tests {
         assert_eq!(card.labels(), ["Cancel", "Sync and trash 3"]);
         assert!(!card.danger(), "the trash is undoable");
         assert!(card.status().starts_with("Mirror · "));
+        // Read with slashes: a label is in the platform's separator.
         assert_eq!(
             card.rows()
                 .iter()
-                .map(|row| (row.mark, row.text.as_str()))
+                .map(|row| (
+                    row.mark,
+                    df_core::path::with_slashes(&row.text).into_owned()
+                ))
                 .collect::<Vec<_>>(),
             [
-                (Mark::New, "photos/a.jpg"),
-                (Mark::Extra, "photos/old/"),
-                (Mark::Extra, "photos/old/x.jpg"),
-                (Mark::Extra, "photos/old/y.jpg"),
-                (Mark::Extra, "photos/stray.txt"),
+                (Mark::New, "photos/a.jpg".to_string()),
+                (Mark::Extra, "photos/old/".to_string()),
+                (Mark::Extra, "photos/old/x.jpg".to_string()),
+                (Mark::Extra, "photos/old/y.jpg".to_string()),
+                (Mark::Extra, "photos/stray.txt".to_string()),
             ]
         );
         assert!(card.hints()[0].label == "update only");
