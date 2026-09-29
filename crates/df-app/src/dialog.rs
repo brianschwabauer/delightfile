@@ -1530,7 +1530,8 @@ pub fn paint_bulk(
             (row.old.width() - PAD_X * 2.0).max(0.0),
             bulk_font(),
         );
-        clipped.text(
+        crate::glyphs::text(
+            &clipped,
             egui::pos2(row.old.right() + BULK_ARROW / 2.0, row.rect.center().y),
             egui::Align2::CENTER_CENTER,
             "→",
@@ -1996,7 +1997,8 @@ pub fn paint_conflict(
         (title_right - left).max(0.0),
         egui::FontId::proportional(FONT + 2.0),
     );
-    painter.text(
+    crate::glyphs::text(
+        painter,
         egui::pos2(left, geometry.card.top() + CARD_PAD + ROW + ROW / 2.0),
         egui::Align2::LEFT_CENTER,
         dialog

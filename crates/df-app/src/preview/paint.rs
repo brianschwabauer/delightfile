@@ -567,7 +567,8 @@ fn md_block(
             spans,
         } => {
             let left = content.left() + *depth as f32 * MD_INDENT;
-            painter.text(
+            crate::glyphs::text(
+                painter,
                 egui::pos2(left, y),
                 egui::Align2::LEFT_TOP,
                 marker,

@@ -426,7 +426,8 @@ impl Toasts {
         };
 
         let rect = measure(painter, area, bottom, toast, drop).rect;
-        let message = painter.layout_no_wrap(
+        let message = crate::glyphs::line(
+            painter,
             fitted_message(painter, toast, rect.width()),
             egui::FontId::proportional(FONT),
             palette.text,
@@ -464,12 +465,13 @@ impl Toasts {
             palette.text
         };
         let inside = painter.with_clip_rect(rect);
-        inside.galley(
+        let height = message.size().y;
+        message.paint(
+            &inside,
             egui::pos2(
                 rect.left() + RULE_WIDTH + PAD,
-                rect.center().y - message.size().y / 2.0,
+                rect.center().y - height / 2.0,
             ),
-            message,
             fade(text_color),
         );
         if let Some((key, what)) = hint {
@@ -586,11 +588,7 @@ fn fitted_message(painter: &egui::Painter, toast: &Toast, width: f32) -> String 
 const TOAST_RADIUS: u8 = crate::chrome::CARD_RADIUS;
 
 fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
-    painter
-        // Measured, never drawn: the colour is no part of the width.
-        .layout_no_wrap(text.to_string(), font, egui::Color32::WHITE)
-        .size()
-        .x
+    crate::glyphs::width(painter, text, font)
 }
 
 #[cfg(test)]

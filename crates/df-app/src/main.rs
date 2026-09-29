@@ -24,6 +24,8 @@ mod focus;
 mod folders;
 mod format;
 mod fuzzy;
+/// The chrome's symbols, drawn when no face can.
+mod glyphs;
 mod graphics;
 mod grid;
 mod help;

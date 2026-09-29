@@ -920,8 +920,8 @@ fn crumbs_left(row: egui::Rect) -> f32 {
 /// The menu button's glyph with the patched font (nf-fa-bars)…
 const MENU_ICON: char = '\u{f0c9}';
 
-/// …and without it: the identity sign, the nearest thing to three bars the
-/// stock faces draw.
+/// …and without it: the identity sign, the nearest thing to three bars in
+/// Unicode, which the stock faces lack and [`crate::glyphs`] draws.
 const MENU_GLYPH: &str = "≡";
 
 /// Where each crumb goes, sharing the measurement with the paint so a click
@@ -2043,7 +2043,8 @@ fn menu_button(
             crate::theme::splash(palette, splash.alpha),
         );
     }
-    inside.text(
+    crate::glyphs::text(
+        &inside,
         rect.center(),
         egui::Align2::CENTER_CENTER,
         crate::icons::glyph(paint.nerd, MENU_ICON, MENU_GLYPH),
@@ -3046,25 +3047,31 @@ pub fn hints(
         }
         let painter = paint.painter.with_clip_rect(*rect);
         let label_colour = mix(palette.faint, palette.text, hover);
-        let key_galley =
-            painter.layout_no_wrap(hint.keys.to_string(), key_font(HINT_FONT), palette.subtext0);
-        let label_galley = painter.layout_no_wrap(
+        let key_line = crate::glyphs::line(
+            &painter,
+            hint.keys.to_string(),
+            key_font(HINT_FONT),
+            palette.subtext0,
+        );
+        let label_line = crate::glyphs::line(
+            &painter,
             hint.label.to_string(),
             egui::FontId::proportional(HINT_FONT),
             label_colour,
         );
         let x = rect.left() + HINT_AIR;
-        painter.galley(
-            egui::pos2(x, rect.center().y - key_galley.size().y / 2.0),
-            key_galley.clone(),
+        let (key_size, label_size) = (key_line.size(), label_line.size());
+        key_line.paint(
+            &painter,
+            egui::pos2(x, rect.center().y - key_size.y / 2.0),
             palette.subtext0,
         );
-        painter.galley(
+        label_line.paint(
+            &painter,
             egui::pos2(
-                x + key_galley.size().x + HINT_KEY_GAP,
-                rect.center().y - label_galley.size().y / 2.0,
+                x + key_size.x + HINT_KEY_GAP,
+                rect.center().y - label_size.y / 2.0,
             ),
-            label_galley,
             label_colour,
         );
     }
@@ -3131,14 +3138,16 @@ pub fn which_key(
             );
         }
         let y = rect.center().y;
-        painter.text(
+        crate::glyphs::text(
+            &painter,
             egui::pos2(rect.left() + PAD_X, y),
             egui::Align2::LEFT_CENTER,
             &row.keys,
             key_font(FONT),
             fade(crate::theme::ink(palette, palette.yellow), alpha),
         );
-        painter.text(
+        crate::glyphs::text(
+            &painter,
             egui::pos2(*label_x, y),
             egui::Align2::LEFT_CENTER,
             &row.label,
@@ -3631,11 +3640,7 @@ pub fn key_font(size: f32) -> egui::FontId {
 }
 
 pub fn text_width(painter: &egui::Painter, text: &str, font: egui::FontId) -> f32 {
-    painter
-        // Measured, never drawn: the colour is no part of the width.
-        .layout_no_wrap(text.to_string(), font, egui::Color32::WHITE)
-        .size()
-        .x
+    crate::glyphs::width(painter, text, font)
 }
 
 /// Left-aligned, vertically centred, ellipsised at `max_width`.
@@ -3681,12 +3686,9 @@ pub fn truncated_in(
         break_anywhere: true,
         overflow_character: Some('…'),
     };
-    let galley = painter.layout_job(job);
-    painter.galley(
-        egui::pos2(pos.x, pos.y - galley.size().y / 2.0),
-        galley,
-        color,
-    );
+    let line = crate::glyphs::layout(painter, job);
+    let height = line.size().y;
+    line.paint(painter, egui::pos2(pos.x, pos.y - height / 2.0), color);
 }
 
 /// A `/`-separated path shortened to fit `max_width` in `font`, keeping the

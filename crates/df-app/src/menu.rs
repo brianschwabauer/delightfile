@@ -1746,7 +1746,8 @@ fn row(
     };
     if item.has_submenu() {
         // The submenu's promise, in the place every menu puts it.
-        inside.text(
+        crate::glyphs::text(
+            &inside,
             egui::pos2(rect.right() - PAD_X, rect.center().y),
             egui::Align2::RIGHT_CENTER,
             "▸",
@@ -1757,7 +1758,8 @@ fn row(
     // The tick, in the column [`CHECK_COLUMN`] keeps for it — and that column
     // kept empty on every other row of a list that has one.
     if item.checked == Some(true) {
-        inside.text(
+        crate::glyphs::text(
+            &inside,
             egui::pos2(rect.left() + PAD_X, rect.center().y),
             egui::Align2::LEFT_CENTER,
             crate::icons::glyph(paint.nerd, CHECK_ICON, CHECK_GLYPH),

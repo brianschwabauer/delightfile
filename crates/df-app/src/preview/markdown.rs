@@ -271,7 +271,8 @@ fn list_item(trimmed: &str) -> Option<(String, &str)> {
                     .or_else(|| text.strip_prefix("[X] "))
                 {
                     // `✓` rather than `☑`: the stock faces draw the empty
-                    // box but not the ticked one.
+                    // box but not the ticked one, and a `✓` no face draws
+                    // is drawn by `crate::glyphs`.
                     return Some(("✓".to_string(), task));
                 }
                 return Some(("•".to_string(), text));

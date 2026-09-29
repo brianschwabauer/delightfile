@@ -15,7 +15,8 @@
 //! rather than as a replacement. Two consequences, both wanted: the UI keeps
 //! egui's own text face, and every other glyph the chrome needs that a plain
 //! Latin font might be missing — the `→` on a symlink row, the arrows in the
-//! help sheet — resolves through the same fallback.
+//! help sheet — resolves through the same fallback. Where there is no patched
+//! face to fall back on, [`crate::glyphs`] draws those few itself.
 //!
 //! **When no patched font is installed the icons degrade to `ls -F`.** Not to a
 //! different pictogram set — there isn't one that is reliably present — but to
@@ -955,11 +956,13 @@ mod tests {
 
 #[cfg(test)]
 mod glyph_tests {
-    /// Every glyph the chrome sets in the stock faces has to be a character
-    /// those faces draw, patched font or not: the missing-glyph box is what
-    /// `⑂` and `⌕` used to show, and this is the test that would have caught
-    /// them. The patched-font icons are checked too when a Nerd Font is on
-    /// the machine, and skipped when it is not.
+    /// Every glyph the chrome sets in the stock faces has to be drawn, patched
+    /// font or not: by a face, or — for the few symbols no stock face has — by
+    /// [`crate::glyphs`]' stand-in. The missing-glyph box is what `⑂` and `⌕`
+    /// used to show, and this is the test that would have caught them. Both
+    /// families are asked, since keys are set in the monospace one. The
+    /// patched-font icons are checked too when a Nerd Font is on the machine,
+    /// and skipped when it is not; they are pictures, so only a face will do.
     #[test]
     fn the_chrome_glyphs_all_render() {
         let ctx = egui::Context::default();
@@ -971,6 +974,19 @@ mod glyph_tests {
             // The permissions card's mixed octal digit, and its `0–7` hint.
             '–',
         ];
+        for font in [
+            egui::FontId::proportional(14.0),
+            egui::FontId::monospace(14.0),
+        ] {
+            for c in plain {
+                assert!(
+                    crate::glyphs::drawn(&ctx, &font, c),
+                    "nothing draws {c:?} (U+{:04X}) in {:?}",
+                    c as u32,
+                    font.family
+                );
+            }
+        }
         let patched = [
             '\u{f418}',
             '\u{f0b0}',
@@ -980,16 +996,6 @@ mod glyph_tests {
             // The app menu's button and its ticks.
             '\u{f0c9}',
             '\u{f00c}',
-        ];
-        let font = egui::FontId::proportional(14.0);
-        for c in plain.iter().chain(patched.iter().filter(|_| nerd)) {
-            assert!(
-                ctx.fonts_mut(|f| f.has_glyph(&font, *c)),
-                "no face draws {c:?} (U+{:04X})",
-                *c as u32
-            );
-        }
-        for c in [
             super::GENERIC_DIR,
             super::GENERIC_FILE,
             super::NETWORK_PLACE,
@@ -999,11 +1005,14 @@ mod glyph_tests {
             super::PHONE,
             super::CAMERA,
             super::PLUS,
-        ]
-        .iter()
-        .filter(|_| nerd)
-        {
-            assert!(ctx.fonts_mut(|f| f.has_glyph(&font, *c)), "{c:?}");
+        ];
+        let font = egui::FontId::proportional(14.0);
+        for c in patched.iter().filter(|_| nerd) {
+            assert!(
+                crate::glyphs::drawn_by_a_face(&ctx, &font, *c),
+                "no face draws {c:?} (U+{:04X})",
+                *c as u32
+            );
         }
     }
 }

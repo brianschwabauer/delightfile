@@ -185,7 +185,8 @@ pub fn rate_label(rate: f64, playing: bool) -> Option<String> {
         format!("{mag:.1}×")
     };
     Some(if rate < 0.0 {
-        // `◂`, the small triangle: `◀` is not in the faces the strip is set in.
+        // `◂`, the small triangle: `◀` is not in the faces the strip is set
+        // in, and where no face has `◂` either, `crate::glyphs` draws it.
         format!("◂ {number}")
     } else {
         number
@@ -500,11 +501,7 @@ pub fn progress(state: &TransportState) -> f32 {
 /// Measure a line of text without drawing it — the strip lays itself out by
 /// hand, so it needs this before it knows where the bar's ends are.
 fn text_width(painter: &egui::Painter, text: &str, font: &egui::FontId) -> f32 {
-    painter
-        // Measured, never drawn: the colour is no part of the width.
-        .layout_no_wrap(text.to_string(), font.clone(), egui::Color32::WHITE)
-        .rect
-        .width()
+    crate::glyphs::width(painter, text, font.clone())
 }
 
 /// The strip's own rect inside `content`, so the hit test and the drawing
@@ -633,7 +630,8 @@ pub fn paint(
         None => (total, dim),
     };
     let label_w = text_width(&painter, &label, &font);
-    painter.text(
+    crate::glyphs::text(
+        &painter,
         egui::pos2(right, mid),
         egui::Align2::RIGHT_CENTER,
         &label,

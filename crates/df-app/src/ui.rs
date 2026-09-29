@@ -1892,14 +1892,10 @@ impl Painting<'_> {
             break_anywhere: true,
             overflow_character: Some('…'),
         };
-        let galley = painter.layout_job(job);
-        let width = galley.size().x;
-        painter.galley(
-            egui::pos2(pos.x, pos.y - galley.size().y / 2.0),
-            galley,
-            color,
-        );
-        pos.x + width
+        let line = crate::glyphs::layout(painter, job);
+        let size = line.size();
+        line.paint(painter, egui::pos2(pos.x, pos.y - size.y / 2.0), color);
+        pos.x + size.x
     }
 
     /// What a pane says when it has no rows to show — or `None` when it has.

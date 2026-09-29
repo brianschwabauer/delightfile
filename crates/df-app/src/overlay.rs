@@ -890,12 +890,9 @@ fn spans(
         break_anywhere: true,
         overflow_character: Some('…'),
     };
-    let galley = painter.layout_job(job);
-    painter.galley(
-        egui::pos2(pos.x, pos.y - galley.size().y / 2.0),
-        galley,
-        color,
-    );
+    let line = crate::glyphs::layout(painter, job);
+    let height = line.size().y;
+    line.paint(painter, egui::pos2(pos.x, pos.y - height / 2.0), color);
 }
 
 #[cfg(test)]
