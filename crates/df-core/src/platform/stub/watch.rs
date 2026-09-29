@@ -1,5 +1,5 @@
-//! No directory watcher: stands in on macOS until M2.1 (kqueue) and on Windows
-//! until W4.4 (`ReadDirectoryChangesW`).
+//! No directory watcher: stands in on Windows until W4.4
+//! (`ReadDirectoryChangesW`). macOS has kqueue's (`platform/macos/watch.rs`).
 //!
 //! [`Backend::open`] fails, so [`crate::fs::Watcher::start`] logs the reason
 //! and hands back its disabled watcher: every pane still loads and refreshes on

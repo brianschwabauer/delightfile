@@ -11,6 +11,10 @@
 //! What a stub does is fixed by `plans/other-platforms/00-ground-rules.md` §2:
 //! an operation fails with [`crate::DfError::Unsupported`], a query answers
 //! "nothing", a service comes up inert. Never a panic, never a silent success.
+//!
+//! A stub only Windows still stands behind is compiled only there
+//! (`#[cfg(windows)]` on its line below), so it is not dead code on macOS,
+//! which has its own body.
 
 pub mod fs;
 pub mod nofollow;
@@ -18,5 +22,6 @@ pub mod process;
 pub mod thread;
 pub mod trash;
 pub mod user;
+#[cfg(windows)]
 pub mod watch;
 pub mod xattr;
