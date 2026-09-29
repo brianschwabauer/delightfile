@@ -1,9 +1,10 @@
 # The CI matrix of plans/other-platforms/06-build-and-release.md §1 (B6.1–B6.4,
 # B6.6). It is the only thing that holds the platform seam to one function set
 # on every target (00-ground-rules.md §2), so each job compiles the whole
-# workspace for its own OS rather than cross-checking from Linux: df-app cannot
-# be cross-checked at all, because ffmpeg-sys-next's build script needs the
-# target's own FFmpeg headers.
+# workspace for its own OS rather than cross-checking from Linux: a cross check
+# (build/xcheck.sh) type-checks df-app against stand-ins for the target's
+# FFmpeg and C toolchain, which proves the types and nothing that links or
+# runs.
 #
 # Linux runs in an Arch container because ffmpeg-next 9 needs FFmpeg 9
 # (libavcodec 63), which Ubuntu LTS does not ship, and because Arch is the one

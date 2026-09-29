@@ -144,31 +144,36 @@ Until Phase 3 lands, df-core assumes Unix paths. After Phase 3:
 - **Local cross-compilation on Brian's machine**: the system toolchain is Arch's
   `rust` package and stays untouched; it builds and tests Linux, with the
   worktree's own `target/`. A private rustup (1.98.1, the same version as the
-  system `rust`) with both foreign targets lives out of the way under
-  `~/.cache/delightfile-xcheck`, and is used **only** for cross checks. Set the
-  variables per command, never for the whole shell:
+  system `rust`, with clippy) with both foreign targets lives out of the way
+  under `~/.cache/delightfile-xcheck`, and is used **only** for cross checks,
+  through `build/xcheck.sh`:
   ```
-  RUSTUP_HOME=$HOME/.cache/delightfile-xcheck/rustup \
-  CARGO_HOME=$HOME/.cache/delightfile-xcheck/cargo \
-  CARGO_TARGET_DIR=$HOME/.cache/delightfile-xcheck/target-core \
-  PATH=$HOME/.cache/delightfile-xcheck/cargo/bin:$PATH \
-  cargo check -p df-core --target aarch64-apple-darwin   # or x86_64-pc-windows-msvc
+  build/xcheck.sh aarch64-apple-darwin clippy -p df-core -p df-app --all-targets \
+      -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
+  build/xcheck.sh x86_64-pc-windows-msvc clippy -p df-core -p df-app --all-targets \
+      -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
   ```
-  and the same with `--tests` to check the test target. df-core has no C
-  dependencies so `check` works without a linker for the target. df-app has
-  two build scripts that want the target's C toolchain — `ffmpeg-sys-next`
-  runs bindgen over the FFmpeg headers, and `libsqlite3-sys` compiles its
-  bundled SQLite — and `check` needs neither's output to be right, only to
-  exist. So for macOS it is checked (never built) with three more variables:
-  `FFMPEG_DIR` naming a directory whose `include` is a link to `/usr/include`
-  (Arch's FFmpeg 9 headers), `BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin=
-  --target=x86_64-unknown-linux-gnu` so bindgen parses them as the host does
-  (LP64 either way; only the Rust types matter to `check`), and
-  `CC_aarch64_apple_darwin`/`AR_aarch64_apple_darwin` naming two small
-  scripts that write an empty object and an empty archive. `cargo check` and
-  `cargo clippy --all-targets` for `-p df-app --target aarch64-apple-darwin`
-  then type-check everything, the objc2 calls included. Only the runners
-  build, link and run it (`06-build-and-release.md`).
+  The first argument is the target and the rest a cargo command, which gets
+  `--target` after its subcommand; `check` and `clippy` are the ones that mean
+  anything. The script sets `RUSTUP_HOME`, `CARGO_HOME` and a
+  `CARGO_TARGET_DIR` of its own (`~/.cache/delightfile-xcheck/target-<target>`)
+  for its one cargo and never for the shell, and when the toolchain or the
+  target is missing it says so and prints the `rustup-init` (or `rustup
+  target add`) command that makes it. df-core has no C dependencies, so it
+  needs nothing else. df-app has two build scripts that want the target's C
+  toolchain — `ffmpeg-sys-next` runs bindgen over the FFmpeg headers, and
+  `libsqlite3-sys` compiles its bundled SQLite — and `check` needs neither's
+  output to be right, only to exist, so the script writes stand-ins under
+  `~/.cache/delightfile-xcheck/stand-ins` on every run: an `FFMPEG_DIR`
+  whose `include` links the host's FFmpeg 9 header folders; bindgen told to
+  read them as a clang target with the real target's C data model (x86_64
+  Linux for macOS, LP64 either way; MSVC itself for Windows, with a handful
+  of C library headers the script writes, since glibc's only know LP64 and
+  Windows' `long` is 32 bits); and a `CC` and `AR` for the target that write
+  an empty object and an empty archive. Both crates' `check` and `clippy
+  --all-targets` then type-check for either target, the objc2 and
+  windows-sys calls included. Only the runners build, link and run
+  (`06-build-and-release.md`).
 - Nothing about the macOS or Windows *UI* can be verified from Linux. Every task
   that changes on-screen behaviour on those targets is marked done at "compiles and
   unit tests pass" and is listed in `07-verification.md` for a human pass. Do not
@@ -212,6 +217,15 @@ Until Phase 3 lands, df-core assumes Unix paths. After Phase 3:
   twelve minutes, and every AppKit call Phase 2 makes is otherwise first
   compiled there; the check proves the types, the runner still proves the
   link and the behaviour.
+- 2026-09-29 — The cross check is a committed script, `build/xcheck.sh
+  <target> <cargo args…>`, for macOS and Windows alike (Brian's call): the
+  df-app branch's scratch copy named a session directory and was partly
+  lost. It keeps everything it makes under `~/.cache/delightfile-xcheck`,
+  names no path outside it and the repository, and says how to make the
+  toolchain when it is not there (§6). Windows needed more than macOS did:
+  read as x86_64 Linux, glibc's `long` fields gave bindgen layouts that
+  Windows' 32-bit `c_long` fails at compile time, so the Windows run reads the
+  FFmpeg headers as MSVC over a few C library headers of the script's own.
 
 ## Open questions
 
