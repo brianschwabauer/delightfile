@@ -416,6 +416,11 @@ commands! {
     // be fetched from the system clipboard first, which is a round trip the app
     // makes and the editor knows nothing about.
     InputPaste => "input-paste",
+    // Its other half: the field's selection, or the whole text when nothing
+    // is selected, handed to the system clipboard, which the editor does not
+    // own either. Bound on macOS to Cmd+C (05-defaults-and-config.md §3);
+    // unbound on Linux and Windows, where Ctrl+c in a field cancels it.
+    InputCopy => "input-copy",
 }
 
 #[cfg(test)]

@@ -492,6 +492,23 @@ pub(super) fn build() -> Registry {
         }
     }
 
+    // The platform's conventions over the table, before any `keymap.toml`
+    // (05-defaults-and-config.md §3): on macOS, where Cmd reads as `ctrl`,
+    // Cmd+C copies rather than closing a tab, Cmd+W closes one, Cmd+V pastes,
+    // Cmd+Q quits and Cmd+C in a field copies from it. Each replaces what the
+    // table bound to its keys. Empty on Linux and Windows.
+    for (context, keys, id, description) in crate::platform::defaults::KEYMAP_OVERRIDES {
+        let context = Context::from_name(context)
+            .unwrap_or_else(|| panic!("platform keymap: `{keys}`: no context `{context}`"));
+        let seq = parse_sequence(keys).unwrap_or_else(|e| panic!("platform keymap: `{keys}`: {e}"));
+        let command = Command::from_id(id)
+            .unwrap_or_else(|| panic!("platform keymap: `{keys}`: no command `{id}`"));
+        km.unbind(context, &seq);
+        if let Err(e) = km.register(context, seq, command, *description, Always) {
+            panic!("platform keymap: `{keys}`: {e}");
+        }
+    }
+
     // The `g <key>` bookmark rows come from the config table so that the paths
     // and the chords stay a single list (PLAN §3).
     let warnings = km.apply_bookmarks(&crate::config::default_bookmarks(), Path::new("<defaults>"));

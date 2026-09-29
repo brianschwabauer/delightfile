@@ -44,7 +44,16 @@ fn the_files_table_is_the_muscle_memory_contract() {
     for (keys, expected) in [
         ("q", Command::Quit),
         ("Q", Command::QuitNoCwdFile),
-        ("ctrl+c", Command::CloseTab),
+        // On a Mac Cmd+C copies, and Cmd+W closes the tab instead
+        // (`platform::defaults::KEYMAP_OVERRIDES`).
+        (
+            "ctrl+c",
+            if cfg!(target_os = "macos") {
+                Command::CopyToClipboard
+            } else {
+                Command::CloseTab
+            },
+        ),
         ("up", Command::CursorUp),
         ("down", Command::CursorDown),
         ("ctrl+u", Command::HalfPageUp),

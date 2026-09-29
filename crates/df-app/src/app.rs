@@ -9263,6 +9263,10 @@ impl App {
         // rather than a keystroke (see [`App::paste_into_prompt`]). Checked
         // here rather than mapped into an [`InputAction`], because there is no
         // editing verb for "wait for a pipe".
+        if self.keymap.lookup(Context::Input, chord) == Some(Command::InputCopy) {
+            self.copy_from_prompt(now);
+            return;
+        }
         if self.keymap.lookup(Context::Input, chord) == Some(Command::InputPaste) {
             self.paste_into_prompt(now);
             return;
@@ -15921,6 +15925,22 @@ impl App {
             }
             Err(error) => self.clip_failed(error, now),
         }
+    }
+
+    /// `input-copy` — Cmd+C in a prompt on macOS: the field's selection, or
+    /// its whole line, to the system clipboard, the way every copy in the
+    /// program goes ([`App::offer`]). An empty field has nothing to give and
+    /// the press does nothing, as the bulk card's copy does.
+    fn copy_from_prompt(&mut self, now: Instant) {
+        let Some(text) = self
+            .prompt
+            .as_ref()
+            .and_then(|prompt| prompt.copy_text())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.offer(None, text.as_bytes(), "Copied text".to_string(), now);
     }
 
     /// `Ctrl+v` in a prompt, or in the bulk rename card: the system

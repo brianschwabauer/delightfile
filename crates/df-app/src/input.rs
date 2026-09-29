@@ -355,6 +355,18 @@ impl Prompt {
         event
     }
 
+    /// What `input-copy` hands the clipboard: the selection, or the whole
+    /// line when nothing is selected; `None` for an empty field
+    /// (05-defaults-and-config.md §3).
+    pub fn copy_text(&self) -> Option<&str> {
+        let text = self.buffer.text();
+        let copied = match self.buffer.selection_bytes() {
+            Some(range) => text.get(range).unwrap_or(text),
+            None => text,
+        };
+        (!copied.is_empty()).then_some(copied)
+    }
+
     /// A press in the field (PLAN §7.5).
     ///
     /// `at` is the character boundary nearest the pointer and `under` the
@@ -414,6 +426,18 @@ mod tests {
 
     fn chord(c: char) -> Chord {
         Chord::from_char(c).expect("a printable key")
+    }
+
+    /// `input-copy` copies the selection, the whole line when nothing is
+    /// selected, and nothing from an empty field.
+    #[test]
+    fn a_copy_takes_the_selection_or_else_the_line() {
+        let mut prompt = Prompt::with(PromptKind::Rename, 0, InputBuffer::new("holiday photos", 0));
+        assert_eq!(prompt.copy_text(), Some("holiday photos"));
+        prompt.buffer.set_selection(8, 14);
+        assert_eq!(prompt.copy_text(), Some("photos"));
+        let empty = Prompt::with(PromptKind::Filter, 0, InputBuffer::new("", 0));
+        assert_eq!(empty.copy_text(), None);
     }
 
     #[test]

@@ -6,3 +6,7 @@
 pub use crate::config::{
     DEFAULT_BOOKMARKS as BOOKMARKS, DEFAULT_OPENERS as OPENERS, DEFAULT_RULES as RULES,
 };
+
+/// Rows the platform lays over the shipped keymap: none. Linux's keymap is
+/// the table in `keymap/defaults.rs` as it stands.
+pub const KEYMAP_OVERRIDES: &[(&str, &str, &str, &str)] = &[];

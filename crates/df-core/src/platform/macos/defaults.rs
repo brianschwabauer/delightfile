@@ -125,10 +125,64 @@ pub const BOOKMARKS: &[(&str, &str, &str)] = &[
     ("w", "~/Work", "Go to ~/Work"),
 ];
 
+/// Rows laid over the shipped keymap, before the user's `keymap.toml`:
+/// context, keys, command id, description (05-defaults-and-config.md §3).
+///
+/// Command reads as `ctrl` here (df-app's `platform::keys::mods`), so these
+/// are the Mac's Cmd chords: Cmd+C copies the selection's paths (`Y`) where
+/// Linux's Ctrl+c closes a tab, Cmd+W closes the tab, Cmd+V pastes (`p`, the
+/// yank or else the system clipboard), Cmd+Q quits, and in a field Cmd+C
+/// copies from it where Linux's cancels it. Every other overlay keeps
+/// Ctrl+c as its way out.
+pub const KEYMAP_OVERRIDES: &[(&str, &str, &str, &str)] = &[
+    (
+        "files",
+        "ctrl+c",
+        "copy-to-clipboard",
+        "Copy to the system clipboard",
+    ),
+    (
+        "files",
+        "ctrl+w",
+        "close-tab",
+        "Close tab, or quit if it is the last",
+    ),
+    ("files", "ctrl+v", "paste", "Paste"),
+    ("files", "ctrl+q", "quit", "Quit"),
+    (
+        "input",
+        "ctrl+c",
+        "input-copy",
+        "Copy the selection, or the whole line",
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{Config, Opener};
+    use crate::keymap::{parse_sequence, Command, Context, Registry};
+
+    /// The Cmd chords a Mac expects, over the shipped keymap: Cmd+C in the
+    /// file list copies to the system clipboard and in a field copies from
+    /// it, Cmd+W closes a tab, Cmd+V pastes, Cmd+Q quits, and the overlays
+    /// still close on Cmd+C.
+    #[test]
+    fn the_cmd_chords_mean_what_a_mac_means() {
+        let km = Registry::defaults();
+        let at = |context: Context, keys: &str| {
+            let seq = parse_sequence(keys).expect("chord");
+            km.lookup(context, seq[0])
+        };
+        assert_eq!(at(Context::Files, "ctrl+c"), Some(Command::CopyToClipboard));
+        assert_eq!(at(Context::Files, "ctrl+w"), Some(Command::CloseTab));
+        assert_eq!(at(Context::Files, "ctrl+v"), Some(Command::Paste));
+        assert_eq!(at(Context::Files, "ctrl+q"), Some(Command::Quit));
+        assert_eq!(at(Context::Input, "ctrl+c"), Some(Command::InputCopy));
+        assert_eq!(at(Context::Confirm, "ctrl+c"), Some(Command::OverlayClose));
+        assert_eq!(at(Context::Help, "ctrl+c"), Some(Command::OverlayClose));
+        assert_eq!(at(Context::Files, "Y"), Some(Command::CopyToClipboard));
+    }
 
     fn names(openers: Vec<&Opener>) -> Vec<&str> {
         openers.into_iter().map(|o| o.name.as_str()).collect()
