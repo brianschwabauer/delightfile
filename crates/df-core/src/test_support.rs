@@ -108,8 +108,39 @@ pub fn folds_case(dir: &Path) -> bool {
 }
 
 /// The gnarly names of PLAN §9, in one place so every operation test
-/// exercises the same set.
+/// exercises the same set — the nastiest names the platform will make.
+///
+/// On Unix, where only NUL and `/` are refused, that includes a newline, a
+/// tab, a backslash and a double quote. Windows refuses all four (and `<>:|?*`,
+/// and a trailing dot or space), so its set is the nastiest it allows instead:
+/// curly quotes, a leading space, a leading dot run, a combining accent, every
+/// punctuation mark a shell cares about, a name that only starts like a
+/// device, and a long name (200 units, so the longest path a test builds stays
+/// short of what the Recycle Bin's calls take).
 pub fn gnarly_names() -> Vec<String> {
+    gnarly_names_for(crate::platform::os::STRICT_NAMES)
+}
+
+/// [`gnarly_names`] for strict (Windows) or permissive (Unix) names, both
+/// sets on every target so each is checked against its rule.
+fn gnarly_names_for(strict: bool) -> Vec<String> {
+    if strict {
+        return vec![
+            "plain.txt".to_string(),
+            "with spaces.txt".to_string(),
+            "ünïcödé — 日本語 🎬.txt".to_string(),
+            "'quoted' and ‘curly’ “double”.txt".to_string(),
+            " leading space.txt".to_string(),
+            "-leading-dash.txt".to_string(),
+            "...leading dots.txt".to_string(),
+            "e\u{301} combining.txt".to_string(),
+            "semi;colon, comma & ampersand = $dollar @at !bang ~tilde.txt".to_string(),
+            "[brackets] {braces} (parens) #hash +plus^caret`tick.txt".to_string(),
+            "CON-only-looks-like-a-device.txt".to_string(),
+            "x".repeat(200),
+            "%20already-encoded.txt".to_string(),
+        ];
+    }
     vec![
         "plain.txt".to_string(),
         "with spaces.txt".to_string(),
@@ -124,4 +155,37 @@ pub fn gnarly_names() -> Vec<String> {
         "x".repeat(255),
         "%20already-encoded.txt".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every gnarly name is one the platform takes: the set is the nastiest
+    /// allowed, not a list of names the tests would fail to make.
+    #[test]
+    fn every_gnarly_name_is_one_its_platform_takes() {
+        use crate::path::{name_is_valid_permissive, name_is_valid_strict};
+        use std::ffi::OsStr;
+        let windows = gnarly_names_for(true);
+        let unix = gnarly_names_for(false);
+        assert!(windows.len() >= 10 && unix.len() >= 10);
+        for name in &windows {
+            assert!(name_is_valid_strict(OsStr::new(name)).is_ok(), "{name:?}");
+        }
+        for name in &unix {
+            assert!(
+                name_is_valid_permissive(OsStr::new(name)).is_ok(),
+                "{name:?}"
+            );
+        }
+        assert!(
+            unix.iter().any(|n| n.contains('\n')),
+            "the Unix set is whole"
+        );
+        assert_eq!(
+            gnarly_names(),
+            gnarly_names_for(crate::platform::os::STRICT_NAMES)
+        );
+    }
 }

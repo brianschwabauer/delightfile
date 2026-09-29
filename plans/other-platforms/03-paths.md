@@ -463,10 +463,17 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `rename::facts::Facts::stat(dir, name: &str)`. Tests:
       `a_selected_row_is_acted_on_by_its_own_path` (everywhere) and
       `a_name_that_is_not_utf8_is_acted_on_by_the_path_that_exists` (Unix).
-- [ ] **P3.23** `test_support::gnarly_names()` returns the Windows-legal subset when
+- [x] **P3.23** `test_support::gnarly_names()` returns the Windows-legal subset when
       `cfg!(windows)` (drop `\n`, `\t`, `\`, `"`, and the 255-`x` name becomes 200
       to stay under `MAX_PATH` with the temp prefix). Linux list unchanged. Done
       when: Linux tests unchanged; the df-core test suite compiles on Windows.
+      — done (port/paths). Chosen by `platform::os::STRICT_NAMES` (no `cfg`),
+      so macOS keeps the Unix set. The Windows set is not only the subset: it
+      is the nastiest Windows allows — curly quotes, a leading space, a leading
+      dot run, a combining accent, the shell's punctuation, a name that starts
+      like a device, 200 `x` — per the brief. `every_gnarly_name_is_one_its_platform_takes`
+      checks both sets against their rules on every target (P3.30: the four
+      gnarly-tree tests were bin 2).
 - [~] **P3.31** (split from P3.21, 2026-09-29) The bulk rename preview says
       why a row's name cannot be made on this platform. — blocked: the plan put
       it in df-core's `rename/` through the template's "cannot be filled"

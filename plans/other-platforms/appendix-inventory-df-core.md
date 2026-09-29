@@ -381,7 +381,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 61–68 | `TempTree::symlink`: `std::os::unix::fs::symlink(target, &p)` | Unix-only | df-core tests; df-app tests (feature) | df-app's test build does not compile on Windows through this ✓ S1.15 |
-| 81–95 | `gnarly_names()`: names with `\n`, `\t`, `\\`, `"`, and 255 `x` | Windows-differs | ops tests; rename/template tests; df-app tests | On Windows `\` is a separator and `"`, `\n`, `\t` are illegal in names |
+| 81–95 | `gnarly_names()`: names with `\n`, `\t`, `\\`, `"`, and 255 `x` | Windows-differs | ops tests; rename/template tests; df-app tests | On Windows `\` is a separator and `"`, `\n`, `\t` are illegal in names ✓ P3.23 |
 
 ### thread.rs
 
