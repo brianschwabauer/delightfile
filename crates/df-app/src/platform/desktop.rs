@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-pub use super::device::{pointer_position, start, Desktop};
+pub use super::device::{pointer_position, start, Desktop, HANDS_OFF_ON_CURSOR_MOVED};
 
 /// What the pointer's own drag machinery learns from the compositor.
 #[derive(Debug, Clone)]

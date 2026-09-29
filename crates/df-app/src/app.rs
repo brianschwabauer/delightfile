@@ -14875,8 +14875,13 @@ impl App {
         // The implicit pointer grab means motion keeps arriving even outside
         // our own surface, so "left the window" is a question this side can
         // still answer — and the moment it becomes true is the moment the
-        // pointer stops being ours (see [`crate::platform::desktop`]).
-        if !window.contains(at) && pointer.down {
+        // pointer stops being ours (see [`crate::platform::desktop`]). Where
+        // the platform takes a drag only inside the mouse event, the
+        // `CursorMoved` arm of `window_event` hands it off instead.
+        if !window.contains(at)
+            && pointer.down
+            && !crate::platform::desktop::HANDS_OFF_ON_CURSOR_MOVED
+        {
             self.hand_off_drag(now);
             return None;
         }
@@ -20511,6 +20516,22 @@ impl ApplicationHandler<crate::Wake> for App {
                         chord,
                         text,
                     });
+                    wants_frame = true;
+                }
+            }
+            // Our drag leaving the window, where the platform begins a drag
+            // only inside the mouse event that is dragging (macOS): this is
+            // that event, and the frame after it would be too late. Elsewhere
+            // `tick_drag` hands it off, and this arm is never taken.
+            WindowEvent::CursorMoved { position, .. }
+                if crate::platform::desktop::HANDS_OFF_ON_CURSOR_MOVED =>
+            {
+                let scale = gfx.window.scale_factor();
+                let at = position.to_logical::<f32>(scale);
+                let size = gfx.window.inner_size().to_logical::<f32>(scale);
+                let outside = at.x < 0.0 || at.y < 0.0 || at.x >= size.width || at.y >= size.height;
+                if outside && self.drag.as_ref().is_some_and(|drag| !drag.handed_off) {
+                    self.hand_off_drag(Instant::now());
                     wants_frame = true;
                 }
             }
