@@ -9,6 +9,10 @@ use std::process::Child;
 /// The file that discards what is written to it and reads as empty.
 pub const NULL_DEVICE: &str = "NUL";
 
+/// No `rsync` on Windows, ever: it is not a Windows tool, and its `host:path`
+/// syntax collides with drive letters. The remote sync is not offered.
+pub const HAS_RSYNC: bool = false;
+
 /// Refused: Windows has no `SIGSTOP`, and suspending another process's
 /// threads one by one is not a pause worth offering (W4.2).
 pub fn pause(_child: &Child) -> io::Result<()> {

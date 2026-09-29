@@ -66,14 +66,25 @@ const PARTIAL: [i32; 2] = [23, 24];
 
 /// Whether `rsync` is on `PATH`, asked the way the archive readers ask about
 /// their tools: by running it, so the answer cannot disagree with the run.
+///
+/// Only where rsync is a tool of the platform at all
+/// ([`crate::platform::process::HAS_RSYNC`]): not on Windows, where it is not
+/// installed and its `host:path` syntax reads a drive letter as a host.
 pub fn available() -> bool {
-    Command::new("rsync")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    gated(crate::platform::process::HAS_RSYNC, || {
+        Command::new("rsync")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+/// [`available`]'s rule: `probe` runs only on a platform that has rsync.
+fn gated(has_rsync: bool, probe: impl FnOnce() -> bool) -> bool {
+    has_rsync && probe()
 }
 
 /// How to reach the server.
@@ -1235,6 +1246,15 @@ mod tests {
     #![allow(clippy::unwrap_used)] // tests: a broken fixture should panic
 
     use super::*;
+
+    /// A platform without rsync (Windows) answers "no" without spawning
+    /// anything; one with it asks the probe, whatever the probe says.
+    #[test]
+    fn rsync_is_asked_for_only_where_the_platform_has_it() {
+        assert!(!gated(false, || panic!("nothing is spawned without rsync")));
+        assert!(gated(true, || true));
+        assert!(!gated(true, || false));
+    }
 
     fn upload() -> Transfer {
         Transfer {

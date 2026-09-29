@@ -331,7 +331,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 43 | `use std::os::unix::ffi::{OsStrExt, OsStringExt}` | Unix-only | file-wide | |
-| 69–77 | `available()`: `rsync --version` | Windows-differs; macOS-differs | app:app/syncing.rs:remote_sync | rsync is not in a stock Windows install. macOS bundles `/usr/bin/rsync` 2.6.9 (macOS 15 adds openrsync) |
+| 69–77 | `available()`: `rsync --version` | Windows-differs; macOS-differs | app:app/syncing.rs:remote_sync | rsync is not in a stock Windows install. macOS bundles `/usr/bin/rsync` 2.6.9 (macOS 15 adds openrsync) ✓ S1.14 |
 | 126–139 | `Host::shell`: `Command::new("ssh")` + a POSIX-shell script for the server | Windows-differs | `remote_digests` | §4 |
 | 173–188 | `rsh()` / `rsh_with("ssh")`: the `-e` string rsync uses to start ssh | Windows-differs | `common()` → `dry_run_args`, `run_args` | |
 | 230–244 | `endpoint`: `as_os_str().as_bytes()`, trims or appends `b'/'`, prefixes `host:` for the remote side, `OsStr::from_bytes` | Unix-only | `endpoints` → `dry_run_args`, `run_args` | In rsync's argument syntax a colon before the first `/` means `host:path`, so a Windows local path `C:\x` reads as host `C` |

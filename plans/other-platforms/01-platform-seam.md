@@ -264,12 +264,14 @@ has not dropped.
       constant needs one now). Done when: no `libc::kill`/`SIGSTOP` outside
       `platform/`; archive tests pass on Linux. — df-core core-seam session,
       started 2026-09-29; the grep's last hit is `vfs/child.rs`, which S1.50 moves.
-- [ ] **S1.14** `sync::rsync::available()` (`sync/rsync.rs:69–77`) returns `false` on
+- [x] **S1.14** `sync::rsync::available()` (`sync/rsync.rs:69–77`) returns `false` on
       Windows without spawning (rsync is not a Windows tool; the `host:` endpoint
       syntax collides with drive letters). macOS keeps the real check; the version
       gate is Phase 2. Done when: a Windows-shaped unit test of the gating function
       exists (pure) and the function has no cfg outside `platform/` (put the
       constant `platform::process::HAS_RSYNC: bool` in the platform module).
+      — done SHA_S114, cross-checked locally, CI pending (the pure gate is
+      `sync::rsync::gated(has_rsync, probe)`; its test runs on every target)
 - [ ] **S1.16** Bytes ↔ UTF-8 at every `OsStrExt`/`OsStringExt` site outside
       `platform/` — **the mechanical half of `03-paths.md` §2, pulled into this
       phase** because without it df-core cannot compile on Windows and S1.40's exit

@@ -55,6 +55,7 @@
 //! | `dirs` | `home`, `config_dir`, `state_dir`, `data_dir`, `cache_dir`, `runtime_dir`, `temp_dir`: `fn() -> Option<PathBuf>` | XDG, `$HOME` fallbacks (unix) | unix, the same (D5.1) | `%USERPROFILE%` and `%TEMP%`; the rest `None` (D5.1) |
 //! | `pipe` | `AVAILABLE: bool`; `fd(&pipe) -> i32`; `remaining(deadline)`; `poll_read2(stdout, stderr, timeout) -> io::Result<(bool, bool)>`; `poll_write(fd, timeout) -> io::Result<bool>`; `set_nonblocking(fd) -> io::Result<()>` | `poll`, `fcntl` (unix) | unix | `AVAILABLE = false`, so SFTP refuses before spawning; the rest `Unsupported("SFTP")` (W4.20) |
 //! | `process` | `NULL_DEVICE: &str` | `/dev/null` (unix) | unix | `NUL` |
+//! | `process` | `HAS_RSYNC: bool` | `true` (unix) | unix; the version gate is M2.6 | `false` |
 //! | `process` | `pause(&Child)`, `resume(&Child)` `-> io::Result<()>` | `SIGSTOP` / `SIGCONT` (unix) | unix | `Unsupported` (W4.2) |
 //! | `process` | `is_executable(&Path) -> bool` | an execute bit (unix) | unix | extension in `PATHEXT` |
 //! | `process` | `candidates(name) -> Vec<String>` (file names to look for on `PATH`) | `[name]` (unix) | unix | `[name.exe, name]`, and `tar.exe`, `tar` for `bsdtar` |

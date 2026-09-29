@@ -9,6 +9,10 @@ use std::process::Child;
 /// The file that discards what is written to it and reads as empty.
 pub const NULL_DEVICE: &str = "/dev/null";
 
+/// Whether `rsync` is a tool this platform has: yes on Unix, where
+/// [`crate::sync::rsync::available`] then asks whether it is installed.
+pub const HAS_RSYNC: bool = true;
+
 /// Stop `child` (`SIGSTOP`): how a pause reaches a process that is not ours
 /// to checkpoint.
 pub fn pause(child: &Child) -> io::Result<()> {
