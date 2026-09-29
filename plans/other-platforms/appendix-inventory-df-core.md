@@ -1783,8 +1783,8 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| fs/scan.rs:328, 369 | `Entry.name = item.file_name().to_string_lossy()` | Windows-differs (unpaired surrogates); also Unix (non-UTF-8) | `DirState` | |
-| fs/mod.rs:506 | `selected_paths`: `self.path.join(n)` over lossy `name`s | same | every op in df-app | The rebuilt path differs from the real one when the name was not valid Unicode |
+| fs/scan.rs:328, 369 | `Entry.name = item.file_name().to_string_lossy()` | Windows-differs (unpaired surrogates); also Unix (non-UTF-8) | `DirState` | ✓ P3.22 |
+| fs/mod.rs:506 | `selected_paths`: `self.path.join(n)` over lossy `name`s | same | every op in df-app | The rebuilt path differs from the real one when the name was not valid Unicode ✓ P3.22 |
 | config.rs:772; vfs/config.rs:150 | `home.to_string_lossy()` spliced into a path string | same | bookmarks, key file | ✓ P3.14 |
 | zoxide/mod.rs:259 | `std::str::from_utf8(raw)` → `PathBuf::from(path)` (non-UTF-8 fails the whole file) | portable | `load_from` | |
 

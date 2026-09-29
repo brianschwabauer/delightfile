@@ -563,8 +563,31 @@ impl DirState {
 
     /// Selected files, in name order, as paths — the input to every operation
     /// in PLAN §5. Only the ones in play ([`DirState::in_play`]).
+    ///
+    /// Each is its row's own [`Entry::path`], never the directory joined with
+    /// the row's name: the name is for display, made lossy from a name that
+    /// is not UTF-8 (Unix) or not Unicode (Windows), and joined back it would
+    /// name a file that does not exist. A selected name with no row (the scan
+    /// has not delivered it yet) is joined as it is spelled.
     pub fn selected_paths(&self) -> Vec<PathBuf> {
-        self.selected_in_play().map(|n| self.path.join(n)).collect()
+        let names: Vec<&String> = self.selected_in_play().collect();
+        if names.is_empty() {
+            return Vec::new();
+        }
+        let wanted: std::collections::HashSet<&str> = names.iter().map(|n| n.as_str()).collect();
+        let rows: std::collections::HashMap<&str, &Path> = self
+            .entries
+            .iter()
+            .filter(|entry| wanted.contains(entry.name.as_str()))
+            .map(|entry| (entry.name.as_str(), entry.path.as_path()))
+            .collect();
+        names
+            .into_iter()
+            .map(|name| match rows.get(name.as_str()) {
+                Some(path) => path.to_path_buf(),
+                None => self.path.join(name),
+            })
+            .collect()
     }
 
     /// How many files a verb would act on — the counter's number, and what

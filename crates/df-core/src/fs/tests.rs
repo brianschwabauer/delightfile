@@ -1102,6 +1102,43 @@ fn a_type_filter_in_the_config_narrows_a_new_listing() {
     assert_eq!(shown, ["a.pdf", "c.PDF"]);
 }
 
+/// The paths an operation gets are the rows' own, not the directory joined
+/// with a row's display name: a name that is not UTF-8 is shown lossily, and
+/// joined back it would name nothing.
+#[test]
+fn a_selected_row_is_acted_on_by_its_own_path() {
+    let mut odd = file("caf\u{FFFD} latin-1");
+    odd.path = PathBuf::from("/fixture/the real spelling");
+    let mut state = loaded_state(vec![file("a.txt"), odd]);
+    state.toggle_selected(0);
+    state.toggle_selected(1);
+    assert_eq!(
+        state.selected_paths(),
+        vec![
+            PathBuf::from("/fixture/a.txt"),
+            PathBuf::from("/fixture/the real spelling")
+        ]
+    );
+}
+
+/// On Unix, where a name is bytes, a row read off the disk with a name that
+/// is not UTF-8 is acted on by the path that exists.
+#[cfg(unix)]
+#[test]
+fn a_name_that_is_not_utf8_is_acted_on_by_the_path_that_exists() {
+    use std::os::unix::ffi::OsStrExt;
+    let tmp = TempDir::new("lossy-select");
+    let raw = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
+    std::fs::write(tmp.path.join(raw), b"x").expect("write");
+    let entry = Entry::read(tmp.path.join(raw)).expect("read");
+    assert_ne!(Path::new(&entry.name), Path::new(raw), "shown lossily");
+    let mut state = loaded_state(vec![entry]);
+    state.toggle_selected(0);
+    let paths = state.selected_paths();
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].exists(), "{}", paths[0].display());
+}
+
 #[test]
 fn selection_is_by_name_and_survives_a_re_sort() {
     let mut state = loaded_state(files(&["a.txt", "b.txt", "c.txt"]));

@@ -449,11 +449,20 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `a_name_is_made_valid_by_underscores`. On Linux the one visible
       difference is the wording of the refusal for a typed NUL, which the
       system refused before anyway.
-- [ ] **P3.22** `fs/scan.rs:328, 369` and `fs/mod.rs:506`: `Entry.name` stays a lossy
+- [x] **P3.22** `fs/scan.rs:328, 369` and `fs/mod.rs:506`: `Entry.name` stays a lossy
       `String` for display, but `selected_paths` and every op takes `Entry.path`
       (the real `PathBuf`), never `dir.join(name)`. Audit and fix the callers listed
       in the appendix row. Done when: `grep -n "join(&*name\|join(name" crates/df-core/src`
-      finds no remaining rebuild of a path from a lossy name.
+      finds no remaining rebuild of a path from a lossy name. — done (port/paths)
+      for the rows listed: `selected_paths` returns each selected row's own
+      `Entry.path`, in name order as before (a selected name with no row yet
+      is joined as spelled). The grep's other hits outside tests join real
+      `OsStr` names, except two that rebuild from a lossy `String` and are
+      left with a Decisions-log line each: `DuCache::heavy_hitters`
+      (`du/cache.rs`, the child names `DuRecord::children` holds) and
+      `rename::facts::Facts::stat(dir, name: &str)`. Tests:
+      `a_selected_row_is_acted_on_by_its_own_path` (everywhere) and
+      `a_name_that_is_not_utf8_is_acted_on_by_the_path_that_exists` (Unix).
 - [ ] **P3.23** `test_support::gnarly_names()` returns the Windows-legal subset when
       `cfg!(windows)` (drop `\n`, `\t`, `\`, `"`, and the 255-`x` name becomes 200
       to stay under `MAX_PATH` with the temp prefix). Linux list unchanged. Done
@@ -585,6 +594,19 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
   (options there). The number skips P3.29 and P3.30: P3.30 was assigned to
   the Windows test-suite task by the brief this phase ran under, and P3.29 is
   left alone in case another branch has taken it.
+- 2026-09-29 — P3.22: `selected_paths` returning the rows' own paths
+  changes Linux for one case only: a selected name that is not UTF-8, whose
+  lossy display name joined back named nothing, so every operation on it
+  failed; it now acts on the file. For every UTF-8 name the path is the same
+  bytes as before (the row's path is the directory joined with its name).
+- 2026-09-29 — P3.22: `DuCache::heavy_hitters` (its `path` is the directory
+  joined with a child name from `DuRecord::children`, a lossy `String`) and
+  `Facts::stat(dir, name: &str)` still rebuild a path from a display name.
+  Left: both are as they were on Linux, where only a name that is not UTF-8
+  is affected (the usage view cannot drill into it; the bulk card shows it
+  no dates), Windows has essentially no names that are not Unicode, and each
+  fix changes a type df-app reads (`DuRecord::children`, the bulk card's
+  names).
 - 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
   did, not every one through `trim_trailing_separator`: `a//` stays `a/`
   and a typed `/` stays "no name given" on Linux.
