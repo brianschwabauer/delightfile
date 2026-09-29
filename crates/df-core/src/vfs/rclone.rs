@@ -1421,6 +1421,7 @@ mod tests {
     /// **Dropped mid-copy, the daemon is stopped gently** — `SIGTERM`, which
     /// rclone cleans up on — so the `.partial` it was writing goes with it,
     /// and the drop does not have to wait for the `SIGKILL` fallback.
+    #[cfg(unix)]
     #[test]
     fn a_daemon_dropped_mid_copy_cleans_up_after_itself() {
         use super::super::rclone_tests::{

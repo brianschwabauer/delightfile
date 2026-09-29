@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -317,6 +316,7 @@ fn extras_are_found_at_every_depth_with_everything_under_them() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_socket_is_skipped_by_name_rather_than_silently() {
     let t = TempTree::new("sync-special");
@@ -385,6 +385,7 @@ fn a_sync_leaves_an_existing_folder_s_tags_alone() {
     assert!(there.join("new.jpg").is_file());
 }
 
+#[cfg(unix)]
 #[test]
 fn a_folder_that_could_not_be_read_is_a_problem() {
     use std::os::unix::fs::PermissionsExt;
@@ -487,7 +488,10 @@ fn a_sync_copies_the_new_and_the_changed_and_touches_nothing_else() {
     );
     // The unchanged file is the same file: same inode, same date, not rewritten.
     let same_after = std::fs::metadata(&same).unwrap();
-    assert_eq!(same_after.ino(), same_before.ino());
+    assert_eq!(
+        crate::platform::meta::ino(&same_after),
+        crate::platform::meta::ino(&same_before)
+    );
     assert_eq!(
         same_after.modified().unwrap(),
         same_before.modified().unwrap()
@@ -501,6 +505,7 @@ fn a_sync_copies_the_new_and_the_changed_and_touches_nothing_else() {
     assert_eq!(again.unchanged.count, 4);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_new_folder_gets_its_mode_and_date_after_its_children() {
     use std::os::unix::fs::PermissionsExt;
@@ -875,6 +880,7 @@ fn a_mirror_moves_a_folder_in_the_way_to_the_trash_and_copies_the_file() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_removal_that_fails_is_recorded_and_the_rest_carry_on() {
     use std::os::unix::fs::PermissionsExt;
@@ -1031,6 +1037,7 @@ fn a_file_a_case_folding_card_lists_in_its_own_case_is_rewritten_not_trashed() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_source_that_cannot_be_read_back_is_named_as_itself() {
     use std::os::unix::fs::PermissionsExt;

@@ -55,6 +55,7 @@ fn unicode_stays_readable_in_the_file() {
 
 // ── round trips ─────────────────────────────────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn gnarly_paths_survive_a_save_and_a_load() {
     let tree = TempTree::new("state-gnarly");

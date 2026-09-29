@@ -302,7 +302,7 @@ has not dropped.
       rclone config lookup, and a `preview::cache` test. Done when: `fs::owner`
       tests pass on Linux; no `"HOME"` literal in
       df-core outside `platform/`. — done d9af4f4
-- [ ] **S1.15** Tests that stop df-core's test target from *compiling* elsewhere:
+- [x] **S1.15** Tests that stop df-core's test target from *compiling* elsewhere:
       `test_support.rs:61–68` (`TempTree::symlink` → `platform::fs::symlink`);
       `vfs/tests.rs`, `sync/rsync.rs` tests and `archive/external.rs` tests that write
       `#!/bin/sh` scripts with `0o755` → `#[cfg(unix)]` on those tests; `du/tests.rs`,
@@ -310,6 +310,21 @@ has not dropped.
       `UnixListener` → `#[cfg(unix)]`. Only compile errors are fixed here; tests that
       would *fail* on Windows for path reasons are Phase 3 P3.24. Done when:
       `cargo test -p df-core --no-run` succeeds on the macOS and Windows runners.
+      Done as: `#[cfg(unix)]` on the tests that set modes, make links, read
+      `st_ino`, serve a unix socket, run a `#!/bin/sh` stand-in, or build a
+      non-UTF-8 path (`archive/external.rs`, `archive/write/tests.rs`,
+      `du/tests.rs`, `fs/tests.rs`, `ops/copy.rs`, `ops/delete.rs`,
+      `ops/journal.rs`, `state/tests.rs`, `sync/rsync.rs`, `sync/tests.rs`,
+      `vfs/tests.rs`, `vfs/rclone.rs`; this covers the df-core half of S1.33's
+      list), with the helpers only they use; `#[cfg(target_os = "linux")]` on
+      `ops/jobs.rs`'s mode job test, since the walk is Linux's (S1.19). Shared
+      fixtures go through the platform instead, so the tests that use them keep
+      compiling everywhere: `TempTree::symlink` (`platform::fs::symlink`), the
+      archive writer's `photos()` (`platform::fs::apply_mode`), `du/tests.rs`'s
+      size helpers (`Metadata::len`, `platform::meta::blocks_bytes`), and
+      `sync/tests.rs`'s inode check (`platform::meta::ino`). — done SHA_S115,
+      cross-checked locally (`cargo check -p df-core --tests` for both targets;
+      linking needs the runners), CI pending
 - [x] **S1.18** `platform::xattr` (added 2026-09-29: file tags postdate the
       inventory). `fs/tags.rs`'s four `l*xattr` calls (`lgetxattr`, `llistxattr`,
       `lsetxattr`, `lremovexattr`), their buffer sizing, the errno they read
@@ -372,7 +387,7 @@ has not dropped.
       `vfs/rclone_tests.rs`, and `socket_names_are_short_safe_and_distinct`).
       Windows transport: W4.32. Done when: `vfs/http.rs` and `vfs/rclone.rs`
       name no `std::os::unix` outside tests, the rclone tests pass on Linux, and
-      df-core compiles on all three targets. — done SHA_S151, cross-checked
+      df-core compiles on all three targets. — done d9f34ca, cross-checked
       locally, CI pending
 
 ## 3. df-app: the seam

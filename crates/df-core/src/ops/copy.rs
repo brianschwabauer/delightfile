@@ -805,6 +805,7 @@ mod tests {
     use super::*;
     use crate::ops::fixture::{gnarly_names, TempTree};
     use crate::tasks::{ProgressSink, TaskCtx, TaskFlags};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -831,6 +832,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn copies_a_file_with_mode_and_mtime() {
         let t = TempTree::new("copy-file");
@@ -874,6 +876,7 @@ mod tests {
         verify_copy(&src, &dst).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn recreates_symlinks_without_following_them() {
         let t = TempTree::new("copy-symlink");
@@ -1127,6 +1130,7 @@ mod tests {
         assert_eq!(std::fs::read(dst.join("a")).unwrap(), b"new");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_durable_copy_flushes_every_file_and_every_directory_it_names() {
         let t = TempTree::new("copy-durable");
@@ -1207,6 +1211,7 @@ mod tests {
         assert_eq!(std::fs::read(&dst).unwrap(), std::fs::read(&src).unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn measure_counts_bytes_and_entries() {
         let t = TempTree::new("measure");
@@ -1248,6 +1253,7 @@ mod tests {
         assert!(inner.join("neighbour").is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_move_that_cannot_happen_leaves_the_destination_alone() {
         // BUG: an overwriting move deleted the old destination *before* trying
@@ -1292,6 +1298,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn cross_device_move_copies_verifies_then_deletes() {
         let t = TempTree::new("move-xdev");
@@ -1335,6 +1342,7 @@ mod tests {
     /// another through its temporary name, a durable copy, a folder and what
     /// is inside it — and a read-only file, whose mode would refuse them if it
     /// were set first.
+    #[cfg(unix)]
     #[test]
     fn a_copy_carries_the_tags() {
         let Some(t) = tag_tree("copy-tags") else {

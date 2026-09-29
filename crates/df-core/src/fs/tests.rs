@@ -418,6 +418,7 @@ fn a_hash_query_filters_by_tag() {
 /// A scan reads each file's tags with it, so a row can draw its dots and be
 /// filtered by them without going back to the disk — a link's own (none),
 /// never its target's.
+#[cfg(unix)]
 #[test]
 fn a_scan_carries_each_entry_s_tags() {
     let tmp = TempDir::new("scan-tags");
@@ -1329,6 +1330,7 @@ fn a_failed_load_says_why_instead_of_looking_empty() {
 
 // ── Entries against a real tree ─────────────────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn entries_read_kinds_sizes_and_symlinks_off_the_disk() {
     let tmp = TempDir::new("entries");

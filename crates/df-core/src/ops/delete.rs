@@ -183,6 +183,7 @@ mod tests {
         assert!(!exists(&victim));
     }
 
+    #[cfg(unix)]
     #[test]
     fn never_descends_a_symlinked_directory() {
         let t = TempTree::new("delete-symlink");

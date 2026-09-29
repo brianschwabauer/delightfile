@@ -2277,6 +2277,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn undo_of_a_copied_tree_removes_every_path_it_made() {
         let t = TempTree::new("j-copy-tree");
@@ -2324,6 +2325,7 @@ mod tests {
         assert!(dst.join("sub/mine").is_dir());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_partly_undone_copy_leaves_only_the_remainder_to_retry() {
         // A multi-item paste whose second item cannot be deleted: the first is
@@ -2374,6 +2376,7 @@ mod tests {
         assert_eq!(std::fs::read(src_dir.join("inner")).unwrap(), b"inner");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_partly_undone_move_leaves_only_the_remainder_to_retry() {
         // BUG: an undo that failed part way through left an entry describing
@@ -2737,6 +2740,7 @@ mod tests {
         assert!(target.is_file(), "the target is untouched");
     }
 
+    #[cfg(unix)]
     #[test]
     fn undo_of_a_symlink_refuses_when_it_points_elsewhere_now() {
         let t = TempTree::new("j-link-changed");
@@ -2812,6 +2816,7 @@ mod tests {
 
     /// All-or-nothing on the check: one link pointing somewhere else now
     /// refuses the whole batch, and nothing is removed.
+    #[cfg(unix)]
     #[test]
     fn undo_of_a_batch_refuses_whole_when_one_link_changed() {
         let t = TempTree::new("j-links-changed");
@@ -3293,6 +3298,7 @@ mod tests {
         assert!(target.is_file());
     }
 
+    #[cfg(unix)]
     #[test]
     fn redo_of_a_hard_link_links_the_same_file_again() {
         use std::os::unix::fs::MetadataExt;
@@ -3397,6 +3403,7 @@ mod tests {
     /// An undo that stopped half way has no forward form for the half that
     /// went, so the line of redos behind it goes with it. One that was
     /// refused outright changed nothing, and leaves the line alone.
+    #[cfg(unix)]
     #[test]
     fn a_partial_undo_clears_the_redo_stack_and_a_refused_one_does_not() {
         use std::os::unix::fs::PermissionsExt;
@@ -3603,6 +3610,7 @@ mod tests {
     /// as a move's does: the entry stops listing the file that went back, a
     /// second `u` finishes, and the redo line — which has no forward form for
     /// the half that went — is cleared.
+    #[cfg(unix)]
     #[test]
     fn a_partly_undone_trash_leaves_only_the_remainder_and_clears_the_redo_stack() {
         use std::os::unix::fs::PermissionsExt;
@@ -3645,6 +3653,7 @@ mod tests {
     /// A redo that fails part way is split across the stacks: what moved is on
     /// the undo stack, what did not is on the redo stack — and `u`, `U`, `U`
     /// walks both halves.
+    #[cfg(unix)]
     #[test]
     fn a_partial_redo_splits_and_both_halves_can_be_walked() {
         use std::os::unix::fs::PermissionsExt;

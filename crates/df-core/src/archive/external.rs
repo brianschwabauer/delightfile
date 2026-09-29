@@ -302,14 +302,17 @@ mod tests {
     #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
     use super::*;
+    #[cfg(unix)]
     use crate::ops::fixture::TempTree;
 
+    #[cfg(unix)]
     fn fake(t: &TempTree, rel: &str) {
         use std::os::unix::fs::PermissionsExt;
         let path = t.file(rel, b"#!/bin/sh\n");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn seven_zip_is_preferred_and_bsdtar_is_the_fallback() {
         let t = TempTree::new("extractor-path");

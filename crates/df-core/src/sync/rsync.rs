@@ -1532,12 +1532,15 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
 
     // ── End to end, with a stand-in for ssh ─────────────────────────────────
 
+    #[cfg(unix)]
     use crate::ops::fixture::TempTree;
+    #[cfg(unix)]
     use crate::tasks::TaskCtx;
 
     /// A "server" that is this machine: `ssh`'s stand-in drops the destination
     /// and runs the rest. `fail_verify` makes it answer a `sha256sum` the way a
     /// server with none would.
+    #[cfg(unix)]
     fn server(t: &TempTree, fail_verify: bool) -> Host {
         use std::os::unix::fs::PermissionsExt;
         let refuse = if fail_verify {
@@ -1558,6 +1561,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         }
     }
 
+    #[cfg(unix)]
     fn remote_plan(transfer: &Transfer, t: &TempTree) -> SyncPlan {
         let (sources, dest): (Vec<PathBuf>, PathBuf) = match transfer.direction {
             Direction::Upload => (transfer.sources.clone(), t.join("server-view")),
@@ -1580,6 +1584,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         .unwrap()
     }
 
+    #[cfg(unix)]
     fn rsync_here() -> bool {
         let here = available();
         if !here {
@@ -1588,6 +1593,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         here
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_upload_is_planned_run_and_verified_on_the_far_side() {
         if !rsync_here() {
@@ -1639,6 +1645,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         assert!(!server_home.join("photos/extra.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_download_is_verified_against_the_folder_each_source_is_in() {
         if !rsync_here() {
@@ -1673,6 +1680,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         assert_eq!(std::fs::read(local.join("notes.txt")).unwrap(), b"n");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_server_without_sha256sum_is_verified_locally_only() {
         if !rsync_here() {
@@ -1698,6 +1706,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_server_that_cannot_be_reached_is_an_error_in_its_own_words() {
         if !rsync_here() {
@@ -1731,6 +1740,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         assert!(err.to_string().contains("Connection refused"), "{err}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_stopped_dry_run_is_killed_and_cancelled() {
         if !rsync_here() {
@@ -1757,6 +1767,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         assert!(matches!(result, Err(DfError::Cancelled)), "{result:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_runs_progress_fills_the_bar_and_a_cancel_stops_it() {
         use crate::tasks::{ProgressSink, TaskFlags};
@@ -1843,6 +1854,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_server_that_refuses_fsync_is_synced_without_it_and_says_so() {
         use std::os::unix::fs::PermissionsExt;
@@ -1896,6 +1908,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
     /// What `rsync` really hands its remote shell for our `-e`: every option
     /// whole, a key with a space and a quote in its name included, the user
     /// as `-l`, then `--`, then the host.
+    #[cfg(unix)]
     #[test]
     fn rsync_hands_ssh_exactly_the_options_given() {
         use std::os::unix::fs::PermissionsExt;
@@ -1950,6 +1963,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_file_rsync_could_not_send_is_one_problem_not_two() {
         use std::os::unix::fs::PermissionsExt;

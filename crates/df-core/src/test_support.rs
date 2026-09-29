@@ -63,7 +63,7 @@ impl TempTree {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent).expect("parents");
         }
-        std::os::unix::fs::symlink(target.as_ref(), &p).expect("symlink");
+        crate::platform::fs::symlink(target.as_ref(), &p).expect("symlink");
         p
     }
 }

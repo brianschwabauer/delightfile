@@ -10,7 +10,6 @@
 
 #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
-use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -29,11 +28,11 @@ fn walk_collect(root: &Path, options: &DuOptions) -> (DuTotals, Vec<DuUpdate>) {
 }
 
 fn apparent_of(path: &Path) -> u64 {
-    std::fs::symlink_metadata(path).unwrap().size()
+    std::fs::symlink_metadata(path).unwrap().len()
 }
 
 fn blocks_of(path: &Path) -> u64 {
-    std::fs::symlink_metadata(path).unwrap().blocks() * BLOCK_UNIT
+    crate::platform::meta::blocks_bytes(&std::fs::symlink_metadata(path).unwrap())
 }
 
 /// A tree whose every byte is accounted for:
@@ -192,6 +191,7 @@ fn the_depth_cap_stops_descending_without_stopping_counting() {
     assert_eq!(totals.dirs, 3, "`deep` still counts as a directory");
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_subdirectory_does_not_fail_the_walk() {
     use std::os::unix::fs::PermissionsExt;
@@ -1046,6 +1046,7 @@ fn child_counts_are_immediate_children_by_name() {
 
 /// A symlink to a directory is not a directory here, for the reason the walk
 /// skips them: the tree it points at is somewhere else.
+#[cfg(unix)]
 #[test]
 fn child_counts_skip_symlinks() {
     let tree = TempTree::new("du-counts-link");

@@ -906,7 +906,7 @@ impl Connection {
                     requeued.retain(|(o, _)| *o < offset);
                 }
                 Reply::Data(data) => {
-                    crate::platform::fs::write_all_at(&file, &data, offset).map_err(|e| {
+                    crate::platform::fs::write_all_at(file, &data, offset).map_err(|e| {
                         VfsError::Io {
                             path: local.to_path_buf(),
                             source: e,

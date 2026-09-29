@@ -20,7 +20,9 @@
 #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,7 +33,9 @@ use super::wire::{
 };
 use super::{Service, Vfs, VfsConfig, VfsError, VfsPath, VfsUpdate};
 use crate::fs::{no_notifier, Kind, LinkTarget};
-use crate::tasks::{ProgressSink, TaskCtx, TaskFlags};
+use crate::tasks::TaskCtx;
+#[cfg(unix)]
+use crate::tasks::{ProgressSink, TaskFlags};
 
 /// Generous enough for a loaded CI box, short enough that a genuine hang fails
 /// the suite instead of hanging it.
@@ -1161,12 +1165,14 @@ fn find_sftp_server() -> Option<PathBuf> {
 }
 
 /// A sink that counts, for asserting transfer progress actually reports.
+#[cfg(unix)]
 #[derive(Default)]
 pub(super) struct CountingSink {
     pub(super) total: AtomicU64,
     pub(super) advanced: AtomicU64,
 }
 
+#[cfg(unix)]
 impl ProgressSink for CountingSink {
     fn set_total(&self, bytes: u64, _files: u64) {
         self.total.store(bytes, Ordering::SeqCst);
@@ -1177,6 +1183,7 @@ impl ProgressSink for CountingSink {
 }
 
 /// Drain listing updates until `Done`/`Failed` for `token`, or the deadline.
+#[cfg(unix)]
 pub(super) fn collect_listing(vfs: &Vfs, token: super::VfsToken) -> Vec<VfsUpdate> {
     let deadline = Instant::now() + T;
     let mut updates = Vec::new();
@@ -1200,6 +1207,7 @@ pub(super) fn collect_listing(vfs: &Vfs, token: super::VfsToken) -> Vec<VfsUpdat
 /// a temp directory: no ssh, no network, no credentials — the child's stdio
 /// *is* the server side of every packet this module can send. See
 /// [`Service::program`] for why this seam is a real field.
+#[cfg(unix)]
 #[test]
 fn sftp_server_round_trip_everything() {
     let Some(server) = find_sftp_server() else {

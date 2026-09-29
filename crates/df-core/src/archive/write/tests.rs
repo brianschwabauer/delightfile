@@ -10,7 +10,6 @@
 #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
 use std::io::Cursor;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,14 +37,14 @@ fn set_mtime(path: &Path, secs: i64) {
 fn photos(t: &TempTree) -> PathBuf {
     let root = t.dir("src/photos");
     let text = t.file("src/photos/notes.txt", &b"the quick brown fox ".repeat(400));
-    std::fs::set_permissions(&text, std::fs::Permissions::from_mode(0o640)).unwrap();
+    crate::platform::fs::apply_mode(&text, 0o640).unwrap();
     set_mtime(&text, STAMP);
     t.file("src/photos/.hidden", b"dotfile");
     let empty = t.file("src/photos/empty.txt", b"");
     set_mtime(&empty, STAMP + 2);
     t.file("src/photos/trip/IMG_0001.jpg", &[0xFFu8; 5000]);
     let run = t.file("src/photos/trip/run.sh", b"#!/bin/sh\necho hi\n");
-    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::platform::fs::apply_mode(&run, 0o755).unwrap();
     t.dir("src/photos/nothing");
     t.symlink("notes.txt", "src/photos/link");
     set_mtime(&t.join("src/photos/nothing"), STAMP + 4);
@@ -717,8 +716,10 @@ fn a_cancel_leaves_no_archive_no_temp_file_and_no_new_folders() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn an_unreadable_file_fails_the_whole_archive() {
+    use std::os::unix::fs::PermissionsExt;
     let t = TempTree::new("write-unreadable");
     t.file("src/box/fine.txt", b"fine");
     let locked = t.file("src/box/locked.txt", b"secret");
