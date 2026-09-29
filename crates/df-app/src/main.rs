@@ -93,7 +93,7 @@ fn main() {
         .format_timestamp_millis()
         .init();
 
-    let args = match cli::parse(std::env::args().skip(1)) {
+    let args = match cli::parse(std::env::args_os().skip(1)) {
         cli::Outcome::Run(args) => args,
         // Before the event loop: the backend has no window, and building a
         // loop would open a Wayland connection it never uses.

@@ -216,14 +216,7 @@ mod tests {
     /// directory whose name looks like a flag included.
     #[test]
     fn a_spawned_window_opens_the_directory_it_was_given() {
-        let round_trip = |dir: &str| {
-            let args = spawn_args(Path::new(dir));
-            let strings: Vec<String> = args
-                .iter()
-                .map(|a| a.to_string_lossy().into_owned())
-                .collect();
-            cli::parse(strings)
-        };
+        let round_trip = |dir: &str| cli::parse(spawn_args(Path::new(dir)));
         assert_eq!(
             round_trip("/home/brian/src"),
             cli::Outcome::Run(cli::Args {

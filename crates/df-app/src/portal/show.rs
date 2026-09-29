@@ -600,13 +600,7 @@ mod tests {
     #[test]
     fn each_window_parses_as_what_it_was_asked_for() {
         use crate::cli::{parse, Args, Outcome};
-        let parsed = |args: Vec<OsString>| {
-            parse(
-                args.into_iter()
-                    .map(|arg| arg.into_string().unwrap())
-                    .collect::<Vec<_>>(),
-            )
-        };
+        let parsed = |args: Vec<OsString>| parse(args);
         let [item] = windows(Method::Items, &uris(&["file:///home/b/--odd%20name"]))
             .try_into()
             .unwrap();
@@ -614,6 +608,20 @@ mod tests {
             parsed(item),
             Outcome::Run(Args {
                 start: Some(PathBuf::from("/home/b/--odd name")),
+                reveal: true,
+                ..Args::default()
+            })
+        );
+        // A name that is not UTF-8 reaches the window as the bytes it is.
+        let [odd] = windows(Method::Items, &uris(&["file:///home/b/caf%E9.txt"]))
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            parsed(odd),
+            Outcome::Run(Args {
+                start: Some(PathBuf::from(OsString::from_vec(
+                    b"/home/b/caf\xe9.txt".to_vec()
+                ))),
                 reveal: true,
                 ..Args::default()
             })

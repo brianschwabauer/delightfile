@@ -40,6 +40,8 @@
 //! path cannot say it, because a bare path to a folder opens the folder, and
 //! showing a folder means showing it among its siblings.
 
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// What the command line asked for.
@@ -203,7 +205,12 @@ usage: delightfile [path] [options]
 ";
 
 /// Parse everything after the program name.
-pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
+///
+/// As `OsString`s, the way `std::env::args_os` hands them over: a path is
+/// bytes, and a file whose name is not UTF-8 is still a file somebody can ask
+/// to be shown. Only an option's *name* has to be text; what it is given, and
+/// every positional path, is kept byte for byte.
+pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Outcome {
     let mut out = Args::default();
     let mut rest_are_paths = false;
     // The switches are collected on their own and folded into a `Chooser`
@@ -216,14 +223,19 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
     let mut reveal = false;
     for arg in args {
         count += 1;
-        if rest_are_paths || !arg.starts_with('-') {
+        if rest_are_paths || !arg.as_bytes().starts_with(b"-") {
             if out.start.is_some() {
-                return Outcome::Fail(format!("only one path can be opened (got `{arg}` as well)"));
+                return Outcome::Fail(format!(
+                    "only one path can be opened (got `{}` as well)",
+                    arg.to_string_lossy()
+                ));
             }
             out.start = Some(PathBuf::from(arg));
             continue;
         }
-        match arg.as_str() {
+        // An option that is not text is none of the switches, and falls
+        // through to the flags, whose values need not be.
+        match arg.to_str().unwrap_or_default() {
             // The POSIX end-of-options marker, so a directory literally called
             // `--help` is still openable.
             "--" => rest_are_paths = true,
@@ -244,7 +256,10 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Outcome {
                         found => Some((name, found)),
                     });
                 let Some((name, found)) = found else {
-                    return Outcome::Fail(format!("unknown option `{arg}`\n\n{USAGE}"));
+                    return Outcome::Fail(format!(
+                        "unknown option `{}`\n\n{USAGE}",
+                        arg.to_string_lossy()
+                    ));
                 };
                 let Flag::Value(path) = found else {
                     return Outcome::Fail(format!("{name} needs a path"));
@@ -335,19 +350,22 @@ enum Flag<'a> {
     Absent,
     /// This is that flag, and it was given nothing.
     Empty,
-    Value(&'a str),
+    Value(&'a OsStr),
 }
 
 /// Read `--name=value` out of one argument.
 ///
 /// Three flags take a path and all reject an empty one, so the reading and
 /// the rejecting are one function rather than the same three lines thrice.
-fn flag<'a>(arg: &'a str, name: &str) -> Flag<'a> {
+///
+/// The value is a path, so it is read as bytes: only the name is text.
+fn flag<'a>(arg: &'a OsStr, name: &str) -> Flag<'a> {
     match arg
-        .strip_prefix(name)
-        .and_then(|rest| rest.strip_prefix('='))
+        .as_bytes()
+        .strip_prefix(name.as_bytes())
+        .and_then(|rest| rest.strip_prefix(b"="))
     {
-        Some(value) if !value.is_empty() => Flag::Value(value),
+        Some(value) if !value.is_empty() => Flag::Value(OsStr::from_bytes(value)),
         Some(_) => Flag::Empty,
         None => Flag::Absent,
     }
@@ -512,7 +530,53 @@ mod tests {
     use super::*;
 
     fn parse_str(args: &[&str]) -> Outcome {
-        parse(args.iter().map(|s| (*s).to_string()))
+        parse(args.iter().map(OsString::from))
+    }
+
+    /// A name that is not UTF-8 is a path like any other: positional, after
+    /// `--reveal`, and as what a flag is given. An *option* that is not text
+    /// is an unknown option, said with the bytes it could not read replaced.
+    #[test]
+    fn a_path_that_is_not_utf8_is_kept_byte_for_byte() {
+        use std::os::unix::ffi::OsStringExt;
+        let bytes = |bytes: &[u8]| OsString::from_vec(bytes.to_vec());
+        let odd = bytes(b"/tmp/caf\xe9.txt");
+
+        assert_eq!(
+            parse([odd.clone()]),
+            Outcome::Run(Args {
+                start: Some(PathBuf::from(&odd)),
+                ..Args::default()
+            })
+        );
+        assert_eq!(
+            parse([
+                OsString::from("--reveal"),
+                OsString::from("--"),
+                odd.clone()
+            ]),
+            Outcome::Run(Args {
+                start: Some(PathBuf::from(&odd)),
+                reveal: true,
+                ..Args::default()
+            })
+        );
+        assert_eq!(
+            parse([bytes(b"--cwd-file=/tmp/caf\xe9.txt")]),
+            Outcome::Run(Args {
+                cwd_file: Some(PathBuf::from(&odd)),
+                ..Args::default()
+            })
+        );
+        match parse([bytes(b"--caf\xe9")]) {
+            Outcome::Fail(message) => {
+                assert!(
+                    message.contains("unknown option `--caf\u{FFFD}`"),
+                    "{message}"
+                )
+            }
+            other => panic!("parsed as {other:?}"),
+        }
     }
 
     #[test]
