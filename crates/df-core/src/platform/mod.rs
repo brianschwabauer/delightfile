@@ -37,6 +37,7 @@
 //! | `fs` | `write_all_at(file, data, offset) -> io::Result<()>` | `FileExt::write_all_at` (unix) | unix | `seek_write` loop |
 //! | `fs` | `same_file(a, b) -> io::Result<bool>` (not through a link) | `dev` + `ino` (unix) | unix | volume serial + file index, through `meta::identity` (P3.3) |
 //! | `fs` | `writable(dir) -> bool` | `access(W_OK)` (unix) | unix | `true` (W4.6) |
+//! | `fs` | `is_junction(path) -> bool` (the path itself, P3.7) | `false` (unix) | unix | reparse tag `IO_REPARSE_TAG_MOUNT_POINT` |
 //! | `fs` | `reflink(reader, writer) -> bool` | `FICLONE` | `false` (M2.2) | `false` |
 //! | `fs` | `forget_cached(file, path)` | `posix_fadvise(DONTNEED)` | nothing (M2.7) | nothing |
 //! | `fs` | `is_remote(path) -> bool`, `magic_of(path) -> Option<i64>` | `statfs` `f_type` against `du::REMOTE_FS_MAGIC` | `false` / `None` (M2.3) | `false` / `None` |

@@ -301,6 +301,18 @@ pub fn display(p: &Path) -> String {
     shown.to_string_lossy().into_owned()
 }
 
+/// `text` with this platform's separator written as `/`, for the formats
+/// that own the `/` — an archive's member names and link targets, a pattern
+/// a config wrote with slashes. The identity on Unix, where a `\` is part of
+/// a name; on Windows every `\` becomes a `/`.
+pub fn with_slashes(text: &str) -> Cow<'_, str> {
+    if std::path::MAIN_SEPARATOR == '/' || !text.contains(std::path::MAIN_SEPARATOR) {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(text.replace(std::path::MAIN_SEPARATOR, "/"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +533,19 @@ mod tests {
         }
         if cfg!(windows) {
             assert!(name_is_valid(OsStr::new("con.txt")).is_err());
+        }
+    }
+
+    #[test]
+    fn slashes_replace_the_platform_separator_only() {
+        assert_eq!(with_slashes("a/b"), "a/b");
+        assert!(matches!(with_slashes("a/b"), Cow::Borrowed(_)));
+        if cfg!(unix) {
+            assert_eq!(with_slashes(r"a\b"), r"a\b", "a name's own backslash");
+        }
+        if cfg!(windows) {
+            assert_eq!(with_slashes(r"..\a\b"), "../a/b");
+            assert_eq!(with_slashes(r"C:\a/b"), "C:/a/b");
         }
     }
 

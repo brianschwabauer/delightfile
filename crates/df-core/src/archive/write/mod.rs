@@ -562,9 +562,20 @@ fn visit(path: &Path, name: Vec<u8>, walked: &mut Walked, ctx: &TaskCtx) -> Resu
         stored,
     };
     let kind = meta.file_type();
-    if kind.is_symlink() {
+    if kind.is_symlink() && crate::platform::fs::is_junction(path) {
+        // A Windows junction: a link whose target is an absolute path on
+        // this machine, which no other machine can resolve. Left out, and
+        // said so, like any other thing the formats cannot hold.
+        log::warn!("{}: a junction, not archived", path.display());
+        walked.skipped.push(path.to_path_buf());
+    } else if kind.is_symlink() {
+        // The link's text as the formats write one, with `/` between names
+        // (on Windows a relative link reads back as `..\x`).
         let target = std::fs::read_link(path).map_err(|e| DfError::io(path, e))?;
-        let target = crate::platform::os::as_bytes(target.as_os_str())?.into_owned();
+        let target = match target.to_str() {
+            Some(text) => crate::path::with_slashes(text).into_owned().into_bytes(),
+            None => crate::platform::os::as_bytes(target.as_os_str())?.into_owned(),
+        };
         walked.members.push(member(name, What::Link(target), true));
     } else if kind.is_dir() {
         let mut dir_name = name.clone();

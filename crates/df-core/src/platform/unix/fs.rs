@@ -100,6 +100,11 @@ pub fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
     Ok(ma.dev() == mb.dev() && ma.ino() == mb.ino())
 }
 
+/// Never: Unix has symlinks and mount points, and no junctions.
+pub fn is_junction(_path: &Path) -> bool {
+    false
+}
+
 /// `access(2)` for writing: whether this user may make a name in `dir`.
 ///
 /// Asked of the kernel rather than worked out from the mode bits, because

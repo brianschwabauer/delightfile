@@ -14,11 +14,13 @@
 //! up from the file type and the read-only flag, no owner, the size for the
 //! blocks (W4.35 reads the allocation), and the last write for the change time.
 //!
-//! The one `unsafe` call is `GetFileInformationByHandle` on a handle this
-//! module opened, still owns, and closes by dropping it; the struct it fills is
-//! a local of the right type, read only when the call says it succeeded.
+//! The `unsafe` calls are `GetFileInformationByHandle` and
+//! `GetFileInformationByHandleEx` (a link's reparse tag, for
+//! [`crate::platform::fs::is_junction`]), each on a handle this module opened,
+//! still owns, and closes by dropping it; the struct each fills is a local of
+//! the right type and size, read only when the call says it succeeded.
 
-#![allow(unsafe_code)] // GetFileInformationByHandle, on a handle owned here
+#![allow(unsafe_code)] // GetFileInformationByHandle(Ex), on handles owned here
 
 use std::ffi::OsStr;
 use std::fs::Metadata;
@@ -30,8 +32,9 @@ use std::time::SystemTime;
 
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FileAttributeTagInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 };
 
 /// What names one file on one volume, and how many names it has: two paths
@@ -87,6 +90,33 @@ pub fn identity(path: &Path, _meta: &Metadata) -> io::Result<Identity> {
         ino: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
         nlink: u64::from(info.nNumberOfLinks),
     })
+}
+
+/// The reparse tag of `path` itself — what kind of link or placeholder it
+/// is — or `None` when it is not a reparse point or cannot be opened. For
+/// [`crate::platform::fs::is_junction`].
+pub(in crate::platform) fn reparse_tag(path: &Path) -> Option<u32> {
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let mut info = FILE_ATTRIBUTE_TAG_INFO {
+        FileAttributes: 0,
+        ReparseTag: 0,
+    };
+    // SAFETY: the handle is `file`'s, open for the length of the call; `info`
+    // is a local of the struct `FileAttributeTagInfo` names, and the size
+    // passed is its size.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle() as HANDLE,
+            FileAttributeTagInfo,
+            std::ptr::addr_of_mut!(info).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    };
+    (ok != 0 && info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(info.ReparseTag)
 }
 
 /// Whether the file may have names besides this one, as far as `meta` can

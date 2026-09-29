@@ -181,12 +181,23 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       character or a surrogate pair. `MAX_NAME_BYTES` stays, the Linux trash's
       byte budget. Tests: a UTF-8 name clipped by both rules, a surrogate pair
       kept whole, and the existing ones measured in the platform's unit.
-- [ ] **P3.7** Archive member names: `archive/write/mod.rs:529–580`; member
+- [x] **P3.7** Archive member names: `archive/write/mod.rs:529–580`; member
       `mode`/`uid`/`gid`/`mtime` via `platform::meta`. `MADE_BY` stays "Unix" on
       every target (readers accept it; the synthesized mode is valid). Symlink
       members on Windows: `read_link` works for symlinks; junctions are skipped with
       a warning line. Done when: `archive/write/tests.rs` passes on Linux and a UTF-8
-      member name test exists.
+      member name test exists. — done (port/paths). Names and the member stat
+      were already `platform::os`/`platform::meta` (S1.16, S1.7). New:
+      `platform::fs::is_junction` (Unix `false`; Windows the reparse tag
+      `IO_REPARSE_TAG_MOUNT_POINT` by `GetFileInformationByHandleEx`) — a
+      junction goes to the walk's `skipped` list with a `warn!` line; a link's
+      target is written with `/` between names (`path::with_slashes`, the
+      identity on Unix, so Linux writes the same bytes). Test:
+      `a_unicode_member_name_goes_in_and_comes_back_as_its_utf8` (zip and
+      tar). The test fixture's `set_mtime` goes through `platform::fs::set_times`
+      (a read-only `File` cannot set a time on Windows) and the mode checks
+      compare with the platform's `st_mode` as well as, on Unix, the literal
+      (P3.30, bin 2).
 - [ ] **P3.8** git: `git/status.rs:556–565` (`insert`), the `-c core.hooksPath=/dev/null`
       argument at `:291` becomes `platform::process::NULL_DEVICE` (`/dev/null` or
       `NUL`). Done when: `git/tests.rs` passes on Linux; the three real-`git` tests

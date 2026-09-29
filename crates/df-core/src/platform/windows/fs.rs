@@ -97,6 +97,17 @@ pub fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
     Ok(a.dev == b.dev && a.ino == b.ino)
 }
 
+/// `IO_REPARSE_TAG_MOUNT_POINT`, from `winnt.h`: the tag of a junction, and
+/// of a volume mounted in a folder.
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+/// Whether `path` itself is a junction (or a volume mounted in a folder):
+/// a link std reports as a directory symlink, whose target is always an
+/// absolute path on this machine — not something an archive can carry.
+pub fn is_junction(path: &Path) -> bool {
+    crate::platform::meta::reparse_tag(path) == Some(IO_REPARSE_TAG_MOUNT_POINT)
+}
+
 /// Assumed: the CRT's `_access(path, 2)` ignores the read-only bit on a
 /// directory and would say the same. W4.6 replaces this with a real probe.
 pub fn writable(_dir: &Path) -> bool {

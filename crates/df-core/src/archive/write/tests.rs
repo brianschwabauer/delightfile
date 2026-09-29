@@ -25,10 +25,18 @@ use crate::tasks::{ProgressSink, TaskFlags};
 /// 2023-11-14 22:13:21 UTC: odd seconds, which DOS time cannot hold.
 const STAMP: i64 = 1_700_000_001;
 
+/// Through the platform's own `set_times`: a handle opened only for reading
+/// may not set a time on Windows, and a directory is not a `File` there.
 fn set_mtime(path: &Path, secs: i64) {
     let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64);
-    let file = std::fs::File::open(path).unwrap();
-    file.set_modified(when).unwrap();
+    crate::platform::fs::set_times(path, None, Some(when)).unwrap();
+}
+
+/// The `st_mode` the platform reports for a fixture file, which is what the
+/// archive has to carry: the mode `photos` set on Unix, and on Windows the
+/// one made up from the read-only flag.
+fn mode_on_disk(path: &Path) -> u32 {
+    crate::platform::meta::mode(&std::fs::symlink_metadata(path).unwrap())
 }
 
 /// `photos/` with everything the writers have to get right in it: a text
@@ -262,8 +270,17 @@ fn a_zip_round_trips_through_the_reader() {
     );
 
     let modes = zip_modes(&std::fs::read(&dest).unwrap());
-    assert_eq!(zip_mode(&modes, "photos/notes.txt"), 0o100_640);
-    assert_eq!(zip_mode(&modes, "photos/trip/run.sh"), 0o100_755);
+    if cfg!(unix) {
+        assert_eq!(zip_mode(&modes, "photos/notes.txt"), 0o100_640);
+        assert_eq!(zip_mode(&modes, "photos/trip/run.sh"), 0o100_755);
+    }
+    for rel in ["notes.txt", "trip/run.sh"] {
+        assert_eq!(
+            zip_mode(&modes, &format!("photos/{rel}")),
+            mode_on_disk(&t.join("src/photos").join(rel)),
+            "{rel}"
+        );
+    }
     assert_eq!(zip_mode(&modes, "photos/link") & 0o170_000, 0o120_000);
     assert_eq!(zip_mode(&modes, "photos/nothing/") & 0o170_000, 0o040_000);
 }
@@ -285,8 +302,17 @@ fn a_tar_round_trips_through_the_reader() {
     assert_photos_extract(&t, &dest, "out");
 
     let rows = tar_modes(&std::fs::read(&dest).unwrap());
-    assert_eq!(tar_mode(&rows, "photos/notes.txt"), 0o640);
-    assert_eq!(tar_mode(&rows, "photos/trip/run.sh"), 0o755);
+    if cfg!(unix) {
+        assert_eq!(tar_mode(&rows, "photos/notes.txt"), 0o640);
+        assert_eq!(tar_mode(&rows, "photos/trip/run.sh"), 0o755);
+    }
+    for rel in ["notes.txt", "trip/run.sh"] {
+        assert_eq!(
+            tar_mode(&rows, &format!("photos/{rel}")),
+            mode_on_disk(&t.join("src/photos").join(rel)) & 0o7777,
+            "{rel}"
+        );
+    }
     let link = rows.iter().find(|r| r.0 == "photos/link").unwrap();
     assert_eq!((link.2, link.3.as_str()), (b'2', "notes.txt"));
     let dir = rows.iter().find(|r| r.0 == "photos/nothing/").unwrap();
@@ -472,6 +498,36 @@ fn long_names_go_through_pax_and_come_back_whole() {
     let want = format!("top/{deep}.txt");
     assert!(tree.get(&want).is_some(), "{:?}", paths(&tree));
     assert_eq!(tree.get(&want).unwrap().len, 4);
+}
+
+/// A name that is not ASCII goes into a zip and a tar as its UTF-8, on every
+/// target — on Windows by way of the UTF-16 name — with the zip's UTF-8 flag
+/// set, and comes back the same through the reader and through an extract.
+#[test]
+fn a_unicode_member_name_goes_in_and_comes_back_as_its_utf8() {
+    let name = "ünïcödé — 日本語 🎬";
+    for format in [Format::Zip, Format::Tar] {
+        let t = TempTree::new("write-unicode");
+        t.file(format!("src/{name}/{name}.txt"), b"hello");
+        let dest = t.join(format!("unicode.{}", format.label()));
+        pack(vec![t.join(format!("src/{name}"))], dest.clone(), format);
+        let want = format!("{name}/{name}.txt");
+        let tree = list(&dest).unwrap();
+        assert_eq!(tree.get(&want).map(|e| e.len), Some(5), "{format:?}");
+        let bytes = std::fs::read(&dest).unwrap();
+        assert!(
+            bytes.windows(want.len()).any(|w| w == want.as_bytes()),
+            "{format:?}: the name is written as its UTF-8"
+        );
+        if format == Format::Zip {
+            // `zip_modes` asserts the UTF-8 flag on every record.
+            assert_eq!(zip_modes(&bytes).len(), 2);
+        }
+        let out = t.dir("out");
+        let plan = plan_extract(&tree, &[], &out);
+        crate::archive::extract(&plan, &TaskCtx::detached()).unwrap();
+        assert_eq!(std::fs::read(out.join(&want)).unwrap(), b"hello");
+    }
 }
 
 // ── Stored or deflated ──────────────────────────────────────────────────────
@@ -853,6 +909,13 @@ fn relative_to_cwd(path: &Path) -> PathBuf {
 #[test]
 fn a_relative_destination_lands_where_it_says() {
     let t = TempTree::new("write-relative");
+    let cwd = std::env::current_dir().unwrap();
+    if crate::path::root_of(&cwd) != crate::path::root_of(t.path()) {
+        // A Windows runner builds on one drive and keeps its temp directory
+        // on another: no relative path reaches from the one to the other.
+        eprintln!("skipping: the temp directory is on another drive");
+        return;
+    }
     let photos = photos(&t);
     let mut formats = vec![Format::Zip, Format::Tar];
     if on_path("7z").is_some() {
