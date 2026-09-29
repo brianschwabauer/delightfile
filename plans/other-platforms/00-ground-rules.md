@@ -155,9 +155,20 @@ Until Phase 3 lands, df-core assumes Unix paths. After Phase 3:
   cargo check -p df-core --target aarch64-apple-darwin   # or x86_64-pc-windows-msvc
   ```
   and the same with `--tests` to check the test target. df-core has no C
-  dependencies so `check` works without a linker for the target. **df-app cannot be
-  cross-checked locally**: `ffmpeg-sys-next`'s build script needs the target's FFmpeg
-  headers. df-app is only checked on the CI runners (`06-build-and-release.md`).
+  dependencies so `check` works without a linker for the target. df-app has
+  two build scripts that want the target's C toolchain — `ffmpeg-sys-next`
+  runs bindgen over the FFmpeg headers, and `libsqlite3-sys` compiles its
+  bundled SQLite — and `check` needs neither's output to be right, only to
+  exist. So for macOS it is checked (never built) with three more variables:
+  `FFMPEG_DIR` naming a directory whose `include` is a link to `/usr/include`
+  (Arch's FFmpeg 9 headers), `BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_darwin=
+  --target=x86_64-unknown-linux-gnu` so bindgen parses them as the host does
+  (LP64 either way; only the Rust types matter to `check`), and
+  `CC_aarch64_apple_darwin`/`AR_aarch64_apple_darwin` naming two small
+  scripts that write an empty object and an empty archive. `cargo check` and
+  `cargo clippy --all-targets` for `-p df-app --target aarch64-apple-darwin`
+  then type-check everything, the objc2 calls included. Only the runners
+  build, link and run it (`06-build-and-release.md`).
 - Nothing about the macOS or Windows *UI* can be verified from Linux. Every task
   that changes on-screen behaviour on those targets is marked done at "compiles and
   unit tests pass" and is listed in `07-verification.md` for a human pass. Do not
@@ -196,6 +207,11 @@ Until Phase 3 lands, df-core assumes Unix paths. After Phase 3:
   with rustup would change the toolchain every Linux build uses; a side
   toolchain at the same version checks the foreign targets and leaves the daily
   build exactly as it was (§6).
+- (df-app) 2026-09-29 — df-app *is* cross-checked for macOS locally, with
+  stand-ins for the two C build steps (§6). Reason: a runner round trip is
+  twelve minutes, and every AppKit call Phase 2 makes is otherwise first
+  compiled there; the check proves the types, the runner still proves the
+  link and the behaviour.
 
 ## Open questions
 

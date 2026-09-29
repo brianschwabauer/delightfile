@@ -535,6 +535,9 @@ mod tests {
     /// The mapping from a trash record to a row, pinned: the in-trash name, the
     /// real path, and the deletion date standing in for the modification time.
     #[test]
+    // The freedesktop trash's layout (`<trash>/files/<name>`), which is
+    // Linux's: macOS keeps no such layout (02-macos.md M2.8, M2.34).
+    #[cfg(target_os = "linux")]
     fn a_trash_record_becomes_a_list_pane_row() {
         let i = item(
             "notes_1.txt",
@@ -686,6 +689,9 @@ mod tests {
     /// Every path a restore can be refused on, against a real tree — including
     /// the one PLAN §5 exists for: the original name being taken again.
     #[test]
+    // The freedesktop trash's layout (`<trash>/files/<name>`), which is
+    // Linux's: macOS keeps no such layout (02-macos.md M2.8, M2.34).
+    #[cfg(target_os = "linux")]
     fn a_restore_is_refused_rather_than_overwriting_newer_work() {
         let tree = df_core::test_support::TempTree::new("trashview-restore");
         let root = tree.path();
@@ -739,6 +745,9 @@ mod tests {
     /// A row is found by the name the pane keys everything else by, and a set
     /// of selected paths comes back as the items they name.
     #[test]
+    // The freedesktop trash's layout (`<trash>/files/<name>`), which is
+    // Linux's: macOS keeps no such layout (02-macos.md M2.8, M2.34).
+    #[cfg(target_os = "linux")]
     fn rows_map_back_to_the_records_they_came_from() {
         let view = View {
             items: vec![

@@ -808,8 +808,13 @@ mod tests {
     #[cfg(unix)]
     fn a_socket_is_left_out_in_the_toast_and_is_no_problem() {
         let (tree, mut app) = yanked("sync-app-special");
-        let _listener =
-            std::os::unix::net::UnixListener::bind(tree.join("src/photos/sock")).unwrap();
+        // Bound at a short path and moved into the tree: a socket's path must
+        // fit in `sun_path` (104 bytes on macOS), and the tree is deep inside
+        // a temporary directory that on macOS is already half that long.
+        let short = std::env::temp_dir().join(format!("df-sync-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&short);
+        let _listener = std::os::unix::net::UnixListener::bind(&short).unwrap();
+        std::fs::rename(&short, tree.join("src/photos/sock")).unwrap();
         app.run(Command::PasteSync, 10, Instant::now());
         compared(&mut app);
         key(&mut app, Key::Enter);
