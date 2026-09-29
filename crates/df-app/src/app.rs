@@ -42,7 +42,7 @@ use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::ModifiersState;
-use winit::window::{Window, WindowId};
+use winit::window::WindowId;
 
 use crate::archive::ExtractMode;
 use crate::chrome;
@@ -98,7 +98,7 @@ mod trash;
 /// being read, and at much under this the preview stops being worth its share.
 /// Tiled compositors override it immediately; it only decides the floating and
 /// first-run case.
-const WINDOW_SIZE: (f64, f64) = (1400.0, 900.0);
+pub(crate) const WINDOW_SIZE: (f64, f64) = (1400.0, 900.0);
 
 /// Wayland `app_id`. Matches the desktop file and whatever window rule the user
 /// writes, so it must never change casually.
@@ -2532,8 +2532,6 @@ impl App {
     }
 
     fn init_gfx(&mut self, event_loop: &ActiveEventLoop) -> Result<(), GfxError> {
-        use winit::platform::wayland::WindowAttributesExtWayland;
-
         let (title, app_id) = match &self.chooser {
             Some(chooser) => (
                 chooser.title.as_deref().unwrap_or(PICKER_TITLE),
@@ -2541,10 +2539,7 @@ impl App {
             ),
             None => (APP_ID, APP_ID),
         };
-        let attrs = Window::default_attributes()
-            .with_title(title)
-            .with_inner_size(winit::dpi::LogicalSize::new(WINDOW_SIZE.0, WINDOW_SIZE.1))
-            .with_name(app_id, app_id);
+        let attrs = crate::platform::window::attributes(title, app_id);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)

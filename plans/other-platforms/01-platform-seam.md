@@ -505,7 +505,7 @@ their native clipboards *are* synchronous.
       `df_core::platform::os::{as_bytes, from_bytes}` (Phase 3 P3.1) instead of
       `OsStrExt`. Done when: Linux tests in `clipboard.rs` pass; df-app compiles on
       all targets.
-- [>] **S1.24** `platform::mounts` (df-app): `Mounts::start(notify)`, `ask`, `drain`,
+- [x] **S1.24** `platform::mounts` (df-app): `Mounts::start(notify)`, `ask`, `drain`,
       `connect(url) -> Connected`, `list_shares()`, `TERMINAL_MOUNT: Option<&str>`.
       Linux = the moved worker. Stubs: `ask(Request::List)` answers
       `Reply::Listing { devices: vec![], shares: vec![] }`; every other request
@@ -532,8 +532,9 @@ their native clipboards *are* synchronous.
       `df_core::du::gvfs_root()` now (df-core's to place). The card's empty-state
       text is `Card::devices_empty`. The done-when is checked on Linux by
       `app::tests::an_empty_listing_leaves_the_places_and_the_connect_row`, which
-      feeds the stub's answer through a detached worker. — df-app agent, started
-      2026-09-29
+      feeds the stub's answer through a detached worker. — done 2ebad86, Linux
+      verified (the stubs type-check when selected on Linux), other targets
+      unverified until CI
 - [ ] **S1.25** `format.rs:189–222` (`civil_local`) → `df_core::platform::time::local_civil`
       (S1.10). `app.rs:7201–7255` (`set_mode`) → `df_core::platform::fs::apply_mode`.
       `trashview.rs:163–248` (`row_from`) → `df_core::platform::meta` (S1.7).
@@ -551,7 +552,7 @@ their native clipboards *are* synchronous.
       `spawn_detached`/`run_blocking` return `Err(io::Error::from(ErrorKind::Unsupported))`
       (Phase 4 W4.10 supplies the argv model). Done when: `open.rs` tests pass on
       Linux; compiles everywhere.
-- [ ] **S1.27** `platform::window::attributes(title: &str, app_id: &str) ->
+- [>] **S1.27** `platform::window::attributes(title: &str, app_id: &str) ->
       WindowAttributes`: Linux body is `app.rs:2111–2124` (`with_name` from
       `WindowAttributesExtWayland`); Windows body sets title and size only; macOS
       body sets title and size **and `with_option_as_alt(OptionAsAlt::Both)`**
@@ -562,6 +563,13 @@ their native clipboards *are* synchronous.
       keyboard-driven app, logged in `02-macos.md`. `app.rs:init_gfx` calls it.
       Done when: Linux unchanged; compiles everywhere (`winit::platform::wayland`
       and `winit::platform::macos` are not referenced outside `platform/`).
+      *As built:* each body builds on `Window::default_attributes()` with the
+      title and `app::WINDOW_SIZE` (now `pub(crate)`), so the size stays one
+      constant; `app_id` is unused off Linux. `WindowAttributesExtMacOS::
+      with_option_as_alt` and `OptionAsAlt::Both` checked against winit 0.30.13's
+      `src/platform/macos.rs` (the trait at :280, the method at :304, the enum at
+      :518); the macOS body is the one stub that cannot be type-checked on Linux.
+      — df-app agent, started 2026-09-29
 - [ ] **S1.28** `platform::gfx::PREFERRED_BACKENDS: wgpu::Backends` — Linux `VULKAN`
       (unchanged), macOS `METAL`, Windows `DX12`. `graphics.rs:92` reads it. The
       retry-with-all-backends path stays as is. The four Wayland-reasoning comments

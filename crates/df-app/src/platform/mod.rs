@@ -36,6 +36,7 @@
 //! | `mounts::system_gio` | `fn() -> mounts::Gio` | runs `gio` | answers every run `Unsupported` | S1.24 |
 //! | `mounts::Monitor` | `start(Notifier) -> Option<Monitor>`, `gone(&mut self) -> bool`, `started(&self) -> Instant`, `drain(&self) -> Vec<mounts::Event>` | `gio mount --monitor --detail` | `start` is `None`; no value exists | S1.24 |
 //! | `mounts::TERMINAL_MOUNT` | `Option<&str>` | the shell line that re-runs `gio mount` in a terminal | `None` | S1.24 |
+//! | `window::attributes` | `fn(title: &str, app_id: &str) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title, size, Option read as Alt; Windows: title, size | S1.27 |
 //! | `icon::{draw, Icon, Rgba, HOTSPOT}` | the drag icon's pixels | portable, drawn for the Wayland drag | same, unused until a native drag-out | S1.22 |
 //!
 //! The rows are the phase's checklist inside the code: each task of

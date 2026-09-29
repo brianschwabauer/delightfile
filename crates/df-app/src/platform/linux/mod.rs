@@ -14,3 +14,4 @@ pub mod mounts;
 /// `org.freedesktop.FileManager1` ("Show in folder").
 pub mod portal;
 mod wayland;
+pub mod window;
