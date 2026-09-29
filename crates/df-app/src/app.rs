@@ -4710,9 +4710,20 @@ impl App {
         }
     }
 
+    /// The line under the list pane when it is the trash and the trash is
+    /// empty ([`crate::trashview::empty_note`]); `None` anywhere else.
+    fn trash_empty_note(&self) -> Option<String> {
+        self.tab()
+            .trash
+            .as_ref()
+            .and_then(|_| crate::trashview::empty_note(self.config.mgr.trash_keep_days))
+    }
+
     /// `D` in the trash, and "Empty trash" — the same job with a different
-    /// subject. Never journalled: there is nothing to record.
-    fn trash_purge(&mut self, items: Vec<df_core::ops::TrashedItem>, now: Instant) {
+    /// subject. Never journalled: there is nothing to record. `whole` is
+    /// "Empty trash", whose toast says so where the view does not list the
+    /// whole of the trash ([`crate::trashview::purged_whole`]).
+    fn trash_purge(&mut self, items: Vec<df_core::ops::TrashedItem>, whole: bool, now: Instant) {
         if items.is_empty() {
             self.toasts.notice("Nothing to destroy", now);
             return;
@@ -4742,7 +4753,10 @@ impl App {
                     )),
                     Some(message) => Err(message),
                     None => Ok(RemoteDone {
-                        message: format!("Destroyed {}", plural(gone, "item", "items")),
+                        message: crate::trashview::purged_whole(
+                            format!("Destroyed {}", plural(gone, "item", "items")),
+                            whole,
+                        ),
                         ..RemoteDone::default()
                     }),
                 };
@@ -5055,7 +5069,8 @@ impl App {
                     .as_ref()
                     .map(|view| view.items_for(&confirm.paths))
                     .unwrap_or_default();
-                self.trash_purge(items, now);
+                let whole = confirm.kind == ConfirmKind::EmptyTrash;
+                self.trash_purge(items, whole, now);
                 return;
             }
         };
@@ -18310,11 +18325,7 @@ impl App {
             });
         }
         self.paint_scrollbar(&paint, Column::Parent, parent_bar, now);
-        let keep_note = self
-            .tab()
-            .trash
-            .as_ref()
-            .and_then(|_| crate::trashview::keep_text(self.config.mgr.trash_keep_days));
+        let keep_note = self.trash_empty_note();
         let list_view = ListView {
             pane: layout.list,
             ground: list_ground,
@@ -22126,6 +22137,33 @@ mod tests {
         app.run(Command::Trash, 10, now);
         assert_eq!(toast_text(&app), refusal);
         assert!(app.files.join("a.txt").exists(), "d deleted nothing");
+    }
+
+    /// An empty trash view says, under its "empty", what the platform's
+    /// trash cannot show: on macOS that only what delightfile trashed is
+    /// listed, since Finder's own items have no record here (M2.9); on Linux,
+    /// which lists the whole freedesktop trash, its clock.
+    #[test]
+    fn an_empty_trash_says_what_it_lists() {
+        let mut app = Fixture::new("trash-note", &["a.txt"]);
+        let now = Instant::now();
+        let root = app.files.parent().expect("sandbox").join("Trash");
+        std::fs::create_dir_all(root.join("files")).expect("files");
+        std::fs::create_dir_all(root.join("info")).expect("info");
+        app.trash_home = Some(root);
+        let origin = app.files.clone();
+        app.show_trash(origin, now);
+        assert!(app.tab().trash.is_some(), "the view opened");
+        assert_eq!(app.tab().cwd.dir.total(), 0);
+        let expected = if cfg!(target_os = "macos") {
+            Some(
+                "Only files trashed from delightfile are listed — Finder's Trash may hold more"
+                    .to_string(),
+            )
+        } else {
+            crate::trashview::keep_text(app.config.mgr.trash_keep_days)
+        };
+        assert_eq!(app.trash_empty_note(), expected);
     }
 
     /// A quit that never came through `finish` — Cmd+Q on macOS, which winit
