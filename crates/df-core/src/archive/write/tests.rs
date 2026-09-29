@@ -1159,8 +1159,10 @@ fn the_real_tools_accept_what_is_written() {
         assert!(tool_accepts("7z", &["t"], &tgz), "7z t on the tar.gz");
     }
     // The program `on_path` found, by its own name: on Windows bsdtar is
-    // `tar.exe`.
-    if let Some(bsdtar) = on_path("bsdtar") {
+    // `tar.exe` — which lists a zip's UTF-8 names in the ANSI code page and
+    // fails on one it has no characters for (日本語), a fact about the
+    // console rather than the archive; 7-Zip above has read the same zip.
+    if let Some(bsdtar) = on_path("bsdtar").filter(|_| !cfg!(windows)) {
         assert!(tool_accepts(&bsdtar, &["-tf"], &zip), "bsdtar on the zip");
     }
 }
