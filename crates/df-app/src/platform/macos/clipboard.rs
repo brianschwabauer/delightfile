@@ -274,7 +274,12 @@ mod tests {
         let board = private();
         let png = b"\x89PNG\r\n\x1a\nnot really the rest of a png";
         copy_to(&board, Some("image/png"), png).expect("copied");
-        assert_eq!(offered_by(&board), vec!["image/png".to_string()]);
+        // First under its own type; the pasteboard server adds the TIFF it
+        // can convert any image to, which is its offer, not ours.
+        assert_eq!(
+            offered_by(&board).first().map(String::as_str),
+            Some("image/png")
+        );
         assert_eq!(paste_from(&board, "image/png").expect("pasted"), png);
         assert!(
             copy_to(&board, Some("image/avif"), b"not a png").is_err(),
