@@ -44,7 +44,7 @@ use std::thread::JoinHandle;
 
 use super::request::Setup;
 use super::{invalid_args, no_interface, no_property, with_args, INTROSPECTABLE, PEER, PROPERTIES};
-use crate::dbus::{Message, Value};
+use crate::platform::linux::dbus::{Message, Value};
 
 /// The name "Show in folder" asks the session bus for.
 pub const BUS_NAME: &str = "org.freedesktop.FileManager1";
@@ -391,7 +391,7 @@ mod tests {
     #![allow(clippy::unwrap_used)] // tests: a broken fixture should panic
 
     use super::*;
-    use crate::dbus::{MSG_ERROR, MSG_METHOD_RETURN};
+    use crate::platform::linux::dbus::{MSG_ERROR, MSG_METHOD_RETURN};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     use std::time::{Duration, Instant};

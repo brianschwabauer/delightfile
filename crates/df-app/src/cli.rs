@@ -31,7 +31,7 @@
 //! Three switches are all a wrapper *can* pass. `--chooser-request` is the
 //! rest of the dialog — its title, the caller's button label, the suggested
 //! name, where to start, the file-type filters — as a small TOML file that
-//! `delightfile --portal` (see [`crate::portal`]) writes for each dialog it
+//! `delightfile --portal` (see [`crate::platform::portal`]) writes for each dialog it
 //! is asked for and removes once the window has answered.
 //!
 //! `--reveal` is the file manager's side of the same service: "Show in
@@ -378,7 +378,7 @@ pub fn read_request(path: &Path, out: PathBuf) -> Result<(Chooser, Option<PathBu
     parse_request(&text, path, out)
 }
 
-/// The request file's text, understood — the format `crate::portal` writes:
+/// The request file's text, understood — the format `crate::platform::portal` writes:
 ///
 /// ```toml
 /// kind = "open"            # or "save", or "save-files" (a folder to save into)

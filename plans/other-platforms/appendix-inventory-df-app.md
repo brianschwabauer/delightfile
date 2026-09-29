@@ -151,7 +151,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 394-415 | `pub fn offered_types() -> Result<Vec<String>, ClipError>`: `wl-paste --list-types` `.output()` | Linux-only | App::paste_system (13361), App::paste_into_prompt (13439) | Blocking, on the UI thread. |
 | 417-431 | `pub fn paste(mime: &str) -> Result<Vec<u8>, ClipError>`: `wl-paste --no-newline --type <mime>` `.output()` | Linux-only | App::paste_via_wl_paste (12908), App::expire_clipboard (12894), App::paste_system (13382), App::paste_into_prompt (13450) | Blocking, on the UI thread. |
 
-### src/dbus.rs — Linux-only module (see block at end of this section)
+### src/dbus.rs — Linux-only module (see block at end of this section) ✓ S1.21 (now `src/platform/linux/dbus.rs`)
 
 ### src/dnd.rs (1,140 lines; non-test 1-697)
 
@@ -214,12 +214,12 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
 | 1-9 | crate doc "file manager for Wayland"; no crate-level attributes (no `#![windows_subsystem = "windows"]`) | Windows-differs | — | Without the attribute a Windows build is a console-subsystem binary and opens a console window. |
-| 10-65 | unconditional `mod` list including `clipboard` (15), `dbus` (16), `mounts` (34), `portal` (41), `wayland` (63) | Linux-only modules compiled everywhere | — | — |
+| 10-65 | unconditional `mod` list including `clipboard` (15), `dbus` (16), `mounts` (34), `portal` (41), `wayland` (63) | Linux-only modules compiled everywhere | — | — ✓ S1.21 |
 | 83-85 | `env_logger::Builder::from_env(Env::default().default_filter_or("info")).format_timestamp_millis().init()` | portable (stderr) | main | — |
 | 87 | `cli::parse(std::env::args().skip(1))` | all platforms | main | `std::env::args()` panics on an argument that is not valid Unicode. |
 | 88-92 | comment "building a loop would open a Wayland connection"; `cli::Outcome::Portal => std::process::exit(portal::run())` | Linux-only | main | — |
 
-### src/mounts.rs — Linux-only module (see block at end of this section)
+### src/mounts.rs — Linux-only module (see block at end of this section) ✓ S1.21 (worker now `src/platform/linux/mounts.rs`)
 
 ### src/open.rs (615 lines; non-test 1-378)
 
@@ -241,7 +241,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 549 | `"Type to search. Esc to close, Ctrl+s to stop."` | text | paint_search | §3. |
 | 727-760 | `fn path_text(painter, pos, path: &str, bright, dim, max_width) -> f32`: `path.rfind('/')` splits dim directory / bright name (741) | Windows-differs (display) | overlay::paint_search (618, 638) with `hit.relative` from search.rs | — |
 
-### src/portal/mod.rs, src/portal/request.rs — Linux-only module (see block at end of this section)
+### src/portal/mod.rs, src/portal/request.rs — Linux-only module (see block at end of this section) ✓ S1.21 (now `src/platform/linux/portal/`, with `show.rs` since 2ec71f3)
 
 ### src/preview/decode.rs (1,570 lines; non-test 1-1098)
 
@@ -313,7 +313,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 297-326 | `pub fn deleted_at(text: &str) -> Option<SystemTime>`: parses `YYYY-MM-DDThh:mm:ss` as UTC | portable | `row_from` (237) | Format is df-core's trashinfo `DeletionDate`. |
 | 339-381 | `pub fn restore_refusal(item: &TrashedItem) -> Option<String>`: `symlink_metadata` on `item.files_path()`, `original`, `original.parent()` | portable API | App::trash_restore (4115) | — |
 
-### src/wayland/mod.rs, src/wayland/icon.rs — Linux-only module (see block below)
+### src/wayland/mod.rs, src/wayland/icon.rs — Linux-only module (see block below) ✓ S1.21 (now `src/platform/linux/wayland/`; `icon.rs` is `src/platform/icon.rs`, S1.22)
 
 ### src/window.rs (319 lines; non-test 1-208)
 
@@ -327,7 +327,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 ### Linux-only module blocks
 
-#### `src/wayland/` — `mod.rs` 1,447 lines (non-test 1-1378, `mod tests` 1379-1447, 5 tests) + `icon.rs` 391 lines (non-test 1-267, `mod tests` 268-391, 6 tests)
+#### `src/wayland/` — `mod.rs` 1,447 lines (non-test 1-1378, `mod tests` 1379-1447, 5 tests) + `icon.rs` 391 lines (non-test 1-267, `mod tests` 268-391, 6 tests) ✓ S1.21
 
 What it rests on: the crate `wayland_client` (imports mod.rs:146-164) adopting winit's `wl_display` via `Backend::from_foreign_display` (mod.rs:335), `std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd}` (mod.rs:139), and `libc::pipe2` (437), `libc::write` (452), `libc::poll`/`pollfd` (459-472), `libc::read` (485), `libc::memfd_create` (847), all under `#![allow(unsafe_code)]` (mod.rs:133). It runs one thread named `df-wayland` (mod.rs:348-350) that binds its own `wl_seat`/`wl_pointer`/`wl_keyboard` for input serials, and has 5 s `SEND_TIMEOUT` / `RECEIVE_TIMEOUT` (176, 181). `icon.rs` is pure pixel code: premultiplied `Argb8888` into a `wl_shm` pool, with little-endian `B G R A` byte order hard-coded (icon.rs:18-21, 149). It uses no OS API itself but is only reachable through `mod icon;` (mod.rs:135).
 
@@ -368,7 +368,7 @@ Call sites outside the module (the seam):
 | (inbound) wayland/mod.rs:1242-1243 | `Dispatch<WlDataDevice>::event` (`Enter`) | calls `crate::dnd::is_ours(&mimes)`, `crate::dnd::wanted_mime(&mimes)` |
 | (inbound) wayland/mod.rs:168, 257, 262 | — | `crate::app::Waker`, `crate::format::human_size` |
 
-#### `src/dbus.rs` — 2,976 lines (non-test 1-1808, except `#[cfg(test)]` items `Value::bytes` 261-265, `encode_message` 1135-1161, `push_field` 1445-1451, `push_signature_field` 1453-1459; tests `mod tests` 1809-2387, `mod hostile` 2388-2482, `mod generic` 2483-2976, 32 tests)
+#### `src/dbus.rs` — 2,976 lines (non-test 1-1808, except `#[cfg(test)]` items `Value::bytes` 261-265, `encode_message` 1135-1161, `push_field` 1445-1451, `push_signature_field` 1453-1459; tests `mod tests` 1809-2387, `mod hostile` 2388-2482, `mod generic` 2483-2976, 32 tests) ✓ S1.21
 
 What it rests on: `std::os::unix::ffi::OsStringExt` (55), `std::os::unix::net::UnixStream` (56; fields at 460, 849, 902; `try_clone` 562). `SYSTEM_BUS = "/run/dbus/system_bus_socket"` (106), overridden by `DBUS_SYSTEM_BUS_ADDRESS` (485). `session_address()` (1044-1056) reads `DBUS_SESSION_BUS_ADDRESS`, then `DBUS_STARTER_ADDRESS`, then `$XDG_RUNTIME_DIR/bus`. SASL `AUTH EXTERNAL` uses `uid()`, which reads `/proc/self` via `std::os::unix::fs::MetadataExt::uid` (961-968, used at 587). `BusSocket::Abstract` connects with `std::os::linux::net::SocketAddrExt` + `std::os::unix::net::SocketAddr::from_abstract_name` (984-989); that one is Linux-only, not available on macOS. `bus_socket` builds `OsString::from_vec` paths (1006). The client is hand-rolled; there is no zbus.
 
@@ -455,7 +455,7 @@ Call sites outside the module (only `mounts` and `portal` use it):
 | portal/mod.rs:164-460 | `Service::answer`, `with_args`, `properties`, `machine_id`, … | `call.kind`, `call.wants_reply()`, `call.path/member/interface`, `call.args()`, `Message::method_return`, `Message::error`, `.with_args`, `Value::*`, `Outbox::send` (393) |
 | portal/request.rs:27 | — | `use crate::dbus::Value;` (`Dialog::from_args` 122-190 uses `Value::{Path, Str, Dict, Array, Struct, U32}`, `as_str`, `as_bool`, `as_bytes`, `peeled`) |
 
-#### `src/portal/` — `mod.rs` 696 lines (non-test 1-578, tests 579-696, 3 tests) + `request.rs` 1,225 lines (non-test 1-713, tests 714-1225, 11 tests)
+#### `src/portal/` — `mod.rs` 696 lines (non-test 1-578, tests 579-696, 3 tests) + `request.rs` 1,225 lines (non-test 1-713, tests 714-1225, 11 tests) ✓ S1.21
 
 What it rests on: `crate::dbus` on the **session** bus (`Bus::session`, mod.rs:94). It owns `org.freedesktop.impl.portal.desktop.delightfile` at `/org/freedesktop/portal/desktop` and answers `org.freedesktop.impl.portal.FileChooser.{OpenFile, SaveFile, SaveFiles}`, `org.freedesktop.impl.portal.Request.Close`, `Properties`, `Introspectable` and `Peer`. `Peer.GetMachineId` reads `/etc/machine-id` (mod.rs:458-464). Each dialog runs on its own `portal-request` thread (mod.rs:254-256). On the request.rs side:
 - It imports `std::os::unix::ffi::{OsStrExt, OsStringExt}` (18) and `std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt}` (19).
@@ -509,7 +509,7 @@ Call sites outside the module:
 | (inbound) request.rs:351 | `Setup::from_env` | `df_core::state::state_path_from(var("XDG_STATE_HOME"), var("HOME"))` |
 | tests/portal.rs | integration | runs `CARGO_BIN_EXE_delightfile --portal` on a private `dbus-daemon` (see §7) |
 
-#### `src/mounts.rs` — 2,875 lines (non-test 1-1887, `mod tests` 1888-2875, 21 tests)
+#### `src/mounts.rs` — 2,875 lines (non-test 1-1887, `mod tests` 1888-2875, 21 tests) ✓ S1.21 (split)
 
 What it rests on:
 - **udisks2 over the system bus** through `crate::dbus` (88-96; `Bus::system` 1036).

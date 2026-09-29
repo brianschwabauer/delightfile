@@ -15,7 +15,6 @@ mod bulk;
 mod chrome;
 mod cli;
 mod clipboard;
-mod dbus;
 mod dialog;
 mod divider;
 mod dnd;
@@ -46,9 +45,6 @@ mod permissions;
 /// Everything that differs by operating system, behind one set of names.
 mod platform;
 mod playback;
-/// `--portal`: the xdg-desktop-portal file-chooser backend, and
-/// `org.freedesktop.FileManager1` ("Show in folder").
-mod portal;
 mod preview;
 /// Remote services browsed as directories (PLAN §7.6).
 mod remote;
@@ -71,7 +67,6 @@ mod usage;
 mod viewport;
 /// More than one window (PLAN §2): `Ctrl+N`, and dragging a tab out.
 mod watchdog;
-mod wayland;
 mod whichkey;
 mod window;
 
@@ -99,7 +94,7 @@ fn main() {
         cli::Outcome::Run(args) => args,
         // Before the event loop: the backend has no window, and building a
         // loop would open a Wayland connection it never uses.
-        cli::Outcome::Portal => std::process::exit(portal::run()),
+        cli::Outcome::Portal => std::process::exit(platform::portal::run()),
         cli::Outcome::Print(text) => {
             print!("{text}");
             return;

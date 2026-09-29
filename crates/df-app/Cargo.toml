@@ -72,11 +72,11 @@ miniz_oxide.workspace = true
 # registry framework on top of objects `wayland::State` holds directly. Neither
 # is new to the tree — winit builds both — so this is the smaller of two
 # already-compiled options, and the protocol-faithful one. The module essay in
-# `src/wayland/mod.rs` defends why hand-rolling the wire, the house answer
-# everywhere else, is *impossible* here rather than merely harder. Linux only:
-# winit builds its own Wayland crates for no other target, so anywhere else
-# this would be a second copy of them and a `wayland-client` system library to
-# find.
+# `src/platform/linux/wayland/mod.rs` defends why hand-rolling the wire, the
+# house answer everywhere else, is *impossible* here rather than merely harder.
+# Linux only: winit builds its own Wayland crates for no other target, so
+# anywhere else this would be a second copy of them and a `wayland-client`
+# system library to find.
 wayland-client.workspace = true
 
 [dev-dependencies]

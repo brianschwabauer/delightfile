@@ -429,7 +429,7 @@ their native clipboards *are* synchronous.
       without the target installed, so this one also runs on Linux.)
       — done 29726ca, Linux verified (`cargo tree` for both other targets names no
       `wayland-*`), other targets unverified until CI
-- [ ] **S1.21** `git mv crates/df-app/src/wayland crates/df-app/src/platform/linux/wayland`,
+- [>] **S1.21** `git mv crates/df-app/src/wayland crates/df-app/src/platform/linux/wayland`,
       `git mv src/dbus.rs src/platform/linux/dbus.rs`, `git mv src/portal
       src/platform/linux/portal`, and split `src/mounts.rs`: the model and card
       (`Device`, `Share`, `Address`, `Spec`, `Request`, `Reply`, `Card`, `Item`,
@@ -445,6 +445,26 @@ their native clipboards *are* synchronous.
       Update `main.rs:10–65`'s `mod` list: `wayland`, `dbus`, `portal` are gone from
       it; `mod platform;` is added. Done when: Linux builds, all moved tests pass
       from their new paths, `tests/portal.rs` gets `#![cfg(target_os = "linux")]`.
+      *As built (the code moved on after this plan):* `mounts.rs` now also holds
+      the phones (`Phone`, `Protocol`, `phones_from`), the watcher's readers
+      (`Change`, `Event`, `Blocks`, `event_from`, `listen`, `restart_due`), `Gio`
+      (how `gio` is run, so a test can stand in for it), `Answer`, `Cloud`, and
+      `mount_gio`/`unmount_gio`. What moved to `platform/linux/mounts.rs` is what
+      talks to the machine: the udisks2 names and `devices_from`,
+      `TERMINAL_MOUNT`, `ARRIVAL`, `gvfs_entries`, `GioListing` (was
+      `ShareListing`) and `list_shares`, `system_gio`, `gio_error`, `unmount_gio`
+      (was `unmount_share`), `mount_gio`, `connect`, the worker's loop `run` with
+      `udisks`/`handle`/`list_devices`, and `Monitor` (`gio mount --monitor`).
+      Three things stayed portable against the list above: the `Mounts` handle
+      (channels, `ask`, `drain`, `in_flight`, the test-only `detached`), whose
+      thread now runs `platform::mounts::run` (see S1.24); `gvfs_root`, which is
+      now `df_core::du::gvfs_root()` and so df-core's to place; and `listen` and
+      `first_line`, pure helpers the Linux worker calls (made `pub`). The card's
+      tests took their disks from `devices_from(&objects())`; they now use
+      `mounts::tests::disks()`, the same two rows, and a Linux test holds the two
+      equal. `icon.rs` moved in S1.22, and `mod platform;` was added in S1.2.
+      `wayland` and `dbus` are private to `platform::linux`; `portal` is public
+      there for `main`. — df-app agent, started 2026-09-29
 - [x] **S1.22** `platform::desktop` (df-app): `pub struct Desktop` with exactly the
       `DataDevice` API (`ready`, `set_selection`, `receive`, `drag`, `poll`) and
       `pub enum Event { Enter, Motion, Leave, Drop, DragEnded, Selection, Copied,
@@ -585,7 +605,7 @@ their native clipboards *are* synchronous.
       `Unsupported`, `App::refusal(Command::ShowTrash)` (and `Trash`) returns the
       message and the key toasts. Done when: the refusal test from S1.6 passes and
       Linux is unchanged.
-- [>] **S1.35** `platform::appearance` (df-app): the desktop's light or dark for
+- [x] **S1.35** `platform::appearance` (df-app): the desktop's light or dark for
       `[flavor] mode = "auto"` (the portal read and its `SettingChanged` watcher,
       which arrived after this plan was written). Move `src/appearance.rs` to
       `src/platform/linux/appearance.rs` with its history — the Linux body
@@ -604,7 +624,8 @@ their native clipboards *are* synchronous.
       session}`. Native bodies: M2.28, W4.31. Done when: Linux tests pass from their
       new paths (`platform::linux::appearance::tests`, `app/tests/appearance.rs`),
       Linux behaviour is unchanged, and df-app compiles on the macOS and Windows
-      runners with the stubs. — df-app agent, started 2026-09-29
+      runners with the stubs. — done a6b17de, Linux verified (the stubs type-check
+      when selected on Linux), other targets unverified until CI
 
 ## 4. Closing the phase
 
@@ -775,6 +796,14 @@ their native clipboards *are* synchronous.
   rather than delivering a `NoPreference`: the window lands on dark either way,
   and `theme-auto` then says it could not reach the setting instead of claiming
   to follow one. M2.28 and W4.31 carry the native bodies.
+- (df-app) 2026-09-29 — S1.21 split `mounts.rs` by what talks to the machine, not
+  by the plan's list, which predates the phones: gio's output readers stay
+  portable (pure, tested without gio), the processes and the bus move. The
+  `Mounts` handle stays portable too — only its thread's body, `run`, is per
+  target — because a stub needs the same channels, `in_flight` bookkeeping and
+  test-only `detached` as Linux, and three copies of those would drift. The card
+  tests' disk fixture became a plain `Vec<Device>` so it exists where
+  `dbus::Interfaces` does not; a Linux test pins it to what `devices_from` makes.
 
 ## Open questions
 

@@ -30,7 +30,7 @@
 //! that is supposed to be *finishing* it. Three more things would have had to
 //! change with it:
 //!
-//! 1. [`crate::wayland::DataDevice`] is built around **one** origin
+//! 1. `platform::linux::wayland::DataDevice` is built around **one** origin
 //!    `wl_surface`: it adopts a single surface pointer for `start_drag`, and it
 //!    tracks a single incoming offer for that surface. Two windows means a
 //!    surface→window map, per-surface enter/leave routing and per-window

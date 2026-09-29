@@ -54,9 +54,9 @@
 //!
 //! gvfs is asked through `gio`, its command-line front end, and not over
 //! D-Bus. Its mount tracker lives on the *session* bus behind an interface
-//! gvfs keeps private, where [`crate::dbus`] speaks only to the system bus;
-//! `gio mount` is the surface gvfs promises, and it is installed wherever gvfs
-//! is. The listing is two lines per mount and [`shares_from`] reads it as a
+//! gvfs keeps private, where this program's D-Bus client
+//! (`platform::linux::dbus`) speaks only to the system bus; `gio mount` is the
+//! surface gvfs promises, and it is installed wherever gvfs is. The listing is two lines per mount and [`shares_from`] reads it as a
 //! pure function, so the parsing is a test over a captured listing rather than
 //! something that needs a server.
 //!
@@ -114,6 +114,15 @@
 //! ([`mount_gio`]), which waits on a USB device that may be asking its owner
 //! whether to allow it.
 //!
+//! ## Where the worker lives
+//!
+//! Everything here that talks to this machine — udisks2, `gio`, gvfs-fuse's
+//! directory and the watcher — is Linux's, and lives with the worker's loop in
+//! `crate::platform::mounts`. This module is the card, the model, and the
+//! readers of what gio prints, which are pure and tested here. A platform
+//! with no body of its own yet has a worker that lists nothing and refuses
+//! the rest, so its card is the Places, the cloud rows and the connect row.
+//!
 //! ## When udisks2 is not there
 //!
 //! A notice, once, and no card. A machine without udisks2 is a machine without
@@ -128,23 +137,18 @@
 //! or from [`connect`] saying `gio` is missing. No phone is listed without
 //! `gvfs-mtp` (or a camera without `gvfs-gphoto2`), and with no `gio` there is
 //! no watcher either: nothing is started and nothing is said.
+//!
+//! [`devices_from`]: crate::platform::mounts::devices_from
+//! [`mount_gio`]: crate::platform::mounts::mount_gio
+//! [`Monitor`]: crate::platform::mounts::Monitor
+//! [`connect`]: crate::platform::mounts::connect
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
-use crate::dbus::{Bus, Interfaces, Value};
 use crate::viewport::Jump;
-
-/// The udisks2 names, in one place.
-const SERVICE: &str = "org.freedesktop.UDisks2";
-const MANAGER_PATH: &str = "/org/freedesktop/UDisks2";
-const OBJECT_MANAGER: &str = "org.freedesktop.DBus.ObjectManager";
-const BLOCK: &str = "org.freedesktop.UDisks2.Block";
-const FILESYSTEM: &str = "org.freedesktop.UDisks2.Filesystem";
-const DRIVE: &str = "org.freedesktop.UDisks2.Drive";
 
 /// How many rows the card shows before it scrolls, at most: a window too short
 /// for them gets fewer ([`window`]).
@@ -203,113 +207,6 @@ impl Device {
 /// What a disk's or a phone's row says where the mount point would be.
 const NOT_MOUNTED: &str = "not mounted";
 
-/// Turn a `GetManagedObjects` reply into the rows the card shows.
-///
-/// The filter, and why each half of it is there:
-///
-/// - **A `Filesystem` interface**, because a row that cannot be mounted is a row
-///   whose `Enter` does nothing. That drops the whole-disk objects (`/dev/sda`
-///   as opposed to `/dev/sda1`), swap partitions, and unformatted space.
-/// - **A `Drive`**, because everything else is a loop device, a ramdisk or a
-///   device-mapper node — real to the kernel and not what anybody means by
-///   "the disks".
-/// - **`HintIgnore` false**, which is udisks2's own "do not show this to a
-///   person" flag, set for things like the EFI system partition on some setups.
-///
-/// Sorted removable-first and then by label, because the answer to `M` is
-/// almost always the USB stick that was just plugged in.
-pub fn devices_from(objects: &[(String, Interfaces)]) -> Vec<Device> {
-    let drives: std::collections::HashMap<&str, &Interfaces> = objects
-        .iter()
-        .filter(|(_, interfaces)| interfaces.contains_key(DRIVE))
-        .map(|(path, interfaces)| (path.as_str(), interfaces))
-        .collect();
-
-    let mut out: Vec<Device> = Vec::new();
-    for (path, interfaces) in objects {
-        let (Some(block), Some(filesystem)) = (interfaces.get(BLOCK), interfaces.get(FILESYSTEM))
-        else {
-            continue;
-        };
-        let get =
-            |props: &std::collections::HashMap<String, Value>, key: &str| props.get(key).cloned();
-        if get(block, "HintIgnore")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let drive_path = get(block, "Drive")
-            .and_then(|v| v.as_str().map(str::to_string))
-            .filter(|path| path != "/");
-        let Some(drive_path) = drive_path else {
-            continue;
-        };
-        let drive = drives.get(drive_path.as_str()).and_then(|i| i.get(DRIVE));
-
-        let node = get(block, "Device")
-            .and_then(|v| v.as_bytestring())
-            .unwrap_or_default();
-        let label = get(block, "IdLabel")
-            .and_then(|v| v.as_str().map(str::to_string))
-            .filter(|label| !label.is_empty())
-            .unwrap_or_else(|| {
-                // No label: the device node's last component, which is what
-                // every other tool falls back to and what the user will
-                // recognise from `lsblk`.
-                node.rsplit('/').next().unwrap_or("disk").to_string()
-            });
-        let mount = get(filesystem, "MountPoints")
-            .and_then(|v| v.as_bytestrings())
-            .unwrap_or_default()
-            .into_iter()
-            .find(|m| !m.is_empty())
-            .map(PathBuf::from);
-
-        let drive_str = |key: &str| {
-            drive
-                .and_then(|props| props.get(key))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string()
-        };
-        let hardware = [drive_str("Vendor"), drive_str("Model")]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        out.push(Device {
-            object: path.clone(),
-            drive: Some(drive_path),
-            node,
-            label,
-            fs: get(block, "IdType")
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_default(),
-            size: get(block, "Size").and_then(|v| v.as_u64()).unwrap_or(0),
-            mount,
-            removable: drive
-                .and_then(|props| props.get("Removable"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            ejectable: drive
-                .and_then(|props| props.get("Ejectable"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            hardware,
-        });
-    }
-    out.sort_by(|a, b| {
-        b.removable
-            .cmp(&a.removable)
-            .then_with(|| a.label.to_lowercase().cmp(&b.label.to_lowercase()))
-            .then_with(|| a.node.cmp(&b.node))
-    });
-    out
-}
-
 // ── Network shares (gvfs) ───────────────────────────────────────────────────
 
 /// What the connect prompt takes: gvfs's network-share backends, and not
@@ -320,18 +217,6 @@ pub const SCHEMES: &[&str] = &["smb", "sftp", "ftp", "dav", "davs", "nfs"];
 
 /// [`SCHEMES`] as the prompt's error spells them.
 const SCHEME_LIST: &str = "smb://, sftp://, ftp://, dav://, davs:// or nfs://";
-
-/// The command a mount with questions to ask is re-run under, in a terminal
-/// where it can ask them. `$1` is the address, handed over as an *argument* by
-/// [`crate::open::spawn_detached`] and never spliced into this line: a URL is
-/// text somebody typed.
-pub const TERMINAL_MOUNT: &str = r#"setsid uwsm-app -- "${TERMINAL:-ghostty}" -e gio mount "$1""#;
-
-/// How long a new mount is given to appear under gvfs-fuse's directory after
-/// `gio mount` has said it is done. gvfs-fuse hears about mounts over D-Bus, a
-/// moment after the mount itself; two seconds is far more than that moment and
-/// far less than a user waiting on a window that is not going to change.
-const ARRIVAL: Duration = Duration::from_secs(2);
 
 /// One mounted network share: a row in the Network section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -916,141 +801,18 @@ pub fn gvfs_root() -> PathBuf {
     df_core::du::gvfs_root()
 }
 
-/// The names in gvfs-fuse's directory; none when it is not there.
-fn gvfs_entries(root: &Path) -> Vec<String> {
-    std::fs::read_dir(root)
-        .map(|dir| {
-            dir.flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// `gio mount -li`, started and not yet waited for.
-///
-/// In two halves because gio spends half a second of every listing waiting for
-/// gvfs's volume monitors to report in, whatever there is to report. So the
-/// worker starts it, asks udisks2 its question while gio waits, and collects
-/// both: one round trip for the card, with the quicker half hidden inside the
-/// slower one.
-///
-/// `-i` for the activation root a phone's volume is mounted by, which the
-/// plain listing leaves out; the rest of what it adds is indented under the
-/// line it is about, where the share parser does not look.
-struct GioListing(Option<std::process::Child>);
-
-impl GioListing {
-    fn start() -> GioListing {
-        let child = Command::new("gio")
-            .args(["mount", "-li"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn();
-        GioListing(match child {
-            Ok(child) => Some(child),
-            Err(e) => {
-                log::debug!("gio mount -li did not start: {e}");
-                None
-            }
-        })
-    }
-
-    /// The phones and the shares. No gio, or a gio that failed, is neither: a
-    /// machine without gvfs has nothing mounted through it.
-    fn finish(self) -> (Vec<Phone>, Vec<Share>) {
-        let Some(child) = self.0 else {
-            return (Vec::new(), Vec::new());
-        };
-        let Ok(output) = child.wait_with_output() else {
-            return (Vec::new(), Vec::new());
-        };
-        let listing = String::from_utf8_lossy(&output.stdout);
-        let root = gvfs_root();
-        let entries = gvfs_entries(&root);
-        (
-            phones_from(&listing, &root, &entries),
-            shares_from(&listing, &root, &entries),
-        )
-    }
-}
-
-/// Every share gvfs has mounted, now. Blocks for as long as gio does.
-pub fn list_shares() -> Vec<Share> {
-    GioListing::start().finish().1
-}
-
 /// How this program runs one `gio` command to its end: `gio` itself
 /// ([`system_gio`]), or a test's stand-in, which notes what it was asked and
 /// answers the way gio would have. The mounts and unmounts go through it; the
 /// listing, which is started and collected in two halves, does not.
+///
+/// [`system_gio`]: crate::platform::mounts::system_gio
 pub type Gio =
     std::sync::Arc<dyn Fn(&[&str]) -> std::io::Result<std::process::Output> + Send + Sync>;
 
-/// The real `gio`, its stdin closed, so a question it asks is answered by
-/// end-of-file ([`attempt`]).
-pub fn system_gio() -> Gio {
-    std::sync::Arc::new(|args: &[&str]| {
-        Command::new("gio").args(args).stdin(Stdio::null()).output()
-    })
-}
-
-/// A `gio` that could not be started, as a sentence.
-fn gio_error(e: &std::io::Error) -> String {
-    if e.kind() == std::io::ErrorKind::NotFound {
-        "gio is not installed: network shares need gvfs".to_string()
-    } else {
-        format!("gio: {e}")
-    }
-}
-
 /// The first line of `text` with anything on it.
-fn first_line(text: &str) -> Option<&str> {
+pub fn first_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).find(|line| !line.is_empty())
-}
-
-/// `u` on a share, or on a phone: `gio mount -u <url>`, which is what a
-/// desktop's own eject button beside either does.
-fn unmount_gio(url: &str, gio: &Gio) -> Reply {
-    match gio(&["mount", "-u", url]) {
-        Ok(output) if output.status.success() => Reply::Unmounted,
-        Ok(output) => Reply::Failed(
-            first_line(&String::from_utf8_lossy(&output.stderr))
-                .unwrap_or("gio could not unmount it")
-                .to_string(),
-        ),
-        Err(e) => Reply::Failed(gio_error(&e)),
-    }
-}
-
-/// `Enter` or `m` on a phone or a camera: `gio mount <root>`, nobody there to
-/// answer anything. Called on a task-engine worker, since a phone takes a
-/// moment to open and may be asking its owner whether to allow it.
-///
-/// Mounted, or gio's own first words about why not. A device asks no
-/// questions — MTP has no password — so where a share would fall back to a
-/// terminal ([`Connected::NeedsTerminal`]) this has nothing to fall back to,
-/// and "already mounted" is mounted, as it is for a share.
-pub fn mount_gio(root: &str, gio: &Gio) -> Connected {
-    let output = match gio(&["mount", root]) {
-        Ok(output) => output,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Connected::Failed("gio is not installed: phones need gvfs".to_string())
-        }
-        Err(e) => return Connected::Failed(gio_error(&e)),
-    };
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status.success() || stderr.to_lowercase().contains("already mounted") {
-        return Connected::Mounted(None);
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Connected::Failed(
-        first_line(&stderr)
-            .or_else(|| first_line(&stdout))
-            .unwrap_or("gio mount failed without saying why")
-            .to_string(),
-    )
 }
 
 /// What the card says to somebody whose phone would not open because of the
@@ -1153,6 +915,8 @@ pub fn attempt(success: bool, stdout: &str, stderr: &str) -> Attempt {
 }
 
 /// What [`connect`] came to.
+///
+/// [`connect`]: crate::platform::mounts::connect
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Connected {
     /// Mounted, and where to go: inside the share, at the path the address
@@ -1162,46 +926,6 @@ pub enum Connected {
     Mounted(Option<PathBuf>),
     NeedsTerminal,
     Failed(String),
-}
-
-/// `gio mount <url>` with stdin closed, and then where the mount is.
-///
-/// Called on a task-engine worker: it blocks for as long as the server takes
-/// to answer, and then for as long as gvfs-fuse takes to show the mount.
-pub fn connect(url: &str, gio: &Gio) -> Connected {
-    let output = match gio(&["mount", url]) {
-        Ok(output) => output,
-        Err(e) => return Connected::Failed(gio_error(&e)),
-    };
-    match attempt(
-        output.status.success(),
-        &String::from_utf8_lossy(&output.stdout),
-        &String::from_utf8_lossy(&output.stderr),
-    ) {
-        Attempt::Mounted => {}
-        Attempt::NeedsTerminal => return Connected::NeedsTerminal,
-        Attempt::Failed(message) => return Connected::Failed(message),
-    }
-    let Some(address) = Address::parse(url) else {
-        return Connected::Mounted(None);
-    };
-    let Some((share, within)) = landing(&list_shares(), &address) else {
-        return Connected::Mounted(None);
-    };
-    let deadline = Instant::now() + ARRIVAL;
-    while !share.is_dir() {
-        if Instant::now() >= deadline {
-            return Connected::Mounted(None);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    // A path inside the share that is not there — a typo after the share's
-    // name — still lands in the share, which is the nearest true answer.
-    let inside = share.join(&within);
-    if within.as_os_str().is_empty() || !inside.is_dir() {
-        return Connected::Mounted(Some(share));
-    }
-    Connected::Mounted(Some(inside))
 }
 
 /// Where `address` lands among the mounted shares: the share it is on, and
@@ -1316,7 +1040,7 @@ pub enum Reply {
     Unmounted,
     Ejected,
     /// Something failed, already turned into a sentence by
-    /// [`crate::dbus::readable_error`] or taken from gio's own stderr.
+    /// `platform::linux::dbus::readable_error` or taken from gio's own stderr.
     Failed(String),
 }
 
@@ -1343,7 +1067,7 @@ impl Mounts {
         let (reply_tx, reply_rx) = unbounded::<Answer>();
         let handle = std::thread::Builder::new()
             .name("df-mounts".to_string())
-            .spawn(move || run(rx, reply_tx, notify, gio));
+            .spawn(move || crate::platform::mounts::run(rx, reply_tx, notify, gio));
         let worker = match handle {
             Ok(h) => Some(h),
             Err(e) => {
@@ -1419,108 +1143,6 @@ impl Drop for Mounts {
             let _ = worker.join();
         }
     }
-}
-
-/// The worker loop.
-///
-/// The connection is opened lazily and kept: a card that is opened and closed
-/// four times should not authenticate four times, and a connection that has
-/// gone away is reopened on the next request rather than being an error the
-/// user has to do something about.
-fn run(
-    requests: Receiver<Request>,
-    replies: Sender<Answer>,
-    notify: df_core::fs::Notifier,
-    gio: Gio,
-) {
-    let mut bus: Option<Bus> = None;
-    for request in requests {
-        let reply = match &request {
-            // gio, not the system bus: a share or a phone is put away whether
-            // or not udisks2 is there to be asked.
-            Request::GioUnmount(url) => unmount_gio(url, &gio),
-            _ => udisks(&mut bus, &request),
-        };
-        let _ = replies.send(Answer { to: request, reply });
-        notify();
-    }
-}
-
-/// One request that needs udisks2, over the kept connection.
-fn udisks(bus: &mut Option<Bus>, request: &Request) -> Reply {
-    if bus.is_none() {
-        match Bus::system() {
-            Ok(connected) => *bus = Some(connected),
-            Err(e) => return Reply::Failed(e),
-        }
-    }
-    let Some(connection) = bus.as_mut() else {
-        return Reply::Failed("the system bus is not connected".to_string());
-    };
-    match handle(connection, request) {
-        Ok(reply) => reply,
-        Err(e) => {
-            // A broken connection is dropped so the next request reopens it; a
-            // refusal is not, because the connection is fine.
-            if e.contains("closed the connection") || e.contains("reading from") {
-                *bus = None;
-            }
-            Reply::Failed(e)
-        }
-    }
-}
-
-fn handle(bus: &mut Bus, request: &Request) -> Result<Reply, String> {
-    match request {
-        Request::List => {
-            // gio first, and collected last: see [`GioListing`]. Collected
-            // whatever udisks2 said, so a failed call does not leave the child
-            // behind unreaped.
-            let gio = GioListing::start();
-            let devices = list_devices(bus);
-            let (phones, shares) = gio.finish();
-            Ok(Reply::Listing {
-                devices: devices?,
-                phones,
-                shares,
-            })
-        }
-        Request::Mount(object) => {
-            let mut args = Vec::new();
-            crate::dbus::marshal_no_options(&mut args);
-            let body = bus.call(SERVICE, object, FILESYSTEM, "Mount", Some("a{sv}"), &args)?;
-            let path = crate::dbus::Reader::new(&body).string()?;
-            Ok(Reply::Mounted(PathBuf::from(path)))
-        }
-        Request::Unmount(object) => {
-            let mut args = Vec::new();
-            crate::dbus::marshal_no_options(&mut args);
-            bus.call(SERVICE, object, FILESYSTEM, "Unmount", Some("a{sv}"), &args)?;
-            Ok(Reply::Unmounted)
-        }
-        Request::Eject { drive, .. } => {
-            let mut args = Vec::new();
-            crate::dbus::marshal_no_options(&mut args);
-            bus.call(SERVICE, drive, DRIVE, "Eject", Some("a{sv}"), &args)?;
-            Ok(Reply::Ejected)
-        }
-        // Answered in `run`, never through the bus.
-        Request::GioUnmount(_) => Err("gio unmounts, not udisks2".to_string()),
-    }
-}
-
-/// udisks2's half of a listing.
-fn list_devices(bus: &mut Bus) -> Result<Vec<Device>, String> {
-    let body = bus.call(
-        SERVICE,
-        MANAGER_PATH,
-        OBJECT_MANAGER,
-        "GetManagedObjects",
-        None,
-        &[],
-    )?;
-    let objects = crate::dbus::parse_managed_objects(&body)?;
-    Ok(devices_from(&objects))
 }
 
 // ── Hearing a phone arrive: `gio mount --monitor` ───────────────────────────
@@ -1656,121 +1278,6 @@ pub fn event_from(block: &[String]) -> Option<Event> {
     })
 }
 
-/// `gio mount --monitor --detail` for the life of the window, and the thread
-/// that reads it.
-///
-/// The thread blocks on gio's stdout and does nothing else: it wakes when gio
-/// prints, hands over each event whole, and rings the event loop once per
-/// line that completed one — so a window with nothing being plugged in is a
-/// window at zero frames. It ends when the pipe does, which is gio dying: it
-/// says so ([`Monitor::gone`]) and rings once more, so the app can start
-/// another ([`restart_due`]).
-///
-/// Dropping this kills gio — it holds nothing that needs a gentler end — and
-/// reaps it, which closes the pipe, and then joins the thread. gio is tied to
-/// the thread that started it ([`df_core::vfs::child::tie_to_this_thread`]),
-/// the event loop's, so a window that dies without running its destructors
-/// does not leave a gio behind, listening on the session bus for nobody.
-pub struct Monitor {
-    child: std::process::Child,
-    events: Receiver<Event>,
-    reader: Option<std::thread::JoinHandle<()>>,
-    /// The pipe has ended: gio is dead, and nothing more will be heard.
-    gone: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// When it was started, for [`restart_due`].
-    started: Instant,
-}
-
-impl Monitor {
-    /// Start listening, or `None` when there is no `gio` to listen with —
-    /// which is nothing to tell anyone: a machine without gvfs has no phones
-    /// for it to hear about. Call it on the event loop's thread; see above.
-    pub fn start(notify: df_core::fs::Notifier) -> Option<Monitor> {
-        let mut command = Command::new("gio");
-        command.args(["mount", "--monitor", "--detail"]);
-        Monitor::spawn(command, notify)
-    }
-
-    /// `command`'s stdout, heard as gio's is: [`Monitor::start`]'s gio, or a
-    /// test's stand-in that prints gio's words and exits.
-    fn spawn(mut command: Command, notify: df_core::fs::Notifier) -> Option<Monitor> {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        df_core::vfs::child::tie_to_this_thread(&mut command);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(e) => {
-                log::debug!("gio mount --monitor did not start: {e}");
-                return None;
-            }
-        };
-        let (tx, events) = unbounded::<Event>();
-        let gone = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ended = std::sync::Arc::clone(&gone);
-        let reader = child.stdout.take().and_then(|stdout| {
-            std::thread::Builder::new()
-                .name("df-gio-monitor".to_string())
-                .spawn(move || {
-                    listen(stdout, tx, std::sync::Arc::clone(&notify));
-                    ended.store(true, std::sync::atomic::Ordering::SeqCst);
-                    notify();
-                })
-                .map_err(|e| log::warn!("the gio monitor's reader did not start: {e}"))
-                .ok()
-        });
-        if reader.is_none() {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        Some(Monitor {
-            child,
-            events,
-            reader,
-            gone,
-            started: Instant::now(),
-        })
-    }
-
-    /// Whether gio has died: its pipe ended, and the thread with it. A dead
-    /// gio is reaped here and now, rather than left a zombie until the
-    /// restart or the window's end: the frame the reader's last bell brings
-    /// asks this.
-    pub fn gone(&mut self) -> bool {
-        if !self.gone.load(std::sync::atomic::Ordering::SeqCst) {
-            return false;
-        }
-        if let Err(e) = self.child.try_wait() {
-            log::debug!("the gio monitor could not be reaped: {e}");
-        }
-        true
-    }
-
-    /// When this watcher was started.
-    pub fn started(&self) -> Instant {
-        self.started
-    }
-
-    /// Whatever gio has said since the last call.
-    pub fn drain(&self) -> Vec<Event> {
-        self.events.try_iter().collect()
-    }
-}
-
-impl Drop for Monitor {
-    fn drop(&mut self) {
-        if let Err(e) = self.child.kill() {
-            log::debug!("the gio monitor would not stop: {e}");
-        }
-        let _ = self.child.wait();
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
-    }
-}
-
 /// Whether a watcher whose gio has died is started again now.
 ///
 /// **Once** in a window's life, and not before
@@ -1788,7 +1295,7 @@ pub fn restart_due(gone: bool, restarts: u32, started: Instant, now: Instant) ->
 
 /// The reader thread: gio's stdout, line by line, until it ends. Any reader,
 /// so a test can hand it gio's words without a gio.
-fn listen(stdout: impl std::io::Read, events: Sender<Event>, notify: df_core::fs::Notifier) {
+pub fn listen(stdout: impl std::io::Read, events: Sender<Event>, notify: df_core::fs::Notifier) {
     use std::io::BufRead;
     let mut reader = std::io::BufReader::new(stdout);
     let mut blocks = Blocks::default();
@@ -3069,8 +2576,40 @@ fn paint_face(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The two rows udisks2's reply in the Linux worker's tests makes
+    /// (`platform::linux::mounts`, whose test holds the two equal): a USB
+    /// stick not mounted, and the root filesystem, removable first.
+    pub(crate) fn disks() -> Vec<Device> {
+        vec![
+            Device {
+                object: "/block/sdb1".to_string(),
+                drive: Some("/drives/usb".to_string()),
+                node: "/dev/sdb1".to_string(),
+                label: "PHOTOS".to_string(),
+                fs: "vfat".to_string(),
+                size: 16_000_000_000,
+                mount: None,
+                removable: true,
+                ejectable: true,
+                hardware: "SanDisk Cruzer".to_string(),
+            },
+            Device {
+                object: "/block/nvme0n1p2".to_string(),
+                drive: Some("/drives/nvme".to_string()),
+                node: "/dev/nvme0n1p2".to_string(),
+                label: "nvme0n1p2".to_string(),
+                fs: "ext4".to_string(),
+                size: 500_000_000_000,
+                mount: Some(PathBuf::from("/")),
+                removable: false,
+                ejectable: false,
+                hardware: String::new(),
+            },
+        ]
+    }
 
     /// Same rule as the yank tray, which this card got wrong in the other
     /// direction — a 14 pt inset against a 10-derived radius, so the gap
@@ -3082,180 +2621,6 @@ mod tests {
             crate::chrome::CARD_RADIUS as f32
         );
     }
-    use std::collections::HashMap;
-
-    fn props(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
-    }
-
-    fn bytes(text: &str) -> Value {
-        Value::Array(text.bytes().map(Value::U8).chain([Value::U8(0)]).collect())
-    }
-
-    fn objects() -> Vec<(String, Interfaces)> {
-        let drive: Interfaces = [(
-            DRIVE.to_string(),
-            props(&[
-                ("Removable", Value::Bool(true)),
-                ("Ejectable", Value::Bool(true)),
-                ("Vendor", Value::Str("SanDisk".into())),
-                ("Model", Value::Str("Cruzer".into())),
-            ]),
-        )]
-        .into_iter()
-        .collect();
-
-        let usb: Interfaces = [
-            (
-                BLOCK.to_string(),
-                props(&[
-                    ("Device", bytes("/dev/sdb1")),
-                    ("IdLabel", Value::Str("PHOTOS".into())),
-                    ("IdType", Value::Str("vfat".into())),
-                    ("Size", Value::U64(16_000_000_000)),
-                    ("Drive", Value::Path("/drives/usb".into())),
-                ]),
-            ),
-            (
-                FILESYSTEM.to_string(),
-                props(&[("MountPoints", Value::Array(vec![]))]),
-            ),
-        ]
-        .into_iter()
-        .collect();
-
-        let internal_drive: Interfaces = [(
-            DRIVE.to_string(),
-            props(&[("Removable", Value::Bool(false))]),
-        )]
-        .into_iter()
-        .collect();
-
-        let root: Interfaces = [
-            (
-                BLOCK.to_string(),
-                props(&[
-                    ("Device", bytes("/dev/nvme0n1p2")),
-                    ("IdLabel", Value::Str("".into())),
-                    ("IdType", Value::Str("ext4".into())),
-                    ("Size", Value::U64(500_000_000_000)),
-                    ("Drive", Value::Path("/drives/nvme".into())),
-                ]),
-            ),
-            (
-                FILESYSTEM.to_string(),
-                props(&[("MountPoints", Value::Array(vec![bytes("/")]))]),
-            ),
-        ]
-        .into_iter()
-        .collect();
-
-        // A loop device: a filesystem with no drive behind it.
-        let loop_dev: Interfaces = [
-            (
-                BLOCK.to_string(),
-                props(&[
-                    ("Device", bytes("/dev/loop0")),
-                    ("Drive", Value::Path("/".into())),
-                ]),
-            ),
-            (
-                FILESYSTEM.to_string(),
-                props(&[("MountPoints", Value::Array(vec![]))]),
-            ),
-        ]
-        .into_iter()
-        .collect();
-
-        // The whole disk, which has no filesystem of its own.
-        let whole: Interfaces = [(
-            BLOCK.to_string(),
-            props(&[
-                ("Device", bytes("/dev/sdb")),
-                ("Drive", Value::Path("/drives/usb".into())),
-            ]),
-        )]
-        .into_iter()
-        .collect();
-
-        // Something udisks2 itself says not to show.
-        let hidden: Interfaces = [
-            (
-                BLOCK.to_string(),
-                props(&[
-                    ("Device", bytes("/dev/nvme0n1p1")),
-                    ("Drive", Value::Path("/drives/nvme".into())),
-                    ("HintIgnore", Value::Bool(true)),
-                ]),
-            ),
-            (
-                FILESYSTEM.to_string(),
-                props(&[("MountPoints", Value::Array(vec![]))]),
-            ),
-        ]
-        .into_iter()
-        .collect();
-
-        vec![
-            ("/drives/usb".to_string(), drive),
-            ("/drives/nvme".to_string(), internal_drive),
-            ("/block/nvme0n1p2".to_string(), root),
-            ("/block/sdb1".to_string(), usb),
-            ("/block/loop0".to_string(), loop_dev),
-            ("/block/sdb".to_string(), whole),
-            ("/block/nvme0n1p1".to_string(), hidden),
-        ]
-    }
-
-    /// The filter, in one test: what is a row, what is not, and why.
-    #[test]
-    fn only_mountable_filesystems_on_real_drives_become_rows() {
-        let devices = devices_from(&objects());
-        let nodes: Vec<&str> = devices.iter().map(|d| d.node.as_str()).collect();
-        assert_eq!(
-            nodes,
-            vec!["/dev/sdb1", "/dev/nvme0n1p2"],
-            "removable first, and nothing else got in"
-        );
-        // The loop device has no drive, the whole disk has no filesystem, and
-        // the EFI partition asked not to be shown.
-        assert!(!nodes.contains(&"/dev/loop0"));
-        assert!(!nodes.contains(&"/dev/sdb"));
-        assert!(!nodes.contains(&"/dev/nvme0n1p1"));
-    }
-
-    /// Every fact a row shows, taken off the right interface.
-    #[test]
-    fn a_device_carries_what_the_row_needs() {
-        let devices = devices_from(&objects());
-        let usb = &devices[0];
-        assert_eq!(usb.label, "PHOTOS");
-        assert_eq!(usb.fs, "vfat");
-        assert_eq!(usb.size, 16_000_000_000);
-        assert!(usb.removable && usb.ejectable);
-        assert_eq!(usb.hardware, "SanDisk Cruzer");
-        assert!(!usb.is_mounted());
-        assert_eq!(
-            usb.detail(),
-            "14.9 GB · vfat · not mounted",
-            "size, filesystem, and where — here, nowhere"
-        );
-        assert_eq!(usb.drive.as_deref(), Some("/drives/usb"));
-
-        // No label: the device node's last component, which is what `lsblk`
-        // would have shown.
-        let root = &devices[1];
-        assert_eq!(root.label, "nvme0n1p2");
-        assert!(root.is_mounted());
-        assert_eq!(root.detail(), "465.7 GB · ext4 · /");
-        assert!(!root.removable);
-        assert!(!root.ejectable, "an unstated flag is false, not true");
-        assert_eq!(root.hardware, "", "a drive with no vendor says nothing");
-    }
-
     // ── gvfs ────────────────────────────────────────────────────────────────
 
     /// `gio mount -l` on the development machine (gio 2.88, gvfs 1.60), taken
@@ -3798,7 +3163,7 @@ Mount(0): Pixel 10a -> mtp://Google_Pixel_10a_4B021FDAQ00123/
   is_shadowed=1
 ";
 
-    const PIXEL: &str = "mtp://Google_Pixel_10a_4B021FDAQ00123/";
+    pub(crate) const PIXEL: &str = "mtp://Google_Pixel_10a_4B021FDAQ00123/";
     const PIXEL_DIR: &str = "mtp:host=Google_Pixel_10a_4B021FDAQ00123";
 
     /// Unplugged, plugged in, and mounted: no phone, then the phone not
@@ -4069,64 +3434,6 @@ Volume removed:     'Pixel 10a'
         assert_eq!(rung.load(std::sync::atomic::Ordering::SeqCst), 5);
     }
 
-    /// A watcher whose gio exits is gone once its last words are heard, and
-    /// is started again once — ten seconds after it started, never before,
-    /// and never a second time.
-    #[test]
-    fn a_dead_watcher_is_started_again_once_after_ten_seconds() {
-        let rung = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let bell = std::sync::Arc::clone(&rung);
-        let mut command = Command::new("sh");
-        command.args([
-            "-c",
-            "printf '%s\\n' \"Volume added:       'Pixel 10a'\" '  Volume(0): Pixel 10a' \
-             '    Type: GProxyVolume (GProxyVolumeMonitorMTP)' ''",
-        ]);
-        let mut monitor = Monitor::spawn(
-            command,
-            std::sync::Arc::new(move || {
-                bell.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }),
-        )
-        .expect("sh starts");
-        let proc = PathBuf::from(format!("/proc/{}", monitor.child.id()));
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !monitor.gone() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(monitor.gone(), "the pipe ended and nobody noticed");
-        // Asked while it is gone, it is reaped: no zombie is left in the
-        // process table (the exit can trail the pipe's end by a moment, so
-        // it is asked until then).
-        while proc.exists() && Instant::now() < deadline {
-            assert!(monitor.gone());
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(!proc.exists(), "a dead gio was left a zombie");
-        let heard = monitor.drain();
-        assert_eq!(heard.len(), 1);
-        assert_eq!(heard[0].change, Change::VolumeAdded);
-        assert_eq!(heard[0].protocol, Some(Protocol::Mtp));
-        assert_eq!(
-            rung.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "once for the event, once for the end"
-        );
-
-        let started = monitor.started();
-        let retry = crate::appearance::RETRY;
-        assert!(
-            !restart_due(false, 0, started, started + retry * 2),
-            "alive"
-        );
-        assert!(
-            !restart_due(true, 0, started, started + retry / 2),
-            "too soon"
-        );
-        assert!(restart_due(true, 0, started, started + retry));
-        assert!(!restart_due(true, 1, started, started + retry * 2), "twice");
-    }
-
     /// The worker's answers come with the request they answer, and what is
     /// still out is known after the card that asked for it has gone: the
     /// oldest request about a row, until its own answer comes back — a
@@ -4171,92 +3478,6 @@ Volume removed:     'Pixel 10a'
             Some(PIXEL),
             "a phone's or a share's is its URL"
         );
-    }
-
-    /// A stand-in for gio that notes what it was asked and answers with
-    /// `code`, `stdout` and `stderr`.
-    fn fake_gio(
-        code: i32,
-        stdout: &'static str,
-        stderr: &'static str,
-    ) -> (Gio, std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
-        use std::os::unix::process::ExitStatusExt;
-        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log = std::sync::Arc::clone(&asked);
-        let gio: Gio = std::sync::Arc::new(move |args: &[&str]| {
-            log.lock()
-                .expect("the log")
-                .push(args.iter().map(|arg| arg.to_string()).collect());
-            Ok(std::process::Output {
-                status: std::process::ExitStatus::from_raw(code << 8),
-                stdout: stdout.as_bytes().to_vec(),
-                stderr: stderr.as_bytes().to_vec(),
-            })
-        });
-        (gio, asked)
-    }
-
-    /// `gio mount <root>`: mounted, already mounted, or gio's first words —
-    /// and for a locked phone, what to do about it instead.
-    #[test]
-    fn a_phone_is_mounted_by_its_root_and_a_locked_one_says_so() {
-        let (gio, asked) = fake_gio(0, "", "");
-        assert_eq!(mount_gio(PIXEL, &gio), Connected::Mounted(None));
-        assert_eq!(
-            *asked.lock().expect("the log"),
-            vec![vec!["mount".to_string(), PIXEL.to_string()]]
-        );
-        let (gio, _) = fake_gio(2, "", "gio: mtp://x/: Location is already mounted\n");
-        assert_eq!(mount_gio(PIXEL, &gio), Connected::Mounted(None));
-
-        let locked =
-            "gio: mtp://Google_Pixel_10a_4B021FDAQ00123/: Unable to open MTP device “003,012”\n";
-        let (gio, _) = fake_gio(2, "", locked);
-        let Connected::Failed(message) = mount_gio(PIXEL, &gio) else {
-            panic!("a locked phone mounted");
-        };
-        assert_eq!(message, locked.trim());
-        assert_eq!(unlock_hint(Protocol::Mtp, &message), Some(UNLOCK));
-        assert_eq!(
-            UNLOCK,
-            "Unlock the phone and choose File transfer, then try again"
-        );
-        for said in [
-            "gio: mtp://x/: Device is busy",
-            "gio: mtp://x/: LIBMTP_ERROR_GENERAL",
-        ] {
-            assert_eq!(unlock_hint(Protocol::Mtp, said), Some(UNLOCK), "{said}");
-        }
-        // Anything else is in gio's words, and a camera has no lock screen.
-        assert_eq!(
-            unlock_hint(Protocol::Mtp, "gio: mtp://x/: No such device"),
-            None
-        );
-        assert_eq!(unlock_hint(Protocol::Gphoto2, locked), None);
-
-        let (gio, _) = fake_gio(1, "", "");
-        assert!(matches!(mount_gio(PIXEL, &gio), Connected::Failed(_)));
-    }
-
-    /// `u` on a share or a phone is `gio mount -u <url>`, and its failure is
-    /// gio's first line.
-    #[test]
-    fn a_gio_mount_is_put_away_by_its_url() {
-        let (gio, asked) = fake_gio(0, "", "");
-        assert!(matches!(unmount_gio(PIXEL, &gio), Reply::Unmounted));
-        assert_eq!(
-            *asked.lock().expect("the log"),
-            vec![vec![
-                "mount".to_string(),
-                "-u".to_string(),
-                PIXEL.to_string()
-            ]]
-        );
-        let (gio, _) = fake_gio(2, "", "gio: mtp://x/: Device busy\nmore\n");
-        assert!(matches!(
-            unmount_gio(PIXEL, &gio),
-            Reply::Failed(message) if message == "gio: mtp://x/: Device busy"
-        ));
     }
 
     // ── The card ────────────────────────────────────────────────────────────
@@ -4373,7 +3594,7 @@ Volume removed:     'Pixel 10a'
     fn the_card_hit_tests_its_one_line_rows_and_not_its_headings() {
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
         let mut card = Card::new();
-        card.update(devices_from(&objects()), vec![pixel(false)], share_rows(1));
+        card.update(disks(), vec![pixel(false)], share_rows(1));
         let g = geometry(area, &card);
         // Two disks, the phone, one share and the connect row.
         assert_eq!(g.rows.len(), 5);
@@ -4758,7 +3979,7 @@ Volume removed:     'Pixel 10a'
     fn the_card_is_as_tall_as_what_it_draws() {
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1400.0, 900.0));
         let mut card = Card::new();
-        card.update(devices_from(&objects()), Vec::new(), Vec::new());
+        card.update(disks(), Vec::new(), Vec::new());
         let g = geometry(area, &card);
         let (_, last) = *g.lines.last().expect("lines");
         assert_eq!(last.height(), ROW);
@@ -4773,12 +3994,6 @@ Volume removed:     'Pixel 10a'
         }
     }
 
-    /// An empty reply is a normal machine, not a failure.
-    #[test]
-    fn a_machine_with_no_disks_produces_no_rows() {
-        assert!(devices_from(&[]).is_empty());
-    }
-
     /// The page keys clamp, and a refresh keeps the cursor on the row it was
     /// on.
     #[test]
@@ -4787,7 +4002,7 @@ Volume removed:     'Pixel 10a'
         assert_eq!(card.devices_empty(), Some("asking udisks2…"));
         assert_eq!(card.shares_empty(), Some("asking gvfs…"));
         assert_eq!(card.selected(), Some(Item::Connect), "the only row so far");
-        card.update(devices_from(&objects()), Vec::new(), share_rows(1));
+        card.update(disks(), Vec::new(), share_rows(1));
         assert_eq!(card.devices_empty(), None);
         assert_eq!(card.shares_empty(), None);
         assert_eq!(
@@ -4812,7 +4027,7 @@ Volume removed:     'Pixel 10a'
         // it before and after.
         card.move_cursor(1);
         let on = card.selected_device().map(|d| d.object.clone());
-        let mut again = devices_from(&objects());
+        let mut again = disks();
         again.reverse();
         card.update(again, Vec::new(), share_rows(1));
         assert_eq!(card.selected_device().map(|d| d.object.clone()), on);
@@ -4877,7 +4092,7 @@ Volume removed:     'Pixel 10a'
             Some(Item::Connect),
             "until a device is there"
         );
-        card.update(devices_from(&objects()), vec![pixel(false)], share_rows(1));
+        card.update(disks(), vec![pixel(false)], share_rows(1));
         assert_eq!(card.cursor, 0, "no jump when the listing lands");
         assert_eq!(
             card.selected(),
@@ -4930,14 +4145,14 @@ Volume removed:     'Pixel 10a'
         let mut early = Card::with_places(places(3));
         early.move_cursor(-2);
         assert_eq!(early.selected(), Some(Item::Place(1)));
-        early.update(devices_from(&objects()), Vec::new(), Vec::new());
+        early.update(disks(), Vec::new(), Vec::new());
         assert_eq!(early.selected(), Some(Item::Place(1)));
 
         // Thirty places under the devices: the card opens at its top, and the
         // last place, reached by End, is whole at the bottom — what is drawn
         // is whole lines, so no half row sits under the "+N more".
         let mut long = Card::with_places(places(30));
-        long.update(devices_from(&objects()), Vec::new(), share_rows(1));
+        long.update(disks(), Vec::new(), share_rows(1));
         assert_eq!(long.selected(), Some(Item::Disk(0)));
         assert_eq!(long.visible()[0].0, Line::Section("Devices"));
         assert!(long.visible().len() < long.lines().len());
@@ -5015,7 +4230,7 @@ Volume removed:     'Pixel 10a'
     #[test]
     fn the_arrows_wrap_at_both_ends() {
         let mut card = Card::with_places(places(2));
-        card.update(devices_from(&objects()), Vec::new(), share_rows(1));
+        card.update(disks(), Vec::new(), share_rows(1));
         let last = card.items().len() - 1;
         assert_eq!(card.selected(), Some(Item::Disk(0)));
 

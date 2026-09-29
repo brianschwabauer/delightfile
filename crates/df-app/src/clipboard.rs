@@ -4,7 +4,7 @@
 //! ## The protocol first, `wl-copy` second
 //!
 //! PLAN §7.4 says "all via Wayland data-control/data-device", and that is now
-//! where a copy goes: [`crate::wayland`]'s thread owns a `wl_data_source`,
+//! where a copy goes: `platform::linux::wayland`'s thread owns a `wl_data_source`,
 //! answers `set_selection` with it and serves the bytes over a pipe when some
 //! other application pastes — the same machinery, and the same 5 s send
 //! timeout, drag-out already uses. A clipboard *source* on Wayland has to stay
@@ -392,7 +392,7 @@ pub fn reap(child: &mut Child) {
 }
 
 /// The mime types the clipboard is currently offering, most specific first —
-/// `wl-paste --list-types`. The fallback for [`crate::wayland`]'s own mirror of
+/// `wl-paste --list-types`. The fallback for `platform::linux::wayland`'s own mirror of
 /// the selection's offer.
 pub fn offered_types() -> Result<Vec<String>, ClipError> {
     let output = Command::new("wl-paste")

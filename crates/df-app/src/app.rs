@@ -1657,10 +1657,11 @@ pub struct App {
     /// in a test.
     gvfs: PathBuf,
     /// `gio mount --monitor`, heard for the life of the window: a phone
-    /// plugged in, a share or a phone going away ([`crate::mounts::Monitor`]).
-    /// Started by [`App::new`] — never in a file dialog, never in a test —
-    /// and `None` on a machine without gio.
-    gio_monitor: Option<crate::mounts::Monitor>,
+    /// plugged in, a share or a phone going away
+    /// ([`crate::platform::mounts::Monitor`]). Started by [`App::new`] — never
+    /// in a file dialog, never in a test — and `None` on a machine without
+    /// gio.
+    gio_monitor: Option<crate::platform::mounts::Monitor>,
     /// How many times a dead watcher has been started again: once at most
     /// ([`crate::mounts::restart_due`]).
     gio_restarts: u32,
@@ -2212,7 +2213,8 @@ impl App {
         // because gio's life is tied to the thread that starts it.
         if app.chooser.is_none() {
             let waker = app.waker.named("gio");
-            app.gio_monitor = crate::mounts::Monitor::start(Arc::new(move || waker.wake()));
+            app.gio_monitor =
+                crate::platform::mounts::Monitor::start(Arc::new(move || waker.wake()));
         }
         app
     }
@@ -2431,7 +2433,7 @@ impl App {
             udisks: None,
             mounts: None,
             connects: Vec::new(),
-            gio: crate::mounts::system_gio(),
+            gio: crate::platform::mounts::system_gio(),
             gvfs: crate::mounts::gvfs_root(),
             gio_monitor: None,
             gio_restarts: 0,
@@ -7469,10 +7471,10 @@ impl App {
     }
 
     /// `gio mount <root>` for a phone on the pool, through the connect
-    /// machinery ([`crate::mounts::mount_gio`]), its row saying `mounting…`
-    /// until the job lands. A phone asks nothing of the keyboard — the "allow
-    /// access?" it may ask is on its own screen — so there is no terminal to
-    /// hand it to.
+    /// machinery ([`crate::platform::mounts::mount_gio`]), its row saying
+    /// `mounting…` until the job lands. A phone asks nothing of the keyboard —
+    /// the "allow access?" it may ask is on its own screen — so there is no
+    /// terminal to hand it to.
     ///
     /// Never twice: a mount of this root already on the pool — started by a
     /// card since closed and opened again — is the one the row is waiting
@@ -7496,7 +7498,7 @@ impl App {
             format!("Mount {}", phone.name),
             Lane::Micro,
             move |_ctx: &TaskCtx| {
-                let result = crate::mounts::mount_gio(&root, &gio);
+                let result = crate::platform::mounts::mount_gio(&root, &gio);
                 match sink.lock() {
                     Ok(mut guard) => *guard = Some(result),
                     Err(poisoned) => *poisoned.into_inner() = Some(result),
@@ -7690,7 +7692,7 @@ impl App {
             format!("Connect to {label}"),
             Lane::Micro,
             move |_ctx: &TaskCtx| {
-                let result = crate::mounts::connect(&job_url, &gio);
+                let result = crate::platform::mounts::connect(&job_url, &gio);
                 match sink.lock() {
                     Ok(mut guard) => *guard = Some(result),
                     Err(poisoned) => *poisoned.into_inner() = Some(result),
@@ -7795,7 +7797,7 @@ impl App {
                 // on the card's next listing — `M`, or `r` if it is up.
                 let cwd = self.child_cwd();
                 match open::spawn_detached(
-                    crate::mounts::TERMINAL_MOUNT,
+                    crate::platform::mounts::TERMINAL_MOUNT,
                     &[PathBuf::from(url)],
                     &cwd,
                 ) {
@@ -7842,8 +7844,8 @@ impl App {
                     self.toasts.error(said, now);
                 }
             }
-            // A device asks nothing ([`crate::mounts::mount_gio`] never says
-            // this); were it to, there is nobody to answer.
+            // A device asks nothing ([`crate::platform::mounts::mount_gio`]
+            // never says this); were it to, there is nobody to answer.
             crate::mounts::Connected::NeedsTerminal => {
                 if let Some(card) = self.mounts.as_mut().filter(|card| card.is_busy(root)) {
                     card.fail("gio wanted an answer");
@@ -7974,7 +7976,7 @@ impl App {
         self.gio_restarts += 1;
         log::info!("gio mount --monitor ended; starting it again");
         let waker = self.waker.named("gio");
-        self.gio_monitor = crate::mounts::Monitor::start(Arc::new(move || waker.wake()));
+        self.gio_monitor = crate::platform::mounts::Monitor::start(Arc::new(move || waker.wake()));
     }
 
     /// What gvfs said, acted on.

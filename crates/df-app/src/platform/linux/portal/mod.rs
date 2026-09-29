@@ -60,7 +60,7 @@ mod show;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use crate::dbus::{Bus, Claim, Inbox, Message, Outbox, Value, MSG_METHOD_CALL};
+use crate::platform::linux::dbus::{Bus, Claim, Inbox, Message, Outbox, Value, MSG_METHOD_CALL};
 use request::{Answer, Dialog, Kind, Pending, Setup};
 
 /// The well-known name the `.portal` file points xdg-desktop-portal at.
@@ -726,7 +726,11 @@ mod tests {
             let reply = service
                 .answer(&show_items(show::OBJECT_PATH, interface))
                 .unwrap();
-            assert_eq!(reply.kind, crate::dbus::MSG_METHOD_RETURN, "{interface:?}");
+            assert_eq!(
+                reply.kind,
+                crate::platform::linux::dbus::MSG_METHOD_RETURN,
+                "{interface:?}"
+            );
             assert!(reply.body.is_empty());
         }
         let elsewhere = service
@@ -741,7 +745,8 @@ mod tests {
         // A bad body is the caller's error, and the service goes on.
         let mut bad = show_items(show::OBJECT_PATH, None);
         bad.signature = Some("as".into());
-        bad.body = crate::dbus::marshal_body("as", &[Value::Array(Vec::new())]).unwrap();
+        bad.body =
+            crate::platform::linux::dbus::marshal_body("as", &[Value::Array(Vec::new())]).unwrap();
         assert_eq!(
             service.answer(&bad).unwrap().error_name.as_deref(),
             Some(INVALID_ARGS)
@@ -763,7 +768,7 @@ mod tests {
         };
         assert_eq!(
             service.answer(&ping).unwrap().kind,
-            crate::dbus::MSG_METHOD_RETURN
+            crate::platform::linux::dbus::MSG_METHOD_RETURN
         );
     }
 

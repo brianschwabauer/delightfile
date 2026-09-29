@@ -8,8 +8,9 @@
 //! kills it.
 //!
 //! Skipped, with a line saying so, on a machine without `dbus-daemon` or
-//! `busctl`.
+//! `busctl`. Linux only: `--portal` exists nowhere else.
 
+#![cfg(target_os = "linux")]
 #![allow(clippy::unwrap_used)] // tests: a broken fixture should panic
 
 use std::io::{BufRead, BufReader};

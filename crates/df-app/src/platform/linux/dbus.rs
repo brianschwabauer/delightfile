@@ -14,7 +14,7 @@
 //!
 //! ## The service half
 //!
-//! `delightfile --portal` ([`crate::portal`]) is the other end of a call: it
+//! `delightfile --portal` ([`super::portal`]) is the other end of a call: it
 //! owns a name, reads method calls off the socket and answers them. That needs
 //! three things the client never did — marshalling *arbitrary* values (the
 //! portal's options arrive as `a{sv}` holding `a(sa(us))` filters and `ay`
@@ -64,7 +64,7 @@ pub const MSG_METHOD_RETURN: u8 = 2;
 pub const MSG_ERROR: u8 = 3;
 /// A broadcast. udisks2 sends them unasked and [`Bus::call`] reads past them
 /// to find its reply; the one this program subscribes to is the portal's
-/// `SettingChanged`, which [`crate::appearance`] listens for.
+/// `SettingChanged`, which [`super::appearance`] listens for.
 pub const MSG_SIGNAL: u8 = 4;
 
 /// The header flag a caller sets when it will not read the answer. A service

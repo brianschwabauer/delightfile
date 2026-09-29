@@ -65,7 +65,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use df_core::fs::Notifier;
 
 use crate::appearance::{Link, Scheme};
-use crate::dbus::{
+use crate::platform::linux::dbus::{
     marshal_body, Bus, Hangup, Message, Outbox, Reader, Value, BUS_DRIVER, MSG_ERROR,
     MSG_METHOD_RETURN, MSG_SIGNAL,
 };
@@ -172,7 +172,7 @@ pub fn portal_returned(msg: &Message) -> Option<String> {
 ///
 /// `ReadOne` answers `v` holding the `u`; `Read` answers `v` holding a `v`
 /// holding the `u`, a wrapping the interface's second version apologised for.
-/// [`crate::dbus::Value::as_u64`] looks through any number of variants, so one
+/// [`super::dbus::Value::as_u64`] looks through any number of variants, so one
 /// reader serves both.
 pub fn read_reply(body: &[u8]) -> Result<Scheme, String> {
     let value = Reader::new(body).value("v")?;
@@ -573,7 +573,7 @@ pub fn scheme_signal(value: u32) -> Message {
 }
 
 /// A make-believe session bus on the far end of a socket pair: the pair-socket
-/// fixture `crate::dbus`'s own tests use, taught just enough of the bus driver
+/// fixture `super::dbus`'s own tests use, taught just enough of the bus driver
 /// and the portal to serve a watcher.
 #[cfg(test)]
 pub mod fake_bus {
@@ -583,7 +583,7 @@ pub mod fake_bus {
     use std::os::unix::net::UnixStream;
 
     use super::*;
-    use crate::dbus::{frame_len, parse_message};
+    use crate::platform::linux::dbus::{frame_len, parse_message};
 
     /// The portal's unique name on this bus, and the one it has after
     /// [`Peer::portal_restarts`].
@@ -752,7 +752,7 @@ pub mod fake_bus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dbus::{parse_message, Value};
+    use crate::platform::linux::dbus::{parse_message, Value};
     use fake_bus::Say;
 
     /// A `SettingChanged` as the portal sends it, built with this program's
@@ -814,7 +814,7 @@ mod tests {
         renamed.member = Some("SettingsChanged".to_string());
         assert_eq!(setting_changed(&renamed), None);
         let mut called = signal(NAMESPACE, KEY, Value::variant("u", Value::U32(2)));
-        called.kind = crate::dbus::MSG_METHOD_CALL;
+        called.kind = crate::platform::linux::dbus::MSG_METHOD_CALL;
         assert_eq!(setting_changed(&called), None);
         let mut elsewhere = signal(NAMESPACE, KEY, Value::variant("u", Value::U32(2)));
         elsewhere.path = Some("/org/freedesktop/portal/other".to_string());

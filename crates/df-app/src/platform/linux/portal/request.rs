@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use super::lock;
 use crate::cli::TypeFilter;
-use crate::dbus::Value;
+use crate::platform::linux::dbus::Value;
 
 /// The portal's response codes.
 pub const SUCCESS: u32 = 0;

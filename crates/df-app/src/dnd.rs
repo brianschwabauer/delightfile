@@ -5,7 +5,7 @@
 //! over `(geometry, Instant)`, for the reason [`crate::mouse`] gives: a gesture
 //! decided inside the paint loop is a gesture that can only be tested by waving
 //! a mouse at it. The routing lives in [`crate::app`], the wire protocol in
-//! [`crate::wayland`]; this module answers the questions both of them ask.
+//! `platform::linux::wayland`; this module answers the questions both of them ask.
 //!
 //! ## The three drags, and why they are one gesture
 //!
