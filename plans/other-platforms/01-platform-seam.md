@@ -233,15 +233,23 @@ has not dropped.
       but `home()` (`USERPROFILE`) and `temp_dir()`. Since the plan was written,
       `du::gvfs_root` and `vfs/rclone.rs`'s socket directory read
       `$XDG_RUNTIME_DIR` too; they use `runtime_dir()`. Done when: callers use
-      `platform::dirs`, Linux tests pass. — done SHA_S111, cross-checked locally,
+      `platform::dirs`, Linux tests pass. — done 865e921, cross-checked locally,
       CI pending
-- [ ] **S1.12** `platform::pipe`: `git mv vfs/poll.rs platform/unix/pipe.rs`
+- [x] **S1.12** `platform::pipe`: `git mv vfs/poll.rs platform/unix/pipe.rs`
       (`set_nonblocking`, `poll_read2`, `poll_write`). Windows: the module exists with
       the same three signatures returning `Err(Unsupported)`, and
       `vfs/conn.rs:184–188` (`Transport::spawn`) propagates that error so the vfs
       worker reports "SFTP is not available on this platform" through the existing
       `VfsError` path. Phase 4 replaces the Windows body with reader threads (W4.20).
-      Done when: compiles on all targets, `vfs/tests.rs` passes on Linux.
+      The module also has `AVAILABLE: bool` and `fd(&pipe) -> i32`: `vfs/conn.rs`
+      took raw fds with `AsRawFd`, which Windows does not have, and on Windows
+      `Transport::spawn` checks `AVAILABLE` before starting `ssh` and returns
+      `VfsError::Spawn` with the refusal as its source ("could not start ssh:
+      SFTP is not available on this platform") — no child started for nothing,
+      and Linux's handling of a failed `set_nonblocking` (logged, not fatal) is
+      unchanged.
+      Done when: compiles on all targets, `vfs/tests.rs` passes on Linux. — done
+      SHA_S112, cross-checked locally, CI pending
 - [ ] **S1.13** `platform::process` (df-core): `NULL_DEVICE: &str`, `pause(&Child)`,
       `resume(&Child)`, `is_executable(&Path) -> bool`, `candidates(name: &str) ->
       Vec<String>` (Unix: `[name]`; Windows: `[name.exe, name]` plus the

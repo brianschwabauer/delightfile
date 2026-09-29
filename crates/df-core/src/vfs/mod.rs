@@ -35,8 +35,8 @@
 //! ## The pieces
 //!
 //! - [`wire`] — the pure codec: bytes ↔ messages, every length checked, no I/O.
-//! - `poll` — timed waits on the child's pipes; the crate's second island of
-//!   `unsafe`, after `fs::inotify`.
+//! - [`crate::platform::pipe`] — timed waits on the child's pipes (`poll` on
+//!   Unix; nothing yet on Windows, where SFTP says it is not available).
 //! - `conn` — one child process and one live session: handshake, pipelined
 //!   transfers, request-id matching, teardown.
 //! - `config` — `vfs.toml`, read from yazi's file first and delightfile's
@@ -46,8 +46,7 @@
 //!   it, over [`json`], `http` (one `POST` per call on a unix socket) and
 //!   `rfc3339` (rclone's dates).
 //! - `child` — the daemon's life tied to its worker thread's (a parent-death
-//!   signal set between `fork` and `exec`) and its gentle `SIGTERM`; the vfs's
-//!   other island of `unsafe`, beside `poll`.
+//!   signal set between `fork` and `exec`) and its gentle `SIGTERM`.
 //! - [`Vfs`] (this file) — the manager: one worker thread per service, lazy
 //!   connect, reconnect after a drop, and the channel-and-token listing API.
 //!
@@ -87,7 +86,6 @@ mod http;
 /// Public for the same reason [`wire`] is: rclone's replies are documents in
 /// this format, and the codec is a small, tested thing a reader may want.
 pub mod json;
-mod poll;
 mod rclone;
 mod rfc3339;
 /// Public because the codec *is* a documented artifact: df-app never speaks

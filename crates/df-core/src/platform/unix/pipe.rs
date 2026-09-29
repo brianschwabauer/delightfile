@@ -7,7 +7,7 @@
 //! FIN, a network that is dropping packets into a hole. A plain `read` on the
 //! child's stdout waits for that forever, and the connection thread with it, and
 //! then every listing queued behind it. So every read and every write in
-//! [`super::conn`] happens after a `poll` with a timeout, and a timeout is an
+//! `vfs::conn` happens after a `poll` with a timeout, and a timeout is an
 //! error the user gets told about (PLAN §7.6's remote panes must fail visibly,
 //! not silently stop being a file manager).
 //!
@@ -34,7 +34,18 @@
 #![allow(unsafe_code)]
 
 use std::io;
+use std::os::unix::io::AsRawFd;
 use std::time::{Duration, Instant};
+
+/// Whether the child's pipes can be waited on with a deadline here: they can,
+/// with `poll`.
+pub const AVAILABLE: bool = true;
+
+/// The raw descriptor of one of a child's pipes, for the calls below. The
+/// caller keeps the pipe alive for as long as it uses the number.
+pub fn fd(pipe: &impl AsRawFd) -> i32 {
+    pipe.as_raw_fd()
+}
 
 /// How many milliseconds to hand `poll`, from a `Duration`.
 ///

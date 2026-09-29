@@ -380,11 +380,11 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 54 | `use std::os::unix::fs::FileExt` (for `write_all_at`) | Unix-only | `download_body` | ✓ S1.5 |
-| 55 | `use std::os::unix::io::AsRawFd` | Unix-only | `Transport` | |
-| 184–188 | `Transport::spawn`: `poll::set_nonblocking(stdin.as_raw_fd())`, `(stderr.as_raw_fd())` | Unix-only | `Connection::connect` ← core:vfs/mod.rs worker (`dispatch`) | |
-| 256–268 | `drain_stderr`: `poll::poll_read2(self.stderr.as_raw_fd(), -1, left)` | Unix-only | `fill`, `write_all` | A negative fd is ignored by `poll` |
-| 271–308 | `fill`: `poll_read2(stdout fd, stderr fd or -1, left)` then a blocking `read` | Unix-only | `read_packet` | |
-| 337–367 | `write_all`: `poll::poll_write(self.stdin.as_raw_fd(), left)` then a non-blocking `write` | Unix-only | `send`, `connect` | |
+| 55 | `use std::os::unix::io::AsRawFd` | Unix-only | `Transport` | ✓ S1.12 |
+| 184–188 | `Transport::spawn`: `poll::set_nonblocking(stdin.as_raw_fd())`, `(stderr.as_raw_fd())` | Unix-only | `Connection::connect` ← core:vfs/mod.rs worker (`dispatch`) | ✓ S1.12 |
+| 256–268 | `drain_stderr`: `poll::poll_read2(self.stderr.as_raw_fd(), -1, left)` | Unix-only | `fill`, `write_all` | A negative fd is ignored by `poll` ✓ S1.12 |
+| 271–308 | `fill`: `poll_read2(stdout fd, stderr fd or -1, left)` then a blocking `read` | Unix-only | `read_packet` | ✓ S1.12 |
+| 337–367 | `write_all`: `poll::poll_write(self.stdin.as_raw_fd(), left)` then a non-blocking `write` | Unix-only | `send`, `connect` | ✓ S1.12 |
 | 897 | `download_body`: `file.write_all_at(&data, offset)` | Unix-only | `download` ← core:vfs/mod.rs:Vfs::download, download_to_temp ← app:app.rs:open_remote, sync_remote_preview, remote_download | Windows `FileExt` has `seek_write`, not `write_all_at` ✓ S1.5 |
 
 ### vfs/mod.rs
@@ -399,9 +399,9 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 70–97 | `poll_read2`: `libc::pollfd` ×2, `libc::POLLIN`, `libc::poll` | Unix-only (Windows: no `poll`; pipes are not pollable handles) | core:vfs/conn.rs:drain_stderr, fill | |
-| 105–122 | `poll_write`: `libc::pollfd`, `libc::POLLOUT`, `libc::poll` | Unix-only | core:vfs/conn.rs:write_all | |
-| 132–145 | `set_nonblocking`: `libc::fcntl(F_GETFL)`, `fcntl(F_SETFL, flags \| O_NONBLOCK)` | Unix-only | core:vfs/conn.rs:Transport::spawn | |
+| 70–97 | `poll_read2`: `libc::pollfd` ×2, `libc::POLLIN`, `libc::poll` | Unix-only (Windows: no `poll`; pipes are not pollable handles) | core:vfs/conn.rs:drain_stderr, fill | ✓ S1.12 |
+| 105–122 | `poll_write`: `libc::pollfd`, `libc::POLLOUT`, `libc::poll` | Unix-only | core:vfs/conn.rs:write_all | ✓ S1.12 |
+| 132–145 | `set_nonblocking`: `libc::fcntl(F_GETFL)`, `fcntl(F_SETFL, flags \| O_NONBLOCK)` | Unix-only | core:vfs/conn.rs:Transport::spawn | ✓ S1.12 |
 
 ### zoxide/mod.rs
 

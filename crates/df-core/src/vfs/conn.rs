@@ -14,9 +14,9 @@
 //!
 //! ## Nothing blocks forever
 //!
-//! Every read and every write goes through [`super::poll`] with a deadline
-//! ([`super::CONNECT_TIMEOUT`] for the handshake, [`super::OP_TIMEOUT`] for
-//! everything after). stderr is polled alongside stdout on every wait, so
+//! Every read and every write goes through [`crate::platform::pipe`] with a
+//! deadline ([`super::CONNECT_TIMEOUT`] for the handshake, [`super::OP_TIMEOUT`]
+//! for everything after). stderr is polled alongside stdout on every wait, so
 //! `ssh`'s own diagnosis — "Permission denied (publickey)", "Host key
 //! verification failed" — is already in hand at the moment stdout hits EOF, and
 //! the user is told *why* the connection failed rather than that it did.
@@ -51,16 +51,15 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::config::Service;
-use super::poll;
 use super::wire::{self, Attrs, Packet, Reply, Request, Status, StatusCode};
 use super::{VfsError, VfsPath, CONNECT_TIMEOUT, OP_TIMEOUT};
+use crate::platform::pipe;
 use crate::tasks::TaskCtx;
 
 /// Bytes per `READ`/`WRITE`.
@@ -153,6 +152,19 @@ struct Transport {
 impl Transport {
     fn spawn(service: &Service) -> Result<Transport, VfsError> {
         let mut command = service.command();
+        // Nothing here can wait on a pipe with a deadline (Windows, until
+        // W4.20), so nothing is started: the connection fails with the
+        // platform's refusal rather than with a session that could hang.
+        if !pipe::AVAILABLE {
+            return Err(VfsError::Spawn {
+                service: service.name.clone(),
+                program: command.get_program().to_string_lossy().into_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    crate::DfError::Unsupported("SFTP"),
+                ),
+            });
+        }
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -175,14 +187,14 @@ impl Transport {
         let stdout = child.stdout.take().ok_or_else(missing)?;
         let stderr = child.stderr.take().ok_or_else(missing)?;
 
-        // Stdin and stderr, not stdout: see `poll::set_nonblocking` for why
+        // Stdin and stderr, not stdout: see `pipe::set_nonblocking` for why
         // stdout stays blocking. Stderr must not block because
         // `drain_stderr` reads it *without* a preceding poll saying
         // "readable". A failure here is not fatal — a blocking pipe is still
         // correct, just capable of blocking past its deadline — so it is
         // logged rather than raised.
-        for (name, fd) in [("stdin", stdin.as_raw_fd()), ("stderr", stderr.as_raw_fd())] {
-            if let Err(e) = poll::set_nonblocking(fd) {
+        for (name, fd) in [("stdin", pipe::fd(&stdin)), ("stderr", pipe::fd(&stderr))] {
+            if let Err(e) = pipe::set_nonblocking(fd) {
                 log::warn!("vfs {}: {name} stayed blocking: {e}", service.name);
             }
         }
@@ -256,10 +268,10 @@ impl Transport {
     fn drain_stderr(&mut self) {
         let deadline = Instant::now() + STDERR_GRACE;
         while !self.stderr_done {
-            let Some(left) = poll::remaining(deadline) else {
+            let Some(left) = pipe::remaining(deadline) else {
                 return;
             };
-            match poll::poll_read2(self.stderr.as_raw_fd(), -1, left) {
+            match pipe::poll_read2(pipe::fd(&self.stderr), -1, left) {
                 Ok((true, _)) => self.slurp_stderr(),
                 Ok(_) => return, // the grace period elapsed with nothing there
                 Err(_) => return,
@@ -270,7 +282,7 @@ impl Transport {
     /// Read until `inbuf` holds at least `want` bytes, or the deadline passes.
     fn fill(&mut self, want: usize, deadline: Instant, op: &'static str) -> Result<(), VfsError> {
         while self.inbuf.len() < want {
-            let Some(left) = poll::remaining(deadline) else {
+            let Some(left) = pipe::remaining(deadline) else {
                 return Err(self.timed_out(op, OP_TIMEOUT));
             };
             // A negative fd is ignored by `poll`, which is how a finished
@@ -278,10 +290,10 @@ impl Transport {
             let err_fd = if self.stderr_done {
                 -1
             } else {
-                self.stderr.as_raw_fd()
+                pipe::fd(&self.stderr)
             };
             let (out_ready, err_ready) =
-                poll::poll_read2(self.stdout.as_raw_fd(), err_fd, left).map_err(|e| self.io(e))?;
+                pipe::poll_read2(pipe::fd(&self.stdout), err_fd, left).map_err(|e| self.io(e))?;
             if err_ready {
                 self.slurp_stderr();
             }
@@ -341,10 +353,10 @@ impl Transport {
         op: &'static str,
     ) -> Result<(), VfsError> {
         while !bytes.is_empty() {
-            let Some(left) = poll::remaining(deadline) else {
+            let Some(left) = pipe::remaining(deadline) else {
                 return Err(self.timed_out(op, OP_TIMEOUT));
             };
-            if !poll::poll_write(self.stdin.as_raw_fd(), left).map_err(|e| self.io(e))? {
+            if !pipe::poll_write(pipe::fd(&self.stdin), left).map_err(|e| self.io(e))? {
                 continue;
             }
             match self.stdin.write(bytes) {
