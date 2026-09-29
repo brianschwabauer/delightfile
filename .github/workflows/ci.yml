@@ -42,11 +42,27 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # The build user's cargo home, spelled out so that the cache paths below
+      # name the directory cargo writes whatever HOME a step runs with.
+      CARGO_HOME: /home/builder/.cargo
     steps:
       # Before checkout: without git in the container, actions/checkout falls
       # back to a tarball with no .git in it.
       - name: Native dependencies (pacman)
         run: pacman -Syu --noconfirm rust ffmpeg pkgconf clang git
+
+      # The container runs every step as root, and permission bits do not stop
+      # root, so the df-core and df-app tests that chmod a file away and expect
+      # the I/O to fail would see it succeed. Every cargo step and the smoke test
+      # therefore run as this unprivileged user through `runuser -u builder --`
+      # (Decisions log, 2026-09-29). The uid is fixed so that a restored cache
+      # comes back owned by the same user it was saved from. safe.directory is
+      # set system-wide, so git accepts the checkout for root and builder alike.
+      - name: Unprivileged build user
+        run: |
+          useradd --create-home --uid 1000 --user-group builder
+          git config --system --add safe.directory "$GITHUB_WORKSPACE"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -62,38 +78,45 @@ jobs:
       # because Arch's rust rolls: without it, a rust upgrade would restore a
       # target/ that cargo throws away wholesale, and the cache (saved only on a
       # key miss) would keep handing back the stale one until Cargo.lock changed.
+      # The paths are builder's cargo home and the workspace's target/.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /home/builder/.cargo/registry
+            /home/builder/.cargo/git
             target
           key: ${{ github.job }}-rustc-${{ steps.versions.outputs.rustc }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ github.job }}-rustc-${{ steps.versions.outputs.rustc }}-
 
+      # actions/checkout and the cache restore run as root. Whatever they wrote,
+      # builder has to own it before building on top of it.
+      - name: Hand the workspace to builder
+        run: |
+          mkdir -p "$CARGO_HOME"
+          chown -R builder:builder "$GITHUB_WORKSPACE" /home/builder
+
       - name: cargo fmt --check
-        run: cargo fmt --check
+        run: runuser -u builder -- cargo fmt --check
 
       - name: cargo build --workspace
-        run: cargo build --workspace
+        run: runuser -u builder -- cargo build --workspace
 
       # The whole workspace, dv-* included: the container has the ffmpeg binary
       # and bash that dv-media's and dv-playback's integration tests call.
-      # Steps here run as root, whom permission bits do not stop, so the tests
-      # that chmod a file away and expect the I/O to fail will fail here until
-      # the root question under Open questions in 06-build-and-release.md is
-      # settled.
+      # Four tests that pass on Brian's machine fail in a clean container (no
+      # Nerd Font, no zip, overlayfs directory order): see Open questions in
+      # 06-build-and-release.md.
       - name: cargo test --workspace
-        run: cargo test --workspace
+        run: runuser -u builder -- cargo test --workspace
 
       # chunks_exact_to_as_chunks is the 34-warning baseline in dv-* and
       # preview/ (00-ground-rules.md §1), allowed until it is fixed separately.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
+        run: runuser -u builder -- cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
 
       - name: Smoke test (the binary loads and runs)
-        run: target/debug/delightfile --version
+        run: runuser -u builder -- target/debug/delightfile --version
 
   macos:
     runs-on: macos-latest

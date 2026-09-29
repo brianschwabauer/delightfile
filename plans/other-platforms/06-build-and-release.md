@@ -58,20 +58,25 @@ has been pushed, so every task it covers is at most `[>]`.
       Done when: the workflow file exists and the `linux` job is green on `main`.
       The `macos` and `windows` jobs are allowed to fail until Phase 1's stubs land
       (`continue-on-error: true` with a comment naming the Phase 1 task that removes
-      it). — written 2026-09-29, unverified until the first push. The macOS and
-      Windows jobs run `cargo build -p df-core`, `cargo test -p df-core` and
-      `cargo build -p dv-media` ahead of the B6.1 steps, so that while they fail
-      the log shows how far each gets (B6.3's, B6.4's and B6.7's done-when). The
-      linux job is expected to fail at `cargo test --workspace` because the
-      container runs as root; see Open questions.
+      it). — written 2026-09-29, linux job's steps pass in a local archlinux
+      container except `cargo test --workspace` (4 failures, Open questions),
+      unverified on GitHub until the first push. The macOS and Windows jobs run
+      `cargo build -p df-core`, `cargo test -p df-core` and `cargo build -p dv-media`
+      ahead of the B6.1 steps, so that while they fail the log shows how far each
+      gets (B6.3's, B6.4's and B6.7's done-when). The linux job's cargo steps run as
+      an unprivileged `builder` user, because the container's root ignores
+      permission bits (Decisions log).
 - [>] **B6.2** Linux job runs in `container: archlinux:latest` with
       `pacman -Syu --noconfirm rust ffmpeg pkgconf clang git`. Cache
       `~/.cargo/registry`, `~/.cargo/git`, `target/` keyed on `Cargo.lock` and the
       job name.
       Done when: a cold run and a warm run both pass and the warm run is under 10
-      minutes. — written 2026-09-29, unverified until the first push. The key is
+      minutes. — written 2026-09-29, pacman line and cache hand-over pass in a local
+      archlinux container, unverified on GitHub until the first push. The key is
       `<job>-rustc-<hash of rustc -vV>-<hash of Cargo.lock>`; the compiler is in it
-      because Arch's `rust` rolls (Decisions log).
+      because Arch's `rust` rolls (Decisions log). `~` here is the build user's home,
+      so the cached cargo directories are `/home/builder/.cargo/{registry,git}`.
+      Neither the cold time on a GitHub runner nor the warm one is known yet.
 - [>] **B6.3** macOS job on `macos-latest` (verify it is arm64 with `uname -m` in the
       log). Toolchain via `dtolnay/rust-toolchain@stable`. Native deps per §2.2.
       Done when: `cargo build -p df-core` and `cargo test -p df-core` pass on the
@@ -86,8 +91,53 @@ has been pushed, so every task it covers is at most `[>]`.
       last task of Phase 1 (`01-platform-seam.md` S1.40 cross-references it).
       Done when: all three jobs are required and green on `main`.
 - [>] **B6.6** Add `cargo fmt --check` to the linux job only. Done when: green.
-      — written 2026-09-29, unverified until the first push. It is the first cargo
-      step in the job, straight after the cache restore.
+      — written 2026-09-29, passes in a local archlinux container, unverified on
+      GitHub until the first push. It is the first cargo step in the job, straight
+      after the ownership hand-over.
+
+**Local run of the linux job, 2026-09-29.** Its steps ran in order in Docker's
+`archlinux:latest`, generated from `ci.yml` itself. The checkout was a clone of a git
+bundle of the branch, the cache a cold miss, and the run was capped at 8 CPUs with
+`CARGO_BUILD_JOBS=8`. That day pacman gave rust 1.98.1 and ffmpeg 2:9.0.2-1
+(libavcodec 63.1.102). Results:
+
+| Step | Result |
+|---|---|
+| pacman line, user, checkout, versions, ownership hand-over | pass (pacman 24 s) |
+| `cargo fmt --check` | pass |
+| `cargo build --workspace` | pass, 431 s cold |
+| `cargo test --workspace` | fail (4 real failures, below) |
+| `cargo clippy …` | pass, 105 s |
+| `delightfile --version` | pass |
+
+Test counts with `--no-fail-fast`:
+
+- df-app: 1216 passed, 3 failed, plus the 2 `tests/portal.rs` tests.
+- df-core: 1130 passed, 1 failed, 1 ignored.
+- dv-core: 167 passed.
+- dv-media: 31 unit tests, plus 21 + 1 + 1 integration tests.
+- dv-playback: 60 unit tests, plus 2 in `mix_render`.
+- df-core doctests: 1.
+
+The four failures fail again when run alone, so they are not load flakes; Open
+questions has them. The 12 permission tests the builder user is there for all
+passed. A second pass chowned `target/` and the cargo home to root, the way a
+restore could leave them, then ran the hand-over, the build and `--version` again.
+All three passed, and cargo rebuilt nothing.
+
+Skipped in the container and run on the host, each for a missing binary or file:
+
+- rsync: 9 df-core `sync::rsync` tests and df-app `y_on_a_server_row_then_alt_p_syncs_it_down_through_rsync`.
+- 7z: 6 df-core `archive` tests, df-app `an_extraction_here_lands_on_what_the_extractor_made`, and df-app
+  `preview::listing::tests::{a_7z_lists_through_7zip, a_tar_bz2_lists_its_members_through_7zip}`, which
+  return without a message.
+- rclone: 8 df-core `vfs::rclone*` tests.
+- sftp-server: 2 df-core `vfs::tests`.
+- No system font: 5 df-app `preview::doc::font` tests.
+- No yazi cache: `preview::cache::tests::opportunistically_matches_a_real_yazi_entry`.
+- No zoxide database: `zoxide::tests::the_real_database_parses_if_it_exists`.
+
+git was installed, so nothing skipped for it.
 
 ## 2. Native dependencies per target
 
@@ -503,43 +553,70 @@ Why not sign now:
   image's default host.
 - 2026-09-29 — The Windows FFmpeg pin (`FFMPEG_URL`, `FFMPEG_SHA256`) lives in the
   job's `env:` in `ci.yml` until B6.10 creates `build/windows/ffmpeg.lock`.
+- 2026-09-29 — The linux job builds and tests as an unprivileged user. The archlinux
+  container runs every step as root, and permission bits do not stop root. Under
+  `unshare -r` on the host, 13 tests that chmod a path to `0o000` or `0o555` and
+  expect the I/O to fail saw it succeed and failed. In df-core they are
+  `ops::copy::tests::a_move_that_cannot_happen_leaves_the_destination_alone`, five
+  `ops::journal::tests::a_partial…`/`a_partly_undone…` tests, three `sync::tests`
+  and `sync::rsync::tests::a_file_rsync_could_not_send_is_one_problem_not_two`,
+  which the container skips for want of rsync. In df-app they are two
+  `app::syncing::tests` and
+  `app::tests::undo::a_copy_redo_that_cannot_land_goes_back_and_undo_works_again`.
+  The choice was between running cargo as another user and making those tests skip
+  under root, as `du/tests.rs:208`, `archive/write/tests.rs:727` and
+  `vfs/rclone_tests.rs:1146` do. Running as another user won, because those tests
+  must keep asserting something in CI, and nothing under `crates/` changes for CI's
+  sake. After pacman the job runs `useradd --create-home --uid 1000 --user-group
+  builder` and `git config --system --add safe.directory "$GITHUB_WORKSPACE"`, so
+  git accepts the checkout whichever user owns it.
+  `CARGO_HOME` is fixed at `/home/builder/.cargo` in the job's `env:`, and the cache
+  paths name it. Checkout and the cache restore stay root. A step after the restore
+  runs `chown -R builder:builder "$GITHUB_WORKSPACE" /home/builder`, and every
+  cargo step and the smoke test run as `runuser -u builder -- …`. The uid is fixed
+  so that a restored cache comes back owned by the user it was saved from; the chown
+  covers the case where it does not. macOS runs as an ordinary user, and on
+  Windows these tests do not exist, because they set Unix mode bits. In the local
+  container run under §1 the 12 tests pass as builder, and a `target/` and cargo
+  home left owned by root are handed over and build without a rebuild.
 
 ## Open questions
 
 - Homebrew FFmpeg major on the macOS runner at implementation time (B6.7 resolves).
   (2026-09-29: `formulae.brew.sh` lists `ffmpeg` 9.0.2 with an `arm64_tahoe` bottle.
   The first run's FFmpeg step log settles it.)
-- The Linux job runs as root, and root ignores permission bits (found 2026-09-29).
-  The archlinux container runs every step as root. Under `unshare -r` (namespace
-  root, which bypasses permission checks the same way), `cargo test --workspace` on
-  main fails 13 tests. Each chmods something to `0o000` or `0o555` and expects the
-  I/O to fail. In df-core: `ops::copy::tests::a_move_that_cannot_happen_leaves_the_destination_alone`,
-  `ops::journal::tests::{a_partial_undo_clears_the_redo_stack_and_a_refused_one_does_not,
-  a_partial_redo_splits_and_both_halves_can_be_walked,
-  a_partly_undone_copy_leaves_only_the_remainder_to_retry,
-  a_partly_undone_move_leaves_only_the_remainder_to_retry,
-  a_partly_undone_trash_leaves_only_the_remainder_and_clears_the_redo_stack}`,
-  `sync::tests::{a_folder_that_could_not_be_read_is_a_problem,
-  a_removal_that_fails_is_recorded_and_the_rest_carry_on,
-  a_source_that_cannot_be_read_back_is_named_as_itself}`, and
-  `sync::rsync::tests::a_file_rsync_could_not_send_is_one_problem_not_two`, which the
-  container skips because it has no rsync. In df-app:
-  `app::syncing::tests::{a_run_with_problems_comes_back_as_a_card_naming_them,
-  a_folder_that_could_not_be_read_opens_the_card_and_fails_the_task}` and
-  `app::tests::undo::a_copy_redo_that_cannot_land_goes_back_and_undo_works_again`.
-  As an ordinary user all of them pass. There are two ways out:
-  1. Run the cargo steps as an unprivileged user inside the container: `useradd`,
-     `chown` the workspace and a fixed `CARGO_HOME`, and prefix each cargo step
-     with `runuser -u <user> --`. This is CI-only and leaves the code alone. The
-     cost is more workflow, and file ownership to keep right for the cache step.
-  2. Make those tests skip when the chmod'd path is still readable, as
-     `du/tests.rs:208`, `archive/write/tests.rs:727` and `vfs/rclone_tests.rs:1146`
-     already do. The workflow stays as written, but the change is in `crates/`,
-     and in CI those 12 tests would then assert nothing.
+- Four tests pass on Brian's machine and fail in a clean archlinux container (found
+  2026-09-29 in the local run under §1; each fails again when run alone). Until
+  they are dealt with, the linux job goes red at `cargo test --workspace`.
+  - Two need a Nerd Font. `icons::glyph_tests::the_chrome_glyphs_all_render`
+    panics with "no face draws '✓' (U+2713)", and
+    `menu::tests::a_key_stands_clear_of_the_chevron` with "the key is -0.84375 pt
+    from the ▸". On the host, hiding `/usr/share/fonts/TTF` and
+    `~/.local/share/fonts` in a mount namespace reproduces both. The glyph test's
+    own doc says the plain glyphs must draw "patched font or not". So on a machine
+    without a Nerd Font, which includes every stock Mac and Windows install, the
+    chrome has at least ✓ drawn as a missing-glyph box. That matters to the port
+    as well as to CI.
+  - One depends on directory order. `app::places::tests::the_menus_pin_and_go`
+    takes `sub`'s index from `entries()`, which came back as `["sub", "other"]`,
+    and after `set_cursor` with it the row menu pins `other`. The test passes with
+    TMPDIR on tmpfs, where the host's `/tmp` is, and fails with TMPDIR on btrfs
+    and on the container's overlayfs.
+  - One takes a branch the host never reaches.
+    `archive::tests::a_zip_written_by_a_real_archiver_lists_the_same_way` builds
+    its fixture with `zip` when it is installed and with `bsdtar` otherwise. The
+    container has only bsdtar, which writes `./`-prefixed members (`./`,
+    `./one.txt`, `./sub/`, `./sub/two.txt`), and the lister counts one of them
+    unsafe: `unsafe_count()` is 1 where the test wants 0.
 
-  Until one is chosen, expect the linux job to go red at `cargo test --workspace`.
-  macOS is not affected, because the runner's user is not root. Windows is not
-  affected either, because these tests set Unix mode bits and do not run there.
+  There are two ways to settle them, and they can be combined. One is to change
+  code under `crates/`. For the fonts, decide what the chrome falls back to for ✓
+  and ▸. For the places test, take the cursor index from the order on screen. For
+  the archive test, decide whether a `./` member is unsafe. The other is to make
+  the container look like Brian's machine, adding a Nerd Font such as
+  `ttf-jetbrains-mono-nerd` (232 MiB installed) and `zip` to the pacman line. That
+  turns three of the four green, but it hides the font gap from CI, and the places
+  test still depends on the filesystem.
 - The linux job uses Arch's `rust` package, while macOS and Windows use rustup's
   current stable. After a Rust release the two can differ by a version for
   a few days, and a new clippy lint under `-D warnings` would then fail one job and
