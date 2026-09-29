@@ -474,6 +474,25 @@ pub fn keep_text(keep_days: u64) -> Option<String> {
     (keep_days > 0).then(|| format!("Items are removed for good after {}", days(keep_days)))
 }
 
+/// The line under an empty trash view: what the platform's trash cannot
+/// show, where there is something it cannot ([`crate::platform::trash`] —
+/// on macOS, Finder's own items), and otherwise the trash's clock.
+pub fn empty_note(keep_days: u64) -> Option<String> {
+    crate::platform::trash::LISTED_NOTE
+        .map(str::to_string)
+        .or_else(|| keep_text(keep_days))
+}
+
+/// What a purge says when it is done: `message`, and when it was "Empty
+/// trash" on a platform whose trash view does not see all of the trash,
+/// that it emptied only what it could see.
+pub fn purged_whole(message: String, whole: bool) -> String {
+    match crate::platform::trash::EMPTIED_NOTE {
+        Some(note) if whole => format!("{message} — {note}"),
+        _ => message,
+    }
+}
+
 /// `30 days`, `1 day`.
 pub fn days(n: u64) -> String {
     if n == 1 {
@@ -740,6 +759,36 @@ mod tests {
         assert!(df_core::ops::trash::restore(&taken, &ctx).is_err());
         assert!(df_core::ops::trash::restore(&fine, &ctx).is_ok());
         assert!(root.join("work/fine.txt").exists());
+    }
+
+    /// Under an empty trash view: on macOS, that Finder's own items are not
+    /// listed, whatever the clock; elsewhere the clock, or nothing. And
+    /// "Empty trash" says on macOS that it emptied only what it listed
+    /// (02-macos.md M2.9).
+    #[test]
+    fn the_trash_says_what_it_cannot_see_where_it_cannot_see_it() {
+        let finder =
+            "Only files trashed from delightfile are listed — Finder's Trash may hold more";
+        if cfg!(target_os = "macos") {
+            assert_eq!(empty_note(30).as_deref(), Some(finder));
+            assert_eq!(empty_note(0).as_deref(), Some(finder));
+            assert_eq!(
+                purged_whole("Destroyed 3 items".to_string(), true),
+                "Destroyed 3 items — only what delightfile trashed; Finder's Trash may hold more"
+            );
+        } else {
+            assert_eq!(empty_note(30), keep_text(30));
+            assert_eq!(empty_note(0), None);
+            assert_eq!(
+                purged_whole("Destroyed 3 items".to_string(), true),
+                "Destroyed 3 items"
+            );
+        }
+        assert_eq!(
+            purged_whole("Destroyed 1 item".to_string(), false),
+            "Destroyed 1 item",
+            "a purge of a selection is about the selection"
+        );
     }
 
     /// A row is found by the name the pane keys everything else by, and a set

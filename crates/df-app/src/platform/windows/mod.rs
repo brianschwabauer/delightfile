@@ -18,4 +18,5 @@ pub mod mounts;
 pub mod open;
 pub mod pdfium;
 pub mod portal;
+pub mod trash;
 pub mod window;

@@ -23,5 +23,6 @@ pub mod pdfium;
 /// `--portal`: the xdg-desktop-portal file-chooser backend, and
 /// `org.freedesktop.FileManager1` ("Show in folder").
 pub mod portal;
+pub mod trash;
 mod wayland;
 pub mod window;
