@@ -624,6 +624,31 @@ Why not sign now:
   alternative, shipping or requiring the Visual C++ Redistributable, puts an
   installer in front of a program that is otherwise a folder to unzip. The same
   start opened a console window beside the program, which is W4.1/B6.21's to close.
+- 2026-09-29 — The linux job's portal failure was in the test, not the program.
+  `the_bus_starts_the_backend_on_the_first_call` in `crates/df-app/tests/portal.rs`
+  kills its private `dbus-daemon` and waits for `/proc/<pid>` of the service that
+  bus started to go away. The service stops at once. In run 36637010603 it logged
+  `portal: stopping: the session bus closed the connection` within 3 ms of the kill,
+  and `main` exits after that line. But the bus was the service's parent, so killing the
+  bus orphans it, and whoever adopts an orphan has to reap it. On a desktop that is
+  systemd or a subreaper. In a container it is PID 1, and GitHub creates job
+  containers with `--entrypoint "tail"` and `"-f" "/dev/null"`, so PID 1 is `tail`,
+  which never calls `wait`. The service stayed a zombie with parent 1, and its
+  `/proc` entry never went. Reproduced in `archlinux:latest` created the way the
+  runner creates it, with `tail -f /dev/null` as PID 1, steps through `docker exec`,
+  `--cpus 4` and cargo as builder. 3 of 3 runs failed after 10 s, and each left one
+  `delightfile <defunct>` under PID 1. The same test binary passed 3 of 3 in 0.2 s
+  under `docker run --init`, whose tini reaps, and with bash as PID 1, which reaps
+  whatever it adopts. A local run started as `docker run … bash <script>` passes for
+  that reason. Timing and the builder user's environment played no part. The test
+  now counts a zombie as exited: `has_exited` reads the `State:` line of
+  `/proc/<pid>/status` and takes Z or X. A service that kept running still fails it,
+  checked by making the service sleep after its bus closed: state S, and the test
+  gave up as before. Nothing under `src/` changed, because the program does exit when
+  its bus goes. `options: --init` on the job's container would also have turned the
+  job green. It was not taken, because the test would stay wrong on any machine
+  where nobody reaps orphans. With the change, the `tail` container passes 3 of 3,
+  and so did the runner: run 36643463056 of `port/linux-ci` has the linux job green.
 
 ## Open questions
 
