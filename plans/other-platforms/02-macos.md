@@ -281,6 +281,20 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       the live check finds 4K playback unusable, and note the divergence in
       `crates/dv-media/Cargo.toml`'s header comment.
 
+## 8. Found in Phase 1
+
+- [ ] **M2.28** `platform::nofollow` macOS body (S1.19), in place of the stub
+      that refuses every permissions change: the same anchored walk without
+      `/proc` — `open(anchor, O_RDONLY | O_DIRECTORY)`, then each component with
+      `openat(dirfd, name, O_RDONLY | O_NOFOLLOW | O_DIRECTORY)` (macOS has no
+      `O_PATH`, so a folder must be readable to be walked; one shut to its owner
+      is the "Apply again" case `ops::mode` already reports),
+      `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` for what the last component is,
+      and `fchmodat(dirfd, name, mode, AT_SYMLINK_NOFOLLOW)` to set it, which on
+      macOS refuses a link rather than following it. `read_dir_in` lists through
+      the descriptor (`fdopendir` of a `dup`). Done when: `ops/mode.rs`'s
+      `on_disk` tests are `#[cfg(unix)]` and pass on the macOS runner.
+
 ## Decisions log
 
 - 2026-09-25 — kqueue over FSEvents (coarse event model, no new FFI).

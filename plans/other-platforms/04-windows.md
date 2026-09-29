@@ -329,3 +329,10 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
   is absent on a fresh Windows 10 LTSC.
+- Permissions editing on Windows (S1.19): does the `C` card exist there at all?
+  Windows has one permission bit, read-only (W4.29 maps the spot panel to a
+  Read-only chip through `platform::fs::apply_mode`), and ACLs the nine-bit grid
+  cannot show. Either `ops::mode` is offered on Windows reduced to read-only,
+  with a walk that opens each component with `FILE_FLAG_OPEN_REPARSE_POINT`, or
+  the card and `Command::Permissions` are absent there. Until decided,
+  `platform::nofollow` on Windows is the stub and every change refuses.

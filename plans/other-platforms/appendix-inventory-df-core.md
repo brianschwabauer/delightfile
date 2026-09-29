@@ -243,6 +243,19 @@
 | 85–88 | Link parent fallback `PathBuf::from("/")` | Windows-differs | `symlink` | |
 | 92 | `std::os::unix::fs::symlink(&text, link)` | Unix-only | app:app.rs:link_into | Windows: `symlink_file`/`symlink_dir`, needs privilege ✓ S1.5 |
 
+### ops/mode.rs (added 2026-09-29: the permissions change postdates the inventory; lines as of 6aee8d1)
+
+| Line | What | Class | Used by | Note |
+|---|---|---|---|---|
+| 63–64 | `std::os::fd::AsRawFd`; `std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt}` | Unix-only | file-wide | ✓ S1.7, S1.19 |
+| 313–390 | The anchored walk: `PROC_FD = "/proc/self/fd"`, `proc_ready`, `named`, `open_named` with `libc::O_PATH \| O_NOFOLLOW \| O_DIRECTORY`, `open_in`, `stat_in` | Linux-only (macOS: no `O_PATH`, no `/proc`; Windows: neither) | `plan`, `chmod`, `undo`, `redo` ← app:app.rs, app:app/permissions.rs | ✓ S1.19 |
+| 423–483 | `Finder` (anchor opened with `O_PATH \| O_DIRECTORY`, `ENOTDIR` for a swapped folder) | Linux-only | as above | ✓ S1.19 |
+| 486–489 | `swapped`: `ENOTDIR \| ELOOP` | Linux-only numbers | `lookup_failed`, `unreachable`, `redo_unreachable` | ✓ S1.19 |
+| 503–516 | `set_mode_of`: `set_permissions` of the `/proc` name with `Permissions::from_mode` | Linux-only | `set_one`, `undo`, `redo` | ✓ S1.19 |
+| 564–634, 825–844, 1054, 1085–1145 | `meta.mode()`, `dev()`, `ino()` | Unix-only | `plan`, `set_one`, `redo`, `still_as_*` | ✓ S1.7 |
+| 819 | `e.raw_os_error() == Some(libc::ENOTDIR)` | Unix-only numbers | `set_one` | ✓ S1.3 |
+| 1181–2073 | Tests set modes with `from_mode`, make links with `std::os::unix::fs::symlink`, and read modes back | Unix/Linux semantics | | Disk tests moved to a Linux-gated `on_disk` module ✓ S1.19 |
+
 ### ops/paste.rs
 
 | Line | What | Class | Used by | Note |

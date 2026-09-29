@@ -324,7 +324,24 @@ has not dropped.
       `user.xdg.tags` or Finder's `com.apple.metadata:_kMDItemUserTags` is an open
       question in `02-macos.md`. Done when: the tags tests pass on Linux,
       `fs/tags.rs` names no `libc`, and df-core compiles on all three targets.
-      — done SHA_S118, cross-checked locally, CI pending
+      — done cb54c3a, cross-checked locally, CI pending
+- [x] **S1.19** `platform::nofollow`, the permissions change's descriptor walk
+      (added 2026-09-29: `ops/mode.rs` postdates the inventory). Finding a path
+      below the anchor without following a link — `O_PATH | O_NOFOLLOW`
+      descriptors named through `/proc/self/fd/<n>`, `ready()` (was
+      `proc_ready`), `Finder`, `open_in`, `stat_in`, `swapped`, `set_mode_of`, and
+      a `read_dir_in` wrapper for the one `read_dir(named(..))` in `plan` — moves
+      to `platform/linux/nofollow.rs` unchanged; `ops::mode` keeps the grid,
+      the plan, the ordering, the record and the undo/redo checks, and `below`/
+      `outside` (pure path logic the walk borrows). macOS and Windows:
+      `platform/stub/nofollow.rs`, whose `ready()` refuses with
+      "Permissions is not available on this platform" — the answer every
+      change, undo and redo already gives when `/proc` is missing — and never
+      falls back to a `chmod` by path. The tests that change modes on disk move
+      to a Linux-gated `on_disk` module in `ops/mode.rs`; the grid tests run
+      everywhere. Done when: `ops/mode.rs` names no `libc` or `O_PATH` in code,
+      its tests pass on Linux, and df-core compiles on all three targets.
+      — done SHA_S119, cross-checked locally, CI pending
 
 ## 3. df-app: the seam
 
@@ -629,6 +646,15 @@ their native clipboards *are* synchronous.
   question in `02-macos.md`). `tags::write` checks `xattr::AVAILABLE` after its
   comma check, so a stub platform refuses with "Tags is not available on this
   platform" rather than the Linux text for a drive that keeps no attributes.
+- 2026-09-29 — S1.19 (new task): the permissions change (`C`, `ops/mode.rs`)
+  finds each path with `O_PATH | O_NOFOLLOW` descriptors named through
+  `/proc/self/fd`, which neither macOS nor Windows has. Fixed rule: the Linux
+  walk moved unchanged into `platform::nofollow`, stubs elsewhere refuse
+  through the existing `/proc`-missing path (its `ready()` check), so
+  `ops::mode::plan` still returns `Ok` with each target's refusal in
+  `errors`, as it always has without `/proc`. The disk tests are
+  `#[cfg(target_os = "linux")]` because they test the Linux walk; a macOS body
+  is M2.28.
 
 ## Open questions
 
