@@ -139,6 +139,11 @@ PDF previews want `libpdfium.so`, loaded at runtime from `~/.local/lib/delightfi
 `pdfium_7881`). Without it a PDF falls back to its thumbnail, which is a missing feature
 and never an error.
 
+Row icons are a Nerd Font's glyphs when one is installed, and `ls`-style classifiers when
+none is. On Linux any patched face in the system or user font directories is found (on
+Arch, `pacman -S ttf-jetbrains-mono-nerd`); on macOS `brew install --cask
+font-symbols-only-nerd-font` puts one in `~/Library/Fonts`, where it is looked for.
+
 `fd`, `rg`, `git`, `zip`, `bsdtar` and `wl-copy` are run as subprocesses when they exist.
 Each one only powers its own feature, and a missing binary shows up as a message naming it
 rather than as a failure. The trash, the D-Bus mount client, the TOML parser and the
