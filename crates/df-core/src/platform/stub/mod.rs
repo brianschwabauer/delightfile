@@ -16,6 +16,7 @@
 //! (`#[cfg(windows)]` on its line below), so it is not dead code on macOS,
 //! which has its own body.
 
+#[cfg(windows)]
 pub mod fs;
 pub mod nofollow;
 pub mod process;
