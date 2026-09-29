@@ -1,12 +1,12 @@
-//! The Linux-only file primitives, answered with "no": stands in on macOS and
-//! on Windows.
+//! The file primitives Linux and macOS answer with a syscall of their own,
+//! answered with "no": stands in on Windows (macOS has its own,
+//! `platform/macos/fs.rs`).
 //!
-//! - [`reflink`]: `false`, so every copy takes the chunked path. macOS gets
-//!   `clonefile` as a pre-open hook in M2.2; Windows keeps the chunked copy.
+//! - [`reflink`]: `false`, so every copy takes the chunked path.
 //! - [`forget_cached`]: nothing. A verify then reads through the cache, which
-//!   still catches everything but a lying medium; macOS stays this way (M2.7).
+//!   still catches everything but a lying medium.
 //! - [`is_remote`] / [`magic_of`]: `false` / `None`, so automatic folder sizes
-//!   walk a network mount as they would a disk until M2.3 and W4.x answer it.
+//!   walk a network mount as they would a disk until W4.x answers it.
 
 use std::fs::File;
 use std::path::Path;
