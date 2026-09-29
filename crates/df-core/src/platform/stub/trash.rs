@@ -1,5 +1,5 @@
-//! No trash: stands in on macOS until M2.8 (`NSFileManager` and a restore
-//! journal) and on Windows until W4.7 (the Recycle Bin).
+//! No trash: stands in on Windows until W4.7 (the Recycle Bin). macOS has
+//! Finder's, with a restore journal (`platform/macos/trash.rs`).
 //!
 //! There is no home trash to find, so [`Trash::home`] and [`for_path`] refuse
 //! with [`DfError::Unsupported`], and the app turns that into its refusal

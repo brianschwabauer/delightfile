@@ -570,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
+    #[cfg(unix)] // a trash to put things in (Windows: W4.7)
     fn a_trash_job_is_undoable() {
         let t = TempTree::new("job-trash");
         // `for_path` picks a real trash, so this test drives the plain trash
