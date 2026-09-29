@@ -179,7 +179,7 @@ the README and for choosing defaults).
       Homebrew cask installs `SymbolsNerdFontMono-Regular.ttf`, so add
       `SymbolsNerdFontMono-Regular` to `PREFERRED`. Done when: the `install` test
       with a fake directory passes on every target.
-      — done 6b2d653: the directories were S1.29's; `SymbolsNerdFontMono-Regular`
+      — done 14120fe: the directories were S1.29's; `SymbolsNerdFontMono-Regular`
       ends `PREFERRED`, and
       `icons::tests::the_icon_face_is_found_by_preference_across_directories` runs
       on every target, the macOS runner included. On Linux the one difference is

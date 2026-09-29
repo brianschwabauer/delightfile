@@ -36,7 +36,7 @@
 //! temporary file renamed over the journal.
 //!
 //! Emptying old items (`[mgr] trash_keep_days`) is not done here yet:
-//! [`purge_due_in`] is never due (M2.34).
+//! [`purge_due_in`] is never due (M2.35).
 
 // Foundation's methods are `unsafe fn` in objc2-foundation 0.2: every call
 // here is one of three (`defaultManager`, a file URL from a path's bytes,
@@ -331,7 +331,7 @@ pub struct Purged {
     pub first_error: Option<String>,
 }
 
-/// Refused: old items are not emptied on macOS yet (M2.34).
+/// Refused: old items are not emptied on macOS yet (M2.35).
 pub fn purge_expired(
     _trash: &Trash,
     _keep_days: u64,
@@ -352,7 +352,7 @@ pub fn purge_expired_if_due(
     Err(DfError::Unsupported("Emptying old trash"))
 }
 
-/// Never owed a purge until M2.34: asked again in `every`.
+/// Never owed a purge until M2.35: asked again in `every`.
 pub fn purge_due_in(_trash: &Trash, every: Duration, _now: SystemTime) -> Option<Duration> {
     Some(every)
 }

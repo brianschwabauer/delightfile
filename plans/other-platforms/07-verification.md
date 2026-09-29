@@ -144,7 +144,7 @@ document that owns the feature.
 - [ ] Items trashed by Finder do not appear in the trash view (M2.8 decided it:
       the view lists what the app trashed, from its journal); emptying the Trash in
       Finder takes the app's items out of the view too.
-- [ ] Once df-core's M2.8 is in (M2.9): with nothing trashed from delightfile, `g t`
+- [ ] With nothing trashed from delightfile (M2.9): `g t`
       shows "empty" and under it "Only files trashed from delightfile are listed —
       Finder's Trash may hold more"; "Empty trash" toasts "Destroyed N items — only
       what delightfile trashed; Finder's Trash may hold more" and leaves Finder's own
