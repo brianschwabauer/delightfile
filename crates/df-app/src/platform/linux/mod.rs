@@ -12,6 +12,7 @@ pub mod device;
 pub mod fonts;
 pub mod gfx;
 pub mod mounts;
+pub mod pdfium;
 /// `--portal`: the xdg-desktop-portal file-chooser backend, and
 /// `org.freedesktop.FileManager1` ("Show in folder").
 pub mod portal;

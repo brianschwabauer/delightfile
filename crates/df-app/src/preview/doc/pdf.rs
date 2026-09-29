@@ -17,6 +17,12 @@
 //! 5. The system loader, which is what the AUR `pdfium-binaries` package
 //!    installs.
 //!
+//! That is Linux's list; each platform's is [`crate::platform::pdfium`], under
+//! its own file name ([`crate::platform::pdfium::LIBRARY_NAME`]) — on macOS
+//! the explicit path, the `.app` bundle's `Frameworks` and the same per-user
+//! directory, on Windows the explicit path and the executable's own directory
+//! — and the system loader is asked last everywhere.
+//!
 //! If none of them load, a PDF falls back to its cached thumbnail and a `pdf`
 //! badge — PLAN §6's "missing lib = missing feature, **never a failure**". The
 //! pane never shows an error for it, because a missing optional library is not
@@ -31,34 +37,12 @@
 //! `Worker`'s — so the serialization is structural rather than a
 //! mutex. A [`Doc`] is not `Send` and never leaves that thread.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{PdfDocument, PdfRenderConfig, Pdfium};
 
 use super::Rgba;
-
-/// Candidate paths for the dynamic library, most specific first.
-fn candidates() -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if let Some(explicit) = std::env::var_os("DF_PDFIUM_LIB") {
-        out.push(PathBuf::from(explicit));
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        out.push(home.join(".local/lib/delightfile/libpdfium.so"));
-        // The sibling program's copy. Sharing it is the point of pinning the
-        // same ABI: there is one 7 MB library on this machine and neither
-        // program should be the reason there are two.
-        out.push(home.join(".local/lib/delightviewer/libpdfium.so"));
-    }
-    out.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target")
-            .join("libpdfium.so"),
-    );
-    out
-}
 
 /// The process's one pdfium instance, or `None` when there is no usable
 /// library.
@@ -71,7 +55,7 @@ fn candidates() -> Vec<PathBuf> {
 pub fn pdfium() -> Option<&'static Pdfium> {
     static INSTANCE: OnceLock<Option<&'static Pdfium>> = OnceLock::new();
     *INSTANCE.get_or_init(|| {
-        let bindings = candidates()
+        let bindings = crate::platform::pdfium::candidates()
             .into_iter()
             .find_map(|path| match Pdfium::bind_to_library(&path) {
                 Ok(b) => {
@@ -189,22 +173,23 @@ mod tests {
 
     /// The candidate list is ordered, and the explicit override is first — a
     /// packager's `$DF_PDFIUM_LIB` must beat whatever happens to be installed.
+    /// Everything after it is this platform's file name for the library, in
+    /// the places this platform's list looks (on Linux, the per-user copies
+    /// `platform::linux::pdfium`'s own test names).
     #[test]
     fn the_library_is_looked_for_in_the_documented_order() {
+        use crate::platform::pdfium::{candidates, LIBRARY_NAME};
         let paths = candidates();
         assert!(!paths.is_empty());
-        if std::env::var_os("HOME").is_some() {
-            assert!(
-                paths
-                    .iter()
-                    .any(|p| p.ends_with(".local/lib/delightfile/libpdfium.so")),
+        let explicit = std::env::var_os("DF_PDFIUM_LIB").map(std::path::PathBuf::from);
+        if let Some(explicit) = &explicit {
+            assert_eq!(paths.first(), Some(explicit), "{paths:?}");
+        }
+        for path in &paths[usize::from(explicit.is_some())..] {
+            assert_eq!(
+                path.file_name(),
+                Some(std::ffi::OsStr::new(LIBRARY_NAME)),
                 "{paths:?}"
-            );
-            assert!(
-                paths
-                    .iter()
-                    .any(|p| p.ends_with(".local/lib/delightviewer/libpdfium.so")),
-                "the sibling's copy is shared on purpose: {paths:?}"
             );
         }
     }

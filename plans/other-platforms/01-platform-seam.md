@@ -586,7 +586,7 @@ their native clipboards *are* synchronous.
       Linux is verified by the code, not a launch (no GUI is driven here): the
       first instance is built from `Backends::VULKAN` exactly as before.
       — done 381ce41, Linux verified, other targets unverified until CI
-- [>] **S1.29** `platform::fonts::dirs() -> Vec<PathBuf>`: Linux body is
+- [x] **S1.29** `platform::fonts::dirs() -> Vec<PathBuf>`: Linux body is
       `icons.rs:72–82` + the `$HOME` additions at `:102–105`; macOS and Windows lists
       are defined in `05-defaults-and-config.md` D5.6 and filled here (they are just
       strings). Done when: `icons.rs` has no path literal.
@@ -595,14 +595,22 @@ their native clipboards *are* synchronous.
       half — adding `SymbolsNerdFontMono-Regular` to `PREFERRED` — is D5.6's and
       was not done here: it would re-rank a face Linux already accepts as a
       last-resort match. A Linux test pins the order (system directories, then
-      `~/.local/share/fonts`, `~/.fonts`). — df-app agent, started 2026-09-29
-- [ ] **S1.30** `platform::pdfium::{LIBRARY_NAME, candidates()}`: `preview/doc/pdf.rs:41–61`
+      `~/.local/share/fonts`, `~/.fonts`). — done cf13fa4, Linux verified, other
+      targets unverified until CI
+- [>] **S1.30** `platform::pdfium::{LIBRARY_NAME, candidates()}`: `preview/doc/pdf.rs:41–61`
       builds its list from them. Linux: `libpdfium.so` and the four paths as today.
       macOS: `libpdfium.dylib`, `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/libpdfium.dylib`
       (the bundle), `~/.local/lib/delightfile/libpdfium.dylib`. Windows: `pdfium.dll`,
       `$DF_PDFIUM_LIB`, `<exe dir>\pdfium.dll`. Done when: the pdf.rs test
       `the_library_is_looked_for_in_the_documented_order` is parameterised on the
       platform list and passes on Linux.
+      *As built:* `pdf.rs`'s `candidates` moved whole to
+      `platform/linux/pdfium.rs`, its three `"libpdfium.so"` joins now joining
+      `LIBRARY_NAME` (the same paths, component for component). The pdf.rs test
+      asserts what holds on every target — the override first when set, and
+      every other candidate named `LIBRARY_NAME` — and its two Linux-only
+      assertions (the delightfile and delightviewer per-user copies) moved to
+      `platform::linux::pdfium`'s own test. — df-app agent, started 2026-09-29
 - [ ] **S1.31** CLI: `cli.rs:221, 246–252` produce `Outcome::Portal` only when
       `platform::HAS_PORTAL` (a `const bool`, Linux `true`); otherwise `--portal` is
       an unknown flag. `main.rs:89–91` calls `platform::portal::run()`, which exists

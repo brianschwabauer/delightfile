@@ -254,8 +254,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 3-19 | doc: search order `$DF_PDFIUM_LIB`, `~/.local/lib/delightfile/libpdfium.so`, `~/.local/lib/delightviewer/libpdfium.so`, `$CARGO_MANIFEST_DIR/../../target/libpdfium.so`, system loader | — | — | — |
-| 41-61 | `fn candidates() -> Vec<PathBuf>`: `var_os("DF_PDFIUM_LIB")` (44-45); `var_os("HOME")` + `.local/lib/delightfile/libpdfium.so` (47-49) and `.local/lib/delightviewer/libpdfium.so` (53); `Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target").join("libpdfium.so")` (55-59) | Linux-only file name (`.so`); Windows-differs (`HOME`) | `pdfium()` (74) | The three fixed candidates hard-code `libpdfium.so`. |
+| 3-19 | doc: search order `$DF_PDFIUM_LIB`, `~/.local/lib/delightfile/libpdfium.so`, `~/.local/lib/delightviewer/libpdfium.so`, `$CARGO_MANIFEST_DIR/../../target/libpdfium.so`, system loader | — | — | — ✓ S1.30 |
+| 41-61 | `fn candidates() -> Vec<PathBuf>`: `var_os("DF_PDFIUM_LIB")` (44-45); `var_os("HOME")` + `.local/lib/delightfile/libpdfium.so` (47-49) and `.local/lib/delightviewer/libpdfium.so` (53); `Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target").join("libpdfium.so")` (55-59) | Linux-only file name (`.so`); Windows-differs (`HOME`) | `pdfium()` (74) | The three fixed candidates hard-code `libpdfium.so`. ✓ S1.30 |
 | 63-100 | `pub fn pdfium() -> Option<&'static Pdfium>`: `Pdfium::bind_to_library(&path)` per candidate (76), then `Pdfium::bind_to_system_library()` (86) | portable at the system step | `available()` (105), `Doc::open` (121) ← preview/doc/mod.rs:load (487, 490) | pdfium-render's system name is `libloading::library_filename("pdfium")` (pdfium-render-0.9.3/src/pdfium.rs:168-170): `libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`. |
 | 184 | `const MISSING: &str = "PDF pages need libpdfium — see the README";` | text | Doc::open | Logged, not shown. |
 
