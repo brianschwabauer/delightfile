@@ -1466,6 +1466,12 @@ pub struct App {
     /// `Quit` exists at all.
     chosen: Vec<PathBuf>,
     quit: Option<Quit>,
+    /// Whether [`App::wrap_up`] has run: the quit's files are written and
+    /// the desktop device is gone. `exiting` reads it, because on macOS
+    /// Cmd+Q ends the program through winit's application delegate without
+    /// a `CloseRequested` first, and what `finish` would have written must
+    /// still be written.
+    finished: bool,
 
     // ── Input ───────────────────────────────────────────────────────────────
     /// Keystrokes that arrived since the last frame. Queued rather than acted
@@ -2402,6 +2408,7 @@ impl App {
             suggested,
             chosen: Vec::new(),
             quit: None,
+            finished: false,
             engine,
             task_events,
             ops: Vec::new(),
@@ -19555,6 +19562,18 @@ impl App {
 
     /// Write whatever this quit calls for, and say goodbye.
     fn finish(&mut self, event_loop: &ActiveEventLoop) {
+        self.wrap_up();
+        event_loop.exit();
+    }
+
+    /// [`App::finish`] without the event loop: the quit's files, and the
+    /// desktop device dropped. Once only, and [`App::tear_down`] runs it for
+    /// a quit that never came through `finish`.
+    fn wrap_up(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
         if let (Some(Quit::Chosen), Some(chooser)) = (self.quit, self.chooser.as_ref()) {
             crate::cli::write_chooser_file(&chooser.out, &self.chosen);
         }
@@ -19574,7 +19593,6 @@ impl App {
         // one place that promise is kept (see `DataDevice::start`'s safety
         // note).
         self.data_device = None;
-        event_loop.exit();
     }
 }
 
@@ -20580,6 +20598,24 @@ impl ApplicationHandler<crate::Wake> for App {
     /// taught stands: anything holding a platform resource is dropped in this
     /// window and not later.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.tear_down();
+    }
+}
+
+impl App {
+    /// Everything [`ApplicationHandler::exiting`] does, which is the whole of
+    /// it: apart so that a test can end an `App` with no event loop.
+    ///
+    /// A quit that did not come through [`App::finish`] is wrapped up here
+    /// first, as the closing of the window would have been. On macOS that is
+    /// Cmd+Q: winit's default menu sends `terminate:`, whose delegate calls
+    /// `exiting` and nothing before it, so without this the cwd file a shell
+    /// wrapper waits for would never be written.
+    fn tear_down(&mut self) {
+        if !self.finished {
+            self.quit.get_or_insert(Quit::WriteCwd);
+            self.wrap_up();
+        }
         // PLAN §2's other half of the debounce: whatever the timer has not
         // written yet is written now, because there is no later. Written first,
         // before anything that can take time, so a slow worker shutdown cannot
@@ -22090,6 +22126,34 @@ mod tests {
         app.run(Command::Trash, 10, now);
         assert_eq!(toast_text(&app), refusal);
         assert!(app.files.join("a.txt").exists(), "d deleted nothing");
+    }
+
+    /// A quit that never came through `finish` — Cmd+Q on macOS, which winit
+    /// turns into `exiting` alone — still writes the cwd file, as closing the
+    /// window would have; one that did come through it is not written twice,
+    /// and a `Q` that asked for no cwd file gets none (M2.26).
+    #[test]
+    fn an_exit_without_a_close_still_writes_the_cwd_file() {
+        let mut app = Fixture::new("exit-cwd", &["a.txt"]);
+        let out = app.files.parent().expect("sandbox").join("cwd");
+        app.cwd_file = Some(out.clone());
+        let cwd = app.tab().cwd.path().to_path_buf();
+        assert!(cwd.ends_with("files"), "{}", cwd.display());
+        app.tear_down();
+        let written = std::fs::read_to_string(&out).expect("the cwd file");
+        assert_eq!(PathBuf::from(written), cwd);
+
+        let mut quiet = Fixture::new("exit-silent", &["a.txt"]);
+        let out = quiet.files.parent().expect("sandbox").join("cwd");
+        quiet.cwd_file = Some(out.clone());
+        quiet.quit = Some(Quit::Silent);
+        quiet.wrap_up();
+        quiet.quit = None;
+        quiet.tear_down();
+        assert!(
+            !out.exists(),
+            "Q wrote nothing, and the exit did not either"
+        );
     }
 
     /// **The view scale is the tab's.** `=` in one tab moves that tab and
