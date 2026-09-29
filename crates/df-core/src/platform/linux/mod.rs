@@ -1,6 +1,7 @@
 //! Linux: the platform delightfile was written on, and the one every body here
 //! was moved from unchanged.
 
+pub mod defaults;
 pub mod fs;
 mod inotify;
 pub mod nofollow;

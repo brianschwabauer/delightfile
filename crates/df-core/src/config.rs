@@ -179,6 +179,10 @@ pub const DEFAULT_IMAGE_QUALITY: u8 = 80;
 
 /// The `g` chord's bookmarks, in which-key order: key, path, description.
 /// `~` is expanded at use time so `$HOME` can move.
+///
+/// This and the two opener tables below are Linux's, and Windows' until
+/// W4.3; a fresh install reads its platform's through
+/// [`crate::platform::defaults`], and macOS has its own there.
 pub const DEFAULT_BOOKMARKS: &[(&str, &str, &str)] = &[
     ("h", "~", "Go home"),
     ("c", "~/.config", "Go to ~/.config"),
@@ -330,7 +334,7 @@ pub const DEFAULT_OPENERS: &[(&str, &str, bool, &str)] = &[
 /// so a mime rule would send half the 3D formats to an editor and half to
 /// nothing. A `.gcode` is `text/plain` to every detector on the machine, which
 /// would open a 40 MB toolpath in a text editor.
-const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
+pub const DEFAULT_RULES: &[(&str, &str, &[&str])] = &[
     ("glob", "bulk-rename.txt", &["bulk-rename"]),
     (
         "glob",
@@ -918,9 +922,10 @@ impl Bookmark {
 /// them can come to disagree about where `~` is.
 pub use crate::path::expand_home;
 
-/// The shipped bookmark table, as [`Bookmark`]s.
+/// The shipped bookmark table, as [`Bookmark`]s: the platform's
+/// ([`crate::platform::defaults::BOOKMARKS`]).
 pub fn default_bookmarks() -> Vec<Bookmark> {
-    DEFAULT_BOOKMARKS
+    crate::platform::defaults::BOOKMARKS
         .iter()
         .map(|(key, path, description)| Bookmark {
             key: (*key).to_string(),
@@ -1006,7 +1011,7 @@ impl Default for Config {
             tasks: TasksConfig::default(),
             preview: PreviewConfig::default(),
             goto: default_bookmarks(),
-            openers: DEFAULT_OPENERS
+            openers: crate::platform::defaults::OPENERS
                 .iter()
                 .map(|(name, command, block, description)| Opener {
                     name: (*name).to_string(),
@@ -1015,7 +1020,7 @@ impl Default for Config {
                     description: (*description).to_string(),
                 })
                 .collect(),
-            rules: DEFAULT_RULES
+            rules: crate::platform::defaults::RULES
                 .iter()
                 .map(|(kind, pattern, openers)| OpenRule {
                     matcher: if *kind == "mime" {
@@ -2240,7 +2245,10 @@ mod tests {
         assert!(warnings[0].message.contains("unknown key"), "{warnings:?}");
     }
 
+    // Linux's table, which Windows ships until W4.3; macOS's has its own
+    // test beside it (`platform::defaults`).
     #[test]
+    #[cfg(any(target_os = "linux", windows))]
     fn default_bookmarks_are_the_goto_table() {
         let c = Config::default();
         let pairs: Vec<(&str, &str)> = c
@@ -2280,7 +2288,10 @@ mod tests {
         assert!(t.dir_icon("/home/brian/Nope", "Nope").is_none());
     }
 
+    // Linux's rules, which Windows ships until W4.3; macOS's are tested
+    // beside them (`platform::defaults`).
     #[test]
+    #[cfg(any(target_os = "linux", windows))]
     fn opener_rules_match_by_mime_and_by_glob() {
         let c = Config::default();
         let names =
@@ -2366,7 +2377,9 @@ mod tests {
     /// `edit` used to wait on `$EDITOR` with no terminal behind it, which for
     /// a terminal editor is nothing happening at all; and `reveal` opened a
     /// second file manager from inside this one. Both are gone for good.
+    /// Linux's openers, which Windows ships until W4.3.
     #[test]
+    #[cfg(any(target_os = "linux", windows))]
     fn edit_opens_a_terminal_and_nothing_reveals() {
         let c = Config::default();
         let edit = c.opener("edit").expect("edit");
@@ -2572,6 +2585,17 @@ mod tests {
         assert!(c.opener("helix").is_some_and(|o| o.block));
         // …and the shipped rules are still underneath.
         assert!(!c.openers_for("cat.png", "image/png", false).is_empty());
+    }
+
+    /// Every platform's table opens a text file in Zed first (05 D5.3).
+    #[test]
+    fn a_text_file_opens_in_zed_first_everywhere() {
+        let c = Config::default();
+        let first = c
+            .openers_for("x.txt", "text/plain", false)
+            .first()
+            .map(|o| o.name.clone());
+        assert_eq!(first.as_deref(), Some("zed"));
     }
 
     #[test]

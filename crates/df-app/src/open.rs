@@ -435,11 +435,14 @@ mod tests {
         let choice = named(&config, TERMINAL_OPENER).expect("shipped");
         assert_eq!(choice.name, "terminal-here");
         assert!(!choice.block, "a terminal must not hold the window");
-        assert!(
-            choice.command.contains(r#"--working-directory="$1""#),
-            "{}",
-            choice.command
-        );
+        // The folder itself: ghostty's `--working-directory` on Linux, the
+        // folder handed to Terminal.app on a Mac.
+        let folder = if cfg!(target_os = "macos") {
+            r#""${TERMINAL_APP:-Terminal}" "$1""#
+        } else {
+            r#"--working-directory="$1""#
+        };
+        assert!(choice.command.contains(folder), "{}", choice.command);
         assert!(!choice.command.contains("dirname"), "{}", choice.command);
         let folder_rule = config.openers_for("Work", "inode/directory", true);
         assert!(folder_rule.iter().any(|o| o.name == TERMINAL_OPENER));
@@ -450,8 +453,10 @@ mod tests {
     }
 
     /// PLAN §6's rules, as shipped: the first choice is what `o` runs and the
-    /// whole list is what `O` offers.
+    /// whole list is what `O` offers. Linux's, which Windows ships until
+    /// W4.3; a Mac's are the twin below.
     #[test]
+    #[cfg(any(target_os = "linux", windows))]
     fn opener_rules_pick_by_glob_then_mime() {
         let config = Config::default();
         let names = |name: &str, mime: &str, is_dir: bool| -> Vec<String> {
@@ -513,6 +518,37 @@ mod tests {
             Some("extract"),
             "…and it is a built-in, not a shell command"
         );
+    }
+
+    /// The rules a Mac ships (05-defaults-and-config.md §2.1, §2.3, M2.17):
+    /// what Linux hands to delightviewer opens in the default app through
+    /// `open "$1"`, text still opens in Zed, and `edit` is a terminal of its
+    /// own, never a wait.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn opener_rules_pick_by_glob_then_mime_on_macos() {
+        let config = Config::default();
+        let first = |name: &str, mime: &str| -> Option<&Opener> {
+            config.openers_for(name, mime, false).into_iter().next()
+        };
+        for (name, mime) in [
+            ("cat.png", "image/png"),
+            ("paper.pdf", "application/pdf"),
+            ("mystery", "application/octet-stream"),
+        ] {
+            let open = first(name, mime).expect(name);
+            assert_eq!(open.name, "open", "{name}");
+            assert_eq!(open.command, r#"open "$1""#, "{name}");
+        }
+        assert_eq!(
+            first("notes.txt", "text/plain").map(|o| o.name.as_str()),
+            Some("zed")
+        );
+        let edit = config.opener("edit").expect("edit");
+        assert!(!edit.block, "edit must not block: {}", edit.command);
+        assert!(config.opener("reveal").is_none());
+        let archive = first("backup.tar.gz", "application/gzip").expect("archive");
+        assert_eq!(archive.builtin(), Some("extract"));
     }
 
     fn file(name: &str) -> Entry {

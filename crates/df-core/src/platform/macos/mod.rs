@@ -4,6 +4,7 @@
 pub use super::unix::{errno, meta, os, pipe, socket, time};
 
 mod bplist;
+pub mod defaults;
 pub mod dirs;
 pub mod fs;
 mod kqueue;

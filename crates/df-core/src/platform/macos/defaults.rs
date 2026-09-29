@@ -1,0 +1,245 @@
+//! What a fresh install ships on macOS
+//! (`plans/other-platforms/05-defaults-and-config.md` §2.1, §2.3, §6).
+//!
+//! Linux's tables are Brian's machine: `setsid uwsm-app` to hand a program
+//! to the compositor, `xdg-open`, delightviewer, pinta, his wallpaper and
+//! AVIF helpers, his server's mounts. None of that is on a Mac. These are
+//! what a fresh Mac has, in the same shell-string form (`$SHELL -c`, `$1` and
+//! `$@`), plus Zed and mpv where they are installed; a missing one is the
+//! ordinary "opener not found". Detaching needs no prefix here: the shared
+//! Unix spawn puts every launch in a process group of its own (M2.16).
+//!
+//! The rules are Linux's, less every row that names an opener macOS does
+//! not ship (delightviewer and its editor, the wallpaper and AVIF helpers),
+//! so a picture, a video, a song or a PDF falls through to the last row and
+//! opens in the system's default app. The bookmarks are the four the plan
+//! gives keys to; Brian's server mounts and hosts stay Linux's.
+
+/// Openers a rule can name: id, command, blocking, description.
+///
+/// `edit` wants a terminal to run `$EDITOR` in: `$TERMINAL`, else Ghostty,
+/// when either is on `PATH`, and Terminal.app when neither is.
+/// `TERMINAL_APP` is delightfile's own variable, since `$TERMINAL` names a
+/// program and `open -a` wants an application's name.
+pub const OPENERS: &[(&str, &str, bool, &str)] = &[
+    (
+        "edit",
+        r#"command -v "${TERMINAL:-ghostty}" >/dev/null 2>&1 && exec "${TERMINAL:-ghostty}" -e "${EDITOR:-vi}" "$@"; exec open -a Terminal "$@""#,
+        false,
+        "Edit in $EDITOR",
+    ),
+    (
+        "zed",
+        r#"zed "$@" 2>/dev/null || open -a Zed "$@""#,
+        false,
+        "Open in Zed",
+    ),
+    (
+        "zed-workspace",
+        r#"zed "$1" 2>/dev/null || open -a Zed "$1""#,
+        false,
+        "Open folder in Zed",
+    ),
+    (
+        "terminal-here",
+        r#"open -a "${TERMINAL_APP:-Terminal}" "$1""#,
+        false,
+        "Terminal here",
+    ),
+    (
+        "terminal-at",
+        r#"open -a "${TERMINAL_APP:-Terminal}" "$(dirname "$1")""#,
+        false,
+        "Terminal at file",
+    ),
+    (
+        "open-in-chrome",
+        r#"open -a "Google Chrome" "$@""#,
+        false,
+        "Open in Chrome",
+    ),
+    ("edit-image", r#"open -a Preview "$@""#, false, "Edit image"),
+    (
+        "bulk-rename",
+        r#"zed --new --wait "$@""#,
+        true,
+        "Bulk rename in Zed",
+    ),
+    ("open", r#"open "$1""#, false, "Open"),
+    (
+        "play",
+        r#"command -v mpv >/dev/null 2>&1 && exec mpv --force-window "$@"; exec open "$@""#,
+        false,
+        "Play",
+    ),
+    ("extract", "builtin:extract", false, "Extract to folder"),
+    (
+        "extract-here",
+        "builtin:extract-here",
+        false,
+        "Extract here",
+    ),
+    (
+        "extract-merged",
+        "builtin:extract-merged",
+        false,
+        "Extract all into one folder",
+    ),
+];
+
+/// Opener rules, matched top-down: Linux's
+/// ([`crate::config::DEFAULT_RULES`]) less the rows that name an opener
+/// [`OPENERS`] does not have.
+pub const RULES: &[(&str, &str, &[&str])] = &[
+    ("glob", "bulk-rename.txt", &["bulk-rename"]),
+    (
+        "glob",
+        "*.{zip,tar,tgz,gz,bz2,xz,zst,7z,rar,cbz,cbr}",
+        &["extract", "extract-here", "extract-merged", "open"],
+    ),
+    (
+        "mime",
+        "application/{zip,x-tar,gzip,x-bzip2,x-xz,zstd,x-7z-compressed,vnd.rar}",
+        &["extract", "extract-here", "extract-merged", "open"],
+    ),
+    (
+        "mime",
+        "text/html",
+        &["zed", "open-in-chrome", "edit", "open", "terminal-at"],
+    ),
+    ("mime", "text/*", &["zed", "edit", "open", "terminal-at"]),
+    (
+        "mime",
+        "application/{json,ndjson,xml,javascript,x-shellscript,x-yaml,toml}",
+        &["zed", "edit", "open", "terminal-at"],
+    ),
+    ("glob", "*/", &["open", "zed-workspace", "terminal-here"]),
+    ("glob", "*", &["open", "terminal-at"]),
+];
+
+/// The `g` chord's bookmarks: key, path, description, in which-key order.
+pub const BOOKMARKS: &[(&str, &str, &str)] = &[
+    ("h", "~", "Go home"),
+    ("c", "~/.config", "Go to ~/.config"),
+    ("d", "~/Downloads", "Go to ~/Downloads"),
+    ("w", "~/Work", "Go to ~/Work"),
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, Opener};
+
+    fn names(openers: Vec<&Opener>) -> Vec<&str> {
+        openers.into_iter().map(|o| o.name.as_str()).collect()
+    }
+
+    /// A fresh install on a Mac reads these tables: the `g` bookmarks are
+    /// the four with keys, `~/Work` at `g w` as on Linux.
+    #[test]
+    fn default_bookmarks_are_the_goto_table() {
+        let c = Config::default();
+        let pairs: Vec<(&str, &str)> = c
+            .goto
+            .iter()
+            .map(|b| (b.key.as_str(), b.path.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("h", "~"),
+                ("c", "~/.config"),
+                ("d", "~/Downloads"),
+                ("w", "~/Work"),
+            ]
+        );
+    }
+
+    /// The rules as a Mac gets them: text in Zed first, then the terminal
+    /// editor, the default app and a shell in the folder, as on Linux; what
+    /// Linux sends to delightviewer — pictures, video, sound, PDFs — opens
+    /// in the default app through `open`; archives extract; a folder opens,
+    /// and nothing is ever an empty picker.
+    #[test]
+    fn opener_rules_match_by_mime_and_by_glob() {
+        let c = Config::default();
+        assert_eq!(names(c.openers_for("x.txt", "text/plain", false))[0], "zed");
+        assert_eq!(
+            names(c.openers_for("notes.md", "text/markdown", false)),
+            vec!["zed", "edit", "open", "terminal-at"]
+        );
+        assert_eq!(
+            names(c.openers_for("index.html", "text/html", false)),
+            vec!["zed", "open-in-chrome", "edit", "open", "terminal-at"]
+        );
+        assert_eq!(
+            names(c.openers_for("package.json", "application/json", false)),
+            vec!["zed", "edit", "open", "terminal-at"]
+        );
+        for (name, mime) in [
+            ("cat.png", "image/png"),
+            ("clip.mp4", "video/mp4"),
+            ("song.mp3", "audio/mpeg"),
+            ("paper.pdf", "application/pdf"),
+            ("mystery", "application/octet-stream"),
+        ] {
+            assert_eq!(
+                names(c.openers_for(name, mime, false)),
+                vec!["open", "terminal-at"],
+                "{name}"
+            );
+        }
+        assert_eq!(
+            names(c.openers_for("backup.tar.gz", "application/gzip", false)),
+            vec!["extract", "extract-here", "extract-merged", "open"]
+        );
+        assert_eq!(
+            names(c.openers_for("Work", "inode/directory", true)),
+            vec!["open", "zed-workspace", "terminal-here"]
+        );
+        let open = c.opener("open").expect("open");
+        assert_eq!(open.command, r#"open "$1""#);
+    }
+
+    /// `edit` is a terminal, never a wait, and the terminals are
+    /// Terminal.app unless `TERMINAL_APP` names another.
+    #[test]
+    fn edit_opens_a_terminal_and_terminals_are_apps() {
+        let c = Config::default();
+        let edit = c.opener("edit").expect("edit");
+        assert!(!edit.block);
+        assert!(edit.command.contains(r#""${EDITOR:-vi}""#));
+        assert!(edit.command.ends_with(r#"exec open -a Terminal "$@""#));
+        let at = c.opener("terminal-at").expect("terminal-at");
+        assert_eq!(
+            at.command,
+            r#"open -a "${TERMINAL_APP:-Terminal}" "$(dirname "$1")""#
+        );
+        assert!(c.opener("bulk-rename").is_some_and(|o| o.block));
+    }
+
+    /// Every opener a rule names is one this table has, so no rule offers a
+    /// row `O` would drop.
+    #[test]
+    fn every_rule_names_an_opener_macos_ships() {
+        for (_, pattern, openers) in RULES {
+            for name in *openers {
+                assert!(
+                    OPENERS.iter().any(|(id, ..)| id == name),
+                    "{pattern} names {name}"
+                );
+            }
+        }
+    }
+
+    /// Nothing of Linux's desktop is left in a command: no `setsid`, no
+    /// `uwsm-app`, no `xdg-open`.
+    #[test]
+    fn no_command_names_linux_tools() {
+        for (id, command, ..) in OPENERS {
+            for linux in ["setsid", "uwsm-app", "xdg-open", "zeditor"] {
+                assert!(!command.contains(linux), "{id}: {command}");
+            }
+        }
+    }
+}
