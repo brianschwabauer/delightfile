@@ -589,6 +589,11 @@ Why not sign now:
   attribute in the code and no `cfg` outside `platform/`, so the allowance is
   the workflow's. It comes off per job when Phase 2 (M2.31) and Phase 4
   (W4.34) give those items callers.
+- 2026-09-29 — Of the four container failures in Open questions, the two that
+  are not about fonts are fixed under `crates/` (S1.54 in
+  `01-platform-seam.md`): `the_menus_pin_and_go` finds its row by name instead
+  of by scan order, and an archive's `./` member is no longer unsafe. The two
+  Nerd Font tests remain as that question describes.
 
 ## Open questions
 

@@ -701,6 +701,30 @@ fn normalize_agrees_with_itself_about_separators_and_dots() {
     assert_eq!(normalize("./."), None);
 }
 
+/// A `.` component is the same path spelled with the folder it was made in —
+/// what `bsdtar -cf x.zip .` writes on every member: `./a` is `a`, `a/./b` is
+/// `a/b`, and `./` alone is the root, which lists as nothing and is not
+/// unsafe. A `..` behind a `./` still climbs, and `/` is still absolute.
+#[test]
+fn a_dot_component_is_the_same_path_and_only_a_dot_dot_climbs() {
+    for (name, key) in [
+        ("./a", Some("a")),
+        ("./", None),
+        ("./../a", Some("../a")),
+        ("a/./b", Some("a/b")),
+    ] {
+        assert_eq!(normalize(name).as_deref(), key, "{name:?}");
+    }
+    for name in ["./a", "./", "a/./b"] {
+        assert!(!name_is_unsafe(name), "{name:?} should be fine");
+    }
+    assert!(name_is_unsafe("./../a"), "a `..` behind `./` climbs");
+    assert!(
+        name_is_unsafe("/"),
+        "the root spelled absolutely is absolute"
+    );
+}
+
 // ── extraction planning ─────────────────────────────────────────────────────
 
 fn sample_tree() -> ArchiveTree {
@@ -1128,6 +1152,52 @@ fn a_zip_extracts_stored_and_deflated_members_alike() {
     assert_eq!(read(&dest.join("src/main.rs")), "fn main() {}");
     assert_eq!(read(&dest.join("src/big.txt")), big);
     assert_eq!(report.bytes, 5 + 12 + big.len() as u64);
+}
+
+/// The members `bsdtar` writes, listed and then extracted: each lists under its
+/// name without the `./` and lands where the listing says it is, the `./`
+/// member is neither a row nor an unsafe entry, and a `..` behind a `./` is
+/// flagged, skipped and never written.
+#[test]
+fn dot_slash_members_list_and_extract_as_the_names_without_it() {
+    let t = TempTree::new("archive-dot-slash");
+    let bytes = build_zip(
+        &[
+            ZipMember::dir("./"),
+            ZipMember::file("./one.txt", b"one"),
+            ZipMember::dir("./sub"),
+            ZipMember::file("./sub/two.txt", b"two"),
+            ZipMember::file("a/./b.txt", b"b"),
+            ZipMember::file("./../escape.txt", b"bad"),
+        ],
+        b"",
+    );
+    let archive = write(&t, "dots.zip", &bytes);
+    let tree = list(&archive).unwrap();
+    assert_eq!(tree.unsafe_count(), 1, "only the `..`");
+    for key in ["one.txt", "sub", "sub/two.txt", "a/b.txt"] {
+        assert!(tree.get(key).is_some_and(|e| !e.unsafe_name), "{key}");
+    }
+    assert!(tree.get("../escape.txt").is_some_and(|e| e.unsafe_name));
+
+    let (report, dest) = extract_all(&t, &archive, "out");
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.files, 3);
+    assert_eq!(read(&dest.join("one.txt")), "one");
+    assert_eq!(read(&dest.join("sub/two.txt")), "two");
+    assert_eq!(read(&dest.join("a/b.txt")), "b");
+    assert!(!t.path().join("escape.txt").exists(), "nothing climbed out");
+    // Every destination is the listed path under the folder, and what was
+    // refused is the `..` and what is under it.
+    let plan = plan_extract(&tree, &[], &dest);
+    for item in &plan.items {
+        assert_eq!(item.dest, dest.join(&item.inner));
+    }
+    assert!(!report.skipped.is_empty());
+    assert!(report
+        .skipped
+        .iter()
+        .all(|(path, why)| path.starts_with("..") && *why == SkipReason::UnsafeName));
 }
 
 /// The zip a streaming writer makes (a web app zipping files into a download,

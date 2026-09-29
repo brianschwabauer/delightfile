@@ -1298,17 +1298,10 @@ mod tests {
         assert_eq!(s.app.cwd(), files.join("other"));
         s.go(files.clone());
 
-        // A directory row's menu pins that folder, not this one.
-        let at = s
-            .app
-            .tab()
-            .cwd
-            .dir
-            .entries()
-            .iter()
-            .position(|e| e.name == "sub")
-            .expect("sub");
-        s.app.dir().set_cursor(at);
+        // A directory row's menu pins that folder, not this one. The row is
+        // found by name: `set_cursor` takes a position on screen, and
+        // `entries()` is scan order, which is the filesystem's to choose.
+        assert!(s.app.dir().cursor_to_name("sub"), "sub is listed");
         s.app.open_menu(egui::pos2(10.0, 10.0));
         let menu = s.app.menu.take().expect("the row menu");
         let row = menu

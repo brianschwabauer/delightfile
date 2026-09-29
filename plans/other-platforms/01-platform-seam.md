@@ -904,6 +904,49 @@ their native clipboards *are* synchronous.
       the workflow still parses. — done, uncommitted 2026-09-29, Linux
       verified (the YAML parses; df-app built and linted on Linux with each
       target's stubs shows only dead code), other targets unverified until CI
+- [x] **S1.54** Two tests that failed anywhere but Brian's machine (added
+      2026-09-29 at integration; found by running the CI linux job's steps in
+      an `archlinux:latest` container, `06-build-and-release.md` Open
+      questions). Fixed under `crates/`:
+      1. `app::places::tests::the_menus_pin_and_go` took `sub`'s index from
+         `DirState::entries()` and handed it to `set_cursor`. `entries()` is
+         scan order ("rarely what a caller wants", its doc says) and
+         `set_cursor` takes a position on screen, so the cursor landed on
+         whichever row the filesystem listed second: `other` on btrfs and
+         overlayfs, `sub` on tmpfs. The app never mixes the two: the row
+         menu's pin reads `cursor_entry()`, a view position, and no other
+         df-app code takes an index from `entries()` for the cursor. So the
+         test was wrong, not the app; it now finds its row with
+         `cursor_to_name("sub")`. Reproduced before the fix with `TMPDIR` on
+         btrfs, and passes after it on btrfs and tmpfs.
+      2. `archive::tests::a_zip_written_by_a_real_archiver_lists_the_same_way`,
+         built with `bsdtar` where `zip` is missing: `bsdtar -a -cf real.zip .`
+         writes `./`, `./one.txt`, `./sub/`, `./sub/two.txt`, and the lister
+         counted the `./` member unsafe (a name that normalizes to nothing was
+         flagged). Decided: a leading `./` is a harmless spelling of the same
+         relative path, so such a member is safe and lists under the name
+         without it; `..` components and absolute names stay unsafe.
+         `archive::name_is_unsafe` no longer flags a relative name that
+         normalizes to the root (`./`, `.`); `./a` and `a/./b` were already
+         safe and listed as `a` and `a/b`. The extractor agrees by
+         construction: `plan_extract` joins the tree's normalized path onto
+         the destination, and `unpack` finds each member by
+         `normalize(name)`, so `./one.txt` extracts to `dest/one.txt`, the
+         path the listing shows; the `./` member has no row, so it is never
+         planned or opened (before, it was counted unsafe but never in the
+         plan's skipped list either, so the two disagreed); the external
+         extractors (7-Zip, `bsdtar`) extract whole archives with their own
+         rules and are never given a member name. New tests:
+         `a_dot_component_is_the_same_path_and_only_a_dot_dot_climbs`
+         (`./a`, `./`, `./../a`, `a/./b`) and
+         `dot_slash_members_list_and_extract_as_the_names_without_it` (lists
+         and extracts a zip of `./` members plus `./../escape.txt`, which is
+         flagged, skipped and not written). The real-archiver test passes with
+         only `bsdtar` on `PATH`.
+      The two font tests the container also fails are not this task's (the
+      Open question in `06-build-and-release.md` stands). Done when: both
+      tests pass with `TMPDIR` on btrfs and without `zip`; Linux's other
+      tests unchanged. — done, uncommitted 2026-09-29, Linux verified
 
 ## 4. Closing the phase
 
@@ -1147,6 +1190,14 @@ their native clipboards *are* synchronous.
   lines), not by `allow` attributes or `cfg`s in the code, and M2.31 and
   W4.34 take the flag off once Phases 2 and 4 have given them callers. The
   linux job still allows none.
+- 2026-09-29 — S1.54 (new task), a Linux-visible change: an archive member
+  spelled `./` (or `.`), the root of the extraction written relatively, is no
+  longer counted unsafe. `bsdtar -cf x.zip .` writes one in every archive it
+  makes, so opening such a zip used to say "1 entry cannot be extracted
+  safely" about an entry that was never going to be extracted anywhere. A `.`
+  component anywhere else was already dropped by `normalize`; `..` and
+  absolute names are flagged as before, and nothing that extracts moved. The
+  places test's fix is a test fix only: the app was right.
 
 ## Open questions
 

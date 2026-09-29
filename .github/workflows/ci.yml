@@ -104,9 +104,10 @@ jobs:
 
       # The whole workspace, dv-* included: the container has the ffmpeg binary
       # and bash that dv-media's and dv-playback's integration tests call.
-      # Four tests that pass on Brian's machine fail in a clean container (no
-      # Nerd Font, no zip, overlayfs directory order): see Open questions in
-      # 06-build-and-release.md.
+      # Two tests that pass on Brian's machine fail in a clean container for
+      # want of a Nerd Font: see Open questions in 06-build-and-release.md.
+      # (Two more it found, zip's `./` members and directory order, were fixed
+      # in S1.54.)
       - name: cargo test --workspace
         run: runuser -u builder -- cargo test --workspace
 

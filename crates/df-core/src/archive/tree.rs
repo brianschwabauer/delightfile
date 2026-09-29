@@ -34,6 +34,12 @@
 //! Plus the mechanical ones: an empty name, a name with a NUL in it, and a name
 //! longer than [`MAX_NAME_BYTES`].
 //!
+//! A `.` component is none of these. `./one.txt`, which `bsdtar` writes for
+//! every member of an archive made with `bsdtar -cf x.zip .`, is `one.txt`
+//! spelled with the directory it was made in, lists as `one.txt`, and extracts
+//! to the same place; `./` alone is the root of the extraction and lists as
+//! nothing. Only what [`normalize`] keeps can climb: a `..` stays a `..`.
+//!
 //! **The contract for extraction**: an entry with `unsafe_name` set must be
 //! skipped, or renamed to something inside the destination — never joined onto
 //! the destination path and never trusted. [`super::extract::plan_extract`]
@@ -340,8 +346,9 @@ pub fn build(
         }
         let Some(key) = normalize(&raw.name) else {
             // A name that normalizes to nothing — `/`, `.`, `./` — describes the
-            // archive root, which already exists. Counted as unsafe above, and
-            // otherwise dropped.
+            // archive root, which already exists, and is dropped. `/` was
+            // counted as unsafe above, being absolute; `./` and `.` are the
+            // root spelled relatively, which is not.
             continue;
         };
         ensure_parents(&mut tree, &key);
@@ -488,7 +495,11 @@ pub fn name_is_unsafe(name: &str) -> bool {
             return true;
         }
     }
-    // A name that normalizes away entirely (`.`, `./.`) names the root and
-    // cannot be extracted to anything.
-    normalize(name).is_none()
+    // What is left is relative and climbs nowhere. A `.` component, leading
+    // or not, is a harmless spelling of the same path — `./a` is `a` — and
+    // a name that is nothing else (`./`, `.`, which `bsdtar -cf x.zip .`
+    // writes for the folder it was run in) is the root of the extraction,
+    // which already exists: [`build`] lists nothing for it and
+    // [`super::unpack`] never opens it.
+    false
 }
