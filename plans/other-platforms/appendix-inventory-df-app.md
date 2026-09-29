@@ -16,11 +16,11 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| Cargo.toml:37 | `wayland-client = { version = "0.31", features = ["system"] }` (workspace dep) | Linux-only (compile) | crates/df-app/Cargo.toml:49 `wayland-client.workspace = true` → `src/wayland/mod.rs` | Declared unconditionally in `[dependencies]`, not under a `[target.'cfg(...)']` table. winit 0.30.13 gates its own wayland deps to `cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_os = "ios", target_os = "macos"))))` (winit Cargo.toml target tables), so on macOS/Windows nothing unifies in `dlopen`. `wayland-sys` 0.31.11 build.rs probes pkg-config `wayland-client` unless feature `dlopen` is set. `wayland-backend` 0.3.17 source uses `std::os::unix` (e.g. src/rs/socket.rs, src/sys/client_impl/mod.rs). |
+| Cargo.toml:37 | `wayland-client = { version = "0.31", features = ["system"] }` (workspace dep) | Linux-only (compile) | crates/df-app/Cargo.toml:49 `wayland-client.workspace = true` → `src/wayland/mod.rs` | Declared unconditionally in `[dependencies]`, not under a `[target.'cfg(...)']` table. winit 0.30.13 gates its own wayland deps to `cfg(all(unix, not(any(target_os = "redox", target_family = "wasm", target_os = "android", target_os = "ios", target_os = "macos"))))` (winit Cargo.toml target tables), so on macOS/Windows nothing unifies in `dlopen`. `wayland-sys` 0.31.11 build.rs probes pkg-config `wayland-client` unless feature `dlopen` is set. `wayland-backend` 0.3.17 source uses `std::os::unix` (e.g. src/rs/socket.rs, src/sys/client_impl/mod.rs). ✓ S1.20 |
 | Cargo.toml:31 / crates/df-app/Cargo.toml:37-40 | `libc = "0.2"`; df-app comment: "Only for `localtime_r`" | Unix-only (compile, via use) | format.rs:199-222 | The `libc` crate builds on Windows; `libc::localtime_r` does not exist there (Windows CRT has `localtime_s`). |
 | crates/df-app/Cargo.toml:3 | `description = "… file manager for Wayland."` | text | — | — |
 | crates/df-app/Cargo.toml:63-66 | `pdfium-render = { version = "0.9.3", default-features = false, features = ["pdfium_7881", "thread_safe"] }` | — | preview/doc/pdf.rs | No `static`: library is dlopen'd at runtime (see preview/doc/pdf.rs). |
-| Cargo.toml:62 | `egui-winit = "0.35.0"` default features | — | graphics.rs:172 | `clipboard`/`links`/`wayland`/`x11` on (see intro). |
+| Cargo.toml:62 | `egui-winit = "0.35.0"` default features | — | graphics.rs:172 | `clipboard`/`links`/`wayland`/`x11` on (see intro). ✓ S1.20 |
 
 ### src/app.rs (22,396 lines; non-test 1-17287)
 
@@ -74,7 +74,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 13785-13787 | pointer modifiers: `shift: i.modifiers.shift, toggle: i.modifiers.command \|\| i.modifiers.ctrl, alt: i.modifiers.alt` | macOS-differs | App::frame → click (10698), bulk_press (11588, 11601), tick_drag (12442), preview_gesture (5359), rubber band (14576) | egui `command` = Cmd on macOS. See §3. |
 | 14674-14705 | `self.poll_data_device(now)`; incoming Wayland drag position feeds drop-target highlight (14684-14703) | Linux-only | App::frame | — |
 | 15782-15788 | external-drop ring: `paint.drop_window(area)` when `self.incoming` is `Some` and `!incoming.ours` | Linux-only | App::frame | — |
-| 16208-16211 | `gfx.egui_state.handle_platform_output(&gfx.window, platform_output)` | egui-winit (arboard/smithay-clipboard, webbrowser) | App::redraw_inner | — |
+| 16208-16211 | `gfx.egui_state.handle_platform_output(&gfx.window, platform_output)` | egui-winit (arboard/smithay-clipboard, webbrowser) | App::redraw_inner | — ✓ S1.20 |
 | 16217-16236 | `Presented::Occluded` arm: "But not on Wayland, where neither this nor that event exists"; `repaint_at = now + OCCLUDED_PROBE` | macOS-differs | App::redraw_inner | — |
 | 16345-16367 | `fn finish`: `crate::cli::write_chooser_file(&chooser.out, &self.chosen)` (16348); `crate::cli::write_cwd_file(path, &cwd)` (16359); `self.data_device = None` (16365) "before the `wl_surface`" | Linux-only (data device) / see cli.rs | CloseRequested (17093-17096), RedrawRequested quit (17142-17146) | — |
 | 16727-16750 | `fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>)`: fallback `std::env::current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` (16732) | Windows-differs | App::assemble (1928) | — |
@@ -177,7 +177,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 38-67 | `pub enum Presented { Shown, Retry, Occluded }`; `Occluded` doc "Dead on this platform, and kept anyway" | macOS-differs | App::redraw_inner (`match gfx.present` at 16218) | — |
 | 77-115 | `Gfx::new`: `Backends::from_env().is_some()` (91); `InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() }.with_env()` (92-96); retry `new_without_display_handle_from_env()` (109-112) unless pinned | macOS-differs (no Vulkan backend compiled → always retries); Windows-differs (Vulkan before DX12) | App::init_gfx (2130) | Comments 78-90, 99-106 are Wayland/Hyprland measurements. |
 | 134-157 | `surface_config.present_mode = if caps.present_modes.contains(&PresentMode::Mailbox) { Mailbox } else { Fifo }` | runtime-differs | Gfx::new | Comment 135-147 is Wayland frame-callback reasoning. |
-| 171-179 | `egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(max_texture_dimension_2d))` | egui-winit clipboard created here | Gfx::new | — |
+| 171-179 | `egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(max_texture_dimension_2d))` | egui-winit clipboard created here | Gfx::new | — ✓ S1.20 |
 | 262-284 | `Cst::Timeout` reconfigure; `Cst::Occluded` (278-284) not reconfigured | runtime-differs | Gfx::present | — |
 
 ### src/grid.rs (1,552 lines; non-test 1-1121)

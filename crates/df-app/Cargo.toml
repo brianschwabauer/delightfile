@@ -38,15 +38,6 @@ pollster.workspace = true
 # Only for `localtime_r`: the mtime/btime linemodes have to be in the machine's
 # timezone, and the zoneinfo rules that decide the offset live behind libc.
 libc.workspace = true
-# PLAN §7.1's drag out and drop in. `wayland-client` rather than
-# `smithay-client-toolkit`: every interface a data-device drag needs is in the
-# *core* protocol this crate generates itself, and sctk would add a seat and
-# registry framework on top of objects `wayland::State` holds directly. Neither
-# is new to the tree — winit builds both — so this is the smaller of two
-# already-compiled options, and the protocol-faithful one. The module essay in
-# `src/wayland/mod.rs` defends why hand-rolling the wire, the house answer
-# everywhere else, is *impossible* here rather than merely harder.
-wayland-client.workspace = true
 # PDF pages (PLAN §6). The version and the `pdfium_7881` ABI are delightviewer's
 # to the digit, so the two programs load the *same* `libpdfium.so` — there is one
 # copy of it on this machine and neither program may be the one that needs a
@@ -73,6 +64,20 @@ ttf-parser = "0.25"
 # compilation either — everything else about the zip a 3MF is lives in
 # `preview::doc::model`.
 miniz_oxide.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# PLAN §7.1's drag out and drop in. `wayland-client` rather than
+# `smithay-client-toolkit`: every interface a data-device drag needs is in the
+# *core* protocol this crate generates itself, and sctk would add a seat and
+# registry framework on top of objects `wayland::State` holds directly. Neither
+# is new to the tree — winit builds both — so this is the smaller of two
+# already-compiled options, and the protocol-faithful one. The module essay in
+# `src/wayland/mod.rs` defends why hand-rolling the wire, the house answer
+# everywhere else, is *impossible* here rather than merely harder. Linux only:
+# winit builds its own Wayland crates for no other target, so anywhere else
+# this would be a second copy of them and a `wayland-client` system library to
+# find.
+wayland-client.workspace = true
 
 [dev-dependencies]
 # The `TempTree` fixture and PLAN §9's gnarly names, shared rather than

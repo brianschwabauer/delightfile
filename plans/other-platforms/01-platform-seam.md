@@ -406,11 +406,14 @@ drag state machine (appendix B §1 `app.rs` rows 12428–13455) untouched on Lin
 gives macOS and Windows a synchronous clipboard for free in later phases, because
 their native clipboards *are* synchronous.
 
-- [ ] **S1.20** Cargo: move `wayland-client` from `[dependencies]` to
+- [>] **S1.20** Cargo: move `wayland-client` from `[dependencies]` to
       `[target.'cfg(target_os = "linux")'.dependencies]` in `crates/df-app/Cargo.toml`
       (the workspace entry at `Cargo.toml:37` stays). Move `libc` to the same Linux
-      target table: after S1.25 its remaining df-app uses are the nine in
-      `wayland/mod.rs` (`pipe2`, `poll`, `read`, `write`, `memfd_create`), all Linux.
+      target table **with S1.25, not before**: after S1.25 its remaining df-app uses
+      are the nine in `wayland/mod.rs` (`pipe2`, `poll`, `read`, `write`,
+      `memfd_create`), all Linux, but until then `format.rs`'s `localtime_r` needs it
+      on macOS too (the first pass left it in `[dependencies]`; the second pass
+      moves it in S1.25's change).
       **egui-winit**: change `Cargo.toml:62` to `egui-winit = { version = "0.35.0",
       default-features = false, features = ["wayland", "x11"] }`, dropping
       `clipboard` (arboard + smithay-clipboard: a second clipboard that reads the OS
@@ -422,7 +425,9 @@ their native clipboards *are* synchronous.
       description strings (`crates/df-app/Cargo.toml:3`, `main.rs:1–9`,
       `cli.rs:161`) to "for Linux, macOS and Windows" only when Phase 2 ships;
       for now leave them. Done when: `cargo tree -p df-app --target
-      aarch64-apple-darwin` (on CI) shows no `wayland-*`.
+      aarch64-apple-darwin` (on CI) shows no `wayland-*`. (`cargo tree` resolves
+      without the target installed, so this one also runs on Linux.)
+      — df-app agent, started 2026-09-29
 - [ ] **S1.21** `git mv crates/df-app/src/wayland crates/df-app/src/platform/linux/wayland`,
       `git mv src/dbus.rs src/platform/linux/dbus.rs`, `git mv src/portal
       src/platform/linux/portal`, and split `src/mounts.rs`: the model and card
@@ -724,6 +729,14 @@ their native clipboards *are* synchronous.
   (only Linux's body calls it outside tests), and `fs::watch::Control::Watch`
   carries `#[allow(dead_code)]` (only a platform's watcher thread reads the
   list, and the stub never starts one).
+- (df-app) 2026-09-29 — S1.20: `libc` stays in df-app's `[dependencies]` until
+  S1.25 takes `format.rs` off `localtime_r`. Moved now it would stop `format.rs`
+  compiling on macOS, where every other `libc`/`std::os::unix` use left in df-app
+  still compiles. The lockfile only loses packages (arboard, smithay-clipboard,
+  webbrowser and what only they needed). The `image` crate's features on Linux are
+  unchanged — arboard asked for `png` there, which df-app already has — but on
+  macOS arboard had enabled `image`'s `tiff` decoder, so a TIFF still there goes
+  to `ffmpeg_still` instead.
 
 ## Open questions
 

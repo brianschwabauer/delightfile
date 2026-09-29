@@ -20485,10 +20485,12 @@ impl ApplicationHandler<crate::Wake> for App {
     }
 
     /// winit's last callback, and the only point at which the Wayland
-    /// connection is still alive. egui-winit's clipboard worker must be joined
-    /// here rather than when `run_app` drops us — the same SIGSEGV-at-quit
-    /// delightviewer hit — so anything holding a platform resource is dropped
-    /// in this window and not later.
+    /// connection is still alive. egui-winit's clipboard worker had to be
+    /// joined here rather than when `run_app` drops us — the same
+    /// SIGSEGV-at-quit delightviewer hit — and although that worker is gone
+    /// (egui-winit is built without its `clipboard` feature), the rule it
+    /// taught stands: anything holding a platform resource is dropped in this
+    /// window and not later.
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         // PLAN §2's other half of the debounce: whatever the timer has not
         // written yet is written now, because there is no later. Written first,

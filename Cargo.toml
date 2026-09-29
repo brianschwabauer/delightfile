@@ -59,7 +59,16 @@ dv-core = { path = "crates/dv-core" }
 # only through `egui_wgpu::wgpu`, never as a direct dependency (PLAN §1).
 egui = "0.35.0"
 egui-wgpu = "0.35.0"
-egui-winit = "0.35.0"
+# Without `clipboard` and `links`. `clipboard` is a second clipboard (arboard,
+# and smithay-clipboard's worker thread on Wayland) that reads the system's on
+# egui's own paste chord, an event df-app never consumes — its clipboard is
+# its own, through the desktop device and `crate::clipboard` — and whose
+# thread the window's exit had to outlive. `links` opens URLs through
+# webbrowser, which df-app never asks egui to do.
+egui-winit = { version = "0.35.0", default-features = false, features = [
+    "wayland",
+    "x11",
+] }
 winit = "0.30.13"
 pollster = "1.0.1"
 miniz_oxide = "0.8"
