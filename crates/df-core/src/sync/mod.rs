@@ -265,23 +265,21 @@ impl SyncPlan {
     /// `item` as a person reads it on the card: the root's name and the path
     /// below it, with a trailing separator on a folder — the platform's
     /// separator throughout, `photos/2024/` on Unix and `photos\2024\` on
-    /// Windows, where `rel` is joined with `\` and a `/` beside it would mix
-    /// the two.
+    /// Windows, where `rel` may hold either (joined here with `\`, or read
+    /// from rsync's `/`) and printing it as it is would mix the two. The
+    /// names are `rel`'s components, so on Unix the label is the bytes it
+    /// always was.
     pub fn label(&self, item: &Item) -> String {
         let name = self.roots[item.root]
             .dst
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let mut label = if item.rel.as_os_str().is_empty() {
-            name
-        } else {
-            format!(
-                "{name}{}{}",
-                std::path::MAIN_SEPARATOR,
-                crate::path::display(&item.rel)
-            )
-        };
+        let mut label = name;
+        for part in item.rel.components() {
+            label.push(std::path::MAIN_SEPARATOR);
+            label.push_str(&part.as_os_str().to_string_lossy());
+        }
         if item.kind == Kind::Dir {
             label.push(std::path::MAIN_SEPARATOR);
         }
