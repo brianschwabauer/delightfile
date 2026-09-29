@@ -54,7 +54,9 @@ pub enum Presented {
     /// simply goes on presenting frames the compositor throws away. The arm
     /// stays because the code is correct where it *is* reached (an X11 or macOS
     /// build, a future wgpu that reports it here), and deleting it would mean
-    /// re-deriving it the day it starts arriving.
+    /// re-deriving it the day it starts arriving. On macOS both halves exist —
+    /// Metal reports occlusion and winit sends `WindowEvent::Occluded` — so
+    /// there this arm is live.
     ///
     /// Almost nothing is retried: a covered window does not start answering
     /// because it was asked again, and probing it costs an acquire — which can
@@ -88,13 +90,17 @@ impl Gfx {
         // The override goes in *before* `with_env`, so `WGPU_BACKEND=gl` still
         // gets GL, and the flag variables (`WGPU_VALIDATION` and the rest) read
         // the environment exactly as they did.
+        //
+        // Vulkan is Linux's first choice ([`crate::platform::gfx`]); macOS
+        // starts with Metal and Windows with DX12, each the backend its
+        // platform draws with natively, for the same reason.
         let pinned = wgpu::Backends::from_env().is_some();
-        let vulkan = wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+        let preferred = wgpu::InstanceDescriptor {
+            backends: crate::platform::gfx::PREFERRED_BACKENDS,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         }
         .with_env();
-        let (surface, adapter) = match find_adapter(&window, vulkan) {
+        let (surface, adapter) = match find_adapter(&window, preferred) {
             Ok(found) => found,
             // No Vulkan: one more attempt with every backend, which is what
             // every launch used to do, so a machine without Vulkan ends up
@@ -103,9 +109,14 @@ impl Gfx {
             // display handle to give EGL — and it was the same error before
             // the narrowing (both checked with `VK_DRIVER_FILES=/nonexistent`).
             // Not when `WGPU_BACKEND` chose the set: that was the user's
-            // choice, and the error should say it failed.
+            // choice, and the error should say it failed. On macOS Metal is
+            // the only backend built, so there the retry can only fail the
+            // same way; on Windows it can still find Vulkan or GL.
             Err(e) if !pinned => {
-                log::warn!("Vulkan only: {e}; retrying with every backend");
+                log::warn!(
+                    "{} only: {e}; retrying with every backend",
+                    crate::platform::gfx::PREFERRED_NAME
+                );
                 find_adapter(
                     &window,
                     wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
@@ -144,7 +155,9 @@ impl Gfx {
         // `DF_FRAME_LOG`), which is a file manager that stops answering keys
         // the moment you alt-tab. Measured on Hyprland + NVIDIA. Mailbox never
         // waits on the frame callback, and with no game loop behind it never
-        // burns a frame either.
+        // burns a frame either. Metal offers no Mailbox, so macOS takes Fifo
+        // (whether its pacing stutters is a live check, M2.24); DX12 always
+        // offers it, so Windows takes Mailbox as this does.
         surface_config.present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
         } else {

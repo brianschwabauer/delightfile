@@ -4,5 +4,6 @@
 
 pub mod appearance;
 pub mod device;
+pub mod gfx;
 pub mod mounts;
 pub mod window;

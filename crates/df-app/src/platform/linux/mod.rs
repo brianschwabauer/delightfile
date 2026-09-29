@@ -9,6 +9,7 @@
 pub mod appearance;
 mod dbus;
 pub mod device;
+pub mod gfx;
 pub mod mounts;
 /// `--portal`: the xdg-desktop-portal file-chooser backend, and
 /// `org.freedesktop.FileManager1` ("Show in folder").

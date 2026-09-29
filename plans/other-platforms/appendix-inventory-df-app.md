@@ -180,9 +180,9 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 38-67 | `pub enum Presented { Shown, Retry, Occluded }`; `Occluded` doc "Dead on this platform, and kept anyway" | macOS-differs | App::redraw_inner (`match gfx.present` at 16218) | — |
-| 77-115 | `Gfx::new`: `Backends::from_env().is_some()` (91); `InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() }.with_env()` (92-96); retry `new_without_display_handle_from_env()` (109-112) unless pinned | macOS-differs (no Vulkan backend compiled → always retries); Windows-differs (Vulkan before DX12) | App::init_gfx (2130) | Comments 78-90, 99-106 are Wayland/Hyprland measurements. |
-| 134-157 | `surface_config.present_mode = if caps.present_modes.contains(&PresentMode::Mailbox) { Mailbox } else { Fifo }` | runtime-differs | Gfx::new | Comment 135-147 is Wayland frame-callback reasoning. |
+| 38-67 | `pub enum Presented { Shown, Retry, Occluded }`; `Occluded` doc "Dead on this platform, and kept anyway" | macOS-differs | App::redraw_inner (`match gfx.present` at 16218) | — ✓ S1.28 |
+| 77-115 | `Gfx::new`: `Backends::from_env().is_some()` (91); `InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..InstanceDescriptor::new_without_display_handle() }.with_env()` (92-96); retry `new_without_display_handle_from_env()` (109-112) unless pinned | macOS-differs (no Vulkan backend compiled → always retries); Windows-differs (Vulkan before DX12) | App::init_gfx (2130) | Comments 78-90, 99-106 are Wayland/Hyprland measurements. ✓ S1.28 |
+| 134-157 | `surface_config.present_mode = if caps.present_modes.contains(&PresentMode::Mailbox) { Mailbox } else { Fifo }` | runtime-differs | Gfx::new | Comment 135-147 is Wayland frame-callback reasoning. ✓ S1.28 |
 | 171-179 | `egui_winit::State::new(egui_ctx.clone(), egui::ViewportId::ROOT, &window, Some(window.scale_factor() as f32), None, Some(max_texture_dimension_2d))` | egui-winit clipboard created here | Gfx::new | — ✓ S1.20 |
 | 262-284 | `Cst::Timeout` reconfigure; `Cst::Occluded` (278-284) not reconfigured | runtime-differs | Gfx::present | — |
 

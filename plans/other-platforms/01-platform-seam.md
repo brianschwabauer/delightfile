@@ -552,7 +552,7 @@ their native clipboards *are* synchronous.
       `spawn_detached`/`run_blocking` return `Err(io::Error::from(ErrorKind::Unsupported))`
       (Phase 4 W4.10 supplies the argv model). Done when: `open.rs` tests pass on
       Linux; compiles everywhere.
-- [>] **S1.27** `platform::window::attributes(title: &str, app_id: &str) ->
+- [x] **S1.27** `platform::window::attributes(title: &str, app_id: &str) ->
       WindowAttributes`: Linux body is `app.rs:2111–2124` (`with_name` from
       `WindowAttributesExtWayland`); Windows body sets title and size only; macOS
       body sets title and size **and `with_option_as_alt(OptionAsAlt::Both)`**
@@ -569,14 +569,23 @@ their native clipboards *are* synchronous.
       with_option_as_alt` and `OptionAsAlt::Both` checked against winit 0.30.13's
       `src/platform/macos.rs` (the trait at :280, the method at :304, the enum at
       :518); the macOS body is the one stub that cannot be type-checked on Linux.
-      — df-app agent, started 2026-09-29
-- [ ] **S1.28** `platform::gfx::PREFERRED_BACKENDS: wgpu::Backends` — Linux `VULKAN`
+      — done efe3869, Linux verified, other targets unverified until CI
+- [>] **S1.28** `platform::gfx::PREFERRED_BACKENDS: wgpu::Backends` — Linux `VULKAN`
       (unchanged), macOS `METAL`, Windows `DX12`. `graphics.rs:92` reads it. The
       retry-with-all-backends path stays as is. The four Wayland-reasoning comments
       (`graphics.rs:47–54, 78–90, 99–106, 135–147`) get one added sentence each saying
       what the other platforms do (Metal reports occlusion; Mailbox is absent on
       Metal so Fifo is taken). Done when: compiles everywhere; Linux picks Vulkan as
       before (check the `DF_FRAME_LOG` or the wgpu adapter log line).
+      *As built:* also `platform::gfx::PREFERRED_NAME` ("Vulkan", "Metal", "DX12"),
+      so the retry's warning names what was tried and reads exactly as before on
+      Linux. Checked against wgpu-hal 29.0.4: Metal offers `Fifo` (and
+      `Immediate`) but no `Mailbox` (`src/metal/adapter.rs:418`), DX12 always
+      offers `Mailbox` (`src/dx12/adapter.rs:1276`); wgpu 29 builds no Vulkan or
+      GL backend on Apple without `vulkan-portability`/`angle` (`build.rs`).
+      Linux is verified by the code, not a launch (no GUI is driven here): the
+      first instance is built from `Backends::VULKAN` exactly as before.
+      — df-app agent, started 2026-09-29
 - [ ] **S1.29** `platform::fonts::dirs() -> Vec<PathBuf>`: Linux body is
       `icons.rs:72–82` + the `$HOME` additions at `:102–105`; macOS and Windows lists
       are defined in `05-defaults-and-config.md` D5.6 and filled here (they are just
