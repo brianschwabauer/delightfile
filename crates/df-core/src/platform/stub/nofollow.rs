@@ -43,8 +43,14 @@ pub fn read_dir_in(_dir: &File) -> io::Result<std::fs::ReadDir> {
 }
 
 /// Finds nothing: every lookup is refused.
+///
+/// A struct with a field, though it holds nothing, because `ops::mode` makes
+/// one with `Finder::default()` as it does Linux's, and clippy objects to
+/// `default()` on a unit struct (`default_constructed_unit_structs`).
 #[derive(Default)]
-pub struct Finder;
+pub struct Finder {
+    _nothing: (),
+}
 
 impl Finder {
     /// Refused.

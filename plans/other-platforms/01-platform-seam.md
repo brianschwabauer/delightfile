@@ -442,6 +442,19 @@ has not dropped.
       --tests` is clean for both targets. — done, uncommitted 2026-09-29, Linux
       verified (1138 with S1.26's new test; cross-checked clean for both
       targets), other targets unverified until CI
+- [x] **S1.55** df-core linted for macOS and Windows as their CI jobs lint it
+      (added 2026-09-29 at integration: the cross checks above are `cargo
+      check`, and the jobs run clippy with `-D warnings`). The private
+      toolchain (`00-ground-rules.md` §6) now has the clippy component, and
+      `cargo clippy -p df-core --all-targets --target <t> -- -D warnings -A
+      clippy::chunks_exact_to_as_chunks -A dead_code` — the jobs' own line —
+      found one lint, six times, on both targets:
+      `default_constructed_unit_structs` on `Finder::default()` in
+      `ops/mode.rs`, because the `nofollow` stub's `Finder` was a unit
+      struct. The stub's `Finder` now carries a private `()` field; Linux's
+      `Finder` and `ops::mode` are unchanged. Done when: that command is clean
+      for both targets. — done, uncommitted 2026-09-29, cross-checked locally,
+      CI pending
 
 ## 3. df-app: the seam
 
@@ -1213,6 +1226,11 @@ their native clipboards *are* synchronous.
   paragraph is a subsection of the README's Status, the one place the
   repository still points at a plan from. The README's link to `PLAN.md`
   itself is left as it is: whether it goes is not this plan's call.
+- 2026-09-29 — S1.55 (new task): the private cross-check toolchain has the
+  clippy component as well, so df-core is linted for macOS and Windows with
+  the CI jobs' own clippy line before a push. The one lint it found was fixed
+  in the stub that caused it (`nofollow`'s `Finder` is no longer a unit
+  struct), not with an `allow` in `ops::mode`.
 
 ## Open questions
 
