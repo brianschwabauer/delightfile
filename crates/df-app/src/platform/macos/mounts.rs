@@ -12,9 +12,12 @@
 //! `unmountAndEjectDeviceAtURL:error:`, and a share is put away the same
 //! way, found by its address in a fresh listing.
 //!
-//! Connecting to a server is not here yet (M2.15). No phone or camera is
-//! listed — nothing mounts one as a directory here — and no `gio` is ever
-//! run.
+//! Connecting hands the address to Finder (`NSWorkspace.openURL`), which is
+//! macOS's own connect flow: it asks for a password in its own dialog when
+//! the server wants one, and mounts the share under `/Volumes`. What comes
+//! back is where the share appeared, when a new entry turns up there within
+//! [`CONNECT_WAIT`]. No phone or camera is listed — nothing mounts one as a
+//! directory here — and no `gio` is ever run.
 //!
 //! **Unsafe.** The Foundation and AppKit calls are `unsafe` in objc2 0.2's
 //! generated bindings, and `statfs` is a C call into a buffer this file owns.
@@ -22,11 +25,11 @@
 
 #![allow(unsafe_code)] // NSFileManager, NSWorkspace and statfs; see the essay.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
 use df_core::fs::Notifier;
@@ -42,7 +45,7 @@ use objc2_foundation::{
 };
 
 use crate::mounts::{Answer, Connected, Event, Gio, Reply, Request};
-use crate::platform::volumes::{self, Volume};
+use crate::platform::volumes::{self, Route, Volume};
 
 /// What a phone's mount is answered: there is no such thing here.
 const NOT_HERE: &str = "Not available on this platform";
@@ -50,7 +53,15 @@ const NOT_HERE: &str = "Not available on this platform";
 /// What `Mount` is answered: a disk is mounted as it is plugged in.
 const MOUNTS_ITSELF: &str = "macOS mounts disks itself";
 
-/// No mount asks questions in a terminal here.
+/// How long a connect waits for its share to turn up under `/Volumes`: time
+/// for Finder to reach the server and for a person to type a password into
+/// its dialog, and no longer than a task should sit on the pool.
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
+
+/// Where Finder mounts a server's share.
+const VOLUMES: &str = "/Volumes";
+
+/// No mount asks questions in a terminal here: Finder asks in its own dialog.
 pub const TERMINAL_MOUNT: Option<&str> = None;
 
 /// A `gio` that is never there: it answers every run with "unsupported".
@@ -97,9 +108,37 @@ pub fn run(requests: Receiver<Request>, replies: Sender<Answer>, notify: Notifie
     }
 }
 
-/// Connecting to a server: not here yet (M2.15).
-pub fn connect(_url: &str, _gio: &Gio) -> Connected {
-    Connected::Failed(NOT_HERE.to_string())
+/// Connect to a server through Finder, and say where its share appeared.
+///
+/// `Mounted(None)` when nothing new turned up under `/Volumes` in
+/// [`CONNECT_WAIT`]: Finder may still be asking for a password, or the share
+/// was mounted already; either way the card lists it once it is there.
+pub fn connect(url: &str, _gio: &Gio) -> Connected {
+    if let Route::Refused(why) = volumes::route(url) {
+        return Connected::Failed(why.to_string());
+    }
+    let before = entries(Path::new(VOLUMES));
+    let opened = autoreleasepool(|_| {
+        // SAFETY: a class method taking a live string; `None` for a string
+        // that is not a URL.
+        let Some(address) = (unsafe { NSURL::URLWithString(&NSString::from_str(url)) }) else {
+            return false;
+        };
+        // SAFETY: the shared workspace, asked to open a live URL. It may be
+        // asked from any thread.
+        unsafe { NSWorkspace::sharedWorkspace().openURL(&address) }
+    });
+    if !opened {
+        return Connected::Failed(format!("Finder could not open {url}"));
+    }
+    let started = Instant::now();
+    while started.elapsed() < CONNECT_WAIT {
+        if let Some(name) = volumes::appeared(&before, &entries(Path::new(VOLUMES))) {
+            return Connected::Mounted(Some(Path::new(VOLUMES).join(name)));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Connected::Mounted(None)
 }
 
 /// Mounting a phone or a camera: not here.
@@ -127,6 +166,13 @@ impl Monitor {
     pub fn drain(&self) -> Vec<Event> {
         match *self {}
     }
+}
+
+/// The names in a directory, or none when it cannot be read.
+fn entries(dir: &Path) -> Vec<OsString> {
+    std::fs::read_dir(dir)
+        .map(|entries| entries.flatten().map(|entry| entry.file_name()).collect())
+        .unwrap_or_default()
 }
 
 /// Unmount the volume mounted at `path`, and eject what it is on when that
@@ -313,5 +359,13 @@ mod tests {
         run(asked, replies, Arc::new(|| {}), system_gio());
         let answer = answers.recv().expect("answered");
         assert!(matches!(answer.reply, Reply::Failed(ref why) if why == MOUNTS_ITSELF));
+    }
+
+    #[test]
+    fn sftp_is_refused_before_finder_is_asked() {
+        assert_eq!(
+            connect("sftp://me@host/srv", &system_gio()),
+            Connected::Failed("use the sftp: bookmark instead".to_string())
+        );
     }
 }
