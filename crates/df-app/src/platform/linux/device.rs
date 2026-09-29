@@ -8,6 +8,11 @@ use winit::window::Window;
 
 use crate::app::Waker;
 
+/// Whether the window hands a drag off from its `CursorMoved` arm rather
+/// than from the frame: no. The Wayland data device takes the drag from the
+/// frame that finds the pointer outside the window.
+pub const HANDS_OFF_ON_CURSOR_MOVED: bool = false;
+
 pub use super::wayland::DataDevice as Desktop;
 
 /// Adopt winit's Wayland connection for [`super::wayland`].

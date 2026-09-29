@@ -12,6 +12,10 @@ use crate::app::Waker;
 use crate::platform::desktop::Event;
 use crate::platform::icon::Rgba;
 
+/// Whether the window hands a drag off from its `CursorMoved` arm rather
+/// than from the frame: no, and there is no device to hand it to yet.
+pub const HANDS_OFF_ON_CURSOR_MOVED: bool = false;
+
 /// The device. No value of it exists on this platform yet — [`start`] never
 /// makes one — so none of these is ever called.
 pub enum Desktop {}

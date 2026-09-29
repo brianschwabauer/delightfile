@@ -35,6 +35,7 @@
 //! | `appearance::session` | `fn() -> Connect` | the session bus | macOS: the application; Windows: a connection that is never made | S1.35 |
 //! | `desktop::Desktop` | `ready(&self) -> bool`, `set_selection(&self, Vec<String>, Vec<u8>) -> bool`, `receive(&self, u64, String) -> bool`, `drag(&self, Vec<(String, Vec<u8>)>, usize, icon::Rgba, icon::Rgba, i32) -> bool`, `poll(&self) -> Vec<desktop::Event>` | the Wayland data device | macOS: the pasteboard, each request done at once and answered on the next `poll`, the mirror taken from its change count; `drag` refused until M2.12 (M2.13). Windows: no value exists | S1.22 |
 //! | `desktop::start` | `fn(&ActiveEventLoop, &Window, app::Waker) -> Option<Desktop>` | adopts winit's Wayland connection | macOS: always `Some`; Windows: `None` | S1.22 |
+//! | `desktop::HANDS_OFF_ON_CURSOR_MOVED` | `const bool`: whether the window hands a drag off from its `CursorMoved` arm rather than from the frame | `false` | macOS `true`, since AppKit begins a drag only inside the mouse event that is dragging (M2.12); Windows `false` | M2.12 |
 //! | `desktop::pointer_position` | `fn(&Window) -> Option<(f32, f32)>`, logical points, for a drop winit reports | `None` (Wayland has no query, and never reports one) | macOS: the window's pointer (`mouseLocationOutsideOfEventStream`) in winit's flipped view (M2.11); Windows: `None` until W4.17 | S1.32 |
 //! | `desktop::{Event, PasteFailure}` | the events `Desktop::poll` answers in | portable, one definition | same | S1.22 |
 //! | `mounts::run` | `fn(Receiver<mounts::Request>, Sender<mounts::Answer>, Notifier, mounts::Gio)`, the Places card worker's thread | udisks2 over the system bus, `gio mount -u`, `gio mount -li` | macOS: `NSFileManager`'s mounted volumes, the local ones disks and the rest shares, unmount and eject through `NSWorkspace`, `Mount` answered that macOS mounts disks itself (M2.14); Windows: an empty listing, any other request `Failed("Not available on this platform")` | S1.24 |
@@ -79,6 +80,11 @@ mod pasteboard;
 /// tests for the same reason.
 #[cfg(any(target_os = "macos", test))]
 mod volumes;
+
+/// What a drag out of the window carries on macOS, and its picture's
+/// pixels: macOS's, and compiled in every target's tests.
+#[cfg(any(target_os = "macos", test))]
+mod dragout;
 
 #[cfg(target_os = "linux")]
 mod linux;
