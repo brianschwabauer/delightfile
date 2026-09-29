@@ -1,0 +1,11 @@
+# The C runtime is linked into the program on Windows. A Windows that has never
+# had Visual Studio or a "Visual C++ Redistributable" installed has no
+# VCRUNTIME140.dll, and the dynamically linked program stops at a system error
+# box before `main` (seen on a clean Windows 11, 2026-09-29). Static linking
+# costs a few hundred kilobytes and takes the installer out of the question.
+# FFmpeg's DLLs are MinGW builds with their own runtime and are not affected.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

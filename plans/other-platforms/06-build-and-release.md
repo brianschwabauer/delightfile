@@ -618,6 +618,13 @@ Why not sign now:
   builder user, where the 5 `preview::doc::font` tests still skip for want of any
   system font.
 
+- 2026-09-29 — The C runtime is linked statically on Windows (`.cargo/config.toml`,
+  `+crt-static` for the msvc targets). The first CI build, started on a clean
+  Windows 11 VM, stopped at "VCRUNTIME140.dll was not found" before `main`. The
+  alternative, shipping or requiring the Visual C++ Redistributable, puts an
+  installer in front of a program that is otherwise a folder to unzip. The same
+  start opened a console window beside the program, which is W4.1/B6.21's to close.
+
 ## Open questions
 
 - Homebrew FFmpeg major on the macOS runner at implementation time (B6.7 resolves).
