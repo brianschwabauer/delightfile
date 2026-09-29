@@ -66,8 +66,7 @@ pub use crate::platform::fs::{is_remote, magic_of};
 /// where gvfsd starts it, or `/run/user/<uid>/gvfs` when the variable is unset
 /// or not an absolute path — the directory systemd would have given it.
 pub fn gvfs_root() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
+    crate::platform::dirs::runtime_dir()
         .filter(|dir| dir.is_absolute())
         .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", crate::platform::user::uid())))
         .join("gvfs")

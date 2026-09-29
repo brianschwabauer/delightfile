@@ -6,6 +6,7 @@
 //! module, and a macOS body that has to diverge later replaces one re-export
 //! rather than a caller.
 
+pub mod dirs;
 pub mod errno;
 pub mod fs;
 pub mod meta;

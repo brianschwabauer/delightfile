@@ -118,11 +118,7 @@ pub fn db_path() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("_ZO_DATA_DIR") {
         return Some(PathBuf::from(dir).join("db.zo"));
     }
-    let data = match std::env::var_os("XDG_DATA_HOME") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".local/share"),
-    };
-    Some(data.join("zoxide/db.zo"))
+    Some(crate::platform::dirs::data_dir()?.join("zoxide/db.zo"))
 }
 
 /// Every directory zoxide knows about, in the order the file stores them.

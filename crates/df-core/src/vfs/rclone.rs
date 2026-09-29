@@ -1103,8 +1103,10 @@ fn socket_path(service: &Service) -> Result<PathBuf, VfsError> {
         // where it must not go, too.
         Some(dir) => candidates.push(dir.clone()),
         None => {
-            if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-                candidates.push(PathBuf::from(runtime).join("delightfile"));
+            if let Some(runtime) =
+                crate::platform::dirs::runtime_dir().filter(|d| !d.as_os_str().is_empty())
+            {
+                candidates.push(runtime.join("delightfile"));
             }
             candidates.push(std::env::temp_dir().join(format!("delightfile-{uid}")));
             // A `$TMPDIR` deep enough to push the name past `sun_path` still

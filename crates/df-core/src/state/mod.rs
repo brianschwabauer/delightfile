@@ -231,9 +231,10 @@ impl StateStore {
     ///
     /// State, not config and not cache: this is data the program generated that
     /// should survive a reboot but that nobody would put in a dotfiles repo.
-    /// That is precisely the directory `$XDG_STATE_HOME` was added for.
+    /// That is precisely the directory `$XDG_STATE_HOME` was added for. The
+    /// directory is the platform's ([`crate::platform::dirs::state_dir`]).
     pub fn state_path() -> Option<PathBuf> {
-        state_path_from(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+        crate::platform::dirs::state_dir().map(|dir| dir.join("delightfile").join("state"))
     }
 
     /// Load from the default location. Never fails: a missing file is a fresh
@@ -657,7 +658,9 @@ impl StateStore {
     }
 }
 
-/// [`StateStore::state_path`]'s rule, with the environment passed in.
+/// [`StateStore::state_path`]'s rule on Linux and macOS
+/// ([`crate::platform::dirs::state_dir`], then `delightfile/state`), with the
+/// environment passed in.
 ///
 /// Split out so the rule can be tested without `set_var`: mutating the process
 /// environment from a test is a data race against every other test thread

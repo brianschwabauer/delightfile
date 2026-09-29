@@ -221,8 +221,8 @@ has not dropped.
       of `rename/facts.rs:53–88`: Unix `localtime_r`; Windows `localtime_s` (present
       in the windows libc). Also df-app's `format.rs` localtime (appendix B) calls
       the same function. Done when: `Civil::local` tests pass on Linux; compiles on
-      Windows. — done SHA_S110, cross-checked locally, CI pending
-- [ ] **S1.11** `platform::dirs`: `home()`, `config_dir()`, `state_dir()`,
+      Windows. — done bf77db9, cross-checked locally, CI pending
+- [x] **S1.11** `platform::dirs`: `home()`, `config_dir()`, `state_dir()`,
       `data_dir()`, `cache_dir()`, `runtime_dir()`, `temp_dir()`, returning
       `Option<PathBuf>`. Linux bodies moved from `config.rs:1400–1407`,
       `state/mod.rs:637–657`, `ops/trash.rs:110–116, 484–491`, `zoxide/mod.rs:117–126`,
@@ -230,8 +230,11 @@ has not dropped.
       `05-defaults-and-config.md` §1** and implemented there (D5.1); in this phase
       the macOS body equals the Linux body (XDG with `$HOME` fallbacks, which is
       what yazi does on macOS) and the Windows body returns `None` for everything
-      but `home()` (`USERPROFILE`) and `temp_dir()`. Done when: callers use
-      `platform::dirs`, Linux tests pass.
+      but `home()` (`USERPROFILE`) and `temp_dir()`. Since the plan was written,
+      `du::gvfs_root` and `vfs/rclone.rs`'s socket directory read
+      `$XDG_RUNTIME_DIR` too; they use `runtime_dir()`. Done when: callers use
+      `platform::dirs`, Linux tests pass. — done SHA_S111, cross-checked locally,
+      CI pending
 - [ ] **S1.12** `platform::pipe`: `git mv vfs/poll.rs platform/unix/pipe.rs`
       (`set_nonblocking`, `poll_read2`, `poll_write`). Windows: the module exists with
       the same three signatures returning `Err(Unsupported)`, and
@@ -546,6 +549,16 @@ their native clipboards *are* synchronous.
   `yazi-<USERNAME>`: `cache_suffix()` is `"0"` there, and the uid on Unix as
   before. The Linux trash keeps `uid` as a re-export of `platform::user::uid`,
   so `ops::trash::uid` still exists on Linux.
+- 2026-09-29 — S1.11: each `platform::dirs` function is the rule its callers
+  used, so Linux answers are unchanged: an empty variable counts as unset, a
+  relative one is kept, and `runtime_dir()` returns `$XDG_RUNTIME_DIR` as set
+  because gvfs wants it absolute and the rclone socket only non-empty — each
+  keeps its own test. The freedesktop trash keeps its own
+  `$XDG_DATA_HOME`/`$HOME` rule inside `platform/linux/trash.rs`: the spec
+  ignores a relative `$XDG_DATA_HOME`, which zoxide's rule (now `data_dir()`)
+  does not. `state::state_path_from` stays public and pure (df-app's portal and
+  the state tests call it); a unit test pins it to `state_dir()` so the two
+  copies of the rule cannot drift.
 
 ## Open questions
 

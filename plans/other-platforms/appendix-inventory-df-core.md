@@ -89,7 +89,7 @@
 | 306–375 | `DEFAULT_RULES`: glob/mime rules naming those openers (`open` = `xdg-open`) | Linux-only (via openers) | `Config::openers_for` ← app:open.rs:choices_for | |
 | 767–775 | `expand_home`: `var_os("HOME")`, `format!("{}{}", home.to_string_lossy(), rest)` | Windows-differs | `Bookmark::expanded_path` ← app:app.rs:goto, app:app/places.rs:pool, app:finder.rs:merge_places; core:state/pins.rs:expanded_path, same_place; app:app/places.rs:shown | `HOME` is not set by default on Windows (`USERPROFILE` is). The string splice keeps the `/` from `~/Work` |
 | 1220–1229 | `Theme::dir_icon`: a pattern containing `/` is matched against the full path string | Windows-differs | app:icons.rs:icon_for (passes `entry.path.to_string_lossy()`) | Windows path strings use `\`, so such a pattern never matches |
-| 1400–1407 | `config_dir()`: `$XDG_CONFIG_HOME` (non-empty) or `$HOME/.config`, then `/delightfile` | Windows-differs; macOS-differs (not `~/Library/…`) | `load` ← app:app.rs:new; app:app.rs:new; core:vfs/config.rs:config_paths | Returns `None` on Windows unless `HOME` is set |
+| 1400–1407 | `config_dir()`: `$XDG_CONFIG_HOME` (non-empty) or `$HOME/.config`, then `/delightfile` | Windows-differs; macOS-differs (not `~/Library/…`) | `load` ← app:app.rs:new; app:app.rs:new; core:vfs/config.rs:config_paths | Returns `None` on Windows unless `HOME` is set ✓ S1.11 |
 
 ### du/fstype.rs
 
@@ -285,11 +285,11 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 221–223 | `state_path()` → `state_path_from(var_os("XDG_STATE_HOME"), var_os("HOME"))` | Linux-only | `StateStore::load` ← app:app.rs:new | Windows: `HOME` unset → `None` → session-only |
+| 221–223 | `state_path()` → `state_path_from(var_os("XDG_STATE_HOME"), var_os("HOME"))` | Linux-only | `StateStore::load` ← app:app.rs:new | Windows: `HOME` unset → `None` → session-only ✓ S1.11 |
 | 481, 500 | `render`: `escape(path_bytes(key))`, tab paths `path_bytes(tab)` | Unix-only | `flush` ← app:app.rs:flush_state | |
 | 536 | `parse`: `if !key.starts_with(b"/")` → line skipped | Windows-differs | `load_from` ← `load` | A Windows absolute path starts with a drive letter, so every directory record would be dropped |
 | 594, 616 | `parse` / `parse_tabs`: `path_from(&key)`, `path_from(&value)` | Unix-only | as above | |
-| 637–657 | `state_path_from`: `$XDG_STATE_HOME/delightfile/state` or `$HOME/.local/state/delightfile/state` | Linux-only; macOS-differs (not `~/Library`) | `state_path`; app:portal/request.rs:from_env | |
+| 637–657 | `state_path_from`: `$XDG_STATE_HOME/delightfile/state` or `$HOME/.local/state/delightfile/state` | Linux-only; macOS-differs (not `~/Library`) | `state_path`; app:portal/request.rs:from_env | ✓ S1.11 |
 | 744–747 | `path_bytes`: `OsStrExt::as_bytes` | Unix-only | `render` | |
 | 749–752 | `path_from`: `OsStringExt::from_vec` | Unix-only | `parse`, `parse_tabs` | |
 | 202, 305–318 | `dirs: HashMap<PathBuf, Record>`; `get`/`sort`/`linemode`/`show_hidden` | Windows-differs (case) | app:app.rs, app:tab.rs:new, app:app/places.rs | |
@@ -373,7 +373,7 @@
 |---|---|---|---|---|
 | 144–151 | `Service::key_path`: `~` → `var_os("HOME")` + `format!("{}{rest}", …)` | Windows-differs | `command`; app:app/syncing.rs:remote_sync | |
 | 181–202 | `Service::command`: `Command::new("ssh")` `-x -o BatchMode=yes -o ConnectTimeout=15 [-p] [-i] -s <dest> sftp` | Windows-differs | core:vfs/conn.rs:Transport::spawn | §4 |
-| 292–308 | `config_paths` / `xdg_config_home`: `$XDG_CONFIG_HOME` or `$HOME/.config` → `yazi/vfs.toml`, plus `config_dir()/vfs.toml` | Windows-differs; macOS-differs | `VfsConfig::load` ← core:vfs/mod.rs:Vfs::start ← app:app.rs:vfs | |
+| 292–308 | `config_paths` / `xdg_config_home`: `$XDG_CONFIG_HOME` or `$HOME/.config` → `yazi/vfs.toml`, plus `config_dir()/vfs.toml` | Windows-differs; macOS-differs | `VfsConfig::load` ← core:vfs/mod.rs:Vfs::start ← app:app.rs:vfs | ✓ S1.11 |
 
 ### vfs/conn.rs
 
@@ -407,7 +407,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 117–126 | `db_path`: `$_ZO_DATA_DIR/db.zo`, else `$XDG_DATA_HOME` or `$HOME/.local/share`, then `zoxide/db.zo` | Linux-only; macOS-differs | `load` ← app:app.rs:zoxide_db | Upstream zoxide resolves its data dir with `dirs::data_local_dir()` (macOS: `~/Library/Application Support`; Windows: `%LOCALAPPDATA%`) when `_ZO_DATA_DIR` is unset |
+| 117–126 | `db_path`: `$_ZO_DATA_DIR/db.zo`, else `$XDG_DATA_HOME` or `$HOME/.local/share`, then `zoxide/db.zo` | Linux-only; macOS-differs | `load` ← app:app.rs:zoxide_db | Upstream zoxide resolves its data dir with `dirs::data_local_dir()` (macOS: `~/Library/Application Support`; Windows: `%LOCALAPPDATA%`) when `_ZO_DATA_DIR` is unset ✓ S1.11 |
 | 338–364 | `classify`: last component via `path.rsplit('/')` | Windows-differs | `query` ← app:app.rs:jump_rows | Windows zoxide paths use `\` |
 
 ---
@@ -1668,7 +1668,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | config.rs:771–772 | `expand_home` string concatenation | Windows-differs | bookmarks, pins | |
 | config.rs:1222 | `dir_icon`: pattern `contains('/')` → match against the full path string | Windows-differs | app:icons.rs:icon_for | |
 | vfs/config.rs:146–150 | `key_path`: `~` + `HOME` string splice | Windows-differs | `command` | |
-| zoxide/mod.rs:123, 125 | `.join(".local/share")`, `.join("zoxide/db.zo")` | Linux-only | `db_path` | |
+| zoxide/mod.rs:123, 125 | `.join(".local/share")`, `.join("zoxide/db.zo")` | Linux-only | `db_path` | ✓ S1.11 |
 | zoxide/mod.rs:340 | `path.rsplit('/')` for the last component | Windows-differs | `query` | |
 | archive/write/mod.rs:187, 213 | `text.rsplit('/')` for the leaf of a typed archive name | Windows-differs | app:app/compress.rs | |
 | git/status.rs:557 | Trailing `b'/'` in git's output means a directory | (git format) | `insert` | git uses `/` on every platform |

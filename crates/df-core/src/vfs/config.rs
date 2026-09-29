@@ -555,10 +555,7 @@ pub fn parse_rclone_conf(text: &str, file: &Path) -> (Vec<Service>, Vec<ConfigWa
 }
 
 fn xdg_config_home() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    crate::platform::dirs::config_dir()
 }
 
 /// A `type = "rclone"` table. Never fails: every key it reads is optional,

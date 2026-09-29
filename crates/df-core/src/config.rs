@@ -1797,10 +1797,7 @@ pub struct Loaded {
 
 /// `$XDG_CONFIG_HOME/delightfile`, else `~/.config/delightfile` (PLAN §3).
 pub fn config_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let base = crate::platform::dirs::config_dir()?;
     Some(base.join("delightfile"))
 }
 

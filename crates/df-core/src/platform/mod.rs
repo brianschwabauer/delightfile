@@ -52,6 +52,7 @@
 //! | `user` | `cache_suffix() -> String` (the `yazi-<suffix>` thumbnail directory) | the uid (unix) | unix | `"0"`, yazi's `uid_or_zero` |
 //! | `thread` | `lower_priority(nice: i32) -> bool` (called with 1–19 by [`crate::thread::lower_priority`]) | `setpriority(PRIO_PROCESS, 0, nice)`: this thread | nothing, `false` (M2.5) | nothing, `false` |
 //! | `time` | `local_civil(secs: i64) -> Option<rename::facts::Civil>` | `localtime_r` (unix) | unix | `localtime_s` |
+//! | `dirs` | `home`, `config_dir`, `state_dir`, `data_dir`, `cache_dir`, `runtime_dir`, `temp_dir`: `fn() -> Option<PathBuf>` | XDG, `$HOME` fallbacks (unix) | unix, the same (D5.1) | `%USERPROFILE%` and `%TEMP%`; the rest `None` (D5.1) |
 
 #[cfg(unix)]
 mod unix;

@@ -2,6 +2,7 @@
 //! stubs everywhere else (the native bodies are Phase 4,
 //! `plans/other-platforms/04-windows.md`).
 
+pub mod dirs;
 pub mod errno;
 pub mod fs;
 pub mod meta;
