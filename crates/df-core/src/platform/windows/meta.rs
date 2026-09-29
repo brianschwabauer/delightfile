@@ -167,14 +167,27 @@ pub fn blocks_bytes(meta: &Metadata) -> u64 {
 /// The last write, as seconds and nanoseconds since the epoch: Windows keeps
 /// no inode change time.
 pub fn change_time(meta: &Metadata) -> (i64, i64) {
-    let Ok(modified) = meta.modified() else {
-        return (0, 0);
-    };
-    match modified.duration_since(SystemTime::UNIX_EPOCH) {
+    match meta.modified() {
+        Ok(modified) => since_epoch(modified),
+        Err(_) => (0, 0),
+    }
+}
+
+/// `when` as a `stat` spells a time: whole seconds, floored, and nanoseconds
+/// that are never negative — 0.5 s before the epoch is `(-1, 500_000_000)`,
+/// as on Unix. The thumbnail key turns the pair back into a `SystemTime`, and
+/// a negative nanosecond field there overflows.
+fn since_epoch(when: SystemTime) -> (i64, i64) {
+    match when.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(d) => (d.as_secs() as i64, i64::from(d.subsec_nanos())),
         Err(e) => {
             let d = e.duration();
-            (-(d.as_secs() as i64), -i64::from(d.subsec_nanos()))
+            let (secs, nanos) = (d.as_secs() as i64, i64::from(d.subsec_nanos()));
+            if nanos == 0 {
+                (-secs, 0)
+            } else {
+                (-secs - 1, 1_000_000_000 - nanos)
+            }
         }
     }
 }
@@ -204,6 +217,18 @@ mod tests {
         assert_ne!(of(&a).ino, of(&other).ino);
         assert_eq!(of(&other).nlink, 1);
         assert!(of(t.path()).ino != 0, "a directory opens too");
+    }
+
+    #[test]
+    fn a_time_before_the_epoch_is_floored_as_a_stat_floors_it() {
+        use std::time::Duration;
+        let epoch = SystemTime::UNIX_EPOCH;
+        assert_eq!(since_epoch(epoch + Duration::new(5, 7)), (5, 7));
+        assert_eq!(since_epoch(epoch - Duration::from_secs(2)), (-2, 0));
+        assert_eq!(
+            since_epoch(epoch - Duration::from_millis(500)),
+            (-1, 500_000_000)
+        );
     }
 
     #[test]
