@@ -1,14 +1,16 @@
-//! The Places card's rows on macOS, from the volumes the system has mounted.
+//! The Places card's rows on macOS, from the volumes the system has mounted,
+//! and how its connect prompt is answered there.
 //!
 //! macOS mounts disks itself, as they are plugged in, and mounts a server's
 //! share through Finder's own connect flow; what the card can do is list what
 //! is mounted, put a volume away, and hand an address to Finder. The AppKit
 //! half — asking `NSFileManager` for the volumes, `statfs` for where each came
-//! from, `NSWorkspace` to unmount — is
+//! from, `NSWorkspace` to unmount and to connect — is
 //! `platform::macos::mounts`. What the answers become is decided here, as pure
 //! functions over plain values, compiled on macOS and in every target's
 //! tests, so the rules are checked on the machine they are edited on.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use crate::mounts::{Address, Device, Share};
@@ -117,6 +119,40 @@ fn name_of(name: &str, path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
+/// What the connect prompt's address comes to on macOS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// Handed to Finder, which asks for any credentials in its own dialog
+    /// and mounts the share under `/Volumes`.
+    Finder,
+    /// Not something Finder mounts from an address: this is why.
+    Refused(&'static str),
+}
+
+/// Where an address the prompt accepted (`crate::mounts::connect_url`)
+/// goes. Finder mounts `smb://`, `nfs://` and `ftp://` addresses handed to
+/// it; it has no `sftp://` at all, and it mounts WebDAV only from its own
+/// Connect to Server, where the address is an `http(s)://` one that
+/// anything else would open in a browser.
+pub fn route(url: &str) -> Route {
+    let scheme = url
+        .split_once("://")
+        .map(|(scheme, _)| scheme.to_ascii_lowercase())
+        .unwrap_or_default();
+    match scheme.as_str() {
+        "sftp" => Route::Refused("use the sftp: bookmark instead"),
+        "dav" | "davs" => Route::Refused(
+            "Finder mounts WebDAV from its own Connect to Server (⌘K), with an https:// address",
+        ),
+        _ => Route::Finder,
+    }
+}
+
+/// The entry of `/Volumes` that was not there `before`, if one has appeared.
+pub fn appeared(before: &[OsString], now: &[OsString]) -> Option<OsString> {
+    now.iter().find(|name| !before.contains(name)).cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +258,30 @@ mod tests {
         }]);
         assert_eq!(devices[0].label, "Untitled 1");
         assert_eq!(devices[0].fs, "hfs");
+    }
+
+    #[test]
+    fn finder_is_handed_what_it_mounts_and_nothing_else() {
+        assert_eq!(route("smb://nas/media"), Route::Finder);
+        assert_eq!(route("nfs://nas/exports"), Route::Finder);
+        assert_eq!(route("ftp://files.example.org/"), Route::Finder);
+        assert_eq!(
+            route("sftp://me@host/srv"),
+            Route::Refused("use the sftp: bookmark instead")
+        );
+        assert!(matches!(
+            route("davs://cloud/remote.php"),
+            Route::Refused(_)
+        ));
+        assert!(matches!(route("dav://cloud/"), Route::Refused(_)));
+    }
+
+    #[test]
+    fn a_new_entry_under_volumes_is_the_one_that_appeared() {
+        let before = vec![OsString::from("Macintosh HD"), OsString::from("STICK")];
+        let mut now = before.clone();
+        assert_eq!(appeared(&before, &now), None);
+        now.push(OsString::from("media"));
+        assert_eq!(appeared(&before, &now), Some(OsString::from("media")));
     }
 }
