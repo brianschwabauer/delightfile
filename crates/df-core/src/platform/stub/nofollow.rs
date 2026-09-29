@@ -1,6 +1,7 @@
-//! No way to find a path without following a link: stands in on macOS until
-//! the `openat`/`O_NOFOLLOW` walk lands (M2.28) and on Windows, where whether
-//! permissions editing exists at all is an open question (`04-windows.md`).
+//! No way to find a path without following a link: stands in on Windows,
+//! where whether permissions editing exists at all is an open question
+//! (`04-windows.md`). macOS walks with the `*at` calls
+//! (`platform/macos/nofollow.rs`).
 //!
 //! [`ready`] refuses, and every change and undo in [`crate::ops::mode`] asks it
 //! first, so the permissions change reports "Permissions is not available on
@@ -14,6 +15,17 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::DfError;
+
+/// A folder the walk would hold; never made.
+pub type Folder = File;
+
+/// A path the walk would find; never made.
+pub type Entry = File;
+
+/// What a lookup would answer, read through [`meta`].
+pub type Stat = std::fs::Metadata;
+
+pub use crate::platform::meta;
 
 fn unsupported() -> io::Error {
     io::Error::new(

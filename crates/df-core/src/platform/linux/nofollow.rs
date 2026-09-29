@@ -34,6 +34,19 @@ use std::rc::Rc;
 
 use crate::ops::mode::{below, outside, MODE_BITS};
 
+/// A folder the walk holds: an `O_PATH` descriptor.
+pub type Folder = File;
+
+/// A path the walk found, held to set its mode through: its own `O_PATH`
+/// descriptor.
+pub type Entry = File;
+
+/// What a lookup answers: the inode's own metadata, read through
+/// [`meta`] (the platform's, since it is a `Metadata`).
+pub type Stat = std::fs::Metadata;
+
+pub use crate::platform::meta;
+
 /// Where the descriptors are named, and what the toast says without it.
 const PROC_FD: &str = "/proc/self/fd";
 const NO_PROC: &str =

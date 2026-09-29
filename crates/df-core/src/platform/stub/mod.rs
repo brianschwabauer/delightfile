@@ -18,6 +18,7 @@
 
 #[cfg(windows)]
 pub mod fs;
+#[cfg(windows)]
 pub mod nofollow;
 pub mod process;
 #[cfg(windows)]

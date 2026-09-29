@@ -621,7 +621,7 @@ mod tests {
 
     /// `C`'s Apply on the pool: a folder and what is in it, the X rule for
     /// the folder, one record for the lot, and `u` putting all of it back.
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn a_mode_job_goes_inside_and_can_be_undone() {
         use std::os::unix::fs::PermissionsExt;

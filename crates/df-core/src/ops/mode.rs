@@ -58,13 +58,13 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
-use crate::platform::meta;
-use crate::platform::nofollow::{self, open_in, set_mode_of, stat_in, swapped, Finder};
+use crate::platform::nofollow::{
+    self, meta, open_in, set_mode_of, stat_in, swapped, Entry, Finder, Folder, Stat,
+};
 use crate::tasks::TaskCtx;
 use crate::text::grouped;
 use crate::{DfError, Result};
@@ -319,8 +319,8 @@ const NOT_BELOW: &str = "not inside the folder the change was asked in";
 // reached by its path: each component is opened from the folder above it
 // without following a link, and the mode is set on what was opened. How is
 // the platform's ([`crate::platform::nofollow`]): descriptors named through
-// `/proc` on Linux, and on macOS and Windows nothing yet, where every change
-// is refused rather than made by path.
+// `/proc` on Linux, the `*at` calls on macOS, and on Windows nothing yet,
+// where every change is refused rather than made by path.
 
 pub(crate) fn outside() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, NOT_BELOW)
@@ -389,7 +389,7 @@ pub fn plan(
     }
     // Folders still to be listed: the folder each is in, open, its path for
     // the record — never the path to open — and the mode it is to be given.
-    let mut folders: Vec<(Rc<File>, PathBuf, u32)> = Vec::new();
+    let mut folders: Vec<(Rc<Folder>, PathBuf, u32)> = Vec::new();
     let mut finder = Finder::default();
     for target in targets {
         ctx.checkpoint()?;
@@ -924,7 +924,7 @@ pub(super) fn redo(changes: &[ModeChange], ctx: &TaskCtx) -> Redone {
 
 /// Whether a path is still the file the change set, with the `st_mode` the
 /// undo put back, and the sentence that says what moved if not.
-fn still_as_put_back(change: &ModeChange, now: &std::fs::Metadata) -> Result<()> {
+fn still_as_put_back(change: &ModeChange, now: &Stat) -> Result<()> {
     if now.file_type().is_symlink() || meta::mode(now) & FILE_TYPE != change.before & FILE_TYPE {
         return Err(DfError::Op(format!(
             "cannot redo: {} is not the same kind of file any more",
@@ -964,7 +964,7 @@ fn redo_unreachable(change: &ModeChange, e: &io::Error) -> DfError {
 }
 
 /// A recorded path, found again from the folder its change was asked in.
-fn find(finder: &mut Finder, change: &ModeChange) -> io::Result<(File, std::fs::Metadata)> {
+fn find(finder: &mut Finder, change: &ModeChange) -> io::Result<(Entry, Stat)> {
     let anchor = change.anchor()?;
     let (file, meta, _) = finder.open(&anchor, &change.path, change.is_dir())?;
     Ok((file, meta))
@@ -972,7 +972,7 @@ fn find(finder: &mut Finder, change: &ModeChange) -> io::Result<(File, std::fs::
 
 /// Whether a path is still the file the change set, with the `st_mode` it
 /// left, and the sentence that says what moved if not.
-fn still_as_left(change: &ModeChange, now: &std::fs::Metadata) -> Result<()> {
+fn still_as_left(change: &ModeChange, now: &Stat) -> Result<()> {
     if now.file_type().is_symlink() || meta::mode(now) & FILE_TYPE != change.after & FILE_TYPE {
         return Err(DfError::Op(format!(
             "cannot undo: {} is not the same kind of file any more",
@@ -1127,9 +1127,10 @@ mod tests {
     }
 }
 
-/// The change on a real disk, end to end: the Linux descriptor walk
-/// ([`crate::platform::nofollow`]). Linux only until another target has a walk.
-#[cfg(all(test, target_os = "linux"))]
+/// The change on a real disk, end to end: the platform's descriptor walk
+/// ([`crate::platform::nofollow`]), Linux's through `/proc` and macOS's
+/// through the `*at` calls.
+#[cfg(all(test, unix))]
 mod on_disk {
     #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
@@ -1143,7 +1144,7 @@ mod on_disk {
     }
 
     fn mode_of(path: &Path) -> u32 {
-        meta::mode(&std::fs::symlink_metadata(path).unwrap()) & MODE_BITS
+        crate::platform::meta::mode(&std::fs::symlink_metadata(path).unwrap()) & MODE_BITS
     }
 
     fn set(path: &Path, mode: u32) {
@@ -1159,7 +1160,10 @@ mod on_disk {
 
     fn inode(path: &Path) -> (u64, u64) {
         let m = std::fs::symlink_metadata(path).unwrap();
-        (meta::dev(&m), meta::ino(&m))
+        (
+            crate::platform::meta::dev(&m),
+            crate::platform::meta::ino(&m),
+        )
     }
 
     #[test]
