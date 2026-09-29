@@ -6,6 +6,12 @@
 //! is only ever wound onto one of those: a test `App` has no clock at all
 //! ([`App::for_test`]), so nothing here can reach the trash of the machine
 //! running it.
+//!
+//! Linux only: the fixtures write a freedesktop trash (`.trashinfo` records,
+//! the purge stamp), which only Linux's trash has; the others have none yet
+//! (M2.8, W4.7).
+
+#![cfg(target_os = "linux")]
 
 use std::time::SystemTime;
 

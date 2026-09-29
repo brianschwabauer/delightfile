@@ -172,6 +172,7 @@ fn a_selection_is_tagged_by_the_difference() {
 /// are tagged and journaled, and the undo toast says how many links were
 /// left. A selection of nothing but links is refused before a prompt opens.
 #[test]
+#[cfg(unix)]
 fn links_in_a_selection_are_skipped_and_counted() {
     let Some(mut app) = fixture("tags-links", &["a.txt", "b.txt"]) else {
         return;

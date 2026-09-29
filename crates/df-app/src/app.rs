@@ -21276,6 +21276,7 @@ mod tests {
     /// lands on the first of it with all of it selected — through the scan
     /// that brings the rows, as `finish_op` drives it.
     #[test]
+    #[cfg(unix)]
     fn an_extraction_here_lands_on_what_the_extractor_made() {
         use df_core::archive::{ExtractorKind, Unpack};
         use df_core::fs::no_notifier;
@@ -26367,6 +26368,7 @@ mod tests {
     /// The spot's `Space` hint is `Space` on the focused row: over the
     /// permission row it flips the chosen bit, on the file itself.
     #[test]
+    #[cfg(target_os = "linux")] // the chip's change is Linux's walk (S1.19)
     fn a_click_on_the_spots_space_hint_toggles_the_chosen_bit() {
         use std::os::unix::fs::PermissionsExt;
         let ctx = egui::Context::default();

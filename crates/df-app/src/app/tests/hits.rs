@@ -710,6 +710,7 @@ fn the_watcher_is_coalesced_and_only_the_touched_folder_is_read() {
 /// the file is trashed there and journalled as `d`'s job journals it, and the
 /// folder is re-read as the job's end re-reads it.
 #[test]
+#[cfg(target_os = "linux")] // a trash to undo (M2.8, W4.7)
 fn undoing_a_trash_brings_the_row_back_unmarked() {
     let mut app = tree("hits-untrash");
     let root = app.files.clone();
@@ -744,6 +745,7 @@ fn undoing_a_trash_brings_the_row_back_unmarked() {
 /// again — its file is back in the sandbox's trash, and no stale row stays
 /// for it — and the next `u` brings the row back once more.
 #[test]
+#[cfg(target_os = "linux")] // a trash to redo (M2.8, W4.7)
 fn redoing_a_trash_takes_the_row_out_again() {
     let mut app = tree("hits-retrash");
     let root = app.files.clone();

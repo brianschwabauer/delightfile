@@ -9,6 +9,11 @@
 //! ([`crate::mounts::Mounts::detached`]), gvfs's events are handed to the app
 //! as the watcher's thread would hand them, and gvfs-fuse's directory is a
 //! folder in the fixture's sandbox.
+//!
+//! Linux only: phones are gvfs's, whose `gio` and events exist nowhere else,
+//! and the stand-in's exit statuses are Unix ones (`ExitStatusExt`).
+
+#![cfg(target_os = "linux")]
 
 use std::os::unix::process::ExitStatusExt;
 use std::sync::Mutex;

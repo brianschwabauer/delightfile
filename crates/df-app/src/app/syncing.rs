@@ -509,7 +509,7 @@ mod tests {
     use df_core::test_support::TempTree;
 
     use super::super::*;
-    use super::{remote_sync, server_path, SyncCard, TEST_SHELL};
+    use super::{remote_sync, server_path, SyncCard};
     use df_core::sync::rsync::{Direction, Host};
 
     /// An `App` opened on `dir`, with nothing read from this machine: the
@@ -743,6 +743,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_run_with_problems_comes_back_as_a_card_naming_them() {
         use std::os::unix::fs::PermissionsExt;
         let (tree, mut app) = yanked("sync-app-problems");
@@ -778,6 +779,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_folder_that_could_not_be_read_opens_the_card_and_fails_the_task() {
         use std::os::unix::fs::PermissionsExt;
         let (tree, mut app) = yanked("sync-app-unreadable");
@@ -803,6 +805,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_socket_is_left_out_in_the_toast_and_is_no_problem() {
         let (tree, mut app) = yanked("sync-app-special");
         let _listener =
@@ -906,7 +909,9 @@ mod tests {
     /// the folder down and verifies it against the server's `sha256sum` —
     /// the server being this machine, through a stand-in for `ssh`.
     #[test]
+    #[cfg(unix)]
     fn y_on_a_server_row_then_alt_p_syncs_it_down_through_rsync() {
+        use super::TEST_SHELL;
         use std::os::unix::fs::PermissionsExt;
         if !df_core::sync::rsync::available() {
             eprintln!("rsync is not installed; skipping");

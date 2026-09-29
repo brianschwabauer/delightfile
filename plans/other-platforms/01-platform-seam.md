@@ -732,7 +732,7 @@ their native clipboards *are* synchronous.
       `a_file_dropped_through_winit_is_copied_into_the_folder_on_screen` and
       `winits_hovers_and_drops_read_as_the_devices_do`. — done 415e4ea, Linux
       verified, other targets unverified until CI
-- [ ] **S1.33** Tests that block df-app's test target from compiling elsewhere
+- [x] **S1.33** Tests that block df-app's test target from compiling elsewhere
       (appendix B §7 "unix-ext", "unix-socket", "sh"): `#[cfg(unix)]` on
       `app.rs a_click_on_the_spots_space_hint_toggles_the_chosen_bit`, the four
       `app/syncing.rs` tests, `trashview.rs a_trashed_symlink_is_a_symlink…`, the
@@ -744,6 +744,39 @@ their native clipboards *are* synchronous.
       `preview/doc/font.rs:907–918` font-root helper (add the Windows root
       `C:\Windows\Fonts` there instead of gating). Done when: `cargo test -p df-app
       --no-run` succeeds on the macOS and Windows runners.
+      *As built:* `#[cfg(unix)]` on `app.rs`
+      `an_extraction_here_lands_on_what_the_extractor_made`, the four
+      `app/syncing.rs` tests (`a_run_with_problems_comes_back_as_a_card_naming_them`,
+      `a_folder_that_could_not_be_read_opens_the_card_and_fails_the_task`,
+      `a_socket_is_left_out_in_the_toast_and_is_no_problem`,
+      `y_on_a_server_row_then_alt_p_syncs_it_down_through_rsync`, which now
+      imports `TEST_SHELL` itself so the module's `use` is not left unused on
+      Windows), `trashview.rs a_trashed_symlink_is_a_symlink_and_not_a_special_file`,
+      and two the plan predates: `app/tests/undo.rs
+      a_copy_redo_that_cannot_land_goes_back_and_undo_works_again`
+      (`PermissionsExt`) and `app/tests/tagging.rs
+      links_in_a_selection_are_skipped_and_counted` (a symlink).
+      `#[cfg(target_os = "linux")]` where a test drives a body only Linux
+      has: `app.rs a_click_on_the_spots_space_hint_toggles_the_chosen_bit`
+      (its chip goes through the chmod walk, S1.19, so `cfg(unix)` would
+      compile on macOS and fail there), the whole of `app/tests/permissions.rs`
+      (the same walk, M2.28 un-gates it), `app/tests/trash.rs` (a
+      freedesktop trash: `.trashinfo` text, `TRASHINFO_EXT`, `PURGE_STAMP`,
+      `Trash::ensure`), `app/tests/appearance.rs` (the portal's fakes, and a
+      freedesktop trash), `app/tests/phones.rs` (gvfs, and `ExitStatusExt`),
+      and `app/tests/hits.rs undoing_a_trash_brings_the_row_back_unmarked` and
+      `redoing_a_trash_takes_the_row_out_again` (they trash through the stub,
+      which refuses). The `open.rs` tests moved with their bodies (S1.26);
+      `cli.rs`'s is S1.36's. `trashview.rs`'s `HOME` test reads
+      `platform::dirs::home()` instead of being gated, the same `$HOME` on
+      Linux and a real home elsewhere, and `font.rs`'s helper has
+      `C:\Windows\Fonts`. The df-core half was S1.15's. Checked on Linux by
+      building df-app's tests with the macOS and then the Windows platform
+      modules selected and df-app's own `target_os = "linux"` (and, for
+      Windows, `unix`) gates turned off: no errors, and no warning but the
+      dead code S1.53 allows; `std::os::unix` and df-core's Linux-only items,
+      which such a build still resolves, by grep. — done, uncommitted
+      2026-09-29, Linux verified, other targets unverified until CI
 - [x] **S1.34** `remote.rs:419–421` uses `df_core::fs::names::suffixed` (moved in
       S1.6). `app.rs:4055–4190` (`show_trash`, `trash_restore`, `trash_purge`) call
       the `platform::trash` surface; on a target where `Trash::home()` is

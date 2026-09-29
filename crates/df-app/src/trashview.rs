@@ -565,6 +565,7 @@ mod tests {
     /// those bits with `Kind::File`, it called every trashed link `Special` and
     /// the icon column drew the device glyph for a shortcut to a text file.
     #[test]
+    #[cfg(unix)]
     fn a_trashed_symlink_is_a_symlink_and_not_a_special_file() {
         use df_core::fs::{FileKind, Kind, LinkTarget};
 
@@ -664,7 +665,9 @@ mod tests {
     /// The linemode column: the original directory, with `$HOME` folded to `~`.
     #[test]
     fn the_column_shows_where_each_row_came_from() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        let home = df_core::platform::dirs::home()
+            .map(|home| home.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let items = vec![
             item(
                 "a.txt",

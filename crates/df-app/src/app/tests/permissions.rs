@@ -2,6 +2,12 @@
 //! and over a folder, its grid and its field kept in step, the job on the
 //! real engine landed the way `finish_op` lands one, `u`, the menus' rows,
 //! the spot panel's door to it, and where it refuses.
+//!
+//! Linux only: the change is found through Linux's descriptor walk
+//! (`df_core::platform::nofollow`, S1.19), which the other targets refuse
+//! until M2.28 gives macOS one; the fixtures set and read Unix mode bits.
+
+#![cfg(target_os = "linux")]
 
 use std::os::unix::fs::PermissionsExt;
 

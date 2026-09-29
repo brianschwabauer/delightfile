@@ -910,6 +910,7 @@ mod tests {
             "/usr/local/share/fonts",
             "/Library/Fonts",
             "/System/Library/Fonts",
+            r"C:\Windows\Fonts",
         ];
         ROOTS
             .iter()

@@ -1,6 +1,12 @@
 //! Light and dark: the `theme-*` commands, the desktop's word through the
 //! portal watcher, and the Appearance radios — and that a window turned
 //! light still paints every surface it has.
+//!
+//! Linux only: the desktop's word comes through the portal watcher, and its
+//! fakes (`FakePortal`, `fake_bus`) are the Linux body's own; the fixtures
+//! also make a freedesktop trash.
+
+#![cfg(target_os = "linux")]
 
 use super::*;
 use crate::appearance::Link;

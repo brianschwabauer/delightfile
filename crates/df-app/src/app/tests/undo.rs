@@ -186,6 +186,7 @@ fn a_copy_is_redone_as_a_task_and_round_trips() {
 /// A copy redone whose paste fails — its folder can no longer be written to —
 /// goes back on the redo stack, and `u` and `U` work again.
 #[test]
+#[cfg(unix)]
 fn a_copy_redo_that_cannot_land_goes_back_and_undo_works_again() {
     use std::os::unix::fs::PermissionsExt;
     let ctx = egui::Context::default();
