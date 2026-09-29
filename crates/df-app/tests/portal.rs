@@ -525,7 +525,23 @@ fn the_bus_starts_the_backend_on_the_first_call() {
     let pid = pid.trim_start_matches("u ").to_string();
     // The service lives as long as its bus, and no longer.
     drop(bus);
-    let proc_entry = PathBuf::from(format!("/proc/{pid}"));
-    wait_for("the service to exit with its bus", || !proc_entry.exists());
+    wait_for("the service to exit with its bus", || has_exited(&pid));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Whether process `pid` has exited: it is gone from /proc, or it is a zombie,
+/// finished with nobody yet to collect its status.
+///
+/// The bus started the service, so killing the bus orphans it, and whoever
+/// adopts orphans reaps it: systemd or a subreaper on a desktop, PID 1 in a
+/// container. GitHub's job container runs `tail -f /dev/null` as PID 1, which
+/// never reaps, so there a service that has exited stays in /proc for good.
+fn has_exited(pid: &str) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+        Err(_) => true,
+        Ok(status) => status.lines().any(|line| {
+            line.strip_prefix("State:")
+                .is_some_and(|state| state.trim_start().starts_with(['Z', 'X']))
+        }),
+    }
 }
