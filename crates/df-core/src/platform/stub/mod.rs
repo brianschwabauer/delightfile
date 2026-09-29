@@ -20,6 +20,7 @@
 pub mod fs;
 pub mod nofollow;
 pub mod process;
+#[cfg(windows)]
 pub mod thread;
 pub mod trash;
 #[cfg(windows)]

@@ -16,10 +16,12 @@
 /// is nicer, 0 is the default and negative values need privileges we do not
 /// have and do not want).
 ///
-/// Linux only in effect — the only platform where `setpriority(PRIO_PROCESS,
-/// 0, …)` means *this thread* rather than the whole process; elsewhere it
-/// changes nothing ([`crate::platform::thread`]). Call it from inside the
-/// thread it is meant for; calling it from the spawner would nice the spawner.
+/// On Linux, the only platform where `setpriority(PRIO_PROCESS, 0, …)` means
+/// *this thread* rather than the whole process, that is the nice value; on
+/// macOS it is the thread's QoS class, utility for every nice level; on
+/// Windows nothing changes ([`crate::platform::thread`]). Call it from inside
+/// the thread it is meant for; calling it from the spawner would nice the
+/// spawner.
 ///
 /// Returns whether the kernel took it, so a caller that cares can log. Nothing
 /// in the program treats a refusal as an error.
