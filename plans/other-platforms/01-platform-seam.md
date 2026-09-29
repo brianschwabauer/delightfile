@@ -886,6 +886,24 @@ their native clipboards *are* synchronous.
       The non-UTF-8 test is `#[cfg(unix)]`; no Windows twin, since W4.26 owns
       the Windows twins. — done, uncommitted 2026-09-29, Linux verified, other
       targets unverified until CI
+- [x] **S1.53** Dead code off Linux (added 2026-09-29 at integration). Built
+      with the macOS or the Windows platform modules selected, df-app has some
+      48 dead-code warnings per target and nothing else: the drag-and-drop
+      helpers (`dnd.rs`), gio's output readers and the variants only gio and
+      udisks answer in (`mounts.rs`), `platform::desktop::Event`'s drag and
+      clipboard variants and `PasteFailure`, the portal's `appearance::Scheme`
+      and `Link` states, `clipboard::ClipError::Failed`, and the drag image
+      (`platform/icon.rs`) — items whose only callers are Linux bodies. Decided: no `allow`
+      attribute in the code and no `cfg` outside `platform/` for them. The
+      `macos` and `windows` jobs in `.github/workflows/ci.yml` pass
+      `-A dead_code` to clippy, each with a comment saying it is removed when
+      Phase 2 and Phase 4 give those items callers; that removal is M2.31 and
+      W4.34, and `06-build-and-release.md`'s Decisions log says so. The
+      `linux` job's clippy line is unchanged. Done when: both foreign jobs'
+      clippy lines carry the flag and its comment, the Linux one does not, and
+      the workflow still parses. — done, uncommitted 2026-09-29, Linux
+      verified (the YAML parses; df-app built and linted on Linux with each
+      target's stubs shows only dead code), other targets unverified until CI
 
 ## 4. Closing the phase
 
@@ -1118,11 +1136,17 @@ their native clipboards *are* synchronous.
   written out, because `App::refusal` answers `&'static str`.
 - 2026-09-29 — S1.52 (new task): df-core tests that compile everywhere but
   reach a Linux-only stub (the trash through the journal, the job and the
-  mirror) are gated `#[cfg(target_os = "linux")]`, as the brief for the
-  integration decided, and the task that gives the body (M2.8, W4.7) removes
-  the gate. Tests that reach a stub on Windows only (`same_file`, P3.3) are
+  mirror) are gated `#[cfg(target_os = "linux")]`, as decided at
+  integration, and the task that gives the body (M2.8, W4.7) removes the
+  gate. Tests that reach a stub on Windows only (`same_file`, P3.3) are
   left with the Windows path failures to P3.24: that job is red until Phase 3
   either way, and gating them now would hide what P3.3 has to make pass.
+- 2026-09-29 — S1.53 (new task): off Linux df-app's items whose only callers
+  are Linux bodies are dead code, some 48 warnings per target. They are
+  allowed by the macos and windows CI jobs (`-A dead_code` on their clippy
+  lines), not by `allow` attributes or `cfg`s in the code, and M2.31 and
+  W4.34 take the flag off once Phases 2 and 4 have given them callers. The
+  linux job still allows none.
 
 ## Open questions
 

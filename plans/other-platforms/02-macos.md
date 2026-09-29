@@ -316,6 +316,14 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       wrapper process that starts the daemon and signals it when the parent
       goes) is this task's to settle and record. Done when: a runner test kills
       the parent with `SIGKILL` and sees the daemon gone within a second.
+- [ ] **M2.31** Take `-A dead_code` off the macos job's clippy line in
+      `.github/workflows/ci.yml` (S1.53). It is there because df-app items
+      whose only callers are Linux bodies — the drag-and-drop helpers in
+      `dnd.rs`, gio's output readers in `mounts.rs`, `platform/icon.rs`,
+      `platform::desktop::Event`'s drag and clipboard variants and others the
+      Linux device alone constructs — are dead on macOS until this phase gives
+      them callers (M2.10–M2.15). Done when: the last of those lands and the
+      macos job's clippy passes without the flag.
 
 ## Decisions log
 

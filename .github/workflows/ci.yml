@@ -198,8 +198,13 @@ jobs:
       - name: cargo test -p df-core -p df-app
         run: cargo test -p df-core -p df-app
 
+      # -A dead_code here and on Windows only (S1.53): the drag-and-drop
+      # helpers, gio's output readers, platform/icon.rs and a few enum
+      # variants have no caller on macOS but a Linux body, so a macOS build
+      # sees them unused. It comes off with M2.31 in 02-macos.md, once Phase 2
+      # has given them callers. The linux job allows no dead code.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
 
       - name: Smoke test (the binary loads and runs)
         run: target/debug/delightfile --version
@@ -303,8 +308,11 @@ jobs:
       - name: cargo test -p df-core -p df-app
         run: cargo test -p df-core -p df-app
 
+      # -A dead_code, as on macOS (S1.53): what only a Linux body calls is
+      # unused here. It comes off with W4.34 in 04-windows.md, once Phase 4
+      # has given those items callers.
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
 
       - name: Smoke test (the binary loads and runs)
         run: target/debug/delightfile --version

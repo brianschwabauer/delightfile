@@ -579,6 +579,16 @@ Why not sign now:
   Windows these tests do not exist, because they set Unix mode bits. In the local
   container run under §1 the 12 tests pass as builder, and a `target/` and cargo
   home left owned by root are handed over and build without a rebuild.
+- 2026-09-29 — The macos and windows jobs run clippy with `-A dead_code` beside
+  `-A clippy::chunks_exact_to_as_chunks`; the linux job does not (S1.53 in
+  `01-platform-seam.md`). Off Linux, df-app has some 48 dead-code warnings per
+  target — the drag-and-drop helpers, gio's output readers, enum variants only
+  the Wayland device constructs, `platform/icon.rs` — because their only
+  callers are Linux bodies, found by building df-app on Linux with each
+  target's platform modules selected. The rule for them is no `allow`
+  attribute in the code and no `cfg` outside `platform/`, so the allowance is
+  the workflow's. It comes off per job when Phase 2 (M2.31) and Phase 4
+  (W4.34) give those items callers.
 
 ## Open questions
 

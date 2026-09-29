@@ -350,6 +350,16 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       password, since a loopback port is open to every local user. Then give
       `platform/windows/socket.rs` that body and `AVAILABLE = true`. Done when:
       `vfs/rclone_tests.rs` runs on the Windows runner.
+- [ ] **W4.34** Take `-A dead_code` off the windows job's clippy line in
+      `.github/workflows/ci.yml` (S1.53). It is there because df-app items
+      whose only callers are Linux bodies — the drag-and-drop helpers in
+      `dnd.rs`, gio's output readers in `mounts.rs`, `platform/icon.rs`,
+      `platform::desktop::Event`'s drag and clipboard variants and others the
+      Linux device alone constructs — are dead on Windows until this phase
+      gives them callers (W4.16–W4.19). `platform/icon.rs` is the drag image,
+      whose Windows caller is the deferred W4.27; while that stays skipped the
+      icon has no caller here and this task cannot close. Done when: the
+      callers land and the windows job's clippy passes without the flag.
 
 ## Decisions log
 
