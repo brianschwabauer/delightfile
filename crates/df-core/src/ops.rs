@@ -199,28 +199,6 @@ pub fn is_real_dir(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A path with any trailing `/` trimmed, for the calls that must act on the
-/// *link* rather than on what it points at.
-///
-/// POSIX makes a trailing slash mean "and this had better be a directory", so
-/// `lstat("link/")` follows the final symlink and answers about the target.
-/// A recursive delete handed `~/link/` would therefore descend into the target
-/// and empty it. Everything that unlinks trims first.
-pub fn trim_trailing_slash(path: &Path) -> PathBuf {
-    // A path that has no bytes to trim (not Unicode, on Windows) is left as it
-    // is: there is no slash in it that could be read.
-    let Ok(raw) = crate::platform::os::as_bytes(path.as_os_str()) else {
-        return path.to_path_buf();
-    };
-    let mut end = raw.len();
-    while end > 1 && raw[end - 1] == b'/' {
-        end -= 1;
-    }
-    crate::platform::os::from_bytes(&raw[..end])
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| path.to_path_buf())
-}
-
 /// Are these two paths the same file *on disk* (same device and inode)?
 ///
 /// The lexical comparison is not enough: `~/x` and `/home/brian/x` are the same

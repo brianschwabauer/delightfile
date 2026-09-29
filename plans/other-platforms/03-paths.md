@@ -221,11 +221,17 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       (`false` on Windows), so Phase 4 has no stub to add. df-core compiles on
       all three targets (CI, and the local cross checks) and `sync/tests.rs`
       passes on Linux.
-- [ ] **P3.10** `ops.rs:109–120` (`is_url`) scans the UTF-8 view (`to_str`), and a
+- [x] **P3.10** `ops.rs:109–120` (`is_url`) scans the UTF-8 view (`to_str`), and a
       non-UTF-8 path is simply not a URL. `ops.rs:196–204` (`trim_trailing_slash`)
       becomes `path::trim_trailing_separator`. `ops/create.rs:36–43` uses
       `path::has_trailing_separator` for the "create a directory" signal. Done when:
-      the three functions have no `OsStrExt` and their tests pass.
+      the three functions have no `OsStrExt` and their tests pass. — done
+      (port/paths). `ops::trim_trailing_slash` is gone; `remove_tree` and
+      `remove_tree_unchecked` trim with `path::trim_trailing_separator` (Linux:
+      the same bytes, the root kept). `create` reads the marker with
+      `has_trailing_separator` and trims that one separator, as before; a new
+      test makes a folder with the platform's own separator. `is_url` keeps
+      S1.16's `platform::os::as_bytes` scan (Decisions log).
 - [ ] **P3.11** `du/fstype.rs:64`, `ops/copy.rs:672`, `sync/mod.rs:481`,
       `fs/inotify.rs:109`: `CString` construction for libc calls. These move into
       `platform/` in Phase 1 (they are Unix-only bodies) and keep `OsStrExt` there,
@@ -388,6 +394,15 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
   point a mounted volume hangs from, and the Linux-only chmod walk. On Unix
   `identity` reads the `stat` the caller already has, so the du walk makes
   exactly the calls it made before.
+- 2026-09-29 — P3.10: `is_url` keeps scanning `platform::os::as_bytes`
+  rather than `to_str`. On Windows that already is the UTF-8 view, and a
+  non-Unicode path is not a URL, as the task wants; on Unix it is the bytes,
+  so an `sftp://` path with a non-UTF-8 byte in it stays a URL there, as it
+  is today. `to_str` would have turned it into a local path on Linux, a
+  change the task did not need.
+- 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
+  did, not every one through `trim_trailing_separator`: `a//` stays `a/`
+  and a typed `/` stays "no name given" on Linux.
 
 ## Open questions
 

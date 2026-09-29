@@ -188,9 +188,9 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 73–98 | `normalize`: `path.is_absolute()`, else `current_dir().join(path)`; pushes `"/"` when empty (95) | Windows-differs | ~30 core callers incl. core:ops/delete.rs:check_deletable, core:ops/journal.rs:record, core:ops/link.rs:symlink, core:ops/paste.rs:carried, core:ops/trash.rs:trash, for_path, mount_point_of, core:sync/plan.rs:roots, walk | On Windows `is_absolute` needs a prefix and a root, so `\foo` and `/foo` are relative |
-| 109–120 | `is_url`: `use std::os::unix::ffi::OsStrExt`; scans `as_bytes()` for `://` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 |
+| 109–120 | `is_url`: `use std::os::unix::ffi::OsStrExt`; scans `as_bytes()` for `://` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 ✓ P3.10 |
 | 142–149 | `resolved`: `std::fs::canonicalize(path)` / `canonicalize(parent).join(name)` | Windows-differs | `is_ancestor_resolved` ← core:ops/paste.rs:plan_paste, core:sync/plan.rs:roots; `is_strict_ancestor_resolved` ← core:ops/copy.rs:copies_into_itself, move_path | Windows `canonicalize` returns `\\?\`-prefixed verbatim paths |
-| 196–204 | `trim_trailing_slash`: `as_bytes()`, trims `b'/'`, `OsStr::from_bytes` | Unix-only | core:ops/delete.rs:remove_tree, remove_tree_unchecked | `\` is also a separator on Windows ✓ S1.16 |
+| 196–204 | `trim_trailing_slash`: `as_bytes()`, trims `b'/'`, `OsStr::from_bytes` | Unix-only | core:ops/delete.rs:remove_tree, remove_tree_unchecked | `\` is also a separator on Windows ✓ S1.16 ✓ P3.10 |
 | 212–218 | `same_file`: `MetadataExt::dev()` / `ino()` of both `symlink_metadata` | Unix-only | core:ops/copy.rs:copy_tree_with, copy_file, move_path; core:ops/create.rs:rename; core:ops/paste.rs:plan_paste; core:sync/plan.rs:roots | ✓ S1.5 |
 
 ### ops/copy.rs
@@ -213,7 +213,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 33–46 | `create`: `use std::os::unix::ffi::OsStrExt`; trailing `b'/'` means "directory"; trimmed with `OsStr::from_bytes` | Unix-only | app:app.rs:create | A typed trailing `\` is not a directory marker ✓ S1.16 |
+| 33–46 | `create`: `use std::os::unix::ffi::OsStrExt`; trailing `b'/'` means "directory"; trimmed with `OsStr::from_bytes` | Unix-only | app:app.rs:create | A typed trailing `\` is not a directory marker ✓ S1.16 ✓ P3.10 |
 | 139–146 | `rename`: `from.parent().map(normalize) != to.parent().map(normalize)`; message falls back to `Path::new("/")` | Windows-differs (case) | app:app.rs:rename, run_bulk; app:bulk.rs:start | |
 
 ### ops/delete.rs
@@ -1685,10 +1685,10 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | du/fstype.rs:64 | `CString::new(path.as_os_str().as_bytes())` for `statfs` | Unix-only | `is_remote` | ✓ S1.5 |
 | fs/inotify.rs:109 | `CString::new(path.as_os_str().as_bytes())` for `inotify_add_watch` | Linux-only | `add_watch` | ✓ S1.4 |
 | git/status.rs:564 | `Path::new(OsStr::from_bytes(trimmed))` from git `-z` output | Unix-only | `parse_porcelain_v2` | ✓ S1.16 ✓ P3.8 |
-| ops.rs:111 | `is_url` scans `as_bytes()` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 |
-| ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | ✓ S1.16 |
+| ops.rs:111 | `is_url` scans `as_bytes()` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 ✓ P3.10 |
+| ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | ✓ S1.16 ✓ P3.10 |
 | ops/copy.rs:672 | `CString::new(path.as_os_str().as_bytes())` for `utimensat` | Unix-only | `set_times` | ✓ S1.5 |
-| ops/create.rs:36–43 | `create`: bytes in, trailing `/` check, `from_bytes` out | Unix-only | app:app.rs:create | ✓ S1.16 |
+| ops/create.rs:36–43 | `create`: bytes in, trailing `/` check, `from_bytes` out | Unix-only | app:app.rs:create | ✓ S1.16 ✓ P3.10 |
 | ops/trash.rs:266–270 | `list`: `file.as_bytes()`, `OsString::from_vec` | Unix-only | app:app.rs:show_trash | ✓ S1.6 |
 | ops/trash.rs:613–632 | `fit`: `file_stem().as_bytes()`, `extension().as_bytes()`, `OsString::from_vec` | Unix-only | `suffixed`, `claim_name` | ✓ S1.16 |
 | ops/trash.rs:682 | `encode_path`: `as_bytes()` | Unix-only | `trashinfo_text` | ✓ S1.6 |
@@ -1706,8 +1706,8 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| ops.rs:200 | `trim_trailing_slash` trims only `b'/'` | Windows-differs | core:ops/delete.rs | |
-| ops/create.rs:37 | Trailing `b'/'` marks "create a directory" | Windows-differs | app:app.rs:create | |
+| ops.rs:200 | `trim_trailing_slash` trims only `b'/'` | Windows-differs | core:ops/delete.rs | ✓ P3.10 |
+| ops/create.rs:37 | Trailing `b'/'` marks "create a directory" | Windows-differs | app:app.rs:create | ✓ P3.10 |
 | ops/trash.rs:489 | `home.join(".local/share/Trash")` (embedded `/`) | Linux-only | `Trash::home` | ✓ S1.6 |
 | ops/trash.rs:683 | `encode_path` leaves `/` unescaped as the separator | Windows-differs | `trashinfo_text` | ✓ S1.6 |
 | state/pins.rs:59, 93 | `expand_home` splices `HOME` + `"/Work"` from `~/Work` | Windows-differs | pins, bookmarks | |

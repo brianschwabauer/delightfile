@@ -26,7 +26,7 @@ use std::path::Path;
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
-use super::{is_ancestor, normalize, trim_trailing_slash};
+use super::{is_ancestor, normalize};
 
 /// Would deleting `path` be reckless? Errors say which rail was hit.
 pub fn check_deletable(path: &Path, cwd: &Path, home: Option<&Path>) -> Result<()> {
@@ -84,8 +84,10 @@ pub fn delete_permanent(path: &Path, ctx: &TaskCtx) -> Result<()> {
 pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
     ctx.checkpoint()?;
     // `lstat("link/")` answers about the *target*, so a walk that kept the
-    // slash would descend a symlink and empty what it points at.
-    let path = &trim_trailing_slash(path);
+    // slash would descend a symlink and empty what it points at. Everything
+    // that unlinks trims first.
+    let trimmed = crate::path::trim_trailing_separator(path.as_os_str());
+    let path = Path::new(&trimmed);
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         // Already gone is the state we wanted.
@@ -144,7 +146,8 @@ fn gone(e: &std::io::Error) -> bool {
 /// Only for cleaning up something *this program just created* — a partial copy,
 /// a destination the user chose to overwrite. Never reachable from a keystroke.
 pub(crate) fn remove_tree_unchecked(path: &Path) -> Result<()> {
-    let path = &trim_trailing_slash(path);
+    let trimmed = crate::path::trim_trailing_separator(path.as_os_str());
+    let path = Path::new(&trimmed);
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

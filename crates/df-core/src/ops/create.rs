@@ -26,19 +26,20 @@ pub struct Created {
     pub created_parents: Vec<PathBuf>,
 }
 
-/// Create a file or a directory. A trailing `/` means directory.
+/// Create a file or a directory. A trailing separator means directory — `/`,
+/// or on Windows `\` as well.
 ///
 /// Refuses to touch an existing path: `a` is for making something new, and
 /// truncating a file the user forgot about would be unrecoverable.
 pub fn create(path: &Path) -> Result<Created> {
-    let raw = crate::platform::os::as_bytes(path.as_os_str())?;
-    let is_dir = raw.last() == Some(&b'/');
+    let is_dir = crate::path::has_trailing_separator(path.as_os_str());
     let path = if is_dir {
         // Trim the marker; `Path` keeps trailing slashes in its `OsStr`, and
         // `create_dir` does not mind them, but everything downstream compares
-        // paths and `a/` must equal `a`.
-        let trimmed = &raw[..raw.len() - 1];
-        PathBuf::from(crate::platform::os::from_bytes(trimmed)?)
+        // paths and `a/` must equal `a`. One separator, and one byte: every
+        // separator is ASCII.
+        let raw = crate::platform::os::as_bytes(path.as_os_str())?;
+        PathBuf::from(crate::platform::os::from_bytes(&raw[..raw.len() - 1])?)
     } else {
         path.to_path_buf()
     };
@@ -184,6 +185,21 @@ mod tests {
         assert!(made.is_dir);
         assert!(made.path.is_dir());
         assert_eq!(made.path, t.join("stuff"), "the marker is trimmed");
+    }
+
+    /// The platform's own separator is the marker too: `\` on Windows. On
+    /// Unix a `\` is part of a name, so `stuff\` there is a file.
+    #[test]
+    fn a_trailing_platform_separator_means_a_directory() {
+        let t = TempTree::new("create-dir-sep");
+        let asked = t.join(format!("stuff{}", std::path::MAIN_SEPARATOR));
+        let made = create(&asked).unwrap();
+        assert!(made.is_dir && made.path.is_dir());
+        assert_eq!(made.path, t.join("stuff"));
+        if cfg!(unix) {
+            let made = create(&t.join("back\\")).unwrap();
+            assert!(!made.is_dir, "a backslash is a name's on Unix");
+        }
     }
 
     #[test]
