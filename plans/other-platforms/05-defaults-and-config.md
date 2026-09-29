@@ -1,6 +1,6 @@
 # 05 — Defaults and config per platform
 
-Status: **not started**
+Status: **in progress**
 
 Scope: every value that is "Brian's Arch machine" today and has to be a per-platform
 table: directories, the opener and rule tables, bookmarks, the keymap conventions
@@ -102,14 +102,20 @@ macOS and Windows use the Linux `DEFAULT_RULES` table minus the rows that name a
 dropped opener (`delightviewer*`, `edit-image` → `open` on Windows, `set-wallpaper`,
 `optimize-avif`). The `text/*` rule keeps `zed, edit, open, terminal-at`.
 
-- [ ] **D5.3** `platform::defaults::{OPENERS, RULES}` per target; `Config::default`
+- [~] **D5.3** `platform::defaults::{OPENERS, RULES}` per target; `Config::default`
       (`config.rs`) reads them; the Linux tables are the existing constants
       re-exported from `platform/linux/defaults.rs` so the diff on Linux is a move.
       Done when: `config.rs` tests pass on Linux; a test per target asserts
       `openers_for("x.txt", "text/plain", false)` names `zed` first.
+      — blocked on the macOS side: `platform::defaults` and `Config::default` are
+      df-core's, and the df-app branch kept out of df-core (02-macos.md M2.17 has
+      the options).
 - [ ] **D5.4** `platform::open::first_available(candidates: &[&str]) -> &str` for
       the two-candidate Windows entries (and usable on macOS for `edit`). Done
       when: unit test with a fake `PATH`.
+      — nothing to do on the macOS side (df-app, 2026-09-29): the macOS `edit` opener
+      carries its fallback in its shell string (§2.1), so nothing there calls
+      `first_available`; it is W4.3's, for the Windows argv entries.
 
 ## 3. Keymap
 
@@ -134,9 +140,14 @@ role rendered `⌘` since Cmd is what people press; a binding the user wrote as
 there) with a config warning "super is Cmd, which is Ctrl on macOS". Linux and
 Windows: `Ctrl+` `Alt+` `Shift+` `Super+` as today.
 
-- [ ] **D5.5** Implement the override table and `input-copy`; the help sheet's
+- [~] **D5.5** Implement the override table and `input-copy`; the help sheet's
       mouse section says "⌘-click toggles, ⌥-drag links" on macOS. Done when: a
       `Keymap` test on macOS resolves `ctrl+c` in Files to `yank-to-system`.
+      — blocked: the override table is df-core's keymap and `input-copy` a df-core
+      command (02-macos.md M2.17 says why the df-app branch kept out of df-core).
+      The help sheet's "⌘-click toggles, ⌥-drag links" needs a mouse section the
+      sheet does not have yet; which section, and whether Linux gets its own line
+      there, is part of this task.
 
 ## 4. External binaries
 
@@ -160,7 +171,7 @@ the README and for choosing defaults).
 | `libpdfium` | PDF pages | manual | bundled in the `.app` | bundled in the zip |
 | FFmpeg 9 shared libs | video, HEIF, audio | system | bundled | bundled |
 
-- [ ] **D5.6** `platform::fonts::dirs()` (S1.29, M2.19, W4.22):
+- [x] **D5.6** `platform::fonts::dirs()` (S1.29, M2.19, W4.22):
       Linux unchanged; macOS `~/Library/Fonts`, `/Library/Fonts`,
       `/System/Library/Fonts`, `/System/Library/Fonts/Supplemental`; Windows
       `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, `C:\Windows\Fonts`. The `PREFERRED`
@@ -168,6 +179,12 @@ the README and for choosing defaults).
       Homebrew cask installs `SymbolsNerdFontMono-Regular.ttf`, so add
       `SymbolsNerdFontMono-Regular` to `PREFERRED`. Done when: the `install` test
       with a fake directory passes on every target.
+      — done 6b2d653: the directories were S1.29's; `SymbolsNerdFontMono-Regular`
+      ends `PREFERRED`, and
+      `icons::tests::the_icon_face_is_found_by_preference_across_directories` runs
+      on every target, the macOS runner included. On Linux the one difference is
+      that face ranking ahead of a patched face the list does not name (Decisions
+      log).
 - [ ] **D5.7** `candidates()` additions from the table (`7zz`, `tar` on macOS;
       `tar.exe` on Windows is W4.2). Done when: unit tests.
 - [ ] **D5.8** README "What it uses" table per platform from §4. Done when:
@@ -195,8 +212,9 @@ the README and for choosing defaults).
 | `g w` | `~/Work` | `~/Work` | `~/Work` |
 | (others) | `/mnt/schwabserverroot…`, `sftp://showandtour1/2` | `~/Desktop`, `~/Documents` | `~/Desktop`, `~/Documents` |
 
-- [ ] **D5.11** `platform::defaults::BOOKMARKS`; Linux is the existing constant
+- [~] **D5.11** `platform::defaults::BOOKMARKS`; Linux is the existing constant
       moved. Done when: `keymap/defaults.rs` reads it and tests pass.
+      — blocked: `keymap/defaults.rs` is df-core's (02-macos.md M2.17).
 
 ## Decisions log
 
@@ -206,6 +224,12 @@ the README and for choosing defaults).
   defaults.
 - 2026-09-25 — `TERMINAL_APP` env var for `open -a` on macOS.
 - 2026-09-25 — Cmd+C/V/W overrides on macOS; `input-copy` command added for prompts.
+- (df-app) 2026-09-29 — D5.6: `SymbolsNerdFontMono-Regular` is named last in
+  `PREFERRED` on every target, as planned. It was already found on any target as
+  a patched face the list does not name; naming it only ranks it above those,
+  which on Linux matters only on a machine with that face and another unnamed
+  one and none of the named four.
+- (df-app) 2026-09-29 — D5.4 has no macOS side: see the task.
 
 ## Open questions
 

@@ -1,6 +1,6 @@
 # 07 — Verification
 
-Status: **not started**
+Status: **in progress**
 
 Scope: what the automated pipeline proves, what only a human at a real machine can
 prove, the per-platform live checklist, and the rule that gates a release on it.
@@ -78,10 +78,30 @@ document that owns the feature.
       (this exercises the occlusion path that is dead on Wayland).
 - [ ] Two windows via Ctrl+N (or Cmd+N per Phase 5's mapping): two processes, two
       Dock icons, both responsive; closing one leaves the other.
-- [ ] Dark and light appearance: the theme is whatever the config says; no unreadable
-      combination (the app does not follow system appearance unless Phase 5 says so).
+- [ ] Dark and light appearance: with `[flavor] mode = "dark"` or `"light"` the
+      window stays on that side whatever System Settings says; no unreadable
+      combination.
+- [ ] `[flavor] mode = "auto"` (M2.30): the first frame is on the side System
+      Settings → Appearance is on; switching Appearance turns the window at once,
+      including a window left idle with nothing animating; `theme-auto` from the
+      palette toasts "Following the desktop (light)" or "(dark)", never "Could not
+      reach…".
 - [ ] Quit via `q`, via Cmd+Q, via the red button: state file written, no zombie
       process (`ps aux | grep delightfile`).
+- [ ] Cmd+Q from a shell wrapper that reads `--cwd-file` (M2.26): the shell lands
+      in the folder the window was showing, as it does after `q` and after the red
+      button; after `Q` it stays where it was.
+- [ ] Minimize to the Dock and restore with `RUST_LOG=debug` (M2.23): the log says
+      "surface occluded; frames paused until the window is shown" once, then
+      "surface visible again" once; the restored window is current at once.
+- [ ] Scroll a long listing and flick through a folder of pictures (M2.24): motion
+      is even under `Fifo`, with no stutter a Linux window of the same content
+      does not have.
+- [ ] Cmd+N (M2.25): a second `delightfile` process and a second Dock tile, both
+      from inside the `.app`.
+- [ ] With `brew install --cask font-symbols-only-nerd-font` (M2.19): row icons are
+      the Nerd Font's glyphs; without it, the `ls`-style classifiers, and the log
+      says "no Nerd Font found".
 
 ### 4.2 Keyboard
 - [ ] Arrows, Enter, Backspace, Space, Tab, Esc, `?` help sheet.
@@ -91,6 +111,8 @@ document that owns the feature.
 - [ ] Every default Ctrl binding works with the modifier Phase 5 chose (Ctrl or Cmd,
       or both). Ctrl+L go-to-path, Ctrl+a, Ctrl+r, Ctrl+d/Ctrl+Shift+l in bulk rename,
       Ctrl+z, Ctrl+wheel view scale, Ctrl+←/→ page turn in a PDF.
+- [ ] Command and Control are one modifier (M2.20): each of the chords above fires
+      with Cmd and with Control alike; Cmd+P opens the palette, Cmd+N a window.
 - [ ] Typing in a prompt: `~`, `/`, `-`, `[`, `]`, non-ASCII letters, an emoji via
       the character viewer.
 - [ ] Caps Lock on: `j`/`k` still shuttle, `J`/`K` are not sent.
@@ -121,6 +143,11 @@ document that owns the feature.
       lists, restores and purges items the app trashed.
 - [ ] Items trashed by Finder appear in the trash view (or are documented as not
       appearing; Phase 2 decides, record which).
+- [ ] Once df-core's M2.8 is in (M2.9): with nothing trashed from delightfile, `g t`
+      shows "empty" and under it "Only files trashed from delightfile are listed —
+      Finder's Trash may hold more"; "Empty trash" toasts "Destroyed N items — only
+      what delightfile trashed; Finder's Trash may hold more" and leaves Finder's own
+      items in the Trash.
 - [ ] Rename, bulk rename with `{taken}` on a photo (EXIF read), `{camera}`.
 - [ ] Create file, create folder with `/` in the prompt.
 - [ ] Archive: extract a zip, a tar.gz, a 7z (if `7z` is installed via Homebrew,
@@ -134,7 +161,25 @@ document that owns the feature.
       modifier Phase 2 chose); the drop highlight tracks the pointer.
 - [ ] Drag a row out of the app onto the Desktop: a copy appears; onto a Mail
       compose window: an attachment; onto the other delightfile window: a copy.
+- [ ] Drag-out, closer (M2.12): the drag leaves the window without a gap — the ghost
+      goes at the edge and the system's drag picture takes over under the pointer,
+      right way up, in the ghost's colours, with no dark halo; two files dragged
+      onto the Desktop make two copies and no text clipping; the same drag onto a
+      TextEdit document types the two paths; a drag that is let go over nothing
+      springs back and the window takes keys again at once; after any drag out,
+      the next click in the window is an ordinary click (AppKit keeps the
+      `mouseUp` that ended the drag, and winit may not see the button come up).
+      If the drag never starts, winit's `CursorMoved` is not inside the
+      `mouseDragged` (02-macos.md Open questions).
 - [ ] Escape mid-drag cancels.
+- [ ] A drop from Finder (M2.11): the folder row under the pointer lights as the
+      drag passes over it and takes the drop; dropped on a file row, it lands in the
+      folder on screen.
+- [ ] `Y` on a PNG, then File → New from Clipboard in Preview (M2.10): the picture;
+      `Y` on a text file, then Cmd+V in TextEdit: its text; a screenshot copied with
+      Cmd+Ctrl+Shift+4, then `p`: a `clipboard_….png` in the folder.
+- [ ] `p` right after copying something new in another app (M2.13): what was just
+      copied is pasted, not what was on the pasteboard before.
 
 ### 4.6 Preview
 - [ ] JPEG, PNG, WebP, animated GIF, HEIC from an iPhone (through FFmpeg), a 4K
@@ -151,6 +196,20 @@ document that owns the feature.
       installed) in the folder.
 - [ ] `M` volumes card: internal disk, a USB stick, a mounted dmg, a network share;
       eject the USB stick from the card and confirm Finder agrees.
+- [ ] The volumes card, closer (M2.14): the boot volume reads "Macintosh HD", its
+      size and "APFS", and none of the system's hidden volumes is listed; `u` on a
+      mounted dmg unmounts it; `e` on the boot volume says it cannot be ejected; `m`
+      on any disk says macOS mounts disks itself; a share connected in Finder is in
+      the Network section and `u` there unmounts it.
+- [ ] Connect (M2.15): `c` then `smb://<server>/<share>` brings up Finder's own
+      password dialog, and once it is answered the window goes into the share
+      under `/Volumes`; `sftp://host` is refused with "use the sftp: bookmark
+      instead" and `davs://…` with where Finder mounts WebDAV; what the toast says
+      when the dialog takes longer than ten seconds is noted for the Open question
+      in 02-macos.md.
+- [ ] Openers run detached (M2.16): open a file in TextEdit with `o`, quit
+      delightfile, and TextEdit stays; quit TextEdit while delightfile runs and
+      `ps -o stat= -p <its pid>` shows nothing, not a `Z`.
 - [ ] SFTP: `Connect to:` an ssh host that is in `~/.ssh/config`; list, preview a
       text file, copy a file down, copy a file up.
 - [ ] `--chooser-file` and the portal flag are absent from `--help`.
@@ -234,6 +293,10 @@ workflow, launched by double-click from Explorer.
 
 - 2026-09-25 — Release gate requires one human pass per platform; CI is necessary,
   not sufficient.
+- (df-app) 2026-09-29 — §4 gained the on-screen checks for Phase 2's df-app
+  tasks (M2.9–M2.16, M2.19, M2.20, M2.23–M2.26, M2.30), each marked with its
+  task; the appearance line no longer says the app does not follow the system,
+  since `auto` now does (M2.30).
 
 ## Open questions
 
