@@ -1,6 +1,6 @@
 # 01 — The platform seam
 
-Status: **not started**
+Status: **in progress**
 
 Scope: make every crate in the workspace **compile and pass its tests on
 `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` and `x86_64-pc-windows-msvc`**,
@@ -56,7 +56,7 @@ has not dropped.
 - [ ] **S1.1** `crates/df-core/src/lib.rs:46–82`: add
       `#[error("{0} is not available on this platform")] Unsupported(&'static str)`
       to `DfError`. Done when: it exists and `cargo test -p df-core` is green.
-- [ ] **S1.2** Create `crates/df-core/src/platform/{mod.rs, unix.rs, linux/mod.rs,
+- [>] **S1.2** Create `crates/df-core/src/platform/{mod.rs, unix/mod.rs, linux/mod.rs,
       macos/mod.rs, windows/mod.rs}` and `crates/df-app/src/platform/{mod.rs,
       linux/mod.rs, macos/mod.rs, windows/mod.rs}` with the selection boilerplate:
       ```rust
@@ -460,6 +460,9 @@ their native clipboards *are* synchronous.
   egui's paste event or opened links through egui.
 - 2026-09-25 — Off-Linux, a drop from another delightfile window is an external
   copy; the Linux `SELF_MIME` self-drop semantics are not reproduced.
+- 2026-09-29 — df-core's shared Unix bodies are a directory, `platform/unix/mod.rs`,
+  not `platform/unix.rs`: S1.12 moves `vfs/poll.rs` to `platform/unix/pipe.rs`, so
+  there are several of them. S1.2's file list corrected.
 
 ## Open questions
 

@@ -19,6 +19,9 @@ pub mod input;
 pub mod keymap;
 /// Thread priority: how a background walk gets out of the UI thread's way.
 pub mod ops;
+/// Everything whose body depends on the operating system, behind one set of
+/// functions every target provides (`plans/other-platforms/`).
+pub mod platform;
 pub mod preview;
 pub mod rename;
 pub mod sha256;
@@ -79,6 +82,13 @@ pub enum DfError {
     /// about the first.
     #[error("cancelled")]
     Cancelled,
+
+    /// A feature this platform has no implementation of (yet): the honest
+    /// answer of a [`platform`] stub. The name is the feature as a person
+    /// would say it — "Trash", "SFTP" — so the sentence reads as a refusal,
+    /// not as a crash.
+    #[error("{0} is not available on this platform")]
+    Unsupported(&'static str),
 }
 
 impl DfError {
@@ -109,5 +119,13 @@ mod tests {
         let text = e.to_string();
         assert!(text.contains("/tmp/nope"), "{text}");
         assert!(text.contains("no such file"), "{text}");
+    }
+
+    #[test]
+    fn unsupported_names_the_feature_and_the_platform() {
+        assert_eq!(
+            DfError::Unsupported("Trash").to_string(),
+            "Trash is not available on this platform"
+        );
     }
 }
