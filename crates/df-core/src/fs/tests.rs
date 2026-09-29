@@ -1129,7 +1129,11 @@ fn a_name_that_is_not_utf8_is_acted_on_by_the_path_that_exists() {
     use std::os::unix::ffi::OsStrExt;
     let tmp = TempDir::new("lossy-select");
     let raw = std::ffi::OsStr::from_bytes(b"caf\xe9.txt");
-    std::fs::write(tmp.path.join(raw), b"x").expect("write");
+    if let Err(e) = std::fs::write(tmp.path.join(raw), b"x") {
+        // APFS refuses a name that is not UTF-8 ("Illegal byte sequence").
+        eprintln!("skipping: this file system will not make such a name ({e})");
+        return;
+    }
     let entry = Entry::read(tmp.path.join(raw)).expect("read");
     assert_ne!(Path::new(&entry.name), Path::new(raw), "shown lossily");
     let mut state = loaded_state(vec![entry]);
