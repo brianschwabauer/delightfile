@@ -88,7 +88,7 @@
 | 192–282 | `DEFAULT_OPENERS`: POSIX-shell command strings: `setsid uwsm-app -- …`, `"${TERMINAL:-ghostty}"`, `"${EDITOR:-vi}"`, `zeditor`, `google-chrome-stable`, `delightviewer`, `pinta`, `system-cmd-wallpaper-set`, `system-cmd-image-optimize-yazi`, `xdg-open "$1"`, `mpv`, `$(dirname "$1")`, `>/dev/null 2>&1` | Linux-only | `Config::default` → `opener()`/`openers_for()` ← app:open.rs:choices_for, app:open.rs:from (copies `opener.command`) | Spawned by df-app, not df-core. `setsid` (util-linux), `uwsm-app` and `xdg-open` are Linux |
 | 306–375 | `DEFAULT_RULES`: glob/mime rules naming those openers (`open` = `xdg-open`) | Linux-only (via openers) | `Config::openers_for` ← app:open.rs:choices_for | |
 | 767–775 | `expand_home`: `var_os("HOME")`, `format!("{}{}", home.to_string_lossy(), rest)` | Windows-differs | `Bookmark::expanded_path` ← app:app.rs:goto, app:app/places.rs:pool, app:finder.rs:merge_places; core:state/pins.rs:expanded_path, same_place; app:app/places.rs:shown | `HOME` is not set by default on Windows (`USERPROFILE` is). The string splice keeps the `/` from `~/Work` ✓ S1.17 ✓ P3.14 |
-| 1220–1229 | `Theme::dir_icon`: a pattern containing `/` is matched against the full path string | Windows-differs | app:icons.rs:icon_for (passes `entry.path.to_string_lossy()`) | Windows path strings use `\`, so such a pattern never matches |
+| 1220–1229 | `Theme::dir_icon`: a pattern containing `/` is matched against the full path string | Windows-differs | app:icons.rs:icon_for (passes `entry.path.to_string_lossy()`) | Windows path strings use `\`, so such a pattern never matches ✓ P3.15 |
 | 1400–1407 | `config_dir()`: `$XDG_CONFIG_HOME` (non-empty) or `$HOME/.config`, then `/delightfile` | Windows-differs; macOS-differs (not `~/Library/…`) | `load` ← app:app.rs:new; app:app.rs:new; core:vfs/config.rs:config_paths | Returns `None` on Windows unless `HOME` is set ✓ S1.11 |
 
 ### du/fstype.rs
@@ -1712,7 +1712,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | ops/trash.rs:683 | `encode_path` leaves `/` unescaped as the separator | Windows-differs | `trashinfo_text` | ✓ S1.6 |
 | state/pins.rs:59, 93 | `expand_home` splices `HOME` + `"/Work"` from `~/Work` | Windows-differs | pins, bookmarks | ✓ P3.14 |
 | config.rs:771–772 | `expand_home` string concatenation | Windows-differs | bookmarks, pins | ✓ P3.14 |
-| config.rs:1222 | `dir_icon`: pattern `contains('/')` → match against the full path string | Windows-differs | app:icons.rs:icon_for | |
+| config.rs:1222 | `dir_icon`: pattern `contains('/')` → match against the full path string | Windows-differs | app:icons.rs:icon_for | ✓ P3.15 |
 | vfs/config.rs:146–150 | `key_path`: `~` + `HOME` string splice | Windows-differs | `command` | ✓ P3.14 |
 | zoxide/mod.rs:123, 125 | `.join(".local/share")`, `.join("zoxide/db.zo")` | Linux-only | `db_path` | ✓ S1.11 |
 | zoxide/mod.rs:340 | `path.rsplit('/')` for the last component | Windows-differs | `query` | |

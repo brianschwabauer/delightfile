@@ -1517,11 +1517,15 @@ impl Theme {
     }
 
     /// The icon for a directory, first rule wins. `path` is the full path and
-    /// `name` its last component; a pattern with a `/` matches the path.
+    /// `name` its last component; a pattern with a `/` matches the path, read
+    /// with `/` between its names on every platform
+    /// ([`crate::path::with_slashes`]) so a rule written with slashes matches
+    /// `C:\Users\x\Work` on Windows too.
     pub fn dir_icon(&self, path: &str, name: &str) -> Option<&DirIcon> {
+        let slashed = crate::path::with_slashes(path);
         self.dir_icons.iter().find(|i| {
             let subject = if i.pattern.as_str().contains('/') {
-                path
+                slashed.as_ref()
             } else {
                 name
             };
@@ -2709,6 +2713,29 @@ mod tests {
         assert_eq!(work.text, 'W');
         // Written, so its colour is the writer's on both sides.
         assert_eq!(work.light, None);
+    }
+
+    /// A rule with a `/` in it is matched against the whole path, and a rule
+    /// written with slashes finds a Windows path, whose separator is `\`.
+    #[test]
+    fn a_path_rule_written_with_slashes_matches_on_every_platform() {
+        let (t, warnings) = Theme::parse(
+            "[[icon.dir]]\nname = \"*/Projects/*\"\ntext = \"P\"\n",
+            Path::new("theme.toml"),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let on = |path: &str, name: &str| t.dir_icon(path, name).map(|icon| icon.text);
+        assert_eq!(on("/home/brian/Projects/site", "site"), Some('P'));
+        assert_eq!(on("/home/brian/site", "site"), None);
+        if cfg!(windows) {
+            assert_eq!(on(r"C:\Users\brian\Projects\site", "site"), Some('P'));
+        } else {
+            assert_eq!(
+                on(r"C:\Users\brian\Projects\site", "site"),
+                None,
+                "a backslash is a name's on Unix"
+            );
+        }
     }
 
     /// `[flavor]`: the mode, and a flavour for each side, by name — with

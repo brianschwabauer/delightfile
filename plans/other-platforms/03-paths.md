@@ -282,10 +282,16 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `~` with no home. The trash and zoxide sites were moved by S1.6 and
       S1.11. New test: `~`, `~/Work` and `~\Work` keep what was typed after
       the home.
-- [ ] **P3.15** `config.rs:1220–1229` (`Theme::dir_icon`): a pattern containing `/`
+- [x] **P3.15** `config.rs:1220–1229` (`Theme::dir_icon`): a pattern containing `/`
       is matched against `path::display(p)` with `\` normalized to `/` on Windows
       first, so a config written with `/` matches on every target. Done when: an
-      icon test with a Windows-shaped path passes.
+      icon test with a Windows-shaped path passes. — done (port/paths).
+      `dir_icon` takes the path as the `&str` df-app already hands it, so the
+      normalizing is `path::with_slashes` (the identity on Unix) on that text;
+      a verbatim prefix never reaches it from a listing, so `display`'s part
+      is not needed. `a_path_rule_written_with_slashes_matches_on_every_platform`
+      matches `C:\Users\brian\Projects\site` on Windows (and, on Unix, finds
+      the backslashes to be part of a name).
 - [ ] **P3.16** `zoxide/mod.rs:338–364` (`classify`): last component via
       `Path::new(s).file_name()`; and `archive/write/mod.rs:187, 213` (leaf of a typed
       archive name) via `Path::new(text).file_name()`. Done when: their tests pass and
