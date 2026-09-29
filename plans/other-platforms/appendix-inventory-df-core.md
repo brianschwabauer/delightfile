@@ -239,7 +239,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 40–70 | `relative_to`: strips the shared component prefix of two `normalize`d paths and pushes `..` per `Component::Normal` | Windows-differs | `symlink` (Relative) | Paths on different drives share no `Prefix`, so the remaining `Prefix`/`RootDir` components are pushed onto the result (63–65) |
+| 40–70 | `relative_to`: strips the shared component prefix of two `normalize`d paths and pushes `..` per `Component::Normal` | Windows-differs | `symlink` (Relative) | Paths on different drives share no `Prefix`, so the remaining `Prefix`/`RootDir` components are pushed onto the result (63–65) ✓ P3.27 |
 | 85–88 | Link parent fallback `PathBuf::from("/")` | Windows-differs | `symlink` | ✓ P3.13 |
 | 92 | `std::os::unix::fs::symlink(&text, link)` | Unix-only | app:app.rs:link_into | Windows: `symlink_file`/`symlink_dir`, needs privilege ✓ S1.5 |
 

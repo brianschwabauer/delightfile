@@ -37,15 +37,34 @@ pub enum LinkKind {
 /// resolution (resolving would defeat the point: a relative link *through* a
 /// symlinked parent is usually exactly what was asked for). Returns `.` when
 /// the two are the same place.
+///
+/// Names are compared by [`crate::path::key`], so on Windows `C:\Users` and
+/// `c:\users` are one folder. Two drives or shares have no relative path
+/// between them: `to` comes back absolute.
 pub fn relative_to(from_dir: &Path, to: &Path) -> PathBuf {
     let from = normalize(from_dir);
     let to = normalize(to);
+
+    let same = |a: &Component<'_>, b: &Component<'_>| {
+        crate::path::key(Path::new(a.as_os_str())) == crate::path::key(Path::new(b.as_os_str()))
+    };
+    fn prefix(p: &Path) -> Option<Component<'_>> {
+        match p.components().next() {
+            Some(c @ Component::Prefix(_)) => Some(c),
+            _ => None,
+        }
+    }
+    match (prefix(&from), prefix(&to)) {
+        (Some(a), Some(b)) if !same(&a, &b) => return to,
+        (Some(_), None) | (None, Some(_)) => return to,
+        _ => {}
+    }
 
     let mut f = from.components().peekable();
     let mut t = to.components().peekable();
     // Drop the shared prefix.
     while let (Some(a), Some(b)) = (f.peek(), t.peek()) {
-        if a == b {
+        if same(a, b) {
             f.next();
             t.next();
         } else {
@@ -125,6 +144,28 @@ mod tests {
     use super::*;
     use crate::ops::fixture::TempTree;
     use crate::platform::meta;
+
+    /// Two drives or shares have no relative path between them, and one
+    /// drive in two cases is one drive (Windows only: on Unix these are
+    /// relative names).
+    #[test]
+    fn another_drive_is_linked_absolutely() {
+        if !cfg!(windows) {
+            return;
+        }
+        assert_eq!(
+            relative_to(Path::new(r"C:\a"), Path::new(r"D:\b")),
+            Path::new(r"D:\b")
+        );
+        assert_eq!(
+            relative_to(Path::new(r"\\s\sh\a"), Path::new(r"C:\b")),
+            Path::new(r"C:\b")
+        );
+        assert_eq!(
+            relative_to(Path::new(r"C:\Users\a"), Path::new(r"c:\users\b\f")),
+            Path::new(r"..\b\f")
+        );
+    }
 
     #[test]
     fn relative_between_siblings() {

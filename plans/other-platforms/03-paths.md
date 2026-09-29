@@ -401,10 +401,14 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       (`CopyManifest::remove`). `removes_a_link_to_a_directory_and_nothing_it_points_at`
       runs everywhere and skips where no link can be made (P3.30:
       `a_trailing_slash_does_not_turn_a_link_into_its_target` was bin 1).
-- [ ] **P3.27** `ops/link.rs:40–70` (`relative_to`): when the two paths have
+- [x] **P3.27** `ops/link.rs:40–70` (`relative_to`): when the two paths have
       different `Prefix` components (different drives or a UNC), return the target
       absolute rather than a relative path with prefix components in it. Done when:
-      a `cfg!(windows)` test for `C:\a` → `D:\b` yields `D:\b`.
+      a `cfg!(windows)` test for `C:\a` → `D:\b` yields `D:\b`. — done
+      (port/paths); components, prefixes included, are compared by
+      `path::key`, so `C:\Users` and `c:\users` share their prefix on Windows
+      (Unix: the equality it was). `another_drive_is_linked_absolutely` has
+      `C:\a` → `D:\b`, a share → a drive, and one drive in two cases.
 - [ ] **P3.28** `fs/kind.rs:315–357, 402` decides `Executable` by `mode & 0o111`;
       with the synthesized Windows mode nothing is executable. Add
       `platform::meta::is_executable(name: &OsStr, mode: u32) -> bool` (Unix: the
