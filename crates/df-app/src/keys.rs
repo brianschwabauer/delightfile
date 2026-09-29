@@ -49,17 +49,19 @@ pub fn text(event: &KeyEvent) -> Option<String> {
 }
 
 /// The pure half, so the mapping can be tested without a window.
+///
+/// Which physical key is which modifier is the platform's
+/// ([`crate::platform::keys::mods`]): on macOS Command is `ctrl`.
 pub fn chord_from(key: &WinitKey, mods: ModifiersState) -> Option<Chord> {
     let (key, implied_shift) = translate(key)?;
+    let held = crate::platform::keys::mods(mods);
     Some(Chord {
         mods: Mods {
-            ctrl: mods.control_key(),
-            alt: mods.alt_key(),
             // `implied_shift` covers the fallback path, where a compositor
             // handed over the *shifted* glyph: `<` implies Shift whatever the
             // modifier state says, because it cannot be typed without one.
-            shift: mods.shift_key() || implied_shift,
-            super_key: mods.super_key(),
+            shift: held.shift || implied_shift,
+            ..held
         },
         key,
     })
@@ -162,6 +164,18 @@ mod tests {
             chord_from(&WinitKey::Named(NamedKey::ArrowLeft), ModifiersState::ALT).expect("Alt+←");
         assert_eq!(alt_left, Chord::alt(Key::ArrowLeft));
         assert_eq!(alt_left.label(), "Alt+←");
+    }
+
+    /// Command is Ctrl on macOS (`plans/other-platforms/02-macos.md` M2.20),
+    /// so a keymap's `ctrl+…` answers to it; everywhere else Super is Super.
+    #[test]
+    fn super_is_ctrl_on_macos_and_itself_elsewhere() {
+        let chord = chord_from(&character("c"), ModifiersState::SUPER).expect("Super+c");
+        if cfg!(target_os = "macos") {
+            assert_eq!(chord, Chord::ctrl(Key::Char('c')));
+        } else {
+            assert!(chord.mods.super_key && !chord.mods.ctrl, "{chord:?}");
+        }
     }
 
     #[test]
