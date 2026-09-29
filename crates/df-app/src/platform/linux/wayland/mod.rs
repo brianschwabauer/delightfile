@@ -132,6 +132,8 @@
 // file in df-app where the compiler is not checking.
 #![allow(unsafe_code)]
 
+mod incoming;
+
 use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
@@ -816,7 +818,7 @@ impl State {
             // cut can fall mid-URI, and half a `file://` line names a path
             // nobody dragged. An incomplete read drops nothing.
             Some(mime) => match receive(&self.connection, &offer, mime) {
-                Ok(bytes) => crate::dnd::paths_from(mime, &bytes),
+                Ok(bytes) => incoming::paths_from(mime, &bytes),
                 Err(failure) => {
                     log::warn!("wayland: the drop never arrived in full: {failure}");
                     Vec::new()
@@ -1150,9 +1152,9 @@ impl Dispatch<WlDataDevice, ()> for State {
                 // *This* window's own drag, come back through the compositor —
                 // not merely some delightfile's, which with one process per
                 // window is an ordinary external drag (see
-                // [`crate::dnd::is_ours`]).
-                let ours = crate::dnd::is_ours(&mimes);
-                let wanted = crate::dnd::wanted_mime(&mimes);
+                // [`incoming::is_ours`]).
+                let ours = incoming::is_ours(&mimes);
+                let wanted = incoming::wanted_mime(&mimes);
                 // Accepting is what turns the cursor into a "yes" in the
                 // source application; a `None` accept is the honest answer for
                 // a drag carrying nothing we can paste.

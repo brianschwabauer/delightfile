@@ -12,10 +12,12 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
 use crate::mounts::{
-    attempt, first_line, gvfs_root, landing, listen, phones_from, shares_from, Address, Answer,
-    Attempt, Connected, Device, Event, Gio, Phone, Reply, Request, Share,
+    gvfs_root, Address, Answer, Connected, Device, Event, Gio, Phone, Reply, Request, Share,
 };
 use crate::platform::linux::dbus::{Bus, Interfaces, Value};
+use crate::platform::linux::gio::{
+    attempt, first_line, landing, listen, phones_from, shares_from, Attempt,
+};
 
 /// The udisks2 names, in one place.
 const SERVICE: &str = "org.freedesktop.UDisks2";

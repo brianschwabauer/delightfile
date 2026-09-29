@@ -14501,8 +14501,8 @@ impl App {
     // window onto a folder row in the old one. The second window should open on
     // the same directory with its own tab strip; the drag between them should
     // ring the *receiving* window's edge (the drop-in path, not the local-drag
-    // path — that is what [`crate::dnd::is_ours`]'s pid is for) and paste with
-    // the usual conflict dialog and undo toast.
+    // path — that is what the Wayland drop reader's `is_ours` checks the pid
+    // for) and paste with the usual conflict dialog and undo toast.
     ///
     /// A whole new process, for the reasons set out in [`crate::window`]. The
     /// failure is a toast rather than a log line because there is nothing else

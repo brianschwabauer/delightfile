@@ -212,12 +212,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test -p df-core -p df-app --no-fail-fast
 
-      # -A dead_code here and on Windows only (S1.53): gio's output readers,
-      # the Wayland device's drop readers in dnd.rs and a few enum variants
-      # only Linux constructs have no caller on macOS, so a macOS build sees
-      # them unused. Phase 2 gave the rest callers (49 items down to 29); the
-      # ones left are Linux's alone, and whether the flag comes off is M2.31's
-      # open question in 02-macos.md. The linux job allows no dead code.
+      # -A dead_code here and on Windows only (S1.53): six enum variants only
+      # Linux constructs (ClipError::Missing, Reply::Mounted,
+      # Connected::NeedsTerminal, PasteFailure::{Stalled, Broken},
+      # Link::Starting and gio's monitor Changes) are never made on macOS,
+      # and no Phase 2 task gives them a maker. Everything else Phase 2 gave a
+      # caller or moved into platform/linux/ (M2.31 in 02-macos.md). The
+      # linux job allows no dead code.
       - name: cargo clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
