@@ -5,4 +5,4 @@
 pub mod errno;
 pub mod fs;
 
-pub use super::stub::watch;
+pub use super::stub::{trash, watch};

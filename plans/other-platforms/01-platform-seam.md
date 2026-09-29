@@ -148,7 +148,7 @@ has not dropped.
       (except the `MetadataExt` sites, which are P3.4) and Linux tests pass.
       — df-core core-seam session, started 2026-09-29; the grep's other hits are
       later tasks' sites (S1.7, S1.12, S1.13, S1.15, S1.16, S1.18–S1.51).
-- [ ] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
+- [>] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
       crates/df-core/src/platform/linux/trash.rs`; `ops/trash.rs` becomes a shim
       that `pub use`s the portable surface. The portable surface is:
       `TrashedItem` with its **current** fields (`name`, `original`, `deleted_at`,
@@ -161,18 +161,28 @@ has not dropped.
       provide the same methods returning what makes sense (`info_path` →
       `location()`, `is_orphan` → `false`). `Trash` with `home()`, `at()`, `trash()`, `list()`, `restore()`,
       `purge()`, and the free fns `for_path`, `restore`, `purge`, `suffixed`,
-      `iso8601_utc`. `suffixed`/`fit`/`clip` are **not** trash-specific (paste and vfs
-      use them): move them to `df_core::fs::names` in this task, re-exported from
+      `iso8601_utc`, and — since the plan was written — the trash-aging surface
+      df-app calls: `Purged`, `purge_expired`, `purge_expired_if_due`,
+      `purge_due_in`, `parse_deletion_date` (plus `Trash::{root, files_dir}`).
+      `suffixed`/`fit`/`clip` are **not** trash-specific (paste and vfs
+      use them): move them to `df_core::fs::names` in this task, with
+      `MAX_NAME_BYTES` and `MAX_TRASH_COLLISIONS` (every caller of `suffixed` bounds
+      its loop with it), re-exported from
       `ops::trash` for now. macOS/Windows stubs: `home()` and `for_path()` return
       `Err(DfError::Unsupported("Trash"))`; `list()` `Ok(vec![])`. The
       `sync/mod.rs:412–458` `trash_available`/`trash_for` move to
-      `platform::trash::{available_for, for_path}` with the same stubs. Done when:
+      `platform::trash::{available_for, for_sync}` with the same stubs (not
+      `for_path`, which already names the `d` rule; the mirror's rule differs in
+      refusing rather than falling back to the home trash). Done when:
       Linux trash tests pass from their new location, df-app compiles unchanged on
       Linux, and `d` on macOS/Windows would reach the refusal toast. The check is a
       df-app unit test gated `#[cfg(not(target_os = "linux"))]` asserting
       `App::refusal(Command::Trash)` is `Some` for a local path; it first runs for
       real on the CI matrix at S1.40. On Linux `available_for` is true for every
       local path, so there is nothing to assert there.
+      — df-core core-seam session, started 2026-09-29: df-core half done (see the
+      commit that closes it below); the df-app refusal test is the §3 agent's, with
+      S1.34.
 - [ ] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
       `03-paths.md` P3.4. In this phase create the module with the **Unix body only**
       and a Windows body good enough to compile: `dev = 0`, `ino = 0`, `nlink = 1`,
@@ -505,6 +515,17 @@ their native clipboards *are* synchronous.
   `sync_dir` keeps its test counters in `ops::copy` and calls the platform for
   the flush. `UTIME_OMIT` is `libc::UTIME_OMIT` as decided; the local constant
   and its doc comment are gone.
+- 2026-09-29 — S1.6's stub (`platform/stub/trash.rs`) provides the whole
+  surface df-core and df-app call, including the trash-aging functions added
+  since the plan: operations refuse with `Unsupported("Trash")`, `list` is
+  empty, `purge_due_in` is never due, `available_for` is false. Its
+  `TrashedItem` has the shared fields and answers `location()`/`files_path()`/
+  `info_path()` with an empty path and `is_orphan()` with `false`.
+  `iso8601_utc` and `parse_deletion_date` are real bodies copied into the stub:
+  the trash view reads the `DeletionDate` text on every target and M2.8's
+  journal writes the same text. What only the freedesktop spec has
+  (`.trashinfo` text, `$topdir` trashes, `PURGE_STAMP`, `expired`) is not in
+  the stub, so df-app tests that use those items need a Linux gate (S1.33).
 
 ## Open questions
 

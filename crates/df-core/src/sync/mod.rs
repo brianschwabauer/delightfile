@@ -401,60 +401,21 @@ impl SyncPlan {
 }
 
 /// Whether a trash can live on the filesystem `dest` is on, asked without
-/// creating one.
-///
-/// The home trash when `dest` shares its device; otherwise the spec's
-/// `$topdir/.Trash/$uid` or `$topdir/.Trash-$uid` when one is already there,
-/// or could be made because the mount's root is writable. What `d` does past
-/// that — fall back to the home trash, copying the file across — is not a
-/// mirror's to do: pulling every extra off a card and onto the laptop's disk
-/// is not what the card's "to trash" promised.
+/// creating one: the platform's rule ([`crate::platform::trash::available_for`]),
+/// which on Linux is the home trash or the mount's own and never a copy across
+/// to the home one.
 pub fn trash_available(dest: &Path) -> bool {
-    use crate::ops::trash;
-    use std::os::unix::fs::PermissionsExt;
-    let Ok(home) = trash::Trash::home() else {
-        return false;
-    };
-    match (trash::device_of(dest), trash::device_of(home.root())) {
-        (Some(a), Some(b)) if a == b => return true,
-        (None, _) => return false,
-        _ => {}
-    }
-    let Some(top) = trash::mount_point_of(dest) else {
-        return false;
-    };
-    if let Ok(meta) = std::fs::symlink_metadata(top.join(".Trash")) {
-        if meta.is_dir() && meta.permissions().mode() & 0o1000 != 0 {
-            return true;
-        }
-    }
-    let own = top.join(format!(".Trash-{}", trash::uid()));
-    if std::fs::symlink_metadata(&own).is_ok_and(|meta| meta.is_dir()) {
-        return true;
-    }
-    crate::platform::fs::writable(&top)
+    crate::platform::trash::available_for(dest)
 }
 
-/// The trash a mirror's extras under `dest` go into — made if it has to be.
-///
-/// The same choice [`trash_available`] describes, made for real: the home
-/// trash on the home filesystem, the mount's own trash anywhere else, and an
-/// error rather than the home trash when the mount cannot have one.
+/// The trash a mirror's extras under `dest` go into — made if it has to be
+/// ([`crate::platform::trash::for_sync`]).
 pub(crate) fn trash_for(dest: &Path) -> crate::Result<crate::ops::Trash> {
-    use crate::ops::trash;
     #[cfg(test)]
     if let Some(root) = TEST_TRASH.with(|slot| slot.borrow().clone()) {
-        return Ok(trash::Trash::at(root));
+        return Ok(crate::ops::Trash::at(root));
     }
-    let home = trash::Trash::home()?;
-    if let (Some(a), Some(b)) = (trash::device_of(dest), trash::device_of(home.root())) {
-        if a == b {
-            return Ok(home);
-        }
-    }
-    let top = trash::mount_point_of(dest)
-        .ok_or_else(|| crate::DfError::Op(format!("no trash for {}", dest.display())))?;
-    Ok(trash::Trash::at(trash::topdir_trash(&top, trash::uid())?))
+    crate::platform::trash::for_sync(dest)
 }
 
 #[cfg(test)]

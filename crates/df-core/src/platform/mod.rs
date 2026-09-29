@@ -40,6 +40,13 @@
 //! | `fs` | `reflink(reader, writer) -> bool` | `FICLONE` | `false` (M2.2) | `false` |
 //! | `fs` | `forget_cached(file, path)` | `posix_fadvise(DONTNEED)` | nothing (M2.7) | nothing |
 //! | `fs` | `is_remote(path) -> bool`, `magic_of(path) -> Option<i64>` | `statfs` `f_type` against `du::REMOTE_FS_MAGIC` | `false` / `None` (M2.3) | `false` / `None` |
+//! | `trash` | `TrashedItem { trash_root, name, original, deleted_at }` with `location()`, `files_path()`, `info_path()`, `is_orphan()` | freedesktop `files/` + `info/` | empty paths, never an orphan (M2.8) | same stub (W4.7) |
+//! | `trash` | `Trash::{at, home, root, files_dir, trash, list, restore, purge}` | freedesktop spec | `home` and every operation `Unsupported("Trash")`, `list` empty | same stub |
+//! | `trash` | `for_path(path) -> Result<Trash>`, `restore(item, ctx)`, `purge(item, ctx)` | spec §Trash directories | `Unsupported("Trash")` | same stub |
+//! | `trash` | `available_for(dest) -> bool`, `for_sync(dest) -> Result<Trash>` (a mirror's extras) | home or `$topdir` trash | `false` / `Unsupported("Trash")` | same stub |
+//! | `trash` | `Purged`, `purge_expired`, `purge_expired_if_due`, `purge_due_in` | `[mgr] trash_keep_days` over the spec | `Unsupported("Trash")`; `purge_due_in` is never due | same stub |
+//! | `trash` | `iso8601_utc(SystemTime) -> String`, `parse_deletion_date(&str) -> Option<SystemTime>` | the `DeletionDate` text | the same text | the same text |
+//! | `trash` | Linux only: `TRASHINFO_EXT`, `PURGE_STAMP`, `DATE_SLACK_SECS`, `home_trash_path`, `topdir_trash`, `mount_point_of`, `uid`, `trashinfo_text`, `parse_trashinfo`, `encode_path`, `decode_path`, `expired`, `purge_wait`, `Trash::{info_dir, ensure}` | the spec's own vocabulary | — | — |
 
 #[cfg(unix)]
 mod unix;

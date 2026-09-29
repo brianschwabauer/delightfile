@@ -42,8 +42,8 @@ use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
 use super::journal::{CopyManifest, MovedPath, OpRecord};
-use super::trash::{suffixed, MAX_TRASH_COLLISIONS};
 use super::{exists, file_name, is_ancestor_resolved, is_real_dir, is_url, normalize, same_file};
+use crate::fs::names::{suffixed, MAX_TRASH_COLLISIONS};
 
 /// A path as the clipboard carries it: absolute and lexically clean
 /// ([`normalize`]) — unless it is a URL, which is kept exactly as given.

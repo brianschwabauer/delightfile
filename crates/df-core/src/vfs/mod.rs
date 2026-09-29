@@ -790,8 +790,8 @@ impl Vfs {
         }
         let parent = remote.parent().unwrap_or_else(|| remote.service_root());
         let name = std::ffi::OsString::from(remote.name());
-        for n in 1..crate::ops::trash::MAX_TRASH_COLLISIONS {
-            let candidate = parent.join(&crate::ops::trash::suffixed(&name, n).to_string_lossy());
+        for n in 1..crate::fs::names::MAX_TRASH_COLLISIONS {
+            let candidate = parent.join(&crate::fs::names::suffixed(&name, n).to_string_lossy());
             if !self.exists(&candidate, ctx)? {
                 return Ok(candidate);
             }

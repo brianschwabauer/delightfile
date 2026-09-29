@@ -245,24 +245,24 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 1–30 | Module: freedesktop.org Trash spec (`Trash/files`, `Trash/info/*.trashinfo`, `$topdir/.Trash[-$uid]`) | Linux-only | | The macOS Finder trash is `~/.Trash` (plus `/Volumes/*/.Trashes/<uid>`). The Windows Recycle Bin is per-volume `$Recycle.Bin\<SID>` |
-| 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` |
-| 132–145 | `ensure`: `PermissionsExt`, `from_mode(0o700)` | Unix-only | `Trash::trash` | |
+| 1–30 | Module: freedesktop.org Trash spec (`Trash/files`, `Trash/info/*.trashinfo`, `$topdir/.Trash[-$uid]`) | Linux-only | | The macOS Finder trash is `~/.Trash` (plus `/Volumes/*/.Trashes/<uid>`). The Windows Recycle Bin is per-volume `$Recycle.Bin\<SID>` ✓ S1.6 |
+| 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` ✓ S1.6 |
+| 132–145 | `ensure`: `PermissionsExt`, `from_mode(0o700)` | Unix-only | `Trash::trash` | ✓ S1.6 |
 | 178–184 | `trash`: `rename(path, &dst)`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::trash` ← core:ops/jobs.rs:TrashJob::run; core:sync/execute.rs:remove; app:app.rs:run, menu_action | See ops/copy.rs:738 on Win32 codes ✓ S1.3 |
-| 201–205 | `claim_name`: `room = MAX_NAME_BYTES (255) - "trashinfo".len() - 1`, in bytes | Windows-differs | `trash` | The NTFS component limit is 255 UTF-16 units |
-| 255–270 | `list`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; strips `.trashinfo` on bytes; `OsString::from_vec` | Unix-only | app:app.rs:show_trash | |
-| 410–415 | `restorable_destination`: `original.is_absolute()` and no `..` | Windows-differs | `restore` | A decoded `/home/…` is not absolute on Windows, so the restore is refused |
+| 201–205 | `claim_name`: `room = MAX_NAME_BYTES (255) - "trashinfo".len() - 1`, in bytes | Windows-differs | `trash` | The NTFS component limit is 255 UTF-16 units ✓ S1.6 |
+| 255–270 | `list`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; strips `.trashinfo` on bytes; `OsString::from_vec` | Unix-only | app:app.rs:show_trash | ✓ S1.6 |
+| 410–415 | `restorable_destination`: `original.is_absolute()` and no `..` | Windows-differs | `restore` | A decoded `/home/…` is not absolute on Windows, so the restore is refused ✓ S1.6 |
 | 462–468 | `restore`: `rename`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::restore`; core:ops/journal.rs:undo_trash; app:app.rs:trash_restore | ✓ S1.3 |
-| 484–491 | `home_trash_path`: `dir.is_absolute()`; `home.join(".local/share/Trash")` | Linux-only | `Trash::home` | |
-| 494–521 | `for_path`: compares `device_of(target)` with `device_of(home)`, else `mount_point_of` + `topdir_trash(uid())` | Linux-only | core:ops/jobs.rs:TrashJob::run | |
-| 524–551 | `topdir_trash`: `.Trash` must be a real dir with the sticky bit (`mode() & 0o1000`); `.Trash/<uid>`; `.Trash-<uid>` at 0o700 | Linux-only | `for_path`; core:sync/mod.rs:trash_for | |
-| 554–564 | `device_of`: `MetadataExt::dev()` of the nearest existing ancestor | Unix-only | `for_path`, `mount_point_of`; core:sync/mod.rs:trash_available, trash_for | |
-| 568–582 | `mount_point_of`: walks `parent()` until `device_of` changes | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows mount points and junctions do not change a `dev` |
+| 484–491 | `home_trash_path`: `dir.is_absolute()`; `home.join(".local/share/Trash")` | Linux-only | `Trash::home` | ✓ S1.6 |
+| 494–521 | `for_path`: compares `device_of(target)` with `device_of(home)`, else `mount_point_of` + `topdir_trash(uid())` | Linux-only | core:ops/jobs.rs:TrashJob::run | ✓ S1.6 |
+| 524–551 | `topdir_trash`: `.Trash` must be a real dir with the sticky bit (`mode() & 0o1000`); `.Trash/<uid>`; `.Trash-<uid>` at 0o700 | Linux-only | `for_path`; core:sync/mod.rs:trash_for | ✓ S1.6 |
+| 554–564 | `device_of`: `MetadataExt::dev()` of the nearest existing ancestor | Unix-only | `for_path`, `mount_point_of`; core:sync/mod.rs:trash_available, trash_for | ✓ S1.6 |
+| 568–582 | `mount_point_of`: walks `parent()` until `device_of` changes | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows mount points and junctions do not change a `dev` ✓ S1.6 |
 | 588–594 | `uid()`: `libc::getuid()` | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for; app:mounts.rs:gvfs_root | |
 | 609–633 | `fit`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; stem/extension clipped as bytes | Unix-only | `suffixed` ← core:ops/paste.rs:unique_name, core:vfs/mod.rs:unique_name, app:remote.rs:free_name; `claim_name` | |
 | 637–646 | `clip`: cuts at a UTF-8 boundary in a byte string | Unix-only (byte model) | `fit` | |
-| 679–691 | `encode_path`: `OsStrExt::as_bytes`, percent-encodes, `/` unreserved | Unix-only | `trashinfo_text` ← `Trash::trash` | |
-| 695–720 | `decode_path`: `OsStringExt::from_vec` | Unix-only | `parse_trashinfo` ← `Trash::list` | |
+| 679–691 | `encode_path`: `OsStrExt::as_bytes`, percent-encodes, `/` unreserved | Unix-only | `trashinfo_text` ← `Trash::trash` | ✓ S1.6 |
+| 695–720 | `decode_path`: `OsStringExt::from_vec` | Unix-only | `parse_trashinfo` ← `Trash::list` | ✓ S1.6 |
 
 ### preview/cache.rs
 
@@ -313,9 +313,9 @@
 |---|---|---|---|---|
 | 267–282 | `SyncPlan::label`: `format!("{name}/{}", item.rel.to_string_lossy())`, trailing `'/'` for folders | Windows-differs | app:sync.rs (card rows) | Mixed separators on Windows (`rel` renders with `\`) |
 | 310–318 | `is_debris`: `use std::os::unix::ffi::OsStrExt`; `name.as_bytes().starts_with(TEMP_PREFIX)` | Unix-only | `has_debris`, `in_sync`, `listed`, `removals`; core:sync/execute.rs:remove_extras | |
-| 412–436 | `trash_available`: `Trash::home`, `device_of`, `mount_point_of`, `.Trash` sticky `mode() & 0o1000` (427), `.Trash-{uid()}` (431), `writable` | Linux-only | core:sync/plan.rs:walk | |
-| 414 | `use std::os::unix::fs::PermissionsExt` | Unix-only | `trash_available` | |
-| 443–458 | `trash_for`: home trash if same `dev`, else `topdir_trash(mount_point_of(dest), uid())` | Linux-only | core:sync/execute.rs:remove | |
+| 412–436 | `trash_available`: `Trash::home`, `device_of`, `mount_point_of`, `.Trash` sticky `mode() & 0o1000` (427), `.Trash-{uid()}` (431), `writable` | Linux-only | core:sync/plan.rs:walk | ✓ S1.6 |
+| 414 | `use std::os::unix::fs::PermissionsExt` | Unix-only | `trash_available` | ✓ S1.6 |
+| 443–458 | `trash_for`: home trash if same `dev`, else `topdir_trash(mount_point_of(dest), uid())` | Linux-only | core:sync/execute.rs:remove | ✓ S1.6 |
 | 479–488 | `writable`: `OsStrExt` → `CString`; `libc::access(path, libc::W_OK)` | Unix-only (windows libc has `access`, not `W_OK`) | `trash_available` | ✓ S1.5 |
 
 ### sync/plan.rs
@@ -1643,10 +1643,10 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | |
 | ops/copy.rs:672 | `CString::new(path.as_os_str().as_bytes())` for `utimensat` | Unix-only | `set_times` | ✓ S1.5 |
 | ops/create.rs:36–43 | `create`: bytes in, trailing `/` check, `from_bytes` out | Unix-only | app:app.rs:create | |
-| ops/trash.rs:266–270 | `list`: `file.as_bytes()`, `OsString::from_vec` | Unix-only | app:app.rs:show_trash | |
+| ops/trash.rs:266–270 | `list`: `file.as_bytes()`, `OsString::from_vec` | Unix-only | app:app.rs:show_trash | ✓ S1.6 |
 | ops/trash.rs:613–632 | `fit`: `file_stem().as_bytes()`, `extension().as_bytes()`, `OsString::from_vec` | Unix-only | `suffixed`, `claim_name` | |
-| ops/trash.rs:682 | `encode_path`: `as_bytes()` | Unix-only | `trashinfo_text` | |
-| ops/trash.rs:719 | `decode_path`: `OsString::from_vec(out)` | Unix-only | `parse_trashinfo` | |
+| ops/trash.rs:682 | `encode_path`: `as_bytes()` | Unix-only | `trashinfo_text` | ✓ S1.6 |
+| ops/trash.rs:719 | `decode_path`: `OsString::from_vec(out)` | Unix-only | `parse_trashinfo` | ✓ S1.6 |
 | state/mod.rs:746 | `path_bytes`: `as_bytes()` | Unix-only | `render` | |
 | state/mod.rs:751 | `path_from`: `OsString::from_vec` | Unix-only | `parse`, `parse_tabs` | |
 | sync/mod.rs:315–316 | `is_debris`: `name.as_bytes().starts_with(TEMP_PREFIX.as_bytes())` | Unix-only | plan helpers | |
@@ -1662,8 +1662,8 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 |---|---|---|---|---|
 | ops.rs:200 | `trim_trailing_slash` trims only `b'/'` | Windows-differs | core:ops/delete.rs | |
 | ops/create.rs:37 | Trailing `b'/'` marks "create a directory" | Windows-differs | app:app.rs:create | |
-| ops/trash.rs:489 | `home.join(".local/share/Trash")` (embedded `/`) | Linux-only | `Trash::home` | |
-| ops/trash.rs:683 | `encode_path` leaves `/` unescaped as the separator | Windows-differs | `trashinfo_text` | |
+| ops/trash.rs:489 | `home.join(".local/share/Trash")` (embedded `/`) | Linux-only | `Trash::home` | ✓ S1.6 |
+| ops/trash.rs:683 | `encode_path` leaves `/` unescaped as the separator | Windows-differs | `trashinfo_text` | ✓ S1.6 |
 | state/pins.rs:59, 93 | `expand_home` splices `HOME` + `"/Work"` from `~/Work` | Windows-differs | pins, bookmarks | |
 | config.rs:771–772 | `expand_home` string concatenation | Windows-differs | bookmarks, pins | |
 | config.rs:1222 | `dir_icon`: pattern `contains('/')` → match against the full path string | Windows-differs | app:icons.rs:icon_for | |

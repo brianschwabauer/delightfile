@@ -52,6 +52,7 @@ mod history;
 pub mod kind;
 mod memory;
 pub mod mime;
+pub mod names;
 pub mod owner;
 mod scan;
 mod sort;

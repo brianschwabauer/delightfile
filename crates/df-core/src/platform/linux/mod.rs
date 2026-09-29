@@ -3,6 +3,7 @@
 
 pub mod fs;
 mod inotify;
+pub mod trash;
 pub mod watch;
 
 pub use super::unix::errno;
