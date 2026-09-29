@@ -37,7 +37,8 @@
 //! | `fs` | `write_all_at(file, data, offset) -> io::Result<()>` | `FileExt::write_all_at` (unix) | unix | `seek_write` loop |
 //! | `fs` | `same_file(a, b) -> io::Result<bool>` (not through a link) | `dev` + `ino` (unix) | unix | `Unsupported` (P3.3) |
 //! | `fs` | `writable(dir) -> bool` | `access(W_OK)` (unix) | unix | `true` (W4.6) |
-//! | `fs` | `reflink(reader, writer) -> bool` | `FICLONE` | `false` (M2.2) | `false` |
+//! | `fs` | `reflink(reader, writer) -> bool` (clone into an open file) | `FICLONE` | `false` | `false` |
+//! | `fs` | `clone_before_open(reader, dst) -> io::Result<bool>` (clone into a new file; `false`: copy the long way) | `Ok(false)` | `fclonefileat` (APFS) | `Ok(false)` |
 //! | `fs` | `forget_cached(file, path)` | `posix_fadvise(DONTNEED)` | nothing (`F_NOCACHE` is no hint) | nothing |
 //! | `fs` | `is_remote(path) -> bool`, `magic_of(path) -> Option<i64>` | `statfs` `f_type` against `du::REMOTE_FS_MAGIC` | `statfs` `f_fstypename` (`smbfs`, `nfs`, `macfuse`…) / `f_type` | `false` / `None` |
 //! | `trash` | `TrashedItem { trash_root, name, original, deleted_at }` with `location()`, `files_path()`, `info_path()`, `is_orphan()` | freedesktop `files/` + `info/` | empty paths, never an orphan (M2.8) | same stub (W4.7) |

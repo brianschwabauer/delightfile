@@ -36,6 +36,12 @@ pub fn reflink(reader: &File, writer: &File) -> bool {
     rc == 0
 }
 
+/// Never: Linux clones into an open file ([`reflink`]), not before one is
+/// opened, which is macOS's way.
+pub fn clone_before_open(_reader: &File, _dst: &Path) -> std::io::Result<bool> {
+    Ok(false)
+}
+
 /// Ask the kernel to drop a file's cached pages. Advisory: a filesystem that
 /// ignores it (some FUSE mounts, where the server holds the cache) is logged
 /// and read anyway, since a read through the cache still catches everything

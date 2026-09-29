@@ -2,9 +2,10 @@
 //!
 //! Copy is reflink-first: on btrfs and XFS the `FICLONE` ioctl makes the
 //! destination share the source's extents, so duplicating a 40 GB video is
-//! instant and free (PLAN §5). Everywhere else — ext4, tmpfs, a different
-//! filesystem, a kernel that says no — it silently degrades to a chunked
-//! read/write loop that reports progress and stops when cancelled.
+//! instant and free (PLAN §5), and on macOS's APFS `fclonefileat` does the
+//! same before the destination is opened. Everywhere else — ext4, tmpfs, a
+//! different filesystem, a kernel that says no — it silently degrades to a
+//! chunked read/write loop that reports progress and stops when cancelled.
 //!
 //! A copy can also be *durable* ([`CopyOptions::durable`]): every file is
 //! flushed to the medium before it is renamed into place, and its directory
@@ -365,34 +366,56 @@ fn copy_file(
     }
 
     let mut reader = File::open(src).map_err(|e| DfError::io(src, e))?;
-    let (write_path, mut writer) = if replacing || options.durable {
-        let temp = temp_beside(dst)?;
-        let file = std::fs::OpenOptions::new()
+    let through_temp = replacing || options.durable;
+    let write_path = if through_temp {
+        temp_beside(dst)?
+    } else {
+        dst.to_path_buf()
+    };
+    let cloned = clone_first(&reader, &write_path)?;
+    let mut writer = if cloned {
+        // The clone is the whole file already, with the source's mode, so it
+        // is opened only to be flushed.
+        match File::open(&write_path) {
+            Ok(file) => file,
+            Err(e) => {
+                let _ignored = std::fs::remove_file(&write_path);
+                return Err(DfError::io(&write_path, e));
+            }
+        }
+    } else if through_temp {
+        std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&temp)
-            .map_err(|e| DfError::io(&temp, e))?;
-        (temp, file)
+            .open(&write_path)
+            .map_err(|e| DfError::io(&write_path, e))?
     } else {
-        let file = std::fs::OpenOptions::new()
+        std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .open(dst)
-            .map_err(|e| DfError::io(dst, e))?;
-        (dst.to_path_buf(), file)
+            .map_err(|e| DfError::io(dst, e))?
     };
 
-    let result = write_contents(&mut reader, &mut writer, src, &write_path, ctx, meta.len())
-        .and_then(|bytes| {
-            let dropped = crate::fs::tags::carry(src, &write_path);
-            apply_mode(&write_path, meta);
-            apply_times(&write_path, meta);
-            if options.durable {
-                sync_file(&writer, &write_path)?;
-            }
-            Ok((bytes, dropped))
-        });
+    let written = if cloned {
+        ctx.checkpoint().map(|()| {
+            log::debug!("cloned {} → {}", src.display(), dst.display());
+            ctx.advance(meta.len(), 0);
+            meta.len()
+        })
+    } else {
+        write_contents(&mut reader, &mut writer, src, &write_path, ctx, meta.len())
+    };
+    let result = written.and_then(|bytes| {
+        let dropped = crate::fs::tags::carry(src, &write_path);
+        apply_mode(&write_path, meta);
+        apply_times(&write_path, meta);
+        if options.durable {
+            sync_file(&writer, &write_path)?;
+        }
+        Ok((bytes, dropped))
+    });
     match result {
         Ok(copied) => {
             drop(writer);
@@ -588,12 +611,25 @@ fn write_contents(
     Ok(total)
 }
 
-/// Whether to try `FICLONE` at all.
+/// Make `write_path` a clone of `reader`'s file, before anything is opened
+/// there: macOS's `fclonefileat` on APFS
+/// ([`platform::fs::clone_before_open`]), where a clone is a file made rather
+/// than one filled. `false` wherever that is not how clones are made — Linux
+/// clones into the open writer instead ([`platform::fs::reflink`]) — and when
+/// the volume cannot, and under [`without_reflink`].
+fn clone_first(reader: &File, write_path: &Path) -> Result<bool> {
+    if !reflink_enabled() {
+        return Ok(false);
+    }
+    platform::fs::clone_before_open(reader, write_path).map_err(|e| DfError::io(write_path, e))
+}
+
+/// Whether to try `FICLONE` (or macOS's clone) at all.
 ///
 /// Always yes outside tests. Under `cfg(test)` it is a thread-local switch, so
 /// the chunked fallback can be exercised deterministically on a machine whose
-/// `$TMPDIR` happens to be btrfs — otherwise the fallback would only ever be
-/// tested on ext4 and would rot on the developer's own laptop.
+/// `$TMPDIR` happens to be btrfs or APFS — otherwise the fallback would only
+/// ever be tested on ext4 and would rot on the developer's own laptop.
 #[cfg(not(test))]
 fn reflink_enabled() -> bool {
     true
@@ -609,7 +645,7 @@ fn reflink_enabled() -> bool {
     REFLINK_ENABLED.with(|c| c.get())
 }
 
-/// Run `f` with `FICLONE` disabled on this thread.
+/// Run `f` with `FICLONE` and macOS's clone disabled on this thread.
 #[cfg(test)]
 pub(crate) fn without_reflink<T>(f: impl FnOnce() -> T) -> T {
     REFLINK_ENABLED.with(|c| c.set(false));

@@ -2,7 +2,8 @@
 //! answered with "no": stands in on Windows (macOS has its own,
 //! `platform/macos/fs.rs`).
 //!
-//! - [`reflink`]: `false`, so every copy takes the chunked path.
+//! - [`reflink`] and [`clone_before_open`]: `false`, so every copy takes the
+//!   chunked path.
 //! - [`forget_cached`]: nothing. A verify then reads through the cache, which
 //!   still catches everything but a lying medium.
 //! - [`is_remote`] / [`magic_of`]: `false` / `None`, so automatic folder sizes
@@ -14,6 +15,11 @@ use std::path::Path;
 /// Never: no reflink on this platform (yet).
 pub fn reflink(_reader: &File, _writer: &File) -> bool {
     false
+}
+
+/// Never: no clone copy on this platform (yet).
+pub fn clone_before_open(_reader: &File, _dst: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 /// Nothing to ask the kernel for here.
