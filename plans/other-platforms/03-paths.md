@@ -1,6 +1,6 @@
 # 03 — Paths
 
-Status: **not started**
+Status: **in progress** (port/paths, 2026-09-29)
 
 Scope: everything df-core assumes about the shape of a path that is false on
 Windows, and the case-sensitivity assumptions that are false on Windows and on the
@@ -76,7 +76,7 @@ roots, budgets) to sites that already compile everywhere.
       otherwise. Unit tests on both. Done when: both bodies compile on their
       targets (CI) and the Unix tests pass on Linux. — done e34eab8 (S1.16),
       cross-checked locally, CI pending
-- [ ] **P3.2** `crates/df-core/src/path.rs` (new, portable, no cfg inside):
+- [x] **P3.2** `crates/df-core/src/path.rs` (new, portable, no cfg inside):
       - `pub fn root_of(p: &Path) -> PathBuf` — the `Prefix`+`RootDir` components
         (`C:\`, `\\server\share\`) or `/`; for a relative path, the root of the
         current directory.
@@ -102,7 +102,12 @@ roots, budgets) to sites that already compile everywhere.
       `\\?\C:\a`, trailing separators, and `key` on a mixed-case Windows path; the
       Windows-shaped tests run on every target by building the inputs with
       `PathBuf::from` of a literal only when `cfg!(windows)`, otherwise by testing
-      the pure helpers on `&str`.
+      the pure helpers on `&str`. — done (port/paths). As built: `key` returns
+      `Cow<'_, Path>` (borrowed, no copy, where it is the identity) with
+      `into_key(PathBuf)` for inserts; the Windows rules are public as
+      `folded` and `name_is_valid_strict` (and `name_is_valid_permissive`), so
+      Linux tests them; the constants are `platform::os::{STRICT_NAMES,
+      FOLD_CASE}` (Decisions log).
 - [ ] **P3.3** `platform::fs::same_file(a: &Path, b: &Path) -> io::Result<bool>`:
       Unix `dev`+`ino` of `symlink_metadata` (the body of `ops.rs:212–218` moved);
       Windows `GetFileInformationByHandle` volume serial + file index via a
@@ -302,6 +307,25 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 - 2026-09-25 — `Entry.path` keeps the `sftp://` URL; the fix is discipline at the
   call sites, not a type change.
 - 2026-09-25 — `MADE_BY` in written zips stays Unix on every target.
+- 2026-09-29 — Before any P3 task changed code, `main`'s formats were pinned
+  as fixtures (`state/testdata/state-419a776`, `zoxide/testdata/db-v3.zo`,
+  written by the code at 419a776) with tests that Linux loads them and
+  writes the state file back byte for byte. Pins, tags, panes and tabs live
+  in the state file, so its fixture covers them; the undo journal is in
+  memory only (appendix §3.6), so there is no journal file to pin.
+- 2026-09-29 — P3.2: `path::key` returns `Cow<'_, Path>`, not `PathBuf`, and
+  `path::into_key(PathBuf) -> PathBuf` is its owned twin. Reason: on Unix the
+  key is the identity, and `git::StatusData::status_for` asks for every
+  visible row on every frame; a `PathBuf` return would copy the path each
+  time, a cost Linux never had.
+- 2026-09-29 — P3.2: the constants the plan put in `platform::path` are in
+  `platform::os` (`STRICT_NAMES`, `FOLD_CASE`, and P3.6's `MAX_NAME`,
+  `NAME_IN_UTF16`). Reason: `os` is already the module about how this
+  platform spells a name, and macOS takes it from `unix` through its existing
+  re-export, so no new module has to be threaded through every target.
+- 2026-09-29 — P3.2: `name_is_valid`'s Unix rule is also public as
+  `name_is_valid_permissive`, beside `name_is_valid_strict`, and `key`'s
+  Windows fold as `folded`, so that each platform's rule is tested on Linux.
 
 ## Open questions
 

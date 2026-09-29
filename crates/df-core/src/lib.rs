@@ -19,6 +19,9 @@ pub mod input;
 pub mod keymap;
 /// Thread priority: how a background walk gets out of the UI thread's way.
 pub mod ops;
+/// The questions about a local path `std::path` does not answer: roots,
+/// trailing separators, breadcrumb segments, lookup keys, valid names.
+pub mod path;
 /// Everything whose body depends on the operating system, behind one set of
 /// functions every target provides (`plans/other-platforms/`).
 pub mod platform;

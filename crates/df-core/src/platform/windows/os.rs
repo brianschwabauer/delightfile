@@ -3,11 +3,24 @@
 //! unpaired surrogate — legal to NTFS, essentially never made by anything — has
 //! no UTF-8, and is refused with [`DfError::Unsupported`] by whatever would
 //! have written it down, never mangled (`00-ground-rules.md` §4).
+//!
+//! Beside the conversion, what Windows holds a name to, as the constants
+//! [`crate::path`] reads: its reserved characters and device names, and one
+//! file for every spelling that differs only in case.
 
 use std::borrow::Cow;
 use std::ffi::{OsStr, OsString};
 
 use crate::{DfError, Result};
+
+/// Whether names are held to Windows' rules (reserved characters and device
+/// names, no trailing dot or space): yes — the system refuses them, or makes
+/// a file nothing else can open.
+pub const STRICT_NAMES: bool = true;
+
+/// Whether a table keyed by path folds case ([`crate::path::key`]): yes, as
+/// NTFS does, so `C:\Users\x` and `c:\users\X` find one record.
+pub const FOLD_CASE: bool = true;
 
 /// The UTF-8 of `s`, or a refusal when it is not valid Unicode.
 pub fn as_bytes(s: &OsStr) -> Result<Cow<'_, [u8]>> {
