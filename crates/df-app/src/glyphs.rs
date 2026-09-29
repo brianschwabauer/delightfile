@@ -7,7 +7,9 @@
 //! ([`crate::icons::install`]). A handful of the symbols the chrome spells with
 //! are in the Nerd Font and in neither stock face: the menu's `✓` and `▸`, the
 //! arrows in hints and task names, the rate badge's `◂`, the menu button's
-//! `≡`, the hint strip's `⇧` and `⟷`. On a machine without a Nerd Font —
+//! `≡`, the hint strip's `⇧` and `⟷`, and the Option and Control marks a Mac
+//! writes its chords with, `⌥` and `⌃` (Command's `⌘` is in a stock face
+//! already). On a machine without a Nerd Font —
 //! every stock Mac and Windows install, and CI's container — each of those
 //! was the missing-glyph box, and it *measured* as the box too, which is a
 //! box's width wherever the chrome lays one out: the menu's key column ran
@@ -15,9 +17,9 @@
 //!
 //! ## The answer: draw them
 //!
-//! Not a bundled font. The shapes are ten, a font file is megabytes and a
+//! Not a bundled font. The shapes are twelve, a font file is megabytes and a
 //! licence, and a second face in the fallback chain would answer for far more
-//! than these ten. Not a substitute character either: there is no symbol the
+//! than these twelve. Not a substitute character either: there is no symbol the
 //! stock faces are known to have that says "tick" or "submenu", which is how
 //! the chrome came to reach for these in the first place.
 //!
@@ -79,10 +81,14 @@ enum StandIn {
     Bars,
     /// `⟷`, U+27F7: "names ⟷ contents".
     Both,
+    /// `⌥`, U+2325: Option, in a Mac's chord labels.
+    Option,
+    /// `⌃`, U+2303: Control, in a Mac's chord labels.
+    Control,
 }
 
 /// Every character with a stand-in, and its stand-in.
-const TABLE: [(char, StandIn); 10] = [
+const TABLE: [(char, StandIn); 12] = [
     ('✓', StandIn::Check),
     ('▸', StandIn::PointRight),
     ('◂', StandIn::PointLeft),
@@ -93,6 +99,8 @@ const TABLE: [(char, StandIn); 10] = [
     ('⇧', StandIn::Shift),
     ('≡', StandIn::Bars),
     ('⟷', StandIn::Both),
+    ('⌥', StandIn::Option),
+    ('⌃', StandIn::Control),
 ];
 
 fn stand_in(c: char) -> Option<StandIn> {
@@ -161,6 +169,8 @@ impl StandIn {
             StandIn::Shift => 0.72,
             StandIn::Bars => 0.56,
             StandIn::Both => 1.20,
+            StandIn::Option => 0.72,
+            StandIn::Control => 0.62,
         }
     }
 
@@ -269,6 +279,33 @@ impl StandIn {
                     pen.head(left, egui::vec2(-1.0, 0.0)),
                 ];
                 pen.arrow(left, right, &heads);
+            }
+            StandIn::Option => {
+                // The key cap's switch: a bar along the top that drops on a
+                // slant to a bar along the foot, and apart from it a second
+                // bar along the top on the right. Both bars are on pixel
+                // rows, so the slant runs between two crisp lines.
+                let top = pen.on_row(face.cap - rest);
+                let foot = pen.on_row(rest);
+                let (left, bend, drop, right) =
+                    (pen.x(-0.28), pen.x(-0.10), pen.x(0.10), pen.x(0.28));
+                pen.stroke(&[
+                    egui::pos2(left, top),
+                    egui::pos2(bend, top),
+                    egui::pos2(drop, foot),
+                    egui::pos2(right, foot),
+                ]);
+                pen.stroke(&[egui::pos2(pen.x(0.06), top), egui::pos2(right, top)]);
+            }
+            StandIn::Control => {
+                // The key cap's caret: wider than `^` and set high, its point
+                // at a capital's height and its feet a little over the axis.
+                let feet = face.axis + 0.08;
+                pen.stroke(&[
+                    pen.at(-0.22, feet),
+                    pen.at(0.0, face.cap - rest),
+                    pen.at(0.22, feet),
+                ]);
             }
         }
     }
@@ -828,7 +865,7 @@ mod tests {
             .collect()
     }
 
-    /// The premise: none of the ten is in a stock proportional face, so on a
+    /// The premise: none of the twelve is in a stock proportional face, so on a
     /// machine without a Nerd Font every one of them is a stand-in. An egui
     /// that grew one of them would fail here, and that stand-in could go.
     #[test]

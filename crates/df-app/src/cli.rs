@@ -173,13 +173,15 @@ pub enum Outcome {
 /// In pieces, because three entries differ by platform
 /// ([`crate::platform::cli`]): `--portal` exists only where there is a
 /// desktop portal to serve, and the two flags whose Linux lines say the
-/// portal uses them say nothing of it anywhere else.
+/// portal uses them say nothing of it anywhere else. The Select button's
+/// chord is written the platform's way: `Ctrl+Enter`, or `⌘Enter` on a Mac.
 pub fn usage() -> String {
     use crate::platform::cli::{EXTRA_USAGE, REQUEST_USAGE, REVEAL_USAGE};
+    let chooser = USAGE_CHOOSER.replace("{choose}", crate::keys::written("ctrl+enter"));
     [
         USAGE_HEAD,
         REVEAL_USAGE,
-        USAGE_CHOOSER,
+        &chooser,
         REQUEST_USAGE,
         EXTRA_USAGE,
         USAGE_TAIL,
@@ -197,12 +199,13 @@ usage: delightfile [path] [options]
                          a file opens its directory with the cursor on it
 ";
 
-/// `--help` from after `--reveal` to `--chooser-request`.
+/// `--help` from after `--reveal` to `--chooser-request`. `{choose}` is the
+/// Select button's chord, which [`usage`] writes in.
 const USAGE_CHOOSER: &str =
     "  --cwd-file=<path>      write the final directory here when quitting with `q`
                          (`Q` quits without writing it)
   --chooser-file=<path>  pick rather than open: `Enter` or the Select button
-                         (`Ctrl+Enter`) writes the picked paths here, one per
+                         (`{choose}`) writes the picked paths here, one per
                          line, and quits. Quitting any other way writes
                          nothing, which is a cancel.
   --chooser-multiple     the dialog takes several files (default: one)

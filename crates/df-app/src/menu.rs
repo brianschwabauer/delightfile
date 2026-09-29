@@ -1786,6 +1786,20 @@ fn row(
 mod tests {
     use super::*;
 
+    /// The chords the rows teach, as this platform writes them (M2.21):
+    /// `Ctrl+l` on Linux and Windows, `⌘l` on a Mac, where the `ctrl` role
+    /// is Command and Alt is Option.
+    const MAC: bool = cfg!(target_os = "macos");
+    const CTRL_L: &str = if MAC { "⌘l" } else { "Ctrl+l" };
+    const CTRL_T: &str = if MAC { "⌘t" } else { "Ctrl+t" };
+    const CTRL_N: &str = if MAC { "⌘n" } else { "Ctrl+n" };
+    const CTRL_P: &str = if MAC { "⌘p" } else { "Ctrl+p" };
+    const CTRL_A: &str = if MAC { "⌘a" } else { "Ctrl+a" };
+    const CTRL_R: &str = if MAC { "⌘r" } else { "Ctrl+r" };
+    const ALT_P: &str = if MAC { "⌥p" } else { "Alt+p" };
+    const ALT_T: &str = if MAC { "⌥t" } else { "Alt+t" };
+    const ALT_Y: &str = if MAC { "⌥y" } else { "Alt+y" };
+
     fn facts() -> Facts {
         Facts {
             has_row: true,
@@ -1966,9 +1980,9 @@ mod tests {
         assert_eq!(
             outline(list),
             [
-                ("Go to path…", "Ctrl+l", false),
+                ("Go to path…", CTRL_L, false),
                 ("Jump to…", "z", false),
-                ("Open terminal here", "Ctrl+t", false),
+                ("Open terminal here", CTRL_T, false),
                 ("~/Work", "g w", true),
                 ("Pin this folder", "g b", false),
             ]
@@ -2760,7 +2774,7 @@ mod tests {
             outline(&rows),
             vec![
                 ("New tab", "t", false),
-                ("New window", "Ctrl+n", false),
+                ("New window", CTRL_N, false),
                 ("Go", "", true),
                 ("Find", "", false),
                 ("Edit", "", true),
@@ -2772,7 +2786,7 @@ mod tests {
                 ("Tasks", "w", false),
                 ("Clipboard", "B", false),
                 ("Disk usage", "m u", false),
-                ("Command palette…", "Ctrl+p", true),
+                ("Command palette…", CTRL_P, true),
                 ("Keyboard shortcuts", "F1", false),
                 ("Quit", "q", true),
             ]
@@ -2782,9 +2796,9 @@ mod tests {
         assert_eq!(
             outline(list("Go")),
             vec![
-                ("Go to path…", "Ctrl+l", false),
+                ("Go to path…", CTRL_L, false),
                 ("Jump to…", "z", false),
-                ("Open terminal here", "Ctrl+t", false),
+                ("Open terminal here", CTRL_T, false),
             ]
         );
         assert_eq!(
@@ -2801,12 +2815,12 @@ mod tests {
                 ("Undo", "u", false),
                 ("Redo", "U", false),
                 ("Undo history…", "", false),
-                ("Select all", "Ctrl+a", true),
-                ("Invert selection", "Ctrl+r", false),
+                ("Select all", CTRL_A, true),
+                ("Invert selection", CTRL_R, false),
                 ("Copy", "y", true),
                 ("Cut", "x", false),
                 ("Paste", "p", false),
-                ("Sync here…", "Alt+p", false),
+                ("Sync here…", ALT_P, false),
                 ("Rename", "r", false),
                 ("Permissions…", "C", false),
                 ("Tags…", "T", false),
@@ -2953,8 +2967,8 @@ mod tests {
                 .expect("free");
         }
         let rows = app_items(app_facts(), Vec::new(), &keymap, |_| false);
-        assert_eq!(anywhere(&rows, "New tab").keys, "Alt+t");
-        assert_eq!(anywhere(&rows, "Copy").keys, "Alt+y", "Edit ▸ Copy");
+        assert_eq!(anywhere(&rows, "New tab").keys, ALT_T);
+        assert_eq!(anywhere(&rows, "Copy").keys, ALT_Y, "Edit ▸ Copy");
     }
 
     /// Greyed by what is there: nothing yanked greys Paste, nothing under the
@@ -3109,7 +3123,7 @@ mod tests {
                 ("New folder…", "", Action::CreateFolder, true, false, None),
                 (
                     "Open terminal here",
-                    "Ctrl+t",
+                    CTRL_T,
                     Action::Run(C::TerminalHere),
                     true,
                     true,
@@ -3118,7 +3132,7 @@ mod tests {
                 ("Paste", "p", Action::Paste, true, true, None),
                 (
                     "Sync here…",
-                    "Alt+p",
+                    ALT_P,
                     Action::Run(C::PasteSync),
                     true,
                     false,
@@ -3126,7 +3140,7 @@ mod tests {
                 ),
                 (
                     "Select all",
-                    "Ctrl+a",
+                    CTRL_A,
                     Action::Run(C::SelectAll),
                     true,
                     false,

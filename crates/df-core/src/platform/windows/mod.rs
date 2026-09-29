@@ -6,6 +6,7 @@ pub mod defaults;
 pub mod dirs;
 pub mod errno;
 pub mod fs;
+pub mod keys;
 pub mod meta;
 pub mod os;
 pub mod pipe;

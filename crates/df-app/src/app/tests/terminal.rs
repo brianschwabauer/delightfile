@@ -184,7 +184,13 @@ fn the_folder_menu_opens_a_terminal_and_greys_it_in_the_trash() {
     );
     let terminal = row(&app, "Open terminal here");
     assert!(terminal.enabled && terminal.gap_before);
-    assert_eq!(terminal.keys, "Ctrl+t");
+    // Written the platform's way (M2.21).
+    let ctrl_t = if cfg!(target_os = "macos") {
+        "⌘t"
+    } else {
+        "Ctrl+t"
+    };
+    assert_eq!(terminal.keys, ctrl_t);
     assert_eq!(terminal.action, menu::Action::Run(Command::TerminalHere));
 
     let origin = app.files.clone();

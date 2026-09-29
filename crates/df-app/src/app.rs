@@ -14822,8 +14822,13 @@ impl App {
             return;
         }
         if self.tabs.len() <= 1 {
-            self.toasts
-                .notice("This is the only tab — Ctrl+N opens another window", now);
+            self.toasts.notice(
+                format!(
+                    "This is the only tab — {} opens another window",
+                    crate::keys::written("ctrl+N")
+                ),
+                now,
+            );
             self.spring_tab_home(drag, at, now);
             return;
         }
@@ -15317,8 +15322,13 @@ impl App {
             // to undo — it is one keystroke, and the cheapest honest answer is
             // to say so rather than to make a second round trip on behalf of a
             // field that may not be open any more.
-            self.toasts
-                .notice("The clipboard stopped answering — press Ctrl+v again", now);
+            self.toasts.notice(
+                format!(
+                    "The clipboard stopped answering — press {} again",
+                    crate::keys::written("ctrl+v")
+                ),
+                now,
+            );
         }
     }
 
@@ -19754,12 +19764,12 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
             // Every hit into the pane, or the highlighted one's folder
             // (PLAN §7.2).
             Hint::new("Enter", "list them", C::OverlaySubmit),
-            Hint::new("Alt+Enter", "go there", C::Reveal),
+            Hint::new(crate::keys::written("alt+enter"), "go there", C::Reveal),
             // `⟷` and not the shorter `↔`, here and on the help sheet: no
             // face the program ships draws `↔`, so it would be a box
             // (`icons`' glyph test holds the line).
             Hint::new("Tab", "names ⟷ contents", C::SearchToggle),
-            Hint::new("Ctrl+s", "stop", C::CancelSearch),
+            Hint::new(crate::keys::written("ctrl+s"), "stop", C::CancelSearch),
             Hint::new("Esc", "close", C::OverlayClose),
         ],
         OverlayGeom::Picker(..) => vec![
@@ -20165,9 +20175,17 @@ fn save_target(dir: &Path, text: &str) -> Result<PathBuf, String> {
 /// cancelling is the difference between an upload happening and not — so it
 /// is said once, on the way in, where a person is already looking.
 fn picker_greeting(mode: PickMode) -> &'static str {
+    // The click that adds to a selection is the platform's `ctrl` role:
+    // "Ctrl-click", or "⌘-click" on a Mac (M2.21).
+    static FILES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     match mode {
         PickMode::File => "Pick a file — Enter or Select chooses, Esc cancels",
-        PickMode::Files => "Pick files — Space or Ctrl-click selects, Enter or Select chooses",
+        PickMode::Files => FILES.get_or_init(|| {
+            format!(
+                "Pick files — Space or {}-click selects, Enter or Select chooses",
+                df_core::platform::keys::ctrl_name()
+            )
+        }),
         PickMode::Folder => "Choose a folder — Enter walks in, Choose folder picks it",
         PickMode::Save => "Enter on a file replaces it, Save names a new one",
     }
@@ -23863,10 +23881,13 @@ mod tests {
             picker_greeting(PickMode::File),
             "Pick a file — Enter or Select chooses, Esc cancels"
         );
-        assert_eq!(
-            picker_greeting(PickMode::Files),
+        // The click that adds is the platform's `ctrl` role (M2.21).
+        let files = if cfg!(target_os = "macos") {
+            "Pick files — Space or ⌘-click selects, Enter or Select chooses"
+        } else {
             "Pick files — Space or Ctrl-click selects, Enter or Select chooses"
-        );
+        };
+        assert_eq!(picker_greeting(PickMode::Files), files);
         assert_eq!(
             picker_greeting(PickMode::Folder),
             "Choose a folder — Enter walks in, Choose folder picks it"

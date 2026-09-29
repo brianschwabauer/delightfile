@@ -607,13 +607,16 @@ pub fn paint_search(
             let message = if search.error.is_some() {
                 // The error is already in the field's status; down here goes
                 // what to do about it.
-                "Nothing to show. Esc to close."
+                "Nothing to show. Esc to close.".to_string()
             } else if search.query().is_empty() {
-                "Type to search. Esc to close, Ctrl+s to stop."
+                format!(
+                    "Type to search. Esc to close, {} to stop.",
+                    crate::keys::written("ctrl+s")
+                )
             } else if search.searching() {
-                "Searching…"
+                "Searching…".to_string()
             } else {
-                "Nothing matched. Backspace to widen the search."
+                "Nothing matched. Backspace to widen the search.".to_string()
             };
             painter.text(
                 egui::pos2(rect.center().x, rect.center().y),

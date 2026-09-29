@@ -7,6 +7,7 @@ mod bplist;
 pub mod defaults;
 pub mod dirs;
 pub mod fs;
+pub mod keys;
 mod kqueue;
 pub mod nofollow;
 pub mod process;

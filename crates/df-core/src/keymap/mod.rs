@@ -78,7 +78,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub use command::Command;
-pub use key::{label_sequence, parse_chord, parse_sequence, Chord, Key, KeymapError, Mods};
+pub use key::{
+    label_sequence, parse_chord, parse_sequence, Chord, Key, KeymapError, Modifier, Mods,
+};
 
 use crate::toml::{ConfigWarning, Value};
 
@@ -632,13 +634,23 @@ impl Registry {
                     ));
                     continue;
                 };
-                let seq = match parse_sequence(&entry.key) {
+                let mut seq = match parse_sequence(&entry.key) {
                     Ok(seq) => seq,
                     Err(e) => {
                         warnings.push(ConfigWarning::new(file, entry.line, e.to_string()));
                         continue;
                     }
                 };
+                // On a Mac Super is Command, and Command is `ctrl`: nothing
+                // ever presses a Super chord there, so one written down is
+                // bound as the Cmd chord it means, and said to be.
+                if crate::platform::keys::SUPER_IS_CTRL && fold_super(&mut seq) {
+                    warnings.push(ConfigWarning::new(
+                        file,
+                        entry.line,
+                        format!("`{}`: super is Cmd, which is Ctrl on macOS", entry.key),
+                    ));
+                }
                 // An empty value unbinds — the only way to take a default away.
                 if id.is_empty() {
                     if self.unbind(context, &seq) == 0 {
@@ -812,6 +824,20 @@ impl Registry {
             .map(|b| b.description.clone())
             .unwrap_or_else(|| command.id())
     }
+}
+
+/// Make every Super in `seq` a Ctrl, for a platform where they are one key
+/// ([`crate::platform::keys::SUPER_IS_CTRL`]). Returns whether any was.
+fn fold_super(seq: &mut [Chord]) -> bool {
+    let mut folded = false;
+    for chord in seq {
+        if chord.mods.super_key {
+            chord.mods.super_key = false;
+            chord.mods.ctrl = true;
+            folded = true;
+        }
+    }
+    folded
 }
 
 /// Whether this keystroke is one of the hard-reserved transport presses.

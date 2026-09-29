@@ -4,6 +4,7 @@
 pub mod defaults;
 pub mod fs;
 mod inotify;
+pub mod keys;
 pub mod nofollow;
 pub mod process;
 pub mod thread;

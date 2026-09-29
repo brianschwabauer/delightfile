@@ -320,30 +320,45 @@ impl Chord {
     /// lowercase unless the binding carries Shift, in which case the capital
     /// *is* the Shift and the prefix comes off. Shifted punctuation prints its
     /// shifted glyph for the same reason — `<`, not `Shift+,`.
+    ///
+    /// The modifiers are written the platform's way
+    /// ([`crate::platform::keys::LABELS`]): `Ctrl+Alt+x` on Linux and
+    /// Windows, `⌥⌘x` on a Mac, where the `ctrl` role is Command.
     pub fn label(&self) -> String {
-        let mut out = String::new();
-        if self.mods.ctrl {
-            out.push_str("Ctrl+");
-        }
-        if self.mods.alt {
-            out.push_str("Alt+");
-        }
-        if self.mods.super_key {
-            out.push_str("Super+");
-        }
-        if self.mods.shift {
-            match self.key.shifted_glyph() {
-                Some(glyph) => out.push(glyph),
-                None => {
-                    out.push_str("Shift+");
-                    out.push_str(&self.key.label());
-                }
-            }
+        let glyph = if self.mods.shift {
+            self.key.shifted_glyph()
         } else {
-            out.push_str(&self.key.label());
+            None
+        };
+        let mut out = String::new();
+        for (modifier, mark) in crate::platform::keys::LABELS {
+            let held = match modifier {
+                Modifier::Ctrl => self.mods.ctrl,
+                Modifier::Alt => self.mods.alt,
+                Modifier::Super => self.mods.super_key,
+                // A Shift that makes the key its shifted glyph is the glyph.
+                Modifier::Shift => self.mods.shift && glyph.is_none(),
+            };
+            if held {
+                out.push_str(mark);
+            }
+        }
+        match glyph {
+            Some(glyph) => out.push(glyph),
+            None => out.push_str(&self.key.label()),
         }
         out
     }
+}
+
+/// One of a chord's modifiers, as [`crate::platform::keys::LABELS`] names
+/// them to say how and in what order each is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modifier {
+    Ctrl,
+    Alt,
+    Shift,
+    Super,
 }
 
 impl fmt::Display for Chord {
@@ -479,15 +494,21 @@ mod tests {
             parse_chord("Alt+Left").expect("parses"),
             Chord::alt(Key::ArrowLeft)
         );
+        // Written the platform's way: Command's `⌘` on a Mac (M2.21).
+        let (z, minus) = if cfg!(target_os = "macos") {
+            ("⌘Z", "⌘-")
+        } else {
+            ("Ctrl+Z", "Ctrl+-")
+        };
         assert_eq!(
             parse_chord("ctrl+shift+z").expect("parses").label(),
             // The capital *is* the Shift, even with a Ctrl in front of it.
-            "Ctrl+Z"
+            z
         );
         assert_eq!(parse_chord("f1").expect("parses").key, Key::F(1));
         assert_eq!(parse_chord("<Esc>").expect("parses").key, Key::Escape);
         assert_eq!(parse_chord("+").expect("parses").label(), "+");
-        assert_eq!(parse_chord("ctrl+-").expect("parses").label(), "Ctrl+-");
+        assert_eq!(parse_chord("ctrl+-").expect("parses").label(), minus);
     }
 
     #[test]

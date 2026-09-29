@@ -48,6 +48,30 @@ pub fn text(event: &KeyEvent) -> Option<String> {
     Some(text.to_string())
 }
 
+/// A chord as the keymap spells it (`ctrl+s`, `alt+enter`) written the way
+/// this platform writes chords — `Ctrl+s` on Linux, `⌘s` on a Mac
+/// ([`df_core::platform::keys::LABELS`], M2.21) — for the few places that
+/// name a key in running text or a card's `&'static str` hint rather than
+/// asking the keymap. Each chord is written once per process and kept; text
+/// that is not a chord comes back as it is.
+pub fn written(chord: &'static str) -> &'static str {
+    use std::sync::Mutex;
+    static WRITTEN: Mutex<Vec<(&str, &str)>> = Mutex::new(Vec::new());
+    let mut written = match WRITTEN.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some((_, label)) = written.iter().find(|(text, _)| *text == chord) {
+        return label;
+    }
+    let Ok(parsed) = df_core::keymap::parse_chord(chord) else {
+        return chord;
+    };
+    let label: &'static str = Box::leak(parsed.label().into_boxed_str());
+    written.push((chord, label));
+    label
+}
+
 /// The pure half, so the mapping can be tested without a window.
 ///
 /// Which physical key is which modifier is the platform's
@@ -163,7 +187,29 @@ mod tests {
         let alt_left =
             chord_from(&WinitKey::Named(NamedKey::ArrowLeft), ModifiersState::ALT).expect("Alt+←");
         assert_eq!(alt_left, Chord::alt(Key::ArrowLeft));
-        assert_eq!(alt_left.label(), "Alt+←");
+        // Written the platform's way (M2.21): the key caps' `⌥` on a Mac.
+        let written = if cfg!(target_os = "macos") {
+            "⌥←"
+        } else {
+            "Alt+←"
+        };
+        assert_eq!(alt_left.label(), written);
+    }
+
+    /// A chord named in running text is written as the keymap writes it,
+    /// once, and anything that is not a chord is left alone.
+    #[test]
+    fn a_named_chord_is_written_the_platforms_way() {
+        let (stop, other) = if cfg!(target_os = "macos") {
+            ("⌘s", "⌘N")
+        } else {
+            ("Ctrl+s", "Ctrl+N")
+        };
+        assert_eq!(written("ctrl+s"), stop);
+        assert!(std::ptr::eq(written("ctrl+s"), written("ctrl+s")));
+        assert_eq!(written("ctrl+N"), other);
+        assert_eq!(written("alt+enter"), Chord::alt(Key::Enter).label());
+        assert_eq!(written("not a chord"), "not a chord");
     }
 
     /// Command is Ctrl on macOS (`plans/other-platforms/02-macos.md` M2.20),
