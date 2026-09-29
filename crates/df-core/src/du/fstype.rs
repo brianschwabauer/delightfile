@@ -56,14 +56,11 @@ pub const REMOTE_FS_MAGIC: &[i64] = &[
     0x0BD0_0BD0, // Lustre
 ];
 
-/// Whether `path` sits on a filesystem an automatic walk should leave alone.
-///
-/// `false` when the question cannot be answered — a path that has just been
-/// deleted, a `statfs` that failed. Refusing to measure on a failed syscall
-/// would turn one transient error into a column of em dashes.
-pub fn is_remote(path: &Path) -> bool {
-    magic_of(path).is_some_and(|magic| REMOTE_FS_MAGIC.contains(&magic))
-}
+/// Whether `path` sits on a filesystem an automatic walk should leave alone,
+/// and the `statfs` magic that answers it: the platform's to ask
+/// ([`crate::platform::fs::is_remote`]). Where it cannot be asked the answer is
+/// "not remote", as it is for a path whose `statfs` failed.
+pub use crate::platform::fs::{is_remote, magic_of};
 
 /// Where gvfs-fuse shows gvfs's mounts: `$XDG_RUNTIME_DIR/gvfs`, which is
 /// where gvfsd starts it, or `/run/user/<uid>/gvfs` when the variable is unset
@@ -94,43 +91,9 @@ pub fn on_device(path: &Path, gvfs: &Path) -> bool {
         .is_some_and(|first| first.starts_with("mtp:") || first.starts_with("gphoto2:"))
 }
 
-/// The `f_type` of the filesystem `path` is on.
-///
-/// Split out so the table above can be checked against a real mount by hand
-/// (`stat -f -c %t`) without the answer being hidden behind a boolean.
-#[allow(unsafe_code)]
-pub fn magic_of(path: &Path) -> Option<i64> {
-    use std::os::unix::ffi::OsStrExt;
-    let raw = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut buf = std::mem::MaybeUninit::<libc::statfs>::uninit();
-    // SAFETY: `raw` is a NUL-terminated C string that outlives the call, and
-    // `buf` is a correctly sized, correctly aligned `statfs` the kernel fills
-    // in. Nothing is read from it unless the call reported success.
-    let rc = unsafe { libc::statfs(raw.as_ptr(), buf.as_mut_ptr()) };
-    if rc != 0 {
-        return None;
-    }
-    // SAFETY: a zero return means the kernel initialised the struct.
-    let buf = unsafe { buf.assume_init() };
-    // `f_type` is `__fsword_t`, which is `i64` on 64-bit Linux and `i32`
-    // elsewhere — so the cast is a no-op on the machine clippy is reading and
-    // the only thing making this compile on the others.
-    #[allow(clippy::unnecessary_cast)]
-    Some(buf.f_type as i64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The one filesystem a test can rely on being there, and the one answer
-    /// that matters: a walk of the source tree is allowed to start.
-    #[test]
-    fn a_local_path_is_not_remote() {
-        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
-        assert!(!is_remote(here));
-        assert!(magic_of(here).is_some());
-    }
 
     /// A path that is not there answers "not remote" rather than blocking the
     /// column on a failed syscall.

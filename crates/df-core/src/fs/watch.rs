@@ -110,7 +110,9 @@ impl Watcher {
         match Watcher::new(notify) {
             Ok(w) => w,
             Err(e) => {
-                log::warn!("directory watching unavailable ({e}); directories will not auto-refresh");
+                log::warn!(
+                    "directory watching unavailable ({e}); directories will not auto-refresh"
+                );
                 Watcher::disabled()
             }
         }

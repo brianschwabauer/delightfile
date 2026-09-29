@@ -7,3 +7,4 @@
 //! rather than a caller.
 
 pub mod errno;
+pub mod fs;

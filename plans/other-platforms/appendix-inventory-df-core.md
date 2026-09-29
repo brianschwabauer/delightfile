@@ -95,8 +95,8 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 33–46 | `REMOTE_FS_MAGIC`: Linux `f_type` magics (NFS 0x6969, CIFS, SMB2, FUSE 0x65735546, …) | Linux-only (macOS: compiles, never matches) | `is_remote` | In the Apple `libc::statfs` layout, `f_type` is a `u32` Darwin type number, with the name in `f_fstypename: [c_char; 16]` |
-| 61–80 | `magic_of`: `OsStrExt::as_bytes` → `CString`, `libc::statfs`, `buf.f_type as i64` | Linux-only (macOS: compiles; Windows: no compile) | `is_remote` ← app:app.rs:poll_folders, begin_folder_sizes | |
+| 33–46 | `REMOTE_FS_MAGIC`: Linux `f_type` magics (NFS 0x6969, CIFS, SMB2, FUSE 0x65735546, …) | Linux-only (macOS: compiles, never matches) | `is_remote` | In the Apple `libc::statfs` layout, `f_type` is a `u32` Darwin type number, with the name in `f_fstypename: [c_char; 16]` ✓ S1.5 |
+| 61–80 | `magic_of`: `OsStrExt::as_bytes` → `CString`, `libc::statfs`, `buf.f_type as i64` | Linux-only (macOS: compiles; Windows: no compile) | `is_remote` ← app:app.rs:poll_folders, begin_folder_sizes | ✓ S1.5 |
 
 ### du/walk.rs
 
@@ -182,21 +182,21 @@
 | 109–120 | `is_url`: `use std::os::unix::ffi::OsStrExt`; scans `as_bytes()` for `://` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | |
 | 142–149 | `resolved`: `std::fs::canonicalize(path)` / `canonicalize(parent).join(name)` | Windows-differs | `is_ancestor_resolved` ← core:ops/paste.rs:plan_paste, core:sync/plan.rs:roots; `is_strict_ancestor_resolved` ← core:ops/copy.rs:copies_into_itself, move_path | Windows `canonicalize` returns `\\?\`-prefixed verbatim paths |
 | 196–204 | `trim_trailing_slash`: `as_bytes()`, trims `b'/'`, `OsStr::from_bytes` | Unix-only | core:ops/delete.rs:remove_tree, remove_tree_unchecked | `\` is also a separator on Windows |
-| 212–218 | `same_file`: `MetadataExt::dev()` / `ino()` of both `symlink_metadata` | Unix-only | core:ops/copy.rs:copy_tree_with, copy_file, move_path; core:ops/create.rs:rename; core:ops/paste.rs:plan_paste; core:sync/plan.rs:roots | |
+| 212–218 | `same_file`: `MetadataExt::dev()` / `ino()` of both `symlink_metadata` | Unix-only | core:ops/copy.rs:copy_tree_with, copy_file, move_path; core:ops/create.rs:rename; core:ops/paste.rs:plan_paste; core:sync/plan.rs:roots | ✓ S1.5 |
 
 ### ops/copy.rs
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 54 | `const FICLONE: libc::c_ulong = 0x4004_9409` | Linux-only (macOS: compiles, ioctl fails) | `reflink` | |
-| 231–244 | `copy_symlink`: `std::os::unix::fs::symlink(&target, dst)` (239) | Unix-only | `copy_entry`; core:sync/execute.rs:copy_one | Windows needs `symlink_file`/`symlink_dir` plus privilege |
+| 54 | `const FICLONE: libc::c_ulong = 0x4004_9409` | Linux-only (macOS: compiles, ioctl fails) | `reflink` | ✓ S1.5 |
+| 231–244 | `copy_symlink`: `std::os::unix::fs::symlink(&target, dst)` (239) | Unix-only | `copy_entry`; core:sync/execute.rs:copy_one | Windows needs `symlink_file`/`symlink_dir` plus privilege ✓ S1.5 |
 | 432–439 | `sync_file`: `File::sync_all` | macOS-differs | `copy_file`, `sync_path` ← core:sync/rsync.rs:flush_here | Rust std on Apple implements `sync_all` with `fcntl(F_FULLFSYNC)`. Doc comment 431 describes Linux `fsync` |
-| 464–479 | `sync_dir`: `File::open(dir)` then `sync_all`; `EINVAL` tolerated | Windows-differs | `sync_parent` ← `copy_symlink`, `copy_dir`, `copy_file`, core:sync/execute.rs:make_dir; core:sync/rsync.rs:flush_here | On Windows std's `File::open` of a directory fails (no `FILE_FLAG_BACKUP_SEMANTICS`) |
+| 464–479 | `sync_dir`: `File::open(dir)` then `sync_all`; `EINVAL` tolerated | Windows-differs | `sync_parent` ← `copy_symlink`, `copy_dir`, `copy_file`, core:sync/execute.rs:make_dir; core:sync/rsync.rs:flush_here | On Windows std's `File::open` of a directory fails (no `FILE_FLAG_BACKUP_SEMANTICS`) ✓ S1.5 |
 | 473 | `e.raw_os_error() == Some(libc::EINVAL)` | Windows-differs | `sync_dir` | On Windows `raw_os_error` carries Win32 codes. `libc::EINVAL` there is the CRT's 22 ✓ S1.3 |
-| 581–594 | `reflink`: `use std::os::unix::io::AsRawFd`; `libc::ioctl(writer, FICLONE, reader)` | Linux-only (macOS: compiles, always falls back; Windows: no compile) | `write_contents` ← `copy_file` ← `copy_entry`, `copy_file_with` | |
+| 581–594 | `reflink`: `use std::os::unix::io::AsRawFd`; `libc::ioctl(writer, FICLONE, reader)` | Linux-only (macOS: compiles, always falls back; Windows: no compile) | `write_contents` ← `copy_file` ← `copy_entry`, `copy_file_with` | ✓ S1.5 |
 | 629–635 | `apply_mode`: `PermissionsExt::mode()`, `Permissions::from_mode` | Unix-only | `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | |
-| 651–688 | `set_times`: `OsStrExt` → `CString`; `libc::timespec`; `libc::utimensat(AT_FDCWD, …, AT_SYMLINK_NOFOLLOW)` | Unix-only | `apply_times` ← `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | |
-| 655, 665–668 | `const UTIME_OMIT: i64 = 0x3ffffffe` used as `tv_nsec` for a missing time | Linux-only (macOS: compiles, wrong constant) | `set_times` | libc apple: `UTIME_OMIT = -2`. Taken for pre-1970 or unreadable atime/mtime |
+| 651–688 | `set_times`: `OsStrExt` → `CString`; `libc::timespec`; `libc::utimensat(AT_FDCWD, …, AT_SYMLINK_NOFOLLOW)` | Unix-only | `apply_times` ← `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | ✓ S1.5 |
+| 655, 665–668 | `const UTIME_OMIT: i64 = 0x3ffffffe` used as `tv_nsec` for a missing time | Linux-only (macOS: compiles, wrong constant) | `set_times` | libc apple: `UTIME_OMIT = -2`. Taken for pre-1970 or unreadable atime/mtime ✓ S1.5 |
 | 738–756 | `move_path`: `rename`, then `raw_os_error() == Some(libc::EXDEV)` → `move_cross_device` (740, 754) | Windows-differs | core:ops/paste.rs:execute; core:ops/journal.rs:undo_moves | A Windows cross-volume rename fails with Win32 `ERROR_NOT_SAME_DEVICE` (17). `libc::EXDEV` on the windows target is 18 ✓ S1.3 |
 | 764–771 | `in_the_way`: `ENOTEMPTY \| EEXIST \| EISDIR \| ENOTDIR` against `raw_os_error()` | Windows-differs | `move_path` (746) | On the windows target `libc::EEXIST` = 17 = `ERROR_NOT_SAME_DEVICE`. A cross-volume move onto an existing destination therefore matches, and `move_path` then calls `remove_tree_unchecked(dst)` (751) ✓ S1.3 |
 
@@ -224,6 +224,7 @@
 |---|---|---|---|---|
 | 879 | `undo_link`: `std::fs::remove_file(link)` | Windows-differs | `undo_attempt` ← `Journal::undo` ← app:app.rs:undo | Directory symlinks need `remove_dir` on Windows |
 | 933 | `undo_links`: `std::fs::remove_file(&l.link)` | Windows-differs | as above | As above |
+| 1999 | `redo_links`: `std::os::unix::fs::symlink(text, &l.link)` | Unix-only | `Journal::redo` ← app:app.rs (redo) | Added 2026-09-29: redo postdates the inventory ✓ S1.5 |
 
 ### ops/link.rs
 
@@ -231,7 +232,7 @@
 |---|---|---|---|---|
 | 40–70 | `relative_to`: strips the shared component prefix of two `normalize`d paths and pushes `..` per `Component::Normal` | Windows-differs | `symlink` (Relative) | Paths on different drives share no `Prefix`, so the remaining `Prefix`/`RootDir` components are pushed onto the result (63–65) |
 | 85–88 | Link parent fallback `PathBuf::from("/")` | Windows-differs | `symlink` | |
-| 92 | `std::os::unix::fs::symlink(&text, link)` | Unix-only | app:app.rs:link_into | Windows: `symlink_file`/`symlink_dir`, needs privilege |
+| 92 | `std::os::unix::fs::symlink(&text, link)` | Unix-only | app:app.rs:link_into | Windows: `symlink_file`/`symlink_dir`, needs privilege ✓ S1.5 |
 
 ### ops/paste.rs
 
@@ -304,7 +305,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 470–482 | `forget_cached`: `use std::os::unix::io::AsRawFd`; `libc::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` | Linux-only (macOS: no compile, libc apple has no `posix_fadvise`) | `read_back` ← `Run::same_bytes` (verify); core:sync/rsync.rs:verify_remote | |
+| 470–482 | `forget_cached`: `use std::os::unix::io::AsRawFd`; `libc::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)` | Linux-only (macOS: no compile, libc apple has no `posix_fadvise`) | `read_back` ← `Run::same_bytes` (verify); core:sync/rsync.rs:verify_remote | ✓ S1.5 |
 
 ### sync/mod.rs
 
@@ -315,7 +316,7 @@
 | 412–436 | `trash_available`: `Trash::home`, `device_of`, `mount_point_of`, `.Trash` sticky `mode() & 0o1000` (427), `.Trash-{uid()}` (431), `writable` | Linux-only | core:sync/plan.rs:walk | |
 | 414 | `use std::os::unix::fs::PermissionsExt` | Unix-only | `trash_available` | |
 | 443–458 | `trash_for`: home trash if same `dev`, else `topdir_trash(mount_point_of(dest), uid())` | Linux-only | core:sync/execute.rs:remove | |
-| 479–488 | `writable`: `OsStrExt` → `CString`; `libc::access(path, libc::W_OK)` | Unix-only (windows libc has `access`, not `W_OK`) | `trash_available` | |
+| 479–488 | `writable`: `OsStrExt` → `CString`; `libc::access(path, libc::W_OK)` | Unix-only (windows libc has `access`, not `W_OK`) | `trash_available` | ✓ S1.5 |
 
 ### sync/plan.rs
 
@@ -378,13 +379,13 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 54 | `use std::os::unix::fs::FileExt` (for `write_all_at`) | Unix-only | `download_body` | |
+| 54 | `use std::os::unix::fs::FileExt` (for `write_all_at`) | Unix-only | `download_body` | ✓ S1.5 |
 | 55 | `use std::os::unix::io::AsRawFd` | Unix-only | `Transport` | |
 | 184–188 | `Transport::spawn`: `poll::set_nonblocking(stdin.as_raw_fd())`, `(stderr.as_raw_fd())` | Unix-only | `Connection::connect` ← core:vfs/mod.rs worker (`dispatch`) | |
 | 256–268 | `drain_stderr`: `poll::poll_read2(self.stderr.as_raw_fd(), -1, left)` | Unix-only | `fill`, `write_all` | A negative fd is ignored by `poll` |
 | 271–308 | `fill`: `poll_read2(stdout fd, stderr fd or -1, left)` then a blocking `read` | Unix-only | `read_packet` | |
 | 337–367 | `write_all`: `poll::poll_write(self.stdin.as_raw_fd(), left)` then a non-blocking `write` | Unix-only | `send`, `connect` | |
-| 897 | `download_body`: `file.write_all_at(&data, offset)` | Unix-only | `download` ← core:vfs/mod.rs:Vfs::download, download_to_temp ← app:app.rs:open_remote, sync_remote_preview, remote_download | Windows `FileExt` has `seek_write`, not `write_all_at` |
+| 897 | `download_body`: `file.write_all_at(&data, offset)` | Unix-only | `download` ← core:vfs/mod.rs:Vfs::download, download_to_temp ← app:app.rs:open_remote, sync_remote_preview, remote_download | Windows `FileExt` has `seek_write`, not `write_all_at` ✓ S1.5 |
 
 ### vfs/mod.rs
 
@@ -1635,12 +1636,12 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | archive/write/mod.rs:536 | Top-level member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` | Written into zip/tar headers |
 | archive/write/mod.rs:562 | Symlink target `as_os_str().as_bytes()` | Unix-only | as above | Stored as the link payload |
 | archive/write/mod.rs:580 | Child name `child.as_bytes()` | Unix-only | as above | |
-| du/fstype.rs:64 | `CString::new(path.as_os_str().as_bytes())` for `statfs` | Unix-only | `is_remote` | |
+| du/fstype.rs:64 | `CString::new(path.as_os_str().as_bytes())` for `statfs` | Unix-only | `is_remote` | ✓ S1.5 |
 | fs/inotify.rs:109 | `CString::new(path.as_os_str().as_bytes())` for `inotify_add_watch` | Linux-only | `add_watch` | ✓ S1.4 |
 | git/status.rs:564 | `Path::new(OsStr::from_bytes(trimmed))` from git `-z` output | Unix-only | `parse_porcelain_v2` | |
 | ops.rs:111 | `is_url` scans `as_bytes()` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | |
 | ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | |
-| ops/copy.rs:672 | `CString::new(path.as_os_str().as_bytes())` for `utimensat` | Unix-only | `set_times` | |
+| ops/copy.rs:672 | `CString::new(path.as_os_str().as_bytes())` for `utimensat` | Unix-only | `set_times` | ✓ S1.5 |
 | ops/create.rs:36–43 | `create`: bytes in, trailing `/` check, `from_bytes` out | Unix-only | app:app.rs:create | |
 | ops/trash.rs:266–270 | `list`: `file.as_bytes()`, `OsString::from_vec` | Unix-only | app:app.rs:show_trash | |
 | ops/trash.rs:613–632 | `fit`: `file_stem().as_bytes()`, `extension().as_bytes()`, `OsString::from_vec` | Unix-only | `suffixed`, `claim_name` | |
@@ -1649,7 +1650,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | state/mod.rs:746 | `path_bytes`: `as_bytes()` | Unix-only | `render` | |
 | state/mod.rs:751 | `path_from`: `OsString::from_vec` | Unix-only | `parse`, `parse_tabs` | |
 | sync/mod.rs:315–316 | `is_debris`: `name.as_bytes().starts_with(TEMP_PREFIX.as_bytes())` | Unix-only | plan helpers | |
-| sync/mod.rs:481 | `writable`: `CString::new(dir.as_os_str().as_bytes())` | Unix-only | `trash_available` | |
+| sync/mod.rs:481 | `writable`: `CString::new(dir.as_os_str().as_bytes())` | Unix-only | `trash_available` | ✓ S1.5 |
 | sync/rsync.rs:231, 242 | `endpoint`: `as_bytes()` in, `OsStr::from_bytes` out | Unix-only | rsync argv | |
 | sync/rsync.rs:398 | `parse_line`: `OsString::from_vec(name)` | Unix-only | `parse_itemized` | |
 | sync/rsync.rs:1146 | `remote_digests`: `name.as_os_str().as_bytes()` to stdin | Unix-only | `verify_remote` | |

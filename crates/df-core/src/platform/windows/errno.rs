@@ -65,10 +65,7 @@ pub fn is_transient(e: &io::Error) -> bool {
     matches!(
         e.raw_os_error(),
         Some(
-            ERROR_SHARING_VIOLATION
-                | ERROR_LOCK_VIOLATION
-                | ERROR_TOO_MANY_OPEN_FILES
-                | ERROR_BUSY
+            ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_TOO_MANY_OPEN_FILES | ERROR_BUSY
         )
     )
 }

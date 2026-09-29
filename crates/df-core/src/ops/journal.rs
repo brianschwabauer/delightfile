@@ -1996,7 +1996,7 @@ fn redo_links(undone: &Undone, links: &[CreatedLink], ctx: &TaskCtx) -> RedoAtte
         let made =
             ctx.checkpoint()
                 .and_then(|()| match (&l.target, &l.original) {
-                    (Some(text), _) => std::os::unix::fs::symlink(text, &l.link)
+                    (Some(text), _) => crate::platform::fs::symlink(text, &l.link)
                         .map_err(|e| DfError::io(&l.link, e)),
                     (None, Some(original)) => super::link::hardlink(original, &l.link),
                     (None, None) => Err(DfError::Op(format!(

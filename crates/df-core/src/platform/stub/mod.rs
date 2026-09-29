@@ -12,4 +12,5 @@
 //! an operation fails with [`crate::DfError::Unsupported`], a query answers
 //! "nothing", a service comes up inert. Never a panic, never a silent success.
 
+pub mod fs;
 pub mod watch;

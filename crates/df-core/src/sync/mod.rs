@@ -432,7 +432,7 @@ pub fn trash_available(dest: &Path) -> bool {
     if std::fs::symlink_metadata(&own).is_ok_and(|meta| meta.is_dir()) {
         return true;
     }
-    writable(&top)
+    crate::platform::fs::writable(&top)
 }
 
 /// The trash a mirror's extras under `dest` go into — made if it has to be.
@@ -469,22 +469,6 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn trash_at(root: PathBuf) {
     TEST_TRASH.with(|slot| *slot.borrow_mut() = Some(root));
-}
-
-/// `access(2)` for writing: whether this user may make a name in `dir`.
-///
-/// Asked of the kernel rather than worked out from the mode bits, because
-/// ACLs, a read-only mount and root squashing on a network share all answer
-/// differently from what the bits say.
-fn writable(dir: &Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let Ok(path) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
-        return false;
-    };
-    // One syscall on a string we own; nothing is written through the pointer.
-    #[allow(unsafe_code)]
-    let rc = unsafe { libc::access(path.as_ptr(), libc::W_OK) };
-    rc == 0
 }
 
 /// `base` with `rel` under it — or `base` itself for an empty `rel`, which

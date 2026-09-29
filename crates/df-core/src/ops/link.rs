@@ -89,7 +89,7 @@ pub fn symlink(target: &Path, link: &Path, kind: LinkKind) -> Result<PathBuf> {
             relative_to(&dir, target)
         }
     };
-    std::os::unix::fs::symlink(&text, link).map_err(|e| DfError::io(link, e))?;
+    crate::platform::fs::symlink(&text, link).map_err(|e| DfError::io(link, e))?;
     Ok(text)
 }
 

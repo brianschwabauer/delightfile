@@ -3,3 +3,10 @@
 
 pub use super::stub::watch;
 pub use super::unix::errno;
+
+/// The shared Unix file primitives, with the Linux-only ones (reflink,
+/// dropping cached pages, `statfs` magic) answered by the stubs.
+pub mod fs {
+    pub use crate::platform::stub::fs::*;
+    pub use crate::platform::unix::fs::*;
+}

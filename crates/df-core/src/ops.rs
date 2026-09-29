@@ -222,11 +222,7 @@ pub fn trim_trailing_slash(path: &Path) -> PathBuf {
 /// own copy" rail has to catch that. `false` when either side cannot be
 /// stat'ed, since a path that does not exist is not the same file as anything.
 pub fn same_file(a: &Path, b: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
-        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
-        _ => false,
-    }
+    crate::platform::fs::same_file(a, b).unwrap_or(false)
 }
 
 /// The file name of a path, or an error naming the path that has none

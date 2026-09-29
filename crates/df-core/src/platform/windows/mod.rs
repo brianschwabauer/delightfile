@@ -3,5 +3,6 @@
 //! `plans/other-platforms/04-windows.md`).
 
 pub mod errno;
+pub mod fs;
 
 pub use super::stub::watch;

@@ -51,7 +51,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::os::unix::fs::FileExt;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio};
@@ -895,9 +894,11 @@ impl Connection {
                     requeued.retain(|(o, _)| *o < offset);
                 }
                 Reply::Data(data) => {
-                    file.write_all_at(&data, offset).map_err(|e| VfsError::Io {
-                        path: local.to_path_buf(),
-                        source: e,
+                    crate::platform::fs::write_all_at(&file, &data, offset).map_err(|e| {
+                        VfsError::Io {
+                            path: local.to_path_buf(),
+                            source: e,
+                        }
                     })?;
                     let n = data.len() as u64;
                     written += n;

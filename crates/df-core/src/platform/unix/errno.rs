@@ -50,7 +50,9 @@ pub fn is_invalid(e: &io::Error) -> bool {
 pub fn is_transient(e: &io::Error) -> bool {
     matches!(
         e.raw_os_error(),
-        Some(libc::EAGAIN | libc::EBUSY | libc::ENFILE | libc::EMFILE | libc::ETXTBSY | libc::ESTALE)
+        Some(
+            libc::EAGAIN | libc::EBUSY | libc::ENFILE | libc::EMFILE | libc::ETXTBSY | libc::ESTALE
+        )
     )
 }
 

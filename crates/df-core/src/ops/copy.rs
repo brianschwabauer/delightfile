@@ -30,9 +30,8 @@
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
-use crate::platform::errno;
+use crate::platform::{self, errno};
 use crate::tasks::TaskCtx;
 use crate::{DfError, Result};
 
@@ -56,13 +55,6 @@ fn copies_into_itself(src: &Path, dst: &Path) -> bool {
 /// spinning disk: at a pessimistic 30 MB/s one chunk is ~33 ms, well under the
 /// ~100 ms at which a cancel stops feeling instant.
 pub const COPY_CHUNK: usize = 1 << 20;
-
-/// `FICLONE`: `_IOW(0x94, 9, int)`, the reflink ioctl.
-///
-/// Spelled out rather than pulled from a crate because it is one number and its
-/// derivation is right here: direction `_IOC_WRITE` (1) << 30, size 4 << 16,
-/// type `0x94` << 8, number 9 — `0x4000_0000 | 0x0004_0000 | 0x9400 | 0x09`.
-const FICLONE: libc::c_ulong = 0x4004_9409;
 
 /// How many `.df-tmp-…` names to try before giving up.
 ///
@@ -253,7 +245,7 @@ pub(crate) fn copy_symlink(src: &Path, dst: &Path, options: CopyOptions) -> Resu
         }
         super::delete::remove_tree_unchecked(dst)?;
     }
-    std::os::unix::fs::symlink(&target, dst).map_err(|e| DfError::io(dst, e))?;
+    platform::fs::symlink(&target, dst).map_err(|e| DfError::io(dst, e))?;
     if options.durable {
         sync_parent(dst)?;
     }
@@ -491,27 +483,16 @@ pub(crate) fn sync_parent(path: &Path) -> Result<()> {
     }
 }
 
-/// `fsync(2)` a directory: open it read-only, flush, close.
-///
-/// A filesystem that cannot flush a directory at all (`EINVAL`: some FUSE and
-/// network mounts, where the server decides) is logged and let through. The
-/// name is as safe there as that filesystem ever makes one, and failing every
-/// sync onto such a mount would make it a place a sync can never reach.
+/// `fsync(2)` a directory: open it read-only, flush, close
+/// ([`platform::fs::sync_dir`], which lets through a filesystem that cannot
+/// flush one).
 pub(crate) fn sync_dir(dir: &Path) -> Result<()> {
     #[cfg(test)]
     {
         SYNCS.with(|c| c.set((c.get().0, c.get().1 + 1)));
         note(format!("fsync-dir {}", dir.display()));
     }
-    let handle = File::open(dir).map_err(|e| DfError::io(dir, e))?;
-    match handle.sync_all() {
-        Ok(()) => Ok(()),
-        Err(e) if errno::is_invalid(&e) => {
-            log::debug!("{} cannot be flushed as a directory: {e}", dir.display());
-            Ok(())
-        }
-        Err(e) => Err(DfError::io(dir, e)),
-    }
+    platform::fs::sync_dir(dir)
 }
 
 #[cfg(test)]
@@ -580,7 +561,7 @@ fn write_contents(
     len: u64,
 ) -> Result<u64> {
     ctx.checkpoint()?;
-    if reflink_enabled() && reflink(reader, writer) {
+    if reflink_enabled() && platform::fs::reflink(reader, writer) {
         log::debug!("reflinked {} → {}", src.display(), dst.display());
         ctx.advance(len, 0);
         return Ok(len);
@@ -605,28 +586,6 @@ fn write_contents(
     }
     writer.flush().map_err(|e| DfError::io(dst, e))?;
     Ok(total)
-}
-
-/// Ask the kernel to share the source's extents with the destination.
-///
-/// Returns `false` for every failure, and that is the whole error handling:
-/// `EOPNOTSUPP` (ext4, tmpfs), `EXDEV` (different filesystem), `EINVAL` (not a
-/// regular file, or a destination that is not empty) and anything else all mean
-/// exactly one thing to the caller — copy it the long way. The destination file
-/// is untouched on failure, so falling through costs nothing.
-fn reflink(reader: &File, writer: &File) -> bool {
-    use std::os::unix::io::AsRawFd;
-    // The only unsafe in df-core besides `getuid`: one ioctl on two fds we own,
-    // with no pointers involved and no way to alias anything.
-    #[allow(unsafe_code)]
-    let rc = unsafe { libc::ioctl(writer.as_raw_fd(), FICLONE, reader.as_raw_fd()) };
-    if rc != 0 {
-        log::trace!(
-            "FICLONE unavailable ({}), falling back to a chunked copy",
-            std::io::Error::last_os_error()
-        );
-    }
-    rc == 0
 }
 
 /// Whether to try `FICLONE` at all.
@@ -665,7 +624,7 @@ pub(crate) fn without_reflink<T>(f: impl FnOnce() -> T) -> T {
 pub(crate) fn apply_mode(path: &Path, meta: &std::fs::Metadata) {
     use std::os::unix::fs::PermissionsExt;
     let mode = meta.permissions().mode();
-    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+    if let Err(e) = platform::fs::apply_mode(path, mode) {
         log::warn!("could not set mode on {}: {e}", path.display());
     }
 }
@@ -674,53 +633,9 @@ pub(crate) fn apply_mode(path: &Path, meta: &std::fs::Metadata) {
 pub(crate) fn apply_times(path: &Path, meta: &std::fs::Metadata) {
     let mtime = meta.modified().ok();
     let atime = meta.accessed().ok();
-    if let Err(e) = set_times(path, atime, mtime) {
+    if let Err(e) = platform::fs::set_times(path, atime, mtime) {
         log::warn!("could not set times on {}: {e}", path.display());
     }
-}
-
-/// `utimensat` on the path itself, never through a symlink.
-///
-/// `File::set_times` cannot be used: it needs a writable handle, and a
-/// directory cannot be opened for writing on Linux. `utimensat` with
-/// `AT_SYMLINK_NOFOLLOW` handles files, directories and symlinks with one call.
-fn set_times(path: &Path, atime: Option<SystemTime>, mtime: Option<SystemTime>) -> Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-
-    /// Leave this timestamp alone (`UTIME_OMIT`, from `<sys/stat.h>`).
-    const UTIME_OMIT: i64 = 0x3ffffffe;
-
-    fn spec(t: Option<SystemTime>) -> libc::timespec {
-        match t.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()) {
-            Some(d) => libc::timespec {
-                tv_sec: d.as_secs() as libc::time_t,
-                tv_nsec: d.subsec_nanos() as i64,
-            },
-            // Pre-1970 timestamps and unreadable ones both end up here; leaving
-            // the value alone beats writing a wrong one.
-            None => libc::timespec {
-                tv_sec: 0,
-                tv_nsec: UTIME_OMIT,
-            },
-        }
-    }
-
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| DfError::Op(format!("{}: path contains a NUL byte", path.display())))?;
-    let times = [spec(atime), spec(mtime)];
-    #[allow(unsafe_code)]
-    let rc = unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            c_path.as_ptr(),
-            times.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if rc != 0 {
-        return Err(DfError::io(path, std::io::Error::last_os_error()));
-    }
-    Ok(())
 }
 
 fn already_exists(dst: &Path) -> DfError {
@@ -1081,7 +996,10 @@ mod tests {
         let src = t.file("a.txt", b"x");
         let a = File::open(&src).unwrap();
         let dir = File::open(t.path()).unwrap();
-        assert!(!reflink(&a, &dir), "cloning into a directory cannot work");
+        assert!(
+            !platform::fs::reflink(&a, &dir),
+            "cloning into a directory cannot work"
+        );
     }
 
     #[test]

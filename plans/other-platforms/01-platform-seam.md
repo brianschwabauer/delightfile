@@ -109,18 +109,19 @@ has not dropped.
       watcher pass on Linux
       and are `#[cfg(target_os = "linux")]`-gated until Phase 2/4 add bodies; df-core
       compiles on all three targets.
-- [ ] **S1.5** `platform::fs` (df-core), moving these bodies out of `ops/copy.rs`,
+- [>] **S1.5** `platform::fs` (df-core), moving these bodies out of `ops/copy.rs`,
       `ops/link.rs`, `ops.rs`, `sync/execute.rs`, `vfs/conn.rs`:
-      - `reflink(reader: &File, writer: &File) -> io::Result<bool>` — Linux:
-        `ops/copy.rs:54, 581–594` (FICLONE) unchanged; macOS/Windows stub `Ok(false)`.
+      - `reflink(reader: &File, writer: &File) -> bool` — Linux:
+        `ops/copy.rs:54, 581–594` (FICLONE) unchanged; macOS/Windows stub `false`.
       - `symlink(target: &Path, link: &Path) -> io::Result<()>` — Unix:
         `std::os::unix::fs::symlink`; Windows: `symlink_dir` when
         `target`-resolved-from-`link.parent()` is a directory, else `symlink_file`.
-        Callers: `ops/copy.rs:231–244`, `ops/link.rs`, `test_support.rs:61–68`.
+        Callers: `ops/copy.rs:231–244`, `ops/link.rs`, `ops/journal.rs`
+        (`redo_links`, which remakes an undone link), `test_support.rs:61–68`.
       - `apply_mode(path: &Path, mode: u32) -> io::Result<()>` — Unix:
         `ops/copy.rs:629–635`; Windows: set the read-only attribute when
         `mode & 0o222 == 0`, clear it otherwise.
-      - `set_times(path, atime: Option<SystemTime>, mtime: Option<SystemTime>)` —
+      - `set_times(path, atime: Option<SystemTime>, mtime: Option<SystemTime>) -> Result<()>` —
         Unix: `ops/copy.rs:651–688` with `UTIME_OMIT` taken from **`libc::UTIME_OMIT`**
         rather than the hard-coded `0x3ffffffe` (appendix flags the macOS value is
         `-2`; on Linux `libc::UTIME_OMIT` equals the current literal, so Linux is
@@ -128,20 +129,25 @@ has not dropped.
         `FILE_FLAG_OPEN_REPARSE_POINT`.
       - `sync_dir(dir: &Path) -> io::Result<()>` — Unix: `ops/copy.rs:464–479`;
         Windows: `Ok(())` (directories have no fsync).
-      - `forget_cached(file: &File)` — Linux: `sync/execute.rs:470–482`
+      - `forget_cached(file: &File, path: &Path)` (the path is for its log line) — Linux: `sync/execute.rs:470–482`
         (`posix_fadvise`); macOS and Windows: no-op. (With `fs/inotify.rs` — S1.4 —
         this is one of the two df-core sites that do not compile on macOS today.)
       - `write_all_at(file: &File, data: &[u8], offset: u64)` — Unix: `FileExt`;
         Windows: `seek_write` loop. Caller `vfs/conn.rs:897`.
-      - `same_file(a, b)` — defined in `03-paths.md` P3.3; create the Unix body here
-        (`ops.rs:212–218` moved) and the Windows body in P3.3.
+      - `same_file(a, b) -> io::Result<bool>` — defined in `03-paths.md` P3.3; create the Unix body here
+        (`ops.rs:212–218` moved; `ops::same_file` is `.unwrap_or(false)` of it) and
+        the Windows body in P3.3 (Phase 1 Windows: `Err(Unsupported)`).
       - `writable(dir: &Path) -> bool` — Unix: `sync/mod.rs:479–488` (`access(W_OK)`);
         Windows stub: `true` (the CRT's `_access(path, 2)` ignores read-only on
         directories, so it would say the same); W4.6 supersedes it with a real probe.
-      - `is_remote(path) -> bool` and `magic_of` — Linux: `du/fstype.rs` whole file
-        moved; macOS/Windows stub `false`/`None` (Phases 2/4 fill).
+      - `is_remote(path) -> bool` and `magic_of` — Linux: the two functions from
+        `du/fstype.rs` moved (the file also holds `REMOTE_FS_MAGIC`, `gvfs_root` and
+        `on_device`, which stay, and re-exports the two); macOS/Windows stub
+        `false`/`None` (Phases 2/4 fill).
       Done when: `grep -rn "std::os::unix" crates/df-core/src` hits only `platform/`
       (except the `MetadataExt` sites, which are P3.4) and Linux tests pass.
+      — df-core core-seam session, started 2026-09-29; the grep's other hits are
+      later tasks' sites (S1.7, S1.12, S1.13, S1.15, S1.16, S1.18–S1.51).
 - [ ] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
       crates/df-core/src/platform/linux/trash.rs`; `ops/trash.rs` becomes a shim
       that `pub use`s the portable surface. The portable surface is:
@@ -489,6 +495,16 @@ their native clipboards *are* synchronous.
 - 2026-09-29 — S1.4's done-when named three `Watcher` tests; two start a real
   watcher and are Linux-gated. The third, `a_disabled_watcher_is_inert…`, tests
   the portable disabled watcher and runs on every target.
+- 2026-09-29 — S1.5 signatures follow the moved code rather than the sketch:
+  `reflink` returns `bool` (it logs and falls back, it never errs),
+  `set_times` returns the crate `Result` (a NUL in the path is `DfError::Op`),
+  `forget_cached` keeps its `path` for the log line, `same_file` is P3.3's
+  `io::Result<bool>`. Of `du/fstype.rs` only `is_remote` and `magic_of` move:
+  since the plan was written the file gained `gvfs_root` and `on_device`, which
+  are path logic, and `REMOTE_FS_MAGIC`, which `fs::tags::read_on` also reads.
+  `sync_dir` keeps its test counters in `ops::copy` and calls the platform for
+  the flush. `UTIME_OMIT` is `libc::UTIME_OMIT` as decided; the local constant
+  and its doc comment are gone.
 
 ## Open questions
 

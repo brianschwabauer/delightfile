@@ -452,7 +452,7 @@ fn same_target(src: &Path, dst: &Path) -> Result<Option<String>> {
 /// has to go to the device.
 pub(super) fn read_back(path: &Path, ctx: &TaskCtx, buf: &mut [u8]) -> Result<[u8; 32]> {
     let mut file = File::open(path).map_err(|e| DfError::io(path, e))?;
-    forget_cached(&file, path);
+    crate::platform::fs::forget_cached(&file, path);
     let mut hasher = crate::sha256::Sha256::new();
     loop {
         ctx.checkpoint()?;
@@ -467,24 +467,6 @@ pub(super) fn read_back(path: &Path, ctx: &TaskCtx, buf: &mut [u8]) -> Result<[u
         }
     }
     Ok(hasher.finish())
-}
-
-/// Ask the kernel to drop a file's cached pages. Advisory: a filesystem that
-/// ignores it (some FUSE mounts, where the server holds the cache) is logged
-/// and read anyway, since a read through the cache still catches everything
-/// but a lying medium.
-fn forget_cached(file: &File, path: &Path) {
-    use std::os::unix::io::AsRawFd;
-    // One syscall on an fd we own, with no pointers involved.
-    #[allow(unsafe_code)]
-    let rc = unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
-    if rc != 0 {
-        log::debug!(
-            "{}: the page cache could not be dropped ({})",
-            path.display(),
-            std::io::Error::from_raw_os_error(rc)
-        );
-    }
 }
 
 #[cfg(test)]
