@@ -216,12 +216,12 @@ has not dropped.
       Windows stub no-op.
       Callers unchanged (they call `df_core::thread::lower_priority`, which now
       delegates; the clamp to 1–19 stays there, on every target). Done when:
-      compiles on all targets. — done SHA_S19, cross-checked locally, CI pending
-- [ ] **S1.10** `platform::time::local_civil(secs: i64) -> Option<Civil>` with the body
+      compiles on all targets. — done 9419fde, cross-checked locally, CI pending
+- [x] **S1.10** `platform::time::local_civil(secs: i64) -> Option<Civil>` with the body
       of `rename/facts.rs:53–88`: Unix `localtime_r`; Windows `localtime_s` (present
       in the windows libc). Also df-app's `format.rs` localtime (appendix B) calls
       the same function. Done when: `Civil::local` tests pass on Linux; compiles on
-      Windows.
+      Windows. — done SHA_S110, cross-checked locally, CI pending
 - [ ] **S1.11** `platform::dirs`: `home()`, `config_dir()`, `state_dir()`,
       `data_dir()`, `cache_dir()`, `runtime_dir()`, `temp_dir()`, returning
       `Option<PathBuf>`. Linux bodies moved from `config.rs:1400–1407`,

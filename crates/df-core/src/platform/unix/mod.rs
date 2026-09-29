@@ -9,4 +9,5 @@
 pub mod errno;
 pub mod fs;
 pub mod meta;
+pub mod time;
 pub mod user;

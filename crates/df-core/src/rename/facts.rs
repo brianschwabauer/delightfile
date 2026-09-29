@@ -43,14 +43,14 @@ pub struct Civil {
 impl Civil {
     /// A `SystemTime` on the machine's local wall clock.
     ///
-    /// `localtime_r` rather than a hand-rolled calendar, for the reason
-    /// df-app's `format::civil_local` gives: the calendar is the easy half, and
-    /// the hard half — which offset applied on that date under that year's DST
-    /// rules — is the zoneinfo database this program has no business carrying.
+    /// The C library's local time (`localtime_r`, [`crate::platform::time`])
+    /// rather than a hand-rolled calendar, for the reason df-app's
+    /// `format::civil_local` gives: the calendar is the easy half, and the hard
+    /// half — which offset applied on that date under that year's DST rules —
+    /// is the zoneinfo database this program has no business carrying.
     ///
     /// `None` only if the C library refuses, which in practice means a time so
     /// far out that the year no longer fits its `int`.
-    #[allow(unsafe_code)]
     pub fn local(time: SystemTime) -> Option<Civil> {
         // Times before 1970 are legal on a filesystem (a bogus archive stamp, a
         // clock that was wrong), and `duration_since` refuses them, so the sign
@@ -64,27 +64,7 @@ impl Civil {
                 -whole.checked_add(i64::from(d.subsec_nanos() > 0))?
             }
         };
-        let t = libc::time_t::try_from(secs).ok()?;
-        // SAFETY: `libc::tm` is a plain C struct of integers (and, on glibc, a
-        // zone-name pointer), for which all-zero bits are a valid value.
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        // SAFETY: `t` and `tm` are owned locals of the right types, and
-        // `localtime_r` writes only into `tm`. The `_r` form is the reentrant
-        // one, so there is no shared static to race the photo workers over.
-        let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
-        if !ok {
-            return None;
-        }
-        Some(Civil {
-            year: tm.tm_year.checked_add(1900)?,
-            month: u32::try_from(tm.tm_mon).ok()?.checked_add(1)?,
-            day: u32::try_from(tm.tm_mday).ok()?,
-            hour: u32::try_from(tm.tm_hour).ok()?,
-            minute: u32::try_from(tm.tm_min).ok()?,
-            // A leap second reads as :60 from some C libraries. A filename has
-            // no use for it, and every formatter downstream assumes 0–59.
-            second: u32::try_from(tm.tm_sec).ok()?.min(59),
-        })
+        crate::platform::time::local_civil(secs)
     }
 
     /// The wall clock right now, for `{date}`'s "is this taken date believable"

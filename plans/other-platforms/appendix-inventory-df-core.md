@@ -279,7 +279,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 53–88 | `Civil::local`: `libc::time_t`, `libc::tm` (`mem::zeroed`), `libc::localtime_r` | Unix-only (Windows libc has `localtime_s`, not `localtime_r`) | `Civil::now` ← app:bulk.rs:from_facts, preview, rewrite, refresh, expand_tokens, accept; `Facts::stat` ← app:bulk.rs:new | |
+| 53–88 | `Civil::local`: `libc::time_t`, `libc::tm` (`mem::zeroed`), `libc::localtime_r` | Unix-only (Windows libc has `localtime_s`, not `localtime_r`) | `Civil::now` ← app:bulk.rs:from_facts, preview, rewrite, refresh, expand_tokens, accept; `Facts::stat` ← app:bulk.rs:new | ✓ S1.10 |
 
 ### state/mod.rs
 

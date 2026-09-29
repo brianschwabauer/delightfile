@@ -5,6 +5,7 @@
 pub mod errno;
 pub mod fs;
 pub mod meta;
+pub mod time;
 pub mod user;
 
 pub use super::stub::{thread, trash, watch};
