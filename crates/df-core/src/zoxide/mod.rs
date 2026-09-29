@@ -331,9 +331,14 @@ pub fn query(dirs: &[ZoxideDir], query: &str, now: u64) -> Vec<Match> {
     out
 }
 
-/// How (and whether) `path` matches, both already lowercased.
+/// How (and whether) `path` matches, both already lowercased. The last
+/// component is what follows the last separator the platform has (`/`, and
+/// on Windows `\` too), since a Windows zoxide writes `C:\Users\x\Work`.
 fn classify(path: &str, needle: &str, keywords: &[&str]) -> Option<MatchKind> {
-    let last = path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path);
+    let last = path
+        .rsplit(std::path::is_separator)
+        .find(|s| !s.is_empty())
+        .unwrap_or(path);
     if needle.is_empty() {
         return Some(MatchKind::Keywords);
     }

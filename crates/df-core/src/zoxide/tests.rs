@@ -291,6 +291,28 @@ fn keywords_must_appear_in_order_and_end_in_the_last_component() {
     assert!(!query(&d, "brian work", LATER).is_empty());
 }
 
+/// The last component is found after the platform's separators: on Windows
+/// zoxide writes `C:\Users\x\Work`, and `wo` is a prefix of its last name.
+#[test]
+fn the_last_component_follows_the_platforms_separator() {
+    let windows = [ZoxideDir {
+        path: PathBuf::from(r"C:\Users\brian\Work\delightfile"),
+        rank: 1.0,
+        last_accessed: 0,
+    }];
+    let prefix = query(&windows, "deli", LATER);
+    let across = query(&windows, "work deli", LATER);
+    if cfg!(windows) {
+        assert_eq!(prefix.first().map(|m| m.kind), Some(MatchKind::Prefix));
+        assert_eq!(across.len(), 1);
+        assert!(query(&windows, "delightfile work", LATER).is_empty());
+    } else {
+        // One name with backslashes in it: `deli` is inside it, not at its
+        // start.
+        assert_eq!(prefix.first().map(|m| m.kind), Some(MatchKind::Component));
+    }
+}
+
 #[test]
 fn a_query_that_matches_nothing_is_empty_not_everything() {
     assert!(query(&dirs(), "zzzz", LATER).is_empty());

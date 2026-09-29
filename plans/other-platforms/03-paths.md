@@ -292,10 +292,15 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       is not needed. `a_path_rule_written_with_slashes_matches_on_every_platform`
       matches `C:\Users\brian\Projects\site` on Windows (and, on Unix, finds
       the backslashes to be part of a name).
-- [ ] **P3.16** `zoxide/mod.rs:338–364` (`classify`): last component via
+- [x] **P3.16** `zoxide/mod.rs:338–364` (`classify`): last component via
       `Path::new(s).file_name()`; and `archive/write/mod.rs:187, 213` (leaf of a typed
       archive name) via `Path::new(text).file_name()`. Done when: their tests pass and
-      a `\`-separated input has a test under `cfg!(windows)`.
+      a `\`-separated input has a test under `cfg!(windows)`. — done (port/paths),
+      with `rsplit(std::path::is_separator)` rather than `file_name` (Decisions
+      log): `/` on Unix, exactly the split it was, and `/` or `\` on Windows.
+      Tests: a Windows zoxide path's last name (`the_last_component_follows_the_platforms_separator`)
+      and `out\photos` / `out\.zip` in `a_typed_name_chooses_the_format`, each
+      under `cfg!(windows)` with the Unix reading beside it.
 - [ ] **P3.17** `sync/mod.rs:267–282` (`SyncPlan::label`): render `rel` with
       `path::display` and the platform separator; the trailing separator for folders
       is `std::path::MAIN_SEPARATOR`. Done when: the label test passes on Linux
@@ -431,6 +436,13 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
   so an `sftp://` path with a non-UTF-8 byte in it stays a URL there, as it
   is today. `to_str` would have turned it into a local path on Linux, a
   change the task did not need.
+- 2026-09-29 — P3.16: the leaves are split with
+  `rsplit(std::path::is_separator)`, not found with `Path::file_name`. Reason:
+  `file_name` would change Linux — it reads `out/` as `out`, where
+  `archive::write::named` must see an empty leaf ("a trailing `/`" is no
+  name), and skips a final `.` or `..` that the old split kept — while the
+  platform's separator set is exactly `/` on Unix and `/` or `\` on
+  Windows, which is the whole of the change the task wants.
 - 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
   did, not every one through `trim_trailing_separator`: `a//` stays `a/`
   and a typed `/` stays "no name given" on Linux.

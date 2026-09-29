@@ -57,7 +57,7 @@
 |---|---|---|---|---|
 | 98–105 | `Format::tool()`: `"zstd"`, `"xz"`, `"7z"` | Windows-differs | `is_available`, `piped`, `seven_zip` | Bare names |
 | 116–121 | `Format::is_available`: `on_path("7z")` or `super::have(tool)` | Windows-differs | app:app/compress.rs:open_archive_prompt | |
-| 187, 213 | `extension_of` / `named`: `text.rsplit('/')` takes the leaf of a typed archive name | Windows-differs | `extension` ← app:app/compress.rs:format_hint; `named` ← app:app/compress.rs:archive_submit | A typed `out\photos.zip` is not split on `\` |
+| 187, 213 | `extension_of` / `named`: `text.rsplit('/')` takes the leaf of a typed archive name | Windows-differs | `extension` ← app:app/compress.rs:format_hint; `named` ← app:app/compress.rs:archive_submit | A typed `out\photos.zip` is not split on `\` ✓ P3.16 |
 | 529–536 | `walk`: `use std::os::unix::ffi::OsStrExt`; member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` ← app:app/compress.rs:spawn_archive | ✓ S1.16 ✓ P3.7 |
 | 542–543 | `visit`: `use std::os::unix::ffi::OsStrExt; use std::os::unix::fs::MetadataExt` | Unix-only | as above | ✓ S1.16 ✓ P3.7 |
 | 553–556 | `Member { mode: meta.mode(), mtime: meta.mtime(), uid: meta.uid(), gid: meta.gid() }` | Unix-only | Consumed by write/tar.rs:175–181 and write/zip.rs:218–235 | ✓ S1.7 ✓ P3.7 |
@@ -454,7 +454,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 117–126 | `db_path`: `$_ZO_DATA_DIR/db.zo`, else `$XDG_DATA_HOME` or `$HOME/.local/share`, then `zoxide/db.zo` | Linux-only; macOS-differs | `load` ← app:app.rs:zoxide_db | Upstream zoxide resolves its data dir with `dirs::data_local_dir()` (macOS: `~/Library/Application Support`; Windows: `%LOCALAPPDATA%`) when `_ZO_DATA_DIR` is unset ✓ S1.11 |
-| 338–364 | `classify`: last component via `path.rsplit('/')` | Windows-differs | `query` ← app:app.rs:jump_rows | Windows zoxide paths use `\` |
+| 338–364 | `classify`: last component via `path.rsplit('/')` | Windows-differs | `query` ← app:app.rs:jump_rows | Windows zoxide paths use `\` ✓ P3.16 |
 
 ---
 
@@ -1715,8 +1715,8 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | config.rs:1222 | `dir_icon`: pattern `contains('/')` → match against the full path string | Windows-differs | app:icons.rs:icon_for | ✓ P3.15 |
 | vfs/config.rs:146–150 | `key_path`: `~` + `HOME` string splice | Windows-differs | `command` | ✓ P3.14 |
 | zoxide/mod.rs:123, 125 | `.join(".local/share")`, `.join("zoxide/db.zo")` | Linux-only | `db_path` | ✓ S1.11 |
-| zoxide/mod.rs:340 | `path.rsplit('/')` for the last component | Windows-differs | `query` | |
-| archive/write/mod.rs:187, 213 | `text.rsplit('/')` for the leaf of a typed archive name | Windows-differs | app:app/compress.rs | |
+| zoxide/mod.rs:340 | `path.rsplit('/')` for the last component | Windows-differs | `query` | ✓ P3.16 |
+| archive/write/mod.rs:187, 213 | `text.rsplit('/')` for the leaf of a typed archive name | Windows-differs | app:app/compress.rs | ✓ P3.16 |
 | git/status.rs:557 | Trailing `b'/'` in git's output means a directory | (git format) | `insert` | git uses `/` on every platform |
 | sync/mod.rs:276, 279 | `label` joins with `/` and appends `/` | Windows-differs | app:sync.rs | |
 | sync/rsync.rs:232–236 | `endpoint` trims and appends `b'/'` | Unix-only | rsync argv | |

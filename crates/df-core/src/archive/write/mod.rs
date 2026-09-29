@@ -192,7 +192,7 @@ pub enum Extension {
 /// that component it takes.
 fn extension_of(text: &str) -> (Extension, usize) {
     let text = text.trim();
-    let leaf = text.rsplit('/').next().unwrap_or(text);
+    let leaf = text.rsplit(std::path::is_separator).next().unwrap_or(text);
     let lower = leaf.to_ascii_lowercase();
     if let Some((suffix, format)) = WRITABLE.iter().find(|(s, _)| lower.ends_with(s)) {
         return (Extension::Writes(*format), suffix.len());
@@ -218,7 +218,7 @@ pub fn extension(text: &str) -> Extension {
 /// `.tar.zst`, `photos.rar` is a refusal.
 pub fn named(text: &str) -> Named {
     let text = text.trim();
-    let leaf = text.rsplit('/').next().unwrap_or(text);
+    let leaf = text.rsplit(std::path::is_separator).next().unwrap_or(text);
     let (extension, suffix) = extension_of(text);
     // An extension with nothing in front of it is not a name: `.zip` would be
     // a hidden file that is also an archive, which nobody means.

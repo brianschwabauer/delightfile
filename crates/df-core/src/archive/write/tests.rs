@@ -1070,6 +1070,18 @@ fn a_typed_name_chooses_the_format() {
     for empty in ["", "   ", ".zip", "out/", "out/.tar.gz", ".rar"] {
         assert_eq!(named(empty), Named::Empty, "{empty:?}");
     }
+    // The platform's own separator marks the leaf too: `\` on Windows. On
+    // Unix it is part of a name, so `.zip` there goes after the whole text.
+    if cfg!(windows) {
+        assert_eq!(
+            named(r"out\photos"),
+            archive(r"out\photos.zip", Format::Zip)
+        );
+        assert_eq!(named(r"out\.tar.gz"), Named::Empty);
+        assert_eq!(named(r"out\.zip"), Named::Empty);
+    } else {
+        assert_eq!(named(r"out\.zip"), archive(r"out\.zip", Format::Zip));
+    }
     // The extension alone, for a hint that lights up before there is a name.
     assert_eq!(extension(".tar.gz"), Extension::Writes(Format::TarGz));
     assert_eq!(extension("x.7Z"), Extension::Writes(Format::SevenZip));
