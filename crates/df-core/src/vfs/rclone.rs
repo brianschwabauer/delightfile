@@ -1095,10 +1095,10 @@ fn spawn_failure(service: &Service, program: &Path, source: std::io::Error) -> V
 /// `$XDG_RUNTIME_DIR/delightfile/`, else a private directory under the temp
 /// dir, else one under `/tmp`, the first whose socket path fits `sun_path`.
 ///
-/// macOS sets no `$XDG_RUNTIME_DIR`, so there the socket goes under
-/// `$TMPDIR`, the `/var/folders/…/T/` macOS makes for each user and keeps
-/// private to them — the nearest thing it has to a runtime directory — and
-/// under `/tmp` when a long remote name pushes that past macOS's 103 bytes.
+/// macOS has no `$XDG_RUNTIME_DIR`, and its runtime directory is `$TMPDIR`
+/// ([`crate::platform::dirs::runtime_dir`]), the `/var/folders/…/T/` it makes
+/// for each user and keeps private to them; the socket goes there, and under
+/// `/tmp` when a long remote name pushes that past macOS's 103 bytes.
 ///
 /// The name carries the pid, the service and a per-process counter. The pid
 /// keeps two delightfiles apart; the counter keeps two daemons in one process

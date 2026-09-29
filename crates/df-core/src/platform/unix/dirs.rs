@@ -1,7 +1,7 @@
 //! Where a user's files of each kind live, by the XDG base-directory rules with
-//! `$HOME` fallbacks — Linux's convention, and what yazi and zoxide use on
-//! macOS too, so this phase gives macOS the same answers (D5.1 decides whether
-//! macOS moves to `~/Library`).
+//! `$HOME` fallbacks — Linux's convention, and what yazi uses on macOS too, so
+//! macOS gives the same answers but for its runtime directory
+//! (`platform/macos/dirs.rs`).
 //!
 //! Each function is the rule one of the callers used inline before the seam,
 //! so the answers are exactly the ones they gave: a set-but-empty variable
@@ -57,7 +57,9 @@ pub fn cache_dir() -> Option<PathBuf> {
 
 /// `$XDG_RUNTIME_DIR`, as it is set. The callers differ on what makes one
 /// usable (gvfs needs it absolute, the rclone socket only non-empty), so each
-/// applies its own test; with none set, each has its own fallback.
+/// applies its own test; with none set, each has its own fallback. Linux's
+/// alone: macOS, which sets no such variable, answers its `$TMPDIR`.
+#[cfg(target_os = "linux")]
 pub fn runtime_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
 }
