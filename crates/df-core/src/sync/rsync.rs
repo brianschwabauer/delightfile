@@ -64,8 +64,19 @@ const KEEP_STDERR: u64 = 64 * 1024;
 /// that is not 0 is a run that did not happen.
 const PARTIAL: [i32; 2] = [23, 24];
 
-/// Whether `rsync` is on `PATH`, asked the way the archive readers ask about
-/// their tools: by running it, so the answer cannot disagree with the run.
+/// The oldest `rsync` a sync with a server runs: 3.1.0, the first to know
+/// `--info=progress2`, which the run's progress bar is read from.
+///
+/// macOS's own `/usr/bin/rsync` is older: Samba's 2.6.9, or openrsync, which
+/// calls itself compatible with 2.6.9. Both refuse the option, so on a Mac the
+/// feature needs Homebrew's ([`crate::platform::process::RSYNC_HINT`] says
+/// so).
+pub const MIN_VERSION: (u32, u32, u32) = (3, 1, 0);
+
+/// Whether `rsync` is on `PATH` and new enough ([`MIN_VERSION`]), asked the way
+/// the archive readers ask about their tools: by running it, so the answer
+/// cannot disagree with the run. One too old is not there as far as a sync is
+/// concerned, since every run would fail on its first option.
 ///
 /// Only where rsync is a tool of the platform at all
 /// ([`crate::platform::process::HAS_RSYNC`]): not on Windows, where it is not
@@ -74,12 +85,21 @@ pub fn available() -> bool {
     gated(crate::platform::process::HAS_RSYNC, || {
         Command::new("rsync")
             .arg("--version")
+            .env("LC_ALL", "C")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+            .output()
+            .is_ok_and(|out| {
+                out.status.success() && new_enough(&String::from_utf8_lossy(&out.stdout))
+            })
     })
+}
+
+/// Whether `rsync --version` printed `text` for an rsync of [`MIN_VERSION`] or
+/// newer. openrsync's banner (`openrsync: protocol version 29`) names no rsync
+/// version on its first line, and is not one.
+pub fn new_enough(text: &str) -> bool {
+    parse_version(text).is_some_and(|version| version >= MIN_VERSION)
 }
 
 /// [`available`]'s rule: `probe` runs only on a platform that has rsync.
@@ -336,18 +356,23 @@ pub fn local_version() -> Option<(u32, u32, u32)> {
 
 /// The version on `rsync --version`'s first line — `rsync  version
 /// 3.5.0-g471e17dc  protocol version 32` is `(3, 5, 0)`; a missing third
-/// number is 0, and anything after the numbers (a git suffix, `pre1`) is not
-/// part of it.
+/// number is 0, a `v` before the numbers (a build from a git tag) is not part
+/// of them, and neither is anything after them (a git suffix, `pre1`).
 pub fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     let line = text.lines().next()?;
     let mut words = line.split_whitespace();
     if words.next()? != "rsync" || words.next()? != "version" {
         return None;
     }
-    let mut numbers = words.next()?.split('.').map(|part| {
-        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
-        digits.parse::<u32>().ok()
-    });
+    let word = words.next()?;
+    let mut numbers = word
+        .strip_prefix('v')
+        .unwrap_or(word)
+        .split('.')
+        .map(|part| {
+            let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse::<u32>().ok()
+        });
     let major = numbers.next()??;
     let minor = numbers.next().flatten().unwrap_or(0);
     let patch = numbers.next().flatten().unwrap_or(0);
@@ -1588,7 +1613,7 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
     fn rsync_here() -> bool {
         let here = available();
         if !here {
-            eprintln!("rsync is not installed; skipping");
+            eprintln!("no rsync 3.1 or newer is installed; skipping");
         }
         here
     }
@@ -1838,8 +1863,34 @@ rsync error: some files/attrs were not transferred (see previous errors) (code 2
             parse_version("rsync  version 2.6  protocol"),
             Some((2, 6, 0))
         );
+        assert_eq!(
+            parse_version("rsync  version v3.3.0  protocol version 32"),
+            Some((3, 3, 0))
+        );
         assert_eq!(parse_version("openrsync: protocol version 29"), None);
         assert_eq!(parse_version(""), None);
+    }
+
+    /// The rsyncs a Mac comes with are refused, Homebrew's is run: Samba's
+    /// 2.6.9 and openrsync (which says it is 2.6.9 on its second line, never
+    /// its first) know nothing of `--info=progress2`.
+    #[test]
+    fn only_an_rsync_that_knows_progress2_is_run() {
+        assert!(!new_enough(
+            "rsync  version 2.6.9  protocol version 29\nCopyright"
+        ));
+        assert!(!new_enough(
+            "openrsync: protocol version 29\nrsync version 2.6.9 compatible\n"
+        ));
+        assert!(!new_enough("rsync  version 3.0.9  protocol version 30"));
+        assert!(new_enough("rsync  version 3.1.0  protocol version 31"));
+        assert!(new_enough(
+            "rsync  version 3.2.7  protocol version 31\nCopyright"
+        ));
+        assert!(new_enough(
+            "rsync  version 3.5.0-g471e17dc  protocol version 32"
+        ));
+        assert!(!new_enough(""));
     }
 
     #[test]

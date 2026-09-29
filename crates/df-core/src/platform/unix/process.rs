@@ -11,7 +11,8 @@ use std::process::{Child, ExitStatus};
 pub const NULL_DEVICE: &str = "/dev/null";
 
 /// Whether `rsync` is a tool this platform has: yes on Unix, where
-/// [`crate::sync::rsync::available`] then asks whether it is installed.
+/// [`crate::sync::rsync::available`] then asks whether it is installed and
+/// new enough.
 pub const HAS_RSYNC: bool = true;
 
 /// Stop `child` (`SIGSTOP`): how a pause reaches a process that is not ours

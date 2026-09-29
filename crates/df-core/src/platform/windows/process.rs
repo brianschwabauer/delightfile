@@ -15,6 +15,9 @@ pub const NULL_DEVICE: &str = "NUL";
 /// syntax collides with drive letters. The remote sync is not offered.
 pub const HAS_RSYNC: bool = false;
 
+/// Nothing to add to "needs rsync": no rsync is ever asked for here.
+pub const RSYNC_HINT: &str = "";
+
 /// Refused: Windows has no `SIGSTOP`, and suspending another process's
 /// threads one by one is not a pause worth offering (W4.2).
 pub fn pause(_child: &Child) -> io::Result<()> {
