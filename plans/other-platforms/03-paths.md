@@ -108,12 +108,15 @@ roots, budgets) to sites that already compile everywhere.
       `folded` and `name_is_valid_strict` (and `name_is_valid_permissive`), so
       Linux tests them; the constants are `platform::os::{STRICT_NAMES,
       FOLD_CASE}` (Decisions log).
-- [ ] **P3.3** `platform::fs::same_file(a: &Path, b: &Path) -> io::Result<bool>`:
+- [x] **P3.3** `platform::fs::same_file(a: &Path, b: &Path) -> io::Result<bool>`:
       Unix `dev`+`ino` of `symlink_metadata` (the body of `ops.rs:212–218` moved);
       Windows `GetFileInformationByHandle` volume serial + file index via a
       `File::open` with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`.
       Done when: `ops::same_file` is a one-line call to it and every §3.4 row that
-      decides an overwrite uses it (see P3.14).
+      decides an overwrite uses it (see P3.14). — done (port/paths): the Windows
+      body compares `platform::meta::identity` (P3.4) of both paths;
+      `ops::same_file` was already the one line (S1.5); the overwrite rows are
+      P3.18's (the "see P3.14" above means P3.18).
 - [x] **P3.4** `platform::meta` (the `MetadataExt` surface, appendix §2 `fs::entry`,
       `du::walk`, `preview::cache`, `archive::write`): `dev(&Metadata) -> u64`,
       `ino`, `nlink`, `mode -> u32`, `uid`, `gid`, `blocks_bytes -> u64`,

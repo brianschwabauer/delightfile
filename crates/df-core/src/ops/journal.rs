@@ -3319,9 +3319,8 @@ mod tests {
         j.undo(&ctx()).unwrap();
         assert!(!super::exists(&hard));
         redone(&mut j);
-        assert_eq!(
-            crate::platform::meta::ino(&std::fs::metadata(&hard).unwrap()),
-            crate::platform::meta::ino(&std::fs::metadata(&target).unwrap()),
+        assert!(
+            crate::platform::fs::same_file(&hard, &target).unwrap(),
             "a second name for the same file"
         );
         j.undo(&ctx()).unwrap();

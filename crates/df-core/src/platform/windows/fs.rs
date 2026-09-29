@@ -1,5 +1,7 @@
-//! Windows file primitives: the ones `std` can do in a call or two, and honest
-//! answers for the rest until W4.6 and P3.3.
+//! Windows file primitives: the ones `std` can do in a call or two, a file's
+//! identity from its handle ([`same_file`], through
+//! [`crate::platform::meta::identity`]), and honest answers for the rest until
+//! W4.6.
 
 use std::fs::File;
 use std::path::Path;
@@ -81,11 +83,18 @@ pub fn write_all_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::R
     Ok(())
 }
 
-/// Not answerable yet: the file index that says so is P3.3's
-/// (`GetFileInformationByHandle`). The caller treats an error as "not the same
-/// file", exactly as it treats a path it cannot stat.
-pub fn same_file(_a: &Path, _b: &Path) -> std::io::Result<bool> {
-    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+/// Are these two paths the same file *on disk* — the same volume serial and
+/// file index, as `GetFileInformationByHandle` reports them — neither followed
+/// if it is a link? The answer that holds however the two are spelled: in
+/// another case, through a junction, as a short `8.3` name. An error when
+/// either cannot be opened.
+pub fn same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let of = |path: &Path| {
+        let meta = std::fs::symlink_metadata(path)?;
+        crate::platform::meta::identity(path, &meta)
+    };
+    let (a, b) = (of(a)?, of(b)?);
+    Ok(a.dev == b.dev && a.ino == b.ino)
 }
 
 /// Assumed: the CRT's `_access(path, 2)` ignores the read-only bit on a
