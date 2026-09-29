@@ -10261,10 +10261,10 @@ impl App {
         if command == Command::TerminalHere && self.tab().virtual_kind().is_some() {
             return Some("Terminals open on local folders");
         }
-        // A platform with no trash yet (the stub on macOS and Windows, until
-        // M2.8 and W4.7): `d` on this disk, the trash view and emptying it are
-        // turned away in the stub's own words, rather than a job failing or a
-        // view opening on nothing. `d` over the link is a delete on the
+        // A platform with no trash yet (the stub on Windows, until W4.7): `d`
+        // on this disk, the trash view and emptying it are turned away in the
+        // stub's own words, rather than a job failing or a view opening on
+        // nothing. `d` over the link is a delete on the
         // server, which no local trash is part of. On Linux the home trash is
         // `Err` only without `$HOME`, which is not this refusal.
         if (matches!(command, Command::OpenTrash | Command::EmptyTrash)
@@ -22150,13 +22150,13 @@ mod tests {
         app.toasts.current().map(|toast| toast.message.as_str())
     }
 
-    /// A platform with no trash yet (macOS and Windows until M2.8 and W4.7):
-    /// `d` on a local file, the trash view and emptying it are refused in the
-    /// stub's own words, and the key says so and deletes nothing (S1.6,
-    /// S1.34). Linux always has a home trash, so there is nothing to refuse
-    /// there and this runs on the other two.
+    /// A platform with no trash yet (Windows until W4.7): `d` on a local
+    /// file, the trash view and emptying it are refused in the stub's own
+    /// words, and the key says so and deletes nothing (S1.6, S1.34). Linux
+    /// always has a home trash and macOS has Finder's (M2.8), so there is
+    /// nothing to refuse there and this runs on Windows alone.
     #[test]
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
     fn the_trash_is_refused_where_the_platform_has_none() {
         let mut app = Fixture::new("no-trash", &["a.txt"]);
         let now = Instant::now();
