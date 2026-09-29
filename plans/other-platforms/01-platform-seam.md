@@ -445,7 +445,7 @@ their native clipboards *are* synchronous.
       Update `main.rs:10–65`'s `mod` list: `wayland`, `dbus`, `portal` are gone from
       it; `mod platform;` is added. Done when: Linux builds, all moved tests pass
       from their new paths, `tests/portal.rs` gets `#![cfg(target_os = "linux")]`.
-- [>] **S1.22** `platform::desktop` (df-app): `pub struct Desktop` with exactly the
+- [x] **S1.22** `platform::desktop` (df-app): `pub struct Desktop` with exactly the
       `DataDevice` API (`ready`, `set_selection`, `receive`, `drag`, `poll`) and
       `pub enum Event { Enter, Motion, Leave, Drop, DragEnded, Selection, Copied,
       Pasted }` + `PasteFailure` moved verbatim from `wayland/mod.rs:185–266` into
@@ -467,7 +467,7 @@ their native clipboards *are* synchronous.
       S1.21, because `Rgba` is in `Desktop::drag`'s signature. The moved enums'
       doc links to the Wayland thread's private `Command` and `RECEIVE_TIMEOUT`
       now name `Desktop::set_selection`/`receive` and "time"; nothing else in them
-      changed. — df-app agent, started 2026-09-29
+      changed. — done 0a2217e, Linux verified, other targets unverified until CI
 - [ ] **S1.23** `platform::clipboard` (df-app): move the *fallback* transport out of
       `clipboard.rs:330–431` — `copy`, `reap`, `offered_types`, `paste` — into
       `platform/linux/clipboard.rs` (wl-copy/wl-paste bodies unchanged) with stubs
@@ -585,6 +585,26 @@ their native clipboards *are* synchronous.
       `Unsupported`, `App::refusal(Command::ShowTrash)` (and `Trash`) returns the
       message and the key toasts. Done when: the refusal test from S1.6 passes and
       Linux is unchanged.
+- [>] **S1.35** `platform::appearance` (df-app): the desktop's light or dark for
+      `[flavor] mode = "auto"` (the portal read and its `SettingChanged` watcher,
+      which arrived after this plan was written). Move `src/appearance.rs` to
+      `src/platform/linux/appearance.rs` with its history — the Linux body
+      unchanged: `Desktop` (`watch_over`, `drain`, `heard`, `link`, `started`,
+      `wait_first`, and the test-only `fake`/`FakePortal`), `Connect`, `session`,
+      the portal names, the match rules, the thread, `fake_bus`, and
+      `Scheme::from_value` (the portal's number, kept as an inherent `impl` beside
+      the body that reads it). What an answer *means* stays portable in
+      `src/appearance.rs`: `Scheme` with `appearance()`, `Link`, `RETRY` (also read
+      by `mounts::restart_due`), and the `only_a_clear_light_is_light` test. macOS
+      and Windows stubs: `Desktop` starts no thread, answers nothing (which `auto`
+      already treats as dark) and reports `Link::Gone` at once, so `theme-auto`
+      toasts that it could not reach the setting rather than claiming to follow it;
+      `Connect` is `Arc<dyn Fn() -> Result<Infallible, String>>`, a connection
+      never made. `app.rs` names `platform::appearance::{Desktop, Connect,
+      session}`. Native bodies: M2.28, W4.31. Done when: Linux tests pass from their
+      new paths (`platform::linux::appearance::tests`, `app/tests/appearance.rs`),
+      Linux behaviour is unchanged, and df-app compiles on the macOS and Windows
+      runners with the stubs. — df-app agent, started 2026-09-29
 
 ## 4. Closing the phase
 
@@ -747,6 +767,14 @@ their native clipboards *are* synchronous.
   unchanged — arboard asked for `png` there, which df-app already has — but on
   macOS arboard had enabled `image`'s `tiff` decoder, so a TIFF still there goes
   to `ffmpeg_still` instead.
+- (df-app) 2026-09-29 — S1.35 added (light mode's `auto` reads the XDG portal over
+  D-Bus; it arrived after this plan). The Linux body moved whole; what an answer
+  means (`Scheme`, `Link`, `RETRY`) stayed in `crate::appearance`, with
+  `Scheme::from_value` — the portal's number — left beside the body that reads it
+  as an inherent `impl`. The stubs answer nothing and say `Link::Gone` at once
+  rather than delivering a `NoPreference`: the window lands on dark either way,
+  and `theme-auto` then says it could not reach the setting instead of claiming
+  to follow one. M2.28 and W4.31 carry the native bodies.
 
 ## Open questions
 

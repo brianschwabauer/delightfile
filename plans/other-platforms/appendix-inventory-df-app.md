@@ -101,6 +101,12 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 123-124 | `if !df_core::sync::rsync::available() { return Err("Sync to a server needs rsync") }` | df-core seam (rsync/ssh) | App::paste_sync remote branch | rsync/ssh spawning is df-core sync/rsync.rs. |
 | 411-424 | `fn server_path(path: &str, root: &str) -> PathBuf`: `raw == "/"`, `raw.starts_with('/')`, `format!("{}/{raw}", root.trim_end_matches('/'))` | Windows-differs (server POSIX path held in `PathBuf`) | `remote_sync` (436) | Handed to rsync as an argument. |
 
+### src/appearance.rs (added after this inventory: 1,057 lines at 7ad55ad; row added 2026-09-29 by the df-app agent)
+
+| Line | What | Class | Used by (file:fn) | Note |
+|---|---|---|---|---|
+| 68-71, 135-140, 224-605 | `crate::dbus::{Bus, Hangup, Message, …}`; `Connect = Arc<dyn Fn() -> Result<Bus, String>>`, `session()` = `Bus::session`; `Desktop::watch_over` starts the `df-appearance` thread that asks `org.freedesktop.portal.Settings` `ReadOne`/`Read` for `org.freedesktop.appearance` `color-scheme` on the session bus and listens for `SettingChanged` and `NameOwnerChanged`; `fake_bus` (test) is a `UnixStream::pair` | Linux-only (compile, via `dbus`) | App::new (`desktop_bus = Some(session())`), App::follow_desktop, App::poll_workers (`drain`), App::init_gfx (`wait_first`), app/tests/appearance.rs | `Scheme`, `Link` and `RETRY` are portable; so is `Scheme::appearance`. ✓ S1.35 |
+
 ### src/archive.rs (1,067 lines; non-test 1-661)
 
 | Line | What | Class | Used by (file:fn) | Note |

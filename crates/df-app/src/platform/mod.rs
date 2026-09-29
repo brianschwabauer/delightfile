@@ -25,6 +25,9 @@
 //!
 //! | Item | Signature | Linux | macOS, Windows | Task |
 //! |---|---|---|---|---|
+//! | `appearance::Desktop` | `watch_over(Connect, Notifier) -> Desktop`, `drain(&mut self) -> Option<appearance::Scheme>`, `heard(&self) -> bool`, `link(&self) -> appearance::Link`, `started(&self) -> Instant`, `wait_first(&mut self, Duration) -> Option<Scheme>` | the portal's `color-scheme`, read and then heard on a thread | no thread; never heard, `Link::Gone` | S1.35 |
+//! | `appearance::Connect` | `Clone` type the app holds and hands to `watch_over` | `Arc<dyn Fn() -> Result<Bus, String>>` | `Arc<dyn Fn() -> Result<Infallible, String>>` | S1.35 |
+//! | `appearance::session` | `fn() -> Connect` | the session bus | a connection that is never made | S1.35 |
 //! | `desktop::Desktop` | `ready(&self) -> bool`, `set_selection(&self, Vec<String>, Vec<u8>) -> bool`, `receive(&self, u64, String) -> bool`, `drag(&self, Vec<(String, Vec<u8>)>, usize, icon::Rgba, icon::Rgba, i32) -> bool`, `poll(&self) -> Vec<desktop::Event>` | the Wayland data device | no value exists | S1.22 |
 //! | `desktop::start` | `fn(&ActiveEventLoop, &Window, app::Waker) -> Option<Desktop>` | adopts winit's Wayland connection | `None` | S1.22 |
 //! | `desktop::{Event, PasteFailure}` | the events `Desktop::poll` answers in | portable, one definition | same | S1.22 |

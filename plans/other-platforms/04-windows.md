@@ -298,6 +298,20 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       `save_target`, `parse_file_uri`; `#[cfg(unix)]` on the df-app tests appendix B
       §7 flags that S1.33 did not already gate. Done when: `cargo test -p df-app`
       green on the runner.
+- [ ] **W4.31** `platform::appearance` Windows body (S1.35's surface: `Desktop`,
+      `Connect`, `session`): the system's light or dark for `[flavor] mode =
+      "auto"`, in place of the stub that answers nothing and says `Link::Gone`.
+      Two routes, to be chosen here and logged: winit 0.30.13 already reports the
+      system theme on Windows (`Window::theme()`, `WindowEvent::ThemeChanged`),
+      with the same catches as on macOS (M2.28: the seam asks before the window
+      exists, and `App::window_theme` setting the window's theme stops
+      `ThemeChanged`); or the registry value `AppsUseLightTheme` under
+      `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize` (`0` dark,
+      `1` light) read with windows-sys `RegGetValueW`, and heard with
+      `RegNotifyChangeKeyValue` on the watcher's thread, which needs no window.
+      Done when: a unit test of the value → `Scheme` mapping passes on the
+      runner; live check that switching Settings → Colours turns a window in
+      `auto` (V7 §5.1).
 
 ## 8. Deferred, with the design recorded
 
@@ -343,6 +357,9 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 - 2026-09-25 — Argv openers with `$1`/`$@`/`$dir`; `builtin:shell-open`.
 - 2026-09-25 — Thread-per-pipe SFTP transport on Windows; Unix keeps `poll`.
 - 2026-09-25 — WARP fallback adapter allowed on Windows only.
+- (df-app) 2026-09-29 — W4.31 appended: light mode's `auto` (which arrived after
+  this plan) reads the XDG portal on Linux; on Windows S1.35 leaves a stub that
+  answers nothing, and W4.31 is its native body.
 
 ## Open questions
 

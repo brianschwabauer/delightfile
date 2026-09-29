@@ -1375,12 +1375,12 @@ pub struct App {
     /// ([`crate::appearance`]). Kept after a `theme-dark` or `theme-light`,
     /// so `theme-auto` finds the answer already there, and replaced when its
     /// line has gone ([`App::revive_desktop`]).
-    desktop: Option<crate::appearance::Desktop>,
+    desktop: Option<crate::platform::appearance::Desktop>,
     /// How this app reaches the desktop: the session bus, or `None` for a
     /// test's `App`, which reads nothing from this machine and hands in a
-    /// [`crate::appearance::Desktop::fake`] — or a socket pair — of its own
+    /// [`crate::platform::appearance::Desktop::fake`] — or a socket pair — of its own
     /// when it wants one.
-    desktop_bus: Option<crate::appearance::Connect>,
+    desktop_bus: Option<crate::platform::appearance::Connect>,
     /// `theme-auto` has been asked for and not yet said what it is following:
     /// the toast waits for the watcher to be listening, or to have failed.
     announce_follow: bool,
@@ -2204,7 +2204,7 @@ impl App {
         // Before the window, with the other workers (PLAN §6's cold-start
         // ordering): the portal's answer is in by the time wgpu has an
         // adapter, and the first frame is on the side the desktop is on.
-        app.desktop_bus = Some(crate::appearance::session());
+        app.desktop_bus = Some(crate::platform::appearance::session());
         app.follow_desktop(true, Instant::now());
         // gvfs's events, so a phone plugged in is heard with no card open
         // (PLAN §7.4). Not in a file dialog, which is somebody else's window
@@ -2642,7 +2642,7 @@ impl App {
         if let Some(scheme) = self
             .desktop
             .as_mut()
-            .and_then(crate::appearance::Desktop::drain)
+            .and_then(crate::platform::appearance::Desktop::drain)
         {
             changed |= self.desktop_said(scheme);
         }
@@ -16112,7 +16112,7 @@ impl App {
         };
         if due {
             let waker = self.waker.named("desktop");
-            self.desktop = Some(crate::appearance::Desktop::watch_over(
+            self.desktop = Some(crate::platform::appearance::Desktop::watch_over(
                 connect,
                 Arc::new(move || waker.wake()),
             ));

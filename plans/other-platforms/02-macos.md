@@ -271,6 +271,20 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `applicationShouldTerminate:` to route through `CloseRequested` — is the
       fallback if the first proves insufficient. Done when: a unit test drives
       `exiting` without `finish` and sees the cwd file written; live check V7 §4.1.
+- [ ] **M2.28** `platform::appearance` macOS body (S1.35's surface: `Desktop`,
+      `Connect`, `session`): the system's light or dark for `[flavor] mode =
+      "auto"`, in place of the stub that answers nothing and says `Link::Gone`.
+      Two routes, to be chosen here and logged: winit 0.30.13 already reports the
+      system theme on macOS with no new FFI (`Window::theme()`, and
+      `WindowEvent::ThemeChanged`, which winit documents as unsupported only on
+      iOS/Android/X11/Wayland/Orbital), but the seam asks before the window
+      exists (`App::new`) and `App::window_theme` sets the window's own theme,
+      after which `ThemeChanged` no longer reports; or
+      `NSApp.effectiveAppearance` through objc2-app-kit 0.2 with a key-value
+      observer on the app, which needs no window. Done when: a unit test of the
+      appearance-name → `Scheme` mapping passes on the macOS runner; live check
+      that switching System Settings → Appearance turns a window in `auto`
+      (V7 §4.1).
 
 ## 7. Optional
 
@@ -315,6 +329,9 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   composition key. Dead-key composition (Option+e, e → é) is lost in prompts; typing
   accented text there needs the character viewer or a paste. Accepted for a
   keyboard-driven file manager whose prompts are mostly file names.
+- (df-app) 2026-09-29 — M2.28 appended: light mode's `auto` (which arrived after
+  this plan) reads the XDG portal on Linux; on macOS S1.35 leaves a stub that
+  answers nothing, and M2.28 is its native body.
 
 ## Open questions
 

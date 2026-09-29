@@ -3,4 +3,5 @@
 //! runs while Phase 4 (`plans/other-platforms/04-windows.md`) writes the
 //! native ones.
 
+pub mod appearance;
 pub mod device;

@@ -3,8 +3,9 @@
 //! light still paints every surface it has.
 
 use super::*;
-use crate::appearance::{
-    fake_bus, scheme_signal, setting_changed, Connect, Desktop, FakePortal, Link,
+use crate::appearance::Link;
+use crate::platform::appearance::{
+    fake_bus, scheme_signal, setting_changed, Connect, Desktop, FakePortal,
 };
 
 /// The two sides of the default theme, as the painter gets them.
