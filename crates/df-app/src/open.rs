@@ -15,15 +15,16 @@
 //! shell puts in an error message, so a failing snippet says which program ran
 //! it.
 //!
-//! Detaching (PLAN §6's "launched detached") is `setsid`: the opener commands
-//! ported from the yazi config already say `setsid uwsm-app --` themselves, and
-//! a bare `;` command should be no less free of delightfile's process group —
-//! quit the file manager and what you started stays up. It is a real program
-//! rather than a `pre_exec` closure because the workspace lints
-//! `unsafe_code = "warn"`, and this does not need unsafe to be correct.
+//! How a snippet is run is the platform's ([`crate::platform::open`]): the
+//! `$SHELL -c` above on Linux and macOS, with Linux detaching the child
+//! through `setsid`, and nothing yet on Windows, whose openers will be argv
+//! lists. What is the same everywhere — the opener rules, the picker, the
+//! words a toast uses — is this module's, and the two calls the window makes
+//! are re-exported from here.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
+
+pub use crate::platform::open::{run_blocking, spawn_detached};
 
 use df_core::config::{Config, Opener};
 use df_core::fs::Entry;
@@ -33,105 +34,6 @@ use crate::hover::{pressed_rect, Hovers};
 use crate::ripple::Ripples;
 use crate::theme::mix;
 use crate::ui::{Control, Painting};
-
-/// `$0` for every snippet delightfile runs.
-const ARGV0: &str = "delightfile";
-
-/// The shell, in `$SHELL` order of preference. POSIX `sh` is the fallback
-/// because it is the one binary that is definitely there.
-pub fn shell_program() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "/bin/sh".to_string())
-}
-
-/// The full argv for running `snippet` over `paths`.
-///
-/// Pure, and the reason it is: the argument order *is* the contract with every
-/// opener rule in the shipped config (`"$@"`, `"$1"`), and getting `$0` wrong
-/// would silently shift every one of them by one.
-pub fn shell_argv(shell: &str, snippet: &str, paths: &[PathBuf]) -> Vec<String> {
-    let mut argv = vec![
-        shell.to_string(),
-        "-c".to_string(),
-        snippet.to_string(),
-        ARGV0.to_string(),
-    ];
-    argv.extend(paths.iter().map(|p| p.to_string_lossy().into_owned()));
-    argv
-}
-
-/// Wrap an argv so the child leaves delightfile's process group.
-///
-/// `--fork` is not optional: without it `setsid` *execs* the program in place
-/// whenever the caller is not already a process-group leader, and delightfile
-/// usually is not — so the "detached" child would be this very process's child
-/// and the `wait` in [`spawn_detached`] would block the UI thread for as long
-/// as the editor stayed open. With `--fork` the direct child exits immediately
-/// and the grandchild is the compositor's.
-///
-/// `setsid` is util-linux and is on every machine this targets; if it is
-/// somehow not there the command still runs — just parented to us, which is
-/// worse than detached and much better than not opening the file.
-pub fn detached_argv(argv: Vec<String>) -> Vec<String> {
-    if which("setsid").is_none() {
-        return argv;
-    }
-    let mut out = vec!["setsid".to_string(), "--fork".to_string()];
-    out.extend(argv);
-    out
-}
-
-/// Is `name` on `$PATH`?
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
-}
-
-fn command_from(argv: &[String], cwd: &Path) -> Option<Command> {
-    let (program, args) = argv.split_first()?;
-    let mut command = Command::new(program);
-    command.args(args).current_dir(cwd);
-    Some(command)
-}
-
-/// Start `snippet` and do not wait for it (`;`, and every non-blocking opener).
-pub fn spawn_detached(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<()> {
-    let plain = shell_argv(&shell_program(), snippet, paths);
-    let argv = detached_argv(plain.clone());
-    let detached = argv.len() != plain.len();
-    let mut command =
-        command_from(&argv, cwd).ok_or_else(|| std::io::Error::other("empty command"))?;
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let mut child = command.spawn()?;
-    if detached {
-        // `setsid --fork` is gone the instant it has forked, so this reaps a
-        // process that has already exited rather than waiting on the editor.
-        let _ = child.wait();
-    }
-    Ok(())
-}
-
-/// Run `snippet` to completion (`:`, and `block = true` openers). Called on a
-/// task worker, never on the UI thread.
-pub fn run_blocking(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<i32> {
-    let argv = shell_argv(&shell_program(), snippet, paths);
-    let mut command =
-        command_from(&argv, cwd).ok_or_else(|| std::io::Error::other("empty command"))?;
-    let status = command.status()?;
-    // A signalled child has no code; 128 + signal is what every shell reports
-    // for one, so the toast says the number the user would see in `$?`.
-    Ok(status.code().unwrap_or_else(|| {
-        use std::os::unix::process::ExitStatusExt;
-        128 + status.signal().unwrap_or(0)
-    }))
-}
 
 /// How a finished blocking command reads in a toast.
 pub fn exit_text(snippet: &str, code: i32) -> String {
@@ -524,34 +426,6 @@ pub fn paint_picker(
 mod tests {
     use super::*;
 
-    /// The contract every opener rule in the shipped config depends on: the
-    /// snippet is `-c`'s argument, `$0` is delightfile, and the paths start at
-    /// `$1` — never spliced into the string.
-    #[test]
-    fn paths_reach_the_shell_as_arguments() {
-        let paths = vec![
-            PathBuf::from("/home/brian/a b.txt"),
-            PathBuf::from("/home/brian/; rm -rf ~"),
-        ];
-        let argv = shell_argv("/bin/zsh", r#"zeditor "$@""#, &paths);
-        assert_eq!(
-            argv,
-            vec![
-                "/bin/zsh".to_string(),
-                "-c".to_string(),
-                r#"zeditor "$@""#.to_string(),
-                "delightfile".to_string(),
-                "/home/brian/a b.txt".to_string(),
-                "/home/brian/; rm -rf ~".to_string(),
-            ],
-            "a semicolon in a file name is a character in an argument, not a command"
-        );
-        // `$1` is the first path, which is what the single-file openers use.
-        assert_eq!(argv[4], "/home/brian/a b.txt");
-        // …and with no selection the snippet still runs, with no positionals.
-        assert_eq!(shell_argv("/bin/sh", "ls", &[]).len(), 4);
-    }
-
     /// "Open terminal here" is the folder's own opener, whose `$1` is the
     /// folder — not the file's, which would open in the folder's parent — and
     /// a config without it has nothing to find rather than something else.
@@ -573,21 +447,6 @@ mod tests {
         let mut bare = Config::default();
         bare.openers.retain(|o| o.name != TERMINAL_OPENER);
         assert_eq!(named(&bare, TERMINAL_OPENER), None);
-    }
-
-    #[test]
-    fn detaching_only_prefixes_what_it_can_find() {
-        let argv = shell_argv("/bin/sh", "true", &[]);
-        let detached = detached_argv(argv.clone());
-        if which("setsid").is_some() {
-            assert_eq!(
-                &detached[..2],
-                &["setsid".to_string(), "--fork".to_string()]
-            );
-            assert_eq!(&detached[2..], &argv[..]);
-        } else {
-            assert_eq!(detached, argv, "no setsid: still open the file");
-        }
     }
 
     /// PLAN §6's rules, as shipped: the first choice is what `o` runs and the

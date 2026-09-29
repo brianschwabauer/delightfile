@@ -1,10 +1,10 @@
 //! The parts of running another program that differ by platform, as Windows
-//! has them: `NUL`, no stopping a child, executables known by their extension,
-//! and tools that carry `.exe`.
+//! has them: `NUL`, no stopping a child, an exit code that is always there,
+//! executables known by their extension, and tools that carry `.exe`.
 
 use std::io;
 use std::path::Path;
-use std::process::Child;
+use std::process::{Child, ExitStatus};
 
 pub use crate::platform::stub::process::*;
 
@@ -33,6 +33,13 @@ pub fn terminate(child: &mut Child) -> io::Result<()> {
         return Ok(());
     }
     child.kill()
+}
+
+/// The number a finished child exited with. A Windows process always has
+/// one — there are no signals to end it without — so the 1 is never reached;
+/// it stands for a failure all the same, never for a success.
+pub fn exit_code(status: &ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
 }
 
 /// Whether `path` is a file whose extension is one `PATHEXT` names

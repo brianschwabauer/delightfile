@@ -1,10 +1,11 @@
 //! The parts of running another program that differ by platform: the null
-//! device, stopping and continuing a child, what counts as an executable on
-//! `PATH` and under which names a tool is looked for.
+//! device, stopping and continuing a child, the number a finished one exited
+//! with, what counts as an executable on `PATH` and under which names a tool
+//! is looked for.
 
 use std::io;
 use std::path::Path;
-use std::process::Child;
+use std::process::{Child, ExitStatus};
 
 /// The file that discards what is written to it and reads as empty.
 pub const NULL_DEVICE: &str = "/dev/null";
@@ -61,6 +62,16 @@ pub fn terminate(child: &mut Child) -> io::Result<()> {
     Ok(())
 }
 
+/// The number a finished child exited with, as a shell's `$?` says it.
+pub fn exit_code(status: &ExitStatus) -> i32 {
+    // A signalled child has no code; 128 + signal is what every shell reports
+    // for one, so the toast says the number the user would see in `$?`.
+    status.code().unwrap_or_else(|| {
+        use std::os::unix::process::ExitStatusExt;
+        128 + status.signal().unwrap_or(0)
+    })
+}
+
 /// Whether `path` is a file some execute bit is set on.
 pub fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -70,4 +81,25 @@ pub fn is_executable(path: &Path) -> bool {
 /// The file names a tool called `name` may have on `PATH`: just its name.
 pub fn candidates(name: &str) -> Vec<String> {
     vec![name.to_string()]
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
+
+    use super::*;
+    use std::process::Command;
+
+    /// What `$?` would say: the code when the child exited, 128 + the signal
+    /// when one ended it.
+    #[test]
+    fn an_exit_code_is_the_one_a_shell_would_report() {
+        let exited = Command::new("sh").args(["-c", "exit 3"]).status().unwrap();
+        assert_eq!(exit_code(&exited), 3);
+        let killed = Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+        assert_eq!(exit_code(&killed), 128 + libc::SIGTERM);
+    }
 }

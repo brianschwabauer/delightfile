@@ -64,6 +64,7 @@
 //! | `process` | `pause(&Child)`, `resume(&Child)` `-> io::Result<()>` | `SIGSTOP` / `SIGCONT` (unix) | unix | `Unsupported` (W4.2) |
 //! | `process` | `terminate(&mut Child) -> io::Result<()>` (not a reaped one) | `kill(SIGTERM)` (unix) | unix | `Child::kill` |
 //! | `process` | `tie_to_this_thread(&mut Command)` (re-exported as `vfs::child`) | `prctl(PR_SET_PDEATHSIG)` + `getppid` in `pre_exec` | nothing: the child can outlive a crash (M2.29) | nothing (W4.31) |
+//! | `process` | `exit_code(&ExitStatus) -> i32` (what a shell's `$?` would say; df-app's blocking opener) | the code, else 128 + the signal (unix) | unix | the code, else 1 (never reached: Windows always has one) |
 //! | `process` | `is_executable(&Path) -> bool` | an execute bit (unix) | unix | extension in `PATHEXT` |
 //! | `process` | `candidates(name) -> Vec<String>` (file names to look for on `PATH`) | `[name]` (unix) | unix | `[name.exe, name]`, and `tar.exe`, `tar` for `bsdtar` |
 

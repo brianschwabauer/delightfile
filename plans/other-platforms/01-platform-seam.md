@@ -579,7 +579,7 @@ their native clipboards *are* synchronous.
       but tests marked `#[cfg(unix)]` or Linux (S1.33). — done, uncommitted
       2026-09-29, Linux verified (the stubs type-check when selected on Linux),
       other targets unverified until CI
-- [ ] **S1.26** `platform::open` (df-app): `shell_program`, `shell_argv`,
+- [x] **S1.26** `platform::open` (df-app): `shell_program`, `shell_argv`,
       `detached_argv`, `which`, `spawn_detached`, `run_blocking` bodies
       (`open.rs:40–134`) move to `platform/linux/open.rs`, re-exported from `open.rs`.
       The Unix body is shared with macOS via `platform/unix/open.rs` **except**
@@ -589,6 +589,28 @@ their native clipboards *are* synchronous.
       `spawn_detached`/`run_blocking` return `Err(io::Error::from(ErrorKind::Unsupported))`
       (Phase 4 W4.10 supplies the argv model). Done when: `open.rs` tests pass on
       Linux; compiles everywhere.
+      *As built:* the shared body is `platform/unix/open.rs` (df-app's first
+      `unix` module, `#[cfg(unix)]` in `platform/mod.rs`): `shell_program`,
+      `shell_argv`, `command_from`, `spawn_detached` and `run_blocking`, moved
+      unchanged but for `run_blocking`'s last line, which is now
+      `df_core::platform::process::exit_code(&status)` — added to df-core's
+      `platform::process` here, its Unix body the old signal arm moved
+      unchanged, its Windows body `status.code().unwrap_or(1)`, with a Unix
+      test and a contract row. `detached_argv` and `which` (which only it
+      calls) are `platform/linux/open.rs`, which re-exports the shared body;
+      macOS re-exports it too, with a `detached_argv` that returns the argv as
+      it is — Linux's own answer when `setsid` is missing — until M2.16.
+      `open.rs` re-exports `spawn_detached` and `run_blocking`, the two calls
+      the window makes, and the contract names only those; the Windows stub
+      refuses both with `io::ErrorKind::Unsupported` carrying "Running
+      programs is not available on this platform", since the window toasts the
+      error's text. The argv model is W4.3's (the W4.10 above is roots and
+      fallbacks). The two tests of moved bodies moved with them:
+      `paths_reach_the_shell_as_arguments` to `platform::unix::open` and
+      `detaching_only_prefixes_what_it_can_find` to `platform::linux::open`
+      (S1.33's `/bin/zsh` and `setsid` gates, by where they live). — done,
+      uncommitted 2026-09-29, Linux verified (the stubs type-check when
+      selected on Linux), other targets unverified until CI
 - [x] **S1.27** `platform::window::attributes(title: &str, app_id: &str) ->
       WindowAttributes`: Linux body is `app.rs:2111–2124` (`with_name` from
       `WindowAttributesExtWayland`); Windows body sets title and size only; macOS
@@ -968,6 +990,18 @@ their native clipboards *are* synchronous.
   has: a time whose year is past `i32::MAX` (some 6.7 × 10¹⁶ seconds out),
   where the old `tm_year + 1900` overflowed, is now `None` and the linemode
   shows it as unknown. Every real mtime reads the same numbers as before.
+- 2026-09-29 — S1.26: df-app gets a `platform/unix/` module, as the task
+  says, for the shell body Linux and macOS share; `which` went with
+  `detached_argv` into `platform/linux/open.rs` because nothing else calls
+  it, and on macOS it would be dead code. macOS's `detached_argv` returns the
+  argv unchanged until M2.16: the child runs parented to the window, what
+  Linux already does without `setsid`. df-core's
+  `platform::process::exit_code` is Windows `status.code().unwrap_or(1)`, not
+  W4.2's `-1` (W4.2's text corrected): a Windows process always has a code,
+  and a stand-in should read as a failure the way a shell's non-zero does.
+  The Windows opener stub's error carries "Running programs is not available
+  on this platform" rather than the bare `Unsupported` kind, whose text
+  ("unsupported") is what the window would otherwise toast.
 
 ## Open questions
 

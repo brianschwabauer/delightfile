@@ -42,6 +42,7 @@
 //! | `mounts::system_gio` | `fn() -> mounts::Gio` | runs `gio` | answers every run `Unsupported` | S1.24 |
 //! | `mounts::Monitor` | `start(Notifier) -> Option<Monitor>`, `gone(&mut self) -> bool`, `started(&self) -> Instant`, `drain(&self) -> Vec<mounts::Event>` | `gio mount --monitor --detail` | `start` is `None`; no value exists | S1.24 |
 //! | `mounts::TERMINAL_MOUNT` | `Option<&str>` | the shell line that re-runs `gio mount` in a terminal | `None` | S1.24 |
+//! | `open::{spawn_detached, run_blocking}` | `spawn_detached(&str, &[PathBuf], &Path) -> io::Result<()>`, `run_blocking(&str, &[PathBuf], &Path) -> io::Result<i32>`: an opener's or a typed `;`/`:` snippet over paths, from a directory | `$SHELL -c '<snippet>' delightfile <path>…` (the shared `unix` body), detached with `setsid --fork`; `run_blocking`'s code from `df_core::platform::process::exit_code` | macOS: the same shell body, not yet detached (M2.16); Windows: `Unsupported`, "Running programs is not available on this platform" (W4.3) | S1.26 |
 //! | `pdfium::LIBRARY_NAME` | `&str`, the library's file name | `libpdfium.so` | `libpdfium.dylib`, `pdfium.dll` | S1.30 |
 //! | `pdfium::candidates` | `fn() -> Vec<PathBuf>`, most specific first, before the system loader | `$DF_PDFIUM_LIB`, `~/.local/lib/{delightfile,delightviewer}/`, the dev `target/` | macOS: `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/`, `~/.local/lib/delightfile/`; Windows: `$DF_PDFIUM_LIB`, the executable's directory | S1.30 |
 //! | `window::attributes` | `fn(title: &str, app_id: &str) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title, size, Option read as Alt; Windows: title, size | S1.27 |
@@ -54,10 +55,16 @@
 //! `plans/other-platforms/01-platform-seam.md` §3 adds its own as it lands.
 //! `desktop` and `icon` are the same on every target and live here rather
 //! than in a target's module; `desktop` takes its `Desktop` and `start` from
-//! the target's `device`.
+//! the target's `device`. `unix` holds what Linux and macOS share (the shell
+//! body of `open`), which their modules re-export beside what is their own.
 
 pub mod desktop;
 pub mod icon;
+
+/// What Linux and macOS share: taken from by their modules, named by no one
+/// else.
+#[cfg(unix)]
+mod unix;
 
 #[cfg(target_os = "linux")]
 mod linux;

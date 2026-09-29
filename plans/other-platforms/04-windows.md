@@ -57,7 +57,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       `is_executable` = extension is in `PATHEXT` (default `.COM;.EXE;.BAT;.CMD`);
       `candidates("7z")` = `["7z.exe", "7z"]`, `candidates("bsdtar")` = `["bsdtar.exe",
       "tar.exe"]` (Windows ships libarchive's bsdtar as `tar.exe`; GNU-tar flags are
-      not an issue there); `exit_code(status)` = `status.code().unwrap_or(-1)`;
+      not an issue there); `exit_code(status)` = `status.code()`, 1 when there is none (written in S1.26);
       `pause`/`resume` → `Unsupported`; `kill` = `Child::kill` (TerminateProcess).
       Every `Command` df-core and df-app build on Windows for a *console* tool
       (`git`, `7z`, `tar`, `ssh`, `fd`, `rg`) gets `creation_flags(CREATE_NO_WINDOW)`

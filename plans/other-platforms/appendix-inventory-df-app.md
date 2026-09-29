@@ -232,14 +232,14 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 1-23 | module doc: snippets run as `$SHELL -c '<snippet>' delightfile <path> …`; "Detaching … is `setsid`: the opener commands … already say `setsid uwsm-app --`" | Unix/Linux (doc) | — | — |
-| 40-47 | `pub fn shell_program() -> String`: `std::env::var("SHELL")`, non-blank, else `"/bin/sh"` | Unix-only (runtime) | spawn_detached (103), run_blocking (124) | — |
-| 49-64 | `pub fn shell_argv(shell: &str, snippet: &str, paths: &[PathBuf]) -> Vec<String>`: `[shell, "-c", snippet, "delightfile", paths (to_string_lossy)…]` | Unix-only (runtime: POSIX `sh -c` + positional `$0/$1/$@`) | spawn_detached, run_blocking | Non-UTF-8 path bytes are replaced lossily. |
-| 66-84 | `pub fn detached_argv(argv: Vec<String>) -> Vec<String>`: prefixes `["setsid", "--fork"]` when `which("setsid")` | Linux-only (util-linux) | spawn_detached (104) | — |
-| 86-92 | `fn which(name: &str) -> Option<PathBuf>`: `split_paths($PATH)` → `dir.join(name).is_file()` | Windows-differs | detached_argv | No `PATHEXT`/`.exe` handling. |
-| 94-99 | `fn command_from(argv: &[String], cwd: &Path) -> Option<Command>` | — | spawn_detached, run_blocking | — |
-| 101-119 | `pub fn spawn_detached(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<()>`: stdio null; `command.spawn()` (112); `child.wait()` only when `setsid` prefixed (113-117) | Linux-only (detach) | App::launch (5131), App::run_shell (5145), App::connected (6575) | — |
-| 121-134 | `pub fn run_blocking(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<i32>`: `command.status()` (127); `use std::os::unix::process::ExitStatusExt;` (131); `128 + status.signal().unwrap_or(0)` (132) | Unix-only (compile) | App::run_shell FnJob (5162) | — |
+| 1-23 | module doc: snippets run as `$SHELL -c '<snippet>' delightfile <path> …`; "Detaching … is `setsid`: the opener commands … already say `setsid uwsm-app --`" | Unix/Linux (doc) | — | — ✓ S1.26 |
+| 40-47 | `pub fn shell_program() -> String`: `std::env::var("SHELL")`, non-blank, else `"/bin/sh"` | Unix-only (runtime) | spawn_detached (103), run_blocking (124) | — ✓ S1.26 |
+| 49-64 | `pub fn shell_argv(shell: &str, snippet: &str, paths: &[PathBuf]) -> Vec<String>`: `[shell, "-c", snippet, "delightfile", paths (to_string_lossy)…]` | Unix-only (runtime: POSIX `sh -c` + positional `$0/$1/$@`) | spawn_detached, run_blocking | Non-UTF-8 path bytes are replaced lossily. ✓ S1.26 |
+| 66-84 | `pub fn detached_argv(argv: Vec<String>) -> Vec<String>`: prefixes `["setsid", "--fork"]` when `which("setsid")` | Linux-only (util-linux) | spawn_detached (104) | — ✓ S1.26 |
+| 86-92 | `fn which(name: &str) -> Option<PathBuf>`: `split_paths($PATH)` → `dir.join(name).is_file()` | Windows-differs | detached_argv | No `PATHEXT`/`.exe` handling. ✓ S1.26 |
+| 94-99 | `fn command_from(argv: &[String], cwd: &Path) -> Option<Command>` | — | spawn_detached, run_blocking | — ✓ S1.26 |
+| 101-119 | `pub fn spawn_detached(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<()>`: stdio null; `command.spawn()` (112); `child.wait()` only when `setsid` prefixed (113-117) | Linux-only (detach) | App::launch (5131), App::run_shell (5145), App::connected (6575) | — ✓ S1.26 |
+| 121-134 | `pub fn run_blocking(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<i32>`: `command.status()` (127); `use std::os::unix::process::ExitStatusExt;` (131); `128 + status.signal().unwrap_or(0)` (132) | Unix-only (compile) | App::run_shell FnJob (5162) | — ✓ S1.26 |
 
 ### src/overlay.rs (1,057 lines; non-test 1-827)
 
