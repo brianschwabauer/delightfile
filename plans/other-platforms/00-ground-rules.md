@@ -141,11 +141,20 @@ Until Phase 3 lands, df-core assumes Unix paths. After Phase 3:
 - A test that needs Unix semantics (mode bits, `getuid`, symlink without privilege,
   `EXDEV`) gets `#[cfg(unix)]`. A test that needs a binary (`git`, `ssh`, `7z`) already
   skips when it is absent; keep that.
-- **Local cross-compilation on Brian's machine**: the toolchain is Arch's `rust`
-  package, no rustup, so no foreign targets are installed. To check df-core for
-  another target locally: `sudo pacman -S rustup` (replaces `rust`), then
-  `rustup target add aarch64-apple-darwin x86_64-pc-windows-msvc` and
-  `cargo check -p df-core --target aarch64-apple-darwin`. df-core has no C
+- **Local cross-compilation on Brian's machine**: the system toolchain is Arch's
+  `rust` package and stays untouched; it builds and tests Linux, with the
+  worktree's own `target/`. A private rustup (1.98.1, the same version as the
+  system `rust`) with both foreign targets lives out of the way under
+  `~/.cache/delightfile-xcheck`, and is used **only** for cross checks. Set the
+  variables per command, never for the whole shell:
+  ```
+  RUSTUP_HOME=$HOME/.cache/delightfile-xcheck/rustup \
+  CARGO_HOME=$HOME/.cache/delightfile-xcheck/cargo \
+  CARGO_TARGET_DIR=$HOME/.cache/delightfile-xcheck/target-core \
+  PATH=$HOME/.cache/delightfile-xcheck/cargo/bin:$PATH \
+  cargo check -p df-core --target aarch64-apple-darwin   # or x86_64-pc-windows-msvc
+  ```
+  and the same with `--tests` to check the test target. df-core has no C
   dependencies so `check` works without a linker for the target. **df-app cannot be
   cross-checked locally**: `ffmpeg-sys-next`'s build script needs the target's FFmpeg
   headers. df-app is only checked on the CI runners (`06-build-and-release.md`).
@@ -181,6 +190,12 @@ Until Phase 3 lands, df-core assumes Unix paths. After Phase 3:
 - 2026-09-25 — Process-per-window stays on all platforms. Reason: it is how
   cross-window drag works and how the code is shaped; one Dock icon per window on
   macOS is accepted. Revisit only if a macOS user pass finds it unbearable.
+- 2026-09-29 — Local cross checks use a private rustup under
+  `~/.cache/delightfile-xcheck` (its own `RUSTUP_HOME`, `CARGO_HOME` and
+  `CARGO_TARGET_DIR`), not `pacman -S rustup`. Reason: replacing Arch's `rust`
+  with rustup would change the toolchain every Linux build uses; a side
+  toolchain at the same version checks the foreign targets and leaves the daily
+  build exactly as it was (§6).
 
 ## Open questions
 
