@@ -649,6 +649,28 @@ Why not sign now:
   job green. It was not taken, because the test would stay wrong on any machine
   where nobody reaps orphans. With the change, the `tail` container passes 3 of 3,
   and so did the runner: run 36643463056 of `port/linux-ci` has the linux job green.
+- 2026-09-29 — `app::tests::appearance::the_newer_surfaces_paint_from_the_light_palette`
+  failed in 2 of the first 4 linux jobs on `port/linux-ci`, runs 36642159735 and
+  36645262088, with `the permissions card's ripple painted a white splash on the
+  light side: #03_03_03_03`. It never failed on Brian's machine: 0 of 50 runs alone,
+  and 0 of 18 whole-suite runs pinned to 4, 2 and 1 CPUs. There was no white splash
+  on that frame. The test switches to light, and the switch shows a "Light theme"
+  toast whose plate fades in linearly over 220 ms (`RISE` in `toast.rs`) in latte's
+  crust. Crust at alpha 1 to 3 premultiplies to `#01_01_01_01` through
+  `#03_03_03_03`, the same bytes as white at that alpha. `no_white_splash` judged
+  every colour on the frame, so a ripple frame painted 0.4 to 3 ms after the switch
+  failed. The runner paints the frames in between fast enough to land there, and this
+  machine does not. A toast born 2.5 ms before the ripple frame reproduces the exact
+  message. There were three test-only ways out: clear the toast before the ripple
+  checks, judge only what a ripple paints, or count r = g = b = a as white only from
+  alpha 8 up. The second was taken. `painted` also returns the fill of every circle,
+  which is all a ripple paints, since every `theme::splash` in df-app is a
+  `circle_filled`, and `no_white_splash` judges only those. A light surface fading
+  in is never taken for a splash, and a white splash is still caught at every alpha.
+  Checked both ways. With the 2.5 ms toast on the ripple frame, `#03_03_03_03` is
+  among the frame's colours, the old judgement fails and the new one passes. With
+  `theme::splash` made to return white on the light side, the test fails on the
+  permissions ripple with `#14_14_14_14`. Nothing outside the test helpers changed.
 
 ## Open questions
 
