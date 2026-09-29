@@ -57,7 +57,7 @@ has not dropped.
       `#[error("{0} is not available on this platform")] Unsupported(&'static str)`
       to `DfError`. Done when: it exists and `cargo test -p df-core` is green.
       — done 94131a7
-- [>] **S1.2** Create `crates/df-core/src/platform/{mod.rs, unix/mod.rs, linux/mod.rs,
+- [x] **S1.2** Create `crates/df-core/src/platform/{mod.rs, unix/mod.rs, linux/mod.rs,
       macos/mod.rs, windows/mod.rs}` and `crates/df-app/src/platform/{mod.rs,
       linux/mod.rs, macos/mod.rs, windows/mod.rs}` with the selection boilerplate:
       ```rust
@@ -71,8 +71,9 @@ has not dropped.
       that the following tasks add (fill the table as you go; it is the phase's
       checklist inside the code). Done when: both crates compile on Linux with the
       empty modules and the CI workflow from B6.1 exists.
-      — df-core core-seam session, started 2026-09-29: df-core half done 94131a7;
-      the df-app half (§3) and the B6.1 workflow belong to other agents.
+      — done: the df-core half 94131a7, the df-app half 6fa7daf, the B6.1
+      workflow 9afe895 (closed at integration; the workflow's first run is
+      S1.40's). Linux verified, other targets unverified until CI
 - [x] **S1.3** `platform::errno` (df-core): `is_cross_device`, `is_exists`,
       `is_not_empty`, `is_not_dir`, `is_dir`, `is_invalid`, `is_transient`, each
       `fn(&io::Error) -> bool`. Unix body compares `raw_os_error()` with the
@@ -151,7 +152,7 @@ has not dropped.
       — done e1e5e8c; the grep holds from bf80031 for everything but tests
       marked `#[cfg(unix)]` (S1.15), which name `std::os::unix` because they test
       Unix semantics, as `00-ground-rules.md` §6 has them do.
-- [>] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
+- [x] **S1.6** `platform::trash`: `git mv crates/df-core/src/ops/trash.rs
       crates/df-core/src/platform/linux/trash.rs`; `ops/trash.rs` becomes a shim
       that `pub use`s the portable surface. The portable surface is:
       `TrashedItem` with its **current** fields (`name`, `original`, `deleted_at`,
@@ -183,8 +184,11 @@ has not dropped.
       `App::refusal(Command::Trash)` is `Some` for a local path; it first runs for
       real on the CI matrix at S1.40. On Linux `available_for` is true for every
       local path, so there is nothing to assert there.
-      — df-core core-seam session, started 2026-09-29: df-core half done 70ad913;
-      the df-app refusal test is the §3 agent's, with S1.34.
+      — done: the df-core half 70ad913; the df-app refusal test,
+      `app::tests::the_trash_is_refused_where_the_platform_has_none`, with
+      S1.34, done, uncommitted 2026-09-29. Linux verified, other targets
+      unverified until CI (the test is compiled out on Linux and first runs on
+      the macOS and Windows runners)
 - [x] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
       `03-paths.md` P3.4. In this phase create the module with the **Unix body only**
       and a Windows body good enough to compile: `dev = 0`, `ino = 0`, `nlink = 1`,
@@ -740,12 +744,26 @@ their native clipboards *are* synchronous.
       `preview/doc/font.rs:907–918` font-root helper (add the Windows root
       `C:\Windows\Fonts` there instead of gating). Done when: `cargo test -p df-app
       --no-run` succeeds on the macOS and Windows runners.
-- [ ] **S1.34** `remote.rs:419–421` uses `df_core::fs::names::suffixed` (moved in
+- [x] **S1.34** `remote.rs:419–421` uses `df_core::fs::names::suffixed` (moved in
       S1.6). `app.rs:4055–4190` (`show_trash`, `trash_restore`, `trash_purge`) call
       the `platform::trash` surface; on a target where `Trash::home()` is
       `Unsupported`, `App::refusal(Command::ShowTrash)` (and `Trash`) returns the
       message and the key toasts. Done when: the refusal test from S1.6 passes and
       Linux is unchanged.
+      *As built:* `free_name` takes `suffixed` and `MAX_TRASH_COLLISIONS` from
+      `df_core::fs::names`. The three trash functions already called the
+      platform surface through the `ops::trash` shim (S1.6), so they did not
+      change; what is new is the refusal, in `App::refusal`: where
+      `Trash::home()` is `Err(DfError::Unsupported(_))` — the stub, never Linux,
+      whose only `Err` is a missing `$HOME` — `Command::OpenTrash` (the plan's
+      `ShowTrash`: `g t`), `Command::EmptyTrash` and `Command::Trash` answer
+      "Trash is not available on this platform", so the key toasts it and the
+      app menu greys the rows. `Trash` is refused only off a remote tab: `d`
+      over the link is a delete on the server, which has no local trash in
+      it. The S1.6 test asserts the three refusals and that `d` toasts and
+      deletes nothing; compiled with its gate lifted it builds on Linux and
+      fails there, as it should. — done, uncommitted 2026-09-29, Linux
+      verified, other targets unverified until CI
 - [x] **S1.35** `platform::appearance` (df-app): the desktop's light or dark for
       `[flavor] mode = "auto"` (the portal read and its `SettingChanged` watcher,
       which arrived after this plan was written). Move `src/appearance.rs` to
@@ -1013,6 +1031,13 @@ their native clipboards *are* synchronous.
   The Windows opener stub's error carries "Running programs is not available
   on this platform" rather than the bare `Unsupported` kind, whose text
   ("unsupported") is what the window would otherwise toast.
+- 2026-09-29 — S1.34: the refusal asks `Trash::home()` whether the error is
+  `Unsupported`, so Linux, whose only `Err` there is a missing `$HOME`, never
+  sees it. It covers `EmptyTrash` beside the plan's `Trash` and `ShowTrash`
+  (which is `OpenTrash`), since emptying a trash the platform does not have
+  is the same missing feature, and not `d` on a remote tab, which deletes on
+  the server. The words are the stub's `DfError::Unsupported("Trash")` text
+  written out, because `App::refusal` answers `&'static str`.
 
 ## Open questions
 

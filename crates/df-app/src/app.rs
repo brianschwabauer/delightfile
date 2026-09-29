@@ -10239,6 +10239,21 @@ impl App {
         if command == Command::TerminalHere && self.tab().virtual_kind().is_some() {
             return Some("Terminals open on local folders");
         }
+        // A platform with no trash yet (the stub on macOS and Windows, until
+        // M2.8 and W4.7): `d` on this disk, the trash view and emptying it are
+        // turned away in the stub's own words, rather than a job failing or a
+        // view opening on nothing. `d` over the link is a delete on the
+        // server, which no local trash is part of. On Linux the home trash is
+        // `Err` only without `$HOME`, which is not this refusal.
+        if (matches!(command, Command::OpenTrash | Command::EmptyTrash)
+            || (command == Command::Trash && self.tab().remote.is_none()))
+            && matches!(
+                df_core::ops::Trash::home(),
+                Err(df_core::DfError::Unsupported(_))
+            )
+        {
+            return Some("Trash is not available on this platform");
+        }
         // Tags are an attribute on a file on this machine's disk, and an
         // archive's rows, a remote service's and the trash's are not that —
         // one sentence for all three, since the reason is the same. A
@@ -22055,6 +22070,25 @@ mod tests {
     /// right thing.
     fn toast_text(app: &App) -> Option<&str> {
         app.toasts.current().map(|toast| toast.message.as_str())
+    }
+
+    /// A platform with no trash yet (macOS and Windows until M2.8 and W4.7):
+    /// `d` on a local file, the trash view and emptying it are refused in the
+    /// stub's own words, and the key says so and deletes nothing (S1.6,
+    /// S1.34). Linux always has a home trash, so there is nothing to refuse
+    /// there and this runs on the other two.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn the_trash_is_refused_where_the_platform_has_none() {
+        let mut app = Fixture::new("no-trash", &["a.txt"]);
+        let now = Instant::now();
+        let refusal = Some("Trash is not available on this platform");
+        for command in [Command::Trash, Command::OpenTrash, Command::EmptyTrash] {
+            assert_eq!(app.refusal(command), refusal, "{command:?}");
+        }
+        app.run(Command::Trash, 10, now);
+        assert_eq!(toast_text(&app), refusal);
+        assert!(app.files.join("a.txt").exists(), "d deleted nothing");
     }
 
     /// **The view scale is the tab's.** `=` in one tab moves that tab and

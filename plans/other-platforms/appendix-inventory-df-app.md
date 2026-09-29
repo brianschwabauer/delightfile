@@ -40,9 +40,9 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 2133 | `self.nerd = crate::icons::install(&gfx.egui_ctx)` | Linux-only (font dirs) | App::init_gfx | See icons.rs. ✓ S1.29 |
 | 2182-2193 | `self.data_device = Self::start_data_device(event_loop, &gfx.window, self.waker.named("wayland"))`; `log::info!("no wayland data device — drag out and drop in are off")` | Linux-only | App::init_gfx | — ✓ S1.22 |
 | 2198-2229 | `fn start_data_device(event_loop: &ActiveEventLoop, window: &Window, waker: Waker) -> Option<crate::wayland::DataDevice>`: `let RawDisplayHandle::Wayland(display) = event_loop.display_handle().ok()?.as_raw() else { return None }` (2211), same for `RawWindowHandle::Wayland(surface)` (2214), then `#[allow(unsafe_code)] unsafe { crate::wayland::DataDevice::start(display.display, surface.surface, waker) }` (2224-2227) | Linux-only (compile via `crate::wayland`; runtime `None` on non-Wayland handles) | App::init_gfx (2189) | The only `unsafe` call site into `crate::wayland` outside that module (comment 2220-2222). ✓ S1.22 |
-| 4055-4078 | `fn show_trash`: `df_core::ops::Trash::home()` (4057), `trash.list()` | df-core seam (freedesktop trash) | App::open_trash (4044), App::refresh_trash (4081) | See trashview.rs; df-core owns the trash layout. |
-| 4105-4140 | `fn trash_restore` → `crate::trashview::restore_refusal` (4115), `df_core::ops::trash::restore(item, &ctx)` (4119) | df-core seam | key `Enter`/`r` in trash view | — |
-| 4142-4190 | `fn trash_purge` → FnJob `df_core::ops::purge(item, ctx)` (4158) | df-core seam | `D`, "Empty trash" (4410-4472) | — |
+| 4055-4078 | `fn show_trash`: `df_core::ops::Trash::home()` (4057), `trash.list()` | df-core seam (freedesktop trash) | App::open_trash (4044), App::refresh_trash (4081) | See trashview.rs; df-core owns the trash layout. ✓ S1.34 |
+| 4105-4140 | `fn trash_restore` → `crate::trashview::restore_refusal` (4115), `df_core::ops::trash::restore(item, &ctx)` (4119) | df-core seam | key `Enter`/`r` in trash view | — ✓ S1.34 |
+| 4142-4190 | `fn trash_purge` → FnJob `df_core::ops::purge(item, ctx)` (4158) | df-core seam | `D`, "Empty trash" (4410-4472) | — ✓ S1.34 |
 | 5107-5134 | `fn launch(&mut self, choice: &open::Choice, paths: Vec<PathBuf>, now: Instant)` → `open::spawn_detached(&choice.command, &paths, &cwd)` (5131) | Linux-only (runtime: opener strings) + Unix-only (via open.rs) | `o`/`O`/menu Open-with | Opener strings are df-core `DEFAULT_OPENERS` (crates/df-core/src/config.rs:192-275): `setsid uwsm-app -- …`, `"${TERMINAL:-ghostty}"`, `zeditor`, `google-chrome-stable`, `delightviewer`, `pinta`, `xdg-open "$1"`, `mpv`, `system-cmd-*`, `$(dirname "$1")`, `>/dev/null 2>&1`. |
 | 5136-5184 | `fn run_shell(&mut self, snippet: &str, paths: Vec<PathBuf>, block: bool, now: Instant)`: non-block → `open::spawn_detached` (5145); block → FnJob (Lane::Micro) → `open::run_blocking(&snippet, &paths, &cwd)` (5162) | Unix-only (compile via open.rs:131) | `;`, `:`, `block = true` openers | — |
 | 5528-5561 | `fn route_keys`: `press.text` used only when `press.chord` is `None` (multi-char commits 5536-5549, single char fallback 5553-5559) | macOS-differs | App::frame (13696) | See §3. |
@@ -624,9 +624,9 @@ Listed as seams only; df-core is covered by the other inventory.
 | app.rs:1834 (App::new) | `StateStore::load()` | state file location |
 | portal/request.rs:351 (Setup::from_env) | `df_core::state::state_path_from(XDG_STATE_HOME, HOME)` | XDG state path |
 | app.rs:1864 (App::assemble) | `Watcher::start` | filesystem watcher (inotify per README/workspace comment "df-core calls inotify through it", format.rs:197) |
-| app.rs:4057, 4119, 4158 | `ops::Trash::home()`, `ops::trash::restore`, `ops::purge` | freedesktop trash |
+| app.rs:4057, 4119, 4158 | `ops::Trash::home()`, `ops::trash::restore`, `ops::purge` | freedesktop trash ✓ S1.34 |
 | mounts.rs:658 | `ops::trash::uid()` | `libc::getuid` (df-core ops/trash.rs:588-594) |
-| remote.rs:419-421 | `ops::trash::{MAX_TRASH_COLLISIONS, suffixed}` | 255-byte name clip |
+| remote.rs:419-421 | `ops::trash::{MAX_TRASH_COLLISIONS, suffixed}` | 255-byte name clip ✓ S1.34 |
 | app.rs:4516 | `ops::symlink(target, &link, kind)` | symlink creation |
 | app.rs:3209, 3219, 3514, 3640, … | `vfs::Vfs::start`, `download_to_temp`, `upload_new`, … | sftp via ssh; temp dir `$TMPDIR/delightfile-vfs-<pid>/` |
 | app/syncing.rs:123 | `sync::rsync::available()` | spawns rsync/ssh (df-core sync/rsync.rs) |

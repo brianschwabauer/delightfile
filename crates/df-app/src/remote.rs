@@ -426,9 +426,9 @@ fn free_name(name: &str, taken: &[Entry], claimed: &[String]) -> Option<String> 
         return Some(name.to_string());
     }
     let as_os = std::ffi::OsString::from(name);
-    (1..df_core::ops::trash::MAX_TRASH_COLLISIONS)
+    (1..df_core::fs::names::MAX_TRASH_COLLISIONS)
         .map(|n| {
-            df_core::ops::trash::suffixed(&as_os, n)
+            df_core::fs::names::suffixed(&as_os, n)
                 .to_string_lossy()
                 .into_owned()
         })
