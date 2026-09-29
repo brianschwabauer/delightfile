@@ -82,6 +82,12 @@ pub use trash::{purge, Trash, TrashedItem};
 /// lexically, which is wrong in the presence of symlinked parents — so it is
 /// only ever used for *comparisons and display*, never as the path an
 /// operation actually acts on. Operations use the path the caller gave them.
+///
+/// Absolute as the platform reads it: on Windows `\x` and `C:x` are not, and
+/// resolve against the current directory as `current_dir().join` does — onto
+/// its drive. The prefix and root are components like any other and are
+/// never popped (`C:\a\..\..` is `C:\`); a path that pops to nothing is its
+/// root ([`crate::path::root_of`]).
 pub fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     let absolute = if path.is_absolute() {
@@ -104,7 +110,7 @@ pub fn normalize(path: &Path) -> PathBuf {
         }
     }
     if out.as_os_str().is_empty() {
-        out.push("/");
+        return crate::path::root_of(&absolute);
     }
     out
 }
@@ -240,10 +246,27 @@ mod tests {
 
     #[test]
     fn normalize_cleans_lexically() {
-        assert_eq!(normalize(Path::new("/a/./b/../c")), Path::new("/a/c"));
-        assert_eq!(normalize(Path::new("/a/b/../..")), Path::new("/"));
-        assert_eq!(normalize(Path::new("/")), Path::new("/"));
-        assert_eq!(normalize(Path::new("/a//b")), Path::new("/a/b"));
+        if cfg!(unix) {
+            assert_eq!(normalize(Path::new("/a/./b/../c")), Path::new("/a/c"));
+            assert_eq!(normalize(Path::new("/a/b/../..")), Path::new("/"));
+            assert_eq!(normalize(Path::new("/")), Path::new("/"));
+            assert_eq!(normalize(Path::new("/a//b")), Path::new("/a/b"));
+        }
+        if cfg!(windows) {
+            assert_eq!(normalize(Path::new(r"C:\a\.\b\..\c")), Path::new(r"C:\a\c"));
+            assert_eq!(normalize(Path::new(r"C:\a\b\..\..")), Path::new(r"C:\"));
+            assert_eq!(normalize(Path::new(r"C:\")), Path::new(r"C:\"));
+            assert_eq!(normalize(Path::new(r"C:\a\\b")), Path::new(r"C:\a\b"));
+            assert_eq!(normalize(Path::new("C:/a/b")), Path::new(r"C:\a\b"));
+            assert_eq!(
+                normalize(Path::new(r"\\s\sh\a\..")),
+                Path::new(r"\\s\sh\"),
+                "a share's root is a root"
+            );
+            // No drive: the current directory's.
+            let drive = crate::path::root_of(&std::env::current_dir().unwrap());
+            assert_eq!(normalize(Path::new(r"\a")), drive.join("a"));
+        }
     }
 
     #[test]

@@ -187,7 +187,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 73–98 | `normalize`: `path.is_absolute()`, else `current_dir().join(path)`; pushes `"/"` when empty (95) | Windows-differs | ~30 core callers incl. core:ops/delete.rs:check_deletable, core:ops/journal.rs:record, core:ops/link.rs:symlink, core:ops/paste.rs:carried, core:ops/trash.rs:trash, for_path, mount_point_of, core:sync/plan.rs:roots, walk | On Windows `is_absolute` needs a prefix and a root, so `\foo` and `/foo` are relative |
+| 73–98 | `normalize`: `path.is_absolute()`, else `current_dir().join(path)`; pushes `"/"` when empty (95) | Windows-differs | ~30 core callers incl. core:ops/delete.rs:check_deletable, core:ops/journal.rs:record, core:ops/link.rs:symlink, core:ops/paste.rs:carried, core:ops/trash.rs:trash, for_path, mount_point_of, core:sync/plan.rs:roots, walk | On Windows `is_absolute` needs a prefix and a root, so `\foo` and `/foo` are relative ✓ P3.12 |
 | 109–120 | `is_url`: `use std::os::unix::ffi::OsStrExt`; scans `as_bytes()` for `://` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | ✓ S1.16 ✓ P3.10 |
 | 142–149 | `resolved`: `std::fs::canonicalize(path)` / `canonicalize(parent).join(name)` | Windows-differs | `is_ancestor_resolved` ← core:ops/paste.rs:plan_paste, core:sync/plan.rs:roots; `is_strict_ancestor_resolved` ← core:ops/copy.rs:copies_into_itself, move_path | Windows `canonicalize` returns `\\?\`-prefixed verbatim paths |
 | 196–204 | `trim_trailing_slash`: `as_bytes()`, trims `b'/'`, `OsStr::from_bytes` | Unix-only | core:ops/delete.rs:remove_tree, remove_tree_unchecked | `\` is also a separator on Windows ✓ S1.16 ✓ P3.10 |
@@ -1731,7 +1731,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| ops.rs:94–96 | `normalize` returns `"/"` when components pop to empty | Windows-differs | ~30 callers | |
+| ops.rs:94–96 | `normalize` returns `"/"` when components pop to empty | Windows-differs | ~30 callers | ✓ P3.12 |
 | ops/delete.rs:35 | Root rail `target == Path::new("/")` | Windows-differs | `check_deletable_here` | |
 | ops/delete.rs:63 | cwd fallback `PathBuf::from("/")` | Windows-differs | as above | |
 | ops/create.rs:145 | Error text falls back to `Path::new("/")` | Windows-differs | `rename` | Display only |

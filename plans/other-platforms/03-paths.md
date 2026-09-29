@@ -244,12 +244,19 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 
 ## 3. Literal `/` and the root (appendix §3.2, §3.3)
 
-- [ ] **P3.12** `ops.rs:73–98` (`normalize`): pop components with `Path::components`
+- [x] **P3.12** `ops.rs:73–98` (`normalize`): pop components with `Path::components`
       keeping `Prefix` and `RootDir`; the empty case yields `path::root_of`. On
       Windows `is_absolute` is false for `\foo` and `/foo`; both resolve against the
       current directory's drive, which is what `current_dir().join` does. Done when:
       the existing `normalize` tests pass on Linux and a Windows-shaped test
-      (`C:\a\b\..\..` → `C:\`) exists (built only under `cfg!(windows)`).
+      (`C:\a\b\..\..` → `C:\`) exists (built only under `cfg!(windows)`). — done
+      (port/paths). The walk already went by `components` and `PathBuf::pop`,
+      which never pops a prefix or a root; the one change is the empty case,
+      `root_of` instead of `/` (on Unix `/` either way). The Linux asserts of
+      `normalize_cleans_lexically` run under `cfg!(unix)` as they were, beside
+      Windows ones (`C:\a\b\..\..`, a share's root, `\a` onto the current
+      drive) under `cfg!(windows)` (P3.30: bin 1 for the root, bin 2 for the
+      literals).
 - [ ] **P3.13** Root rails and fallbacks: `ops/delete.rs:35, 63`, `ops/create.rs:145`,
       `ops/link.rs:88`, `fs/entry.rs:104–109` (a path with no `file_name` is a root:
       its display name is `path::segments(p)[0].label`). Done when: no
