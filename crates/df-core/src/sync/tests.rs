@@ -469,6 +469,11 @@ fn a_sync_copies_the_new_and_the_changed_and_touches_nothing_else() {
     let extra = t.file("dst/photos/only-here.jpg", b"extra");
     let dest = t.join("dst");
     let same_before = std::fs::metadata(&same).unwrap();
+    let identity = |meta: &std::fs::Metadata| {
+        let id = crate::platform::meta::identity(&same, meta).unwrap();
+        (id.dev, id.ino)
+    };
+    let same_before_id = identity(&same_before);
 
     let plan = quick(&[photos], &dest);
     let report = execute(&plan, Mode::Update, Verify::Copied, &TaskCtx::detached());
@@ -488,10 +493,7 @@ fn a_sync_copies_the_new_and_the_changed_and_touches_nothing_else() {
     );
     // The unchanged file is the same file: same inode, same date, not rewritten.
     let same_after = std::fs::metadata(&same).unwrap();
-    assert_eq!(
-        crate::platform::meta::ino(&same_after),
-        crate::platform::meta::ino(&same_before)
-    );
+    assert_eq!(identity(&same_after), same_before_id);
     assert_eq!(
         same_after.modified().unwrap(),
         same_before.modified().unwrap()

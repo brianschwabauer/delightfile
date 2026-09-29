@@ -35,7 +35,7 @@
 //! | `fs` | `set_times(path, atime, mtime) -> Result<()>` (not through a link) | `utimensat`, `libc::UTIME_OMIT` (unix) | unix | `File::set_times` on the reparse point |
 //! | `fs` | `sync_dir(dir) -> Result<()>` | `fsync`, `EINVAL` tolerated (unix) | unix | `Ok(())` |
 //! | `fs` | `write_all_at(file, data, offset) -> io::Result<()>` | `FileExt::write_all_at` (unix) | unix | `seek_write` loop |
-//! | `fs` | `same_file(a, b) -> io::Result<bool>` (not through a link) | `dev` + `ino` (unix) | unix | `Unsupported` (P3.3) |
+//! | `fs` | `same_file(a, b) -> io::Result<bool>` (not through a link) | `dev` + `ino` (unix) | unix | volume serial + file index, through `meta::identity` (P3.3) |
 //! | `fs` | `writable(dir) -> bool` | `access(W_OK)` (unix) | unix | `true` (W4.6) |
 //! | `fs` | `reflink(reader, writer) -> bool` | `FICLONE` | `false` (M2.2) | `false` |
 //! | `fs` | `forget_cached(file, path)` | `posix_fadvise(DONTNEED)` | nothing (M2.7) | nothing |
@@ -49,7 +49,9 @@
 //! | `trash` | Linux only: `TRASHINFO_EXT`, `PURGE_STAMP`, `DATE_SLACK_SECS`, `home_trash_path`, `topdir_trash`, `mount_point_of`, `uid` (the `user` one, re-exported), `trashinfo_text`, `parse_trashinfo`, `encode_path`, `decode_path`, `expired`, `purge_wait`, `Trash::{info_dir, ensure}` | the spec's own vocabulary | — | — |
 //! | `xattr` | `AVAILABLE: bool`; `get_raw(path, name) -> io::Result<Option<Vec<u8>>>`, `list_raw(path) -> io::Result<Vec<String>>`, `set_raw(path, name, value)`, `remove_raw(path, name)`; `quiet`, `is_absent`, `is_unsupported`, `is_not_permitted`: `fn(&io::Error) -> bool` | `l*xattr`, never through a link | nothing to read, writes `Unsupported("Tags")` (open question in 02-macos.md) | same stub |
 //! | `nofollow` | `ready() -> Result<(), String>`; `Finder::{default, folder(anchor, names), open(anchor, path, want_dir)}`; `open_in(dir, name, want_dir)`, `stat_in(dir, name)`, `read_dir_in(dir)`; `set_mode_of(file, mode) -> Result<(), String>`; `swapped(&io::Error) -> bool` (the permissions change's walk) | `O_PATH | O_NOFOLLOW` descriptors named through `/proc/self/fd` | `ready()` refuses: `Unsupported("Permissions")` (M2.28) | same stub (open question in 04-windows.md) |
-//! | `meta` | `dev`, `ino`, `nlink`, `blocks_bytes` `-> u64`; `mode`, `uid`, `gid` `-> u32`; `change_time -> (i64, i64)`; `mtime -> i64`; each `fn(&Metadata)` | `MetadataExt` (unix) | unix | `0`, `0`, `1`, the size; a mode made from the type and read-only flag; `0`, `0`; the last write (W4.5) |
+//! | `meta` | `dev`, `ino`, `nlink`, `blocks_bytes` `-> u64`; `mode`, `uid`, `gid` `-> u32`; `change_time -> (i64, i64)`; `mtime -> i64`; each `fn(&Metadata)` | `MetadataExt` (unix) | unix | `0`, `0`, `1`, the size (W4.35); a mode made from the type and read-only flag; `0`, `0`; the last write |
+//! | `meta` | `Identity { dev, ino, nlink }`; `identity(path, &Metadata) -> io::Result<Identity>` (the `symlink_metadata`: not through a link); `maybe_linked(&Metadata) -> bool` (P3.4) | off the `stat` (unix) | unix | `GetFileInformationByHandle` on a handle opened with `FILE_FLAG_OPEN_REPARSE_POINT`; any regular file may be linked |
+//! | `meta` | `is_hidden(name: &OsStr, &Metadata) -> bool` (the row's own metadata) (P3.4) | a leading dot (unix) | unix: `UF_HIDDEN` not read | a leading dot or `FILE_ATTRIBUTE_HIDDEN` |
 //! | `user` | `uid() -> u32` | `getuid` (unix) | unix | `0` |
 //! | `user` | `cache_suffix() -> String` (the `yazi-<suffix>` thumbnail directory) | the uid (unix) | unix | `"0"`, yazi's `uid_or_zero` |
 //! | `user` | `user_name(uid)`, `group_name(gid)` `-> Option<&'static str>` | `/etc/passwd`, `/etc/group`, read once | `None` (M2.4) | `None` |

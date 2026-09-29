@@ -114,7 +114,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 119 | `from_parts`: `use std::os::unix::fs::MetadataExt` | Unix-only | core:fs/scan.rs:run_scan, scan_blocking; `Entry::read` ← app:app.rs:archive_units, open_local_temp; app:dialog.rs:read; app:search.rs:parse; core:preview/job.rs:build | ✓ S1.7 |
-| 121 | `is_hidden = name.starts_with('.')` | Windows-differs; macOS-differs | core:fs/filter.rs:filter_indices; app:ui.rs:listing; app:spot.rs:from_entry; app:trashview.rs:row_from; app:archive.rs:row | Windows marks hidden files with an attribute bit; macOS also has the `UF_HIDDEN` flag |
+| 121 | `is_hidden = name.starts_with('.')` | Windows-differs; macOS-differs | core:fs/filter.rs:filter_indices; app:ui.rs:listing; app:spot.rs:from_entry; app:trashview.rs:row_from; app:archive.rs:row | Windows marks hidden files with an attribute bit; macOS also has the `UF_HIDDEN` flag ✓ P3.4 |
 | 164 | `classify(kind, &name, mime, meta.mode())` | Unix-only | as line 119 | ✓ S1.7 |
 | 173–175 | `mode: meta.mode(), uid: meta.uid(), gid: meta.gid()` | Unix-only | Field readers: app:spot.rs:from_entry, permissions; app:remote.rs:card_rows; app:format.rs:linemode_text; app:app.rs:set_mode (`chmod` via `PermissionsExt` in df-app) | ✓ S1.7 |
 | 236–270 | `permissions_string`: decodes `st_mode` type bits (0o170000) and rwx/setuid/sticky | Windows-differs | app:format.rs:linemode_text; app:remote.rs:card_rows | |

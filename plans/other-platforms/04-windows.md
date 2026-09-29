@@ -94,7 +94,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       deleted or renamed) → `Gone(dir)` and the handle closes. Done when: a
       Windows-runner test creates a file in a watched temp dir and receives
       `Changed` within one second; another deletes the dir and receives `Gone`.
-- [ ] **W4.5** `platform::meta` real bodies (P3.4 specified them; P3.4 may have
+- [x] **W4.5** `platform::meta` real bodies (P3.4 specified them; P3.4 may have
       shipped the minimal version): `dev` = `GetVolumeInformationW` serial of the
       path's root, cached per root for the process; `ino` = `0` unless the caller
       asks `platform::meta::identity(path) -> io::Result<(u64, u64)>` which opens the
@@ -106,7 +106,13 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       handle per entry is what makes it expensive, and defaulting to `1` when the
       open fails; `blocks_bytes` = `GetCompressedFileSizeW` (so compressed
       and sparse files report their allocated size, matching `st_blocks` intent).
-      Done when: du tests with hard links pass on the runner.
+      Done when: du tests with hard links pass on the runner. — done in Phase 3
+      (P3.4, port/paths), ahead of this phase because some twenty df-core tests
+      hung on it: `identity(path, &meta) -> io::Result<Identity { dev, ino,
+      nlink }>`, all three from one `GetFileInformationByHandle` (so `dev` is the
+      volume serial of the file's own handle, not a per-root cache), asked by
+      `same_file` and, for regular files only (`maybe_linked`), by the du
+      walk's hard-link dedupe. `blocks_bytes` is split out as W4.35.
 - [ ] **W4.6** `platform::fs` Windows bodies S1.5 left as stubs (this task
       supersedes S1.5's `writable`): `symlink` maps
       `ERROR_PRIVILEGE_NOT_HELD` (1314) to `DfError::Op("Creating links needs
@@ -361,6 +367,17 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       icon has no caller here and this task cannot close. Done when: the
       callers land and the windows job's clippy passes without the flag.
 
+## 10. Found in Phase 3
+
+- [ ] **W4.35** `platform::meta::blocks_bytes` on Windows, split from W4.5
+      when P3.4 did its identity half: the allocated size by
+      `GetCompressedFileSizeW` (compressed and sparse files report what they
+      occupy, as `st_blocks` does), in place of the file size. It needs the
+      path, which a `Metadata` does not carry, so it becomes
+      `blocks_bytes(path, &meta)` (Unix: off the `stat`, the path unread) and
+      the du walk's `sizes_of` passes the entry's path. Done when: a du test on
+      the runner sees a sparse file's total below its length.
+
 ## Decisions log
 
 - 2026-09-25 — No hand-written COM; drag-out and Recycle Bin restore deferred.
@@ -370,6 +387,11 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 - (df-app) 2026-09-29 — W4.33 appended: light mode's `auto` (which arrived after
   this plan) reads the XDG portal on Linux; on Windows S1.35 leaves a stub that
   answers nothing, and W4.33 is its native body.
+- 2026-09-29 — W4.5's file identity (volume serial, file index, link count)
+  was done in Phase 3 under P3.4, with P3.3's `same_file`, because the
+  Windows runner's df-core suite could not go green without it; its
+  allocated-size half is W4.35. `windows-sys` 0.52.0 (winit's) is df-core's
+  from that commit, features `Win32_Foundation` and `Win32_Storage_FileSystem`.
 - 2026-09-29 — The appearance body was appended as `W4.31` on the df-app branch
   while the df-core branch took `W4.31` for the job object; at integration the
   job object kept it and the appearance body became `W4.33`

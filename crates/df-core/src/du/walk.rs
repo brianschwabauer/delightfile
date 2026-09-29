@@ -686,7 +686,17 @@ pub fn walk_reusing(
         }
 
         let (blocks, apparent) = sizes_of(&meta);
-        let counted = if crate::platform::meta::nlink(&meta) > 1 {
+        // Asked in two steps because on Windows the link count is behind a
+        // handle: `maybe_linked` is free, and only a file it cannot rule out
+        // pays for `identity`.
+        let linked = if crate::platform::meta::maybe_linked(&meta) {
+            crate::platform::meta::identity(&item.path(), &meta)
+                .ok()
+                .filter(|id| id.nlink > 1)
+        } else {
+            None
+        };
+        let counted = if let Some(id) = linked {
             if seen_links.len() >= options.hardlink_cap {
                 if !link_cap_hit {
                     link_cap_hit = true;
@@ -699,10 +709,7 @@ pub fn walk_reusing(
                 }
                 true
             } else {
-                seen_links.insert((
-                    crate::platform::meta::dev(&meta),
-                    crate::platform::meta::ino(&meta),
-                ))
+                seen_links.insert((id.dev, id.ino))
             }
         } else {
             true

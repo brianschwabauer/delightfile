@@ -49,5 +49,17 @@ miniz_oxide.workspace = true
 # crate — so the build gains a few features rather than a dependency.
 regex.workspace = true
 
+# Windows: the calls std keeps unstable or does not have — first
+# `GetFileInformationByHandle`, whose volume serial and file index say two
+# names are one file (`platform::meta::identity`). Pinned to the version
+# winit 0.30.13 already compiles, so Windows builds no second copy
+# (plans/other-platforms/00-ground-rules.md §3), with only the features the
+# platform module calls.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52.0", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
+
 [lints]
 workspace = true

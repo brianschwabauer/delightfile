@@ -729,6 +729,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "regex",
  "thiserror 2.0.20",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

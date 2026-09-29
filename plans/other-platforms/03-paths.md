@@ -114,7 +114,7 @@ roots, budgets) to sites that already compile everywhere.
       `File::open` with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`.
       Done when: `ops::same_file` is a one-line call to it and every §3.4 row that
       decides an overwrite uses it (see P3.14).
-- [ ] **P3.4** `platform::meta` (the `MetadataExt` surface, appendix §2 `fs::entry`,
+- [x] **P3.4** `platform::meta` (the `MetadataExt` surface, appendix §2 `fs::entry`,
       `du::walk`, `preview::cache`, `archive::write`): `dev(&Metadata) -> u64`,
       `ino`, `nlink`, `mode -> u32`, `uid`, `gid`, `blocks_bytes -> u64`,
       `change_time -> (i64, i64)`, `is_hidden(name: &OsStr, meta: &Metadata) ->
@@ -128,7 +128,18 @@ roots, budgets) to sites that already compile everywhere.
       `UF_HIDDEN` flag hides `~/Library`, which a file manager for power users should
       show). Done when: every `use std::os::unix::fs::MetadataExt` outside
       `platform/` is gone from df-core (`grep` is the test) and `Entry`'s fields are
-      filled through these.
+      filled through these. — done (port/paths). S1.7 had moved the
+      `MetadataExt` surface; this task added `is_hidden` (called by
+      `Entry::from_parts` with the row's own `lstat`) and the real Windows
+      numbers, which a `Metadata` cannot carry on stable Rust: `Identity { dev,
+      ino, nlink }` from `identity(path, &meta)` (Unix: off the `stat`, no
+      syscall; Windows: `GetFileInformationByHandle` on a handle opened with
+      `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`, through
+      `windows-sys` 0.52.0, winit's), and `maybe_linked(&meta)` (Unix `nlink >
+      1`; Windows any regular file), which the du walk asks before paying for a
+      handle. `dev`/`ino`/`nlink` of a bare `Metadata` stay `0`/`0`/`1` on
+      Windows (Decisions log). This is W4.5's identity half, marked done there;
+      `blocks_bytes` by `GetCompressedFileSizeW` became W4.35.
 
 ## 2. Bytes → UTF-8 at every persisted and wire format (appendix §3.1, §3.6)
 
@@ -326,6 +337,16 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 - 2026-09-29 — P3.2: `name_is_valid`'s Unix rule is also public as
   `name_is_valid_permissive`, beside `name_is_valid_strict`, and `key`'s
   Windows fold as `folded`, so that each platform's rule is tested on Linux.
+- 2026-09-29 — P3.4: Windows' volume serial, file index and link count come
+  from `platform::meta::identity(path, &meta)`, not from `dev`/`ino`/`nlink`
+  of a `Metadata`, which stay `0`/`0`/`1` there. Reason: std keeps those
+  fields unstable (`windows_by_handle`) and a `Metadata` has no path to open,
+  so the plan's "volume serial of the path" cannot be read from one. The
+  only callers of the bare three off Linux are the du walk's boundary check,
+  which is right with one device because a walk never follows the reparse
+  point a mounted volume hangs from, and the Linux-only chmod walk. On Unix
+  `identity` reads the `stat` the caller already has, so the du walk makes
+  exactly the calls it made before.
 
 ## Open questions
 

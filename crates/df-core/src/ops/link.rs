@@ -235,13 +235,10 @@ mod tests {
         let target = t.file("t", b"x");
         let link = t.join("l");
         hardlink(&target, &link).unwrap();
-        let a = std::fs::metadata(&target).unwrap();
-        let b = std::fs::metadata(&link).unwrap();
-        assert_eq!(
-            (meta::dev(&a), meta::ino(&a)),
-            (meta::dev(&b), meta::ino(&b))
-        );
-        assert_eq!(meta::nlink(&b), 2);
+        let of = |p: &Path| meta::identity(p, &std::fs::symlink_metadata(p).unwrap()).unwrap();
+        let (a, b) = (of(&target), of(&link));
+        assert_eq!((a.dev, a.ino), (b.dev, b.ino));
+        assert_eq!(b.nlink, 2);
     }
 
     #[test]

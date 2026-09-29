@@ -140,7 +140,7 @@ impl Entry {
         link_meta: std::fs::Metadata,
         tags: bool,
     ) -> Entry {
-        let is_hidden = name.starts_with('.');
+        let is_hidden = crate::platform::meta::is_hidden(std::ffi::OsStr::new(&name), &link_meta);
         let (kind, meta) = if link_meta.file_type().is_symlink() {
             match std::fs::metadata(&path) {
                 Ok(target) => {
