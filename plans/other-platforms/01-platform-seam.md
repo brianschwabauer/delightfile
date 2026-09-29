@@ -597,7 +597,7 @@ their native clipboards *are* synchronous.
       last-resort match. A Linux test pins the order (system directories, then
       `~/.local/share/fonts`, `~/.fonts`). — done cf13fa4, Linux verified, other
       targets unverified until CI
-- [>] **S1.30** `platform::pdfium::{LIBRARY_NAME, candidates()}`: `preview/doc/pdf.rs:41–61`
+- [x] **S1.30** `platform::pdfium::{LIBRARY_NAME, candidates()}`: `preview/doc/pdf.rs:41–61`
       builds its list from them. Linux: `libpdfium.so` and the four paths as today.
       macOS: `libpdfium.dylib`, `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/libpdfium.dylib`
       (the bundle), `~/.local/lib/delightfile/libpdfium.dylib`. Windows: `pdfium.dll`,
@@ -610,20 +610,36 @@ their native clipboards *are* synchronous.
       asserts what holds on every target — the override first when set, and
       every other candidate named `LIBRARY_NAME` — and its two Linux-only
       assertions (the delightfile and delightviewer per-user copies) moved to
-      `platform::linux::pdfium`'s own test. — df-app agent, started 2026-09-29
-- [ ] **S1.31** CLI: `cli.rs:221, 246–252` produce `Outcome::Portal` only when
+      `platform::linux::pdfium`'s own test. — done 99246fe, Linux verified, other
+      targets unverified until CI
+- [>] **S1.31** CLI: `cli.rs:221, 246–252` produce `Outcome::Portal` only when
       `platform::HAS_PORTAL` (a `const bool`, Linux `true`); otherwise `--portal` is
       an unknown flag. `main.rs:89–91` calls `platform::portal::run()`, which exists
       only on Linux; on other targets the `Outcome::Portal` arm is unreachable and is
       written as `Outcome::Portal => platform::portal::run()` with a stub that
       returns `2` after printing "not available on this platform" (so the match
-      stays exhaustive without a cfg in `main.rs`). `main.rs:87` uses
+      stays exhaustive without a cfg in `main.rs`). ~~`main.rs:87` uses
       `std::env::args_os()` with `to_string_lossy` per argument instead of
-      `std::env::args()`, which panics on a non-Unicode argument (a real risk on
-      Windows, harmless on Linux). `USAGE` (`cli.rs:158–189`) is
+      `std::env::args()`~~ — already done, and done better, by 7ad55ad: `main`
+      hands `cli::parse` the `OsString`s themselves, so a non-UTF-8 path is kept
+      byte for byte rather than made lossy (which leaves the Windows half of that
+      to S1.36). `USAGE` (`cli.rs:158–189`) is
       assembled from a portable head plus `platform::cli::EXTRA_USAGE` so the
       `--portal` lines appear only on Linux. Done when: `--help` on the macOS
       runner does not mention the portal (assert in a test that builds the string).
+      *As built:* `--portal` now also serves `org.freedesktop.FileManager1`
+      (2ec71f3), and two other entries name it — `--reveal` ("what Show in folder
+      asks --portal for") and `--chooser-request` ("written by --portal") — so
+      `USAGE` became `cli::usage() -> String`, assembled from portable pieces and
+      three platform ones, `platform::cli::{REVEAL_USAGE, REQUEST_USAGE,
+      EXTRA_USAGE}`: Linux's are its lines as they were (the built binary's
+      `--help` is byte-identical to the baseline's), the others' are the same two
+      entries without the portal and an empty `EXTRA_USAGE`. `--reveal` itself is
+      portable and stays everywhere. The match arm is `"--portal" if
+      platform::HAS_PORTAL`, so elsewhere `--portal` is an unknown option.
+      `cli::tests::the_help_names_the_portal_only_where_there_is_one` asserts
+      `help.contains("portal") == HAS_PORTAL`; `portal_stands_alone` asserts the
+      unknown option where there is none. — df-app agent, started 2026-09-29
 - [ ] **S1.32** Drop-in via winit on every target: add `WindowEvent::HoveredFile`,
       `HoveredFileCancelled`, `DroppedFile` arms to `app.rs:17066–17162` that push
       `platform::desktop::Event::{Enter, Motion, Leave, Drop}` onto a new
@@ -677,6 +693,18 @@ their native clipboards *are* synchronous.
       Linux behaviour is unchanged, and df-app compiles on the macOS and Windows
       runners with the stubs. — done a6b17de, Linux verified (the stubs type-check
       when selected on Linux), other targets unverified until CI
+- [ ] **S1.36** `cli.rs` reads an argument as bytes (arrived with 7ad55ad, after
+      this plan): `parse` asks `OsStrExt::as_bytes(arg).starts_with(b"-")`,
+      `flag` splits `--name=value` on the bytes and rebuilds the value with
+      `OsStr::from_bytes`, and `a_path_that_is_not_utf8_is_kept_byte_for_byte`
+      builds its names with `OsStringExt::from_vec`. It compiles on macOS and not
+      on Windows. Second pass, beside S1.23 and S1.25, because the portable
+      spelling is df-core's: route both through
+      `df_core::platform::os::{as_bytes, from_bytes}` (S1.16, P3.1) — the Linux
+      bytes are the same bytes — and give the test `#[cfg(unix)]` (a name that is
+      not UTF-8 is a Unix path) or a Windows twin with an unpaired surrogate.
+      Done when: `std::os::unix` is gone from `cli.rs`'s non-test code, the `cli`
+      tests pass on Linux, and df-app compiles on the Windows runner.
 
 ## 4. Closing the phase
 
@@ -855,6 +883,13 @@ their native clipboards *are* synchronous.
   test-only `detached` as Linux, and three copies of those would drift. The card
   tests' disk fixture became a plain `Vec<Device>` so it exists where
   `dbus::Interfaces` does not; a Linux test pins it to what `devices_from` makes.
+- (df-app) 2026-09-29 — S1.31: `--help` is assembled from three platform pieces,
+  not one, because `--reveal` and `--chooser-request` name the portal too; Linux's
+  pieces are its old lines verbatim, so its `--help` is byte-identical (checked
+  against the baseline binary). S1.36 added: `cli.rs`'s byte reads of an argument
+  (7ad55ad) do not compile on Windows, and their portable spelling is df-core's
+  `platform::os`, so they wait for the second pass rather than growing a second
+  copy of that helper here.
 
 ## Open questions
 

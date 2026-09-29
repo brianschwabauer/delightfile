@@ -6,7 +6,11 @@
 //! the bodies below are built on, and nothing outside `platform/` may name
 //! them, because no other target has them.
 
+/// Whether `--portal` exists: there is a desktop portal to serve.
+pub const HAS_PORTAL: bool = true;
+
 pub mod appearance;
+pub mod cli;
 mod dbus;
 pub mod device;
 pub mod fonts;

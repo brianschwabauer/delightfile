@@ -132,11 +132,12 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 158-189 | `pub const USAGE`: "delightfile — a keyboard-first file manager for Wayland" (161); `--chooser-file` "(`Ctrl+Enter`)" (170); `--portal` "serve the xdg-desktop-portal file chooser on the session bus; D-Bus starts this, not a person" (184-185) | text (Linux) | `-h`/`--help` | — |
-| 221, 246-252 | `"--portal" => portal = true`; `Outcome::Portal` only when it is the sole argument | Linux-only (feature) | main.rs:91 | — |
+| 158-189 | `pub const USAGE`: "delightfile — a keyboard-first file manager for Wayland" (161); `--chooser-file` "(`Ctrl+Enter`)" (170); `--portal` "serve the xdg-desktop-portal file chooser on the session bus; D-Bus starts this, not a person" (184-185) | text (Linux) | `-h`/`--help` | — ✓ S1.31 |
+| 221, 246-252 | `"--portal" => portal = true`; `Outcome::Portal` only when it is the sole argument | Linux-only (feature) | main.rs:91 | — ✓ S1.31 |
 | 214-217 | `-V`/`--version` → `format!("delightfile {}\n", env!("CARGO_PKG_VERSION"))` | portable | main | — |
 | 449-459 | `pub fn write_cwd_file(path: &Path, cwd: &Path)`: `std::fs::write(path, cwd.as_os_str().as_encoded_bytes())` | Windows-differs (bytes are WTF-8 on Windows; no newline) | App::finish (16359) | Consumer is the `Super+F` shell function / yazi-style wrapper. |
 | 461-478 | `pub fn write_chooser_file(path: &Path, paths: &[PathBuf])`: each `as_encoded_bytes()` + `b'\n'` | Windows-differs | App::finish (16348) | Consumer: termfilechooser wrapper / `portal::request::read_picked`. |
+| 44, 226, 362-372, 541 (at 7ad55ad; row added 2026-09-29 by the df-app agent) | `use std::os::unix::ffi::OsStrExt`; `parse` tests `arg.as_bytes().starts_with(b"-")`; `flag` strips `--name=` off `arg.as_bytes()` and rebuilds the value with `OsStr::from_bytes`; the test `a_path_that_is_not_utf8_is_kept_byte_for_byte` uses `OsStringExt::from_vec` | Unix-only (compile; Windows) | main (`cli::parse(std::env::args_os().skip(1))`) | Arrived with 7ad55ad. Second pass: S1.36 (through `df_core::platform::os`). |
 
 ### src/clipboard.rs (693 lines; non-test 1-501)
 
@@ -216,8 +217,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 1-9 | crate doc "file manager for Wayland"; no crate-level attributes (no `#![windows_subsystem = "windows"]`) | Windows-differs | — | Without the attribute a Windows build is a console-subsystem binary and opens a console window. |
 | 10-65 | unconditional `mod` list including `clipboard` (15), `dbus` (16), `mounts` (34), `portal` (41), `wayland` (63) | Linux-only modules compiled everywhere | — | — ✓ S1.21 |
 | 83-85 | `env_logger::Builder::from_env(Env::default().default_filter_or("info")).format_timestamp_millis().init()` | portable (stderr) | main | — |
-| 87 | `cli::parse(std::env::args().skip(1))` | all platforms | main | `std::env::args()` panics on an argument that is not valid Unicode. |
-| 88-92 | comment "building a loop would open a Wayland connection"; `cli::Outcome::Portal => std::process::exit(portal::run())` | Linux-only | main | — |
+| 87 | `cli::parse(std::env::args().skip(1))` | all platforms | main | `std::env::args()` panics on an argument that is not valid Unicode. ✓ S1.31 |
+| 88-92 | comment "building a loop would open a Wayland connection"; `cli::Outcome::Portal => std::process::exit(portal::run())` | Linux-only | main | — ✓ S1.31 |
 
 ### src/mounts.rs — Linux-only module (see block at end of this section) ✓ S1.21 (worker now `src/platform/linux/mounts.rs`)
 
@@ -502,8 +503,8 @@ Call sites outside the module:
 
 | File:line | fn | Use |
 |---|---|---|
-| main.rs:91 | `main` | `cli::Outcome::Portal => std::process::exit(portal::run())` |
-| cli.rs:221, 246-252 | `cli::parse` | produces `Outcome::Portal` for `--portal` |
+| main.rs:91 | `main` | `cli::Outcome::Portal => std::process::exit(portal::run())` ✓ S1.31 |
+| cli.rs:221, 246-252 | `cli::parse` | produces `Outcome::Portal` for `--portal` ✓ S1.31 |
 | cli.rs:327-448 | `read_request`, `parse_request` | read the TOML `request.rs::request_toml` writes (`--chooser-request`) — the file protocol between the portal process and the picker process |
 | (inbound) request.rs:26 | — | `use crate::cli::TypeFilter;` (= `df_core::fs::TypeFilter`) |
 | (inbound) request.rs:351 | `Setup::from_env` | `df_core::state::state_path_from(var("XDG_STATE_HOME"), var("HOME"))` |

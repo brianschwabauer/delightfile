@@ -159,7 +159,8 @@ impl Chooser {
 pub enum Outcome {
     Run(Args),
     /// `--portal`: no window, just the file-chooser backend and
-    /// `org.freedesktop.FileManager1` on the session bus.
+    /// `org.freedesktop.FileManager1` on the session bus. Only produced where
+    /// there is one ([`crate::platform::HAS_PORTAL`]).
     Portal,
     /// Print this and exit 0 — `--help`, `--version`.
     Print(String),
@@ -169,18 +170,37 @@ pub enum Outcome {
 
 /// The `--help` text. Written out rather than generated: it is the one place a
 /// person reads what the flags are, so it is prose, not a table dump.
-pub const USAGE: &str = "\
+///
+/// In pieces, because three entries differ by platform
+/// ([`crate::platform::cli`]): `--portal` exists only where there is a
+/// desktop portal to serve, and the two flags whose Linux lines say the
+/// portal uses them say nothing of it anywhere else.
+pub fn usage() -> String {
+    use crate::platform::cli::{EXTRA_USAGE, REQUEST_USAGE, REVEAL_USAGE};
+    [
+        USAGE_HEAD,
+        REVEAL_USAGE,
+        USAGE_CHOOSER,
+        REQUEST_USAGE,
+        EXTRA_USAGE,
+        USAGE_TAIL,
+    ]
+    .concat()
+}
+
+/// `--help` down to `--reveal`.
+const USAGE_HEAD: &str = "\
 delightfile — a keyboard-first file manager for Wayland
 
 usage: delightfile [path] [options]
 
   path                   the directory to open (default: the current one);
                          a file opens its directory with the cursor on it
-  --reveal               show the path rather than open it: its folder opens
-                         with the cursor on it, a folder included (what
-                         \"Show in folder\" asks --portal for; needs a path,
-                         and cannot be a --chooser-* dialog)
-  --cwd-file=<path>      write the final directory here when quitting with `q`
+";
+
+/// `--help` from after `--reveal` to `--chooser-request`.
+const USAGE_CHOOSER: &str =
+    "  --cwd-file=<path>      write the final directory here when quitting with `q`
                          (`Q` quits without writing it)
   --chooser-file=<path>  pick rather than open: `Enter` or the Select button
                          (`Ctrl+Enter`) writes the picked paths here, one per
@@ -192,15 +212,10 @@ usage: delightfile [path] [options]
   --chooser-save         the dialog is a save: pick a file to replace, or
                          Save to type a new name
                          (the three above need --chooser-file)
-  --chooser-request=<path>
-                         read the whole dialog from this file instead: its
-                         kind, title, button label, suggested name, starting
-                         folder and file-type filters (written by --portal;
-                         needs --chooser-file, and outranks the switches)
-  --portal               serve the xdg-desktop-portal file chooser, and
-                         org.freedesktop.FileManager1 (\"Show in folder\"), on
-                         the session bus; D-Bus starts this, not a person
-  -h, --help             show this
+";
+
+/// `--help` after the platform's own flags.
+const USAGE_TAIL: &str = "  -h, --help             show this
   -V, --version          show the version
 ";
 
@@ -239,14 +254,16 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Outcome {
             // The POSIX end-of-options marker, so a directory literally called
             // `--help` is still openable.
             "--" => rest_are_paths = true,
-            "-h" | "--help" => return Outcome::Print(USAGE.to_string()),
+            "-h" | "--help" => return Outcome::Print(usage()),
             "-V" | "--version" => {
                 return Outcome::Print(format!("delightfile {}\n", env!("CARGO_PKG_VERSION")))
             }
             "--chooser-multiple" => multiple = true,
             "--chooser-directory" => directory = true,
             "--chooser-save" => save = true,
-            "--portal" => portal = true,
+            // Only where there is a portal to serve; anywhere else it is an
+            // option like any other this program does not have.
+            "--portal" if crate::platform::HAS_PORTAL => portal = true,
             "--reveal" => reveal = true,
             _ => {
                 let found = ["--cwd-file", "--chooser-file", "--chooser-request"]
@@ -257,8 +274,9 @@ pub fn parse<I: IntoIterator<Item = OsString>>(args: I) -> Outcome {
                     });
                 let Some((name, found)) = found else {
                     return Outcome::Fail(format!(
-                        "unknown option `{}`\n\n{USAGE}",
-                        arg.to_string_lossy()
+                        "unknown option `{}`\n\n{}",
+                        arg.to_string_lossy(),
+                        usage()
                     ));
                 };
                 let Flag::Value(path) = found else {
@@ -773,15 +791,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `--portal` is the backend and nothing else.
+    /// `--portal` is the backend and nothing else — where there is one. Where
+    /// there is not, it is an unknown option.
     #[test]
     fn portal_stands_alone() {
-        assert_eq!(parse_str(&["--portal"]), Outcome::Portal);
+        if crate::platform::HAS_PORTAL {
+            assert_eq!(parse_str(&["--portal"]), Outcome::Portal);
+        } else {
+            match parse_str(&["--portal"]) {
+                Outcome::Fail(message) => {
+                    assert!(
+                        message.starts_with("unknown option `--portal`"),
+                        "{message}"
+                    )
+                }
+                other => panic!("--portal parsed as {other:?}"),
+            }
+        }
         assert!(matches!(parse_str(&["--portal", "/tmp"]), Outcome::Fail(_)));
         assert!(matches!(
             parse_str(&["--chooser-file=/tmp/out", "--portal"]),
             Outcome::Fail(_)
         ));
+    }
+
+    /// `--help` names the portal exactly where there is one: its own entry,
+    /// and the two flags whose lines say the portal uses them.
+    #[test]
+    fn the_help_names_the_portal_only_where_there_is_one() {
+        let Outcome::Print(help) = parse_str(&["--help"]) else {
+            panic!("--help did not print");
+        };
+        assert_eq!(
+            help.contains("portal"),
+            crate::platform::HAS_PORTAL,
+            "{help}"
+        );
+        for flag in ["--reveal", "--cwd-file", "--chooser-request", "--help"] {
+            assert!(help.contains(flag), "{flag} is missing from:\n{help}");
+        }
+        assert!(help.ends_with("show the version\n"));
+        // Every entry keeps its indent across the seams between the pieces.
+        assert!(
+            help.lines().all(|line| !line.starts_with('-')),
+            "an entry lost its indent:\n{help}"
+        );
     }
 
     /// `--reveal` marks the path as one to show; it needs a path, and it is
