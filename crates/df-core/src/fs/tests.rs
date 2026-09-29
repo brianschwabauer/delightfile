@@ -1390,6 +1390,23 @@ fn entries_read_kinds_sizes_and_symlinks_off_the_disk() {
     assert_eq!(to_sub.mime, mime::DIR_MIME);
 }
 
+/// A root has no last component, and is named the way the breadcrumb names
+/// it: `/`, or the drive (`C:`) on Windows.
+#[test]
+fn a_root_is_named_as_the_breadcrumb_names_it() {
+    let root = crate::path::root_of(&std::env::temp_dir());
+    let entry = Entry::read(&root).expect("read the root");
+    assert!(entry.is_dir());
+    let label = crate::path::segments(&root)[0].label.clone();
+    assert_eq!(entry.name, label);
+    if cfg!(unix) {
+        assert_eq!(entry.name, "/");
+    }
+    if cfg!(windows) {
+        assert!(entry.name.ends_with(':') || entry.name.starts_with(r"\\"));
+    }
+}
+
 #[test]
 fn permission_strings_read_like_ls() {
     let mut e = file("x");

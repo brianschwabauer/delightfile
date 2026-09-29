@@ -85,7 +85,7 @@ pub fn symlink(target: &Path, link: &Path, kind: LinkKind) -> Result<PathBuf> {
             let dir = link
                 .parent()
                 .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| PathBuf::from("/"));
+                .unwrap_or_else(|| crate::path::root_of(link));
             relative_to(&dir, target)
         }
     };

@@ -10,7 +10,7 @@
 //!
 //! [`check_deletable`] refuses, in order:
 //!
-//! 1. the filesystem root `/`;
+//! 1. a filesystem root: `/`, or on Windows a drive or share (`C:\`);
 //! 2. `$HOME` itself, and anything above it (`/home`), because "delete the
 //!    thing my cursor is on" should never mean "delete every user";
 //! 3. any path at or above the current working directory — the directory the
@@ -32,7 +32,7 @@ use super::{is_ancestor, normalize};
 pub fn check_deletable(path: &Path, cwd: &Path, home: Option<&Path>) -> Result<()> {
     let target = normalize(path);
 
-    if target == Path::new("/") {
+    if crate::path::is_root(&target) {
         return Err(DfError::Op(
             "refusing to delete the filesystem root".to_string(),
         ));
@@ -58,9 +58,9 @@ pub fn check_deletable(path: &Path, cwd: &Path, home: Option<&Path>) -> Result<(
 /// The rails, resolved against the real cwd and `$HOME`.
 pub fn check_deletable_here(path: &Path) -> Result<()> {
     // A process whose cwd has been deleted out from under it still deserves the
-    // other rails, so an unreadable cwd falls back to `/` — which makes the cwd
-    // rail refuse everything rather than nothing.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+    // other rails, so an unreadable cwd falls back to the root the target
+    // hangs from (`/`, or its drive), which the cwd rail then guards.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| crate::path::root_of(path));
     let home = crate::platform::dirs::home();
     check_deletable(path, &cwd, home.as_deref())
 }
@@ -288,6 +288,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("filesystem root"), "{err}");
+    }
+
+    /// Every root the platform has is one: a drive, a share, however spelled.
+    #[test]
+    fn rail_refuses_a_drive_and_a_share() {
+        if !cfg!(windows) {
+            return;
+        }
+        let cwd = Path::new(r"C:\Users\someone\work");
+        let home = Some(Path::new(r"C:\Users\someone"));
+        for root in [r"C:\", "C:/", r"D:\", r"\\server\share", r"\\server\share\"] {
+            let err = check_deletable(Path::new(root), cwd, home).unwrap_err();
+            assert!(err.to_string().contains("filesystem root"), "{root}: {err}");
+        }
+        check_deletable(Path::new(r"D:\junk"), cwd, home).unwrap();
     }
 
     #[test]

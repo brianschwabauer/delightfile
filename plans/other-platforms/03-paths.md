@@ -257,11 +257,18 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       Windows ones (`C:\a\b\..\..`, a share's root, `\a` onto the current
       drive) under `cfg!(windows)` (P3.30: bin 1 for the root, bin 2 for the
       literals).
-- [ ] **P3.13** Root rails and fallbacks: `ops/delete.rs:35, 63`, `ops/create.rs:145`,
+- [x] **P3.13** Root rails and fallbacks: `ops/delete.rs:35, 63`, `ops/create.rs:145`,
       `ops/link.rs:88`, `fs/entry.rs:104–109` (a path with no `file_name` is a root:
       its display name is `path::segments(p)[0].label`). Done when: no
       `Path::new("/")`/`PathBuf::from("/")` outside `platform/` and tests in df-core
-      (`grep` is the test) and the delete-rail tests pass on Linux.
+      (`grep` is the test) and the delete-rail tests pass on Linux. — done
+      (port/paths). The root rail is `path::is_root` of the normalized target
+      (Linux: exactly `/` as before); the unreadable-cwd fallback, the link
+      parent and the rename message fall back to `path::root_of`; `Entry::read`
+      names a root by its first segment, and anything else without a
+      `file_name` as before. The grep finds only test code. New tests: a
+      Windows drive and share refused by the rail, and a root entry named as
+      the breadcrumb names it (P3.30: `rail_refuses_the_root` was bin 1).
 - [ ] **P3.14** Home expansion: `config.rs:767–775` and `state/pins.rs:59, 93`,
       `vfs/config.rs:144–151` all call one `df_core::path::expand_home(text: &str) ->
       String` that uses `platform::dirs::home()` (`HOME` on Unix, `USERPROFILE` on

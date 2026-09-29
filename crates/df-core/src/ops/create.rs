@@ -141,7 +141,10 @@ pub fn rename(from: &Path, to: &Path, force: bool) -> Result<()> {
         return Err(DfError::Op(format!(
             "rename stays in one directory: {} is not in {}",
             to.display(),
-            from.parent().unwrap_or(Path::new("/")).display()
+            from.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| crate::path::root_of(from))
+                .display()
         )));
     }
 

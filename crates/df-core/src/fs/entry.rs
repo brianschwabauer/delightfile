@@ -117,12 +117,18 @@ impl Entry {
     /// Its tags are read when its directory is on a local filesystem.
     pub fn read(path: impl Into<PathBuf>) -> Result<Entry> {
         let path = path.into();
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            // A path with no last component is `/` or `..`; `/` is the only one
-            // that reaches here and it is its own name.
-            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let name = match path.file_name() {
+            Some(n) => n.to_string_lossy().into_owned(),
+            // A path with no last component is a root or ends in `..`; a root
+            // is the only one that reaches here, and is named the way the
+            // breadcrumb names it: `/`, or a drive as `C:`.
+            None if crate::path::is_root(&path) => crate::path::segments(&path)
+                .into_iter()
+                .next()
+                .map(|segment| segment.label)
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            None => path.to_string_lossy().into_owned(),
+        };
         let link_meta =
             std::fs::symlink_metadata(&path).map_err(|e| DfError::io(path.clone(), e))?;
         let tags = path.parent().is_none_or(super::tags::read_here);

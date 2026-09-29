@@ -220,9 +220,9 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 35 | `check_deletable`: `target == Path::new("/")` is the root rail | Windows-differs | `check_deletable_here` ← core:ops/jobs.rs:DeleteJob::run; core:ops/trash.rs:Trash::trash | Drive roots (`C:\`) are not caught by this rail |
+| 35 | `check_deletable`: `target == Path::new("/")` is the root rail | Windows-differs | `check_deletable_here` ← core:ops/jobs.rs:DeleteJob::run; core:ops/trash.rs:Trash::trash | Drive roots (`C:\`) are not caught by this rail ✓ P3.13 |
 | 40–54 | Home and cwd rails via lexical `is_ancestor` | Windows-differs (case) | as above | |
-| 63 | `current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` | Windows-differs | as above | |
+| 63 | `current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` | Windows-differs | as above | ✓ P3.13 |
 | 64 | `std::env::var_os("HOME")` | Windows-differs | as above | Unset on Windows, so the home rail is skipped ✓ S1.17 |
 | 96–111 | `remove_tree`: a symlink is removed with `remove_file` (109) | Windows-differs | `delete_permanent` ← core:ops/jobs.rs:DeleteJob::run, core:ops/trash.rs:purge, core:sync/execute.rs:remove_extras, remove; core:ops/copy.rs:move_cross_device | Windows directory symlinks and junctions are removed with `remove_dir` |
 | 118–130 | `remove_tree_unchecked`: `remove_dir_all` for a real dir, otherwise `remove_file` | Windows-differs | core:ops/copy.rs:copy_tree_with, copy_symlink, copy_dir, move_path; core:ops/create.rs:rename; core:ops/trash.rs:trash | As above |
@@ -240,7 +240,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 40–70 | `relative_to`: strips the shared component prefix of two `normalize`d paths and pushes `..` per `Component::Normal` | Windows-differs | `symlink` (Relative) | Paths on different drives share no `Prefix`, so the remaining `Prefix`/`RootDir` components are pushed onto the result (63–65) |
-| 85–88 | Link parent fallback `PathBuf::from("/")` | Windows-differs | `symlink` | |
+| 85–88 | Link parent fallback `PathBuf::from("/")` | Windows-differs | `symlink` | ✓ P3.13 |
 | 92 | `std::os::unix::fs::symlink(&text, link)` | Unix-only | app:app.rs:link_into | Windows: `symlink_file`/`symlink_dir`, needs privilege ✓ S1.5 |
 
 ### ops/mode.rs (added 2026-09-29: the permissions change postdates the inventory; lines as of 6aee8d1)
@@ -1732,12 +1732,12 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | ops.rs:94–96 | `normalize` returns `"/"` when components pop to empty | Windows-differs | ~30 callers | ✓ P3.12 |
-| ops/delete.rs:35 | Root rail `target == Path::new("/")` | Windows-differs | `check_deletable_here` | |
-| ops/delete.rs:63 | cwd fallback `PathBuf::from("/")` | Windows-differs | as above | |
-| ops/create.rs:145 | Error text falls back to `Path::new("/")` | Windows-differs | `rename` | Display only |
-| ops/link.rs:88 | Link parent fallback `PathBuf::from("/")` | Windows-differs | `symlink` | |
+| ops/delete.rs:35 | Root rail `target == Path::new("/")` | Windows-differs | `check_deletable_here` | ✓ P3.13 |
+| ops/delete.rs:63 | cwd fallback `PathBuf::from("/")` | Windows-differs | as above | ✓ P3.13 |
+| ops/create.rs:145 | Error text falls back to `Path::new("/")` | Windows-differs | `rename` | Display only ✓ P3.13 |
+| ops/link.rs:88 | Link parent fallback `PathBuf::from("/")` | Windows-differs | `symlink` | ✓ P3.13 |
 | ops/trash.rs:568–582 | `mount_point_of` walks `parent()` to the top by `dev` | Unix-only | trash, sync | The top on Windows is a drive root or UNC share |
-| fs/entry.rs:104–109 | A path with no `file_name()` ("`/`") uses the whole path as its name | Windows-differs | `Entry::read` | `C:\` also has no `file_name()` |
+| fs/entry.rs:104–109 | A path with no `file_name()` ("`/`") uses the whole path as its name | Windows-differs | `Entry::read` | `C:\` also has no `file_name()` ✓ P3.13 |
 | rename/facts.rs:159–164 | A file at the root gets an empty `parent` | (portable) | `Facts::stat` | |
 | state/mod.rs:536 | A record key must start with `/` | Windows-differs | `parse` | |
 | du/walk.rs (doc 37–41) | Boundary rule described in terms of `/`, `/proc`, `/mnt` | n/a | | Documentation only |
