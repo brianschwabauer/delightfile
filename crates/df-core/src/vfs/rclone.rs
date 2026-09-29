@@ -1096,7 +1096,7 @@ fn socket_path(service: &Service) -> Result<PathBuf, VfsError> {
         std::process::id(),
         file_safe(&service.name)
     );
-    let uid = crate::ops::trash::uid();
+    let uid = crate::platform::user::uid();
     let mut candidates: Vec<PathBuf> = Vec::new();
     match &service.socket_dir {
         // Only there: a service that says where its socket goes has said

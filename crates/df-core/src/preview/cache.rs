@@ -67,6 +67,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use super::xxh3::xxh3_128;
+use crate::platform;
 
 /// The cache directory's name inside `$TMPDIR`, minus the uid.
 const CACHE_DIR_PREFIX: &str = "yazi-";
@@ -127,7 +128,10 @@ impl KeyHasher {
 /// the call that creates it.
 pub fn cache_dir() -> Option<PathBuf> {
     let mut dir = std::env::temp_dir();
-    dir.push(format!("{CACHE_DIR_PREFIX}{}", uid()));
+    dir.push(format!(
+        "{CACHE_DIR_PREFIX}{}",
+        platform::user::cache_suffix()
+    ));
     dir.is_dir().then_some(dir)
 }
 
@@ -193,21 +197,16 @@ pub fn cached_thumb(path: &Path) -> Option<PathBuf> {
 /// directory cannot be made or `path` cannot be stat'd.
 pub fn store_thumb(path: &Path, skip: usize) -> Option<PathBuf> {
     let mut dir = std::env::temp_dir();
-    dir.push(format!("{CACHE_DIR_PREFIX}{}", uid()));
+    dir.push(format!(
+        "{CACHE_DIR_PREFIX}{}",
+        platform::user::cache_suffix()
+    ));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log::debug!("thumbnail cache dir {} unusable: {e}", dir.display());
         return None;
     }
     let meta = std::fs::metadata(path).ok()?;
     Some(dir.join(cache_key(path, &meta, skip)))
-}
-
-fn uid() -> u32 {
-    // `getuid` cannot fail and touches nothing; std simply does not expose it.
-    #[allow(unsafe_code)]
-    unsafe {
-        libc::getuid()
-    }
 }
 
 #[cfg(test)]

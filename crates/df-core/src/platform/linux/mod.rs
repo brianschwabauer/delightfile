@@ -6,4 +6,4 @@ mod inotify;
 pub mod trash;
 pub mod watch;
 
-pub use super::unix::{errno, meta};
+pub use super::unix::{errno, meta, user};

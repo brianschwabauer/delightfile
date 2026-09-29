@@ -200,14 +200,15 @@ has not dropped.
       outside `platform/` in df-core, Linux tests pass. — df-core core-seam
       session, started 2026-09-29; the remaining hits are tests (S1.15) and
       `vfs/rclone.rs` (S1.51).
-- [ ] **S1.8** `platform::user`: `uid() -> u32` (Unix `getuid`; Windows: `0`, and
+- [x] **S1.8** `platform::user`: `uid() -> u32` (Unix `getuid`; Windows: `0`, and
       **`cache_suffix() -> String`** used by `preview/cache.rs:128–132, 195–212` for
-      `yazi-<suffix>`: Unix the uid, Windows the `USERNAME` env var — confirm yazi's
-      own Windows convention in its source at implementation time and match it,
-      recording the finding in the Decisions log). Callers: `ops/trash.rs:588–594`
+      `yazi-<suffix>`: Unix the uid, Windows ~~the `USERNAME` env var~~ `"0"` — yazi's
+      own Windows convention, confirmed in its source, see the Decisions log). Callers: `ops/trash.rs:588–594`
       (moved), `sync/mod.rs:431, 443–458` (moved), `preview/cache.rs`, and
-      df-app `mounts.rs:gvfs_root` (Linux-only after S1.20). Done when: no
-      `libc::getuid` outside `platform/`.
+      df-app `mounts.rs:gvfs_root` (Linux-only after S1.20), and since the plan was
+      written df-core's own `du::gvfs_root` and `vfs/rclone.rs`'s socket directory.
+      Done when: no `libc::getuid` outside `platform/`. — done SHA_S18,
+      cross-checked locally, CI pending
 - [ ] **S1.9** `platform::thread::lower_priority(nice: i32)`: Linux body from
       `thread.rs:27–43`; the macOS body (a QoS class via
       `pthread_set_qos_class_self_np`, M2.5) is **not** done in this phase because it
@@ -536,6 +537,14 @@ their native clipboards *are* synchronous.
   `MetadataExt::mtime`. `blocks_bytes` is `st_blocks × du::BLOCK_UNIT`, the
   multiplication `du::walk` did, and `du::walk` now reads the apparent size with
   `Metadata::len()` instead of `MetadataExt::size()` — both are `st_size`.
+- 2026-09-29 — S1.8, yazi's Windows cache directory: yazi (sxyazi/yazi at
+  a228e69) builds its temp cache as `env::temp_dir()` joined with
+  `format!("yazi-{}", Uzers::uid_or_zero())` (`yazi-fs/src/xdg.rs`,
+  `Xdg::load_temp_dir`), and `uid_or_zero` is `unix_either!(Self::uid(), 0)`
+  (`yazi-shim/src/uzers.rs`). So the Windows directory is `%TEMP%\yazi-0`, not
+  `yazi-<USERNAME>`: `cache_suffix()` is `"0"` there, and the uid on Unix as
+  before. The Linux trash keeps `uid` as a re-export of `platform::user::uid`,
+  so `ops::trash::uid` still exists on Linux.
 
 ## Open questions
 

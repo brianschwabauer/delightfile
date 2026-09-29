@@ -69,7 +69,7 @@ pub fn gvfs_root() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
-        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", crate::ops::trash::uid())))
+        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", crate::platform::user::uid())))
         .join("gvfs")
 }
 

@@ -258,7 +258,7 @@
 | 524–551 | `topdir_trash`: `.Trash` must be a real dir with the sticky bit (`mode() & 0o1000`); `.Trash/<uid>`; `.Trash-<uid>` at 0o700 | Linux-only | `for_path`; core:sync/mod.rs:trash_for | ✓ S1.6 |
 | 554–564 | `device_of`: `MetadataExt::dev()` of the nearest existing ancestor | Unix-only | `for_path`, `mount_point_of`; core:sync/mod.rs:trash_available, trash_for | ✓ S1.6 |
 | 568–582 | `mount_point_of`: walks `parent()` until `device_of` changes | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows mount points and junctions do not change a `dev` ✓ S1.6 |
-| 588–594 | `uid()`: `libc::getuid()` | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for; app:mounts.rs:gvfs_root | |
+| 588–594 | `uid()`: `libc::getuid()` | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for; app:mounts.rs:gvfs_root | ✓ S1.8 |
 | 609–633 | `fit`: `use std::os::unix::ffi::{OsStrExt, OsStringExt}`; stem/extension clipped as bytes | Unix-only | `suffixed` ← core:ops/paste.rs:unique_name, core:vfs/mod.rs:unique_name, app:remote.rs:free_name; `claim_name` | |
 | 637–646 | `clip`: cuts at a UTF-8 boundary in a byte string | Unix-only (byte model) | `fit` | |
 | 679–691 | `encode_path`: `OsStrExt::as_bytes`, percent-encodes, `/` unreserved | Unix-only | `trashinfo_text` ← `Trash::trash` | ✓ S1.6 |
@@ -268,12 +268,12 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 128–132 | `cache_dir`: `std::env::temp_dir()` + `yazi-{uid()}` | Unix-only (uid) | `thumb_path` ← `cached_thumb` ← app:grid.rs:tile_image, core:preview/job.rs:build | `temp_dir()` is `$TMPDIR` (per-user `/var/folders/…`) on macOS and `%TEMP%` on Windows |
+| 128–132 | `cache_dir`: `std::env::temp_dir()` + `yazi-{uid()}` | Unix-only (uid) | `thumb_path` ← `cached_thumb` ← app:grid.rs:tile_image, core:preview/job.rs:build | `temp_dir()` is `$TMPDIR` (per-user `/var/folders/…`) on macOS and `%TEMP%` on Windows ✓ S1.8 |
 | 137 | `cache_key`: `use std::os::unix::fs::MetadataExt` | Unix-only | `thumb_path`, `store_thumb` | ✓ S1.7 |
 | 143 | `path.hash(&mut h)` via std `Hash for Path` | Windows-differs | `cache_key` | The bytes std's `Path` hash feeds in are platform-specific |
 | 149–151 | ctime from `meta.ctime()`, `meta.ctime_nsec()` | Unix-only | `cache_key` | ✓ S1.7 |
-| 195–204 | `store_thumb`: `temp_dir()` + `yazi-{uid()}`, `create_dir_all` | Unix-only (uid) | app:preview/decode.rs:write_thumb | |
-| 206–212 | `uid()`: `libc::getuid()` | Unix-only | `cache_dir`, `store_thumb` | |
+| 195–204 | `store_thumb`: `temp_dir()` + `yazi-{uid()}`, `create_dir_all` | Unix-only (uid) | app:preview/decode.rs:write_thumb | ✓ S1.8 |
+| 206–212 | `uid()`: `libc::getuid()` | Unix-only | `cache_dir`, `store_thumb` | ✓ S1.8 |
 
 ### rename/facts.rs
 
@@ -1676,7 +1676,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | sync/rsync.rs:232–236 | `endpoint` trims and appends `b'/'` | Unix-only | rsync argv | |
 | sync/rsync.rs:391–393 | `parse_line` trailing `/` means folder | (rsync format) | | |
 | sync/rsync.rs:1206 | `parse_sha256sum` strips `./` | (sha256sum format) | | |
-| preview/cache.rs:130, 197 | `dir.push(format!("yazi-{uid}"))` | Unix-only (uid) | | |
+| preview/cache.rs:130, 197 | `dir.push(format!("yazi-{uid}"))` | Unix-only (uid) | | ✓ S1.8 |
 | archive/tree.rs:452–464 | `normalize` splits on both `/` and `\`, rejoins with `/` | already dual | archive listing | Archive-internal names, not local paths |
 | vfs/mod.rs:140–202 | `VfsPath::{parse,to_url,join,parent,name}` split and join on `/` | Server side (Unix) | vfs, df-app | Remote paths are `String`s, not `PathBuf`s |
 | vfs/conn.rs:493–506 | `wire_path`: `/` root, `starts_with('/')`, `format!("{home}/{raw}")` | Server side | every SFTP request | |
