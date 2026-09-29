@@ -34,7 +34,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 183-194 | `const WL_COPY_SETTLE: Duration = 150 ms` | Linux-only | App::settle_wl_copy (13171-13220), App::next_deadline (16104-16108) | wl-copy fallback settle window. |
 | 979-982 | `fn home() -> Option<PathBuf> { std::env::var_os("HOME").map(PathBuf::from) }` | Windows-differs (runtime) | App::palette_rows (6176, 6183, 6205), App::go_to_path (7945), app/places.rs (88, 352, 358, 365, 414, 429, 444, 478, 495, 502, 507, 515, 563), app/syncing.rs:99 | Only `HOME` is read; used for `~` shortening/expansion and the Places home row. |
 | 1510-1513 | field `data_device: Option<crate::wayland::DataDevice>` | Linux-only (compile, via module) | set App::init_gfx (2188), dropped App::finish (16365) | — ✓ S1.22 |
-| 1782-1800 | `struct WlCopy { child: std::process::Child, message: Option<String>, started: Instant }` | Linux-only (runtime) | App::copy_via_wl_copy, App::settle_wl_copy, App::retire_wl_copy | Holds the running `wl-copy --foreground`. |
+| 1782-1800 | `struct WlCopy { child: std::process::Child, message: Option<String>, started: Instant }` | Linux-only (runtime) | App::copy_via_wl_copy, App::settle_wl_copy, App::retire_wl_copy | Holds the running `wl-copy --foreground`. ✓ S1.23 |
 | 2111-2112 | `fn init_gfx` … `use winit::platform::wayland::WindowAttributesExtWayland;` | Linux-only (compile) | ApplicationHandler::resumed (17057-17064) | winit's `platform::wayland` module is `#[cfg(any(wayland_platform, docsrs))]` (winit src/platform/mod.rs:15-16). ✓ S1.27 |
 | 2114-2124 | `Window::default_attributes().with_title(title).with_inner_size(LogicalSize::new(1400.0, 900.0)).with_name(app_id, app_id)` | Linux-only (compile) | App::init_gfx | `with_name` is the `WindowAttributesExtWayland` method (winit src/platform/wayland.rs:108; X11 has its own at x11.rs:159). These three are the only window attributes set: no icon, no decorations/transparency/theme settings. ✓ S1.27 |
 | 2133 | `self.nerd = crate::icons::install(&gfx.egui_ctx)` | Linux-only (font dirs) | App::init_gfx | See icons.rs. ✓ S1.29 |
@@ -63,9 +63,9 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 12978-13015 | `fn yank_to_system` (`Y`): `clipboard::branch_for` → `offer(Some(mime), …)` / `offer(None, …)` / `offer(Some("text/uri-list"), clipboard::uri_list(&paths), …)` (13008-13013) | Linux-only (via offer) | key `Y` | — |
 | 13048-13075 | `fn copy_piece`: `Piece::Dirname` → `path.parent().unwrap_or(Path::new("/"))` (13061-13065) | Windows-differs | `c c`/`c d`/`c f`/`c n` | — |
 | 13097-13128 | `fn offer(&mut self, mime: Option<&str>, bytes: &[u8], message: String, now: Instant)`: `device.ready() && device.set_selection(crate::clipboard::offer_mimes(mime), bytes.to_vec())` (13110-13113) else `copy_via_wl_copy` (13127) | Linux-only | yank_to_system, copy_file_text, copy_piece, copy contents | — |
-| 13129-13165 | `fn copy_via_wl_copy` → `retire_wl_copy()` (13147), `crate::clipboard::copy(mime, bytes)` (13148) | Linux-only | offer, copy_answered, clipboard_thread_gone, expire_clipboard | — |
-| 13166-13220 | `fn settle_wl_copy`: `state.child.try_wait()` (13175) | Linux-only | frame | — |
-| 13222-13235 | `fn retire_wl_copy` → `crate::clipboard::reap(&mut state.child)` (13233) | Linux-only | copy_via_wl_copy, exiting (17238) | kill + wait. |
+| 13129-13165 | `fn copy_via_wl_copy` → `retire_wl_copy()` (13147), `crate::clipboard::copy(mime, bytes)` (13148) | Linux-only | offer, copy_answered, clipboard_thread_gone, expire_clipboard | — ✓ S1.23 |
+| 13166-13220 | `fn settle_wl_copy`: `state.child.try_wait()` (13175) | Linux-only | frame | — ✓ S1.23 |
+| 13222-13235 | `fn retire_wl_copy` → `crate::clipboard::reap(&mut state.child)` (13233) | Linux-only | copy_via_wl_copy, exiting (17238) | kill + wait. ✓ S1.23 |
 | 13237-13265 | `fn copy_answered(&mut self, ok: bool, now: Instant)` | Linux-only | poll_data_device (12759) | Falls back to wl-copy on refusal. |
 | 13315-13400 | `fn paste_system(&mut self, force: bool, now: Instant)`: native `device.receive(seq, mime.clone())` (13350-13353); else `crate::clipboard::offered_types()` (13361) and `crate::clipboard::paste(&mime)` (13382), both synchronous | Linux-only | `p` with nothing yanked | — |
 | 13402-13455 | `fn paste_into_prompt(&mut self, now: Instant)`: same shape (13423-13426, 13439, 13450) | Linux-only | `ctrl+v` in `[input]` (prompt_key) | — |
@@ -143,14 +143,14 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 42 | `use std::process::{Child, Command, Stdio};` | — | copy/offered_types/paste | — |
-| 208-224 | `fn unreserved(byte)`, `pub fn file_uri(path: &Path) -> String`: `use std::os::unix::ffi::OsStrExt;` (215); percent-encodes every byte of `path.as_os_str().as_bytes()` (217) except `[A-Za-z0-9-._~/]` | Unix-only (compile) | `uri_list` (270) ← dnd::offer (631), App::yank_to_system (13008) | Produces `file://` + the raw path bytes, percent-encoded; assumes the path starts with `/`. |
-| 226-261 | `pub fn parse_file_uri(text: &str) -> Option<PathBuf>`: `use std::os::unix::ffi::OsStringExt;` (232); accepts `file:///…`, `file://localhost/…`; requires `/` after `file://` (245) and keeps it; `PathBuf::from(OsString::from_vec(out))` (260) | Unix-only (compile); Windows-differs (`file:///C:/x` → `/C:/x`) | `parse_uri_list` (281) ← dnd::paths_from (681, 683), App::paste_clipboard_files (13562) | — |
-| 318-325 | `ClipError::Missing` text: "{tool} is not installed — install wl-clipboard" (322) | Linux-only (text) | App::clip_failed | — |
-| 330-383 | `pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<Child, ClipError>`: `Command::new("wl-copy")`, `--foreground`, optional `--type <mime>`, stdin piped, stdout/stderr null (340-353) | Linux-only | App::copy_via_wl_copy (13148) | — |
-| 385-392 | `pub fn reap(child: &mut Child)`: `child.kill()` + `child.wait()` | portable | App::retire_wl_copy (13233) | — |
-| 394-415 | `pub fn offered_types() -> Result<Vec<String>, ClipError>`: `wl-paste --list-types` `.output()` | Linux-only | App::paste_system (13361), App::paste_into_prompt (13439) | Blocking, on the UI thread. |
-| 417-431 | `pub fn paste(mime: &str) -> Result<Vec<u8>, ClipError>`: `wl-paste --no-newline --type <mime>` `.output()` | Linux-only | App::paste_via_wl_paste (12908), App::expire_clipboard (12894), App::paste_system (13382), App::paste_into_prompt (13450) | Blocking, on the UI thread. |
+| 42 | `use std::process::{Child, Command, Stdio};` | — | copy/offered_types/paste | — ✓ S1.23 |
+| 208-224 | `fn unreserved(byte)`, `pub fn file_uri(path: &Path) -> String`: `use std::os::unix::ffi::OsStrExt;` (215); percent-encodes every byte of `path.as_os_str().as_bytes()` (217) except `[A-Za-z0-9-._~/]` | Unix-only (compile) | `uri_list` (270) ← dnd::offer (631), App::yank_to_system (13008) | Produces `file://` + the raw path bytes, percent-encoded; assumes the path starts with `/`. ✓ S1.23 |
+| 226-261 | `pub fn parse_file_uri(text: &str) -> Option<PathBuf>`: `use std::os::unix::ffi::OsStringExt;` (232); accepts `file:///…`, `file://localhost/…`; requires `/` after `file://` (245) and keeps it; `PathBuf::from(OsString::from_vec(out))` (260) | Unix-only (compile); Windows-differs (`file:///C:/x` → `/C:/x`) | `parse_uri_list` (281) ← dnd::paths_from (681, 683), App::paste_clipboard_files (13562) | — ✓ S1.23 |
+| 318-325 | `ClipError::Missing` text: "{tool} is not installed — install wl-clipboard" (322) | Linux-only (text) | App::clip_failed | — ✓ S1.23 |
+| 330-383 | `pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<Child, ClipError>`: `Command::new("wl-copy")`, `--foreground`, optional `--type <mime>`, stdin piped, stdout/stderr null (340-353) | Linux-only | App::copy_via_wl_copy (13148) | — ✓ S1.23 |
+| 385-392 | `pub fn reap(child: &mut Child)`: `child.kill()` + `child.wait()` | portable | App::retire_wl_copy (13233) | — ✓ S1.23 |
+| 394-415 | `pub fn offered_types() -> Result<Vec<String>, ClipError>`: `wl-paste --list-types` `.output()` | Linux-only | App::paste_system (13361), App::paste_into_prompt (13439) | Blocking, on the UI thread. ✓ S1.23 |
+| 417-431 | `pub fn paste(mime: &str) -> Result<Vec<u8>, ClipError>`: `wl-paste --no-newline --type <mime>` `.output()` | Linux-only | App::paste_via_wl_paste (12908), App::expire_clipboard (12894), App::paste_system (13382), App::paste_into_prompt (13450) | Blocking, on the UI thread. ✓ S1.23 |
 
 ### src/dbus.rs — Linux-only module (see block at end of this section) ✓ S1.21 (now `src/platform/linux/dbus.rs`)
 

@@ -15618,13 +15618,21 @@ impl App {
         // for the rest of the session with nobody left to notice it.
         self.retire_wl_copy();
         match crate::clipboard::copy(mime, bytes) {
-            Ok(child) => {
+            Ok(Some(child)) => {
                 log::info!("clipboard: handed {} bytes to wl-copy", bytes.len());
                 self.wl_copy = Some(WlCopy {
                     child,
                     message: Some(message.to_string()),
                     started: now,
                 });
+                true
+            }
+            // A clipboard that copies before it returns (a platform's own,
+            // not a process to watch): already settled, so there is nothing
+            // to wait on and the toast is owed now.
+            Ok(None) => {
+                log::info!("clipboard: copied {} bytes", bytes.len());
+                self.toasts.notice(message.to_string(), now);
                 true
             }
             Err(error) => {

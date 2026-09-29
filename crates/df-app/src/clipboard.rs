@@ -10,7 +10,7 @@
 //! timeout, drag-out already uses. A clipboard *source* on Wayland has to stay
 //! alive to serve its data, and that thread is the thing that stays alive.
 //!
-//! [`copy`], [`offered_types`] and [`paste`] below are what is left of the old
+//! [`copy`], [`offered_types`] and [`paste`] are what is left of the old
 //! answer, and they are now the **fallback**: a session with no seat and no
 //! data device (X11, a compositor without `wl_data_device_manager`, a registry
 //! that did not answer) still copies and pastes by shelling out, exactly as
@@ -34,12 +34,13 @@
 //!
 //! The *decisions* — which branch a file takes, what a `file://` URI looks like
 //! for a name with a newline in it, whether the size cap has been hit — are
-//! pure functions with tests. Only the two `Command` calls at the bottom touch
-//! the world.
+//! pure functions with tests. What touches the world is the platform's
+//! ([`crate::platform::clipboard`]): on Linux the `wl-copy` and `wl-paste`
+//! runs, re-exported here under the names the window has always called.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+
+pub use crate::platform::clipboard::{copy, offered_types, paste, reap};
 
 /// The largest file whose *contents* go on the clipboard. Past this only a
 /// `file://` reference does.
@@ -211,10 +212,17 @@ fn unreserved(byte: u8) -> bool {
 }
 
 /// One path as a `file://` URI.
+///
+/// The bytes are the path's own ([`df_core::platform::os::as_bytes`]),
+/// exactly on Linux and macOS. Only on Windows can a name have none — one
+/// that is not valid Unicode — and that one is spelled lossily: the URI is
+/// for another program to read, and there is no exact spelling to give it.
 pub fn file_uri(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
+    let bytes = df_core::platform::os::as_bytes(path.as_os_str()).unwrap_or_else(|_| {
+        std::borrow::Cow::Owned(path.to_string_lossy().into_owned().into_bytes())
+    });
     let mut uri = String::from("file://");
-    for &byte in path.as_os_str().as_bytes() {
+    for &byte in bytes.iter() {
         if unreserved(byte) {
             uri.push(byte as char);
         } else {
@@ -226,11 +234,9 @@ pub fn file_uri(path: &Path) -> String {
 
 /// The other direction. `None` for anything that is not a local `file://` URI —
 /// a `http://` in a uri-list is somebody's browser drag, and pasting it as a
-/// file would be a lie.
+/// file would be a lie. So is a name this platform cannot spell: bytes that
+/// are not UTF-8, on Windows ([`df_core::platform::os::from_bytes`]).
 pub fn parse_file_uri(text: &str) -> Option<PathBuf> {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt;
-
     let text = text.trim();
     // `file:///path` is the spec's spelling (empty authority); `file://path`
     // is what a great many programs — including `clipboard.sh` — actually
@@ -257,7 +263,9 @@ pub fn parse_file_uri(text: &str) -> Option<PathBuf> {
             i += 1;
         }
     }
-    Some(PathBuf::from(OsString::from_vec(out)))
+    df_core::platform::os::from_bytes(&out)
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// The `text/uri-list` payload for a selection.
@@ -303,14 +311,16 @@ pub fn offer_mimes(mime: Option<&str>) -> Vec<String> {
     }
 }
 
-// ── The fallback calls that touch the world ─────────────────────────────────
+// ── How the fallback fails ──────────────────────────────────────────────────
 
 /// What can go wrong, in the two shapes the caller words differently.
 #[derive(Debug)]
 pub enum ClipError {
-    /// `wl-copy`/`wl-paste` are not on `PATH` — and this path is only reached
-    /// when the data device was not there either, so the copy did not happen
-    /// and it says so in red like any other failure.
+    /// The transport is not there — `wl-copy`/`wl-paste` not on `PATH` on
+    /// Linux, no clipboard at all yet on macOS and Windows — and this path is
+    /// only reached when the data device was not there either, so the copy
+    /// did not happen and it says so in red like any other failure. The
+    /// words are the platform's ([`crate::platform::clipboard::missing`]).
     Missing(&'static str),
     Failed(String),
 }
@@ -318,117 +328,10 @@ pub enum ClipError {
 impl std::fmt::Display for ClipError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClipError::Missing(tool) => {
-                write!(f, "{tool} is not installed — install wl-clipboard")
-            }
+            ClipError::Missing(tool) => f.write_str(&crate::platform::clipboard::missing(tool)),
             ClipError::Failed(message) => f.write_str(message),
         }
     }
-}
-
-/// Put `bytes` on the clipboard, offered as `mime` (or as plain text when it is
-/// `None`) — the **fallback** copy, for a session with no data device.
-///
-/// Returns the running `wl-copy`, which the caller owns and must eventually
-/// [`reap`]. `--foreground` is the whole point: without it `wl-copy` forks a
-/// server and the parent exits zero *before* that server has taken the
-/// selection, so a successful `wait` here says nothing at all about whether the
-/// copy happened — which is exactly the false "Copied" this program used to
-/// show. With it, the process that is serving the selection is the process this
-/// function hands back, and it being alive a moment later is evidence.
-pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<Child, ClipError> {
-    let mut command = Command::new("wl-copy");
-    command.arg("--foreground");
-    if let Some(mime) = mime {
-        command.arg("--type").arg(mime);
-    }
-    // **No `--trim-newline`.** The bytes handed over are the bytes offered:
-    // trimming would eat the final newline of a copied file (changing its
-    // contents) and the terminating CRLF of a `text/uri-list` (making it
-    // invalid). The scripts this is a port of do not trim either.
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => ClipError::Missing("wl-copy"),
-            _ => ClipError::Failed(e.to_string()),
-        })?;
-    // Every failure from here on has a process attached to it, and each one
-    // reaps it: an error return that left `wl-copy` running would be a stranger
-    // holding the clipboard, and one that left it exited but unwaited would be
-    // a zombie for the rest of the session.
-    let Some(mut stdin) = child.stdin.take() else {
-        // Piped a line ago, so this cannot happen — and a copy that silently
-        // succeeded with nothing written is the one way it could go wrong that
-        // the user would never see, so it is an error rather than an `if let`
-        // with no `else`.
-        reap(&mut child);
-        return Err(ClipError::Failed(
-            "wl-copy gave us nothing to write to".to_string(),
-        ));
-    };
-    let written = stdin.write_all(bytes);
-    // Closed before anything waits on the process, or `wl-copy` sits reading a
-    // pipe nobody is going to close.
-    drop(stdin);
-    if let Err(e) = written {
-        reap(&mut child);
-        return Err(ClipError::Failed(e.to_string()));
-    }
-    Ok(child)
-}
-
-/// Stop a `wl-copy` we are done with and collect it.
-///
-/// Both halves. `kill` alone leaves a zombie until this process exits, and
-/// `wait` alone would block forever on a `--foreground` server that is doing
-/// exactly what it was asked to do. Called when a newer copy replaces this one
-/// and when the window quits.
-pub fn reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-/// The mime types the clipboard is currently offering, most specific first —
-/// `wl-paste --list-types`. The fallback for `platform::linux::wayland`'s own mirror of
-/// the selection's offer.
-pub fn offered_types() -> Result<Vec<String>, ClipError> {
-    let output = Command::new("wl-paste")
-        .arg("--list-types")
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => ClipError::Missing("wl-paste"),
-            _ => ClipError::Failed(e.to_string()),
-        })?;
-    if !output.status.success() {
-        // An empty clipboard is an exit code, not a crash: "nothing to paste"
-        // is a legitimate answer and the caller says so in a notice.
-        return Ok(Vec::new());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect())
-}
-
-/// The clipboard's bytes, as `mime`.
-pub fn paste(mime: &str) -> Result<Vec<u8>, ClipError> {
-    let output = Command::new("wl-paste")
-        .arg("--no-newline")
-        .arg("--type")
-        .arg(mime)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => ClipError::Missing("wl-paste"),
-            _ => ClipError::Failed(e.to_string()),
-        })?;
-    if !output.status.success() {
-        return Err(ClipError::Failed("nothing on the clipboard".to_string()));
-    }
-    Ok(output.stdout)
 }
 
 /// Which offered type this paste should ask for, and what to do with it.

@@ -8,6 +8,7 @@ pub const HAS_PORTAL: bool = false;
 
 pub mod appearance;
 pub mod cli;
+pub mod clipboard;
 pub mod device;
 pub mod fonts;
 pub mod gfx;

@@ -489,7 +489,7 @@ their native clipboards *are* synchronous.
       doc links to the Wayland thread's private `Command` and `RECEIVE_TIMEOUT`
       now name `Desktop::set_selection`/`receive` and "time"; nothing else in them
       changed. — done 019d4fe, Linux verified, other targets unverified until CI
-- [ ] **S1.23** `platform::clipboard` (df-app): move the *fallback* transport out of
+- [x] **S1.23** `platform::clipboard` (df-app): move the *fallback* transport out of
       `clipboard.rs:330–431` — `copy`, `reap`, `offered_types`, `paste` — into
       `platform/linux/clipboard.rs` (wl-copy/wl-paste bodies unchanged) with stubs
       elsewhere returning `Err(ClipError::Missing("clipboard"))`. Change `copy`'s
@@ -505,6 +505,22 @@ their native clipboards *are* synchronous.
       `df_core::platform::os::{as_bytes, from_bytes}` (Phase 3 P3.1) instead of
       `OsStrExt`. Done when: Linux tests in `clipboard.rs` pass; df-app compiles on
       all targets.
+      *As built:* `platform/linux/clipboard.rs` holds the four, unchanged but
+      for `copy`'s `Ok(Some(child))`, and `missing(tool)`, the "… install
+      wl-clipboard" words `ClipError::Missing` now asks the platform for;
+      `clipboard.rs` re-exports the four, so the window's calls did not move.
+      The macOS and Windows stubs refuse every call with
+      `ClipError::Missing("clipboard")`, which reads "No clipboard transport on
+      this platform"; their `reap` stops and collects whatever child it is
+      handed, though they never hand one out. `Ok(None)` is answered where
+      `copy` is called: `copy_via_wl_copy` says the toast at once and keeps no
+      `WlCopy`, so `WlCopy`, `settle_wl_copy` and `retire_wl_copy`, which only
+      ever hold a running child, did not change. Off Linux's exact bytes,
+      `file_uri` spells a name that has none (not valid Unicode, Windows only)
+      lossily, and `parse_file_uri` answers `None` for bytes the platform
+      cannot spell (not UTF-8, Windows only). — done, uncommitted 2026-09-29,
+      Linux verified (the stubs type-check when selected on Linux), other
+      targets unverified until CI
 - [x] **S1.24** `platform::mounts` (df-app): `Mounts::start(notify)`, `ask`, `drain`,
       `connect(url) -> Connected`, `list_shares()`, `TERMINAL_MOUNT: Option<&str>`.
       Linux = the moved worker. Stubs: `ask(Request::List)` answers
@@ -918,6 +934,13 @@ their native clipboards *are* synchronous.
   the rclone transport); df-app's appearance bodies became `M2.30` and `W4.33`,
   in `02-macos.md`, `04-windows.md`, their Decisions logs, S1.35 and the two
   stubs' doc comments. No other ID changed.
+- 2026-09-29 — S1.23: `copy`'s `Ok(None)` is answered in `copy_via_wl_copy`
+  (the toast at once, no `WlCopy` kept) rather than by giving `WlCopy` an
+  optional child: a copy already made has nothing to settle or retire. For a
+  name the platform cannot spell (Windows only) `file_uri` is lossy, as
+  `fs::names::fit` is (S1.16), and `parse_file_uri` answers `None`, as a
+  record that cannot be spelled is skipped. Linux is unchanged: both
+  conversions are exact there, and `ClipError::Missing` reads as it did.
 
 ## Open questions
 

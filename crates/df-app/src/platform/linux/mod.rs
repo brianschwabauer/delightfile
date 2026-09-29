@@ -11,6 +11,7 @@ pub const HAS_PORTAL: bool = true;
 
 pub mod appearance;
 pub mod cli;
+pub mod clipboard;
 mod dbus;
 pub mod device;
 pub mod fonts;
