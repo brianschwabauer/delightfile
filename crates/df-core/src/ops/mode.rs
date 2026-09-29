@@ -61,10 +61,11 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
+use crate::platform::meta;
 use crate::tasks::TaskCtx;
 use crate::text::grouped;
 use crate::{DfError, Result};
@@ -561,7 +562,7 @@ pub fn plan(
             Err(e) => plan.errors.push((target.clone(), lookup_failed(&e))),
             Ok((_, meta)) if meta.file_type().is_symlink() => plan.links += 1,
             Ok((dir, meta)) if recursive && meta.is_dir() => {
-                let mode = searchable(grid.apply(meta.mode()));
+                let mode = searchable(grid.apply(meta::mode(&meta)));
                 plan.pairs.push(Planned {
                     path: target.clone(),
                     mode,
@@ -570,7 +571,7 @@ pub fn plan(
             }
             Ok((_, meta)) => plan.pairs.push(Planned {
                 path: target.clone(),
-                mode: grid.apply(meta.mode()),
+                mode: grid.apply(meta::mode(&meta)),
             }),
         }
     }
@@ -622,7 +623,7 @@ pub fn plan(
                 Err(e) => plan.errors.push((path, e.to_string())),
                 Ok(meta) if meta.file_type().is_symlink() => plan.links += 1,
                 Ok(meta) if meta.is_dir() => {
-                    let mode = searchable(grid.apply(meta.mode()));
+                    let mode = searchable(grid.apply(meta::mode(&meta)));
                     plan.pairs.push(Planned {
                         path: path.clone(),
                         mode,
@@ -631,7 +632,7 @@ pub fn plan(
                 }
                 Ok(meta) => plan.pairs.push(Planned {
                     path,
-                    mode: grid.apply(meta.mode()),
+                    mode: grid.apply(meta::mode(&meta)),
                 }),
             }
         }
@@ -822,7 +823,7 @@ fn set_one(finder: &mut Finder, anchor: &Path, pair: &Planned) -> std::result::R
                 Missed::Failed(lookup_failed(&e))
             }
         })?;
-    let before = meta.mode();
+    let before = meta::mode(&meta);
     if expected == 0 && meta.file_type().is_symlink() {
         return Ok(Set::Link);
     }
@@ -834,14 +835,14 @@ fn set_one(finder: &mut Finder, anchor: &Path, pair: &Planned) -> std::result::R
         return Ok(Set::Unchanged);
     }
     set_mode_of(&file, target).map_err(Missed::Failed)?;
-    let after = file.metadata().map(|meta| meta.mode()).unwrap_or(target);
+    let after = file.metadata().map(|m| meta::mode(&m)).unwrap_or(target);
     Ok(Set::Changed(ModeChange {
         path: pair.path.clone(),
         before,
         after,
         depth,
-        dev: meta.dev(),
-        ino: meta.ino(),
+        dev: meta::dev(&meta),
+        ino: meta::ino(&meta),
     }))
 }
 
@@ -1051,7 +1052,7 @@ pub(super) fn redo(changes: &[ModeChange], ctx: &TaskCtx) -> Redone {
             Ok(file) => {
                 let after = file
                     .metadata()
-                    .map(|meta| meta.mode())
+                    .map(|m| meta::mode(&m))
                     .unwrap_or(change.after);
                 set[index] = Some(ModeChange {
                     after,
@@ -1082,19 +1083,19 @@ pub(super) fn redo(changes: &[ModeChange], ctx: &TaskCtx) -> Redone {
 /// Whether a path is still the file the change set, with the `st_mode` the
 /// undo put back, and the sentence that says what moved if not.
 fn still_as_put_back(change: &ModeChange, now: &std::fs::Metadata) -> Result<()> {
-    if now.file_type().is_symlink() || now.mode() & FILE_TYPE != change.before & FILE_TYPE {
+    if now.file_type().is_symlink() || meta::mode(now) & FILE_TYPE != change.before & FILE_TYPE {
         return Err(DfError::Op(format!(
             "cannot redo: {} is not the same kind of file any more",
             change.path.display()
         )));
     }
-    if (now.dev(), now.ino()) != (change.dev, change.ino) {
+    if (meta::dev(now), meta::ino(now)) != (change.dev, change.ino) {
         return Err(DfError::Op(format!(
             "cannot redo: {} is not the file that was changed — it was replaced since",
             change.path.display()
         )));
     }
-    if now.mode() != change.before {
+    if meta::mode(now) != change.before {
         return Err(DfError::Op(format!(
             "cannot redo: the permissions of {} have changed since",
             change.path.display()
@@ -1130,19 +1131,19 @@ fn find(finder: &mut Finder, change: &ModeChange) -> io::Result<(File, std::fs::
 /// Whether a path is still the file the change set, with the `st_mode` it
 /// left, and the sentence that says what moved if not.
 fn still_as_left(change: &ModeChange, now: &std::fs::Metadata) -> Result<()> {
-    if now.file_type().is_symlink() || now.mode() & FILE_TYPE != change.after & FILE_TYPE {
+    if now.file_type().is_symlink() || meta::mode(now) & FILE_TYPE != change.after & FILE_TYPE {
         return Err(DfError::Op(format!(
             "cannot undo: {} is not the same kind of file any more",
             change.path.display()
         )));
     }
-    if (now.dev(), now.ino()) != (change.dev, change.ino) {
+    if (meta::dev(now), meta::ino(now)) != (change.dev, change.ino) {
         return Err(DfError::Op(format!(
             "cannot undo: {} is not the file that was changed — it was replaced since",
             change.path.display()
         )));
     }
-    if now.mode() != change.after {
+    if meta::mode(now) != change.after {
         return Err(DfError::Op(format!(
             "cannot undo: the permissions of {} have changed since",
             change.path.display()
@@ -1191,7 +1192,7 @@ mod tests {
     }
 
     fn mode_of(path: &Path) -> u32 {
-        std::fs::symlink_metadata(path).unwrap().mode() & MODE_BITS
+        meta::mode(&std::fs::symlink_metadata(path).unwrap()) & MODE_BITS
     }
 
     fn set(path: &Path, mode: u32) {
@@ -1288,8 +1289,8 @@ mod tests {
     }
 
     fn inode(path: &Path) -> (u64, u64) {
-        let meta = std::fs::symlink_metadata(path).unwrap();
-        (meta.dev(), meta.ino())
+        let m = std::fs::symlink_metadata(path).unwrap();
+        (meta::dev(&m), meta::ino(&m))
     }
 
     #[test]

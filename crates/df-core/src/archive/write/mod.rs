@@ -548,7 +548,6 @@ fn walk(sources: &[PathBuf], ctx: &TaskCtx) -> Result<Walked> {
 
 fn visit(path: &Path, name: Vec<u8>, walked: &mut Walked, ctx: &TaskCtx) -> Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::MetadataExt;
 
     if walked.members.len().is_multiple_of(WALK_CHECK) {
         ctx.checkpoint()?;
@@ -558,10 +557,10 @@ fn visit(path: &Path, name: Vec<u8>, walked: &mut Walked, ctx: &TaskCtx) -> Resu
         source: path.to_path_buf(),
         name,
         what,
-        mode: meta.mode(),
-        mtime: meta.mtime(),
-        uid: meta.uid(),
-        gid: meta.gid(),
+        mode: crate::platform::meta::mode(&meta),
+        mtime: crate::platform::meta::mtime(&meta),
+        uid: crate::platform::meta::uid(&meta),
+        gid: crate::platform::meta::gid(&meta),
         stored,
     };
     let kind = meta.file_type();

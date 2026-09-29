@@ -140,8 +140,6 @@ impl Entry {
         link_meta: std::fs::Metadata,
         tags: bool,
     ) -> Entry {
-        use std::os::unix::fs::MetadataExt;
-
         let is_hidden = name.starts_with('.');
         let (kind, meta) = if link_meta.file_type().is_symlink() {
             match std::fs::metadata(&path) {
@@ -185,7 +183,8 @@ impl Entry {
         } else {
             mime::hint_for_name(&name)
         };
-        let file_kind = super::kind::classify(kind, &name, mime, meta.mode());
+        let file_kind =
+            super::kind::classify(kind, &name, mime, crate::platform::meta::mode(&meta));
         // The link's own attributes, never its target's: a symlink carries no
         // `user.*` attribute on Linux, so a link row has no tags even when the
         // file it points at does — tagging the row tags the thing the row is.
@@ -202,9 +201,9 @@ impl Entry {
             len: if is_dir { 0 } else { meta.len() },
             mtime: meta.modified().ok(),
             btime: meta.created().ok(),
-            mode: meta.mode(),
-            uid: meta.uid(),
-            gid: meta.gid(),
+            mode: crate::platform::meta::mode(&meta),
+            uid: crate::platform::meta::uid(&meta),
+            gid: crate::platform::meta::gid(&meta),
             is_hidden,
             mime,
             file_kind,

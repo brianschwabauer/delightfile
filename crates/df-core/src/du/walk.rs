@@ -57,7 +57,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use std::collections::HashSet;
-use std::os::unix::fs::MetadataExt;
 
 use crate::{DfError, Result};
 
@@ -361,7 +360,7 @@ pub fn child_counts(
     let Ok(root_meta) = std::fs::symlink_metadata(root) else {
         return;
     };
-    let root_dev = root_meta.dev();
+    let root_dev = crate::platform::meta::dev(&root_meta);
     let Ok(reader) = std::fs::read_dir(root) else {
         return;
     };
@@ -381,7 +380,11 @@ pub fn child_counts(
         // cheap pass is the one thing in the mode that wanders onto the backup
         // drive under `/mnt`, and it does so *before* the walk has started.
         if let Ok(meta) = item.metadata() {
-            if crosses_boundary(root_dev, meta.dev(), options.cross_filesystems) {
+            if crosses_boundary(
+                root_dev,
+                crate::platform::meta::dev(&meta),
+                options.cross_filesystems,
+            ) {
                 continue;
             }
         }
@@ -428,7 +431,7 @@ pub fn crosses_boundary(root_dev: u64, child_dev: u64, cross_filesystems: bool) 
 
 /// Block usage and apparent size of one already-`stat`ed thing.
 fn sizes_of(meta: &std::fs::Metadata) -> (u64, u64) {
-    (meta.blocks().saturating_mul(BLOCK_UNIT), meta.size())
+    (crate::platform::meta::blocks_bytes(meta), meta.len())
 }
 
 struct Frame {
@@ -522,7 +525,7 @@ pub fn walk_reusing(
             std::io::Error::new(std::io::ErrorKind::NotADirectory, "not a directory"),
         ));
     }
-    let root_dev = root_meta.dev();
+    let root_dev = crate::platform::meta::dev(&root_meta);
     let root_reader = std::fs::read_dir(root).map_err(|e| DfError::io(root, e))?;
 
     let (blocks, apparent) = sizes_of(&root_meta);
@@ -613,7 +616,11 @@ pub fn walk_reusing(
         if meta.is_symlink() {
             continue;
         }
-        if crosses_boundary(root_dev, meta.dev(), options.cross_filesystems) {
+        if crosses_boundary(
+            root_dev,
+            crate::platform::meta::dev(&meta),
+            options.cross_filesystems,
+        ) {
             continue;
         }
 
@@ -679,7 +686,7 @@ pub fn walk_reusing(
         }
 
         let (blocks, apparent) = sizes_of(&meta);
-        let counted = if meta.nlink() > 1 {
+        let counted = if crate::platform::meta::nlink(&meta) > 1 {
             if seen_links.len() >= options.hardlink_cap {
                 if !link_cap_hit {
                     link_cap_hit = true;
@@ -692,7 +699,10 @@ pub fn walk_reusing(
                 }
                 true
             } else {
-                seen_links.insert((meta.dev(), meta.ino()))
+                seen_links.insert((
+                    crate::platform::meta::dev(&meta),
+                    crate::platform::meta::ino(&meta),
+                ))
             }
         } else {
             true

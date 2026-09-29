@@ -180,10 +180,9 @@ has not dropped.
       `App::refusal(Command::Trash)` is `Some` for a local path; it first runs for
       real on the CI matrix at S1.40. On Linux `available_for` is true for every
       local path, so there is nothing to assert there.
-      — df-core core-seam session, started 2026-09-29: df-core half done (see the
-      commit that closes it below); the df-app refusal test is the §3 agent's, with
-      S1.34.
-- [ ] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
+      — df-core core-seam session, started 2026-09-29: df-core half done d7768c1;
+      the df-app refusal test is the §3 agent's, with S1.34.
+- [>] **S1.7** `platform::meta` — the `MetadataExt` surface is specified in
       `03-paths.md` P3.4. In this phase create the module with the **Unix body only**
       and a Windows body good enough to compile: `dev = 0`, `ino = 0`, `nlink = 1`,
       synthesized `mode`, zero `uid`/`gid`, `change_time` from `last_write_time`.
@@ -193,8 +192,14 @@ has not dropped.
       the real values from `GetFileInformationByHandle` via `windows-sys`.)
       and route `fs/entry.rs:119–175`, `du/walk.rs:60–696`, `preview/cache.rs:137–151`,
       `archive/write/mod.rs:542–556`, `ops/link.rs` (nlink test helper),
-      `ops/trash.rs` (`device_of`, moved) through it. Done when: no `MetadataExt`
-      outside `platform/` in df-core, Linux tests pass.
+      `ops/trash.rs` (`device_of`, moved) through it — and, since the plan was
+      written, `ops/mode.rs` (the permissions change reads `st_mode`, `st_dev`,
+      `st_ino`) and `ops/copy.rs`'s `apply_mode` (`PermissionsExt::mode()`, the same
+      `st_mode`). `archive/write` also needs `st_mtime`, so the module has
+      `mtime(&Metadata) -> i64` beside P3.4's list. Done when: no `MetadataExt`
+      outside `platform/` in df-core, Linux tests pass. — df-core core-seam
+      session, started 2026-09-29; the remaining hits are tests (S1.15) and
+      `vfs/rclone.rs` (S1.51).
 - [ ] **S1.8** `platform::user`: `uid() -> u32` (Unix `getuid`; Windows: `0`, and
       **`cache_suffix() -> String`** used by `preview/cache.rs:128–132, 195–212` for
       `yazi-<suffix>`: Unix the uid, Windows the `USERNAME` env var — confirm yazi's
@@ -526,6 +531,11 @@ their native clipboards *are* synchronous.
   journal writes the same text. What only the freedesktop spec has
   (`.trashinfo` text, `$topdir` trashes, `PURGE_STAMP`, `expired`) is not in
   the stub, so df-app tests that use those items need a Linux gate (S1.33).
+- 2026-09-29 — S1.7: `platform::meta` has `mtime` beside P3.4's list, because
+  the archive writer stores `st_mtime` in tar and zip headers; its Unix body is
+  `MetadataExt::mtime`. `blocks_bytes` is `st_blocks × du::BLOCK_UNIT`, the
+  multiplication `du::walk` did, and `du::walk` now reads the apparent size with
+  `Metadata::len()` instead of `MetadataExt::size()` — both are `st_size`.
 
 ## Open questions
 

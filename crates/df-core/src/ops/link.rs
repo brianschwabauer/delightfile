@@ -124,7 +124,7 @@ mod tests {
 
     use super::*;
     use crate::ops::fixture::TempTree;
-    use std::os::unix::fs::MetadataExt;
+    use crate::platform::meta;
 
     #[test]
     fn relative_between_siblings() {
@@ -237,8 +237,11 @@ mod tests {
         hardlink(&target, &link).unwrap();
         let a = std::fs::metadata(&target).unwrap();
         let b = std::fs::metadata(&link).unwrap();
-        assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
-        assert_eq!(b.nlink(), 2);
+        assert_eq!(
+            (meta::dev(&a), meta::ino(&a)),
+            (meta::dev(&b), meta::ino(&b))
+        );
+        assert_eq!(meta::nlink(&b), 2);
     }
 
     #[test]

@@ -60,7 +60,7 @@
 | 187, 213 | `extension_of` / `named`: `text.rsplit('/')` takes the leaf of a typed archive name | Windows-differs | `extension` ← app:app/compress.rs:format_hint; `named` ← app:app/compress.rs:archive_submit | A typed `out\photos.zip` is not split on `\` |
 | 529–536 | `walk`: `use std::os::unix::ffi::OsStrExt`; member name `name.as_bytes().to_vec()` | Unix-only | `Pack::run` ← app:app/compress.rs:spawn_archive | |
 | 542–543 | `visit`: `use std::os::unix::ffi::OsStrExt; use std::os::unix::fs::MetadataExt` | Unix-only | as above | |
-| 553–556 | `Member { mode: meta.mode(), mtime: meta.mtime(), uid: meta.uid(), gid: meta.gid() }` | Unix-only | Consumed by write/tar.rs:175–181 and write/zip.rs:218–235 | |
+| 553–556 | `Member { mode: meta.mode(), mtime: meta.mtime(), uid: meta.uid(), gid: meta.gid() }` | Unix-only | Consumed by write/tar.rs:175–181 and write/zip.rs:218–235 | ✓ S1.7 |
 | 561–562 | Symlink target `read_link(path)…as_os_str().as_bytes()` | Unix-only | as above | Link text is stored as raw bytes |
 | 566, 579–580 | Member names built as bytes: `push(b'/')`, `extend_from_slice(child.as_bytes())` | Unix-only | as above | `/` is the archive format's own separator. The child bytes come from `OsStr` |
 | 656–661 | `on_path`: `var_os("PATH")`, `dir.join(name)`, `external::is_executable` | Windows-differs (+ Unix-only via `is_executable`) | `Format::is_available`, `seven_zip` | No `.exe` suffix |
@@ -102,21 +102,21 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 60 | `use std::os::unix::fs::MetadataExt` | Unix-only | file-wide | |
-| 364, 384 | `child_counts`: `root_meta.dev()`, `meta.dev()` → `crosses_boundary` | Unix-only | core:du/scanner.rs:run_walk | Windows has no `st_dev` |
+| 60 | `use std::os::unix::fs::MetadataExt` | Unix-only | file-wide | ✓ S1.7 |
+| 364, 384 | `child_counts`: `root_meta.dev()`, `meta.dev()` → `crosses_boundary` | Unix-only | core:du/scanner.rs:run_walk | Windows has no `st_dev` ✓ S1.7 |
 | 425–427 | `pub fn crosses_boundary(root_dev: u64, child_dev: u64, cross_filesystems: bool)` | Windows-differs | `walk_reusing`, `child_counts` | API is keyed on a Unix device number |
-| 430–432 | `sizes_of`: `meta.blocks().saturating_mul(512)`, `meta.size()` | Unix-only | `walk_reusing` | |
-| 525, 616 | `walk_reusing`: `root_meta.dev()`, `meta.dev()` | Unix-only | `walk` ← core:du/scanner.rs:run_walk; `walk_blocking` ← `du_blocking` | |
-| 682–696 | `meta.nlink() > 1` → `seen_links.insert((meta.dev(), meta.ino()))` | Unix-only | `walk_reusing` | |
+| 430–432 | `sizes_of`: `meta.blocks().saturating_mul(512)`, `meta.size()` | Unix-only | `walk_reusing` | ✓ S1.7 |
+| 525, 616 | `walk_reusing`: `root_meta.dev()`, `meta.dev()` | Unix-only | `walk` ← core:du/scanner.rs:run_walk; `walk_blocking` ← `du_blocking` | ✓ S1.7 |
+| 682–696 | `meta.nlink() > 1` → `seen_links.insert((meta.dev(), meta.ino()))` | Unix-only | `walk_reusing` | ✓ S1.7 |
 
 ### fs/entry.rs
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 119 | `from_parts`: `use std::os::unix::fs::MetadataExt` | Unix-only | core:fs/scan.rs:run_scan, scan_blocking; `Entry::read` ← app:app.rs:archive_units, open_local_temp; app:dialog.rs:read; app:search.rs:parse; core:preview/job.rs:build | |
+| 119 | `from_parts`: `use std::os::unix::fs::MetadataExt` | Unix-only | core:fs/scan.rs:run_scan, scan_blocking; `Entry::read` ← app:app.rs:archive_units, open_local_temp; app:dialog.rs:read; app:search.rs:parse; core:preview/job.rs:build | ✓ S1.7 |
 | 121 | `is_hidden = name.starts_with('.')` | Windows-differs; macOS-differs | core:fs/filter.rs:filter_indices; app:ui.rs:listing; app:spot.rs:from_entry; app:trashview.rs:row_from; app:archive.rs:row | Windows marks hidden files with an attribute bit; macOS also has the `UF_HIDDEN` flag |
-| 164 | `classify(kind, &name, mime, meta.mode())` | Unix-only | as line 119 | |
-| 173–175 | `mode: meta.mode(), uid: meta.uid(), gid: meta.gid()` | Unix-only | Field readers: app:spot.rs:from_entry, permissions; app:remote.rs:card_rows; app:format.rs:linemode_text; app:app.rs:set_mode (`chmod` via `PermissionsExt` in df-app) | |
+| 164 | `classify(kind, &name, mime, meta.mode())` | Unix-only | as line 119 | ✓ S1.7 |
+| 173–175 | `mode: meta.mode(), uid: meta.uid(), gid: meta.gid()` | Unix-only | Field readers: app:spot.rs:from_entry, permissions; app:remote.rs:card_rows; app:format.rs:linemode_text; app:app.rs:set_mode (`chmod` via `PermissionsExt` in df-app) | ✓ S1.7 |
 | 236–270 | `permissions_string`: decodes `st_mode` type bits (0o170000) and rwx/setuid/sticky | Windows-differs | app:format.rs:linemode_text; app:remote.rs:card_rows | |
 | 273–275 | `owner_label` → `fs::owner::owner_label(uid, gid)` | see fs/owner.rs | app:format.rs:linemode_text; app:remote.rs:card_rows | |
 
@@ -194,7 +194,7 @@
 | 464–479 | `sync_dir`: `File::open(dir)` then `sync_all`; `EINVAL` tolerated | Windows-differs | `sync_parent` ← `copy_symlink`, `copy_dir`, `copy_file`, core:sync/execute.rs:make_dir; core:sync/rsync.rs:flush_here | On Windows std's `File::open` of a directory fails (no `FILE_FLAG_BACKUP_SEMANTICS`) ✓ S1.5 |
 | 473 | `e.raw_os_error() == Some(libc::EINVAL)` | Windows-differs | `sync_dir` | On Windows `raw_os_error` carries Win32 codes. `libc::EINVAL` there is the CRT's 22 ✓ S1.3 |
 | 581–594 | `reflink`: `use std::os::unix::io::AsRawFd`; `libc::ioctl(writer, FICLONE, reader)` | Linux-only (macOS: compiles, always falls back; Windows: no compile) | `write_contents` ← `copy_file` ← `copy_entry`, `copy_file_with` | ✓ S1.5 |
-| 629–635 | `apply_mode`: `PermissionsExt::mode()`, `Permissions::from_mode` | Unix-only | `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | |
+| 629–635 | `apply_mode`: `PermissionsExt::mode()`, `Permissions::from_mode` | Unix-only | `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | ✓ S1.7 |
 | 651–688 | `set_times`: `OsStrExt` → `CString`; `libc::timespec`; `libc::utimensat(AT_FDCWD, …, AT_SYMLINK_NOFOLLOW)` | Unix-only | `apply_times` ← `copy_file`, `copy_dir`; core:sync/execute.rs:copy_all | ✓ S1.5 |
 | 655, 665–668 | `const UTIME_OMIT: i64 = 0x3ffffffe` used as `tv_nsec` for a missing time | Linux-only (macOS: compiles, wrong constant) | `set_times` | libc apple: `UTIME_OMIT = -2`. Taken for pre-1970 or unreadable atime/mtime ✓ S1.5 |
 | 738–756 | `move_path`: `rename`, then `raw_os_error() == Some(libc::EXDEV)` → `move_cross_device` (740, 754) | Windows-differs | core:ops/paste.rs:execute; core:ops/journal.rs:undo_moves | A Windows cross-volume rename fails with Win32 `ERROR_NOT_SAME_DEVICE` (17). `libc::EXDEV` on the windows target is 18 ✓ S1.3 |
@@ -269,9 +269,9 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 128–132 | `cache_dir`: `std::env::temp_dir()` + `yazi-{uid()}` | Unix-only (uid) | `thumb_path` ← `cached_thumb` ← app:grid.rs:tile_image, core:preview/job.rs:build | `temp_dir()` is `$TMPDIR` (per-user `/var/folders/…`) on macOS and `%TEMP%` on Windows |
-| 137 | `cache_key`: `use std::os::unix::fs::MetadataExt` | Unix-only | `thumb_path`, `store_thumb` | |
+| 137 | `cache_key`: `use std::os::unix::fs::MetadataExt` | Unix-only | `thumb_path`, `store_thumb` | ✓ S1.7 |
 | 143 | `path.hash(&mut h)` via std `Hash for Path` | Windows-differs | `cache_key` | The bytes std's `Path` hash feeds in are platform-specific |
-| 149–151 | ctime from `meta.ctime()`, `meta.ctime_nsec()` | Unix-only | `cache_key` | |
+| 149–151 | ctime from `meta.ctime()`, `meta.ctime_nsec()` | Unix-only | `cache_key` | ✓ S1.7 |
 | 195–204 | `store_thumb`: `temp_dir()` + `yazi-{uid()}`, `create_dir_all` | Unix-only (uid) | app:preview/decode.rs:write_thumb | |
 | 206–212 | `uid()`: `libc::getuid()` | Unix-only | `cache_dir`, `store_thumb` | |
 

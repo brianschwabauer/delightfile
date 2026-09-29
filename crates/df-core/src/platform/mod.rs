@@ -47,6 +47,7 @@
 //! | `trash` | `Purged`, `purge_expired`, `purge_expired_if_due`, `purge_due_in` | `[mgr] trash_keep_days` over the spec | `Unsupported("Trash")`; `purge_due_in` is never due | same stub |
 //! | `trash` | `iso8601_utc(SystemTime) -> String`, `parse_deletion_date(&str) -> Option<SystemTime>` | the `DeletionDate` text | the same text | the same text |
 //! | `trash` | Linux only: `TRASHINFO_EXT`, `PURGE_STAMP`, `DATE_SLACK_SECS`, `home_trash_path`, `topdir_trash`, `mount_point_of`, `uid`, `trashinfo_text`, `parse_trashinfo`, `encode_path`, `decode_path`, `expired`, `purge_wait`, `Trash::{info_dir, ensure}` | the spec's own vocabulary | — | — |
+//! | `meta` | `dev`, `ino`, `nlink`, `blocks_bytes` `-> u64`; `mode`, `uid`, `gid` `-> u32`; `change_time -> (i64, i64)`; `mtime -> i64`; each `fn(&Metadata)` | `MetadataExt` (unix) | unix | `0`, `0`, `1`, the size; a mode made from the type and read-only flag; `0`, `0`; the last write (W4.5) |
 
 #[cfg(unix)]
 mod unix;

@@ -134,8 +134,6 @@ pub fn cache_dir() -> Option<PathBuf> {
 /// The cache file name yazi would write for `path` at `skip`, given `path`'s
 /// metadata. Pure, so the scheme is testable without a filesystem.
 pub fn cache_key(path: &Path, meta: &std::fs::Metadata, skip: usize) -> String {
-    use std::os::unix::fs::MetadataExt;
-
     let mut h = KeyHasher::default();
 
     // --- yazi_fs::File::hash
@@ -143,11 +141,12 @@ pub fn cache_key(path: &Path, meta: &std::fs::Metadata, skip: usize) -> String {
     path.hash(&mut h);
     meta.len().hash(&mut h);
     meta.created().ok().hash(&mut h);
+    let (ctime, ctime_nsec) = crate::platform::meta::change_time(meta);
     // yazi builds ctime by hand from the raw stat fields, because std has no
     // accessor for it. The reconstruction has to match exactly, nanoseconds
     // included — this is part of the key.
     UNIX_EPOCH
-        .checked_add(Duration::new(meta.ctime() as u64, meta.ctime_nsec() as u32))
+        .checked_add(Duration::new(ctime as u64, ctime_nsec as u32))
         .hash(&mut h);
     meta.modified().ok().hash(&mut h);
 

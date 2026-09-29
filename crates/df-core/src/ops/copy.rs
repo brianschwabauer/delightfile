@@ -622,8 +622,7 @@ pub(crate) fn without_reflink<T>(f: impl FnOnce() -> T) -> T {
 /// filesystem without Unix modes (FAT, some network mounts) still succeeded at
 /// the part the user asked for.
 pub(crate) fn apply_mode(path: &Path, meta: &std::fs::Metadata) {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = meta.permissions().mode();
+    let mode = platform::meta::mode(meta);
     if let Err(e) = platform::fs::apply_mode(path, mode) {
         log::warn!("could not set mode on {}: {e}", path.display());
     }
