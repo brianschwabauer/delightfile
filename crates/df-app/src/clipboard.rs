@@ -36,7 +36,8 @@
 //! for a name with a newline in it, whether the size cap has been hit — are
 //! pure functions with tests. What touches the world is the platform's
 //! ([`crate::platform::clipboard`]): on Linux the `wl-copy` and `wl-paste`
-//! runs, re-exported here under the names the window has always called.
+//! runs, on macOS the pasteboard, re-exported here under the names the
+//! window has always called.
 
 use std::path::{Path, PathBuf};
 
@@ -317,7 +318,7 @@ pub fn offer_mimes(mime: Option<&str>) -> Vec<String> {
 #[derive(Debug)]
 pub enum ClipError {
     /// The transport is not there — `wl-copy`/`wl-paste` not on `PATH` on
-    /// Linux, no clipboard at all yet on macOS and Windows — and this path is
+    /// Linux, no clipboard at all yet on Windows — and this path is
     /// only reached when the data device was not there either, so the copy
     /// did not happen and it says so in red like any other failure. The
     /// words are the platform's ([`crate::platform::clipboard::missing`]).

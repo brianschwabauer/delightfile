@@ -80,6 +80,23 @@ wayland-client.workspace = true
 # local clock the linemodes read is df-core's (`platform::time`).
 libc.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The AppKit and Foundation calls behind `src/platform/macos/`, at the versions
+# winit already builds (see the workspace manifest). Each feature is a class
+# or a header a body here calls into, and nothing else is switched on.
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = [
+    "NSArray",
+    "NSData",
+    "NSEnumerator",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { workspace = true, features = [
+    "NSPasteboard",
+    "NSPasteboardItem",
+] }
+
 [dev-dependencies]
 # The `TempTree` fixture and PLAN §9's gnarly names, shared rather than
 # re-typed: the trash and remote views are exercised against real directories,
