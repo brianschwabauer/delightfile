@@ -243,7 +243,8 @@ mod tests {
     fn a_time_before_the_epoch_is_floored_as_a_stat_floors_it() {
         use std::time::Duration;
         let epoch = SystemTime::UNIX_EPOCH;
-        assert_eq!(since_epoch(epoch + Duration::new(5, 7)), (5, 7));
+        // Whole hundreds of nanoseconds: a `SystemTime` here counts in 100 ns.
+        assert_eq!(since_epoch(epoch + Duration::new(5, 700)), (5, 700));
         assert_eq!(since_epoch(epoch - Duration::from_secs(2)), (-2, 0));
         assert_eq!(
             since_epoch(epoch - Duration::from_millis(500)),

@@ -304,8 +304,11 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 - [x] **P3.17** `sync/mod.rs:267–282` (`SyncPlan::label`): render `rel` with
       `path::display` and the platform separator; the trailing separator for folders
       is `std::path::MAIN_SEPARATOR`. Done when: the label test passes on Linux
-      unchanged. — done (port/paths): `{name}{MAIN_SEPARATOR}{display(rel)}`
-      and a trailing `MAIN_SEPARATOR`, byte for byte the old label on Unix. The
+      unchanged. — done (port/paths): the root's name, then each of `rel`'s
+      components after a `MAIN_SEPARATOR`, and a trailing `MAIN_SEPARATOR` on a
+      folder — components rather than `path::display(rel)`, because a `rel`
+      read from rsync's output or built by a test holds `/` and would print
+      mixed on Windows; byte for byte the old label on Unix. The
       sync tests read labels through `with_slashes` so their expectations
       stay written once; `a_label_uses_the_platforms_separator_throughout`
       asserts the native form (P3.30: the four planner tests were bin 1, the

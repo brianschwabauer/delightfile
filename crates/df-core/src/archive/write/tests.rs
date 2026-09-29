@@ -1110,7 +1110,7 @@ fn the_task_is_named_for_the_panel() {
 
 // ── The real tools, where the machine has them ──────────────────────────────
 
-fn tool_accepts(tool: &str, args: &[&str], archive: &Path) -> bool {
+fn tool_accepts(tool: impl AsRef<std::ffi::OsStr>, args: &[&str], archive: &Path) -> bool {
     Command::new(tool)
         .args(args)
         .arg(archive)
@@ -1158,7 +1158,9 @@ fn the_real_tools_accept_what_is_written() {
         assert!(tool_accepts("7z", &["t"], &zip), "7z t on the zip");
         assert!(tool_accepts("7z", &["t"], &tgz), "7z t on the tar.gz");
     }
-    if on_path("bsdtar").is_some() {
-        assert!(tool_accepts("bsdtar", &["-tf"], &zip), "bsdtar on the zip");
+    // The program `on_path` found, by its own name: on Windows bsdtar is
+    // `tar.exe`.
+    if let Some(bsdtar) = on_path("bsdtar") {
+        assert!(tool_accepts(&bsdtar, &["-tf"], &zip), "bsdtar on the zip");
     }
 }

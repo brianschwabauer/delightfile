@@ -420,7 +420,9 @@ mod tests {
     #[test]
     fn a_name_the_platform_refuses_is_refused_with_its_reason() {
         let t = TempTree::new("create-invalid");
-        for name in ["x:y.txt", "con.txt", "trailing.", "sub/what?/inner.txt"] {
+        // `xy:z`, not `x:y`: a single letter and a colon is a drive to
+        // `Path`, and joining one replaces the whole path.
+        for name in ["xy:z.txt", "con.txt", "trailing.", "sub/what?/inner.txt"] {
             let made = create(&t.join(name));
             if cfg!(windows) {
                 let err = made.unwrap_err().to_string();

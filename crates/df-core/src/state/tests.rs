@@ -13,10 +13,13 @@ fn store_at(tree: &TempTree) -> StateStore {
     StateStore::load_from(tree.join("state"))
 }
 
-/// [`abs`]`(unix)` as its key is written in the file: escaped, so a Windows
-/// key's backslashes are doubled.
+/// [`abs`]`(unix)` as its key is written in the file: its
+/// [`crate::path::key`] (folded on Windows), escaped, so a Windows key's
+/// backslashes are doubled.
 fn key_text(unix: &str) -> String {
-    String::from_utf8(escape(&path_bytes(&abs(unix)).unwrap())).unwrap()
+    let path = abs(unix);
+    let key = crate::path::key(&path);
+    String::from_utf8(escape(&path_bytes(&key).unwrap())).unwrap()
 }
 
 fn text_of(store: &StateStore) -> String {

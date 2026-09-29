@@ -721,9 +721,15 @@ mod tests {
         let block = with_mode("sda", "application/octet-stream", 0o060_000 | 0o660);
         assert_eq!(kind_of(&block), FileKind::Special);
 
-        // A regular file with the same bits is still what it was.
+        // A regular file with the same bits is still what it was: runnable
+        // where the bit says so (Unix; Windows asks the extension instead).
         let script = with_mode("run", "application/octet-stream", 0o100_000 | 0o755);
-        assert_eq!(kind_of(&script), FileKind::Executable);
+        assert_eq!(
+            kind_of(&script) == FileKind::Executable,
+            cfg!(unix),
+            "{:?}",
+            kind_of(&script)
+        );
 
         let photo = with_mode("holiday.jpg", "image/jpeg", 0o100_000 | 0o644);
         assert_eq!(kind_of(&photo), FileKind::Image);
@@ -738,8 +744,9 @@ mod tests {
             FileKind::Image
         );
         assert_eq!(
-            kind_for_name("run", "application/octet-stream", 0o755),
-            FileKind::Executable
+            kind_for_name("run", "application/octet-stream", 0o755) == FileKind::Executable,
+            cfg!(unix),
+            "the bit, where the platform reads one"
         );
         let entry = entry("run", Kind::File, "application/octet-stream");
         assert_eq!(entry.mode & 0o170_000, 0);
