@@ -1,12 +1,11 @@
-//! No extended attributes: stands in on macOS and on Windows.
+//! No extended attributes: stands in on Windows. (macOS has its own body,
+//! with Finder's tags: `platform/macos/xattr.rs`.)
 //!
 //! Reads answer "no attributes" — no value, an empty list — so no row has
 //! tags, a tag search finds nothing, and a copy carries nothing and reports
 //! nothing lost. Writes refuse, and [`AVAILABLE`] is `false` so the tags
 //! prompt refuses with "Tags is not available on this platform" before it
-//! gets here. macOS does have attributes; whether its tags are freedesktop's
-//! `user.xdg.tags` or Finder's `com.apple.metadata:_kMDItemUserTags` is an
-//! open question (`plans/other-platforms/02-macos.md`), so it has no body yet.
+//! gets here.
 
 use std::io;
 use std::path::Path;
