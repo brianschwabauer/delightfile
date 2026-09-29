@@ -5814,6 +5814,33 @@ impl App {
     /// A save dialog's Save button: `Save as:`, prefilled with the name the
     /// caller suggested (`current_name`, through the portal) or the file the
     /// dialog was opened on — or, when there is neither, the file under the
+    /// What a picker session does on the frame it appears: says which dialog
+    /// it is, and — in a save whose caller suggested a name (`current_name`)
+    /// — opens `Save as:` on that name, so `Enter` saves it here and the name
+    /// is on screen before anything has been pressed. The name is of a file
+    /// that does not exist yet, so there is no row for the cursor to say it
+    /// with; `Esc` puts the field away to browse, and Save brings it back
+    /// with the same name.
+    fn greet_picker(&mut self, now: Instant) {
+        let Some(mode) = self.pick_mode() else {
+            return;
+        };
+        let named = mode == PickMode::Save
+            && self
+                .chooser
+                .as_ref()
+                .is_some_and(|chooser| chooser.name.is_some());
+        if named && self.prompt.is_none() && self.dialog.is_none() {
+            self.open_save_as(now);
+        }
+        if self.prompt.as_ref().map(|prompt| prompt.kind) == Some(PromptKind::SaveAs) {
+            self.toasts.notice(SAVE_NAMED_GREETING, now);
+            return;
+        }
+        let filter = self.narrowing().map(|filter| filter.name.as_str());
+        self.toasts.notice(picker_line(mode, filter), now);
+    }
+
     /// cursor, since saving next to a file under a name like it is the common
     /// case — with the stem selected, so typing replaces the name and keeps
     /// the extension, the way every save dialog opens.
@@ -19386,11 +19413,7 @@ impl App {
             );
             // A picker session says so on the frame it appears — see
             // [`picker_greeting`].
-            if let Some(mode) = self.pick_mode() {
-                let filter = self.narrowing().map(|filter| filter.name.as_str());
-                self.toasts
-                    .notice(picker_line(mode, filter), Instant::now());
-            }
+            self.greet_picker(Instant::now());
         }
         if !self.logged_first_listing {
             let rows = self.tabs.active().cwd.dir.len();
@@ -20015,6 +20038,10 @@ fn with_filter_clause(greeting: &str, name: &str) -> String {
 /// One value for the whole session rather than one per tab or per directory:
 /// the dialog asked for one kind of file, and a tab that quietly showed
 /// another would be a second answer to the same question.
+/// The greeting of a save that opened with `Save as:` already up on the
+/// caller's name (see [`App::greet_picker`]).
+const SAVE_NAMED_GREETING: &str = "Enter saves it here — Esc browses, Save names it again";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Showing {
     /// Only the files the active filter admits, dotfiles hidden. Where every
@@ -23305,6 +23332,39 @@ mod tests {
         let mut app = picker("folder-here", &["a.txt"], &["docs"], FOLDER);
         app.press_pick(now);
         assert_eq!(app.chosen, [app.files.clone()], "nothing selected is here");
+    /// A save whose caller suggested a name opens with `Save as:` already up
+    /// on it, and `Enter` saves under it in the folder on screen; a save with
+    /// no name to suggest opens on the listing as before.
+    #[test]
+    fn a_named_save_opens_on_its_name() {
+        let now = Instant::now();
+        let mut app = picker("save-greets", &["other.txt"], &[], SAVE);
+        if let Some(chooser) = app.chooser.as_mut() {
+            chooser.name = Some("report.pdf".to_string());
+        }
+        app.greet_picker(now);
+        let prompt = app.prompt.as_ref().expect("the name is on screen");
+        assert_eq!(prompt.kind, PromptKind::SaveAs);
+        assert_eq!(prompt.query(), "report.pdf");
+        assert_eq!(
+            prompt.buffer.selection(),
+            Some(0..6),
+            "the stem is selected"
+        );
+        assert_eq!(toast(&app).as_deref(), Some(SAVE_NAMED_GREETING));
+        app.submit_prompt("report.pdf".to_string(), now);
+        assert_eq!(app.quit, Some(Quit::Chosen));
+        assert_eq!(app.chosen, [app.files.join("report.pdf")]);
+
+        let mut app = picker("save-greets-unnamed", &["other.txt"], &[], SAVE);
+        app.greet_picker(now);
+        assert!(app.prompt.is_none(), "nothing to suggest, nothing opened");
+        assert_eq!(
+            toast(&app).as_deref(),
+            Some(picker_greeting(PickMode::Save))
+        );
+    }
+
     }
 
     /// `Esc` climbs its ladder as ever, and only a press with nothing left to
