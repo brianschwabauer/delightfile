@@ -33,6 +33,14 @@ pub fn detached_argv(argv: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Nothing to set on the command: `setsid` in the argv is the detaching
+/// ([`detached_argv`]).
+pub fn detach(_command: &mut std::process::Command) {}
+
+/// A child that was not detached — `setsid` missing — is left as it always
+/// was: running, parented to the window.
+pub fn release(_child: std::process::Child) {}
+
 /// Is `name` on `$PATH`?
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;

@@ -1,13 +1,15 @@
 //! Running a snippet on Linux and macOS: `$SHELL -c '<snippet>' delightfile
 //! <path>…`, the mechanism `crate::open`'s essay describes, moved here
-//! unchanged. How a child is detached from the window is each target's own
-//! ([`crate::platform::open::detached_argv`]): `setsid --fork` on Linux,
-//! nothing yet on macOS.
+//! unchanged. How a child is detached from the window is each target's own:
+//! `setsid --fork` in front of the argv on Linux
+//! ([`crate::platform::open::detached_argv`]), a process group of its own on
+//! macOS ([`crate::platform::open::detach`]), and on macOS a thread that
+//! collects the child when it exits ([`crate::platform::open::release`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::platform::open::detached_argv;
+use crate::platform::open::{detach, detached_argv, release};
 
 /// `$0` for every snippet delightfile runs.
 const ARGV0: &str = "delightfile";
@@ -55,11 +57,14 @@ pub fn spawn_detached(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    detach(&mut command);
     let mut child = command.spawn()?;
     if detached {
         // `setsid --fork` is gone the instant it has forked, so this reaps a
         // process that has already exited rather than waiting on the editor.
         let _ = child.wait();
+    } else {
+        release(child);
     }
     Ok(())
 }
