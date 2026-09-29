@@ -22,6 +22,7 @@ pub mod nofollow;
 pub mod process;
 pub mod thread;
 pub mod trash;
+#[cfg(windows)]
 pub mod user;
 #[cfg(windows)]
 pub mod watch;

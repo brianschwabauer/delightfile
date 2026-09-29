@@ -1,7 +1,6 @@
-//! No owner names: stands in on macOS until M2.4 (`getpwuid_r`, since macOS
-//! keeps its users in Open Directory and `/etc/passwd` lists only system
-//! accounts) and on Windows, whose owners are SIDs. The owner linemode then
-//! shows the numbers.
+//! No owner names: stands in on Windows, whose owners are SIDs. The owner
+//! linemode then shows the numbers. (macOS asks Open Directory,
+//! `platform/macos/user.rs`.)
 
 /// Not known here.
 pub fn user_name(_uid: u32) -> Option<&'static str> {

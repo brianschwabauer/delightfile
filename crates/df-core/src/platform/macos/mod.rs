@@ -7,10 +7,5 @@ pub use super::unix::{dirs, errno, meta, os, pipe, socket, time};
 pub mod fs;
 mod kqueue;
 pub mod process;
+pub mod user;
 pub mod watch;
-
-/// The shared Unix uid, with no owner names until M2.4.
-pub mod user {
-    pub use crate::platform::stub::user::*;
-    pub use crate::platform::unix::user::*;
-}
