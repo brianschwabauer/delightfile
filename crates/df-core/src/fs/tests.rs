@@ -1653,6 +1653,8 @@ fn a_disabled_watcher_is_inert_rather_than_a_failure() {
 ///
 /// Skipped rather than failed where inotify is unavailable — a sandbox with no
 /// instances left is not a broken build, and the model works without it.
+/// Linux only until M2.1 and W4.4 give the other targets a watcher.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_file_landing_in_a_watched_directory_raises_a_refresh() {
     let tmp = TempDir::new("watch");
@@ -1709,6 +1711,7 @@ fn a_file_landing_in_a_watched_directory_raises_a_refresh() {
     assert!(events.iter().all(|e| matches!(e, WatchEvent::Changed(_))));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_watched_directory_that_disappears_reports_itself_gone() {
     let outer = TempDir::new("watch-gone");

@@ -124,20 +124,20 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 28 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `add_watch` | |
-| 46–54 | `pub const WATCH_MASK` from `libc::IN_CREATE \| … \| IN_ONLYDIR` | Linux-only (macOS: no compile) | fs/watch.rs:set_watches | libc apple defines no `IN_*` |
-| 71–78 | `Event::is_overflow` (`IN_Q_OVERFLOW`), `is_self_gone` (`IN_DELETE_SELF\|IN_MOVE_SELF\|IN_IGNORED`) | Linux-only | fs/watch.rs:run | |
-| 92–99 | `Inotify::new`: `libc::inotify_init1(IN_NONBLOCK \| IN_CLOEXEC)` | Linux-only | fs/watch.rs:Watcher::new | |
-| 108–118 | `add_watch`: `CString::new(path.as_os_str().as_bytes())`, `libc::inotify_add_watch` | Linux-only | fs/watch.rs:set_watches | |
-| 120–125 | `rm_watch`: `libc::inotify_rm_watch` | Linux-only | fs/watch.rs:set_watches | |
-| 129–150 | `read_events`: `libc::read` on the inotify fd into `[u64; 512]` | Linux-only | fs/watch.rs:run | |
-| 153–159 | `Drop for Inotify`: `libc::close` | Unix-only | | |
-| 163–196 | `HEADER = size_of::<libc::inotify_event>()`, `parse_events` with `read_unaligned::<libc::inotify_event>` | Linux-only | `read_events` | |
-| 210–222 | `Pipe::new`: `libc::pipe2(fds, O_CLOEXEC \| O_NONBLOCK)` | Linux-only (macOS: no compile, libc apple has no `pipe2`) | fs/watch.rs:Watcher::new | |
-| 231–241 | `Pipe::wake`: `libc::write` | Unix-only | fs/watch.rs:Watcher::interrupt | |
-| 244–259 | `Pipe::drain`: `libc::read` loop | Unix-only | fs/watch.rs:run | |
-| 262–271 | `Drop for Pipe`: `libc::close` ×2 | Unix-only | | |
-| 280–312 | `poll_two`: `libc::pollfd`, `libc::POLLIN`, `libc::poll` on two fds | Unix-only (Windows: no `poll`) | fs/watch.rs:run | |
+| 28 | `use std::os::unix::ffi::OsStrExt` | Unix-only | `add_watch` | ✓ S1.4 |
+| 46–54 | `pub const WATCH_MASK` from `libc::IN_CREATE \| … \| IN_ONLYDIR` | Linux-only (macOS: no compile) | fs/watch.rs:set_watches | libc apple defines no `IN_*` ✓ S1.4 |
+| 71–78 | `Event::is_overflow` (`IN_Q_OVERFLOW`), `is_self_gone` (`IN_DELETE_SELF\|IN_MOVE_SELF\|IN_IGNORED`) | Linux-only | fs/watch.rs:run | ✓ S1.4 |
+| 92–99 | `Inotify::new`: `libc::inotify_init1(IN_NONBLOCK \| IN_CLOEXEC)` | Linux-only | fs/watch.rs:Watcher::new | ✓ S1.4 |
+| 108–118 | `add_watch`: `CString::new(path.as_os_str().as_bytes())`, `libc::inotify_add_watch` | Linux-only | fs/watch.rs:set_watches | ✓ S1.4 |
+| 120–125 | `rm_watch`: `libc::inotify_rm_watch` | Linux-only | fs/watch.rs:set_watches | ✓ S1.4 |
+| 129–150 | `read_events`: `libc::read` on the inotify fd into `[u64; 512]` | Linux-only | fs/watch.rs:run | ✓ S1.4 |
+| 153–159 | `Drop for Inotify`: `libc::close` | Unix-only | | ✓ S1.4 |
+| 163–196 | `HEADER = size_of::<libc::inotify_event>()`, `parse_events` with `read_unaligned::<libc::inotify_event>` | Linux-only | `read_events` | ✓ S1.4 |
+| 210–222 | `Pipe::new`: `libc::pipe2(fds, O_CLOEXEC \| O_NONBLOCK)` | Linux-only (macOS: no compile, libc apple has no `pipe2`) | fs/watch.rs:Watcher::new | ✓ S1.4 |
+| 231–241 | `Pipe::wake`: `libc::write` | Unix-only | fs/watch.rs:Watcher::interrupt | ✓ S1.4 |
+| 244–259 | `Pipe::drain`: `libc::read` loop | Unix-only | fs/watch.rs:run | ✓ S1.4 |
+| 262–271 | `Drop for Pipe`: `libc::close` ×2 | Unix-only | | ✓ S1.4 |
+| 280–312 | `poll_two`: `libc::pollfd`, `libc::POLLIN`, `libc::poll` on two fds | Unix-only (Windows: no `poll`) | fs/watch.rs:run | ✓ S1.4 |
 
 ### fs/kind.rs
 
@@ -159,11 +159,11 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 41 | `use super::inotify::{self, Inotify, Pipe, WATCH_MASK}` | Linux-only | | |
-| 94–111 | `Watcher::new`: `Inotify::new()?`, `Pipe::new()?`, spawns thread `df-watch` running `run` | Linux-only | `Watcher::start` ← app:app.rs:assemble | On error, `start` falls back to `Watcher::disabled()` (122: log text names inotify) |
-| 147–167 | `Watcher::watch` / `interrupt` → `Pipe::wake` | Linux-only (via `Pipe`) | app:app.rs:assemble, rewatch; `drain` ← app:app.rs:poll_workers | |
-| 181–276 | `run`: `inotify::poll_two(inotify.fd(), pipe.read_fd(), timeout)`, `read_events`, `HashMap<i32 (wd), PathBuf>` | Linux-only | thread body | |
-| 279–301 | `set_watches`: `add_watch(&dir, WATCH_MASK)`, `rm_watch(wd)` | Linux-only | `run` | |
+| 41 | `use super::inotify::{self, Inotify, Pipe, WATCH_MASK}` | Linux-only | | ✓ S1.4 |
+| 94–111 | `Watcher::new`: `Inotify::new()?`, `Pipe::new()?`, spawns thread `df-watch` running `run` | Linux-only | `Watcher::start` ← app:app.rs:assemble | On error, `start` falls back to `Watcher::disabled()` (122: log text names inotify) ✓ S1.4 |
+| 147–167 | `Watcher::watch` / `interrupt` → `Pipe::wake` | Linux-only (via `Pipe`) | app:app.rs:assemble, rewatch; `drain` ← app:app.rs:poll_workers | ✓ S1.4 |
+| 181–276 | `run`: `inotify::poll_two(inotify.fd(), pipe.read_fd(), timeout)`, `read_events`, `HashMap<i32 (wd), PathBuf>` | Linux-only | thread body | ✓ S1.4 |
+| 279–301 | `set_watches`: `add_watch(&dir, WATCH_MASK)`, `rm_watch(wd)` | Linux-only | `run` | ✓ S1.4 |
 
 ### git/status.rs
 
@@ -1636,7 +1636,7 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | archive/write/mod.rs:562 | Symlink target `as_os_str().as_bytes()` | Unix-only | as above | Stored as the link payload |
 | archive/write/mod.rs:580 | Child name `child.as_bytes()` | Unix-only | as above | |
 | du/fstype.rs:64 | `CString::new(path.as_os_str().as_bytes())` for `statfs` | Unix-only | `is_remote` | |
-| fs/inotify.rs:109 | `CString::new(path.as_os_str().as_bytes())` for `inotify_add_watch` | Linux-only | `add_watch` | |
+| fs/inotify.rs:109 | `CString::new(path.as_os_str().as_bytes())` for `inotify_add_watch` | Linux-only | `add_watch` | ✓ S1.4 |
 | git/status.rs:564 | `Path::new(OsStr::from_bytes(trimmed))` from git `-z` output | Unix-only | `parse_porcelain_v2` | |
 | ops.rs:111 | `is_url` scans `as_bytes()` | Unix-only | core:ops/paste.rs:carried; core:sync/plan.rs:roots | |
 | ops.rs:198–203 | `trim_trailing_slash` bytes in and out (`from_bytes`) | Unix-only | core:ops/delete.rs | |

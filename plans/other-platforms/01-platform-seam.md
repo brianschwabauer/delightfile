@@ -94,16 +94,19 @@ has not dropped.
 
 ## 2. df-core: filesystem primitives
 
-- [ ] **S1.4** `platform::watch`: move `fs/inotify.rs` (whole file) and the run loop
+- [>] **S1.4** `platform::watch`: move `fs/inotify.rs` (whole file) and the run loop
       of `fs/watch.rs:94–111, 147–167, 181–301` into `platform/linux/watch.rs` +
       `platform/linux/inotify.rs`. `fs/watch.rs` keeps `WatchEvent`, `Notifier`, the
       `Watcher` struct's public methods (`new`, `start`, `disabled`, `is_active`,
       `watch`, `events`, `drain`, appendix §2 `fs::watch`) and delegates to
-      `platform::watch::Backend` (a struct each platform defines with `open()`,
-      `set_watches(&[PathBuf])`, `wake()`, and the thread body). macOS and Windows
+      `platform::watch::Backend` (a type each platform defines with
+      `open(control, events, notify) -> io::Result<(Backend, JoinHandle<()>)>`, which
+      starts the thread body, and `wake()`; `set_watches` stays a private helper of
+      the Linux thread). macOS and Windows
       `Backend::open` return `Err(io::Error::from(ErrorKind::Unsupported))`; the log
       line at `:122` that names inotify becomes platform-neutral text with the error
-      appended. Done when: the three `Watcher` tests in `fs/tests.rs` pass on Linux
+      appended. Done when: the two `Watcher` tests in `fs/tests.rs` that start a real
+      watcher pass on Linux
       and are `#[cfg(target_os = "linux")]`-gated until Phase 2/4 add bodies; df-core
       compiles on all three targets.
 - [ ] **S1.5** `platform::fs` (df-core), moving these bodies out of `ops/copy.rs`,
@@ -468,6 +471,24 @@ their native clipboards *are* synchronous.
 - 2026-09-29 — df-core's shared Unix bodies are a directory, `platform/unix/mod.rs`,
   not `platform/unix.rs`: S1.12 moves `vfs/poll.rs` to `platform/unix/pipe.rs`, so
   there are several of them. S1.2's file list corrected.
+- 2026-09-29 — Stubs that macOS and Windows share live once, in
+  `platform/stub/`, selected by `#[cfg(not(target_os = "linux"))]` (the ground
+  rules' one use of `not(...)`); `macos/mod.rs` and `windows/mod.rs` each
+  `pub use super::stub::<module>`, so a native body lands by swapping that one
+  line for `pub mod <module>` and the other target is untouched. Two identical
+  copies would drift, and a stub that later diverges moves into its target
+  directory then.
+- 2026-09-29 — S1.4: `platform::watch::Backend` is `open(control, events, notify)`,
+  which starts the thread and returns its handle, plus `wake()`. `set_watches` is
+  thread-private state (inotify's wd map), not part of the cross-platform shape,
+  so it stays inside the Linux thread body. `Watcher::new` now makes its two
+  channels before the backend opens rather than after; channel creation has no
+  side effect, so Linux is unchanged. The one Linux-visible change is the
+  plan's own: the warning when watching is unavailable reads "directory watching
+  unavailable (…)" instead of "inotify unavailable (…)".
+- 2026-09-29 — S1.4's done-when named three `Watcher` tests; two start a real
+  watcher and are Linux-gated. The third, `a_disabled_watcher_is_inert…`, tests
+  the portable disabled watcher and runs on every target.
 
 ## Open questions
 

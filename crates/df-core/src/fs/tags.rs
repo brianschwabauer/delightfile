@@ -41,7 +41,7 @@
 //! path, a name and a buffer each do not clear it. So the calls are made
 //! through `libc` in the small functions under "The syscalls" below, each an
 //! `unsafe` block with its own `#[allow(unsafe_code)]` (the workspace warns on
-//! `unsafe_code` so every use is a deliberate one, as in [`super::inotify`]).
+//! `unsafe_code` so every use is a deliberate one, as in the inotify watcher).
 //! Nothing unsafe escapes them: the paths and names are `CString`s that
 //! outlive the call, every buffer is a `Vec` whose length is the size handed
 //! in, and every return value is checked and turned into

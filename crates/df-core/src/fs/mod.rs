@@ -49,7 +49,6 @@
 mod entry;
 mod filter;
 mod history;
-mod inotify;
 pub mod kind;
 mod memory;
 pub mod mime;
@@ -58,7 +57,7 @@ mod scan;
 mod sort;
 pub mod tags;
 mod typefilter;
-mod watch;
+pub(crate) mod watch;
 
 #[cfg(test)]
 mod tests;
