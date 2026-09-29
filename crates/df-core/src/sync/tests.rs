@@ -1077,6 +1077,29 @@ fn a_file_a_case_folding_card_lists_in_its_own_case_is_rewritten_not_trashed() {
     );
 }
 
+/// On a volume that folds case, the destination's `photo.jpg` is the
+/// source's `Photo.JPG`: a stat of one spelling finds the other, so it is a
+/// change to write, not a new file beside an extra. Skipped on a volume
+/// that keeps case (Linux's), where the fake listing above stands in.
+#[test]
+fn a_destination_in_another_case_is_the_same_file_where_the_volume_folds_case() {
+    let t = TempTree::new("sync-case-volume");
+    if !crate::test_support::folds_case(t.path()) {
+        eprintln!("skipping: the temp volume keeps case");
+        return;
+    }
+    let dir = t.dir("src/d");
+    t.file("src/d/Photo.JPG", b"the new bytes");
+    t.file("dst/d/photo.jpg", b"old");
+    let plan = quick(&[dir], &t.join("dst"));
+    assert_eq!(class_of(&plan, "d/Photo.JPG"), Class::Changed);
+    assert!(
+        !plan.items.iter().any(|item| item.class == Class::Extra),
+        "{:?}",
+        classes(&plan)
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_source_that_cannot_be_read_back_is_named_as_itself() {

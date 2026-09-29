@@ -121,6 +121,11 @@ pub fn remove_parents(made: &[PathBuf]) {
 /// half-replacing is worse than refusing. Renaming a file to its own name is a
 /// no-op rather than an error, because that is what pressing Enter on an
 /// unedited rename prompt means.
+///
+/// On a volume that folds case (Windows, the default macOS one, a FAT card)
+/// `Foo` and `foo` are one file, and renaming one to the other is how a
+/// person fixes the case of a name — so it is done, by way of a temporary
+/// name, rather than taken for the unchanged name.
 pub fn rename(from: &Path, to: &Path, force: bool) -> Result<()> {
     if !exists(from) {
         return Err(DfError::io(
@@ -135,9 +140,11 @@ pub fn rename(from: &Path, to: &Path, force: bool) -> Result<()> {
         return Err(DfError::Op("no name given".to_string()));
     }
 
+    // One directory however it is spelled: keyed, so `C:\Dir` and `c:\dir`
+    // are one on Windows. On Unix the key is the path itself.
     let from_dir = from.parent().map(super::normalize);
     let to_dir = to.parent().map(super::normalize);
-    if from_dir != to_dir {
+    if from_dir.as_deref().map(crate::path::key) != to_dir.as_deref().map(crate::path::key) {
         return Err(DfError::Op(format!(
             "rename stays in one directory: {} is not in {}",
             to.display(),
@@ -149,6 +156,9 @@ pub fn rename(from: &Path, to: &Path, force: bool) -> Result<()> {
     }
 
     if same_file(from, to) {
+        if is_case_change(from, to) {
+            return rename_by_way_of_a_temporary_name(from, to);
+        }
         // The same file by a different spelling, including the unchanged name.
         return Ok(());
     }
@@ -162,6 +172,65 @@ pub fn rename(from: &Path, to: &Path, force: bool) -> Result<()> {
         super::delete::remove_tree_unchecked(to)?;
     }
     std::fs::rename(from, to).map_err(|e| DfError::io(from, e))
+}
+
+/// Whether `to` is `from` in another case, reached only because the volume
+/// folds case: the names differ, they are equal once lowercased, and the
+/// directory has no entry spelled as `to` is. On a volume that does not fold
+/// case — Linux's — two such names that are one file are two hard links, both
+/// listed, and renaming one onto the other stays the no-op it was.
+fn is_case_change(from: &Path, to: &Path) -> bool {
+    let (Some(old), Some(new)) = (
+        from.file_name().and_then(|n| n.to_str()),
+        to.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return false;
+    };
+    if old == new || old.to_lowercase() != new.to_lowercase() {
+        return false;
+    }
+    let Some(dir) = to.parent() else {
+        return false;
+    };
+    let listed = |dir: &Path| -> std::io::Result<bool> {
+        for entry in std::fs::read_dir(dir)? {
+            if entry?.file_name() == std::ffi::OsStr::new(new) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    matches!(listed(dir), Ok(false))
+}
+
+/// `from` to `to` in two steps, through a free `.df-tmp-` name beside them:
+/// a rename that only changes case is a no-op to some file systems. When the
+/// second step fails the first is taken back, so the file keeps its old name.
+fn rename_by_way_of_a_temporary_name(from: &Path, to: &Path) -> Result<()> {
+    let dir = from.parent().unwrap_or(Path::new("."));
+    // As many tries as a copy's temporary names get (`copy.rs`).
+    const ATTEMPTS: u32 = 16;
+    let temp = (0..ATTEMPTS)
+        .map(|n| {
+            dir.join(format!(
+                "{}rename-{}-{n}",
+                super::copy::TEMP_PREFIX,
+                std::process::id()
+            ))
+        })
+        .find(|candidate| !exists(candidate))
+        .ok_or_else(|| DfError::Op(format!("no free temporary name in {}", dir.display())))?;
+    std::fs::rename(from, &temp).map_err(|e| DfError::io(from, e))?;
+    if let Err(e) = std::fs::rename(&temp, to) {
+        let _ignored = std::fs::rename(&temp, from);
+        return Err(DfError::io(to, e));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -275,6 +344,52 @@ mod tests {
         let p = t.file("a.txt", b"x");
         rename(&p, &p, false).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"x");
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Where the volume folds case, `Foo.txt` renamed to `foo.txt` is the
+    /// same file under a new spelling — done, not taken for the unchanged
+    /// name. Skipped on a volume that keeps case (Linux's).
+    #[test]
+    fn a_case_only_rename_changes_the_case_where_the_volume_folds_it() {
+        let t = TempTree::new("rename-case");
+        if !crate::test_support::folds_case(t.path()) {
+            eprintln!("skipping: the temp volume keeps case");
+            return;
+        }
+        let from = t.file("Foo.txt", b"x");
+        rename(&from, &t.join("foo.txt"), false).unwrap();
+        assert_eq!(names_in(t.path()), ["foo.txt"]);
+        assert_eq!(std::fs::read(t.join("foo.txt")).unwrap(), b"x");
+        // And a folder, back again.
+        t.dir("Dir/inside");
+        rename(&t.join("Dir"), &t.join("dir"), false).unwrap();
+        assert!(names_in(t.path()).contains(&"dir".to_string()));
+        assert!(t.join("dir/inside").is_dir());
+    }
+
+    /// Where the volume keeps case, `Foo.txt` and `foo.txt` that are one file
+    /// are two hard links, and renaming one onto the other is the no-op it
+    /// always was: both names stay.
+    #[test]
+    fn a_rename_onto_a_hard_link_in_another_case_is_a_no_op() {
+        let t = TempTree::new("rename-case-link");
+        if crate::test_support::folds_case(t.path()) {
+            eprintln!("skipping: the temp volume folds case");
+            return;
+        }
+        let from = t.file("Foo.txt", b"x");
+        std::fs::hard_link(&from, t.join("foo.txt")).unwrap();
+        rename(&from, &t.join("foo.txt"), false).unwrap();
+        assert_eq!(names_in(t.path()), ["Foo.txt", "foo.txt"]);
     }
 
     #[test]

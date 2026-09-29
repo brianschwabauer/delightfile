@@ -214,7 +214,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 33–46 | `create`: `use std::os::unix::ffi::OsStrExt`; trailing `b'/'` means "directory"; trimmed with `OsStr::from_bytes` | Unix-only | app:app.rs:create | A typed trailing `\` is not a directory marker ✓ S1.16 ✓ P3.10 |
-| 139–146 | `rename`: `from.parent().map(normalize) != to.parent().map(normalize)`; message falls back to `Path::new("/")` | Windows-differs (case) | app:app.rs:rename, run_bulk; app:bulk.rs:start | |
+| 139–146 | `rename`: `from.parent().map(normalize) != to.parent().map(normalize)`; message falls back to `Path::new("/")` | Windows-differs (case) | app:app.rs:rename, run_bulk; app:bulk.rs:start | ✓ P3.18 |
 
 ### ops/delete.rs
 
@@ -345,7 +345,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 51–67 | `roots`: duplicate yanked names via `HashSet<OsString>` | Windows-differs (case) | `walk` ← `plan` ← app:sync.rs:plan_job | |
-| 178–199 | `visit`: `symlink_metadata(dst)` decides New/Changed/Unchanged | Windows-differs (case) | as above | On a case-insensitive destination, `dst.join(name)` resolves to a differently cased existing entry |
+| 178–199 | `visit`: `symlink_metadata(dst)` decides New/Changed/Unchanged | Windows-differs (case) | as above | On a case-insensitive destination, `dst.join(name)` resolves to a differently cased existing entry ✓ P3.18 |
 | 366–424 | `case_twins`, `fold`, `fold_char`: Unicode simple case folding of UTF-8 names (`to_str()`; non-UTF-8 skipped) | Windows-/macOS-relevant | `extras_in` | Already handles case-folding destinations. No Unicode normalization (NFC/NFD) handling |
 
 ### sync/rsync.rs
@@ -1750,12 +1750,12 @@ All of these are **Unix-only**, because `std::os::windows::ffi` exposes `encode_
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | ops.rs:124–135 | `is_ancestor` / `is_strict_ancestor`: `normalize` + `starts_with` | Windows-/macOS-differs (case) | delete rails; app:app/syncing.rs:paste_sync | |
-| ops.rs:158–177 | `*_resolved`: `canonicalize` both sides, `starts_with` | (canonical spelling on both sides) | paste, copy, sync | |
+| ops.rs:158–177 | `*_resolved`: `canonicalize` both sides, `starts_with` | (canonical spelling on both sides) | paste, copy, sync | ✓ P3.18 |
 | ops/delete.rs:40–54 | Home and cwd rails | (case) | `check_deletable` | |
-| ops/create.rs:139–141 | Same-directory check for rename | (case) | `rename` | |
+| ops/create.rs:139–141 | Same-directory check for rename | (case) | `rename` | ✓ P3.18 |
 | ops/paste.rs:128–176 | `Clipboard` membership (`Vec`/`HashSet<PathBuf>`) | (case) | yank/cut/toggle | |
 | ops/paste.rs:193 | `spans_directories`: `parent != first` | (case) | df-app tray | |
-| ops/paste.rs:273 | `resolve`: `c.src == src` | (case) | conflict dialog | |
+| ops/paste.rs:273 | `resolve`: `c.src == src` | (case) | conflict dialog | ✓ P3.18 |
 | ops/paste.rs:400, 457, 462 | `claimed.contains` | (case) | `plan_paste`, `unique_name` | |
 | ops/trash.rs:316 | `orphans`: `item.name == name` (`OsString`) | (case) | `list` | Both sides come from `read_dir` |
 | ops/journal.rs:872, 911 | `read_link(link) != target` | (case) | undo | Link text compare |

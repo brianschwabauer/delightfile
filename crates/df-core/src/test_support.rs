@@ -92,6 +92,21 @@ pub fn abs(unix: &str) -> PathBuf {
         .fold(PathBuf::from(root), |path, name| path.join(name))
 }
 
+/// Whether the file system `dir` is on folds case: a file made as
+/// `CASE-PROBE` opens as `case-probe`. Windows' and the default macOS volume
+/// do; Linux's do not. For the tests that only mean something on such a
+/// volume, which skip elsewhere.
+pub fn folds_case(dir: &Path) -> bool {
+    let upper = dir.join(format!("CASE-PROBE-{}", std::process::id()));
+    let lower = dir.join(format!("case-probe-{}", std::process::id()));
+    if std::fs::write(&upper, b"").is_err() {
+        return false;
+    }
+    let folds = std::fs::symlink_metadata(&lower).is_ok();
+    let _ignored = std::fs::remove_file(&upper);
+    folds
+}
+
 /// The gnarly names of PLAN §9, in one place so every operation test
 /// exercises the same set.
 pub fn gnarly_names() -> Vec<String> {

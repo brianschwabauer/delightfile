@@ -313,7 +313,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 
 ## 4. Case (appendix §3.4)
 
-- [ ] **P3.18** Overwrite and self-paste decisions use `platform::fs::same_file`:
+- [x] **P3.18** Overwrite and self-paste decisions use `platform::fs::same_file`:
       `ops/create.rs:139–141` (rename into itself — a case-only rename `Foo`→`foo`
       must be *allowed* on a case-insensitive volume: when `same_file` is true and
       the names differ only by case, do the rename via a temporary name),
@@ -323,7 +323,24 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       "New"; confirm `case_twins` at `:366–424` already covers it and extend the test).
       (macOS too.) Done when: a test on a case-insensitive temp volume is skipped
       unless the volume is case-insensitive (probe by creating `A` and opening `a`),
-      and passes there.
+      and passes there. — done (port/paths). `rename`: the one-directory check
+      compares `path::key`s of the normalized parents, and when `same_file`
+      says `from` and `to` are one file, the names differ, they are equal
+      lowercased and the directory lists no entry spelled as `to`, the rename
+      goes through a `.df-tmp-rename-…` name (the second step failing puts the
+      first back); anything else that is the same file is the no-op it was —
+      on Linux, where such a pair can only be two hard links, both listed,
+      nothing changes. Confirmed without change: `paste.rs:273` (`resolve`)
+      compares the conflict's own `src` with the one the dialog hands back,
+      one spelling from one plan; `copies_into_itself`, `move_path` and the
+      paste rails already ask `same_file` or the resolved (canonical, so
+      on-disk case on both sides) paths; `visit` stats the destination, which a
+      folding volume answers for either spelling, and `case_twins` keeps the
+      destination's spelling from being an extra. Tests, skipped where the temp
+      volume keeps case (`test_support::folds_case`, the `A`/`a` probe):
+      `a_case_only_rename_changes_the_case_where_the_volume_folds_it` and
+      `a_destination_in_another_case_is_the_same_file_where_the_volume_folds_case`;
+      and where it keeps case, `a_rename_onto_a_hard_link_in_another_case_is_a_no_op`.
 - [ ] **P3.19** Lookup tables keyed on `path::key`: `state/mod.rs:202, 305–318,
       357, 367, 382–398` (`dirs` map: every `get` **and every write path**),
       `fs/memory.rs:29, 53, 69` (`Recent`), `ops.rs:124–135` (`is_ancestor`/
