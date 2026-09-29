@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use super::*;
 use crate::ops::copy::{syncs, without_reflink};
 use crate::ops::fixture::TempTree;
-use crate::ops::{Trash, COPY_CHUNK};
+use crate::ops::COPY_CHUNK;
 use crate::tasks::{ProgressSink, TaskCtx, TaskFlags};
 
 fn quick(sources: &[PathBuf], dest: &Path) -> SyncPlan {
@@ -796,6 +796,7 @@ fn removals_are_the_topmost_extras_deepest_first_with_what_each_takes() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
 fn a_mirror_trashes_the_extras_after_copying_and_before_verifying() {
     let t = TempTree::new("sync-mirror-trash");
     let mut plan = with_extras(&t);
@@ -823,7 +824,7 @@ fn a_mirror_trashes_the_extras_after_copying_and_before_verifying() {
         b"1234"
     );
     assert!(files.join("deep-extra.txt").is_file());
-    let trashed = Trash::at(t.join("Trash")).list().unwrap();
+    let trashed = crate::ops::Trash::at(t.join("Trash")).list().unwrap();
     assert_eq!(trashed.len(), 2);
 
     // And the next plan finds the two sides the same.
@@ -853,6 +854,7 @@ fn an_update_removes_nothing_whatever_the_plan_found() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
 fn a_mirror_moves_a_folder_in_the_way_to_the_trash_and_copies_the_file() {
     let t = TempTree::new("sync-mirror-in-the-way");
     let dir = t.dir("src/d");

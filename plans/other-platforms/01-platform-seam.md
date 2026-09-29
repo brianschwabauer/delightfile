@@ -397,6 +397,51 @@ has not dropped.
       name no `std::os::unix` outside tests, the rclone tests pass on Linux, and
       df-core compiles on all three targets. — done 5811c6b, cross-checked
       locally, CI pending
+- [x] **S1.52** df-core tests that compile everywhere but drive a body that is
+      a stub off Linux (added 2026-09-29 at integration: S1.15 made df-core's
+      tests *compile* for macOS and Windows, and these would then fail on both
+      runners). Gated `#[cfg(target_os = "linux")]`, each until the task that
+      gives the body, which removes the gate in the same change:
+      - the trash through the journal and the job (M2.8, W4.7):
+        `ops/journal.rs` `undo_of_a_trash_restores_it`,
+        `undo_of_a_trash_refuses_when_the_name_came_back`,
+        `redo_of_a_trash_trashes_it_again_into_the_same_trash`,
+        `a_partly_undone_trash_leaves_only_the_remainder_and_clears_the_redo_stack`,
+        `redo_of_a_trash_refuses_a_file_replaced_under_the_same_name`, and
+        `ops/jobs.rs` `a_trash_job_is_undoable`;
+      - the mirror's trash (M2.8, W4.7): `sync/tests.rs`
+        `a_mirror_trashes_the_extras_after_copying_and_before_verifying` and
+        `a_mirror_moves_a_folder_in_the_way_to_the_trash_and_copies_the_file`,
+        the two that set `Removal::Trash`. The other tests built on
+        `with_extras` run everywhere and are not gated:
+        `removals_are_the_topmost_extras_deepest_first_with_what_each_takes`
+        only plans, `a_mirror_deletes_for_good_where_there_is_no_trash` and
+        `a_mirrors_progress_counts_each_removal` delete for good,
+        `an_update_removes_nothing_whatever_the_plan_found` removes nothing
+        (and `a_removal_that_fails_is_recorded_and_the_rest_carry_on` was
+        already `unix`).
+      Already gated, and checked: the chmod walk's disk tests (`ops/mode.rs`'s
+      `on_disk` module and `ops/jobs.rs a_mode_job_goes_inside_and_can_be_undone`,
+      S1.15 and S1.19; M2.28 un-gates) and the two watcher tests in
+      `fs/tests.rs` (S1.4; M2.1, W4.4). Not gated, because they do not reach a
+      stub: every test that writes a tag asks `tags::supported_here` first,
+      which the xattr stub answers `false`, so it prints "skipping" and
+      returns; the tag tests that write nothing are pure. Tests that reach a
+      stub on **Windows only** are left with the Windows path failures to
+      Phase 3 (P3.24), since that job is red for those anyway: `same_file` is
+      `Unsupported` there until P3.3, which `ops.rs
+      same_file_sees_through_a_symlinked_route`, `ops/copy.rs
+      refuses_to_copy_a_file_over_itself`, `sync/tests.rs
+      the_rails_refuse_what_no_sync_can_do_safely` (its "onto itself" case)
+      and `ops/paste.rs same_directory_copy_auto_suffixes` rely on; the SFTP,
+      rclone and rsync tests are already `unix` or skip (S1.15, S1.51, S1.14).
+      The gated tests spell `crate::ops::Trash::at` in full, so their modules'
+      imports are used on every target. Done when: none of df-core's tests
+      reaches a Linux-only stub on the macOS or Windows runner, Linux's count is
+      unchanged (the gated tests still run there), and `cargo check -p df-core
+      --tests` is clean for both targets. — done, uncommitted 2026-09-29, Linux
+      verified (1138 with S1.26's new test; cross-checked clean for both
+      targets), other targets unverified until CI
 
 ## 3. df-app: the seam
 
@@ -1071,6 +1116,13 @@ their native clipboards *are* synchronous.
   is the same missing feature, and not `d` on a remote tab, which deletes on
   the server. The words are the stub's `DfError::Unsupported("Trash")` text
   written out, because `App::refusal` answers `&'static str`.
+- 2026-09-29 — S1.52 (new task): df-core tests that compile everywhere but
+  reach a Linux-only stub (the trash through the journal, the job and the
+  mirror) are gated `#[cfg(target_os = "linux")]`, as the brief for the
+  integration decided, and the task that gives the body (M2.8, W4.7) removes
+  the gate. Tests that reach a stub on Windows only (`same_file`, P3.3) are
+  left with the Windows path failures to P3.24: that job is red until Phase 3
+  either way, and gating them now would hide what P3.3 has to make pass.
 
 ## Open questions
 

@@ -454,7 +454,7 @@ mod tests {
     use crate::config::TasksConfig;
     use crate::ops::fixture::TempTree;
     use crate::ops::paste::{plan_paste, Clipboard};
-    use crate::ops::{trash, Journal};
+    use crate::ops::Journal;
     use crate::tasks::{TaskEngine, TaskState};
     use std::time::Duration;
 
@@ -570,11 +570,12 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
     fn a_trash_job_is_undoable() {
         let t = TempTree::new("job-trash");
         // `for_path` picks a real trash, so this test drives the plain trash
         // API directly and only exercises the job's record-keeping shape.
-        let bin = trash::Trash::at(t.join("Trash"));
+        let bin = crate::ops::Trash::at(t.join("Trash"));
         let file = t.file("work/notes.txt", b"x");
         let item = bin.trash(&file, &TaskCtx::detached()).unwrap();
 

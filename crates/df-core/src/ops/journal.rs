@@ -2040,7 +2040,7 @@ mod tests {
     use super::*;
     use crate::ops::fixture::TempTree;
     use crate::ops::link::LinkKind;
-    use crate::ops::{copy, create, link, trash};
+    use crate::ops::{copy, create, link};
 
     fn ctx() -> TaskCtx {
         TaskCtx::detached()
@@ -2455,9 +2455,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
     fn undo_of_a_trash_restores_it() {
         let t = TempTree::new("j-trash");
-        let bin = trash::Trash::at(t.join("Trash"));
+        let bin = crate::ops::Trash::at(t.join("Trash"));
         let file = t.file("work/notes.txt", b"contents");
         let item = bin.trash(&file, &ctx()).unwrap();
 
@@ -2471,9 +2472,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
     fn undo_of_a_trash_refuses_when_the_name_came_back() {
         let t = TempTree::new("j-trash-taken");
-        let bin = trash::Trash::at(t.join("Trash"));
+        let bin = crate::ops::Trash::at(t.join("Trash"));
         let file = t.file("work/notes.txt", b"old");
         let item = bin.trash(&file, &ctx()).unwrap();
         std::fs::write(&file, b"newer").unwrap();
@@ -3094,9 +3096,10 @@ mod tests {
     /// A redo of `d` puts the file back in the trash it was restored from,
     /// which is the one `u` will look in next.
     #[test]
+    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
     fn redo_of_a_trash_trashes_it_again_into_the_same_trash() {
         let t = TempTree::new("j-redo-trash");
-        let bin = trash::Trash::at(t.join("Trash"));
+        let bin = crate::ops::Trash::at(t.join("Trash"));
         let file = t.file("work/notes.txt", b"contents");
         let item = bin.trash(&file, &ctx()).unwrap();
         let mut j = Journal::default();
@@ -3611,10 +3614,11 @@ mod tests {
     /// the half that went — is cleared.
     #[cfg(unix)]
     #[test]
+    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
     fn a_partly_undone_trash_leaves_only_the_remainder_and_clears_the_redo_stack() {
         use std::os::unix::fs::PermissionsExt;
         let t = TempTree::new("j-trash-partial");
-        let bin = trash::Trash::at(t.join("Trash"));
+        let bin = crate::ops::Trash::at(t.join("Trash"));
         let a = t.file("one/a.txt", b"a");
         let b = t.file("two/b.txt", b"b");
         let items = vec![
@@ -3702,9 +3706,10 @@ mod tests {
     /// The name a redo of `d` would trash again now belongs to a different
     /// file: refused, and the new file stays where it is.
     #[test]
+    #[cfg(target_os = "linux")] // a trash to put things in (M2.8, W4.7)
     fn redo_of_a_trash_refuses_a_file_replaced_under_the_same_name() {
         let t = TempTree::new("j-redo-trash-replaced");
-        let bin = trash::Trash::at(t.join("Trash"));
+        let bin = crate::ops::Trash::at(t.join("Trash"));
         let file = t.file("work/notes.txt", b"the old notes");
         let item = bin.trash(&file, &ctx()).unwrap();
         let mut j = Journal::default();
