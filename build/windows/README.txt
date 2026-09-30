@@ -26,6 +26,7 @@ Installed with scoop instead, it is not checked by SmartScreen:
 
 Licenses
 --------
-delightfile is GPL-3.0-or-later (LICENSE.txt). The FFmpeg DLLs are an FFmpeg
-GPL build (licenses\ffmpeg.txt) and pdfium.dll carries its own and its
-libraries' licenses (licenses\pdfium\).
+delightfile is GPL-3.0-or-later. The FFmpeg DLLs are an FFmpeg GPL build, and
+pdfium.dll carries its own license and its libraries'. Licenses\ holds them
+all, and Licenses\SOURCES.txt says exactly which FFmpeg this is and where its
+source is.

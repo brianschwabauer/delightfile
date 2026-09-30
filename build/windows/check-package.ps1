@@ -2,8 +2,9 @@
 .SYNOPSIS
 B6.19's acceptance check for the Windows zip: unpacked into an empty folder,
 delightfile.exe --version runs from there with every FFmpeg folder taken off
-PATH, so only the zip's own DLLs can answer; and the exe carries the icon and
-the version resource of B6.20, the version being the one --version says.
+PATH, so only the zip's own DLLs can answer; the exe carries the icon and
+the version resource of B6.20, the version being the one --version says; and
+Licenses\ holds delightfile's, FFmpeg's and pdfium's licenses and SOURCES.txt.
 
 .DESCRIPTION
     & build\windows\check-package.ps1 target\dist\delightfile-<version>-x86_64-windows.zip
@@ -32,6 +33,11 @@ try {
     if (-not (Test-Path $exe)) { throw "the zip has no $name\delightfile.exe" }
     Get-ChildItem (Join-Path $trial $name) -Recurse -File |
         ForEach-Object { Write-Host ("  {0,12:N0}  {1}" -f $_.Length, $_.FullName.Substring($trial.Length + 1)) }
+    foreach ($file in 'delightfile\LICENSE.txt', 'FFmpeg\COPYING.GPLv3.txt', 'pdfium\LICENSE.txt', 'SOURCES.txt') {
+        $path = Join-Path $trial "$name\Licenses\$file"
+        if (-not (Test-Path $path) -or (Get-Item $path).Length -eq 0) { throw "the zip has no Licenses\$file" }
+    }
+    Get-Content (Join-Path $trial "$name\Licenses\SOURCES.txt") | ForEach-Object { Write-Host "  | $_" }
 
     $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'avcodec-63.dll')) }) -join ';'
     # The program is a windows-subsystem executable that keeps the handle it

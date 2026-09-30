@@ -17,6 +17,14 @@ avdevice, avfilter and the ffmpeg programs stay out. Everything any file in
 the folder imports is then either in the folder or part of Windows, or the
 script stops and names what is missing.
 
+Licenses\ holds delightfile's license, FFmpeg's COPYING.GPLv3 (the BtbN
+zip's LICENSE.txt, which is that file byte for byte), pdfium's licenses and
+SOURCES.txt, which names the exact FFmpeg (from the BtbN folder's name) and
+where its source is: FFmpeg's repository at the commit that name ends in, and
+BtbN's build scripts at the release ffmpeg.lock names. Each file ends in .txt
+so a double-click opens it. The BtbN zip carries no LICENSE.md; SOURCES.txt
+says where it is.
+
 The zip is then checked the way a person would use it, by
 check-package.ps1: unpacked into an empty folder, delightfile.exe --version
 run there with every FFmpeg folder taken off PATH, and the exe's icon and
@@ -129,12 +137,55 @@ try {
 
     $readme = (Get-Content (Join-Path $PSScriptRoot 'README.txt') -Raw) -replace '@VERSION@', $version
     [System.IO.File]::WriteAllText((Join-Path $dir 'README.txt'), ($readme -replace "`r?`n", "`r`n"))
-    Copy-Item (Join-Path $repo 'LICENSE') (Join-Path $dir 'LICENSE.txt')
-    New-Item -ItemType Directory -Force (Join-Path $dir 'licenses\pdfium') | Out-Null
-    Copy-Item (Join-Path $FfmpegDir 'LICENSE.txt') (Join-Path $dir 'licenses\ffmpeg.txt')
+    $licenses = Join-Path $dir 'Licenses'
+    foreach ($sub in 'delightfile', 'FFmpeg', 'pdfium') {
+        New-Item -ItemType Directory -Force (Join-Path $licenses $sub) | Out-Null
+    }
+    Copy-Item (Join-Path $repo 'LICENSE') (Join-Path $licenses 'delightfile\LICENSE.txt')
+    Copy-Item (Join-Path $FfmpegDir 'LICENSE.txt') (Join-Path $licenses 'FFmpeg\COPYING.GPLv3.txt')
     $pdfium_root = Split-Path (Split-Path $Pdfium)
-    Copy-Item (Join-Path $pdfium_root 'LICENSE') (Join-Path $dir 'licenses\pdfium\LICENSE.txt')
-    Copy-Item (Join-Path $pdfium_root 'licenses\*') (Join-Path $dir 'licenses\pdfium')
+    Copy-Item (Join-Path $pdfium_root 'LICENSE') (Join-Path $licenses 'pdfium\LICENSE.txt')
+    Copy-Item (Join-Path $pdfium_root 'licenses\*') (Join-Path $licenses 'pdfium')
+
+    # Which FFmpeg, from BtbN's folder name (ffmpeg-n9.0.1-11-ge47273f4d9-
+    # win64-gpl-shared-9.0: git describe of the FFmpeg commit), and which
+    # BtbN release, from the lock's URL.
+    $ffmpeg_name = Split-Path (Resolve-Path $FfmpegDir).Path -Leaf
+    if ($ffmpeg_name -notmatch '^ffmpeg-(n[0-9.]+(?:-[0-9]+-g([0-9a-f]+))?)-win64-gpl-shared') {
+        throw "$ffmpeg_name is not named as BtbN's GPL shared builds are, so SOURCES.txt cannot say where its source is"
+    }
+    $ffmpeg_version = $Matches[1]
+    $ffmpeg_ref = if ($Matches[2]) { $Matches[2] } else { $ffmpeg_version }
+    $lock_url = (Get-Content (Join-Path $PSScriptRoot 'ffmpeg.lock'))[0].Trim()
+    if ($lock_url -notmatch '/releases/download/([^/]+)/') { throw "ffmpeg.lock's URL names no BtbN release" }
+    $btbn_release = $Matches[1]
+    $pdfium_lock_url = (Get-Content (Join-Path $PSScriptRoot 'pdfium.lock'))[0].Trim()
+    $pdfium_release = ($pdfium_lock_url -replace '^.*/releases/download/', '') -replace '/[^/]+$', ''
+    $sources = @"
+Where the source is of what this folder carries
+
+delightfile $version
+  License: GPL-3.0-or-later, Licenses\delightfile\LICENSE.txt
+  Source:  https://github.com/brianschwabauer/delightfile (tag v$version)
+
+FFmpeg $ffmpeg_version, the DLLs avcodec, avformat, avutil, swresample and
+swscale: BtbN/FFmpeg-Builds release $btbn_release, win64 GPL shared.
+  License: GPL-3.0-or-later, Licenses\FFmpeg\COPYING.GPLv3.txt (the build's
+           LICENSE.txt). FFmpeg's LICENSE.md, which says which parts are under
+           which license, is in the source below.
+  Source:  FFmpeg's repository at $ffmpeg_ref
+           https://git.ffmpeg.org/ffmpeg.git
+           https://github.com/FFmpeg/FFmpeg/tree/$ffmpeg_ref (mirror)
+  Build:   the scripts that built these DLLs, which name the version of every
+           library built into them
+           https://github.com/BtbN/FFmpeg-Builds/tree/$btbn_release
+
+pdfium, bblanchon/pdfium-binaries $pdfium_release, pdfium.dll
+  License: Licenses\pdfium\LICENSE.txt, and beside it the licenses of what it
+           builds in
+  Source:  https://github.com/bblanchon/pdfium-binaries/releases/tag/$pdfium_release
+"@
+    [System.IO.File]::WriteAllText((Join-Path $licenses 'SOURCES.txt'), ($sources -replace "`r?`n", "`r`n"))
 
     New-Item -ItemType Directory -Force $Out | Out-Null
     $zip = Join-Path (Resolve-Path $Out).Path "$name.zip"

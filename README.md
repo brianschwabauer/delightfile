@@ -153,11 +153,14 @@ has one download per system, each with a `.sha256` beside it. None of them is si
 Apple or Microsoft, so macOS and Windows each ask once before delightfile first opens. The
 steps for that are below. Signing costs a yearly fee that a hobby project does not pay yet
 ([plans/other-platforms/06-build-and-release.md](plans/other-platforms/06-build-and-release.md)
-§6 has the reasoning).
+§6 has the reasoning). The macOS and Windows downloads carry FFmpeg built under the GPL,
+and `Licenses/SOURCES.txt` (in the app's `Contents/Resources` on macOS, beside
+`delightfile.exe` on Windows) names that exact FFmpeg and where its source is.
 
 ### macOS
 
-Apple silicon only. The release notes name the oldest macOS each release starts on.
+Apple silicon, macOS 15 or later. The release notes name the oldest macOS each release
+starts on.
 
 ```sh
 brew install --cask brianschwabauer/tap/delightfile

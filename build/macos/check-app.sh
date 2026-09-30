@@ -5,7 +5,9 @@
 #
 #   bash build/macos/check-app.sh path/to/delightfile.app
 #
-# - Info.plist lints and names the executable, the icon is there.
+# - Info.plist lints and names the executable, the icon is there, and
+#   Resources/Licenses holds delightfile's, FFmpeg's and pdfium's licenses and
+#   SOURCES.txt.
 # - `codesign --verify --deep --strict` accepts the ad hoc signature.
 # - `otool -L` on the program and every bundled library names only the
 #   system's libraries and the bundle's own Contents/Frameworks, and every
@@ -35,6 +37,11 @@ plist() {
 [[ $(plist CFBundleExecutable) == delightfile ]] || problem "CFBundleExecutable is not delightfile"
 [[ -f $contents/Resources/$(plist CFBundleIconFile) ]] || problem "no Resources/$(plist CFBundleIconFile)"
 [[ -f $frameworks/libpdfium.dylib ]] || problem "no Frameworks/libpdfium.dylib"
+for file in delightfile/LICENSE FFmpeg/COPYING.GPLv3 FFmpeg/LICENSE.md pdfium/LICENSE SOURCES.txt; do
+    [[ -s $contents/Resources/Licenses/$file ]] || problem "no Resources/Licenses/$file"
+done
+echo "Resources/Licenses:"
+(cd "$contents/Resources/Licenses" && find . -type f | sed 's|^\./|  |' | sort)
 echo "$(plist CFBundleIdentifier) $(plist CFBundleShortVersionString), LSMinimumSystemVersion $(plist LSMinimumSystemVersion)"
 
 codesign --verify --deep --strict --verbose=2 "$app"
