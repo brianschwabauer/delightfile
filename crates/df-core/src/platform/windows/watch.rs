@@ -442,7 +442,13 @@ mod tests {
         assert!(watcher.is_active());
         watcher.watch(vec![t.path().to_path_buf()]);
         armed(&watcher, t.path(), Duration::from_secs(10)).expect("the watch never armed");
-        while watcher.events().try_recv().is_ok() {}
+        // Let the arming files' last burst flush, so the change below is the
+        // only one left to arrive.
+        while watcher
+            .events()
+            .recv_timeout(crate::fs::DEBOUNCE * 4)
+            .is_ok()
+        {}
 
         let landed = Instant::now();
         std::fs::write(t.join("landed.txt"), b"hi").unwrap();
@@ -494,7 +500,11 @@ mod tests {
         armed(&watcher, &a, Duration::from_secs(10)).expect("a never armed");
         watcher.watch(vec![t.join("missing"), b.clone()]);
         armed(&watcher, &b, Duration::from_secs(10)).expect("b never armed");
-        while watcher.events().try_recv().is_ok() {}
+        while watcher
+            .events()
+            .recv_timeout(crate::fs::DEBOUNCE * 4)
+            .is_ok()
+        {}
         std::fs::write(a.join("unwatched.txt"), b"x").unwrap();
         std::fs::write(b.join("watched.txt"), b"x").unwrap();
         let mut seen = Vec::new();
