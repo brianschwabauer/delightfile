@@ -33,6 +33,10 @@ use crate::platform::fit::{fit, Area, Fitted, Frame};
 
 pub use super::titlebar::{adopt, caption_pointer, set_theme, title_band, title_regions};
 
+/// Nothing to line up with the row: the caption buttons are the window's
+/// own, drawn the band's full depth.
+pub fn band_row(_window: &Window, _row: egui::Rect) {}
+
 /// No press the window sees is the title bar's: the system asks the window
 /// where its title bar is (`WM_NCHITTEST`, [`super::titlebar`]) and keeps
 /// those presses to itself.

@@ -609,6 +609,15 @@ rows), `appendix-inventory-df-app.md` §1–§3.
         new: with one tab the top row is in the band and starts a gap past
         the lights, with two or more the strip does, the top row under it
         the window's width.
+      - The lights sit level with the row (Brian, 2026-09-30, after the
+        first build): after every layout `window::band_row` is given the row
+        in the band, its first line (`ui::Layout::band_row`), and AppKit's
+        title bar — the close button's superview's superview — is made
+        twice as deep as the row's middle is low, its top still the
+        window's, with each button centred in it (`caption::lights_at`), as
+        Electron's `trafficLightPosition` does. Written only when the
+        buttons are not already there; put back where AppKit had them when
+        the band goes (full screen).
       - The band is still a title bar. After every layout
         `window::title_regions` keeps the band and the window's controls in
         it (`chrome::band_controls`, as on Windows); a new seam function,
@@ -660,10 +669,11 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       attempt after df-core's
       `git::tests::the_cache_fills_in_asynchronously_and_bumps_the_generation`
       read its bell before the worker rang it, which this change does not
-      touch), not seen on screen. One piece of the brief is blocked rather than
-      done: `NSWindow.setMovableByWindowBackground(true)` is not set, since
-      winit's view answers every press as one that can move the window and
-      the whole window would drag (Open questions); the band drags through
+      touch), not seen on screen; the lights centred on the row in the
+      commit after fe54200, which names this line, not seen on screen.
+      `NSWindow.setMovableByWindowBackground(true)`, which the brief asked
+      for beside `title_press`, is not set, by Brian's call once it was
+      found to drag the whole window (Decisions log); the band drags through
       `title_press` alone.
 
 ## Decisions log
@@ -1078,6 +1088,39 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   macOS answer no band; it now says Linux does and macOS did until M2.37
   (the ground rules' §7: the document is fixed in the change that made it
   untrue). Nothing else of Windows' plan or code changed.
+- 2026-09-30 — Brian (delegated, through the coordinator) on M2.37's two
+  open questions. **`setMovableByWindowBackground` stays off**: winit's
+  view answers every press as one that can move the window, so with it on
+  the whole window would drag — a rubber band in the list, a divider, a
+  scrollbar, a drag of files out — and the band's empty space drags
+  through `title_press` alone. **The traffic lights sit level with the
+  row**, as Electron's `trafficLightPosition` and VS Code put them, rather
+  than where AppKit keeps them, level with the row's upper half: after each
+  layout they are centred on the row in the band, and put back where
+  AppKit had them when the band goes (full screen). Both questions are
+  taken out of Open questions below; whether AppKit drags the window by
+  itself from the title bar's depth stays, for the live check.
+- (mac-native) 2026-09-30 — M2.37, the lights: the platform is told the
+  row by a new seam function, `window::band_row`, called after
+  `title_regions` (Linux never calls it, Windows' does nothing, its buttons
+  being its own), rather than a new argument to `title_regions`, whose
+  Windows body is band code this change keeps out of. The row is its first
+  line (`ui::Layout::band_row`): with a strip, the strip, whose middle is 23
+  points down; with one tab, the top row's first 38 points, whose middle is
+  27 down, so a prompt's second line, for an error, grows the row without
+  moving the lights. AppKit's title bar is made twice as deep as that
+  middle is low, 46 or 54 points where it was about 28, its top kept where
+  it is, and each button centred in it (`caption::lights_at`) — Electron's
+  arithmetic, read from its `window_buttons_proxy.mm`, which also says the
+  buttons are not to be held (AppKit may replace them) and that AppKit
+  lays its title bar out again on its own occasions. So the buttons are
+  read after every layout and written only when the title bar's depth or a
+  button's height from its foot is half a point or more from where they
+  should be: the first time, when the row moves (a strip coming or going),
+  and after AppKit has put them back. Where AppKit had them — the title
+  bar's depth and each origin — is taken once, before the first move, and
+  is where they go back to when the band goes. The band's `left_inset` is
+  read as before; the lights only move down.
 
 ## Open questions
 
@@ -1094,38 +1137,17 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   scattered through Finder's Trash that the journal names. Options: a task
   that weighs the journal's items (a walk of each `location()`) and gives
   `app/tests/trash.rs` macOS twins; or accept the count alone.
-- (mac-native) **Blocked**, M2.37: `NSWindow.setMovableByWindowBackground(true)`,
-  which the brief asks for beside `title_press`, is not set. A window movable
-  by its background moves on a drag from any view that answers
-  `mouseDownCanMoveWindow` YES, and winit's view does not override that
-  answer, whose default is YES for a view that is not opaque — winit's own
-  docs call the attribute "click-and-drag behavior for the entire window",
-  and egui's warn it moves the window under a slider. Here it would move the
-  window from a rubber band in the list, a divider, a scrollbar and a drag
-  of files out. Options: (a) leave it off: the band's empty space drags
-  through `title_press`, which is what is built; (b) set it and give
-  winit's view a `mouseDownCanMoveWindow` that answers YES only in the
-  band's empty space, a method added to winit's class at run time
-  (`class_addMethod`, reading the press from `NSApp.currentEvent`), so
-  AppKit moves the window itself there — a patch to a class that is
-  winit's; (c) set it as the brief says and accept that every drag in the
-  window moves it.
-- (mac-native) Whether AppKit moves the window by itself from a press in
-  the see-through title bar's own depth (about 28 points) that lands on one
-  of the row's controls — a tab chip, a crumb — for the reason above: the
-  view under it answers that it can move the window. If the live check
-  (`07-verification.md` §4.1, M2.37) finds a drag from a tab or a crumb
-  moving the window, option (b) above, answering NO on the controls, is the
-  fix.
-- (mac-native) Where the traffic lights sit against the row (M2.37). AppKit
-  keeps them in its own title bar, about 28 points deep, so their middle is
-  some 14 points from the window's top; the top row is 38 points deep under
-  an 8-point margin, its middle at 27. The lights sit level with the row's
-  upper half, not its middle as Finder's sit in its toolbar. Options: leave
-  them; move the three buttons down to the row's middle (Electron's
-  `trafficLightPosition`: each button's frame set again after every layout,
-  since AppKit lays its title bar out again on a resize, and its container
-  made deep enough to hold them); or give the window an empty unified
-  `NSToolbar`, which makes AppKit's title bar 52 points deep with the lights
-  in its middle, at the risk of the toolbar's view taking the row's clicks.
-  To be decided on a first look.
+- (mac-native) Whether AppKit moves the window by itself from a press on
+  one of the row's controls — a tab chip, a crumb — inside the see-through
+  title bar's depth, which since the lights sit level with the row (M2.37)
+  is 46 or 54 points, the row's whole depth, where AppKit's own is about
+  28. winit's view answers every press as one that can move the window
+  (`mouseDownCanMoveWindow`, which it does not override, is YES for a view
+  that is not opaque), and AppKit may take that answer in a title bar's
+  depth without being movable by its background; Electron and VS Code put
+  clickable controls under a title bar deepened the same way, which says it
+  does not. The live check (`07-verification.md` §4.1, M2.37) answers it.
+  If a drag from a tab or a crumb moves the window, the fix is a
+  `mouseDownCanMoveWindow` on winit's view that answers NO over the
+  window's controls, a method added to winit's class at run time
+  (`class_addMethod`) — a patch to a class that is winit's.

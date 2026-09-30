@@ -42,6 +42,9 @@ pub fn title_regions(
 ) {
 }
 
+/// Never called: there is no band.
+pub fn band_row(_window: &Window, _row: egui::Rect) {}
+
 /// No press is the title bar's: there is none in the window.
 pub fn title_press(_window: &Window) -> bool {
     false

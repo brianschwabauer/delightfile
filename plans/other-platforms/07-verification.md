@@ -106,10 +106,17 @@ document that owns the feature.
       the window; the top row is the top of the window, the traffic lights
       over its left end on the window's ground and the breadcrumb starting a
       gap past the zoom button; there is no ☰ button, the first crumb sitting
-      in the row's corner where it was. Record where the lights sit against
-      the row (02-macos.md, Open questions: they are expected level with its
-      upper half). The lights work: close, minimize, zoom, and Option-click
-      zoom.
+      in the row's corner where it was. The lights work: close, minimize,
+      zoom, and Option-click zoom.
+- [ ] Lights centred on the row (M2.37): the traffic lights' middle is level
+      with the top row's middle, the breadcrumb's text beside them; with two
+      tabs, level with the strip's; still there after a resize from each edge,
+      after minimizing and restoring, after a rename prompt shows an error on
+      a second line, and after the window loses and regains the keyboard;
+      in full screen AppKit's own title bar comes down with the lights where
+      it always has them, and back out of full screen they are level with
+      the row again. Each light answers its hover and its click over the
+      whole of it.
 - [ ] The band is the title bar (M2.37): a drag from the row's empty space
       (between the crumbs and the counter, beside the lights, the margin
       above the row) moves the window; a double click there zooms, and again
@@ -604,6 +611,9 @@ release zip is run.
   double-click setting, two tabs, full screen, the menu bar's seven menus,
   its rows and their greys, and keys shown in the menus but answered by the
   keymap. Nothing of it has been seen on a Mac.
+- (mac-native) 2026-09-30 — §4.1 gained "Lights centred on the row" once
+  Brian had the lights moved to the row's middle (02-macos.md, Decisions
+  log), and the one-header line no longer asks where they sit.
 
 - (finish) 2026-09-30 — §5.4 gained "Empty trash" (W4.8) and the console
   line names the preview's listings and the search panel (W4.38); §5.7

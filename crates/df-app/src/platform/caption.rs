@@ -33,7 +33,8 @@
 //! there reaches the window like any other; the window asks [`classify`]
 //! whether the press is the title bar's, with no resize edge and no buttons
 //! of its own to answer for, and if it is, moves the window or does what a
-//! double click on a title bar does ([`double_click`]).
+//! double click on a title bar does ([`double_click`]). The lights
+//! themselves are moved down to sit level with the row ([`lights_at`]).
 
 use crate::ui::{CaptionButton, CaptionPointer};
 
@@ -235,9 +236,35 @@ pub fn double_click(setting: Option<&str>, minimize_legacy: bool) -> DoubleClick
     }
 }
 
+/// Where the traffic lights go so that their middle is `centre` points below
+/// the window's top (macOS): AppKit's title bar made twice that deep, its
+/// top still the window's, and each button, `button` points tall, centred
+/// in it — its bottom edge `(depth − button) / 2` up from the title bar's
+/// foot, which is the same measured from its top. Electron's way with its
+/// `trafficLightPosition`. `(depth, y)`, or `None` for a button of no
+/// height, or a middle too near the top to hold one.
+#[cfg(any(target_os = "macos", test))]
+pub fn lights_at(centre: f64, button: f64) -> Option<(f64, f64)> {
+    let depth = centre * 2.0;
+    (button > 0.0 && depth >= button).then(|| (depth, (depth - button) / 2.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 16-point button with its middle on the top row's (27 points down,
+    /// a margin of 8 and half a 38-point row) and on the strip's (8 and
+    /// half of 30).
+    #[test]
+    fn the_lights_are_centred_in_a_title_bar_twice_as_deep_as_their_middle() {
+        assert_eq!(lights_at(27.0, 16.0), Some((54.0, 19.0)));
+        assert_eq!(lights_at(23.0, 16.0), Some((46.0, 15.0)));
+        let (depth, y) = lights_at(27.0, 16.0).expect("room");
+        assert_eq!(depth - y - 16.0, y, "as far from the top as the foot");
+        assert_eq!(lights_at(5.0, 16.0), None, "no room above the middle");
+        assert_eq!(lights_at(27.0, 0.0), None, "not laid out yet");
+    }
 
     #[test]
     fn a_double_click_does_what_system_settings_says() {
