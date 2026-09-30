@@ -1771,6 +1771,12 @@ fn a_file_landing_in_a_watched_directory_raises_a_refresh() {
         eprintln!("skipping: no inotify watch could be installed (watch limit?)");
         return;
     }
+    // The watcher rings after it sends, so the event can be in hand a moment
+    // before the bell has rung.
+    let rung_by = Instant::now() + Duration::from_secs(2);
+    while bell.load(Ordering::SeqCst) == 0 && Instant::now() < rung_by {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(
         bell.load(Ordering::SeqCst) > 0,
         "the notifier is what wakes the event loop"
