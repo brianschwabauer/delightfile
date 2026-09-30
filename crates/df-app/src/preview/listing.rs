@@ -36,6 +36,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use df_core::archive::{ArchiveError, ArchiveFormat, ArchiveTree, VolumeKind};
+// 7-Zip is a console program: on Windows it would flash a console window of
+// its own for each listing (W4.38); elsewhere this does nothing.
+use df_core::platform::process::quiet;
 
 /// The most members a preview keeps: five hundred.
 ///
@@ -321,7 +324,7 @@ fn tar_through_7z(program: &Path, path: &Path, stop: &dyn Fn() -> bool) -> Optio
     if stop() {
         return None;
     }
-    let mut child = Command::new(program)
+    let mut child = quiet(&mut Command::new(program))
         .args(["x", "-so", "--"])
         .arg(path)
         .stdin(Stdio::null())
@@ -376,7 +379,7 @@ fn list_with_7z(
     if stop() {
         return Err(STOPPED.to_string());
     }
-    let mut child = Command::new(program)
+    let mut child = quiet(&mut Command::new(program))
         .args(["l", "-ba", "-slt", "--"])
         .arg(path)
         .stdin(Stdio::null())
@@ -932,7 +935,7 @@ Offset = 63
     }
 
     fn run(program: &Path, args: &[&str], dir: &Path) -> bool {
-        Command::new(program)
+        quiet(&mut Command::new(program))
             .args(args)
             .current_dir(dir)
             .stdin(Stdio::null())
