@@ -57,7 +57,10 @@
 //! | `window::title_regions` | `fn(&Window, band: egui::Rect, buttons: Option<[egui::Rect; 3]>, controls: &[egui::Rect])`, after every layout that has a band: the band, the caption buttons and the window's own controls in it, logical points | never called | macOS never called; Windows: what the title bar's hit test answers the next point with | W4.39 |
 //! | `window::caption_pointer` | `fn(&Window) -> ui::CaptionPointer`: the caption button the pointer is over and the one it pressed, for the frame that draws them | nothing over, nothing pressed | macOS the same; Windows: what the non-client mouse messages said | W4.39 |
 //! | `window::set_theme` | `fn(&Window, winit::window::Theme)`, the window's side | `Window::set_theme` | macOS the same; Windows: that, and `DWMWA_USE_IMMERSIVE_DARK_MODE` for DWM's frame | W4.39 |
-//! | `menubar::MENU_BUTTON` | `const bool`: whether the top row leads with the ☰ button that opens the app menu | `true` | `true` everywhere for now | M2.37 |
+//! | `menubar::MENU_BUTTON` | `const bool`: whether the top row leads with the ☰ button that opens the app menu | `true` | macOS `false`, the app menu being the menu bar's; Windows `true` | M2.37 |
+//! | `menubar::start` | `fn(app::Waker)`, once, after the window is made | nothing | macOS: the menu bar made, and handed to the application with the first rows `publish` brings; Windows nothing | M2.37 |
+//! | `menubar::publish` | `fn(&[menu::Item], &Registry)`, every frame where `MENU_BUTTON` is `false`: the app menu's rows as the ☰ button would open them now | never called | macOS: kept, each of the bar's menus built from the latest as it opens ([`mirror`] says where each row goes); Windows never called | M2.37 |
+//! | `menubar::take` | `fn() -> Vec<menu::Action>`: what was chosen in the menu bar since the last frame, for the window to do as the ☰ menu's rows | empty | macOS: the rows chosen, queued by the items' target, the window's bell rung for each; Windows empty | M2.37 |
 //! | `fonts::dirs` | `fn() -> Vec<PathBuf>`, where a Nerd Font is looked for, in order | `/usr/share/fonts/…`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts` | macOS: `~/Library/Fonts`, `/Library/Fonts`, `/System/Library/Fonts{,/Supplemental}`; Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, `C:\Windows\Fonts` | S1.29 |
 //! | `trash::{LISTED_NOTE, EMPTIED_NOTE}` | `Option<&str>`: what the trash view says it cannot see, under an empty view and after "Empty trash" | `None`: the view is the whole freedesktop trash | macOS: only what delightfile trashed is listed and emptied, Finder's Trash may hold more (M2.9); Windows: `None`, there is no trash view | M2.9 |
 //! | `trash::{SYSTEM_BIN, RESTORED_ELSEWHERE}` | `Option<&str>`: the system's own trash, opened in place of the trash view — and, where there is one, what "Empty trash" counts and empties whole (`dialog::ConfirmKind::EmptyBin`) — and what `u` after a trash says when it cannot be taken back here | `None`, `None` | macOS `None`, `None`; Windows `shell:RecycleBinFolder`, "Restore it from the Recycle Bin" | W4.8 |
@@ -129,7 +132,15 @@ mod fit;
 #[cfg(any(windows, test))]
 mod caption;
 
-/// The app menu stays the ☰ button's.
+/// Which of the app menu's rows goes under which of a menu bar's menus, and
+/// a chord as a menu item's key equivalent: macOS's, and compiled in every
+/// target's tests.
+#[cfg(any(target_os = "macos", test))]
+mod mirror;
+
+/// The app menu stays the ☰ button's: Linux's and Windows' stand-in for
+/// macOS's menu bar (`macos/menubar.rs`).
+#[cfg(not(target_os = "macos"))]
 pub mod menubar;
 
 #[cfg(target_os = "linux")]

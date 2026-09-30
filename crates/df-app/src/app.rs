@@ -2564,6 +2564,9 @@ impl App {
         // the top row goes up into the title bar (W4.39), that size has the
         // caption's band in it.
         crate::platform::window::adopt(&window);
+        // The system's menu bar, where the app menu lives there (macOS):
+        // made now, handed its rows at the end of the first frame.
+        crate::platform::menubar::start(self.waker.named("menubar"));
         let gfx = Gfx::new(window, self.palette.base)?;
 
         // Before the first frame, so no row is ever drawn with the wrong face.
@@ -13725,6 +13728,15 @@ impl App {
     /// row closes the menu as it runs, so the menu never outlives the moment
     /// its ticks and greys were true.
     fn open_app_menu(&mut self) {
+        let items = self.app_menu_items();
+        // One menu at a time: this replaces a context menu that was up.
+        self.show_menu(Menu::app(self.menu_button, items));
+        self.clicks.reset();
+    }
+
+    /// The app menu's rows, as the button, `F10` or the menu bar would open
+    /// them now: their ticks, their greys, the places in Go.
+    fn app_menu_items(&self) -> Vec<menu::Item> {
         let facts = menu::AppFacts {
             picker: self.chooser.is_some(),
             // `GotoPath`'s own refusal, in `run`.
@@ -13744,9 +13756,57 @@ impl App {
             self.refusal(command).is_some()
         });
         menu::insert_go(&mut items, self.place_rows());
-        // One menu at a time: this replaces a context menu that was up.
-        self.show_menu(Menu::app(self.menu_button, items));
-        self.clicks.reset();
+        items
+    }
+
+    /// Whether a surface has the keyboard that the app menu cannot be opened
+    /// over: a prompt, the help sheet, or a card ([`App::overlay_open`]).
+    /// The ☰ button and `F10` are the browser's, and none of these is.
+    fn keyboard_taken(&self) -> bool {
+        self.prompt.is_some() || self.help.is_some() || self.overlay_open()
+    }
+
+    /// The app menu's rows for the system's menu bar, where the app menu
+    /// lives there and not behind a button (macOS, M2.37): the ☰ menu's own
+    /// rows, and every one of them grey while a surface has the keyboard
+    /// ([`App::keyboard_taken`]), as a Mac greys a window's menus under a
+    /// sheet — the ☰ menu could not be opened then, and its rows are not
+    /// the bar's to reach round it.
+    fn menu_bar_items(&self) -> Vec<menu::Item> {
+        let mut items = self.app_menu_items();
+        if self.keyboard_taken() {
+            grey_out(&mut items);
+        }
+        items
+    }
+
+    /// Hand the menu bar the app menu as it stands at the end of this frame.
+    /// Every frame, since the frame is where rows change; the bar builds a
+    /// menu from the latest only as it opens, so a frame that changes
+    /// nothing costs the rows and one comparison. Nothing at all where the
+    /// app menu is the ☰ button's.
+    fn publish_menu_bar(&self) {
+        if crate::platform::menubar::MENU_BUTTON {
+            return;
+        }
+        crate::platform::menubar::publish(&self.menu_bar_items(), &self.keymap);
+    }
+
+    /// What was chosen in the system's menu bar since the last frame (macOS,
+    /// M2.37), each done as a click on the ☰ menu's row is: the in-window
+    /// menu put away first, then the row's action through the one door.
+    /// Something chosen after a surface took the keyboard — a card that came
+    /// up while the menu was open — is dropped, as a click on a grey row is:
+    /// the rows went grey with it.
+    fn route_menu_bar(&mut self, page: usize, now: Instant) {
+        for action in crate::platform::menubar::take() {
+            if self.keyboard_taken() {
+                log::debug!("menu bar: {action:?} dropped: a surface has the keyboard");
+                continue;
+            }
+            self.close_menu(now);
+            self.menu_action(action, page, now);
+        }
     }
 
     /// Put `menu` up, in place of any that was. Its rows answer the pointer
@@ -16634,6 +16694,10 @@ impl App {
             }
         }
         self.route_keys(page, now);
+        // …and what was chosen in the menu bar, where the app menu is there
+        // (macOS), at the same point and for the same reason: a row runs
+        // what its key would.
+        self.route_menu_bar(page, now);
         self.which.update(self.keys.which_key_due(), now);
         // The two write-behind timers, both of which are deadlines rather than
         // polls: the search's debounce and the state file's.
@@ -19292,6 +19356,10 @@ impl App {
             self.menu = None;
         }
 
+        // The app menu as this frame leaves it, for the system's menu bar
+        // where that is where it lives (macOS, M2.37).
+        self.publish_menu_bar();
+
         // ── The repaint discipline, in one place (PLAN §1) ──────────────────
         // A frame is asked for only while something is actually moving. A
         // pointer parked on a row holds a 1.0 that will be 1.0 again next
@@ -20100,6 +20168,16 @@ fn spawnable_cwd(pane: &Path, origin: &Path) -> PathBuf {
 /// that are not commands — the opener submenu's own parent, and the two trash
 /// verbs the keymap spells with `Enter`/`D` in a view that already gates them —
 /// answer `None`.
+/// Every row of `items` grey, the lists they fly out included.
+fn grey_out(items: &mut [menu::Item]) {
+    for item in items {
+        item.enabled = false;
+        if let Some(list) = &mut item.submenu {
+            grey_out(list);
+        }
+    }
+}
+
 fn menu_command(action: menu::Action) -> Option<Command> {
     use menu::Action as A;
     use Command as C;
@@ -23335,6 +23413,37 @@ mod tests {
         assert_eq!(live_menu(&app), Some(menu::Kind::App), "swapped");
         press_key(&mut app, &ctx, Key::Escape);
         assert_eq!(live_menu(&app), None);
+    }
+
+    /// The menu bar's rows (macOS, M2.37) are the app menu's, greys and all;
+    /// while a prompt has the keyboard, where the ☰ menu cannot be opened,
+    /// every one of them is grey, and they come back when it goes.
+    #[test]
+    fn the_menu_bars_rows_are_the_app_menus_and_grey_under_a_prompt() {
+        fn shape(items: &[menu::Item]) -> Vec<(String, bool)> {
+            items
+                .iter()
+                .map(|item| (item.label.clone(), item.enabled))
+                .collect()
+        }
+        fn any_live(items: &[menu::Item]) -> bool {
+            items
+                .iter()
+                .any(|item| item.enabled || item.submenu.as_deref().is_some_and(any_live))
+        }
+        let mut app = Fixture::new("menu-bar", &["a.txt", "b.txt"]);
+        let ctx = egui::Context::default();
+        run_frame(&mut app, &ctx, Vec::new());
+        assert_eq!(shape(&app.menu_bar_items()), shape(&app.app_menu_items()));
+        assert!(any_live(&app.menu_bar_items()));
+
+        press_key(&mut app, &ctx, Key::Char('/'));
+        assert!(app.prompt.is_some(), "`/` opens the find prompt");
+        assert!(!any_live(&app.menu_bar_items()));
+
+        press_key(&mut app, &ctx, Key::Escape);
+        assert!(app.prompt.is_none());
+        assert_eq!(shape(&app.menu_bar_items()), shape(&app.app_menu_items()));
     }
 
     /// A secondary click at `at`, down on one frame and up on the next.
