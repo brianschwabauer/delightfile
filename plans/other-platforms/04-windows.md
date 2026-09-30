@@ -815,6 +815,14 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   asking again (Windows answers every later call the same; on Unix the
   listing had already ended), and `STATUS_FILE_DELETED` — a call on a folder
   deleted since it was opened — reads as gone too.
+- (df-core) 2026-09-29 — W4.7 turns one df-app test red on Windows, left
+  for W4.8 on the df-app branch rather than edited here (the brief keeps
+  this branch out of df-app but for compile fixes, and W4.8 rewrites that
+  path): `app::tests::the_trash_is_refused_where_the_platform_has_none`,
+  under `cfg(not(target_os = "linux"))` "until M2.8 and W4.7", expects `d`
+  to refuse with "Trash is not available on this platform"; Windows now has
+  the Recycle Bin, so its gate becomes `cfg(target_os = "macos")`. With it,
+  df-app fails 15 of 1,117 on the runner where `main` fails 14.
 
 ## Open questions
 
