@@ -295,7 +295,9 @@ while IFS= read -r line; do
 done <"$work/sources" | sort -u >"$work/kegs"
 # shellcheck disable=SC2046 # one formula name per word
 brew info --json=v2 --formula $(cut -d' ' -f1 "$work/kegs" | sort -u) >"$work/brew.json"
-jq -r '.formulae[] | [.name, .versions.stable, (.revision | tostring), .urls.stable.url,
+# A source that is a git repository (x264's) names its commit.
+jq -r '.formulae[] | [.name, .versions.stable, (.revision | tostring),
+        (.urls.stable.url + (if .urls.stable.revision then " at " + .urls.stable.revision else "" end)),
         (.urls.stable.checksum // "-"), (.license // "-")] | @tsv' "$work/brew.json" >"$work/formulae"
 
 # A formula's line, and whether its version is the one bundled (`pkg` is
