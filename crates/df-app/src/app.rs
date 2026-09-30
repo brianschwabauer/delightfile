@@ -4601,8 +4601,19 @@ impl App {
 
     // ── The trash, browsed (PLAN §7.4) ──────────────────────────────────────
 
-    /// `g t`, and the palette's "Open trash".
+    /// `g t`, and the palette's "Open trash". Where the system's trash is
+    /// its own and not listed here — Windows' Recycle Bin (W4.8) — it is
+    /// opened where the system shows it, and no trash tab is made.
     fn open_trash(&mut self, now: Instant) {
+        if let Some(bin) = crate::platform::trash::SYSTEM_BIN {
+            match open::shell_open(std::ffi::OsStr::new(bin)) {
+                Ok(()) => self
+                    .toasts
+                    .notice("Opened the Recycle Bin in Explorer", now),
+                Err(e) => self.toasts.error(format!("The Recycle Bin: {e}"), now),
+            }
+            return;
+        }
         let origin = self.local_origin();
         self.show_trash(origin, now);
     }
@@ -5154,6 +5165,16 @@ impl App {
     fn undo(&mut self, now: Instant) -> bool {
         if self.journal.is_empty() {
             self.toasts.notice("Nothing to undo", now);
+            return false;
+        }
+        // A trash this program cannot take back — Windows' Recycle Bin keeps
+        // no name to find the file by again (W4.8) — says where it can be,
+        // rather than failing to find the file where it went.
+        if let (Some(words), Some(OpRecord::Trash { .. })) = (
+            crate::platform::trash::RESTORED_ELSEWHERE,
+            self.journal.peek(),
+        ) {
+            self.toasts.notice(words, now);
             return false;
         }
         // Asked before the undo, because afterwards the record is gone and the
@@ -22375,6 +22396,32 @@ mod tests {
         app.run(Command::Trash, 10, now);
         assert_eq!(toast_text(&app), refusal);
         assert!(app.files.join("a.txt").exists(), "d deleted nothing");
+    }
+
+    /// `u` after a trash that went to Windows' Recycle Bin says to restore it
+    /// from there — the bin keeps no name this program can find the file by
+    /// again (W4.7) — and takes nothing back; everywhere else the journal
+    /// restores it, and a file that is not where the record says fails in
+    /// the journal's words (W4.8).
+    #[test]
+    fn undo_after_a_trash_says_where_to_restore_it_on_windows() {
+        let mut app = Fixture::new("undo-recycled", &["a.txt"]);
+        let now = Instant::now();
+        let item = df_core::ops::TrashedItem {
+            trash_root: app.files.join("nowhere"),
+            name: std::ffi::OsString::from("b.txt"),
+            original: app.files.join("b.txt"),
+            deleted_at: "2026-09-29T20:00:00".to_string(),
+        };
+        app.journal.record(OpRecord::Trash { items: vec![item] });
+        assert!(!app.undo(now), "nothing was taken back");
+        if cfg!(windows) {
+            assert_eq!(toast_text(&app), Some("Restore it from the Recycle Bin"));
+            assert_eq!(app.journal.len(), 1, "the record stays for the bin");
+        } else {
+            assert_ne!(toast_text(&app), Some("Restore it from the Recycle Bin"));
+        }
+        assert!(!app.files.join("b.txt").exists());
     }
 
     /// An empty trash view says, under its "empty", what the platform's

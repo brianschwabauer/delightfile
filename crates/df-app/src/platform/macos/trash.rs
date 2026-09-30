@@ -15,3 +15,11 @@ pub const LISTED_NOTE: Option<&str> =
 /// What "Empty trash" adds to its toast.
 pub const EMPTIED_NOTE: Option<&str> =
     Some("only what delightfile trashed; Finder's Trash may hold more");
+
+/// The system's own view of its trash, opened in place of the trash view:
+/// none, the view lists what delightfile trashed.
+pub const SYSTEM_BIN: Option<&str> = None;
+
+/// What `u` after a trash says when this program cannot restore it: never
+/// said, the journal knows where each item went.
+pub const RESTORED_ELSEWHERE: Option<&str> = None;

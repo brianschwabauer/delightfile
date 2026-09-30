@@ -9,3 +9,11 @@ pub const LISTED_NOTE: Option<&str> = None;
 
 /// What "Empty trash" adds to its toast: nothing.
 pub const EMPTIED_NOTE: Option<&str> = None;
+
+/// The system's own view of its trash, opened in place of the trash view:
+/// none, the view is the trash.
+pub const SYSTEM_BIN: Option<&str> = None;
+
+/// What `u` after a trash says when this program cannot restore it: never
+/// said, every item has its `.trashinfo`.
+pub const RESTORED_ELSEWHERE: Option<&str> = None;
