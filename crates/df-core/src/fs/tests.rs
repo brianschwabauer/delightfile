@@ -1733,8 +1733,8 @@ fn a_disabled_watcher_is_inert_rather_than_a_failure() {
 ///
 /// Skipped rather than failed where inotify is unavailable — a sandbox with no
 /// instances left is not a broken build, and the model works without it.
-/// Linux (inotify) and macOS (kqueue) until W4.4 gives Windows a watcher.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+/// Every target: inotify on Linux, kqueue on macOS, `ReadDirectoryChangesW`
+/// on Windows.
 #[test]
 fn a_file_landing_in_a_watched_directory_raises_a_refresh() {
     let tmp = TempDir::new("watch");
@@ -1795,7 +1795,6 @@ fn a_file_landing_in_a_watched_directory_raises_a_refresh() {
     assert!(events.iter().all(|e| matches!(e, WatchEvent::Changed(_))));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_watched_directory_that_disappears_reports_itself_gone() {
     let outer = TempDir::new("watch-gone");

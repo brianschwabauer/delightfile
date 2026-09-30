@@ -28,6 +28,4 @@ pub mod thread;
 #[cfg(windows)]
 pub mod user;
 #[cfg(windows)]
-pub mod watch;
-#[cfg(windows)]
 pub mod xattr;

@@ -15,5 +15,6 @@ pub mod socket;
 pub mod time;
 pub mod trash;
 pub mod user;
+pub mod watch;
 
-pub use super::stub::{nofollow, thread, watch, xattr};
+pub use super::stub::{nofollow, thread, xattr};

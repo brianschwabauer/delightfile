@@ -738,6 +738,18 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   then deleted by a second call: the system removes it when the handle
   closes, so a crash between the two leaves nothing behind. Its only caller
   today is Linux's trash (`available_for`); on Windows nothing asks it yet.
+- (df-core) 2026-09-29 — W4.4: besides the re-arm the task names, a watched
+  directory is checked by name at each flush, and one no longer there (or no
+  longer a directory) is `Gone`. Reason: a handle does not notice its
+  directory renamed away, and a directory deleted with POSIX semantics
+  leaves the name at once while the handle's read may never complete; the
+  name is what the pane shows. A read that completes with an error other
+  than `ERROR_NOTIFY_ENUM_DIR` is `Gone` too (a deleted directory's pending
+  read fails with access denied). Every watch is looked at after any wake,
+  since `WaitForMultipleObjects` reports only the lowest signalled handle,
+  and at most 63 directories are watched, its limit less the wake event.
+- (df-core) 2026-09-29 — W4.4: `platform/stub/watch.rs` is compiled for macOS
+  alone, as the trash stub is (W4.7).
 
 ## Open questions
 
