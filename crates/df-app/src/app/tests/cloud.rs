@@ -88,6 +88,66 @@ fn a_server_url_for_a_cloud_remote_lands_on_the_remote() {
     assert_eq!(app.cwd(), PathBuf::from("rclone://r2/bucket"));
 }
 
+/// A remote folder is entered and left by its URL, built by the vfs's own
+/// `join` and `parent`, never by a local path's: on Windows a `PathBuf` join
+/// would write `sftp://box/srv\www`, which no service parses (W4.14). The
+/// rows come from the session's cache, as a step back does, so no server is
+/// needed.
+#[test]
+fn a_remote_folder_is_entered_and_left_by_its_url() {
+    use df_core::vfs::{stat_entry, Attrs};
+    let mut app = Fixture::new("remote-rows", &["a.txt"]);
+    with_services(&mut app, vec![server("box")]);
+    let now = Instant::now();
+    let srv = VfsPath::new("box", "/srv");
+    app.navigate(crate::remote::display(&srv), now);
+    let folder = Attrs {
+        permissions: Some(0o040_755),
+        ..Attrs::default()
+    };
+    let file = Attrs {
+        permissions: Some(0o100_644),
+        size: Some(3),
+        ..Attrs::default()
+    };
+    let rows = vec![
+        stat_entry(&srv.join("www"), folder),
+        stat_entry(&srv.join("notes.txt"), file),
+    ];
+    app.tabs
+        .active_mut()
+        .remote
+        .as_mut()
+        .expect("a session")
+        .store(&srv, rows);
+    // The same place again: a step on one service keeps its cache.
+    app.navigate(crate::remote::display(&srv), now);
+    let www = app
+        .tab()
+        .cwd
+        .dir
+        .position_of("www")
+        .expect("the folder's row");
+    app.dir().set_cursor(www);
+
+    app.run(Command::EnterDirectory, 10, now);
+    assert_eq!(remote_at(&app), Some(srv.join("www")));
+    let url = app.cwd().to_string_lossy().into_owned();
+    assert_eq!(url, "sftp://box/srv/www");
+    assert!(!url.contains('\\'), "{url}");
+
+    app.run(Command::Leave, 10, now);
+    assert_eq!(remote_at(&app), Some(srv.clone()));
+    assert_eq!(app.cwd(), PathBuf::from("sftp://box/srv"));
+    for entry in app.tab().cwd.dir.entries() {
+        let path = entry.path.to_string_lossy();
+        assert!(
+            path.starts_with("sftp://box/srv/") && !path.contains('\\'),
+            "{path}"
+        );
+    }
+}
+
 #[test]
 fn an_unknown_service_names_both_files() {
     let mut app = Fixture::new("cloud-unknown", &["a.txt"]);

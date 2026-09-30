@@ -441,15 +441,19 @@ fn needs_rsync(hint: &str) -> String {
 /// it: the vfs's own rule (`vfs::conn`'s `wire_path`). Empty is the service's
 /// root — the login directory, unless `vfs.toml` names another; absolute is
 /// absolute; relative is under the root.
-fn server_path(path: &str, root: &str) -> PathBuf {
+///
+/// Text, not a local path: it is the server's, `/`-separated whatever this
+/// machine writes, and a `Path` operation on it would join with `\` on Windows
+/// (W4.14). It becomes a `PathBuf` only as the argument `rsync` is handed.
+fn server_path(path: &str, root: &str) -> String {
     let raw = path.trim();
     if raw.is_empty() || raw == "/" {
-        return PathBuf::from(root);
+        return root.to_string();
     }
     if raw.starts_with('/') || root == "." {
-        return PathBuf::from(raw);
+        return raw.to_string();
     }
-    PathBuf::from(format!("{}/{raw}", root.trim_end_matches('/')))
+    format!("{}/{raw}", root.trim_end_matches('/'))
 }
 
 /// The transfer and the card's roots for a sync with `host`: each source
@@ -462,7 +466,9 @@ fn remote_sync(
     host: Host,
     root: &str,
 ) -> Result<Remote, String> {
-    let far = |path: &Path| crate::remote::at_of(path).map(|at| server_path(&at.path, root));
+    let far = |path: &Path| {
+        crate::remote::at_of(path).map(|at| PathBuf::from(server_path(&at.path, root)))
+    };
     let (paths, into) = match direction {
         Direction::Upload => (
             sources.to_vec(),
@@ -489,9 +495,15 @@ fn remote_sync(
                 name.to_string_lossy()
             ));
         }
+        // A server's destination is joined by the vfs's rule, with `/`, as
+        // its rows are; a local one by the platform's.
+        let dst = match crate::remote::at_of(dest) {
+            Some(at) => crate::remote::display(&at.join(&name.to_string_lossy())),
+            None => dest.join(name),
+        };
         roots.push(Root {
             src: source.clone(),
-            dst: dest.join(name),
+            dst,
         });
     }
     Ok(Remote {
@@ -856,14 +868,11 @@ mod tests {
 
     #[test]
     fn a_server_path_is_what_the_remote_pane_would_have_read() {
-        assert_eq!(server_path("", "."), PathBuf::from("."));
-        assert_eq!(server_path("/", "/srv"), PathBuf::from("/srv"));
-        assert_eq!(
-            server_path("/home/brian/photos", "."),
-            PathBuf::from("/home/brian/photos")
-        );
-        assert_eq!(server_path("photos", "."), PathBuf::from("photos"));
-        assert_eq!(server_path("photos", "/srv/"), PathBuf::from("/srv/photos"));
+        assert_eq!(server_path("", "."), ".");
+        assert_eq!(server_path("/", "/srv"), "/srv");
+        assert_eq!(server_path("/home/brian/photos", "."), "/home/brian/photos");
+        assert_eq!(server_path("photos", "."), "photos");
+        assert_eq!(server_path("photos", "/srv/"), "/srv/photos");
     }
 
     /// With no rsync new enough, the refusal is Linux's sentence as it was,
