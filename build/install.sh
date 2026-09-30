@@ -9,6 +9,11 @@
 #   bash build/install.sh --remove-portal  # undo just the portal backend
 #   bash build/install.sh uninstall        # remove everything this installs
 #
+# The release tarball (build/linux/package.sh) holds this script with the
+# binary and the files it installs beside it, laid out as build/ is here, so
+# from an unpacked tarball it is the same commands as `bash install.sh`, and
+# it installs the tarball's binary.
+#
 # The file picker is the program's own business, so it is wired up here:
 # delightfile is its own xdg-desktop-portal backend (`delightfile --portal`),
 # D-Bus starts it on the first file dialog, and portals.conf is pointed at it —
@@ -24,8 +29,16 @@
 # a surprise.
 set -euo pipefail
 
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-bin="$repo/target/release/delightfile"
+# What gets installed sits beside this script: build/ in the repository, the
+# top folder in the release tarball. The binary is the tarball's when there
+# is one beside the script, which in the repository there never is.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo="$(cd "$here/.." && pwd)"
+if [[ -e $here/delightfile ]]; then
+    bin="$here/delightfile"
+else
+    bin="$repo/target/release/delightfile"
+fi
 
 data="${XDG_DATA_HOME:-$HOME/.local/share}"
 config="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -187,7 +200,7 @@ install_portal() {
     for name in "$bus_name" "$file_manager_name"; do
         tmp="$(mktemp)"
         sed "s|@BIN@|$bindir/delightfile|" \
-            "$repo/build/$name.service.in" >"$tmp"
+            "$here/$name.service.in" >"$tmp"
         install -Dm644 "$tmp" "$data/dbus-1/services/$name.service"
         rm -f "$tmp"
         echo "  $data/dbus-1/services/$name.service"
@@ -197,16 +210,16 @@ install_portal() {
     # $XDG_DATA_DIRS since 1.20.1; before that, only from its own
     # /usr/share. The user copy goes in either way — it costs nothing, and
     # it is the one that counts after an upgrade.
-    install -Dm644 "$repo/build/delightfile.portal" "$portal_user"
+    install -Dm644 "$here/delightfile.portal" "$portal_user"
     echo "  $portal_user"
     version="$(xdp_version || true)"
     if [[ -z $version ]]; then
         echo "note: xdg-desktop-portal was not found. Versions before 1.20.1 read"
         echo "      backends only from /usr/share; on one of those, also run:"
-        echo "  sudo install -Dm644 $repo/build/delightfile.portal $portal_system"
+        echo "  sudo install -Dm644 $here/delightfile.portal $portal_system"
     elif ! version_at_least "$version" 1.20.1; then
         echo "xdg-desktop-portal $version reads backends only from /usr/share:"
-        as_root install -Dm644 "$repo/build/delightfile.portal" "$portal_system"
+        as_root install -Dm644 "$here/delightfile.portal" "$portal_system"
     fi
     prefer_delightfile
     reload_bus
@@ -284,16 +297,16 @@ fi
 install -Dm755 "$bin" "$bindir/delightfile"
 # The basename has to stay `delightfile.desktop`: it is the Wayland app_id the
 # window sets, and that match is what pairs the window with the icon.
-install -Dm644 "$repo/build/delightfile.desktop" \
+install -Dm644 "$here/delightfile.desktop" \
     "$data/applications/delightfile.desktop"
-install -Dm644 "$repo/build/delightfile.svg" \
+install -Dm644 "$here/delightfile.svg" \
     "$data/icons/hicolor/scalable/apps/delightfile.svg"
 # …and the same icon as bitmaps, because some launchers and taskbars only look
 # in the sized directories and leave the scalable one alone. Checked in rather
 # than rendered here: three files under 5 KB beat a dependency on a rasteriser
 # at install time.
 for size in 48 128 256; do
-    install -Dm644 "$repo/build/icons/delightfile-$size.png" \
+    install -Dm644 "$here/icons/delightfile-$size.png" \
         "$data/icons/hicolor/${size}x${size}/apps/delightfile.png"
 done
 # The termfilechooser wrapper, for machines that route the file chooser
@@ -301,7 +314,7 @@ done
 # *own* config directory, the first place its modified PATH looks — so
 # `cmd=delightfile-wrapper.sh` needs no absolute path and keeps working if this
 # repo moves.
-install -Dm755 "$repo/build/delightfile-wrapper.sh" \
+install -Dm755 "$here/delightfile-wrapper.sh" \
     "$config/xdg-desktop-portal-termfilechooser/delightfile-wrapper.sh"
 
 echo "installed:"
