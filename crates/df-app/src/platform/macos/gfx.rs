@@ -10,3 +10,6 @@ pub const PREFERRED_BACKENDS: wgpu::Backends = wgpu::Backends::METAL;
 
 /// What the log calls them when they find no adapter.
 pub const PREFERRED_NAME: &str = "Metal";
+
+/// Metal has no software adapter to ask for.
+pub const ALLOW_FALLBACK_ADAPTER: bool = false;

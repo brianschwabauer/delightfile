@@ -95,13 +95,41 @@ impl Gfx {
         // starts with Metal and Windows with DX12, each the backend its
         // platform draws with natively, for the same reason.
         let pinned = wgpu::Backends::from_env().is_some();
-        let preferred = wgpu::InstanceDescriptor {
-            backends: crate::platform::gfx::PREFERRED_BACKENDS,
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        }
-        .with_env();
-        let (surface, adapter) = match find_adapter(&window, preferred) {
+        let preferred = || {
+            wgpu::InstanceDescriptor {
+                backends: crate::platform::gfx::PREFERRED_BACKENDS,
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            }
+            .with_env()
+        };
+        let (surface, adapter) = match find_adapter(&window, preferred(), false) {
             Ok(found) => found,
+            // No hardware adapter where the platform ships a software one
+            // (Windows' WARP, in a VM without a GPU): ask for it by name
+            // before trying other backends, since it draws with the same
+            // DX12 as the hardware would, only slower. Where the platform
+            // has none this arm is never taken.
+            Err(e) if crate::platform::gfx::ALLOW_FALLBACK_ADAPTER => {
+                log::warn!(
+                    "{}: {e}; asking for the software adapter",
+                    crate::platform::gfx::PREFERRED_NAME
+                );
+                match find_adapter(&window, preferred(), true) {
+                    Ok(found) => found,
+                    Err(soft) if !pinned => {
+                        log::warn!(
+                            "{} only: {e}, and no software adapter: {soft}; retrying with every backend",
+                            crate::platform::gfx::PREFERRED_NAME
+                        );
+                        find_adapter(
+                            &window,
+                            wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+                            false,
+                        )?
+                    }
+                    Err(soft) => return Err(soft),
+                }
+            }
             // No Vulkan: one more attempt with every backend, which is what
             // every launch used to do, so a machine without Vulkan ends up
             // where it did before. On Wayland that is still an error — "gl not
@@ -120,6 +148,7 @@ impl Gfx {
                 find_adapter(
                     &window,
                     wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+                    false,
                 )?
             }
             Err(e) => return Err(e),
@@ -131,6 +160,13 @@ impl Gfx {
             info.device_type,
             info.backend
         );
+        // The adapter request ranks a software adapter last but still takes
+        // it when it is all there is, so a VM without a GPU lands here from
+        // the first request as often as from the retry.
+        if crate::platform::gfx::ALLOW_FALLBACK_ADAPTER && info.device_type == wgpu::DeviceType::Cpu
+        {
+            log::warn!("using the software adapter (WARP): drawing will be slow");
+        }
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|e| GfxError(format!("request device: {e}")))?;
@@ -385,7 +421,7 @@ impl Gfx {
 }
 
 /// An instance built from `desc`, the window's surface on it, and an adapter
-/// that can present to that surface.
+/// that can present to that surface — only a software one when `software`.
 ///
 /// The instance itself is dropped here: the surface and the adapter keep what
 /// they need of it alive, and a failed attempt must take its surface down with
@@ -393,6 +429,7 @@ impl Gfx {
 fn find_adapter(
     window: &Arc<Window>,
     desc: wgpu::InstanceDescriptor,
+    software: bool,
 ) -> Result<(wgpu::Surface<'static>, wgpu::Adapter), GfxError> {
     let instance = wgpu::Instance::new(desc);
     let surface = instance
@@ -401,7 +438,7 @@ fn find_adapter(
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::default(),
         compatible_surface: Some(&surface),
-        force_fallback_adapter: false,
+        force_fallback_adapter: software,
     }))
     .map_err(|e| GfxError(format!("no suitable adapter: {e}")))?;
     Ok((surface, adapter))

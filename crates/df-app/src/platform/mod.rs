@@ -54,6 +54,7 @@
 //! | `keys::mods` | `fn(winit::keyboard::ModifiersState) -> df_core::keymap::Mods`, the held modifiers as the keymap names them | each as itself | macOS: Command or Control is `ctrl`, never `super_key`; Windows: as Linux | M2.20 |
 //! | `gfx::PREFERRED_BACKENDS` | `wgpu::Backends`, the first instance's | `VULKAN` | macOS `METAL`, Windows `DX12` | S1.28 |
 //! | `gfx::PREFERRED_NAME` | `&str`, what the log calls them | `"Vulkan"` | `"Metal"`, `"DX12"` | S1.28 |
+//! | `gfx::ALLOW_FALLBACK_ADAPTER` | `const bool`: whether a failed adapter request is retried for the software adapter before other backends | `false` | macOS `false`; Windows `true` (WARP) | W4.23 |
 //! | `icon::{draw, Icon, Rgba, HOTSPOT}` | the drag icon's pixels | portable, drawn for the Wayland drag | same, unused until a native drag-out | S1.22 |
 //!
 //! The rows are the phase's checklist inside the code: each task of
