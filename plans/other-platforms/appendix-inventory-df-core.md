@@ -421,16 +421,16 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 32, 95–101 | `use std::os::unix::net::UnixStream`; `post` connects and sets read and write timeouts | Unix-only (Windows: no unix sockets in `std`) | `post` ← core:vfs/rclone.rs:Daemon::call, run_job | ✓ S1.51 |
-| 308, 455–560 | Tests serve one response on a `UnixListener` | Unix-only | | `#[cfg(unix)] mod over_a_socket` ✓ S1.51 |
+| 32, 95–101 | `use std::os::unix::net::UnixStream`; `post` connects and sets read and write timeouts | Unix-only (Windows: no unix sockets in `std`) | `post` ← core:vfs/rclone.rs:Daemon::call, run_job | ✓ S1.51 ✓ W4.32 (Windows' `AF_UNIX` through WinSock) |
+| 308, 455–560 | Tests serve one response on a `UnixListener` | Unix-only | | `#[cfg(unix)] mod over_a_socket` ✓ S1.51 ✓ W4.32 (on every platform, through `platform::socket::Listener`) |
 
 ### vfs/rclone.rs (added 2026-09-29; lines as of 6aee8d1)
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 98 | `use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}` | Unix-only | `private_dir`, a test | ✓ S1.51 |
-| 1091–1133 | `socket_path`: `$XDG_RUNTIME_DIR` (non-empty), `$TMPDIR/delightfile-<uid>`, `/tmp/delightfile-<uid>`, `sun_path` bound | Unix model (Windows: no unix socket) | `Daemon::spawn` | uid ✓ S1.8, runtime dir ✓ S1.11 `sun_path` bound per platform ✓ M2.32; macOS runtime dir `$TMPDIR` ✓ M2.18 |
-| 1140–1157 | `private_dir`: `DirBuilder::mode(0o700)`, owner `uid()` check, re-close with `from_mode(0o700)` | Unix-only | `socket_path` | ✓ S1.51 |
+| 1091–1133 | `socket_path`: `$XDG_RUNTIME_DIR` (non-empty), `$TMPDIR/delightfile-<uid>`, `/tmp/delightfile-<uid>`, `sun_path` bound | Unix model (Windows: no unix socket) | `Daemon::spawn` | uid ✓ S1.8, runtime dir ✓ S1.11 `sun_path` bound per platform ✓ M2.32; macOS runtime dir `$TMPDIR` ✓ M2.18; the places moved to `platform::socket::dirs`, Windows' `%LOCALAPPDATA%\delightfile\run` ✓ W4.32 |
+| 1140–1157 | `private_dir`: `DirBuilder::mode(0o700)`, owner `uid()` check, re-close with `from_mode(0o700)` | Unix-only | `socket_path` | ✓ S1.51 ✓ W4.32 (the ACL it inherits) |
 | 248, 857 | `child::tie_to_this_thread`, `child::terminate` | Linux-only / Unix-only | `Daemon::spawn`, `Drop for Daemon` | ✓ S1.50 ✓ W4.31 |
 
 ### vfs/mod.rs

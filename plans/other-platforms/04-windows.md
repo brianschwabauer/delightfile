@@ -171,7 +171,11 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       — done 304fcf7, green on the Windows runner at run 36666369775: a trashed temp
       file leaves its folder and the shell's own count of the bin goes up
       (`SHQueryRecycleBinW`); fixed drives only (Decisions log)
-- [~] **W4.8** df-app: `u` after a trash on Windows → the undo journal entry for a
+      — and 44429aa: `FOF_WANTNUKEWARNING`, so a file too big for the bin is
+      deleted for good only after the shell's own question (Decisions log,
+      green on the Windows runner at run 36737465177,
+      `a_recycle_asks_before_it_deletes_for_good`)
+- [x] **W4.8** df-app: `u` after a trash on Windows → the undo journal entry for a
       trash carries `restorable: false` and `App::undo` toasts "Restore it from the
       Recycle Bin" (`ops/journal.rs` gains the flag; Linux/macOS set `true`).
       `App::show_trash` on Windows → `ShellExecuteW("open", "shell:RecycleBinFolder")`
@@ -198,6 +202,14 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       df-core half: 704ea0b, green on the Windows runner at run 36666369775
       (`the_bin_is_counted_and_emptied`); 645bfbc turns df-app's "the trash
       is refused" test into one that no platform refuses it.
+      — done 2225ac7, green on the Windows runner at run 36737465177: "Empty
+      trash" opens `ConfirmKind::EmptyBin`, "Empty the Recycle Bin? N items
+      · X will be deleted for good.", from `bin_size()`, and its yes runs
+      `empty_bin()` as a job; the palette offers the row on Windows in any
+      folder; the gate that refused a platform with no trash is gone
+      (`empty_trash_counts_the_bin_where_the_system_keeps_it`,
+      `the_trash_is_there_on_every_platform`, Decisions log). Not seen on
+      the VM (07 §5.8).
 
 ## 3. Paths in df-app (the df-app rows of Phase 3)
 
@@ -499,7 +511,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       test ends the parent with `TerminateProcess` and sees the child gone.
       — done 3bb0ecf, 4223e26, green on the Windows runner at run 36666369775: a
       parent ended by `TerminateProcess` takes its tied child with it
-- [~] **W4.32** Cloud remotes on Windows (S1.51): `rclone rcd` serves a unix
+- [x] **W4.32** Cloud remotes on Windows (S1.51): `rclone rcd` serves a unix
       socket, which `std` cannot connect to on Windows, so `platform::socket` is
       refused there and every cloud remote says "Cloud remotes is not available
       on this platform". Choose the transport and record it: Windows 10's own
@@ -513,6 +525,18 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       security models, which the task leaves open and the df-core brief did
       not make; the options and what each costs are in Open questions. The
       daemon's job object (W4.31) is in place for either.
+      — done 09a2d88, green on the Windows runner at run 36737465177,
+      Windows' own `AF_UNIX` as Brian decided, step by step: (a) run
+      36724365335 installed rclone 1.75.1 and a .NET client got `HTTP/1.1
+      200 OK` and `{"probe": "W4.32"}` from `rc/noop` on
+      `unix://D:\a\_temp\rclone-socket\probe.sock`; (b)
+      `platform/windows/socket.rs`, WinSock through `windows-sys`, the socket
+      in `%LOCALAPPDATA%\delightfile\run`; (c) `vfs/rclone_tests.rs` and
+      `vfs/http.rs`'s socket tests run there (Decisions log). Two fixes the
+      runner asked for on the way: a `select` before each `recv` and `send`,
+      since `SO_RCVTIMEO` did not end an `AF_UNIX` read, and
+      `platform::fs::sync_file`, since `FlushFileBuffers` refuses a handle
+      opened only to read.
 - [~] **W4.34** Take `-A dead_code` off the windows job's clippy line in
       `.github/workflows/ci.yml` (S1.53). It is there because df-app items
       whose only callers are Linux bodies — the drag-and-drop helpers in
@@ -572,13 +596,17 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 
 ## 11. Found in Phase 4
 
-- [ ] **W4.38** df-app's console tools through `df_core::platform::process::quiet`
+- [x] **W4.38** df-app's console tools through `df_core::platform::process::quiet`
       (W4.2's df-app half, split off because the df-core branch keeps out of
       df-app): the 7-Zip and tar listings in `preview/listing.rs` (`:324`,
       `:379`, `:930`) and any other console program df-app starts headlessly,
       so none flashes a console window on Windows. Never an opener or a new
       window of delightfile itself. Done when: each such `Command` goes
       through `quiet` (grep), and the listing tests pass on the runner.
+      — done d43e913, green on the Windows runner at run 36737465177:
+      7-Zip's two listings, the listing tests' fixture maker, and fd and rg
+      behind the search panel (Decisions log). Not seen on the VM (07
+      §5.8).
 
 ## 12. Native feel
 
@@ -1113,6 +1141,19 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   rclone.portable 1.75.1 from Chocolatey, the real `rclone.exe` ahead of
   Chocolatey's shim on `PATH`, and shows rclone serving on a unix socket
   before the tests run.
+- (finish) 2026-09-30 — The finish branch, `port/windows-finish`, rebased
+  onto `main` at 4c0012c (the release tooling and W4.39's title bar): W4.7's
+  nuke warning (44429aa), W4.8's df-app half (2225ac7), W4.38 (d43e913),
+  W4.32 (09a2d88), the README (a9d6d4f), and da51f03, the preview worker
+  test waiting for its bell as the watcher tests do, a race the Windows
+  runner showed once on this branch. Run 36737465177 is green on all three
+  jobs: on Windows df-core passes 1,101 tests and 1 ignored (1,081 at run
+  36724365335, before W4.32 un-gated rclone's and the socket's), df-app
+  1,164, and clippy and the smoke test pass; Linux passes df-core's 1,187
+  and 1 ignored and df-app's 1,308, 2 and 1. W4.34 is left as its entry
+  says. The VM check this round was to make did not happen: at the first
+  look the VM was at its sign-in screen, whose password no agent enters,
+  and at the second the viewer stopped answering (07 §5.8).
 
 ## Open questions
 
