@@ -102,6 +102,52 @@ document that owns the feature.
 - [ ] With `brew install --cask font-symbols-only-nerd-font` (M2.19): row icons are
       the Nerd Font's glyphs; without it, the `ls`-style classifiers, and the log
       says "no Nerd Font found".
+- [ ] One header (M2.37): no "delightfile" title and no grey title bar over
+      the window; the top row is the top of the window, the traffic lights
+      over its left end on the window's ground and the breadcrumb starting a
+      gap past the zoom button; there is no ☰ button, the first crumb sitting
+      in the row's corner where it was. Record where the lights sit against
+      the row (02-macos.md, Open questions: they are expected level with its
+      upper half). The lights work: close, minimize, zoom, and Option-click
+      zoom.
+- [ ] The band is the title bar (M2.37): a drag from the row's empty space
+      (between the crumbs and the counter, beside the lights, the margin
+      above the row) moves the window; a double click there zooms, and again
+      unzooms; with System Settings → Desktop & Dock → "Double-click a
+      window's title bar to" Minimize it minimizes, and with Do Nothing it
+      does nothing. A crumb, the counter and the chips still answer as
+      themselves, and a drag that starts on a crumb or a tab does what it
+      does on Linux and does not move the window (02-macos.md, Open
+      questions).
+- [ ] Two tabs (M2.37): with `t`, the strip is the top of the window, past
+      the lights, and the top row under it runs the window's width; the tabs,
+      their `×` and the `+` answer; the space after the `+` drags the window.
+- [ ] Full screen with the band (M2.37): the row is at the window's top-left
+      with no gap for the lights, and the title bar that comes down under the
+      pointer is AppKit's; back out of full screen, the row is past the
+      lights again.
+- [ ] The menu bar (M2.37): delightfile, File, Edit, View, Go, Window, Help.
+      delightfile has About delightfile (the About panel), Services, Hide
+      delightfile ⌘H, Hide Others ⌥⌘H, Show All, and Quit delightfile ⌘Q,
+      which quits as Cmd+Q does (the cwd-file line above holds for it too).
+      File, Edit, View, Go and Help hold the ☰ menu's rows as 02-macos.md's
+      Decisions log lays them out, each once; Window has Minimize ⌘M, Zoom,
+      Bring All to Front and the window below them, and no Show Tab Bar or
+      Merge All Windows anywhere.
+- [ ] The menu bar's rows (M2.37): choosing one does what the ☰ row did on
+      Linux (View ▸ Show hidden files, a place under Go, Edit ▸ Clipboard,
+      Help ▸ Keyboard shortcuts); View's ticks follow `-`/`=` and `.`, and
+      Sort's the sort keys; Go ▸ Go to path… is grey inside an archive; with
+      a rename prompt, the help sheet or the palette up, every row of File,
+      Edit, View, Go and Help is grey; `F10` still opens the app menu in the
+      window, from the row's left corner.
+- [ ] Keys in the menu bar (M2.37): rows show their keys the Mac way — New
+      window ⌘N, New tab T, Redo ⇧U, Command palette… ⌘P, Keyboard shortcuts
+      F1 — and no row with a two-key sequence shows one. Pressing a shown key
+      does what the keymap says, not the menu: `y` typed into a rename prompt
+      types `y`, ⌘V in a rename prompt pastes text, and ⌘V in the list pastes
+      files; the menu's title does not flash for them. ⌘M minimizes, also
+      with the pointer over a playing clip.
 
 ### 4.2 Keyboard
 - [ ] Arrows, Enter, Backspace, Space, Tab, Esc, `?` help sheet.
@@ -553,6 +599,11 @@ release zip is run.
   records that the VM was locked when the build was ready. The buttons'
   line was rewritten the same day for the buttons the window draws itself
   (04-windows.md, Decisions log).
+- (mac-native) 2026-09-30 — §4.1 gained M2.37's checks: one header with the
+  traffic lights over the top row and no ☰, the band as title bar with the
+  double-click setting, two tabs, full screen, the menu bar's seven menus,
+  its rows and their greys, and keys shown in the menus but answered by the
+  keymap. Nothing of it has been seen on a Mac.
 
 - (finish) 2026-09-30 — §5.4 gained "Empty trash" (W4.8) and the console
   line names the preview's listings and the search panel (W4.38); §5.7

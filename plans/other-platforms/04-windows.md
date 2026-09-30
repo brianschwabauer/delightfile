@@ -666,8 +666,9 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       - `window::set_theme` sets `DWMWA_USE_IMMERSIVE_DARK_MODE` for DWM's
         frame beside winit's theme; the buttons follow the palette, being
         painted by the window.
-      - Linux and macOS answer no band, and lay out as they did: a test
-        holds five of `main`'s layouts at 39c4d51 to the point.
+      - Linux answers no band, and lays out as it did: a test holds five
+        of `main`'s layouts at 39c4d51 to the point. (macOS answered none
+        too until `02-macos.md` M2.37 gave it the traffic lights' band.)
       Done when: the runner is green, and the VM shows the §5.1 checks of
       `07-verification.md` marked W4.39.
       — titlebar agent (`port/titlebar`), started 2026-09-30; e40bc6b,

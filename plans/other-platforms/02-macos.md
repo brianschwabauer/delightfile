@@ -589,6 +589,83 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       and `plutil -lint` passes, and live check `07-verification.md` §4.7
       "Open With from Finder" passes.
 
+## 10. Native feel
+
+- [x] **M2.37** The window's own top row in the title bar, and the app menu
+      in the menu bar (Brian, 2026-09-30), as Finder and Safari are one
+      header with their toolbars and every Mac program keeps its menu at the
+      top of the screen. The model is Windows' W4.39 (`04-windows.md` §12);
+      Linux and Windows do not change.
+      - The title bar (`platform/macos/window.rs`): the window is made with
+        `with_titlebar_transparent(true)`, `with_fullsize_content_view(true)`
+        and `with_title_hidden(true)` beside `with_option_as_alt`, so the top
+        row is drawn at the window's top with the traffic lights over its
+        left end. `window::title_band` answers a band whose `left_inset` is
+        as far in as the rightmost of AppKit's three buttons reaches
+        (`standardWindowButton` frames, in the window's coordinates; 78
+        points when AppKit will not say), whose `right_inset` is 0 and whose
+        `height` is the lights' foot, which the row is deeper than, so the
+        band is the row's; `None` in full screen. The layout needs nothing
+        new: with one tab the top row is in the band and starts a gap past
+        the lights, with two or more the strip does, the top row under it
+        the window's width.
+      - The band is still a title bar. After every layout
+        `window::title_regions` keeps the band and the window's controls in
+        it (`chrome::band_controls`, as on Windows); a new seam function,
+        `window::title_press`, is asked in the window's `MouseInput` arm
+        before egui sees a primary press, inside the `mouseDown:` it came in,
+        and a press in the band on none of the controls
+        (`caption::classify`, with no resize edge and no buttons) is handed
+        to `winit::Window::drag_window()` (AppKit's
+        `performWindowDragWithEvent:` with that press), or, the second of a
+        double click, sends `performZoom:` or `performMiniaturize:` as
+        `AppleActionOnDoubleClick` says (`caption::double_click`). The
+        window never sees such a press. Linux's and Windows' bodies say no
+        press is the title bar's.
+      - The menu bar (`platform/mirror.rs`, pure; `platform/macos/menubar.rs`,
+        AppKit): the window builds the app menu's rows as the ☰ button would
+        open them (`App::app_menu_items`) at the end of every frame and
+        `menubar::publish`es them; `mirror::bar` lays them under File, Edit,
+        View, Go and Help (the mapping is in the Decisions log), beside the
+        application menu (About delightfile, Services, Hide delightfile ⌘H,
+        Hide Others ⌥⌘H, Show All, Quit delightfile ⌘Q, which is the ☰
+        menu's Quit and sends `terminate:`, M2.26's path) and Window
+        (Minimize ⌘M, Zoom, Bring All to Front, and AppKit's list of
+        windows). No Preferences…: the app has no settings command. Each
+        mirrored menu is built from the latest rows by its delegate's
+        `menuNeedsUpdate:` as it opens; a row shows its key in AppKit's
+        notation when the ☰ row's key is one chord (Cmd is the keymap's
+        `ctrl`, M2.20), is grey where the ☰ row is grey and ticked where it
+        is ticked. Choosing a row sends `delightfileChoose:` to a
+        `declare_class!` target, which queues the row's action and rings the
+        window's bell; the window `menubar::take`s the queue after the keys
+        in its next frame and does each through `App::menu_action`, the ☰
+        menu's own door.
+      - The ☰ button is gone from macOS's top row
+        (`menubar::MENU_BUTTON`, `false` on macOS alone): the breadcrumb
+        starts at the row's corner, and `F10` still opens the app menu in
+        the window, from that corner.
+      Done when: the mapping's tests (`platform::mirror`: every ☰ row has a
+      home, once; the groups where the Decisions log says; greys and ticks
+      carried; chords as key equivalents), the band's (`ui::tests::
+      the_traffic_lights_are_kept_clear_at_the_bands_left_end`,
+      `caption::tests::with_no_edge_and_no_buttons_only_the_controls_are_the_windows`,
+      the double-click setting), Linux's pinned layouts and ☰ button, and on
+      the runner the menus built and read back
+      (`platform::macos::menubar::tests`), pass; live check
+      `07-verification.md` §4.1, the lines marked M2.37.
+      — done 73f29f6, fdf7c2c, 51b1139, green on the macOS runner (run
+      36742883643: df-app 1,217 there, the menus built and read back among
+      them; Linux and Windows green in the same run, Windows on a second
+      attempt after df-core's
+      `git::tests::the_cache_fills_in_asynchronously_and_bumps_the_generation`
+      read its bell before the worker rang it, which this change does not
+      touch), not seen on screen. One piece of the brief is blocked rather than
+      done: `NSWindow.setMovableByWindowBackground(true)` is not set, since
+      winit's view answers every press as one that can move the window and
+      the whole window would drag (Open questions); the band drags through
+      `title_press` alone.
+
 ## Decisions log
 
 - 2026-09-25 — kqueue over FSEvents (coarse event model, no new FFI).
@@ -888,6 +965,119 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   folder to weigh, and on a Mac there is no one folder to weigh — the trash
   chip counts items and shows no size there (`weigh_trash` has nothing to
   walk).
+- (mac-native) 2026-09-30 — M2.37 appended as a section of its own, Native
+  feel, after Windows' §12: Brian's calls on the title bar and the menu bar,
+  made that day. M2.36 was taken (Open With from Finder, from
+  `port/release-2`), so this is the next free number.
+- (mac-native) 2026-09-30 — M2.37: the ☰ menu's groups under the bar's
+  names, each group whole and in the ☰ menu's order. **File**: New tab, New
+  window; then Find's three rows (Search everywhere by name…, …inside
+  files…, Filter this folder…), where Finder has Find. **Edit**: the Edit
+  list; then Clipboard (Finder's Show Clipboard). **View**: the View list;
+  then Sort, File type (in a file dialog) and Appearance, each still a list
+  flown out of its row, as Finder's View has Sort By; then Tasks and Disk
+  usage; then Command palette…. **Go**: the Go list, places and pin row
+  included; then Places… and Trash. **Help**: Keyboard shortcuts. **Quit**
+  is the application menu's Quit. A list of verbs that lands in another
+  menu is laid in it after a separator, a list of one setting's choices
+  stays a list, and a row the table does not know goes at the end of File,
+  so every ☰ row has a home whatever is added to the ☰ menu later
+  (`mirror::tests::every_row_of_the_app_menu_has_a_home_in_the_bar`).
+  Labels are the ☰ menu's, in its sentence case, not a Mac's Title Case.
+- (mac-native) 2026-09-30 — M2.37: Tasks and Disk usage are in View, not
+  Window, because Window is AppKit's own items and nothing else: the
+  mirrored menus' keys are shown and not answered (below), and Window's ⌘M
+  has to answer.
+- (mac-native) 2026-09-30 — M2.37: a mirrored row's key is shown and not
+  answered. Its menu's delegate answers `menuHasKeyEquivalent:forEvent:
+  target:action:` with NO (objc2-app-kit 0.2 leaves the method out for its
+  out-pointers; it is declared on the delegate with the raw signature), so
+  the key goes to the window, as before, and through the keymap. Answered,
+  ⌘V in a rename prompt would paste files where it pastes text, a bare `y`
+  typed into a prompt would copy the selection, and there would be two
+  doors for one key. The cost is AppKit's flash of the menu's title when a
+  key fires a row. The application menu's and Window's keys (⌘H, ⌥⌘H, ⌘Q,
+  ⌘M) are AppKit's and answer, as winit's default menu's did.
+- (mac-native) 2026-09-30 — M2.37: Window's Minimize has the standard ⌘M,
+  which answers, so on a Mac ⌘M over a clip minimizes the window where
+  `ctrl+m` (Mute, when media is hovered) would mute it; the ⌘M a Mac user
+  expects wins over a binding only a pointer over a clip reaches.
+- (mac-native) 2026-09-30 — M2.37: a key equivalent is one chord. A command
+  row takes the chord of the binding whose label is the ☰ row's key; a key
+  that is a sequence (`g h`) has none, a row that is not a command (a
+  place, a file type) is not looked up, and a function key past F35 has
+  none. A letter is lower case with ⇧ in the mask; shifted punctuation is
+  its glyph (`<`, not ⇧`,`), as the label writes it.
+- (mac-native) 2026-09-30 — M2.37: while a prompt, the help sheet or a card
+  has the keyboard, every mirrored row is grey, as a Mac greys a window's
+  menus under a sheet: the ☰ menu cannot be opened over any of them. A
+  choice that arrives while one is up (a card that came up with the menu
+  open) is dropped. An in-window menu that is up is put away before a
+  chosen row runs, as a click on a row puts its menu away.
+- (mac-native) 2026-09-30 — M2.37: in a file dialog the ☰ menu's last row
+  is Cancel; the bar's is still "Quit delightfile", and `terminate:` ends a
+  dialog session as M2.26's path does, which is Cancel.
+- (mac-native) 2026-09-30 — M2.37: the rows are published every frame, and
+  a menu is built from the latest only as it opens (never while it is
+  open). The first rows are built at once and the bar handed to the
+  application then, so winit's default menu is up only until the first
+  frame. The cost, measured on the Linux build machine with the dev
+  profile (which is optimized): about 51 µs for the rows, 25 µs to lay
+  them out, 1 µs to compare them with the last, per frame, on macOS only;
+  Linux and Windows build nothing. A throttle is the answer if a Mac's
+  `DF_FRAME_LOG` shows it.
+- (mac-native) 2026-09-30 — M2.37: a mirrored menu keeps what AppKit puts
+  in it itself (Help's search, a View menu's Enter Full Screen): our rows
+  carry tags at or above 0x44460000 and only those are taken out when a
+  menu is built again, the new ones going where the old began. A chosen
+  row's tag says which menu and which entry of that menu's list of
+  actions, and a list is replaced only when its menu is built, so a tag
+  always names the row that was on screen.
+- (mac-native) 2026-09-30 — M2.37: window tabbing is off for the process
+  (`NSWindow.allowsAutomaticWindowTabbing = NO`, before the bar is made):
+  the window has tabs of its own, and with a process per window AppKit's
+  Show Tab Bar and Merge All Windows would show one tab or do nothing.
+- (mac-native) 2026-09-30 — M2.37: the band's `left_inset` is the rightmost
+  light's right edge from the window's left edge, and the row starts a
+  `GAP` past it, as Windows' row ends a `GAP` short of its buttons; its
+  `height` is the lights' foot. 78 points stand in when AppKit has no
+  buttons for the window or reports them at under a point (a window not
+  yet laid out). No band in full screen, where AppKit's title bar comes
+  down over the window only under the pointer, or for a window whose
+  content does not run up under its title bar.
+- (mac-native) 2026-09-30 — M2.37: the drag is a new seam function,
+  `window::title_press`, asked in the `MouseInput` arm before egui, since
+  AppKit begins a window drag only inside the press (`drag_window` hands
+  winit's current event to `performWindowDragWithEvent:`). Windows' and
+  Linux's bodies answer `false`; Windows' is in `windows/window.rs` and its
+  band code (`titlebar.rs`) is untouched. A double click reads
+  `AppleActionOnDoubleClick` from the user's defaults (which search the
+  global domain): `Maximize` zooms, `Minimize` minimizes, `None` does
+  nothing, macOS 15's `Fill`, which has no public call, zooms; unset, the
+  older `AppleMiniaturizeOnDoubleClick` decides, and otherwise it zooms.
+- (mac-native) 2026-09-30 — M2.37: with no ☰ button the first crumb's plate
+  is inset from the row's corner by the chips' inset, as the button's was,
+  and an elided path's `…`, which is text on no plate, by the row's
+  padding; `F10`'s menu hangs from the corner the button would have been
+  in (`App::menu_button`). Linux's and Windows' rows are the same to the
+  point (`ui::tests::with_no_title_band_the_layout_is_what_it_was` pins
+  the button's place on each of its five rows).
+- (mac-native) 2026-09-30 — M2.37: Linux's and Windows' stand-in for the
+  menu bar (`MENU_BUTTON = true`, `start`, `publish`, `take`) is one file,
+  `platform/menubar.rs`, compiled `not(target_os = "macos")`, so neither
+  `platform/linux/` nor `platform/windows/` changes for it.
+- (mac-native) 2026-09-30 — M2.37: `fitted_size` asks AppKit how much
+  taller than its content a window is with `FullSizeContentView` in the
+  style, as the window is now made, rather than for a plain titled window.
+- (mac-native) 2026-09-30 — M2.37: the runner test that builds the bar's
+  menus and reads them back runs on libtest's thread, not the main one, so
+  its `MainThreadMarker` is `new_unchecked`: the menus are made, read and
+  dropped on that one thread and never reach the application or the
+  screen.
+- (mac-native) 2026-09-30 — M2.37: `04-windows.md` W4.39 said Linux and
+  macOS answer no band; it now says Linux does and macOS did until M2.37
+  (the ground rules' §7: the document is fixed in the change that made it
+  untrue). Nothing else of Windows' plan or code changed.
 
 ## Open questions
 
@@ -904,3 +1094,38 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   scattered through Finder's Trash that the journal names. Options: a task
   that weighs the journal's items (a walk of each `location()`) and gives
   `app/tests/trash.rs` macOS twins; or accept the count alone.
+- (mac-native) **Blocked**, M2.37: `NSWindow.setMovableByWindowBackground(true)`,
+  which the brief asks for beside `title_press`, is not set. A window movable
+  by its background moves on a drag from any view that answers
+  `mouseDownCanMoveWindow` YES, and winit's view does not override that
+  answer, whose default is YES for a view that is not opaque — winit's own
+  docs call the attribute "click-and-drag behavior for the entire window",
+  and egui's warn it moves the window under a slider. Here it would move the
+  window from a rubber band in the list, a divider, a scrollbar and a drag
+  of files out. Options: (a) leave it off: the band's empty space drags
+  through `title_press`, which is what is built; (b) set it and give
+  winit's view a `mouseDownCanMoveWindow` that answers YES only in the
+  band's empty space, a method added to winit's class at run time
+  (`class_addMethod`, reading the press from `NSApp.currentEvent`), so
+  AppKit moves the window itself there — a patch to a class that is
+  winit's; (c) set it as the brief says and accept that every drag in the
+  window moves it.
+- (mac-native) Whether AppKit moves the window by itself from a press in
+  the see-through title bar's own depth (about 28 points) that lands on one
+  of the row's controls — a tab chip, a crumb — for the reason above: the
+  view under it answers that it can move the window. If the live check
+  (`07-verification.md` §4.1, M2.37) finds a drag from a tab or a crumb
+  moving the window, option (b) above, answering NO on the controls, is the
+  fix.
+- (mac-native) Where the traffic lights sit against the row (M2.37). AppKit
+  keeps them in its own title bar, about 28 points deep, so their middle is
+  some 14 points from the window's top; the top row is 38 points deep under
+  an 8-point margin, its middle at 27. The lights sit level with the row's
+  upper half, not its middle as Finder's sit in its toolbar. Options: leave
+  them; move the three buttons down to the row's middle (Electron's
+  `trafficLightPosition`: each button's frame set again after every layout,
+  since AppKit lays its title bar out again on a resize, and its container
+  made deep enough to hold them); or give the window an empty unified
+  `NSToolbar`, which makes AppKit's title bar 52 points deep with the lights
+  in its middle, at the risk of the toolbar's view taking the row's clicks.
+  To be decided on a first look.
