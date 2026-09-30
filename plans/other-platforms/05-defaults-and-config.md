@@ -91,10 +91,10 @@ because `$TERMINAL` names a binary on Linux and `open -a` wants an app name.
 | id | command | block | description |
 |---|---|---|---|
 | `open` | `builtin:shell-open` | — | Open |
-| `edit` | `code --wait "$@"`, else `notepad "$@"` (two candidates via `first_available`, D5.4; the splitter expands no environment variables, W4.3) | no | Edit |
+| `edit` | `code --wait "$@"`, else `notepad "$@"` (two candidates, the first on `PATH` when the table is built, D5.4; the splitter expands no environment variables, W4.3) | no | Edit |
 | `zed` | `zed "$@"` | no | Open in Zed |
 | `zed-workspace` | `zed "$1"` | no | Open folder in Zed |
-| `terminal-here` | `wt -d "$1"` when `wt` is on `PATH`, else `cmd /K cd /d "$1"` (encoded as two candidates, first found wins: `platform::open::first_available(&[...])`) | no | Terminal here |
+| `terminal-here` | `wt -d "$1"` when `wt` is on `PATH`, else `cmd /K cd /d "$1"` (two candidates, first found wins, D5.4) | no | Terminal here |
 | `terminal-at` | `wt -d "$dir"`, else `cmd /K cd /d "$dir"` | no | Terminal at file |
 | `open-in-chrome` | `chrome "$@"` — resolved on `PATH` only; when Chrome is installed but not on `PATH` the ordinary not-found toast appears and the person adds the full path in `delightfile.toml` | no | Open in Chrome |
 | `play` | `builtin:shell-open` | — | Play |
@@ -124,7 +124,7 @@ which took pictures, video, sound and PDFs down to the fallback row.)
       `config::tests::a_text_file_opens_in_zed_first_everywhere` is the
       per-target test; the tests that pin Linux's openers and rules run on
       Linux and Windows, and `platform/macos/defaults.rs` pins macOS's.
-- [~] **D5.4** `platform::open::first_available(candidates: &[&str]) -> &str` for
+- [x] **D5.4** `platform::open::first_available(candidates: &[&str]) -> &str` for
       the two-candidate Windows entries (and usable on macOS for `edit`). Done
       when: unit test with a fake `PATH`.
       — nothing to do on the macOS side (df-app, 2026-09-29): the macOS `edit` opener
@@ -145,6 +145,12 @@ which took pictures, video, sound and PDFs down to the fallback row.)
       written (a program installed while delightfile runs is seen at the next
       start). Until then a Windows config has Linux's openers, which name
       programs Windows does not have.
+      — done (df-core, port/windows-core) by option (c), as decided (Decisions
+      log): `platform/windows/defaults.rs` holds §2.2's table as candidate
+      lists, and `platform::defaults::openers()` — `OPENERS` as it stands on
+      Linux and macOS — picks each Windows row's first command whose program
+      is on `PATH` when `Config::default` builds the table, else its last.
+      No `first_available`, no config format change.
 
 ## 3. Keymap
 
@@ -337,6 +343,20 @@ the README and for choosing defaults).
   `platform/windows/user.rs` records from yazi's source), not the
   `<USERNAME>` the table guessed: the Windows half of the open question below
   is answered.
+- (df-core) 2026-09-29 — D5.4: option (c), decided for Brian and relayed to
+  the df-core branch: no config format change and no `first_available` API.
+  `platform::windows::defaults::CANDIDATES` holds §2.2's openers with each
+  row's commands in order of preference, and `platform::defaults::openers()`
+  (the seam's new entry, which `Config::default` reads in place of the
+  `OPENERS` constant) picks per row the first whose program is on `PATH` —
+  under the names Windows runs it by, `candidates` and `.cmd`, the form VS
+  Code's `code` takes — else the last, which is `notepad` or `cmd`, always
+  there. A builtin needs no program. On Linux and macOS `openers()` is
+  `OPENERS` as it stands, so their tables are unchanged. §2.2's table is
+  written in full, and Windows' rules are Linux's row for row as §2.3 reads
+  them, `edit-image` becoming `open`; the tests that pinned Linux's openers
+  and rules on Windows too ("until W4.3") now run on Linux alone, and
+  `platform/windows/defaults.rs` pins Windows'.
 - (df-core) 2026-09-29 — D5.7, Windows: `candidates("7z")` is `7z.exe`, `7z`,
   then `7za.exe`, `7za` — 7-Zip's standalone console build, which takes the
   same commands and switches and reads 7z, zip, tar, gzip and xz but not rar.

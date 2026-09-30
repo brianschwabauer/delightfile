@@ -180,10 +180,9 @@ pub const DEFAULT_IMAGE_QUALITY: u8 = 80;
 /// The `g` chord's bookmarks, in which-key order: key, path, description.
 /// `~` is expanded at use time so `$HOME` can move.
 ///
-/// This and the two opener tables below are Linux's (the openers and rules
-/// Windows' too, until W4.3); a fresh install reads its platform's through
-/// [`crate::platform::defaults`], where macOS has all three of its own and
-/// Windows its bookmarks.
+/// This and the two opener tables below are Linux's; a fresh install reads
+/// its platform's through [`crate::platform::defaults`], where macOS and
+/// Windows have all three of their own.
 pub const DEFAULT_BOOKMARKS: &[(&str, &str, &str)] = &[
     ("h", "~", "Go home"),
     ("c", "~/.config", "Go to ~/.config"),
@@ -1012,13 +1011,13 @@ impl Default for Config {
             tasks: TasksConfig::default(),
             preview: PreviewConfig::default(),
             goto: default_bookmarks(),
-            openers: crate::platform::defaults::OPENERS
-                .iter()
+            openers: crate::platform::defaults::openers()
+                .into_iter()
                 .map(|(name, command, block, description)| Opener {
-                    name: (*name).to_string(),
-                    command: (*command).to_string(),
-                    block: *block,
-                    description: (*description).to_string(),
+                    name: name.to_string(),
+                    command: command.to_string(),
+                    block,
+                    description: description.to_string(),
                 })
                 .collect(),
             rules: crate::platform::defaults::RULES
@@ -2289,10 +2288,10 @@ mod tests {
         assert!(t.dir_icon("/home/brian/Nope", "Nope").is_none());
     }
 
-    // Linux's rules, which Windows ships until W4.3; macOS's are tested
-    // beside them (`platform::defaults`).
+    // Linux's rules; macOS's and Windows' are tested beside them
+    // (`platform::defaults`).
     #[test]
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(target_os = "linux")]
     fn opener_rules_match_by_mime_and_by_glob() {
         let c = Config::default();
         let names =
@@ -2378,9 +2377,9 @@ mod tests {
     /// `edit` used to wait on `$EDITOR` with no terminal behind it, which for
     /// a terminal editor is nothing happening at all; and `reveal` opened a
     /// second file manager from inside this one. Both are gone for good.
-    /// Linux's openers, which Windows ships until W4.3.
+    /// Linux's openers.
     #[test]
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(target_os = "linux")]
     fn edit_opens_a_terminal_and_nothing_reveals() {
         let c = Config::default();
         let edit = c.opener("edit").expect("edit");

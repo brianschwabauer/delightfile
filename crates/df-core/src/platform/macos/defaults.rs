@@ -89,6 +89,12 @@ pub const OPENERS: &[(&str, &str, bool, &str)] = &[
     ),
 ];
 
+/// The openers a fresh install ships, one command per row: [`OPENERS`] as
+/// it stands, each carrying its own fallback in its shell string.
+pub fn openers() -> Vec<(&'static str, &'static str, bool, &'static str)> {
+    OPENERS.to_vec()
+}
+
 /// Opener rules, matched top-down: Linux's
 /// ([`crate::config::DEFAULT_RULES`]) row for row, with `open` — the
 /// system's default app — where Linux has delightviewer, and the openers a
