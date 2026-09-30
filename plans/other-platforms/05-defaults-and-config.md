@@ -237,7 +237,8 @@ the README and for choosing defaults).
       `platform::defaults::BOOKMARKS`. Linux's is `DEFAULT_BOOKMARKS`
       re-exported unmoved (Decisions log). macOS and Windows ship their
       columns above, `g D` and `g o` on Finder's letters as Brian chose
-      (f0d0573); Windows' `g c` is `~/AppData/Roaming`, where `%APPDATA%`
+      (f0d0573; a places test that pinned on `o` moved to `q` in 854dd1e);
+      Windows' `g c` is `~/AppData/Roaming`, where `%APPDATA%`
       points by default, since a bookmark expands `~` and nothing else.
       `platform/{macos,windows}/defaults.rs` each pin their table.
 
