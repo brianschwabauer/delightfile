@@ -391,7 +391,10 @@ the workflow, so a human with the machine can produce the same artifact.
       — done db8fdae, verified on the runner: `plutil -lint` passes on the filled
       plist in the release run's macos job and again on the app in the dmg
       (run 36729167091). `LSMinimumSystemVersion` is not `13.0` but the bundle's
-      real minimum, 26.0 today (Decisions log and Open questions, 2026-09-30).
+      real minimum, 26.0 at first and 15.0 since the release builds on
+      `macos-15` (6456c15, dry run 36734749641); and since e420ed4 there is
+      no `CFBundleDocumentTypes` until M2.36 in `02-macos.md` (Decisions log,
+      2026-09-30).
 - [x] **B6.16** `build/macos/bundle.sh`: assembles `delightfile.app` from
       `target/release/delightfile`: `Contents/MacOS/delightfile`, `Contents/Info.plist`,
       `Contents/Resources/delightfile.icns` (generated from the PNG icons in `build/`
@@ -515,11 +518,30 @@ the `release` artifact, downloaded and checked here with `sha256sum -c`:
 | `notes.md` | 120,227 | Drafted, cut to fit (B6.23). |
 | three `.sha256` | ~100 each | `sha256sum -c` here and in each verify job. |
 
+**Dry run on `port/release-2`, 2026-09-30**, after the decisions on the macOS
+minimum, the document types, the licenses and scoop's notes: run 36736333110 at
+e9b1c8c, green, with `verify-macos` on macOS 15.7.9 (`macos-15`) and 26.6.2
+(`macos-latest`). Downloaded and checked here as before: the tarball
+(11,683,227 bytes) installs in a clean local Arch container; the dmg
+(28,931,060 bytes) unpacks to an app with `LSMinimumSystemVersion` 15.0, no
+`CFBundleDocumentTypes`, 17 dylibs linked only through
+`@executable_path/../Frameworks` and the system, and
+`Contents/Resources/Licenses` holding `delightfile/LICENSE`,
+`FFmpeg/COPYING.GPLv3`, `FFmpeg/LICENSE.md`, `pdfium/LICENSE` with the 15
+licenses of what pdfium builds in, and `SOURCES.txt`; the zip (63,164,215 bytes)
+holds `Licenses\delightfile\LICENSE.txt`, `Licenses\FFmpeg\COPYING.GPLv3.txt`,
+`Licenses\pdfium\LICENSE.txt` with the same 15 and `Licenses\SOURCES.txt`; the
+cask says `depends_on macos: :sequoia`; scoop prints the manifest's notes with
+`$dir` filled in. The run before it, 36734749641 at ac5257a, was green too; e9b1c8c
+added x264's commit to the macOS `SOURCES.txt` and a final newline to the
+Windows one.
+
 ## 5. Distribution channels
 
 - [>] **B6.24** Homebrew tap: a repository `brianschwabauer/homebrew-tap` with
       `Casks/delightfile.rb` pointing at the dmg URL and sha256, `depends_on macos:`
-      the bundle's own minimum (`:tahoe` today; B6.24 said `">= :ventura"`, see the
+      the bundle's own minimum (`:sequoia` since the release builds on `macos-15`;
+      B6.24 said `">= :ventura"`, see the
       Decisions log, 2026-09-30), and a `caveats` block with the unsigned-app
       instructions (§6): Homebrew **does** quarantine cask downloads, and Homebrew 6
       removed `--no-quarantine` (and `HOMEBREW_CASK_OPTS=--no-quarantine`), which
@@ -549,7 +571,8 @@ the `release` artifact, downloaded and checked here with `sha256sum -c`:
       fills it in and attaches it as `delightfile.json`. On the dry run's
       `verify-windows` (36730956539), `scoop install` of the filled manifest works
       and the installed program's `--version` is right. `scoop bucket add` waits
-      for the bucket repository; the shim is a GUI one (Decisions log, 2026-09-30).
+      for the bucket repository; the shim is a GUI one, which the manifest's
+      `notes` say since ac5257a (Decisions log, 2026-09-30).
 - [>] **B6.26** README: an "Installing" section per platform with the exact commands
       and the unsigned-app notes. Done when: reviewed by Brian.
       — written ab1faba, marked as pending the first release; waits for Brian's
@@ -914,6 +937,42 @@ Why not sign now:
   window opens as it should, and the program itself prints, so the check now asks
   the installed exe and looks for the shim and the Start menu shortcut. Whether
   scoop should put the program's folder on `PATH` instead is in Open questions.
+- 2026-09-30 — Decided (relayed by the coordinator): the release's macos job
+  builds on `macos-15`; `ci.yml` stays on `macos-latest`. The bundle's minimum is
+  whatever `macos-15`'s Homebrew bottles carry, `minos 15.0` in dry run
+  36734749641, so the release starts on macOS 15 and later and the cask says
+  `depends_on macos: :sequoia`. When GitHub retires the `macos-15` image, the
+  minimum moves with whatever runner the job moves to. If a user asks for
+  something older, option (c) in Open questions is the way back to 13: FFmpeg
+  built from source with `MACOSX_DEPLOYMENT_TARGET=13.0`. `verify-macos` runs on
+  `macos-15` and on `macos-latest`, the oldest macOS the bundle claims and the
+  newest the runners have.
+- 2026-09-30 — Decided: `build/macos/Info.plist` declares no document types until
+  the app handles the folder Finder hands it, which is `02-macos.md` M2.36; that
+  task puts `public.folder` back. `07-verification.md` §4.7 lists Open With from
+  Finder as not available.
+- 2026-09-30 — Decided: the macOS bundle (`Contents/Resources/Licenses`) and the
+  Windows zip (`Licenses\` beside the exe) carry delightfile's license, FFmpeg's
+  `COPYING.GPLv3`, pdfium's `LICENSE` with the licenses of what pdfium builds in,
+  and `SOURCES.txt`. On macOS `COPYING.GPLv3` and `LICENSE.md` come from the
+  Homebrew keg the bundled FFmpeg came from, and `SOURCES.txt` gives the
+  formula's source URL and sha256 (read with `brew info --json=v2` and jq),
+  refusing a keg whose version is not the formula's, and lists every other
+  bundled Homebrew library with its version, license and source URL. Two things
+  differ from what was decided, because BtbN's release is not what it was
+  taken to be: its zip carries FFmpeg's license only as `LICENSE.txt` (byte for
+  byte FFmpeg's `COPYING.GPLv3`, sha256 `8ceb4b9e…`), with no `LICENSE.md`, and
+  its release page carries builds and checksums, no source archives. So the
+  Windows `Licenses\FFmpeg\` holds `COPYING.GPLv3.txt` only, and `SOURCES.txt`
+  names FFmpeg's repository at the commit BtbN's folder name ends in
+  (`e47273f4d9`, which carries `LICENSE.md`) and BtbN's build scripts at the
+  release `ffmpeg.lock` names, which pin every library built into the DLLs. The
+  Windows files end in `.txt` so a double-click opens them. README's Installing
+  says the downloads carry GPL FFmpeg and where `SOURCES.txt` is.
+- 2026-09-30 — Decided: scoop keeps `bin`, and the manifest's `notes`, which
+  scoop prints after an install, say that `--version` and `--help` print nothing
+  through the shim, that the window opens as usual, and give the program's own
+  path (`$dir\delightfile.exe`) for them.
 
 ## Open questions
 
@@ -966,19 +1025,26 @@ Why not sign now:
     minimum is 13.0 as planned, and the bundle drops what Homebrew's FFmpeg links
     and a previewer never uses (x264, x265, SVT-AV1, lame, openssl, libvpx's
     encoder). About ten minutes on a cache miss and the most to maintain.
+
+  Decided 2026-09-30: (b), with (c) as the way back to 13 if a user asks
+  (Decisions log).
 - (2026-09-30) The bundle declares `public.folder` (B6.15), so Finder's Open With
   offers delightfile for a folder. But macOS hands the folder over as an
   open-documents event, and winit 0.30 does not pass that event on, so the app
   starts in its usual folder rather than the one chosen. Keep the declaration
   until df-app handles the event, or drop it until then?
+  Decided 2026-09-30: dropped until `02-macos.md` M2.36 (Decisions log).
 - (2026-09-30) Licenses in the packages. Each carries delightfile's `LICENSE` and
   pdfium's license files, and the Windows zip carries FFmpeg's `LICENSE.txt`. The
   macOS bundle does not carry the notices of Homebrew's FFmpeg and what it links
   (x264 and x265 are GPL, the rest BSD, LGPL or Apache). Distributing GPL FFmpeg
   binaries also means offering their source. How far should the release go here?
+  Decided 2026-09-30: a `Licenses` folder with SOURCES.txt in both (Decisions log).
 - (2026-09-30) Scoop and the command line. The manifest's `bin` makes a GUI shim,
   so `delightfile` from a terminal opens the window but `delightfile --version` and
   `--help` print nothing there (Decisions log). `"env_add_path": "."` in place of
   `bin` would put the real exe on `PATH`, which joins the terminal's console and
   prints (W4.1), at the cost of the FFmpeg DLLs' folder being on `PATH` too. Keep
   `bin`, or switch?
+  Decided 2026-09-30: keep `bin`, and say so in the manifest's `notes`
+  (Decisions log).
