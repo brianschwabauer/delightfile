@@ -212,18 +212,49 @@ fn unreserved(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/')
 }
 
+/// Whether this platform writes paths with `\` and drive letters, which a
+/// `file://` URI spells differently (RFC 8089): `C:\x` is `file:///C:/x`,
+/// and a share, `\\server\share\x`, is `file://server/share/x`.
+fn backslash_paths() -> bool {
+    std::path::MAIN_SEPARATOR == '\\'
+}
+
+/// Whether `bytes` start with a drive, `C:`.
+fn starts_with_drive(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 /// One path as a `file://` URI.
 ///
 /// The bytes are the path's own ([`df_core::platform::os::as_bytes`]),
 /// exactly on Linux and macOS. Only on Windows can a name have none — one
 /// that is not valid Unicode — and that one is spelled lossily: the URI is
 /// for another program to read, and there is no exact spelling to give it.
+/// There the path's `\` are the URI's `/`, a drive follows a third slash
+/// with its colon as it is, and a share's server is the authority (W4.13).
 pub fn file_uri(path: &Path) -> String {
     let bytes = df_core::platform::os::as_bytes(path.as_os_str()).unwrap_or_else(|_| {
         std::borrow::Cow::Owned(path.to_string_lossy().into_owned().into_bytes())
     });
     let mut uri = String::from("file://");
-    for &byte in bytes.iter() {
+    let mut bytes: &[u8] = &bytes;
+    let slashed: Vec<u8>;
+    if backslash_paths() {
+        slashed = bytes
+            .iter()
+            .map(|&b| if b == b'\\' { b'/' } else { b })
+            .collect();
+        bytes = &slashed;
+        if let Some(share) = bytes.strip_prefix(b"//") {
+            bytes = share;
+        } else if starts_with_drive(bytes) {
+            uri.push('/');
+            uri.push(bytes[0] as char);
+            uri.push(':');
+            bytes = &bytes[2..];
+        }
+    }
+    for &byte in bytes {
         if unreserved(byte) {
             uri.push(byte as char);
         } else {
@@ -237,6 +268,10 @@ pub fn file_uri(path: &Path) -> String {
 /// a `http://` in a uri-list is somebody's browser drag, and pasting it as a
 /// file would be a lie. So is a name this platform cannot spell: bytes that
 /// are not UTF-8, on Windows ([`df_core::platform::os::from_bytes`]).
+///
+/// On Windows `file:///C:/x` is `C:\x` — the slash before the drive is the
+/// URI's, not the path's — and `file://server/share/x` is the share
+/// `\\server\share\x`, a path Windows opens like any other (W4.13).
 pub fn parse_file_uri(text: &str) -> Option<PathBuf> {
     let text = text.trim();
     // `file:///path` is the spec's spelling (empty authority); `file://path`
@@ -247,9 +282,32 @@ pub fn parse_file_uri(text: &str) -> Option<PathBuf> {
         // `file://localhost/tmp/x` — rare, legal, and one line to honour.
         return parse_file_uri(&format!("file:///{local}"));
     }
+    if backslash_paths() {
+        return windows_path(rest);
+    }
     // Anything else after the `//` is a *remote* authority, and a remote path
     // is not a file this program can paste.
     let rest = rest.strip_prefix('/').map(|_| rest)?;
+    decoded(rest)
+}
+
+/// What follows `file://` as a path on Windows: a drive after a third
+/// slash, a server's share without one, `\` for every `/`.
+fn windows_path(rest: &str) -> Option<PathBuf> {
+    // Decoded first: some programs write the drive's colon as `%3A`.
+    let decoded = decoded(rest)?;
+    let decoded = decoded.to_str()?;
+    let path = match decoded.strip_prefix('/') {
+        Some(local) if starts_with_drive(local.as_bytes()) => local.to_string(),
+        Some(_) => decoded.to_string(),
+        None if decoded.is_empty() => return None,
+        None => format!("//{decoded}"),
+    };
+    Some(PathBuf::from(path.replace('/', "\\")))
+}
+
+/// A URI path with its `%XX` escapes decoded into the platform's bytes.
+fn decoded(rest: &str) -> Option<PathBuf> {
     let bytes = rest.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -522,10 +580,46 @@ mod tests {
             parse_file_uri("file://localhost/tmp/a.txt"),
             Some(PathBuf::from("/tmp/a.txt"))
         );
-        // A remote authority is refused rather than silently made local.
-        assert_eq!(parse_file_uri("file://other-host/tmp/a.txt"), None);
+        // A remote authority is refused rather than silently made local —
+        // except on Windows, where it is a share the system opens itself.
+        let remote = parse_file_uri("file://other-host/tmp/a.txt");
+        if cfg!(windows) {
+            assert_eq!(remote, Some(PathBuf::from(r"\\other-host\tmp\a.txt")));
+        } else {
+            assert_eq!(remote, None);
+        }
         assert_eq!(parse_file_uri("/tmp/a.txt"), None);
         assert_eq!(parse_file_uri("https://example.com"), None);
+    }
+
+    /// On Windows a drive's path and a share's are the URIs other Windows
+    /// programs write (W4.13): the drive after a third slash with its colon,
+    /// the share's server as the authority, `/` for `\`.
+    #[test]
+    fn windows_paths_round_trip_as_windows_writes_them() {
+        if !cfg!(windows) {
+            return;
+        }
+        for (path, uri) in [
+            (r"C:\Users\a b\x.txt", "file:///C:/Users/a%20b/x.txt"),
+            (r"D:\", "file:///D:/"),
+            (
+                r"\\server\share\docs\ü.txt",
+                "file://server/share/docs/%C3%BC.txt",
+            ),
+        ] {
+            assert_eq!(file_uri(Path::new(path)), uri);
+            assert_eq!(parse_file_uri(uri), Some(PathBuf::from(path)), "{uri}");
+        }
+        assert_eq!(
+            parse_file_uri("file:///C%3A/Windows"),
+            Some(PathBuf::from(r"C:\Windows")),
+            "a colon written as %3A"
+        );
+        assert_eq!(
+            parse_file_uri("file://localhost/C:/x.txt"),
+            Some(PathBuf::from(r"C:\x.txt"))
+        );
     }
 
     /// The paste side's preference order.

@@ -2622,8 +2622,10 @@ mod tests {
             vec![file("a.txt", None), file("a.txt", None)],
             others,
         );
+        // Labelled in the platform's separator, which the test reads as `/`.
+        let label = |row| df_core::path::with_slashes(&bulk.label(row)).into_owned();
         assert_eq!(
-            (bulk.label(0), bulk.label(1)),
+            (label(0), label(1)),
             ("one/a.txt".into(), "two/a.txt".into())
         );
 

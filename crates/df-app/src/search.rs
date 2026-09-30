@@ -968,8 +968,9 @@ pub(crate) fn parse(mode: Mode, root: &Path, query: &str, line: &str) -> Option<
     }
     match mode {
         Mode::Names => {
-            // fd prints paths relative to where it was run, which is `root`.
-            let relative = line.trim_end_matches('/').to_string();
+            // fd prints paths relative to where it was run, which is `root`,
+            // a folder's with a separator after it.
+            let relative = native(line.trim_end_matches(std::path::is_separator));
             if relative.is_empty() {
                 return None;
             }
@@ -990,17 +991,30 @@ pub(crate) fn parse(mode: Mode, root: &Path, query: &str, line: &str) -> Option<
             let (column, text) = rest.split_once(':')?;
             let number: usize = number.parse().ok()?;
             let column: usize = column.parse().ok()?;
-            let path = root.join(relative);
+            let relative = native(relative);
+            let path = root.join(&relative);
             Some(Hit {
                 entry: Entry::read(&path).ok(),
                 path,
-                relative: relative.to_string(),
+                relative,
                 line: Some(number),
                 span: highlight(text, column, query),
                 text: text.to_string(),
             })
         }
     }
+}
+
+/// A tool's relative path in the platform's separator. A hit's name is its
+/// path from the root, and a rename or the bulk card spells the name it
+/// makes as the platform does ([`crate::hits::name_under`]); a `/` from fd or
+/// rg on Windows would make the same file two names (W4.13). The identity
+/// where `/` is the separator.
+fn native(relative: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        return relative.to_string();
+    }
+    relative.replace('/', std::path::MAIN_SEPARATOR_STR)
 }
 
 /// Where to draw the match inside a result line.
@@ -1033,6 +1047,7 @@ fn highlight(text: &str, column: usize, query: &str) -> Option<Span> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use df_core::path::with_slashes;
 
     fn root() -> PathBuf {
         PathBuf::from("/nonexistent-search-root")
@@ -1042,8 +1057,8 @@ mod tests {
     #[test]
     fn an_fd_line_is_a_relative_path() {
         let hit = parse(Mode::Names, &root(), "mouse", "src/mouse.rs").expect("parses");
-        assert_eq!(hit.relative, "src/mouse.rs");
-        assert_eq!(hit.path, root().join("src/mouse.rs"));
+        assert_eq!(with_slashes(&hit.relative), "src/mouse.rs");
+        assert_eq!(hit.path, root().join("src").join("mouse.rs"));
         assert_eq!(hit.line, None);
         // The file does not exist, so there is no entry — and that is a row,
         // not a crash.
@@ -1053,6 +1068,24 @@ mod tests {
         let hit = parse(Mode::Names, &root(), "src", "src/").expect("parses");
         assert_eq!(hit.relative, "src");
         assert!(parse(Mode::Names, &root(), "x", "").is_none());
+    }
+
+    /// On Windows fd writes `\` and a hit's name is spelled as the platform
+    /// spells a path, whichever separator the tool used, so a renamed hit
+    /// and a found one are named alike (W4.13).
+    #[test]
+    fn a_hit_is_named_in_the_platforms_separator() {
+        let sep = std::path::MAIN_SEPARATOR;
+        for line in ["src/app/foo.rs", r"src\app\foo.rs"] {
+            if sep == '/' && line.contains('\\') {
+                continue; // a `\` is part of a name on Unix
+            }
+            let hit = parse(Mode::Names, &root(), "foo", line).expect("parses");
+            assert_eq!(hit.relative, format!("src{sep}app{sep}foo.rs"));
+        }
+        let folder =
+            parse(Mode::Names, &root(), "app", &format!("src{sep}app{sep}")).expect("parses");
+        assert_eq!(folder.relative, format!("src{sep}app"));
     }
 
     /// rg's `--null --column` format, exactly as it comes off the pipe.
@@ -1065,7 +1098,7 @@ mod tests {
             "src/ui.rs\u{0}66:11:pub const ROW_HEIGHT: f32 = 22.0;",
         )
         .expect("parses");
-        assert_eq!(hit.relative, "src/ui.rs");
+        assert_eq!(with_slashes(&hit.relative), "src/ui.rs");
         assert_eq!(hit.line, Some(66));
         assert_eq!(hit.text, "pub const ROW_HEIGHT: f32 = 22.0;");
         let (start, end) = hit.span.expect("the literal is at the reported column");

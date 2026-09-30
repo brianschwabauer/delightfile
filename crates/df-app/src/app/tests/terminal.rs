@@ -340,7 +340,7 @@ fn ctrl_t_is_refused_in_a_search_s_hits_and_a_folder_row_s_terminal_is_not() {
         .tab()
         .cwd
         .dir
-        .position_of("src/deep")
+        .position_of(&format!("src{}deep", std::path::MAIN_SEPARATOR))
         .expect("the folder's row");
     app.dir().set_cursor(index);
     app.open_menu(egui::pos2(300.0, 300.0));

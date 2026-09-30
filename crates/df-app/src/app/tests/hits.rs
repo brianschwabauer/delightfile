@@ -3,8 +3,20 @@
 //! and a walk still streaming into them. The search's process is a test
 //! [`search::Feed`] rather than fd or rg, so what arrives, and when, is the
 //! test's to say.
+//!
+//! The names are written here with `/`. A hit is named in the platform's
+//! separator (`search::parse`, W4.13), so on Windows a name the tests hand
+//! in goes through [`native`], and the names read back through
+//! [`df_core::path::with_slashes`].
+
+use df_core::path::with_slashes;
 
 use super::*;
+
+/// `name`, written with `/`, in the platform's separator.
+fn native(name: &str) -> String {
+    name.replace('/', std::path::MAIN_SEPARATOR_STR)
+}
 
 /// A fixture with a small tree under it: `a.txt` and `b.txt` at the top,
 /// `src/foo.txt`, `src/deep/foo.txt` and `docs/foo.txt` below, and `src/deep`
@@ -57,12 +69,16 @@ fn rows(app: &App) -> Vec<String> {
         .cwd
         .dir
         .rows()
-        .map(|(entry, _)| entry.name.clone())
+        .map(|(entry, _)| with_slashes(&entry.name).into_owned())
         .collect()
 }
 
 fn cursor(app: &App) -> Option<String> {
-    app.tab().cwd.dir.cursor_entry().map(|e| e.name.clone())
+    app.tab()
+        .cwd
+        .dir
+        .cursor_entry()
+        .map(|e| with_slashes(&e.name).into_owned())
 }
 
 /// Three names hits in, the second highlighted, `Enter`: the listing, finished.
@@ -240,7 +256,7 @@ fn right_on_a_directory_hit_enters_it_and_back_is_the_root() {
 fn the_filter_matches_the_path_from_the_root() {
     let mut app = tree("hits-filter");
     commit_three(&mut app);
-    app.dir().set_filter("src/");
+    app.dir().set_filter(native("src/"));
     let mut names = rows(&app);
     names.sort();
     assert_eq!(names, ["src/deep/foo.txt", "src/foo.txt"]);
@@ -388,7 +404,9 @@ fn the_bulk_card_renames_hits_across_folders() {
     let Some(Dialog::Bulk(bulk)) = &mut app.dialog else {
         panic!("no card");
     };
-    let mut labels: Vec<String> = (0..bulk.len()).map(|row| bulk.label(row)).collect();
+    let mut labels: Vec<String> = (0..bulk.len())
+        .map(|row| with_slashes(&bulk.label(row)).into_owned())
+        .collect();
     labels.sort();
     assert_eq!(labels, ["docs/foo.txt", "src/deep/foo.txt", "src/foo.txt"]);
     // Every row to `baz.txt`: three of one name, in three folders, so none
@@ -587,16 +605,16 @@ fn a_content_hit_shows_its_line_and_opens_there() {
     assert_eq!(names, ["docs/foo.txt", "src/foo.txt"]);
     let view = app.tab().hits.as_ref().expect("hits");
     assert_eq!(
-        view.notes.get("docs/foo.txt").map(String::as_str),
+        view.notes.get(&native("docs/foo.txt")).map(String::as_str),
         Some("2 · foo here")
     );
     assert_eq!(
-        view.notes.get("src/foo.txt").map(String::as_str),
+        view.notes.get(&native("src/foo.txt")).map(String::as_str),
         Some("foo here")
     );
 
     // The frame seeds the preview's place for the hovered hit's file.
-    app.dir().cursor_to_name("docs/foo.txt");
+    app.dir().cursor_to_name(&native("docs/foo.txt"));
     let ctx = egui::Context::default();
     run_frame(&mut app, &ctx, Vec::new());
     assert_eq!(
@@ -623,7 +641,7 @@ fn renaming_a_folder_hit_carries_the_hits_inside_it() {
     let root = app.files.clone();
     commit_folder_and_child(&mut app);
     let now = Instant::now();
-    app.dir().cursor_to_name("src/deep");
+    app.dir().cursor_to_name(&native("src/deep"));
     app.run(Command::Rename, 10, now);
     app.submit_prompt("deeper".to_string(), now);
 
@@ -634,7 +652,7 @@ fn renaming_a_folder_hit_carries_the_hits_inside_it() {
         app.tab()
             .cwd
             .dir
-            .position_of("src/deeper/foo.txt")
+            .position_of(&native("src/deeper/foo.txt"))
             .expect("the child's row"),
     );
     assert_eq!(
@@ -728,9 +746,9 @@ fn undoing_a_trash_brings_the_row_back_unmarked() {
     let root = app.files.clone();
     commit_three(&mut app);
     let now = Instant::now();
-    app.dir().cursor_to_name("docs/foo.txt");
+    app.dir().cursor_to_name(&native("docs/foo.txt"));
     app.run(Command::ToggleSelect, 10, now);
-    assert!(app.tab().cwd.dir.is_selected("docs/foo.txt"));
+    assert!(app.tab().cwd.dir.is_selected(&native("docs/foo.txt")));
 
     let trash = df_core::ops::Trash::at(root.join("..").join("Trash"));
     let item = trash
@@ -747,7 +765,7 @@ fn undoing_a_trash_brings_the_row_back_unmarked() {
         "the row stayed gone"
     );
     assert!(
-        !app.tab().cwd.dir.is_selected("docs/foo.txt"),
+        !app.tab().cwd.dir.is_selected(&native("docs/foo.txt")),
         "the mark came back"
     );
     assert_eq!(cursor(&app).as_deref(), Some("docs/foo.txt"));

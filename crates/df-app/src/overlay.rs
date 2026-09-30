@@ -814,7 +814,11 @@ fn path_text(
     max_width: f32,
 ) -> f32 {
     use egui::text::{LayoutJob, TextFormat, TextWrapping};
-    let split = path.rfind('/').map(|at| at + 1).unwrap_or(0);
+    // The platform's separators: `\` as well as `/` on Windows (W4.13).
+    let split = path
+        .rfind(std::path::is_separator)
+        .map(|at| at + 1)
+        .unwrap_or(0);
     let format = |color: Color32| TextFormat {
         font_id: FontId::proportional(FONT),
         color,
