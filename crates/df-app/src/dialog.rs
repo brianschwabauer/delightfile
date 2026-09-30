@@ -98,6 +98,13 @@ pub enum ConfirmKind {
     Purge,
     /// "Empty trash", from the palette or the context menu. The scary one.
     EmptyTrash,
+    /// "Empty trash" where the trash is the system's own bin and not a view
+    /// here — Windows' Recycle Bin (W4.8). [`ConfirmKind::EmptyTrash`]
+    /// counting rather than listing: the bin's items have no names this
+    /// program can read, so the card says how many there are and what they
+    /// weigh ([`Confirm::counted`], [`Confirm::size`]) and lists nothing, and
+    /// its yes empties the whole bin in one call.
+    EmptyBin,
     /// A save dialog aimed at a file that is already there (`--chooser-save`).
     /// Nothing is overwritten *here* — the program that asked does that after
     /// the pick — but the pick is the last moment anybody can say no, so this
@@ -134,14 +141,20 @@ pub struct Confirm {
     /// What emptying the trash frees, for [`ConfirmKind::EmptyTrash`]'s
     /// question: the trash chip's number, `~` and all, kept in step with it by
     /// the app while the card is up. `None` for every other kind, and for a
-    /// trash whose walk has said nothing yet.
+    /// trash whose walk has said nothing yet. [`ConfirmKind::EmptyBin`]'s
+    /// is the bin's own count of its bytes, settled.
     pub size: Option<crate::folders::Size>,
+    /// How many items the card is about when it counts them rather than
+    /// listing them: [`ConfirmKind::EmptyBin`]'s, the bin's own count.
+    /// `None` for every other kind, whose count is its names.
+    pub counted: Option<u64>,
 }
 
 impl Confirm {
     pub fn new(kind: ConfirmKind, paths: Vec<PathBuf>) -> Confirm {
         Confirm {
             size: None,
+            counted: None,
             kind,
             paths,
             scroll: 0,
@@ -176,6 +189,15 @@ impl Confirm {
                 "Empty the trash? {} will be deleted for good.",
                 crate::trashview::weight_text(n, self.size)
             ),
+            // The same question about the bin, in the same words, with the
+            // count the bin gave rather than the names the card holds.
+            ConfirmKind::EmptyBin => format!(
+                "Empty the Recycle Bin? {} will be deleted for good.",
+                crate::trashview::weight_text(
+                    usize::try_from(self.counted.unwrap_or(0)).unwrap_or(usize::MAX),
+                    self.size
+                )
+            ),
             // One file, by name: the question is about *that* file, and a
             // count of one would be the card not saying which.
             ConfirmKind::Replace => format!("Replace {}?", self.body().join(", ")),
@@ -186,10 +208,10 @@ impl Confirm {
     ///
     /// None for a replace, whose title already *is* the name — the same word
     /// twice, once as the question and once underneath it, would read as two
-    /// files.
+    /// files — nor for the bin, which has no names to give.
     fn lines(&self) -> usize {
         match self.kind {
-            ConfirmKind::Replace => 0,
+            ConfirmKind::Replace | ConfirmKind::EmptyBin => 0,
             _ => self.paths.len().min(BODY_VISIBLE),
         }
     }
@@ -801,7 +823,7 @@ pub fn confirm_verb(kind: ConfirmKind) -> &'static str {
         ConfirmKind::Delete => "Delete",
         ConfirmKind::RemoteDelete => "Delete",
         ConfirmKind::Purge => "Destroy",
-        ConfirmKind::EmptyTrash => "Empty",
+        ConfirmKind::EmptyTrash | ConfirmKind::EmptyBin => "Empty",
         ConfirmKind::Replace => "Replace",
     }
 }
@@ -2378,6 +2400,21 @@ mod tests {
             empty.title(),
             "Empty the trash? 2 items · 1.2 GB will be deleted for good."
         );
+        // The Recycle Bin is counted, not listed (W4.8): the bin's own count
+        // and weight in the same words, and no names under the question.
+        let mut bin = Confirm::new(ConfirmKind::EmptyBin, Vec::new());
+        bin.counted = Some(1_204);
+        bin.size = Some(crate::folders::Size {
+            bytes: 1_288_490_189,
+            settled: true,
+        });
+        assert_eq!(
+            bin.title(),
+            "Empty the Recycle Bin? 1,204 items · 1.2 GB will be deleted for good."
+        );
+        assert!(bin.danger(), "emptying the bin is red");
+        assert_eq!(bin.lines(), 0);
+        assert_eq!(confirm_verb(bin.kind), "Empty");
 
         // A save's replace names its one file in the question, and lists
         // nothing under it: the name once, where it is being asked about.

@@ -5,9 +5,10 @@
 //! went but not where the bin keeps it, and the bin's own names and its
 //! restore are COM (`IShellFolder`, `IContextMenu`), deferred with their
 //! design recorded (W4.28). So there is no trash view here: the trash's
-//! doors open the Recycle Bin in Explorer, where a file is restored or the
-//! bin emptied ([`SYSTEM_BIN`]), and `u` after a trash says that is where to
-//! go ([`RESTORED_ELSEWHERE`]) rather than failing to find the file.
+//! doors open the Recycle Bin in Explorer, where a file is restored
+//! ([`SYSTEM_BIN`]), "Empty trash" counts the bin rather than listing it and
+//! empties it whole, and `u` after a trash says where to go
+//! ([`RESTORED_ELSEWHERE`]) rather than failing to find the file.
 
 /// The line under an empty trash view: there is no trash view here.
 pub const LISTED_NOTE: Option<&str> = None;
