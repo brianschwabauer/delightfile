@@ -23,7 +23,7 @@
 | 63 | `std::env::var_os("PATH")` into `extractor_on` in `external_extractor()` | Windows-differs | app:app.rs:extract_paths; app:preview/listing.rs:seven_zip | `split_paths` already uses `;` on Windows |
 | 75–78 | `extractor_on`: `split_paths(path).map(\|dir\| dir.join(name))` for `"7z"`, then `"bsdtar"` | Windows-differs | as above | Candidate names carry no `.exe`. Windows 10+ ships libarchive's bsdtar as `tar.exe`, not `bsdtar` ✓ S1.13 |
 | 82–85 | `is_executable`: `std::os::unix::fs::PermissionsExt`, `mode() & 0o111 != 0` | Unix-only | `extractor_on`; core:archive/write/mod.rs:on_path | Windows has no execute bits ✓ S1.13 |
-| 207–217 | `run_in`: `Command::new(program)…spawn()` | Windows-differs | core:archive/whole.rs:by_extractor, two_stage; core:archive/write/mod.rs:seven_zip | See §4 |
+| 207–217 | `run_in`: `Command::new(program)…spawn()` | Windows-differs | core:archive/whole.rs:by_extractor, two_stage; core:archive/write/mod.rs:seven_zip | See §4 ✓ W4.2 |
 
 ### archive/extract.rs
 
@@ -36,8 +36,8 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 131–138 | `ArchiveFormat::decompressor()` returns `"gzip"`, `"xz"`, `"zstd"` | Windows-differs | `list_compressed_tar`; core:archive/unpack.rs:extract_compressed_tar; `is_available` | Looked up by bare name on `PATH`. None of the three is in a stock Windows install |
-| 329–344 | `list_compressed_tar`: `Command::new(binary).arg("-dc")` with the archive `File` as stdin | Windows-differs | `list_until`/`list` ← app:app.rs:ask_archive; app:preview/listing.rs:list_with | §4 |
-| 392–401 | `have(binary)`: `binary --version`, `.status()` | Windows-differs | `ArchiveFormat::is_available`; core:archive/write/mod.rs:Format::is_available ← app:app/compress.rs:open_archive_prompt | §4 |
+| 329–344 | `list_compressed_tar`: `Command::new(binary).arg("-dc")` with the archive `File` as stdin | Windows-differs | `list_until`/`list` ← app:app.rs:ask_archive; app:preview/listing.rs:list_with | §4 ✓ W4.2 |
+| 392–401 | `have(binary)`: `binary --version`, `.status()` | Windows-differs | `ArchiveFormat::is_available`; core:archive/write/mod.rs:Format::is_available ← app:app/compress.rs:open_archive_prompt | §4 ✓ W4.2 |
 
 ### archive/tree.rs
 
@@ -49,7 +49,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 600–615 | `extract_compressed_tar`: `std::process::Command::new(binary).arg("-dc")` | Windows-differs | `extract` ← core:ops/jobs.rs:ExtractJob::run (← app:app.rs:spawn_extract); core:archive/whole.rs:read_here | §4 |
+| 600–615 | `extract_compressed_tar`: `std::process::Command::new(binary).arg("-dc")` | Windows-differs | `extract` ← core:ops/jobs.rs:ExtractJob::run (← app:app.rs:spawn_extract); core:archive/whole.rs:read_here | §4 ✓ W4.2 |
 
 ### archive/write/mod.rs
 
@@ -64,8 +64,8 @@
 | 561–562 | Symlink target `read_link(path)…as_os_str().as_bytes()` | Unix-only | as above | Link text is stored as raw bytes ✓ S1.16 ✓ P3.7 |
 | 566, 579–580 | Member names built as bytes: `push(b'/')`, `extend_from_slice(child.as_bytes())` | Unix-only | as above | `/` is the archive format's own separator. The child bytes come from `OsStr` ✓ S1.16 ✓ P3.7 |
 | 656–661 | `on_path`: `var_os("PATH")`, `dir.join(name)`, `external::is_executable` | Windows-differs (+ Unix-only via `is_executable`) | `Format::is_available`, `seven_zip` | No `.exe` suffix ✓ S1.13 |
-| 684–696 | `piped`: `Command::new(tool)` with `-q -c -T0` or `-z -c -q -T0` | Windows-differs | `Pack::run` | §4 |
-| 762–782 | `seven_zip`: `7z a -t7z -bd -y -snl -- <temp> <names…>` via `external::run_in(…, Some(dir), …)` | Windows-differs | `Pack::run` | §4 |
+| 684–696 | `piped`: `Command::new(tool)` with `-q -c -T0` or `-z -c -q -T0` | Windows-differs | `Pack::run` | §4 ✓ W4.2 |
+| 762–782 | `seven_zip`: `7z a -t7z -bd -y -snl -- <temp> <names…>` via `external::run_in(…, Some(dir), …)` | Windows-differs | `Pack::run` | §4 ✓ W4.2 |
 
 ### archive/write/tar.rs
 
@@ -105,7 +105,7 @@
 | 60 | `use std::os::unix::fs::MetadataExt` | Unix-only | file-wide | ✓ S1.7 |
 | 364, 384 | `child_counts`: `root_meta.dev()`, `meta.dev()` → `crosses_boundary` | Unix-only | core:du/scanner.rs:run_walk | Windows has no `st_dev` ✓ S1.7 |
 | 425–427 | `pub fn crosses_boundary(root_dev: u64, child_dev: u64, cross_filesystems: bool)` | Windows-differs | `walk_reusing`, `child_counts` | API is keyed on a Unix device number |
-| 430–432 | `sizes_of`: `meta.blocks().saturating_mul(512)`, `meta.size()` | Unix-only | `walk_reusing` | ✓ S1.7 |
+| 430–432 | `sizes_of`: `meta.blocks().saturating_mul(512)`, `meta.size()` | Unix-only | `walk_reusing` | ✓ S1.7 ✓ W4.35 |
 | 525, 616 | `walk_reusing`: `root_meta.dev()`, `meta.dev()` | Unix-only | `walk` ← core:du/scanner.rs:run_walk; `walk_blocking` ← `du_blocking` | ✓ S1.7 |
 | 682–696 | `meta.nlink() > 1` → `seen_links.insert((meta.dev(), meta.ino()))` | Unix-only | `walk_reusing` | ✓ S1.7 |
 
@@ -169,10 +169,10 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 41 | `use super::inotify::{self, Inotify, Pipe, WATCH_MASK}` | Linux-only | | ✓ S1.4 |
-| 94–111 | `Watcher::new`: `Inotify::new()?`, `Pipe::new()?`, spawns thread `df-watch` running `run` | Linux-only | `Watcher::start` ← app:app.rs:assemble | On error, `start` falls back to `Watcher::disabled()` (122: log text names inotify) ✓ S1.4 ✓ M2.1 (kqueue) |
-| 147–167 | `Watcher::watch` / `interrupt` → `Pipe::wake` | Linux-only (via `Pipe`) | app:app.rs:assemble, rewatch; `drain` ← app:app.rs:poll_workers | ✓ S1.4 |
-| 181–276 | `run`: `inotify::poll_two(inotify.fd(), pipe.read_fd(), timeout)`, `read_events`, `HashMap<i32 (wd), PathBuf>` | Linux-only | thread body | ✓ S1.4 ✓ M2.1 (kqueue) |
-| 279–301 | `set_watches`: `add_watch(&dir, WATCH_MASK)`, `rm_watch(wd)` | Linux-only | `run` | ✓ S1.4 |
+| 94–111 | `Watcher::new`: `Inotify::new()?`, `Pipe::new()?`, spawns thread `df-watch` running `run` | Linux-only | `Watcher::start` ← app:app.rs:assemble | On error, `start` falls back to `Watcher::disabled()` (122: log text names inotify) ✓ S1.4 ✓ M2.1 (kqueue) ✓ W4.4 |
+| 147–167 | `Watcher::watch` / `interrupt` → `Pipe::wake` | Linux-only (via `Pipe`) | app:app.rs:assemble, rewatch; `drain` ← app:app.rs:poll_workers | ✓ S1.4 ✓ W4.4 |
+| 181–276 | `run`: `inotify::poll_two(inotify.fd(), pipe.read_fd(), timeout)`, `read_events`, `HashMap<i32 (wd), PathBuf>` | Linux-only | thread body | ✓ S1.4 ✓ M2.1 (kqueue) ✓ W4.4 |
+| 279–301 | `set_watches`: `add_watch(&dir, WATCH_MASK)`, `rm_watch(wd)` | Linux-only | `run` | ✓ S1.4 ✓ W4.4 |
 
 ### git/status.rs
 
@@ -224,7 +224,7 @@
 | 40–54 | Home and cwd rails via lexical `is_ancestor` | Windows-differs (case) | as above | |
 | 63 | `current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` | Windows-differs | as above | ✓ P3.13 |
 | 64 | `std::env::var_os("HOME")` | Windows-differs | as above | Unset on Windows, so the home rail is skipped ✓ S1.17 |
-| 96–111 | `remove_tree`: a symlink is removed with `remove_file` (109) | Windows-differs | `delete_permanent` ← core:ops/jobs.rs:DeleteJob::run, core:ops/trash.rs:purge, core:sync/execute.rs:remove_extras, remove; core:ops/copy.rs:move_cross_device | Windows directory symlinks and junctions are removed with `remove_dir` ✓ P3.26 |
+| 96–111 | `remove_tree`: a symlink is removed with `remove_file` (109) | Windows-differs | `delete_permanent` ← core:ops/jobs.rs:DeleteJob::run, core:ops/trash.rs:purge, core:sync/execute.rs:remove_extras, remove; core:ops/copy.rs:move_cross_device | Windows directory symlinks and junctions are removed with `remove_dir` ✓ P3.26 ✓ W4.37 |
 | 118–130 | `remove_tree_unchecked`: `remove_dir_all` for a real dir, otherwise `remove_file` | Windows-differs | core:ops/copy.rs:copy_tree_with, copy_symlink, copy_dir, move_path; core:ops/create.rs:rename; core:ops/trash.rs:trash | As above ✓ P3.26 |
 
 ### ops/journal.rs (in memory only; the journal is never written to disk)
@@ -267,8 +267,8 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 1–30 | Module: freedesktop.org Trash spec (`Trash/files`, `Trash/info/*.trashinfo`, `$topdir/.Trash[-$uid]`) | Linux-only | | The macOS Finder trash is `~/.Trash` (plus `/Volumes/*/.Trashes/<uid>`). The Windows Recycle Bin is per-volume `$Recycle.Bin\<SID>` ✓ S1.6 ✓ M2.8 (NSFileManager + journal) |
-| 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` ✓ S1.6 ✓ M2.8 (macOS: the journal in the state directory) |
+| 1–30 | Module: freedesktop.org Trash spec (`Trash/files`, `Trash/info/*.trashinfo`, `$topdir/.Trash[-$uid]`) | Linux-only | | The macOS Finder trash is `~/.Trash` (plus `/Volumes/*/.Trashes/<uid>`). The Windows Recycle Bin is per-volume `$Recycle.Bin\<SID>` ✓ S1.6 ✓ M2.8 (NSFileManager + journal) ✓ W4.7 |
+| 110–116 | `Trash::home`: `var_os("XDG_DATA_HOME")`, `var_os("HOME")` (error if unset) | Linux-only | app:app.rs:show_trash; `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows: `HOME` unset gives `Err("$HOME is not set: no home trash")` ✓ S1.6 ✓ M2.8 (macOS: the journal in the state directory) ✓ W4.7 |
 | 132–145 | `ensure`: `PermissionsExt`, `from_mode(0o700)` | Unix-only | `Trash::trash` | ✓ S1.6 |
 | 178–184 | `trash`: `rename(path, &dst)`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::trash` ← core:ops/jobs.rs:TrashJob::run; core:sync/execute.rs:remove; app:app.rs:run, menu_action | See ops/copy.rs:738 on Win32 codes ✓ S1.3 |
 | 201–205 | `claim_name`: `room = MAX_NAME_BYTES (255) - "trashinfo".len() - 1`, in bytes | Windows-differs | `trash` | The NTFS component limit is 255 UTF-16 units ✓ S1.6 ✓ P3.6 |
@@ -276,7 +276,7 @@
 | 410–415 | `restorable_destination`: `original.is_absolute()` and no `..` | Windows-differs | `restore` | A decoded `/home/…` is not absolute on Windows, so the restore is refused ✓ S1.6 |
 | 462–468 | `restore`: `rename`, `Some(libc::EXDEV)` → `move_cross_device` | Windows-differs | `Trash::restore`; core:ops/journal.rs:undo_trash; app:app.rs:trash_restore | ✓ S1.3 |
 | 484–491 | `home_trash_path`: `dir.is_absolute()`; `home.join(".local/share/Trash")` | Linux-only | `Trash::home` | ✓ S1.6 |
-| 494–521 | `for_path`: compares `device_of(target)` with `device_of(home)`, else `mount_point_of` + `topdir_trash(uid())` | Linux-only | core:ops/jobs.rs:TrashJob::run | ✓ S1.6 |
+| 494–521 | `for_path`: compares `device_of(target)` with `device_of(home)`, else `mount_point_of` + `topdir_trash(uid())` | Linux-only | core:ops/jobs.rs:TrashJob::run | ✓ S1.6 ✓ W4.7 |
 | 524–551 | `topdir_trash`: `.Trash` must be a real dir with the sticky bit (`mode() & 0o1000`); `.Trash/<uid>`; `.Trash-<uid>` at 0o700 | Linux-only | `for_path`; core:sync/mod.rs:trash_for | ✓ S1.6 |
 | 554–564 | `device_of`: `MetadataExt::dev()` of the nearest existing ancestor | Unix-only | `for_path`, `mount_point_of`; core:sync/mod.rs:trash_available, trash_for | ✓ S1.6 |
 | 568–582 | `mount_point_of`: walks `parent()` until `device_of` changes | Unix-only | `for_path`; core:sync/mod.rs:trash_available, trash_for | Windows mount points and junctions do not change a `dev` ✓ S1.6 |
@@ -301,7 +301,7 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 53–88 | `Civil::local`: `libc::time_t`, `libc::tm` (`mem::zeroed`), `libc::localtime_r` | Unix-only (Windows libc has `localtime_s`, not `localtime_r`) | `Civil::now` ← app:bulk.rs:from_facts, preview, rewrite, refresh, expand_tokens, accept; `Facts::stat` ← app:bulk.rs:new | ✓ S1.10 |
+| 53–88 | `Civil::local`: `libc::time_t`, `libc::tm` (`mem::zeroed`), `libc::localtime_r` | Unix-only (Windows libc has `localtime_s`, not `localtime_r`) | `Civil::now` ← app:bulk.rs:from_facts, preview, rewrite, refresh, expand_tokens, accept; `Facts::stat` ← app:bulk.rs:new | ✓ S1.10 ✓ W4.36 |
 
 ### state/mod.rs
 
@@ -394,7 +394,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 144–151 | `Service::key_path`: `~` → `var_os("HOME")` + `format!("{}{rest}", …)` | Windows-differs | `command`; app:app/syncing.rs:remote_sync | ✓ S1.17 ✓ P3.14 |
-| 181–202 | `Service::command`: `Command::new("ssh")` `-x -o BatchMode=yes -o ConnectTimeout=15 [-p] [-i] -s <dest> sftp` | Windows-differs | core:vfs/conn.rs:Transport::spawn | §4 |
+| 181–202 | `Service::command`: `Command::new("ssh")` `-x -o BatchMode=yes -o ConnectTimeout=15 [-p] [-i] -s <dest> sftp` | Windows-differs | core:vfs/conn.rs:Transport::spawn | §4 ✓ W4.21 |
 | 292–308 | `config_paths` / `xdg_config_home`: `$XDG_CONFIG_HOME` or `$HOME/.config` → `yazi/vfs.toml`, plus `config_dir()/vfs.toml` | Windows-differs; macOS-differs | `VfsConfig::load` ← core:vfs/mod.rs:Vfs::start ← app:app.rs:vfs | ✓ S1.11 |
 
 ### vfs/conn.rs
@@ -403,10 +403,10 @@
 |---|---|---|---|---|
 | 54 | `use std::os::unix::fs::FileExt` (for `write_all_at`) | Unix-only | `download_body` | ✓ S1.5 |
 | 55 | `use std::os::unix::io::AsRawFd` | Unix-only | `Transport` | ✓ S1.12 |
-| 184–188 | `Transport::spawn`: `poll::set_nonblocking(stdin.as_raw_fd())`, `(stderr.as_raw_fd())` | Unix-only | `Connection::connect` ← core:vfs/mod.rs worker (`dispatch`) | ✓ S1.12 |
-| 256–268 | `drain_stderr`: `poll::poll_read2(self.stderr.as_raw_fd(), -1, left)` | Unix-only | `fill`, `write_all` | A negative fd is ignored by `poll` ✓ S1.12 |
-| 271–308 | `fill`: `poll_read2(stdout fd, stderr fd or -1, left)` then a blocking `read` | Unix-only | `read_packet` | ✓ S1.12 |
-| 337–367 | `write_all`: `poll::poll_write(self.stdin.as_raw_fd(), left)` then a non-blocking `write` | Unix-only | `send`, `connect` | ✓ S1.12 |
+| 184–188 | `Transport::spawn`: `poll::set_nonblocking(stdin.as_raw_fd())`, `(stderr.as_raw_fd())` | Unix-only | `Connection::connect` ← core:vfs/mod.rs worker (`dispatch`) | ✓ S1.12 ✓ W4.20 |
+| 256–268 | `drain_stderr`: `poll::poll_read2(self.stderr.as_raw_fd(), -1, left)` | Unix-only | `fill`, `write_all` | A negative fd is ignored by `poll` ✓ S1.12 ✓ W4.20 |
+| 271–308 | `fill`: `poll_read2(stdout fd, stderr fd or -1, left)` then a blocking `read` | Unix-only | `read_packet` | ✓ S1.12 ✓ W4.20 |
+| 337–367 | `write_all`: `poll::poll_write(self.stdin.as_raw_fd(), left)` then a non-blocking `write` | Unix-only | `send`, `connect` | ✓ S1.12 ✓ W4.20 |
 | 897 | `download_body`: `file.write_all_at(&data, offset)` | Unix-only | `download` ← core:vfs/mod.rs:Vfs::download, download_to_temp ← app:app.rs:open_remote, sync_remote_preview, remote_download | Windows `FileExt` has `seek_write`, not `write_all_at` ✓ S1.5 |
 
 ### vfs/child.rs (added 2026-09-29: the rclone daemon postdates the inventory; lines as of 6aee8d1)
@@ -414,7 +414,7 @@
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
 | 55 | `use std::os::unix::process::CommandExt` (`pre_exec`) | Unix-only | `tie_to_this_thread` | ✓ S1.50 |
-| 61–95 | `tie_to_this_thread`: `prctl(PR_SET_PDEATHSIG, SIGTERM)` and `getppid()` in `pre_exec`, `ESRCH` when the parent is gone | Linux-only (macOS: no `prctl`; Windows: no `pre_exec`) | core:vfs/rclone.rs:Daemon::spawn; app:mounts.rs (gvfs watcher) | ✓ S1.50 ✓ M2.29 (a kqueue `NOTE_EXIT` watcher) |
+| 61–95 | `tie_to_this_thread`: `prctl(PR_SET_PDEATHSIG, SIGTERM)` and `getppid()` in `pre_exec`, `ESRCH` when the parent is gone | Linux-only (macOS: no `prctl`; Windows: no `pre_exec`) | core:vfs/rclone.rs:Daemon::spawn; app:mounts.rs (gvfs watcher) | ✓ S1.50 ✓ M2.29 (a kqueue `NOTE_EXIT` watcher) ✓ W4.31 |
 | 104–116 | `terminate`: `libc::kill(pid, SIGTERM)` on a child not yet reaped | Unix-only | core:vfs/rclone.rs:Daemon drop | ✓ S1.50 |
 
 ### vfs/http.rs (added 2026-09-29; lines as of 6aee8d1)
@@ -431,7 +431,7 @@
 | 98 | `use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}` | Unix-only | `private_dir`, a test | ✓ S1.51 |
 | 1091–1133 | `socket_path`: `$XDG_RUNTIME_DIR` (non-empty), `$TMPDIR/delightfile-<uid>`, `/tmp/delightfile-<uid>`, `sun_path` bound | Unix model (Windows: no unix socket) | `Daemon::spawn` | uid ✓ S1.8, runtime dir ✓ S1.11 `sun_path` bound per platform ✓ M2.32; macOS runtime dir `$TMPDIR` ✓ M2.18 |
 | 1140–1157 | `private_dir`: `DirBuilder::mode(0o700)`, owner `uid()` check, re-close with `from_mode(0o700)` | Unix-only | `socket_path` | ✓ S1.51 |
-| 248, 857 | `child::tie_to_this_thread`, `child::terminate` | Linux-only / Unix-only | `Daemon::spawn`, `Drop for Daemon` | ✓ S1.50 |
+| 248, 857 | `child::tie_to_this_thread`, `child::terminate` | Linux-only / Unix-only | `Daemon::spawn`, `Drop for Daemon` | ✓ S1.50 ✓ W4.31 |
 
 ### vfs/mod.rs
 
@@ -445,9 +445,9 @@
 
 | Line | What | Class | Used by | Note |
 |---|---|---|---|---|
-| 70–97 | `poll_read2`: `libc::pollfd` ×2, `libc::POLLIN`, `libc::poll` | Unix-only (Windows: no `poll`; pipes are not pollable handles) | core:vfs/conn.rs:drain_stderr, fill | ✓ S1.12 |
-| 105–122 | `poll_write`: `libc::pollfd`, `libc::POLLOUT`, `libc::poll` | Unix-only | core:vfs/conn.rs:write_all | ✓ S1.12 |
-| 132–145 | `set_nonblocking`: `libc::fcntl(F_GETFL)`, `fcntl(F_SETFL, flags \| O_NONBLOCK)` | Unix-only | core:vfs/conn.rs:Transport::spawn | ✓ S1.12 |
+| 70–97 | `poll_read2`: `libc::pollfd` ×2, `libc::POLLIN`, `libc::poll` | Unix-only (Windows: no `poll`; pipes are not pollable handles) | core:vfs/conn.rs:drain_stderr, fill | ✓ S1.12 ✓ W4.20 |
+| 105–122 | `poll_write`: `libc::pollfd`, `libc::POLLOUT`, `libc::poll` | Unix-only | core:vfs/conn.rs:write_all | ✓ S1.12 ✓ W4.20 |
+| 132–145 | `set_nonblocking`: `libc::fcntl(F_GETFL)`, `fcntl(F_SETFL, flags \| O_NONBLOCK)` | Unix-only | core:vfs/conn.rs:Transport::spawn | ✓ S1.12 ✓ W4.20 |
 
 ### zoxide/mod.rs
 

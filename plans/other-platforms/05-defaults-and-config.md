@@ -48,12 +48,18 @@ Factual basis: `appendix-inventory-df-core.md` §2 `config`, `state`, `zoxide`,
 | zoxide `db.zo` | `$_ZO_DATA_DIR` or `$XDG_DATA_HOME/zoxide` or `~/.local/share/zoxide` | `$_ZO_DATA_DIR` or `~/Library/Application Support/zoxide` | `$_ZO_DATA_DIR` or `%LOCALAPPDATA%\zoxide` |
 | keymap, theme, config file names | `delightfile.toml`, `theme.toml`, `keymap.toml`, `vfs.toml` in `config_dir()` | same | same |
 
-- [>] **D5.1** Implement the table in `platform/{linux,macos,windows}/dirs.rs`
+- [x] **D5.1** Implement the table in `platform/{linux,macos,windows}/dirs.rs`
       (Linux body moved by S1.11). `config_dir()` and `state_dir()` create nothing;
       writers create on first write as today. Done when: a test per target asserts
       the paths with a controlled environment (`std::env::set_var` inside a lock,
       as the existing `state_path_from` tests do).
-      — port/windows-core (df-core), started 2026-09-29: the Windows column.
+      — done f2196c8, green on the Windows runner at run 36666369775: the Windows
+      column, tested with a controlled environment (`platform::windows::dirs`
+      reads a variable table the tests hand it) and against the runner's own;
+      Linux keeps the Unix rule S1.11 moved, asserted by
+      `the_state_directory_is_the_state_files_own_rule` and the
+      `state_path_from` tests, and macOS takes it but for its runtime
+      directory (`platform/macos/dirs.rs`, Phase 2, with its own test).
 - [>] **D5.2** `README.md` gets a "Where things live" table per platform. Done
       when: reviewed by Brian.
       — port/windows-app (df-app), started 2026-09-29: written b60122c
@@ -145,7 +151,8 @@ which took pictures, video, sound and PDFs down to the fallback row.)
       written (a program installed while delightfile runs is seen at the next
       start). Until then a Windows config has Linux's openers, which name
       programs Windows does not have.
-      — done (df-core, port/windows-core) by option (c), as decided (Decisions
+      — done dbf880a (and c32eaa0, df-app's opener tests), green on the
+      Windows runner at run 36666369775, by option (c), as decided (Decisions
       log): `platform/windows/defaults.rs` holds §2.2's table as candidate
       lists, and `platform::defaults::openers()` — `OPENERS` as it stands on
       Linux and macOS — picks each Windows row's first command whose program
@@ -226,9 +233,10 @@ the README and for choosing defaults).
       on every target, the macOS runner included. On Linux the one difference is
       that face ranking ahead of a patched face the list does not name (Decisions
       log).
-- [>] **D5.7** `candidates()` additions from the table (`7zz`, `tar` on macOS;
+- [ ] **D5.7** `candidates()` additions from the table (`7zz`, `tar` on macOS;
       `tar.exe` on Windows is W4.2). Done when: unit tests.
-      — port/windows-core (df-core), started 2026-09-29: the Windows half.
+      — the Windows half done 45cff54 (`7za` after `7z`), green on the Windows
+      runner at run 36666369775; the macOS half is open.
 - [>] **D5.8** README "What it uses" table per platform from §4. Done when:
       reviewed.
       — port/windows-app (df-app), started 2026-09-29: written b60122c

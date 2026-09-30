@@ -296,6 +296,11 @@ workflow, launched by double-click from Explorer.
       to the user profile.
 - [ ] Watch: create, delete, rename from Explorer and from PowerShell; each appears
       without refresh.
+- [ ] Watch (W4.4): a burst of a thousand files landing (an unzip in PowerShell)
+      is one refresh, not a thousand; the folder on screen deleted from Explorer
+      makes the pane leave it; a folder above the one on screen can still be
+      renamed and deleted from Explorer while delightfile shows it (the watch's
+      handles share delete).
 - [ ] Size column, `m u` usage, git chip, hidden files (attribute-hidden and
       dot-prefixed both count as hidden per Phase 3's decision).
 - [ ] Symlink creation: refused with the privilege toast when not elevated, works
@@ -313,6 +318,12 @@ workflow, launched by double-click from Explorer.
 - [ ] Trash with `d`: item in the Recycle Bin; `u` after trash does what Phase 4
       decided (restore via the journal or a toast pointing at the Recycle Bin); `D`
       permanent; the trash view tab does what Phase 4 decided.
+- [ ] `d` (W4.7): an item on a USB stick or a network share is refused for the
+      Recycle Bin and goes to the permanent-delete confirm, never deleted without
+      a word; record what happens to a file larger than the bin's size limit on
+      a fixed drive (04-windows.md Open questions, W4.7).
+- [ ] No console window flashes (W4.2): while the git chip refreshes, while a
+      7z or a `.tar.gz` is listed or extracted, while `A` writes an archive.
 - [ ] Rename with a case-only change; bulk rename.
 - [ ] Extract zip, tar.gz; 7z when `7z.exe` is on `PATH`.
 
@@ -339,7 +350,15 @@ workflow, launched by double-click from Explorer.
       folder.
 - [ ] `M` drives card lists every drive with type and free space; eject a USB stick
       if Phase 4 implemented it.
-- [ ] SFTP through the built-in OpenSSH client.
+- [ ] SFTP through the built-in OpenSSH client (W4.20, W4.21): no console window
+      appears; a listing streams and a large download and upload complete; a
+      key given as `-i ~\.ssh\key` in `vfs.toml` works; a host that refuses
+      says ssh's own words; pulling the network cable mid-transfer ends in a
+      timeout toast, not a hang.
+- [ ] Where things live (D5.1): `%APPDATA%\delightfile\delightfile.toml` is read;
+      `%LOCALAPPDATA%\delightfile\state` survives a restart; the services of
+      yazi's `%APPDATA%\yazi\config\vfs.toml` are listed; `Z` finds zoxide's
+      `%LOCALAPPDATA%\zoxide\db.zo`.
 - [ ] Connect (W4.19): `c` then `smb://<server>/<share>` brings up Explorer's
       password dialog, and once it is answered the window goes into
       `\\<server>\<share>`; a dialog left unanswered for more than ten
