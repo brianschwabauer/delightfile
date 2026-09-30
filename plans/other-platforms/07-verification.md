@@ -281,6 +281,26 @@ workflow, launched by double-click from Explorer.
 - [ ] `[flavor] mode = "auto"` (W4.33): the first frame is on the side
       Settings → Personalisation → Colours is on; switching it there turns the
       window at once.
+- [ ] One header (W4.39): no "delightfile" caption above the window; the
+      top row (☰, breadcrumb, counter) is the top of the window, with
+      Windows' own minimize, maximize and close at its right end, and the
+      counter a gap short of them. The window keeps its rounded corners, its
+      shadow and its resize edges, the top one included.
+- [ ] The band is the title bar (W4.39): a drag from its empty space (between
+      the crumbs and the counter, beside or under the buttons) moves the
+      window; a double click there maximizes, and again restores; a right
+      click opens the system menu; ☰, a crumb and the counter still answer
+      as themselves.
+- [ ] The caption buttons (W4.39): each works; hovering Maximize brings up
+      Snap Layouts; they are drawn light on a dark window and dark on a
+      light one, and turn with View ▸ Appearance.
+- [ ] Two tabs (W4.39): with `t` or the menu's new tab, the strip is the top
+      of the window and the top row under it; the tabs, their `×` and the `+`
+      answer; the space after the `+` drags the window; the strip stops short
+      of the buttons.
+- [ ] Maximized (W4.39): nothing is cut off at the top, no strip of the
+      window hangs off the screen, and the band's controls answer; restored,
+      the window is where it was.
 
 ### 5.2 Keyboard
 - [ ] All the Linux default bindings with Ctrl and Alt; AltGr on a German layout
@@ -421,6 +441,17 @@ release zip is run.
     (refused until W4.7), extracting, drag in or out, media preview and
     sound, the openers (Linux's table until D5.4), eject, connect, SFTP,
     going to a bookmark, and `auto`.
+- 2026-09-30, titlebar agent (`port/titlebar`, W4.39) — the same VM. Before:
+  the 2026-09-29 run's first screenshot (d8919ef) has both headers, the
+  system's "delightfile" caption with its three buttons over the app's own
+  top row (kept as `titlebar/shots/00-before-d8919ef-two-headers.jpg` in the
+  agent's scratchpad).
+  - Run 36727934410 (04a3425) built and was put in the share as
+    `delightfile\titlebar-04a3425\`, but not run: the VM was at its lock
+    screen, and past it at the sign-in for the account `admin`
+    (`titlebar/shots/01-vm-locked-sign-in.jpg`), which an agent may not
+    pass. Escape went back to the lock screen; nothing else was touched.
+  - Not seen: every W4.39 line in §5.1.
 
 ## 6. Release gate
 
@@ -454,6 +485,10 @@ release zip is run.
   clipboard line says what `y`, `x` and `Y` do on Windows (04-windows.md,
   W4.16's log entry). §5.8 records the Windows 11 VM runs, which were not a
   release pass: CI debug builds, a viewer that passes no modifier chords.
+- (titlebar) 2026-09-30 — §5.1 gained W4.39's checks: one header, the band
+  as title bar, the caption buttons with Snap Layouts and their light and
+  dark, the strip in the band with two tabs, and a maximized window; §5.8
+  records that the VM was locked when the build was ready.
 
 ## Open questions
 
