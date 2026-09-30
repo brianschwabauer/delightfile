@@ -26803,8 +26803,12 @@ mod tests {
         app.run(Command::SelectAll, 10, now);
         app.run(Command::Rename, 10, now);
         card(&mut app, "bulk");
-        app.run(Command::Permissions, 10, now);
-        card(&mut app, "permissions");
+        // The card exists where a file has permission bits to edit (not on a
+        // Windows drive, W4.29).
+        if app.refusal(Command::Permissions).is_none() {
+            app.run(Command::Permissions, 10, now);
+            card(&mut app, "permissions");
+        }
         std::fs::write(app.files.join("sub").join("a.txt"), b"y").expect("write the source");
         let plan = plan_paste(
             &Clipboard::yank([app.files.join("sub").join("a.txt")]),
