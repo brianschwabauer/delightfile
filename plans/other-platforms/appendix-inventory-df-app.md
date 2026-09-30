@@ -42,7 +42,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 2198-2229 | `fn start_data_device(event_loop: &ActiveEventLoop, window: &Window, waker: Waker) -> Option<crate::wayland::DataDevice>`: `let RawDisplayHandle::Wayland(display) = event_loop.display_handle().ok()?.as_raw() else { return None }` (2211), same for `RawWindowHandle::Wayland(surface)` (2214), then `#[allow(unsafe_code)] unsafe { crate::wayland::DataDevice::start(display.display, surface.surface, waker) }` (2224-2227) | Linux-only (compile via `crate::wayland`; runtime `None` on non-Wayland handles) | App::init_gfx (2189) | The only `unsafe` call site into `crate::wayland` outside that module (comment 2220-2222). ✓ S1.22 |
 | 4055-4078 | `fn show_trash`: `df_core::ops::Trash::home()` (4057), `trash.list()` | df-core seam (freedesktop trash) | App::open_trash (4044), App::refresh_trash (4081) | See trashview.rs; df-core owns the trash layout. ✓ S1.34 ✓ M2.9 |
 | 4105-4140 | `fn trash_restore` → `crate::trashview::restore_refusal` (4115), `df_core::ops::trash::restore(item, &ctx)` (4119) | df-core seam | key `Enter`/`r` in trash view | — ✓ S1.34 |
-| 4142-4190 | `fn trash_purge` → FnJob `df_core::ops::purge(item, ctx)` (4158) | df-core seam | `D`, "Empty trash" (4410-4472) | — ✓ S1.34 |
+| 4142-4190 | `fn trash_purge` → FnJob `df_core::ops::purge(item, ctx)` (4158) | df-core seam | `D`, "Empty trash" (4410-4472) | — ✓ S1.34; on Windows "Empty trash" is `App::open_empty_bin` and `empty_bin` over the Recycle Bin ✓ W4.8 |
 | 5107-5134 | `fn launch(&mut self, choice: &open::Choice, paths: Vec<PathBuf>, now: Instant)` → `open::spawn_detached(&choice.command, &paths, &cwd)` (5131) | Linux-only (runtime: opener strings) + Unix-only (via open.rs) | `o`/`O`/menu Open-with | Opener strings are df-core `DEFAULT_OPENERS` (crates/df-core/src/config.rs:192-275): `setsid uwsm-app -- …`, `"${TERMINAL:-ghostty}"`, `zeditor`, `google-chrome-stable`, `delightviewer`, `pinta`, `xdg-open "$1"`, `mpv`, `system-cmd-*`, `$(dirname "$1")`, `>/dev/null 2>&1`. ✓ M2.16 |
 | 5136-5184 | `fn run_shell(&mut self, snippet: &str, paths: Vec<PathBuf>, block: bool, now: Instant)`: non-block → `open::spawn_detached` (5145); block → FnJob (Lane::Micro) → `open::run_blocking(&snippet, &paths, &cwd)` (5162) | Unix-only (compile via open.rs:131) | `;`, `:`, `block = true` openers | — |
 | 5528-5561 | `fn route_keys`: `press.text` used only when `press.chord` is `None` (multi-char commits 5536-5549, single char fallback 5553-5559) | macOS-differs | App::frame (13696) | See §3. |
@@ -271,8 +271,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
 | 232-239 | `fn seven_zip() -> Option<PathBuf>`: `df_core::archive::external_extractor()` filtered to `ExtractorKind::SevenZip` | df-core seam (PATH lookup) | `list` (182) ← preview/body.rs:289 | — |
-| 316-362 | `fn tar_through_7z(program: &Path, path: &Path, stop) -> Option<ArchiveTree>`: `Command::new(program).args(["x", "-so", "--"]).arg(path)`, stdin null, stdout piped, stderr null (324-330) | external binary | `list_with` (188) | — |
-| 364-450 | `fn list_with_7z(program, path, format, stop) -> Result<Listing, String>`: `Command::new(program).args(["l", "-ba", "-slt", "--"]).arg(path)` (379-385); doc "stdin is `/dev/null`" (367) = `Stdio::null()` | external binary | `list_with` (188) | — |
+| 316-362 | `fn tar_through_7z(program: &Path, path: &Path, stop) -> Option<ArchiveTree>`: `Command::new(program).args(["x", "-so", "--"]).arg(path)`, stdin null, stdout piped, stderr null (324-330) | external binary | `list_with` (188) | — ✓ W4.38 |
+| 364-450 | `fn list_with_7z(program, path, format, stop) -> Result<Listing, String>`: `Command::new(program).args(["l", "-ba", "-slt", "--"]).arg(path)` (379-385); doc "stdin is `/dev/null`" (367) = `Stdio::null()` | external binary | `list_with` (188) | — ✓ W4.38 |
 | 604 | `raw.ends_with('/') \|\| raw.ends_with('\\')` | already separator-agnostic | `row_from_slt` | — |
 
 ### src/remote.rs (1,184 lines; non-test 1-749)
@@ -287,7 +287,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 138-145 | `pub fn binary(self) -> &'static str`: `Mode::Names => "fd"`, `Mode::Content => "rg"` | external binaries | `Search::spawn` (480), `start_failure` (490) | One fixed name per mode; no alternate name is tried. |
+| 138-145 | `pub fn binary(self) -> &'static str`: `Mode::Names => "fd"`, `Mode::Content => "rg"` | external binaries | `Search::spawn` (480), `start_failure` (490) | One fixed name per mode; no alternate name is tried. `build` runs it through `quiet` ✓ W4.38 |
 | 196-212 | `impl Drop for Running`: `child.kill()` + `child.wait()` | portable | respawn/close/cancel | — |
 | 466-523 | `fn spawn(&mut self, query: &str)`: `build(...)`, `.current_dir(&self.root)`, stdout piped, stderr/stdin null, `process.spawn()` (487); reader thread `"df-search"` (508-510) | external binaries | `Search::tick` (377) | — |
 | 525-565 | `fn build(mode: Mode, query: &str, hidden: bool) -> Process`: fd `--color=never [--hidden] -- <query>`; rg `--color=never --smart-case --line-number --column --no-heading --null --max-columns 200 [--hidden] -- <query>` | external binaries | `spawn` | — |

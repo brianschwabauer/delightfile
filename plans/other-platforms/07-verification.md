@@ -347,8 +347,14 @@ workflow, launched by double-click from Explorer.
       up the shell's own "permanently delete?" dialog, whose No leaves the file
       and toasts that the move was cancelled (04-windows.md Decisions log,
       W4.7).
-- [ ] No console window flashes (W4.2): while the git chip refreshes, while a
-      7z or a `.tar.gz` is listed or extracted, while `A` writes an archive.
+- [ ] "Empty trash" (W4.8): the palette's "Empty trash" row, there on Windows
+      in any folder, opens "Empty the Recycle Bin? N items · X will be deleted
+      for good." with the bin's own count and no names under it; Empty empties
+      it and toasts "Emptied the Recycle Bin"; with the bin already empty, no
+      card and "The Recycle Bin is already empty".
+- [ ] No console window flashes (W4.2, W4.38): while the git chip refreshes,
+      while a 7z or a `.tar.gz` is listed in the preview or extracted, while
+      `A` writes an archive, while the search panel runs fd or rg.
 - [ ] Rename with a case-only change; bulk rename.
 - [ ] Extract zip, tar.gz; 7z when `7z.exe` is on `PATH`.
 
@@ -380,6 +386,11 @@ workflow, launched by double-click from Explorer.
       key given as `-i ~\.ssh\key` in `vfs.toml` works; a host that refuses
       says ssh's own words; pulling the network cable mid-transfer ends in a
       timeout toast, not a hang.
+- [ ] Cloud remotes (W4.32), with rclone installed and a remote in
+      `%APPDATA%\rclone\rclone.conf`: the remote lists, a download and an
+      upload complete, and no console window appears; while it is open
+      `%LOCALAPPDATA%\delightfile\run` holds one `rclone-<pid>-<name>-<n>.sock`,
+      and after quitting it holds none.
 - [ ] Where things live (D5.1): `%APPDATA%\delightfile\delightfile.toml` is read;
       `%LOCALAPPDATA%\delightfile\state` survives a restart; the services of
       yazi's `%APPDATA%\yazi\config\vfs.toml` are listed; `Z` finds zoxide's
@@ -480,6 +491,24 @@ release zip is run.
     right click on the band, Snap Layouts, the three buttons' hover, press
     and commands, ☰, two tabs in the band, a maximized window and the
     theme switch.
+- 2026-09-30, the finish agent (`port/windows-finish`) — not run. At the
+  first look (09:22 on the VM's clock) the VM was at the sign-in for
+  `admin`, asking for a password (`shots/01-locked-sign-in.jpg` in the
+  agent's scratchpad), which no agent enters. At the second (10:27, after
+  the coordinator's restart) it was signed in, the titlebar agent's window
+  of f2cd5c8 still open; a right click and then a left click on the
+  taskbar's File Explorer button changed nothing on screen, and the next
+  capture timed out, so the viewer was left alone, by the rule for one that
+  misbehaves twice running. Nothing in any window was pressed. The build of
+  the branch at a9d6d4f (run 36737465177) is in
+  `\\host.lan\Data\delightfile\a9d6d4f\` (ac1f843's, from before the
+  rebase onto `main` at 4c0012c, beside it), with `scratch\` in it
+  (`pack.7z`, `pack.tar.bz2`, `trash-me.txt`, `recycle-me.txt`), for the
+  checks this round was to make: "Empty trash"
+  from the palette, its card and what emptying says; `d` on a copy of
+  `recycle-me.txt` pasted onto the Desktop, then `u`'s words; `pack.7z` and
+  `pack.tar.bz2` listed in the preview with no console window, and whether
+  7-Zip is on the VM at all; `;notepad` in the share as before.
 
 ## 6. Release gate
 
@@ -519,6 +548,13 @@ release zip is run.
   records that the VM was locked when the build was ready. The buttons'
   line was rewritten the same day for the buttons the window draws itself
   (04-windows.md, Decisions log).
+
+- (finish) 2026-09-30 — §5.4 gained "Empty trash" (W4.8) and the console
+  line names the preview's listings and the search panel (W4.38); §5.7
+  gained cloud remotes (W4.32); §5.4's line on a file too big for the bin
+  says what the shell now asks (W4.7's `FOF_WANTNUKEWARNING`). §5.8 records
+  that this round's VM check was not made: a sign-in screen, then a viewer
+  that stopped answering.
 
 ## Open questions
 
