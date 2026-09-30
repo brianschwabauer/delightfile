@@ -3,6 +3,8 @@
 Status: **done** at "compiles, unit tests pass on the macOS runner" (2026-09-29,
 `port/macos-finish`): every task is `[x]` or `[~]` with its reason. Nothing
 here has been seen on a Mac's screen; that pass is `07-verification.md` §4.
+One task has been added since and is open: M2.36, Open With from Finder
+(2026-09-30).
 
 Scope: native macOS bodies behind the Phase 1 seam, so that the `.app` produced by
 `06-build-and-release.md` is a working file manager on Apple Silicon: file watching,
@@ -573,6 +575,19 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       aging tests of `platform/linux/trash.rs` have twins in
       `platform/macos/trash.rs`, over a journal and a Trash folder of the
       test's own. Live check 07-verification.md §4.4.
+- [ ] **M2.36** Open With from Finder (added 2026-09-30, from
+      `06-build-and-release.md`): a folder chosen in Finder's Open With, or
+      dropped on the Dock icon, reaches the app as an open-documents event,
+      `application:openURLs:` on the application delegate, which winit 0.30
+      does not pass on, so the app would start in its usual folder. Hook
+      winit's `NSApplicationDelegate` with objc2 (0.5, `00-ground-rules.md` §3)
+      in `platform/macos/` so the URLs reach the app, and open each the way
+      `delightfile <path>` does; then put `CFBundleDocumentTypes` back into
+      `build/macos/Info.plist` (`public.folder`, role Viewer, rank Alternate),
+      which came out on 2026-09-30 until this lands. Done when: a unit test of
+      the URL-to-path step passes on the macOS runner, the declaration is back
+      and `plutil -lint` passes, and live check `07-verification.md` §4.7
+      "Open With from Finder" passes.
 
 ## Decisions log
 

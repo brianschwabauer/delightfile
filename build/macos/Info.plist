@@ -8,8 +8,9 @@
   program and the libraries it carries, because dyld refuses a library built
   for a newer macOS than the one running.
 
-  CFBundleDocumentTypes offers the app for folders in Finder's Open With, at
-  Alternate rank, so it never takes over from Finder by itself.
+  No CFBundleDocumentTypes: Finder would offer the app for folders in Open
+  With, but the app cannot yet take the folder Finder hands it (M2.36 in
+  plans/other-platforms/02-macos.md adds that, and the declaration with it).
 -->
 <plist version="1.0">
 <dict>
@@ -17,21 +18,6 @@
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>delightfile</string>
-	<key>CFBundleDocumentTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleTypeName</key>
-			<string>Folder</string>
-			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
-			<key>LSHandlerRank</key>
-			<string>Alternate</string>
-			<key>LSItemContentTypes</key>
-			<array>
-				<string>public.folder</string>
-			</array>
-		</dict>
-	</array>
 	<key>CFBundleExecutable</key>
 	<string>delightfile</string>
 	<key>CFBundleIconFile</key>
