@@ -242,6 +242,12 @@ mod tests {
         assert!(first(&watcher, Duration::from_secs(5), |e| {
             *e == WatchEvent::Changed(dir.clone())
         }));
+        // The watcher rings after it sends, so the event can be in hand a
+        // moment before the bell has rung.
+        let rung_by = Instant::now() + Duration::from_secs(2);
+        while bell.load(Ordering::SeqCst) == 0 && Instant::now() < rung_by {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(bell.load(Ordering::SeqCst) > 0, "the notifier was rung");
 
         // One refresh per DEBOUNCE of the burst, whatever it holds: the runner
