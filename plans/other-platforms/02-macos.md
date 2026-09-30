@@ -104,17 +104,19 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       2e98de6, green on the macOS runner (run 36640376030)
 - [x] **M2.6** `platform::process::rsync_available()` gates on version: parse
       `rsync --version`'s first line and require ≥ 3.1.0 (`--info=progress2`);
-      `platform::process::RSYNC_HINT` = "needs rsync 3.1 or newer — `brew install
-      rsync`" and `app/syncing.rs:123` appends it to its error. Done when: the
+      `platform::process::RSYNC_HINT` = "rsync 3.1 or newer — `brew install
+      rsync`", which the refusal in `app/syncing.rs` names as what is needed in
+      place of the bare "rsync" ("Sync to a server needs rsync 3.1 or newer —
+      `brew install rsync`"); `""` on Linux and Windows, where the sentence
+      stays "Sync to a server needs rsync". Done when: the
       pure parser test covers `rsync  version 2.6.9`, `3.2.7` and openrsync's
       banner (returns false). — done b101fa7, green on the macOS runner (run
-      36640376030); the df-app half, appending `RSYNC_HINT` to the refusal in
-      `app/syncing.rs`, is the df-app branch's — done 89def0e on
-      `port/macos-finish`, green on the macOS runner (run 36649716767), not seen on
-      screen: `needs_rsync` puts the hint after a dash, so the Mac's refusal
-      is "Sync to a server needs rsync — needs rsync 3.1 or newer — `brew
-      install rsync`" and Linux's sentence is as it was
-      (`app::syncing::tests::a_sync_with_no_rsync_says_what_the_platform_needs`);
+      36640376030); the df-app half is the df-app branch's — done 89def0e on
+      `port/macos-finish` and made to read once in c74fbc5 (Brian's call:
+      the first composition said "needs rsync" twice), compiles and
+      unit-tested on the macOS runner, not seen on screen: `needs_rsync`
+      names the hint in the bare "rsync"'s place, and Linux's sentence is as
+      it was (`app::syncing::tests::a_sync_with_no_rsync_says_what_the_platform_needs`);
       the window's rsync test skips where no rsync is 3.1 or newer. Live check
       07-verification.md §4.7.
 - [x] **M2.7** `platform::fs::forget_cached`: `fcntl(fd, F_NOCACHE, 1)` is *not*
@@ -293,14 +295,15 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       given leave to make the df-core half) done 29cfb82 (with D5.3 and D5.11),
       green on the macOS runner (run 36649716767), not seen on screen.
       `df_core::platform::defaults` has the three tables per target: Linux's
-      are `config.rs`'s constants re-exported, unchanged, Windows ships the
-      same until W4.3, and macOS's are 05 §2.1's openers, §2.3's rules read
-      literally (Linux's rows less every row that names an opener macOS does
-      not ship) and §6's four keyed bookmarks. `open.rs`'s
-      `opener_rules_pick_by_glob_then_mime_on_macos` finds `open "$1"` first
-      for a picture, a PDF and an unknown file; the Linux-table tests run where
-      those tables ship (Decisions log; the reading of §2.3 is an Open
-      question). Live check §4.7.
+      are `config.rs`'s constants re-exported, unchanged; Windows ships
+      Linux's openers and rules until W4.3 and §6's bookmarks of its own; and
+      macOS's are 05 §2.1's openers, §2.3's rules — Linux's row for row with
+      `open` where delightviewer was (ebb95b8, Brian's call over the literal
+      reading first shipped) — and §6's bookmarks, `g D` and `g o` among them
+      (f0d0573). `open.rs`'s `opener_rules_pick_by_glob_then_mime_on_macos`
+      finds `open "$1"` first for a picture, a PDF and an unknown file; the
+      Linux-table tests run where those tables ship (Decisions log). Live
+      check §4.7.
 - [x] **M2.18** `platform::dirs` macOS values per `05-defaults-and-config.md` §1
       (D5.1 lands them; this task is the cross-reference). Done when: D5.1 done. —
       done da3fdb1, green on the macOS runner (run 36640376030); the macOS column of
@@ -357,7 +360,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       Cmd-click toggles and Cmd-drag is `Verb::Copy`; Option is egui's `alt`, so
       Option-drag is `Verb::Link`. The help sheet has no mouse section to add the
       mapping to; its "⌘-click toggles, ⌥-drag links" line is D5.5's, and
-      where it goes is still an Open question (05). Live check §4.5.
+      Brian left it out: it is shown nowhere (05 D5.5). Live check §4.5.
 - [x] **M2.23** Occlusion path (`app.rs:158–167, 16217–16236`, `graphics.rs:38–67`):
       the comments say the code is right and dead on Wayland. On macOS it is live.
       No code change; add a `log::debug!` when `Presented::Occluded` fires so the
@@ -548,8 +551,10 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       and ran `--version` on the macOS runner, and 1,128 of its 1,129 tests
       passed, the one left the rsync test above. Since M2.6 and M2.8 are in
       (`port/macos-finish`), the rsync test skips there, the three `trashview`
-      tests have macOS twins built through the journal (e9be774), and the
-      trash-refusal test is Windows' alone (cfcfc8b).
+      tests have macOS twins built through the journal (e9be774), the
+      trash-refusal test is Windows' alone (cfcfc8b), and the hits' undo and
+      redo of a trash run on every Unix, checked through the trash's own
+      list (abdfa65). `app/tests/trash.rs` stays Linux's (Open questions).
 - [x] **M2.35** Emptying old trash on macOS (`[mgr] trash_keep_days`, added
       2026-09-29 on the df-core branch as M2.34, renumbered at integration):
       `purge_expired`, `purge_expired_if_due` and `purge_due_in`
@@ -779,7 +784,8 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   dash, as other toasts add a clause. The plan's own hint begins "needs
   rsync", so the Mac's sentence says it twice ("Sync to a server needs rsync
   — needs rsync 3.1 or newer — `brew install rsync`"); the constant is
-  df-core's and was left as the plan wrote it.
+  df-core's and was left as the plan wrote it. (Superseded by Brian's call
+  below.)
 - (macos-finish) 2026-09-29 — M2.15: the words are a platform constant,
   `platform::mounts::CONNECT_UNSEEN` (`Some` on macOS, `None` elsewhere), read
   when a connect comes back `Mounted(None)`, rather than a new `Connected`
@@ -792,12 +798,14 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   `port/paths`, which is changing `config.rs` now, meets three lines instead
   of two hundred. Windows re-exports the same tables until W4.3 writes its
   own (05 §2.2 needs that phase's argv splitter and `first_available`).
+  (Windows' bookmarks are now its own: see Brian's calls below.)
 - (macos-finish) 2026-09-29 — M2.17: 05 §2.3's "minus the rows that name a
   dropped opener" is read as written, whole rows. On a Mac a picture, a
   video, a song and a PDF therefore open in the default app through the
   fallback row; `edit-image` and `play` are in the opener table but in no
   rule; and a 3D model or a `.gcode`, which is `text/plain`, reaches the
   text rule and opens in Zed. The other readings are in Open questions.
+  (Superseded by Brian's call below.)
 - (macos-finish) 2026-09-29 — M2.21: the marks are written in Apple's order,
   `⌃⌥⇧⌘`, with nothing between them or the key, which is how macOS menus
   write a chord; the `ctrl` role is `⌘`, and `⌃` is the Super role's, which
@@ -846,6 +854,25 @@ rows), `appendix-inventory-df-app.md` §1–§3.
 - (macos-finish) 2026-09-29 — The `trashview` twins trash real files into the
   runner's `~/.Trash` through a journal of their own, as M2.8's tests do,
   and destroy what they trashed before they end.
+- 2026-09-29 — Brian-delegated, taken out of the Open questions: a Mac's
+  opener rules are Linux's row for row with `open`, the system's default
+  app, where delightviewer was, and a second `open` in a row named once, so
+  Enter on a PDF or a song goes to the Mac's own app and `O` still offers
+  Preview for a picture and mpv for a video (ebb95b8); `g D` is the Desktop
+  and `g o` Documents on a Mac, and on Windows, which ships §6's column
+  (f0d0573, 05's log); the sync refusal reads once, "Sync to a server needs
+  rsync 3.1 or newer — `brew install rsync`", `RSYNC_HINT` being what the
+  sentence names in place of the bare "rsync" and the M2.6 text corrected
+  to match (c74fbc5); and the help sheet's "⌘-click toggles, ⌥-drag links"
+  is left out and shown nowhere (05 D5.5).
+- (macos-finish) 2026-09-29 — The hits' undo and redo of a trash run on every
+  Unix; the redo's check asks the trash's `list()` and the item's
+  `location()` in place of counting the freedesktop `files/` folder, which on
+  Linux says the same thing (abdfa65). `app/tests/trash.rs` stays Linux's:
+  its fixtures are `.trashinfo` records, the purge stamp and a `files/`
+  folder to weigh, and on a Mac there is no one folder to weigh — the trash
+  chip counts items and shows no size there (`weigh_trash` has nothing to
+  walk).
 
 ## Open questions
 
@@ -856,12 +883,9 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   `07-verification.md` §4.5 can answer.)
 - Ghostty on macOS: does `ghostty -e` work from `open -a`? Affects the `edit` opener
   default in `05-defaults-and-config.md`.
-- (macos-finish) 05 §2.3 on a Mac (M2.17): the rows that name a dropped
-  opener are gone, as written, so `edit-image` and `play` are offered by no
-  rule and a `.obj` or `.gcode` opens in Zed. Other readings: (a) drop only
-  the dropped openers from each row — then an audio file's and a PDF's rows
-  hold only `terminal-at`, and `Enter` on a PDF opens Terminal; (b) put
-  `open` where delightviewer was — pictures, video, sound, PDFs, 3D models
-  and fonts open in the default app, with `edit-image` and `play` after it in
-  `O`, and a `.gcode` opens with `open` before `edit`. The literal reading
-  shipped; (b) is a change to one table in `platform/macos/defaults.rs`.
+- (macos-finish) The trash's weight on a Mac (M2.9, M2.35): the chip beside
+  the counter and the Empty trash card's question show a count and no size,
+  since the du walk weighs one `files/` folder and a Mac's trash is items
+  scattered through Finder's Trash that the journal names. Options: a task
+  that weighs the journal's items (a walk of each `location()`) and gives
+  `app/tests/trash.rs` macOS twins; or accept the count alone.

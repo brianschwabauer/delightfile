@@ -98,9 +98,13 @@ because `$TERMINAL` names a binary on Linux and `open -a` wants an app name.
 
 ### 2.3 Rules
 
-macOS and Windows use the Linux `DEFAULT_RULES` table minus the rows that name a
-dropped opener (`delightviewer*`, `edit-image` → `open` on Windows, `set-wallpaper`,
-`optimize-avif`). The `text/*` rule keeps `zed, edit, open, terminal-at`.
+macOS and Windows use the Linux `DEFAULT_RULES` table row for row, with `open`
+(the system's default app) where a row names `delightviewer`, the other dropped
+openers (`delightviewer-edit`, `set-wallpaper`, `optimize-avif`, and on Windows
+`edit-image`, which becomes `open`) left out, and an `open` a row would name
+twice named once. The `text/*` rule keeps `zed, edit, open, terminal-at`.
+(Brian, 2026-09-29: this replaces "minus the rows that name a dropped opener",
+which took pictures, video, sound and PDFs down to the fallback row.)
 
 - [x] **D5.3** `platform::defaults::{OPENERS, RULES}` per target; `Config::default`
       (`config.rs`) reads them; the Linux tables are the existing constants
@@ -111,10 +115,10 @@ dropped opener (`delightviewer*`, `edit-image` → `open` on Windows, `set-wallp
       `port/macos-finish` (with M2.17 and D5.11), green on the macOS runner (run
       36649716767). Linux's tables are `config.rs`'s constants, re-exported unmoved
       (Decisions log); Windows re-exports the same until W4.3 writes §2.2's;
-      macOS has §2.1's openers and §2.3's rules. `config::tests::
-      a_text_file_opens_in_zed_first_everywhere` is the per-target test; the
-      tests that pin Linux's tables run on Linux and Windows, and
-      `platform/macos/defaults.rs` pins macOS's.
+      macOS has §2.1's openers and §2.3's rules, as §2.3 now reads (ebb95b8).
+      `config::tests::a_text_file_opens_in_zed_first_everywhere` is the
+      per-target test; the tests that pin Linux's openers and rules run on
+      Linux and Windows, and `platform/macos/defaults.rs` pins macOS's.
 - [ ] **D5.4** `platform::open::first_available(candidates: &[&str]) -> &str` for
       the two-candidate Windows entries (and usable on macOS for `edit`). Done
       when: unit test with a fake `PATH`.
@@ -145,8 +149,9 @@ role rendered `⌘` since Cmd is what people press; a binding the user wrote as
 there) with a config warning "super is Cmd, which is Ctrl on macOS". Linux and
 Windows: `Ctrl+` `Alt+` `Shift+` `Super+` as today.
 
-- [x] **D5.5** Implement the override table and `input-copy`; the help sheet's
-      mouse section says "⌘-click toggles, ⌥-drag links" on macOS. Done when: a
+- [x] **D5.5** Implement the override table and `input-copy`. (The help sheet
+      has no mouse section, so "⌘-click toggles, ⌥-drag links" is not shown
+      anywhere: Brian left it out, 2026-09-29.) Done when: a
       `Keymap` test on macOS resolves `ctrl+c` in Files to `yank-to-system`.
       — (blocked on df-core on the df-app branch) done 344715e on
       `port/macos-finish`, green on the macOS runner (run 36649716767), not seen on
@@ -157,9 +162,7 @@ Windows: `Ctrl+` `Alt+` `Shift+` `Super+` as today.
       `ctrl+c` in Files to `copy-to-clipboard`, the command the plan called
       `yank-to-system`. `input-copy` is a df-core command unbound on Linux and
       Windows, and df-app's prompt runs it before the field sees the key
-      (`Prompt::copy_text`). Not done: the help sheet's "⌘-click toggles,
-      ⌥-drag links", for want of a mouse section to put it in (Open
-      questions). Live check 07-verification.md §4.2.
+      (`Prompt::copy_text`). Live check 07-verification.md §4.2.
 
 ## 4. External binaries
 
@@ -219,10 +222,12 @@ the README and for choosing defaults).
 | Key | Linux (unchanged) | macOS | Windows |
 |---|---|---|---|
 | `g h` | `~` | `~` | `~` |
-| `g c` | `~/.config` | `~/.config` | `%APPDATA%` |
+| `g c` | `~/.config` | `~/.config` | `%APPDATA%` (shipped as `~/AppData/Roaming`) |
 | `g d` | `~/Downloads` | `~/Downloads` | `~/Downloads` |
 | `g w` | `~/Work` | `~/Work` | `~/Work` |
-| (others) | `/mnt/schwabserverroot…`, `sftp://showandtour1/2` | `~/Desktop`, `~/Documents` | `~/Desktop`, `~/Documents` |
+| `g D` | — | `~/Desktop` | `~/Desktop` |
+| `g o` | — | `~/Documents` | `~/Documents` |
+| (others) | `/mnt/schwabserverroot…`, `sftp://showandtour1/2` | — | — |
 
 - [x] **D5.11** `platform::defaults::BOOKMARKS`; Linux is the existing constant
       moved. Done when: `keymap/defaults.rs` reads it and tests pass.
@@ -230,10 +235,11 @@ the README and for choosing defaults).
       `port/macos-finish` (with M2.17 and D5.3), green on the macOS runner (run
       36649716767): `default_bookmarks()`, and through it `keymap/defaults.rs`, reads
       `platform::defaults::BOOKMARKS`. Linux's is `DEFAULT_BOOKMARKS`
-      re-exported unmoved (Decisions log), Windows' the same until W4.3, and
-      macOS's the four rows with keys, `g h`, `g c`, `g d`, `g w`. The macOS
-      "(others)", `~/Desktop` and `~/Documents`, have no keys in the table and
-      are not shipped (Open questions).
+      re-exported unmoved (Decisions log). macOS and Windows ship their
+      columns above, `g D` and `g o` on Finder's letters as Brian chose
+      (f0d0573); Windows' `g c` is `~/AppData/Roaming`, where `%APPDATA%`
+      points by default, since a bookmark expands `~` and nothing else.
+      `platform/{macos,windows}/defaults.rs` each pin their table.
 
 ## Decisions log
 
@@ -266,18 +272,16 @@ the README and for choosing defaults).
   bulk card's copy does, and otherwise goes out through `App::offer` like
   every copy, with the toast "Copied text". On Linux and Windows it exists
   and is unbound: a `keymap.toml` can bind it.
+- 2026-09-29 — Brian-delegated, taken out of the Open questions: §2.3 puts
+  `open` where delightviewer was rather than dropping those rows (ebb95b8);
+  `g D` is `~/Desktop` and `g o` is `~/Documents` on macOS and Windows,
+  Finder's letters, and Windows ships its §6 column in place of Linux's
+  table, `%APPDATA%` written `~/AppData/Roaming` (f0d0573); the help
+  sheet's "⌘-click toggles, ⌥-drag links" is left out and shown nowhere,
+  the sheet having no mouse section (D5.5).
 
 ## Open questions
 
 - yazi's exact cache-dir suffix on macOS and Windows (verify at D5.1).
 - Whether `wt` should be the Windows terminal default (see `04-windows.md`).
 - Ghostty `-e` on macOS (see `02-macos.md`).
-- (macos-finish) §6's macOS "(others)", `~/Desktop` and `~/Documents`, have
-  no keys (D5.11), and are not shipped until they do. `g d` is Downloads.
-  Options: `g D` and `g o` (Finder's ⇧⌘D and ⇧⌘O); `g e` and `g o`; `g k`
-  and `g m`; or none, since a pin (`g b`) gives any folder a key.
-- (macos-finish) D5.5's "⌘-click toggles, ⌥-drag links" on the help sheet:
-  the sheet lists the keymap's rows and has no mouse section. Where the line
-  goes (a section of its own under the keys, or a footer), and whether Linux
-  gets "Ctrl-click toggles, Alt-drag links" there too, is open; the chords
-  themselves work (02-macos.md M2.22).

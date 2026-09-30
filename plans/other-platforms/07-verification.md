@@ -223,15 +223,17 @@ document that owns the feature.
 - [ ] Enter on a file opens it in the default app; `o` shows the opener picker with
       the macOS defaults from Phase 5; `terminal-at` opens Terminal (or ghostty when
       installed) in the folder.
-- [ ] The macOS openers (M2.17): Enter on a picture, a PDF, a song and an unknown
-      file opens each in its default app (`open`); on a text file it opens Zed
-      when installed, and `O` offers Zed, `edit`, `open` and a Terminal in the
+- [ ] The macOS openers (M2.17): Enter on a picture, a video, a PDF, a song, a
+      `.stl`, a `.ttf`, a `.gcode` and an unknown file opens each in its default
+      app (`open`); `O` on a picture offers Preview (`edit-image`) after it, on a
+      video mpv (`play`) when installed; on a text file Enter opens Zed when
+      installed, and `O` offers Zed, `edit`, `open` and a Terminal in the
       folder; `edit` runs `$EDITOR` in ghostty when installed, else in
       Terminal.app; `terminal-here` on a folder opens Terminal.app there, or the
       app `TERMINAL_APP` names; nothing says `xdg-open` or `setsid`.
-- [ ] The `g` bookmarks (D5.11): `g h`, `g c`, `g d` and `g w` go to home,
-      `~/.config`, Downloads and `~/Work`, and the which-key card lists those four
-      and no server mounts.
+- [ ] The `g` bookmarks (D5.11): `g h`, `g c`, `g d`, `g w`, `g D` (Shift+d)
+      and `g o` go to home, `~/.config`, Downloads, `~/Work`, the Desktop and
+      Documents, and the which-key card lists those six and no server mounts.
 - [ ] `M` volumes card: internal disk, a USB stick, a mounted dmg, a network share;
       eject the USB stick from the card and confirm Finder agrees.
 - [ ] The volumes card, closer (M2.14): the boot volume reads "Macintosh HD", its
@@ -253,8 +255,9 @@ document that owns the feature.
       text file, copy a file down, copy a file up.
 - [ ] A cloud remote open, then `kill -9` the app: `rclone rcd` is gone within a
       second (`ps aux | grep rclone`) (M2.29).
-- [ ] `alt+p` sync to a server with Apple's `rsync` only: refused, and the toast
-      names Homebrew's (`RSYNC_HINT`); with `brew install rsync`: it runs (M2.6).
+- [ ] `alt+p` sync to a server with Apple's `rsync` only: refused with "Sync to a
+      server needs rsync 3.1 or newer — `brew install rsync`", said once
+      (`RSYNC_HINT`); with `brew install rsync`: it runs (M2.6).
 - [ ] `--chooser-file` and the portal flag are absent from `--help`.
 - [ ] Zoxide jumps if `zoxide` is installed via Homebrew.
 
@@ -320,6 +323,9 @@ workflow, launched by double-click from Explorer.
 - [ ] `M` drives card lists every drive with type and free space; eject a USB stick
       if Phase 4 implemented it.
 - [ ] SFTP through the built-in OpenSSH client.
+- [ ] The `g` bookmarks (D5.11): `g h`, `g c`, `g d`, `g w`, `g D` and `g o` go to
+      the user profile, `%APPDATA%`, Downloads, `Work`, the Desktop and
+      Documents; the which-key card lists those six and no server mounts.
 
 ## 6. Release gate
 
@@ -344,6 +350,10 @@ workflow, launched by double-click from Explorer.
   that needed both branches (M2.17, M2.21, M2.28 through the app, M2.35, and
   05's D5.5 and D5.11); the connect line says what a slow dialog toasts now
   that Brian settled it (M2.15), and the M2.9 line no longer waits on M2.8.
+- (macos-finish) 2026-09-29 — After Brian's calls: the openers line checks
+  the default app for every kind Linux gives delightviewer, the bookmarks
+  lines (§4.7 and §5.7) have `g D` and `g o`, and the rsync line quotes the
+  sentence that now reads once.
 
 ## Open questions
 
