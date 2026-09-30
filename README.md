@@ -36,6 +36,35 @@ The port to macOS and Windows is planned, phase by phase, in
 progress is marked. The first phase, cutting the code along a platform seam so that one
 source tree builds for all three, is under way; neither port has been run yet.
 
+Where things live, per platform
+([plans/other-platforms/05-defaults-and-config.md](plans/other-platforms/05-defaults-and-config.md) §1):
+
+| What | Linux | macOS | Windows |
+|---|---|---|---|
+| `delightfile.toml`, `keymap.toml`, `theme.toml`, `vfs.toml` | `$XDG_CONFIG_HOME/delightfile`, else `~/.config/delightfile` | the same | `%APPDATA%\delightfile` |
+| The state file (tabs, panes, pins) | `$XDG_STATE_HOME/delightfile/state`, else `~/.local/state/delightfile/state` | the same | `%LOCALAPPDATA%\delightfile\state` |
+| Thumbnails (shared with yazi) | `$TMPDIR/yazi-<uid>`, else `/tmp/yazi-<uid>` | `$TMPDIR/yazi-<uid>` | `%TEMP%\yazi-0` |
+| yazi's `vfs.toml`, read before ours | `~/.config/yazi/vfs.toml` | the same | `%APPDATA%\yazi\config\vfs.toml` |
+| zoxide's database | `$_ZO_DATA_DIR`, else `~/.local/share/zoxide` | `$_ZO_DATA_DIR`, else `~/Library/Application Support/zoxide` | `$_ZO_DATA_DIR`, else `%LOCALAPPDATA%\zoxide` |
+| The trash | the freedesktop trash, `~/.local/share/Trash` and each drive's `.Trash-<uid>` | Finder's Trash, listing only what delightfile put there | the Recycle Bin, opened in Explorer; `u` after `d` says to restore from there |
+
+What it uses, per platform (§4 of the same document). Every one of them is optional: a
+missing program is a missing feature that says so, never a failure.
+
+| Program | For | Linux | macOS | Windows |
+|---|---|---|---|---|
+| `7z` | 7z, rar and iso listings and extraction, `A` to 7z | p7zip | `brew install 7zip` | 7-Zip, with `7z.exe` on `PATH`, or the standalone `7za.exe` (no rar) |
+| `bsdtar` / `tar` | extraction when there is no 7-Zip | libarchive | the system's `tar` | `tar.exe`, part of Windows 10 and 11 |
+| `git` | the git chip | usually present | Xcode's command line tools | Git for Windows |
+| `ssh` | SFTP services, and `alt+p` to a server | OpenSSH | built in | Windows' OpenSSH client, built in |
+| `rsync` 3.1 or later | `alt+p` sync | usually present | `brew install rsync` | not offered |
+| `fd`, `rg` | the search panel | the distribution's | Homebrew | scoop or winget |
+| `zoxide` | `z` jumps | the distribution's | Homebrew | scoop or winget |
+| `gio`, udisks2, `wl-copy` | the Places card's phones and mounts, the clipboard without a data device | present on a GNOME-ish desktop | — | — |
+| The default program for a file | the `open` opener | `xdg-open` | `open` | the shell's own "open" (`builtin:shell-open`), what a double-click in Explorer does |
+| `libpdfium` | PDF pages | installed by hand | bundled | bundled |
+| FFmpeg 9's shared libraries | video, audio, HEIF and AVIF | the system's | bundled | bundled |
+
 ## What is in it
 
 Three miller columns, a preview pane that decodes rather than shells out, and a top bar
