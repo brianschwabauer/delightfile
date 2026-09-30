@@ -1005,12 +1005,14 @@ mod tests {
     /// keystroke, `Goto(n)` reaching past `[goto]` into them.
     #[test]
     fn pins_in_the_store_are_keys_at_startup() {
+        // On `q`, which no platform's shipped `[goto]` takes: a Mac's and
+        // Windows' `g o` is Documents.
         let mut s = Sandbox::new("boot", |files, _, state| {
             state
-                .pin(text(&files.join("other")), Some("o".to_string()))
+                .pin(text(&files.join("other")), Some("q".to_string()))
                 .expect("pin");
         });
-        s.keys("g o");
+        s.keys("g q");
         assert_eq!(s.app.cwd(), s.files().join("other"));
     }
 
