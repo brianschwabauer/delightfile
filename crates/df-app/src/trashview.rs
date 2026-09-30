@@ -536,6 +536,23 @@ mod tests {
     use std::ffi::OsString;
     use std::time::{Duration, UNIX_EPOCH};
 
+    /// The pseudo-paths the panes compare as `Path`s — the trash's URL, a
+    /// server's — compare as their text does on every platform, Windows
+    /// included, where neither has a drive and a component comparison is
+    /// what equality and `starts_with` are (W4.30): the assumption is
+    /// checked rather than believed.
+    #[test]
+    fn pseudo_paths_compare_as_paths_everywhere() {
+        use std::path::{Path, PathBuf};
+        assert_eq!(Path::new(URL), PathBuf::from("trash://"));
+        let file = PathBuf::from("sftp://h/a");
+        assert!(file.starts_with("sftp://h"));
+        assert!(!file.starts_with("sftp://ho"));
+        assert!(!PathBuf::from("sftp://h2/a").starts_with("sftp://h"));
+        assert_eq!(file.parent(), Some(Path::new("sftp://h")));
+        assert!(!Path::new(URL).is_absolute(), "never a place on a disk");
+    }
+
     fn item(name: &str, original: &str, deleted_at: &str) -> TrashedItem {
         TrashedItem {
             trash_root: PathBuf::from("/home/brian/.local/share/Trash"),
