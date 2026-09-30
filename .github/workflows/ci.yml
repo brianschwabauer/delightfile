@@ -126,9 +126,6 @@ jobs:
 
   macos:
     runs-on: macos-latest
-    # Allowed to fail until Phase 1's stubs land. S1.40 in 01-platform-seam.md
-    # (= B6.5 in 06-build-and-release.md) removes this line.
-    continue-on-error: true
     timeout-minutes: 90
     defaults:
       run:
@@ -229,9 +226,6 @@ jobs:
 
   windows:
     runs-on: windows-latest
-    # Allowed to fail until Phase 1's stubs land. S1.40 in 01-platform-seam.md
-    # (= B6.5 in 06-build-and-release.md) removes this line.
-    continue-on-error: true
     timeout-minutes: 90
     defaults:
       run:
