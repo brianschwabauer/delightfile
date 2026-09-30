@@ -134,12 +134,25 @@ const BRIEF: usize = 40;
 /// `sftp://host/…/www`, `…/files/Projects`. The last folder always stays
 /// whole — it is the name the place is known by — so a single enormous name
 /// is left to the painter's ellipsis.
+///
+/// A server's path is split on `/`, the URL's separator; a local one on the
+/// platform's, and put back together with the one it was written with
+/// (`~\…\crates\df-app` for a Windows path off a listing, W4.11).
 fn brief(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
+    let (split, sep): (fn(char) -> bool, char) = if text.contains("://") {
+        (|c| c == '/', '/')
+    } else {
+        let written = text
+            .chars()
+            .find(|&c| std::path::is_separator(c))
+            .unwrap_or(std::path::MAIN_SEPARATOR);
+        (std::path::is_separator, written)
+    };
     // What stays at the front: home, or a server, and nothing else.
-    let head_len = if text.starts_with("~/") {
+    let head_len = if text.starts_with('~') && text[1..].starts_with(split) {
         1
     } else if let Some(scheme) = text.find("://") {
         let after = scheme + 3;
@@ -150,7 +163,7 @@ fn brief(text: &str, max: usize) -> String {
         0
     };
     let (head, rest) = text.split_at(head_len);
-    let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = rest.split(split).filter(|part| !part.is_empty()).collect();
     // `…/`, or the head and `/…/`.
     let prefix = if head.is_empty() {
         2
@@ -163,7 +176,7 @@ fn brief(text: &str, max: usize) -> String {
         let longer = if tail.is_empty() {
             (*part).to_string()
         } else {
-            format!("{part}/{tail}")
+            format!("{part}{sep}{tail}")
         };
         if !tail.is_empty() && prefix + longer.chars().count() > max {
             break;
@@ -176,9 +189,9 @@ fn brief(text: &str, max: usize) -> String {
         return text.to_string();
     }
     if head.is_empty() {
-        format!("…/{tail}")
+        format!("…{sep}{tail}")
     } else {
-        format!("{head}/…/{tail}")
+        format!("{head}{sep}…{sep}{tail}")
     }
 }
 
@@ -189,9 +202,16 @@ fn said(written: &str, home: Option<&Path>) -> String {
 
 /// How a folder is written into the state file when it is pinned: under `~`
 /// when it is under home, so it survives `$HOME` moving, and as its URL when
-/// it is on a server.
+/// it is on a server. What follows `~` is written with `/` on every
+/// platform, so the pin reads the same wherever the file goes
+/// ([`df_core::path::expand_home`] takes it either way); elsewhere a path is
+/// written as the platform spells it (W4.11).
 pub(super) fn written(dir: &Path, home: Option<&Path>) -> String {
-    finder::shorten_home(dir, home)
+    let written = finder::shorten_home(dir, home);
+    if written.starts_with('~') {
+        return df_core::path::with_slashes(&written).into_owned();
+    }
+    written
 }
 
 /// One entry of the Places list.
@@ -336,13 +356,15 @@ pub(super) fn card_places(
 /// What a place is called on its row: the last name in `label` — `Work` for
 /// `~/Work`, `srv` for `sftp://box/srv`, the server for `sftp://box` — and
 /// the label itself for `~` and `/`, which have no name of their own to give.
+/// A local label is split on the platform's separators (`Work` for
+/// `~\Work` on Windows, W4.11), a server's on the URL's `/`.
 fn folder_name(label: &str) -> String {
-    let path = match label.split_once("://") {
-        Some((_, rest)) => rest,
-        None => label,
+    let (path, split): (&str, fn(char) -> bool) = match label.split_once("://") {
+        Some((_, rest)) => (rest, |c| c == '/'),
+        None => (label, std::path::is_separator),
     };
-    path.trim_end_matches('/')
-        .rsplit('/')
+    path.trim_end_matches(split)
+        .rsplit(split)
         .next()
         .filter(|name| !name.is_empty())
         .unwrap_or(label)
@@ -886,6 +908,33 @@ mod tests {
         let long =
             "/tmp/claude-1000/-home-brian-Work-delightfile/818c1cd4-fa17/live/files/Projects";
         assert!(brief(long, BRIEF).chars().count() <= BRIEF);
+    }
+
+    /// On Windows a place off a listing is spelled with `\`: it loses its
+    /// middle the same way and keeps its separator, it is named by its last
+    /// folder, and it is written into the state file under `~` with `/`,
+    /// elsewhere as the platform spells it (W4.11).
+    #[test]
+    fn a_windows_place_is_briefed_named_and_written_with_its_separators() {
+        if !cfg!(windows) {
+            return;
+        }
+        assert_eq!(
+            brief(r"~\Work\delightfile\crates\df-app\src", 24),
+            r"~\…\crates\df-app\src"
+        );
+        assert_eq!(
+            brief(r"D:\a-long-one\b\files\Projects", 20),
+            r"…\b\files\Projects"
+        );
+        assert_eq!(folder_name(r"~\Work\delightfile\"), "delightfile");
+        assert_eq!(folder_name(r"D:\Photos"), "Photos");
+        let home = Some(Path::new(r"C:\Users\brian"));
+        assert_eq!(
+            written(Path::new(r"C:\Users\brian\Work\x"), home),
+            "~/Work/x"
+        );
+        assert_eq!(written(Path::new(r"D:\Photos"), home), r"D:\Photos");
     }
 
     /// `g b` on a folder that is not pinned asks for a key; `Enter` on

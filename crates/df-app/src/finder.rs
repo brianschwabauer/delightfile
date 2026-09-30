@@ -345,6 +345,11 @@ fn place_row(path: &Path, label: Option<String>, home: Option<&Path>) -> Row {
 /// so it carries no information and spends a third of the column saying
 /// nothing. `~` says the same thing in one character, and the painter dims what
 /// is left of the directory part so the eye lands on the last component.
+///
+/// The boundary is either separator on Windows, where the rest keeps the
+/// separator the path was spelled with — `~\Work` for a path off a listing
+/// (`plans/other-platforms/04-windows.md` W4.11); on Linux the one separator
+/// is `/` and this is the text it always was.
 pub fn shorten_home(path: &Path, home: Option<&Path>) -> String {
     let text = path.to_string_lossy();
     let Some(home) = home else {
@@ -357,7 +362,7 @@ pub fn shorten_home(path: &Path, home: Option<&Path>) -> String {
     match text.strip_prefix(home.as_ref()) {
         Some("") => "~".to_string(),
         // Only at a component boundary: `/home/brianne` is not inside `~`.
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        Some(rest) if rest.starts_with(std::path::is_separator) => format!("~{rest}"),
         _ => text.into_owned(),
     }
 }
@@ -728,6 +733,26 @@ mod tests {
             "/home/brianne/Work"
         );
         assert_eq!(shorten_home(Path::new("/etc"), None), "/etc");
+    }
+
+    /// The same on Windows, where the home is `%USERPROFILE%` and a path
+    /// off a listing is spelled with `\` (W4.11).
+    #[test]
+    fn the_home_prefix_shortens_on_windows() {
+        if !cfg!(windows) {
+            return;
+        }
+        let home = Some(Path::new(r"C:\Users\brian"));
+        assert_eq!(shorten_home(Path::new(r"C:\Users\brian"), home), "~");
+        assert_eq!(
+            shorten_home(Path::new(r"C:\Users\brian\Work\x"), home),
+            r"~\Work\x"
+        );
+        assert_eq!(
+            shorten_home(Path::new(r"C:\Users\brianne\Work"), home),
+            r"C:\Users\brianne\Work"
+        );
+        assert_eq!(shorten_home(Path::new(r"D:\Photos"), home), r"D:\Photos");
     }
 
     /// `↑` from the top is the bottom. The one wrapping list in the program,

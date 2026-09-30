@@ -282,19 +282,13 @@ pub fn notes(items: &[TrashedItem]) -> std::collections::HashMap<String, String>
 
 /// `$HOME/Work/x` → `~/Work/x`. The column is narrow and the home prefix is the
 /// part every row shares, so it is the part worth spending one character on.
+/// The finder's rule ([`crate::finder::shorten_home`]), so the two agree on
+/// every platform.
 fn shorten(path: &str) -> String {
-    let Some(home) = df_core::platform::dirs::home() else {
-        return path.to_string();
-    };
-    let home = home.to_string_lossy().into_owned();
-    if home.is_empty() {
-        return path.to_string();
-    }
-    match path.strip_prefix(&home) {
-        Some("") => "~".to_string(),
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-        _ => path.to_string(),
-    }
+    crate::finder::shorten_home(
+        std::path::Path::new(path),
+        df_core::platform::dirs::home().as_deref(),
+    )
 }
 
 /// `YYYY-MM-DDThh:mm:ss` (UTC, as [`df_core::ops::trash`] writes it) as a

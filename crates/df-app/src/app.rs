@@ -20385,13 +20385,18 @@ fn nearest_existing(path: &Path) -> PathBuf {
 /// a symlinked folder goes to the sibling the breadcrumb shows, not to one
 /// beside wherever the link happens to point, and the history gets a clean path
 /// rather than one with `..` in the middle of it.
+///
+/// A separator is the platform's: on Windows `~\x` is `~/x`, `C:/x` is
+/// `C:\x`, `\\server\share` is a share, and a drive typed alone, `D:`, is
+/// that drive's root rather than the folder Windows last had open on it —
+/// which a window that has never been there cannot know.
 fn typed_path(text: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
     use std::path::Component;
     let text = text.trim();
     let expanded = match (text.strip_prefix('~'), home) {
         (Some(""), Some(home)) => home.to_path_buf(),
-        (Some(rest), Some(home)) if rest.starts_with('/') => {
-            home.join(rest.trim_start_matches('/'))
+        (Some(rest), Some(home)) if rest.starts_with(std::path::is_separator) => {
+            home.join(rest.trim_start_matches(std::path::is_separator))
         }
         _ => PathBuf::from(text),
     };
@@ -20405,6 +20410,11 @@ fn typed_path(text: &str, cwd: &Path, home: Option<&Path>) -> PathBuf {
             // `pop` at the root is a no-op, which is where `/..` is.
             Component::ParentDir => {
                 out.pop();
+            }
+            // A drive with no root after it (`D:`) is given one.
+            Component::Prefix(_) if !joined.has_root() => {
+                out.push(component.as_os_str());
+                out.push(std::path::MAIN_SEPARATOR_STR);
             }
             other => out.push(other.as_os_str()),
         }
@@ -21713,6 +21723,41 @@ mod tests {
             typed_path("~/x", cwd, None),
             PathBuf::from("/home/me/src/~/x")
         );
+    }
+
+    /// The same on Windows, where a path is typed with either separator and
+    /// starts at a drive or a share (W4.11): `~\x` is `~/x`, `C:/x` is
+    /// `C:\x`, a drive alone is its root, and `..` stops at the drive.
+    #[test]
+    fn a_typed_path_resolves_like_a_shell_would_on_windows() {
+        if !cfg!(windows) {
+            return;
+        }
+        let cwd = Path::new(r"C:\Users\me\src");
+        let home = Some(Path::new(r"C:\Users\me"));
+        let go = |text: &str| typed_path(text, cwd, home);
+
+        assert_eq!(go("~"), PathBuf::from(r"C:\Users\me"));
+        assert_eq!(go(r"~\Downloads"), PathBuf::from(r"C:\Users\me\Downloads"));
+        assert_eq!(go("~/Downloads"), PathBuf::from(r"C:\Users\me\Downloads"));
+        assert_eq!(go(r"C:\Windows\"), PathBuf::from(r"C:\Windows"));
+        assert_eq!(
+            go("C:/Windows/System32"),
+            PathBuf::from(r"C:\Windows\System32")
+        );
+        assert_eq!(go("D:"), PathBuf::from(r"D:\"), "a drive alone is its root");
+        assert_eq!(
+            go(r"D:\..\.."),
+            PathBuf::from(r"D:\"),
+            "the drive has no parent"
+        );
+        assert_eq!(go(r"\Temp"), PathBuf::from(r"C:\Temp"), "this drive's root");
+        assert_eq!(
+            go(r"\\server\share\docs"),
+            PathBuf::from(r"\\server\share\docs")
+        );
+        assert_eq!(go(r"..\photos"), PathBuf::from(r"C:\Users\me\photos"));
+        assert_eq!(go("app/lib"), PathBuf::from(r"C:\Users\me\src\app\lib"));
     }
 
     #[test]
