@@ -33,8 +33,11 @@ surprising.
 
 The port to macOS and Windows is planned, phase by phase, in
 [plans/other-platforms/README.md](plans/other-platforms/README.md), which is also where its
-progress is marked. The first phase, cutting the code along a platform seam so that one
-source tree builds for all three, is under way; neither port has been run yet.
+progress is marked. Linux, in a Wayland session, is still the platform delightfile
+supports. The macOS build compiles and passes its tests on CI, but no person has run it
+yet. The Windows build compiles, passes its tests on CI and has been run on a Windows 11
+VM ([07-verification.md §5.8](plans/other-platforms/07-verification.md#58-runs)). Neither
+has had the release pass on real hardware that the plan asks for.
 
 Where things live, per platform
 ([plans/other-platforms/05-defaults-and-config.md](plans/other-platforms/05-defaults-and-config.md) §1):
@@ -46,7 +49,7 @@ Where things live, per platform
 | Thumbnails (shared with yazi) | `$TMPDIR/yazi-<uid>`, else `/tmp/yazi-<uid>` | `$TMPDIR/yazi-<uid>` | `%TEMP%\yazi-0` |
 | yazi's `vfs.toml`, read before ours | `~/.config/yazi/vfs.toml` | the same | `%APPDATA%\yazi\config\vfs.toml` |
 | zoxide's database | `$_ZO_DATA_DIR`, else `~/.local/share/zoxide` | `$_ZO_DATA_DIR`, else `~/Library/Application Support/zoxide` | `$_ZO_DATA_DIR`, else `%LOCALAPPDATA%\zoxide` |
-| The trash | the freedesktop trash, `~/.local/share/Trash` and each drive's `.Trash-<uid>` | Finder's Trash, listing only what delightfile put there | the Recycle Bin, opened in Explorer; `u` after `d` says to restore from there |
+| The trash | the freedesktop trash, `~/.local/share/Trash` and each drive's `.Trash-<uid>` | Finder's Trash, listing only what delightfile put there | the Recycle Bin, opened in Explorer; "Empty trash" counts it and empties it whole; `u` after `d` says to restore from there |
 
 What it uses, per platform (§4 of the same document). Every one of them is optional: a
 missing program is a missing feature that says so, never a failure.
@@ -215,9 +218,11 @@ binary: everything goes under `~/.local`, the file-picker backend included, and
 ## Building
 
 Linux, in a Wayland session, is the platform delightfile supports. macOS and Windows are a
-port in progress: their builds are meant to compile, with stand-ins that say "not
-available on this platform" where a feature has no native body yet, but they are
-unverified and nobody has run one. The plan and how far it has got are in
+port in progress. Both build and pass their tests on CI, with a stand-in that says "not
+available on this platform" wherever a feature has no native body. No person has run the
+macOS build yet; the Windows build has been run on a Windows 11 VM
+([07-verification.md §5.8](plans/other-platforms/07-verification.md#58-runs)), which is
+not the release pass on real hardware. The plan and how far it has got are in
 [plans/other-platforms/](plans/other-platforms/README.md).
 
 On Linux it needs a recent stable Rust and FFmpeg 9 development libraries, which
