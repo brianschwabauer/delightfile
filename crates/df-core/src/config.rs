@@ -180,9 +180,10 @@ pub const DEFAULT_IMAGE_QUALITY: u8 = 80;
 /// The `g` chord's bookmarks, in which-key order: key, path, description.
 /// `~` is expanded at use time so `$HOME` can move.
 ///
-/// This and the two opener tables below are Linux's, and Windows' until
-/// W4.3; a fresh install reads its platform's through
-/// [`crate::platform::defaults`], and macOS has its own there.
+/// This and the two opener tables below are Linux's (the openers and rules
+/// Windows' too, until W4.3); a fresh install reads its platform's through
+/// [`crate::platform::defaults`], where macOS has all three of its own and
+/// Windows its bookmarks.
 pub const DEFAULT_BOOKMARKS: &[(&str, &str, &str)] = &[
     ("h", "~", "Go home"),
     ("c", "~/.config", "Go to ~/.config"),
@@ -2245,10 +2246,10 @@ mod tests {
         assert!(warnings[0].message.contains("unknown key"), "{warnings:?}");
     }
 
-    // Linux's table, which Windows ships until W4.3; macOS's has its own
-    // test beside it (`platform::defaults`).
+    // Linux's table; macOS's and Windows' have their own tests beside them
+    // (`platform::defaults`).
     #[test]
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(target_os = "linux")]
     fn default_bookmarks_are_the_goto_table() {
         let c = Config::default();
         let pairs: Vec<(&str, &str)> = c

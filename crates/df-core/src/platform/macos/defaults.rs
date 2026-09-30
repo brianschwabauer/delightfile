@@ -13,8 +13,9 @@
 //! where Linux has delightviewer: a picture, a video, a song, a PDF, a 3D
 //! model, a font and a toolpath each open in whatever the Mac opens them
 //! with, and `O` still offers Preview for a picture and mpv for a video. The
-//! bookmarks are the four the plan gives keys to; Brian's server mounts and
-//! hosts stay Linux's.
+//! bookmarks are the plan's four and Finder's two places, Desktop and
+//! Documents, on Finder's letters; Brian's server mounts and hosts stay
+//! Linux's.
 
 /// Openers a rule can name: id, command, blocking, description.
 ///
@@ -128,11 +129,15 @@ pub const RULES: &[(&str, &str, &[&str])] = &[
 ];
 
 /// The `g` chord's bookmarks: key, path, description, in which-key order.
+/// Desktop and Documents are on the letters Finder's own shortcuts use for
+/// them (⇧⌘D, ⇧⌘O), since `g d` is Downloads.
 pub const BOOKMARKS: &[(&str, &str, &str)] = &[
     ("h", "~", "Go home"),
     ("c", "~/.config", "Go to ~/.config"),
     ("d", "~/Downloads", "Go to ~/Downloads"),
     ("w", "~/Work", "Go to ~/Work"),
+    ("D", "~/Desktop", "Go to ~/Desktop"),
+    ("o", "~/Documents", "Go to ~/Documents"),
 ];
 
 /// Rows laid over the shipped keymap, before the user's `keymap.toml`:
@@ -199,7 +204,8 @@ mod tests {
     }
 
     /// A fresh install on a Mac reads these tables: the `g` bookmarks are
-    /// the four with keys, `~/Work` at `g w` as on Linux.
+    /// the plan's four, `~/Work` at `g w` as on Linux, and Desktop and
+    /// Documents on Finder's letters.
     #[test]
     fn default_bookmarks_are_the_goto_table() {
         let c = Config::default();
@@ -215,6 +221,8 @@ mod tests {
                 ("c", "~/.config"),
                 ("d", "~/Downloads"),
                 ("w", "~/Work"),
+                ("D", "~/Desktop"),
+                ("o", "~/Documents"),
             ]
         );
     }
