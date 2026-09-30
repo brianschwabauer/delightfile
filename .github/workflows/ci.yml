@@ -230,19 +230,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      # B6.10: BtbN's FFmpeg 9.0.1 GPL shared build for win64 (libavcodec
-      # 63.1.101, the same FFmpeg as Arch's 9.0.1). A month-end autobuild,
-      # because BtbN keeps the last build of each month for two years and a
-      # daily one for 14 days, and `latest` is rebuilt daily so no hash could
-      # hold. The zip carries MSVC import libraries (lib/avcodec.lib, …) beside
-      # the MinGW ones, which is what FFMPEG_DIR needs under link.exe, and
-      # unpacks to a directory named after itself. Switching to another build
-      # (a newer BtbN one, or gyan.dev's) is these two lines; the candidates
-      # are in 06-build-and-release.md, "Switching B6.10 to another build".
-      # B6.10 moves the pin into build/windows/ffmpeg.lock.
-      FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-31-13-27/ffmpeg-n9.0.1-11-ge47273f4d9-win64-gpl-shared-9.0.zip
-      FFMPEG_SHA256: 00d78694632f17a1de325c639d0acf04a6b3ab8f20ce0a2e5bedd2d5e21e3adb
     steps:
       # The runner's git checks out with CRLF; tests that read files from the
       # tree should see the bytes Linux sees.
@@ -257,21 +244,20 @@ jobs:
           toolchain: stable-x86_64-pc-windows-msvc
           components: clippy
 
-      - name: FFmpeg (pinned by sha256)
+      # B6.10: BtbN's FFmpeg 9.0.1 GPL shared build for win64 (libavcodec
+      # 63.1.101, the same FFmpeg as Arch's 9.0.1), pinned by URL and sha256
+      # in build/windows/ffmpeg.lock, which the release workflow reads too. A
+      # month-end autobuild, because BtbN keeps the last build of each month
+      # for two years and a daily one for 14 days, and `latest` is rebuilt
+      # daily so no hash could hold. The zip carries MSVC import libraries
+      # (lib/avcodec.lib, …) beside the MinGW ones, which is what FFMPEG_DIR
+      # needs under link.exe. Switching to another build (a newer BtbN one,
+      # or gyan.dev's) is the lock's two lines; the candidates are in
+      # 06-build-and-release.md, "Switching B6.10 to another build".
+      - name: FFmpeg (build/windows/ffmpeg.lock)
         shell: pwsh
         run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $name = ($env:FFMPEG_URL -split '/')[-1] -replace '\.zip$', ''
-          $zip = Join-Path $env:RUNNER_TEMP "$name.zip"
-          Invoke-WebRequest $env:FFMPEG_URL -OutFile $zip
-          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($sha -ne $env:FFMPEG_SHA256) { throw "$name.zip has sha256 $sha, expected $env:FFMPEG_SHA256" }
-          7z x $zip "-o$env:RUNNER_TEMP" -y | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "7z could not extract $zip" }
-          $dir = Join-Path $env:RUNNER_TEMP $name
-          $major = (Select-String -Path "$dir\include\libavcodec\version_major.h" -Pattern 'define LIBAVCODEC_VERSION_MAJOR\s+(\d+)').Matches[0].Groups[1].Value
-          Write-Output "FFmpeg: B6.10, $name, libavcodec major $major"
-          if ($major -ne '63') { throw "libavcodec major is $major; ffmpeg-next 9 needs 63" }
+          $dir = & build/windows/fetch-ffmpeg.ps1 -Dest $env:RUNNER_TEMP
           # ffmpeg-sys-next reads FFMPEG_DIR ({dir}\include, {dir}\lib); the
           # DLLs in bin\ have to be on PATH for the tests and the smoke test
           # (B6.13).
