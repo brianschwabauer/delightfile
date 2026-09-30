@@ -686,6 +686,18 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   file until it builds one (`DirEntry::path` allocates), and building it for
   every file would be a cost on Linux for an argument Unix never reads; with
   the closure only Windows builds it, and only for a regular file.
+- (df-core) 2026-09-29 — W4.37: `platform::errno::is_delete_pending` reads
+  the NT status under an access-denied error (`RtlGetLastNtStatus`, ntdll's,
+  declared by hand), the first of the task's two routes. The second — an
+  access-denied `lstat` of a name the directory no longer lists — cannot
+  tell: a delete-pending name is still listed until its last handle closes.
+  The status is the thread's record of its last failure, so `gone` is asked
+  straight after each failing call, as `remove_tree` already did; it also
+  reads a not-found status under an access-denied error as gone, which is
+  what `std`'s `symlink_metadata` returns when its directory lookup finds the
+  name gone after a denied open. On Linux `is_delete_pending` is `false` and
+  `gone` is the `NotFound` check it was; the top `lstat` of `remove_tree` now
+  asks `gone` too, the same check there.
 
 ## Open questions
 

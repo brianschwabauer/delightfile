@@ -6,10 +6,19 @@
 //! cross-volume move as "something is in the way" and clears the destination.
 //! The codes are named here from `winerror.h`: a handful of integers do not
 //! need a bindings crate.
+//!
+//! One question needs more than the code: [`is_delete_pending`], whose
+//! answer is in the NT status the thread's last failed call ended on, read
+//! with `RtlGetLastNtStatus` — ntdll's, and not in `windows-sys`, so declared
+//! here. It takes nothing and reads the calling thread's own record, which
+//! is the whole of its `unsafe`.
+
+#![allow(unsafe_code)] // RtlGetLastNtStatus, which reads this thread's record
 
 use std::io;
 
 const ERROR_TOO_MANY_OPEN_FILES: i32 = 4;
+const ERROR_ACCESS_DENIED: i32 = 5;
 const ERROR_NOT_SAME_DEVICE: i32 = 17;
 const ERROR_SHARING_VIOLATION: i32 = 32;
 const ERROR_LOCK_VIOLATION: i32 = 33;
@@ -70,6 +79,42 @@ pub fn is_transient(e: &io::Error) -> bool {
     )
 }
 
+/// `STATUS_DELETE_PENDING`, from `ntstatus.h`: the file has been marked for
+/// deletion by a handle that is still open, and will be gone when it closes.
+const STATUS_DELETE_PENDING: i32 = 0xC000_0056_u32 as i32;
+/// `STATUS_OBJECT_NAME_NOT_FOUND`, `STATUS_OBJECT_PATH_NOT_FOUND`,
+/// `STATUS_NO_SUCH_FILE`: the name is not there.
+const STATUS_NOT_THERE: [i32; 3] = [
+    0xC000_0034_u32 as i32,
+    0xC000_003A_u32 as i32,
+    0xC000_000F_u32 as i32,
+];
+
+#[link(name = "ntdll")]
+extern "system" {
+    fn RtlGetLastNtStatus() -> i32;
+}
+
+/// Whether `e`, an `ERROR_ACCESS_DENIED`, is a name another deleter has
+/// already marked for deletion — `STATUS_DELETE_PENDING` underneath, which
+/// Win32 reports as access denied — and so is as good as gone. Also when the
+/// last status says the name is not there at all: `std`'s `symlink_metadata`
+/// answers a denied open by looking the name up in its directory, and returns
+/// the first error when the name has gone meanwhile.
+///
+/// Asked straight after the call that failed, on the thread that made it:
+/// the status is the thread's record of its last failure, which the next
+/// failing call replaces.
+pub fn is_delete_pending(e: &io::Error) -> bool {
+    if e.raw_os_error() != Some(ERROR_ACCESS_DENIED) {
+        return false;
+    }
+    // SAFETY: no arguments; it reads the calling thread's own environment
+    // block, which exists for as long as the thread does.
+    let status = unsafe { RtlGetLastNtStatus() };
+    status == STATUS_DELETE_PENDING || STATUS_NOT_THERE.contains(&status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,5 +150,46 @@ mod tests {
         // Access denied and disk full are answers, not delays.
         assert!(!is_transient(&code(5)));
         assert!(!is_transient(&code(112)));
+    }
+
+    /// A file somebody has opened with delete-on-close is delete-pending until
+    /// they close it; opening it meanwhile is refused with access denied,
+    /// which reads as gone. A real refusal does not.
+    #[test]
+    fn a_name_marked_for_deletion_is_as_good_as_gone() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+        const FILE_SHARE_ALL: u32 = 0x7;
+        let t = crate::test_support::TempTree::new("win-delete-pending");
+        let path = t.file("going.txt", b"x");
+        let holder = std::fs::OpenOptions::new()
+            .access_mode(DELETE)
+            .share_mode(FILE_SHARE_ALL)
+            .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+            .open(&path)
+            .expect("open for delete");
+        // Marked, but the name lingers while `holder` is open — unless the
+        // file system unlinks it at once (POSIX semantics), when the open
+        // below says not found, which is gone too.
+        let _ = std::fs::remove_file(&path);
+        match std::fs::OpenOptions::new().read(true).open(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => assert!(is_delete_pending(&e), "{e:?}"),
+            Ok(_) => panic!("a file marked for deletion opened"),
+        }
+        drop(holder);
+        assert!(!path.exists());
+
+        // Access denied for any other reason is not gone.
+        let denied = std::fs::OpenOptions::new()
+            .read(true)
+            .open(r"C:\System Volume Information");
+        if let Err(e) = denied {
+            if e.raw_os_error() == Some(ERROR_ACCESS_DENIED) {
+                assert!(!is_delete_pending(&e), "{e:?}");
+            }
+        }
+        assert!(!is_delete_pending(&code(ERROR_SHARING_VIOLATION)));
     }
 }

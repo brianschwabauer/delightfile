@@ -91,7 +91,7 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         // Already gone is the state we wanted.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if gone(&e) => return Ok(()),
         Err(e) => return Err(DfError::io(path, e)),
     };
 
@@ -143,9 +143,12 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
 }
 
 /// Whether an io error says the thing is not there — which, to a delete, is
-/// the thing having been deleted.
+/// the thing having been deleted. On Windows a name another deleter has
+/// marked is not there yet, but answers "access denied" until it goes
+/// ([`crate::platform::errno::is_delete_pending`]); asked straight after the
+/// failing call, as every caller here does.
 fn gone(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::NotFound
+    e.kind() == std::io::ErrorKind::NotFound || crate::platform::errno::is_delete_pending(e)
 }
 
 /// Remove a tree with no cancellation and no rails.
@@ -267,12 +270,8 @@ mod tests {
     /// Two deletes of one tree at once — two delightfiles purging the same
     /// trash — both succeed: whatever one finds already gone, the other took,
     /// and a directory that vanished between being seen and being opened, or
-    /// being emptied and being removed, is not a failure.
-    ///
-    /// Unix only until W4.37: on Windows a file the other delete has marked
-    /// for deletion answers "access denied", not "not found", to the next
-    /// open, and `gone` does not read that as gone yet.
-    #[cfg(unix)]
+    /// being emptied and being removed, is not a failure. On Windows that
+    /// includes a name the other has marked for deletion and not yet let go.
     #[test]
     fn a_tree_emptied_by_somebody_else_meanwhile_is_not_a_failure() {
         for round in 0..20 {

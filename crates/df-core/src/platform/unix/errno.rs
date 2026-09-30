@@ -56,6 +56,12 @@ pub fn is_transient(e: &io::Error) -> bool {
     )
 }
 
+/// Never: Unix has no "marked for deletion" state that a name lingers in. An
+/// unlinked name is gone at once, and asking for it answers `ENOENT`.
+pub fn is_delete_pending(_e: &io::Error) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

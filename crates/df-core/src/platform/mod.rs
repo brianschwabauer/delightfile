@@ -29,6 +29,7 @@
 //! | Module | Item | Linux | macOS | Windows |
 //! |---|---|---|---|---|
 //! | `errno` | `is_cross_device`, `is_exists`, `is_not_empty`, `is_not_dir`, `is_dir`, `is_invalid`, `is_transient`: `fn(&io::Error) -> bool` | `libc::E*` (unix) | `libc::E*` (unix) | Win32 codes; `is_dir` never |
+//! | `errno` | `is_delete_pending(&io::Error) -> bool`: a name another deleter has marked and not yet let go, as good as gone (asked straight after the failing call, on its thread) | never (unix) | unix | access denied over `STATUS_DELETE_PENDING` (or a name not there), from `RtlGetLastNtStatus` (W4.37) |
 //! | `watch` | `Backend::open(control, events, notify) -> io::Result<(Backend, JoinHandle<()>)>`, `Backend::wake(&self)` (crate-internal: [`crate::fs::Watcher`] is the API) | inotify + self-pipe | kqueue `EVFILT_VNODE` per directory + self-pipe | `Unsupported` → disabled watcher (W4.4) |
 //! | `fs` | `symlink(target, link) -> io::Result<()>` | `std::os::unix::fs::symlink` (unix) | unix | `symlink_dir` / `symlink_file` by what the target resolves to |
 //! | `fs` | `apply_mode(path, mode: u32) -> io::Result<()>` | `chmod` (unix) | unix | read-only attribute from `mode & 0o222` |
