@@ -1,6 +1,6 @@
 # 04 — Windows
 
-Status: **not started**
+Status: **in progress**
 
 Scope: native Windows bodies behind the Phase 1 seam, plus the df-app side of the
 path model that Phase 3 did for df-core. The result is the zip from
@@ -46,13 +46,22 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
 
 ## 1. Process, console, entry point
 
-- [ ] **W4.1** `main.rs`: `#![cfg_attr(windows, windows_subsystem = "windows")]`
+- [x] **W4.1** `main.rs`: `#![cfg_attr(windows, windows_subsystem = "windows")]`
       (the one allowed cfg outside `platform/`, `00-ground-rules.md` §2). Before
       `cli::parse`, call `platform::process::attach_parent_console()` — Windows body
       `AttachConsole(ATTACH_PARENT_PROCESS)` then reopen stdout/stderr handles so
       `Outcome::Print`/`Fail` reach the terminal that launched us; a no-op elsewhere.
       Done when: on the Windows runner `delightfile.exe --version` prints to the
       job log (B6.13) and double-clicking the exe shows no console (live check).
+      — done 5722b0a: `platform::process::attach_parent_console` (the Linux
+      and macOS body a no-op in `unix/`), standard output and error reopened
+      on `CONOUT$` only when they point nowhere, so a pipe or a file the
+      parent gave is kept; the attribute is `cfg_attr(all(windows,
+      not(test)))`, the unit-test build staying a console program. The Windows
+      job's smoke test now checks what `--version` printed (`delightfile
+      0.1.0`, run 36662477949), `tests/version.rs` checks `--version` and
+      `--help` through a pipe on every target, and on the VM a double-click
+      opened no console (07 §5.8).
 - [ ] **W4.2** `platform::process` Windows bodies: `NULL_DEVICE = "NUL"`;
       `is_executable` = extension is in `PATHEXT` (default `.COM;.EXE;.BAT;.CMD`);
       `candidates("7z")` = `["7z.exe", "7z"]`, `candidates("bsdtar")` = `["bsdtar.exe",
@@ -65,7 +74,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       so nothing flashes a console. Done when: `git status` on the runner spawns
       without a window (assert the flag in a unit test that inspects the builder,
       since the effect is not observable headlessly).
-- [ ] **W4.3** `platform::open` Windows body (S1.26 surface): `shell_argv` is
+- [x] **W4.3** `platform::open` Windows body (S1.26 surface): `shell_argv` is
       replaced on Windows by `argv_from(command: &str, paths: &[PathBuf]) ->
       Vec<OsString>` implementing the Decisions' split-and-substitute rules
       (`$dir` = parent of the first path); `spawn_detached` builds `Command::new(argv[0])`
@@ -78,6 +87,17 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       (Linux/macOS bodies: `Unsupported`, since their tables never name it). Done
       when: pure tests for the splitter (`zed "$@"` with two paths, `wt -d "$dir"`,
       a quoted path with spaces) pass everywhere; live check V7 §5.7.
+      — done ddafa4b, d3bf75c and 4d56ecf: the splitter is `platform/argv.rs`
+      (compiled on Windows and in every target's tests);
+      `spawn_detached`/`run_blocking` run an opener's argv in a process group
+      of its own; a typed line goes through `spawn_typed`/`run_typed`,
+      `%COMSPEC% /S /C "<line> <paths…>"` with the line as a raw argument,
+      under `CREATE_NO_WINDOW`, and between `pushd` and `popd` when the folder
+      is a share (Decisions log), so the window says whose line it runs
+      (`open::Line`); `shell_open` is `ShellExecuteW` "open", with COM started
+      on the calling thread for the call (9be302e). `first_available` is not
+      written: its callers are the Windows opener table, D5.3, which is
+      df-core's (05 D5.4).
 
 ## 2. Filesystem (df-core `platform/windows/`)
 
@@ -138,7 +158,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       must fall back to the permanent-delete confirm as it does for remote rows).
       Done when: a runner test trashes a temp file and it is gone from the
       directory (the bin itself cannot be inspected headlessly).
-- [ ] **W4.8** df-app: `u` after a trash on Windows → the undo journal entry for a
+- [~] **W4.8** df-app: `u` after a trash on Windows → the undo journal entry for a
       trash carries `restorable: false` and `App::undo` toasts "Restore it from the
       Recycle Bin" (`ops/journal.rs` gains the flag; Linux/macOS set `true`).
       `App::show_trash` on Windows → `ShellExecuteW("open", "shell:RecycleBinFolder")`
@@ -146,6 +166,17 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       created. "Empty trash" → `SHEmptyRecycleBinW(NULL, NULL, SHERB_NOCONFIRMATION)`
       after the existing confirm card. Done when: `App::for_test` tests on Windows
       assert the toasts.
+      — blocked in part: de6769e does the df-app half against the contract
+      W4.7 publishes on `port/windows-core` (a `TrashedItem` whose
+      `location()` is empty): `u` after a trash says "Restore it from the
+      Recycle Bin" and takes nothing back
+      (`platform::trash::RESTORED_ELSEWHERE`; the journal has no `restorable`
+      flag, being df-core's, and every Windows trash is unrestorable here),
+      and the trash's door opens `shell:RecycleBinFolder` in Explorer with
+      "Opened the Recycle Bin in Explorer" (`SYSTEM_BIN`);
+      `undo_after_a_trash_says_where_to_restore_it_on_windows`. Both stay
+      behind the "Trash is not available on this platform" refusal until W4.7
+      is merged. "Empty trash" is blocked on a choice: Open questions.
 
 ## 3. Paths in df-app (the df-app rows of Phase 3)
 
@@ -173,7 +204,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       to take a root from when the working directory is gone, fall back to
       `MAIN_SEPARATOR_STR` (`/` on Linux, as before). The grep's hits left
       are all test code (`mounts.rs:2606` is a `#[cfg(test)]` fixture).
-- [ ] **W4.11** Home and `~`: `app.rs:16914–16950` (`typed_path`) accepts `~`,
+- [x] **W4.11** Home and `~`: `app.rs:16914–16950` (`typed_path`) accepts `~`,
       `~/x`, `~\x`, `C:\x`, `C:/x`, `\\s\sh`; `finder.rs:336–359` (`shorten_home`)
       strips the home prefix on either separator and renders `~` + the platform
       separator; `app/places.rs:118–196` (`shown`, `brief`, `written`) build from
@@ -181,13 +212,30 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       `~/…` with `/` (portable file, `expand_home` keeps whatever was typed).
       `trashview.rs:276–293` (`shorten`) shares `shorten_home`. Done when: tests
       for each with Windows-shaped inputs.
-- [ ] **W4.12** Names: `app.rs:16752–16770` (`save_target`), `bulk.rs:1306–1331`
+      — done d27a843: `typed_path` splits `~` on either separator and gives a
+      drive typed alone its root (`D:` is `D:\`); `shorten_home` takes either
+      separator as the boundary and keeps the one the path was spelled with;
+      the Places card's `brief` and `folder_name` split a local label on the
+      platform's separators and a URL on `/`; `written` puts a pin under `~`
+      with `/` (`path::with_slashes`); the trash view's `shorten` is
+      `shorten_home`. Windows twins:
+      `a_typed_path_resolves_like_a_shell_would_on_windows`,
+      `the_home_prefix_shortens_on_windows`,
+      `a_windows_place_is_briefed_named_and_written_with_its_separators`.
+- [x] **W4.12** Names: `app.rs:16752–16770` (`save_target`), `bulk.rs:1306–1331`
       (`problems`) use `df_core::path::name_is_valid` (P3.2, strict on Windows);
       `bulk.rs:126–130` `NAME_MAX` becomes `df_core::platform::path::MAX_NAME`
       (255 UTF-16 units on Windows). The bulk card's row problem text names the
       offending character. Done when: `problems(["con"])` is `Unusable` on Windows
       and `None` on Linux in tests.
-- [ ] **W4.13** Separators in output parsing: `search.rs:686–731` (`parse`) trims
+      — done 770943f, which is P3.31's option (a): `Problem::Unusable(Why)`
+      says which character is to blame (`cannot contain :`), or the platform's
+      own words for a trailing dot or a device name; `NAME_MAX` is
+      `platform::os::MAX_NAME` counted in UTF-16 on Windows; `save_target`
+      refuses what `name_is_valid` refuses.
+      `a_name_windows_will_not_make_is_unusable_there_only` and
+      `a_save_name_is_a_name_windows_can_make`.
+- [x] **W4.13** Separators in output parsing: `search.rs:686–731` (`parse`) trims
       either separator from `fd` output; `overlay.rs:727–760` (`path_text`) splits
       on the last of either separator; `dnd.rs:670–696` (`paths_from` plain-text
       fallback) keeps lines where `Path::new(line).is_absolute()`;
@@ -195,7 +243,16 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       (drop the leading `/` when the next two characters are a drive letter and
       `:`) and `file_uri` emits `file:///C:/x` (forward slashes, drive kept). Done
       when: round-trip tests for `C:\Users\a b\x.txt` ↔ `file:///C:/Users/a%20b/x.txt`.
-- [ ] **W4.14** Remote rows: audit every `Path::join`/`parent`/`file_name` applied
+      — done 9594ced and 654b5af: a hit is named in the platform's separator
+      whichever one fd or rg wrote (`search::native`), which is what the six
+      hits tests the runner failed needed; `path_text` splits at either
+      separator; `file_uri`/`parse_file_uri` write and read `file:///C:/x` and
+      `file://server/share/x`
+      (`windows_paths_round_trip_as_windows_writes_them`). The plain-text
+      drop's `paths_from` is not changed: M2.31 moved it to
+      `platform/linux/wayland/incoming.rs`, where `/` is what absolute means,
+      and a drop from Explorer arrives as winit's `DroppedFile` paths (W4.17).
+- [x] **W4.14** Remote rows: audit every `Path::join`/`parent`/`file_name` applied
       to an `Entry.path` while `remote::is_remote(path)` (appendix B `remote.rs:107–122`
       row lists the entry points: `scannable`, `spawnable_cwd`, `child_cwd`,
       `jump_to`, `remote_at`) and route them through `VfsPath` (`at_of` first).
@@ -203,13 +260,19 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       Done when: a Windows-runner test navigates a fake remote listing (the
       `vfs/tests.rs` replay server is Unix-only, so use a `Session` with cached
       rows) and the derived child URL has no `\`.
-- [ ] **W4.15** `cli.rs:449–478` (`write_cwd_file`, `write_chooser_file`) use
+      — done 5e89119: every remote path df-app makes is `VfsPath`'s join or
+      parent already, bar one, the sync card's destination label, now joined
+      through `VfsPath`; `server_path` returns `String`;
+      `a_remote_folder_is_entered_and_left_by_its_url` walks a cached listing
+      and finds no `\` in any URL.
+- [x] **W4.15** `cli.rs:449–478` (`write_cwd_file`, `write_chooser_file`) use
       `as_encoded_bytes` which is WTF-8 on Windows; document that the wrapper
       protocol is UTF-8 and leave the code. Done when: the doc comment says so.
+      — done 65c8b50.
 
 ## 4. Clipboard and drop (df-app `platform/windows/`)
 
-- [ ] **W4.16** `platform::clipboard` bodies: `OpenClipboard(hwnd)` with a retry
+- [x] **W4.16** `platform::clipboard` bodies: `OpenClipboard(hwnd)` with a retry
       loop (up to 10 × 10 ms, since another app may hold it), `EmptyClipboard`,
       then per branch: text → `CF_UNICODETEXT` (`HGLOBAL` of UTF-16 + NUL);
       `text/uri-list` → `CF_HDROP` (`DROPFILES { pFiles: size_of::<DROPFILES>(),
@@ -225,15 +288,26 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       Done when: a runner test round-trips text and one path through the real
       clipboard (the runner has a desktop session; guard with `#[ignore]` if it
       proves flaky and say so).
-- [ ] **W4.17** `platform::desktop::pointer_position(&Window)`: `GetCursorPos` +
+      — done 742fa79: `CF_UNICODETEXT`, `CF_HDROP` + `Preferred DropEffect`
+      (copy), the registered `PNG`; a non-PNG picture is made a PNG on a copy
+      and a `CF_DIBV5`/`CF_DIB` one on a paste (`platform/clipformats.rs`,
+      tested on every target); the clipboard is opened for the window once
+      there is one (`own_with`).
+      `text_and_files_round_trip_through_the_clipboard` and
+      `a_png_round_trips_under_its_own_format` pass on the runner
+      (36662477949), not ignored.
+- [x] **W4.17** `platform::desktop::pointer_position(&Window)`: `GetCursorPos` +
       `ScreenToClient(hwnd)` divided by the scale factor. `Desktop::start` returns a
       handle whose `set_selection`/`receive` delegate to W4.16 synchronously (as
       M2.13 does on macOS) and whose `drag` returns `false` (§8). Done when: a drop
       from Explorer lands on the row under the pointer (live check V7 §5.5).
+      — done 390e380: `Desktop` answers each request on the next `poll`,
+      mirrors the clipboard by `GetClipboardSequenceNumber`, refuses a drag;
+      `pointer_position` is `GetCursorPos` + `ScreenToClient` over the scale.
 
 ## 5. Drives card (df-app `platform/windows/mounts.rs`)
 
-- [ ] **W4.18** `Request::List` → for each bit of `GetLogicalDrives`:
+- [x] **W4.18** `Request::List` → for each bit of `GetLogicalDrives`:
       `GetDriveTypeW(X:\)`; `DRIVE_FIXED|DRIVE_REMOVABLE|DRIVE_CDROM` → `Device {
       object: "X:", drive: None, node: "X:\", label: GetVolumeInformationW name or
       "Local Disk", fs: the filesystem name, size: GetDiskFreeSpaceExW total,
@@ -246,11 +320,19 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       unmount; use Eject for removable drives")`; `Mount` → `Failed`;
       `UnmountShare(X:)` → `WNetCancelConnection2W`. Done when: the mapping has
       unit tests with a fake table; live check V7 §5.7.
-- [ ] **W4.19** `connect(url)`: `smb://server/share` → `ShellExecuteW("open",
+      — done 9be302e: the mapping is `platform/drives.rs` (tested with a fake
+      table on every target); a letter with no medium is not listed; the
+      listing finds the runner's system drive (`the_system_drive_is_listed`).
+- [x] **W4.19** `connect(url)`: `smb://server/share` → `ShellExecuteW("open",
       "\\\\server\\share")` (Explorer prompts for credentials) →
       `Connected::Mounted(Some(UNC as PathBuf))`; other schemes →
       `Connected::Failed("Windows opens smb:// shares only")`. `TERMINAL_MOUNT` is
       `None`. Done when: live check.
+      — done 9be302e and 214488a: the connect waits up to 10 s, on its pool
+      thread, for the UNC path to answer before going there, so the window
+      never waits on a network timeout; `Mounted(None)` after that, which says
+      "Explorer was asked to connect to …" (`mounts::CONNECT_UNSEEN`, as M2.15
+      on macOS).
 
 ## 6. SFTP (df-core `platform/windows/pipe.rs` and `vfs/conn.rs`)
 
@@ -278,13 +360,18 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
 
 - [ ] **W4.22** `platform::fonts::dirs()` Windows list per `05-defaults-and-config.md`
       D5.6. Done when: D5.6 done.
-- [ ] **W4.23** `graphics.rs:77–115`: after the hardware `request_adapter` fails on
+- [x] **W4.23** `graphics.rs:77–115`: after the hardware `request_adapter` fails on
       Windows, retry with `force_fallback_adapter: true` and log "using the
       software adapter (WARP)". Guarded by `platform::gfx::ALLOW_FALLBACK_ADAPTER`
       (Windows `true`). Done when: the app draws in a VM without GPU passthrough
       (live check V7 §3).
+      — done 4e6adfa: the retry is `find_adapter(…, software: true)` on the
+      DX12 instance, before the every-backend retry; and whatever request
+      found it, a CPU adapter is logged as WARP, since wgpu ranks a software
+      adapter last but takes it when it is all there is, which is how the VM
+      got one from the first request.
 - [ ] **W4.24** `platform::dirs` Windows values (D5.1). Done when: D5.1 done.
-- [ ] **W4.25** Keyboard: AltGr. On a layout where `@`/`€` need AltGr, winit reports
+- [x] **W4.25** Keyboard: AltGr. On a layout where `@`/`€` need AltGr, winit reports
       Ctrl+Alt held. `platform::keys::mods` on Windows: when both `control_key()`
       and `alt_key()` are set **and** the event carries printable `text`, treat the
       press as unmodified text (chord `None`) so `route_keys` types it. This covers
@@ -293,7 +380,10 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       are now empty. Done when:
       a `keys.rs` test with `CONTROL|ALT` and `text: "@"` yields no chord under
       `cfg!(windows)`; live check V7 §5.2.
-- [ ] **W4.29** Permissions and owner off-Linux: `spot.rs:116–130, 150–200,
+      — done 3b368bd: `platform::keys::composed`; winit 0.30.13 already leaves
+      Ctrl and Alt out while the right Alt is AltGr, so this covers the left
+      Ctrl+Alt spelling. `ctrl_alt_with_text_is_altgr_on_windows_only`.
+- [x] **W4.29** Permissions and owner off-Linux: `spot.rs:116–130, 150–200,
       268–275, 369–383, 532` (nine POSIX mode chips, the Owner row, `SetMode`) and
       `format.rs:19–33` (`Permissions`/`Owner` linemodes). On Windows the spot
       panel shows one chip, **Read-only**, toggling `0o222` through
@@ -303,14 +393,23 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       `—`. Implemented by `platform::meta::PermissionModel { Posix, ReadOnlyFlag }`
       consulted by `spot::rows`/`BITS` and `format::linemode_text`. macOS keeps the
       POSIX model. Done when: `spot` tests under `cfg!(windows)` see one chip.
-- [ ] **W4.30** `trash://` and `sftp://` pseudo-paths compared as `Path` (`tab.rs:770–790`,
+      — done e7c1f26, 8e07c77 and 9c86b06, as the Phase 4 brief decided
+      (permissions editing does not exist on Windows; the rows are hidden
+      where the platform has none): `platform::POSIX_PERMISSIONS` is `false`
+      on Windows, the spot panel has no Owner or Permissions row for a local
+      file there (no Read-only chip), no octal in its title and no bit keys in
+      its hint, the Permissions linemode says `rw`/`ro` and ` h` for a hidden
+      file, Owner says `—`, and `C` is refused with "Permissions can't be
+      changed on this platform". A server's file keeps all of it and the card.
+- [x] **W4.30** `trash://` and `sftp://` pseudo-paths compared as `Path` (`tab.rs:770–790`,
       `trashview.rs:72–78`, `app.rs:2486, 6785, 16555`): add a unit test that
       `Path::new("trash://") == PathBuf::from("trash://")` and that
       `PathBuf::from("sftp://h/a").starts_with("sftp://h")` hold on Windows (they
       should, since neither has a drive prefix and equality is component-wise), so
       the assumption is checked rather than believed. Done when: the test passes on
       the runner.
-- [ ] **W4.26** Tests: Windows twins for `crumbs`, `typed_path`, `shorten_home`,
+      — done f0ed81a: `pseudo_paths_compare_as_paths_everywhere`.
+- [x] **W4.26** Tests: Windows twins for `crumbs`, `typed_path`, `shorten_home`,
       `save_target`, `parse_file_uri`; `#[cfg(unix)]` on the df-app tests appendix B
       §7 flags that S1.33 did not already gate. Done when: `cargo test -p df-app`
       green on the runner. Phase 3 (port/paths) did the `crumbs` twin (W4.9)
@@ -320,7 +419,12 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       What the runner still failed at the end of Phase 3 (14 of 1,117) is
       listed by cause in `03-paths.md`'s Decisions log (2026-09-29, "df-app
       on the Windows runner").
-- [ ] **W4.33** `platform::appearance` Windows body (S1.35's surface: `Desktop`,
+      — done e28af95 with the twins above (W4.11, W4.12, W4.13) and the
+      separator fixes (W4.13, W4.14): the gvfs card test runs on Unix only,
+      the 7-Zip test reads the system's own words, the sleeve test skips where
+      `bash` is WSL's launcher. df-app on the runner: 1,145 of 1,145 pass at
+      run 36662477949.
+- [x] **W4.33** `platform::appearance` Windows body (S1.35's surface: `Desktop`,
       `Connect`, `session`): the system's light or dark for `[flavor] mode =
       "auto"`, in place of the stub that answers nothing and says `Link::Gone`.
       Two routes, to be chosen here and logged: winit 0.30.13 already reports the
@@ -334,6 +438,9 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       Done when: a unit test of the value → `Scheme` mapping passes on the
       runner; live check that switching Settings → Colours turns a window in
       `auto` (V7 §5.1).
+      — done 6bdc883, the registry route (Decisions log).
+      `the_value_is_the_side` and `the_first_answer_is_there_at_once` on the
+      runner.
 
 ## 8. Deferred, with the design recorded
 
@@ -372,7 +479,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       password, since a loopback port is open to every local user. Then give
       `platform/windows/socket.rs` that body and `AVAILABLE = true`. Done when:
       `vfs/rclone_tests.rs` runs on the Windows runner.
-- [ ] **W4.34** Take `-A dead_code` off the windows job's clippy line in
+- [~] **W4.34** Take `-A dead_code` off the windows job's clippy line in
       `.github/workflows/ci.yml` (S1.53). It is there because df-app items
       whose only callers are Linux bodies — the drag-and-drop helpers in
       `dnd.rs`, gio's output readers in `mounts.rs`, `platform/icon.rs`,
@@ -382,6 +489,19 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       whose Windows caller is the deferred W4.27; while that stays skipped the
       icon has no caller here and this task cannot close. Done when: the
       callers land and the windows job's clippy passes without the flag.
+      — skipped in part, as Brian decided for macOS in M2.31 (Decisions log):
+      after M2.31's moves the Windows build has 25 dead items and df-core
+      none. Six are the enum variants only Linux's bodies make, the ones M2.31
+      names (`ClipError::Missing`, `mounts::Reply::Mounted`,
+      `mounts::Connected::NeedsTerminal`, `desktop::PasteFailure::{Stalled,
+      Broken}`, `appearance::Link::Starting`, gio's `mounts::Change`s), which
+      Windows says its own way too: the clipboard is always there, Windows
+      mounts disks itself and Explorer asks for a share's password, the
+      clipboard is synchronous, the registry answers before `watch_over`
+      returns, and there is no drive watcher. The rest wait on the skipped
+      W4.27: `platform/icon.rs` (the drag picture: `Icon`, `draw`, `Canvas`,
+      its constants and digits) and `desktop::Event::DragEnded`. The flag
+      stays; b71c6ee says why in `ci.yml`.
 
 ## 10. Found in Phase 3
 
@@ -433,6 +553,95 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   while the df-core branch took `W4.31` for the job object; at integration the
   job object kept it and the appearance body became `W4.33`
   (`01-platform-seam.md` Decisions log).
+- (df-app) 2026-09-29 — The keyboard report from the VM (main at 490b481: `j`,
+  `k`, `h` and ↓ did not move the cursor) has no cause in the code: winit
+  0.30.13 hands Windows' ↓ over as `key_without_modifiers` `ArrowDown` with no
+  text, the keypad's ↓ with Num Lock on the same, and a letter as its
+  character with its text, and df-app's key path at 490b481 is the one it has
+  now. On the VM, the build of 3b368bd (run 36653756431, 07 §5.8) moved the
+  cursor with ↓ and ↑, opened the find prompt with `/` and wrapped at the
+  bottom, and `j`, `k`, `h` moved nothing — which they do nowhere, the list's
+  cursor keys being the arrows and `j` `k` `l` the transport's
+  (`keymap::RESERVED_TRANSPORT_KEYS`). What is left is the ↓ of that report,
+  which this build does not reproduce; the likeliest reading is the keyboard
+  left with the console window the console-subsystem build opened beside the
+  window, which W4.1 removes. 821f346 makes the path testable (`keys::Stroke`,
+  `App::key_down`, `keystrokes_shaped_as_windows_sends_them_reach_the_cursor`)
+  and traces every key down at `RUST_LOG=trace`.
+- (df-app) 2026-09-29 — A window that would not fit on the screen opens cut to
+  fit (e2b564e): winit reports no work area on any platform, so Windows asks
+  `SystemParametersInfoW(SPI_GETWORKAREA)` for the primary monitor's and
+  `AdjustWindowRectExForDpi` for the frame, and centres the fitted window
+  there; macOS cuts the size to `NSScreen.mainScreen.visibleFrame` less the
+  title bar and leaves the placing to AppKit. Linux is unchanged: a Wayland
+  client is told no screen's size, and X11's answer is not asked (the pure
+  rule, `platform/fit.rs`, is tested everywhere).
+- (df-app) 2026-09-29 — W4.3: a typed `;`/`:` line and an opener are run by
+  two contract functions each (`spawn_detached`/`run_blocking`,
+  `spawn_typed`/`run_typed`), the Unix bodies of the second pair calling the
+  first, because on Windows one is an argument list and the other `cmd`'s.
+  `builtin:shell-open` in a Linux or macOS config says "`builtin:shell-open`
+  is not something delightfile can do", the words any unknown builtin had
+  before.
+- (df-app) 2026-09-29 — W4.3, from the VM: a typed line runs under
+  `CREATE_NO_WINDOW`, as a Linux one runs with no terminal, because `;notepad`
+  opened a `cmd` console beside Notepad that stayed while Notepad ran; what
+  the line starts still shows its own window. In a share's folder the line
+  runs between `(pushd "<folder>" || exit 1)` and `popd` (d3bf75c, 4d56ecf),
+  since `cmd` refuses a UNC working directory and starts in the Windows
+  folder, where a relative name in the line would act. `pushd` maps the share
+  to a free letter, which stays mapped for the session unless `popd` gives it
+  back, so the tail gives it back and exits with the line's own status, read
+  through `call` after the line has run (`typed` in `platform/windows/open.rs`
+  says how); a runner test sees the status and no new letter, and on the VM
+  the Places card listed the letter while Notepad ran and not after (07 §5.8).
+  An opener is not changed: it is its program, started directly.
+- (df-app) 2026-09-29 — W4.12 is P3.31's option (a): the bulk card's one list
+  of a row's problems asks `path::name_is_valid`. On Linux the one change is a
+  NUL in a row or in `Save as:`, now refused in `name_is_valid`'s words; no
+  key types one.
+- (df-app) 2026-09-29 — W4.13: on Windows `parse_file_uri` reads a remote
+  authority as the share it names (`file://server/share/x` is
+  `\\server\share\x`), where Unix refuses it, because a Windows program writes
+  a share that way and Windows opens it like any other path. The task's
+  `paths_from` row is left to Linux: M2.31 moved it into the Wayland device,
+  which is the only reader of a plain-text drop.
+- (df-app) 2026-09-29 — W4.16 converts where the task said PNG only: a picture
+  that is not a PNG is made one for a copy (`image` decodes every format the
+  window copies by value), and a `CF_DIBV5`/`CF_DIB` another program offered
+  is made one for a paste (a bare Print Screen, an old program). The system
+  clipboard is copied to by `Y` and read by `p` with nothing yanked; `y` and
+  `x` are the window's own clipboard, as on Linux, so `Preferred DropEffect`
+  is always copy and 07 §5.5's "`x` then paste in Explorer moves" has nothing
+  to check (the line is corrected there).
+- (df-app) 2026-09-29 — W4.19: `mounts::CONNECT_UNSEEN` is "Explorer was asked
+  to connect to" on Windows, where main had `None` while nothing connected
+  there. A connect whose share has not answered in its 10 s may still be
+  behind Explorer's password dialog, which is M2.15's case on macOS, so the
+  window says as much as it knows.
+- (df-app) 2026-09-29 — W4.33 takes the registry route: the question goes out
+  before the window exists, and a window whose theme `App::window_theme` sets
+  stops reporting the system's, so winit's `ThemeChanged` would have needed
+  the same work-arounds as macOS's M2.30; `AppsUseLightTheme` and
+  `RegNotifyChangeKeyValue` need no window.
+- (df-app) 2026-09-29 — W4.29 follows the Phase 4 brief rather than the task's
+  Read-only chip: the spot panel has no Owner or Permissions row for a file on
+  a Windows drive, since permissions editing does not exist there (decided for
+  Brian, who delegated it; the df-core branch logs it with the nofollow stub,
+  f320cb7 on `port/windows-core`). With the rows go the octal in the panel's
+  title and the permission-bit keys in its hint, which the VM showed left
+  behind (9c86b06); Space there is hash alone. The Permissions linemode has no
+  `s` for a system file: `Entry` carries no system attribute.
+- (df-app) 2026-09-29 — W4.8: the undo record of a Windows trash stays on the
+  stack — the journal has no way to drop the top record, and dropping it would
+  hide that the trash happened — so `u` keeps saying where to restore it until
+  something else is done on top.
+- (df-app) 2026-09-29 — W4.34 skipped in part: Brian's M2.31 decision for
+  macOS — the Linux-only functions moved under `platform/linux/`, the six
+  Linux-only enum variants kept with `-A dead_code` — covers the same six on
+  Windows, and the rest of what is dead there is the drag picture and
+  `Event::DragEnded`, whose caller is the skipped W4.27. The windows job keeps
+  the flag until W4.27 is done.
 
 ## Open questions
 
@@ -447,3 +656,11 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   with a walk that opens each component with `FILE_FLAG_OPEN_REPARSE_POINT`, or
   the card and `Command::Permissions` are absent there. Until decided,
   `platform::nofollow` on Windows is the stub and every change refuses.
+- (df-app) W4.8: "Empty trash" on Windows. The confirm card lists the trash
+  view's items, and there is no view: (a) the command opens the Recycle Bin in
+  Explorer, where emptying it is one button, and no card; (b) a card that
+  counts rather than lists — "Empty the Recycle Bin? N items, X" from
+  `SHQueryRecycleBinW` — then `SHEmptyRecycleBinW(…, SHERB_NOCONFIRMATION)`,
+  which needs a count-only variant of `ConfirmKind::EmptyTrash`. Until chosen
+  it is refused with the rest of the trash, and after W4.7 lands it would say
+  "The trash is already empty".
