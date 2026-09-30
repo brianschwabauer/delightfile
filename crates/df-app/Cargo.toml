@@ -113,6 +113,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSPasteboard",
     "NSPasteboardItem",
     "NSResponder",
+    "NSScreen",
     "NSView",
     "NSWindow",
     "NSWorkspace",
@@ -130,6 +131,8 @@ windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]

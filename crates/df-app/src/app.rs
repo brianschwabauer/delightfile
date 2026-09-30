@@ -2553,7 +2553,7 @@ impl App {
             ),
             None => (APP_ID, APP_ID),
         };
-        let attrs = crate::platform::window::attributes(title, app_id);
+        let attrs = crate::platform::window::attributes(title, app_id, event_loop);
         let window = Arc::new(
             event_loop
                 .create_window(attrs)

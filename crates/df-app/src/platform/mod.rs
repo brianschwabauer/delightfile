@@ -48,7 +48,7 @@
 //! | `open::{spawn_detached, run_blocking}` | `spawn_detached(&str, &[PathBuf], &Path) -> io::Result<()>`, `run_blocking(&str, &[PathBuf], &Path) -> io::Result<i32>`: an opener's or a typed `;`/`:` snippet over paths, from a directory | `$SHELL -c '<snippet>' delightfile <path>…` (the shared `unix` body), detached with `setsid --fork`; `run_blocking`'s code from `df_core::platform::process::exit_code` | macOS: the same shell body, in a process group of its own and collected by a thread when it exits (M2.16); Windows: `Unsupported`, "Running programs is not available on this platform" (W4.3) | S1.26 |
 //! | `pdfium::LIBRARY_NAME` | `&str`, the library's file name | `libpdfium.so` | `libpdfium.dylib`, `pdfium.dll` | S1.30 |
 //! | `pdfium::candidates` | `fn() -> Vec<PathBuf>`, most specific first, before the system loader | `$DF_PDFIUM_LIB`, `~/.local/lib/{delightfile,delightviewer}/`, the dev `target/` | macOS: `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/`, `~/.local/lib/delightfile/`; Windows: `$DF_PDFIUM_LIB`, the executable's directory | S1.30 |
-//! | `window::attributes` | `fn(title: &str, app_id: &str) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title, size, Option read as Alt; Windows: title, size | S1.27 |
+//! | `window::attributes` | `fn(title: &str, app_id: &str, &ActiveEventLoop) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title, the size cut to the main screen's visible frame ([`fit`]), Option read as Alt; Windows: title, the size cut to the primary monitor's work area and centred there when it would not fit | S1.27 |
 //! | `fonts::dirs` | `fn() -> Vec<PathBuf>`, where a Nerd Font is looked for, in order | `/usr/share/fonts/…`, `/usr/local/share/fonts`, `~/.local/share/fonts`, `~/.fonts` | macOS: `~/Library/Fonts`, `/Library/Fonts`, `/System/Library/Fonts{,/Supplemental}`; Windows: `%LOCALAPPDATA%\Microsoft\Windows\Fonts`, `C:\Windows\Fonts` | S1.29 |
 //! | `trash::{LISTED_NOTE, EMPTIED_NOTE}` | `Option<&str>`: what the trash view says it cannot see, under an empty view and after "Empty trash" | `None`: the view is the whole freedesktop trash | macOS: only what delightfile trashed is listed and emptied, Finder's Trash may hold more (M2.9); Windows: `None` until Phase 4 | M2.9 |
 //! | `keys::mods` | `fn(winit::keyboard::ModifiersState) -> df_core::keymap::Mods`, the held modifiers as the keymap names them | each as itself | macOS: Command or Control is `ctrl`, never `super_key`; Windows: as Linux | M2.20 |
@@ -87,6 +87,12 @@ mod volumes;
 /// pixels: macOS's, and compiled in every target's tests.
 #[cfg(any(target_os = "macos", test))]
 mod dragout;
+
+/// The opening size cut to a screen too small for it: macOS's and
+/// Windows', which can say how big the screen is, and compiled in every
+/// target's tests.
+#[cfg(any(target_os = "macos", windows, test))]
+mod fit;
 
 #[cfg(target_os = "linux")]
 mod linux;
