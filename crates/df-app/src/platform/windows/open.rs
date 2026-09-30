@@ -21,8 +21,9 @@
 //! delightfile's does. And `cmd` cannot stand in a share's folder — handed
 //! `\\server\share\…` as its directory it says so and starts in the Windows
 //! folder, where a relative name in the line would then act — so in a share
-//! the line is run after `pushd` into it, which maps the share to a letter
-//! for the length of the line.
+//! the line is run after `pushd` into it, which maps the share to a letter,
+//! and `popd` gives the letter back after it, the line's status kept
+//! ([`typed`]).
 //!
 //! **`builtin:shell-open` is `ShellExecuteW(…, "open", …)`**: what a
 //! double-click in Explorer does, the file's associated program or the
@@ -91,16 +92,32 @@ pub fn run_blocking(command: &str, paths: &[PathBuf], cwd: &Path) -> io::Result<
 }
 
 /// A typed line as `cmd` runs it, from `cwd`.
+///
+/// In a share the line is wrapped: `(pushd "<cwd>" || exit 1) & <line> &
+/// (call set DF_STATUS=%^ERRORLEVEL%) & popd & call exit %^DF_STATUS%`. The
+/// parentheses keep the `||` to `pushd` whatever the line's own `&&` and
+/// `||` are, so a share that cannot be entered runs nothing; `&` is `cmd`'s
+/// loosest joint, so the tail runs however the line ends. The tail is there
+/// because the letter `pushd` maps stays mapped, for the rest of the
+/// session, unless `popd` gives it back, and `popd` must not stand in for
+/// the line's status: `%^ERRORLEVEL%` reaches `call` as `%ERRORLEVEL%` (the
+/// caret is gone by then, and on a command line an unknown name is left as
+/// written), so it is read after the line has run rather than when `cmd`
+/// read the whole.
 fn typed(line: &str, paths: &[PathBuf], cwd: &Path) -> Command {
+    let share = cwd.as_os_str().to_string_lossy().starts_with(r"\\");
     let mut whole = String::from("/S /C \"");
-    if cwd.as_os_str().to_string_lossy().starts_with(r"\\") {
-        whole.push_str(&format!("pushd \"{}\" && ", cwd.display()));
+    if share {
+        whole.push_str(&format!("(pushd \"{}\" || exit 1) & ", cwd.display()));
     }
     whole.push_str(line);
     for path in paths {
         whole.push_str(" \"");
         whole.push_str(&path.to_string_lossy());
         whole.push('"');
+    }
+    if share {
+        whole.push_str(" & (call set DF_STATUS=%^ERRORLEVEL%) & popd & call exit %^DF_STATUS%");
     }
     whole.push('"');
     let mut command = Command::new(shell_program());
@@ -228,8 +245,7 @@ mod tests {
         let text = std::fs::read_to_string(&out).expect("cmd wrote");
         assert_eq!(text.trim_end(), "said");
         assert_eq!(run_typed("exit 3", &[], &dir).expect("ran"), 3);
-        // It runs in the folder it is given, a share's included: `cd` there
-        // prints the folder, and in a share a letter `pushd` mapped to it.
+        // It runs in the folder it is given: `cd` there prints the folder.
         let here = dir.join("here.txt");
         run_typed(&format!("cd > \"{}\"", here.display()), &[], &dir).expect("ran");
         let said = std::fs::read_to_string(&here).expect("cmd wrote");
@@ -237,21 +253,62 @@ mod tests {
             PathBuf::from(said.trim_end()).canonicalize().expect("real"),
             dir.canonicalize().expect("real")
         );
-        // The same folder through the administrative share, where the runner
-        // may reach it (an elevated account on the machine's own C$).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// In a share's folder a line runs there, through the letter `pushd`
+    /// maps, its own `&` and relative names included; its status is its
+    /// own, not `popd`'s; and the letter is given back. The share is the
+    /// temp folder through the machine's own `C$`, which a runner's
+    /// elevated account reaches; elsewhere, with no such share, the test
+    /// says so and stops, and on a runner it fails instead.
+    #[test]
+    fn a_typed_line_in_a_share_runs_there_and_gives_its_letter_back() {
+        use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+        let dir = std::env::temp_dir().join(format!("df-typed-share-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let dir = dir.canonicalize().expect("real");
         let text = dir.to_string_lossy().into_owned();
-        if let Some(rest) = text.strip_prefix(r"C:\") {
-            let share = PathBuf::from(format!(r"\\localhost\C$\{rest}"));
-            if share.is_dir() {
-                let there = dir.join("there.txt");
-                run_typed(&format!("cd > \"{}\"", there.display()), &[], &share).expect("ran");
-                let said = std::fs::read_to_string(&there).expect("cmd wrote");
-                assert!(
-                    !said.trim_end().eq_ignore_ascii_case(r"C:\Windows"),
-                    "cmd started in the Windows folder: {said}"
-                );
-            }
-        }
+        let rest = text
+            .trim_start_matches(r"\\?\")
+            .strip_prefix(r"C:\")
+            .map(str::to_string);
+        let share = rest.map(|rest| PathBuf::from(format!(r"\\localhost\C$\{rest}")));
+        let Some(share) = share.filter(|share| share.is_dir()) else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no administrative share to run in at {text}"
+            );
+            eprintln!("skipped: {text} has no administrative share here");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
+        // SAFETY: takes nothing and returns a bit mask of the letters in use.
+        let letters = || unsafe { GetLogicalDrives() };
+        let before = letters();
+
+        let there = dir.join("there.txt");
+        let code = run_typed(&format!("cd > \"{}\"", there.display()), &[], &share).expect("ran");
+        assert_eq!(code, 0);
+        let said = std::fs::read_to_string(&there).expect("cmd wrote");
+        let said = said.trim_end();
+        assert!(
+            !said.eq_ignore_ascii_case(r"C:\Windows"),
+            "cmd started in the Windows folder: {said}"
+        );
+        let tail = text.trim_start_matches(r"\\?\").trim_start_matches(r"C:\");
+        assert!(
+            said.to_ascii_lowercase()
+                .ends_with(&tail.to_ascii_lowercase()),
+            "{said} is not the share's folder"
+        );
+
+        let code = run_typed("echo one> a.txt & echo two> b.txt", &[], &share).expect("ran");
+        assert_eq!(code, 0);
+        assert!(dir.join("a.txt").is_file() && dir.join("b.txt").is_file());
+
+        assert_eq!(run_typed("cmd /c exit 4", &[], &share).expect("ran"), 4);
+        assert_eq!(letters(), before, "a letter pushd mapped is still mapped");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
