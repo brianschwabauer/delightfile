@@ -15,3 +15,10 @@ pub fn mods(state: ModifiersState) -> Mods {
         super_key: state.super_key(),
     }
 }
+
+/// Whether a press is a character composed with modifiers that are not
+/// modifiers here: never on Linux, where AltGr is a level of its own and
+/// never arrives as Ctrl+Alt.
+pub fn composed(_state: ModifiersState, _text: Option<&str>) -> bool {
+    false
+}

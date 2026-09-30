@@ -56,8 +56,14 @@ impl Stroke {
 ///
 /// Modifier presses themselves are `None`: holding Ctrl is not a keystroke, and
 /// treating it as one would abandon every pending chord the moment a hand
-/// reached for the next key.
+/// reached for the next key. So is a character the platform composed with
+/// modifiers that are not modifiers there — Windows' AltGr, which arrives as
+/// Ctrl+Alt ([`crate::platform::keys::composed`]): it is text, and the router
+/// types it.
 pub fn chord(stroke: &Stroke, mods: ModifiersState) -> Option<Chord> {
+    if crate::platform::keys::composed(mods, text(stroke).as_deref()) {
+        return None;
+    }
     // `key_without_modifiers` is the whole normalization: it undoes Shift, Caps
     // Lock and Ctrl, so the layout question is answered once, by the compositor,
     // rather than by a shift table here. `logical_key` is the fallback for the
@@ -292,5 +298,46 @@ mod tests {
         );
         // …and neither is a composed multi-character input.
         assert_eq!(chord_from(&character("ab"), ModifiersState::empty()), None);
+    }
+
+    /// A stroke with its text, as a platform hands one over.
+    fn stroke(key: &str, text: Option<&str>) -> Stroke {
+        Stroke {
+            unmodified: character(key),
+            logical: character(text.unwrap_or(key)),
+            text: text.map(str::to_string),
+            repeat: false,
+        }
+    }
+
+    /// AltGr on Windows (W4.25): a German layout's `@` is AltGr+q, which
+    /// arrives as Ctrl+Alt+q with `@` for its text. There it is the text,
+    /// not the chord `ctrl+alt+q`; everywhere else Ctrl+Alt is itself.
+    #[test]
+    fn ctrl_alt_with_text_is_altgr_on_windows_only() {
+        const CTRL_ALT: Mods = Mods {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            super_key: false,
+        };
+        let held = ModifiersState::CONTROL | ModifiersState::ALT;
+        let at = stroke("q", Some("@"));
+        assert_eq!(text(&at).as_deref(), Some("@"));
+        if cfg!(windows) {
+            assert_eq!(chord(&at, held), None, "AltGr types `@`");
+        } else {
+            assert_eq!(chord(&at, held), Some(Chord::new(CTRL_ALT, Key::Char('q'))));
+        }
+        // Ctrl+Alt with nothing typed is a chord on every platform, and so is
+        // Ctrl alone with the letter it would have typed (Windows reports it).
+        assert_eq!(
+            chord(&stroke("q", None), held),
+            Some(Chord::new(CTRL_ALT, Key::Char('q')))
+        );
+        assert_eq!(
+            chord(&stroke("j", Some("j")), ModifiersState::CONTROL),
+            Some(Chord::ctrl(Key::Char('j')))
+        );
     }
 }

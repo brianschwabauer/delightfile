@@ -22,6 +22,13 @@ pub fn mods(state: ModifiersState) -> Mods {
     }
 }
 
+/// Whether a press is a character composed with modifiers that are not
+/// modifiers here: never on macOS, where Option is read as Alt and composes
+/// nothing ([`super::window`]).
+pub fn composed(_state: ModifiersState, _text: Option<&str>) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
