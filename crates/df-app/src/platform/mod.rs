@@ -29,8 +29,8 @@
 //! | `process::attach_parent_console` | `fn()`, first thing in `main` | nothing (the shared `unix` body) | macOS nothing; Windows: `AttachConsole(ATTACH_PARENT_PROCESS)`, and standard output and error that point nowhere reopened on `CONOUT$` | W4.1 |
 //! | `portal::run` | `fn() -> i32`, the process's exit status | the file-chooser portal and `org.freedesktop.FileManager1` on the session bus | never reached (`--portal` is not accepted); says so and returns 2 | S1.31 |
 //! | `cli::{REVEAL_USAGE, REQUEST_USAGE, EXTRA_USAGE}` | `&str`, the `--help` entries that differ | the `--reveal` and `--chooser-request` entries naming the portal, and `--portal`'s | the same two without it, and `""` | S1.31 |
-//! | `clipboard::{copy, reap, offered_types, paste}` | `copy(Option<&str>, &[u8]) -> Result<Option<Child>, clipboard::ClipError>` (`Some` is a process the window owns until `reap(&mut Child)`, `None` a copy already made), `offered_types() -> Result<Vec<String>, ClipError>`, `paste(&str) -> Result<Vec<u8>, ClipError>`: the clipboard without a data device | `wl-copy --foreground`, `wl-paste` | macOS: `NSPasteboard`, synchronous, so `copy` is `Ok(None)` (M2.10); Windows: every call `ClipError::Missing("clipboard")`; `reap` stops and collects | S1.23 |
-//! | `clipboard::missing` | `fn(&str) -> String`, what `ClipError::Missing` says | "… is not installed — install wl-clipboard" | macOS: "The pasteboard is not available", never said; Windows: "No clipboard transport on this platform" | S1.23 |
+//! | `clipboard::{copy, reap, offered_types, paste}` | `copy(Option<&str>, &[u8]) -> Result<Option<Child>, clipboard::ClipError>` (`Some` is a process the window owns until `reap(&mut Child)`, `None` a copy already made), `offered_types() -> Result<Vec<String>, ClipError>`, `paste(&str) -> Result<Vec<u8>, ClipError>`: the clipboard without a data device | `wl-copy --foreground`, `wl-paste` | macOS: `NSPasteboard`, synchronous, so `copy` is `Ok(None)` (M2.10); Windows: the system clipboard, synchronous too — `CF_UNICODETEXT`, `CF_HDROP` with `Preferred DropEffect` copy, the registered `PNG` (a bitmap made into one on a paste) (W4.16); `reap` stops and collects | S1.23 |
+//! | `clipboard::missing` | `fn(&str) -> String`, what `ClipError::Missing` says | "… is not installed — install wl-clipboard" | macOS: "The pasteboard is not available", never said; Windows: "The clipboard is not available", never said | S1.23 |
 //! | `appearance::Desktop` | `watch_over(Connect, Notifier) -> Desktop`, `drain(&mut self) -> Option<appearance::Scheme>`, `heard(&self) -> bool`, `link(&self) -> appearance::Link`, `started(&self) -> Instant`, `wait_first(&mut self, Duration) -> Option<Scheme>` | the portal's `color-scheme`, read and then heard on a thread | macOS: `NSApp.effectiveAppearance` under key-value observing, the first answer in before `watch_over` returns, `Link::Gone` off the main thread (M2.30); Windows: no thread, never heard, `Link::Gone` | S1.35 |
 //! | `appearance::Connect` | `Clone` type the app holds and hands to `watch_over` | `Arc<dyn Fn() -> Result<Bus, String>>` | macOS: a unit struct, the application being always there to ask; Windows: `Arc<dyn Fn() -> Result<Infallible, String>>` | S1.35 |
 //! | `appearance::session` | `fn() -> Connect` | the session bus | macOS: the application; Windows: a connection that is never made | S1.35 |
@@ -91,6 +91,11 @@ mod volumes;
 /// pixels: macOS's, and compiled in every target's tests.
 #[cfg(any(target_os = "macos", test))]
 mod dragout;
+
+/// The bytes of Windows' clipboard formats — a file list, text, a bitmap
+/// made into a PNG: Windows', and compiled in every target's tests.
+#[cfg(any(windows, test))]
+mod clipformats;
 
 /// An opener's command split into a program and its arguments, the paths
 /// put in: Windows', which has no shell to read it, and compiled in every
