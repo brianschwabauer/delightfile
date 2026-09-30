@@ -804,6 +804,17 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   temp names made valid in Phase 3 (P3.21). A test runs the real `ssh`
   against a closed port wherever there is one and reads its refusal off
   stderr through the new pipes.
+- (df-core) 2026-09-29 — W4.37, from the runner: after access denied, the
+  race's last failure was "not empty" from the folder both deleters had
+  emptied — its last names marked by the other and not yet let go, since a
+  marked name stays listed until its last handle closes. `remove_tree` tries
+  the folder again, every 5 ms for a second at most, while
+  `platform::fs::is_emptying` says every name left is delete-pending; on Unix
+  that is always `false`, so the first "not empty" is the error it was. A
+  gone error from the listing itself now stops the listing rather than
+  asking again (Windows answers every later call the same; on Unix the
+  listing had already ended), and `STATUS_FILE_DELETED` — a call on a folder
+  deleted since it was opened — reads as gone too.
 
 ## Open questions
 

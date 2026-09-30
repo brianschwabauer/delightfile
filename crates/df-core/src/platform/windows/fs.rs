@@ -109,6 +109,39 @@ pub fn is_junction(path: &Path) -> bool {
     crate::platform::meta::reparse_tag(path) == Some(IO_REPARSE_TAG_MOUNT_POINT)
 }
 
+/// Whether every name still listed in `dir` is on its way out: marked for
+/// deletion by a handle another deleter has not yet closed, so the directory
+/// will be empty in a moment though removing it now answers "not empty". A
+/// name that opens is there to stay, and so is one that cannot be asked
+/// about for any other reason; either makes this `false`.
+pub fn is_emptying(dir: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    const FILE_SHARE_ALL: u32 = 0x7;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let Ok(listing) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in listing {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let opened = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_ALL)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(entry.path());
+        match opened {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || crate::platform::errno::is_delete_pending(&e) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Remove the link at `path` itself, never what it points at. Windows has
 /// two kinds: a link to a directory, and a junction, are directories to the
 /// file system and go with `RemoveDirectoryW`; a link to a file goes with

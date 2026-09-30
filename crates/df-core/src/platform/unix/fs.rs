@@ -105,6 +105,12 @@ pub fn is_junction(_path: &Path) -> bool {
     false
 }
 
+/// Never: an unlinked name leaves its directory at once, so a name that is
+/// listed is there to stay (Windows can list one on its way out).
+pub fn is_emptying(_dir: &Path) -> bool {
+    false
+}
+
 /// Remove the symlink at `path` itself, never what it points at: `unlink(2)`,
 /// whatever the link points to.
 pub fn remove_link(path: &Path) -> std::io::Result<()> {

@@ -121,12 +121,27 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
             };
             remove_tree(&entry.path(), ctx)?;
         }
-        match std::fs::remove_dir(path) {
-            Ok(()) => ctx.advance(0, 1),
-            Err(e) if gone(&e) => {}
-            Err(e) => return Err(DfError::io(path, e)),
+        let mut settling = 0;
+        loop {
+            match std::fs::remove_dir(path) {
+                Ok(()) => ctx.advance(0, 1),
+                Err(e) if gone(&e) => {}
+                // "Not empty" while every name left is on its way out —
+                // another deleter's, not yet let go (Windows) — is empty in a
+                // moment; nowhere else is this ever so.
+                Err(e)
+                    if crate::platform::errno::is_not_empty(&e)
+                        && settling < SETTLE_TRIES
+                        && crate::platform::fs::is_emptying(path) =>
+                {
+                    settling += 1;
+                    std::thread::sleep(SETTLE);
+                    continue;
+                }
+                Err(e) => return Err(DfError::io(path, e)),
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     let len = if meta.is_symlink() { 0 } else { meta.len() };
@@ -144,6 +159,12 @@ pub fn remove_tree(path: &Path, ctx: &TaskCtx) -> Result<()> {
     }
     Ok(())
 }
+
+/// How long to wait, and how many times, for a directory whose last names
+/// another deleter is letting go of ([`crate::platform::fs::is_emptying`]):
+/// a second in all, far more than the moment a handle stays open.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(5);
+const SETTLE_TRIES: u32 = 200;
 
 /// Whether an io error says the thing is not there — which, to a delete, is
 /// the thing having been deleted. On Windows a name another deleter has

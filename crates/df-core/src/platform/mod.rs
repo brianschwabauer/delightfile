@@ -39,6 +39,7 @@
 //! | `fs` | `same_file(a, b) -> io::Result<bool>` (not through a link) | `dev` + `ino` (unix) | unix | volume serial + file index, through `meta::identity` (P3.3) |
 //! | `fs` | `writable(dir) -> bool` | `access(W_OK)` (unix) | unix | a hidden `.df-write-test-<pid>-<n>` made there, deleted on close (W4.6) |
 //! | `fs` | `is_junction(path) -> bool` (the path itself, P3.7) | `false` (unix) | unix | reparse tag `IO_REPARSE_TAG_MOUNT_POINT` |
+//! | `fs` | `is_emptying(dir) -> bool`: every name still listed is another deleter's, marked and not yet let go, so "not empty" will pass (W4.37) | `false` (unix) | unix | each name left refuses to open as delete-pending (or is gone) |
 //! | `fs` | `remove_link(path) -> io::Result<()>` (the link, never its target, P3.26) | `remove_file` (unix) | unix | `remove_dir` for a link to a directory or a junction, else `remove_file` |
 //! | `fs` | `reflink(reader, writer) -> bool` (clone into an open file) | `FICLONE` | `false` | `false` |
 //! | `fs` | `clone_before_open(reader, dst) -> io::Result<bool>` (clone into a new file; `false`: copy the long way) | `Ok(false)` | `fclonefileat` (APFS) | `Ok(false)` |
