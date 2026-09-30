@@ -442,11 +442,12 @@ mod tests {
         ));
     }
 
-    /// The exchange over a real socket, which is a unix socket until W4.32.
-    #[cfg(unix)]
+    /// The exchange over a real socket: a unix socket on every platform,
+    /// Windows' own `AF_UNIX` there (W4.32), served by the platform's test
+    /// listener.
     mod over_a_socket {
         use super::*;
-        use std::os::unix::net::UnixListener;
+        use crate::platform::socket::Listener;
         use std::sync::atomic::{AtomicU32, Ordering};
 
         /// A private scratch directory for one test's socket, removed on drop —
@@ -464,9 +465,10 @@ mod tests {
                     std::process::id(),
                     COUNTER.fetch_add(1, Ordering::Relaxed)
                 );
-                // `/tmp` when `$TMPDIR` is too deep for a socket inside it.
+                // `/tmp` when `$TMPDIR` is too deep for a socket inside it
+                // (Unix: Windows has no `/tmp`, and its temp folder is not).
                 let mut dir = std::env::temp_dir().join(&name);
-                if dir.as_os_str().len() > 90 {
+                if cfg!(unix) && dir.as_os_str().len() > 90 {
                     dir = std::path::PathBuf::from("/tmp").join(&name);
                 }
                 let _ = std::fs::remove_dir_all(&dir);
@@ -489,9 +491,9 @@ mod tests {
         /// body, answer with `reply`, hand back what was asked.
         fn serve_once(socket: &Path, reply: &'static [u8]) -> std::thread::JoinHandle<String> {
             let _ = std::fs::remove_file(socket);
-            let listener = UnixListener::bind(socket).unwrap();
+            let listener = Listener::bind(socket).unwrap();
             std::thread::spawn(move || {
-                let (stream, _) = listener.accept().unwrap();
+                let stream = listener.accept().unwrap();
                 let mut reader = BufReader::new(stream);
                 let mut head = String::new();
                 let mut length = 0usize;
@@ -540,10 +542,10 @@ mod tests {
         fn a_silent_server_times_out_and_a_missing_one_is_an_io_error() {
             let scratch = Scratch::new("silent");
             let socket = scratch.socket();
-            let listener = UnixListener::bind(&socket).unwrap();
+            let listener = Listener::bind(&socket).unwrap();
             // Accept and then say nothing, holding the connection open.
             let held = std::thread::spawn(move || {
-                let (stream, _) = listener.accept().unwrap();
+                let stream = listener.accept().unwrap();
                 std::thread::sleep(Duration::from_millis(600));
                 drop(stream);
             });

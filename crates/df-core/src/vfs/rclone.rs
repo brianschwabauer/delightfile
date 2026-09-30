@@ -217,8 +217,9 @@ impl Daemon {
     /// `--bwlimit`, which is how a cancel is caught mid-transfer on a machine
     /// where a local copy would otherwise finish before the first poll.
     pub(super) fn spawn(service: Arc<Service>, extra_args: &[String]) -> Result<Daemon, VfsError> {
-        // No socket to speak to rclone on (Windows, until W4.32): nothing is
-        // started, and the remote says why through the spawn error.
+        // No socket to speak to rclone on (Windows had none until W4.32):
+        // nothing is started, and the remote says why through the spawn
+        // error.
         if !crate::platform::socket::AVAILABLE {
             return Err(VfsError::Spawn {
                 service: service.name.clone(),
@@ -623,7 +624,7 @@ impl Daemon {
         let total = attrs.size.unwrap_or(0);
         match self.run_job("operations/copyfile", params, ctx, Some(total), remote) {
             Ok(bytes) => {
-                let flushed = std::fs::File::open(local).and_then(|file| file.sync_all());
+                let flushed = crate::platform::fs::sync_file(local);
                 flushed.map_err(|source| VfsError::Io {
                     path: local.to_path_buf(),
                     source,
@@ -1108,14 +1109,11 @@ fn spawn_failure(service: &Service, program: &Path, source: std::io::Error) -> V
 }
 
 /// Where the socket goes: the service's [`Service::socket_dir`] when it names
-/// one (the tests' way to keep out of the user's runtime directory), else
+/// one (the tests' way to keep out of the user's runtime directory), else the
+/// platform's places for one ([`crate::platform::socket::dirs`]: on Linux
 /// `$XDG_RUNTIME_DIR/delightfile/`, else a private directory under the temp
-/// dir, else one under `/tmp`, the first whose socket path fits `sun_path`.
-///
-/// macOS has no `$XDG_RUNTIME_DIR`, and its runtime directory is `$TMPDIR`
-/// ([`crate::platform::dirs::runtime_dir`]), the `/var/folders/…/T/` it makes
-/// for each user and keeps private to them; the socket goes there, and under
-/// `/tmp` when a long remote name pushes that past macOS's 103 bytes.
+/// dir, else one under `/tmp`; on Windows `%LOCALAPPDATA%\delightfile\run`),
+/// the first that is private and whose socket path fits `sun_path`.
 ///
 /// The name carries the pid, the service and a per-process counter. The pid
 /// keeps two delightfiles apart; the counter keeps two daemons in one process
@@ -1136,17 +1134,7 @@ fn socket_path(service: &Service) -> Result<PathBuf, VfsError> {
         // Only there: a service that says where its socket goes has said
         // where it must not go, too.
         Some(dir) => candidates.push(dir.clone()),
-        None => {
-            if let Some(runtime) =
-                crate::platform::dirs::runtime_dir().filter(|d| !d.as_os_str().is_empty())
-            {
-                candidates.push(runtime.join("delightfile"));
-            }
-            candidates.push(std::env::temp_dir().join(format!("delightfile-{uid}")));
-            // A `$TMPDIR` deep enough to push the name past `sun_path` still
-            // leaves `/tmp`, which never does.
-            candidates.push(PathBuf::from("/tmp").join(format!("delightfile-{uid}")));
-        }
+        None => candidates.extend(crate::platform::socket::dirs(uid)),
     }
     for dir in candidates {
         let path = dir.join(&name);
@@ -1441,9 +1429,60 @@ mod tests {
         assert!(error.to_string().contains("short enough"), "{error}");
     }
 
+    /// Windows: the socket directory's privacy is the ACL it inherits
+    /// (`platform::socket::private_dir`), so the directory is made as it is,
+    /// and a file where it would be is refused rather than used.
+    #[cfg(windows)]
+    #[test]
+    fn socket_names_are_short_safe_and_distinct() {
+        assert_eq!(file_safe("r2"), "r2");
+        assert_eq!(file_safe("my remote/../x"), "my_remote_.._x");
+        assert_eq!(file_safe(&"x".repeat(100)).len(), 32);
+        let scratch = super::super::tests::TempDir::for_socket("rclone-sockets");
+        let run = scratch.path.join("run");
+        let mut service = Service::rclone("my remote", "r2");
+        service.socket_dir = Some(run.clone());
+        let a = socket_path(&service).unwrap_or_default();
+        let b = socket_path(&service).unwrap_or_default();
+        assert_eq!(
+            a.parent(),
+            Some(run.as_path()),
+            "the service's own directory"
+        );
+        assert!(run.is_dir(), "made: {}", run.display());
+        assert_ne!(a, b, "two daemons in one process never share a socket");
+        assert!(a.as_os_str().len() <= SUN_PATH_MAX, "{}", a.display());
+        let name = a.file_name().map(|n| n.to_string_lossy().into_owned());
+        assert!(
+            name.as_deref().is_some_and(
+                |n| n.starts_with(&format!("rclone-{}-my_remote-", std::process::id()))
+            ),
+            "{name:?}"
+        );
+
+        let mut blocked = Service::rclone("r2", "r2");
+        blocked.socket_dir = Some(scratch.file("in-the-way", b"x"));
+        let error = socket_path(&blocked)
+            .map(|_| ())
+            .expect_err("a file is no place for a socket");
+        assert!(error.to_string().contains("private directory"), "{error}");
+
+        // A directory the socket would not fit in is refused, not bound.
+        let mut deep = Service::rclone("r2", "r2");
+        deep.socket_dir = Some(scratch.path.join("d".repeat(SUN_PATH_MAX)));
+        let error = socket_path(&deep)
+            .map(|_| ())
+            .expect_err("a socket path past sun_path is refused");
+        assert!(error.to_string().contains("short enough"), "{error}");
+    }
+
     /// **Dropped mid-copy, the daemon is stopped gently** — `SIGTERM`, which
     /// rclone cleans up on — so the `.partial` it was writing goes with it,
     /// and the drop does not have to wait for the `SIGKILL` fallback.
+    ///
+    /// Unix only: Windows has no signal to stop a console-less child gently,
+    /// and `terminate` there is `TerminateProcess`, which leaves the
+    /// `.partial` behind (04-windows.md, Open questions).
     #[cfg(unix)]
     #[test]
     fn a_daemon_dropped_mid_copy_cleans_up_after_itself() {

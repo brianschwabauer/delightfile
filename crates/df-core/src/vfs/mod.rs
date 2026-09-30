@@ -94,9 +94,9 @@ mod rfc3339;
 /// extending the client, and the tests exercise both directions of it.
 pub mod wire;
 
-/// The daemon over its unix socket, with a real or a scripted rclone: Unix
-/// until W4.32 gives Windows a transport.
-#[cfg(all(test, unix))]
+/// The daemon over its unix socket, with a real or a scripted rclone — on
+/// Windows too, over its own `AF_UNIX` (W4.32).
+#[cfg(test)]
 mod rclone_tests;
 #[cfg(test)]
 mod tests;

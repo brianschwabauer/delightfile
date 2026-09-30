@@ -5,7 +5,7 @@
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Whether the rclone daemon can be spoken to here: yes, over a unix socket.
@@ -52,6 +52,47 @@ pub fn private_dir(dir: &Path, uid: u32) -> io::Result<()> {
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// Where a socket may go when the caller names nowhere, the first that is
+/// private ([`private_dir`]) and short enough taken:
+/// `$XDG_RUNTIME_DIR/delightfile/`, else `delightfile-<uid>` under the temp
+/// dir, else under `/tmp`.
+///
+/// macOS has no `$XDG_RUNTIME_DIR`, and its runtime directory is `$TMPDIR`
+/// ([`crate::platform::dirs::runtime_dir`]), the `/var/folders/…/T/` it makes
+/// for each user and keeps private to them; the socket goes there, and under
+/// `/tmp` when a long remote name pushes that past macOS's 103 bytes.
+pub fn dirs(uid: u32) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(runtime) =
+        crate::platform::dirs::runtime_dir().filter(|d| !d.as_os_str().is_empty())
+    {
+        candidates.push(runtime.join("delightfile"));
+    }
+    candidates.push(std::env::temp_dir().join(format!("delightfile-{uid}")));
+    // A `$TMPDIR` deep enough to push the name past `sun_path` still
+    // leaves `/tmp`, which never does.
+    candidates.push(PathBuf::from("/tmp").join(format!("delightfile-{uid}")));
+    candidates
+}
+
+/// A socket bound for a test to serve on: the listening end
+/// [`connect`] reaches.
+#[cfg(test)]
+pub struct Listener(std::os::unix::net::UnixListener);
+
+#[cfg(test)]
+impl Listener {
+    /// Bind at `path`, which must not exist.
+    pub fn bind(path: &Path) -> io::Result<Listener> {
+        std::os::unix::net::UnixListener::bind(path).map(Listener)
+    }
+
+    /// The next connection.
+    pub fn accept(&self) -> io::Result<Stream> {
+        self.0.accept().map(|(stream, _)| stream)
+    }
 }
 
 #[cfg(test)]
