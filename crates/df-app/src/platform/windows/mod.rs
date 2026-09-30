@@ -1,7 +1,8 @@
 //! The Windows bodies (`plans/other-platforms/04-windows.md`): the console,
 //! the clipboard, the drives card, the openers, the pointer, the window's
-//! size, the appearance. What has no body yet — a drag out (W4.27), a phone —
-//! answers "not available here" with the Linux names and signatures.
+//! size and its title bar, the appearance. What has no body yet — a drag out
+//! (W4.27), a phone — answers "not available here" with the Linux names and
+//! signatures.
 
 /// Whether `--portal` exists: there is no desktop portal here, so the flag
 /// is an unknown option and `--help` does not mention it.
@@ -27,5 +28,6 @@ pub mod open;
 pub mod pdfium;
 pub mod portal;
 pub mod process;
+mod titlebar;
 pub mod trash;
 pub mod window;
