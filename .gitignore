@@ -1,3 +1,4 @@
 /target
 /build/assets
 .claude/worktrees/
+/build/windows/delightfile.ico
