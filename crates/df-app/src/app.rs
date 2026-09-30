@@ -6440,6 +6440,26 @@ impl App {
 
     // ── Commands ────────────────────────────────────────────────────────────
 
+    /// A key went down: queue it for [`App::route_keys`] as both of the
+    /// things it can be, read with the modifiers held now. Whether there was
+    /// anything to queue — a frame is owed for it.
+    ///
+    /// Key repeat is kept: holding `↓` has to scroll, and the keymap treats a
+    /// repeat exactly as a press.
+    fn key_down(&mut self, stroke: &crate::keys::Stroke) -> bool {
+        let chord = crate::keys::chord(stroke, self.modifiers);
+        let text = crate::keys::text(stroke);
+        if chord.is_none() && text.is_none() {
+            return false;
+        }
+        self.pending_keys.push(Press {
+            repeat: stroke.repeat,
+            chord,
+            text,
+        });
+        true
+    }
+
     /// Turn queued keystrokes into commands and run them.
     ///
     /// `page` is how many rows are on screen, which is what `Ctrl+f` and
@@ -20556,16 +20576,10 @@ impl ApplicationHandler<crate::Wake> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
-                // Key repeat is kept: holding `↓` has to scroll, and the keymap
-                // treats a repeat exactly as a press.
-                let chord = crate::keys::chord(&event, self.modifiers);
-                let text = crate::keys::text(&event);
-                if chord.is_some() || text.is_some() {
-                    self.pending_keys.push(Press {
-                        repeat: event.repeat,
-                        chord,
-                        text,
-                    });
+                if log::log_enabled!(log::Level::Trace) {
+                    log::trace!("key down: {event:?} with {:?}", self.modifiers);
+                }
+                if self.key_down(&crate::keys::Stroke::of(&event)) {
                     wants_frame = true;
                 }
             }
@@ -21053,6 +21067,74 @@ mod tests {
         press(&mut app, Mods::ALT, Key::ArrowLeft);
         assert_eq!(card(&app).1.col, 4, "two stops back is `red`");
         assert_eq!(app.cwd(), here, "the key went to the history");
+    }
+
+    /// Keystrokes shaped as winit delivers them on Windows, followed from the
+    /// window's event to the cursor (the live check in 04-windows.md, where
+    /// `↓` was reported doing nothing): an arrow is a named key with no text,
+    /// on the numeric keypad with Num Lock on it types its digit as well, and a
+    /// letter carries its own text. `↓` and `↑` move the cursor, held or not;
+    /// `/` opens the find prompt and the letters after it are typed into it;
+    /// `j`, `k` and `h` move nothing, because the list's cursor keys are the
+    /// arrows and `j` `k` `l` are the transport's (`RESERVED_TRANSPORT_KEYS`).
+    #[test]
+    fn keystrokes_shaped_as_windows_sends_them_reach_the_cursor() {
+        use crate::keys::Stroke;
+        use winit::keyboard::{Key as WinitKey, NamedKey};
+        let ctx = egui::Context::default();
+        let mut app = Fixture::new("windows-keys", &["a.txt", "b.txt", "c.txt", "d.txt"]);
+        run_frame(&mut app, &ctx, Vec::new());
+        let named = |key: NamedKey, repeat: bool| Stroke {
+            unmodified: WinitKey::Named(key),
+            logical: WinitKey::Named(key),
+            text: None,
+            repeat,
+        };
+        let letter = |c: &str| Stroke {
+            unmodified: WinitKey::Character(c.into()),
+            logical: WinitKey::Character(c.into()),
+            text: Some(c.to_string()),
+            repeat: false,
+        };
+        let press = |app: &mut App, stroke: Stroke| {
+            assert!(app.key_down(&stroke), "{stroke:?} queued nothing");
+            run_frame(app, &ctx, Vec::new());
+        };
+        let cursor = |app: &App| app.tab().cwd.dir.cursor();
+        assert_eq!(cursor(&app), 0);
+
+        press(&mut app, named(NamedKey::ArrowDown, false));
+        assert_eq!(cursor(&app), 1, "↓ moves the cursor");
+        press(&mut app, named(NamedKey::ArrowDown, true));
+        assert_eq!(cursor(&app), 2, "and so does its repeat");
+        press(&mut app, named(NamedKey::ArrowUp, false));
+        assert_eq!(cursor(&app), 1, "↑ moves it back");
+        // The keypad's 2 with Num Lock on: unmodified it is ↓, and it types 2.
+        press(
+            &mut app,
+            Stroke {
+                unmodified: WinitKey::Named(NamedKey::ArrowDown),
+                logical: WinitKey::Character("2".into()),
+                text: Some("2".to_string()),
+                repeat: false,
+            },
+        );
+        assert_eq!(cursor(&app), 2, "the keypad's ↓ is ↓ in the list");
+
+        for key in ["j", "k", "h"] {
+            press(&mut app, letter(key));
+            assert_eq!(cursor(&app), 2, "`{key}` is not a cursor key");
+        }
+
+        press(&mut app, letter("/"));
+        assert!(app.prompt.is_some(), "`/` opens the find prompt");
+        press(&mut app, letter("d"));
+        assert_eq!(cursor(&app), 3, "typing `d` finds d.txt");
+        press(&mut app, named(NamedKey::Escape, false));
+        assert!(app.prompt.is_none(), "Esc closes it");
+        assert_eq!(cursor(&app), 2, "and cancels the find");
+        press(&mut app, named(NamedKey::ArrowUp, false));
+        assert_eq!(cursor(&app), 1, "and the arrows are the list's again");
     }
 
     /// The temporary leg of a swap is an implementation detail of running the

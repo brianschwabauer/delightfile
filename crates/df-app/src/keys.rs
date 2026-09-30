@@ -17,19 +17,52 @@ use df_core::keymap::{Chord, Key, Mods};
 use winit::event::KeyEvent;
 use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
 
+/// A key going down, as the window reads it: the parts of winit's
+/// [`KeyEvent`] a chord and a text are made from.
+///
+/// Its own type rather than the event, because a `KeyEvent` cannot be made
+/// outside winit (its platform half is private), and a test has to be able
+/// to press the key a platform actually delivers — on Windows a letter
+/// carries its text even with Ctrl held, where Wayland hands over a control
+/// character — and follow it all the way to the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stroke {
+    /// The key with no modifier applied (`key_without_modifiers`): what the
+    /// chord is read from first.
+    pub unmodified: WinitKey,
+    /// The key as the layout and the modifiers made it (`logical_key`): the
+    /// fallback where a platform has no unmodified key to give.
+    pub logical: WinitKey,
+    /// What the key types, as winit reports it, control characters and all.
+    pub text: Option<String>,
+    /// winit's own answer to "is this key repeating".
+    pub repeat: bool,
+}
+
+impl Stroke {
+    /// The parts of a real event.
+    pub fn of(event: &KeyEvent) -> Stroke {
+        use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+        Stroke {
+            unmodified: event.key_without_modifiers(),
+            logical: event.logical_key.clone(),
+            text: event.text.as_ref().map(|text| text.to_string()),
+            repeat: event.repeat,
+        }
+    }
+}
+
 /// The chord this keystroke is, if it is one delightfile can bind.
 ///
 /// Modifier presses themselves are `None`: holding Ctrl is not a keystroke, and
 /// treating it as one would abandon every pending chord the moment a hand
 /// reached for the next key.
-pub fn chord(event: &KeyEvent, mods: ModifiersState) -> Option<Chord> {
-    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
+pub fn chord(stroke: &Stroke, mods: ModifiersState) -> Option<Chord> {
     // `key_without_modifiers` is the whole normalization: it undoes Shift, Caps
     // Lock and Ctrl, so the layout question is answered once, by the compositor,
     // rather than by a shift table here. `logical_key` is the fallback for the
     // platforms that do not implement it.
-    chord_from(&event.key_without_modifiers(), mods)
-        .or_else(|| chord_from(&event.logical_key, mods))
+    chord_from(&stroke.unmodified, mods).or_else(|| chord_from(&stroke.logical, mods))
 }
 
 /// What this keystroke *types*, if it types anything.
@@ -40,8 +73,8 @@ pub fn chord(event: &KeyEvent, mods: ModifiersState) -> Option<Chord> {
 /// is `\t`. Those are keystrokes, not text, and a filter query with an escape
 /// character in it is a query that quietly stops matching, so anything with a
 /// control character in it is not text at all.
-pub fn text(event: &KeyEvent) -> Option<String> {
-    let text = event.text.as_deref()?;
+pub fn text(stroke: &Stroke) -> Option<String> {
+    let text = stroke.text.as_deref()?;
     if text.is_empty() || text.chars().any(char::is_control) {
         return None;
     }
