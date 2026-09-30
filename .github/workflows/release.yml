@@ -8,7 +8,7 @@
 # draft and publishes it; nothing here publishes.
 #
 #   linux    Arch container, like CI     delightfile-<v>-x86_64-linux.tar.gz
-#   macos    macos-latest (arm64)        delightfile-<v>-aarch64-macos.dmg
+#   macos    macos-15 (arm64)            delightfile-<v>-aarch64-macos.dmg
 #   windows  windows-latest (MSVC)       delightfile-<v>-x86_64-windows.zip
 #
 # Run by hand (workflow_dispatch) it is a dry run: everything but the release
@@ -117,10 +117,15 @@ jobs:
 
   # B6.16, B6.17. FFmpeg is Homebrew's, as in CI (B6.7 option 1), and the
   # bundle carries it and everything it links; the bundle's minimum macOS is
-  # whatever those libraries were built for (bundle.sh).
+  # whatever those libraries were built for (bundle.sh). Homebrew builds its
+  # bottles for the macOS they are poured on, so this job runs on macos-15,
+  # not CI's macos-latest, and the bundle starts on macOS 15 and later. When
+  # GitHub retires the macos-15 image the minimum moves with the runner this
+  # is changed to; building FFmpeg for macOS 13 is the way back down
+  # (06-build-and-release.md, Decisions log, 2026-09-30).
   macos:
     needs: version
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 90
     defaults:
       run:
@@ -136,7 +141,7 @@ jobs:
           sw_vers
           xcode-select -p
           if [ "$(uname -m)" != arm64 ]; then
-            echo "::error::macos-latest is $(uname -m), not arm64"
+            echo "::error::macos-15 is $(uname -m), not arm64"
             exit 1
           fi
 
@@ -400,10 +405,15 @@ jobs:
 
   # B6.17's done-when on a fresh runner that never installed Homebrew's
   # FFmpeg, and B6.24's: the cask passes brew audit and style, and installs
-  # from the dmg.
+  # from the dmg. Once on the oldest macOS the bundle claims (the release
+  # job's own runner) and once on the newest the runners have.
   verify-macos:
     needs: [version, assemble]
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-latest]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     defaults:
       run:
@@ -423,6 +433,7 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
+          echo "macOS $(sw_vers -productVersion) on ${{ matrix.runner }}"
           (cd dist && shasum -a 256 -c "delightfile-$VERSION-aarch64-macos.dmg.sha256")
           brew list --versions ffmpeg || echo "no Homebrew ffmpeg on this runner"
           bash build/macos/check-dmg.sh "dist/delightfile-$VERSION-aarch64-macos.dmg"
