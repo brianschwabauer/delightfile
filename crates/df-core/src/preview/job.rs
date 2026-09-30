@@ -825,6 +825,12 @@ mod tests {
         assert_eq!(updates.len(), 1, "expected one update");
         assert_eq!(updates[0].token(), token);
         assert_eq!(updates[0].pane(), PaneId(1));
+        // The worker rings after it sends, so the update can be in hand a
+        // moment before the bell has rung.
+        let rung_by = Instant::now() + Duration::from_secs(2);
+        while rung.load(Ordering::Relaxed) == 0 && Instant::now() < rung_by {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(
             rung.load(Ordering::Relaxed) >= 1,
             "the notifier never fired"
