@@ -185,7 +185,7 @@ pdfium, bblanchon/pdfium-binaries $pdfium_release, pdfium.dll
            builds in
   Source:  https://github.com/bblanchon/pdfium-binaries/releases/tag/$pdfium_release
 "@
-    [System.IO.File]::WriteAllText((Join-Path $licenses 'SOURCES.txt'), ($sources -replace "`r?`n", "`r`n"))
+    [System.IO.File]::WriteAllText((Join-Path $licenses 'SOURCES.txt'), (($sources + "`n") -replace "`r?`n", "`r`n"))
 
     New-Item -ItemType Directory -Force $Out | Out-Null
     $zip = Join-Path (Resolve-Path $Out).Path "$name.zip"
