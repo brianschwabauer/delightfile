@@ -31,6 +31,13 @@
 #   builds its bottles for the macOS they are poured on.
 # - Draws the icon from build/delightfile.svg at 1024 px with sips and makes
 #   the .icns with iconutil.
+# - Fills Contents/Resources/Licenses: delightfile's LICENSE, FFmpeg's
+#   COPYING.GPLv3 and LICENSE.md from the Homebrew keg the bundled FFmpeg
+#   came from, pdfium's license files, and SOURCES.txt, which names the exact
+#   FFmpeg and where its source is (the Homebrew formula's URL, read with
+#   `brew info` and jq, which macOS 15 has), and the Homebrew formula of every
+#   other library bundled. An FFmpeg that is not a Homebrew keg stops the
+#   script, since then nothing says where its source is.
 # - Signs every library and then the bundle ad hoc (`codesign --sign -`):
 #   Apple silicon runs no arm64 code without a signature, and a person can
 #   still take the unsigned-app route in the README. Not notarized (§6).
@@ -151,6 +158,7 @@ gather() {
         echo "  $name  ← $source" >&2
         cp -L "$source" "$frameworks/$name"
         chmod 644 "$frameworks/$name"
+        echo "$name $source" >>"$work/sources"
         gather "$frameworks/$name" "$source"
     done < <(links "$file")
 }
@@ -159,6 +167,7 @@ echo "bundling into $app" >&2
 cp -L "$pdfium" "$frameworks/libpdfium.dylib"
 chmod 644 "$frameworks/libpdfium.dylib"
 echo "  libpdfium.dylib  ← $pdfium" >&2
+: >"$work/sources"
 gather "$contents/MacOS/delightfile" "$bin"
 gather "$frameworks/libpdfium.dylib" "$pdfium"
 
@@ -241,12 +250,108 @@ for size in 16 32 128 256 512; do
 done
 iconutil -c icns "$work/delightfile.iconset" -o "$contents/Resources/delightfile.icns"
 
-cp "$repo/LICENSE" "$contents/Resources/LICENSE"
+# ── Licenses ────────────────────────────────────────────────────────────────
+
+# The Homebrew keg a bundled library came from, as `<formula> <version>
+# <keg>`, or nothing when it came from anywhere else.
+keg_of() {
+    local dir
+    dir="$(cd "$(dirname "$1")" && pwd -P)"
+    case $dir in
+    */Cellar/*/*/lib) ;;
+    *) return 0 ;;
+    esac
+    dir="$(dirname "$dir")"
+    echo "$(basename "$(dirname "$dir")") $(basename "$dir") $dir"
+}
+
+licenses="$contents/Resources/Licenses"
+mkdir -p "$licenses/delightfile" "$licenses/FFmpeg" "$licenses/pdfium"
+cp "$repo/LICENSE" "$licenses/delightfile/LICENSE"
+
+ffmpeg_source="$(awk '$1 ~ /^libavcodec\./ { sub(/^[^ ]+ /, ""); print; exit }' "$work/sources")"
+[[ -n $ffmpeg_source ]] || fail "the program links no libavcodec"
+read -r ffmpeg_formula ffmpeg_pkg ffmpeg_keg <<<"$(keg_of "$ffmpeg_source")"
+[[ ${ffmpeg_formula:-} == ffmpeg* ]] ||
+    fail "FFmpeg ($ffmpeg_source) is not a Homebrew keg, so SOURCES.txt cannot say where its source is"
+for file in COPYING.GPLv3 LICENSE.md; do
+    [[ -f $ffmpeg_keg/$file ]] || fail "FFmpeg's keg $ffmpeg_keg has no $file"
+    cp "$ffmpeg_keg/$file" "$licenses/FFmpeg/$file"
+done
+
 pdfium_root="$(dirname "$(dirname "$pdfium")")"
+[[ -f $pdfium_root/LICENSE ]] || fail "no LICENSE in $pdfium_root; run build/macos/fetch-pdfium.sh"
+cp "$pdfium_root/LICENSE" "$licenses/pdfium/LICENSE"
+# The licenses of what pdfium builds in (FreeType, ICU, libjpeg-turbo, …).
 if [[ -d $pdfium_root/licenses ]]; then
-    mkdir -p "$contents/Resources/licenses"
-    cp -R "$pdfium_root/licenses" "$contents/Resources/licenses/pdfium"
+    cp "$pdfium_root"/licenses/* "$licenses/pdfium/"
 fi
+
+# What Homebrew says about each formula a bundled library came from, one
+# tab-separated line each: name, version, revision, source URL, sha256,
+# license.
+while IFS= read -r line; do
+    keg_of "${line#* }"
+done <"$work/sources" | sort -u >"$work/kegs"
+# shellcheck disable=SC2046 # one formula name per word
+brew info --json=v2 --formula $(cut -d' ' -f1 "$work/kegs" | sort -u) >"$work/brew.json"
+jq -r '.formulae[] | [.name, .versions.stable, (.revision | tostring), .urls.stable.url,
+        (.urls.stable.checksum // "-"), (.license // "-")] | @tsv' "$work/brew.json" >"$work/formulae"
+
+# A formula's line, and whether its version is the one bundled (`pkg` is
+# the keg's folder name, `<version>` or `<version>_<revision>`).
+formula_line() {
+    awk -F'\t' -v name="$1" '$1 == name' "$work/formulae"
+}
+same_version() {
+    local stable=$2 revision=$3 pkg=$1
+    [[ $pkg == "$stable" && $revision == 0 ]] || [[ $pkg == "${stable}_$revision" ]]
+}
+
+IFS=$'\t' read -r _ ffmpeg_stable ffmpeg_revision ffmpeg_url ffmpeg_sha ffmpeg_license <<<"$(formula_line "$ffmpeg_formula")"
+same_version "$ffmpeg_pkg" "$ffmpeg_stable" "$ffmpeg_revision" ||
+    fail "Homebrew's $ffmpeg_formula is $ffmpeg_stable (revision $ffmpeg_revision) but the bundled keg is $ffmpeg_pkg, so its URL is not this FFmpeg's source"
+pdfium_release="$(sed -n 1p "$here/pdfium.lock")"
+pdfium_release="${pdfium_release#*/download/}"
+pdfium_release="${pdfium_release%/*}"
+
+{
+    echo "Where the source is of what delightfile.app carries"
+    echo
+    echo "delightfile $version"
+    echo "  License: GPL-3.0-or-later, Licenses/delightfile/LICENSE"
+    echo "  Source:  https://github.com/brianschwabauer/delightfile (tag v$version)"
+    echo
+    echo "FFmpeg $ffmpeg_stable, built by Homebrew (formula $ffmpeg_formula $ffmpeg_pkg), in"
+    echo "Contents/Frameworks as libavcodec, libavformat, libavutil, libswresample and"
+    echo "libswscale. Built with --enable-gpl."
+    echo "  License: $ffmpeg_license (Homebrew's formula), Licenses/FFmpeg/COPYING.GPLv3"
+    echo "           and Licenses/FFmpeg/LICENSE.md"
+    echo "  Source:  $ffmpeg_url"
+    echo "  sha256:  $ffmpeg_sha"
+    echo "  Recipe:  https://formulae.brew.sh/formula/$ffmpeg_formula"
+    echo
+    echo "The libraries FFmpeg links, built by Homebrew, in Contents/Frameworks"
+    echo "(each formula's page has its recipe and its license):"
+    while read -r formula pkg _; do
+        [[ $formula == "$ffmpeg_formula" ]] && continue
+        IFS=$'\t' read -r _ stable revision url _ license <<<"$(formula_line "$formula")"
+        echo "  $formula $pkg ($license)"
+        if same_version "$pkg" "$stable" "$revision"; then
+            echo "    Source: $url"
+        else
+            echo "    Source: the $pkg release of $formula (Homebrew's formula has moved to $stable)"
+        fi
+        echo "    Recipe: https://formulae.brew.sh/formula/$formula"
+    done <"$work/kegs"
+    echo
+    echo "pdfium, bblanchon/pdfium-binaries $pdfium_release, in Contents/Frameworks as"
+    echo "libpdfium.dylib"
+    echo "  License: Licenses/pdfium/LICENSE, and beside it the licenses of what it builds in"
+    echo "  Source:  https://github.com/bblanchon/pdfium-binaries/releases/tag/$pdfium_release"
+} >"$licenses/SOURCES.txt"
+echo "Licenses/SOURCES.txt:" >&2
+sed 's/^/  /' "$licenses/SOURCES.txt" >&2
 
 # ── Signature ───────────────────────────────────────────────────────────────
 
