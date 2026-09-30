@@ -99,8 +99,11 @@
 //! and not one "invalid":
 //!
 //! - **Unusable**: empty, `.`/`..`, or containing a `/`. Nothing can be named
-//!   this; the row is wrong on its own terms.
-//! - **TooLong**: over [`NAME_MAX`] bytes.
+//!   this; the row is wrong on its own terms. So is a name this platform will
+//!   not make ([`df_core::path::name_is_valid`]: on Windows a `\`, any of
+//!   `< > : " | ? *`, a trailing dot or space, a device's name like `con`),
+//!   and the row says which character, or what else, is to blame ([`Why`]).
+//! - **TooLong**: over [`NAME_MAX`], counted as this platform counts a name.
 //! - **Duplicate**: two rows in *this card* want the same name. Neither row is
 //!   wrong by itself, which is why both are marked: the fix is a choice between
 //!   them.
@@ -119,7 +122,9 @@
 //! The swap case is also why the rename runs in two passes; see
 //! [`ordered_renames`].
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -133,11 +138,24 @@ use df_core::rename::exif;
 use df_core::rename::facts::{Civil, Facts, Photo, PhotoFacts};
 use df_core::rename::template::{self, Missing, Part, Template};
 
-/// The longest name this card will accept, in bytes.
+/// The longest name this card will accept, in this platform's unit
+/// ([`name_units`]).
 ///
-/// Linux's own `NAME_MAX`. Refusing at 255 with a readable message beats letting
-/// the rename fail with `ENAMETOOLONG` half way through a batch.
-pub const NAME_MAX: usize = 255;
+/// Linux's own `NAME_MAX`, 255 bytes, and Windows' 255 UTF-16 code units
+/// ([`df_core::platform::os::MAX_NAME`]). Refusing at the limit with a readable
+/// message beats letting the rename fail with `ENAMETOOLONG` half way through a
+/// batch.
+pub const NAME_MAX: usize = df_core::platform::os::MAX_NAME;
+
+/// How long `name` is in the unit [`NAME_MAX`] counts: bytes on Unix, UTF-16
+/// code units on Windows, where `é` is one and not two.
+fn name_units(name: &str) -> usize {
+    if df_core::platform::os::NAME_IN_UTF16 {
+        name.encode_utf16().count()
+    } else {
+        name.len()
+    }
+}
 
 /// How many candidates the `{` popover shows before it scrolls. Eight is the
 /// whole first stage of the catalogue's most-wanted end, and short enough that
@@ -162,13 +180,13 @@ const PHOTO_EXTENSIONS: [&str; 13] = [
 /// What is wrong with one row, if anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Problem {
-    /// Empty, `.`, `..`, or containing a `/`.
-    Unusable,
+    /// Nothing can be called this, and why.
+    Unusable(Why),
     /// Another row in this card wants the same name.
     Duplicate,
     /// Something already on disk is called that.
     Taken,
-    /// Over [`NAME_MAX`] bytes.
+    /// Over [`NAME_MAX`].
     TooLong,
     /// The template needs something this file does not have, in the words of
     /// [`Missing::Because`]: "no date taken", "no camera".
@@ -178,16 +196,34 @@ pub enum Problem {
     Pending,
 }
 
+/// Why a row is [`Problem::Unusable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// Empty, `.`, `..`, or with a `/` in it: nothing anywhere is called that.
+    Nothing,
+    /// A character this platform keeps out of a name: on Windows `\`, any of
+    /// `< > : " | ? *` or a control character, and a NUL everywhere.
+    Character(char),
+    /// Something else this platform refuses, in its own words: on Windows a
+    /// trailing dot or space, or a device's name.
+    Platform(&'static str),
+}
+
 impl Problem {
     /// The inline message, in the words a person can act on.
-    pub fn message(self) -> &'static str {
+    pub fn message(self) -> Cow<'static, str> {
         match self {
-            Problem::Unusable => "not a usable name",
-            Problem::Duplicate => "two rows want this name",
-            Problem::Taken => "already exists here",
-            Problem::TooLong => "too long",
-            Problem::Missing(why) => why,
-            Problem::Pending => "reading photo…",
+            Problem::Unusable(Why::Nothing) => Cow::Borrowed("not a usable name"),
+            Problem::Unusable(Why::Character(c)) if c.is_control() => {
+                Cow::Borrowed("cannot contain a control character")
+            }
+            Problem::Unusable(Why::Character(c)) => Cow::Owned(format!("cannot contain {c}")),
+            Problem::Unusable(Why::Platform(why)) => Cow::Borrowed(why),
+            Problem::Duplicate => Cow::Borrowed("two rows want this name"),
+            Problem::Taken => Cow::Borrowed("already exists here"),
+            Problem::TooLong => Cow::Borrowed("too long"),
+            Problem::Missing(why) => Cow::Borrowed(why),
+            Problem::Pending => Cow::Borrowed("reading photo…"),
         }
     }
 }
@@ -1519,11 +1555,13 @@ pub fn problems(names: &[&str], others: &HashSet<String>) -> Vec<Option<Problem>
     names
         .iter()
         .map(|name| {
-            // `/` only: see plans/other-platforms/03-paths.md for the port.
             if name.is_empty() || *name == "." || *name == ".." || name.contains('/') {
-                return Some(Problem::Unusable);
+                return Some(Problem::Unusable(Why::Nothing));
             }
-            if name.len() > NAME_MAX {
+            if let Some(why) = refused(name) {
+                return Some(Problem::Unusable(why));
+            }
+            if name_units(name) > NAME_MAX {
                 return Some(Problem::TooLong);
             }
             if counts.get(*name).copied().unwrap_or(0) > 1 {
@@ -1535,6 +1573,22 @@ pub fn problems(names: &[&str], others: &HashSet<String>) -> Vec<Option<Problem>
             None
         })
         .collect()
+}
+
+/// Why this platform will not make `name`, if it will not
+/// ([`df_core::path::name_is_valid`], P3.31): the character to blame where
+/// one is — the first that the platform refuses even between two letters,
+/// which is what tells a `:` apart from a trailing dot — and otherwise the
+/// platform's own words.
+fn refused(name: &str) -> Option<Why> {
+    let why = df_core::path::name_is_valid(OsStr::new(name)).err()?;
+    let bad = name
+        .chars()
+        .find(|&c| df_core::path::name_is_valid(OsStr::new(&format!("a{c}a"))).is_err());
+    Some(match bad {
+        Some(c) => Why::Character(c),
+        None => Why::Platform(why),
+    })
 }
 
 /// Order a set of renames so that running them one at a time never collides.
@@ -1834,9 +1888,10 @@ mod tests {
         let others = set(&["taken.txt"]);
         let names = vec!["", "..", "a/b", "same", "same", "taken.txt", "fine.txt"];
         let found = problems(&names, &others);
-        assert_eq!(found[0], Some(Problem::Unusable), "empty");
-        assert_eq!(found[1], Some(Problem::Unusable), "dot dot");
-        assert_eq!(found[2], Some(Problem::Unusable), "slash");
+        let nothing = Some(Problem::Unusable(Why::Nothing));
+        assert_eq!(found[0], nothing, "empty");
+        assert_eq!(found[1], nothing, "dot dot");
+        assert_eq!(found[2], nothing, "slash");
         // Both halves of a duplicate are marked: neither is wrong on its own,
         // and the fix is a choice between them.
         assert_eq!(found[3], Some(Problem::Duplicate));
@@ -1853,6 +1908,36 @@ mod tests {
             problems(&["x".repeat(NAME_MAX).as_str()], &HashSet::new())[0],
             None
         );
+    }
+
+    /// A name Windows will not make is unusable there, and the row says
+    /// which character, or what else, is at fault; on Linux every one of
+    /// them is a name (W4.12, P3.31).
+    #[test]
+    fn a_name_windows_will_not_make_is_unusable_there_only() {
+        let names = ["con", "Con.txt", "a:b.txt", r"a\b", "trailing.", "q?"];
+        let found = problems(&names, &HashSet::new());
+        if !cfg!(windows) {
+            assert_eq!(found, vec![None; names.len()]);
+            return;
+        }
+        let device = |p: Option<Problem>| matches!(p, Some(Problem::Unusable(Why::Platform(_))));
+        assert!(device(found[0]), "{:?}", found[0]);
+        assert!(device(found[1]), "{:?}", found[1]);
+        assert_eq!(found[2], Some(Problem::Unusable(Why::Character(':'))));
+        assert_eq!(found[3], Some(Problem::Unusable(Why::Character('\\'))));
+        assert!(matches!(
+            found[4],
+            Some(Problem::Unusable(Why::Platform(_)))
+        ));
+        assert_eq!(found[5], Some(Problem::Unusable(Why::Character('?'))));
+        assert_eq!(
+            Problem::Unusable(Why::Character(':')).message(),
+            "cannot contain :"
+        );
+        // 255 UTF-16 units, not bytes: 255 `é` are 510 bytes and still fit.
+        let accents = "é".repeat(NAME_MAX);
+        assert_eq!(problems(&[accents.as_str()], &HashSet::new())[0], None);
     }
 
     /// A file being renamed away does not collide with itself, which is what
@@ -2167,7 +2252,10 @@ mod tests {
         retype(&mut bulk, "{taken}{ext}");
         let found = bulk.problems();
         assert_eq!(found, vec![Some(Problem::Missing("no date taken")); 3]);
-        assert_eq!(found[0].map(Problem::message), Some("no date taken"));
+        assert_eq!(
+            found[0].map(Problem::message).as_deref(),
+            Some("no date taken")
+        );
         run(&mut bulk, "<tab><down><end>2");
         let found = bulk.problems();
         assert_eq!(found[1], None, "a row named by hand says what it wants");
@@ -2186,7 +2274,7 @@ mod tests {
         retype(&mut bulk, "{date}{ext}");
         assert_eq!(bulk.problems(), vec![Some(Problem::Pending), None]);
         assert_eq!(
-            bulk.problems()[0].map(Problem::message),
+            bulk.problems()[0].map(Problem::message).as_deref(),
             Some("reading photo…")
         );
         assert_eq!(run(&mut bulk, "<enter>"), Outcome::Consumed);

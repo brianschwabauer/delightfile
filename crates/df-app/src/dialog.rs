@@ -1330,8 +1330,8 @@ pub fn bulk_geometry(painter: &egui::Painter, area: egui::Rect, bulk: &Bulk) -> 
         // a long reason must not leave no name to read beside it.
         let mut right = new.right() - PAD_X;
         if let Some(problem) = problem {
-            let reason =
-                chrome::text_width(painter, problem.message(), font.clone()).min(new.width() / 2.0);
+            let reason = chrome::text_width(painter, &problem.message(), font.clone())
+                .min(new.width() / 2.0);
             right -= reason + PAD_X;
         }
         let text = egui::Rect::from_min_max(
@@ -1769,7 +1769,7 @@ fn paint_name(
         chrome::truncated(
             painter,
             egui::pos2(row.text.right() + PAD_X, rect.center().y),
-            problem.message(),
+            &problem.message(),
             color,
             (right - row.text.right() - PAD_X).max(0.0),
         );

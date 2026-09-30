@@ -20209,7 +20209,9 @@ fn reveal_directory(path: &Path) -> (PathBuf, Option<String>) {
 /// nobody can find by typing its name. A `/` is refused rather than followed —
 /// the dialog saves *here*, in the directory on screen, and a name that
 /// wandered off into another one would be a save to somewhere nobody was
-/// looking.
+/// looking. Past that, a name this platform will not make is refused in its
+/// own words ([`df_core::path::name_is_valid`]): on Windows a `\`, a `:`, a
+/// trailing dot, `con` (W4.12).
 fn save_target(dir: &Path, text: &str) -> Result<PathBuf, String> {
     let name = text.trim();
     if name.is_empty() {
@@ -20218,6 +20220,7 @@ fn save_target(dir: &Path, text: &str) -> Result<PathBuf, String> {
     if name.contains('/') {
         return Err("a file name, not a path — no /".to_string());
     }
+    df_core::path::name_is_valid(std::ffi::OsStr::new(name))?;
     Ok(dir.join(name))
 }
 
@@ -23957,6 +23960,27 @@ mod tests {
         assert_eq!(save_target(dir, ".bashrc"), Ok(dir.join(".bashrc")));
         for bad in ["", "   ", "a/b.txt", "/etc/passwd", "../x"] {
             assert!(save_target(dir, bad).is_err(), "{bad:?} was taken");
+        }
+    }
+
+    /// On Windows `Save as:` also turns away what Windows will not make, in
+    /// its own words, and what Linux takes is taken there (W4.12).
+    #[test]
+    fn a_save_name_is_a_name_windows_can_make() {
+        let dir = std::env::temp_dir();
+        for name in [r"a\b.txt", "con", "con.txt", "a:b.txt", "report.", "what?"] {
+            let target = save_target(&dir, name);
+            if cfg!(windows) {
+                assert!(target.is_err(), "{name:?} was taken");
+            } else {
+                assert_eq!(target, Ok(dir.join(name)), "{name:?}");
+            }
+        }
+        if cfg!(windows) {
+            assert_eq!(
+                save_target(&dir, "con.txt"),
+                Err("CON, PRN, AUX, NUL, COM1–9 and LPT1–9 are the names of devices".to_string())
+            );
         }
     }
 
