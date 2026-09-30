@@ -480,7 +480,10 @@ jobs:
 
       # Scoop from its installer at a fixed commit, then the manifest with
       # its url pointed at a server on this runner, the release it names not
-      # existing yet.
+      # existing yet. Scoop makes the shim of a windows-subsystem program a
+      # windows-subsystem shim, which a shell does not wait for, so the
+      # version is asked of the installed program itself; the shim and the
+      # Start menu shortcut are checked for being there.
       - name: The scoop manifest (scoop install)
         env:
           VERSION: ${{ needs.version.outputs.version }}
@@ -499,9 +502,18 @@ jobs:
             $manifest | ConvertTo-Json -Depth 10 | Set-Content $local
             scoop install $local
             if ($LASTEXITCODE -ne 0) { throw "scoop install failed" }
-            $said = "$(delightfile --version)".Trim()
-            Write-Output "delightfile --version through scoop's shim: $said"
-            if ($said -ne "delightfile $env:VERSION") { throw "the scoop shim's --version said '$said'" }
+            $installed = Join-Path $env:USERPROFILE 'scoop\apps\delightfile\current\delightfile.exe'
+            $shim = Join-Path $env:USERPROFILE 'scoop\shims\delightfile.exe'
+            $shortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Scoop Apps\delightfile.lnk'
+            foreach ($path in $installed, $shim, $shortcut) {
+              if (-not (Test-Path $path)) { throw "scoop install made no $path" }
+              Write-Output "scoop made $path"
+            }
+            $version_file = Join-Path $env:RUNNER_TEMP 'scoop-version.txt'
+            $run = Start-Process $installed -ArgumentList '--version' -NoNewWindow -Wait -PassThru -RedirectStandardOutput $version_file
+            $said = "$(Get-Content $version_file -Raw)".Trim()
+            Write-Output "the scoop-installed delightfile.exe --version: $said (exit $($run.ExitCode))"
+            if ($said -ne "delightfile $env:VERSION") { throw "the scoop-installed program's --version said '$said'" }
             scoop uninstall delightfile
           } finally {
             Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
