@@ -260,6 +260,11 @@ document that owns the feature.
       (`RSYNC_HINT`); with `brew install rsync`: it runs (M2.6).
 - [ ] `--chooser-file` and the portal flag are absent from `--help`.
 - [ ] Zoxide jumps if `zoxide` is installed via Homebrew.
+- [~] Open With from Finder: right-click a folder, Open With, delightfile opens
+      a window on that folder. — skipped: not available. The bundle declares
+      no document types until `02-macos.md` M2.36 hands the app the folder
+      Finder chose, so delightfile is not in Finder's list; check that it is
+      not.
 
 ## 5. Live checklist — Windows
 
