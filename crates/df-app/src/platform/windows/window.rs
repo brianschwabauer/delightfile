@@ -33,6 +33,13 @@ use crate::platform::fit::{fit, Area, Fitted, Frame};
 
 pub use super::titlebar::{adopt, caption_pointer, set_theme, title_band, title_regions};
 
+/// No press the window sees is the title bar's: the system asks the window
+/// where its title bar is (`WM_NCHITTEST`, [`super::titlebar`]) and keeps
+/// those presses to itself.
+pub fn title_press(_window: &Window) -> bool {
+    false
+}
+
 /// The attributes the one window is created with: `title` and the opening
 /// size, fitted to the work area when it would not fit.
 pub fn attributes(title: &str, _app_id: &str, event_loop: &ActiveEventLoop) -> WindowAttributes {

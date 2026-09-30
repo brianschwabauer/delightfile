@@ -51,10 +51,11 @@
 //! | `open::shell_open` | `fn(&OsStr) -> io::Result<()>`: `builtin:shell-open`, the system's own "open" | `Unsupported` (no table names it) | macOS `Unsupported`; Windows `ShellExecuteW(…, "open", …)` (W4.3) | W4.3 |
 //! | `pdfium::LIBRARY_NAME` | `&str`, the library's file name | `libpdfium.so` | `libpdfium.dylib`, `pdfium.dll` | S1.30 |
 //! | `pdfium::candidates` | `fn() -> Vec<PathBuf>`, most specific first, before the system loader | `$DF_PDFIUM_LIB`, `~/.local/lib/{delightfile,delightviewer}/`, the dev `target/` | macOS: `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/`, `~/.local/lib/delightfile/`; Windows: `$DF_PDFIUM_LIB`, the executable's directory | S1.30 |
-//! | `window::attributes` | `fn(title: &str, app_id: &str, &ActiveEventLoop) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title, the size cut to the main screen's visible frame ([`fit`]), Option read as Alt; Windows: title, the size cut to the primary monitor's work area and centred there when it would not fit | S1.27 |
+//! | `window::attributes` | `fn(title: &str, app_id: &str, &ActiveEventLoop) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title (hidden), the size cut to the main screen's visible frame ([`fit`]), Option read as Alt, the title bar see-through over content that runs up under it (M2.37); Windows: title, the size cut to the primary monitor's work area and centred there when it would not fit | S1.27 |
 //! | `window::adopt` | `fn(&Window)`, once, after the window is made and before anything draws | nothing | macOS nothing; Windows: its window procedure in front of winit's and the caption given to the client area ([`caption`]) | W4.39 |
-//! | `window::title_band` | `fn(&Window) -> Option<ui::TitleBand>`, asked every frame: the band at the window's top the title bar shares with the chrome | `None` | macOS `None`; Windows: three 46-point caption buttons of the window's own, kept clear at the right; `None` without a caption (full screen) | W4.39 |
-//! | `window::title_regions` | `fn(&Window, band: egui::Rect, buttons: Option<[egui::Rect; 3]>, controls: &[egui::Rect])`, after every layout that has a band: the band, the caption buttons and the window's own controls in it, logical points | never called | macOS never called; Windows: what the title bar's hit test answers the next point with | W4.39 |
+//! | `window::title_band` | `fn(&Window) -> Option<ui::TitleBand>`, asked every frame: the band at the window's top the title bar shares with the chrome | `None` | macOS: the traffic lights kept clear at the left, as far in as AppKit's three buttons reach (78 points when it will not say), nothing at the right, `None` in full screen (M2.37); Windows: three 46-point caption buttons of the window's own, kept clear at the right; `None` without a caption (full screen) | W4.39 |
+//! | `window::title_regions` | `fn(&Window, band: egui::Rect, buttons: Option<[egui::Rect; 3]>, controls: &[egui::Rect])`, after every layout that has a band: the band, the caption buttons and the window's own controls in it, logical points | never called | macOS: what `title_press` answers the next press with (M2.37); Windows: what the title bar's hit test answers the next point with | W4.39 |
+//! | `window::title_press` | `fn(&Window) -> bool`, on a primary press before egui or the window sees it: whether it was the title bar's, and the platform has acted on it | `false` | macOS: a press in the band on none of the window's controls drags the window (`drag_window`), or on a double click zooms or minimizes it as System Settings says, and is `true` (M2.37); Windows `false`, the system keeping the title bar's presses | M2.37 |
 //! | `window::caption_pointer` | `fn(&Window) -> ui::CaptionPointer`: the caption button the pointer is over and the one it pressed, for the frame that draws them | nothing over, nothing pressed | macOS the same; Windows: what the non-client mouse messages said | W4.39 |
 //! | `window::set_theme` | `fn(&Window, winit::window::Theme)`, the window's side | `Window::set_theme` | macOS the same; Windows: that, and `DWMWA_USE_IMMERSIVE_DARK_MODE` for DWM's frame | W4.39 |
 //! | `menubar::MENU_BUTTON` | `const bool`: whether the top row leads with the ☰ button that opens the app menu | `true` | macOS `false`, the app menu being the menu bar's; Windows `true` | M2.37 |
@@ -127,9 +128,9 @@ mod argv;
 mod fit;
 
 /// Which part of the window's top is the title bar and which the window's
-/// own, when the window draws into the title bar: Windows', and compiled in
-/// every target's tests.
-#[cfg(any(windows, test))]
+/// own, when the window draws into the title bar: Windows' and macOS's, and
+/// compiled in every target's tests.
+#[cfg(any(target_os = "macos", windows, test))]
 mod caption;
 
 /// Which of the app menu's rows goes under which of a menu bar's menus, and

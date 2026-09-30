@@ -97,13 +97,16 @@ objc2-foundation = { workspace = true, features = [
     "NSString",
     "NSThread",
     "NSURL",
+    "NSUserDefaults",
     "NSValue",
 ] }
 objc2-app-kit = { workspace = true, features = [
     "NSAppearance",
     "NSApplication",
     "NSBitmapImageRep",
+    "NSButton",
     "NSCell",
+    "NSControl",
     "NSDragging",
     "NSDraggingItem",
     "NSDraggingSession",
