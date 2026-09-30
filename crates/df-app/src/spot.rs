@@ -822,6 +822,9 @@ pub struct Geometry {
     /// The band the rows' bar is pointed at by, while the rows are taller
     /// than the body ([`crate::scrollbar::band`]).
     pub band: Option<egui::Rect>,
+    /// Whether the file has permission bits to show ([`Facts::posix`]): the
+    /// title's octal and the bit keys' hint are the card's only when it has.
+    pub posix: bool,
 }
 
 impl Geometry {
@@ -992,6 +995,7 @@ pub fn geometry(area: egui::Rect, bar_top: f32, spot: &Spot) -> Geometry {
         bits,
         action,
         close: Some(chrome::close_button_rect(card)),
+        posix: spot.facts.posix,
     }
 }
 
@@ -1097,16 +1101,18 @@ pub fn paint(
         }
         None => geometry.card.right() - CARD_PAD,
     };
-    painter.text(
-        egui::pos2(
-            octal_right,
-            geometry.card.top() + CARD_PAD + chrome::CARD_ROW / 2.0,
-        ),
-        egui::Align2::RIGHT_CENTER,
-        octal(spot.facts.mode),
-        egui::FontId::monospace(FONT),
-        palette.quiet,
-    );
+    if geometry.posix {
+        painter.text(
+            egui::pos2(
+                octal_right,
+                geometry.card.top() + CARD_PAD + chrome::CARD_ROW / 2.0,
+            ),
+            egui::Align2::RIGHT_CENTER,
+            octal(spot.facts.mode),
+            egui::FontId::monospace(FONT),
+            palette.quiet,
+        );
+    }
 
     for (index, rect) in geometry.rows.iter().enumerate() {
         let Some(row) = spot.rows.get(index) else {

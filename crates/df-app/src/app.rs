@@ -19829,6 +19829,14 @@ fn overlay_hints(overlay: &OverlayGeom, dialog: &Option<Dialog>) -> Vec<chrome::
         // Every key the spot card answers to, including the two df-core's
         // `[spot]` table has no row for, for the same reason — and, for the
         // same reason, a press on `Space` types it.
+        // A file with no permission bits (a Windows drive's, W4.29) has no
+        // bit to move to or toggle.
+        OverlayGeom::Spot(geometry) if !geometry.posix => vec![
+            Hint::inert("↑↓", "row"),
+            Hint::inert("←→", "previous / next file"),
+            Hint::key("Space", "hash", Chord::plain(K::Space)),
+            Hint::inert("Tab / Esc", "close"),
+        ],
         OverlayGeom::Spot(_) => vec![
             Hint::inert("↑↓", "row"),
             Hint::inert("←→", "previous / next file"),
@@ -22016,12 +22024,30 @@ mod tests {
                 bits: Vec::new(),
                 action: None,
                 close: None,
+                posix: true,
             }),
             &None,
         );
         assert!(spot.iter().any(|hint| hint.keys.contains("Space")));
         assert!(spot.iter().any(|hint| hint.keys.contains('⇧')));
         assert!(spot.iter().any(|hint| hint.keys.contains("Tab")));
+        // A file with no permission bits has no bit keys to advertise (W4.29).
+        let bitless = overlay_hints(
+            &OverlayGeom::Spot(spot::Geometry {
+                card: nowhere,
+                body: nowhere,
+                first: 0,
+                band: None,
+                rows: Vec::new(),
+                bits: Vec::new(),
+                action: None,
+                close: None,
+                posix: false,
+            }),
+            &None,
+        );
+        assert!(!bitless.iter().any(|hint| hint.keys.contains('⇧')));
+        assert!(bitless.iter().any(|hint| hint.label == "hash"));
         // The mount card advertises the five verbs `[pick]` has no row for.
         let mount_hints = |cloud: bool| {
             overlay_hints(
