@@ -4,7 +4,10 @@
 //! Nothing here opens a terminal. Each test swaps the `terminal-here` opener
 //! for a snippet that writes its `$1` and its working directory into the
 //! fixture's sandbox, and reads that back — the real spawn, the real shell and
-//! the real argument order, with a file where the window would have been.
+//! the real argument order, with a file where the window would have been. On
+//! Windows, where an opener is an argument list and not a shell snippet
+//! (`plans/other-platforms/04-windows.md` W4.3), the snippet is a `.cmd`
+//! beside the file and the opener names it and its `$1`.
 
 use df_core::config::Opener;
 use df_core::keymap::Mods;
@@ -14,17 +17,29 @@ use super::*;
 /// The opener this program runs for "Open terminal here", swapped for one
 /// that says where it was asked to open. Returns the file it writes.
 fn stub_terminal(app: &mut Fixture) -> PathBuf {
-    let out = app
+    let sandbox = app
         .files
         .parent()
         .expect("the fixture's files are in its sandbox")
-        .join("terminal.out");
+        .to_path_buf();
+    let out = sandbox.join("terminal.out");
+    let command = if cfg!(windows) {
+        let stub = sandbox.join("terminal.cmd");
+        std::fs::write(
+            &stub,
+            format!("@(echo %~1& cd) > \"{}\"\r\n", out.display()),
+        )
+        .expect("write the stub");
+        format!(r#""{}" "$1""#, stub.display())
+    } else {
+        format!(r#"printf '%s\n' "$1" "$PWD" > '{}'"#, out.display())
+    };
     app.config
         .openers
         .retain(|opener| opener.name != open::TERMINAL_OPENER);
     app.config.openers.push(Opener {
         name: open::TERMINAL_OPENER.to_string(),
-        command: format!(r#"printf '%s\n' "$1" "$PWD" > '{}'"#, out.display()),
+        command,
         block: false,
         description: "Open a terminal here".to_string(),
     });

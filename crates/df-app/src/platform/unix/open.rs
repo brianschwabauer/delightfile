@@ -80,6 +80,22 @@ pub fn run_blocking(snippet: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Re
     Ok(df_core::platform::process::exit_code(&status))
 }
 
+/// A typed `;` line: a shell snippet, exactly as an opener is here.
+pub fn spawn_typed(line: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<()> {
+    spawn_detached(line, paths, cwd)
+}
+
+/// A typed `:` line: a shell snippet, exactly as a blocking opener is here.
+pub fn run_typed(line: &str, paths: &[PathBuf], cwd: &Path) -> std::io::Result<i32> {
+    run_blocking(line, paths, cwd)
+}
+
+/// `builtin:shell-open`, which no opener table here names: unsupported, and
+/// the window says the builtin is not one it knows, as it always has.
+pub fn shell_open(_target: &std::ffi::OsStr) -> std::io::Result<()> {
+    Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

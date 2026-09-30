@@ -17,14 +17,58 @@
 //!
 //! How a snippet is run is the platform's ([`crate::platform::open`]): the
 //! `$SHELL -c` above on Linux and macOS, with Linux detaching the child
-//! through `setsid`, and nothing yet on Windows, whose openers will be argv
-//! lists. What is the same everywhere — the opener rules, the picker, the
-//! words a toast uses — is this module's, and the two calls the window makes
+//! through `setsid`. Windows has no shell that reads `"$@"`, so there an
+//! opener is an argument list with the paths put in for `$1`, `$@` and
+//! `$dir`, a typed line is `cmd`'s, and `builtin:shell-open` is what a
+//! double-click in Explorer does (`plans/other-platforms/04-windows.md`
+//! W4.3) — which is why the window says whose line it is running
+//! ([`Line`]). What is the same everywhere — the opener rules, the picker,
+//! the words a toast uses — is this module's, and the calls the window makes
 //! are re-exported from here.
 
 use std::path::PathBuf;
 
-pub use crate::platform::open::{run_blocking, spawn_detached};
+pub use crate::platform::open::{run_blocking, shell_open, spawn_detached};
+use crate::platform::open::{run_typed, spawn_typed};
+
+/// Whose line a command is, which decides how it is run where that differs:
+/// an opener's `command` from `delightfile.toml`, or a line typed at the `;`
+/// or `:` prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Line {
+    Opener,
+    Typed,
+}
+
+/// Start `line` over `paths` from `cwd`, and do not wait for it.
+pub fn spawn(
+    line: Line,
+    text: &str,
+    paths: &[PathBuf],
+    cwd: &std::path::Path,
+) -> std::io::Result<()> {
+    match line {
+        Line::Opener => spawn_detached(text, paths, cwd),
+        Line::Typed => spawn_typed(text, paths, cwd),
+    }
+}
+
+/// Run `line` over `paths` from `cwd` to completion: its exit code. Called
+/// on a task worker, never on the UI thread.
+pub fn run(
+    line: Line,
+    text: &str,
+    paths: &[PathBuf],
+    cwd: &std::path::Path,
+) -> std::io::Result<i32> {
+    match line {
+        Line::Opener => run_blocking(text, paths, cwd),
+        Line::Typed => run_typed(text, paths, cwd),
+    }
+}
+
+/// The builtin that is the system's own "open" (`builtin:shell-open`).
+pub const SHELL_OPEN_BUILTIN: &str = "shell-open";
 
 use df_core::config::{Config, Opener};
 use df_core::fs::Entry;

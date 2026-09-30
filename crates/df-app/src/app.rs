@@ -5995,6 +5995,29 @@ impl App {
         now: Instant,
     ) {
         if let Some(builtin) = choice.builtin() {
+            // The system's own "open", where the platform has one to ask
+            // (Windows' opener table names it for `open` and `play`). Where
+            // it has none, the builtin is one delightfile does not know, as
+            // it always was.
+            if builtin == open::SHELL_OPEN_BUILTIN {
+                for path in &paths {
+                    match open::shell_open(path.as_os_str()) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                            self.toasts.error(
+                                format!("`builtin:{builtin}` is not something delightfile can do"),
+                                now,
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            self.toasts.error(format!("{}: {e}", choice.name), now);
+                            return;
+                        }
+                    }
+                }
+                return;
+            }
             // The shipped built-ins are the three extracts (PLAN §6's "fix the
             // yazi gap"), and they are the same verb `e` and `E` are — through
             // the same door and the same gates, so an opener cannot extract
@@ -6013,7 +6036,14 @@ impl App {
             return;
         }
         if choice.block {
-            self.run_shell_in(&choice.command.clone(), paths, true, cwd, now);
+            self.run_shell_in(
+                open::Line::Opener,
+                &choice.command.clone(),
+                paths,
+                true,
+                cwd,
+                now,
+            );
             return;
         }
         if let Err(e) = open::spawn_detached(&choice.command, &paths, &cwd) {
@@ -6055,12 +6085,14 @@ impl App {
     /// comes back as a toast.
     fn run_shell(&mut self, snippet: &str, paths: Vec<PathBuf>, block: bool, now: Instant) {
         let cwd = self.child_cwd();
-        self.run_shell_in(snippet, paths, block, cwd, now);
+        self.run_shell_in(open::Line::Typed, snippet, paths, block, cwd, now);
     }
 
-    /// [`App::run_shell`] with its working directory named.
+    /// [`App::run_shell`] with its working directory named, for a typed line
+    /// or a blocking opener (`line`).
     fn run_shell_in(
         &mut self,
+        line: open::Line,
         snippet: &str,
         paths: Vec<PathBuf>,
         block: bool,
@@ -6068,7 +6100,7 @@ impl App {
         now: Instant,
     ) {
         if !block {
-            match open::spawn_detached(snippet, &paths, &cwd) {
+            match open::spawn(line, snippet, &paths, &cwd) {
                 Ok(()) => self
                     .toasts
                     .notice(format!("{} — started", open::short(snippet)), now),
@@ -6085,7 +6117,7 @@ impl App {
             format!("Shell: {label}"),
             Lane::Micro,
             move |_ctx: &TaskCtx| {
-                let result = open::run_blocking(&snippet, &paths, &cwd);
+                let result = open::run(line, &snippet, &paths, &cwd);
                 let outcome = match result {
                     // A non-zero exit is *reported*, not treated as a failed
                     // task: the command ran, and "exit 1" is its answer. Only a

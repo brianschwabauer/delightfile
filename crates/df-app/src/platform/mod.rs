@@ -45,7 +45,9 @@
 //! | `mounts::Monitor` | `start(Notifier) -> Option<Monitor>`, `gone(&mut self) -> bool`, `started(&self) -> Instant`, `drain(&self) -> Vec<mounts::Event>` | `gio mount --monitor --detail` | `start` is `None`; no value exists | S1.24 |
 //! | `mounts::TERMINAL_MOUNT` | `Option<&str>` | the shell line that re-runs `gio mount` in a terminal | `None` | S1.24 |
 //! | `mounts::CONNECT_UNSEEN` | `Option<&str>`: what a connect back with no share to go to says in place of "Connected to" | `None`: `gio mount` has said it is done | macOS: "Finder was asked to connect to", since Finder's dialog may still be asking (M2.15); Windows: `None` | M2.15 |
-//! | `open::{spawn_detached, run_blocking}` | `spawn_detached(&str, &[PathBuf], &Path) -> io::Result<()>`, `run_blocking(&str, &[PathBuf], &Path) -> io::Result<i32>`: an opener's or a typed `;`/`:` snippet over paths, from a directory | `$SHELL -c '<snippet>' delightfile <path>…` (the shared `unix` body), detached with `setsid --fork`; `run_blocking`'s code from `df_core::platform::process::exit_code` | macOS: the same shell body, in a process group of its own and collected by a thread when it exits (M2.16); Windows: `Unsupported`, "Running programs is not available on this platform" (W4.3) | S1.26 |
+//! | `open::{spawn_detached, run_blocking}` | `spawn_detached(&str, &[PathBuf], &Path) -> io::Result<()>`, `run_blocking(&str, &[PathBuf], &Path) -> io::Result<i32>`: an opener's command over paths, from a directory | `$SHELL -c '<snippet>' delightfile <path>…` (the shared `unix` body), detached with `setsid --fork`; `run_blocking`'s code from `df_core::platform::process::exit_code` | macOS: the same shell body, in a process group of its own and collected by a thread when it exits (M2.16); Windows: an argument list with `$1`, `$@`, `$dir` put in (`argv`), started directly in a process group of its own (W4.3) | S1.26 |
+//! | `open::{spawn_typed, run_typed}` | the same signatures: a line typed at `;`/`:` | the shell body, as an opener | macOS the same; Windows: `%COMSPEC% /S /C "<line> <paths…>"` (W4.3) | W4.3 |
+//! | `open::shell_open` | `fn(&OsStr) -> io::Result<()>`: `builtin:shell-open`, the system's own "open" | `Unsupported` (no table names it) | macOS `Unsupported`; Windows `ShellExecuteW(…, "open", …)` (W4.3) | W4.3 |
 //! | `pdfium::LIBRARY_NAME` | `&str`, the library's file name | `libpdfium.so` | `libpdfium.dylib`, `pdfium.dll` | S1.30 |
 //! | `pdfium::candidates` | `fn() -> Vec<PathBuf>`, most specific first, before the system loader | `$DF_PDFIUM_LIB`, `~/.local/lib/{delightfile,delightviewer}/`, the dev `target/` | macOS: `$DF_PDFIUM_LIB`, `<exe>/../Frameworks/`, `~/.local/lib/delightfile/`; Windows: `$DF_PDFIUM_LIB`, the executable's directory | S1.30 |
 //! | `window::attributes` | `fn(title: &str, app_id: &str, &ActiveEventLoop) -> WindowAttributes` | title, `app::WINDOW_SIZE`, Wayland `app_id` | macOS: title, the size cut to the main screen's visible frame ([`fit`]), Option read as Alt; Windows: title, the size cut to the primary monitor's work area and centred there when it would not fit | S1.27 |
@@ -89,6 +91,12 @@ mod volumes;
 /// pixels: macOS's, and compiled in every target's tests.
 #[cfg(any(target_os = "macos", test))]
 mod dragout;
+
+/// An opener's command split into a program and its arguments, the paths
+/// put in: Windows', which has no shell to read it, and compiled in every
+/// target's tests.
+#[cfg(any(windows, test))]
+mod argv;
 
 /// The opening size cut to a screen too small for it: macOS's and
 /// Windows', which can say how big the screen is, and compiled in every
