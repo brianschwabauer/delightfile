@@ -1,6 +1,6 @@
 # 03 — Paths
 
-Status: **in progress** (port/paths, 2026-09-29)
+Status: **done** (port/paths, 2026-09-29) — every task `[x]` but P3.31, blocked on the open question below
 
 Scope: everything df-core assumes about the shape of a path that is false on
 Windows, and the case-sensitivity assumptions that are false on Windows and on the
@@ -102,7 +102,7 @@ roots, budgets) to sites that already compile everywhere.
       `\\?\C:\a`, trailing separators, and `key` on a mixed-case Windows path; the
       Windows-shaped tests run on every target by building the inputs with
       `PathBuf::from` of a literal only when `cfg!(windows)`, otherwise by testing
-      the pure helpers on `&str`. — done (port/paths). As built: `key` returns
+      the pure helpers on `&str`. — done 55a6421. As built: `key` returns
       `Cow<'_, Path>` (borrowed, no copy, where it is the identity) with
       `into_key(PathBuf)` for inserts; the Windows rules are public as
       `folded` and `name_is_valid_strict` (and `name_is_valid_permissive`), so
@@ -113,7 +113,7 @@ roots, budgets) to sites that already compile everywhere.
       Windows `GetFileInformationByHandle` volume serial + file index via a
       `File::open` with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`.
       Done when: `ops::same_file` is a one-line call to it and every §3.4 row that
-      decides an overwrite uses it (see P3.14). — done (port/paths): the Windows
+      decides an overwrite uses it (see P3.14). — done b9d694c: the Windows
       body compares `platform::meta::identity` (P3.4) of both paths;
       `ops::same_file` was already the one line (S1.5); the overwrite rows are
       P3.18's (the "see P3.14" above means P3.18).
@@ -131,7 +131,7 @@ roots, budgets) to sites that already compile everywhere.
       `UF_HIDDEN` flag hides `~/Library`, which a file manager for power users should
       show). Done when: every `use std::os::unix::fs::MetadataExt` outside
       `platform/` is gone from df-core (`grep` is the test) and `Entry`'s fields are
-      filled through these. — done (port/paths). S1.7 had moved the
+      filled through these. — done 8018e68, df40a0f. S1.7 had moved the
       `MetadataExt` surface; this task added `is_hidden` (called by
       `Entry::from_parts` with the row's own `lstat`) and the real Windows
       numbers, which a `Metadata` cannot carry on stable Rust: `Identity { dev,
@@ -156,7 +156,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       absolute path" via `Path::is_absolute` after decoding. Header stays
       `# delightfile state v1`: the on-disk bytes on Linux do not change. Done when:
       `state/tests.rs` passes on Linux unchanged and a Windows-shaped key
-      (`C:\Users\x`) round-trips in a new test. — done (port/paths):
+      (`C:\Users\x`) round-trips in a new test. — done de8f3ef:
       `path_bytes`/`path_from` were already `platform::os` (S1.16); the key is
       decoded first and kept when `is_absolute`, which on Unix is the leading
       `/` it was. `a_key_is_absolute_as_the_platform_reads_it` round-trips
@@ -173,7 +173,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       Windows have their own `platform::trash`); this task is still needed because
       `suffixed`/`fit` are used by paste and vfs on every target. Done when:
       `ops/trash.rs` tests pass on Linux and `suffixed` has a UTF-8 test. — done
-      (port/paths). `encode_path`, `decode_path` and `list` are in
+      228be1c. `encode_path`, `decode_path` and `list` are in
       `platform/linux/trash.rs` since S1.6 and already byte-exact there, so
       nothing changed in them; `fit` and `clip` (in `fs/names.rs` since S1.6)
       count a name in `platform::os::MAX_NAME` units — bytes on Unix, so Linux
@@ -186,7 +186,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       every target (readers accept it; the synthesized mode is valid). Symlink
       members on Windows: `read_link` works for symlinks; junctions are skipped with
       a warning line. Done when: `archive/write/tests.rs` passes on Linux and a UTF-8
-      member name test exists. — done (port/paths). Names and the member stat
+      member name test exists. — done 21a2fbc. Names and the member stat
       were already `platform::os`/`platform::meta` (S1.16, S1.7). New:
       `platform::fs::is_junction` (Unix `false`; Windows the reparse tag
       `IO_REPARSE_TAG_MOUNT_POINT` by `GetFileInformationByHandleEx`) — a
@@ -202,7 +202,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       argument at `:291` becomes `platform::process::NULL_DEVICE` (`/dev/null` or
       `NUL`). Done when: `git/tests.rs` passes on Linux; the three real-`git` tests
       keep their `GIT_CONFIG_GLOBAL` override through the same constant. — done
-      (port/paths). `insert` (S1.16) and `core.hooksPath` (S1.13) were already
+      a5aa5ef. `insert` (S1.16) and `core.hooksPath` (S1.13) were already
       through the platform; the tests' `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`
       now are too. `non_utf8_filenames_still_get_a_dot` is `#[cfg(unix)]`, with
       a Unicode twin that runs everywhere, and the hostile-config test escapes
@@ -215,7 +215,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       conversions through `platform::os` and let Phase 4 stub `sync::rsync::available`
       to `false` on Windows. macOS keeps the real body (Phase 2 handles the rsync
       version gate). Done when: df-core compiles on all three targets and
-      `sync/tests.rs` passes on Linux. — done (port/paths), nothing left to
+      `sync/tests.rs` passes on Linux. — done f7dc61f, nothing left to
       change: S1.16 routed every byte conversion here through `platform::os`,
       and S1.14 already gates `available` on `platform::process::HAS_RSYNC`
       (`false` on Windows), so Phase 4 has no stub to add. df-core compiles on
@@ -226,7 +226,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       becomes `path::trim_trailing_separator`. `ops/create.rs:36–43` uses
       `path::has_trailing_separator` for the "create a directory" signal. Done when:
       the three functions have no `OsStrExt` and their tests pass. — done
-      (port/paths). `ops::trim_trailing_slash` is gone; `remove_tree` and
+      0fbe1d0. `ops::trim_trailing_slash` is gone; `remove_tree` and
       `remove_tree_unchecked` trim with `path::trim_trailing_separator` (Linux:
       the same bytes, the root kept). `create` reads the marker with
       `has_trailing_separator` and trims that one separator, as before; a new
@@ -236,7 +236,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `fs/inotify.rs:109`: `CString` construction for libc calls. These move into
       `platform/` in Phase 1 (they are Unix-only bodies) and keep `OsStrExt` there,
       which is allowed inside `platform/`. Done when: confirmed moved; nothing to do
-      here beyond checking. — done (port/paths), confirmed: the four are
+      here beyond checking. — done fcc218b, confirmed: the four are
       `platform/linux/fs.rs` (`magic_of`), `platform/unix/fs.rs` (`set_times`,
       `writable`) and `platform/linux/inotify.rs`; `grep -rn
       "OsStrExt\|OsStringExt\|CString::new" crates/df-core/src` outside
@@ -250,7 +250,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       current directory's drive, which is what `current_dir().join` does. Done when:
       the existing `normalize` tests pass on Linux and a Windows-shaped test
       (`C:\a\b\..\..` → `C:\`) exists (built only under `cfg!(windows)`). — done
-      (port/paths). The walk already went by `components` and `PathBuf::pop`,
+      88c1612. The walk already went by `components` and `PathBuf::pop`,
       which never pops a prefix or a root; the one change is the empty case,
       `root_of` instead of `/` (on Unix `/` either way). The Linux asserts of
       `normalize_cleans_lexically` run under `cfg!(unix)` as they were, beside
@@ -262,7 +262,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       its display name is `path::segments(p)[0].label`). Done when: no
       `Path::new("/")`/`PathBuf::from("/")` outside `platform/` and tests in df-core
       (`grep` is the test) and the delete-rail tests pass on Linux. — done
-      (port/paths). The root rail is `path::is_root` of the normalized target
+      2e5621b. The root rail is `path::is_root` of the normalized target
       (Linux: exactly `/` as before); the unreadable-cwd fallback, the link
       parent and the rename message fall back to `path::root_of`; `Entry::read`
       names a root by its first segment, and anything else without a
@@ -275,7 +275,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       Windows) and keeps the separator the person typed. `ops/trash.rs:489` and
       `zoxide/mod.rs:123, 125` move behind `platform::dirs` in Phase 1/5. Done when:
       one `expand_home` exists and `config.rs`, `pins.rs`, `vfs/config.rs` tests pass.
-      — done (port/paths). `path::expand_home` is the body `config::expand_home`
+      — done 31c9aa7. `path::expand_home` is the body `config::expand_home`
       had (S1.17 had put it on `platform::dirs::home`); `config::expand_home` is
       a `pub use` of it, so df-app's import is unchanged; pins call it by its
       new name; `Service::key_path` calls it and keeps its own `None` for a
@@ -285,7 +285,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 - [x] **P3.15** `config.rs:1220–1229` (`Theme::dir_icon`): a pattern containing `/`
       is matched against `path::display(p)` with `\` normalized to `/` on Windows
       first, so a config written with `/` matches on every target. Done when: an
-      icon test with a Windows-shaped path passes. — done (port/paths).
+      icon test with a Windows-shaped path passes. — done 0401764.
       `dir_icon` takes the path as the `&str` df-app already hands it, so the
       normalizing is `path::with_slashes` (the identity on Unix) on that text;
       a verbatim prefix never reaches it from a listing, so `display`'s part
@@ -295,7 +295,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 - [x] **P3.16** `zoxide/mod.rs:338–364` (`classify`): last component via
       `Path::new(s).file_name()`; and `archive/write/mod.rs:187, 213` (leaf of a typed
       archive name) via `Path::new(text).file_name()`. Done when: their tests pass and
-      a `\`-separated input has a test under `cfg!(windows)`. — done (port/paths),
+      a `\`-separated input has a test under `cfg!(windows)`. — done 982b8d3,
       with `rsplit(std::path::is_separator)` rather than `file_name` (Decisions
       log): `/` on Unix, exactly the split it was, and `/` or `\` on Windows.
       Tests: a Windows zoxide path's last name (`the_last_component_follows_the_platforms_separator`)
@@ -304,7 +304,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 - [x] **P3.17** `sync/mod.rs:267–282` (`SyncPlan::label`): render `rel` with
       `path::display` and the platform separator; the trailing separator for folders
       is `std::path::MAIN_SEPARATOR`. Done when: the label test passes on Linux
-      unchanged. — done (port/paths): the root's name, then each of `rel`'s
+      unchanged. — done e5a1fdd, 5a56805: the root's name, then each of `rel`'s
       components after a `MAIN_SEPARATOR`, and a trailing `MAIN_SEPARATOR` on a
       folder — components rather than `path::display(rel)`, because a `rel`
       read from rsync's output or built by a test holds `/` and would print
@@ -326,7 +326,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       "New"; confirm `case_twins` at `:366–424` already covers it and extend the test).
       (macOS too.) Done when: a test on a case-insensitive temp volume is skipped
       unless the volume is case-insensitive (probe by creating `A` and opening `a`),
-      and passes there. — done (port/paths). `rename`: the one-directory check
+      and passes there. — done 6aa5c5b. `rename`: the one-directory check
       compares `path::key`s of the normalized parents, and when `same_file`
       says `from` and `to` are one file, the names differ, they are equal
       lowercased and the directory lists no entry spelled as `to`, the rename
@@ -356,7 +356,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       when the spelling is displayed. On Unix `key` is the identity, so this is a
       no-op there; the test is that Linux tests pass unchanged. Done when: each
       listed map goes through `key` and a Windows-shaped test per module exists.
-      — done (port/paths). Keyed at insert and lookup: the state store's
+      — done b546a89. Keyed at insert and lookup: the state store's
       `dirs` (every getter, `clear`, `touch`, `update`, `parse`), `Recent`
       (`remember`, `recall`, `forget`), `is_ancestor`/`is_strict_ancestor`,
       the sync planner's yanked names and, after `case_twins`, a lazily built
@@ -384,12 +384,12 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `read_dir`), `ops/trash.rs:316`, `ops/journal.rs:872, 911`, `fs/mod.rs:370,
       462, 506` (cursor by name from `read_dir`), `sync/mod.rs:367–383`,
       `sync/rsync.rs:462–473, 814–839`, `vfs/config.rs:214, 224`. Done when: logged.
-      — done (port/paths): nine lines in the Decisions log, one per site.
+      — done 95e8cd0: nine lines in the Decisions log, one per site.
 - [x] **P3.25** Thumbnail cache key (`preview/cache.rs:136–160`) hashes `Path` via
       `Hash for Path`, whose input bytes are platform-specific. Decision: leave the
       code; yazi-parity of *keys* is not attempted on Windows (the directory is still
       shared, and a thumbnail yazi wrote is simply regenerated once). Record it in
-      the module doc. Done when: the doc comment says so. — done (port/paths):
+      the module doc. Done when: the doc comment says so. — done 95e8cd0:
       a paragraph in the module essay's scheme section.
 - [x] **P3.26** Removing links: `ops/delete.rs:96–111, 118–130` and
       `ops/journal.rs:879, 933` remove a symlink with `remove_file`; on Windows a
@@ -399,7 +399,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       else `remove_file`) and call it at those sites. Done when: Linux tests
       unchanged; a Windows-runner test removes a directory symlink made under
       Developer Mode (skipped when `symlink_dir` fails with 1314). — done
-      (port/paths), at the four sites and at one more of the same kind: the
+      2986431, at the four sites and at one more of the same kind: the
       undo of a copy removes a copied link through it
       (`CopyManifest::remove`). `removes_a_link_to_a_directory_and_nothing_it_points_at`
       runs everywhere and skips where no link can be made (P3.30:
@@ -408,7 +408,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       different `Prefix` components (different drives or a UNC), return the target
       absolute rather than a relative path with prefix components in it. Done when:
       a `cfg!(windows)` test for `C:\a` → `D:\b` yields `D:\b`. — done
-      (port/paths); components, prefixes included, are compared by
+      c8dfdeb; components, prefixes included, are compared by
       `path::key`, so `C:\Users` and `c:\users` share their prefix on Windows
       (Unix: the equality it was). `another_drive_is_linked_absolutely` has
       `C:\a` → `D:\b`, a share → a drive, and one drive in two cases.
@@ -417,7 +417,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `platform::meta::is_executable(name: &OsStr, mode: u32) -> bool` (Unix: the
       mode test as today; Windows: extension in `PATHEXT`) and call it from
       `classify`. Done when: `classify("setup.exe")` is `Executable` under
-      `cfg!(windows)` in a test; Linux tests unchanged. — done (port/paths).
+      `cfg!(windows)` in a test; Linux tests unchanged. — done 58adcf7.
       The call is in `kind_for_name`, where `classify` reaches the rule;
       Windows reads `PATHEXT` once (`OnceLock`), since it is asked per row.
       `setup.exe` is `Executable` on every platform already, by the extension
@@ -437,7 +437,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       sanitizes a remote name for the local temp file: replace each invalid character
       with `_`, since that file is disposable). Done when: tests for each on every
       target (the rule set is testable on Linux by calling the strict variant
-      directly). — done (port/paths) for create, rename, the archive and the vfs;
+      directly). — done 9133299 for create, rename, the archive and the vfs;
       the bulk rename preview is split out as P3.31 (blocked, below). `create`
       checks the leaf and every parent it will make before making any;
       `rename` checks the new name; both refuse with
@@ -456,7 +456,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `String` for display, but `selected_paths` and every op takes `Entry.path`
       (the real `PathBuf`), never `dir.join(name)`. Audit and fix the callers listed
       in the appendix row. Done when: `grep -n "join(&*name\|join(name" crates/df-core/src`
-      finds no remaining rebuild of a path from a lossy name. — done (port/paths)
+      finds no remaining rebuild of a path from a lossy name. — done c62814f, 24d63a0
       for the rows listed: `selected_paths` returns each selected row's own
       `Entry.path`, in name order as before (a selected name with no row yet
       is joined as spelled). The grep's other hits outside tests join real
@@ -470,7 +470,7 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       `cfg!(windows)` (drop `\n`, `\t`, `\`, `"`, and the 255-`x` name becomes 200
       to stay under `MAX_PATH` with the temp prefix). Linux list unchanged. Done
       when: Linux tests unchanged; the df-core test suite compiles on Windows.
-      — done (port/paths). Chosen by `platform::os::STRICT_NAMES` (no `cfg`),
+      — done c5dfbe1. Chosen by `platform::os::STRICT_NAMES` (no `cfg`),
       so macOS keeps the Unix set. The Windows set is not only the subset: it
       is the nastiest Windows allows — curly quotes, a leading space, a leading
       dot run, a combining accent, the shell's punctuation, a name that starts
@@ -495,14 +495,19 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 
 ## 6. Tests (appendix §5)
 
-- [>] **P3.24** Sweep the 36 test files: replace literal `/tmp/...` fixture paths that
+- [x] **P3.24** Sweep the 36 test files: replace literal `/tmp/...` fixture paths that
       reach the filesystem with `TempTree`/`temp_dir()`; leave pure-string tests
       that only parse or format (they still pass on Windows because they never
       touch a disk) but wrap those that assert Unix-shaped output (`== "/"`,
       `ends_with("/Work")`) in `#[cfg(unix)]` with a Windows twin where cheap. Mode,
       symlink, uid, `EXDEV` tests get `#[cfg(unix)]`. Done when: `cargo test -p
       df-core` is green on all three CI targets, with the Linux count not lower
-      than before this phase. — port/paths, started 2026-09-29. Driven by the
+      than before this phase. — done eb1019a (with the runner's last fixes,
+      eaae656 and 54e9e75): green on Windows at run 36646367450 (1,044
+      passed, 1 ignored), and on Linux (1,183 passed, 1 ignored, against 1,140
+      before); macOS fails the nine tests that are Phase 2's (the rsync
+      version gate, socket path length, `/bin/true`) and nothing of this
+      phase's. Driven by the
       Windows runner rather than by the regex census of appendix §5 (most of
       its rows pass on Windows as they are: a pure parse over `/repo`, a
       synthetic `Entry` under `/fixture`, a `/tmp/x` in an error message). What
@@ -517,6 +522,47 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
       the concurrent-delete race (W4.37), a date before 1970 (W4.36); and, for
       good, gvfs's runtime directory and a reflink into a directory opened as
       a `File`. The per-test table is P3.30's.
+- [x] **P3.30** (added 2026-09-29, from the brief Phase 3 ran under) `cargo
+      test -p df-core` is green on the Windows runner. Every test that failed
+      there is sorted into one of three bins and handled by its bin: (1) a
+      path-model bug in the code — fixed under the P3 task it belongs to; (2) a
+      fixture that assumes Unix while the behaviour under test is portable —
+      the fixture made portable (for gnarly names, a per-platform set in
+      `test_support`, P3.23); (3) behaviour with no Windows body yet — gated
+      `#[cfg(unix)]` (or `target_os = "linux"`), naming the Phase 4 task that
+      un-gates it. Done when: the windows job's `cargo test -p df-core` step
+      passes. — done eaae656, 54e9e75: run 36646367450's windows job has
+      `cargo build -p df-core` and `cargo test -p df-core` green, 1,044
+      passed, 1 ignored, and the doc test (from 959 passed, 52 failed on
+      `main`'s first Windows run). The 52 failures of `main`'s
+      first Windows run (and the ones this phase's own changes brought out on
+      the way), by bin:
+
+      | Test | Bin | Handled |
+      |---|---|---|
+      | `archive::write::tests::` `a_7z_is_written_by_7_zip_from_the_items_own_folder`, `a_compressor_that_fails_is_quoted`, `a_file_goes_at_the_root_and_several_items_side_by_side`, `a_missing_compressor_is_named_and_leaves_nothing_behind`, `a_tar_gz_is_a_gzip_stream_around_the_same_tar`, `a_tar_round_trips_through_the_reader`, `a_time_past_2038_keeps_its_extended_timestamp`, `a_zip_round_trips_through_the_reader`, `an_archive_inside_what_it_archives_is_refused`, `tar_zst_and_tar_xz_go_through_their_compressors` | 2 | `set_mtime` through `platform::fs::set_times` (a read-only `File` cannot set a time); modes compared with the platform's `st_mode`; 7-Zip's listing read `with_slashes` (P3.7, P3.24) |
+      | `archive::write::tests::a_relative_destination_lands_where_it_says` | 2 | skips when the temp directory and the working directory have different roots (the runner's C: and D:) |
+      | `archive::write::tests::the_real_tools_accept_what_is_written` | 2 | the mode literal under `cfg!(unix)`; bsdtar run by the name `on_path` found, and not on Windows, whose `tar.exe` lists a zip's UTF-8 names in the ANSI code page and fails on `日本語` (7-Zip reads the same zip there) |
+      | `du::fstype::tests::gvfs_lives_in_the_runtime_directory` | 3 | `#[cfg(unix)]`, for good: gvfs is a Linux desktop's; no Phase 4 task |
+      | `du::tests::a_touched_mtime_alone_is_still_fresh` | 2 | the directory's time set through `platform::fs::set_times` |
+      | `du::tests::hardlinked_content_is_counted_once` | 1 | P3.4: `meta::identity`/`maybe_linked` (W4.5's identity half, done here) |
+      | `git::tests::non_utf8_filenames_still_get_a_dot` | 2 | `#[cfg(unix)]` (a byte name is Unix's; Windows refuses one by rule), with a Unicode twin on every target (P3.8) |
+      | `git::tests::a_repository_config_cannot_run_a_command_of_its_own` | 2 | the marker path's backslashes escaped inside git's quoted value (P3.8) |
+      | `ops::copy::tests::copies_a_tree_of_gnarly_names`, `ops::create::tests::creates_gnarly_names`, `ops::delete::tests::deletes_a_tree_of_gnarly_names`, `ops::paste::tests::pastes_a_tree_of_gnarly_names` | 2 | the per-platform gnarly set (P3.23) |
+      | `ops::copy::tests::reflink_of_a_non_regular_file_reports_failure` | 2 | `#[cfg(unix)]`: the fixture opens a directory as a `File`, which Windows does not, and Windows' reflink is `false` for anything |
+      | `ops::copy::tests::refuses_to_copy_a_file_over_itself`, `ops::create::tests::renaming_to_the_same_name_is_a_no_op`, `ops::paste::tests::a_file_may_be_pasted_into_a_directory_that_holds_it`, `ops::paste::tests::force_cannot_overwrite_the_source_with_its_own_copy`, `ops::paste::tests::same_directory_copy_auto_suffixes`, `ops::paste::tests::same_directory_cut_is_a_no_op`, `ops::tests::same_file_sees_through_a_symlinked_route`, `sync::tests::the_rails_refuse_what_no_sync_can_do_safely` | 1 | P3.3: `same_file`'s Windows body |
+      | `ops::delete::tests::a_trailing_slash_does_not_turn_a_link_into_its_target` | 1 | P3.26: `remove_link` |
+      | `ops::delete::tests::rail_refuses_the_root` | 1 | P3.13: the root rail is `path::is_root` |
+      | `ops::delete::tests::a_tree_emptied_by_somebody_else_meanwhile_is_not_a_failure` | 3 | `#[cfg(unix)]` until W4.37 (a delete-pending file answers "access denied") |
+      | `ops::link::tests::hardlink_shares_the_inode` | 1 | P3.4: the test reads `meta::identity` |
+      | `ops::paste::tests::a_yanked_url_is_carried_exactly_as_given`, `the_order_is_the_order_things_were_added`, `toggling_holds_paths_the_way_a_yank_does`, `toggling_is_a_toggle_over_the_whole_batch`, `toggling_keeps_the_verb_unless_there_was_nothing_to_keep`, `toggling_nothing_is_a_no_op` | 2 | `test_support::abs` for the literal absolute paths (P3.24) |
+      | `ops::tests::normalize_cleans_lexically` | 1, 2 | P3.12: the empty case is `root_of` (1); the Unix literals under `cfg!(unix)` beside Windows ones (2) |
+      | `rename::facts::tests::a_time_before_the_epoch_is_still_a_date` | 3 | `#[cfg(unix)]` until W4.36 (`localtime_s` refuses a time before 1970) |
+      | `sync::tests::another_kind_of_thing_under_the_same_name_is_a_change`, `extras_are_found_at_every_depth_with_everything_under_them`, `removals_are_the_topmost_extras_deepest_first_with_what_each_takes`, `the_planner_sorts_every_path_into_new_changed_unchanged_and_extra` | 1 | P3.17: the label mixed `/` with `\`; it is written in the platform's separator, and the tests read it `with_slashes` |
+      | `vfs::tests::` `a_dropped_connection_reconnects_on_the_next_request`, `a_four_gigabyte_length_claim_costs_a_refusal_not_an_allocation`, `a_reply_with_somebody_elses_id_hangs_up_the_connection`, `a_server_speaking_the_wrong_version_is_refused`, `a_server_that_closes_silently_is_a_disconnect`, `a_server_that_dies_before_version_reports_ssh_own_words` | 3 | `#[cfg(unix)]` (with their `/bin/sh` helpers) until W4.20 (SFTP's pipe I/O, and a Rust replay binary for these) |
+      | `state::pins::tests::a_file_from_before_pins_loads_with_none`, `state::tests::` (the keys of seven tests) | 2 | brought out by P3.5's absolute-key rule: `/tmp/…` keys through `abs`, file text through a keyed, escaped `key_text` |
+      | `sync::rsync::tests::a_dry_run_becomes_the_plan_the_card_reads` | 2 | brought out by P3.17: labels read `with_slashes` |
+      | `fs::kind::tests::a_socket_is_special_and_not_executable`, `a_mode_with_no_type_bits_classifies_as_before` | 2 | brought out by P3.28: the execute-bit asserts hold where a bit is read (`cfg!(unix)`) |
 
 ## Decisions log
 
@@ -631,10 +677,51 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
   no dates), Windows has essentially no names that are not Unicode, and each
   fix changes a type df-app reads (`DuRecord::children`, the bulk card's
   names).
+- 2026-09-29 — df-app on the Windows runner, as Phase 3 leaves it. It builds
+  (`cargo build --workspace`), lints (`cargo clippy`, with the job's
+  `-A dead_code`) and starts (the smoke test) — the first Windows build of
+  df-app, which needed no change to compile. Its tests: 1,073 of 1,093 pass
+  at run 36646367450 (1,070 before the tab fixture below). What
+  fails, by cause, each left to the Phase 4 task named:
+  path model in df-app — a search hit's relative label mixes the finder's
+  `/` with the `\` a rename or the bulk card joins with
+  (`app::tests::hits::` `a_renamed_hit_is_renamed_in_its_folder_and_its_row_follows`,
+  `redoing_a_rename_carries_the_row_forward`,
+  `renaming_a_folder_hit_carries_the_hits_inside_it`,
+  `the_bulk_card_renames_a_file_before_its_folder`,
+  `the_bulk_card_renames_hits_across_folders`,
+  `undoing_a_rename_renames_the_row_back`; W4.13, W4.14), a bulk card across
+  folders labels rows in the platform's separator where its test expects `/`
+  (`bulk::tests::a_card_across_folders_judges_each_folder_on_its_own`;
+  W4.26), and the places card names a pin by splitting its path on `/`
+  (`app::places::tests::the_mount_card_lists_the_places_and_d_unpins`;
+  W4.11);
+  no trash on Windows yet — `app::tests::hits::making_something_in_the_hits_is_refused`
+  (the refusal's wording), `trashview::tests::` `a_restore_is_refused_rather_than_overwriting_newer_work`,
+  `a_trash_record_becomes_a_list_pane_row`,
+  `rows_map_back_to_the_records_they_came_from` (W4.7, W4.8, W4.28);
+  openers are shell strings — `app::tests::terminal::` (three; W4.3);
+  gvfs is Linux's — `mounts::tests::every_row_says_what_it_is_after_its_name`
+  (to gate, W4.26);
+  fonts — `icons::glyph_tests::the_chrome_glyphs_all_render`,
+  `menu::tests::a_key_stands_clear_of_the_chevron`, the two that fail in the
+  Linux container too (W4.22, D5.6);
+  test assets — `preview::decode::tests::a_tagged_song_decodes_its_sleeve_to_the_panes_fit`
+  runs `build/test-assets.sh` (bash, ffmpeg; B6);
+  the system's words — `preview::listing::tests::with_no_7zip_the_reason_says_what_to_install`
+  expects "No such file", Windows says "The system cannot find the file
+  specified" (W4.26).
+  Fixed here, being path-model fixtures or this phase's own doing: the sync
+  card's and the state store's tests (labels and keys as the platform writes
+  them), the tab tests' `/` (a temp folder of forty files), and the
+  breadcrumb's twin (W4.9).
 - 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
   did, not every one through `trim_trailing_separator`: `a//` stays `a/`
   and a typed `/` stays "no name given" on Linux.
 
 ## Open questions
 
-(none)
+- P3.31: where the bulk rename card says a row's name cannot be made on this
+  platform — df-app's `bulk::problems` through W4.12 (option a), or the
+  template's `Missing` for the strict rule only (option b). The options and
+  what each costs are in the task.

@@ -1850,42 +1850,42 @@ Counts come from a script that classifies each `#[test]` body, plus the non-test
 
 | Test file | tests | with any | abs path | mode | symlink | uid | watch | spawn | unix API | names | dev | Kind of assumption |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| archive/external.rs | 5 | 4 | 2 | 1 | 0 | 0 | 0 | 2 | 1 | 0 | 0 | Fake `7z`/`bsdtar` files written as `#!/bin/sh` + `0o755` on a synthetic `PATH`. Runs `sh -c "echo …; exit 3"` |
-| archive/tests.rs | 73 | 40 | 15 | 20 | 0 | 0 | 0 | 11 | 0 | 0 | 0 | Synthetic zip/tar headers with Unix modes (pure bytes). `/tmp/out`, `/x.zip`, `/etc/cron.d/evil` as pure strings. 11 spawn `gzip`/`xz`/`zstd`/`zip`/`bsdtar`/7-Zip, guarded by `have_binary` |
-| archive/whole.rs | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | Pure string checks (`"a.7z"`). The spawn hit is the string `"7z"`, not a process |
-| archive/write/tar.rs | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic mode field |
-| archive/write/tests.rs | 25 | 16 | 2 | 13 | 11 | 0 | 0 | 13 | 0 | 0 | 0 | Fixture `photos()` sets `0o640`/`0o755` and makes a symlink. Asserts zip/tar mode fields. Runs `zstd`/`xz`/7-Zip/`gunzip` |
-| config.rs | 28 | 6 | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `/mnt/…` bookmarks, `/home/brian/Work` icon paths, `expand_home(..).ends_with("/Work")`, `load_from_dir("/nonexistent/…")` |
-| du/fstype.rs | 3 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `magic_of(temp dir).is_some()` (Linux `statfs`), `/nonexistent-…` |
-| du/tests.rs | 49 | 7 | 4 | 1 | 2 | 0 | 0 | 0 | 2 | 0 | 0 | `st_blocks` via `MetadataExt`, sparse file, hardlink dedupe (`nlink`), symlink skip, `0o000` unreadable dir |
-| fs/kind.rs | 11 | 9 | 3 | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic `st_mode` values with `S_IF*` socket/fifo/char/block bits and `0o755`. `/tmp` in synthetic `Entry` |
-| fs/tests.rs | 53 | 48 | 48 | 40 | 1 | 0 | 3 | 1 | 1 | 0 | 0 | 48 use synthetic `Entry` with `/fixture` paths, `mode: 0o644` and `uid 1000` (no disk). 3 start a real `Watcher` (inotify). 1 makes symlinks with `std::os::unix::fs::symlink`. 1 parses a passwd table |
-| fs/typefilter.rs | 4 | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic `Entry` |
-| git/tests.rs | 35 | 24 | 24 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 3 | 24 parse synthetic porcelain against root `/repo` (pure). 3 run real `git` with `GIT_CONFIG_GLOBAL=/dev/null` |
-| input/tests.rs | 36 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `segment_at("/home/brian/Downloads", …)` with a `/` separator (pure) |
-| keymap/tests.rs | 34 | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Bookmark path strings |
-| lib.rs | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `DfError::io("/tmp/nope", …)` display (pure) |
-| ops.rs | 6 | 5 | 3 | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | `normalize("/a/b/../..") == "/"`, `is_absolute`. Symlinks via `TempTree::symlink` |
-| ops/copy.rs | 29 | 9 | 1 | 2 | 6 | 0 | 0 | 0 | 4 | 1 | 0 | Mode preservation (`0o640`), `0o555` dir, relative/absolute/broken symlinks (`/nowhere/at/all`), gnarly names |
-| ops/create.rs | 10 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | Creates every gnarly name on disk (`\n`, `\t`, `\`, `"`) |
-| ops/delete.rs | 12 | 9 | 5 | 0 | 3 | 0 | 0 | 0 | 1 | 1 | 0 | Rails on `/`, `/home`, `/home/brian`. Symlink-to-dir deletion and `link/` trailing-slash behaviour. Gnarly names |
-| ops/jobs.rs | 7 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `DeleteJob` on `/` refused |
-| ops/journal.rs | 34 | 9 | 3 | 2 | 6 | 0 | 0 | 0 | 5 | 0 | 0 | `0o555` dirs to force undo failure. Symlink undo (`/somewhere/else`). `/tmp/{i}` records |
-| ops/link.rs | 13 | 12 | 7 | 0 | 5 | 0 | 0 | 0 | 0 | 1 | 0 | `relative_to` over `/a/b/...` (pure). Symlinks created and read back. Hardlink `(dev, ino)`/`nlink` via `MetadataExt` |
-| ops/paste.rs | 37 | 13 | 9 | 0 | 3 | 0 | 0 | 0 | 0 | 1 | 0 | `/tmp/a`, `/tmp/notes.txt` clipboard paths. Paste into itself through a symlink. Gnarly names |
-| ops/trash.rs | 31 | 13 | 8 | 2 | 2 | 3 | 0 | 0 | 4 | 3 | 0 | Sticky `.Trash` (`0o1777`), `.Trash-1000`/`-4242`, `mount_point_of("/tmp")`, non-UTF-8 name `caf\xE9` (rejected by APFS), gnarly names, `$HOME` trash |
-| preview/kind.rs | 7 | 2 | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic `Entry` (`/tmp`, `0o644`) |
-| preview/sniff.rs | 17 | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | `#!/bin/sh` as content bytes (pure) |
-| preview/syntax.rs | 5 | 2 | 0 | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | Shebang bytes (pure) |
-| rename/facts.rs | 15 | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | `Facts::stat(Path::new("/"), …)`, symlink not followed, `localtime_r` via `Civil::local` |
-| rename/template.rs | 34 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | Gnarly names through the template renderer (pure) |
-| state/pins.rs | 7 | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `/tmp/a`, `/tmp/tab\there…` pin paths, `expand_home` + `/` |
-| state/tests.rs | 28 | 22 | 22 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | `/tmp/…`, `/home/brian/…` record keys (the format requires a leading `/`). 1 non-UTF-8 path via `from_vec` |
-| sync/rsync.rs | 23 | 16 | 7 | 8 | 0 | 0 | 0 | 11 | 8 | 0 | 0 | Fake `ssh` scripts (`#!/bin/sh … exec sh -c "$*"`, `0o755`, `0o000` locked dir), real `rsync`, `/tmp/a` sources |
-| sync/tests.rs | 34 | 8 | 0 | 4 | 3 | 0 | 0 | 0 | 5 | 0 | 1 | `UnixListener` socket as a special file, `0o000`/`0o555` dirs, symlink compare, `MetadataExt` modes |
-| tasks.rs | 22 | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `"/tmp/x"` in `DfError::io` (pure). `from_raw_os_error(16)`/`(28)` as Linux EBUSY/ENOSPC |
-| vfs/tests.rs | 43 | 21 | 18 | 6 | 3 | 0 | 1 | 9 | 2 | 0 | 0 | Replay "servers" as `Service::direct("fake", "/bin/sh", …)`, `/bin/true`. OpenSSH `sftp-server` looked up at `/usr/lib/ssh/…`, `/usr/lib/openssh/…`, `/usr/libexec/…` or `which`. Local `/tmp` fixtures and remote `/etc`/`/srv` strings |
-| zoxide/tests.rs | 23 | 16 | 16 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `/home/brian/…`, `/mnt/plex` db paths (pure), `rsplit('/')` matching |
+| archive/external.rs | 5 | 4 | 2 | 1 | 0 | 0 | 0 | 2 | 1 | 0 | 0 | Fake `7z`/`bsdtar` files written as `#!/bin/sh` + `0o755` on a synthetic `PATH`. Runs `sh -c "echo …; exit 3"` ✓ P3.24 |
+| archive/tests.rs | 73 | 40 | 15 | 20 | 0 | 0 | 0 | 11 | 0 | 0 | 0 | Synthetic zip/tar headers with Unix modes (pure bytes). `/tmp/out`, `/x.zip`, `/etc/cron.d/evil` as pure strings. 11 spawn `gzip`/`xz`/`zstd`/`zip`/`bsdtar`/7-Zip, guarded by `have_binary` ✓ P3.24 |
+| archive/whole.rs | 2 | 1 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | Pure string checks (`"a.7z"`). The spawn hit is the string `"7z"`, not a process ✓ P3.24 |
+| archive/write/tar.rs | 2 | 1 | 0 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic mode field ✓ P3.24 |
+| archive/write/tests.rs | 25 | 16 | 2 | 13 | 11 | 0 | 0 | 13 | 0 | 0 | 0 | Fixture `photos()` sets `0o640`/`0o755` and makes a symlink. Asserts zip/tar mode fields. Runs `zstd`/`xz`/7-Zip/`gunzip` ✓ P3.24 |
+| config.rs | 28 | 6 | 6 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `/mnt/…` bookmarks, `/home/brian/Work` icon paths, `expand_home(..).ends_with("/Work")`, `load_from_dir("/nonexistent/…")` ✓ P3.24 |
+| du/fstype.rs | 3 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `magic_of(temp dir).is_some()` (Linux `statfs`), `/nonexistent-…` ✓ P3.24 |
+| du/tests.rs | 49 | 7 | 4 | 1 | 2 | 0 | 0 | 0 | 2 | 0 | 0 | `st_blocks` via `MetadataExt`, sparse file, hardlink dedupe (`nlink`), symlink skip, `0o000` unreadable dir ✓ P3.24 |
+| fs/kind.rs | 11 | 9 | 3 | 9 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic `st_mode` values with `S_IF*` socket/fifo/char/block bits and `0o755`. `/tmp` in synthetic `Entry` ✓ P3.24 |
+| fs/tests.rs | 53 | 48 | 48 | 40 | 1 | 0 | 3 | 1 | 1 | 0 | 0 | 48 use synthetic `Entry` with `/fixture` paths, `mode: 0o644` and `uid 1000` (no disk). 3 start a real `Watcher` (inotify). 1 makes symlinks with `std::os::unix::fs::symlink`. 1 parses a passwd table ✓ P3.24 |
+| fs/typefilter.rs | 4 | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic `Entry` ✓ P3.24 |
+| git/tests.rs | 35 | 24 | 24 | 0 | 0 | 0 | 0 | 3 | 0 | 0 | 3 | 24 parse synthetic porcelain against root `/repo` (pure). 3 run real `git` with `GIT_CONFIG_GLOBAL=/dev/null` ✓ P3.24 |
+| input/tests.rs | 36 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `segment_at("/home/brian/Downloads", …)` with a `/` separator (pure) ✓ P3.24 |
+| keymap/tests.rs | 34 | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Bookmark path strings ✓ P3.24 |
+| lib.rs | 1 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `DfError::io("/tmp/nope", …)` display (pure) ✓ P3.24 |
+| ops.rs | 6 | 5 | 3 | 0 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | `normalize("/a/b/../..") == "/"`, `is_absolute`. Symlinks via `TempTree::symlink` ✓ P3.24 |
+| ops/copy.rs | 29 | 9 | 1 | 2 | 6 | 0 | 0 | 0 | 4 | 1 | 0 | Mode preservation (`0o640`), `0o555` dir, relative/absolute/broken symlinks (`/nowhere/at/all`), gnarly names ✓ P3.24 |
+| ops/create.rs | 10 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | Creates every gnarly name on disk (`\n`, `\t`, `\`, `"`) ✓ P3.24 |
+| ops/delete.rs | 12 | 9 | 5 | 0 | 3 | 0 | 0 | 0 | 1 | 1 | 0 | Rails on `/`, `/home`, `/home/brian`. Symlink-to-dir deletion and `link/` trailing-slash behaviour. Gnarly names ✓ P3.24 |
+| ops/jobs.rs | 7 | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `DeleteJob` on `/` refused ✓ P3.24 |
+| ops/journal.rs | 34 | 9 | 3 | 2 | 6 | 0 | 0 | 0 | 5 | 0 | 0 | `0o555` dirs to force undo failure. Symlink undo (`/somewhere/else`). `/tmp/{i}` records ✓ P3.24 |
+| ops/link.rs | 13 | 12 | 7 | 0 | 5 | 0 | 0 | 0 | 0 | 1 | 0 | `relative_to` over `/a/b/...` (pure). Symlinks created and read back. Hardlink `(dev, ino)`/`nlink` via `MetadataExt` ✓ P3.24 |
+| ops/paste.rs | 37 | 13 | 9 | 0 | 3 | 0 | 0 | 0 | 0 | 1 | 0 | `/tmp/a`, `/tmp/notes.txt` clipboard paths. Paste into itself through a symlink. Gnarly names ✓ P3.24 |
+| ops/trash.rs | 31 | 13 | 8 | 2 | 2 | 3 | 0 | 0 | 4 | 3 | 0 | Sticky `.Trash` (`0o1777`), `.Trash-1000`/`-4242`, `mount_point_of("/tmp")`, non-UTF-8 name `caf\xE9` (rejected by APFS), gnarly names, `$HOME` trash ✓ P3.24 |
+| preview/kind.rs | 7 | 2 | 2 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | Synthetic `Entry` (`/tmp`, `0o644`) ✓ P3.24 |
+| preview/sniff.rs | 17 | 1 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | 0 | `#!/bin/sh` as content bytes (pure) ✓ P3.24 |
+| preview/syntax.rs | 5 | 2 | 0 | 0 | 0 | 0 | 0 | 2 | 0 | 0 | 0 | Shebang bytes (pure) ✓ P3.24 |
+| rename/facts.rs | 15 | 3 | 1 | 0 | 1 | 0 | 0 | 0 | 0 | 1 | 0 | `Facts::stat(Path::new("/"), …)`, symlink not followed, `localtime_r` via `Civil::local` ✓ P3.24 |
+| rename/template.rs | 34 | 1 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | Gnarly names through the template renderer (pure) ✓ P3.24 |
+| state/pins.rs | 7 | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `/tmp/a`, `/tmp/tab\there…` pin paths, `expand_home` + `/` ✓ P3.24 |
+| state/tests.rs | 28 | 22 | 22 | 0 | 0 | 0 | 0 | 0 | 1 | 0 | 0 | `/tmp/…`, `/home/brian/…` record keys (the format requires a leading `/`). 1 non-UTF-8 path via `from_vec` ✓ P3.24 |
+| sync/rsync.rs | 23 | 16 | 7 | 8 | 0 | 0 | 0 | 11 | 8 | 0 | 0 | Fake `ssh` scripts (`#!/bin/sh … exec sh -c "$*"`, `0o755`, `0o000` locked dir), real `rsync`, `/tmp/a` sources ✓ P3.24 |
+| sync/tests.rs | 34 | 8 | 0 | 4 | 3 | 0 | 0 | 0 | 5 | 0 | 1 | `UnixListener` socket as a special file, `0o000`/`0o555` dirs, symlink compare, `MetadataExt` modes ✓ P3.24 |
+| tasks.rs | 22 | 5 | 5 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `"/tmp/x"` in `DfError::io` (pure). `from_raw_os_error(16)`/`(28)` as Linux EBUSY/ENOSPC ✓ P3.24 |
+| vfs/tests.rs | 43 | 21 | 18 | 6 | 3 | 0 | 1 | 9 | 2 | 0 | 0 | Replay "servers" as `Service::direct("fake", "/bin/sh", …)`, `/bin/true`. OpenSSH `sftp-server` looked up at `/usr/lib/ssh/…`, `/usr/lib/openssh/…`, `/usr/libexec/…` or `which`. Local `/tmp` fixtures and remote `/etc`/`/srv` strings ✓ P3.24 |
+| zoxide/tests.rs | 23 | 16 | 16 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | `/home/brian/…`, `/mnt/plex` db paths (pure), `rsplit('/')` matching ✓ P3.24 |
 
 Cross-cutting test facts:
 
