@@ -713,6 +713,13 @@ and the existing non-UTF-8 test kept under `#[cfg(unix)]`.
 - 2026-09-29 — P3.10: `create` trims exactly one trailing separator, as it
   did, not every one through `trim_trailing_separator`: `a//` stays `a/`
   and a typed `/` stays "no name given" on Linux.
+- 2026-09-29 — P3.21: on Linux the one thing `create` and `rename` now
+  refuse in their own words is a name with a NUL in it (`"<name>" cannot be
+  a name here: a name cannot contain a NUL character`), which the system
+  call refused before with std's "file name contained an unexpected NUL
+  byte". A `/` never reaches the check there (`create` splits on it, and
+  `rename`'s name is `file_name` of the target), so no other Linux name is
+  refused, or refused differently, than before.
 
 ## Open questions
 
