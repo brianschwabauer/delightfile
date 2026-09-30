@@ -682,9 +682,9 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   device) is refused before the call, as the too-long path is.
 - (df-core) 2026-09-29 — W4.7: the Windows trash has its own `TrashedItem`,
   `Purged` and date helpers (the stub's, copied), and `platform/stub/trash.rs`
-  is compiled for macOS alone. Reason: Windows' item is a real one whose
-  location is unknown rather than a stand-in, and a stub module Windows no
-  longer re-exports would be dead code there.
+  is gone: after the rebase onto Phase 2, which gave macOS its own trash,
+  nothing used it. Reason for the copy: Windows' item is a real one whose
+  location is unknown rather than a stand-in.
 - (df-core) 2026-09-29 — Permissions editing (the `C` card, `ops::mode`) does
   not exist on Windows; decided for Brian, who delegated the open question
   that asked it. Windows has one permission bit, read-only, which W4.29 shows
@@ -751,8 +751,8 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   read fails with access denied). Every watch is looked at after any wake,
   since `WaitForMultipleObjects` reports only the lowest signalled handle,
   and at most 63 directories are watched, its limit less the wake event.
-- (df-core) 2026-09-29 — W4.4: `platform/stub/watch.rs` is compiled for macOS
-  alone, as the trash stub is (W4.7).
+- (df-core) 2026-09-29 — W4.4: `platform/stub/watch.rs` is gone, as the trash
+  stub is (W4.7): macOS has kqueue since Phase 2.
 - (df-core) 2026-09-29 — W4.31: the seam gains `tie(&Child) -> io::Result<Tie>`
   beside `tie_to_this_thread(&mut Command)`. Reason: a process goes into a
   job only once it exists, and `std` has no stable way to start one inside a
@@ -763,8 +763,9 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   killed between the spawn and the assignment leaves that one child running.
   The runner test ends a parent with `TerminateProcess` and sees its tied
   child end; nothing on Windows spawns the daemon until W4.32.
-- (df-core) 2026-09-29 — W4.31: `platform/stub/process.rs` is compiled for
-  macOS alone, as the trash and watch stubs are.
+- (df-core) 2026-09-29 — W4.31: `platform/stub/process.rs` is gone, as the
+  trash and watch stubs are: macOS has its own parent-death watcher since
+  Phase 2.
 - (df-core) 2026-09-29 — W4.20: stdin has a thread too, `df-sftp-in`, where
   the task kept it synchronous with a watchdog check on the next call. A
   synchronous write the child has stopped draining never returns, so no
@@ -787,12 +788,13 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   `cargo test` builds examples before it runs tests, and a unit test finds
   one beside its own binary, where a `[[bin]]`'s path is given only to
   integration tests. A `--lib` run has no examples, and the Windows tests
-  that need it skip, saying so. The six fake-server tests lost their
-  `cfg(unix)`; Unix keeps `/bin/sh` for them. The reconnect test needs
-  OpenSSH's `sftp-server`, which the runner's Windows has not, so it has a
-  Windows twin of the same name: a replay server that answers the
-  handshake and one `STAT`, ended by `taskkill` through the pid file it
-  writes.
+  that need it skip, saying so — but on a runner (`CI` set), where a
+  missing example means a broken build, they fail. The six fake-server
+  tests lost their `cfg(unix)`; Unix keeps `/bin/sh` for them. The
+  reconnect test needs OpenSSH's `sftp-server`, which the runner's Windows
+  has not, so it has a Windows twin of the same name: a replay server that
+  answers the handshake and one `STAT`, ended by `taskkill` through the pid
+  file it writes.
 - (df-core) 2026-09-29 — W4.21: `ssh` is not resolved by hand through
   `candidates`. `std`'s Windows lookup adds `.exe` to a bare name and
   searches `PATH` (after the program's own directory and the system's),
