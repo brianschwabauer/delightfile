@@ -189,7 +189,10 @@ pub fn track(pointer: &mut CaptionPointer, mouse: Mouse) -> Heard {
         }
         Mouse::Up(on) => {
             heard.click = on.filter(|button| before.pressed == Some(*button));
-            pointer.hover = on;
+            // A click moves the window out from under the pointer — down to
+            // the taskbar, out to the screen's edge, away — so the button it
+            // was over is lit again only by the next move that finds it.
+            pointer.hover = if heard.click.is_some() { None } else { on };
             pointer.pressed = None;
             heard.ours = on.is_some();
         }
@@ -415,7 +418,7 @@ mod tests {
         let up = track(&mut pointer, Mouse::Up(CLOSE));
         assert_eq!(up.click, CLOSE);
         assert!(up.ours);
-        assert_eq!(pointer.pressed, None);
+        assert_eq!(pointer, CaptionPointer::default(), "put out by its click");
 
         track(&mut pointer, Mouse::Down(CLOSE));
         track(&mut pointer, Mouse::Move(MAX));
