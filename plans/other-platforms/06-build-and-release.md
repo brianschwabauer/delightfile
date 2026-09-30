@@ -973,6 +973,26 @@ Why not sign now:
   scoop prints after an install, say that `--version` and `--help` print nothing
   through the shim, that the window opens as usual, and give the program's own
   path (`$dir\delightfile.exe`) for them.
+- 2026-09-30 — FFmpeg's `LICENSE.md` in the Windows zip: option (c), a copy
+  committed to the repository, decided for Brian, who delegated it.
+  `build/windows/FFmpeg-LICENSE.md` is FFmpeg's `LICENSE.md` at `e47273f4d9`
+  (`e47273f4d9227152dcbf543cebaf9e2430ddbcc4`, `n9.0.1-11-ge47273f4d9` on
+  `release/9.0`), the commit the BtbN build in `ffmpeg.lock` is from. It was
+  fetched from `https://git.ffmpeg.org/ffmpeg.git` and is 4,346 bytes, sha256
+  `2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af`. It is
+  the 9.0.1 release's text byte for byte. The blob is the one at the `n9.0.1`
+  tag, and none of the eleven commits after the tag touches it. The bytes are
+  those of the `LICENSE.md` in `ffmpeg-9.0.1.tar.xz` from
+  `ffmpeg.org/releases`, whose signature is good from FFmpeg's release signing
+  key (`FCF9 86EA 15E6 E293 A564 4F10 B432 2F04 D676 58D8`). `package.ps1`
+  copies it unchanged into the zip as `Licenses\FFmpeg\LICENSE.md.txt`, beside
+  `COPYING.GPLv3.txt`. It refuses an FFmpeg build from any other commit until
+  the file is replaced with that commit's `LICENSE.md` and
+  `$ffmpeg_license_commit` in the script names the new commit.
+  `check-package.ps1` looks for the file, and `SOURCES.txt` names it where it
+  used to say the file was only in the source. The Windows `Licenses\FFmpeg\`
+  now holds both of FFmpeg's files, as the macOS bundle does, and the entry
+  above's "`COPYING.GPLv3.txt` only" no longer holds.
 
 ## Open questions
 

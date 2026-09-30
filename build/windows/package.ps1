@@ -18,12 +18,17 @@ the folder imports is then either in the folder or part of Windows, or the
 script stops and names what is missing.
 
 Licenses\ holds delightfile's license, FFmpeg's COPYING.GPLv3 (the BtbN
-zip's LICENSE.txt, which is that file byte for byte), pdfium's licenses and
-SOURCES.txt, which names the exact FFmpeg (from the BtbN folder's name) and
-where its source is: FFmpeg's repository at the commit that name ends in, and
-BtbN's build scripts at the release ffmpeg.lock names. Each file ends in .txt
-so a double-click opens it. The BtbN zip carries no LICENSE.md; SOURCES.txt
-says where it is.
+zip's LICENSE.txt, which is that file byte for byte) and LICENSE.md, pdfium's
+licenses and SOURCES.txt, which names the exact FFmpeg (from the BtbN folder's
+name) and where its source is: FFmpeg's repository at the commit that name
+ends in, and BtbN's build scripts at the release ffmpeg.lock names. Each file
+ends in .txt so a double-click opens it.
+
+The BtbN zip carries no LICENSE.md, so the one in the zip is
+build\windows\FFmpeg-LICENSE.md: FFmpeg's own, byte for byte, at the commit
+the build is from ($ffmpeg_license_commit below). A build from any other
+commit is refused until that file is replaced with LICENSE.md at the new one
+and $ffmpeg_license_commit names it.
 
 The zip is then checked the way a person would use it, by
 check-package.ps1: unpacked into an empty folder, delightfile.exe --version
@@ -55,6 +60,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+# The FFmpeg commit build\windows\FFmpeg-LICENSE.md was taken from, as BtbN's
+# folder name gives it (ffmpeg.lock's build, FFmpeg 9.0.1 and 11 commits).
+$ffmpeg_license_commit = 'e47273f4d9'
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $version = $null
@@ -156,6 +165,12 @@ try {
     }
     $ffmpeg_version = $Matches[1]
     $ffmpeg_ref = if ($Matches[2]) { $Matches[2] } else { $ffmpeg_version }
+    # FFmpeg's LICENSE.md, which the BtbN zip does not carry, from the
+    # repository: it is one commit's, so a build from another is refused.
+    if ($ffmpeg_ref -ne $ffmpeg_license_commit) {
+        throw "build\windows\FFmpeg-LICENSE.md is FFmpeg's LICENSE.md at $ffmpeg_license_commit and this FFmpeg is ${ffmpeg_ref}: replace it with LICENSE.md at $ffmpeg_ref and set `$ffmpeg_license_commit in package.ps1"
+    }
+    Copy-Item (Join-Path $PSScriptRoot 'FFmpeg-LICENSE.md') (Join-Path $licenses 'FFmpeg\LICENSE.md.txt')
     $lock_url = (Get-Content (Join-Path $PSScriptRoot 'ffmpeg.lock'))[0].Trim()
     if ($lock_url -notmatch '/releases/download/([^/]+)/') { throw "ffmpeg.lock's URL names no BtbN release" }
     $btbn_release = $Matches[1]
@@ -171,8 +186,9 @@ delightfile $version
 FFmpeg $ffmpeg_version, the DLLs avcodec, avformat, avutil, swresample and
 swscale: BtbN/FFmpeg-Builds release $btbn_release, win64 GPL shared.
   License: GPL-3.0-or-later, Licenses\FFmpeg\COPYING.GPLv3.txt (the build's
-           LICENSE.txt). FFmpeg's LICENSE.md, which says which parts are under
-           which license, is in the source below.
+           LICENSE.txt), and Licenses\FFmpeg\LICENSE.md.txt, FFmpeg's
+           LICENSE.md at $ffmpeg_ref, which says which parts are under which
+           license.
   Source:  FFmpeg's repository at $ffmpeg_ref
            https://git.ffmpeg.org/ffmpeg.git
            https://github.com/FFmpeg/FFmpeg/tree/$ffmpeg_ref (mirror)
