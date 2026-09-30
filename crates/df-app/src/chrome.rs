@@ -885,6 +885,10 @@ pub fn crumbs(path: &std::path::Path) -> Vec<Crumb> {
 ///
 /// A function of the row alone, so the hit test, the paint, the crumbs laid
 /// out after it and the menu that drops out of it all read one rect.
+///
+/// Where the platform keeps the app menu elsewhere — macOS's menu bar,
+/// `platform::menubar::MENU_BUTTON` — there is no button, and this is only
+/// the corner the menu hangs from when `F10` opens it in the window.
 pub fn menu_button_rect(row: egui::Rect) -> egui::Rect {
     let side = (row.height() - CHIP_INSET * 2.0).max(0.0);
     egui::Rect::from_min_size(
@@ -893,13 +897,32 @@ pub fn menu_button_rect(row: egui::Rect) -> egui::Rect {
     )
 }
 
-/// Where the path starts on the row: after the menu button and a word space.
+/// Where the path starts on the row: after the menu button and a word space,
+/// or with no `button`, at the row's corner, inset as the button would be.
 ///
 /// [`ICON_GAP`] rather than a crumb separator's width: the button is not a
 /// step of the path, and a chevron's worth of space before the root would read
-/// as a step that had gone missing.
-fn crumbs_left(row: egui::Rect) -> f32 {
-    menu_button_rect(row).right() + ICON_GAP
+/// as a step that had gone missing. [`CHIP_INSET`] with no button, since the
+/// first crumb's plate then sits at the row's rounded corner where the
+/// button's did, and wants the same gap round it (`delightful-ui` §15).
+fn crumbs_left(row: egui::Rect, button: bool) -> f32 {
+    if button {
+        menu_button_rect(row).right() + ICON_GAP
+    } else {
+        row.left() + CHIP_INSET
+    }
+}
+
+/// Where the leading `…` goes when the path does not fit: where the crumbs
+/// start, or with no button, the row's own padding in from its corner — the
+/// `…` is text on the row, not a plate, and a plate's inset would put it
+/// against the row's edge.
+fn ellipsis_left(row: egui::Rect, button: bool) -> f32 {
+    if button {
+        crumbs_left(row, button)
+    } else {
+        row.left() + PAD_X
+    }
 }
 
 /// The menu button's glyph with the patched font (nf-fa-bars)…
@@ -915,11 +938,15 @@ const MENU_GLYPH: &str = "≡";
 /// A crumb that did not fit gets [`egui::Rect::NOTHING`], which contains no
 /// point — so an elided segment is simply not hit-testable, and the vector
 /// stays index-aligned with `crumbs`.
+///
+/// `button` is whether the row leads with the app menu's button
+/// ([`crumbs_left`]).
 pub fn crumb_rects(
     painter: &egui::Painter,
     bar: egui::Rect,
     crumbs: &[Crumb],
     reserved_right: f32,
+    button: bool,
 ) -> Vec<egui::Rect> {
     let font = egui::FontId::proportional(FONT);
     let widths: Vec<f32> = crumbs
@@ -928,19 +955,20 @@ pub fn crumb_rects(
         .collect();
     // The menu button holds the row's leading end, so the path is measured
     // against what is left after it.
-    let start = crumbs_left(bar);
+    let start = crumbs_left(bar, button);
     let room = (bar.right() - PAD_X - reserved_right - start).max(0.0);
+    // How far the leading `…` and the separator after it push the first
+    // crumb shown along, from where the crumbs start.
+    let elided_lead = ellipsis_left(bar, button) - start
+        + text_width(painter, CRUMB_ELLIPSIS, font.clone())
+        + CRUMB_SEPARATOR_WIDTH;
     // Elide from the *left*: the segment you are in and the ones just above it
     // are what a person is reading, and the root is the part they can guess.
     let mut first = 0;
     loop {
         let shown = &widths[first..];
         let separators = CRUMB_SEPARATOR_WIDTH * shown.len().saturating_sub(1) as f32;
-        let ellipsis = if first > 0 {
-            text_width(painter, CRUMB_ELLIPSIS, font.clone()) + CRUMB_SEPARATOR_WIDTH
-        } else {
-            0.0
-        };
+        let ellipsis = if first > 0 { elided_lead } else { 0.0 };
         if shown.iter().sum::<f32>() + separators + ellipsis <= room || first + 1 >= widths.len() {
             break;
         }
@@ -950,7 +978,7 @@ pub fn crumb_rects(
     let mut rects = vec![egui::Rect::NOTHING; crumbs.len()];
     let mut x = start;
     if first > 0 {
-        x += text_width(painter, CRUMB_ELLIPSIS, font.clone()) + CRUMB_SEPARATOR_WIDTH;
+        x += elided_lead;
     }
     for (index, width) in widths.iter().enumerate().skip(first) {
         if index > first {
@@ -1776,8 +1804,9 @@ fn tip_rect(area: egui::Rect, rect: egui::Rect, width: f32, height: f32) -> egui
 /// reason [`tab_rects`] is shared: two functions computing this separately is
 /// how a row grows a one-pixel lie at its edges.
 pub struct TopGeom {
-    /// The app menu's button, at the row's leading end ([`menu_button_rect`]).
-    pub menu: egui::Rect,
+    /// The app menu's button, at the row's leading end ([`menu_button_rect`]),
+    /// where the row has one (`platform::menubar::MENU_BUTTON`).
+    pub menu: Option<egui::Rect>,
     pub crumbs: Vec<egui::Rect>,
     /// The leading `…`, when the path did not fit. It is not a crumb — it
     /// stands for several — so it is not in the vector above.
@@ -1827,7 +1856,9 @@ fn filter_width(painter: &egui::Painter, filter: &str, nerd: bool) -> f32 {
         + CRUMB_SEPARATOR_WIDTH
 }
 
-/// Lay the whole top row out.
+/// Lay the whole top row out. `button` is whether it leads with the app
+/// menu's button: everywhere but where the app menu is the system's menu bar
+/// (`platform::menubar::MENU_BUTTON`).
 pub fn top_geometry(
     painter: &egui::Painter,
     row: egui::Rect,
@@ -1835,11 +1866,12 @@ pub fn top_geometry(
     filter: &str,
     cluster: &Cluster<'_>,
     nerd: bool,
+    button: bool,
 ) -> TopGeom {
     let cluster_geom = cluster_geometry(painter, row, cluster, nerd);
     let filter_w = filter_width(painter, filter, nerd);
     let reserved = cluster_geom.width + filter_w;
-    let rects = crumb_rects(painter, row, crumbs, reserved);
+    let rects = crumb_rects(painter, row, crumbs, reserved, button);
     // After the last crumb that fitted, with a separator's worth of space
     // before it: the committed filter reads as one more step down the path,
     // because that is what it is — `Downloads › ⌕ invoice` is the directory
@@ -1868,7 +1900,7 @@ pub fn top_geometry(
                 .rev()
                 .find(|r| **r != egui::Rect::NOTHING)
                 .map(|last| last.right() + CRUMB_SEPARATOR_WIDTH)
-                .unwrap_or(crumbs_left(row));
+                .unwrap_or(crumbs_left(row, button));
             egui::Rect::from_min_max(
                 egui::pos2(left, row.top() + CHIP_INSET),
                 egui::pos2(
@@ -1912,14 +1944,14 @@ pub fn top_geometry(
         .unwrap_or(crumbs.len());
     let ellipsis = (elided > 0 && !crumbs.is_empty()).then(|| {
         let width = text_width(painter, CRUMB_ELLIPSIS, egui::FontId::proportional(FONT));
-        let left = crumbs_left(row);
+        let left = ellipsis_left(row, button);
         egui::Rect::from_min_max(
             egui::pos2(left, row.top() + CHIP_INSET),
             egui::pos2(left + width, row.bottom() - CHIP_INSET),
         )
     });
     TopGeom {
-        menu: menu_button_rect(row),
+        menu: button.then(|| menu_button_rect(row)),
         crumbs: rects,
         ellipsis,
         filter: filter_rect,
@@ -1957,7 +1989,7 @@ pub fn band_controls(
         controls.extend(field);
     } else {
         let cluster = &row.cluster;
-        controls.push(row.menu);
+        controls.extend(row.menu);
         controls.extend(
             row.crumbs
                 .iter()
@@ -2253,7 +2285,9 @@ pub fn path_bar(
     let font = egui::FontId::proportional(FONT);
     let rects = &geom.crumbs;
 
-    menu_button(paint, geom.menu, menu_open, hovers, ripples);
+    if let Some(button) = geom.menu {
+        menu_button(paint, button, menu_open, hovers, ripples);
+    }
 
     // The leading ellipsis, when the path did not fit. It brightens under the
     // pointer because it answers one — with the segments it is standing in for,
@@ -4216,7 +4250,7 @@ mod tests {
             let wide =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(900.0, TOP_HEIGHT));
             assert!(
-                top_geometry(ui.painter(), wide, &path, "", &bare, false)
+                top_geometry(ui.painter(), wide, &path, "", &bare, false, true)
                     .ellipsis
                     .is_none(),
                 "nothing was elided, so there is no ellipsis to point at"
@@ -4224,7 +4258,7 @@ mod tests {
 
             let narrow =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(120.0, TOP_HEIGHT));
-            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
+            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false, true);
             let rect = geom.ellipsis.expect("a narrow row elides");
             assert!(narrow.contains(rect.center()));
             let first = geom
@@ -4513,7 +4547,7 @@ mod tests {
             let bar =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(700.0, TOP_HEIGHT));
             let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile/crates"));
-            let rects = crumb_rects(ui.painter(), bar, &path, 0.0);
+            let rects = crumb_rects(ui.painter(), bar, &path, 0.0, true);
             assert_eq!(rects.len(), path.len());
             for (index, rect) in rects.iter().enumerate() {
                 assert_ne!(*rect, egui::Rect::NOTHING, "{index} did not fit a wide bar");
@@ -4527,7 +4561,7 @@ mod tests {
             // A narrow bar elides from the left and keeps the tail.
             let narrow =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(150.0, TOP_HEIGHT));
-            let rects = crumb_rects(ui.painter(), narrow, &path, 0.0);
+            let rects = crumb_rects(ui.painter(), narrow, &path, 0.0, true);
             assert_eq!(rects[0], egui::Rect::NOTHING, "the root should be elided");
             assert_ne!(
                 rects[path.len() - 1],
@@ -4539,7 +4573,7 @@ mod tests {
             assert!(!rects[0].contains(narrow.center()));
 
             // The cluster's room comes out of the crumbs' room.
-            let with_cluster = crumb_rects(ui.painter(), bar, &path, 200.0);
+            let with_cluster = crumb_rects(ui.painter(), bar, &path, 200.0, true);
             assert_eq!(with_cluster.len(), path.len());
             assert!(with_cluster
                 .iter()
@@ -4577,8 +4611,8 @@ mod tests {
                 types: None,
                 trash: None,
             };
-            let geom = top_geometry(ui.painter(), row, &path, "", &bare, false);
-            assert_eq!(geom.menu, button);
+            let geom = top_geometry(ui.painter(), row, &path, "", &bare, false, true);
+            assert_eq!(geom.menu, Some(button));
             let first = geom.crumbs[0];
             assert!(
                 (first.left() - (button.right() + ICON_GAP)).abs() < 1e-3,
@@ -4589,12 +4623,77 @@ mod tests {
             // still after the button.
             let narrow =
                 egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(200.0, TOP_HEIGHT));
-            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
+            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false, true);
+            let button = geom.menu.expect("a button");
             let ellipsis = geom.ellipsis.expect("a narrow row elides");
-            assert!((ellipsis.left() - (geom.menu.right() + ICON_GAP)).abs() < 1e-3);
+            assert!((ellipsis.left() - (button.right() + ICON_GAP)).abs() < 1e-3);
             for rect in geom.crumbs.iter().filter(|r| **r != egui::Rect::NOTHING) {
-                assert!(rect.left() > geom.menu.right(), "{rect:?} under the button");
+                assert!(rect.left() > button.right(), "{rect:?} under the button");
             }
+        });
+    }
+
+    /// Where the row has no button — macOS, whose app menu is the menu bar's
+    /// (M2.37) — the path starts at the row's corner: the first crumb's
+    /// plate inset from it as the button's was, and a `…` at the row's
+    /// padding, since it is text and has no plate. Nothing is laid where the
+    /// button was, and the crumbs have the button's room besides.
+    #[test]
+    fn without_the_menu_button_the_path_leads_the_row() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let row =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(900.0, TOP_HEIGHT));
+            let path = crumbs(std::path::Path::new("/home/brian/Work/delightfile/crates"));
+            let bare = Cluster {
+                selected: 0,
+                visual: None,
+                yank: None,
+                branch: None,
+                dirty: None,
+                position: 0,
+                rows: 0,
+                pick: None,
+                types: None,
+                trash: None,
+            };
+            let geom = top_geometry(ui.painter(), row, &path, "", &bare, false, false);
+            assert_eq!(geom.menu, None);
+            let first = geom.crumbs[0];
+            assert!(
+                (first.left() - (row.left() + CHIP_INSET)).abs() < 1e-3,
+                "{first:?}"
+            );
+            assert!(
+                (first.top() - (row.top() + CHIP_INSET)).abs() < 1e-3,
+                "{first:?}"
+            );
+            let with = top_geometry(ui.painter(), row, &path, "", &bare, false, true);
+            let shift = with.crumbs[0].left() - first.left();
+            for (without, with) in geom.crumbs.iter().zip(&with.crumbs) {
+                assert!((with.left() - without.left() - shift).abs() < 1e-3);
+                assert!((with.width() - without.width()).abs() < 1e-3);
+            }
+
+            let narrow =
+                egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(200.0, TOP_HEIGHT));
+            let geom = top_geometry(ui.painter(), narrow, &path, "", &bare, false, false);
+            let ellipsis = geom.ellipsis.expect("a narrow row elides");
+            assert!((ellipsis.left() - (narrow.left() + PAD_X)).abs() < 1e-3);
+            for rect in geom.crumbs.iter().filter(|r| **r != egui::Rect::NOTHING) {
+                assert!(rect.left() > ellipsis.right(), "{rect:?} under the `…`");
+                assert!(rect.right() <= narrow.right(), "{rect:?} off the row");
+            }
+            // The button's room is the path's: a row that elides with it
+            // shows at least as much without it.
+            let shown = |geom: &TopGeom| {
+                geom.crumbs
+                    .iter()
+                    .filter(|r| **r != egui::Rect::NOTHING)
+                    .count()
+            };
+            let with = top_geometry(ui.painter(), narrow, &path, "", &bare, false, true);
+            assert!(shown(&geom) >= shown(&with));
         });
     }
 
@@ -4677,15 +4776,17 @@ mod tests {
 
             // The committed filter is a trailing crumb, after the last one.
             let path = crumbs(std::path::Path::new("/home/brian/Downloads"));
-            let top = top_geometry(ui.painter(), row, &path, "invoice", &bare, false);
+            let top = top_geometry(ui.painter(), row, &path, "invoice", &bare, false, true);
             let filter = top.filter.expect("a filter was given");
             let last = top.crumbs.last().copied().expect("a crumb was drawn");
             assert!(filter.left() > last.right());
             assert!(filter.right() <= row.right() - quiet.width + 1e-3);
             // …and nothing is drawn for it when nothing is filtered.
-            assert!(top_geometry(ui.painter(), row, &path, "", &bare, false)
-                .filter
-                .is_none());
+            assert!(
+                top_geometry(ui.painter(), row, &path, "", &bare, false, true)
+                    .filter
+                    .is_none()
+            );
         });
     }
 
@@ -4758,7 +4859,7 @@ mod tests {
             ));
             let narrow =
                 egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(420.0, TOP_HEIGHT));
-            let with = top_geometry(ui.painter(), narrow, &path, "", &picking, false);
+            let with = top_geometry(ui.painter(), narrow, &path, "", &picking, false, true);
             let cluster_left = narrow.right() - with.cluster.width;
             for crumb in with.crumbs.iter().filter(|r| **r != egui::Rect::NOTHING) {
                 assert!(
@@ -4772,7 +4873,7 @@ mod tests {
                     .filter(|r| **r != egui::Rect::NOTHING)
                     .count()
             };
-            let without = top_geometry(ui.painter(), narrow, &path, "", &bare, false);
+            let without = top_geometry(ui.painter(), narrow, &path, "", &bare, false, true);
             assert!(shown(&with) < shown(&without), "the buttons took no room");
         });
     }
@@ -5223,7 +5324,15 @@ mod tests {
                         tip: Some("Items are removed for good after 30 days".to_string()),
                     }),
                 };
-                let geom = top_geometry(paint.painter, path_rect, &path, filter, &cluster, false);
+                let geom = top_geometry(
+                    paint.painter,
+                    path_rect,
+                    &path,
+                    filter,
+                    &cluster,
+                    false,
+                    true,
+                );
                 path_bar(
                     &paint,
                     area,
@@ -5267,7 +5376,7 @@ mod tests {
                     tip: None,
                 }),
             };
-            let geom = top_geometry(paint.painter, narrow, &path, "", &cluster, false);
+            let geom = top_geometry(paint.painter, narrow, &path, "", &cluster, false, true);
             path_bar(
                 &paint,
                 area,
@@ -5438,7 +5547,7 @@ mod tests {
             )
         };
         TopGeom {
-            menu: menu_button_rect(row),
+            menu: Some(menu_button_rect(row)),
             crumbs: vec![egui::Rect::NOTHING, chip(60.0, 120.0), chip(133.0, 200.0)],
             ellipsis: Some(chip(49.0, 55.0)),
             filter: None,
@@ -5474,13 +5583,23 @@ mod tests {
         assert_eq!(
             controls,
             vec![
-                geometry.menu,
+                geometry.menu.expect("a button"),
                 geometry.crumbs[1],
                 geometry.crumbs[2],
                 geometry.ellipsis.expect("elided"),
                 geometry.cluster.counter,
                 geometry.cluster.git.expect("a repository"),
             ]
+        );
+        // With no button (macOS, whose app menu is the menu bar's) the row's
+        // other controls are the same.
+        let buttonless = TopGeom {
+            menu: None,
+            ..row_geometry(row)
+        };
+        assert_eq!(
+            band_controls(band, None, &[], &buttonless, false, None),
+            controls[1..]
         );
         let field = egui::Rect::from_min_max(egui::pos2(120.0, 11.0), egui::pos2(900.0, 43.0));
         assert_eq!(

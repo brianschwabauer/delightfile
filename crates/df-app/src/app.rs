@@ -1521,7 +1521,8 @@ pub struct App {
     menu: Option<menu::Menu>,
     /// Where the app menu's button is on the top row ([`chrome::menu_button_rect`]):
     /// what the menu hangs from when `F10` opens it rather than a click, which
-    /// has no geometry of its own to hand over.
+    /// has no geometry of its own to hand over. Where the row has no button
+    /// (macOS, `platform::menubar::MENU_BUTTON`), the corner it would be in.
     menu_button: egui::Rect,
     /// The window the menu is laid out in, for the keys that scroll it: an
     /// arrow onto a row the card has scrolled out of view has to know how
@@ -13350,7 +13351,7 @@ impl App {
             // spent closing its menu rather than opening it again.
             Control::MenuButton => {
                 self.open_app_menu();
-                geom.top.menu
+                geom.top.menu.unwrap_or(self.menu_button)
             }
             Control::Action(_)
             | Control::PanelRow(_)
@@ -16855,6 +16856,7 @@ impl App {
                 self.filter_chip_text(),
                 &cluster,
                 self.nerd,
+                crate::platform::menubar::MENU_BUTTON,
             )
         };
         // **Nothing on the top row is hit-testable while a prompt has taken
@@ -17263,7 +17265,7 @@ impl App {
                         .or_else(|| hit(cluster.yank.filter(|_| yank_live), Control::YankChip))
                         // The app menu's button, at the other end of the row
                         // from the cluster: nothing is laid over it.
-                        .or_else(|| hit(Some(top_geom.menu), Control::MenuButton))
+                        .or_else(|| hit(top_geom.menu, Control::MenuButton))
                         // The three chips that were only ever labels until now.
                         // Order does not matter between them — the cluster is
                         // laid out left to right with no overlap — so they are
@@ -23262,6 +23264,13 @@ mod tests {
 
         let button = chrome::menu_button_rect(layout_of(&app).path);
         assert!(layout_of(&app).path.contains(button.center()));
+        if !crate::platform::menubar::MENU_BUTTON {
+            // The app menu is the menu bar's (macOS, M2.37): there is no
+            // button, and the row's corner is the path's.
+            click_at(&mut app, &ctx, button.center());
+            assert_ne!(live_menu(&app), Some(menu::Kind::App));
+            return;
+        }
         click_at(&mut app, &ctx, button.center());
         assert_eq!(live_menu(&app), Some(menu::Kind::App));
         assert_eq!(
@@ -25845,6 +25854,7 @@ mod tests {
                 app.filter_chip_text(),
                 &cluster,
                 app.nerd,
+                crate::platform::menubar::MENU_BUTTON,
             )
             .crumbs;
         });
