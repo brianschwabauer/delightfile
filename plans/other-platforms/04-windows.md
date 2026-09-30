@@ -107,7 +107,7 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       open fails; `blocks_bytes` = `GetCompressedFileSizeW` (so compressed
       and sparse files report their allocated size, matching `st_blocks` intent).
       Done when: du tests with hard links pass on the runner. — done in Phase 3
-      (P3.4, 8018e68), ahead of this phase because ten df-core tests on the runner
+      (P3.4, 76d362e), ahead of this phase because ten df-core tests on the runner
       hung on it: `identity(path, &meta) -> io::Result<Identity { dev, ino,
       nlink }>`, all three from one `GetFileInformationByHandle` (so `dev` is the
       volume serial of the file's own handle, not a per-root cache), asked by
@@ -157,7 +157,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       `\\server\share`) and clicking it goes to the drive root. `trashview::crumbs`
       and `remote::crumbs` unchanged. Done when: a `crumbs` test with a
       Windows-shaped path passes (built under `cfg!(windows)`), Linux tests
-      unchanged. — done 213f44d in Phase 3, with the path model the
+      unchanged. — done 0ff9749 in Phase 3, with the path model the
       breadcrumb is a site of: `crumbs` is `path::segments` mapped, which walks a
       `.`/`..` without offering it as the old loop did, so Linux draws the same
       crumbs; `a_windows_breadcrumb_starts_at_the_drive` (a drive, its root, a
@@ -167,7 +167,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       (`copy_piece` Dirname), `archive.rs:106–113` (`Browse::real`), `spot.rs:239–249`
       ("Where" row) → `df_core::path::root_of` / `display`. Done when: no
       `Path::new("/")`/`PathBuf::from("/")` in df-app outside tests (`grep`). —
-      done 213f44d in Phase 3: `nearest_existing`, `copy_piece`'s dirname
+      done 0ff9749 in Phase 3: `nearest_existing`, `copy_piece`'s dirname
       and `Browse::real` fall back to `root_of` the path, the Where row to its
       `display`; `start_directory` and `reveal_directory`, which have no path
       to take a root from when the working directory is gone, fall back to
@@ -317,7 +317,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       and three fixtures: the tab tests list a temp folder of forty files, not
       `/` (a drive's root on the runner holds a handful), and the sync card
       and state-store tests read labels and keys as the platform writes them.
-      What the runner still failed at the end of Phase 3 (20 of 1,093) is
+      What the runner still failed at the end of Phase 3 (14 of 1,117) is
       listed by cause in `03-paths.md`'s Decisions log (2026-09-29, "df-app
       on the Windows runner").
 - [ ] **W4.33** `platform::appearance` Windows body (S1.35's surface: `Desktop`,
