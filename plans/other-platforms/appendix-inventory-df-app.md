@@ -78,9 +78,9 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 16217-16236 | `Presented::Occluded` arm: "But not on Wayland, where neither this nor that event exists"; `repaint_at = now + OCCLUDED_PROBE` | macOS-differs | App::redraw_inner | — ✓ M2.23 |
 | 16345-16367 | `fn finish`: `crate::cli::write_chooser_file(&chooser.out, &self.chosen)` (16348); `crate::cli::write_cwd_file(path, &cwd)` (16359); `self.data_device = None` (16365) "before the `wl_surface`" | Linux-only (data device) / see cli.rs | CloseRequested (17093-17096), RedrawRequested quit (17142-17146) | — ✓ M2.26 |
 | 16727-16750 | `fn start_directory(requested: Option<&Path>) -> (PathBuf, Option<String>)`: fallback `std::env::current_dir().unwrap_or_else(\|_\| PathBuf::from("/"))` (16732) | Windows-differs | App::assemble (1928) | — ✓ W4.10 |
-| 16752-16770 | `fn save_target(dir: &Path, text: &str) -> Result<PathBuf, String>`: refuses only `name.contains('/')` (16767-16769) | Windows-differs | App::save_as (5005) | `\`, `:`, reserved names are not checked. |
+| 16752-16770 | `fn save_target(dir: &Path, text: &str) -> Result<PathBuf, String>`: refuses only `name.contains('/')` (16767-16769) | Windows-differs | App::save_as (5005) | `\`, `:`, reserved names are not checked. ✓ W4.12 |
 | 16901-16912 | `fn nearest_existing(path: &Path) -> PathBuf` — fallback `PathBuf::from("/")` (16911) | Windows-differs | App::poll_workers (2388) | — ✓ W4.10 |
-| 16914-16950 | `fn typed_path(text: &str, cwd: &Path, home: Option<&Path>) -> PathBuf`: expands `~` and `~/…` only (`rest.starts_with('/')`, 16927-16932) | Windows-differs | App::go_to_path (7945) | — |
+| 16914-16950 | `fn typed_path(text: &str, cwd: &Path, home: Option<&Path>) -> PathBuf`: expands `~` and `~/…` only (`rest.starts_with('/')`, 16927-16932) | Windows-differs | App::go_to_path (7945) | — ✓ W4.11 |
 | 17066-17162 | `fn window_event`: arms `CloseRequested`, `Resized`, `Moved \| ScaleFactorChanged`, `Occluded(false)` (17115), `Focused`, `ModifiersChanged` (17127), `KeyboardInput` (17128-17140), `RedrawRequested`; no arm for `DroppedFile`, `HoveredFile`, `HoveredFileCancelled` or `Ime` | macOS/Windows: drop-in events unused | winit | winit `DroppedFile(PathBuf)`/`HoveredFile(PathBuf)` carry no position (winit src/event.rs:176-192); implementations exist in winit platform_impl for windows (drop_handler.rs), macos (window_delegate.rs), x11. `set_ime_allowed` is never called. ✓ S1.32 ✓ M2.11, M2.12 |
 | 17108-17118 | comment on `Occluded(false)`: "**Never delivered on Wayland**" | macOS-differs | window_event | — ✓ M2.23 |
 | 17209-17262 | `fn exiting`: doc "the only point at which the Wayland connection is still alive. egui-winit's clipboard worker must be joined here"; `self.retire_wl_copy()` (17238) | Linux-only | winit | — ✓ M2.26 |
@@ -89,9 +89,9 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 118-120 | `fn shown(written: &str, home: Option<&Path>) -> String` → `finder::shorten_home(Path::new(&expand_home(written)), home)` | Windows-differs | `said` (188) | `expand_home` is df-core (config.rs:767). |
-| 138-183 | `fn brief(text: &str, max: usize) -> String`: finds `"~/"` or `"://"` head, splits the rest on `'/'` (148, 154) and rejoins with `/` (167, 182) | Windows-differs (display) | `said` (188), `card_places` (323), 568, 838 | — |
-| 190-196 | `pub(super) fn written(dir: &Path, home: Option<&Path>) -> String` — "How a folder is written into the state file when it is pinned: under `~`" → `finder::shorten_home` | Windows-differs | App pin/unpin (358, 478, 495, 502) | Pins persisted as `~/…` strings. |
+| 118-120 | `fn shown(written: &str, home: Option<&Path>) -> String` → `finder::shorten_home(Path::new(&expand_home(written)), home)` | Windows-differs | `said` (188) | `expand_home` is df-core (config.rs:767). ✓ W4.11 |
+| 138-183 | `fn brief(text: &str, max: usize) -> String`: finds `"~/"` or `"://"` head, splits the rest on `'/'` (148, 154) and rejoins with `/` (167, 182) | Windows-differs (display) | `said` (188), `card_places` (323), 568, 838 | — ✓ W4.11 |
+| 190-196 | `pub(super) fn written(dir: &Path, home: Option<&Path>) -> String` — "How a folder is written into the state file when it is pinned: under `~`" → `finder::shorten_home` | Windows-differs | App pin/unpin (358, 478, 495, 502) | Pins persisted as `~/…` strings. ✓ W4.11 |
 
 ### src/app/permissions.rs (added after this inventory; row added 2026-09-29 by the integration pass)
 
@@ -103,9 +103,9 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 99 | `crate::finder::shorten_home(&dest, home().as_deref())` | Windows-differs (display) | App::paste_sync | — |
+| 99 | `crate::finder::shorten_home(&dest, home().as_deref())` | Windows-differs (display) | App::paste_sync | — ✓ W4.11 |
 | 123-124 | `if !df_core::sync::rsync::available() { return Err("Sync to a server needs rsync") }` | df-core seam (rsync/ssh) | App::paste_sync remote branch | rsync/ssh spawning is df-core sync/rsync.rs. |
-| 411-424 | `fn server_path(path: &str, root: &str) -> PathBuf`: `raw == "/"`, `raw.starts_with('/')`, `format!("{}/{raw}", root.trim_end_matches('/'))` | Windows-differs (server POSIX path held in `PathBuf`) | `remote_sync` (436) | Handed to rsync as an argument. |
+| 411-424 | `fn server_path(path: &str, root: &str) -> PathBuf`: `raw == "/"`, `raw.starts_with('/')`, `format!("{}/{raw}", root.trim_end_matches('/'))` | Windows-differs (server POSIX path held in `PathBuf`) | `remote_sync` (436) | Handed to rsync as an argument. ✓ W4.14 |
 
 ### src/appearance.rs (added after this inventory: 1,057 lines at 7ad55ad; row added 2026-09-29 by the df-app agent)
 
@@ -124,8 +124,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 126-130 | `pub const NAME_MAX: usize = 255;` — "Linux's own `NAME_MAX`", in bytes | Windows-differs | `problems` (1319) | — |
-| 1306-1331 | `pub fn problems(names: &[&str], others: &HashSet<String>) -> Vec<Option<Problem>>`: `Unusable` only for `""`, `"."`, `".."`, or `name.contains('/')` (1316) | Windows-differs | bulk rename validation | `\ : * ? " < > \|` and reserved device names are not checked. |
+| 126-130 | `pub const NAME_MAX: usize = 255;` — "Linux's own `NAME_MAX`", in bytes | Windows-differs | `problems` (1319) | — ✓ W4.12 |
+| 1306-1331 | `pub fn problems(names: &[&str], others: &HashSet<String>) -> Vec<Option<Problem>>`: `Unusable` only for `""`, `"."`, `".."`, or `name.contains('/')` (1316) | Windows-differs | bulk rename validation | `\ : * ? " < > \|` and reserved device names are not checked. ✓ W4.12 |
 | 775, 781, 838, 842, 851, 859 | hard-coded `Ctrl` chords in the bulk editor | macOS-differs | see §3 | — |
 
 ### src/chrome.rs (4,992 lines; non-test 1-3663)
@@ -141,8 +141,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 158-189 | `pub const USAGE`: "delightfile — a keyboard-first file manager for Wayland" (161); `--chooser-file` "(`Ctrl+Enter`)" (170); `--portal` "serve the xdg-desktop-portal file chooser on the session bus; D-Bus starts this, not a person" (184-185) | text (Linux) | `-h`/`--help` | — ✓ S1.31 ✓ M2.21 (`Ctrl+Enter`) |
 | 221, 246-252 | `"--portal" => portal = true`; `Outcome::Portal` only when it is the sole argument | Linux-only (feature) | main.rs:91 | — ✓ S1.31 |
 | 214-217 | `-V`/`--version` → `format!("delightfile {}\n", env!("CARGO_PKG_VERSION"))` | portable | main | — |
-| 449-459 | `pub fn write_cwd_file(path: &Path, cwd: &Path)`: `std::fs::write(path, cwd.as_os_str().as_encoded_bytes())` | Windows-differs (bytes are WTF-8 on Windows; no newline) | App::finish (16359) | Consumer is the `Super+F` shell function / yazi-style wrapper. |
-| 461-478 | `pub fn write_chooser_file(path: &Path, paths: &[PathBuf])`: each `as_encoded_bytes()` + `b'\n'` | Windows-differs | App::finish (16348) | Consumer: termfilechooser wrapper / `portal::request::read_picked`. |
+| 449-459 | `pub fn write_cwd_file(path: &Path, cwd: &Path)`: `std::fs::write(path, cwd.as_os_str().as_encoded_bytes())` | Windows-differs (bytes are WTF-8 on Windows; no newline) | App::finish (16359) | Consumer is the `Super+F` shell function / yazi-style wrapper. ✓ W4.15 |
+| 461-478 | `pub fn write_chooser_file(path: &Path, paths: &[PathBuf])`: each `as_encoded_bytes()` + `b'\n'` | Windows-differs | App::finish (16348) | Consumer: termfilechooser wrapper / `portal::request::read_picked`. ✓ W4.15 |
 | 44, 226, 362-372, 541 (at 7ad55ad; row added 2026-09-29 by the df-app agent) | `use std::os::unix::ffi::OsStrExt`; `parse` tests `arg.as_bytes().starts_with(b"-")`; `flag` strips `--name=` off `arg.as_bytes()` and rebuilds the value with `OsStr::from_bytes`; the test `a_path_that_is_not_utf8_is_kept_byte_for_byte` uses `OsStringExt::from_vec` | Unix-only (compile; Windows) | main (`cli::parse(std::env::args_os().skip(1))`) | Arrived with 7ad55ad. Second pass: S1.36 (through `df_core::platform::os`). ✓ S1.36 |
 
 ### src/clipboard.rs (693 lines; non-test 1-501)
@@ -150,8 +150,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
 | 42 | `use std::process::{Child, Command, Stdio};` | — | copy/offered_types/paste | — ✓ S1.23 |
-| 208-224 | `fn unreserved(byte)`, `pub fn file_uri(path: &Path) -> String`: `use std::os::unix::ffi::OsStrExt;` (215); percent-encodes every byte of `path.as_os_str().as_bytes()` (217) except `[A-Za-z0-9-._~/]` | Unix-only (compile) | `uri_list` (270) ← dnd::offer (631), App::yank_to_system (13008) | Produces `file://` + the raw path bytes, percent-encoded; assumes the path starts with `/`. ✓ S1.23 |
-| 226-261 | `pub fn parse_file_uri(text: &str) -> Option<PathBuf>`: `use std::os::unix::ffi::OsStringExt;` (232); accepts `file:///…`, `file://localhost/…`; requires `/` after `file://` (245) and keeps it; `PathBuf::from(OsString::from_vec(out))` (260) | Unix-only (compile); Windows-differs (`file:///C:/x` → `/C:/x`) | `parse_uri_list` (281) ← dnd::paths_from (681, 683), App::paste_clipboard_files (13562) | — ✓ S1.23 |
+| 208-224 | `fn unreserved(byte)`, `pub fn file_uri(path: &Path) -> String`: `use std::os::unix::ffi::OsStrExt;` (215); percent-encodes every byte of `path.as_os_str().as_bytes()` (217) except `[A-Za-z0-9-._~/]` | Unix-only (compile) | `uri_list` (270) ← dnd::offer (631), App::yank_to_system (13008) | Produces `file://` + the raw path bytes, percent-encoded; assumes the path starts with `/`. ✓ S1.23 ✓ W4.13 |
+| 226-261 | `pub fn parse_file_uri(text: &str) -> Option<PathBuf>`: `use std::os::unix::ffi::OsStringExt;` (232); accepts `file:///…`, `file://localhost/…`; requires `/` after `file://` (245) and keeps it; `PathBuf::from(OsString::from_vec(out))` (260) | Unix-only (compile); Windows-differs (`file:///C:/x` → `/C:/x`) | `parse_uri_list` (281) ← dnd::paths_from (681, 683), App::paste_clipboard_files (13562) | — ✓ S1.23 ✓ W4.13 |
 | 318-325 | `ClipError::Missing` text: "{tool} is not installed — install wl-clipboard" (322) | Linux-only (text) | App::clip_failed | — ✓ S1.23 |
 | 330-383 | `pub fn copy(mime: Option<&str>, bytes: &[u8]) -> Result<Child, ClipError>`: `Command::new("wl-copy")`, `--foreground`, optional `--type <mime>`, stdin piped, stdout/stderr null (340-353) | Linux-only | App::copy_via_wl_copy (13148) | — ✓ S1.23 ✓ M2.10 |
 | 385-392 | `pub fn reap(child: &mut Child)`: `child.kill()` + `child.wait()` | portable | App::retire_wl_copy (13233) | — ✓ S1.23 |
@@ -174,7 +174,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 336-359 | `pub fn shorten_home(path: &Path, home: Option<&Path>) -> String`: `text.strip_prefix(home)`, then `Some("") => "~"`, `Some(rest) if rest.starts_with('/') => format!("~{rest}")` (356) | Windows-differs | finder::place_row (332), App::palette_rows (6183), places::{shown (119), written (195), Place::label (221)}, App::paste_sync (syncing.rs:99) | — |
+| 336-359 | `pub fn shorten_home(path: &Path, home: Option<&Path>) -> String`: `text.strip_prefix(home)`, then `Some("") => "~"`, `Some(rest) if rest.starts_with('/') => format!("~{rest}")` (356) | Windows-differs | finder::place_row (332), App::palette_rows (6183), places::{shown (119), written (195), Place::label (221)}, App::paste_sync (syncing.rs:99) | — ✓ W4.11 |
 
 ### src/format.rs (331 lines; non-test 1-224)
 
@@ -246,7 +246,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
 | 549 | `"Type to search. Esc to close, Ctrl+s to stop."` | text | paint_search | §3. ✓ M2.21 |
-| 727-760 | `fn path_text(painter, pos, path: &str, bright, dim, max_width) -> f32`: `path.rfind('/')` splits dim directory / bright name (741) | Windows-differs (display) | overlay::paint_search (618, 638) with `hit.relative` from search.rs | — |
+| 727-760 | `fn path_text(painter, pos, path: &str, bright, dim, max_width) -> f32`: `path.rfind('/')` splits dim directory / bright name (741) | Windows-differs (display) | overlay::paint_search (618, 638) with `hit.relative` from search.rs | — ✓ W4.13 |
 
 ### src/portal/mod.rs, src/portal/request.rs — Linux-only module (see block at end of this section) ✓ S1.21 (now `src/platform/linux/portal/`, with `show.rs` since 2ec71f3)
 
@@ -279,8 +279,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 107-122 | `pub fn display(at: &VfsPath) -> PathBuf { PathBuf::from(at.to_url()) }`; `pub fn at_of(display: &Path) -> Option<VfsPath> { VfsPath::parse(&display.to_string_lossy()) }` | Windows-differs | throughout app.rs; e.g. `scannable` (16555) → `spawnable_cwd`/`child_cwd`, App::jump_to (6785), App::remote_at | `sftp://host/path` URLs are carried as `PathBuf`s; any `Path` method on them follows the platform's separator rules (`\` and `/` on Windows). |
-| 290-297 | `pub fn is_remote(path: &Path) -> bool` | same | App guards, e.g. App::jump_to (6785) | — |
+| 107-122 | `pub fn display(at: &VfsPath) -> PathBuf { PathBuf::from(at.to_url()) }`; `pub fn at_of(display: &Path) -> Option<VfsPath> { VfsPath::parse(&display.to_string_lossy()) }` | Windows-differs | throughout app.rs; e.g. `scannable` (16555) → `spawnable_cwd`/`child_cwd`, App::jump_to (6785), App::remote_at | `sftp://host/path` URLs are carried as `PathBuf`s; any `Path` method on them follows the platform's separator rules (`\` and `/` on Windows). ✓ W4.14 |
+| 290-297 | `pub fn is_remote(path: &Path) -> bool` | same | App guards, e.g. App::jump_to (6785) | — ✓ W4.14 |
 | 428-535 | `pub struct Temps`: ledger of files from df-core `Vfs::download_to_temp`, documented as `$TMPDIR/delightfile-vfs-<pid>/` (433-435); `clear` removes files then `remove_dir` (492-521) | df-core seam | App::exiting (17225-17231) | Directory is chosen by df-core. |
 
 ### src/search.rs (1,065 lines; non-test 1-757)
@@ -291,7 +291,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 196-212 | `impl Drop for Running`: `child.kill()` + `child.wait()` | portable | respawn/close/cancel | — |
 | 466-523 | `fn spawn(&mut self, query: &str)`: `build(...)`, `.current_dir(&self.root)`, stdout piped, stderr/stdin null, `process.spawn()` (487); reader thread `"df-search"` (508-510) | external binaries | `Search::tick` (377) | — |
 | 525-565 | `fn build(mode: Mode, query: &str, hidden: bool) -> Process`: fd `--color=never [--hidden] -- <query>`; rg `--color=never --smart-case --line-number --column --no-heading --null --max-columns 200 [--hidden] -- <query>` | external binaries | `spawn` | — |
-| 686-731 | `pub(crate) fn parse(mode: Mode, root: &Path, query: &str, line: &str) -> Option<Hit>`: Names → `line.trim_end_matches('/')` (697), `root.join(&relative)`; Content → `line.split_once('\0')` (713), `root.join(relative)` | Windows-differs | `read` (645) | Only a trailing `/` is trimmed. |
+| 686-731 | `pub(crate) fn parse(mode: Mode, root: &Path, query: &str, line: &str) -> Option<Hit>`: Names → `line.trim_end_matches('/')` (697), `root.join(&relative)`; Content → `line.split_once('\0')` (713), `root.join(relative)` | Windows-differs | `read` (645) | Only a trailing `/` is trimmed. ✓ W4.13 |
 
 ### src/spot.rs (1,519 lines; non-test 1-1112)
 
@@ -316,7 +316,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 72-78 | `pub const URL: &str = "trash://";` | Windows-differs | tab.rs:788, app.rs:2486 (App::navigate), 6785 (App::jump_to), 16555 (`scannable`) | `crumbs()` (117) is used at app.rs:10389. |
 | 130-150 | `pub fn row(item: &TrashedItem) -> Entry`: `std::fs::symlink_metadata(&path)`; `std::fs::metadata` when the lstat is a symlink | runtime-differs (symlink semantics) | `rows` (127) ← tab.rs:Tab::show_trash (784) | — |
 | 163-248 | `pub fn row_from(item: &TrashedItem, meta: Option<&Metadata>, target: Option<&Metadata>) -> Entry`: `use std::os::unix::fs::MetadataExt;` (176); `.map(\|m\| m.mode()).unwrap_or(if is_dir { 0o040_755 } else { 0o100_644 })` (212-214); `uid: facts.map(\|m\| m.uid())` (240), `gid: … m.gid()` (241) | Unix-only (compile) | `row` (149), tests | — ✓ S1.25 |
-| 276-293 | `fn shorten(path: &str) -> String`: `std::env::var_os("HOME")` (281); `rest.starts_with('/')` (290) | Windows-differs | `notes` (273) ← App::show_trash (4071) | — ✓ S1.25 |
+| 276-293 | `fn shorten(path: &str) -> String`: `std::env::var_os("HOME")` (281); `rest.starts_with('/')` (290) | Windows-differs | `notes` (273) ← App::show_trash (4071) | — ✓ S1.25 ✓ W4.11 |
 | 297-326 | `pub fn deleted_at(text: &str) -> Option<SystemTime>`: parses `YYYY-MM-DDThh:mm:ss` as UTC | portable | `row_from` (237) | Format is df-core's trashinfo `DeletionDate`. |
 | 339-381 | `pub fn restore_refusal(item: &TrashedItem) -> Option<String>`: `symlink_metadata` on `item.files_path()`, `original`, `original.parent()` | portable API | App::trash_restore (4115) | — |
 
