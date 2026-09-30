@@ -142,6 +142,73 @@ It shares a thumbnail cache with yazi and with
 [delightviewer](https://github.com/brianschwabauer/delightviewer), so all three hand off
 the exact frame you were looking at.
 
+## Installing
+
+**Pending the first release.** No release has been tagged yet, so the downloads and the
+Homebrew and scoop commands below do not work until one is. Until then, build it (next
+section).
+
+Each release on the [Releases page](https://github.com/brianschwabauer/delightfile/releases)
+has one download per system, each with a `.sha256` beside it. None of them is signed by
+Apple or Microsoft, so macOS and Windows each ask once before delightfile first opens. The
+steps for that are below. Signing costs a yearly fee that a hobby project does not pay yet
+([plans/other-platforms/06-build-and-release.md](plans/other-platforms/06-build-and-release.md)
+§6 has the reasoning).
+
+### macOS
+
+Apple silicon only. The release notes name the oldest macOS each release starts on.
+
+```sh
+brew install --cask brianschwabauer/tap/delightfile
+xattr -dr com.apple.quarantine /Applications/delightfile.app
+```
+
+Or download `delightfile-<version>-aarch64-macos.dmg`, open it, drag delightfile onto
+Applications, and run the same `xattr` line.
+
+The `xattr` line is the one-time step. Homebrew and the browser both mark what they download
+as quarantined, and macOS will not open a quarantined app that Apple has not notarized.
+Homebrew used to skip this with `--no-quarantine`, but Homebrew 6 removed the flag. Instead
+of `xattr` you can open the app once, let macOS refuse it, then choose Open Anyway under
+System Settings, Privacy & Security. On macOS 14, right-click the app, choose Open, then Open
+again.
+
+### Windows
+
+Windows 10 or 11, x86-64.
+
+```powershell
+scoop bucket add brianschwabauer https://github.com/brianschwabauer/scoop-bucket
+scoop install brianschwabauer/delightfile
+```
+
+Or download `delightfile-<version>-x86_64-windows.zip` and unzip it anywhere. The folder is
+the whole program, FFmpeg and pdfium included, and nothing gets installed. Run
+`delightfile.exe` from it.
+
+The first time a downloaded copy runs, SmartScreen says "Windows protected your PC". Choose
+More info, then Run anyway. Unblocking the zip before unzipping it avoids the prompt:
+right-click it, Properties, tick Unblock. Or in PowerShell,
+`Unblock-File .\delightfile-<version>-x86_64-windows.zip`. scoop's downloads never get the
+prompt.
+
+### Linux
+
+x86-64, with FFmpeg 9 (libavcodec 63) installed. On Arch that is `pacman -S ffmpeg`. The
+binary is built on Arch, so a distribution with an older glibc may refuse it; build from
+source there.
+
+```sh
+tar -xzf delightfile-<version>-x86_64-linux.tar.gz
+cd delightfile-<version>-x86_64-linux
+bash install.sh
+```
+
+That is the same install as `build/install.sh` from a checkout (below), with the tarball's
+binary: everything goes under `~/.local`, the file-picker backend included, and
+`bash install.sh uninstall` takes it all back out.
+
 ## Building
 
 Linux, in a Wayland session, is the platform delightfile supports. macOS and Windows are a
