@@ -20,8 +20,11 @@
 //! **`builtin:shell-open` is `ShellExecuteW(…, "open", …)`**: what a
 //! double-click in Explorer does, the file's associated program or the
 //! "How do you want to open this?" choice, and for a folder an Explorer
-//! window.
-#![allow(unsafe_code)] // ShellExecuteW, on wide strings this function builds and keeps alive for the call
+//! window. The shell may hand the verb to an extension that is a COM object,
+//! so the calling thread has COM for the length of the call: the window's
+//! thread has it already (winit starts OLE there), and a pool thread — the
+//! connect prompt's — is given it and has it taken away again.
+#![allow(unsafe_code)] // COM's per-thread start and ShellExecuteW, on wide strings this function builds and keeps alive for the call
 
 use std::ffi::OsStr;
 use std::io;
@@ -30,6 +33,9 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use windows_sys::Win32::System::Com::{
+    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+};
 use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -114,6 +120,17 @@ pub fn shell_open(target: &OsStr) -> io::Result<()> {
     let wide = |text: &OsStr| -> Vec<u16> { text.encode_wide().chain(Some(0)).collect() };
     let verb = wide(OsStr::new("open"));
     let file = wide(target);
+    // SAFETY: a per-thread start with no pointer but the reserved null. It
+    // answers S_OK or S_FALSE (already started, the window's thread) when
+    // it counted a start, which the CoUninitialize below takes back; a
+    // thread already in another model answers an error and is left as it
+    // is.
+    let com = unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        )
+    };
     // SAFETY: both strings are NUL-terminated and outlive the call; the
     // parameters and directory are null, which the call takes as none.
     let code = unsafe {
@@ -126,6 +143,10 @@ pub fn shell_open(target: &OsStr) -> io::Result<()> {
             SW_SHOWNORMAL,
         )
     };
+    if com >= 0 {
+        // SAFETY: balances the start counted above, on the same thread.
+        unsafe { CoUninitialize() };
+    }
     // Above 32 is success; at or below it one of the documented errors.
     if code > 32 {
         return Ok(());

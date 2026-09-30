@@ -39,8 +39,8 @@
 //! | `desktop::HANDS_OFF_ON_CURSOR_MOVED` | `const bool`: whether the window hands a drag off from its `CursorMoved` arm rather than from the frame | `false` | macOS `true`, since AppKit begins a drag only inside the mouse event that is dragging (M2.12); Windows `false` | M2.12 |
 //! | `desktop::pointer_position` | `fn(&Window) -> Option<(f32, f32)>`, logical points, for a drop winit reports | `None` (Wayland has no query, and never reports one) | macOS: the window's pointer (`mouseLocationOutsideOfEventStream`) in winit's flipped view (M2.11); Windows: `GetCursorPos` + `ScreenToClient`, over the scale (W4.17) | S1.32 |
 //! | `desktop::{Event, PasteFailure}` | the events `Desktop::poll` answers in | portable, one definition | same | S1.22 |
-//! | `mounts::run` | `fn(Receiver<mounts::Request>, Sender<mounts::Answer>, Notifier, mounts::Gio)`, the Places card worker's thread | udisks2 over the system bus, `gio mount -u`, `gio mount -li` | macOS: `NSFileManager`'s mounted volumes, the local ones disks and the rest shares, unmount and eject through `NSWorkspace`, `Mount` answered that macOS mounts disks itself (M2.14); Windows: an empty listing, any other request `Failed("Not available on this platform")` | S1.24 |
-//! | `mounts::{connect, mount_gio}` | `fn(&str, &mounts::Gio) -> mounts::Connected` | `gio mount`, and where the mount landed | macOS: `connect` hands `smb://`, `nfs://` and `ftp://` to Finder and waits up to 10 s for the share under `/Volumes`, and refuses `sftp://` and WebDAV (M2.15), `mount_gio` `Failed`; Windows: `Connected::Failed` | S1.24 |
+//! | `mounts::run` | `fn(Receiver<mounts::Request>, Sender<mounts::Answer>, Notifier, mounts::Gio)`, the Places card worker's thread | udisks2 over the system bus, `gio mount -u`, `gio mount -li` | macOS: `NSFileManager`'s mounted volumes, the local ones disks and the rest shares, unmount and eject through `NSWorkspace`, `Mount` answered that macOS mounts disks itself (M2.14); Windows: the lettered drives, a mapped letter a share (`drives`), `Eject` locking, dismounting and ejecting the volume, a share put away with `WNetCancelConnection2W`, `Mount` and `Unmount` answered what Windows does instead (W4.18) | S1.24 |
+//! | `mounts::{connect, mount_gio}` | `fn(&str, &mounts::Gio) -> mounts::Connected` | `gio mount`, and where the mount landed | macOS: `connect` hands `smb://`, `nfs://` and `ftp://` to Finder and waits up to 10 s for the share under `/Volumes`, and refuses `sftp://` and WebDAV (M2.15), `mount_gio` `Failed`; Windows: `connect` hands `smb://server/share` to Explorer as `\\server\share` and waits up to 10 s for it to answer, anything else refused; `mount_gio` `Failed` (W4.19) | S1.24 |
 //! | `mounts::system_gio` | `fn() -> mounts::Gio` | runs `gio` | answers every run `Unsupported` | S1.24 |
 //! | `mounts::Monitor` | `start(Notifier) -> Option<Monitor>`, `gone(&mut self) -> bool`, `started(&self) -> Instant`, `drain(&self) -> Vec<mounts::Event>` | `gio mount --monitor --detail` | `start` is `None`; no value exists | S1.24 |
 //! | `mounts::TERMINAL_MOUNT` | `Option<&str>` | the shell line that re-runs `gio mount` in a terminal | `None` | S1.24 |
@@ -96,6 +96,12 @@ mod dragout;
 /// made into a PNG: Windows', and compiled in every target's tests.
 #[cfg(any(windows, test))]
 mod clipformats;
+
+/// The Places card's rows from Windows' lettered drives, and where its
+/// connect prompt's address goes there: Windows', and compiled in every
+/// target's tests.
+#[cfg(any(windows, test))]
+mod drives;
 
 /// An opener's command split into a program and its arguments, the paths
 /// put in: Windows', which has no shell to read it, and compiled in every

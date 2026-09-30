@@ -130,9 +130,13 @@ libc.workspace = true
 windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_WNet",
     "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Threading",
