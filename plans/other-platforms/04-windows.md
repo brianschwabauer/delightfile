@@ -580,6 +580,58 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       window of delightfile itself. Done when: each such `Command` goes
       through `quiet` (grep), and the listing tests pass on the runner.
 
+## 12. Native feel
+
+- [>] **W4.39** The window's own top row in the title bar (Brian, 2026-09-30):
+      one header where there were two — the system's caption over the app's
+      top row — as Explorer, Terminal and Edge have one. **The native frame
+      stays**: rounded corners, shadow, resize edges, the three caption
+      buttons and Snap Layouts under Maximize are Windows'; the client area is
+      extended over the caption and the window says which parts of the band
+      are title bar (drag, double click to maximize, right click for the
+      system menu) and which are its own. Not `with_decorations(false)`.
+      - Mechanism (`platform/windows/titlebar.rs`): after winit makes the
+        window, `window::adopt` puts a window procedure in front of winit's
+        (`SetWindowLongPtrW(GWLP_WNDPROC)`, winit's put back at
+        `WM_NCDESTROY`), extends the frame by the caption's depth
+        (`DwmExtendFrameIntoClientArea`, again at `WM_ACTIVATE` and
+        `WM_DPICHANGED`) and has the frame measured again. Every message goes
+        to `DwmDefWindowProc` first (the caption buttons' hover, press and
+        `HTMAXBUTTON`); `WM_NCCALCSIZE` takes the default frame and gives its
+        top back, a maximized window's top brought in by the frame's depth
+        (`SM_CYSIZEFRAME` + `SM_CXPADDEDBORDER`) so nothing hangs off the
+        screen; `WM_NCHITTEST` takes the default (the side and bottom
+        borders) and classifies what it calls client
+        (`platform/caption.rs`, tested on every target): a caption button,
+        `HTTOP`/`HTTOPLEFT`/`HTTOPRIGHT` on the top edge unless maximized,
+        `HTCLIENT` on the chrome's controls and below the band, `HTCAPTION`
+        on the rest of the band. A window with no `WS_CAPTION` (winit's full
+        screen; the app has none) is passed straight through, with no band.
+      - The band (`ui::TitleBand`, `ui::layout`'s new argument): with one
+        tab the top row is in it, with two or more the strip, the top row
+        below as in Explorer; the row a `GAP` short of the caption buttons,
+        whose bounds are DWM's (`DWMWA_CAPTION_BUTTON_BOUNDS`) or three of
+        `SM_CXSIZE` × `SM_CYSIZE`; the band as deep as the row's block or the
+        buttons, whichever is deeper. After each layout the app reports the
+        controls in the band (`chrome::band_controls`: ☰, crumbs and `…`, the
+        filter chip, the cluster's chips and counter, the tab chips and `+`,
+        or a prompt's field) through `window::title_regions`, which the hit
+        test reads.
+      - Colours: `window::set_theme` sets `DWMWA_USE_IMMERSIVE_DARK_MODE`
+        beside winit's theme, whose own call sets an undocumented
+        composition attribute and not this one.
+      - Linux and macOS answer no band, and lay out as they did: a test
+        holds five of `main`'s layouts at 39c4d51 to the point.
+      Done when: the runner is green, and the VM shows the §5.1 checks of
+      `07-verification.md` marked W4.39.
+      — titlebar agent (`port/titlebar`), started 2026-09-30; e40bc6b,
+      04a3425, green on the Windows runner at run 36727934410 (df-app 1,161
+      there, the nine `platform::caption` tests among them). The on-screen
+      half has not been seen: the VM was at its sign-in screen, which an
+      agent may not pass (07 §5.8). The first thing to look at is whether
+      DWM's caption buttons show over the window's DX12 swapchain at all
+      (Open questions).
+
 ## Decisions log
 
 - 2026-09-25 — No hand-written COM; drag-out and Recycle Bin restore deferred.
@@ -874,9 +926,74 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   Linux's table on Windows, which D5.4 replaced and c32eaa0 answers. What is
   left of this half is W4.32 (blocked, Open questions) and D5.7's macOS
   side.
+- (titlebar) 2026-09-30 — W4.39's band is the window's full width from its
+  top edge to the foot of the row in it (the top row with one tab, the strip
+  with more) or of the caption buttons, whichever is lower. The margin above
+  the row is in it — the top resize edge while the window is restored, title
+  bar while it is maximized — and the gap under the row is not, being the
+  window's.
+- (titlebar) 2026-09-30 — The row in the band keeps a `GAP` from the caption
+  buttons' left edge, as it keeps one from the window's edge: `TitleBand`'s
+  `right_inset` is measured from the window's right edge to the buttons, and
+  the row ends a `GAP` before that.
+- (titlebar) 2026-09-30 — "The row is vertically centred" when the buttons
+  are deeper than the row: centred on the band once that puts it lower than
+  its usual margin from the top; until then it keeps the margin, so the row
+  does not jump up as the buttons pass its depth. The panes start a `GAP`
+  under the band, not under the row, so no row of theirs is ever title bar.
+  At Windows 11's defaults (buttons about 32 points deep, the row's block 46,
+  the strip's 38) none of this happens.
+- (titlebar) 2026-09-30 — The frame is extended by the caption's full depth
+  (the top of `AdjustWindowRectExForDpi` for the window's style at its DPI),
+  not one pixel: the extended frame is where DWM draws the caption buttons
+  once the caption is client area, and every message goes to
+  `DwmDefWindowProc` first, as Microsoft's custom-frame guide has it, so
+  DWM answers the buttons' hover, press and `HTMAXBUTTON` itself. The
+  classifier's own button answer (thirds of the reported bounds) is for a
+  point DWM leaves.
+- (titlebar) 2026-09-30 — Where a caption button and the top resize edge
+  overlap, the button wins: it is what is drawn there. The edge is
+  `SM_CYSIZEFRAME` + `SM_CXPADDEDBORDER` deep at the window's DPI (what
+  Terminal uses), and its corners are that wide.
+- (titlebar) 2026-09-30 — While a prompt has the top row, only its field is
+  the window's in the band; the title and the error or case mark beside it
+  are title bar, being words about the field that a press on does nothing.
+  The help sheet's filter has no field on the row, so the whole row is
+  title bar while the sheet is up. A chip fading out is still the window's:
+  a press on it does nothing rather than moving the window.
+- (titlebar) 2026-09-30 — The seam is four functions,
+  `window::{adopt, title_band, title_regions, set_theme}`; `set_theme`
+  replaces the app's direct `Window::set_theme` so Windows can set
+  `DWMWA_USE_IMMERSIVE_DARK_MODE` with it (winit sets
+  `WCA_USEDARKMODECOLORS` through `SetWindowCompositionAttribute`, not the
+  documented attribute). `adopt` runs before `Gfx::new`, whose surface is
+  made at the client size the band is part of. `ui::top_row_width` gives
+  the prompt's second-line measure the row's width in the band.
+- (titlebar) 2026-09-30 — Not handled: winit sizes a window moved to a
+  screen of another DPI from the caption it thinks is there, so after such a
+  move the window is a caption's depth taller than before; and a maximized
+  window covers its work area exactly, so an auto-hiding taskbar may not
+  come up at that edge (Terminal takes a pixel off that side). Neither is
+  seen on the VM's one screen.
 
 ## Open questions
 
+- (titlebar) W4.39: whether DWM's caption buttons are seen over the window's
+  own pixels. DWM draws the extended frame, buttons and all, *behind* the
+  client area; a GDI window lets it through where it paints black, and the
+  window's DX12 swapchain, made from its `HWND`, is opaque. If the VM shows
+  no buttons (they would still answer the pointer, through
+  `DwmDefWindowProc`), the brief's "Windows keeps owning the caption
+  buttons" needs one of: (a) a swapchain DWM composes with alpha — wgpu 29's
+  `Dx12SwapchainKind::DxgiFromVisual` with `CompositeAlphaMode::PreMultiplied`
+  — and the window's paint leaving the buttons' rect transparent, the
+  frame's own caption colour showing there; costs a `platform::gfx` option,
+  a surface alpha mode, and a clear colour and ground that skip one rect;
+  or (b) the window drawing the three buttons itself in the chrome's style,
+  answering `HTMINBUTTON`/`HTMAXBUTTON`/`HTCLOSE` as now (Snap Layouts come
+  from `HTMAXBUTTON`) and sending the commands on release, as Terminal, Zed,
+  WezTerm and Chrome do; costs the buttons' paint and hover, and they no
+  longer follow Windows' look. Until someone has looked, neither.
 - Whether the Windows runner's clipboard tests are stable enough to be required
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
