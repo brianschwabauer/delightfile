@@ -85,12 +85,16 @@ pub fn is_executable(path: &Path) -> bool {
 /// The file names a tool called `name` may have on `PATH`: `name.exe` first,
 /// then the name as given. `bsdtar` is also looked for as `tar`, because
 /// Windows 10 and later ship libarchive's bsdtar as `tar.exe` (where the GNU
-/// tar flags a Linux `tar` would need never come up).
+/// tar flags a Linux `tar` would need never come up). `7z` is also looked for
+/// as `7za`, 7-Zip's standalone console build, which takes the same commands
+/// and switches but reads fewer formats (no rar): a machine with only that
+/// one still extracts a 7z and writes one.
 pub fn candidates(name: &str) -> Vec<String> {
     let mut names = vec![format!("{name}.exe"), name.to_string()];
-    if name == "bsdtar" {
-        names.push("tar.exe".to_string());
-        names.push("tar".to_string());
+    match name {
+        "bsdtar" => names.extend(["tar.exe".to_string(), "tar".to_string()]),
+        "7z" => names.extend(["7za.exe".to_string(), "7za".to_string()]),
+        _ => {}
     }
     names
 }
@@ -118,7 +122,8 @@ mod tests {
 
     #[test]
     fn a_tool_is_looked_for_with_its_extension_first() {
-        assert_eq!(candidates("7z"), ["7z.exe", "7z"]);
+        assert_eq!(candidates("7z"), ["7z.exe", "7z", "7za.exe", "7za"]);
+        assert_eq!(candidates("git"), ["git.exe", "git"]);
         assert_eq!(
             candidates("bsdtar"),
             ["bsdtar.exe", "bsdtar", "tar.exe", "tar"]

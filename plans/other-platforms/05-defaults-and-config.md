@@ -192,7 +192,7 @@ the README and for choosing defaults).
 
 | Binary | Used for | Linux | macOS | Windows |
 |---|---|---|---|---|
-| `7z` | 7z/rar/iso listing and extraction, `A` to 7z | p7zip | `brew install 7zip` (`7zz`: add `7zz` to `candidates("7z")` on macOS) | 7-Zip installer (`7z.exe` on PATH if the user adds it) |
+| `7z` | 7z/rar/iso listing and extraction, `A` to 7z | p7zip | `brew install 7zip` (`7zz`: add `7zz` to `candidates("7z")` on macOS) | 7-Zip installer (`7z.exe` on PATH if the user adds it), or the standalone `7za.exe` (7z, zip, tar, gzip, xz; no rar) |
 | `bsdtar` / `tar` | fallback extractor | libarchive | `/usr/bin/tar` is bsdtar: add `tar` to `candidates("bsdtar")` on macOS | `tar.exe` (bsdtar) ships with Windows 10+ |
 | `gzip`, `xz`, `zstd` | compressed tar list/extract/create | usually present | `gzip`/`xz`(via brew)/`zstd`(brew) | absent unless installed; `.tar.gz` listing falls back to `7z` or `tar.exe` (add `tar -tzf` as a listing path? No: keep the current "no decompressor" toast) |
 | `git` | git chip | present | Xcode CLT | Git for Windows |
@@ -220,8 +220,9 @@ the README and for choosing defaults).
       on every target, the macOS runner included. On Linux the one difference is
       that face ranking ahead of a patched face the list does not name (Decisions
       log).
-- [ ] **D5.7** `candidates()` additions from the table (`7zz`, `tar` on macOS;
+- [>] **D5.7** `candidates()` additions from the table (`7zz`, `tar` on macOS;
       `tar.exe` on Windows is W4.2). Done when: unit tests.
+      — port/windows-core (df-core), started 2026-09-29: the Windows half.
 - [>] **D5.8** README "What it uses" table per platform from §4. Done when:
       reviewed.
       — port/windows-app (df-app), started 2026-09-29: written b60122c
@@ -336,6 +337,12 @@ the README and for choosing defaults).
   `platform/windows/user.rs` records from yazi's source), not the
   `<USERNAME>` the table guessed: the Windows half of the open question below
   is answered.
+- (df-core) 2026-09-29 — D5.7, Windows: `candidates("7z")` is `7z.exe`, `7z`,
+  then `7za.exe`, `7za` — 7-Zip's standalone console build, which takes the
+  same commands and switches and reads 7z, zip, tar, gzip and xz but not rar.
+  Found after the full `7z`, so a machine with both uses the one that reads
+  everything; a machine with only `7za` extracts and writes 7z rather than
+  falling to `tar.exe` for it. `tar.exe` for `bsdtar` was W4.2's, in Phase 1.
 
 ## Open questions
 

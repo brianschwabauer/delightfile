@@ -81,7 +81,7 @@
 //! | `process` | `tie_to_this_thread(&mut Command)` (re-exported as `vfs::child`) | `prctl(PR_SET_PDEATHSIG)` + `getppid` in `pre_exec` | `getppid`, then a watcher forked in `pre_exec` waits in kqueue on `NOTE_EXIT` and sends `SIGTERM`: tied to the process | nothing (W4.31) |
 //! | `process` | `exit_code(&ExitStatus) -> i32` (what a shell's `$?` would say; df-app's blocking opener) | the code, else 128 + the signal (unix) | unix | the code, else 1 (never reached: Windows always has one) |
 //! | `process` | `is_executable(&Path) -> bool` | an execute bit (unix) | unix | extension in `PATHEXT` |
-//! | `process` | `candidates(name) -> Vec<String>` (file names to look for on `PATH`) | `[name]` (unix) | unix | `[name.exe, name]`, and `tar.exe`, `tar` for `bsdtar` |
+//! | `process` | `candidates(name) -> Vec<String>` (file names to look for on `PATH`) | `[name]` (unix) | unix | `[name.exe, name]`, and `tar.exe`, `tar` for `bsdtar`, `7za.exe`, `7za` for `7z` (D5.7) |
 
 #[cfg(unix)]
 mod unix;
