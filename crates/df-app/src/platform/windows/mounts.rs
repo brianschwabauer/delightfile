@@ -66,8 +66,12 @@ const CONNECT_WAIT: Duration = Duration::from_secs(10);
 /// dialog.
 pub const TERMINAL_MOUNT: Option<&str> = None;
 
-/// Nothing connects here, so no connect comes back unseen.
-pub const CONNECT_UNSEEN: Option<&str> = None;
+/// What a connect says when the share did not answer in [`CONNECT_WAIT`]:
+/// Explorer was handed it, and whether it connected is behind Explorer's
+/// password dialog, which this program cannot see, so it does not say it did
+/// (as macOS's Finder, 02-macos.md M2.15). A share that answers is
+/// "Connected to" as anywhere.
+pub const CONNECT_UNSEEN: Option<&str> = Some("Explorer was asked to connect to");
 
 /// A `gio` that is never there: it answers every run with "unsupported".
 /// Nothing on this platform runs it.
@@ -112,7 +116,8 @@ pub fn run(requests: Receiver<Request>, replies: Sender<Answer>, notify: Notifie
 
 /// Connect to a server's share through Explorer, and go there once it
 /// answers. `Mounted(None)` when it has not answered in [`CONNECT_WAIT`]:
-/// Explorer may still be asking for a password.
+/// Explorer may still be asking for a password, and the window says it was
+/// asked rather than that it connected ([`CONNECT_UNSEEN`]).
 pub fn connect(url: &str, _gio: &Gio) -> Connected {
     let unc = match drives::unc_of(url) {
         Ok(unc) => unc,

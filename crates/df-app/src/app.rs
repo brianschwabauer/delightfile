@@ -22509,8 +22509,9 @@ mod tests {
 
     /// A connect that comes back with a share to go to says it connected
     /// everywhere; one that comes back with none says so on Linux, where
-    /// `gio mount` has finished, and on macOS only that Finder was asked,
-    /// since its dialog may still be up (M2.15).
+    /// `gio mount` has finished, and on macOS and Windows only that Finder
+    /// or Explorer was asked, since its dialog may still be up (M2.15,
+    /// W4.19).
     #[test]
     fn a_connect_with_no_share_to_go_to_says_what_is_known() {
         let mut app = Fixture::new("connect-words", &["a.txt"]);
@@ -22524,6 +22525,8 @@ mod tests {
         );
         let unseen = if cfg!(target_os = "macos") {
             "Finder was asked to connect to smb://nas/media"
+        } else if cfg!(windows) {
+            "Explorer was asked to connect to smb://nas/media"
         } else {
             "Connected to smb://nas/media"
         };
