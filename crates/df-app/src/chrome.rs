@@ -1925,6 +1925,65 @@ pub fn top_geometry(
     }
 }
 
+/// The window's own controls in the title band, for the platform's hit test
+/// (`platform::window::title_regions`, W4.39): where a press is the window's
+/// to answer. Everything else in the band is the title bar, which a press
+/// drags, a double click maximizes and a right click opens the system menu
+/// on.
+///
+/// The strip's chips and its `+`, when there is a strip (a chip's `×` is in
+/// the chip). The top row's controls — ☰, the crumbs and their `…`, the
+/// filter chip, every chip of the cluster, the counter among them — or,
+/// while a prompt has the row (`prompting`), only its `field`: the words
+/// either side of it are about the field, and a press on them does nothing.
+/// Each only where it reaches into the band, so the row under a strip adds
+/// nothing: the band is the strip's then.
+pub fn band_controls(
+    band: egui::Rect,
+    strip: Option<egui::Rect>,
+    tab_widths: &[f32],
+    row: &TopGeom,
+    prompting: bool,
+    field: Option<egui::Rect>,
+) -> Vec<egui::Rect> {
+    let mut controls = Vec::new();
+    if let Some(strip) = strip {
+        controls.extend(tab_rects(strip, tab_widths));
+        controls.push(tab_new_rect(strip, tab_widths));
+    }
+    if prompting {
+        controls.extend(field);
+    } else {
+        let cluster = &row.cluster;
+        controls.push(row.menu);
+        controls.extend(
+            row.crumbs
+                .iter()
+                .copied()
+                .filter(|rect| *rect != egui::Rect::NOTHING),
+        );
+        controls.extend(row.ellipsis);
+        controls.extend(row.filter);
+        controls.push(cluster.counter);
+        controls.extend(
+            [
+                cluster.git,
+                cluster.yank,
+                cluster.selected,
+                cluster.visual,
+                cluster.pick,
+                cluster.cancel,
+                cluster.types,
+                cluster.trash,
+            ]
+            .into_iter()
+            .flatten(),
+        );
+    }
+    controls.retain(|rect| band.intersect(*rect).is_positive());
+    controls
+}
+
 /// How far the top row's ground is tinted towards the filter's blue while a
 /// committed filter is on.
 ///
@@ -5240,5 +5299,89 @@ mod tests {
                 &Ripples::new(),
             );
         });
+    }
+
+    /// A top row's geometry with ☰, an elided path (its `…` and two crumbs
+    /// shown), a git chip and the counter.
+    fn row_geometry(row: egui::Rect) -> TopGeom {
+        let chip = |left: f32, right: f32| {
+            egui::Rect::from_min_max(
+                egui::pos2(left, row.top() + CHIP_INSET),
+                egui::pos2(right, row.bottom() - CHIP_INSET),
+            )
+        };
+        TopGeom {
+            menu: menu_button_rect(row),
+            crumbs: vec![egui::Rect::NOTHING, chip(60.0, 120.0), chip(133.0, 200.0)],
+            ellipsis: Some(chip(49.0, 55.0)),
+            filter: None,
+            cluster: ClusterGeom {
+                width: 160.0,
+                counter: egui::Rect::from_min_max(
+                    egui::pos2(1200.0, row.top()),
+                    egui::pos2(1240.0, row.bottom()),
+                ),
+                git: Some(chip(1100.0, 1192.0)),
+                yank: None,
+                selected: None,
+                visual: None,
+                pick: None,
+                cancel: None,
+                types: None,
+                trash: None,
+                labels: ClusterLabels::default(),
+            },
+        }
+    }
+
+    /// W4.39: with one tab the top row is in the band, and its controls are
+    /// the window's — ☰, the `…`, the crumbs shown, the chips and the
+    /// counter, never an elided crumb's empty rect; with a prompt on the row
+    /// only the field is.
+    #[test]
+    fn the_top_rows_controls_are_the_windows_in_the_band() {
+        let band = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1408.0, 46.0));
+        let row = egui::Rect::from_min_max(egui::pos2(8.0, 8.0), egui::pos2(1262.0, 46.0));
+        let geometry = row_geometry(row);
+        let controls = band_controls(band, None, &[], &geometry, false, None);
+        assert_eq!(
+            controls,
+            vec![
+                geometry.menu,
+                geometry.crumbs[1],
+                geometry.crumbs[2],
+                geometry.ellipsis.expect("elided"),
+                geometry.cluster.counter,
+                geometry.cluster.git.expect("a repository"),
+            ]
+        );
+        let field = egui::Rect::from_min_max(egui::pos2(120.0, 11.0), egui::pos2(900.0, 43.0));
+        assert_eq!(
+            band_controls(band, None, &[], &geometry, true, Some(field)),
+            vec![field]
+        );
+        // The help sheet's filter has no field on the row: nothing on it is
+        // a control while the sheet is up.
+        assert_eq!(
+            band_controls(band, None, &[], &geometry, true, None),
+            Vec::<egui::Rect>::new()
+        );
+    }
+
+    /// With two tabs the band is the strip's: its chips and its `+` are the
+    /// window's, and the row under it adds nothing, even where its counter
+    /// touches the band's lower edge.
+    #[test]
+    fn with_a_strip_the_band_holds_the_tabs_alone() {
+        let band = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1408.0, 38.0));
+        let strip = egui::Rect::from_min_max(egui::pos2(8.0, 8.0), egui::pos2(1262.0, 38.0));
+        let row = egui::Rect::from_min_max(egui::pos2(8.0, 38.0), egui::pos2(1400.0, 76.0));
+        let widths = [120.0, 90.0];
+        let controls = band_controls(band, Some(strip), &widths, &row_geometry(row), false, None);
+        let mut expected = tab_rects(strip, &widths);
+        expected.push(tab_new_rect(strip, &widths));
+        assert_eq!(controls, expected);
+        // …and they stop where the strip does, short of the caption buttons.
+        assert!(controls.iter().all(|rect| rect.right() <= strip.right()));
     }
 }

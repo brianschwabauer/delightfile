@@ -2559,6 +2559,10 @@ impl App {
                 .create_window(attrs)
                 .map_err(|e| GfxError(format!("create window: {e}")))?,
         );
+        // Before the surface, which is made at the client area's size: where
+        // the top row goes up into the title bar (W4.39), that size has the
+        // caption's band in it.
+        crate::platform::window::adopt(&window);
         let gfx = Gfx::new(window, self.palette.base)?;
 
         // Before the first frame, so no row is ever drawn with the wrong face.
@@ -12345,7 +12349,12 @@ impl App {
     /// under the fingers — and every pane in the window moves a line each time
     /// it does. Once a prompt has needed two lines it keeps two until it
     /// closes, which is the frame the `_` arm resets it (`delightful-ui` §8).
-    fn sync_path_lines(&mut self, painter: &egui::Painter, area: egui::Rect) {
+    fn sync_path_lines(
+        &mut self,
+        painter: &egui::Painter,
+        area: egui::Rect,
+        band: Option<ui::TitleBand>,
+    ) {
         self.path_lines = match &self.prompt {
             // The help filter is drawn in the sheet's own heading, not here, so
             // it never asks the top row for a second line.
@@ -12354,7 +12363,7 @@ impl App {
                 .max(chrome::prompt_lines(
                     painter,
                     prompt,
-                    area.width() - ui::GAP * 2.0,
+                    ui::top_row_width(area, band, self.tabs.len() > 1),
                     self.prompt_tail(),
                 ))
                 .max(1),
@@ -16470,11 +16479,14 @@ impl App {
     /// client-side frame draws around it.
     fn window_theme(&self) {
         if let Some(gfx) = &self.gfx {
-            gfx.window.set_theme(Some(if self.palette.light {
-                winit::window::Theme::Light
-            } else {
-                winit::window::Theme::Dark
-            }));
+            crate::platform::window::set_theme(
+                &gfx.window,
+                if self.palette.light {
+                    winit::window::Theme::Light
+                } else {
+                    winit::window::Theme::Dark
+                },
+            );
         }
     }
 
@@ -16500,6 +16512,13 @@ impl App {
         let area = ui.max_rect();
         let painter = ui.painter().clone();
         painter.rect_filled(area, 0, self.palette.crust);
+        // The band the title bar shares with the chrome, where the platform
+        // has one (W4.39): asked each frame, since maximizing the window or
+        // moving it to another screen changes it.
+        let band = self
+            .gfx
+            .as_ref()
+            .and_then(|gfx| crate::platform::window::title_band(&gfx.window));
 
         // Layout first: a page is however many rows fit, so the keys cannot be
         // routed until the panes have been measured. It is measured *again*
@@ -16507,8 +16526,14 @@ impl App {
         // strip and therefore how tall the panes are — painting this frame with
         // the pre-keystroke geometry would leave the strip a frame behind the
         // key that asked for it, on a frame nothing would follow.
-        self.sync_path_lines(&painter, area);
-        let layout = ui::layout(area, &self.split(now), self.tabs.len() > 1, self.path_lines);
+        self.sync_path_lines(&painter, area, band);
+        let layout = ui::layout(
+            area,
+            &self.split(now),
+            self.tabs.len() > 1,
+            self.path_lines,
+            band,
+        );
         // How the list pane is drawn, published to the two things that run
         // *before* the pane is measured: the cursor commands and the wheel.
         let first_metrics = self
@@ -16565,7 +16590,7 @@ impl App {
         // Before the row is measured: a hint too long to sit beside the query
         // is what asks the row for a second line.
         self.sync_prompt_hint();
-        self.sync_path_lines(&painter, area);
+        self.sync_path_lines(&painter, area, band);
 
         // ── A divider in the hand ([`crate::divider`]) ──────────────────────
         // Moved before the panes are measured, for the scrollbar thumb's
@@ -16580,7 +16605,13 @@ impl App {
             }
         }
 
-        let layout = ui::layout(area, &self.split(now), self.tabs.len() > 1, self.path_lines);
+        let layout = ui::layout(
+            area,
+            &self.split(now),
+            self.tabs.len() > 1,
+            self.path_lines,
+            band,
+        );
         let list_content = ui::content_rect(layout.list);
         // Which geometry this tab draws its directory in, decided once and
         // threaded everywhere through `grid::pane_*` (PLAN §2). `None` is the
@@ -16797,6 +16828,19 @@ impl App {
         // past the field's edge scrolls on from it.
         if let (Some(field), Some(prompt)) = (&prompt_field, self.prompt.as_mut()) {
             prompt.scroll = field.scroll;
+        }
+        // The chrome's controls in the title band, for the platform's hit
+        // test: the rest of the band is the title bar (W4.39).
+        if let (Some(gfx), Some(band)) = (&self.gfx, layout.band) {
+            let controls = chrome::band_controls(
+                band,
+                layout.strip,
+                &tab_widths,
+                &top_geom,
+                prompting,
+                prompt_field.as_ref().map(|field| field.rect),
+            );
+            crate::platform::window::title_regions(&gfx.window, band, &controls);
         }
         // The rename card, where the last frame drew it: anchored to the
         // cursor's row, as [`chrome::prompt_popup`] anchors it when no dialog
@@ -22393,6 +22437,7 @@ mod tests {
             &app.split(Instant::now()),
             app.tabs.len() > 1,
             app.path_lines,
+            None,
         )
     }
 
@@ -24850,6 +24895,7 @@ mod tests {
             &app.split(Instant::now() + crate::divider::FOLD),
             false,
             1,
+            None,
         );
         assert!((settled.preview.width() - before.preview.width()).abs() < 1e-3);
     }
@@ -24873,7 +24919,7 @@ mod tests {
         assert!(app.state.panes().is_some_and(|p| p.preview_collapsed));
 
         let later = Instant::now() + crate::divider::FOLD;
-        let folded = ui::layout(screen(), &app.split(later), false, 1);
+        let folded = ui::layout(screen(), &app.split(later), false, 1, None);
         assert_eq!(folded.preview.width(), 0.0);
         assert!((screen().right() - folded.list.right() - ui::GAP).abs() < 1e-3);
         assert_eq!(folded.parent, open.parent);
@@ -24889,6 +24935,7 @@ mod tests {
             &app.split(Instant::now() + crate::divider::FOLD),
             false,
             1,
+            None,
         );
         assert!((reopened.preview.width() - open.preview.width()).abs() < 1e-3);
     }
@@ -24909,6 +24956,7 @@ mod tests {
                 &app.split(Instant::now() + crate::divider::FOLD),
                 false,
                 1,
+                None,
             )
         };
 

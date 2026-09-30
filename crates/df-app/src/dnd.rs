@@ -705,7 +705,7 @@ mod tests {
                 collapsed: [true, false],
                 ..crate::ui::Split::at([1, 4, 3])
             };
-            let layout = crate::ui::layout(area, &split, false, 1);
+            let layout = crate::ui::layout(area, &split, false, 1, None);
             let z = zones(&crumbs, &layout);
             let y = layout.list.center().y;
             for x in [
@@ -727,7 +727,7 @@ mod tests {
             assert_eq!(autoscroll(z.parent_content, layout.parent.center()), 0.0);
         }
         // Open, it is one.
-        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), false, 1);
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), false, 1, None);
         let z = zones(&crumbs, &layout);
         assert!(matches!(
             target_at(&z, layout.parent.center(), dirs),
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn a_point_resolves_to_the_thing_drawn_under_it() {
         let (area, crumbs) = zones_area();
-        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), true, 1);
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), true, 1, None);
         let z = zones(&crumbs, &layout);
         let dirs = |_: Column, index: usize| index.is_multiple_of(2);
 
@@ -795,7 +795,7 @@ mod tests {
     #[test]
     fn the_space_below_the_rows_is_the_directory_itself() {
         let (area, crumbs) = zones_area();
-        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), false, 1);
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), false, 1, None);
         let mut z = zones(&crumbs, &layout);
         z.list_rows = 2;
         let below = crate::ui::row_rect(z.list_content, 0.0, 9, z.scale.row_height).center();
@@ -809,7 +809,7 @@ mod tests {
     #[test]
     fn every_target_can_be_drawn_around() {
         let (area, crumbs) = zones_area();
-        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), true, 1);
+        let layout = crate::ui::layout(area, &crate::ui::Split::at([1, 4, 3]), true, 1, None);
         let z = zones(&crumbs, &layout);
         for target in [
             Target::Row(Column::List, 3),

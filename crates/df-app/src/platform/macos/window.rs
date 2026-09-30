@@ -13,16 +13,37 @@
 //! visible frame — the screen less the menu bar and the Dock — cannot hold
 //! the opening size with its title bar, the size is cut to fit. Only the
 //! size: AppKit puts a new window on screen itself when it is shown.
+//!
+//! **The title bar stays AppKit's** for now: no band, nothing adopted.
+//! Drawing the top row into it, beside the traffic lights, is macOS's own
+//! task, apart from Windows' W4.39.
 #![allow(unsafe_code)] // `frameRectForContentRect:styleMask:` is a pure AppKit class method, declared `unsafe` by objc2's generator
 
 use objc2_app_kit::{NSScreen, NSWindow, NSWindowStyleMask};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use winit::event_loop::ActiveEventLoop;
 use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
-use winit::window::{Window, WindowAttributes};
+use winit::window::{Theme, Window, WindowAttributes};
 
 use crate::app::WINDOW_SIZE;
 use crate::platform::fit::{fit, Area, Frame};
+use crate::ui::TitleBand;
+
+/// Nothing to do to a window once it is made.
+pub fn adopt(_window: &Window) {}
+
+/// The title bar is AppKit's, above the window's content.
+pub fn title_band(_window: &Window) -> Option<TitleBand> {
+    None
+}
+
+/// Never called: there is no band.
+pub fn title_regions(_window: &Window, _band: egui::Rect, _controls: &[egui::Rect]) {}
+
+/// The window's side, for the title bar AppKit draws.
+pub fn set_theme(window: &Window, theme: Theme) {
+    window.set_theme(Some(theme));
+}
 
 /// The attributes the one window is created with: `title`, the opening
 /// size fitted to the screen, and Option read as Alt.
