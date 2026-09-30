@@ -537,6 +537,15 @@ fn request_start(folder: Option<PathBuf>, file: Option<PathBuf>) -> Option<PathB
 /// A failure here is logged and swallowed: the user asked to quit, and refusing
 /// to exit because a path could not be written would be a worse answer than a
 /// shell that stays where it was.
+///
+/// **The file is UTF-8**, which is the protocol with every wrapper that reads
+/// it (`--cwd-file`'s shell function, the portal, yazi's own): the path's own
+/// bytes on Unix, where a valid-UTF-8 name — every real one — is its UTF-8,
+/// and on Windows `as_encoded_bytes`, which is WTF-8 and so exactly UTF-8 for
+/// every name that is valid Unicode. Only a name with an unpaired surrogate,
+/// which no Windows program writes, would come out as bytes no UTF-8 reader
+/// takes; that is left as it is rather than mangled
+/// (`plans/other-platforms/04-windows.md` W4.15).
 pub fn write_cwd_file(path: &std::path::Path, cwd: &std::path::Path) {
     if let Err(e) = std::fs::write(path, cwd.as_os_str().as_encoded_bytes()) {
         log::warn!("could not write {}: {e}", path.display());
@@ -544,7 +553,7 @@ pub fn write_cwd_file(path: &std::path::Path, cwd: &std::path::Path) {
 }
 
 /// Write the paths a chooser session picked, one per line, for the portal's
-/// wrapper to read.
+/// wrapper to read. UTF-8, as [`write_cwd_file`] says.
 ///
 /// **Only ever called when something was picked.** An empty file is how every
 /// consumer of this contract spells *cancelled*, so a session that ended any
