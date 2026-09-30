@@ -1,0 +1,451 @@
+# The release workflow of plans/other-platforms/06-build-and-release.md §4
+# (B6.22, B6.23). A tag v<version>, where <version> is Cargo.toml's
+# [workspace.package] version, builds the three release artifacts on their
+# own runners, checks each one the way a person would use it on a machine
+# that never built anything, and creates a draft pre-release holding them
+# and their .sha256 files, with notes drafted from the commit subjects since
+# the previous tag. Brian edits the draft and publishes it; nothing here
+# publishes.
+#
+#   linux    Arch container, like CI     delightfile-<v>-x86_64-linux.tar.gz
+#   macos    macos-latest (arm64)        delightfile-<v>-aarch64-macos.dmg
+#   windows  windows-latest (MSVC)       delightfile-<v>-x86_64-windows.zip
+#
+# Run by hand (workflow_dispatch) it is a dry run: everything but the release
+# itself, with what the release would hold uploaded as the workflow artifact
+# `release`. A dispatch on a tag with dry_run off makes that tag's release,
+# for when the tag's own run failed for a reason outside the code.
+#
+# The packaging is build/<os>/ scripts that run by hand on that OS as well
+# (§3); this file only calls them. The action pins are commit SHAs; the
+# comment after each names the tag.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build, package and check, and upload what the release would hold as an artifact instead of creating it
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # B6.22: the tag must be v + Cargo.toml's version, or nothing is built.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Anything but a tag is a dry run; a dispatch that asks for more on a
+      # branch is refused rather than quietly made one.
+      - name: The tag is the crate's version
+        id: version
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          ASKED_TO_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+        run: |
+          version=$(awk -F'"' '/^\[workspace\.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^version *=/ { print $2; exit }' Cargo.toml)
+          echo "Cargo.toml: $version; ref: $GITHUB_REF ($GITHUB_REF_TYPE); event: $GITHUB_EVENT_NAME; dry run asked: $DRY_RUN"
+          [[ -n $version ]] || { echo "::error::no [workspace.package] version in Cargo.toml"; exit 1; }
+          publish=false
+          if [[ $GITHUB_REF_TYPE == tag ]]; then
+            if [[ $GITHUB_REF_NAME != "v$version" ]]; then
+              echo "::error::the tag is $GITHUB_REF_NAME but Cargo.toml's version is $version; a release is tagged v<version>"
+              exit 1
+            fi
+            [[ $DRY_RUN == true ]] || publish=true
+          elif [[ $ASKED_TO_PUBLISH == true ]]; then
+            echo "::error::a release is made from a tag v<version>; on a branch this can only be a dry run"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "delightfile $version, publish: $publish"
+
+  # B6.14 on the CI image: the release binary links Arch's FFmpeg 9, the one
+  # a Linux user of the tarball is expected to have.
+  linux:
+    needs: version
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Native dependencies (pacman)
+        run: pacman -Syu --noconfirm rust ffmpeg pkgconf clang git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Versions
+        run: |
+          rustc -vV
+          echo "FFmpeg: Arch ffmpeg $(pacman -Q ffmpeg | cut -d' ' -f2), libavcodec $(pkg-config --modversion libavcodec)"
+
+      - name: cargo build --release
+        run: cargo build --release --locked -p df-app
+
+      - name: Package (build/linux/package.sh)
+        run: bash build/linux/package.sh --out dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # B6.16, B6.17. FFmpeg is Homebrew's, as in CI (B6.7 option 1), and the
+  # bundle carries it and everything it links; the bundle's minimum macOS is
+  # whatever those libraries were built for (bundle.sh).
+  macos:
+    needs: version
+    runs-on: macos-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      minimum: ${{ steps.bundle.outputs.minimum }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Runner
+        run: |
+          uname -m
+          sw_vers
+          xcode-select -p
+          if [ "$(uname -m)" != arm64 ]; then
+            echo "::error::macos-latest is $(uname -m), not arm64"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-29
+        with:
+          toolchain: stable
+
+      - name: FFmpeg (Homebrew)
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: |
+          brew install ffmpeg pkgconf
+          lavc=$(pkg-config --modversion libavcodec)
+          echo "FFmpeg: B6.7 option 1, Homebrew $(brew list --versions ffmpeg), libavcodec $lavc"
+          if [ "${lavc%%.*}" != 63 ]; then
+            echo "::error::Homebrew's ffmpeg has libavcodec $lavc; ffmpeg-next 9 needs major 63. See 'Switching B6.7 to a fallback' in plans/other-platforms/06-build-and-release.md."
+            exit 1
+          fi
+
+      # B6.8: the tarball is cached by the lock's hash and its sha256 checked
+      # on every run, cached or not.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target/pdfium/mac-arm64/*.tgz
+          key: pdfium-${{ hashFiles('build/macos/pdfium.lock') }}
+
+      - name: pdfium (build/macos/pdfium.lock)
+        run: bash build/macos/fetch-pdfium.sh
+
+      # Header padding, so that install_name_tool can point the program's
+      # FFmpeg links into the bundle (bundle.sh).
+      - name: cargo rustc --release
+        run: cargo rustc --release --locked -p df-app --bin delightfile -- -C link-arg=-Wl,-headerpad_max_install_names
+
+      - name: Bundle (build/macos/bundle.sh)
+        id: bundle
+        run: |
+          app=$(bash build/macos/bundle.sh)
+          minimum=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
+          echo "minimum=$minimum" >> "$GITHUB_OUTPUT"
+
+      - name: Disk image (build/macos/dmg.sh --check)
+        run: bash build/macos/dmg.sh --out dist --check
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-macos
+          path: dist/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  # B6.19, B6.20. FFmpeg and pdfium come from build/windows/*.lock; the icon
+  # is drawn before the build so build.rs can put it in the exe.
+  windows:
+    needs: version
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out with LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master, 2026-09-29
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      # The downloads only, cached by the locks' hash; both fetch scripts
+      # check the sha256 on every run, cached or not.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/ffmpeg/*.zip
+            target/pdfium/win-x64/*.tgz
+          key: windows-natives-${{ hashFiles('build/windows/ffmpeg.lock', 'build/windows/pdfium.lock') }}
+
+      - name: FFmpeg (build/windows/ffmpeg.lock)
+        run: |
+          $dir = & build/windows/fetch-ffmpeg.ps1
+          Add-Content -Path $env:GITHUB_ENV -Value "FFMPEG_DIR=$dir"
+
+      - name: libclang for bindgen
+        run: |
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\libclang.dll")) {
+            $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+            $llvm = "$vs\VC\Tools\LLVM\x64\bin"
+          }
+          if (-not (Test-Path "$llvm\libclang.dll")) { throw "no libclang.dll under Program Files\LLVM or Visual Studio" }
+          Write-Output "LIBCLANG_PATH=$llvm"
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm"
+
+      - name: pdfium (build/windows/pdfium.lock)
+        run: build/windows/fetch-pdfium.ps1
+
+      - name: Icon (build/windows/icon.ps1)
+        run: |
+          magick -version | Select-Object -First 1
+          build/windows/icon.ps1
+
+      - name: cargo build --release
+        run: cargo build --release --locked -p df-app
+
+      - name: Package (build/windows/package.ps1)
+        run: build/windows/package.ps1 -Out dist
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-windows
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # Everything the release holds, in one place: the three packages, a
+  # .sha256 beside each, and the notes (B6.23).
+  assemble:
+    needs: [version, linux, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # All history and tags, for the previous tag and the subjects since.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          for file in *; do
+            sha256sum "$file" > "$file.sha256"
+            cat "$file.sha256"
+          done
+
+      # B6.23: the subjects since the previous v* tag, or since the start
+      # when there is none, cut to fit GitHub's 125,000-character limit on a
+      # release's text.
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          MINIMUM: ${{ needs.macos.outputs.minimum }}
+        run: |
+          previous=$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_SHA^" 2>/dev/null || true)
+          range=${previous:+$previous..}$GITHUB_SHA
+          count=$(git rev-list --count "$range")
+          {
+            echo "<!-- Drafted by the release workflow from the commit subjects ${previous:+since $previous }(B6.23). Edit before publishing. -->"
+            echo
+            echo "## Installing"
+            echo
+            echo "Not signed or notarized; the README's Installing section has the one-time steps for each system."
+            echo
+            echo "- **macOS $MINIMUM or later, Apple silicon**: \`delightfile-$VERSION-aarch64-macos.dmg\`, or \`brew install --cask brianschwabauer/tap/delightfile\`. Then \`xattr -dr com.apple.quarantine /Applications/delightfile.app\`."
+            echo "- **Windows 10 or 11, x86-64**: \`delightfile-$VERSION-x86_64-windows.zip\`, unzipped anywhere, or \`scoop install brianschwabauer/delightfile\`. SmartScreen: More info, then Run anyway."
+            echo "- **Linux, x86-64, with FFmpeg 9** (Arch: \`pacman -S ffmpeg\`): \`delightfile-$VERSION-x86_64-linux.tar.gz\`, unpacked, then \`bash install.sh\`."
+            echo
+            echo "## Changes${previous:+ since $previous} ($count commits)"
+            echo
+          } > notes.md
+          git log --format='- %s (%h)' "$range" > changes.md
+          limit=$((120000 - $(wc -c < notes.md)))
+          awk -v limit="$limit" -v total="$count" '
+            { size += length($0) + 1 }
+            size > limit { print ""; print "…and " total - NR + 1 " earlier commits; see the history."; exit }
+            { print }
+          ' changes.md >> notes.md
+          echo "notes: $(wc -c < notes.md) characters, $count commits${previous:+ since $previous}"
+          mv notes.md dist/notes.md
+          head -40 dist/notes.md
+
+      - name: Summary
+        working-directory: dist
+        run: |
+          {
+            echo "### delightfile ${{ needs.version.outputs.version }}, publish: ${{ needs.version.outputs.publish }}"
+            echo
+            echo '| File | Bytes | sha256 |'
+            echo '|---|---:|---|'
+            for file in *; do
+              echo "| $file | $(stat -c %s "$file") | $(sha256sum "$file" | cut -c1-16)… |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: dist
+          if-no-files-found: error
+          retention-days: 14
+
+  # B6.14's done-when: a clean Arch container, with only FFmpeg, no session
+  # bus and nobody at a terminal, installs from the tarball.
+  verify-linux:
+    needs: [version, assemble]
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: FFmpeg only (pacman)
+        run: pacman -Syu --noconfirm ffmpeg
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist
+
+      - name: Install from the tarball (build/linux/check-package.sh)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cd dist && sha256sum -c "delightfile-$VERSION-x86_64-linux.tar.gz.sha256" && cd ..
+          useradd --create-home tester
+          chmod -R a+rX dist build
+          runuser -u tester -- bash build/linux/check-package.sh "dist/delightfile-$VERSION-x86_64-linux.tar.gz"
+
+  # B6.17's done-when on a fresh runner that never installed Homebrew's
+  # FFmpeg.
+  verify-macos:
+    needs: [version, assemble]
+    runs-on: macos-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist
+
+      - name: The disk image (build/macos/check-dmg.sh)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          (cd dist && shasum -a 256 -c "delightfile-$VERSION-aarch64-macos.dmg.sha256")
+          brew list --versions ffmpeg || echo "no Homebrew ffmpeg on this runner"
+          bash build/macos/check-dmg.sh "dist/delightfile-$VERSION-aarch64-macos.dmg"
+
+  # B6.19's done-when on a fresh runner that never had FFmpeg.
+  verify-windows:
+    needs: [version, assemble]
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist
+
+      - name: The zip (build/windows/check-package.ps1)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          $zip = "dist/delightfile-$env:VERSION-x86_64-windows.zip"
+          $sha = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $want = ((Get-Content "$zip.sha256") -split '\s+')[0]
+          if ($sha -ne $want) { throw "$zip has sha256 $sha; its .sha256 says $want" }
+          build/windows/check-package.ps1 -Zip $zip
+
+  # B6.22: a draft pre-release on the tag, with everything assemble made.
+  # Only a tag push (or a dispatch on a tag with dry_run off) gets here.
+  publish:
+    needs: [version, assemble, verify-linux, verify-macos, verify-windows]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: dist
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mv dist/notes.md notes.md
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --prerelease \
+            --title "delightfile $VERSION" \
+            --notes-file notes.md
