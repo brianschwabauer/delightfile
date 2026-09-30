@@ -275,6 +275,12 @@ workflow, launched by double-click from Explorer.
 - [ ] Maximize, snap to half screen, minimize and restore.
 - [ ] Two windows via Ctrl+N.
 - [ ] Quit via `q`, via Alt+F4, via the title bar ×.
+- [ ] On a screen smaller than the window's opening size (a VM at 1024×768),
+      the window opens inside the work area, frame and all, above the taskbar
+      (df-app's window fit, 04-windows.md Decisions log).
+- [ ] `[flavor] mode = "auto"` (W4.33): the first frame is on the side
+      Settings → Personalisation → Colours is on; switching it there turns the
+      window at once.
 
 ### 5.2 Keyboard
 - [ ] All the Linux default bindings with Ctrl and Alt; AltGr on a German layout
@@ -294,6 +300,13 @@ workflow, launched by double-click from Explorer.
       dot-prefixed both count as hidden per Phase 3's decision).
 - [ ] Symlink creation: refused with the privilege toast when not elevated, works
       with Developer Mode on; junctions display as links.
+- [ ] A file on `C:` (W4.29): Tab shows no Owner or Permissions row, no octal
+      in the title and no permission-bit keys in the hint; the Permissions
+      column says `rw` or `ro` (and `h` when hidden) and the Owner column `—`;
+      `C` toasts "Permissions can't be changed on this platform" and the menu's
+      Permissions… is greyed. A file on an SFTP server keeps all of it.
+- [ ] A name Windows will not make (W4.12): `Save as:` and the bulk card
+      refuse `a:b`, `con` and `x.` in their own words, naming the character.
 
 ### 5.4 Operations
 - [ ] Copy, move, within and across drives, conflict card, cancel.
@@ -304,8 +317,12 @@ workflow, launched by double-click from Explorer.
 - [ ] Extract zip, tar.gz; 7z when `7z.exe` is on `PATH`.
 
 ### 5.5 Clipboard and drag
-- [ ] `y` then Ctrl+V in Explorer; Ctrl+C in Explorer then `p`; `x` then paste in
-      Explorer moves (the `Preferred DropEffect` format).
+- [ ] `Y` then Ctrl+V in Explorer pastes a copy (`CF_HDROP` with `Preferred
+      DropEffect` copy; `y` and `x` are the window's own clipboard, as on
+      Linux, so no cut reaches Explorer); Ctrl+C in Explorer then `p`; `c c`
+      then Ctrl+V into a text field pastes the path; `Y` on a PNG then Ctrl+V
+      in Paint pastes the picture; a Snipping Tool capture then `p` saves a
+      `clipboard_….png`.
 - [ ] Drag from Explorer into the list.
 - [ ] Drag out of the app: works if Phase 4 implemented OLE drag-out; otherwise the
       row does not start a drag and the plan's `[~]` is referenced here.
@@ -323,9 +340,68 @@ workflow, launched by double-click from Explorer.
 - [ ] `M` drives card lists every drive with type and free space; eject a USB stick
       if Phase 4 implemented it.
 - [ ] SFTP through the built-in OpenSSH client.
+- [ ] Connect (W4.19): `c` then `smb://<server>/<share>` brings up Explorer's
+      password dialog, and once it is answered the window goes into
+      `\\<server>\<share>`; a dialog left unanswered for more than ten
+      seconds toasts "Explorer was asked to connect to …"; `u` on a mapped
+      letter in `M` puts the mapping away; `m` and `u` on a disk say what
+      Windows does instead.
+- [ ] A typed line (W4.3): `;notepad` opens Notepad with no console window
+      beside it; in a share's folder `:cd > here.txt` writes `here.txt` there,
+      and `M` lists no letter the line left mapped.
 - [ ] The `g` bookmarks (D5.11): `g h`, `g c`, `g d`, `g w`, `g D` and `g o` go to
       the user profile, `%APPDATA%`, Downloads, `Work`, the Desktop and
       Documents; the which-key card lists those six and no server mounts.
+
+### 5.8 Runs
+
+Not release passes (§6): each is a CI debug build of a branch, launched by
+double-click from the host share, and the lines above stay unticked until the
+release zip is run.
+
+- 2026-09-29, df-app agent (`port/windows-app`) — Windows 11 in the dockur VM
+  (QEMU, no GPU passthrough, 1024×768), driven through its noVNC viewer by
+  mouse and plain keys; the viewer passes no Shift or modifier chords, so no
+  chord was tried. Screenshots in the agent's scratchpad (`winapp/shots/`),
+  named by the pre-rebase commit each build was.
+  - Run 36653756431 (the build of W4.25, 3b368bd, with W4.1, the window fit
+    and W4.23 under it): the window opened inside the screen, frame and all,
+    above the taskbar, with no console beside it (`01-…`); it drew on the
+    software adapter; ↓ and ↑ moved the cursor and wrapped, `/` opened find
+    and took typing, and `j`, `k`, `h` moved nothing, as on Linux.
+  - Run 36657284865 (W4.26, e28af95): Ctrl+C on a file in Explorer, then `p`
+    in another folder of the share, pasted the file (`02-…`); `c c` then
+    Ctrl+V into Explorer's search box pasted `\\host.lan\Data\…` (`03-…`);
+    `M` listed "Windows (C:)" with its size, NTFS and `C:\`, and "nothing
+    mounted" under Network (`04-…`); Enter on it went to `C:\` (`05-…`). The
+    card's Places still listed Linux's bookmarks, which main's §6 Windows
+    table (D5.11) has since replaced (seen in the last run).
+  - Run 36658528615 (W4.15, 65c8b50, with W4.29 and W4.33 under it): Tab on a
+    file had no Owner or Permissions row (`06-…`), but its title still showed
+    `0644` and its hint the permission-bit keys; the menu's Permissions… was
+    greyed (`07-…`); `Go to:` took `C:/Users`, and `..\from` from a folder of
+    the share (`08-…`); `;notepad` opened Notepad and a `cmd` console beside
+    it that stayed while Notepad ran.
+  - Run 36662477949 (4d56ecf, the branch's code as handed back): Tab on a
+    file in the share has no octal in its title and "Space hash" alone in its
+    hint (`09-…`); `;notepad` there opened the file in Notepad with no console
+    (`10-…`); while Notepad ran the Places card listed "Z: → \\host.lan\Data",
+    the letter `pushd` mapped (`11-…`), and once Notepad was closed `r` found
+    "nothing mounted" (`12-…`). The card's Places are §6's Windows six, `g D`
+    and `g o` among them.
+  - Incident: the viewer's `semicolon` key did not arrive as `;`, so the
+    `explorer .` typed after it ran as keys in `C:\` — a cut chip, the hidden
+    files toggle and a step into `inetpub`. The Tasks panel showed nothing
+    had run but the earlier paste inside the share, the cut was never
+    pasted, and nothing was changed; `;` has been typed with the viewer's
+    text entry since. One screenshot timed out in the viewer; the next call
+    worked.
+  - Not seen: everything else in §5, among it scaling, snapping, a second
+    window, AltGr and the Windows key (no chords), long paths, reserved
+    names, watching, links, a copy or move inside the window, trash
+    (refused until W4.7), extracting, drag in or out, media preview and
+    sound, the openers (Linux's table until D5.4), eject, connect, SFTP,
+    going to a bookmark, and `auto`.
 
 ## 6. Release gate
 
@@ -354,6 +430,11 @@ workflow, launched by double-click from Explorer.
   the default app for every kind Linux gives delightviewer, the bookmarks
   lines (§4.7 and §5.7) have `g D` and `g o`, and the rsync line quotes the
   sentence that now reads once.
+- (df-app) 2026-09-29 — §5 gained the on-screen checks for Phase 4's df-app
+  tasks (the window fit, W4.3, W4.12, W4.19, W4.29, W4.33), and §5.5's
+  clipboard line says what `y`, `x` and `Y` do on Windows (04-windows.md,
+  W4.16's log entry). §5.8 records the Windows 11 VM runs, which were not a
+  release pass: CI debug builds, a viewer that passes no modifier chords.
 
 ## Open questions
 
