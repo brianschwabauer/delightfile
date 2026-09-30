@@ -477,7 +477,7 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       the last handle closes — however the process died. Done when: a runner
       test ends the parent with `TerminateProcess` and sees the child gone.
       — port/windows-core (df-core), started 2026-09-29
-- [>] **W4.32** Cloud remotes on Windows (S1.51): `rclone rcd` serves a unix
+- [~] **W4.32** Cloud remotes on Windows (S1.51): `rclone rcd` serves a unix
       socket, which `std` cannot connect to on Windows, so `platform::socket` is
       refused there and every cloud remote says "Cloud remotes is not available
       on this platform". Choose the transport and record it: Windows 10's own
@@ -487,7 +487,10 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
       password, since a loopback port is open to every local user. Then give
       `platform/windows/socket.rs` that body and `AVAILABLE = true`. Done when:
       `vfs/rclone_tests.rs` runs on the Windows runner.
-      — port/windows-core (df-core), started 2026-09-29
+      — blocked: the transport is a choice between two designs with different
+      security models, which the task leaves open and the df-core brief did
+      not make; the options and what each costs are in Open questions. The
+      daemon's job object (W4.31) is in place for either.
 - [~] **W4.34** Take `-A dead_code` off the windows job's clippy line in
       `.github/workflows/ci.yml` (S1.53). It is there because df-app items
       whose only callers are Linux bodies — the drag-and-drop helpers in
@@ -825,3 +828,26 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (b) `IFileOperation` with `FOFX_RECYCLEONDELETE`, which refuses instead of
   deleting — COM, deferred with W4.27/W4.28; (c) keep the flags and accept
   it. Until decided, (c).
+- (df-core) W4.32, the rclone daemon's transport on Windows. (a) **Windows'
+  own `AF_UNIX`**: rclone is Go, which serves `unix://` addresses on Windows
+  10 1803 and later (to confirm on the runner), so the daemon's command line
+  and `--rc-no-auth` stay as they are, and the directory's privacy is the
+  authentication, as on Unix. Costs: a hand-declared WinSock binding in
+  `platform/windows/socket.rs` (`WSAStartup`, `socket(AF_UNIX)`, `connect`
+  with a `sockaddr_un`, `send`/`recv`, `SO_RCVTIMEO`/`SO_SNDTIMEO`,
+  `closesocket` — `windows-sys` has them under `Win32_Networking_WinSock`),
+  a `Stream` type wrapping the socket, and `private_dir` as a DACL granting
+  this user alone (`SetNamedSecurityInfoW`), or a check that the directory is
+  under `%LOCALAPPDATA%`, whose inherited ACL is already the user's, SYSTEM's
+  and the administrators'. `vfs/http.rs` unchanged. (b) **Loopback TCP with
+  a password**: `--rc-addr 127.0.0.1:0`, `--rc-user`/`--rc-pass` given
+  through rclone's environment (`RCLONE_RC_USER`, `RCLONE_RC_PASS`) so the
+  password is not on a command line, and `std`'s `TcpStream`. Costs: the
+  port rclone chose read from its log line ("Serving remote control on
+  http://127.0.0.1:NNNN/") by the stderr reader, or a free port picked first
+  and raced for; a random password with no RNG crate (`BCryptGenRandom`
+  through `windows-sys`); `vfs/http.rs` sending `Authorization: Basic` (a
+  base64 encoder by hand) where Unix sends none; and a port every local user
+  can knock on, answered only with the password. (a) keeps one security model
+  on every target; (b) keeps Windows' code in `std`. The runner has no rclone
+  either way: the done-when needs the workflow to install it.
