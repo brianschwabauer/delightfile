@@ -233,7 +233,9 @@ mod tests {
                 tie_to_this_thread(&mut command);
                 let child = command.spawn().unwrap();
                 let _tie = tie(&child).unwrap();
-                println!("child-pid {}", child.id());
+                // On a line of its own: the harness has printed the test's
+                // name, and not yet its end, on the line before.
+                println!("\nchild-pid {}", child.id());
                 std::io::stdout().flush().unwrap();
                 std::thread::sleep(Duration::from_secs(120));
             }
@@ -261,7 +263,7 @@ mod tests {
         let out = std::io::BufReader::new(parent.stdout.take().unwrap());
         let pid: u32 = out
             .lines()
-            .find_map(|line| line.ok()?.strip_prefix("child-pid ")?.trim().parse().ok())
+            .find_map(|line| line.ok()?.split("child-pid ").nth(1)?.trim().parse().ok())
             .expect("the parent never named its child");
         // SAFETY: a pid read from the parent, opened for waiting on and, if
         // the test fails, ending; the handle is owned from here on.
