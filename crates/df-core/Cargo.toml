@@ -57,15 +57,14 @@ miniz_oxide.workspace = true
 # crate — so the build gains a few features rather than a dependency.
 regex.workspace = true
 
-# Windows: the calls std keeps unstable or does not have — first
-# `GetFileInformationByHandle`, whose volume serial and file index say two
-# names are one file (`platform::meta::identity`), and `GetCompressedFileSizeW`,
-# what a file occupies (`platform::meta::blocks_bytes`); `SHFileOperationW`, the
-# Recycle Bin (`platform::trash`); the local clock before 1970
-# (`platform::time`). Pinned to the version
-# winit 0.30.13 already compiles, so Windows builds no second copy
-# (plans/other-platforms/00-ground-rules.md §3), with only the features the
-# platform module calls.
+# Windows: the calls std keeps unstable or does not have, each behind
+# `platform::` — a file's identity and allocation (`meta`), the Recycle Bin
+# (`trash`, `UI_Shell`), `ReadDirectoryChangesW` with its events and waits
+# (`watch`, `IO`, `Threading`, `Security`), the job object that ends the rclone
+# daemon with us (`process`, `JobObjects`), the local clock before 1970
+# (`time`). Pinned to the version winit 0.30.13 already compiles, so Windows
+# builds no second copy (plans/other-platforms/00-ground-rules.md §3), with
+# only the features the platform module calls.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
