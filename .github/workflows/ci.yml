@@ -331,9 +331,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: cargo test -p df-core -p df-app --no-fail-fast
 
-      # -A dead_code, as on macOS (S1.53): what only a Linux body calls is
-      # unused here. It comes off with W4.34 in 04-windows.md, once Phase 4
-      # has given those items callers.
+      # -A dead_code, as on macOS (S1.53), and it stays after W4.34 in
+      # 04-windows.md: df-core has no dead code here, and what df-app has is
+      # the six enum variants the macOS job names, which only Linux's bodies
+      # make, and the drag picture (platform/icon.rs) with the
+      # Event::DragEnded that ends a drag out, which Windows has once OLE
+      # drag-out (W4.27) is done.
       - name: cargo clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks -A dead_code
