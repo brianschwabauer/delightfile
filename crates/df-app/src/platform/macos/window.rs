@@ -27,7 +27,7 @@ use winit::window::{Theme, Window, WindowAttributes};
 
 use crate::app::WINDOW_SIZE;
 use crate::platform::fit::{fit, Area, Frame};
-use crate::ui::TitleBand;
+use crate::ui::{CaptionPointer, TitleBand};
 
 /// Nothing to do to a window once it is made.
 pub fn adopt(_window: &Window) {}
@@ -38,7 +38,19 @@ pub fn title_band(_window: &Window) -> Option<TitleBand> {
 }
 
 /// Never called: there is no band.
-pub fn title_regions(_window: &Window, _band: egui::Rect, _controls: &[egui::Rect]) {}
+pub fn title_regions(
+    _window: &Window,
+    _band: egui::Rect,
+    _buttons: Option<[egui::Rect; 3]>,
+    _controls: &[egui::Rect],
+) {
+}
+
+/// The traffic lights are AppKit's: there are no buttons of the window's
+/// own to point at.
+pub fn caption_pointer(_window: &Window) -> CaptionPointer {
+    CaptionPointer::default()
+}
 
 /// The window's side, for the title bar AppKit draws.
 pub fn set_theme(window: &Window, theme: Theme) {

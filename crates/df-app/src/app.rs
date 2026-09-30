@@ -16840,7 +16840,7 @@ impl App {
                 prompting,
                 prompt_field.as_ref().map(|field| field.rect),
             );
-            crate::platform::window::title_regions(&gfx.window, band, &controls);
+            crate::platform::window::title_regions(&gfx.window, band, layout.caption, &controls);
         }
         // The rename card, where the last frame drew it: anchored to the
         // cursor's row, as [`chrome::prompt_popup`] anchors it when no dialog
@@ -19210,6 +19210,17 @@ impl App {
                     self.which.alpha(now),
                 );
             }
+        }
+
+        // The caption buttons the window draws for the title bar (W4.39),
+        // over everything: nothing the window shows covers the title bar's.
+        if let (Some(buttons), Some(gfx)) = (layout.caption, &self.gfx) {
+            chrome::caption_buttons(
+                &paint,
+                buttons,
+                crate::platform::window::caption_pointer(&gfx.window),
+                gfx.window.is_maximized(),
+            );
         }
 
         // A menu whose fade is over is gone: see the `menu` row below.

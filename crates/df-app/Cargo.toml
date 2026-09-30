@@ -124,9 +124,9 @@ libc.workspace = true
 [target.'cfg(windows)'.dependencies]
 # The Win32 calls behind `src/platform/windows/`: the console attach, the
 # clipboard, the drives card, the shell's "open", the pointer, the work area,
-# the appearance in the registry. The version winit 0.30.13 builds (and
-# df-core names), so the crate is already compiled; each feature is a header a
-# body here calls into (plans/other-platforms/00-ground-rules.md §3).
+# the appearance in the registry, the title bar. The version winit 0.30.13
+# builds (and df-core names), so the crate is already compiled; each feature
+# is a header a body here calls into (plans/other-platforms/00-ground-rules.md §3).
 windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -143,6 +143,7 @@ windows-sys = { version = "0.52.0", features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

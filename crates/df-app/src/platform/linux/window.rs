@@ -14,7 +14,7 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Theme, Window, WindowAttributes};
 
 use crate::app::WINDOW_SIZE;
-use crate::ui::TitleBand;
+use crate::ui::{CaptionPointer, TitleBand};
 
 /// The attributes the one window is created with: `title`, the opening
 /// size, and `app_id` as the Wayland `app_id`.
@@ -34,7 +34,18 @@ pub fn title_band(_window: &Window) -> Option<TitleBand> {
 }
 
 /// Never called: there is no band.
-pub fn title_regions(_window: &Window, _band: egui::Rect, _controls: &[egui::Rect]) {}
+pub fn title_regions(
+    _window: &Window,
+    _band: egui::Rect,
+    _buttons: Option<[egui::Rect; 3]>,
+    _controls: &[egui::Rect],
+) {
+}
+
+/// There are no caption buttons of the window's own to point at.
+pub fn caption_pointer(_window: &Window) -> CaptionPointer {
+    CaptionPointer::default()
+}
 
 /// The window's side, for whatever the compositor draws around it.
 pub fn set_theme(window: &Window, theme: Theme) {

@@ -32,7 +32,9 @@ use crate::hover::{pressed_rect, Hovers};
 use crate::input::Prompt;
 use crate::ripple::Ripples;
 use crate::theme::mix;
-use crate::ui::{Control, Painting, CHROME_HEIGHT, GAP, ROW_RADIUS, TOP_HEIGHT};
+use crate::ui::{
+    CaptionButton, CaptionPointer, Control, Painting, CHROME_HEIGHT, GAP, ROW_RADIUS, TOP_HEIGHT,
+};
 
 /// The padding inside a card, and the inset its rows get on every adjacent
 /// side (`delightful-ui` §15's even insets).
@@ -1982,6 +1984,131 @@ pub fn band_controls(
     }
     controls.retain(|rect| band.intersect(*rect).is_positive());
     controls
+}
+
+// ── The caption buttons (W4.39) ─────────────────────────────────────────────
+
+/// How big a caption button's glyph is, in points: Windows 11's minimize,
+/// maximize, restore and close are ten pixels across at 100 %.
+const CAPTION_GLYPH: f32 = 10.0;
+
+/// How far restore's back square stands off its front one, in points.
+const CAPTION_RESTORE_OFFSET: f32 = 2.0;
+
+/// The red Windows 11 lights its close button with, under a white glyph.
+const CAPTION_CLOSE: egui::Color32 = egui::Color32::from_rgb(0xC4, 0x2B, 0x1C);
+
+/// How much darker the close button's red goes while it is held down.
+const CAPTION_CLOSE_PRESS: f32 = 0.14;
+
+/// The three caption buttons the window draws where the system's title bar
+/// was (Windows, W4.39; Brian's call to draw them, 2026-09-30): minimize,
+/// maximize — restore's two squares while the window is maximized — and
+/// close, the shapes of Windows 11's own glyphs drawn as strokes, in the
+/// text's colour at the weight the chrome draws its symbols at
+/// ([`crate::glyphs::weight`]).
+///
+/// Under the pointer, minimize and maximize lift on the plate a chip lifts
+/// on and close turns Windows 11's red with its glyph white; held down, each
+/// is a shade stronger. The plates are the buttons' whole rects, square as
+/// Windows' are: the window's own rounded corner, which DWM cuts, rounds
+/// close's. `pointer` is what the platform heard, the pointer being the
+/// title bar's over them, not egui's.
+pub fn caption_buttons(
+    paint: &Painting<'_>,
+    rects: [egui::Rect; 3],
+    pointer: CaptionPointer,
+    maximized: bool,
+) {
+    let palette = paint.palette;
+    let painter = paint.painter;
+    let ppp = painter.pixels_per_point();
+    let weight = crate::glyphs::weight(&egui::FontId::proportional(FONT), ppp);
+    for (button, rect) in CaptionButton::ALL.into_iter().zip(rects) {
+        let hover = pointer.hover == Some(button);
+        let pressed = hover && pointer.pressed == Some(button);
+        let (plate, ink) = match button {
+            CaptionButton::Close if pressed => (
+                Some(mix(
+                    CAPTION_CLOSE,
+                    egui::Color32::BLACK,
+                    CAPTION_CLOSE_PRESS,
+                )),
+                egui::Color32::WHITE,
+            ),
+            CaptionButton::Close if hover => (Some(CAPTION_CLOSE), egui::Color32::WHITE),
+            _ if pressed => (Some(palette.surface2), palette.text),
+            _ if hover => (Some(palette.surface1), palette.text),
+            _ => (None, palette.text),
+        };
+        if let Some(plate) = plate {
+            painter.rect_filled(rect, 0, plate);
+        }
+        caption_glyph(
+            painter,
+            button,
+            rect.center(),
+            maximized,
+            egui::Stroke::new(weight, ink),
+        );
+    }
+}
+
+/// One caption glyph, centred on `center`: its box's edges on pixel
+/// boundaries and every stroke inside the box, so a one-pixel line is one
+/// pixel and not two half-lit ones.
+fn caption_glyph(
+    painter: &egui::Painter,
+    button: CaptionButton,
+    center: egui::Pos2,
+    maximized: bool,
+    stroke: egui::Stroke,
+) {
+    use egui::emath::GuiRounding as _;
+    let ppp = painter.pixels_per_point();
+    let glyph = egui::Rect::from_center_size(center, egui::vec2(CAPTION_GLYPH, CAPTION_GLYPH))
+        .round_to_pixels(ppp);
+    let inset = stroke.width / 2.0;
+    match button {
+        CaptionButton::Minimize => {
+            let mut y = glyph.center().y;
+            stroke.round_center_to_pixel(ppp, &mut y);
+            painter.line_segment(
+                [egui::pos2(glyph.left(), y), egui::pos2(glyph.right(), y)],
+                stroke,
+            );
+        }
+        CaptionButton::Maximize if !maximized => {
+            painter.rect_stroke(glyph, 1, stroke, egui::StrokeKind::Inside);
+        }
+        CaptionButton::Maximize => {
+            // Restore: a whole square in front, low and to the left, and the
+            // top and right edges of the one behind it.
+            let offset = CAPTION_RESTORE_OFFSET.round_to_pixels(ppp);
+            let front = egui::Rect::from_min_max(
+                egui::pos2(glyph.left(), glyph.top() + offset),
+                egui::pos2(glyph.right() - offset, glyph.bottom()),
+            );
+            painter.rect_stroke(front, 1, stroke, egui::StrokeKind::Inside);
+            let (left, top) = (glyph.left() + offset + inset, glyph.top() + inset);
+            let (right, bottom) = (glyph.right() - inset, glyph.bottom() - offset - inset);
+            painter.add(egui::Shape::line(
+                vec![
+                    egui::pos2(left, front.top()),
+                    egui::pos2(left, top),
+                    egui::pos2(right, top),
+                    egui::pos2(right, bottom),
+                    egui::pos2(front.right(), bottom),
+                ],
+                stroke,
+            ));
+        }
+        CaptionButton::Close => {
+            let glyph = glyph.shrink(inset);
+            painter.line_segment([glyph.left_top(), glyph.right_bottom()], stroke);
+            painter.line_segment([glyph.right_top(), glyph.left_bottom()], stroke);
+        }
+    }
 }
 
 /// How far the top row's ground is tinted towards the filter's blue while a
@@ -5366,6 +5493,81 @@ mod tests {
             band_controls(band, None, &[], &geometry, true, None),
             Vec::<egui::Rect>::new()
         );
+    }
+
+    /// W4.39's caption buttons draw in every state — at rest, each lit, each
+    /// held, the pointer held on one and over another — restored and
+    /// maximized, at 100 % and 150 %; and a lit close is a red plate across
+    /// its whole rect, which minimize's plate is not.
+    #[test]
+    fn the_caption_buttons_paint_in_every_state() {
+        for ppp in [1.0, 1.5] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(ppp);
+            let rects = [0.0, 1.0, 2.0].map(|i: f32| {
+                egui::Rect::from_min_size(
+                    egui::pos2(1262.0 + 46.0 * i, 0.0),
+                    egui::vec2(46.0, 46.0),
+                )
+            });
+            let output = ctx.run_ui(Default::default(), |ui| {
+                let palette = crate::theme::Palette::default();
+                let theme = df_core::config::Theme::default();
+                let paint = Painting {
+                    tips: None,
+                    held: None,
+                    painter: ui.painter(),
+                    palette: &palette,
+                    theme: &theme,
+                    tags: &crate::tags::BUILT_IN,
+                    nerd: false,
+                    show_symlink: true,
+                    now: std::time::Instant::now(),
+                };
+                let mut pointers = vec![CaptionPointer::default()];
+                for button in CaptionButton::ALL {
+                    pointers.push(CaptionPointer {
+                        hover: Some(button),
+                        pressed: None,
+                    });
+                    pointers.push(CaptionPointer {
+                        hover: Some(button),
+                        pressed: Some(button),
+                    });
+                }
+                pointers.push(CaptionPointer {
+                    hover: Some(CaptionButton::Maximize),
+                    pressed: Some(CaptionButton::Close),
+                });
+                for pointer in pointers {
+                    for maximized in [false, true] {
+                        caption_buttons(&paint, rects, pointer, maximized);
+                    }
+                }
+                // Last, alone: close lit, for the plate to be found.
+                ui.painter().rect_filled(ui.max_rect(), 0, palette.crust);
+                caption_buttons(
+                    &paint,
+                    rects,
+                    CaptionPointer {
+                        hover: Some(CaptionButton::Close),
+                        pressed: None,
+                    },
+                    false,
+                );
+            });
+            let plates: Vec<egui::Rect> = output
+                .shapes
+                .iter()
+                .rev()
+                .filter_map(|clipped| match &clipped.shape {
+                    egui::Shape::Rect(rect) if rect.fill == CAPTION_CLOSE => Some(rect.rect),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(plates.first(), Some(&rects[2]), "at {ppp}");
+            assert!(!plates.contains(&rects[0]));
+        }
     }
 
     /// With two tabs the band is the strip's: its chips and its `+` are the

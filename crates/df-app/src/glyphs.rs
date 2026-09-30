@@ -418,6 +418,14 @@ impl Pen<'_> {
 /// How far an arrowhead's barbs reach, back and out, in ems.
 const BARB: f32 = 0.19;
 
+/// The weight a drawn symbol has in `font` at `ppp` pixels to the point: the
+/// face's own `−`, never under a pixel. The face's stems are hinted to one
+/// at the sizes where they would be thinner, and a drawing thinner than the
+/// letters beside it reads as a fainter colour rather than a lighter weight.
+pub fn weight(font: &FontId, ppp: f32) -> f32 {
+    (face(&font.family).stroke * font.size).max(1.0 / ppp)
+}
+
 /// Whether some face in `font`'s family draws `c`.
 ///
 /// Asked of the advance: a face without the character gives it none, and a
@@ -519,11 +527,7 @@ impl Drawn {
             self.color
         };
         let left = top_left.x.round_to_pixels(ppp);
-        // Never under a pixel: the face's own stems are hinted to one at the
-        // sizes where they would be thinner, and a stand-in thinner than the
-        // letters beside it reads as a fainter colour rather than a lighter
-        // weight.
-        let width = (face.stroke * self.font.size).max(1.0 / ppp);
+        let width = weight(&self.font, ppp);
         let pen = Pen {
             painter,
             origin: egui::pos2(left + self.advance / 2.0, top_left.y + self.baseline),

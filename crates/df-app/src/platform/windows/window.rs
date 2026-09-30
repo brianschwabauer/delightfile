@@ -31,7 +31,7 @@ use winit::window::{Window, WindowAttributes};
 use crate::app::WINDOW_SIZE;
 use crate::platform::fit::{fit, Area, Fitted, Frame};
 
-pub use super::titlebar::{adopt, set_theme, title_band, title_regions};
+pub use super::titlebar::{adopt, caption_pointer, set_theme, title_band, title_regions};
 
 /// The attributes the one window is created with: `title` and the opening
 /// size, fitted to the work area when it would not fit.
