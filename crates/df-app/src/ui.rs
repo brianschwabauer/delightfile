@@ -769,6 +769,22 @@ impl Layout {
     pub fn in_preview(&self, at: egui::Pos2) -> bool {
         !self.collapsed[1] && self.preview.contains(at)
     }
+
+    /// The row that went up into the title band — the strip, or with one
+    /// tab the top row — as far as its first line: what buttons the system
+    /// draws in the band are lined up with (macOS's traffic lights, M2.37).
+    /// The first line, so a prompt's second, for an error, does not move
+    /// them. `None` without a band.
+    pub fn band_row(&self) -> Option<egui::Rect> {
+        self.band?;
+        Some(match self.strip {
+            Some(strip) => strip,
+            None => egui::Rect::from_min_size(
+                self.path.min,
+                egui::vec2(self.path.width(), TOP_HEIGHT.min(self.path.height())),
+            ),
+        })
+    }
 }
 
 /// Split the window into miller columns at `split` (PLAN §2), with the tab
@@ -2606,6 +2622,32 @@ mod tests {
         assert_eq!(l.path, bare.path);
         assert_eq!(l.band, Some(r(0.0, 0.0, 1408.0, GAP + CHROME_HEIGHT)));
         assert_eq!(l.list, bare.list);
+    }
+
+    /// The row the traffic lights are centred on (M2.37): the strip with two
+    /// tabs, the top row with one, and of a top row grown a second line for
+    /// a prompt's error only its first, so the lights do not move with it;
+    /// no row without a band.
+    #[test]
+    fn the_lights_line_up_with_the_first_line_of_the_row_in_the_band() {
+        let lights = TitleBand {
+            height: 0.0,
+            left_inset: 78.0,
+            right_inset: 0.0,
+            buttons: 0.0,
+        };
+        let row = |strip, lines| {
+            layout(area(), &Split::at([1, 4, 3]), strip, lines, Some(lights))
+                .band_row()
+                .map(|row| row.center().y)
+        };
+        assert_eq!(row(false, 1), Some(GAP + TOP_HEIGHT / 2.0));
+        assert_eq!(row(true, 1), Some(GAP + CHROME_HEIGHT / 2.0));
+        assert_eq!(row(false, 2), Some(GAP + TOP_HEIGHT / 2.0));
+        assert_eq!(
+            layout(area(), &Split::at([1, 4, 3]), false, 1, None).band_row(),
+            None
+        );
     }
 
     /// A system's three caption buttons, 32 points deep and 138 wide, at the

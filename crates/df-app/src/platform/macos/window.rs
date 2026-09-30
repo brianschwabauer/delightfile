@@ -24,6 +24,21 @@
 //! draws, and the layout starts the row a gap past them; the band is as
 //! deep as the row, the lights being shallower.
 //!
+//! **The lights sit level with the row** (Brian's call, 2026-09-30), as
+//! Electron's `trafficLightPosition` and VS Code put them: AppKit keeps
+//! them in a title bar some 28 points deep, level with the row's upper
+//! half. After each layout [`band_row`] is told where the row is, and the
+//! title bar (the close button's superview's superview, as Electron finds
+//! it) is made twice as deep as the row's middle is low, its top still the
+//! window's, and each button centred in it ([`caption::lights_at`]). The
+//! buttons are read each frame and written only when they are not where
+//! they should be: the first time, when the row moves, and when AppKit has
+//! laid its title bar out again and put them back, which it does on its
+//! own occasions (Electron's source names a resize, and a change to the
+//! buttons' hidden state on macOS 26). With the band gone — full screen —
+//! they are put back where AppKit had them, and its own title bar comes
+//! down over the window as it always does.
+//!
 //! What is left of the band is still a title bar. The see-through title bar
 //! lets a press through to the window, so the window answers for it:
 //! [`title_regions`] is told after every layout where the band and the
@@ -38,12 +53,13 @@
 //! brings one down, and no band: the layout is the one a Linux window has.
 #![allow(unsafe_code)] // AppKit's window, its three buttons and the event being handled, through objc2; each call says why it holds
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::ClassType;
 use objc2_app_kit::{
-    NSApplication, NSEventType, NSScreen, NSView, NSWindow, NSWindowButton, NSWindowStyleMask,
+    NSApplication, NSButton, NSEventType, NSScreen, NSView, NSWindow, NSWindowButton,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{ns_string, MainThreadMarker, NSPoint, NSRect, NSSize, NSUserDefaults};
 use winit::event_loop::ActiveEventLoop;
@@ -63,6 +79,14 @@ thread_local! {
     /// What the layout last said about the band, in physical pixels: read
     /// by [`title_press`], on the main thread, where both run.
     static REGIONS: RefCell<Regions> = const { RefCell::new(Regions::NONE) };
+
+    /// Where AppKit had the traffic lights before they were first moved:
+    /// its title bar's depth and each button's origin, close to zoom.
+    static HOME: RefCell<Option<(f64, [NSPoint; 3])>> = const { RefCell::new(None) };
+
+    /// Whether the lights are where [`band_row`] put them, so that the band
+    /// going puts them back once.
+    static MOVED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Nothing to do to a window once it is made: the attributes asked for the
@@ -72,13 +96,15 @@ pub fn adopt(_window: &Window) {}
 /// The band the title bar shares with the top row: the traffic lights kept
 /// clear at its left end, as far in as the rightmost of them reaches, and
 /// nothing at its right. `None` in full screen, or for a window whose
-/// content does not run up under its title bar.
+/// content does not run up under its title bar; and then the lights go back
+/// where AppKit had them.
 pub fn title_band(window: &Window) -> Option<TitleBand> {
     let ns_window = view_of(window)?.window()?;
     let style = ns_window.styleMask();
     if !style.contains(NSWindowStyleMask::FullSizeContentView)
         || style.contains(NSWindowStyleMask::FullScreen)
     {
+        put_lights_back(&ns_window);
         return None;
     }
     // A window not yet laid out may say its buttons are nowhere.
@@ -115,6 +141,93 @@ fn lights(ns_window: &NSWindow) -> Option<(f32, f32)> {
         });
     }
     reach.map(|(right, bottom)| (right as f32, bottom.max(0.0) as f32))
+}
+
+/// The row that went up into the band, its first line, in logical points
+/// from the window's top-left: the traffic lights are centred on it, and
+/// moved only when they are not already there.
+pub fn band_row(window: &Window, row: egui::Rect) {
+    let Some(ns_window) = view_of(window).and_then(|view| view.window()) else {
+        return;
+    };
+    let Some((buttons, bar)) = light_views(&ns_window) else {
+        return;
+    };
+    let button = buttons[0].frame().size.height;
+    let Some((depth, y)) = caption::lights_at(f64::from(row.center().y), button) else {
+        return;
+    };
+    // Taken the first time, while they are still where AppKit put them.
+    HOME.with(|home| {
+        home.borrow_mut().get_or_insert_with(|| {
+            (
+                bar.frame().size.height,
+                buttons.each_ref().map(|button| button.frame().origin),
+            )
+        });
+    });
+    MOVED.set(true);
+    let placed = (bar.frame().size.height - depth).abs() < 0.5
+        && buttons
+            .iter()
+            .all(|button| (button.frame().origin.y - y).abs() < 0.5);
+    if !placed {
+        let origins = buttons
+            .each_ref()
+            .map(|button| NSPoint::new(button.frame().origin.x, y));
+        lay(&bar, &buttons, depth, origins);
+    }
+}
+
+/// Put the traffic lights back where AppKit had them, if [`band_row`] has
+/// moved them since they were last put back.
+fn put_lights_back(ns_window: &NSWindow) {
+    if !MOVED.replace(false) {
+        return;
+    }
+    let Some(home) = HOME.with(|home| *home.borrow()) else {
+        return;
+    };
+    if let Some((buttons, bar)) = light_views(ns_window) {
+        lay(&bar, &buttons, home.0, home.1);
+    }
+}
+
+/// The three traffic lights, close to zoom, and the title bar they sit in:
+/// the close button's superview's superview, as Electron finds it. Asked
+/// anew each time, since AppKit may put new buttons in. `None` while any
+/// is missing.
+fn light_views(ns_window: &NSWindow) -> Option<([Retained<NSButton>; 3], Retained<NSView>)> {
+    let [Some(close), Some(minimize), Some(zoom)] = [
+        NSWindowButton::NSWindowCloseButton,
+        NSWindowButton::NSWindowMiniaturizeButton,
+        NSWindowButton::NSWindowZoomButton,
+    ]
+    .map(|kind| ns_window.standardWindowButton(kind)) else {
+        return None;
+    };
+    // SAFETY: two reads of a live view's superview.
+    let bar = unsafe { close.superview()?.superview()? };
+    Some(([close, minimize, zoom], bar))
+}
+
+/// Make the title bar `depth` points deep, its top edge where it is, and
+/// put the buttons at `origins` in it.
+fn lay(bar: &NSView, buttons: &[Retained<NSButton>; 3], depth: f64, origins: [NSPoint; 3]) {
+    let frame = bar.frame();
+    let top = frame.origin.y + frame.size.height;
+    // SAFETY: AppKit's own title bar and buttons, on the main thread, given
+    // new frames as Electron gives them; AppKit lays them out again as it
+    // pleases, and the next frame puts them back.
+    unsafe {
+        bar.setFrame(NSRect::new(
+            NSPoint::new(frame.origin.x, top - depth),
+            NSSize::new(frame.size.width, depth),
+        ));
+        for (button, origin) in buttons.iter().zip(origins) {
+            button.setFrameOrigin(origin);
+        }
+    }
 }
 
 /// Where the band and the window's controls in it are, in logical points:

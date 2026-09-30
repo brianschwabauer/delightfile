@@ -16969,6 +16969,11 @@ impl App {
                 prompt_field.as_ref().map(|field| field.rect),
             );
             crate::platform::window::title_regions(&gfx.window, band, layout.caption, &controls);
+            // …and the row in it, for buttons the system draws there to line
+            // up with (macOS's traffic lights, M2.37).
+            if let Some(row) = layout.band_row() {
+                crate::platform::window::band_row(&gfx.window, row);
+            }
         }
         // The rename card, where the last frame drew it: anchored to the
         // cursor's row, as [`chrome::prompt_popup`] anchors it when no dialog
