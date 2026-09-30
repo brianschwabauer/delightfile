@@ -63,6 +63,11 @@ pub fn terminate(child: &mut Child) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether a child that [`terminate`] ends can clean up before it goes: yes.
+/// `SIGTERM` is a signal it handles, and rclone removes its `.partial` files
+/// and its socket on it.
+pub const TERMINATE_IS_GENTLE: bool = true;
+
 /// Nothing: a tool started here has no console window to hide (Windows'
 /// `CREATE_NO_WINDOW`). Returns `command` for chaining.
 pub fn quiet(command: &mut Command) -> &mut Command {

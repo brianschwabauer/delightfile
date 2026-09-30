@@ -43,7 +43,10 @@
 //! (the worker dropping the [`Daemon`]) sends the same `SIGTERM` itself and
 //! waits for rclone to go, which is what lets rclone remove its `.partial`
 //! files and its socket; `SIGKILL` is only for a daemon that has not gone
-//! within [`STOP_GRACE`].
+//! within [`STOP_GRACE`]. Windows has no `SIGTERM` for a console-less child,
+//! and its `terminate` is `TerminateProcess`, which rclone never sees; so
+//! there the drop first stops the job the daemon is running, as a cancel
+//! does, and rclone removes that job's `.partial` before the end comes.
 //!
 //! ## One HTTP request per call
 //!
@@ -148,6 +151,15 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How often a terminated daemon is checked for having exited.
 const EXIT_POLL: Duration = Duration::from_millis(10);
 
+/// Where `terminate` is not gentle ([`child::TERMINATE_IS_GENTLE`], Windows),
+/// a dropped daemon's running job is stopped first; this is how long each
+/// request of that stop may wait for an answer.
+///
+/// Short, because a daemon is often dropped for having stopped answering, and
+/// then the stop costs this once and nothing more. One that answers takes a
+/// few milliseconds per request.
+const LAST_STOP_ANSWER: Duration = Duration::from_millis(250);
+
 /// How long a daemon that has exited is given to finish saying why.
 ///
 /// The same race `conn`'s `STDERR_GRACE` covers: the exit and the last line
@@ -200,6 +212,10 @@ pub(super) struct Daemon {
     /// The next stats group's number: one group per job, so a transfer's bytes
     /// are its own and not the sum of everything the daemon has done.
     next_group: u64,
+    /// The job this daemon started and has not seen end (its `{"jobid": N}`
+    /// and the place it concerns): what the drop stops where `terminate` is
+    /// not gentle.
+    running: Option<(Json, VfsPath)>,
 }
 
 /// A started async job, as the two request bodies that ask about it.
@@ -312,6 +328,7 @@ impl Daemon {
             stderr,
             reader,
             next_group: 0,
+            running: None,
         };
         // On failure `daemon` drops here, which stops and reaps the child and
         // removes the socket — the same teardown as any other end.
@@ -373,17 +390,28 @@ impl Daemon {
         params: &Json,
         about: &VfsPath,
     ) -> Result<Json, VfsError> {
+        self.call_within(method, params, about, OP_TIMEOUT)
+    }
+
+    /// [`Self::call`], waiting at most `timeout` for the answer.
+    fn call_within(
+        &mut self,
+        method: &'static str,
+        params: &Json,
+        about: &VfsPath,
+        timeout: Duration,
+    ) -> Result<Json, VfsError> {
         if let Ok(Some(status)) = self.child.try_wait() {
             return Err(self.exited(status));
         }
         let body = params.to_string();
-        let response = match http::post(&self.socket, method, &body, OP_TIMEOUT) {
+        let response = match http::post(&self.socket, method, &body, timeout) {
             Ok(response) => response,
             Err(HttpError::TimedOut) => {
                 return Err(VfsError::Timeout {
                     service: self.service.name.clone(),
                     op: method,
-                    timeout: OP_TIMEOUT,
+                    timeout,
                 })
             }
             Err(e) => return Err(self.lost(&e)),
@@ -459,7 +487,7 @@ impl Daemon {
         let job = self.start_job("operations/list", params, dir)?;
         let outcome = loop {
             if !wanted() {
-                self.stop(&job.id, dir);
+                self.stop(&job.id, dir, OP_TIMEOUT);
                 break Ok(None);
             }
             let status = match self.call("job/status", &job.id, dir) {
@@ -693,7 +721,7 @@ impl Daemon {
         let mut moved = 0u64;
         let outcome = loop {
             if let Err(crate::DfError::Cancelled) = ctx.checkpoint() {
-                self.stop(&job.id, about);
+                self.stop(&job.id, about, OP_TIMEOUT);
                 break Err(VfsError::Cancelled);
             }
             match self.call("core/stats", &job.group, about) {
@@ -719,7 +747,8 @@ impl Daemon {
     }
 
     /// Send `method` with `_async`, in a stats group named for this daemon's
-    /// next job, and return the handles the polling needs.
+    /// next job, and return the handles the polling needs. The job is the
+    /// daemon's running one until [`Self::end_job`].
     fn start_job(
         &mut self,
         method: &'static str,
@@ -734,8 +763,10 @@ impl Daemon {
         let Some(jobid) = started.get("jobid").and_then(Json::as_i64) else {
             return Err(self.garbled(method));
         };
+        let id = Json::object([("jobid", Json::from(jobid))]);
+        self.running = Some((id.clone(), about.clone()));
         Ok(Job {
-            id: Json::object([("jobid", Json::from(jobid))]),
+            id,
             group: Json::object([("group", Json::from(group.as_str()))]),
         })
     }
@@ -759,7 +790,7 @@ impl Daemon {
     /// daemon down with it, which stops everything anyway. Returns the error.
     fn abandon(&mut self, job: &Job, error: VfsError, about: &VfsPath) -> VfsError {
         if !error.is_connection_fatal() {
-            self.stop(&job.id, about);
+            self.stop(&job.id, about, OP_TIMEOUT);
         }
         error
     }
@@ -767,6 +798,10 @@ impl Daemon {
     /// Delete a finished job's stats group — one per job would otherwise pile
     /// up in the daemon for as long as it runs — unless the daemon is on its
     /// way out, when there is nobody to ask.
+    ///
+    /// On the way out the job may still be running, so it stays the daemon's
+    /// running one, for the drop to stop; otherwise it has finished or been
+    /// stopped, and the daemon is running nothing.
     fn end_job<T>(&mut self, job: &Job, outcome: &Result<T, VfsError>, about: &VfsPath) {
         if outcome
             .as_ref()
@@ -775,6 +810,7 @@ impl Daemon {
         {
             return;
         }
+        self.running = None;
         if let Err(e) = self.call("core/stats-delete", &job.group, about) {
             log::debug!("vfs {}: core/stats-delete: {e}", self.service.name);
         }
@@ -798,15 +834,16 @@ impl Daemon {
     }
 
     /// `job/stop`, then wait (up to [`STOP_GRACE`]) for the job to say it has
-    /// finished — which is when its partial file is gone.
-    fn stop(&mut self, job: &Json, about: &VfsPath) {
-        if let Err(e) = self.call("job/stop", job, about) {
+    /// finished — which is when its partial file is gone. Each request may
+    /// wait `answer` for its reply; the first that gets none ends the wait.
+    fn stop(&mut self, job: &Json, about: &VfsPath, answer: Duration) {
+        if let Err(e) = self.call_within("job/stop", job, about, answer) {
             log::debug!("vfs {}: job/stop: {e}", self.service.name);
             return;
         }
         let deadline = Instant::now() + STOP_GRACE;
         while Instant::now() < deadline {
-            match self.call("job/status", job, about) {
+            match self.call_within("job/status", job, about, answer) {
                 Ok(status) if status.get("finished").and_then(Json::as_bool) == Some(true) => {
                     return
                 }
@@ -882,8 +919,20 @@ impl Drop for Daemon {
     /// and exits in about 200 ms — where `SIGKILL` leaves both behind. So
     /// `SIGTERM`, a wait of up to [`STOP_GRACE`] for the exit, and `SIGKILL`
     /// only for a daemon that is still there after it.
+    ///
+    /// Where `terminate` is not gentle (Windows' `TerminateProcess`), the job
+    /// the daemon is running is stopped first, as a cancel stops it, which is
+    /// when rclone removes its `.partial`; each request of that stop waits at
+    /// most [`LAST_STOP_ANSWER`], so a daemon that has stopped answering
+    /// delays its end by that and no more. Not `core/quit`: rclone sleeps a
+    /// fixed 1.5 s after answering it before it cleans up and exits.
     fn drop(&mut self) {
         let pid = self.pid();
+        if !child::TERMINATE_IS_GENTLE {
+            if let Some((job, about)) = self.running.take() {
+                self.stop(&job, &about, LAST_STOP_ANSWER);
+            }
+        }
         if let Err(e) = child::terminate(&mut self.child) {
             log::debug!("vfs {}: SIGTERM to rclone {pid}: {e}", self.service.name);
         }
@@ -1476,14 +1525,11 @@ mod tests {
         assert!(error.to_string().contains("short enough"), "{error}");
     }
 
-    /// **Dropped mid-copy, the daemon is stopped gently** — `SIGTERM`, which
-    /// rclone cleans up on — so the `.partial` it was writing goes with it,
-    /// and the drop does not have to wait for the `SIGKILL` fallback.
-    ///
-    /// Unix only: Windows has no signal to stop a console-less child gently,
-    /// and `terminate` there is `TerminateProcess`, which leaves the
-    /// `.partial` behind (04-windows.md, Open questions).
-    #[cfg(unix)]
+    /// **Dropped mid-copy, the daemon is stopped gently**, so the `.partial`
+    /// it was writing goes with it, and the drop does not have to wait for
+    /// the fallback. On Unix that is `SIGTERM`, which rclone cleans up on. On
+    /// Windows, where `terminate` is `TerminateProcess`, it is the job stopped
+    /// before it, which rclone cleans up after as it does after a cancel.
     #[test]
     fn a_daemon_dropped_mid_copy_cleans_up_after_itself() {
         use super::super::rclone_tests::{
@@ -1532,9 +1578,18 @@ mod tests {
 
         let started = Instant::now();
         drop(daemon);
+        // Unix: SIGTERM ends the daemon in a fraction of a second, and a drop
+        // that took STOP_GRACE waited for SIGKILL. Windows: the stopped job
+        // finishes in milliseconds and TerminateProcess ends the daemon at
+        // once, so only a stop that never saw the job finish takes that long.
+        let enough = if child::TERMINATE_IS_GENTLE {
+            "SIGTERM was enough"
+        } else {
+            "stopping the job before TerminateProcess was enough"
+        };
         assert!(
             started.elapsed() < STOP_GRACE,
-            "SIGTERM was enough; the drop took {:?}",
+            "{enough}; the drop took {:?}",
             started.elapsed()
         );
         assert!(

@@ -120,6 +120,12 @@ pub fn terminate(child: &mut Child) -> io::Result<()> {
     child.kill()
 }
 
+/// Whether a child that [`terminate`] ends can clean up before it goes: no.
+/// `TerminateProcess` ends it where it stands, so the rclone daemon's owner
+/// stops the job the daemon is running before it (`vfs::rclone`, the
+/// daemon's drop), and rclone removes that job's `.partial` itself.
+pub const TERMINATE_IS_GENTLE: bool = false;
+
 /// What [`quiet`] sets: `CREATE_NO_WINDOW`, and no other creation flag.
 const QUIET: u32 = CREATE_NO_WINDOW;
 

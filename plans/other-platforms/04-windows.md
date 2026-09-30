@@ -1154,6 +1154,32 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   says. The VM check this round was to make did not happen: at the first
   look the VM was at its sign-in screen, whose password no agent enters,
   and at the second the viewer stopped answering (07 §5.8).
+- (tidy) 2026-09-30 — W4.32, a daemon dropped while a transfer runs,
+  decided for Brian, who delegated it; the question is out of Open
+  questions. `TerminateProcess` gives rclone no chance to remove the
+  `.partial` it was writing, so on Windows the drop first stops the job the
+  daemon started and has not seen end, through the `stop()` a cancel uses,
+  and then ends the daemon as before. rclone removes a stopped job's
+  `.partial` itself; the Windows runner already showed that in the upload
+  half of the cancel test, which sweeps nothing. Each request of that stop
+  waits at most 250 ms (`LAST_STOP_ANSWER`), so a daemon that no longer
+  answers costs one such wait: on Linux, with `terminate` made `SIGKILL` for
+  the experiment and the daemon held with `SIGSTOP`, the drop took 261 ms.
+  Not `core/quit`, the question's option (a): rclone 1.75.1 answers it and
+  then sleeps a fixed 1.5 s (`rcQuit` in `fs/rc/internal.go`) before it runs
+  its exit handlers, which remove the partials, and exits. That measured
+  1,516 ms mid-copy and 1,519 ms idle, so every drop on Windows would have
+  cost 1.5 s, and a wait of about a second would have ended in the kill
+  every time. Not `job/list` either: the daemon knows its one running job,
+  since the worker runs one command at a time. Whether `terminate` is gentle
+  is `platform::process::TERMINATE_IS_GENTLE`, true on Unix and false on
+  Windows, so there is no `cfg` outside `platform/`, and Unix's drop is
+  unchanged: `SIGTERM`, nothing before it. Linux still tracks the running
+  job and never reads it. `a_daemon_dropped_mid_copy_cleans_up_after_itself`
+  loses its `cfg(unix)` and runs on the Windows runner. Checked on Linux with
+  `terminate` made `SIGKILL`: with the job stopped first the test passes in
+  0.13 s, and without the stop rclone leaves `big.bin.<hex>.partial` behind
+  and the test fails.
 
 ## Open questions
 
@@ -1161,12 +1187,3 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
   is absent on a fresh Windows 10 LTSC.
-- (finish) W4.32: a daemon dropped while a transfer runs is ended on Windows
-  by `TerminateProcess` (`platform::process::terminate`), which gives rclone
-  no chance to remove the `.partial` it was writing, where Unix's `SIGTERM`
-  does (`a_daemon_dropped_mid_copy_cleans_up_after_itself`, Unix only).
-  Options: (a) ask the daemon to stop over its socket (`core/quit`) and wait
-  the same `STOP_GRACE` before `terminate`, on every platform or on Windows
-  alone; (b) sweep the destination's `.partial` after the drop as a failed
-  download does (it knows the name pattern, not which transfer was live);
-  (c) accept it. Until decided, (c).

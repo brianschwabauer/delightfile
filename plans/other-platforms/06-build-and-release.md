@@ -536,6 +536,17 @@ cask says `depends_on macos: :sequoia`; scoop prints the manifest's notes with
 added x264's commit to the macOS `SOURCES.txt` and a final newline to the
 Windows one.
 
+**Dry run on `port/windows-tidy`, 2026-09-30**, after FFmpeg's `LICENSE.md`
+joined the Windows zip (Decisions log): run 36743611087 at de9028c, green, with
+`verify-macos` on both runners and `publish` skipped. The zip (63,205,238
+bytes, `sha256sum -c` clean here) holds `Licenses\SOURCES.txt`,
+`Licenses\delightfile\LICENSE.txt`, `Licenses\FFmpeg\COPYING.GPLv3.txt`,
+`Licenses\FFmpeg\LICENSE.md.txt` and `Licenses\pdfium\LICENSE.txt` with the
+same 15. `LICENSE.md.txt` is 4,346 bytes with sha256 `2e1d16c7…`, the committed
+`build/windows/FFmpeg-LICENSE.md` byte for byte. `verify-windows` found each
+file and printed `SOURCES.txt`, whose FFmpeg entry names `LICENSE.md.txt` as
+FFmpeg's `LICENSE.md` at `e47273f4d9`.
+
 ## 5. Distribution channels
 
 - [>] **B6.24** Homebrew tap: a repository `brianschwabauer/homebrew-tap` with
