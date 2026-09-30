@@ -26,6 +26,14 @@
 //! which is what the system hands over. The layout is in logical points, so
 //! a rect is taken out to the whole pixels it touches ([`Px::around`]): a
 //! control whose edge falls inside a pixel owns that pixel.
+//!
+//! **macOS** (`plans/other-platforms/02-macos.md` M2.37) asks the same
+//! question another way. Its title bar is see-through over the window's top
+//! row, the traffic lights drawn by AppKit at its left end, and a press
+//! there reaches the window like any other; the window asks [`classify`]
+//! whether the press is the title bar's, with no resize edge and no buttons
+//! of its own to answer for, and if it is, moves the window or does what a
+//! double click on a title bar does ([`double_click`]).
 
 use crate::ui::{CaptionButton, CaptionPointer};
 
@@ -201,9 +209,76 @@ pub fn track(pointer: &mut CaptionPointer, mouse: Mouse) -> Heard {
     heard
 }
 
+/// What a double click on the title bar does, by the user's choice in
+/// System Settings → Desktop & Dock (macOS).
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoubleClick {
+    Zoom,
+    Minimize,
+    Nothing,
+}
+
+/// The double click `setting` asks for: `AppleActionOnDoubleClick` in the
+/// global domain — `Maximize` (the setting's Zoom), `Minimize`, `None`, and
+/// on macOS 15 `Fill`, which has no public call and zooms — or, where that
+/// was never written, the older `AppleMiniaturizeOnDoubleClick`. Zoom is
+/// the system's own default.
+#[cfg(any(target_os = "macos", test))]
+pub fn double_click(setting: Option<&str>, minimize_legacy: bool) -> DoubleClick {
+    match setting {
+        Some("Minimize") => DoubleClick::Minimize,
+        Some("None") => DoubleClick::Nothing,
+        Some(_) => DoubleClick::Zoom,
+        None if minimize_legacy => DoubleClick::Minimize,
+        None => DoubleClick::Zoom,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_double_click_does_what_system_settings_says() {
+        assert_eq!(double_click(Some("Maximize"), false), DoubleClick::Zoom);
+        assert_eq!(double_click(Some("Minimize"), false), DoubleClick::Minimize);
+        assert_eq!(double_click(Some("None"), true), DoubleClick::Nothing);
+        assert_eq!(double_click(Some("Fill"), false), DoubleClick::Zoom);
+        assert_eq!(double_click(None, true), DoubleClick::Minimize);
+        assert_eq!(double_click(None, false), DoubleClick::Zoom);
+    }
+
+    /// macOS: the band's regions as the window reports them, with no
+    /// buttons of its own and no resize edge — AppKit keeps the traffic
+    /// lights and the edges — so only the window's controls in the band are
+    /// its own, right up to the window's top.
+    #[test]
+    fn with_no_edge_and_no_buttons_only_the_controls_are_the_windows() {
+        let frame = Frame {
+            width: 2816,
+            resize: 0,
+            maximized: false,
+        };
+        let px = |left, top, right, bottom| Px {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let regions = Regions {
+            band: px(0, 0, 2816, 92),
+            buttons: None,
+            controls: vec![px(160, 22, 300, 86), px(2600, 16, 2784, 92)],
+        };
+        let at = |x, y| classify((x, y), &frame, &regions);
+        assert_eq!(at(40, 20), Hit::Caption, "under the traffic lights");
+        assert_eq!(at(1400, 0), Hit::Caption, "the window's top edge");
+        assert_eq!(at(1400, 50), Hit::Caption);
+        assert_eq!(at(200, 50), Hit::Client, "a crumb");
+        assert_eq!(at(2700, 20), Hit::Client, "the counter");
+        assert_eq!(at(1400, 92), Hit::Client, "under the band");
+    }
 
     /// A 1400 px wide client area at 100 %, with an 8 px resize edge.
     fn frame() -> Frame {

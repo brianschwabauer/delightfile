@@ -20803,6 +20803,21 @@ impl ApplicationHandler<crate::Wake> for App {
         if gfx.window.id() != id {
             return;
         }
+        // A press on the title bar's part of the band, where the platform
+        // hands those to the window (macOS, M2.37): the platform has moved
+        // or zoomed the window for it, inside the press as it had to, and
+        // neither egui nor the window sees it. A release after it, if one
+        // comes, is a release of nothing to either.
+        if let WindowEvent::MouseInput {
+            state: winit::event::ElementState::Pressed,
+            button: winit::event::MouseButton::Left,
+            ..
+        } = event
+        {
+            if crate::platform::window::title_press(&gfx.window) {
+                return;
+            }
+        }
         let response = gfx.egui_state.on_window_event(&gfx.window, &event);
         // egui-winit answers `repaint: true` to `RedrawRequested` itself, so
         // honouring it unconditionally is a vsync-paced self-loop — the app

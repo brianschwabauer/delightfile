@@ -42,6 +42,11 @@ pub fn title_regions(
 ) {
 }
 
+/// No press is the title bar's: there is none in the window.
+pub fn title_press(_window: &Window) -> bool {
+    false
+}
+
 /// There are no caption buttons of the window's own to point at.
 pub fn caption_pointer(_window: &Window) -> CaptionPointer {
     CaptionPointer::default()

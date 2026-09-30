@@ -653,7 +653,8 @@ impl Split {
 /// With a band, the chrome's first row goes up into it — the top row with
 /// one tab, the strip with more, the top row staying below it then, as in
 /// Explorer — and stops short of what is kept at each end: on Windows, the
-/// three caption buttons, which the window draws there itself.
+/// three caption buttons, which the window draws there itself; on macOS,
+/// the traffic lights at the left, which AppKit draws (M2.37).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TitleBand {
     /// The least depth the band may have: how far down buttons the system
@@ -2425,10 +2426,12 @@ mod tests {
         egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
     }
 
-    /// With no title band — Linux, and macOS for now — the layout is what it
-    /// was before the band existed (W4.39): these are the layouts `main`
-    /// laid out at 39c4d51, written out whole, with and without a strip, a
-    /// second prompt line, a folded pane and a divider in the hand.
+    /// With no title band — Linux — the layout is what it was before the
+    /// band existed (W4.39): these are the layouts `main` laid out at
+    /// 39c4d51, written out whole, with and without a strip, a second prompt
+    /// line, a folded pane and a divider in the hand; and the ☰ button leads
+    /// each top row where it always has (M2.37 took it off macOS's row
+    /// only).
     #[test]
     fn with_no_title_band_the_layout_is_what_it_was() {
         let pulled = Split {
@@ -2528,13 +2531,81 @@ mod tests {
                 },
             ),
         ];
-        for (split, strip, lines, was) in cases {
+        let buttons = [
+            r(11.0, 11.0, 43.0, 43.0),
+            r(11.0, 41.0, 43.0, 73.0),
+            r(11.0, 41.0, 60.0, 90.0),
+            r(11.0, 11.0, 60.0, 60.0),
+            r(11.0, 41.0, 43.0, 73.0),
+        ];
+        for ((split, strip, lines, was), button) in cases.into_iter().zip(buttons) {
             assert_eq!(
                 layout(area(), &split, strip, lines, None),
                 was,
                 "{split:?}, strip {strip}, {lines} line(s)"
             );
+            assert_eq!(crate::chrome::menu_button_rect(was.path), button);
         }
+        assert_eq!(
+            crate::platform::menubar::MENU_BUTTON,
+            !cfg!(target_os = "macos"),
+            "the ☰ button is off macOS's row alone"
+        );
+    }
+
+    /// macOS (M2.37): the band is the top row's, from the window's top edge
+    /// to the row's foot, the traffic lights kept clear at its left end and
+    /// nothing at its right. The row starts a gap past the lights — here at
+    /// the 78 points taken when AppKit will not say where they are — and
+    /// runs to the window's margin; the panes do not move; no buttons are
+    /// the window's to draw.
+    #[test]
+    fn the_traffic_lights_are_kept_clear_at_the_bands_left_end() {
+        let lights = TitleBand {
+            height: 0.0,
+            left_inset: 78.0,
+            right_inset: 0.0,
+            buttons: 0.0,
+        };
+        let bare = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, Some(lights));
+        assert_eq!(l.path, r(GAP + 78.0, GAP, 1400.0, GAP + TOP_HEIGHT));
+        assert_eq!(l.band, Some(r(0.0, 0.0, 1408.0, GAP + TOP_HEIGHT)));
+        assert_eq!(l.caption, None);
+        assert_eq!(
+            [l.parent, l.list, l.preview, l.dividers[0], l.dividers[1]],
+            [
+                bare.parent,
+                bare.list,
+                bare.preview,
+                bare.dividers[0],
+                bare.dividers[1]
+            ]
+        );
+        assert_eq!(top_row_width(area(), Some(lights), false), l.path.width());
+
+        // Lights read from AppKit, 21 points deep: shallower than the row,
+        // so the row keeps its margin and the band is the row's.
+        let read = TitleBand {
+            height: 21.0,
+            left_inset: 61.0,
+            ..lights
+        };
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, Some(read));
+        assert_eq!(l.path, r(GAP + 61.0, GAP, 1400.0, GAP + TOP_HEIGHT));
+        assert_eq!(l.band, Some(r(0.0, 0.0, 1408.0, GAP + TOP_HEIGHT)));
+
+        // Two tabs: the strip starts past the lights, and the top row under
+        // it runs the window's width, as it does with no band.
+        let bare = layout(area(), &Split::at([1, 4, 3]), true, 1, None);
+        let l = layout(area(), &Split::at([1, 4, 3]), true, 1, Some(lights));
+        assert_eq!(
+            l.strip,
+            Some(r(GAP + 78.0, GAP, 1400.0, GAP + CHROME_HEIGHT))
+        );
+        assert_eq!(l.path, bare.path);
+        assert_eq!(l.band, Some(r(0.0, 0.0, 1408.0, GAP + CHROME_HEIGHT)));
+        assert_eq!(l.list, bare.list);
     }
 
     /// A system's three caption buttons, 32 points deep and 138 wide, at the
