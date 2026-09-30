@@ -1,6 +1,6 @@
 [package]
 name = "df-app"
-description = "delightfile — a native, GPU-rendered keyboard-first file manager for Wayland."
+description = "delightfile — a native, GPU-rendered keyboard-first file manager for Linux, macOS and Windows."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

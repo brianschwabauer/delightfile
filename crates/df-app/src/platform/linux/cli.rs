@@ -2,6 +2,9 @@
 //! on Linux, the two flags the portal starts windows with say so, and
 //! `--portal` itself is described.
 
+/// The first line: what the program is, where it was made to be.
+pub const TITLE_USAGE: &str = "delightfile — a keyboard-first file manager for Wayland\n";
+
 /// The `--reveal` entry.
 pub const REVEAL_USAGE: &str =
     "  --reveal               show the path rather than open it: its folder opens

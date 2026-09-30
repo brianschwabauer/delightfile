@@ -170,15 +170,17 @@ pub enum Outcome {
 /// The `--help` text. Written out rather than generated: it is the one place a
 /// person reads what the flags are, so it is prose, not a table dump.
 ///
-/// In pieces, because three entries differ by platform
-/// ([`crate::platform::cli`]): `--portal` exists only where there is a
-/// desktop portal to serve, and the two flags whose Linux lines say the
-/// portal uses them say nothing of it anywhere else. The Select button's
-/// chord is written the platform's way: `Ctrl+Enter`, or `⌘Enter` on a Mac.
+/// In pieces, because the first line and three entries differ by platform
+/// ([`crate::platform::cli`]): Linux's says it is for Wayland, `--portal`
+/// exists only where there is a desktop portal to serve, and the two flags
+/// whose Linux lines say the portal uses them say nothing of it anywhere
+/// else. The Select button's chord is written the platform's way:
+/// `Ctrl+Enter`, or `⌘Enter` on a Mac.
 pub fn usage() -> String {
-    use crate::platform::cli::{EXTRA_USAGE, REQUEST_USAGE, REVEAL_USAGE};
+    use crate::platform::cli::{EXTRA_USAGE, REQUEST_USAGE, REVEAL_USAGE, TITLE_USAGE};
     let chooser = USAGE_CHOOSER.replace("{choose}", crate::keys::written("ctrl+enter"));
     [
+        TITLE_USAGE,
         USAGE_HEAD,
         REVEAL_USAGE,
         &chooser,
@@ -189,10 +191,8 @@ pub fn usage() -> String {
     .concat()
 }
 
-/// `--help` down to `--reveal`.
-const USAGE_HEAD: &str = "\
-delightfile — a keyboard-first file manager for Wayland
-
+/// `--help` after its first line, down to `--reveal`.
+const USAGE_HEAD: &str = "
 usage: delightfile [path] [options]
 
   path                   the directory to open (default: the current one);
@@ -856,6 +856,82 @@ mod tests {
             help.lines().all(|line| !line.starts_with('-')),
             "an entry lost its indent:\n{help}"
         );
+    }
+
+    /// `--help` as each platform prints it, whole: Linux's exactly as it
+    /// always was, macOS's and Windows' with no Wayland in the first line
+    /// and nothing of the portal (D5.9).
+    #[test]
+    fn the_help_is_the_platforms_own() {
+        const LINUX: &str = r#"delightfile — a keyboard-first file manager for Wayland
+
+usage: delightfile [path] [options]
+
+  path                   the directory to open (default: the current one);
+                         a file opens its directory with the cursor on it
+  --reveal               show the path rather than open it: its folder opens
+                         with the cursor on it, a folder included (what
+                         "Show in folder" asks --portal for; needs a path,
+                         and cannot be a --chooser-* dialog)
+  --cwd-file=<path>      write the final directory here when quitting with `q`
+                         (`Q` quits without writing it)
+  --chooser-file=<path>  pick rather than open: `Enter` or the Select button
+                         (`Ctrl+Enter`) writes the picked paths here, one per
+                         line, and quits. Quitting any other way writes
+                         nothing, which is a cancel.
+  --chooser-multiple     the dialog takes several files (default: one)
+  --chooser-directory    the dialog wants a folder: Choose folder picks the
+                         selected folders, or the one you are in
+  --chooser-save         the dialog is a save: pick a file to replace, or
+                         Save to type a new name
+                         (the three above need --chooser-file)
+  --chooser-request=<path>
+                         read the whole dialog from this file instead: its
+                         kind, title, button label, suggested name, starting
+                         folder and file-type filters (written by --portal;
+                         needs --chooser-file, and outranks the switches)
+  --portal               serve the xdg-desktop-portal file chooser, and
+                         org.freedesktop.FileManager1 ("Show in folder"), on
+                         the session bus; D-Bus starts this, not a person
+  -h, --help             show this
+  -V, --version          show the version
+"#;
+        const ELSEWHERE: &str = r#"delightfile — a keyboard-first file manager
+
+usage: delightfile [path] [options]
+
+  path                   the directory to open (default: the current one);
+                         a file opens its directory with the cursor on it
+  --reveal               show the path rather than open it: its folder opens
+                         with the cursor on it, a folder included (needs a
+                         path, and cannot be a --chooser-* dialog)
+  --cwd-file=<path>      write the final directory here when quitting with `q`
+                         (`Q` quits without writing it)
+  --chooser-file=<path>  pick rather than open: `Enter` or the Select button
+                         (`Ctrl+Enter`) writes the picked paths here, one per
+                         line, and quits. Quitting any other way writes
+                         nothing, which is a cancel.
+  --chooser-multiple     the dialog takes several files (default: one)
+  --chooser-directory    the dialog wants a folder: Choose folder picks the
+                         selected folders, or the one you are in
+  --chooser-save         the dialog is a save: pick a file to replace, or
+                         Save to type a new name
+                         (the three above need --chooser-file)
+  --chooser-request=<path>
+                         read the whole dialog from this file instead: its
+                         kind, title, button label, suggested name, starting
+                         folder and file-type filters (needs --chooser-file,
+                         and outranks the switches)
+  -h, --help             show this
+  -V, --version          show the version
+"#;
+        let expected = if cfg!(target_os = "linux") {
+            LINUX.to_string()
+        } else {
+            // The Select chord is the one line written the platform's way.
+            ELSEWHERE.replace("Ctrl+Enter", crate::keys::written("ctrl+enter"))
+        };
+        assert_eq!(usage(), expected);
     }
 
     /// `--reveal` marks the path as one to show; it needs a path, and it is

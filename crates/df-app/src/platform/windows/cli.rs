@@ -3,6 +3,10 @@
 //! Linux lines say the portal is what uses them are described without it,
 //! and there is no `--portal` paragraph.
 
+/// The first line: what the program is, with no desktop to name
+/// (`plans/other-platforms/05-defaults-and-config.md` D5.9).
+pub const TITLE_USAGE: &str = "delightfile — a keyboard-first file manager\n";
+
 /// The `--reveal` entry.
 pub const REVEAL_USAGE: &str =
     "  --reveal               show the path rather than open it: its folder opens
