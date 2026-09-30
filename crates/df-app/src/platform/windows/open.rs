@@ -15,7 +15,14 @@
 //! strip only the outer pair of quotes, so a line that begins with a quoted
 //! program keeps its own. What `cmd` does inside double quotes is its
 //! business: a `%NAME%` in a path is expanded there, as it would be typed at
-//! its prompt.
+//! its prompt. `cmd` runs with no window of its own (`CREATE_NO_WINDOW`), as
+//! a `;` line runs with no terminal on Linux: a program the line starts that
+//! has a window of its own shows it, and a console one's output goes where
+//! delightfile's does. And `cmd` cannot stand in a share's folder — handed
+//! `\\server\share\…` as its directory it says so and starts in the Windows
+//! folder, where a relative name in the line would then act — so in a share
+//! the line is run after `pushd` into it, which maps the share to a letter
+//! for the length of the line.
 //!
 //! **`builtin:shell-open` is `ShellExecuteW(…, "open", …)`**: what a
 //! double-click in Explorer does, the file's associated program or the
@@ -36,7 +43,7 @@ use std::process::{Command, Stdio};
 use windows_sys::Win32::System::Com::{
     CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
 };
-use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
+use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
@@ -85,7 +92,11 @@ pub fn run_blocking(command: &str, paths: &[PathBuf], cwd: &Path) -> io::Result<
 
 /// A typed line as `cmd` runs it, from `cwd`.
 fn typed(line: &str, paths: &[PathBuf], cwd: &Path) -> Command {
-    let mut whole = format!("/S /C \"{line}");
+    let mut whole = String::from("/S /C \"");
+    if cwd.as_os_str().to_string_lossy().starts_with(r"\\") {
+        whole.push_str(&format!("pushd \"{}\" && ", cwd.display()));
+    }
+    whole.push_str(line);
     for path in paths {
         whole.push_str(" \"");
         whole.push_str(&path.to_string_lossy());
@@ -93,14 +104,17 @@ fn typed(line: &str, paths: &[PathBuf], cwd: &Path) -> Command {
     }
     whole.push('"');
     let mut command = Command::new(shell_program());
-    command.raw_arg(whole).current_dir(cwd);
+    command
+        .raw_arg(whole)
+        .current_dir(cwd)
+        .creation_flags(CREATE_NO_WINDOW);
     command
 }
 
 /// Start a typed `;` line and do not wait for it.
 pub fn spawn_typed(line: &str, paths: &[PathBuf], cwd: &Path) -> io::Result<()> {
     typed(line, paths, cwd)
-        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -214,6 +228,30 @@ mod tests {
         let text = std::fs::read_to_string(&out).expect("cmd wrote");
         assert_eq!(text.trim_end(), "said");
         assert_eq!(run_typed("exit 3", &[], &dir).expect("ran"), 3);
+        // It runs in the folder it is given, a share's included: `cd` there
+        // prints the folder, and in a share a letter `pushd` mapped to it.
+        let here = dir.join("here.txt");
+        run_typed(&format!("cd > \"{}\"", here.display()), &[], &dir).expect("ran");
+        let said = std::fs::read_to_string(&here).expect("cmd wrote");
+        assert_eq!(
+            PathBuf::from(said.trim_end()).canonicalize().expect("real"),
+            dir.canonicalize().expect("real")
+        );
+        // The same folder through the administrative share, where the runner
+        // may reach it (an elevated account on the machine's own C$).
+        let text = dir.to_string_lossy().into_owned();
+        if let Some(rest) = text.strip_prefix(r"C:\") {
+            let share = PathBuf::from(format!(r"\\localhost\C$\{rest}"));
+            if share.is_dir() {
+                let there = dir.join("there.txt");
+                run_typed(&format!("cd > \"{}\"", there.display()), &[], &share).expect("ran");
+                let said = std::fs::read_to_string(&there).expect("cmd wrote");
+                assert!(
+                    !said.trim_end().eq_ignore_ascii_case(r"C:\Windows"),
+                    "cmd started in the Windows folder: {said}"
+                );
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
