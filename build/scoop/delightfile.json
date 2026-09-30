@@ -22,6 +22,12 @@
             "delightfile"
         ]
     ],
+    "notes": [
+        "delightfile is a windowed program, so scoop's shim for it is a windowed one too:",
+        "'delightfile' in a terminal opens the window as usual, but 'delightfile --version'",
+        "and '--help' print nothing there. The program itself prints them:",
+        "$dir\\delightfile.exe --version"
+    ],
     "checkver": "github",
     "autoupdate": {
         "architecture": {
