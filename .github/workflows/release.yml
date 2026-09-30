@@ -1,11 +1,11 @@
 # The release workflow of plans/other-platforms/06-build-and-release.md §4
-# (B6.22, B6.23). A tag v<version>, where <version> is Cargo.toml's
+# and §5 (B6.22–B6.24). A tag v<version>, where <version> is Cargo.toml's
 # [workspace.package] version, builds the three release artifacts on their
 # own runners, checks each one the way a person would use it on a machine
-# that never built anything, and creates a draft pre-release holding them
-# and their .sha256 files, with notes drafted from the commit subjects since
-# the previous tag. Brian edits the draft and publishes it; nothing here
-# publishes.
+# that never built anything, and creates a draft pre-release holding them,
+# their .sha256 files and the Homebrew cask, with notes
+# drafted from the commit subjects since the previous tag. Brian edits the
+# draft and publishes it; nothing here publishes.
 #
 #   linux    Arch container, like CI     delightfile-<v>-x86_64-linux.tar.gz
 #   macos    macos-latest (arm64)        delightfile-<v>-aarch64-macos.dmg
@@ -256,7 +256,7 @@ jobs:
           retention-days: 7
 
   # Everything the release holds, in one place: the three packages, a
-  # .sha256 beside each, and the notes (B6.23).
+  # .sha256 beside each, the cask filled in (B6.24), and the notes (B6.23).
   assemble:
     needs: [version, linux, macos, windows]
     runs-on: ubuntu-latest
@@ -280,6 +280,29 @@ jobs:
             sha256sum "$file" > "$file.sha256"
             cat "$file.sha256"
           done
+
+      - name: The Homebrew cask
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          MINIMUM: ${{ needs.macos.outputs.minimum }}
+        run: |
+          dmg="dist/delightfile-$VERSION-aarch64-macos.dmg"
+          case ${MINIMUM%%.*} in
+            11) macos=big_sur ;;
+            12) macos=monterey ;;
+            13) macos=ventura ;;
+            14) macos=sonoma ;;
+            15) macos=sequoia ;;
+            26) macos=tahoe ;;
+            *) echo "::error::no Homebrew name for macOS $MINIMUM; add it here"; exit 1 ;;
+          esac
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHA256@/$(cut -d' ' -f1 "$dmg.sha256")/g" -e "s/@MACOS@/$macos/g" \
+            build/homebrew/delightfile.rb > dist/delightfile.rb
+          if grep -n '@[A-Z0-9_]*@' dist/delightfile.rb; then
+            echo "::error::a placeholder was left unfilled"
+            exit 1
+          fi
+          cat dist/delightfile.rb
 
       # B6.23: the subjects since the previous v* tag, or since the start
       # when there is none, cut to fit GitHub's 125,000-character limit on a
@@ -368,7 +391,8 @@ jobs:
           runuser -u tester -- bash build/linux/check-package.sh "dist/delightfile-$VERSION-x86_64-linux.tar.gz"
 
   # B6.17's done-when on a fresh runner that never installed Homebrew's
-  # FFmpeg.
+  # FFmpeg, and B6.24's: the cask passes brew audit and style, and installs
+  # from the dmg.
   verify-macos:
     needs: [version, assemble]
     runs-on: macos-latest
@@ -394,6 +418,30 @@ jobs:
           (cd dist && shasum -a 256 -c "delightfile-$VERSION-aarch64-macos.dmg.sha256")
           brew list --versions ffmpeg || echo "no Homebrew ffmpeg on this runner"
           bash build/macos/check-dmg.sh "dist/delightfile-$VERSION-aarch64-macos.dmg"
+
+      # A tap of this runner's own, since brew audits and installs casks by
+      # name from a tap. The install takes the dmg from here, the release it
+      # names not existing yet, and ends with the command the caveats give.
+      - name: The cask (brew audit, brew style, brew install)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          brew --version
+          brew install --help | grep -i quarantine || echo "brew install has no quarantine option"
+          brew tap-new --no-git local/delightfile
+          tap="$(brew --repository)/Library/Taps/local/homebrew-delightfile"
+          mkdir -p "$tap/Casks"
+          cp dist/delightfile.rb "$tap/Casks/delightfile.rb"
+          brew audit --cask --strict local/delightfile/delightfile
+          brew style "$tap/Casks/delightfile.rb"
+          dmg="$PWD/dist/delightfile-$VERSION-aarch64-macos.dmg"
+          sed -e "s|^  url .*|  url \"file://$dmg\"|" dist/delightfile.rb > "$tap/Casks/delightfile.rb"
+          brew install --cask local/delightfile/delightfile
+          echo "extended attributes of the installed app:"
+          xattr -l /Applications/delightfile.app || true
+          xattr -dr com.apple.quarantine /Applications/delightfile.app
+          bash build/macos/check-app.sh /Applications/delightfile.app
+          brew uninstall --cask delightfile
 
   # B6.19's done-when on a fresh runner that never had FFmpeg.
   verify-windows:
