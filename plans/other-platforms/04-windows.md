@@ -1039,6 +1039,14 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   the window shows covers its title bar's.
 - (titlebar) 2026-09-30 — Not done: Windows dims the caption glyphs of a
   window that is not the active one; these stay in the text's colour.
+- (finish) 2026-09-30 — W4.7, a file too big for its drive's Recycle Bin:
+  option (a) of the open question, decided for Brian, who delegated it.
+  `FOF_WANTNUKEWARNING` joins the recycle's flags, so before the shell
+  deletes such a file for good it asks in its own dialog, owned by no window
+  of ours, and a No aborts the call, which `Trash::trash` refuses as
+  cancelled ("moving it to the Recycle Bin was cancelled"). The flag
+  overrides `FOF_NOCONFIRMATION` for that one question; the recycle is
+  otherwise as silent as it was. The question is out of Open questions.
 
 ## Open questions
 
@@ -1046,15 +1054,6 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
   is absent on a fresh Windows 10 LTSC.
-- (df-core) W4.7: a file too big for its drive's Recycle Bin (over the bin's
-  size limit) is deleted for good by `SHFileOperationW` under
-  `FOF_NOCONFIRMATION`, without a word — the flags the task names. Options:
-  (a) add `FOF_WANTNUKEWARNING`, so the shell asks "permanently delete?" in
-  its own dialog before it does, and a No aborts (the item is then refused
-  as cancelled); the dialog is the shell's, owned by no window of ours;
-  (b) `IFileOperation` with `FOFX_RECYCLEONDELETE`, which refuses instead of
-  deleting — COM, deferred with W4.27/W4.28; (c) keep the flags and accept
-  it. Until decided, (c).
 - (df-core) W4.32, the rclone daemon's transport on Windows. (a) **Windows'
   own `AF_UNIX`**: rclone is Go, which serves `unix://` addresses on Windows
   10 1803 and later (to confirm on the runner), so the daemon's command line

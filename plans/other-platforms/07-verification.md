@@ -343,8 +343,10 @@ workflow, launched by double-click from Explorer.
       permanent; the trash view tab does what Phase 4 decided.
 - [ ] `d` (W4.7): an item on a USB stick or a network share is refused for the
       Recycle Bin and goes to the permanent-delete confirm, never deleted without
-      a word; record what happens to a file larger than the bin's size limit on
-      a fixed drive (04-windows.md Open questions, W4.7).
+      a word; a file larger than the bin's size limit on a fixed drive brings
+      up the shell's own "permanently delete?" dialog, whose No leaves the file
+      and toasts that the move was cancelled (04-windows.md Decisions log,
+      W4.7).
 - [ ] No console window flashes (W4.2): while the git chip refreshes, while a
       7z or a `.tar.gz` is listed or extracted, while `A` writes an archive.
 - [ ] Rename with a case-only change; bulk rename.

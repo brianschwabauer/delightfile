@@ -24,11 +24,19 @@
 //!
 //! **Where there is no bin, nothing is sent.** The same call on a drive without
 //! a Recycle Bin — a USB stick, a memory card, a network share — deletes the
-//! file for good, silently, because `FOF_NOCONFIRMATION` answers the shell's
-//! "delete permanently?" question for us. So a path is recycled only on a fixed
+//! file for good with no more warning than the shell's own question (below),
+//! where `d` owes the app's permanent-delete card. So a path is recycled only on a fixed
 //! drive (`GetDriveTypeW` of the volume it is on), and anywhere else
 //! [`for_path`] and [`Trash::trash`] refuse, and the app falls back to the
 //! permanent-delete confirm it shows for remote rows.
+//!
+//! **Where the bin has no room, the shell asks.** A file larger than its
+//! drive's bin may hold is not recycled but deleted for good, and nothing
+//! here can tell before the call. `FOF_WANTNUKEWARNING`, which overrides
+//! `FOF_NOCONFIRMATION` for that one question, has the shell ask in its own
+//! dialog ("permanently delete?"); a No leaves the file where it was and
+//! the call reports itself aborted, which [`Trash::trash`] refuses as
+//! cancelled.
 //!
 //! `SHFileOperationW` has no long-path support and rejects a `\\?\` path
 //! outright, so the path it is handed is the plain spelling of the same file,
@@ -56,7 +64,8 @@ use std::time::{Duration, SystemTime};
 use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
 use windows_sys::Win32::UI::Shell::{
     SHEmptyRecycleBinW, SHFileOperationW, SHQueryRecycleBinW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
-    FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHERB_NOCONFIRMATION, SHFILEOPSTRUCTW, SHQUERYRBINFO,
+    FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHERB_NOCONFIRMATION,
+    SHFILEOPSTRUCTW, SHQUERYRBINFO,
 };
 
 use crate::ops::{exists, normalize};
@@ -72,6 +81,14 @@ const MAX_PATH: usize = 260;
 
 /// The name of a drive's Recycle Bin folder, at its root.
 const BIN_FOLDER: &str = "$Recycle.Bin";
+
+/// What a recycle asks of the shell: into the bin (`FOF_ALLOWUNDO`), with no
+/// progress window, no questions and no error dialog of its own, but for its
+/// warning before a file too big for the bin is deleted for good
+/// (`FOF_WANTNUKEWARNING`, which overrides `FOF_NOCONFIRMATION` for that one
+/// question). `SHFILEOPSTRUCTW` holds the flags in 16 bits.
+const RECYCLE_FLAGS: u16 =
+    (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING) as u16;
 
 /// One recycled thing: where it came from and when it went.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,10 +160,13 @@ impl Trash {
     }
 
     /// Recycle `path`: `SHFileOperationW(FO_DELETE)` with `FOF_ALLOWUNDO`,
-    /// silent, no confirmation and no error dialog. Refused, before the call,
-    /// for a path that is not there, one the permanent delete's rails refuse,
-    /// one on a drive with no bin, and one too long or of a form the shell
-    /// cannot take. The item has no [`TrashedItem::location`].
+    /// silent, no confirmation and no error dialog — except the shell's own
+    /// question before a file too big for the bin is deleted for good
+    /// (`FOF_WANTNUKEWARNING`), whose No is refused as cancelled. Refused,
+    /// before the call, for a path that is not there, one the permanent
+    /// delete's rails refuse, one on a drive with no bin, and one too long or
+    /// of a form the shell cannot take. The item has no
+    /// [`TrashedItem::location`].
     pub fn trash(&self, path: &Path, _ctx: &TaskCtx) -> Result<TrashedItem> {
         if !exists(path) {
             return Err(DfError::io(
@@ -166,7 +186,7 @@ impl Trash {
             wFunc: FO_DELETE,
             pFrom: from.as_ptr(),
             pTo: std::ptr::null(),
-            fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI) as u16,
+            fFlags: RECYCLE_FLAGS,
             fAnyOperationsAborted: 0,
             hNameMappings: std::ptr::null_mut(),
             lpszProgressTitle: std::ptr::null(),
@@ -638,6 +658,17 @@ mod tests {
             purge_due_in(&bin, Duration::from_secs(60), SystemTime::now()),
             Some(Duration::from_secs(60))
         );
+    }
+
+    /// The shell is asked to recycle, quietly, and to warn before it deletes
+    /// a file too big for the bin for good; every flag survives the 16 bits
+    /// the struct holds them in. The warning itself is a dialog, which no
+    /// runner shows: 07-verification.md §5.4 is where it is seen.
+    #[test]
+    fn a_recycle_asks_before_it_deletes_for_good() {
+        let wanted =
+            FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING;
+        assert_eq!(u32::from(RECYCLE_FLAGS), wanted);
     }
 
     /// Only a fixed drive keeps a bin: `DRIVE_REMOVABLE` (2), `DRIVE_REMOTE`
