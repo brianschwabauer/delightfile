@@ -73,13 +73,16 @@ mod tests {
     use super::*;
 
     /// A drag of three files is three items, in order, each with its path as
-    /// text, and the window's mark on the first alone.
+    /// text, and the window's mark on the first alone. The paths are
+    /// absolute as the platform spells them, since the items come back
+    /// through a `file://` URI.
     #[test]
     fn every_file_is_one_item() {
+        let home = std::env::temp_dir().join("me");
         let paths = vec![
-            PathBuf::from("/Users/me/a b.txt"),
-            PathBuf::from("/Users/me/ünïcode #1.png"),
-            PathBuf::from("/Users/me/folder"),
+            home.join("a b.txt"),
+            home.join("ünïcode #1.png"),
+            home.join("folder"),
         ];
         let items = items(&crate::dnd::offer(&paths));
         assert_eq!(items.len(), paths.len());
