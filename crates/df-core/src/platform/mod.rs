@@ -31,13 +31,13 @@
 //! | `errno` | `is_cross_device`, `is_exists`, `is_not_empty`, `is_not_dir`, `is_dir`, `is_invalid`, `is_transient`: `fn(&io::Error) -> bool` | `libc::E*` (unix) | `libc::E*` (unix) | Win32 codes; `is_dir` never |
 //! | `errno` | `is_delete_pending(&io::Error) -> bool`: a name another deleter has marked and not yet let go, as good as gone (asked straight after the failing call, on its thread) | never (unix) | unix | access denied over `STATUS_DELETE_PENDING` (or a name not there), from `RtlGetLastNtStatus` (W4.37) |
 //! | `watch` | `Backend::open(control, events, notify) -> io::Result<(Backend, JoinHandle<()>)>`, `Backend::wake(&self)` (crate-internal: [`crate::fs::Watcher`] is the API) | inotify + self-pipe | kqueue `EVFILT_VNODE` per directory + self-pipe | `Unsupported` → disabled watcher (W4.4) |
-//! | `fs` | `symlink(target, link) -> io::Result<()>` | `std::os::unix::fs::symlink` (unix) | unix | `symlink_dir` / `symlink_file` by what the target resolves to |
+//! | `fs` | `symlink(target, link) -> io::Result<()>` | `std::os::unix::fs::symlink` (unix) | unix | `symlink_dir` / `symlink_file` by what the target resolves to from the link's folder; without the privilege, `PermissionDenied` "Creating links needs Developer Mode or an elevated process" (W4.6) |
 //! | `fs` | `apply_mode(path, mode: u32) -> io::Result<()>` | `chmod` (unix) | unix | read-only attribute from `mode & 0o222` |
 //! | `fs` | `set_times(path, atime, mtime) -> Result<()>` (not through a link) | `utimensat`, `libc::UTIME_OMIT` (unix) | unix | `File::set_times` on the reparse point |
 //! | `fs` | `sync_dir(dir) -> Result<()>` | `fsync`, `EINVAL` tolerated (unix) | unix | `Ok(())` |
 //! | `fs` | `write_all_at(file, data, offset) -> io::Result<()>` | `FileExt::write_all_at` (unix) | unix | `seek_write` loop |
 //! | `fs` | `same_file(a, b) -> io::Result<bool>` (not through a link) | `dev` + `ino` (unix) | unix | volume serial + file index, through `meta::identity` (P3.3) |
-//! | `fs` | `writable(dir) -> bool` | `access(W_OK)` (unix) | unix | `true` (W4.6) |
+//! | `fs` | `writable(dir) -> bool` | `access(W_OK)` (unix) | unix | a hidden `.df-write-test-<pid>-<n>` made there, deleted on close (W4.6) |
 //! | `fs` | `is_junction(path) -> bool` (the path itself, P3.7) | `false` (unix) | unix | reparse tag `IO_REPARSE_TAG_MOUNT_POINT` |
 //! | `fs` | `remove_link(path) -> io::Result<()>` (the link, never its target, P3.26) | `remove_file` (unix) | unix | `remove_dir` for a link to a directory or a junction, else `remove_file` |
 //! | `fs` | `reflink(reader, writer) -> bool` (clone into an open file) | `FICLONE` | `false` | `false` |

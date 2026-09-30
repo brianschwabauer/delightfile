@@ -725,6 +725,19 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   detached (macOS's `detach` is there), so it is W4.3's. `NULL_DEVICE`,
   `is_executable`, `candidates`, `exit_code`, `pause`/`resume` and
   `terminate` (`Child::kill`, `TerminateProcess`) were written in Phase 1.
+- (df-core) 2026-09-29 — W4.6: `symlink` keeps its `io::Result`, so the
+  refusal without the privilege is an `io::Error` (`PermissionDenied`,
+  "Creating links needs Developer Mode or an elevated process") rather than
+  the task's `DfError::Op`; every caller wraps it as `DfError::io(link, e)`,
+  so the person reads the link's path and those words. Changing the
+  signature would have changed every caller on Linux for the same sentence.
+  `set_times` on the reparse point and `apply_mode` as the read-only
+  attribute were written in Phase 1; this task gave them tests.
+- (df-core) 2026-09-29 — W4.6: the `writable` probe is opened with
+  `FILE_FLAG_DELETE_ON_CLOSE`, hidden and temporary, rather than created and
+  then deleted by a second call: the system removes it when the handle
+  closes, so a crash between the two leaves nothing behind. Its only caller
+  today is Linux's trash (`available_for`); on Windows nothing asks it yet.
 
 ## Open questions
 
