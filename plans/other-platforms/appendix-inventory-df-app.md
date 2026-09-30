@@ -56,7 +56,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 12428-12461 | `fn tick_drag`: `dnd::verb_for(pointer.toggle, pointer.alt)` (12442); `if !window.contains(at) && pointer.down { self.hand_off_drag(now) }` (12458-12461) | Linux-only (drag-out) | App::frame | winit has no drag-source API on macOS/Windows. ✓ M2.12 |
 | 12680-12722 | `fn hand_off_drag`: `device.drag(dnd::offer(&paths), count, rgba(surface1), rgba(text), scale)` (12708-12716); on `false`/no device, `spring_home` (12717-12721) | Linux-only | App::tick_drag | — ✓ M2.12 |
 | 12724-12806 | `fn poll_data_device`: matches `crate::wayland::Event::{Enter, Motion, Leave, Drop, DragEnded, Selection, Copied, Pasted}` (12732-12795) | Linux-only | App::frame (14674) | Only producer of external drops, selection mirror, paste answers. ✓ S1.22 ✓ M2.13 |
-| 12815-12846 | `fn clipboard_thread_gone`: re-sends stranded copies via `copy_via_wl_copy`, pastes via `paste_via_wl_paste`; notice "press Ctrl+v again" (12845) | Linux-only | poll_data_device (12809) | — |
+| 12815-12846 | `fn clipboard_thread_gone`: re-sends stranded copies via `copy_via_wl_copy`, pastes via `paste_via_wl_paste`; notice "press Ctrl+v again" (12845) | Linux-only | poll_data_device (12809) | — ✓ M2.21 |
 | 12849-12880 | `fn expire_clipboard`: after `CLIPBOARD_ANSWER`, `clipboard::text_offer` + `clipboard::paste` (12893-12894) / wl-copy | Linux-only | poll_data_device (12812) | — |
 | 12906-12924 | `fn paste_via_wl_paste` → `crate::clipboard::paste(&mime)` (12908) | Linux-only | clipboard_thread_gone, expire_clipboard | Blocking `wl-paste` on the UI thread. |
 | 12926-12953 | `fn take_external_drop(&mut self, paths: Vec<PathBuf>, ours: bool, at: Option<egui::Pos2>, now: Instant)` → `Clipboard::yank(paths)` → `self.paste_into(&clip, dest, false, now)` | consumer of Linux-only events | poll_data_device (12746) | Drop-in always copies. |
@@ -138,7 +138,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 158-189 | `pub const USAGE`: "delightfile — a keyboard-first file manager for Wayland" (161); `--chooser-file` "(`Ctrl+Enter`)" (170); `--portal` "serve the xdg-desktop-portal file chooser on the session bus; D-Bus starts this, not a person" (184-185) | text (Linux) | `-h`/`--help` | — ✓ S1.31 |
+| 158-189 | `pub const USAGE`: "delightfile — a keyboard-first file manager for Wayland" (161); `--chooser-file` "(`Ctrl+Enter`)" (170); `--portal` "serve the xdg-desktop-portal file chooser on the session bus; D-Bus starts this, not a person" (184-185) | text (Linux) | `-h`/`--help` | — ✓ S1.31 ✓ M2.21 (`Ctrl+Enter`) |
 | 221, 246-252 | `"--portal" => portal = true`; `Outcome::Portal` only when it is the sole argument | Linux-only (feature) | main.rs:91 | — ✓ S1.31 |
 | 214-217 | `-V`/`--version` → `format!("delightfile {}\n", env!("CARGO_PKG_VERSION"))` | portable | main | — |
 | 449-459 | `pub fn write_cwd_file(path: &Path, cwd: &Path)`: `std::fs::write(path, cwd.as_os_str().as_encoded_bytes())` | Windows-differs (bytes are WTF-8 on Windows; no newline) | App::finish (16359) | Consumer is the `Super+F` shell function / yazi-style wrapper. |
@@ -167,8 +167,8 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 | 76-87 | `pub fn verb_for(ctrl: bool, alt: bool) -> Verb`: Ctrl → `Copy`, Alt → `Link`, none → `Move` | macOS-differs | App::tick_drag (12442), fed `pointer.toggle` (= Cmd \|\| Ctrl) | §3. ✓ M2.22 |
 | 589-613 | `pub const SELF_MIME: &str = "application/x-delightfile-drag"`; `pub fn self_mime() -> &'static str` = `"{SELF_MIME};pid={std::process::id()}"` | Linux-only (only read off `wl_data_offer` mime lists) | `offer` (644), `is_ours` (618) ← wayland/mod.rs:1242 | — |
 | 623-646 | `pub fn offer(paths: &[PathBuf]) -> Vec<(String, Vec<u8>)>`: `text/uri-list` (`clipboard::uri_list`), `text/plain;charset=utf-8` and `text/plain` (paths `to_string_lossy()` joined by `\n`), then `self_mime()` with empty bytes | Unix-only (via clipboard::file_uri) | App::hand_off_drag (12709) | — ✓ M2.12 |
-| 648-668 | `pub fn wanted_mime(offered: &[String]) -> Option<String>`: `text/uri-list` > `text/x-moz-url` > first `text/plain*` | Linux-only consumer | wayland/mod.rs:1243 (Dispatch<WlDataDevice> Enter) | — |
-| 670-696 | `pub fn paths_from(mime: &str, bytes: &[u8]) -> Vec<PathBuf>`: uri-list via `clipboard::parse_uri_list`; plain-text fallback keeps only lines with `line.starts_with('/')` (693) | Windows-differs | wayland/mod.rs:907 (State::take_drop) | — |
+| 648-668 | `pub fn wanted_mime(offered: &[String]) -> Option<String>`: `text/uri-list` > `text/x-moz-url` > first `text/plain*` | Linux-only consumer | wayland/mod.rs:1243 (Dispatch<WlDataDevice> Enter) | — ✓ M2.31 (moved to `platform/linux/wayland/incoming.rs`) |
+| 670-696 | `pub fn paths_from(mime: &str, bytes: &[u8]) -> Vec<PathBuf>`: uri-list via `clipboard::parse_uri_list`; plain-text fallback keeps only lines with `line.starts_with('/')` (693) | Windows-differs | wayland/mod.rs:907 (State::take_drop) | — ✓ M2.31 (moved to `platform/linux/wayland/incoming.rs`) |
 
 ### src/finder.rs (701 lines; non-test 1-468)
 
@@ -245,7 +245,7 @@ Classification column: **Linux-only** = needs a Linux-only facility (Wayland, D-
 
 | Line | What | Class | Used by (file:fn) | Note |
 |---|---|---|---|---|
-| 549 | `"Type to search. Esc to close, Ctrl+s to stop."` | text | paint_search | §3. |
+| 549 | `"Type to search. Esc to close, Ctrl+s to stop."` | text | paint_search | §3. ✓ M2.21 |
 | 727-760 | `fn path_text(painter, pos, path: &str, bright, dim, max_width) -> f32`: `path.rfind('/')` splits dim directory / bright name (741) | Windows-differs (display) | overlay::paint_search (618, 638) with `hit.relative` from search.rs | — |
 
 ### src/portal/mod.rs, src/portal/request.rs — Linux-only module (see block at end of this section) ✓ S1.21 (now `src/platform/linux/portal/`, with `show.rs` since 2ec71f3)
@@ -545,8 +545,8 @@ Full public API:
 | 465 | `impl Spec` · `pub fn of(address: &Address) -> Spec` | The spec gvfs would build for `address`, backend by backend. |
 | 517 | `impl Spec` · `pub fn dir_name(&self) -> String` | The directory name gvfs-fuse gives a mount with this spec. |
 | 532 | `impl Spec` · `pub fn from_dir_name(name: &str) -> Option<Spec>` | Read a gvfs-fuse directory name back into a spec. |
-| 590 | `pub fn gio_mounts(listing: &str) -> Vec<(String, String)>` | The mounts `gio mount -l` lists at the left margin, as `(name, url)`. |
-| 617 | `pub fn shares_from(listing: &str, root: &Path, entries: &[String]) -> Vec<Share>` | The Network section's rows: [`gio_mounts`] out of `listing`, each with the directory under `root` that gvfs-fuse shows it as. |
+| 590 | `pub fn gio_mounts(listing: &str) -> Vec<(String, String)>` | The mounts `gio mount -l` lists at the left margin, as `(name, url)`. ✓ M2.31 (moved to `platform/linux/gio.rs`) |
+| 617 | `pub fn shares_from(listing: &str, root: &Path, entries: &[String]) -> Vec<Share>` | The Network section's rows: [`gio_mounts`] out of `listing`, each with the directory under `root` that gvfs-fuse shows it as. ✓ M2.31 (moved to `platform/linux/gio.rs`) |
 | 657 | `pub fn gvfs_root() -> PathBuf` | Where gvfs-fuse shows its mounts: `/run/user/<uid>/gvfs`. |
 | 717 | `pub fn list_shares() -> Vec<Share>` | Every share gvfs has mounted, now. |
 | 760 | `pub fn connect_url(text: &str) -> Result<String, String>` | Check what was typed at the connect prompt, and return the address to hand to `gio mount`. |
@@ -736,10 +736,10 @@ A prompt's `ctrl+v` (`App::paste_into_prompt`, 13402-13455) uses `text_offer` (`
 | 584 | `impl SpringBack` · `pub fn finished(&self, now: Instant) -> bool` | — |
 | 597 | `pub const SELF_MIME: &str = "application/x-delightfile-drag";` | The private mime that marks an offer as delightfile's. |
 | 610 | `pub fn self_mime() -> &'static str` | The same name with **this process's** pid on it, which is the one actually offered. |
-| 618 | `pub fn is_ours(offered: &[String]) -> bool` | Was this offer started by *this* window? |
+| 618 | `pub fn is_ours(offered: &[String]) -> bool` | Was this offer started by *this* window? ✓ M2.31 (moved to `platform/linux/wayland/incoming.rs`) |
 | 630 | `pub fn offer(paths: &[PathBuf]) -> Vec<(String, Vec<u8>)>` | What the drag offers, in the order it offers it. |
-| 653 | `pub fn wanted_mime(offered: &[String]) -> Option<String>` | Which of an incoming drag's offered mimes to ask for, most useful first. |
-| 678 | `pub fn paths_from(mime: &str, bytes: &[u8]) -> Vec<PathBuf>` | Turn what a drop handed over into paths. |
+| 653 | `pub fn wanted_mime(offered: &[String]) -> Option<String>` | Which of an incoming drag's offered mimes to ask for, most useful first. ✓ M2.31 (moved) |
+| 678 | `pub fn paths_from(mime: &str, bytes: &[u8]) -> Vec<PathBuf>` | Turn what a drop handed over into paths. ✓ M2.31 (moved) |
 
 **Everything above line 597 is platform-neutral geometry and timing.** The internal drag is drawn from egui pointer input (`App::tick_drag`, app.rs:12428-). The verb comes from `verb_for(pointer.toggle, pointer.alt)`.
 
@@ -1146,21 +1146,21 @@ Outside `defaults.rs`, df-core also hard-codes chords in two editors: the readli
 
 | File:line | Text |
 |---|---|
-| cli.rs:170 | `USAGE`: "…the Select button (`Ctrl+Enter`) writes the picked paths…" |
-| overlay.rs:549 | "Type to search. Esc to close, Ctrl+s to stop." |
-| app.rs:12393 | "This is the only tab — Ctrl+N opens another window" (`App::release_tab_drag`) |
-| app.rs:12845 | "The clipboard stopped answering — press Ctrl+v again" (`App::clipboard_thread_gone`) |
-| app.rs:16480 | `Hint::new("Ctrl+s", "stop", C::CancelSearch)` (`overlay_hints`, search overlay) |
-| app.rs:16781 | "Pick files — Space or Ctrl-click selects, Enter or Select chooses" (`picker_greeting`) |
+| cli.rs:170 | `USAGE`: "…the Select button (`Ctrl+Enter`) writes the picked paths…" ✓ M2.21 |
+| overlay.rs:549 | "Type to search. Esc to close, Ctrl+s to stop." ✓ M2.21 |
+| app.rs:12393 | "This is the only tab — Ctrl+N opens another window" (`App::release_tab_drag`) ✓ M2.21 |
+| app.rs:12845 | "The clipboard stopped answering — press Ctrl+v again" (`App::clipboard_thread_gone`) ✓ M2.21 |
+| app.rs:16480 | `Hint::new("Ctrl+s", "stop", C::CancelSearch)` (`overlay_hints`, search overlay) ✓ M2.21 |
+| app.rs:16781 | "Pick files — Space or Ctrl-click selects, Enter or Select chooses" (`picker_greeting`) ✓ M2.21 (`ctrl_name()`) |
 
-**Modifier names generated from the keymap** (df-core `Chord::label`, keymap/key.rs:323-345, prints `Ctrl+`, `Alt+`, `Super+`, `Shift+`) are rendered at:
+**Modifier names generated from the keymap** (df-core `Chord::label`, keymap/key.rs:323-345, prints `Ctrl+`, `Alt+`, `Super+`, `Shift+`) are rendered at (✓ M2.21: written through `df_core::platform::keys::LABELS`, `⌃⌥⇧⌘` on macOS):
 - help.rs:205 (`all_rows`, help sheet);
 - whichkey.rs:150 (`Row::of`);
 - app.rs:6133 (`App::palette_rows`, command palette detail);
 - app/places.rs:227 (`Place::key`), 419 (`App::key_taken`), 432 (`App::pinned_message`);
 - menu.rs:474 (`command_row`) and 680 (`folder_items`), menu shortcut column.
 
-The test keys.rs:164 asserts `"Alt+←"`.
+The test keys.rs:164 asserts `"Alt+←"`, and `"⌥←"` on macOS ✓ M2.21.
 
 ---
 

@@ -102,14 +102,19 @@ macOS and Windows use the Linux `DEFAULT_RULES` table minus the rows that name a
 dropped opener (`delightviewer*`, `edit-image` → `open` on Windows, `set-wallpaper`,
 `optimize-avif`). The `text/*` rule keeps `zed, edit, open, terminal-at`.
 
-- [~] **D5.3** `platform::defaults::{OPENERS, RULES}` per target; `Config::default`
+- [x] **D5.3** `platform::defaults::{OPENERS, RULES}` per target; `Config::default`
       (`config.rs`) reads them; the Linux tables are the existing constants
       re-exported from `platform/linux/defaults.rs` so the diff on Linux is a move.
       Done when: `config.rs` tests pass on Linux; a test per target asserts
       `openers_for("x.txt", "text/plain", false)` names `zed` first.
-      — blocked on the macOS side: `platform::defaults` and `Config::default` are
-      df-core's, and the df-app branch kept out of df-core (02-macos.md M2.17 has
-      the options).
+      — (blocked on df-core on the df-app branch) done 29cfb82 on
+      `port/macos-finish` (with M2.17 and D5.11), green on the macOS runner (run
+      36649716767). Linux's tables are `config.rs`'s constants, re-exported unmoved
+      (Decisions log); Windows re-exports the same until W4.3 writes §2.2's;
+      macOS has §2.1's openers and §2.3's rules. `config::tests::
+      a_text_file_opens_in_zed_first_everywhere` is the per-target test; the
+      tests that pin Linux's tables run on Linux and Windows, and
+      `platform/macos/defaults.rs` pins macOS's.
 - [ ] **D5.4** `platform::open::first_available(candidates: &[&str]) -> &str` for
       the two-candidate Windows entries (and usable on macOS for `edit`). Done
       when: unit test with a fake `PATH`.
@@ -126,12 +131,12 @@ before the user's `keymap.toml`, M2.17):
 
 | Chord (as matched, Cmd = ctrl) | Command | Replaces |
 |---|---|---|
-| `ctrl+c` (Files) | `yank-to-system` (`Y`) | `close-tab` |
+| `ctrl+c` (Files) | `copy-to-clipboard` (`Y`) | `close-tab` |
 | `ctrl+w` (Files) | `close-tab` | — |
-| `ctrl+v` (Files) | `paste-system` (`p` with nothing yanked) | — |
+| `ctrl+v` (Files) | `paste` (`p`: the yank, or with nothing yanked the system clipboard) | — |
 | `ctrl+c` (Input) | `input-copy` — a new command: copy the field's selection, or the whole text when nothing is selected, to the system clipboard | `overlay-close` |
 | `ctrl+c` (Confirm, Pick, Tasks, Spot, Help, Palette) | unchanged `overlay-close` | — |
-| `ctrl+q` | `quit` | — |
+| `ctrl+q` (Files, where `q` is) | `quit` | — |
 | `ctrl+,` | unbound (reserved for a future settings sheet) | — |
 
 Labels (`df_core::platform::keys::LABELS`, M2.21): macOS `⌃` `⌥` `⇧` `⌘`, with the `ctrl`
@@ -140,14 +145,21 @@ role rendered `⌘` since Cmd is what people press; a binding the user wrote as
 there) with a config warning "super is Cmd, which is Ctrl on macOS". Linux and
 Windows: `Ctrl+` `Alt+` `Shift+` `Super+` as today.
 
-- [~] **D5.5** Implement the override table and `input-copy`; the help sheet's
+- [x] **D5.5** Implement the override table and `input-copy`; the help sheet's
       mouse section says "⌘-click toggles, ⌥-drag links" on macOS. Done when: a
       `Keymap` test on macOS resolves `ctrl+c` in Files to `yank-to-system`.
-      — blocked: the override table is df-core's keymap and `input-copy` a df-core
-      command (02-macos.md M2.17 says why the df-app branch kept out of df-core).
-      The help sheet's "⌘-click toggles, ⌥-drag links" needs a mouse section the
-      sheet does not have yet; which section, and whether Linux gets its own line
-      there, is part of this task.
+      — (blocked on df-core on the df-app branch) done 344715e on
+      `port/macos-finish`, green on the macOS runner (run 36649716767), not seen on
+      screen: the table is `platform::defaults::KEYMAP_OVERRIDES` (empty on
+      Linux and Windows), laid over the shipped keymap before `keymap.toml`,
+      each row replacing what the table bound to its keys;
+      `platform::defaults::tests::the_cmd_chords_mean_what_a_mac_means` resolves
+      `ctrl+c` in Files to `copy-to-clipboard`, the command the plan called
+      `yank-to-system`. `input-copy` is a df-core command unbound on Linux and
+      Windows, and df-app's prompt runs it before the field sees the key
+      (`Prompt::copy_text`). Not done: the help sheet's "⌘-click toggles,
+      ⌥-drag links", for want of a mouse section to put it in (Open
+      questions). Live check 07-verification.md §4.2.
 
 ## 4. External binaries
 
@@ -206,15 +218,22 @@ the README and for choosing defaults).
 
 | Key | Linux (unchanged) | macOS | Windows |
 |---|---|---|---|
-| `g ~` | `~` | `~` | `~` |
+| `g h` | `~` | `~` | `~` |
 | `g c` | `~/.config` | `~/.config` | `%APPDATA%` |
 | `g d` | `~/Downloads` | `~/Downloads` | `~/Downloads` |
 | `g w` | `~/Work` | `~/Work` | `~/Work` |
 | (others) | `/mnt/schwabserverroot…`, `sftp://showandtour1/2` | `~/Desktop`, `~/Documents` | `~/Desktop`, `~/Documents` |
 
-- [~] **D5.11** `platform::defaults::BOOKMARKS`; Linux is the existing constant
+- [x] **D5.11** `platform::defaults::BOOKMARKS`; Linux is the existing constant
       moved. Done when: `keymap/defaults.rs` reads it and tests pass.
-      — blocked: `keymap/defaults.rs` is df-core's (02-macos.md M2.17).
+      — (blocked on df-core on the df-app branch) done 29cfb82 on
+      `port/macos-finish` (with M2.17 and D5.3), green on the macOS runner (run
+      36649716767): `default_bookmarks()`, and through it `keymap/defaults.rs`, reads
+      `platform::defaults::BOOKMARKS`. Linux's is `DEFAULT_BOOKMARKS`
+      re-exported unmoved (Decisions log), Windows' the same until W4.3, and
+      macOS's the four rows with keys, `g h`, `g c`, `g d`, `g w`. The macOS
+      "(others)", `~/Desktop` and `~/Documents`, have no keys in the table and
+      are not shipped (Open questions).
 
 ## Decisions log
 
@@ -230,9 +249,35 @@ the README and for choosing defaults).
   which on Linux matters only on a machine with that face and another unnamed
   one and none of the named four.
 - (df-app) 2026-09-29 — D5.4 has no macOS side: see the task.
+- (macos-finish) 2026-09-29 — D5.3 and D5.11: Linux's tables are not moved
+  out of `config.rs` but re-exported from `platform/linux/defaults.rs`, so the
+  change on Linux is the read going through the seam and `port/paths`, which
+  is editing `config.rs`, meets three lines of it; Windows ships them too
+  until W4.3 (02-macos.md Decisions log has the rest, and how §2.3 was read).
+- (macos-finish) 2026-09-29 — §3 and §6 corrected to the code: the commands
+  are `copy-to-clipboard` (`Y`) and `paste` (`p`, which pastes the system
+  clipboard when nothing is yanked), not `yank-to-system` and `paste-system`,
+  which were never written; `ctrl+q` is bound in Files, where `q` is; and the
+  home bookmark's key is `h` (`g h`), not `~`.
+- (macos-finish) 2026-09-29 — D5.5: an override row replaces whatever the
+  table bound to its keys in that context (`Registry::unbind`, then
+  `register`), which is what `keymap.toml` does with a row of its own.
+  `input-copy` copies nothing from an empty field and says nothing, as the
+  bulk card's copy does, and otherwise goes out through `App::offer` like
+  every copy, with the toast "Copied text". On Linux and Windows it exists
+  and is unbound: a `keymap.toml` can bind it.
 
 ## Open questions
 
 - yazi's exact cache-dir suffix on macOS and Windows (verify at D5.1).
 - Whether `wt` should be the Windows terminal default (see `04-windows.md`).
 - Ghostty `-e` on macOS (see `02-macos.md`).
+- (macos-finish) §6's macOS "(others)", `~/Desktop` and `~/Documents`, have
+  no keys (D5.11), and are not shipped until they do. `g d` is Downloads.
+  Options: `g D` and `g o` (Finder's ⇧⌘D and ⇧⌘O); `g e` and `g o`; `g k`
+  and `g m`; or none, since a pin (`g b`) gives any folder a key.
+- (macos-finish) D5.5's "⌘-click toggles, ⌥-drag links" on the help sheet:
+  the sheet lists the keymap's rows and has no mouse section. Where the line
+  goes (a section of its own under the keys, or a footer), and whether Linux
+  gets "Ctrl-click toggles, Alt-drag links" there too, is open; the chords
+  themselves work (02-macos.md M2.22).

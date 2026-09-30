@@ -1,6 +1,8 @@
 # 02 — macOS
 
-Status: **in progress**
+Status: **done** at "compiles, unit tests pass on the macOS runner" (2026-09-29,
+`port/macos-finish`): every task is `[x]` or `[~]` with its reason. Nothing
+here has been seen on a Mac's screen; that pass is `07-verification.md` §4.
 
 Scope: native macOS bodies behind the Phase 1 seam, so that the `.app` produced by
 `06-build-and-release.md` is a working file manager on Apple Silicon: file watching,
@@ -68,7 +70,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       surface as S1.4; `#![allow(unsafe_code)]` with the three ownership rules
       restated. Done when: the three `Watcher` tests from `fs/tests.rs` (S1.4 gated
       them to Linux) are re-enabled under `#[cfg(any(target_os = "linux",
-      target_os = "macos"))]` and pass on the macOS runner. — done e50b384, green on
+      target_os = "macos"))]` and pass on the macOS runner. — done 5730281, green on
       the macOS runner (run 36640376030)
 - [x] **M2.2** `platform::fs::clone_before_open(reader, dst) -> io::Result<bool>`:
       macOS body `libc::fclonefileat(reader_fd, AT_FDCWD, dst_cstr,
@@ -82,35 +84,42 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       calls it before creating the writer and skips the chunked copy on `true`;
       `apply_mode`/`set_times` still run (a clone carries them, so they are
       idempotent). Done when: a test on the macOS runner copies a 100 MiB file and
-      asserts the copy took under 50 ms; skipped on other targets. — done 13ed23f,
+      asserts the copy took under 50 ms; skipped on other targets. — done 094f466,
       green on the macOS runner (run 36640376030)
 - [x] **M2.3** `platform::fs::is_remote`: `statfs` and `f_fstypename` in
       `{"nfs", "smbfs", "afpfs", "webdav", "cifs", "ftp"}` or starting with
       `"fuse"`/`"macfuse"`/`"osxfuse"`. `magic_of` returns `f_type` for parity.
       Done when: a unit test with a fake `statfs` result table passes. — done
-      bd40078, green on the macOS runner (run 36640376030)
+      1ed8bc4, green on the macOS runner (run 36640376030)
 - [x] **M2.4** `platform::user::owner_names`: macOS body uses `getpwuid_r`/`getgrgid_r`
       (Open Directory serves them; `/etc/passwd` lists only system accounts). The
       Linux body keeps its `/etc/passwd` parser. Done when: `fs::owner` tests pass on
-      both. — done fb4b9d8, green on the macOS runner (run 36640376030)
+      both. — done 358ccb4, green on the macOS runner (run 36640376030)
 - [x] **M2.5** `platform::thread::lower_priority`: macOS body
       `pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0)` for `nice > 0`, leaving
       the calling thread's class at UTILITY. Both are in libc 0.2.189
       (`libc::pthread_set_qos_class_self_np`, `libc::qos_class_t::QOS_CLASS_UTILITY`,
       re-exported from its `new/apple/libpthread`), so nothing is declared
       locally. Done when: compiles and a test asserts the call returns 0. — done
-      74850e7, green on the macOS runner (run 36640376030)
+      2e98de6, green on the macOS runner (run 36640376030)
 - [x] **M2.6** `platform::process::rsync_available()` gates on version: parse
       `rsync --version`'s first line and require ≥ 3.1.0 (`--info=progress2`);
       `platform::process::RSYNC_HINT` = "needs rsync 3.1 or newer — `brew install
       rsync`" and `app/syncing.rs:123` appends it to its error. Done when: the
       pure parser test covers `rsync  version 2.6.9`, `3.2.7` and openrsync's
-      banner (returns false). — done 5521a89, green on the macOS runner (run
+      banner (returns false). — done b101fa7, green on the macOS runner (run
       36640376030); the df-app half, appending `RSYNC_HINT` to the refusal in
-      `app/syncing.rs`, is the df-app branch's
+      `app/syncing.rs`, is the df-app branch's — done 89def0e on
+      `port/macos-finish`, green on the macOS runner (run 36649716767), not seen on
+      screen: `needs_rsync` puts the hint after a dash, so the Mac's refusal
+      is "Sync to a server needs rsync — needs rsync 3.1 or newer — `brew
+      install rsync`" and Linux's sentence is as it was
+      (`app::syncing::tests::a_sync_with_no_rsync_says_what_the_platform_needs`);
+      the window's rsync test skips where no rsync is 3.1 or newer. Live check
+      07-verification.md §4.7.
 - [x] **M2.7** `platform::fs::forget_cached`: `fcntl(fd, F_NOCACHE, 1)` is *not*
       used (it changes the file's caching mode, not a hint); the macOS body stays a
-      no-op as in S1.5. Done when: recorded here; nothing to do. — done bd40078,
+      no-op as in S1.5. Done when: recorded here; nothing to do. — done 1ed8bc4,
       green on the macOS runner (run 36640376030)
 
 ## 2. Trash (df-core `platform/macos/trash.rs`)
@@ -131,7 +140,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       path (NSFileManager picks the volume's `.Trashes` itself). `available_for` is
       true for local, non-remote paths. Done when: a test on the macOS runner
       trashes a temp file, sees it under `~/.Trash`, restores it, and the journal
-      is empty again. — done df45c91, green on the macOS runner (run 36640376030)
+      is empty again. — done 57176bb, green on the macOS runner (run 36640376030)
 - [x] **M2.9** Trash view and "Empty trash" on macOS: `App::show_trash`
       (`app.rs:4055–4078`) lists the journal; the empty-state text says "Only
       files trashed from delightfile are listed — Finder's Trash may hold more";
@@ -256,8 +265,14 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       — done d29643e, compiles and unit-tested on the macOS runner, not seen on
       screen for what can run there (the `sftp://` refusal, the routing table);
       nothing connects on a runner. `dav://` and `davs://` are refused too
-      (Decisions log); what `Mounted(None)` says is an Open question. Live check
-      §4.7.
+      (Decisions log). What `Mounted(None)` says, which was an Open question,
+      Brian settled: a connect that saw no share appear says "Finder was asked
+      to connect to …", not that it connected — done 761fc15 on
+      `port/macos-finish`, green on the macOS runner (run 36649716767), not seen on
+      screen: the words are `platform::mounts::CONNECT_UNSEEN` (`None` on
+      Linux and Windows, so Linux still says "Connected to"), and
+      `app::tests::a_connect_with_no_share_to_go_to_says_what_is_known` reads
+      both. Live check §4.7.
 
 ## 5. Openers, fonts, dirs (see `05-defaults-and-config.md` for the tables)
 
@@ -270,21 +285,25 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       child lead a process group of its own, outlive the call, and leave no zombie.
       The shared Unix spawn asks `platform::open::{detach, release}`; on Linux both
       do nothing (Decisions log).
-- [~] **M2.17** The macOS default opener and rule tables from `05-defaults-and-config.md`
+- [x] **M2.17** The macOS default opener and rule tables from `05-defaults-and-config.md`
       §2 are wired into `platform::defaults::{OPENERS, RULES, BOOKMARKS}` and
       `df_core::config::Config::default` reads them. Done when: `open.rs`'s
       `opener_rules_pick_by_glob_then_mime` has a macOS twin asserting `open "$1"`.
-      — blocked: every half of it is df-core's (`Config::default` in `config.rs`,
-      `platform::defaults` beside it), and this branch was told to keep out of
-      df-core while two other branches change it. Options: (a) the df-core branch,
-      or a pass after the three merge, adds `df_core::platform::defaults::{OPENERS,
-      RULES, BOOKMARKS}` per target from 05 §2.1/§6 and `Config::default` reads
-      them, and df-app then gains the `open.rs` twin asserting `open "$1"`; (b)
-      Brian lets this branch make that df-core change itself, at the cost of a
-      likely conflict in `config.rs` with `port/paths`.
+      — (the df-app branch had it blocked on df-core; `port/macos-finish` was
+      given leave to make the df-core half) done 29cfb82 (with D5.3 and D5.11),
+      green on the macOS runner (run 36649716767), not seen on screen.
+      `df_core::platform::defaults` has the three tables per target: Linux's
+      are `config.rs`'s constants re-exported, unchanged, Windows ships the
+      same until W4.3, and macOS's are 05 §2.1's openers, §2.3's rules read
+      literally (Linux's rows less every row that names an opener macOS does
+      not ship) and §6's four keyed bookmarks. `open.rs`'s
+      `opener_rules_pick_by_glob_then_mime_on_macos` finds `open "$1"` first
+      for a picture, a PDF and an unknown file; the Linux-table tests run where
+      those tables ship (Decisions log; the reading of §2.3 is an Open
+      question). Live check §4.7.
 - [x] **M2.18** `platform::dirs` macOS values per `05-defaults-and-config.md` §1
       (D5.1 lands them; this task is the cross-reference). Done when: D5.1 done. —
-      done 9041f14, green on the macOS runner (run 36640376030); the macOS column of
+      done da3fdb1, green on the macOS runner (run 36640376030); the macOS column of
       D5.1's table for `platform::dirs` (zoxide's row is not `platform::dirs` and
       stays with D5.1)
 - [x] **M2.19** `platform::fonts::dirs()` macOS list (D5.6) and the README line
@@ -303,7 +322,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       "macos")` and to `super_key` elsewhere.
       — done 925ed12, compiles and unit-tested on the macOS runner, not seen on
       screen: `keys::tests::super_is_ctrl_on_macos_and_itself_elsewhere`.
-- [~] **M2.21** Labels: `df_core::keymap::Chord::label` (`keymap/key.rs:323–345`)
+- [x] **M2.21** Labels: `df_core::keymap::Chord::label` (`keymap/key.rs:323–345`)
       takes a `df_core::platform::keys::LABELS` table (pure strings, in df-core —
       df-core has no winit, so this is a separate module from df-app's
       `platform::keys::mods`): macOS `⌃`/`⌥`/`⇧`/`⌘` with `Ctrl+`
@@ -312,17 +331,23 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `app.rs:12393, 12845, 16480, 16781`) go through `df_core::platform::keys::ctrl_name()`
       ("Ctrl" / "⌘"). Done when: `keys.rs:164`'s `"Alt+←"` assertion has a macOS
       twin `"⌥←"`.
-      — blocked: `Chord::label` and the `LABELS` table are df-core's (see M2.17 for
-      why this branch did not touch df-core). The df-app half is the strings that
-      name Ctrl, today overlay.rs:612 ("Ctrl+s to stop"), overlay.rs:1194 (`Ctrl+{n}`),
-      app.rs:14814 ("Ctrl+N opens another window"), app.rs:15309 ("press Ctrl+v
-      again"), app.rs:19733 (the `Ctrl+s` hint) and app.rs:20139 ("Ctrl-click
-      selects"), plus cli.rs:205's `Ctrl+Enter`. Options: (a) df-core gains
-      `platform::keys::{LABELS, ctrl_name}` and `Chord::label` reads them, and then
-      the df-app strings go through `ctrl_name()`; (b) df-app renders those strings
-      through a `platform::keys` name of its own now, with chord labels still saying
-      `Ctrl+` on macOS until (a), which would show `⌘` and `Ctrl` side by side
-      meanwhile.
+      — (blocked on df-core on the df-app branch; option (a) taken) done b6866c9
+      on `port/macos-finish`, with three window tests that read a label as text
+      taught a Mac's in 619da12 (run 36648279848 found them), green on the
+      macOS runner (run 36649716767), not seen on screen. `df_core::platform::keys::LABELS` is each modifier's mark in the
+      order a label writes them: `Ctrl+ Alt+ Super+ Shift+` on Linux and
+      Windows, so every Linux label is what it was, and `⌃ ⌥ ⇧ ⌘` run together
+      in Apple's order on macOS, the `ctrl` role wearing `⌘`
+      (`keys::tests::modifiers_carry_through` asserts `"⌥←"` there). The
+      strings that named a chord by hand — the search's "Ctrl+s to stop" and
+      its `Ctrl+s` and `Alt+Enter` hints, "Ctrl+N opens another window",
+      "press Ctrl+v again", `--help`'s `Ctrl+Enter` — are written through the
+      chord label (df-app's `keys::written`), and "Ctrl-click selects"
+      through `ctrl_name()`; Linux's `--help` is byte for byte what it was.
+      `super+…` in a Mac's `keymap.toml` binds the Cmd chord and warns "super
+      is Cmd, which is Ctrl on macOS" (05 §3). `⌥` and `⌃`, which neither
+      stock face draws (`⌘` is in one), are stand-ins in `glyphs.rs` beside
+      `⇧`. Live check §4.2.
 - [x] **M2.22** Pointer modifiers: `app.rs:13785–13787` already treats egui's
       `command` (Cmd) as `toggle`; confirm `dnd::verb_for` gets Cmd → Copy and
       Option → Link on macOS and add the mapping to the help sheet's mouse section.
@@ -331,8 +356,8 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `command || ctrl`, and egui-winit sets `command` from Cmd on macOS, so
       Cmd-click toggles and Cmd-drag is `Verb::Copy`; Option is egui's `alt`, so
       Option-drag is `Verb::Link`. The help sheet has no mouse section to add the
-      mapping to; its "⌘-click toggles, ⌥-drag links" line is D5.5's and blocked
-      with it. Live check §4.5.
+      mapping to; its "⌘-click toggles, ⌥-drag links" line is D5.5's, and
+      where it goes is still an Open question (05). Live check §4.5.
 - [x] **M2.23** Occlusion path (`app.rs:158–167, 16217–16236`, `graphics.rs:38–67`):
       the comments say the code is right and dead on Wayland. On macOS it is live.
       No code change; add a `log::debug!` when `Presented::Occluded` fires so the
@@ -394,6 +419,8 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       "macos")`. This diverges the vendored crate from delightviewer; do it only if
       the live check finds 4K playback unusable, and note the divergence in
       `crates/dv-media/Cargo.toml`'s header comment.
+      — skipped: optional, and waiting on the live check it names (§4.6);
+      software decode stands until a Mac shows 4K playing badly.
 
 ## 8. Found in Phase 1
 
@@ -409,7 +436,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       link's own mode). `read_dir_in` lists through the descriptor (`fdopendir` of
       a `dup`, rewound). Done when: `ops/mode.rs`'s
       `on_disk` tests are `#[cfg(unix)]` and pass on the macOS runner. — done
-      1bf689e, green on the macOS runner (run 36640376030)
+      2198cc9, green on the macOS runner (run 36640376030)
 - [x] **M2.29** `platform::process::tie_to_this_thread` macOS body (S1.50), in
       place of the no-op under which an rclone daemon outlives a delightfile that
       crashes. macOS has no `PR_SET_PDEATHSIG`; the notice of a parent's exit is
@@ -418,7 +445,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       wrapper process that starts the daemon and signals it when the parent
       goes) is this task's to settle and record. Done when: a runner test kills
       the parent with `SIGKILL` and sees the daemon gone within a second. — done
-      18c8dee, green on the macOS runner (run 36640376030)
+      7793732, green on the macOS runner (run 36640376030)
 - [~] **M2.31** Take `-A dead_code` off the macos job's clippy line in
       `.github/workflows/ci.yml` (S1.53). It is there because df-app items
       whose only callers are Linux bodies — the drag-and-drop helpers in
@@ -440,6 +467,26 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       needs an exception to "no cfg outside platform/"; (c) keep `-A dead_code` on
       macOS for good, with the linux job, where every item has its caller, as the
       one that holds dead code out.
+      — skipped in part, as Brian decided (a) for the functions and (c) for the
+      variants: the Linux-only functions and their tests moved, line for line,
+      in a3fb809 on `port/macos-finish` — gio's readers from `mounts.rs` to
+      `platform/linux/gio.rs`, the Wayland device's drop readers from `dnd.rs`
+      to `platform/linux/wayland/incoming.rs` — and the macOS build (df-core,
+      the dv crates and df-app, lib and tests) now leaves six enum variants
+      unused and nothing else. No task gives any of them a maker on macOS,
+      because each is how a Linux body says something macOS says another way:
+      `ClipError::Missing` (no `wl-copy`; the pasteboard is always there, and
+      Windows' stub makes it), `mounts::Reply::Mounted` (udisks2's mount; macOS
+      mounts disks itself, M2.14), `mounts::Connected::NeedsTerminal` (gio's
+      password prompt; Finder asks in its own dialog, M2.15),
+      `desktop::PasteFailure::{Stalled, Broken}` (the Wayland data device's
+      pipe; the pasteboard is synchronous, M2.13), `appearance::Link::Starting`
+      (the portal's connection; macOS answers before `watch_over` returns,
+      M2.30), and `mounts::Change::{VolumeAdded, VolumeRemoved, MountAdded,
+      MountRemoved, Other}` (`gio mount --monitor`'s events; macOS has no
+      watcher, and one that heard `NSWorkspace`'s mount notices would be a new
+      task). So the macos job keeps `-A dead_code`, and its comment in
+      `ci.yml` names the six.
 
 ## 9. Found in Phase 2
 
@@ -452,7 +499,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       103 on macOS) and the tests that bind one do it under `/tmp` when
       `$TMPDIR` is too deep; the fake server that closes at once is `true` on
       `PATH`, not `/bin/true`. Done when: the macos job's `cargo test -p
-      df-core` step passes. — done 0ad983a, green on the macOS runner
+      df-core` step passes. — done 3ff30a7, green on the macOS runner
       (run 36640376030)
 - [x] **M2.33** `platform::xattr` macOS body (added 2026-09-29, when Brian
       delegated the open question on tags): tags are Finder's
@@ -467,7 +514,7 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       `removexattr` and `XATTR_NOFOLLOW`; a tag on a link is refused as on
       Linux. Done when: the tag tests in `fs/tags.rs` and the body's own run
       on the macOS runner, a tag written there reads back from Finder's
-      attribute as Finder's plist, and live check V7 §4.4. — done ecf89d6,
+      attribute as Finder's plist, and live check V7 §4.4. — done 826df6a,
       green on the macOS runner (run 36640376030)
 - [x] **M2.34** df-app builds, lints and passes its tests on the macOS runner
       with the stubs as they are, before any Phase 2 body lands. Run
@@ -497,17 +544,30 @@ rows), `appendix-inventory-df-app.md` §1–§3.
       target). Done when: on the macos job, df-app builds, its clippy line
       passes, `--version` runs, and every df-app test passes except those
       three.
-      — done ccb657f; run 36636630419 on this branch: df-app built, linted and ran
-      `--version` on the macOS runner, and 1,128 of its 1,129 tests passed, the one
-      left the rsync test above.
-- [ ] **M2.35** Emptying old trash on macOS (`[mgr] trash_keep_days`, added
-      2026-09-29 on the df-core branch as M2.34, renumbered at integration): `purge_expired`, `purge_expired_if_due` and `purge_due_in`
+      — done ccb657f; run 36636630419 on the df-app branch: df-app built, linted
+      and ran `--version` on the macOS runner, and 1,128 of its 1,129 tests
+      passed, the one left the rsync test above. Since M2.6 and M2.8 are in
+      (`port/macos-finish`), the rsync test skips there, the three `trashview`
+      tests have macOS twins built through the journal (e9be774), and the
+      trash-refusal test is Windows' alone (cfcfc8b).
+- [x] **M2.35** Emptying old trash on macOS (`[mgr] trash_keep_days`, added
+      2026-09-29 on the df-core branch as M2.34, renumbered at integration):
+      `purge_expired`, `purge_expired_if_due` and `purge_due_in`
       over the M2.8 journal, with a stamp beside it so one window a day purges,
       as Linux's does over the freedesktop trash. Until then `purge_due_in` is
       never due and the other two refuse ("Emptying old trash is not available
       on this platform"). Done when: the aging tests of
       `platform/linux/trash.rs` have macOS twins over the journal that pass on
       the runner.
+      — done eae9889 on `port/macos-finish`, green on the macOS runner (run
+      36645084634, and 36649716767), not seen on screen. Only the journal's lines are
+      ever chosen, so nothing Finder or anything else put in the Trash is
+      touched; a line whose date is the keep old goes, with no zone slack
+      (Decisions log). The stamp is `trash-journal.purge` beside the journal,
+      `flock`ed for the run and written only when it completes. The eight
+      aging tests of `platform/linux/trash.rs` have twins in
+      `platform/macos/trash.rs`, over a journal and a Trash folder of the
+      test's own. Live check 07-verification.md §4.4.
 
 ## Decisions log
 
@@ -706,6 +766,86 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   df-app branch's shas, which named its commits before they were rebased
   onto `main`, name `main`'s. Section 9 holds every task found in Phase 2,
   both branches' in number order.
+- 2026-09-29 — Brian-delegated, and taken out of the Open questions below:
+  the df-core halves of M2.17 and M2.21 (and 05's D5.3, D5.5 and D5.11) are
+  made on `port/macos-finish`, which was given leave to edit df-core for
+  them; a connect that saw no share appear says Finder was asked to connect
+  to the address, not that it connected, and one whose share appears keeps
+  "Connected to" (M2.15); and for M2.31 the Linux-only functions move into
+  `platform/linux/` with their tests, moved and not rewritten, while enum
+  variants and portable items a macOS caller does not exist for stay, with
+  `-A dead_code` kept on the macos job and what remains listed.
+- (macos-finish) 2026-09-29 — M2.6: the hint follows the refusal after a
+  dash, as other toasts add a clause. The plan's own hint begins "needs
+  rsync", so the Mac's sentence says it twice ("Sync to a server needs rsync
+  — needs rsync 3.1 or newer — `brew install rsync`"); the constant is
+  df-core's and was left as the plan wrote it.
+- (macos-finish) 2026-09-29 — M2.15: the words are a platform constant,
+  `platform::mounts::CONNECT_UNSEEN` (`Some` on macOS, `None` elsewhere), read
+  when a connect comes back `Mounted(None)`, rather than a new `Connected`
+  variant: only macOS would make one, and the linux job, which allows no dead
+  code, would refuse a variant Linux never constructs.
+- (macos-finish) 2026-09-29 — M2.17, D5.3, D5.11: Linux's tables stay the
+  `DEFAULT_*` constants in `config.rs` (`DEFAULT_RULES` made `pub`), and
+  `platform/linux/defaults.rs` re-exports them rather than holding a moved
+  copy: the diff on Linux is the read going through the seam, and
+  `port/paths`, which is changing `config.rs` now, meets three lines instead
+  of two hundred. Windows re-exports the same tables until W4.3 writes its
+  own (05 §2.2 needs that phase's argv splitter and `first_available`).
+- (macos-finish) 2026-09-29 — M2.17: 05 §2.3's "minus the rows that name a
+  dropped opener" is read as written, whole rows. On a Mac a picture, a
+  video, a song and a PDF therefore open in the default app through the
+  fallback row; `edit-image` and `play` are in the opener table but in no
+  rule; and a 3D model or a `.gcode`, which is `text/plain`, reaches the
+  text rule and opens in Zed. The other readings are in Open questions.
+- (macos-finish) 2026-09-29 — M2.21: the marks are written in Apple's order,
+  `⌃⌥⇧⌘`, with nothing between them or the key, which is how macOS menus
+  write a chord; the `ctrl` role is `⌘`, and `⌃` is the Super role's, which
+  nothing makes on a Mac since M2.20 folds Super into `ctrl`. Chords named
+  in running text go through the chord label (df-app's `keys::written`,
+  which writes each such chord once and keeps it for the process, since
+  the hint strip holds `&'static str`s), so they read as the keymap's own
+  labels do; only "Ctrl-click" uses `ctrl_name()`. The search's
+  `Alt+Enter` hint, which the plan's six strings did not name, is written
+  the same way. The stock faces draw `⌘` and not `⌥` or `⌃` (checked with
+  `drawn_by_a_face`), so those two became stand-ins. A Mac's labels are
+  narrower (`⌘n` against `Ctrl+n`), so a menu's key column is too; the menu
+  test that rolled the wheel "where the card was" now rolls it where the card
+  was over the list, which on a Mac is only the card's scrollbar band.
+- (macos-finish) 2026-09-29 — M2.31: moved to `platform::linux::gio`:
+  `gio_mounts`, `shares_from`, `phones_from`, `first_line`, `Attempt`,
+  `attempt`, `landing`, the monitor's `Blocks`, `event_from` and `listen`, the
+  private helpers they use, and `Spec::{from_dir_name, same_server}` and
+  `Protocol::of_monitor` as `impl` blocks there; to reach them, `Spec`'s
+  fields, `decode` and `Address::segments` became `pub(crate)`. Moved to
+  `platform::linux::wayland::incoming`: `dnd::{is_ours, wanted_mime,
+  paths_from}`. Their fourteen tests moved with them unchanged, which takes
+  two tests that also check the portable `Spec::of` and `dir_name`
+  (`specs_are_written_and_read_the_way_gvfs_does`,
+  `a_devices_spec_is_its_host`) off the macOS runner; `PIXEL` and
+  `PIXEL_DIR` stay in `mounts`' tests, which the card's tests use too.
+- (macos-finish) 2026-09-29 — M2.35: no zone slack. Linux's
+  `DATE_SLACK_SECS` is there because the spec's `DeletionDate` is local time
+  written by any desktop, and delightfile reads it as UTC; the journal is
+  delightfile's alone and written in UTC, so a line exactly the keep old is
+  old. `expired`, `purge_wait` and the stamp reading are the macOS module's
+  own copies rather than shared with Linux's, which stays as it was.
+- (macos-finish) 2026-09-29 — `port/macos-finish` was rebased onto `main` at
+  4d24113 (Phase 3's path model and the Linux CI fixes) before it was handed
+  back. The conflicts were the platform contract table's rows in
+  `df-core/src/platform/mod.rs` (both sides' rows kept), df-core's
+  `Cargo.toml` (Windows' `windows-sys` table and macOS's objc2 table, both
+  kept) and ticks in `appendix-inventory-df-core.md` (both kept); the code
+  merged without a conflict. Every `done <sha>` in this document names the
+  rebased commit; the run ids name the runs that proved the commits before
+  the rebase, and the branch's CI after it ran again on the rebased ones.
+- (macos-finish) 2026-09-29 — M2.27 is written up as skipped rather than left
+  `[~]` with no reason, so the Status line can say done: it was always
+  optional (Decisions already made: software decode this phase), and only
+  the §4.6 live check can call for it.
+- (macos-finish) 2026-09-29 — The `trashview` twins trash real files into the
+  runner's `~/.Trash` through a journal of their own, as M2.8's tests do,
+  and destroy what they trashed before they end.
 
 ## Open questions
 
@@ -714,18 +854,14 @@ rows), `appendix-inventory-df-app.md` §1–§3.
   the fallback is an `NSView` subclass override of `mouseDragged:` — record which.
   (df-app, 2026-09-29: M2.12 is built on the first; only the live check in
   `07-verification.md` §4.5 can answer.)
-- (df-app) What a connect that saw nothing appear under `/Volumes` within ten
-  seconds should say (M2.15). The plan's `Mounted(None)` makes the window say
-  "Connected to …", which is untrue while Finder's dialog is still asking for a
-  password and true when the share was mounted already. Options: keep it; a
-  new `Connected` variant the window words as "Finder is connecting to … —
-  `M` lists the share once it is mounted"; or wait longer.
-- (df-app) Who makes the df-core halves of M2.17 and M2.21 (and 05's D5.3,
-  D5.5, D5.11): the df-core branch, a pass after the port branches merge, or
-  this branch with leave to touch df-core. The options are in each task.
-- (df-app) M2.31: how the items that only Linux calls stop being dead code on
-  macOS, if they should: moved into `platform/linux/`, allowed per item with a
-  `cfg_attr`, or `-A dead_code` kept on macOS for good. The options are in the
-  task.
 - Ghostty on macOS: does `ghostty -e` work from `open -a`? Affects the `edit` opener
   default in `05-defaults-and-config.md`.
+- (macos-finish) 05 §2.3 on a Mac (M2.17): the rows that name a dropped
+  opener are gone, as written, so `edit-image` and `play` are offered by no
+  rule and a `.obj` or `.gcode` opens in Zed. Other readings: (a) drop only
+  the dropped openers from each row — then an audio file's and a PDF's rows
+  hold only `terminal-at`, and `Enter` on a PDF opens Terminal; (b) put
+  `open` where delightviewer was — pictures, video, sound, PDFs, 3D models
+  and fonts open in the default app, with `edit-image` and `play` after it in
+  `O`, and a `.gcode` opens with `open` before `edit`. The literal reading
+  shipped; (b) is a change to one table in `platform/macos/defaults.rs`.

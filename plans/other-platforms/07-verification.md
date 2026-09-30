@@ -113,6 +113,21 @@ document that owns the feature.
       Ctrl+z, Ctrl+wheel view scale, Ctrl+←/→ page turn in a PDF.
 - [ ] Command and Control are one modifier (M2.20): each of the chords above fires
       with Cmd and with Control alike; Cmd+P opens the palette, Cmd+N a window.
+- [ ] Cmd means what a Mac means (D5.5): in the list, Cmd+C copies the selection's
+      paths (paste into TextEdit), Cmd+W closes the tab (the last one quits),
+      Cmd+V pastes (the yank, else the files copied in Finder) and Cmd+Q quits;
+      in a rename prompt Cmd+C copies the selected text, or the whole name with
+      nothing selected, and leaves the prompt open; in the palette and every
+      card Cmd+C still closes it.
+- [ ] Chord labels (M2.21): the help sheet, the which-key card, the menus and
+      the palette write chords with `⌃ ⌥ ⇧ ⌘` run together in that order —
+      `⌥←`, `⇧⌘Z`, `⌘p` — and never `Ctrl+`; `⌥` and `⌃`, which the app draws
+      itself, sit on the baseline beside the letters as `⇧` does, in the text's
+      colour, at every view scale; the search's hint strip says `⌘s` stop and
+      `⌥Enter` go there; a file dialog's greeting says "⌘-click selects";
+      `delightfile --help` in Terminal says `⌘Enter`.
+- [ ] A `keymap.toml` with `"super+k" = "quit"` under `[files]` (M2.21): Cmd+K
+      quits, and the config warning says "super is Cmd, which is Ctrl on macOS".
 - [ ] Typing in a prompt: `~`, `/`, `-`, `[`, `]`, non-ASCII letters, an emoji via
       the character viewer.
 - [ ] Caps Lock on: `j`/`k` still shuttle, `J`/`K` are not sent.
@@ -153,6 +168,15 @@ document that owns the feature.
       a tag set in Finder shows on the row; a copy (same volume and across) keeps
       them; `T` on a symlink is refused (M2.33).
 - [ ] Owner linemode (`m o`): the logged-in user and `staff` by name (M2.4).
+- [ ] Emptying old trash (M2.35): with `[mgr] trash_keep_days = 1`, trash a file
+      from delightfile, quit, and change its line's first field in
+      `~/.local/state/delightfile/trash-journal` to two days ago; the next window
+      takes it out of Finder's Trash and toasts what it removed, and Finder's own
+      items stay where they are; a second window the same day does not purge
+      again (`trash-journal.purge` beside the journal holds the day).
+- [ ] Permissions (`C`) on macOS (M2.28): toggle a bit on a file and Apply, and
+      `ls -l` agrees; `u` puts it back; a folder shut to its owner (`chmod 000`)
+      asks to Apply again rather than failing.
 - [ ] Rename, bulk rename with `{taken}` on a photo (EXIF read), `{camera}`.
 - [ ] Create file, create folder with `/` in the prompt.
 - [ ] Archive: extract a zip, a tar.gz, a 7z (if `7z` is installed via Homebrew,
@@ -199,6 +223,15 @@ document that owns the feature.
 - [ ] Enter on a file opens it in the default app; `o` shows the opener picker with
       the macOS defaults from Phase 5; `terminal-at` opens Terminal (or ghostty when
       installed) in the folder.
+- [ ] The macOS openers (M2.17): Enter on a picture, a PDF, a song and an unknown
+      file opens each in its default app (`open`); on a text file it opens Zed
+      when installed, and `O` offers Zed, `edit`, `open` and a Terminal in the
+      folder; `edit` runs `$EDITOR` in ghostty when installed, else in
+      Terminal.app; `terminal-here` on a folder opens Terminal.app there, or the
+      app `TERMINAL_APP` names; nothing says `xdg-open` or `setsid`.
+- [ ] The `g` bookmarks (D5.11): `g h`, `g c`, `g d` and `g w` go to home,
+      `~/.config`, Downloads and `~/Work`, and the which-key card lists those four
+      and no server mounts.
 - [ ] `M` volumes card: internal disk, a USB stick, a mounted dmg, a network share;
       eject the USB stick from the card and confirm Finder agrees.
 - [ ] The volumes card, closer (M2.14): the boot volume reads "Macintosh HD", its
@@ -209,9 +242,10 @@ document that owns the feature.
 - [ ] Connect (M2.15): `c` then `smb://<server>/<share>` brings up Finder's own
       password dialog, and once it is answered the window goes into the share
       under `/Volumes`; `sftp://host` is refused with "use the sftp: bookmark
-      instead" and `davs://…` with where Finder mounts WebDAV; what the toast says
-      when the dialog takes longer than ten seconds is noted for the Open question
-      in 02-macos.md.
+      instead" and `davs://…` with where Finder mounts WebDAV; a dialog left
+      unanswered for more than ten seconds toasts "Finder was asked to connect to
+      …" (not "Connected to"), and once it is answered the share is in `M`'s
+      Network section.
 - [ ] Openers run detached (M2.16): open a file in TextEdit with `o`, quit
       delightfile, and TextEdit stays; quit TextEdit while delightfile runs and
       `ps -o stat= -p <its pid>` shows nothing, not a `Z`.
@@ -306,6 +340,10 @@ workflow, launched by double-click from Explorer.
   tasks (M2.9–M2.16, M2.19, M2.20, M2.23–M2.26, M2.30), each marked with its
   task; the appearance line no longer says the app does not follow the system,
   since `auto` now does (M2.30).
+- (macos-finish) 2026-09-29 — §4 gained the on-screen checks for the tasks
+  that needed both branches (M2.17, M2.21, M2.28 through the app, M2.35, and
+  05's D5.5 and D5.11); the connect line says what a slow dialog toasts now
+  that Brian settled it (M2.15), and the M2.9 line no longer waits on M2.8.
 
 ## Open questions
 
