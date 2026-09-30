@@ -71,7 +71,7 @@
 //! | `socket` | `AVAILABLE: bool`; `PATH_MAX: usize` (the longest path `bind` takes); `Stream: Read + Write`; `connect(path, timeout) -> io::Result<Stream>`; `private_dir(dir, uid) -> io::Result<()>` (the rclone daemon's remote control) | `UnixStream`; mode 0700 and owner check; 107 (unix) | unix; 103 | `AVAILABLE = false`, so cloud remotes refuse before `rclone` starts; the rest `Unsupported("Cloud remotes")` (W4.32) |
 //! | `process` | `NULL_DEVICE: &str` | `/dev/null` (unix) | unix | `NUL` |
 //! | `process` | `HAS_RSYNC: bool` (then [`crate::sync::rsync::available`] asks for 3.1 or newer) | `true` (unix) | unix | `false` |
-//! | `process` | `RSYNC_HINT: &str` (what "needs rsync" adds) | `""` | `brew install rsync` | `""` |
+//! | `process` | `RSYNC_HINT: &str` (what "needs …" names in place of the bare "rsync"; empty: "rsync") | `""` | "rsync 3.1 or newer — `brew install rsync`" | `""` |
 //! | `process` | `pause(&Child)`, `resume(&Child)` `-> io::Result<()>` | `SIGSTOP` / `SIGCONT` (unix) | unix | `Unsupported` (W4.2) |
 //! | `process` | `terminate(&mut Child) -> io::Result<()>` (not a reaped one) | `kill(SIGTERM)` (unix) | unix | `Child::kill` |
 //! | `process` | `tie_to_this_thread(&mut Command)` (re-exported as `vfs::child`) | `prctl(PR_SET_PDEATHSIG)` + `getppid` in `pre_exec` | `getppid`, then a watcher forked in `pre_exec` waits in kqueue on `NOTE_EXIT` and sends `SIGTERM`: tied to the process | nothing (W4.31) |

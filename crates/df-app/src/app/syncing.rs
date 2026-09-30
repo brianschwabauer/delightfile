@@ -428,16 +428,13 @@ thread_local! {
 }
 
 /// Why a sync with a server cannot start here: no `rsync`, or one too old to
-/// run it ([`df_core::sync::rsync::available`] asks for 3.1 or newer), with
-/// what the platform adds to that (`RSYNC_HINT`): nothing on Linux, where the
-/// sentence is as it always was, and Homebrew's rsync on a Mac, whose own is
-/// always too old (02-macos.md M2.6).
+/// run it ([`df_core::sync::rsync::available`] asks for 3.1 or newer), in the
+/// platform's words for what is needed (`RSYNC_HINT`): none on Linux, where
+/// the sentence is as it always was, and on a Mac the version and Homebrew's
+/// rsync, since a Mac's own is always too old (02-macos.md M2.6).
 fn needs_rsync(hint: &str) -> String {
-    if hint.is_empty() {
-        "Sync to a server needs rsync".to_string()
-    } else {
-        format!("Sync to a server needs rsync — {hint}")
-    }
+    let needed = if hint.is_empty() { "rsync" } else { hint };
+    format!("Sync to a server needs {needed}")
 }
 
 /// A path in a `sftp://` display path, as the server's `rsync` must be handed
@@ -875,8 +872,8 @@ mod tests {
     fn a_sync_with_no_rsync_says_what_the_platform_needs() {
         assert_eq!(needs_rsync(""), "Sync to a server needs rsync");
         assert_eq!(
-            needs_rsync("needs rsync 3.1 or newer — `brew install rsync`"),
-            "Sync to a server needs rsync — needs rsync 3.1 or newer — `brew install rsync`"
+            needs_rsync("rsync 3.1 or newer — `brew install rsync`"),
+            "Sync to a server needs rsync 3.1 or newer — `brew install rsync`"
         );
         let refusal = needs_rsync(df_core::platform::process::RSYNC_HINT);
         assert_eq!(

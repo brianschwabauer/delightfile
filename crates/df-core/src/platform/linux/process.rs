@@ -57,9 +57,10 @@ use std::process::Command;
 
 pub use crate::platform::unix::process::*;
 
-/// What to add to "needs rsync" when [`crate::sync::rsync::available`] says
-/// no: nothing on Linux, where an `rsync` new enough is one package away and
-/// every distribution's is.
+/// What a refusal says is needed, in place of the bare "rsync", when
+/// [`crate::sync::rsync::available`] says no: nothing, so it says "rsync", on
+/// Linux, where an `rsync` new enough is one package away and every
+/// distribution's is.
 pub const RSYNC_HINT: &str = "";
 
 /// Arrange for the child `command` is about to spawn to receive `SIGTERM` when
