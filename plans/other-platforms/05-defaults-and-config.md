@@ -41,18 +41,19 @@ Factual basis: `appendix-inventory-df-core.md` §2 `config`, `state`, `zoxide`,
 | `config_dir()` | `$XDG_CONFIG_HOME/delightfile` or `~/.config/delightfile` | same rule | `%APPDATA%\delightfile` |
 | `state_dir()` (state file, trash journal, `portal-last-dir`) | `$XDG_STATE_HOME/delightfile` or `~/.local/state/delightfile` | same rule | `%LOCALAPPDATA%\delightfile\state` |
 | `data_dir()` (freedesktop trash root on Linux only) | `$XDG_DATA_HOME` or `~/.local/share` | same rule (unused) | `%LOCALAPPDATA%\delightfile` |
-| `cache_dir()` (thumbnails, shared with yazi) | `$TMPDIR`-or-`/tmp` + `yazi-<uid>` | `std::env::temp_dir()` + `yazi-<uid>` (yazi does the same on macOS: verify in `yazi-shared/src/xdg.rs` at implementation, record the finding) | `%TEMP%\yazi-<USERNAME>` (verify yazi's Windows suffix the same way) |
+| `cache_dir()` (thumbnails, shared with yazi) | `$TMPDIR`-or-`/tmp` + `yazi-<uid>` | `std::env::temp_dir()` + `yazi-<uid>` (yazi does the same on macOS: verify in `yazi-shared/src/xdg.rs` at implementation, record the finding) | `%TEMP%\yazi-0` (yazi's `uid_or_zero`; Decisions log) |
 | `runtime_dir()` (portal sockets, Linux only) | `$XDG_RUNTIME_DIR` | `temp_dir()` | `temp_dir()` |
 | `temp_dir()` (SFTP downloads `delightfile-vfs-<pid>`) | `std::env::temp_dir()` | same | same |
 | yazi `vfs.toml` (read before ours) | `$XDG_CONFIG_HOME/yazi/vfs.toml` or `~/.config/yazi/vfs.toml` | same | `%APPDATA%\yazi\config\vfs.toml` (yazi's Windows config dir has the extra `config` level) |
 | zoxide `db.zo` | `$_ZO_DATA_DIR` or `$XDG_DATA_HOME/zoxide` or `~/.local/share/zoxide` | `$_ZO_DATA_DIR` or `~/Library/Application Support/zoxide` | `$_ZO_DATA_DIR` or `%LOCALAPPDATA%\zoxide` |
 | keymap, theme, config file names | `delightfile.toml`, `theme.toml`, `keymap.toml`, `vfs.toml` in `config_dir()` | same | same |
 
-- [ ] **D5.1** Implement the table in `platform/{linux,macos,windows}/dirs.rs`
+- [>] **D5.1** Implement the table in `platform/{linux,macos,windows}/dirs.rs`
       (Linux body moved by S1.11). `config_dir()` and `state_dir()` create nothing;
       writers create on first write as today. Done when: a test per target asserts
       the paths with a controlled environment (`std::env::set_var` inside a lock,
       as the existing `state_path_from` tests do).
+      — port/windows-core (df-core), started 2026-09-29: the Windows column.
 - [>] **D5.2** `README.md` gets a "Where things live" table per platform. Done
       when: reviewed by Brian.
       — port/windows-app (df-app), started 2026-09-29: written b60122c
@@ -315,10 +316,31 @@ the README and for choosing defaults).
   Phase 4 brief holds Linux's `--help` to what it printed, and on Linux the
   words are true. The first line is `platform::cli::TITLE_USAGE`, macOS and
   Windows saying only "a keyboard-first file manager".
+- (df-core) 2026-09-29 — D5.1, Windows: each `platform::dirs` function
+  answers the base its callers add a folder to, as on Unix, so the table's
+  Windows cells are the files' homes, not the functions' answers:
+  `config_dir()` is `%APPDATA%` (the config is `%APPDATA%\delightfile\`),
+  `state_dir()` and `data_dir()` are `%LOCALAPPDATA%` (the state file is
+  `%LOCALAPPDATA%\delightfile\state`, zoxide's database
+  `%LOCALAPPDATA%\zoxide\db.zo`), and `cache_dir()`, which nothing calls, is
+  `%LOCALAPPDATA%` as well. An unset or empty variable falls back to its
+  folder under `%USERPROFILE%` (`AppData\Roaming`, `AppData\Local`).
+  `HOME` is never read there.
+- (df-core) 2026-09-29 — D5.1: yazi's `vfs.toml` is found through a new
+  `platform::dirs::yazi_config_dir()` — `yazi` under `config_dir()` on Unix,
+  which is the path `vfs::config::config_paths` built before, and
+  `%APPDATA%\yazi\config` on Windows, yazi's extra level there.
+- (df-core) 2026-09-29 — D5.1: the thumbnail cache is not `dirs::cache_dir`
+  but `preview::cache::cache_dir`, `%TEMP%` + `yazi-` + the platform's
+  suffix, and on Windows that suffix is `0` (yazi's `uid_or_zero`, as
+  `platform/windows/user.rs` records from yazi's source), not the
+  `<USERNAME>` the table guessed: the Windows half of the open question below
+  is answered.
 
 ## Open questions
 
 - yazi's exact cache-dir suffix on macOS and Windows (verify at D5.1).
+  Windows: `0` (Decisions log, 2026-09-29); macOS still to verify.
 - Whether `wt` should be the Windows terminal default (see `04-windows.md`).
 - Ghostty `-e` on macOS (see `02-macos.md`).
 - (df-app) D5.4: how a Windows opener row carries its two candidates, and which

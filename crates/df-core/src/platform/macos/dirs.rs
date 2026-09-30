@@ -11,7 +11,9 @@
 
 use std::path::PathBuf;
 
-pub use crate::platform::unix::dirs::{cache_dir, config_dir, data_dir, home, state_dir, temp_dir};
+pub use crate::platform::unix::dirs::{
+    cache_dir, config_dir, data_dir, home, state_dir, temp_dir, yazi_config_dir,
+};
 
 /// `$TMPDIR`, the per-user temporary directory, standing in for the
 /// `$XDG_RUNTIME_DIR` macOS does not have.

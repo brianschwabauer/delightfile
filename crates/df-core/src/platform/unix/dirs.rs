@@ -30,6 +30,12 @@ pub fn config_dir() -> Option<PathBuf> {
         .or_else(|| home().map(|h| h.join(".config")))
 }
 
+/// yazi's configuration folder, whose `vfs.toml` is read before ours:
+/// `yazi` under [`config_dir`].
+pub fn yazi_config_dir() -> Option<PathBuf> {
+    Some(config_dir()?.join("yazi"))
+}
+
 /// `$XDG_STATE_HOME`, else `$HOME/.local/state` — `None` when `$HOME` is unset
 /// or empty too, which leaves the state store session-only.
 pub fn state_dir() -> Option<PathBuf> {

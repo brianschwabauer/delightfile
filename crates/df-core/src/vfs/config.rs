@@ -436,8 +436,8 @@ impl VfsConfig {
 /// Where [`VfsConfig::load`] looks, in precedence order (last wins).
 pub fn config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(base) = xdg_config_home() {
-        paths.push(base.join("yazi").join("vfs.toml"));
+    if let Some(yazi) = crate::platform::dirs::yazi_config_dir() {
+        paths.push(yazi.join("vfs.toml"));
     }
     if let Some(dir) = crate::config::config_dir() {
         paths.push(dir.join("vfs.toml"));
