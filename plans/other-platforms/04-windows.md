@@ -181,6 +181,11 @@ Factual basis: `appendix-inventory-df-core.md` (Unix-only and Windows-differs ro
       `undo_after_a_trash_says_where_to_restore_it_on_windows`. Both stay
       behind the "Trash is not available on this platform" refusal until W4.7
       is merged. "Empty trash" is blocked on a choice: Open questions.
+      — "Empty trash", option (b), decided (Decisions log): df-core's half
+      is `platform::trash::{bin_size, empty_bin}` (port/windows-core), the
+      bins counted by `SHQueryRecycleBinW` and emptied by
+      `SHEmptyRecycleBinW(…, SHERB_NOCONFIRMATION)`; the count-only card
+      ("Empty the Recycle Bin? N items, X") is df-app's, still to do.
 
 ## 3. Paths in df-app (the df-app rows of Phase 3)
 
@@ -825,6 +830,16 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   to refuse with "Trash is not available on this platform"; Windows now has
   the Recycle Bin, so its gate becomes `cfg(target_os = "macos")`. With it,
   df-app fails 15 of 1,117 on the runner where `main` fails 14.
+- (df-core) 2026-09-29 — W4.8, "Empty trash" on Windows: option (b) of the
+  question the df-app branch asked, decided for Brian and relayed to this
+  branch, which takes the question out of Open questions. df-core gives
+  every target `platform::trash::{BinSize, bin_size, empty_bin}`: on Windows
+  the bins of every drive counted by `SHQueryRecycleBinW` (items and bytes)
+  and emptied by `SHEmptyRecycleBinW` with `SHERB_NOCONFIRMATION` — the
+  app's own card having asked — a bin already empty being `Ok` without the
+  call; on Linux and macOS both refuse (`Unsupported("The Recycle Bin")`),
+  their trash being listed and purged item by item. The card that counts
+  rather than lists is df-app's.
 
 ## Open questions
 
@@ -832,14 +847,6 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
   is absent on a fresh Windows 10 LTSC.
-- (df-app) W4.8: "Empty trash" on Windows. The confirm card lists the trash
-  view's items, and there is no view: (a) the command opens the Recycle Bin in
-  Explorer, where emptying it is one button, and no card; (b) a card that
-  counts rather than lists — "Empty the Recycle Bin? N items, X" from
-  `SHQueryRecycleBinW` — then `SHEmptyRecycleBinW(…, SHERB_NOCONFIRMATION)`,
-  which needs a count-only variant of `ConfirmKind::EmptyTrash`. Until chosen
-  it is refused with the rest of the trash, and after W4.7 lands it would say
-  "The trash is already empty".
 - (df-core) W4.7: a file too big for its drive's Recycle Bin (over the bin's
   size limit) is deleted for good by `SHFileOperationW` under
   `FOF_NOCONFIRMATION`, without a word — the flags the task names. Options:

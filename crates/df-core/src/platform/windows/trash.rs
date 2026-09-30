@@ -17,6 +17,10 @@
 //!   to go instead (W4.8), and the trash view is Explorer's.
 //! - **No aging.** The bin keeps its own size limit, and Storage Sense ages it;
 //!   [`purge_due_in`] is never due.
+//! - **Emptying is the whole bin.** "Empty trash" says how many items the
+//!   bins of every drive hold and how much they weigh ([`bin_size`],
+//!   `SHQueryRecycleBinW`), since there is no view to list them in, and on a
+//!   yes empties them all ([`empty_bin`], `SHEmptyRecycleBinW`).
 //!
 //! **Where there is no bin, nothing is sent.** The same call on a drive without
 //! a Recycle Bin — a USB stick, a memory card, a network share — deletes the
@@ -30,8 +34,9 @@
 //! outright, so the path it is handed is the plain spelling of the same file,
 //! under `MAX_PATH`, or the call is not made.
 //!
-//! The `unsafe` is `SHFileOperationW`, `GetVolumePathNameW` and `GetDriveTypeW`,
-//! written to the same three rules as the other islands:
+//! The `unsafe` is `SHFileOperationW`, `SHQueryRecycleBinW`,
+//! `SHEmptyRecycleBinW`, `GetVolumePathNameW` and `GetDriveTypeW`, written to
+//! the same three rules as the other islands:
 //!
 //! 1. Nothing here owns a handle: the calls take strings and a struct, and
 //!    return.
@@ -50,8 +55,8 @@ use std::time::{Duration, SystemTime};
 
 use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
 use windows_sys::Win32::UI::Shell::{
-    SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE,
-    SHFILEOPSTRUCTW,
+    SHEmptyRecycleBinW, SHFileOperationW, SHQueryRecycleBinW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION,
+    FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHERB_NOCONFIRMATION, SHFILEOPSTRUCTW, SHQUERYRBINFO,
 };
 
 use crate::ops::{exists, normalize};
@@ -287,6 +292,54 @@ pub fn purge_due_in(_trash: &Trash, every: Duration, _now: SystemTime) -> Option
     Some(every)
 }
 
+/// What the Recycle Bin holds, on every drive, as the shell counts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinSize {
+    pub items: u64,
+    pub bytes: u64,
+}
+
+/// How many items the Recycle Bins of every drive hold, and their size —
+/// `SHQueryRecycleBinW` over all of them. What "Empty trash" says before it
+/// asks, there being no view here to list the items from (W4.8).
+pub fn bin_size() -> Result<BinSize> {
+    let mut info = SHQUERYRBINFO {
+        cbSize: std::mem::size_of::<SHQUERYRBINFO>() as u32,
+        i64Size: 0,
+        i64NumItems: 0,
+    };
+    // SAFETY: a null root asks for every drive's bin; `info` is a local
+    // with its size set, as the call requires, and outlives it.
+    let code = unsafe { SHQueryRecycleBinW(std::ptr::null(), &mut info) };
+    if code != 0 {
+        return Err(DfError::Op(format!(
+            "the Recycle Bin could not be counted (error {code:#x})"
+        )));
+    }
+    Ok(BinSize {
+        items: u64::try_from(info.i64NumItems).unwrap_or(0),
+        bytes: u64::try_from(info.i64Size).unwrap_or(0),
+    })
+}
+
+/// Empty the Recycle Bin of every drive, for good: `SHEmptyRecycleBinW` with
+/// `SHERB_NOCONFIRMATION`, the app's own confirm having asked. A bin that is
+/// already empty is not asked, and is `Ok`.
+pub fn empty_bin() -> Result<()> {
+    if bin_size()?.items == 0 {
+        return Ok(());
+    }
+    // SAFETY: no window and a null root (every drive's bin); the call reads
+    // nothing of ours.
+    let code = unsafe { SHEmptyRecycleBinW(0, std::ptr::null(), SHERB_NOCONFIRMATION) };
+    if code != 0 {
+        return Err(DfError::Op(format!(
+            "the Recycle Bin could not be emptied (error {code:#x})"
+        )));
+    }
+    Ok(())
+}
+
 /// The refusal for a path whose drive keeps no bin.
 fn no_bin(path: &Path) -> DfError {
     DfError::Op(format!(
@@ -475,7 +528,10 @@ mod tests {
 
     use super::*;
     use crate::test_support::TempTree;
-    use windows_sys::Win32::UI::Shell::{SHQueryRecycleBinW, SHQUERYRBINFO};
+
+    /// The tests that put things in the bin, or empty it, one at a time: a
+    /// count taken around a trash must not see an emptying.
+    static BIN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn ctx() -> TaskCtx {
         TaskCtx::detached()
@@ -501,6 +557,9 @@ mod tests {
     /// nowhere it is now.
     #[test]
     fn a_trashed_file_goes_to_the_recycle_bin() {
+        let _bin = BIN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let t = TempTree::new("win-recycle");
         let file = t.file("doomed.txt", b"bye");
         assert!(
@@ -527,6 +586,9 @@ mod tests {
     /// the shell is asked.
     #[test]
     fn a_folder_goes_whole_and_a_missing_path_is_refused() {
+        let _bin = BIN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let t = TempTree::new("win-recycle-dir");
         let dir = t.dir("folder");
         std::fs::write(dir.join("inner.txt"), b"x").unwrap();
@@ -537,6 +599,24 @@ mod tests {
             .trash(&t.join("never-was"), &ctx())
             .unwrap_err();
         assert!(matches!(missing, DfError::Io { .. }), "{missing}");
+    }
+
+    /// "Empty trash" counts the bin and empties it: something trashed is
+    /// counted, and gone after, and an empty bin empties without a word.
+    #[test]
+    fn the_bin_is_counted_and_emptied() {
+        let _bin = BIN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let t = TempTree::new("win-recycle-empty");
+        let file = t.file("counted.txt", &[b'x'; 4096]);
+        for_path(&file).unwrap().trash(&file, &ctx()).unwrap();
+        let full = bin_size().unwrap();
+        assert!(full.items >= 1, "{full:?}");
+        assert!(full.bytes >= 4096, "{full:?}");
+        empty_bin().unwrap();
+        assert_eq!(bin_size().unwrap().items, 0);
+        empty_bin().unwrap();
     }
 
     /// What cannot be done here says so, and the bin lists nothing.

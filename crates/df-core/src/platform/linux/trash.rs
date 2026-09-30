@@ -1005,6 +1005,25 @@ fn still_recorded(item: &TrashedItem) -> bool {
         })
 }
 
+/// What a recycle bin holds: items and bytes. Windows' "Empty trash" counts
+/// its Recycle Bin with it; here nothing does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinSize {
+    pub items: u64,
+    pub bytes: u64,
+}
+
+/// Refused: this trash is listed, not counted whole (Windows' is, W4.8).
+pub fn bin_size() -> Result<BinSize> {
+    Err(DfError::Unsupported("The Recycle Bin"))
+}
+
+/// Refused: this trash is emptied item by item through [`purge`] (Windows'
+/// in one call, W4.8).
+pub fn empty_bin() -> Result<()> {
+    Err(DfError::Unsupported("The Recycle Bin"))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
