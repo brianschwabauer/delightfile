@@ -9,11 +9,12 @@
 //! ordinary "opener not found". Detaching needs no prefix here: the shared
 //! Unix spawn puts every launch in a process group of its own (M2.16).
 //!
-//! The rules are Linux's, less every row that names an opener macOS does
-//! not ship (delightviewer and its editor, the wallpaper and AVIF helpers),
-//! so a picture, a video, a song or a PDF falls through to the last row and
-//! opens in the system's default app. The bookmarks are the four the plan
-//! gives keys to; Brian's server mounts and hosts stay Linux's.
+//! The rules are Linux's row for row, with the system's default app (`open`)
+//! where Linux has delightviewer: a picture, a video, a song, a PDF, a 3D
+//! model, a font and a toolpath each open in whatever the Mac opens them
+//! with, and `O` still offers Preview for a picture and mpv for a video. The
+//! bookmarks are the four the plan gives keys to; Brian's server mounts and
+//! hosts stay Linux's.
 
 /// Openers a rule can name: id, command, blocking, description.
 ///
@@ -88,10 +89,15 @@ pub const OPENERS: &[(&str, &str, bool, &str)] = &[
 ];
 
 /// Opener rules, matched top-down: Linux's
-/// ([`crate::config::DEFAULT_RULES`]) less the rows that name an opener
-/// [`OPENERS`] does not have.
+/// ([`crate::config::DEFAULT_RULES`]) row for row, with `open` — the
+/// system's default app — where Linux has delightviewer, and the openers a
+/// Mac does not ship (delightviewer's editor, the wallpaper and AVIF
+/// helpers) left out. An `open` a row would then name twice is named once.
 pub const RULES: &[(&str, &str, &[&str])] = &[
     ("glob", "bulk-rename.txt", &["bulk-rename"]),
+    ("glob", "*.{stl,obj,ply,3mf}", &["open", "terminal-at"]),
+    ("glob", "*.{gcode,gco}", &["open", "edit", "terminal-at"]),
+    ("glob", "*.{ttf,otf,ttc}", &["open", "terminal-at"]),
     (
         "glob",
         "*.{zip,tar,tgz,gz,bz2,xz,zst,7z,rar,cbz,cbr}",
@@ -113,6 +119,10 @@ pub const RULES: &[(&str, &str, &[&str])] = &[
         "application/{json,ndjson,xml,javascript,x-shellscript,x-yaml,toml}",
         &["zed", "edit", "open", "terminal-at"],
     ),
+    ("mime", "image/*", &["open", "edit-image", "terminal-at"]),
+    ("mime", "video/*", &["open", "play", "terminal-at"]),
+    ("mime", "audio/*", &["open", "terminal-at"]),
+    ("mime", "application/pdf", &["open", "terminal-at"]),
     ("glob", "*/", &["open", "zed-workspace", "terminal-here"]),
     ("glob", "*", &["open", "terminal-at"]),
 ];
@@ -230,18 +240,32 @@ mod tests {
             names(c.openers_for("package.json", "application/json", false)),
             vec!["zed", "edit", "open", "terminal-at"]
         );
-        for (name, mime) in [
-            ("cat.png", "image/png"),
-            ("clip.mp4", "video/mp4"),
-            ("song.mp3", "audio/mpeg"),
-            ("paper.pdf", "application/pdf"),
-            ("mystery", "application/octet-stream"),
-        ] {
-            assert_eq!(
-                names(c.openers_for(name, mime, false)),
+        // Where Linux has delightviewer, the default app: a 3D model and a
+        // toolpath by name, ahead of the text rule their `text/plain` would
+        // reach, and a font; then pictures, video, sound and PDFs by type.
+        for (name, mime, openers) in [
+            ("teapot.obj", "text/plain", vec!["open", "terminal-at"]),
+            (
+                "benchy.gcode",
+                "text/plain",
+                vec!["open", "edit", "terminal-at"],
+            ),
+            ("Inter.ttf", "font/ttf", vec!["open", "terminal-at"]),
+            (
+                "cat.png",
+                "image/png",
+                vec!["open", "edit-image", "terminal-at"],
+            ),
+            ("clip.mp4", "video/mp4", vec!["open", "play", "terminal-at"]),
+            ("song.mp3", "audio/mpeg", vec!["open", "terminal-at"]),
+            ("paper.pdf", "application/pdf", vec!["open", "terminal-at"]),
+            (
+                "mystery",
+                "application/octet-stream",
                 vec!["open", "terminal-at"],
-                "{name}"
-            );
+            ),
+        ] {
+            assert_eq!(names(c.openers_for(name, mime, false)), openers, "{name}");
         }
         assert_eq!(
             names(c.openers_for("backup.tar.gz", "application/gzip", false)),
