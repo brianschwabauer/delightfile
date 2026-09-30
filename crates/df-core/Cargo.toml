@@ -61,13 +61,15 @@ regex.workspace = true
 # `platform::` — a file's identity and allocation (`meta`), the Recycle Bin
 # (`trash`, `UI_Shell`), `ReadDirectoryChangesW` with its events and waits
 # (`watch`, `IO`, `Threading`, `Security`), the job object that ends the rclone
-# daemon with us (`process`, `JobObjects`), the local clock before 1970
+# daemon with us (`process`, `JobObjects`), the unix socket that daemon
+# answers on (`socket`, `Networking_WinSock`), the local clock before 1970
 # (`time`). Pinned to the version winit 0.30.13 already compiles, so Windows
 # builds no second copy (plans/other-platforms/00-ground-rules.md §3), with
 # only the features the platform module calls.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",

@@ -21,9 +21,9 @@
 #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(unix)]
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,9 +34,9 @@ use super::wire::{
 };
 use super::{Service, Vfs, VfsConfig, VfsError, VfsPath, VfsUpdate};
 use crate::fs::{no_notifier, Kind, LinkTarget};
-use crate::tasks::TaskCtx;
 #[cfg(unix)]
-use crate::tasks::{ProgressSink, TaskFlags};
+use crate::tasks::TaskFlags;
+use crate::tasks::{ProgressSink, TaskCtx};
 
 /// Generous enough for a loaded CI box, short enough that a genuine hang fails
 /// the suite instead of hanging it.
@@ -65,15 +65,16 @@ impl TempDir {
     /// the temp dir while that leaves room in `sun_path`
     /// ([`crate::platform::socket::PATH_MAX`]) for a folder and a socket's
     /// name, under `/tmp` when it does not — macOS's `$TMPDIR` is
-    /// `/var/folders/…/T/`, 49 bytes of its 103.
-    #[cfg(unix)]
+    /// `/var/folders/…/T/`, 49 bytes of its 103. On Windows it is always
+    /// the temp folder, the user's own, which there is no `/tmp` beside; the
+    /// tests' service names are short enough to fit its socket names in.
     pub(super) fn for_socket(tag: &str) -> TempDir {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!("df-{tag}-{}-{unique}", std::process::id());
         let mut path = std::env::temp_dir().join(&name);
         // `run/` and `rclone-<pid>-<32-byte name>-<n>.sock` after it.
-        if path.as_os_str().len() + 64 > crate::platform::socket::PATH_MAX {
+        if cfg!(unix) && path.as_os_str().len() + 64 > crate::platform::socket::PATH_MAX {
             path = PathBuf::from("/tmp").join(&name);
         }
         let _ = std::fs::remove_dir_all(&path);
@@ -1289,14 +1290,12 @@ fn find_sftp_server() -> Option<PathBuf> {
 }
 
 /// A sink that counts, for asserting transfer progress actually reports.
-#[cfg(unix)]
 #[derive(Default)]
 pub(super) struct CountingSink {
     pub(super) total: AtomicU64,
     pub(super) advanced: AtomicU64,
 }
 
-#[cfg(unix)]
 impl ProgressSink for CountingSink {
     fn set_total(&self, bytes: u64, _files: u64) {
         self.total.store(bytes, Ordering::SeqCst);
@@ -1307,7 +1306,6 @@ impl ProgressSink for CountingSink {
 }
 
 /// Drain listing updates until `Done`/`Failed` for `token`, or the deadline.
-#[cfg(unix)]
 pub(super) fn collect_listing(vfs: &Vfs, token: super::VfsToken) -> Vec<VfsUpdate> {
     let deadline = Instant::now() + T;
     let mut updates = Vec::new();

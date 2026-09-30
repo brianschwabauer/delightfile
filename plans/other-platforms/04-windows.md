@@ -1078,6 +1078,41 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   of other tests (`app.rs`'s 7z, `preview/decode.rs`'s ffmpeg and bash),
   which are not the program. A tar's listing is df-core's (`archive::list`,
   bsdtar through `quiet` since W4.2). Linux: `quiet` does nothing there.
+- (finish) 2026-09-30 — W4.32, the rclone daemon's transport on Windows:
+  option (a), Windows' own `AF_UNIX`, decided by Brian (the question is out
+  of Open questions). `platform/windows/socket.rs` is a WinSock stream socket
+  (`WSASocketW` not inherited by children, `connect` with a `SOCKADDR_UN`
+  holding the path's UTF-8 bytes, as rclone's Go hands it over, `select`
+  with the timeout before each `recv` and `send`), owned by std's
+  `OwnedSocket` so its drop is the one `closesocket`. The socket's
+  directory is
+  `%LOCALAPPDATA%\delightfile\run`, made with the ACL it inherits (the user's,
+  SYSTEM's and the administrators'), a link or junction in its place
+  refused; no DACL of our own. Where the socket may go became a contract
+  function, `platform::socket::dirs(uid)`: on Unix the three places
+  `vfs::rclone::socket_path` listed, moved there unchanged, so Linux looks
+  where it looked; on Windows that one folder. `vfs/http.rs`'s client is
+  unchanged; its socket tests serve on a test-only
+  `platform::socket::Listener` (`UnixListener` on Unix) and run on Windows
+  too. rclone's tests
+  (`vfs/rclone_tests.rs`) lose their module-wide `cfg(unix)`; `find_rclone`
+  looks for `rclone.exe` there; the three that reach for Unix itself keep
+  `cfg(unix)`. The killed daemon has a Windows twin of the same name (its
+  pid from rclone's `core/pid`, ended by `taskkill /F`). The daemon dying
+  with its thread has none: the job object ties the daemon to the process
+  on Windows (W4.31). The swept partials have none either: the test needs
+  a source rclone can stat and not read, and on the runner rclone copied
+  both a file held open with nothing shared and one whose ACL denied
+  everyone its data (`icacls /deny *S-1-1-0:(RD)`), which the test process
+  itself could not read. Found on the way: `SO_RCVTIMEO` did not end a read
+  on an `AF_UNIX` socket there (a test waited past a minute), so the socket
+  waits in `select` before each `recv` and `send`; `FlushFileBuffers`
+  refuses a handle opened only to read, so a download is flushed through
+  `platform::fs::sync_file`, which on Windows opens it to write (on Unix
+  the read-only `fsync` the download had, moved). The Windows job installs
+  rclone.portable 1.75.1 from Chocolatey, the real `rclone.exe` ahead of
+  Chocolatey's shim on `PATH`, and shows rclone serving on a unix socket
+  before the tests run.
 
 ## Open questions
 
@@ -1085,26 +1120,12 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   (W4.16); decide after the first ten runs.
 - Whether `wt.exe` is a safe default terminal (`05-defaults-and-config.md` §2): it
   is absent on a fresh Windows 10 LTSC.
-- (df-core) W4.32, the rclone daemon's transport on Windows. (a) **Windows'
-  own `AF_UNIX`**: rclone is Go, which serves `unix://` addresses on Windows
-  10 1803 and later (to confirm on the runner), so the daemon's command line
-  and `--rc-no-auth` stay as they are, and the directory's privacy is the
-  authentication, as on Unix. Costs: a hand-declared WinSock binding in
-  `platform/windows/socket.rs` (`WSAStartup`, `socket(AF_UNIX)`, `connect`
-  with a `sockaddr_un`, `send`/`recv`, `SO_RCVTIMEO`/`SO_SNDTIMEO`,
-  `closesocket` — `windows-sys` has them under `Win32_Networking_WinSock`),
-  a `Stream` type wrapping the socket, and `private_dir` as a DACL granting
-  this user alone (`SetNamedSecurityInfoW`), or a check that the directory is
-  under `%LOCALAPPDATA%`, whose inherited ACL is already the user's, SYSTEM's
-  and the administrators'. `vfs/http.rs` unchanged. (b) **Loopback TCP with
-  a password**: `--rc-addr 127.0.0.1:0`, `--rc-user`/`--rc-pass` given
-  through rclone's environment (`RCLONE_RC_USER`, `RCLONE_RC_PASS`) so the
-  password is not on a command line, and `std`'s `TcpStream`. Costs: the
-  port rclone chose read from its log line ("Serving remote control on
-  http://127.0.0.1:NNNN/") by the stderr reader, or a free port picked first
-  and raced for; a random password with no RNG crate (`BCryptGenRandom`
-  through `windows-sys`); `vfs/http.rs` sending `Authorization: Basic` (a
-  base64 encoder by hand) where Unix sends none; and a port every local user
-  can knock on, answered only with the password. (a) keeps one security model
-  on every target; (b) keeps Windows' code in `std`. The runner has no rclone
-  either way: the done-when needs the workflow to install it.
+- (finish) W4.32: a daemon dropped while a transfer runs is ended on Windows
+  by `TerminateProcess` (`platform::process::terminate`), which gives rclone
+  no chance to remove the `.partial` it was writing, where Unix's `SIGTERM`
+  does (`a_daemon_dropped_mid_copy_cleans_up_after_itself`, Unix only).
+  Options: (a) ask the daemon to stop over its socket (`core/quit`) and wait
+  the same `STOP_GRACE` before `terminate`, on every platform or on Windows
+  alone; (b) sweep the destination's `.partial` after the drop as a failed
+  download does (it knows the name pattern, not which transfer was live);
+  (c) accept it. Until decided, (c).

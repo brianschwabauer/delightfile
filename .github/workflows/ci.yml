@@ -278,6 +278,58 @@ jobs:
           Write-Output "LIBCLANG_PATH=$llvm"
           Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm"
 
+      # W4.32 in 04-windows.md: rclone, pinned, for df-core's rclone tests
+      # (vfs/rclone_tests.rs), which skip where there is none on PATH. The
+      # package that holds the program is rclone.portable (`rclone` is a
+      # package that only depends on it). Chocolatey's shim on PATH starts
+      # the real rclone.exe as a child of its own, and a test that ends the
+      # daemon it started would end the shim and leave rclone running, so the
+      # real program's folder goes on PATH ahead of the shim.
+      - name: rclone (Chocolatey, pinned)
+        shell: pwsh
+        run: |
+          choco install rclone.portable --version 1.75.1 --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco could not install rclone.portable 1.75.1" }
+          $exe = Get-ChildItem "$env:ChocolateyInstall\lib\rclone.portable" -Recurse -Filter rclone.exe | Select-Object -First 1
+          if (-not $exe) { throw "no rclone.exe under $env:ChocolateyInstall\lib\rclone.portable" }
+          & $exe.FullName version
+          Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
+
+      # W4.32's transport is Windows' own AF_UNIX: rclone serves its remote
+      # control on a unix socket at a drive path, spelled as df-core spells it
+      # (`unix://` and the path), and a client that is not rclone's gets its
+      # answer there. What this step shows is rclone's half alone, so that a
+      # failure of the tests below says whose it is.
+      - name: rclone serves a unix socket
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'rclone-socket'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $sock = Join-Path $dir 'probe.sock'
+          $conf = Join-Path $dir 'rclone.conf'
+          $log = Join-Path $dir 'rcd.log'
+          Set-Content -Path $conf -Value ''
+          $rcd = Start-Process rclone -PassThru -NoNewWindow -RedirectStandardError $log -ArgumentList @('rcd', '--rc-addr', "unix://$sock", '--rc-no-auth', '--config', $conf, '-v')
+          try {
+            for ($i = 0; $i -lt 100 -and -not (Test-Path $sock); $i++) { Start-Sleep -Milliseconds 100 }
+            if (-not (Test-Path $sock)) { throw "rclone made no socket at $sock" }
+            $client = [System.Net.Sockets.Socket]::new([System.Net.Sockets.AddressFamily]::Unix, [System.Net.Sockets.SocketType]::Stream, [System.Net.Sockets.ProtocolType]::Unspecified)
+            $client.ReceiveTimeout = 10000
+            $client.Connect([System.Net.Sockets.UnixDomainSocketEndPoint]::new($sock))
+            $body = '{"probe":"W4.32"}'
+            $request = "POST /rc/noop HTTP/1.1`r`nHost: localhost`r`nContent-Type: application/json`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n$body"
+            [void]$client.Send([System.Text.Encoding]::ASCII.GetBytes($request))
+            $buffer = New-Object byte[] 65536
+            $answer = ''
+            while (($n = $client.Receive($buffer)) -gt 0) { $answer += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $n) }
+            $client.Close()
+            Write-Output $answer
+            if ($answer -notmatch '^HTTP/1\.1 200' -or $answer -notmatch 'W4\.32') { throw "rclone did not answer rc/noop on $sock" }
+          } finally {
+            Stop-Process -Id $rcd.Id -ErrorAction SilentlyContinue
+            Get-Content $log -ErrorAction SilentlyContinue
+          }
+
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

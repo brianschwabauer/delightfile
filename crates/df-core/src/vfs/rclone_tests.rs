@@ -13,7 +13,13 @@
 //!    daemon, and only the provider at the far end is the local disk rather
 //!    than somebody's cloud. Each daemon is given a scratch `--config`, so the
 //!    user's `rclone.conf` is never opened. Skipped with a printed reason where
-//!    `rclone` is not on `$PATH`.
+//!    `rclone` is not on `$PATH`. They run on Windows too, over its own
+//!    `AF_UNIX` (W4.32), but for three that reach for Unix itself: the
+//!    killed daemon (a shell wrapper and `kill -9`) has a Windows twin; the
+//!    daemon dying with its thread has none, a job object tying it to the
+//!    process there (W4.31); and the swept partials have none, since the
+//!    runner's rclone copied a file held open unshared and one whose ACL
+//!    denied everyone its data, so nothing made its copy fail there.
 
 #![allow(clippy::unwrap_used)] // tests: panicking on setup failure is the point
 
@@ -316,11 +322,13 @@ fn unsupported_is_a_sentence_and_not_a_hang_up() {
 
 // ── The hermetic integration tests ──────────────────────────────────────────
 
-/// `rclone` on `$PATH`, the way the app will find it.
+/// `rclone` on `$PATH`, the way the app will find it — `rclone.exe` on
+/// Windows ([`crate::platform::process::candidates`]).
 pub(super) fn find_rclone() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    let names = crate::platform::process::candidates("rclone");
     std::env::split_paths(&path)
-        .map(|dir| dir.join("rclone"))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|candidate| candidate.is_file())
 }
 
@@ -373,6 +381,7 @@ pub(super) fn sockets_in(scratch: &TempDir) -> Vec<PathBuf> {
 
 /// Whether process `pid` has exited: gone from `/proc`, or a zombie (`Z`)
 /// waiting for a parent that will never reap it.
+#[cfg(unix)]
 fn has_exited(pid: u32) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return true;
@@ -888,6 +897,7 @@ fn a_daemon_that_cannot_start_says_why() {
 
 /// Kill the daemon out from under a live vfs: one operation fails with a
 /// connection error, and the next starts a fresh daemon and succeeds.
+#[cfg(unix)]
 #[test]
 fn a_killed_daemon_is_replaced_on_the_next_request() {
     let Some(rclone) = find_rclone() else {
@@ -931,6 +941,56 @@ fn a_killed_daemon_is_replaced_on_the_next_request() {
         .status()
         .unwrap();
     assert!(killed.success());
+
+    let deadline = Instant::now() + T;
+    loop {
+        match vfs.stat(&at, true, &ctx) {
+            Err(e) if e.is_connection_fatal() => break,
+            Ok(_) => {}
+            Err(e) => panic!("expected a connection-fatal error, got {e}"),
+        }
+        assert!(Instant::now() < deadline, "the death was never noticed");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let attrs = vfs
+        .stat(&at, true, &ctx)
+        .expect("a fresh daemon answers the next request");
+    assert_eq!(attrs.size, Some(3));
+    drop(vfs);
+    assert!(sockets_in(&scratch).is_empty());
+}
+
+/// The same on Windows, where there is no shell to write the pid down: the
+/// daemon says its own (`core/pid`, over its socket), and `taskkill /F` ends
+/// it as `kill -9` does.
+#[cfg(windows)]
+#[test]
+fn a_killed_daemon_is_replaced_on_the_next_request() {
+    let Some(rclone) = find_rclone() else {
+        eprintln!("skipping a_killed_daemon_is_replaced_on_the_next_request: no rclone on $PATH");
+        return;
+    };
+    let remote = TempDir::new("rclone-respawn");
+    let scratch = TempDir::for_socket("rclone-respawn-scratch");
+    remote.file("still-here.txt", b"yes");
+    let name = unique_name("rs");
+    let vfs = vfs_over(local_service(&name, &remote, &scratch, &rclone));
+    let ctx = TaskCtx::detached();
+    let at = VfsPath::rclone(&name, "still-here.txt");
+
+    assert!(vfs.stat(&at, true, &ctx).is_ok());
+    let socket = sockets_in(&scratch).pop().expect("the daemon's socket");
+    let answer = super::http::post(&socket, "core/pid", "{}", T).unwrap();
+    let pid = std::str::from_utf8(&answer.body)
+        .ok()
+        .and_then(|text| super::json::Json::parse(text).ok())
+        .and_then(|reply| reply.get("pid").and_then(super::json::Json::as_i64))
+        .expect("rclone says its pid");
+    let killed = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output()
+        .unwrap();
+    assert!(killed.status.success(), "{killed:?}");
 
     let deadline = Instant::now() + T;
     loop {
@@ -1095,6 +1155,12 @@ fn a_listing_nobody_wants_is_stopped_rather_than_waited_out() {
 ///
 /// The exited daemon is left a zombie: its `Child` was forgotten, so nothing
 /// in this process will reap it, and it goes when the test binary does.
+///
+/// Unix only: on Windows the daemon is tied to delightfile's *process*, by
+/// the job object its `Daemon` holds (W4.31), so a thread that ends without
+/// dropping it leaves the daemon running until the process ends — which is
+/// what `platform::windows::process`'s own test shows.
+#[cfg(unix)]
 #[test]
 fn a_daemon_dies_with_the_thread_that_spawned_it() {
     let Some(rclone) = find_rclone() else {
@@ -1128,6 +1194,11 @@ fn a_daemon_dies_with_the_thread_that_spawned_it() {
 /// A download that fails removes the `.partial` rclone left beside its
 /// destination — and only that: the user's own files that merely look alike
 /// stay.
+///
+/// Unix only: the failure is a file whose mode lets rclone stat it and not
+/// read it, and on the Windows runner neither a file held open unshared nor
+/// one whose ACL denies its data stopped rclone's copy (see the module note).
+#[cfg(unix)]
 #[test]
 fn a_failed_download_sweeps_up_its_own_partials_and_nothing_else() {
     use std::os::unix::fs::PermissionsExt;

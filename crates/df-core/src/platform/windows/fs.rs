@@ -66,6 +66,16 @@ pub fn sync_dir(_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Flush a file another program wrote (`FlushFileBuffers`), through a
+/// handle opened for writing: the call refuses one opened only to read,
+/// with access denied, where Unix's `fsync` takes either.
+pub fn sync_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .and_then(|file| file.sync_all())
+}
+
 /// Write all of `data` at `offset`: `seek_write` until it is all out, since a
 /// single call may write less.
 pub fn write_all_at(file: &File, mut data: &[u8], mut offset: u64) -> std::io::Result<()> {

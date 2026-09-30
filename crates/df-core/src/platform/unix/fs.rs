@@ -86,6 +86,12 @@ pub fn sync_dir(dir: &Path) -> Result<()> {
     }
 }
 
+/// `fsync(2)` a file another program wrote: open it read-only, flush,
+/// close.
+pub fn sync_file(path: &Path) -> std::io::Result<()> {
+    File::open(path).and_then(|file| file.sync_all())
+}
+
 /// Write all of `data` at `offset`, without moving the file's cursor.
 pub fn write_all_at(file: &File, data: &[u8], offset: u64) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
