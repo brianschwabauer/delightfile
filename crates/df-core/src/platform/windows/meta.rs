@@ -8,33 +8,40 @@
 //! where the answer decides something: [`crate::platform::fs::same_file`], and
 //! the du walk's hard-link dedupe for regular files ([`maybe_linked`]).
 //!
+//! A regular file's allocation is behind its name too: [`blocks_bytes`] asks
+//! `GetCompressedFileSizeW`, which answers what a compressed or sparse file
+//! occupies rather than its length — what `st_blocks` means on Unix.
+//!
 //! The rest is answered from the `Metadata` alone: no device or inode from it
 //! (a boundary check sees one device, which is right, since the walks never
 //! follow the reparse points a mounted volume hangs from), one link, a mode made
-//! up from the file type and the read-only flag, no owner, the size for the
-//! blocks (W4.35 reads the allocation), and the last write for the change time.
+//! up from the file type and the read-only flag, no owner, and the last write
+//! for the change time.
 //!
 //! The `unsafe` calls are `GetFileInformationByHandle` and
 //! `GetFileInformationByHandleEx` (a link's reparse tag, for
 //! [`crate::platform::fs::is_junction`]), each on a handle this module opened,
 //! still owns, and closes by dropping it; the struct each fills is a local of
-//! the right type and size, read only when the call says it succeeded.
+//! the right type and size, read only when the call says it succeeded. And
+//! `GetCompressedFileSizeW`, on a NUL-terminated local name, whose error is
+//! told from a size by the last error, cleared before the call.
 
-#![allow(unsafe_code)] // GetFileInformationByHandle(Ex), on handles owned here
+#![allow(unsafe_code)] // GetFileInformationByHandle(Ex), GetCompressedFileSizeW
 
 use std::ffi::OsStr;
 use std::fs::Metadata;
 use std::io;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{SetLastError, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    FileAttributeTagInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FileAttributeTagInfo, GetCompressedFileSizeW, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_HIDDEN,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, INVALID_FILE_SIZE,
 };
 
 /// What names one file on one volume, and how many names it has: two paths
@@ -178,10 +185,34 @@ pub fn gid(_meta: &Metadata) -> u32 {
     0
 }
 
-/// The size, for want of the allocation W4.35 reads with
-/// `GetCompressedFileSizeW`.
-pub fn blocks_bytes(meta: &Metadata) -> u64 {
-    meta.len()
+/// The bytes a regular file occupies on disk, by `GetCompressedFileSizeW` on
+/// the name `path` builds: less than its length when it is compressed or
+/// sparse. Anything else — a directory, a link — and a file the call cannot
+/// answer for (gone meanwhile, or a path past `MAX_PATH`) count their length.
+pub fn blocks_bytes(meta: &Metadata, path: impl FnOnce() -> PathBuf) -> u64 {
+    if !meta.is_file() {
+        return meta.len();
+    }
+    allocated(&path()).unwrap_or(meta.len())
+}
+
+/// `GetCompressedFileSizeW` of `path`, or `None` when it fails.
+fn allocated(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut high = 0u32;
+    // SAFETY: `SetLastError` takes an integer. `name` is NUL-terminated and
+    // `high` a local; both outlive the call, which writes only `high`.
+    let low = unsafe {
+        SetLastError(0);
+        GetCompressedFileSizeW(name.as_ptr(), &mut high)
+    };
+    // All ones is a size's low word as well as the failure: the last error
+    // tells them apart.
+    if low == INVALID_FILE_SIZE && io::Error::last_os_error().raw_os_error() != Some(0) {
+        return None;
+    }
+    Some((u64::from(high) << 32) | u64::from(low))
 }
 
 /// The last write, as seconds and nanoseconds since the epoch: Windows keeps
@@ -237,6 +268,56 @@ mod tests {
         assert_ne!(of(&a).ino, of(&other).ino);
         assert_eq!(of(&other).nlink, 1);
         assert!(of(t.path()).ino != 0, "a directory opens too");
+    }
+
+    /// `FSCTL_SET_SPARSE`, from `winioctl.h`.
+    const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+
+    /// Mark `file` sparse, so the length set after it allocates nothing.
+    fn set_sparse(file: &std::fs::File) -> bool {
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        let mut returned = 0u32;
+        // SAFETY: the handle is `file`'s, open for writing for the length of
+        // the call; no input or output buffer, and `returned` a local.
+        let ok = unsafe {
+            DeviceIoControl(
+                file.as_raw_handle() as HANDLE,
+                FSCTL_SET_SPARSE,
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        ok != 0
+    }
+
+    /// A sparse file of eight megabytes occupies next to none of them, and
+    /// the du walk's total says so where its apparent size does not.
+    #[test]
+    fn a_sparse_file_occupies_less_than_its_length() {
+        let t = TempTree::new("win-sparse");
+        let path = t.join("sparse.img");
+        let file = std::fs::File::create(&path).unwrap();
+        assert!(set_sparse(&file), "{}", io::Error::last_os_error());
+        file.set_len(8 * 1024 * 1024).unwrap();
+        drop(file);
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(meta.len(), 8 * 1024 * 1024);
+        let blocks = blocks_bytes(&meta, || path.clone());
+        assert!(blocks < meta.len(), "{blocks} of {}", meta.len());
+
+        let totals = crate::du::walk_blocking(t.path(), &crate::du::DuOptions::default()).unwrap();
+        assert!(
+            totals.total_bytes < totals.apparent_bytes,
+            "{} on disk, {} on paper",
+            totals.total_bytes,
+            totals.apparent_bytes
+        );
+        let dir = std::fs::symlink_metadata(t.path()).unwrap();
+        let _ = blocks_bytes(&dir, || unreachable!("a directory's path is not asked for"));
     }
 
     #[test]

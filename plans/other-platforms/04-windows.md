@@ -680,6 +680,12 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   `ready()` refuses with `Unsupported("Permissions")` and the chmod walk is
   never reached. How df-app presents the absence (the command's refusal, the
   menu) is the df-app branch's.
+- (df-core) 2026-09-29 — W4.35: `blocks_bytes` takes the metadata and a
+  closure that builds the path, `blocks_bytes(&meta, || path)`, rather than
+  the path itself as the task wrote. Reason: the du walk has no path for a
+  file until it builds one (`DirEntry::path` allocates), and building it for
+  every file would be a cost on Linux for an argument Unix never reads; with
+  the closure only Windows builds it, and only for a regular file.
 
 ## Open questions
 

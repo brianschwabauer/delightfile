@@ -32,7 +32,9 @@ fn apparent_of(path: &Path) -> u64 {
 }
 
 fn blocks_of(path: &Path) -> u64 {
-    crate::platform::meta::blocks_bytes(&std::fs::symlink_metadata(path).unwrap())
+    crate::platform::meta::blocks_bytes(&std::fs::symlink_metadata(path).unwrap(), || {
+        path.to_path_buf()
+    })
 }
 
 /// A tree whose every byte is accounted for:

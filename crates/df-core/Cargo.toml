@@ -51,7 +51,8 @@ regex.workspace = true
 
 # Windows: the calls std keeps unstable or does not have — first
 # `GetFileInformationByHandle`, whose volume serial and file index say two
-# names are one file (`platform::meta::identity`); `SHFileOperationW`, the
+# names are one file (`platform::meta::identity`), and `GetCompressedFileSizeW`,
+# what a file occupies (`platform::meta::blocks_bytes`); `SHFileOperationW`, the
 # Recycle Bin (`platform::trash`); the local clock before 1970
 # (`platform::time`). Pinned to the version
 # winit 0.30.13 already compiles, so Windows builds no second copy
@@ -61,6 +62,7 @@ regex.workspace = true
 windows-sys = { version = "0.52.0", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_Time",
     "Win32_UI_Shell",
 ] }

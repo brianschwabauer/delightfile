@@ -429,9 +429,11 @@ pub fn crosses_boundary(root_dev: u64, child_dev: u64, cross_filesystems: bool) 
     !cross_filesystems && root_dev != child_dev
 }
 
-/// Block usage and apparent size of one already-`stat`ed thing.
-fn sizes_of(meta: &std::fs::Metadata) -> (u64, u64) {
-    (crate::platform::meta::blocks_bytes(meta), meta.len())
+/// Block usage and apparent size of one already-`stat`ed thing. `path`
+/// builds its path, for a platform that reads the allocation by name
+/// ([`crate::platform::meta::blocks_bytes`]); on Unix it is never called.
+fn sizes_of(meta: &std::fs::Metadata, path: impl FnOnce() -> PathBuf) -> (u64, u64) {
+    (crate::platform::meta::blocks_bytes(meta, path), meta.len())
 }
 
 struct Frame {
@@ -528,7 +530,7 @@ pub fn walk_reusing(
     let root_dev = crate::platform::meta::dev(&root_meta);
     let root_reader = std::fs::read_dir(root).map_err(|e| DfError::io(root, e))?;
 
-    let (blocks, apparent) = sizes_of(&root_meta);
+    let (blocks, apparent) = sizes_of(&root_meta, || root.to_path_buf());
     let mut stack = vec![Frame {
         dir: root.to_path_buf(),
         depth: 0,
@@ -627,7 +629,7 @@ pub fn walk_reusing(
         if meta.is_dir() {
             let path = item.path();
             let depth = stack.last().map(|f| f.depth + 1).unwrap_or(1);
-            let (blocks, apparent) = sizes_of(&meta);
+            let (blocks, apparent) = sizes_of(&meta, || path.clone());
             let own = DuTotals {
                 total_bytes: blocks,
                 apparent_bytes: apparent,
@@ -685,7 +687,7 @@ pub fn walk_reusing(
             continue;
         }
 
-        let (blocks, apparent) = sizes_of(&meta);
+        let (blocks, apparent) = sizes_of(&meta, || item.path());
         // Asked in two steps because on Windows the link count is behind a
         // handle: `maybe_linked` is free, and only a file it cannot rule out
         // pays for `identity`.

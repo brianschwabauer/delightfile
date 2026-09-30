@@ -7,16 +7,17 @@
 //! here, so a target whose metadata has no such fields (Windows) answers with
 //! the closest thing it has rather than failing to compile.
 //!
-//! [`identity`] and [`maybe_linked`] take the path as well as the `stat`
-//! because Windows keeps a file's identity in a handle, not in its metadata;
-//! here the `stat` has it all, and the path is not touched.
+//! [`identity`] takes the path as well as the `stat`, and [`blocks_bytes`] a
+//! way to build it, because Windows keeps a file's identity in a handle and
+//! its allocation behind its name, not in its metadata; here the `stat` has
+//! it all, and the path is not touched.
 
 use std::ffi::OsStr;
 use std::fs::Metadata;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// What names one file on one device, and how many names it has: two paths
 /// with the same `dev` and `ino` are the same file.
@@ -91,8 +92,10 @@ pub fn gid(meta: &Metadata) -> u32 {
 }
 
 /// The bytes the file occupies on disk: `st_blocks` in the 512-byte unit
-/// every Unix reports it in ([`crate::du::BLOCK_UNIT`]).
-pub fn blocks_bytes(meta: &Metadata) -> u64 {
+/// every Unix reports it in ([`crate::du::BLOCK_UNIT`]). `path` builds the
+/// file's path for a platform that reads the allocation by name (Windows);
+/// the `stat` has it here, so it is never called and no path is built.
+pub fn blocks_bytes(meta: &Metadata, _path: impl FnOnce() -> PathBuf) -> u64 {
     meta.blocks().saturating_mul(crate::du::BLOCK_UNIT)
 }
 
