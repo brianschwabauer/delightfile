@@ -1065,6 +1065,19 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   and macOS are unchanged: the new path is taken only where `SYSTEM_BIN` is
   `Some`, and the gate refused only a home trash that was `Unsupported`,
   which neither has.
+- (finish) 2026-09-30 — W4.38: through `df_core::platform::process::quiet`
+  go 7-Zip's two listings in `preview/listing.rs` (`7z x -so` into the tar
+  reader, `7z l -ba -slt`), the fixture maker of that file's tests, which
+  the task names (`:930` then), and fd and rg behind the search panel
+  (`search::build`), which a grep for `Command::new` does not find, that
+  module naming `Command` `Process`. Left as they are: the openers
+  (`platform/{unix,windows}/open.rs`) and a new window (`window.rs`), as the
+  task says; the typed line, under `CREATE_NO_WINDOW` since W4.3; what only
+  Linux's and macOS's own modules start (`gio`, `wl-copy`, `wl-paste`, `sh`,
+  the portal's window, `ps`), which never runs on Windows; and the fixtures
+  of other tests (`app.rs`'s 7z, `preview/decode.rs`'s ffmpeg and bash),
+  which are not the program. A tar's listing is df-core's (`archive::list`,
+  bsdtar through `quiet` since W4.2). Linux: `quiet` does nothing there.
 
 ## Open questions
 

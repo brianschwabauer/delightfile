@@ -802,6 +802,9 @@ impl Search {
 /// rather than a thing buried in a spawn.
 fn build(mode: Mode, query: &str, hidden: bool) -> Process {
     let mut process = Process::new(mode.binary());
+    // fd and rg are console programs, run with no window to show them: on
+    // Windows each would otherwise flash a console of its own (W4.38).
+    df_core::platform::process::quiet(&mut process);
     match mode {
         Mode::Names => {
             // `--color=never` because we parse this, and `--` so a query
