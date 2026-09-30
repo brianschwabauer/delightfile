@@ -10387,6 +10387,15 @@ impl App {
         if self.tab().archive.is_some() && crate::archive::inert_in_archive(command) {
             return Some("Archives are read-only — press e to extract");
         }
+        // A file on this machine has no POSIX bits to set where the platform
+        // gives it none (Windows, W4.29), so the card is not offered for one;
+        // a server's file still has them.
+        if command == Command::Permissions
+            && !crate::platform::POSIX_PERMISSIONS
+            && self.tab().remote.is_none()
+        {
+            return Some("Permissions can't be changed on this platform");
+        }
         // A server has permissions and `SETSTAT` sets them; a bucket or a
         // drive has none that rclone can reach, so the card is not offered
         // there at all rather than put up to fail on Apply.
@@ -22396,6 +22405,27 @@ mod tests {
         app.run(Command::Trash, 10, now);
         assert_eq!(toast_text(&app), refusal);
         assert!(app.files.join("a.txt").exists(), "d deleted nothing");
+    }
+
+    /// `C` over a file on this machine is refused where the platform gives a
+    /// file no POSIX bits (Windows, W4.29), in one sentence, and the card
+    /// does not open; everywhere else the gate lets it through.
+    #[test]
+    fn permissions_are_refused_where_a_file_has_none() {
+        let mut app = Fixture::new("no-posix", &["a.txt"]);
+        let now = Instant::now();
+        let refusal = app.refusal(Command::Permissions);
+        if cfg!(windows) {
+            assert_eq!(
+                refusal,
+                Some("Permissions can't be changed on this platform")
+            );
+            app.run(Command::Permissions, 10, now);
+            assert_eq!(toast_text(&app), refusal);
+            assert!(app.dialog.is_none(), "no card opened");
+        } else {
+            assert_eq!(refusal, None);
+        }
     }
 
     /// `u` after a trash that went to Windows' Recycle Bin says to restore it

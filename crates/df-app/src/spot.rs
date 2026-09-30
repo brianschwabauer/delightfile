@@ -177,6 +177,11 @@ pub struct Facts {
     /// The file's tags, as the row read them at scan time
     /// ([`df_core::fs::tags`]).
     pub tags: Vec<String>,
+    /// Whether the file has an owner and POSIX permission bits to show and
+    /// to change: every file on Linux and macOS, and a server's anywhere;
+    /// none on Windows' own drives, where the card has neither row
+    /// (`plans/other-platforms/04-windows.md` W4.29).
+    pub posix: bool,
 }
 
 impl Facts {
@@ -204,6 +209,7 @@ impl Facts {
             hidden: entry.is_hidden,
             ignored: false,
             tags: entry.tags.clone(),
+            posix: crate::platform::POSIX_PERMISSIONS || crate::remote::is_remote(&entry.path),
         }
     }
 }
@@ -279,19 +285,21 @@ pub fn rows(facts: &Facts) -> Vec<Row> {
     if facts.btime.is_some() {
         rows.push(Row::text("Created", long_stamp(facts.btime)));
     }
-    rows.push(Row::text(
-        "Owner",
-        format!(
-            "{} · {}:{}",
-            df_core::fs::owner::owner_label(facts.uid, facts.gid),
-            facts.uid,
-            facts.gid
-        ),
-    ));
-    rows.push(Row {
-        label: "Permissions",
-        value: Value::Permissions,
-    });
+    if facts.posix {
+        rows.push(Row::text(
+            "Owner",
+            format!(
+                "{} · {}:{}",
+                df_core::fs::owner::owner_label(facts.uid, facts.gid),
+                facts.uid,
+                facts.gid
+            ),
+        ));
+        rows.push(Row {
+            label: "Permissions",
+            value: Value::Permissions,
+        });
+    }
     if let Some(target) = &facts.link_target {
         rows.push(Row::text(
             "Links to",
@@ -1458,6 +1466,7 @@ mod tests {
             hidden: false,
             ignored: false,
             tags: Vec::new(),
+            posix: true,
         }
     }
 
@@ -1487,6 +1496,27 @@ mod tests {
             size.value,
             Value::Text("1.0 MB · 1,048,577 bytes".to_string())
         );
+    }
+
+    /// A file with no owner and no permission bits — one on a Windows
+    /// drive — has neither row, and nothing on the card edits a mode; a
+    /// local file there is such a file, a server's is not (W4.29).
+    #[test]
+    fn a_file_with_no_posix_permissions_has_no_owner_or_permissions_rows() {
+        let facts = Facts {
+            posix: false,
+            ..facts()
+        };
+        let labels: Vec<&str> = rows(&facts).iter().map(|r| r.label).collect();
+        assert!(
+            !labels.contains(&"Owner") && !labels.contains(&"Permissions"),
+            "{labels:?}"
+        );
+        let tree = df_core::test_support::TempTree::new("spot-posix");
+        let mut local = df_core::fs::Entry::read(tree.file("notes.md", b"x")).expect("read");
+        assert_eq!(Facts::from_entry(&local).posix, !cfg!(windows));
+        local.path = PathBuf::from("sftp://box/srv/notes.md");
+        assert!(Facts::from_entry(&local).posix, "a server's file has both");
     }
 
     #[test]

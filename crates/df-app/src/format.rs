@@ -17,9 +17,17 @@ use df_core::config::LineMode;
 use df_core::fs::Entry;
 
 /// What a row's second column says.
+///
+/// A file with no owner and no POSIX bits — one on a Windows drive (W4.29) —
+/// says `ro` or `rw` for its read-only attribute, and `h` after it when it
+/// is hidden, under Permissions, and nothing under Owner; a server's file
+/// says what the server does anywhere.
 pub fn linemode_text(entry: &Entry, mode: LineMode) -> String {
+    let posix = crate::platform::POSIX_PERMISSIONS || crate::remote::is_remote(&entry.path);
     match mode {
         LineMode::Size => size_text(entry),
+        LineMode::Permissions if !posix => attributes_text(entry),
+        LineMode::Owner if !posix => UNKNOWN_SIZE.to_string(),
         LineMode::Permissions => entry.permissions_string(),
         // A hole is normal here, not an error: `btime` is absent on ext4
         // without a big enough inode and on most network mounts (see
@@ -32,6 +40,17 @@ pub fn linemode_text(entry: &Entry, mode: LineMode) -> String {
         // name say which colours a file wears, and this says the rest.
         LineMode::Tags => entry.tags.join(", "),
         LineMode::None => String::new(),
+    }
+}
+
+/// `ro`/`rw`, from the write bits a platform with only a read-only
+/// attribute sets from it, and ` h` for a hidden file.
+fn attributes_text(entry: &Entry) -> String {
+    let access = if entry.mode & 0o222 == 0 { "ro" } else { "rw" };
+    if entry.is_hidden {
+        format!("{access} h")
+    } else {
+        access.to_string()
     }
 }
 
@@ -232,6 +251,28 @@ mod tests {
         // The top unit does not run out: an absurd number stays in PB rather
         // than indexing past the table.
         assert!(human_size(u64::MAX).ends_with(" PB"));
+    }
+
+    /// A file on a Windows drive has no owner and no POSIX bits (W4.29): its
+    /// permissions column says `rw` or `ro`, and `h` when it is hidden, and
+    /// its owner column nothing; elsewhere they are the mode string and the
+    /// owner as ever.
+    #[test]
+    fn a_file_with_no_posix_bits_says_its_attributes() {
+        let tree = df_core::test_support::TempTree::new("linemode-attrs");
+        let mut entry = Entry::read(tree.file("a.txt", b"x")).expect("read");
+        let permissions = linemode_text(&entry, LineMode::Permissions);
+        let owner = linemode_text(&entry, LineMode::Owner);
+        if cfg!(windows) {
+            assert_eq!(permissions, "rw");
+            assert_eq!(owner, UNKNOWN_SIZE);
+            entry.mode &= !0o222;
+            entry.is_hidden = true;
+            assert_eq!(linemode_text(&entry, LineMode::Permissions), "ro h");
+        } else {
+            assert_eq!(permissions, entry.permissions_string());
+            assert_eq!(owner, entry.owner_label());
+        }
     }
 
     /// The three things a directory row can say, and the order they are said

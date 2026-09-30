@@ -6,6 +6,10 @@
 /// is an unknown option and `--help` does not mention it.
 pub const HAS_PORTAL: bool = false;
 
+/// Whether a file on this machine has an owner and POSIX permission bits to
+/// show and to change: every one does.
+pub const POSIX_PERMISSIONS: bool = true;
+
 pub mod appearance;
 pub mod cli;
 pub mod clipboard;
