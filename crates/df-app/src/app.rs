@@ -5006,6 +5006,13 @@ impl App {
 
     /// `D`, remote `d` and the two trash-view purges, all of which ask first.
     fn open_confirm(&mut self, kind: ConfirmKind, now: Instant) {
+        // Where the trash is the system's own bin, never on screen here
+        // (Windows' Recycle Bin, W4.8), "Empty trash" is about the bin, which
+        // is counted rather than listed.
+        if kind == ConfirmKind::EmptyTrash && crate::platform::trash::SYSTEM_BIN.is_some() {
+            self.open_empty_bin(now);
+            return;
+        }
         // "Empty trash" is about the whole trash, not about what is selected —
         // and it is the one confirm whose body has to be able to say how many
         // things it is destroying even when nothing is highlighted.
@@ -5036,6 +5043,58 @@ impl App {
         }
         self.dialog = Some(Dialog::Confirm(confirm));
         self.sync_context();
+    }
+
+    /// "Empty trash" where the trash is the system's bin (W4.8): the card
+    /// says how many items the bin holds and what they weigh, as the bin
+    /// counts them ([`df_core::platform::trash::bin_size`]), since it has no
+    /// names to list. Asked here, on the window's thread, as the trash view
+    /// reads its listing: one shell call over the drives' bins.
+    fn open_empty_bin(&mut self, now: Instant) {
+        match df_core::platform::trash::bin_size() {
+            Ok(bin) if bin.items == 0 => {
+                self.toasts.notice("The Recycle Bin is already empty", now)
+            }
+            Ok(bin) => {
+                let mut confirm = Confirm::new(ConfirmKind::EmptyBin, Vec::new());
+                confirm.counted = Some(bin.items);
+                confirm.size = Some(crate::folders::Size {
+                    bytes: bin.bytes,
+                    settled: true,
+                });
+                self.dialog = Some(Dialog::Confirm(confirm));
+                self.sync_context();
+            }
+            Err(e) => self.toasts.error(e.to_string(), now),
+        }
+    }
+
+    /// The bin card's yes: empty the whole bin
+    /// ([`df_core::platform::trash::empty_bin`]) on a worker, since a full
+    /// one takes the shell a while, and say so when it is done. Never
+    /// journalled, as a purge is not: nothing comes back from it.
+    fn empty_bin(&mut self) {
+        let slot: Arc<std::sync::Mutex<Option<std::result::Result<RemoteDone, String>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let job_slot = Arc::clone(&slot);
+        let job = FnJob::new("Empty the Recycle Bin", Lane::Macro, move |_ctx| {
+            let result = match df_core::platform::trash::empty_bin() {
+                Ok(()) => Ok(RemoteDone {
+                    message: "Emptied the Recycle Bin".to_string(),
+                    ..RemoteDone::default()
+                }),
+                Err(e) => Err(e.to_string()),
+            };
+            match job_slot.lock() {
+                Ok(mut guard) => *guard = Some(result),
+                Err(poisoned) => *poisoned.into_inner() = Some(result),
+            }
+            Ok(())
+        });
+        let id = self.engine.spawn(job);
+        // The purge's bookkeeping (`App::trash_purge`): a job whose result is
+        // a message.
+        self.remote_ops.push(PendingRemote { id, slot });
     }
 
     /// The confirm was answered yes — or, for a local trash, was never put
@@ -5086,6 +5145,12 @@ impl App {
                     .unwrap_or_default();
                 let whole = confirm.kind == ConfirmKind::EmptyTrash;
                 self.trash_purge(items, whole, now);
+                return;
+            }
+            // The whole bin, which is the system's: nothing on screen names
+            // what is in it.
+            ConfirmKind::EmptyBin => {
+                self.empty_bin();
                 return;
             }
         };
@@ -7258,6 +7323,18 @@ impl App {
         // and therefore has no chord to be found under: a key bound to
         // "destroy everything I have deleted" is a key somebody presses by
         // accident, and this one asks first *and* has to be typed for.
+        // Where the trash is the system's own bin (Windows' Recycle Bin,
+        // W4.8), there is no view to be on, and the row is always here; its
+        // count is the card's to take, one shell call a palette need not
+        // make each time it opens.
+        if self.tab().trash.is_none() && crate::platform::trash::SYSTEM_BIN.is_some() {
+            rows.push(finder::Row {
+                label: "Empty trash".to_string(),
+                detail: "Recycle Bin".to_string(),
+                kind: finder::Kind::Command,
+                choice: Choice::Run(Command::EmptyTrash),
+            });
+        }
         if self.tab().trash.is_some() {
             let n = self
                 .tab()
@@ -10349,21 +10426,6 @@ impl App {
         // something else, or not at all.
         if command == Command::TerminalHere && self.tab().virtual_kind().is_some() {
             return Some("Terminals open on local folders");
-        }
-        // A platform with no trash yet (the stub on Windows, until W4.7): `d`
-        // on this disk, the trash view and emptying it are turned away in the
-        // stub's own words, rather than a job failing or a view opening on
-        // nothing. `d` over the link is a delete on the
-        // server, which no local trash is part of. On Linux the home trash is
-        // `Err` only without `$HOME`, which is not this refusal.
-        if (matches!(command, Command::OpenTrash | Command::EmptyTrash)
-            || (command == Command::Trash && self.tab().remote.is_none()))
-            && matches!(
-                df_core::ops::Trash::home(),
-                Err(df_core::DfError::Unsupported(_))
-            )
-        {
-            return Some("Trash is not available on this platform");
         }
         // Tags are an attribute on a file on this machine's disk, and an
         // archive's rows, a remote service's and the trash's are not that —
@@ -22471,18 +22533,56 @@ mod tests {
     }
 
     /// Every platform has a trash now — Linux the freedesktop one, macOS
-    /// Finder's (M2.8), Windows the Recycle Bin (W4.7) — so `d` on a local
-    /// file, the trash's door and "Empty trash" pass the gate that turned
-    /// them away when Windows had none (S1.6, S1.34).
+    /// Finder's (M2.8), Windows the Recycle Bin (W4.7) — so the gate that
+    /// turned `d` on a local file, the trash's door and "Empty trash" away
+    /// when Windows had none (S1.6, S1.34) is gone, and nothing refuses them
+    /// in a folder on this disk.
     #[test]
     fn the_trash_is_there_on_every_platform() {
         let app = Fixture::new("a-trash", &["a.txt"]);
         for command in [Command::Trash, Command::OpenTrash, Command::EmptyTrash] {
-            assert_ne!(
-                app.refusal(command),
-                Some("Trash is not available on this platform"),
-                "{command:?}"
+            assert_eq!(app.refusal(command), None, "{command:?}");
+        }
+    }
+
+    /// "Empty trash" where the trash is the system's bin (Windows, W4.8):
+    /// the card counts the bin — something recycled first, so there is
+    /// something to count — names nothing, and asks in the Empty trash
+    /// card's words. Elsewhere the command, away from the trash view, has
+    /// nothing listed to empty, as before.
+    #[test]
+    fn empty_trash_counts_the_bin_where_the_system_keeps_it() {
+        let mut app = Fixture::new("empty-bin", &["a.txt", "doomed.txt"]);
+        let now = Instant::now();
+        if cfg!(windows) {
+            let doomed = app.files.join("doomed.txt");
+            let bin = df_core::ops::trash::for_path(&doomed).expect("the temp drive has a bin");
+            bin.trash(&doomed, &TaskCtx::detached()).expect("recycled");
+        }
+        app.run(Command::EmptyTrash, 10, now);
+        if cfg!(windows) {
+            let Some(Dialog::Confirm(confirm)) = &app.dialog else {
+                panic!("no card: {:?}", toast_text(&app));
+            };
+            assert_eq!(confirm.kind, ConfirmKind::EmptyBin);
+            assert!(
+                confirm.paths.is_empty(),
+                "the bin's items have no names here"
             );
+            assert!(
+                confirm.counted.is_some_and(|n| n >= 1),
+                "{:?}",
+                confirm.counted
+            );
+            let title = confirm.title();
+            assert!(
+                title.starts_with("Empty the Recycle Bin? ")
+                    && title.ends_with(" will be deleted for good."),
+                "{title}"
+            );
+        } else {
+            assert!(app.dialog.is_none());
+            assert_eq!(toast_text(&app), Some("The trash is already empty"));
         }
     }
 

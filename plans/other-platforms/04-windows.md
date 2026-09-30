@@ -1047,6 +1047,24 @@ Each task closes the named `appendix-inventory-df-app.md` §1 rows; suffix them
   cancelled ("moving it to the Recycle Bin was cancelled"). The flag
   overrides `FOF_NOCONFIRMATION` for that one question; the recycle is
   otherwise as silent as it was. The question is out of Open questions.
+- (finish) 2026-09-30 — W4.8's df-app half. "Empty trash" where the trash
+  is the system's own bin (`platform::trash::SYSTEM_BIN` is `Some`: Windows)
+  opens `ConfirmKind::EmptyBin`, the Empty trash card counting instead of
+  listing: "Empty the Recycle Bin? 3 items · 1.2 MB will be deleted for
+  good.", the count and the bytes from `df_core::platform::trash::bin_size()`
+  in the card's own words (`trashview::weight_text`), no names under the
+  question, Cancel and Empty. Its yes runs `empty_bin()` as a job, which says
+  "Emptied the Recycle Bin" or the shell's error; an empty bin opens no card
+  and says "The Recycle Bin is already empty". There being no trash view on
+  Windows, the palette's "Empty trash" row, which Linux offers only while the
+  trash view is on screen, is always there on Windows, its detail "Recycle
+  Bin" rather than a count, so opening the palette asks the shell nothing.
+  The gate in `App::refusal` for a platform whose trash was a stub (S1.34),
+  which has refused nothing since W4.7, is gone. `u` after a trash says
+  "Restore it from the Recycle Bin" (de6769e), which `d` now reaches. Linux
+  and macOS are unchanged: the new path is taken only where `SYSTEM_BIN` is
+  `Some`, and the gate refused only a home trash that was `Unsupported`,
+  which neither has.
 
 ## Open questions
 
