@@ -644,6 +644,29 @@ impl Split {
     }
 }
 
+/// The band across the window's top that the system's title bar shares with
+/// the chrome, as the platform reports it (`platform::window::title_band`),
+/// in logical points. `None` where the system draws its title bar above the
+/// window, or none at all — Linux, where the top row has always been the
+/// top of the window.
+///
+/// With a band, the chrome's first row goes up into it — the top row with
+/// one tab, the strip with more, the top row staying below it then, as in
+/// Explorer — and stops short of what the system keeps at each end: the
+/// caption buttons on Windows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TitleBand {
+    /// The least depth the band may have: how far down the system's own
+    /// buttons reach. A row shallower than they are is centred in the band
+    /// rather than leaving a button hanging below it.
+    pub height: f32,
+    /// What the system keeps for itself at each end, from the window's
+    /// edge: the chrome's row keeps a [`GAP`] from it, as from the window's
+    /// edge where nothing is kept.
+    pub left_inset: f32,
+    pub right_inset: f32,
+}
+
 /// Where the panes and the chrome go.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
@@ -684,6 +707,12 @@ pub struct Layout {
     /// The width the panes have between them — the window less its margins
     /// and both gaps — which is what a [`Split`]'s shares are shares of.
     pub usable: f32,
+    /// The title band, when the window has one ([`TitleBand`]): the full
+    /// width of the window, from its top to the foot of the row that went up
+    /// into it (the strip, or with one tab the top row), or to the foot of
+    /// the system's buttons if they reach further. What in it is not one of
+    /// the chrome's controls is the title bar.
+    pub band: Option<egui::Rect>,
 }
 
 impl Layout {
@@ -716,7 +745,19 @@ impl Layout {
 /// is an error message clipped to three characters, and a prompt that cannot
 /// say what is wrong with what you typed is worse than a list that moved a row
 /// while you were typing.
-pub fn layout(area: egui::Rect, split: &Split, tab_strip: bool, path_lines: usize) -> Layout {
+///
+/// `band` is the title band, where the window shares its top with the
+/// system's title bar ([`TitleBand`]). The chrome's first row goes up into
+/// it — the strip when there is one, the top row when there is not — and is
+/// drawn short of what the system keeps at the band's ends. Without one the
+/// layout is exactly what it was before there was such a thing.
+pub fn layout(
+    area: egui::Rect,
+    split: &Split,
+    tab_strip: bool,
+    path_lines: usize,
+    band: Option<TitleBand>,
+) -> Layout {
     let outer = area.shrink(GAP);
     // A window narrower or shorter than two gaps shrinks to an *inverted* rect,
     // and every rect derived from it inherits the inversion. Collapsing it to
@@ -726,35 +767,76 @@ pub fn layout(area: egui::Rect, split: &Split, tab_strip: bool, path_lines: usiz
         outer.min,
         egui::pos2(outer.max.x.max(outer.min.x), outer.max.y.max(outer.min.y)),
     );
-    let strip = tab_strip.then(|| {
-        egui::Rect::from_min_size(
-            outer.min,
-            egui::vec2(outer.width(), CHROME_HEIGHT.min(outer.height())),
-        )
-    });
-    // **Flush**, with no gap: the active tab is drawn as a folder tab joined to
-    // this row and filled with its ground (see [`crate::chrome::tab_strip`]),
-    // and a gap between them would be a seam through the middle of one shape.
-    let top = match strip {
-        Some(strip) => strip.bottom(),
-        None => outer.top(),
-    };
     // The second line is a *line*, not a second row: it is the same plate
     // carrying one more baseline, so it grows by the height of a line of text
     // rather than by another TOP_HEIGHT of padding.
     let path_height = TOP_HEIGHT + (path_lines.max(1) - 1) as f32 * PROMPT_ERROR_LINE;
+    // Where the row that goes up into the band is laid: its left and right,
+    // and its top.
+    let banded = band.map(|band| {
+        in_band(
+            band,
+            area,
+            outer,
+            if tab_strip {
+                CHROME_HEIGHT
+            } else {
+                path_height
+            },
+        )
+    });
+    let strip = tab_strip.then(|| match banded {
+        None => egui::Rect::from_min_size(
+            outer.min,
+            egui::vec2(outer.width(), CHROME_HEIGHT.min(outer.height())),
+        ),
+        Some((left, right, top)) => egui::Rect::from_min_max(
+            egui::pos2(left, top),
+            egui::pos2(right, (top + CHROME_HEIGHT).min(outer.bottom()).max(top)),
+        ),
+    });
+    // **Flush**, with no gap: the active tab is drawn as a folder tab joined to
+    // this row and filled with its ground (see [`crate::chrome::tab_strip`]),
+    // and a gap between them would be a seam through the middle of one shape.
+    let top = match (strip, banded) {
+        (Some(strip), _) => strip.bottom(),
+        (None, Some((_, _, top))) => top,
+        (None, None) => outer.top(),
+    };
+    // Under a strip the row runs the window's width, as it always has; in the
+    // band it stops where the band's row does.
+    let (left, right) = match (strip, banded) {
+        (None, Some((left, right, _))) => (left, right),
+        _ => (outer.left(), outer.right()),
+    };
     let path = egui::Rect::from_min_max(
-        egui::pos2(outer.left(), top),
+        egui::pos2(left, top),
         // Clamped against the window's bottom *and* against its own top: a
         // window too short for the chrome collapses the top row to nothing
         // rather than to an inverted rectangle every rect derived from it
         // would inherit.
-        egui::pos2(
-            outer.right(),
-            (top + path_height).min(outer.bottom()).max(top),
-        ),
+        egui::pos2(right, (top + path_height).min(outer.bottom()).max(top)),
     );
-    let top = (path.bottom() + GAP).min(outer.bottom());
+    // The band runs the window's width, down to the foot of the row in it or
+    // of the system's buttons, whichever is lower.
+    let title = band.map(|band| {
+        let held = strip.unwrap_or(path);
+        egui::Rect::from_min_max(
+            area.min,
+            egui::pos2(
+                area.right(),
+                (area.top() + band.height)
+                    .max(held.bottom())
+                    .min(area.bottom()),
+            ),
+        )
+    });
+    // Nothing under the band is in it: buttons deeper than the row keep the
+    // panes below them too, or a press on a row there would move the window.
+    let top = match title {
+        Some(title) => (path.bottom().max(title.bottom()) + GAP).min(outer.bottom()),
+        None => (path.bottom() + GAP).min(outer.bottom()),
+    };
     let inner = egui::Rect::from_min_max(
         egui::pos2(outer.left(), top),
         egui::pos2(outer.right(), outer.bottom().max(top)),
@@ -816,6 +898,42 @@ pub fn layout(area: egui::Rect, split: &Split, tab_strip: bool, path_lines: usiz
         hairlines,
         collapsed: split.collapsed,
         usable,
+        band: title,
+    }
+}
+
+/// Where a row `height` deep goes in the title band: its left, its right
+/// and its top.
+///
+/// A [`GAP`] from what the system keeps at either end, as a row keeps a
+/// `GAP` from the window's edge where nothing is kept. At the window's
+/// margin from the top, as always — unless the system's buttons reach
+/// further down than the row's block (the margin and the row), and then
+/// centred on the band they make, so no button hangs below a row that stops
+/// short of it. Never nearer the top than the margin: the row does not jump
+/// as the buttons pass its depth, it starts to move down only once centring
+/// would take it lower.
+fn in_band(band: TitleBand, area: egui::Rect, outer: egui::Rect, height: f32) -> (f32, f32, f32) {
+    let left = (outer.left() + band.left_inset.max(0.0)).min(outer.right());
+    let right = (outer.right() - band.right_inset.max(0.0)).max(left);
+    let top = if band.height > GAP + height {
+        area.top() + GAP.max((band.height - height) / 2.0)
+    } else {
+        outer.top()
+    };
+    (left, right, top.min(outer.bottom()))
+}
+
+/// How wide the top row is laid out, for what has to be measured before the
+/// layout is (the prompt's second line): the window less its margins, and
+/// less what the title band keeps while the row is up in it.
+pub fn top_row_width(area: egui::Rect, band: Option<TitleBand>, tab_strip: bool) -> f32 {
+    match band {
+        Some(band) if !tab_strip => {
+            (area.width() - GAP * 2.0 - band.left_inset.max(0.0) - band.right_inset.max(0.0))
+                .max(0.0)
+        }
+        _ => area.width() - GAP * 2.0,
     }
 }
 
@@ -2245,10 +2363,217 @@ mod tests {
         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1408.0, 908.0))
     }
 
+    /// A rect from its corners, for the layouts written out below.
+    fn r(left: f32, top: f32, right: f32, bottom: f32) -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
+    }
+
+    /// With no title band — Linux, and macOS for now — the layout is what it
+    /// was before the band existed (W4.39): these are the layouts `main`
+    /// laid out at 39c4d51, written out whole, with and without a strip, a
+    /// second prompt line, a folded pane and a divider in the hand.
+    #[test]
+    fn with_no_title_band_the_layout_is_what_it_was() {
+        let pulled = Split {
+            open: [1.0, 0.5],
+            overshoot: [-10.0, 6.0],
+            ..Split::at([1, 4, 3])
+        };
+        let cases = [
+            (
+                Split::at([1, 4, 3]),
+                false,
+                1,
+                Layout {
+                    strip: None,
+                    path: r(8.0, 8.0, 1400.0, 46.0),
+                    parent: r(8.0, 54.0, 180.0, 900.0),
+                    list: r(188.0, 54.0, 876.0, 900.0),
+                    preview: r(884.0, 54.0, 1400.0, 900.0),
+                    dividers: [r(178.0, 54.0, 190.0, 900.0), r(874.0, 54.0, 886.0, 900.0)],
+                    hairlines: [184.0, 880.0],
+                    collapsed: [false, false],
+                    usable: 1376.0,
+                    band: None,
+                },
+            ),
+            (
+                Split::at([1, 4, 3]),
+                true,
+                1,
+                Layout {
+                    strip: Some(r(8.0, 8.0, 1400.0, 38.0)),
+                    path: r(8.0, 38.0, 1400.0, 76.0),
+                    parent: r(8.0, 84.0, 180.0, 900.0),
+                    list: r(188.0, 84.0, 876.0, 900.0),
+                    preview: r(884.0, 84.0, 1400.0, 900.0),
+                    dividers: [r(178.0, 84.0, 190.0, 900.0), r(874.0, 84.0, 886.0, 900.0)],
+                    hairlines: [184.0, 880.0],
+                    collapsed: [false, false],
+                    usable: 1376.0,
+                    band: None,
+                },
+            ),
+            (
+                Split::at([1, 4, 3]),
+                true,
+                2,
+                Layout {
+                    strip: Some(r(8.0, 8.0, 1400.0, 38.0)),
+                    path: r(8.0, 38.0, 1400.0, 93.0),
+                    parent: r(8.0, 101.0, 180.0, 900.0),
+                    list: r(188.0, 101.0, 876.0, 900.0),
+                    preview: r(884.0, 101.0, 1400.0, 900.0),
+                    dividers: [r(178.0, 101.0, 190.0, 900.0), r(874.0, 101.0, 886.0, 900.0)],
+                    hairlines: [184.0, 880.0],
+                    collapsed: [false, false],
+                    usable: 1376.0,
+                    band: None,
+                },
+            ),
+            (
+                folded(true, false),
+                false,
+                2,
+                Layout {
+                    strip: None,
+                    path: r(8.0, 8.0, 1400.0, 63.0),
+                    parent: r(8.0, 71.0, 8.0, 900.0),
+                    list: r(8.0, 71.0, 876.0, 900.0),
+                    preview: r(884.0, 71.0, 1400.0, 900.0),
+                    dividers: [r(0.0, 71.0, 10.0, 900.0), r(874.0, 71.0, 886.0, 900.0)],
+                    hairlines: [4.0, 880.0],
+                    collapsed: [true, false],
+                    usable: 1376.0,
+                    band: None,
+                },
+            ),
+            (
+                pulled,
+                true,
+                1,
+                Layout {
+                    strip: Some(r(8.0, 8.0, 1400.0, 38.0)),
+                    path: r(8.0, 38.0, 1400.0, 76.0),
+                    parent: r(8.0, 84.0, 170.0, 900.0),
+                    list: r(178.0, 84.0, 1135.0, 900.0),
+                    preview: r(1139.0, 84.0, 1400.0, 900.0),
+                    dividers: [r(168.0, 84.0, 180.0, 900.0), r(1133.0, 84.0, 1141.0, 900.0)],
+                    hairlines: [174.0, 1270.5],
+                    collapsed: [false, false],
+                    usable: 1376.0,
+                    band: None,
+                },
+            ),
+        ];
+        for (split, strip, lines, was) in cases {
+            assert_eq!(
+                layout(area(), &split, strip, lines, None),
+                was,
+                "{split:?}, strip {strip}, {lines} line(s)"
+            );
+        }
+    }
+
+    /// Windows 11 at 100 %: the three caption buttons, 32 points deep and
+    /// 138 wide, at the band's right end.
+    const BAND: TitleBand = TitleBand {
+        height: 32.0,
+        left_inset: 0.0,
+        right_inset: 138.0,
+    };
+
+    /// One tab: the top row goes up into the band, at its margin from the
+    /// window's top and a gap short of the buttons, and the band is the
+    /// row's block. The panes do not move.
+    #[test]
+    fn with_one_tab_the_top_row_is_in_the_band() {
+        let bare = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, Some(BAND));
+        assert_eq!(l.strip, None);
+        assert_eq!(l.path, r(GAP, GAP, 1408.0 - 138.0 - GAP, GAP + TOP_HEIGHT));
+        assert_eq!(l.band, Some(r(0.0, 0.0, 1408.0, GAP + TOP_HEIGHT)));
+        assert_eq!(
+            [l.parent, l.list, l.preview],
+            [bare.parent, bare.list, bare.preview]
+        );
+        assert_eq!(l.dividers, bare.dividers);
+    }
+
+    /// Two tabs: the strip goes up into the band and stops a gap short of
+    /// the buttons, and the top row stays under it, flush and the window's
+    /// width, as in Explorer. The band is the strip's block.
+    #[test]
+    fn with_two_tabs_the_strip_is_in_the_band_and_the_row_below_it() {
+        let bare = layout(area(), &Split::at([1, 4, 3]), true, 1, None);
+        let l = layout(area(), &Split::at([1, 4, 3]), true, 1, Some(BAND));
+        let strip = l.strip.expect("a strip was asked for");
+        assert_eq!(
+            strip,
+            r(GAP, GAP, 1408.0 - 138.0 - GAP, GAP + CHROME_HEIGHT)
+        );
+        assert_eq!(l.path, bare.path);
+        assert_eq!(l.path.top(), strip.bottom(), "flush");
+        assert_eq!(l.band, Some(r(0.0, 0.0, 1408.0, GAP + CHROME_HEIGHT)));
+        assert_eq!(l.list, bare.list);
+    }
+
+    /// Buttons deeper than the row's block make the band theirs: the row is
+    /// centred in it, and the panes start under it. Only just deeper, the
+    /// row keeps its margin rather than jumping up to be centred.
+    #[test]
+    fn buttons_deeper_than_the_row_centre_it_in_their_band() {
+        let deep = TitleBand {
+            height: 60.0,
+            ..BAND
+        };
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, Some(deep));
+        assert_eq!(l.path.center().y, 30.0);
+        assert_eq!(l.band, Some(r(0.0, 0.0, 1408.0, 60.0)));
+        assert_eq!(l.list.top(), 60.0 + GAP);
+
+        let just = TitleBand {
+            height: GAP + TOP_HEIGHT + 2.0,
+            ..BAND
+        };
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, Some(just));
+        assert_eq!(l.path.top(), GAP);
+        assert_eq!(l.band.map(|band| band.bottom()), Some(just.height));
+        assert_eq!(l.list.top(), just.height + GAP);
+
+        // With a strip, the strip is centred and the row is still flush
+        // under it.
+        let l = layout(area(), &Split::at([1, 4, 3]), true, 1, Some(deep));
+        let strip = l.strip.expect("a strip was asked for");
+        assert_eq!(strip.center().y, 30.0);
+        assert_eq!(l.path.top(), strip.bottom());
+        assert!(l.list.top() >= 60.0 + GAP);
+    }
+
+    /// What is measured before the layout — the prompt's second line —
+    /// measures the row as wide as the layout lays it.
+    #[test]
+    fn the_top_row_is_measured_as_wide_as_it_is_laid_out() {
+        for (strip, band) in [
+            (false, None),
+            (true, None),
+            (false, Some(BAND)),
+            (true, Some(BAND)),
+        ] {
+            assert_eq!(
+                top_row_width(area(), band, strip),
+                layout(area(), &Split::at([1, 4, 3]), strip, 1, band)
+                    .path
+                    .width(),
+                "strip {strip}, {band:?}"
+            );
+        }
+    }
+
     /// The ratio describes the panes, not the panes plus the gaps.
     #[test]
     fn the_panes_split_at_the_configured_ratio() {
-        let l = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
         let usable = 1408.0 - GAP * 2.0 - GAP * 2.0;
         assert!((l.parent.width() - usable / 8.0).abs() < 1e-3);
         assert!((l.list.width() - usable * 4.0 / 8.0).abs() < 1e-3);
@@ -2287,12 +2612,16 @@ mod tests {
         });
         for size in [10.0, 40.0, 300.0] {
             for split in &splits {
-                for strip in [false, true] {
+                for (strip, band) in [false, true]
+                    .into_iter()
+                    .flat_map(|strip| [(strip, None), (strip, Some(BAND))])
+                {
                     let l = layout(
                         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(size, 10.0)),
                         split,
                         strip,
                         1,
+                        band,
                     );
                     for rect in [
                         l.parent,
@@ -2301,10 +2630,14 @@ mod tests {
                         l.path,
                         l.dividers[0],
                         l.dividers[1],
-                    ] {
+                    ]
+                    .into_iter()
+                    .chain(l.strip)
+                    .chain(l.band)
+                    {
                         assert!(
                             rect.width() >= 0.0 && rect.height() >= 0.0,
-                            "{size} {split:?}: {rect:?}"
+                            "{size} {split:?} {band:?}: {rect:?}"
                         );
                     }
                 }
@@ -2333,9 +2666,9 @@ mod tests {
     /// on the other side does not move.
     #[test]
     fn a_folded_pane_gives_its_width_and_its_gap_to_the_list() {
-        let open = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let open = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
 
-        let l = layout(area(), &folded(true, false), false, 1);
+        let l = layout(area(), &folded(true, false), false, 1, None);
         assert_eq!(l.parent.width(), 0.0);
         assert!((l.list.left() - GAP).abs() < 1e-3, "{:?}", l.list);
         assert!(
@@ -2345,7 +2678,7 @@ mod tests {
         assert!((l.list.width() - (usable() * 5.0 / 8.0 + GAP)).abs() < 1e-3);
         assert_eq!(l.preview, open.preview, "the other side never moves");
 
-        let l = layout(area(), &folded(false, true), false, 1);
+        let l = layout(area(), &folded(false, true), false, 1, None);
         assert_eq!(l.preview.width(), 0.0);
         assert!((area().right() - l.list.right() - GAP).abs() < 1e-3);
         assert!((l.preview.left() - l.list.right()).abs() < 1e-3);
@@ -2353,7 +2686,7 @@ mod tests {
         assert_eq!(l.parent, open.parent);
 
         // Both: the list is the whole row.
-        let l = layout(area(), &folded(true, true), false, 1);
+        let l = layout(area(), &folded(true, true), false, 1, None);
         assert!((l.list.left() - GAP).abs() < 1e-3);
         assert!((area().right() - l.list.right() - GAP).abs() < 1e-3);
 
@@ -2378,6 +2711,7 @@ mod tests {
             },
             false,
             1,
+            None,
         );
         assert!((l.preview.width() - usable() * 3.0 / 16.0).abs() < 1e-3);
         assert!((l.preview.left() - l.list.right() - GAP / 2.0).abs() < 1e-3);
@@ -2389,7 +2723,7 @@ mod tests {
     /// folded — and the hairline in the middle of whichever it is.
     #[test]
     fn the_dividers_are_the_gaps_widened_onto_each_plate() {
-        let l = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let l = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
         let [left, right] = l.dividers;
         assert!((left.left() - (l.parent.right() - DIVIDER_OVERLAP)).abs() < 1e-3);
         assert!((left.right() - (l.list.left() + DIVIDER_OVERLAP)).abs() < 1e-3);
@@ -2406,7 +2740,7 @@ mod tests {
         assert!((l.hairlines[0] - (l.parent.right() + GAP / 2.0)).abs() < 1e-3);
         assert!((l.hairlines[1] - (l.list.right() + GAP / 2.0)).abs() < 1e-3);
 
-        let l = layout(area(), &folded(true, true), false, 1);
+        let l = layout(area(), &folded(true, true), false, 1, None);
         let [left, right] = l.dividers;
         assert_eq!(left.left(), area().left());
         assert!((left.right() - (GAP + DIVIDER_OVERLAP)).abs() < 1e-3);
@@ -2431,6 +2765,7 @@ mod tests {
                 },
                 false,
                 1,
+                None,
             )
         };
         let l = at([0.01, 0.6, 0.39]);
@@ -2459,6 +2794,7 @@ mod tests {
             },
             false,
             1,
+            None,
         );
         assert_eq!(l.parent.width(), 0.0);
         assert!((l.preview.width() - usable() * 0.375).abs() < 1e-2);
@@ -2467,7 +2803,7 @@ mod tests {
     /// A divider's pull trades with the list and nothing else.
     #[test]
     fn the_pull_is_traded_with_the_list_alone() {
-        let rest = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let rest = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
         let pulled = layout(
             area(),
             &Split {
@@ -2476,6 +2812,7 @@ mod tests {
             },
             false,
             1,
+            None,
         );
         assert!((pulled.parent.width() - (rest.parent.width() - 10.0)).abs() < 1e-3);
         assert!((pulled.preview.width() - (rest.preview.width() + 6.0)).abs() < 1e-3);
@@ -2488,7 +2825,7 @@ mod tests {
     /// the window's own bottom edge now that there is no bar under them.
     #[test]
     fn the_chrome_sits_above_the_panes() {
-        let bare = layout(area(), &Split::at([1, 4, 3]), false, 1);
+        let bare = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
         assert_eq!(bare.strip, None);
         assert!((bare.list.bottom() - (area().bottom() - GAP)).abs() < 1e-3);
         // The top row is always there, and the panes start below it.
@@ -2496,7 +2833,7 @@ mod tests {
         assert!((bare.path.height() - TOP_HEIGHT).abs() < 1e-3);
         assert!((bare.list.top() - (bare.path.bottom() + GAP)).abs() < 1e-3);
 
-        let with_strip = layout(area(), &Split::at([1, 4, 3]), true, 1);
+        let with_strip = layout(area(), &Split::at([1, 4, 3]), true, 1, None);
         let strip = with_strip.strip.expect("a strip was asked for");
         assert!((strip.height() - CHROME_HEIGHT).abs() < 1e-3);
         // Flush: the active tab is drawn joined to the top row, so there is no
@@ -2513,21 +2850,21 @@ mod tests {
     /// back when it closes: the top row is the only chrome that moves them.
     #[test]
     fn a_two_line_prompt_reflows_the_panes() {
-        let one = layout(area(), &Split::at([1, 4, 3]), false, 1);
-        let two = layout(area(), &Split::at([1, 4, 3]), false, 2);
+        let one = layout(area(), &Split::at([1, 4, 3]), false, 1, None);
+        let two = layout(area(), &Split::at([1, 4, 3]), false, 2, None);
         assert!((two.path.height() - one.path.height() - PROMPT_ERROR_LINE).abs() < 1e-3);
         assert!((one.list.height() - two.list.height() - PROMPT_ERROR_LINE).abs() < 1e-3);
         assert!((two.list.top() - (two.path.bottom() + GAP)).abs() < 1e-3);
         // Zero lines is one line: the row is never absent.
         assert_eq!(
-            layout(area(), &Split::at([1, 4, 3]), false, 0).path,
+            layout(area(), &Split::at([1, 4, 3]), false, 0, None).path,
             one.path
         );
     }
 
     #[test]
     fn rows_stack_downwards_from_the_scroll_position() {
-        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1).list);
+        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1, None).list);
         let top = row_rect(content, 0.0, 0, ROW_HEIGHT);
         assert!((top.top() - content.top()).abs() < 1e-3);
         assert!((top.height() - ROW_HEIGHT).abs() < 1e-3);
@@ -2544,7 +2881,7 @@ mod tests {
     /// and the hit test still lands on the row that was drawn.
     #[test]
     fn a_scaled_row_stacks_and_hit_tests_at_its_own_height() {
-        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1).list);
+        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1, None).list);
         for step in df_core::config::VIEW_SCALES {
             let scale = Scale::new(step);
             assert!(
@@ -2572,7 +2909,7 @@ mod tests {
 
     #[test]
     fn hit_testing_finds_the_row_under_the_pointer() {
-        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1).list);
+        let content = content_rect(layout(area(), &Split::at([1, 4, 3]), false, 1, None).list);
         let inside = |index: usize| row_rect(content, 0.0, index, ROW_HEIGHT).center();
         assert_eq!(row_at(content, 0.0, 40, inside(0), ROW_HEIGHT), Some(0));
         assert_eq!(row_at(content, 0.0, 40, inside(7), ROW_HEIGHT), Some(7));

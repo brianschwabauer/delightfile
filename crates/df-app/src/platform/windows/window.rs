@@ -20,10 +20,27 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{Window, WindowAttributes};
+use winit::window::{Theme, Window, WindowAttributes};
 
 use crate::app::WINDOW_SIZE;
 use crate::platform::fit::{fit, Area, Fitted, Frame};
+use crate::ui::TitleBand;
+
+/// Nothing to do to a window once it is made, until W4.39.
+pub fn adopt(_window: &Window) {}
+
+/// The title bar is the system's, above the window's content, until W4.39.
+pub fn title_band(_window: &Window) -> Option<TitleBand> {
+    None
+}
+
+/// Never called: there is no band.
+pub fn title_regions(_window: &Window, _band: egui::Rect, _controls: &[egui::Rect]) {}
+
+/// The window's side, for the title bar the system draws.
+pub fn set_theme(window: &Window, theme: Theme) {
+    window.set_theme(Some(theme));
+}
 
 /// The attributes the one window is created with: `title` and the opening
 /// size, fitted to the work area when it would not fit.

@@ -943,7 +943,7 @@ mod tests {
             egui::pos2(0.0, 0.0),
             egui::vec2(USABLE + 4.0 * crate::ui::GAP, 908.0),
         );
-        crate::ui::layout(area, split, false, 1)
+        crate::ui::layout(area, split, false, 1, None)
     }
 
     /// Let go while the pane it folded is still folding, the pane goes on
