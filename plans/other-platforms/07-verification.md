@@ -283,17 +283,20 @@ workflow, launched by double-click from Explorer.
       window at once.
 - [ ] One header (W4.39): no "delightfile" caption above the window; the
       top row (☰, breadcrumb, counter) is the top of the window, with
-      Windows' own minimize, maximize and close at its right end, and the
-      counter a gap short of them. The window keeps its rounded corners, its
+      minimize, maximize and close at its right end, drawn by the window in
+      Windows 11's shapes, and the counter a gap short of them. The window keeps its rounded corners, its
       shadow and its resize edges, the top one included.
 - [ ] The band is the title bar (W4.39): a drag from its empty space (between
       the crumbs and the counter, beside or under the buttons) moves the
       window; a double click there maximizes, and again restores; a right
       click opens the system menu; ☰, a crumb and the counter still answer
       as themselves.
-- [ ] The caption buttons (W4.39): each works; hovering Maximize brings up
-      Snap Layouts; they are drawn light on a dark window and dark on a
-      light one, and turn with View ▸ Appearance.
+- [ ] The caption buttons (W4.39): each works, on release, and a press
+      dragged off its button does nothing; hovering Maximize brings up Snap
+      Layouts; under the pointer minimize and maximize lift on a plate and
+      close turns red with a white ×, each a shade stronger held; maximized,
+      the middle glyph is restore's two squares; the glyphs turn with View ▸
+      Appearance.
 - [ ] Two tabs (W4.39): with `t` or the menu's new tab, the strip is the top
       of the window and the top row under it; the tabs, their `×` and the `+`
       answer; the space after the `+` drags the window; the strip stops short
@@ -451,6 +454,11 @@ release zip is run.
     screen, and past it at the sign-in for the account `admin`
     (`titlebar/shots/01-vm-locked-sign-in.jpg`), which an agent may not
     pass. Escape went back to the lock screen; nothing else was touched.
+  - Run 36731513722 (f2cd5c8, the caption buttons drawn by the window,
+    Brian's call that day) was put in the share as
+    `delightfile\titlebar-f2cd5c8\`, and not run either: the VM was still
+    at its lock screen (`titlebar/shots/02-vm-still-locked-f2cd5c8.jpg`),
+    and nothing was pressed.
   - Not seen: every W4.39 line in §5.1.
 
 ## 6. Release gate
@@ -488,7 +496,9 @@ release zip is run.
 - (titlebar) 2026-09-30 — §5.1 gained W4.39's checks: one header, the band
   as title bar, the caption buttons with Snap Layouts and their light and
   dark, the strip in the band with two tabs, and a maximized window; §5.8
-  records that the VM was locked when the build was ready.
+  records that the VM was locked when the build was ready. The buttons'
+  line was rewritten the same day for the buttons the window draws itself
+  (04-windows.md, Decisions log).
 
 ## Open questions
 
